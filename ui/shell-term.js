@@ -2004,9 +2004,28 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     return cell.spread !== 0 || cell.wideScale !== 1;
   }
 
+  function measuredRoom() {
+    // CSS can report fixed dimensions under a hidden ancestor. Only a box
+    // participating in layout can supply font metrics or a terminal grid.
+    // Check for a CSS box without adding client-size reads to a tab switch;
+    // the computed dimensions below are already the grid's layout query.
+    if (!host.isConnected) return null;
+    // checkVisibility arrived in Safari 17.4; older supported WebKit builds
+    // can still tell whether the host has a laid-out CSS box.
+    const visible = typeof host.checkVisibility === "function"
+      ? host.checkVisibility() : host.getClientRects().length > 0;
+    if (!visible) return null;
+    const style = getComputedStyle(host);
+    const width = parseFloat(style.width);
+    const height = parseFloat(style.height);
+    if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) return null;
+    return { width, height, style };
+  }
+
   function measure() {
     const under = metricsKey();
     if (under === measuredUnder) return;
+    if (measuredRoom() === null) return;
     // The probe is built exactly like a painted row — a block .term-row with
     // an inline run inside — so the measured box is the box the renderer
     // will actually lay out. An inline-only probe reads the line box (~16px)
@@ -3442,16 +3461,15 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     // window's border-box sizing the computed width IS the border box, so
     // the stylesheet's padding comes off it exactly as it came off the rect
     // — all from the one style object this function was already paying for.
-    const style = getComputedStyle(host);
-    const width = parseFloat(style.width);
-    const height = parseFloat(style.height);
     // `blind` marks the guess: a host that lays nothing out — display:none
-    // somewhere above it — computes no width, and the numbers below are a
-    // default, not a measurement. A caller SIZING something new wants the
-    // default; a caller about to TELL a pty its room must not repeat a guess
+    // somewhere above it — has no CSS box, even with a fixed computed width.
+    // The numbers below are a default, not a measurement. A caller sizing
+    // something new wants that default; a caller telling a pty its room
+    // must not repeat a guess
     // (`resizeTermTab` refuses on it).
-    if (!Number.isFinite(width) || width <= 0) return { rows: 24, cols: 96, blind: true };
-    const grid = gridFor(width, height, style);
+    const room = measuredRoom();
+    if (room === null) return { rows: 24, cols: 96, blind: true };
+    const grid = gridFor(room.width, room.height, room.style);
     placeGrid(grid);
     return grid;
   }
@@ -4183,7 +4201,22 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     // its observer back too, or a closed shell keeps a live observation over a
     // node nobody can see.
     trackWatch.disconnect();
+    fitWatch?.disconnect();
+    cancelAnimationFrame(fitFrame);
   }
+
+  // A restored leaf can become visible, or change room, without the whole
+  // stage changing size. Watch the screen itself and fit off the observer's
+  // delivery, so writing grid insets cannot cause a resize-observer loop.
+  let fitFrame = 0;
+  const fitWatch = owner.resized ? new ResizeObserver(() => {
+    if (host.hidden || fitFrame !== 0) return;
+    fitFrame = requestAnimationFrame(() => {
+      fitFrame = 0;
+      owner.resized();
+    });
+  }) : null;
+  fitWatch?.observe(host);
 
   // `pre` rides out so a caller can read what was actually painted. Nothing in
   // this window copies it any more — the board's peek used to, and clipped for
@@ -5650,6 +5683,7 @@ function termView(term) {
   const view = makeTermView(host, pre, caret, {
     term,
     address: () => ({ kind: "term", term, key: `term:${term}` }),
+    resized: () => resizeTermTab(term),
   });
   termViews.set(term, view);
   return view;
@@ -9378,6 +9412,9 @@ function resizeTermTab(term) {
   // `gridSize` answers its guess for a box that measures no width, and that
   // guess rode to the pty as a real resize — 96×24 to a pane nobody could
   // see. A guess is not a telling.
+  // Every resize road uses the same measured cell, including the stage's
+  // observer and a newly visible leaf whose first measurement was deferred.
+  view.measure();
   const { rows, cols, blind } = view.gridSize();
   if (blind) return;
   const last = termGrids.get(term);
