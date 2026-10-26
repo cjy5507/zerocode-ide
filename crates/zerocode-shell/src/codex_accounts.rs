@@ -824,11 +824,18 @@ pub fn remove_account(
 /// The environment a Codex launch gets, pointing at the single shared runtime
 /// home so conversations and sessions are shared across account switches.
 pub fn launch_env(config_root: &Path) -> Vec<(String, String)> {
+    launch_env_with(config_root, |home| {
+        carry_settings_into(home);
+    })
+}
+
+/// [`launch_env`] with the settings carry handed in, so a test can carry
+/// from a fixture rather than from the person's own `~/.codex`.
+fn launch_env_with(config_root: &Path, carry: impl FnOnce(&Path)) -> Vec<(String, String)> {
     let Some((home, env)) = chosen_env(config_root) else {
         return Vec::new();
     };
-    let home = home.as_path();
-    carry_settings_into(home);
+    carry(home.as_path());
     let _ = materialize_into(config_root, &resolve_runtime_home(config_root));
     env
 }
@@ -932,6 +939,49 @@ mod tests {
         };
         write_store(root, &store).expect("store");
         (home, runtime_home(root))
+    }
+
+    /// The variable a launch names is the one a look names (t-76759): the
+    /// window's `zo models` read reads [`reading_env`], a pane is launched
+    /// with [`launch_env`], and only the launch carries settings and puts
+    /// the login in the runtime home. The carry here is from a fixture, so
+    /// the person's own `~/.codex` is never read.
+    #[test]
+    fn a_launch_names_the_variable_a_look_names_and_only_the_launch_writes() {
+        let root = tempfile::tempdir().expect("a data root");
+        let source = tempfile::tempdir().expect("a fixture settings home");
+        std::fs::write(
+            source.path().join("config.toml"),
+            "model = \"fixture-model\"\n",
+        )
+        .expect("fixture config");
+        let login = auth_fixture("account-one", "2026-09-17T02:48:26Z", "at-fixture");
+        let (home, runtime) = one_selected_account(root.path(), &login);
+
+        let looked = reading_env(root.path());
+        assert_eq!(
+            looked,
+            vec![(
+                zerocode_core::codex_account::HOME_VAR.to_string(),
+                runtime.to_string_lossy().into_owned()
+            )]
+        );
+        assert!(
+            !home.join("config.toml").exists() && !runtime.join(AUTH_FILE).exists(),
+            "a look wrote into the account or the runtime home"
+        );
+
+        let launched = launch_env_with(root.path(), |home| carry_settings(source.path(), home));
+        assert_eq!(launched, looked, "a launch names another home than a look");
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).expect("carried"),
+            "model = \"fixture-model\"\n",
+            "the launch did not carry the settings it was handed"
+        );
+        assert!(
+            runtime.join(AUTH_FILE).exists(),
+            "the launch did not put the login in the runtime home"
+        );
     }
 
     /// A usage read asks with the copy the panes refreshed (t-6583).
