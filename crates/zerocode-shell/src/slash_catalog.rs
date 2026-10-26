@@ -619,7 +619,21 @@ pub fn agent_lineup(
 /// zo pane reads its Claude login (`paneCredentialStore`), so a report made
 /// from another place can be said to be one (t-76598).
 pub fn zo_model_list(home: &Path) -> serde_json::Value {
-    let catalog = zo_models_catalog(home);
+    let mut list = model_list_of(&zo_models_catalog(home));
+    if let Some(root) = ACCOUNTS_ROOT.get() {
+        list.insert(
+            "paneCredentialStore".to_string(),
+            serde_json::Value::String(credential_store(&listing_env(root))),
+        );
+    }
+    serde_json::Value::Object(list)
+}
+
+/// The settings' part of zo's catalog, as the screen may hold it: a report's
+/// `detail` is what a provider answered — an HTTP error body among it — so
+/// every credential in it is masked here, before the IPC answer, and whole,
+/// before the screen cuts it to a line (t-76759).
+fn model_list_of(catalog: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     let mut list = serde_json::Map::new();
     for key in ["models", "customProviders", "reports", "aliases"] {
         list.insert(
@@ -631,13 +645,20 @@ pub fn zo_model_list(home: &Path) -> serde_json::Value {
                 .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
         );
     }
-    if let Some(root) = ACCOUNTS_ROOT.get() {
-        list.insert(
-            "paneCredentialStore".to_string(),
-            serde_json::Value::String(credential_store(&listing_env(root))),
-        );
+    if let Some(reports) = list
+        .get_mut("reports")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for detail in reports
+            .iter_mut()
+            .filter_map(|report| report.get_mut("detail"))
+        {
+            if let Some(text) = detail.as_str() {
+                *detail = serde_json::Value::String(zerocode_core::credential::mask_values(text));
+            }
+        }
     }
-    serde_json::Value::Object(list)
+    list
 }
 
 /// Where the window keeps its accounts, named once at boot. Until it is,
@@ -654,20 +675,27 @@ pub(crate) fn configure_accounts(config_root: PathBuf) {
 /// reads too. A look, not a launch — it runs on the list's clock, so nothing
 /// is materialized and a signed-out account does not stop the read.
 fn listing_env(config_root: &Path) -> Vec<(String, String)> {
-    let mut env = crate::accounts::reading_env_for(config_root, "zo");
-    env.extend(crate::codex_accounts::reading_env(config_root));
-    env
+    crate::usage_runtime::account_vars_for(config_root, "zo")
 }
 
 /// Where a zo given `env` reads its Claude login, in the words zo's report
-/// says it in (`credentialStore`): the folder it is pointed at, else the
-/// keychain.
+/// says it in (`credentialStore`), by zo's own rule (`ClaudeCodeStore::
+/// from_folders`, ZO m-76774): the credential folder variable decides
+/// whenever it is set — empty, it names the keychain — and only its absence
+/// hands over to the config folder; no folder is the keychain.
 fn credential_store(env: &[(String, String)]) -> String {
-    env.iter()
-        .find(|(key, value)| key == zerocode_core::account::CONFIG_DIR_VAR && !value.is_empty())
+    use zerocode_core::account::{CONFIG_DIR_VAR, SECURE_STORAGE_CONFIG_DIR_VAR};
+    let named = |name: &'static str| {
+        env.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, folder)| (name, folder.as_str()))
+    };
+    named(SECURE_STORAGE_CONFIG_DIR_VAR)
+        .or_else(|| named(CONFIG_DIR_VAR))
+        .filter(|(_, folder)| !folder.is_empty())
         .map_or_else(
             || "keychain".to_string(),
-            |(key, value)| format!("{key}:{value}"),
+            |(name, folder)| format!("{name}:{folder}"),
         )
 }
 
@@ -924,10 +952,18 @@ mod tests {
     /// (t-76598): before, it ran with none, so on a machine whose Claude login
     /// lives in the window's account home only the window's read failed — and
     /// the settings said 「로그인 안 됨」 while every zo pane answered.
+    ///
+    /// The fake zo writes down the account variables alone, never the rest of
+    /// the environment it inherits (t-76759), and the variables are compared
+    /// with [`crate::usage_runtime::account_vars_for`] — the launch's own
+    /// variables, computed without putting a login anywhere or carrying the
+    /// person's `~/.codex` into the fixture account.
     #[cfg(unix)]
     #[test]
     fn the_zo_list_is_read_with_the_account_variables_a_zo_pane_gets() {
         use std::os::unix::fs::PermissionsExt;
+        use zerocode_core::account::{CONFIG_DIR_VAR, SECURE_STORAGE_CONFIG_DIR_VAR};
+        use zerocode_core::codex_account::HOME_VAR;
         let home = tempfile::tempdir().expect("home");
         let config = tempfile::tempdir().expect("config root");
         let codex_home = config.path().join("codex-accounts/account-a/home");
@@ -951,17 +987,34 @@ mod tests {
         let bin = crate::zo_companion::zo_path_under(home.path());
         std::fs::create_dir_all(bin.parent().expect("bin dir")).expect("bin dir");
         let seen = home.path().join("seen-env");
+        let pane = crate::usage_runtime::account_vars_for(config.path(), "zo");
+        assert!(
+            !codex_home.join("config.toml").exists() && !codex_home.join("AGENTS.md").exists(),
+            "computing the pane's variables carried settings into the account"
+        );
+        for name in [CONFIG_DIR_VAR, SECURE_STORAGE_CONFIG_DIR_VAR, HOME_VAR] {
+            assert!(
+                pane.iter().any(|(key, _)| key == name),
+                "the pane gets {name}: {pane:?}"
+            );
+        }
+        // The pane's own variable names, and nothing else of what the fake
+        // zo inherits.
+        let names: Vec<&str> = pane.iter().map(|(key, _)| key.as_str()).collect();
+        let script: String = names
+            .iter()
+            .map(|name| format!("[ \"${{{name}+set}}\" = set ] && printf '%s=%s\\n' {name} \"${name}\" >> '{}'\n", seen.display()))
+            .collect();
         std::fs::write(
             &bin,
             format!(
-                "#!/bin/sh\nenv > '{}'\necho '{{\"reports\":[]}}'\n",
+                "#!/bin/sh\n: > '{}'\n{script}echo '{{\"reports\":[]}}'\n",
                 seen.display()
             ),
         )
         .expect("zo");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
 
-        let pane = crate::usage_runtime::account_env_for(config.path(), "zo").expect("pane env");
         assert_eq!(
             catalog_through(
                 &Mutex::new(ModelsCache::default()),
@@ -975,16 +1028,11 @@ mod tests {
             .lines()
             .filter_map(|line| line.split_once('='))
             .collect();
-        for name in [
-            zerocode_core::account::CONFIG_DIR_VAR,
-            zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR,
-            zerocode_core::codex_account::HOME_VAR,
-        ] {
-            assert!(
-                pane.iter().any(|(key, _)| key == name),
-                "the pane gets {name}: {pane:?}"
-            );
-        }
+        assert!(
+            seen.keys().all(|key| names.contains(key)),
+            "the fake zo wrote down more than the account variables: {:?}",
+            seen.keys().collect::<Vec<_>>()
+        );
         for (key, value) in &pane {
             assert_eq!(
                 seen.get(key.as_str()).copied(),
@@ -992,17 +1040,90 @@ mod tests {
                 "the list's zo did not get the pane's {key}"
             );
         }
-        let folder = pane
-            .iter()
-            .find(|(key, _)| key == zerocode_core::account::CONFIG_DIR_VAR)
-            .map(|(_, value)| value.clone())
-            .expect("folder");
         assert_eq!(
             credential_store(&listing_env(config.path())),
-            format!("CLAUDE_CONFIG_DIR:{folder}"),
-            "the place the settings compare a report with is the pane's"
+            credential_store(&pane),
+            "the place the settings compare a report with is not the pane's"
         );
+    }
+
+    /// The label a report is compared with is the one zo would write for the
+    /// pane's variables (ZO m-76774, `ClaudeCodeStore::from_folders`): the
+    /// credential folder wins whenever it is named — empty, it is the
+    /// keychain — and the config folder only when it is not.
+    #[test]
+    fn the_pane_store_is_named_by_zos_own_rule() {
+        use zerocode_core::account::{CONFIG_DIR_VAR, SECURE_STORAGE_CONFIG_DIR_VAR};
+        let env = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect()
+        };
+        assert_eq!(
+            credential_store(&env(&[(CONFIG_DIR_VAR, "/fixture/runtime")])),
+            "CLAUDE_CONFIG_DIR:/fixture/runtime"
+        );
+        assert_eq!(
+            credential_store(&env(&[
+                (CONFIG_DIR_VAR, "/fixture/runtime"),
+                (SECURE_STORAGE_CONFIG_DIR_VAR, "/fixture/account")
+            ])),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR:/fixture/account"
+        );
+        assert_eq!(
+            credential_store(&env(&[
+                (CONFIG_DIR_VAR, "/fixture/runtime"),
+                (SECURE_STORAGE_CONFIG_DIR_VAR, "")
+            ])),
+            "keychain",
+            "an empty credential folder names the keychain, not the config folder"
+        );
+        assert_eq!(credential_store(&env(&[(CONFIG_DIR_VAR, "")])), "keychain");
         assert_eq!(credential_store(&[]), "keychain");
+    }
+
+    /// A login report's `detail` is a provider's answer — an HTTP error body
+    /// that echoes a key, a bearer token or a signed address among it — and
+    /// the screen cuts its first line; every credential is masked before the
+    /// list leaves for the screen (t-76759 P1). Synthetic values only.
+    #[test]
+    fn a_login_failure_reaches_the_screen_with_its_credentials_masked() {
+        let secrets = [
+            "sk-ant-api03-TESTONLYxxxxxxxxxxxxxxxxxxxxxxxx",
+            "TEST_ONLY_LOGIN_SECRET",
+            "X-Amz-Signature=0f3a9c2b7d1e4f5a6b7c8d9e0f1a2b3c",
+            "AKIATESTONLY00000000",
+        ];
+        let catalog = serde_json::json!({
+            "reports": [
+                {"provider": "anthropic", "ok": false,
+                 "detail": format!("anthropic-api: HTTP 401 {{\"error\":\"invalid x-api-key {}\"}}\nsecond line", secrets[0])},
+                {"provider": "anthropic", "ok": false,
+                 "detail": format!("anthropic-api: HTTP 401 echoed Authorization: Bearer {}", secrets[1])},
+                {"provider": "openai", "ok": false,
+                 "detail": format!("openai: HTTP 403 at https://files.example.com/o?{}&X-Amz-Credential={}", secrets[2], secrets[3])},
+                {"provider": "xai", "ok": false, "detail": "skipped: no login"},
+                {"provider": "google", "ok": true, "count": 3}
+            ]
+        });
+        let list = model_list_of(&catalog);
+        let reports = list["reports"].as_array().expect("reports");
+        let said = serde_json::to_string(reports).expect("json");
+        for secret in secrets {
+            assert!(
+                !said.contains(secret),
+                "{secret} reached the screen: {said}"
+            );
+        }
+        assert!(
+            reports[0]["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.starts_with("anthropic-api: HTTP 401")),
+            "the diagnosis around the credential was lost: {said}"
+        );
+        assert_eq!(reports[3]["detail"], "skipped: no login");
+        assert!(reports[4].get("detail").is_none());
     }
 
     #[test]
