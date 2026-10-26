@@ -19781,6 +19781,51 @@ mod tests {
         );
     }
 
+    /// A worker whose briefing the booting program threw away is not a
+    /// started worker (t-74381).
+    ///
+    /// The delivery is done when the words were written; the waiter then looks
+    /// for them on the screen, types them once more when they are not there,
+    /// and fails the launch with the briefing named undelivered when they
+    /// still are not — before the success return, so no ledger line says the
+    /// worker started over an empty composer. The pure half (what counts as
+    /// shown, the one retype) is `zerocode_pty::briefing`, held by
+    /// `crates/zerocode-pty/tests/briefing_taken.rs` against fake Claude and
+    /// Codex shaped programs; this pins that the launch road asks it.
+    #[test]
+    fn a_worker_whose_briefing_never_stood_on_its_screen_fails_its_launch() {
+        let backend = shipped_backend();
+        let waiting = backend
+            .split_once("fn await_worker_ready(&self, term: TermId)")
+            .map_or("", |(_, rest)| rest);
+        let waiting = &waiting[..waiting.find("\n    fn send(").unwrap_or(waiting.len())];
+        let asked = waiting.find("self.confirm_briefing(term, &pending)");
+        let seated = waiting.find("if accepted && undelivered.is_none()");
+        let torn = waiting.find("let removed = state.terminals().remove(&term);");
+        assert!(
+            matches!((asked, seated, torn), (Some(ask), Some(seat), Some(tear)) if ask < seat && seat < tear),
+            "the waiter no longer asks the screen before it calls the launch a success:\n{waiting}"
+        );
+        assert!(
+            waiting.contains("if let Some(why) = undelivered {"),
+            "an undelivered briefing is not the launch's failure reason:\n{waiting}"
+        );
+        let confirming = block_after(backend, "fn confirm_briefing(");
+        assert!(
+            confirming.contains("BriefingWatch::new(")
+                && confirming.contains("briefing_shows(")
+                && confirming.contains("WatchStep::Retype")
+                && confirming.contains("WatchStep::Undelivered")
+                && confirming.contains("briefing not delivered"),
+            "the screen check lost a step:\n{confirming}"
+        );
+        let slot = block_after(backend, "struct PendingWorkerReadiness {");
+        assert!(
+            slot.contains("briefing: String,") && slot.contains("composer: Option<char>,"),
+            "the readiness slot no longer carries the briefing it must find on the screen:\n{slot}"
+        );
+    }
+
     /// Every door that deletes a worktree asks this window's own terminals
     /// first, through ONE function.
     ///

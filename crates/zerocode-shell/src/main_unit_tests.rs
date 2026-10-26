@@ -12046,28 +12046,30 @@ fn a_launch_deadline_is_the_agents_own_on_every_launch_road() {
 
     let backend = shipped_backend();
     let (shipped, _) = backend.split_once("#[cfg(test)]").unwrap_or((backend, ""));
-    // Four mounting constructions: the two ordinary launch roads pay the
+    // Five mounting constructions: the two ordinary launch roads pay the
     // registry's deadline, while orchestration pays its caller-provided
-    // `--timeout-ms`, and a resumed composer pays its agent catalog through
-    // the same PromptDelivery machine;
+    // `--timeout-ms`, a resumed composer pays its agent catalog through
+    // the same PromptDelivery machine, and a worker's briefing typed again
+    // after its booting composer dropped it (t-74381) pays the agent's own
+    // quiet window and deadline;
     // the two `new` that remain are the send road and the queue
     // promotion, which are sends by definition. A reused automation run
     // was counted a launch until t-4530 — it sends to a composer that is
     // already up, and takes the send road's door and timing.
     assert_eq!(
         shipped.matches("PromptDelivery::with_deadlines(").count(),
-        4,
+        5,
         "a launch road stopped paying the agent's own quiet window and deadline"
     );
     assert_eq!(
         shipped.matches("ready_quiet_for(").count(),
-        5,
-        "the quiet resolver or one of its four mounting sites drifted"
+        6,
+        "the quiet resolver or one of its five mounting sites drifted"
     );
     assert_eq!(
         shipped.matches("ready_timeout_for(").count(),
-        4,
-        "the deadline resolver or one of its three catalog-timed launch sites drifted"
+        5,
+        "the deadline resolver or one of its four catalog-timed launch sites drifted"
     );
     assert_eq!(
         shipped.matches("PromptDelivery::new(").count(),
