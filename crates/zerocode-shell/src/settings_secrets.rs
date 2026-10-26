@@ -110,11 +110,49 @@ impl ZoDoor {
     }
 }
 
-/// One plain-text cell zo's listing named.
+/// One plain-text cell zo's listing named: the file as zo spelled it (and is
+/// handed back), the keys down to the cell, and the name it is to refer to.
 struct Literal {
-    file: PathBuf,
+    file: String,
     path: Vec<String>,
     name: String,
+}
+
+impl Literal {
+    fn of(row: &Value) -> Option<Self> {
+        let file = row.get("file")?.as_str()?;
+        let path = row
+            .get("path")?
+            .as_array()?
+            .iter()
+            .map(|key| key.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()?;
+        let name = row.get("name")?.as_str()?;
+        (Path::new(file).is_absolute() && !path.is_empty() && is_name(name)).then(|| Self {
+            file: file.to_string(),
+            path,
+            name: name.to_string(),
+        })
+    }
+}
+
+/// A variable's name as `${NAME}` spells one: a letter or `_`, then letters,
+/// digits and `_`. Anything else would name a keychain item zo never reads.
+fn is_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|rest| rest.is_ascii_alphanumeric() || rest == '_')
+}
+
+/// Whether zo's `file` is the person's settings file the window knows. A
+/// cell elsewhere is not the window's to read.
+fn is_settings_file(file: &str, settings: &Path) -> bool {
+    match (std::fs::canonicalize(file), std::fs::canonicalize(settings)) {
+        (Ok(file), Ok(settings)) => file == settings,
+        _ => Path::new(file) == settings,
+    }
 }
 
 /// What the settings show: the names of the secrets written as plain text,
@@ -158,18 +196,165 @@ pub fn keychain_service(name: &str) -> String {
     format!("{SERVICE_KEYCHAIN_SERVICE_PREFIX}{name}")
 }
 
+/// The plain-text cells of the person's settings file zo lists; `None` when
+/// zo does not answer the door.
+fn literals(zo: &ZoDoor, settings: &Path) -> Option<Vec<Literal>> {
+    let (code, said) = zo.ask(&["settings", "secrets", "--json"])?;
+    if code != 0 {
+        return None;
+    }
+    Some(
+        said.get("literals")?
+            .as_array()?
+            .iter()
+            .filter_map(Literal::of)
+            .filter(|literal| is_settings_file(&literal.file, settings))
+            .collect(),
+    )
+}
+
 /// The names the settings line shows, or `None` when there is nothing to show
 /// — none written as plain text, or a zo that does not know the door.
 pub(crate) fn notice(zo: &ZoDoor, settings: &Path) -> Option<SecretNotice> {
-    let _ = (zo, settings);
-    None
+    let mut names: Vec<String> = Vec::new();
+    for literal in literals(zo, settings)? {
+        if !names.contains(&literal.name) {
+            names.push(literal.name);
+        }
+    }
+    (!names.is_empty()).then_some(SecretNotice { names })
 }
 
 /// Every plain-text cell of the person's settings file, moved in the order zo
 /// listed them, stopping at the first that cannot be.
 pub(crate) fn move_all(zo: &ZoDoor, settings: &Path, keys: &dyn RouterKeys) -> MoveOutcome {
-    let _ = (zo, settings, keys);
-    MoveOutcome::default()
+    let Some(literals) = literals(zo, settings) else {
+        return MoveOutcome {
+            stopped: Some(Stopped {
+                name: String::new(),
+                reason: "zo_silent",
+                why: None,
+                keychain_kept: false,
+            }),
+            ..MoveOutcome::default()
+        };
+    };
+    let mut outcome = MoveOutcome::default();
+    let mut rest = literals.into_iter();
+    while let Some(literal) = rest.next() {
+        match move_one(zo, settings, &literal, keys) {
+            Ok(backup) => outcome.moved.push(Moved {
+                name: literal.name,
+                backup,
+            }),
+            Err(stopped) => {
+                outcome.stopped = Some(stopped);
+                outcome.left = rest.map(|literal| literal.name).collect();
+                break;
+            }
+        }
+    }
+    outcome
+}
+
+/// One cell: its value read into memory, kept in the keychain item zo reads,
+/// the reference checked, the cell rewritten by zo. The value lives in this
+/// call alone and is dropped with it.
+fn move_one(
+    zo: &ZoDoor,
+    settings: &Path,
+    literal: &Literal,
+    keys: &dyn RouterKeys,
+) -> Result<String, Stopped> {
+    let stop = |reason: &'static str, why: Option<String>, keychain_kept: bool| Stopped {
+        name: literal.name.clone(),
+        reason,
+        why,
+        keychain_kept,
+    };
+    let value = cell(settings, &literal.path).ok_or_else(|| stop("cell_changed", None, false))?;
+    // A trimmed copy would be another value, and zo refuses a reference that
+    // does not resolve to the cell's very bytes.
+    if value.is_empty() || value.trim() != value {
+        return Err(stop("padded", None, false));
+    }
+    let service = keychain_service(&literal.name);
+    match keys.read(&service) {
+        Ok(Some(held)) if held == value => {}
+        Ok(Some(_)) => return Err(stop("keychain_differs", None, false)),
+        Ok(None) => crate::typesafe_settings::save_key_at(
+            &service,
+            &value,
+            "비밀 값이 비어 있습니다",
+            keys,
+        )
+        .map_err(|refusal| stop("keychain", said_without(&refusal.message, &value), false))?,
+        Err(refusal) => {
+            return Err(stop("keychain", said_without(&refusal.message, &value), false));
+        }
+    }
+    let name = literal.name.as_str();
+    match zo.ask(&["settings", "secrets", "check", "--name", name, "--json"]) {
+        Some((0, said)) if said.get("resolves") == Some(&Value::Bool(true)) => {}
+        Some((_, said)) if said.get("resolves") == Some(&Value::Bool(false)) => {
+            return Err(stop("not_resolved", why_of(&said, &value), true));
+        }
+        _ => return Err(stop("zo_silent", None, true)),
+    }
+    let path = serde_json::to_string(&literal.path).map_err(|_| stop("cell_changed", None, true))?;
+    let args = [
+        "settings",
+        "secrets",
+        "move",
+        "--file",
+        literal.file.as_str(),
+        "--path",
+        path.as_str(),
+        "--name",
+        name,
+        "--json",
+    ];
+    match zo.ask(&args) {
+        Some((0, said)) if said.get("moved") == Some(&Value::Bool(true)) => said
+            .get("backup")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| stop("zo_silent", None, true)),
+        Some((_, said)) if said.get("moved") == Some(&Value::Bool(false)) => {
+            Err(stop("move_refused", why_of(&said, &value), true))
+        }
+        _ => Err(stop("zo_silent", None, true)),
+    }
+}
+
+/// The string at `path` in the settings file, read under its lock; `None`
+/// when the file, a key on the way or the string is gone.
+fn cell(settings: &Path, path: &[String]) -> Option<String> {
+    crate::api_routers::with_zo_settings_root(settings, |root| {
+        let (first, rest) = path.split_first().ok_or_else(String::new)?;
+        let mut at = root.get(first);
+        for key in rest {
+            at = at.and_then(|node| node.get(key));
+        }
+        Ok(at.and_then(Value::as_str).map(str::to_string))
+    })
+    .ok()
+    .flatten()
+}
+
+/// zo's reason, for the page.
+fn why_of(said: &Value, value: &str) -> Option<String> {
+    said_without(said.get("why")?.as_str()?, value)
+}
+
+/// A sentence for the page, cut to [`WHY_CHARS`] — and not said at all when
+/// it carries the value.
+fn said_without(sentence: &str, value: &str) -> Option<String> {
+    let sentence = sentence.trim();
+    if sentence.is_empty() || sentence.contains(value) {
+        return None;
+    }
+    Some(sentence.chars().take(WHY_CHARS).collect())
 }
 
 #[cfg(all(test, unix))]

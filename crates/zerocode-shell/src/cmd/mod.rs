@@ -51,6 +51,8 @@ pub(crate) mod scm;
 pub(crate) mod second_brain;
 pub(crate) mod session;
 pub(crate) mod settings;
+pub(crate) mod settings_secrets;
+pub(crate) use settings_secrets::{move_settings_secrets, settings_secret_literals};
 pub(crate) mod skills;
 pub(crate) mod supply_chain;
 pub(crate) mod system;

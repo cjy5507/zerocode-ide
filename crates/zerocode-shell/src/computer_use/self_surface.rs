@@ -94,6 +94,7 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "adopt_legacy_judgment_key",
     "save_typesafe_key",
     "remove_typesafe_key",
+    "move_settings_secrets",
     "check_typesafe_key",
     "save_type_value_key",
     "remove_type_value_key",

@@ -412,6 +412,7 @@ use cmd::{
     worktree_stamp, write_primary_selection, write_text_file,
 };
 use cmd::{adopt_legacy_judgment_key, select_coding_model, zo_model_list};
+use cmd::{move_settings_secrets, settings_secret_literals};
 use cmd::{
     artifact_bundle, artifact_copy_path, artifact_counts, artifact_delete, artifact_document,
     artifact_export, artifact_feedback_record, artifact_flow, artifact_import_transcripts,
@@ -2676,6 +2677,8 @@ fn main() -> ExitCode {
             typesafe_settings,
             save_typesafe_key,
             remove_typesafe_key,
+            settings_secret_literals,
+            move_settings_secrets,
             type_value_keys,
             save_type_value_key,
             remove_type_value_key,
