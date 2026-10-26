@@ -117,7 +117,7 @@ RECEIPT_PY=$SELF_DIR/coord_receipt.py   # reads a coordinator's gate receipt aga
 # started and ended green in its runner.log — the queue under the project's workspace folder,
 # where the window's board reads it too (crates/zerocode-shell/src/schedule_timeline.rs
 # LINE_FOLDER). Their owner and run are only what the jobs say of themselves, held to the
-# coordinator's: coord-<label> of RELEASE_COORD_RUN (t-47516).
+# coordinator's: coord-<label> of RELEASE_COORD_RUN, or its -root and -zo lines (t-47516, t-76396).
 RELEASE_BUILD_LINE=${RELEASE_BUILD_LINE:-$HOME/zerocode/workspaces/$(basename "$RELEASE_REPO")/build-line/build-queue}
 RELEASE_COORD_RUN=${RELEASE_COORD_RUN:-run-4275}
 LEGACY_INSTALL_SH=$SELF_DIR/legacy/install.sh   # the old CLI's installer, verbatim (§2.7)
@@ -927,7 +927,7 @@ gate_owed() { # root|zo — 0 when the gate must run; otherwise SKIP says why an
 # one green RC line and one log per entry, a verdict of no red, one owner, run and
 # folder — holds every job to RELEASE_BUILD_LINE (in its done/, started and ended green
 # in its runner.log) and the jobs' own word on owner and run to the coordinator's
-# (coord-<label> of RELEASE_COORD_RUN), and counts a recipe as gated only where an
+# (coord-<label> of RELEASE_COORD_RUN, or its -root and -zo lines), and counts a recipe as gated only where an
 # entry ran exactly `just <recipe>` in that gate's folder from the top of the checkout.
 # The receipt stands for this sha when git finds every job's head to hold the tree its
 # jobs printed, and that tree to be the sha's apart from the stamp's version lines and

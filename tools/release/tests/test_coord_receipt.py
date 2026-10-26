@@ -244,6 +244,57 @@ class Refusing(ReceiptCase):
                 self.refused(lambda: self.facts(receipt))
 
 
+SPLIT = {"g1-build": [("pii-check", "just pii-check", 0)],
+         "g3a-zo-lint": [("zo-fmt-check", "zsh -c 'cd zo-ide && just fmt-check'", 0)]}
+
+
+class SplitGate(ReceiptCase):
+    """t-76396: a gate run as two lines (mkgate-split) has two owners, coord-<label>-root and
+    coord-<label>-zo; the lane takes them as one receipt, and nothing looser."""
+
+    def split(self, root="coord-l9-root", zo="coord-l9-zo", **kw):
+        return self.gate(SPLIT, who={"g1-build": root, "g3a-zo-lint": zo}, **kw)
+
+    def test_the_root_and_zo_lines_of_one_label_are_one_receipt(self):
+        said = self.read_cli(self.made(self.split()), "--dir", ".")
+        self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
+        lines = said.stdout.splitlines()
+        self.assertIn("who coord-l9-root+coord-l9-zo", lines)
+        self.assertIn(f"run {RUN}", lines)
+        self.assertIn("recipe pii-check", lines)
+
+    def test_each_line_must_have_ended_green_under_its_own_owner(self):
+        receipt = self.made(self.split())
+        runner = self.tmp / "build-queue" / "runner.log"
+        name = f"0-{FIRST_JOB + 1}-coord-l9-g3a-zo-lint"
+        runner.write_text(runner.read_text().replace(f"RUN {name} who=coord-l9-zo", f"RUN {name} who=coord-l9-root"))
+        said = self.read_cli(receipt)
+        self.assertEqual(said.returncode, 1, said.stdout + said.stderr)
+        self.assertIn(f"runner.log never ended job {name} green under coord-l9-zo", said.stdout)
+
+    def test_owners_other_than_the_two_lines_of_one_label_are_refused(self):
+        for case, root, zo in (("two labels", "coord-l9-root", "coord-l10-zo"),
+                               ("a plain owner and a line", "coord-l9", "coord-l9-zo"),
+                               ("the same line twice over two names", "coord-l9-zo", "coord-l9-zo+"),
+                               ("a third kind of line", "coord-l9-root", "coord-l9-web"),
+                               ("not a coordinator", "coord-l9-root", "w-70906"),
+                               ("one line named twice with another label", "coord-l9-root", "coord-l9-root-zo")):
+            with self.subTest(case=case):
+                with self.assertRaises(coord_receipt.Refused):
+                    coord_receipt.make(self.split(root, zo))
+                shutil.rmtree(self.tmp / "build-queue")
+
+    def test_a_single_line_owner_still_stands_alone_but_must_be_a_coordinator(self):
+        said = self.read_cli(self.made(self.gate(SPLIT, who="coord-l9-zo")))
+        self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
+        said = self.read_cli(self.made(self.gate(SPLIT, who={"g1-build": "w-70906", "g3a-zo-lint": "w-70906"})))
+        self.assertEqual(said.returncode, 1)
+
+    def test_the_run_is_still_the_lanes_for_both_lines(self):
+        said = self.read_cli(self.made(self.split(run="run-11955")))
+        self.assertIn("the jobs say run run-11955, not run-4275", said.stdout)
+
+
 class OnTheLine(ReceiptCase):
     """ZO's review of t-47516, P2-1: the receipt's evidence is only words the jobs wrote, so
     the reader holds every job to the build line that ran it and to the coordinator's run.
