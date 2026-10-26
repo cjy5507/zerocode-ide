@@ -107,6 +107,8 @@ struct Watch {
     pending: Option<u64>,
     noted: bool,
     badged: bool,
+    /// The length a hang still open is said again at.
+    still_at: u64,
     count: u64,
     /// The previous beat's `(uptime, wall)` — the evidence of a sleep.
     last: Option<(u64, u64)>,
@@ -119,6 +121,7 @@ impl Watch {
             pending: None,
             noted: false,
             badged: false,
+            still_at: 0,
             count: 0,
             last: None,
         }
@@ -177,6 +180,7 @@ impl Watch {
             if !self.noted && ms >= limits.first_ms {
                 self.noted = true;
                 self.count += 1;
+                self.still_at = ms.saturating_add(STILL_OPEN_EVERY_MS);
                 tick.hang = Some(ms);
             }
             if !self.badged && ms >= limits.second_ms {
@@ -184,6 +188,10 @@ impl Watch {
                 tick.badge = Some(ms);
             }
             if answered.is_none() {
+                if seen_open && ms >= self.still_at {
+                    self.still_at = ms.saturating_add(STILL_OPEN_EVERY_MS);
+                    tick.still = Some(ms);
+                }
                 return tick;
             }
             if seen_open {
@@ -387,9 +395,6 @@ fn beat_once(watch: &mut Watch, answer: &Answer, beat: Beat, limits: Limits) -> 
     let answered = answer.take();
     let tick = watch.step(beat, answered, limits);
     let queue = tick.ping && answer.claim();
-    if tick.ping && !queue {
-        watch.pending = None;
-    }
     Beaten {
         tick,
         answered,
@@ -508,6 +513,20 @@ impl Monitor {
                     }
                 });
             }
+        }
+        if let Some(ms) = tick.still {
+            // Said from the scope the main thread still stands in: nothing has
+            // run on it since the hang line, so the scope is the hang's own.
+            let scope = crate::crumbs::main_scope();
+            let io = main_io_now(wall_ms());
+            crate::crumbs::record(
+                "hang_still_open",
+                format_args!("ms={ms} main_scope={scope}"),
+            );
+            crate::note_window_event(
+                app.state::<crate::AppState>().local_data_root(),
+                &format!("hang still open: {ms}ms main_scope={scope} io={io}"),
+            );
         }
         if let Some(ms) = tick.hang {
             let (scope, io) = if answered.is_none() {
@@ -685,10 +704,10 @@ mod tests {
                 .badge,
             Some(limits.second_ms)
         );
-        assert_eq!(
-            watch.step(beat(begin + limits.second_ms * 2), None, limits),
-            Tick::default()
-        );
+        // Still open: no second hang, no second badge, no new ping — at most
+        // the line that says it is still open.
+        let open = watch.step(beat(begin + limits.second_ms * 2), None, limits);
+        assert_eq!((open.hang, open.badge, open.ping), (None, None, false));
         assert!(
             watch
                 .step(

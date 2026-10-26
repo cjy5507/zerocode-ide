@@ -1992,9 +1992,11 @@ impl RuntimeActor {
                         boot,
                         panes,
                         launcher,
-                        receiver,
+                        Mail {
+                            receiver,
+                            serving: &thread_serving,
+                        },
                         boot_sender,
-                        &thread_serving,
                     )
                 }));
                 match outcome {
@@ -6775,16 +6777,23 @@ fn taken_over_letter(
     )
 }
 
+/// The actor's mailbox, and where it says which request it is serving
+/// (t-75646) for a watcher that must never send it one.
+struct Mail<'a> {
+    receiver: Receiver<ActorCommand>,
+    serving: &'a Serving,
+}
+
 fn actor_main(
     store: WorkflowStore,
     ledger_id: String,
     boot: RuntimeBoot,
     panes: Box<dyn PaneTable>,
     launcher: Box<dyn Launcher + Send>,
-    receiver: Receiver<ActorCommand>,
+    mail: Mail<'_>,
     boot_reply: SyncSender<Result<RuntimeImage, RuntimeError>>,
-    serving: &Serving,
 ) -> Result<RuntimeImage, RuntimeError> {
+    let Mail { receiver, serving } = mail;
     let mut state = match RuntimeState::boot(store, ledger_id, boot, panes, launcher) {
         Ok(state) => state,
         Err(error) => {
