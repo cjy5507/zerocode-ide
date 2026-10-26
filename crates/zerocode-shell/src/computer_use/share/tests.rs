@@ -48,7 +48,10 @@ fn ending_a_share_invalidates_an_admitted_request_even_after_sharing_again() {
         let _new_request = admit(ComputerMethod::Click, &click("Sample")).unwrap();
         assert!(ensure_current().is_ok());
     }
-    assert_eq!(ensure_current().unwrap_err().code, error_code::PERSON_TOOK_CONTROL);
+    assert_eq!(
+        ensure_current().unwrap_err().code,
+        error_code::PERSON_TOOK_CONTROL
+    );
 }
 
 #[test]
@@ -61,7 +64,10 @@ fn ending_a_taken_back_share_clears_its_controls_and_keeps_old_requests_refused(
     assert!(ended["target"].is_null(), "{ended}");
     assert_eq!(ended["takenBack"], false);
     give_back();
-    assert_eq!(ensure_current().unwrap_err().code, error_code::PERSON_TOOK_CONTROL);
+    assert_eq!(
+        ensure_current().unwrap_err().code,
+        error_code::PERSON_TOOK_CONTROL
+    );
     admit(ComputerMethod::Click, &click("Sample")).expect("a new card");
     assert_eq!(asked.get(), 2);
 }
@@ -74,8 +80,48 @@ fn ending_a_stale_app_or_generation_preserves_the_current_share() {
     take_control();
     give_back();
     let current = state();
-    assert_eq!(super::end("sample", old["generation"].as_u64().unwrap()), current);
-    assert_eq!(super::end("other", current["generation"].as_u64().unwrap()), current);
+    assert_eq!(
+        super::end("sample", old["generation"].as_u64().unwrap()),
+        current
+    );
+    assert_eq!(
+        super::end("other", current["generation"].as_u64().unwrap()),
+        current
+    );
+    assert_eq!(state(), current);
+}
+
+#[test]
+fn ending_a_share_while_another_card_waits_does_not_restore_a_share_from_its_answer() {
+    let _person = stand_in::stand(|card| {
+        if card.app == "Other" {
+            let current = state();
+            super::end("sample", current["generation"].as_u64().unwrap());
+        }
+        Decision::Allowed
+    });
+    admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    assert_eq!(
+        refused(ComputerMethod::Click, &click("Other")).as_deref(),
+        Some(error_code::PERSON_TOOK_CONTROL)
+    );
+    assert!(
+        state()["target"].is_null(),
+        "a late card cannot undo the end"
+    );
+}
+
+#[test]
+fn a_panel_press_from_an_ended_share_cannot_take_a_new_share() {
+    let (_person, _) = person(Decision::Allowed);
+    admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    let old = state();
+    super::end("sample", old["generation"].as_u64().unwrap());
+    admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    let current = state();
+    let mut panel = old;
+    panel["takenBack"] = true.into();
+    super::hear_panel(&json!({"shareControl": panel}));
     assert_eq!(state(), current);
 }
 

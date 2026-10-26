@@ -119,7 +119,9 @@ function paintComputerBand() {
   band.classList.toggle("is-stopped", stopped);
   say(el("computer-band-word"), () => stopped
     ? t("computer.band.stopped", "Computer Use 정지됨 · {{reason}}", { reason: state.stopped })
-    : t("computer.band.working", "Computer Use 진행 중"));
+    : state.active
+      ? t("computer.band.working", "Computer Use 진행 중")
+      : t("computer.band.idle", "Computer Use 대기 중"));
   say(el("computer-band-count"), () => t("computer.band.actions", "행동 {{count}}", {
     count: state.actions ?? 0,
   }));
@@ -154,12 +156,15 @@ function paintComputerShare() {
     ? null
     : share.takenBack
       ? () => t("computer.share.taken", "「{{app}}」 제어권을 가져왔습니다", { app })
-      : () => t("computer.share.working", "에이전트가 「{{app}}」 창을 다루는 중", { app });
+      : computerBandState.active && computerBandState.stopped == null
+        ? () => t("computer.share.working", "에이전트가 「{{app}}」 창을 다루는 중", { app })
+        : () => t("computer.share.shared", "「{{app}}」 창을 에이전트와 공유 중", { app });
   say(line, words);
   if (!words) line.textContent = "";
   line.hidden = !words;
   el("computer-band-take").hidden = share.target == null || share.takenBack;
   el("computer-band-give").hidden = !share.takenBack;
+  el("computer-band-end").hidden = share.target == null;
   const waiting = share.waitingLabel ?? share.waiting;
   const wait = el("computer-band-wait");
   const waitWords = waiting == null
@@ -179,6 +184,7 @@ function takeComputerShare(said) {
     target: said?.target ?? null,
     label: said?.label ?? null,
     takenBack: said?.takenBack === true,
+    generation: said?.generation ?? null,
     waiting: said?.waiting ?? null,
     waitingLabel: said?.waitingLabel ?? null,
   };
@@ -205,6 +211,13 @@ el("computer-band-hand").addEventListener("click", () => {
 
 el("computer-band-give").addEventListener("click", () => {
   void invoke("computer_give_back", undefined, { hand: handNow() }).catch(() => {});
+});
+
+el("computer-band-end").addEventListener("click", () => {
+  const { target: app, generation } = computerShareState;
+  if (app == null || !Number.isSafeInteger(generation)) return;
+  void invoke("computer_share_end", { app, generation }, { hand: handNow() })
+    .then(takeComputerShare).catch(() => {});
 });
 
 browserWorkspaceChromeReaders.add(paintComputerWorkBrowsers);

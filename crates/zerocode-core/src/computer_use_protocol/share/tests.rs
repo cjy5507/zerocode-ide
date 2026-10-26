@@ -15,7 +15,10 @@ fn ending_a_share_forgets_only_its_app_and_moves_the_generation() {
     assert!(!share.taken_back());
     assert!(share.required());
     assert!(share.generation() > generation);
-    assert_eq!(share.gate(act(Some("sample")), NOW), Gate::Ask("sample".into()));
+    assert_eq!(
+        share.gate(act(Some("sample")), NOW),
+        Gate::Ask("sample".into())
+    );
     assert_eq!(share.gate(act(Some("other")), NOW), Gate::Go);
 }
 
