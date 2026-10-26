@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=390, initial-scale=1">
+<title>Atlas search</title>
+<style>
+  /* The short phone errand of t-76055 (390 × 844 points), what the iPhone
+     Mirroring window shows: connect, open an app from the home screen, press
+     its search field, type, Return, wait for the results, open one. Pixels
+     only, like the long form: the mirror has no accessibility tree. */
+  :root { --ink: #000; --muted: #6d6d72; --line: #c6c6c8; --tint: #007aff; --ground: #f2f2f7; --card: #fff; --keys: #d1d3d9; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; }
+  body { font: 17px/1.3 -apple-system, "SF Pro Text", "Helvetica Neue", Arial, sans-serif; color: var(--ink); background: var(--ground); }
+  .screen { display: none; padding: 60px 16px 0; height: 100%; }
+  .screen.on { display: block; }
+  .center { text-align: center; padding-top: 300px; }
+  .big { font-size: 28px; font-weight: 600; margin-bottom: 24px; }
+  .pill { border: 0; border-radius: 22px; background: var(--tint); color: #fff; font: inherit; padding: 12px 36px; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 28px 12px; padding-top: 20px; }
+  .icon { border: 0; background: none; font: inherit; font-size: 12px; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .icon i { width: 60px; height: 60px; border-radius: 14px; display: block; }
+  h1 { font-size: 32px; margin: 0 0 12px; }
+  .search { width: 100%; border: 0; border-radius: 10px; background: #e3e3e8; font: inherit; padding: 9px 12px; outline: 0; }
+  .note { color: var(--muted); font-size: 13px; margin: 14px 4px; }
+  .rows { background: var(--card); border-radius: 10px; margin-top: 8px; }
+  .rows button { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: none;
+    font: inherit; padding: 13px 16px; }
+  .rows button:last-child { border-bottom: 0; }
+  .keyboard { position: fixed; left: 0; right: 0; bottom: -300px; height: 290px; background: var(--keys); transition: bottom .3s; }
+  .keyboard.up { bottom: 0; }
+  .detail { font-size: 15px; color: var(--muted); margin: 6px 0; }
+</style>
+</head>
+<body>
+<section class="screen on" id="connect"><div class="center"><div class="big">iPhone Mirroring</div>
+  <button class="pill" id="continue">Continue</button><div class="note" id="connecting"></div></div></section>
+<section class="screen" id="home"><div class="grid">
+  <button class="icon"><i style="background:#ffcc00"></i><span>Notes</span></button>
+  <button class="icon"><i style="background:#34c759"></i><span>Maps</span></button>
+  <button class="icon" id="atlas"><i style="background:#5856d6"></i><span>Atlas</span></button>
+  <button class="icon"><i style="background:#5ac8fa"></i><span>Weather</span></button>
+</div></section>
+<section class="screen" id="app"><h1>Atlas</h1>
+  <input class="search" id="query" placeholder="Search places" enterkeyhint="search" autocomplete="off">
+  <div class="note" id="status">Recent: none</div><div class="rows" id="results"></div></section>
+<section class="screen" id="place"><h1 id="place-name"></h1>
+  <div class="detail">Opening hours</div><div class="detail">8 am – 6 pm</div></section>
+<div class="keyboard" id="keyboard"></div>
+<script>
+  // The run's outcome, for the driver's oracle: what was searched, what opened.
+  window.LongForm = { spec: {}, outcome: { query: null, opened: null } };
+  const PLACES = ["Blue Bottle Coffee", "Blue Door Bakery", "Bluebird Books", "Harbour Fish Market"];
+  // How long each step the phone takes, in ms: connecting, and searching.
+  const CONNECT_MS = 800;
+  const SEARCH_MS = 1200;
+  const show = (id) => document.querySelectorAll(".screen").forEach((screen) => screen.classList.toggle("on", screen.id === id));
+  const keyboard = (up) => document.getElementById("keyboard").classList.toggle("up", up);
+  document.getElementById("continue").addEventListener("click", () => {
+    document.getElementById("connecting").textContent = "Connecting…";
+    setTimeout(() => show("home"), CONNECT_MS);
+  });
+  document.getElementById("atlas").addEventListener("click", () => show("app"));
+  const query = document.getElementById("query");
+  query.addEventListener("focus", () => keyboard(true));
+  query.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    const asked = query.value.trim();
+    LongForm.outcome.query = asked;
+    query.blur();
+    keyboard(false);
+    document.getElementById("status").textContent = "Searching…";
+    document.getElementById("results").replaceChildren();
+    setTimeout(() => {
+      const found = PLACES.filter((place) => place.toLowerCase().includes(asked.toLowerCase()));
+      document.getElementById("status").textContent = `${found.length} results for “${asked}”`;
+      document.getElementById("results").replaceChildren(...found.map((place) => {
+        const row = document.createElement("button");
+        row.textContent = place;
+        row.addEventListener("click", () => {
+          LongForm.outcome.opened = place;
+          document.getElementById("place-name").textContent = place;
+          show("place");
+        });
+        return row;
+      }));
+    }, SEARCH_MS);
+  });
+</script>
+</body>
+</html>

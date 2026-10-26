@@ -25,7 +25,8 @@ SUBMISSIONS = "submissions.jsonl"
 HTML = "text/html; charset=utf-8"
 SCRIPT = "text/javascript; charset=utf-8"
 PAGE_FILES = {"": ("form.html", HTML), "form.html": ("form.html", HTML), "form.js": ("form.js", SCRIPT),
-              "phone.html": ("phone.html", HTML), "phone.js": ("phone.js", SCRIPT), "form-core.js": ("form-core.js", SCRIPT)}
+              "phone.html": ("phone.html", HTML), "phone.js": ("phone.js", SCRIPT), "form-core.js": ("form-core.js", SCRIPT),
+              "search.html": ("search.html", HTML)}
 # A reference is the digest's first characters: short enough to read back.
 REFERENCE_CHARS = 8
 # The largest body a post may carry; the form's whole answer is a few KB.
