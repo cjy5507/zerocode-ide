@@ -137,6 +137,14 @@ impl ClaudeCodeStore {
         }
     }
 
+    /// [`claude_code_store_label`] of this store.
+    fn label(&self) -> String {
+        self.folder.as_ref().map_or_else(
+            || self.named_by.to_string(),
+            |folder| format!("{}:{}", self.named_by, folder.display()),
+        )
+    }
+
     fn service(&self) -> String {
         self.folder.as_ref().map_or_else(
             || KEYCHAIN_SERVICE.to_string(),
@@ -526,6 +534,15 @@ fn read_store_session(store: &ClaudeCodeStore) -> Result<KeychainSession, Creden
         }
         KeychainOutcome::Absent => Err(CredentialMiss::Absent),
     }
+}
+
+/// The store this process reads its Claude Code login from, as a
+/// model-discovery report names it: `keychain` for the machine's own login,
+/// else `<variable>:<folder>` for the variable that named the folder
+/// ([`ClaudeCodeStore::current`]). Reads no secret and no file.
+#[must_use]
+pub fn claude_code_store_label() -> String {
+    ClaudeCodeStore::current().label()
 }
 
 /// Whether a Claude Code login is kept where this process would read one —
@@ -962,6 +979,25 @@ mod store_tests {
 
         assert_eq!(ClaudeCodeStore::from_folders(None, None).service(), KEYCHAIN_SERVICE);
         assert_eq!(ClaudeCodeStore::from_folders(None, Some(OsString::new())).folder, None);
+    }
+
+    /// The label a model-discovery report records (t-76621): the variable
+    /// that named the folder and the folder, or `keychain` — the window reads
+    /// these exact forms.
+    #[test]
+    fn the_store_label_names_the_variable_and_folder_or_the_keychain() {
+        let account = OsString::from("/Users/dev/app/claude-accounts/a-1");
+        let runtime_home = OsString::from("/Users/dev/app/.claude");
+        assert_eq!(
+            ClaudeCodeStore::from_folders(Some(account), Some(runtime_home.clone())).label(),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR:/Users/dev/app/claude-accounts/a-1"
+        );
+        assert_eq!(
+            ClaudeCodeStore::from_folders(None, Some(runtime_home)).label(),
+            "CLAUDE_CONFIG_DIR:/Users/dev/app/.claude"
+        );
+        assert_eq!(ClaudeCodeStore::from_folders(Some(OsString::new()), None).label(), "keychain");
+        assert_eq!(ClaudeCodeStore::from_folders(None, None).label(), "keychain");
     }
 
     /// `$USER` names the item as the CLI files it; a name the CLI would not

@@ -137,16 +137,30 @@ impl Report<'_> {
                 "settingsKeySuperseded": self.user.settings_key_superseded(),
             },
             "merged": self.merged,
-            "reports": self.catalog.reports.iter().map(|report| json!({
-                "provider": report.provider,
-                "source": report.source,
-                "ok": report.ok,
-                "detail": report.detail,
-                "count": report.count,
-                "fetchedAt": report.fetched_at,
-                "age": describe_age(report.fetched_at, self.now),
-                "origin": report.origin,
-            })).collect::<Vec<_>>(),
+            "reports": self.catalog.reports.iter().map(|report| {
+                let mut value = json!({
+                    "provider": report.provider,
+                    "source": report.source,
+                    "ok": report.ok,
+                    "detail": report.detail,
+                    "count": report.count,
+                    "fetchedAt": report.fetched_at,
+                    "age": describe_age(report.fetched_at, self.now),
+                    "origin": report.origin,
+                    "credentialStore": report.credential_store,
+                });
+                // A report with no kind — a success, a skip an older zo cached —
+                // has no key, as in the cache: the window reads "no key" as an
+                // older zo, and an empty value as a kind it does not know.
+                if !report.failure_kind.is_empty() {
+                    value["failureKind"] = json!(report.failure_kind);
+                }
+                // A failure without a response has a kind and no number.
+                if let Some(status) = report.http_status {
+                    value["httpStatus"] = json!(status);
+                }
+                value
+            }).collect::<Vec<_>>(),
             "models": self.rows.iter().map(|row| json!({
                 "provider": row.provider.key(),
                 "id": row.id,
@@ -493,6 +507,9 @@ mod tests {
             count,
             fetched_at: 1_000,
             origin: origin.to_string(),
+            credential_store: String::new(),
+            failure_kind: String::new(),
+            http_status: None,
         };
         let now = 1_000 + 2 * 3600;
         assert_eq!(
@@ -511,6 +528,98 @@ mod tests {
             report_line(&report(false, "skipped: no ChatGPT login", 0, ""), now),
             "openai     chatgpt-backend      skipped: no ChatGPT login · 2h old"
         );
+    }
+
+    /// t-76984: `zo models --json` carries each failed source's kind and
+    /// HTTP number as the report holds them — `failureKind`, `httpStatus` —
+    /// so the window reads them instead of the sentence. A source that
+    /// failed without a response has a kind and no number.
+    #[test]
+    fn a_failed_reports_kind_and_http_status_reach_the_json() {
+        use runtime::model_catalog::ModelCatalog;
+        use runtime::model_discovery::{DiscoveredCatalog, Overlay, SourceReport, UpdatePolicy};
+        let home = tempfile::tempdir().expect("an overlay home");
+        let user = ModelCatalog::load_from_home(home.path()).expect("an empty overlay");
+        let rows = user.rows(&super::ALL_PROVIDERS, false);
+        let report = |value: serde_json::Value| -> SourceReport { serde_json::from_value(value).expect("a report") };
+        let catalog = DiscoveredCatalog {
+            fetched_at: 1_790_121_000,
+            reports: vec![
+                report(serde_json::json!({
+                    "provider": "openai", "source": runtime::model_discovery::OPENAI_SOURCE, "ok": false,
+                    "detail": "live: HTTP 401 Unauthorized · cache: skipped: no models_cache.json", "count": 0,
+                    "fetched_at": 1_790_121_000_u64, "origin": "", "failure_kind": "auth_rejected", "http_status": 401
+                })),
+                report(serde_json::json!({
+                    "provider": "xai", "source": runtime::model_discovery::XAI_SOURCE, "ok": false,
+                    "detail": "error sending request", "count": 0,
+                    "fetched_at": 1_790_121_000_u64, "origin": "", "failure_kind": "network"
+                })),
+            ],
+            ..Default::default()
+        };
+        let overlay = Overlay::default();
+        let report = super::Report {
+            policy: UpdatePolicy::Auto,
+            catalog: &catalog,
+            user: &user,
+            rows: &rows,
+            overlay: &overlay,
+            merged: None,
+            tiers: &[],
+            now: 1_790_121_060,
+        };
+        let json: serde_json::Value = serde_json::from_str(&report.json().expect("json")).unwrap();
+        assert_eq!(json["reports"][0]["failureKind"], "auth_rejected");
+        assert_eq!(json["reports"][0]["httpStatus"], 401);
+        assert_eq!(json["reports"][1]["failureKind"], "network");
+        assert!(json["reports"][1].get("httpStatus").is_none(), "no response, no number: {}", json["reports"][1]);
+    }
+
+    /// t-77146: a report without a kind — a skip an older zo cached, a success
+    /// — leaves `failureKind` out of the JSON, as the cache leaves it out. The
+    /// window reads "no field" as an older zo and checks the `skipped:` words
+    /// itself; an empty `failureKind` would read as an unknown kind and turn a
+    /// "not signed in" row into a failed one. A kind that is there is kept,
+    /// `unknown` included.
+    #[test]
+    fn a_report_without_a_kind_leaves_failure_kind_out_of_the_json() {
+        use runtime::model_catalog::ModelCatalog;
+        use runtime::model_discovery::{DiscoveredCatalog, Overlay, SourceReport, UpdatePolicy};
+        let home = tempfile::tempdir().expect("an overlay home");
+        let user = ModelCatalog::load_from_home(home.path()).expect("an empty overlay");
+        let rows = user.rows(&super::ALL_PROVIDERS, false);
+        let report = |value: serde_json::Value| -> SourceReport { serde_json::from_value(value).expect("a report") };
+        let catalog = DiscoveredCatalog {
+            fetched_at: 1_790_300_000,
+            reports: vec![
+                report(serde_json::json!({
+                    "provider": "anthropic", "source": runtime::model_discovery::ANTHROPIC_SOURCE, "ok": false,
+                    "detail": "skipped: no Anthropic credential", "count": 0,
+                    "fetched_at": 1_790_300_000_u64, "origin": ""
+                })),
+                report(serde_json::json!({
+                    "provider": "xai", "source": runtime::model_discovery::XAI_SOURCE, "ok": false,
+                    "detail": "a body that is not the list", "count": 0,
+                    "fetched_at": 1_790_300_000_u64, "origin": "", "failure_kind": "unknown"
+                })),
+            ],
+            ..Default::default()
+        };
+        let overlay = Overlay::default();
+        let report = super::Report {
+            policy: UpdatePolicy::Auto,
+            catalog: &catalog,
+            user: &user,
+            rows: &rows,
+            overlay: &overlay,
+            merged: None,
+            tiers: &[],
+            now: 1_790_300_060,
+        };
+        let json: serde_json::Value = serde_json::from_str(&report.json().expect("json")).unwrap();
+        assert!(json["reports"][0].get("failureKind").is_none(), "an old skip has no kind: {}", json["reports"][0]);
+        assert_eq!(json["reports"][1]["failureKind"], "unknown", "a kind that is there is kept");
     }
 
     /// C4 (t-6248): a shipped row its provider withdrew says so on its own
@@ -719,7 +828,7 @@ mod tests {
                     note: None,
                 })
             } else {
-                Err((source.to_string(), "skipped: not asked in this test".to_string()))
+                Err((source.to_string(), runtime::model_discovery::Fault::skipped("skipped: not asked in this test")))
             }
         });
         let overlay = Overlay::default();

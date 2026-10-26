@@ -170,6 +170,9 @@ pub struct Source {
     /// and the words a report says instead of the raw body — xAI's
     /// `spending-limit` is an account without credits, not a bad key.
     pub refusals: &'static [(&'static str, &'static str)],
+    /// The credential store this process reads the source's login from —
+    /// [`SourceReport::credential_store`]. Offline and cheap, never a secret.
+    pub store: fn() -> String,
 }
 
 impl Source {
@@ -178,14 +181,15 @@ impl Source {
     /// is a failure — whose rows [`carry_forward`] keeps and whose report
     /// the next connection asks again (t-6248).
     #[must_use]
-    pub fn miss(&self, miss: api::CredentialMiss) -> (String, String) {
-        let detail = match miss {
-            api::CredentialMiss::Absent => format!("skipped: {}", self.absent),
-            api::CredentialMiss::Unusable(why) => {
-                format!("{} credential present but not usable: {why}", self.credential)
-            }
+    pub fn miss(&self, miss: api::CredentialMiss) -> (String, Fault) {
+        let fault = match miss {
+            api::CredentialMiss::Absent => Fault::skipped(format!("skipped: {}", self.absent)),
+            api::CredentialMiss::Unusable(why) => Fault::new(
+                FailureKind::CredentialUnusable,
+                format!("{} credential present but not usable: {why}", self.credential),
+            ),
         };
-        (self.key.to_string(), detail)
+        (self.key.to_string(), fault)
     }
 
     /// The report's words for an answer that is not a success: the row's own
@@ -215,6 +219,7 @@ pub const SOURCES: [Source; 6] = [
         ask: openai_models,
         lists_every_model: true,
         refusals: &[],
+        store: api::managed_account::codex_store_label,
     },
     Source {
         provider: "anthropic",
@@ -226,6 +231,7 @@ pub const SOURCES: [Source; 6] = [
         ask: anthropic_models,
         lists_every_model: true,
         refusals: &[],
+        store: api::claude_code_store_label,
     },
     Source {
         provider: "google",
@@ -237,6 +243,7 @@ pub const SOURCES: [Source; 6] = [
         ask: google_models,
         lists_every_model: false,
         refusals: &[],
+        store: String::new,
     },
     Source {
         provider: "google",
@@ -248,6 +255,7 @@ pub const SOURCES: [Source; 6] = [
         ask: antigravity_models,
         lists_every_model: true,
         refusals: &[],
+        store: String::new,
     },
     Source {
         provider: "xai",
@@ -262,6 +270,7 @@ pub const SOURCES: [Source; 6] = [
             "spending-limit",
             "no subscription or credits on this xAI account — add credits or a Grok subscription (the login itself was accepted)",
         )],
+        store: api::grok_store_label,
     },
     Source {
         provider: "kimi",
@@ -273,6 +282,7 @@ pub const SOURCES: [Source; 6] = [
         ask: kimi_code_models,
         lists_every_model: true,
         refusals: &[],
+        store: api::kimi_code_store_label,
     },
 ];
 
@@ -447,6 +457,23 @@ pub struct SourceReport {
     /// [`ORIGIN_PREVIOUS`] when a failed refresh kept last time's rows.
     #[serde(default)]
     pub origin: String,
+    /// The credential store the process that wrote this report read the
+    /// source's login from ([`Source::store`]): `keychain`,
+    /// `<variable>:<folder>`, `home`, or empty when unknown or when the
+    /// source has no per-account store. The window reads these values.
+    #[serde(default)]
+    pub credential_store: String,
+    /// Why the source did not answer, as [`FailureKind::key`] spells it —
+    /// made where the failure happened, never read from [`Self::detail`].
+    /// Empty for a success and for a report written before the key existed,
+    /// and then not written at all: the window reads "no key" as an older zo
+    /// and checks the `skipped:` words itself, where an empty value would read
+    /// as an unknown kind (t-77146).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub failure_kind: String,
+    /// The status number of the response that failed it, when there was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
 }
 
 impl SourceReport {
@@ -654,8 +681,162 @@ pub struct Answered {
     pub note: Option<String>,
 }
 
+/// The kind of a failed or skipped ask, as [`SourceReport::failure_kind`]
+/// spells it. Decided where the failure happens — from the status number of
+/// the response, the client's own error kind or the credential question —
+/// and never read back out of a sentence, a URL or a folder name, which can
+/// say anything (a Codex home called `timeout`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureKind {
+    /// Nothing is configured for the source: a skip.
+    NoCredentials,
+    /// A credential is there, and zo knows before it asks that it cannot be
+    /// used (an expired session with nothing to renew it): sign in again.
+    CredentialUnusable,
+    /// HTTP 401.
+    AuthRejected,
+    /// HTTP 403.
+    Forbidden,
+    /// HTTP 404.
+    NotFound,
+    /// HTTP 429.
+    RateLimited,
+    /// HTTP 5xx.
+    ServerError,
+    /// The request never reached the server (connection refused, no route).
+    Network,
+    /// The request ran out of time.
+    Timeout,
+    /// Anything else — an answer of another status, a body that is not the
+    /// list, an error the client does not classify.
+    Unknown,
+}
+
+impl FailureKind {
+    /// The report's word for the kind.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::NoCredentials => "no_credentials",
+            Self::CredentialUnusable => "credential_unusable",
+            Self::AuthRejected => "auth_rejected",
+            Self::Forbidden => "forbidden",
+            Self::NotFound => "not_found",
+            Self::RateLimited => "rate_limited",
+            Self::ServerError => "server_error",
+            Self::Network => "network",
+            Self::Timeout => "timeout",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// The kind of a request that got no response, by what the client says of
+    /// its error: ran out of time, could not connect, or neither.
+    #[must_use]
+    pub const fn of_transport(timed_out: bool, connect_failed: bool) -> Self {
+        if timed_out {
+            Self::Timeout
+        } else if connect_failed {
+            Self::Network
+        } else {
+            Self::Unknown
+        }
+    }
+
+    /// The kind of an HTTP response by its status number.
+    #[must_use]
+    pub const fn of_status(status: u16) -> Self {
+        match status {
+            401 => Self::AuthRejected,
+            403 => Self::Forbidden,
+            404 => Self::NotFound,
+            429 => Self::RateLimited,
+            500..=599 => Self::ServerError,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Why one source could not answer: the report's sentence, and the kind and
+/// HTTP number made at the moment it failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fault {
+    /// The sentence a report line carries.
+    pub detail: String,
+    pub kind: FailureKind,
+    /// The status number of the response, when there was one.
+    pub http_status: Option<u16>,
+}
+
+impl Fault {
+    /// A failure of `kind` that had no HTTP response.
+    #[must_use]
+    pub fn new(kind: FailureKind, detail: impl Into<String>) -> Self {
+        Self { detail: detail.into(), kind, http_status: None }
+    }
+
+    /// A source nothing is configured for.
+    #[must_use]
+    pub fn skipped(detail: impl Into<String>) -> Self {
+        Self::new(FailureKind::NoCredentials, detail)
+    }
+
+    /// A failure no kind of the table names.
+    #[must_use]
+    pub fn unknown(detail: impl Into<String>) -> Self {
+        Self::new(FailureKind::Unknown, detail)
+    }
+
+    /// A response that was not a success: its status decides the kind.
+    #[must_use]
+    pub fn http(status: reqwest::StatusCode, detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            kind: FailureKind::of_status(status.as_u16()),
+            http_status: Some(status.as_u16()),
+        }
+    }
+
+    /// A transport error of the HTTP client: its own kind decides.
+    #[must_use]
+    pub fn transport(error: &reqwest::Error) -> Self {
+        Self {
+            detail: error.to_string(),
+            kind: FailureKind::of_transport(error.is_timeout(), error.is_connect()),
+            http_status: error.status().map(|status| status.as_u16()),
+        }
+    }
+
+    /// An error of the provider client: the response it carries, else the
+    /// transport error under it.
+    #[must_use]
+    pub fn api(error: &api::ApiError) -> Self {
+        match error {
+            api::ApiError::Api { status, .. } => Self::http(*status, error.to_string()),
+            api::ApiError::Http(transport) => Self::transport(transport),
+            api::ApiError::RetriesExhausted { last_error, .. } => Self { detail: error.to_string(), ..Self::api(last_error) },
+            _ => Self::unknown(error.to_string()),
+        }
+    }
+}
+
+/// The body of a response whose status is already known. A response that
+/// was not a success keeps its status when the body then breaks off or runs
+/// out of time: the kind and the number are made the moment the status is
+/// received, and the body only adds words (t-77146). The error of the
+/// read alone would name neither — a cut body is a decode error that
+/// carries no status. A success whose body fails has no failed status to
+/// keep, so the client's own error stands.
+async fn body_after(response: reqwest::Response, status: reqwest::StatusCode) -> Result<String, Fault> {
+    match response.text().await {
+        Ok(text) => Ok(text),
+        Err(error) if !status.is_success() => Err(Fault::http(status, format!("HTTP {status}: {error}"))),
+        Err(error) => Err(Fault::transport(&error)),
+    }
+}
+
 /// What one source answers: its rows, or its name and why not.
-pub type SourceAnswer = Result<Answered, (String, String)>;
+pub type SourceAnswer = Result<Answered, (String, Fault)>;
 
 /// Ask every source, blocking. Meant for a background thread or `zo models
 /// --refresh`; boot reads the cache instead.
@@ -663,7 +844,7 @@ pub type SourceAnswer = Result<Answered, (String, String)>;
 pub fn discover() -> DiscoveredCatalog {
     let previous = load_cached();
     let every: Vec<&'static str> = SOURCES.iter().map(|source| source.key).collect();
-    refresh_with(previous.as_ref(), &every, now_secs(), &selected_models(), ask)
+    refresh_under(previous.as_ref(), &every, now_secs(), &selected_models(), ask, store_of)
 }
 
 /// Ask only the sources whose last answer is older than `ttl_secs` (or
@@ -675,7 +856,7 @@ pub fn discover() -> DiscoveredCatalog {
 pub fn discover_due(now_secs: u64, ttl_secs: u64) -> Option<DiscoveredCatalog> {
     let previous = load_cached();
     let due = due_sources(previous.as_ref(), now_secs, ttl_secs);
-    (!due.is_empty()).then(|| refresh_with(previous.as_ref(), &due, now_secs, &selected_models(), ask))
+    (!due.is_empty()).then(|| refresh_under(previous.as_ref(), &due, now_secs, &selected_models(), ask, store_of))
 }
 
 /// The sources a connection at `now_secs` has to ask again: every source the
@@ -695,10 +876,8 @@ pub fn due_sources(previous: Option<&DiscoveredCatalog>, now_secs: u64, ttl_secs
         .collect()
 }
 
-/// One refresh: the sources in `due` are asked through `fetch`, every other
-/// source keeps the rows and report the previous catalog carried, a failed
-/// source keeps last time's rows ([`carry_forward`]), and a selected model
-/// the sources stopped listing stays as an unlisted row ([`keep_selected`]).
+/// [`refresh_under`] with every store unknown — the reports record none,
+/// and no store's answer is kept over another's.
 pub fn refresh_with(
     previous: Option<&DiscoveredCatalog>,
     due: &[&str],
@@ -706,34 +885,64 @@ pub fn refresh_with(
     selected: &[String],
     fetch: impl Fn(&'static str) -> SourceAnswer,
 ) -> DiscoveredCatalog {
+    refresh_under(previous, due, now_secs, selected, fetch, |_| String::new())
+}
+
+/// One refresh: the sources in `due` are asked through `fetch`, every other
+/// source keeps the rows and report the previous catalog carried, a failed
+/// source keeps last time's rows ([`carry_forward`]), and a selected model
+/// the sources stopped listing stays as an unlisted row ([`keep_selected`]).
+/// `store` names the credential store this process reads each source from
+/// ([`Source::store`]); a failure or skip never replaces a success another
+/// store answered ([`answered_under_another_store`]).
+pub fn refresh_under(
+    previous: Option<&DiscoveredCatalog>,
+    due: &[&str],
+    now_secs: u64,
+    selected: &[String],
+    fetch: impl Fn(&'static str) -> SourceAnswer,
+    store: impl Fn(&'static str) -> String,
+) -> DiscoveredCatalog {
+    refresh_noting(previous, due, now_secs, selected, fetch, store, |line| eprintln!("{line}"))
+}
+
+/// [`refresh_under`] handing each stderr line to `note`, so a test reads
+/// exactly what the process would have printed.
+pub fn refresh_noting(
+    previous: Option<&DiscoveredCatalog>,
+    due: &[&str],
+    now_secs: u64,
+    selected: &[String],
+    fetch: impl Fn(&'static str) -> SourceAnswer,
+    store: impl Fn(&'static str) -> String,
+    mut note: impl FnMut(&str),
+) -> DiscoveredCatalog {
     let mut catalog = DiscoveredCatalog {
         fetched_at: now_secs,
         ..Default::default()
     };
     for Source { provider, key: source, .. } in &SOURCES {
         let (provider, source) = (*provider, *source);
+        let last = previous.and_then(|catalog| catalog.reports.iter().find(|report| report.source == source));
+        let keep = |catalog: &mut DiscoveredCatalog, report: &SourceReport| {
+            catalog.reports.push(report.clone());
+            if let Some(previous) = previous {
+                catalog.models.extend(
+                    previous
+                        .models
+                        .iter()
+                        .filter(|model| model.source == source)
+                        .cloned(),
+                );
+            }
+        };
         if !due.contains(&source) {
-            let carried = previous.and_then(|catalog| {
-                catalog
-                    .reports
-                    .iter()
-                    .find(|report| report.source == source)
-                    .cloned()
-            });
-            if let Some(report) = carried {
-                catalog.reports.push(report);
-                if let Some(previous) = previous {
-                    catalog.models.extend(
-                        previous
-                            .models
-                            .iter()
-                            .filter(|model| model.source == source)
-                            .cloned(),
-                    );
-                }
+            if let Some(report) = last {
+                keep(&mut catalog, report);
                 continue;
             }
         }
+        let asked_under = store(source);
         match fetch(source) {
             Ok(answered) => {
                 let count = answered.models.len();
@@ -749,23 +958,74 @@ pub fn refresh_with(
                     count,
                     fetched_at: answered.fetched_at,
                     origin: answered.origin,
+                    credential_store: asked_under,
+                    failure_kind: String::new(),
+                    http_status: None,
                 });
                 catalog.models.extend(answered.models);
             }
-            Err((source, detail)) => catalog.reports.push(SourceReport {
-                provider: provider.to_string(),
-                source,
-                ok: false,
-                detail,
-                count: 0,
-                fetched_at: now_secs,
-                origin: String::new(),
-            }),
+            Err((asked, fault)) => match last.filter(|last| answered_under_another_store(last, &asked_under)) {
+                Some(last) => {
+                    note(&format!(
+                        "[zo] model discovery: {source}: kept the answer from {}; this process ({}) could not ask: {}",
+                        store_variable(&last.credential_store),
+                        store_variable(&asked_under),
+                        failure_line(&fault),
+                    ));
+                    keep(&mut catalog, last);
+                }
+                None => catalog.reports.push(SourceReport {
+                    provider: provider.to_string(),
+                    source: asked,
+                    ok: false,
+                    detail: fault.detail,
+                    count: 0,
+                    fetched_at: now_secs,
+                    origin: String::new(),
+                    credential_store: asked_under,
+                    failure_kind: fault.kind.key().to_string(),
+                    http_status: fault.http_status,
+                }),
+            },
         }
     }
     let catalog = carry_forward(catalog, previous);
     let catalog = keep_selected(catalog, previous, selected, now_secs);
     withdraw_shipped(catalog, previous, now_secs)
+}
+
+/// What a failed ask says on stderr: its kind, and the HTTP status number
+/// when the response had one — never the detail. A failed response repeats
+/// whatever the provider echoes (a key, a bearer, a query token) in any
+/// shape, so no masking can promise to catch every value; the line holds
+/// only words [`FailureKind::key`] chose and a number the response carried
+/// (t-76896, t-76984).
+fn failure_line(fault: &Fault) -> String {
+    match fault.http_status {
+        Some(status) => format!("{} (HTTP {status})", fault.kind.key()),
+        None => fault.kind.key().to_string(),
+    }
+}
+
+/// A credential store's label as stderr may show it: the variable that named
+/// it (`CLAUDE_CONFIG_DIR`), or `keychain` / `home` — never the folder after
+/// the `:`, which holds the person's name. A label of any other shape is
+/// `store`.
+fn store_variable(store: &str) -> String {
+    let name = store.split(':').next().unwrap_or("");
+    let plain = !name.is_empty() && name.len() <= 40 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+    if plain { name.to_string() } else { "store".to_string() }
+}
+
+/// Whether a failure or skip asked under `asking` leaves `last` standing:
+/// `last` is a success another named store answered, so this process's miss
+/// says nothing about that login. The window's own `zo models --json`, run
+/// without a pane's account variables, cannot see the pane's Claude login —
+/// and its refusal overwrote the panes' success in the shared cache, so
+/// Settings said "not signed in" while every conversation worked (t-76621).
+/// Either store unknown is the old rule: the miss is the answer.
+fn answered_under_another_store(last: &SourceReport, asking: &str) -> bool {
+    last.ok && !last.credential_store.is_empty() && !asking.is_empty() && last.credential_store != asking
 }
 
 /// The shipped rows each complete list ([`Source::lists_every_model`]) no
@@ -851,11 +1111,16 @@ pub fn withdrawn_since(id: &str) -> Option<u64> {
     withdrawn_since_in(&catalog, id)
 }
 
+/// The real credential stores, by source key — each row's own.
+fn store_of(source: &'static str) -> String {
+    self::source(source).map_or_else(String::new, |row| (row.store)())
+}
+
 /// The real fetchers, by source key — each row's own.
 fn ask(source: &'static str) -> SourceAnswer {
     match self::source(source) {
         Some(row) => (row.ask)(),
-        None => Err((source.to_string(), "skipped: unknown source".to_string())),
+        None => Err((source.to_string(), Fault::unknown("skipped: unknown source"))),
     }
 }
 
@@ -1387,21 +1652,29 @@ fn cache_origin(path: &Path) -> String {
 /// The OpenAI column: the ChatGPT backend live, else the freshest Codex
 /// cache this machine has — with the live failure on the report line.
 fn openai_models() -> SourceAnswer {
-    match chatgpt_backend_models() {
+    openai_answer(chatgpt_backend_models(), codex_cache_models)
+}
+
+/// [`openai_models`] over the two answers it chooses between: the live one,
+/// and — asked only when the live one failed — the cache's.
+fn openai_answer(live: SourceAnswer, cache: impl FnOnce() -> SourceAnswer) -> SourceAnswer {
+    match live {
         Ok(answer) => Ok(answer),
-        Err((source, live)) => match codex_cache_models() {
+        Err((source, live)) => match cache() {
             Ok(mut cached) => {
-                cached.note = Some(format!("live: {live}"));
+                cached.note = Some(format!("live: {}", live.detail));
                 Ok(cached)
             }
             Err((_, cache)) => {
-                let detail = format!("live: {live} · cache: {cache}");
-                let detail = if live.starts_with("skipped:") && cache.starts_with("skipped:") {
+                let detail = format!("live: {} · cache: {}", live.detail, cache.detail);
+                let detail = if live.kind == FailureKind::NoCredentials && cache.kind == FailureKind::NoCredentials {
                     format!("skipped: {detail}")
                 } else {
                     detail
                 };
-                Err((source, detail))
+                // One sentence, but the kind and the status are the live
+                // request's alone — the cache's miss is a folder, not a reply.
+                Err((source, Fault { detail, ..live }))
             }
         },
     }
@@ -1416,14 +1689,14 @@ fn codex_cache_models() -> SourceAnswer {
 pub fn codex_cache_models_from(paths: &[PathBuf]) -> SourceAnswer {
     let source = OPENAI_SOURCE.to_string();
     if paths.is_empty() {
-        return Err((source, "skipped: no Codex home".to_string()));
+        return Err((source, Fault::skipped("skipped: no Codex home")));
     }
     let Some(cache) = freshest_codex_cache(paths) else {
         let homes: Vec<String> = paths
             .iter()
             .map(|path| path.parent().unwrap_or(path).display().to_string())
             .collect();
-        return Err((source, format!("skipped: no {CODEX_MODELS_CACHE_FILE} under {}", homes.join(", "))));
+        return Err((source, Fault::skipped(format!("skipped: no {CODEX_MODELS_CACHE_FILE} under {}", homes.join(", ")))));
     };
     Ok(Answered {
         models: codex_cache_rows(&cache.document, &source),
@@ -1591,7 +1864,7 @@ fn chatgpt_backend_models() -> SourceAnswer {
     let source = OPENAI_SOURCE.to_string();
     let tokens = api::resolve_openai_oauth_explained().map_err(|miss| row(OPENAI_SOURCE).miss(miss))?;
     let Some(home) = codex_home() else {
-        return Err((source, "skipped: no Codex home".to_string()));
+        return Err((source, Fault::skipped("skipped: no Codex home")));
     };
     let path = home.join(CODEX_MODELS_CACHE_FILE);
     let cache = read_codex_cache(&path).ok();
@@ -1617,7 +1890,7 @@ pub fn chatgpt_backend_models_at(
     let source = OPENAI_SOURCE.to_string();
     let client_version = client_version_to_ask(cache, &codex_cache_paths(), installed_codex_version());
     let answer = fetch_chatgpt_models(url, tokens, cache, &client_version.to_string())
-        .map_err(|detail| (source.clone(), detail))?;
+        .map_err(|fault| (source.clone(), fault))?;
     let mut note = answer.not_modified.then(|| "304, the cache is current".to_string());
     let written = cache_write_allowed(cache_path, tokens)
         .and_then(|()| write_codex_cache(cache_path, &answer, SystemTime::now()).map_err(|error| error.to_string()));
@@ -1650,7 +1923,7 @@ pub fn fetch_chatgpt_models(
     tokens: &core_types::OpenAiOAuthTokens,
     cache: Option<&CodexCache>,
     client_version: &str,
-) -> Result<LiveModels, String> {
+) -> Result<LiveModels, Fault> {
     let asked = ClientVersion::parse(client_version);
     let etag = cache
         .filter(|cache| asked.is_some() && cache.answered_under() == asked)
@@ -1664,7 +1937,7 @@ pub fn fetch_chatgpt_models(
         let client = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| Fault::transport(&error))?;
         let mut request = client
             .get(&request_url)
             .header("accept", "application/json")
@@ -1677,21 +1950,21 @@ pub fn fetch_chatgpt_models(
         if let Some(etag) = etag_sent {
             request = request.header("if-none-match", etag);
         }
-        let response = request.send().await.map_err(|error| error.to_string())?;
+        let response = request.send().await.map_err(|error| Fault::transport(&error))?;
         let status = response.status();
         let answered_etag = response
             .headers()
             .get(reqwest::header::ETAG)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let body = response.text().await.map_err(|error| error.to_string())?;
-        Ok::<_, String>((status, body, answered_etag))
+        let body = body_after(response, status).await?;
+        Ok::<_, Fault>((status, body, answered_etag))
     })?;
     if status == reqwest::StatusCode::NOT_MODIFIED {
         // Only an etag that was sent can have been answered "unchanged".
         let cache = cache
             .filter(|_| etag.is_some())
-            .ok_or_else(|| "HTTP 304 without a cache to keep".to_string())?;
+            .ok_or_else(|| Fault::http(status, "HTTP 304 without a cache to keep"))?;
         return Ok(LiveModels {
             document: json!({ "models": cache.document.get("models").cloned().unwrap_or_else(|| json!([])) }),
             etag: cache.etag.clone().or(answered_etag),
@@ -1700,18 +1973,17 @@ pub fn fetch_chatgpt_models(
         });
     }
     if !status.is_success() {
-        return Err(format!("HTTP {status}: {}", body.chars().take(160).collect::<String>()));
+        return Err(Fault::http(status, format!("HTTP {status}: {}", body.chars().take(160).collect::<String>())));
     }
-    let parsed: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
+    let parsed: Value = serde_json::from_str(&body).map_err(|error| Fault::unknown(error.to_string()))?;
     let Some(models) = parsed.get("models").filter(|models| models.is_array()).cloned() else {
-        return Err("no models array in the answer".to_string());
+        return Err(Fault::unknown("no models array in the answer"));
     };
     if !is_codex_model_list(&models) {
-        return Err(
+        return Err(Fault::unknown(
             "the answer is not Codex's model list (rows without slug and visibility — \
-             the ChatGPT web picker answers like that); nothing written"
-                .to_string(),
-        );
+             the ChatGPT web picker answers like that); nothing written",
+        ));
     }
     Ok(LiveModels {
         document: json!({ "models": models }),
@@ -1921,7 +2193,7 @@ fn anthropic_models() -> SourceAnswer {
         let client = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| Fault::transport(&error))?;
         let mut request = client
             .get(&url)
             .header("anthropic-version", api::DEFAULT_ANTHROPIC_VERSION)
@@ -1933,16 +2205,16 @@ fn anthropic_models() -> SourceAnswer {
             .apply(request)
             .send()
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| Fault::transport(&error))?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| error.to_string())?;
+        let text = body_after(response, status).await?;
         if !status.is_success() {
-            return Err(format!("HTTP {status}: {}", text.chars().take(160).collect::<String>()));
+            return Err(Fault::http(status, format!("HTTP {status}: {}", text.chars().take(160).collect::<String>())));
         }
         Ok(text)
     })
-    .map_err(|detail| (source.clone(), detail))?;
-    let parsed: Value = serde_json::from_str(&body).map_err(|error| (source.clone(), error.to_string()))?;
+    .map_err(|fault| (source.clone(), fault))?;
+    let parsed: Value = serde_json::from_str(&body).map_err(|error| (source.clone(), Fault::unknown(error.to_string())))?;
     Ok(live_answer(source, |source| anthropic_rows(&parsed, source)))
 }
 
@@ -2051,23 +2323,23 @@ fn google_models() -> SourceAnswer {
         let client = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| Fault::transport(&error))?;
         let response = client
             .get(&url)
             .header("x-goog-api-key", key)
             .header("accept", "application/json")
             .send()
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| Fault::transport(&error))?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| error.to_string())?;
+        let text = body_after(response, status).await?;
         if !status.is_success() {
-            return Err(format!("HTTP {status}: {}", text.chars().take(160).collect::<String>()));
+            return Err(Fault::http(status, format!("HTTP {status}: {}", text.chars().take(160).collect::<String>())));
         }
         Ok(text)
     })
-    .map_err(|detail| (source.clone(), detail))?;
-    let parsed: Value = serde_json::from_str(&body).map_err(|error| (source.clone(), error.to_string()))?;
+    .map_err(|fault| (source.clone(), fault))?;
+    let parsed: Value = serde_json::from_str(&body).map_err(|error| (source.clone(), Fault::unknown(error.to_string())))?;
     Ok(live_answer(source, |source| google_rows(&parsed, source)))
 }
 
@@ -2163,9 +2435,9 @@ fn antigravity_models() -> SourceAnswer {
         api::GeminiCodeAssistClient::new(tokens.access_token)
             .fetch_available_models()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| Fault::api(&error))
     })
-    .map_err(|detail| (source.clone(), detail))?;
+    .map_err(|fault| (source.clone(), fault))?;
     Ok(live_answer(source, |source| antigravity_rows(&document, source)))
 }
 
@@ -2201,23 +2473,24 @@ fn bearer_models(row: &'static Source, bearer: String) -> SourceAnswer {
         let client = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| Fault::transport(&error))?;
         let response = client
             .get(&url)
             .bearer_auth(bearer)
             .header("accept", "application/json")
             .send()
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| Fault::transport(&error))?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| error.to_string())?;
-        Ok::<_, String>((status, text))
+        let text = body_after(response, status).await?;
+        Ok::<_, Fault>((status, text))
     })
-    .map_err(|detail| (row.key.to_string(), detail))?;
+    .map_err(|fault| (row.key.to_string(), fault))?;
     if !status.is_success() {
-        return Err((row.key.to_string(), row.refused(&status.to_string(), &body)));
+        return Err((row.key.to_string(), Fault::http(status, row.refused(&status.to_string(), &body))));
     }
-    let parsed: Value = serde_json::from_str(&body).map_err(|error| (row.key.to_string(), error.to_string()))?;
+    let parsed: Value =
+        serde_json::from_str(&body).map_err(|error| (row.key.to_string(), Fault::unknown(error.to_string())))?;
     Ok(live_answer(row.key.to_string(), |source| {
         openai_compatible_rows(&parsed, row.provider, source)
     }))
@@ -3660,9 +3933,10 @@ mod tests {
         assert_eq!(answer.fetched_at, freshest.fetched_at, "and dates the rows from that file");
         assert!(answer.models.iter().all(|model| model.source == super::OPENAI_SOURCE));
 
-        let (_, detail) = super::codex_cache_models_from(&[dir.join("absent").join("models_cache.json")])
+        let (_, fault) = super::codex_cache_models_from(&[dir.join("absent").join("models_cache.json")])
             .expect_err("no cache anywhere is a skip, not rows");
-        assert!(detail.starts_with("skipped: no models_cache.json under "), "{detail}");
+        assert!(fault.detail.starts_with("skipped: no models_cache.json under "), "{}", fault.detail);
+        assert_eq!(fault.kind, super::FailureKind::NoCredentials);
         assert!(super::freshest_codex_cache(&[]).is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -3749,10 +4023,11 @@ mod tests {
             ]
         });
         let (url, backend) = fake_backend(vec![("200 OK", vec![], web_body.to_string())]);
-        let (source, detail) = super::chatgpt_backend_models_at(&url, &tokens, &cache_path, None, 1_788_800_000)
+        let (source, fault) = super::chatgpt_backend_models_at(&url, &tokens, &cache_path, None, 1_788_800_000)
             .expect_err("the web picker's catalog is not Codex's list");
         assert_eq!(source, super::OPENAI_SOURCE);
-        assert!(detail.contains("not Codex's model list"), "{detail}");
+        assert!(fault.detail.contains("not Codex's model list"), "{}", fault.detail);
+        assert_eq!((fault.kind, fault.http_status), (super::FailureKind::Unknown, None), "a 200 that is not the list");
         assert!(!cache_path.exists(), "nothing is written back from a refused answer");
         assert_eq!(backend.join().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(dir);
@@ -3826,11 +4101,12 @@ mod tests {
 
         // 3. 401: the live call fails and the freshest cache answers instead.
         let refreshed = super::read_codex_cache(&cache_path).unwrap();
-        let (source, detail) = super::chatgpt_backend_models_at(&url, &tokens, &cache_path, Some(&refreshed), 1_788_507_200)
+        let (source, fault) = super::chatgpt_backend_models_at(&url, &tokens, &cache_path, Some(&refreshed), 1_788_507_200)
             .expect_err("401 is a failure of the live source");
         assert_eq!(source, super::OPENAI_SOURCE);
-        assert!(detail.starts_with("HTTP 401"), "{detail}");
-        assert!(!detail.contains("secret-bearer"), "the token never reaches a report line");
+        assert!(fault.detail.starts_with("HTTP 401"), "{}", fault.detail);
+        assert_eq!((fault.kind, fault.http_status), (super::FailureKind::AuthRejected, Some(401)));
+        assert!(!fault.detail.contains("secret-bearer"), "the token never reaches a report line");
         let fallback = super::codex_cache_models_from(std::slice::from_ref(&cache_path)).expect("the cache we wrote");
         assert_eq!(fallback.origin, format!("cache:{}", account_home.display()));
         assert_eq!(fallback.models.len(), 2);
@@ -3849,12 +4125,6 @@ mod tests {
         assert!(!heads[0].to_ascii_lowercase().contains("if-none-match"), "no cache, no etag: {}", heads[0]);
         assert!(heads[1].to_ascii_lowercase().contains("if-none-match: w/\"v1\""), "{}", heads[1]);
 
-        // 4. Offline: nothing listens on the port any more.
-        let (offline_url, gone) = fake_backend(Vec::new());
-        gone.join().unwrap();
-        let (_, detail) = super::chatgpt_backend_models_at(&offline_url, &tokens, &cache_path, None, 1_788_510_800)
-            .expect_err("a refused connection is a failure of the live source");
-        assert!(!detail.starts_with("skipped:"), "a transport failure keeps last time's rows: {detail}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -4029,7 +4299,7 @@ mod tests {
                 let started = Instant::now();
                 let answer =
                     discovery::chatgpt_backend_models_at(&url, &tokens, &self.selected, cache.as_ref(), 1_788_800_000)
-                        .unwrap_or_else(|(source, detail)| panic!("{source}: {detail}"));
+                        .unwrap_or_else(|(source, fault)| panic!("{source}: {}", fault.detail));
                 let elapsed = started.elapsed();
                 let head = server.join().unwrap().remove(0);
                 let written: Value = serde_json::from_str(&std::fs::read_to_string(&self.selected).unwrap()).unwrap();
@@ -4363,6 +4633,9 @@ mod tests {
             count: 1,
             fetched_at,
             origin: super::ORIGIN_LIVE.to_string(),
+            credential_store: String::new(),
+            failure_kind: String::new(),
+            http_status: None,
         };
         let row = |source: &str, id: &str| DiscoveredModel {
             provider: "openai".to_string(),
@@ -4408,7 +4681,7 @@ mod tests {
                     fetched_at: now,
                     note: None,
                 }),
-                other => Err((other.to_string(), "http error".to_string())),
+                other => Err((other.to_string(), super::Fault::unknown("http error"))),
             }
         });
         assert_eq!(asked.into_inner(), due, "exactly the due sources were asked, in report order");
@@ -4508,6 +4781,9 @@ mod tests {
             count: 0,
             fetched_at,
             origin: String::new(),
+            credential_store: String::new(),
+            failure_kind: String::new(),
+            http_status: None,
         };
         let ttl = 3_600;
         let asked = Cell::new(0);
@@ -4560,6 +4836,9 @@ mod tests {
             count,
             fetched_at: 0,
             origin: String::new(),
+            credential_store: String::new(),
+            failure_kind: String::new(),
+            http_status: None,
         };
         let fresh = super::DiscoveredCatalog {
             fetched_at: previous.fetched_at + 60,
@@ -4764,6 +5043,9 @@ mod tests {
                 count: 1,
                 fetched_at: now - 7_200,
                 origin: super::ORIGIN_LIVE.to_string(),
+                credential_store: String::new(),
+                failure_kind: String::new(),
+                http_status: None,
             }],
             models: vec![DiscoveredModel {
                 provider: "anthropic".to_string(),
@@ -4781,16 +5063,17 @@ mod tests {
         };
         assert_eq!(unusable.0, super::ANTHROPIC_SOURCE);
         assert!(
-            unusable.1.starts_with("claude credential present but not usable: "),
+            unusable.1.detail.starts_with("claude credential present but not usable: "),
             "a configured login that fails says so: {}",
-            unusable.1
+            unusable.1.detail
         );
-        assert!(!unusable.1.contains("expired-access-value"), "the token never reaches a report line");
+        assert_eq!(unusable.1.kind, super::FailureKind::CredentialUnusable);
+        assert!(!unusable.1.detail.contains("expired-access-value"), "the token never reaches a report line");
 
         let refreshed = super::refresh_with(Some(&previous), &[super::ANTHROPIC_SOURCE], now, &[], |source| {
             match source {
                 super::ANTHROPIC_SOURCE => Err(unusable.clone()),
-                other => Err((other.to_string(), "not asked in this test".to_string())),
+                other => Err((other.to_string(), super::Fault::unknown("not asked in this test"))),
             }
         });
         let report = refreshed
@@ -4810,7 +5093,8 @@ mod tests {
             let _scope = claude_scope(&store, None);
             super::anthropic_models().expect_err("no login lists nothing")
         };
-        assert_eq!(absent.1, "skipped: no Anthropic credential", "nothing configured is a skip");
+        assert_eq!(absent.1.detail, "skipped: no Anthropic credential", "nothing configured is a skip");
+        assert_eq!(absent.1.kind, super::FailureKind::NoCredentials);
         let _ = std::fs::remove_dir_all(store);
         let _ = std::fs::remove_dir_all(managed);
     }
@@ -4830,6 +5114,9 @@ mod tests {
                     count: 0,
                     fetched_at: now - 60,
                     origin: String::new(),
+                    credential_store: String::new(),
+                    failure_kind: String::new(),
+                    http_status: None,
                 })
                 .collect(),
             models: Vec::new(),
@@ -4894,6 +5181,545 @@ mod tests {
         let _ = std::fs::remove_dir_all(store);
     }
 
+    /// The store a window pane reads its Claude login from, and the one the
+    /// window's own `zo models --json` read without the pane's variables
+    /// (t-76621): the pane's login works, the machine's own does not.
+    const PANE_STORE: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR:/accounts/pane";
+    const WINDOW_STORE: &str = "keychain";
+
+    /// One anthropic refresh at `now`: the anthropic column answers `answer`
+    /// under `store`, every other source is skipped under no store.
+    fn anthropic_refresh(
+        previous: Option<&DiscoveredCatalog>,
+        now: u64,
+        store: &'static str,
+        answer: &super::SourceAnswer,
+    ) -> DiscoveredCatalog {
+        super::refresh_under(
+            previous,
+            &[super::ANTHROPIC_SOURCE],
+            now,
+            &[],
+            |source| {
+                if source == super::ANTHROPIC_SOURCE {
+                    answer.clone()
+                } else {
+                    Err((source.to_string(), super::Fault::skipped("skipped: not in this test")))
+                }
+            },
+            |source| if source == super::ANTHROPIC_SOURCE { store.to_string() } else { String::new() },
+        )
+    }
+
+    /// The pane's answer: one Opus row, live at `now`.
+    fn opus_answer(now: u64) -> super::Answered {
+        super::Answered {
+            source: super::ANTHROPIC_SOURCE.to_string(),
+            models: vec![DiscoveredModel {
+                provider: "anthropic".to_string(),
+                id: "claude-opus-5-5".to_string(),
+                display_name: "Opus 5.5".to_string(),
+                source: super::ANTHROPIC_SOURCE.to_string(),
+                ..Default::default()
+            }],
+            origin: super::ORIGIN_LIVE.to_string(),
+            fetched_at: now,
+            note: None,
+        }
+    }
+
+    /// The window's answer without the pane's variables: zo's saved copy,
+    /// refused.
+    fn refused_answer() -> super::SourceAnswer {
+        Err((
+            super::ANTHROPIC_SOURCE.to_string(),
+            super::Fault::new(
+                super::FailureKind::CredentialUnusable,
+                "claude credential present but not usable: zo's saved Claude login is a copy of an earlier Claude Code sign-in",
+            ),
+        ))
+    }
+
+    fn anthropic_report(catalog: &DiscoveredCatalog) -> &super::SourceReport {
+        catalog
+            .reports
+            .iter()
+            .find(|report| report.source == super::ANTHROPIC_SOURCE)
+            .expect("the anthropic report")
+    }
+
+    fn holds_opus(catalog: &DiscoveredCatalog) -> bool {
+        catalog.models.iter().any(|model| model.id == "claude-opus-5-5")
+    }
+
+    /// (a) t-76621: a report says which credential store answered it — a
+    /// success and a failure alike, and an unasked source carries the store
+    /// it was answered under.
+    #[test]
+    fn a_report_records_the_credential_store_it_was_answered_under() {
+        let now = 1_790_200_000;
+        let pane = anthropic_refresh(None, now, PANE_STORE, &Ok(opus_answer(now)));
+        assert_eq!(anthropic_report(&pane).credential_store, PANE_STORE);
+        let failed = anthropic_refresh(None, now, WINDOW_STORE, &refused_answer());
+        assert_eq!(anthropic_report(&failed).credential_store, WINDOW_STORE);
+        let carried = super::refresh_under(
+            Some(&pane),
+            &[],
+            now + 60,
+            &[],
+            |source| unreachable!("{source} is not due"),
+            |_| WINDOW_STORE.to_string(),
+        );
+        assert_eq!(
+            anthropic_report(&carried).credential_store,
+            PANE_STORE,
+            "a source nobody asked keeps the store that answered it"
+        );
+    }
+
+    /// (b) t-76621: the window's process cannot see the pane's login; its
+    /// failure must not overwrite the pane's success — the pane's report and
+    /// rows stay exactly as they were.
+    #[test]
+    fn a_failure_under_another_store_keeps_the_success_and_rows_it_found() {
+        let now = 1_790_200_000;
+        let pane = anthropic_refresh(None, now - 60, PANE_STORE, &Ok(opus_answer(now - 60)));
+        let window = anthropic_refresh(Some(&pane), now, WINDOW_STORE, &refused_answer());
+        assert_eq!(anthropic_report(&window), anthropic_report(&pane), "the pane's report stands");
+        assert!(holds_opus(&window), "and its rows with it");
+        assert_eq!(
+            window.models.iter().find(|model| model.id == "claude-opus-5-5").map(|model| model.source.as_str()),
+            Some(super::ANTHROPIC_SOURCE)
+        );
+    }
+
+    /// (c) t-76621: a skip written under another store is no answer about
+    /// the pane's login either.
+    #[test]
+    fn a_skip_under_another_store_keeps_the_success_it_found() {
+        let now = 1_790_200_000;
+        let pane = anthropic_refresh(None, now - 60, PANE_STORE, &Ok(opus_answer(now - 60)));
+        let skipped = Err((super::ANTHROPIC_SOURCE.to_string(), super::Fault::skipped("skipped: no Anthropic credential")));
+        let window = anthropic_refresh(Some(&pane), now, WINDOW_STORE, &skipped);
+        assert_eq!(anthropic_report(&window), anthropic_report(&pane), "the pane's report stands");
+        assert!(holds_opus(&window), "and its rows with it");
+    }
+
+    /// (d) t-76621: under the same store — or where either side names none —
+    /// a failure is this login's own answer: it reports the failure and
+    /// carries last time's rows, and a skip keeps nothing, as before.
+    #[test]
+    fn a_failure_under_the_same_or_an_unknown_store_carries_its_rows_forward_as_before() {
+        let now = 1_790_200_000;
+        let pane = anthropic_refresh(None, now - 60, PANE_STORE, &Ok(opus_answer(now - 60)));
+        let unknown = anthropic_refresh(None, now - 60, "", &Ok(opus_answer(now - 60)));
+        for (previous, store) in [(&pane, PANE_STORE), (&pane, ""), (&unknown, WINDOW_STORE)] {
+            let again = anthropic_refresh(Some(previous), now, store, &refused_answer());
+            let report = anthropic_report(&again);
+            assert!(!report.ok && !report.skipped(), "{store:?}: {}", report.detail);
+            assert_eq!(report.origin, super::ORIGIN_PREVIOUS, "{store:?}: last time's rows answer for it");
+            assert_eq!(report.credential_store, store, "the failure names the store it failed under");
+            assert_eq!(report.fetched_at, now - 60, "dated from the answer the rows came from");
+            assert!(holds_opus(&again), "{store:?}: the rows are carried");
+        }
+        let skipped = Err((super::ANTHROPIC_SOURCE.to_string(), super::Fault::skipped("skipped: no Anthropic credential")));
+        let gone = anthropic_refresh(Some(&pane), now, PANE_STORE, &skipped);
+        assert!(anthropic_report(&gone).skipped(), "a skip under the same store is the answer");
+        assert!(!holds_opus(&gone), "and keeps nothing");
+        let replaced = anthropic_refresh(Some(&pane), now, WINDOW_STORE, &Ok(opus_answer(now)));
+        assert_eq!(anthropic_report(&replaced).credential_store, WINDOW_STORE, "a success replaces whoever answered");
+        assert_eq!(anthropic_report(&replaced).fetched_at, now);
+    }
+
+    /// (e) t-76621: a cache written before the key existed still parses, its
+    /// store unknown, and the key round-trips as `credential_store`.
+    #[test]
+    fn the_credential_store_key_is_optional_on_read_and_round_trips() {
+        let old: super::SourceReport = serde_json::from_value(json!({
+            "provider": "anthropic", "source": super::ANTHROPIC_SOURCE, "ok": true,
+            "detail": "1 model(s)", "count": 1, "fetched_at": 1_790_000_000_u64, "origin": "live"
+        }))
+        .expect("an old report parses");
+        assert_eq!(old.credential_store, "");
+        let pane = super::SourceReport {
+            credential_store: PANE_STORE.to_string(),
+            ..old
+        };
+        let written = serde_json::to_value(&pane).expect("a report serializes");
+        assert_eq!(written["credential_store"], json!(PANE_STORE));
+        assert_eq!(serde_json::from_value::<super::SourceReport>(written).expect("and reads back"), pane);
+    }
+
+    /// t-76896, t-76984: the stderr line a kept answer prints holds the
+    /// failure's kind, its HTTP number when the response had one, and the
+    /// stores' variable names — nothing of the failure's own words. A short
+    /// token, a token with no digit, a query token, a body over several
+    /// lines and a bearer all stay out of the line, and the kind is the one
+    /// the fault was made with, whatever its sentence says.
+    #[test]
+    fn the_stderr_line_of_a_kept_answer_names_the_kind_and_never_the_failures_words() {
+        use super::{FailureKind, Fault};
+        use reqwest::StatusCode;
+        let now = 1_790_200_000;
+        let pane_store = "CLAUDE_CONFIG_DIR:/Users/someone/accounts/pane";
+        let window_store = "CODEX_HOME:/Users/someone/accounts/win\nsk-ant-oat01-Hh5Jr9Ds3Fg6Aq2Ew8Tz";
+        let pane = anthropic_refresh(None, now - 60, "pane-store", &Ok(opus_answer(now - 60)));
+        let pane = super::DiscoveredCatalog {
+            reports: pane
+                .reports
+                .iter()
+                .map(|report| super::SourceReport { credential_store: pane_store.to_string(), ..report.clone() })
+                .collect(),
+            ..pane
+        };
+        let cases: [(Fault, &[&str], &str); 9] = [
+            (Fault::http(StatusCode::UNAUTHORIZED, "HTTP 401 Unauthorized: invalid key abc123"), &["abc123"], "auth_rejected (HTTP 401)"),
+            (Fault::http(StatusCode::FORBIDDEN, "HTTP 403 Forbidden: key hunter2 may not list models"), &["hunter2"], "forbidden (HTTP 403)"),
+            (Fault::http(StatusCode::TOO_MANY_REQUESTS, "HTTP 429 Too Many Requests: slow down, token qwertyuiop"), &["qwertyuiop"], "rate_limited (HTTP 429)"),
+            (Fault::http(StatusCode::SERVICE_UNAVAILABLE, "HTTP 503 Service Unavailable:\r\nAuthorization: Bearer zzzz.yyyy\n\tx"), &["zzzz.yyyy", "Bearer"], "server_error (HTTP 503)"),
+            (Fault::new(FailureKind::Network, "error sending request for url (https://api.example/v1/models?key=shorty&access_token=nodigitstokenvalue)"), &["shorty", "nodigitstokenvalue", "api.example"], "network"),
+            (Fault::new(FailureKind::Timeout, "operation timed out after 30s while asking https://x/?token=tk"), &["tk", "https://x"], "timeout"),
+            (Fault::new(FailureKind::CredentialUnusable, "claude credential present but not usable: the login of someone@example.com (secret pw9) is a copy"), &["someone@example.com", "pw9"], "credential_unusable"),
+            (Fault::skipped("skipped: no Claude login\nsecret: s3"), &["s3", "no Claude login"], "no_credentials"),
+            // The sentence says "HTTP 401" and "timed out"; the fault was made 404.
+            (Fault::http(StatusCode::NOT_FOUND, "live: HTTP 401 · timed out · cache: skipped: no models_cache.json under /timeout/connect"), &["timed out", "/timeout"], "not_found (HTTP 404)"),
+        ];
+        for (fault, secrets, expected) in cases {
+            let detail = fault.detail.clone();
+            let mut notes = Vec::new();
+            let window = super::refresh_noting(
+                Some(&pane),
+                &[super::ANTHROPIC_SOURCE],
+                now,
+                &[],
+                |source| Err((source.to_string(), fault.clone())),
+                |source| if source == super::ANTHROPIC_SOURCE { window_store.to_string() } else { String::new() },
+                |line| notes.push(line.to_string()),
+            );
+            assert_eq!(anthropic_report(&window), anthropic_report(&pane), "the kept answer still stands: {detail:?}");
+            let err = notes.join("\n");
+            assert_eq!(notes.len(), 1, "one kept-answer line: {err:?}");
+            assert!(!err.contains(['\n', '\r', '\t', '\u{1b}']), "no line break: {err:?}");
+            for secret in secrets.iter().copied().chain(["sk-ant-oat01-Hh5Jr9Ds3Fg6Aq2Ew8Tz", "someone", "/accounts"]) {
+                assert!(!err.contains(secret), "{secret} reached stderr: {err:?}");
+            }
+            assert!(err.ends_with(&format!("could not ask: {expected}")), "the kind {expected:?} ends the line: {err:?}");
+            assert!(err.contains("CLAUDE_CONFIG_DIR") && err.contains("CODEX_HOME"), "both stores' variable names: {err:?}");
+        }
+    }
+
+    /// t-76984: the kind of a request that got no response is the HTTP
+    /// client's own word for its error — ran out of time is `timeout`, could
+    /// not connect is `network`, anything else `unknown` — and a status
+    /// number names the kind of a response. Both tables are decided without a
+    /// socket or a clock (t-77146); the same classification on real client
+    /// errors is the integration test `model_discovery_transport`.
+    #[test]
+    fn a_transport_error_is_classified_by_the_clients_error_kind() {
+        use super::FailureKind;
+        for (timed_out, connect_failed, kind) in [
+            (true, false, "timeout"),
+            (true, true, "timeout"),
+            (false, true, "network"),
+            (false, false, "unknown"),
+        ] {
+            assert_eq!(FailureKind::of_transport(timed_out, connect_failed).key(), kind, "timed out {timed_out}, connect failed {connect_failed}");
+        }
+        for (status, kind) in [(401, "auth_rejected"), (403, "forbidden"), (404, "not_found"), (429, "rate_limited"), (500, "server_error"), (599, "server_error"), (400, "unknown"), (418, "unknown"), (304, "unknown")] {
+            assert_eq!(FailureKind::of_status(status).key(), kind, "HTTP {status}");
+        }
+    }
+
+    /// t-76621: a failure stays due at every connection — one written under
+    /// another store a second ago too, so the process whose login works
+    /// answers at once.
+    #[test]
+    fn a_failure_written_under_another_store_is_due_at_once() {
+        let now = 1_790_200_000;
+        let failed = anthropic_refresh(None, now, WINDOW_STORE, &refused_answer());
+        let report = anthropic_report(&failed);
+        assert_eq!(report.credential_store, WINDOW_STORE);
+        assert!(report.due(now, super::LIVE_TTL_SECS, || true), "due the same second it was written");
+        assert!(report.due(now, super::LIVE_TTL_SECS, || false), "whatever this process holds");
+    }
+
+    // ---- t-76984: a failure's kind and HTTP number are made where it happens ----
+
+    fn openai_tokens() -> core_types::OpenAiOAuthTokens {
+        core_types::OpenAiOAuthTokens {
+            access_token: "secret-bearer".to_string(),
+            refresh_token: None,
+            expires_at: None,
+            account_id: Some("acct_42".to_string()),
+            scopes: Vec::new(),
+        }
+    }
+
+    /// One refresh of the `source` column that finds `answer`, over a
+    /// previous catalog that skipped every source. Returns that source's
+    /// report as the cache file writes it.
+    fn report_json(source: &'static str, answer: &super::SourceAnswer, now: u64) -> Value {
+        let refreshed = super::refresh_under(
+            Some(&skipped_everywhere(now)),
+            &[source],
+            now,
+            &[],
+            |asked| if asked == source { answer.clone() } else { unreachable!("{asked} is not due") },
+            |_| "home".to_string(),
+        );
+        let report = refreshed.reports.iter().find(|report| report.source == source).expect("the report");
+        serde_json::to_value(report).expect("a report serializes")
+    }
+
+    /// The stderr lines of the same refresh when the previous catalog holds a
+    /// success another store answered, so the kept-answer line is printed.
+    fn openai_kept_lines(answer: &super::SourceAnswer, now: u64) -> Vec<String> {
+        let mut previous = skipped_everywhere(now);
+        let kept: super::SourceReport = serde_json::from_value(json!({
+            "provider": "openai", "source": super::OPENAI_SOURCE, "ok": true, "detail": "1 model(s)",
+            "count": 0, "fetched_at": now - 60, "origin": "live", "credential_store": "CODEX_HOME:/accounts/pane"
+        }))
+        .expect("a success report");
+        previous.reports.iter_mut().filter(|report| report.source == super::OPENAI_SOURCE).for_each(|report| *report = kept.clone());
+        let mut lines = Vec::new();
+        super::refresh_noting(
+            Some(&previous),
+            &[super::OPENAI_SOURCE],
+            now,
+            &[],
+            |source| if source == super::OPENAI_SOURCE { answer.clone() } else { unreachable!("{source} is not due") },
+            |_| "home".to_string(),
+            |line| lines.push(line.to_string()),
+        );
+        lines
+    }
+
+    /// t-76984: the kind and the HTTP number of a failure come from the
+    /// response that failed — never from its words, its URL or the name of a
+    /// folder. Every status the table names, asked of a local ChatGPT
+    /// backend; the OpenAI column then joins that live failure with its
+    /// cache's miss in one sentence that opens `live:` (the real shape), and
+    /// the cache sits in a folder whose name holds `timeout` and `connect`.
+    /// The report and the stderr line both keep the live request's kind.
+    #[test]
+    fn a_failed_response_names_its_kind_and_status_whatever_the_sentence_or_the_folder_says() {
+        let now = 1_790_300_000;
+        let table = [
+            ("401 Unauthorized", "auth_rejected", 401_u64),
+            ("403 Forbidden", "forbidden", 403),
+            ("404 Not Found", "not_found", 404),
+            ("429 Too Many Requests", "rate_limited", 429),
+            ("500 Internal Server Error", "server_error", 500),
+            ("503 Service Unavailable", "server_error", 503),
+            ("418 I'm a teapot", "unknown", 418),
+        ];
+        for folder in ["account", "timeout-connect-home"] {
+            for (status_line, kind, status) in table {
+                let dir = scratch("kind-by-status");
+                let _machine = bare_machine(&dir);
+                let (url, backend) = fake_backend(vec![(
+                    status_line,
+                    vec![],
+                    "connection timed out: could not connect to the key service".to_string(),
+                )]);
+                let cache_path = dir.join(folder).join(super::CODEX_MODELS_CACHE_FILE);
+                let live = super::chatgpt_backend_models_at(&url, &openai_tokens(), &cache_path, None, now);
+                backend.join().unwrap();
+                let answer = super::openai_answer(live, || super::codex_cache_models_from(std::slice::from_ref(&cache_path)));
+                let report = report_json(super::OPENAI_SOURCE, &answer, now);
+                let scene = format!("{status_line} / {folder}: {}", report["detail"]);
+                assert!(report["detail"].as_str().unwrap().starts_with("live: "), "the real shape: {scene}");
+                assert_eq!(report["failure_kind"], json!(kind), "{scene}");
+                assert_eq!(report["http_status"], json!(status), "{scene}");
+                let lines = openai_kept_lines(&answer, now);
+                assert_eq!(lines.len(), 1, "{scene}: {lines:?}");
+                assert!(lines[0].contains(&format!("{kind} (HTTP {status})")), "{scene}: {}", lines[0]);
+                assert!(!lines[0].contains("timeout") && !lines[0].contains("timed out"), "{scene}: {}", lines[0]);
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    /// A local backend that sends the head of `status_line` with a body
+    /// length it never fulfils — 400 bytes promised, 8 sent — and closes, so
+    /// the client has its status and then fails reading the body. No clock
+    /// and no second connection is involved.
+    fn cut_body_backend(status_line: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/backend-api/codex/models", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && socket.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let response = format!("HTTP/1.1 {status_line}\r\nconnection: close\r\ncontent-length: 400\r\n\r\n{{\"error\"");
+            socket.write_all(response.as_bytes()).unwrap();
+            socket.flush().unwrap();
+        });
+        (url, handle)
+    }
+
+    /// t-77146: a response that failed keeps its status when its body then
+    /// breaks off — the number and the kind are made where the status is
+    /// received, and the body only adds words. A refused key (401) whose
+    /// body is cut is still `auth_rejected (HTTP 401)`, in the report and on
+    /// the stderr line; a success whose body is cut has no status to keep.
+    #[test]
+    fn a_body_that_breaks_off_after_a_failed_status_keeps_the_status() {
+        let now = 1_790_300_000;
+        for (status_line, kind, status) in [
+            ("401 Unauthorized", "auth_rejected", 401_u16),
+            ("403 Forbidden", "forbidden", 403),
+            ("429 Too Many Requests", "rate_limited", 429),
+            ("503 Service Unavailable", "server_error", 503),
+            ("418 I'm a teapot", "unknown", 418),
+        ] {
+            let dir = scratch("cut-body");
+            let _machine = bare_machine(&dir);
+            let (url, backend) = cut_body_backend(status_line);
+            let cache_path = dir.join("account").join(super::CODEX_MODELS_CACHE_FILE);
+            let live = super::chatgpt_backend_models_at(&url, &openai_tokens(), &cache_path, None, now);
+            backend.join().unwrap();
+            let (_, fault) = live.clone().expect_err("a refused status is a failure");
+            assert_eq!((fault.kind.key(), fault.http_status), (kind, Some(status)), "{status_line}: {}", fault.detail);
+            assert!(!fault.detail.contains("secret-bearer"), "{status_line}: {}", fault.detail);
+            let answer = super::openai_answer(live, || super::codex_cache_models_from(std::slice::from_ref(&cache_path)));
+            let report = report_json(super::OPENAI_SOURCE, &answer, now);
+            assert_eq!(report["failure_kind"], json!(kind), "{status_line}: {}", report["detail"]);
+            assert_eq!(report["http_status"], json!(status), "{status_line}: {}", report["detail"]);
+            let lines = openai_kept_lines(&answer, now);
+            assert!(lines.len() == 1 && lines[0].contains(&format!("{kind} (HTTP {status})")), "{status_line}: {lines:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        let dir = scratch("cut-body-ok");
+        let _machine = bare_machine(&dir);
+        let (url, backend) = cut_body_backend("200 OK");
+        let cache_path = dir.join("account").join(super::CODEX_MODELS_CACHE_FILE);
+        let live = super::chatgpt_backend_models_at(&url, &openai_tokens(), &cache_path, None, now);
+        backend.join().unwrap();
+        let (_, fault) = live.expect_err("a success cut short is not an answer");
+        assert_eq!(fault.http_status, None, "a 200 is not a failed status: {}", fault.detail);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// t-76984: a request that never got a response is `network` when it
+    /// could not connect — no HTTP number — and a machine with no login at
+    /// all is `no_credentials`, even when the cache it looked in sits in a
+    /// folder named for a timeout. The live failure is handed in as the
+    /// client would make it (t-77146): no port and no clock are involved.
+    #[test]
+    fn a_refused_connection_is_network_and_no_login_is_no_credentials() {
+        let now = 1_790_300_000;
+        let dir = scratch("kind-by-transport");
+        let cache_path = dir.join("timeout-connect-home").join(super::CODEX_MODELS_CACHE_FILE);
+        {
+            let _machine = bare_machine(&dir);
+            let live = Err((
+                super::OPENAI_SOURCE.to_string(),
+                super::Fault::new(super::FailureKind::of_transport(false, true), "error sending request for url (http://127.0.0.1:1/)"),
+            ));
+            let answer = super::openai_answer(live, || super::codex_cache_models_from(std::slice::from_ref(&cache_path)));
+            let report = report_json(super::OPENAI_SOURCE, &answer, now);
+            assert_eq!(report["failure_kind"], json!("network"), "{}", report["detail"]);
+            assert!(report.get("http_status").is_none(), "no response, no number: {report}");
+            let lines = openai_kept_lines(&answer, now);
+            assert!(lines.len() == 1 && lines[0].contains("network") && !lines[0].contains("HTTP"), "{lines:?}");
+        }
+        {
+            let _scope = nothing_configured(&dir);
+            let answer = super::openai_answer(super::chatgpt_backend_models(), || {
+                super::codex_cache_models_from(std::slice::from_ref(&cache_path))
+            });
+            let report = report_json(super::OPENAI_SOURCE, &answer, now);
+            assert!(report["detail"].as_str().unwrap().starts_with("skipped: "), "{}", report["detail"]);
+            assert_eq!(report["failure_kind"], json!("no_credentials"), "{}", report["detail"]);
+            assert!(report.get("http_status").is_none(), "{report}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// t-76984: a login zo knows is unusable before it asks (an expired
+    /// Claude session with nothing to renew it) is `credential_unusable` —
+    /// the way back is to sign in again — while no login at all is
+    /// `no_credentials`. Neither carries an HTTP number.
+    #[test]
+    fn an_unusable_login_is_credential_unusable_and_no_login_is_no_credentials() {
+        let now = 1_790_300_000;
+        let store = scratch("kind-by-login-store");
+        let managed = scratch("kind-by-login-managed");
+        std::fs::write(
+            managed.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"expired-access-value","expiresAt":1000,"scopes":["user:inference"]}}"#,
+        )
+        .unwrap();
+        let answer_of = |managed: Option<&std::path::Path>| {
+            let _scope = claude_scope(&store, managed);
+            super::anthropic_models()
+        };
+        let report = report_json(super::ANTHROPIC_SOURCE, &answer_of(Some(managed.as_path())), now);
+        assert_eq!(report["failure_kind"], json!("credential_unusable"), "{}", report["detail"]);
+        assert!(report.get("http_status").is_none(), "{report}");
+        let report = report_json(super::ANTHROPIC_SOURCE, &answer_of(None), now);
+        assert_eq!(report["failure_kind"], json!("no_credentials"), "{}", report["detail"]);
+        let _ = std::fs::remove_dir_all(store);
+        let _ = std::fs::remove_dir_all(managed);
+    }
+
+    /// t-76984: xAI spells its own refusal (`spending-limit`) in the row's
+    /// words, and the status still comes from the response: 403 is
+    /// `forbidden` whatever the sentence says.
+    #[test]
+    fn a_row_worded_refusal_keeps_the_kind_of_its_status() {
+        let now = 1_790_300_000;
+        let store = scratch("kind-by-row-words");
+        let (url, server) = fake_backend(vec![(
+            "403 Forbidden",
+            vec![("content-type", "application/json")],
+            XAI_SPENDING_LIMIT.to_string(),
+        )]);
+        let base = url.replace("/backend-api/codex/models", "/v1");
+        let refused = {
+            let _scope = nothing_configured(&store);
+            std::env::set_var("XAI_BASE_URL", &base);
+            std::env::set_var("XAI_API_KEY", "xai-test-key");
+            super::xai_models()
+        };
+        server.join().unwrap();
+        let report = report_json(super::XAI_SOURCE, &refused, now);
+        assert!(report["detail"].as_str().unwrap().contains("no subscription or credits"), "{}", report["detail"]);
+        assert_eq!(report["failure_kind"], json!("forbidden"), "{}", report["detail"]);
+        assert_eq!(report["http_status"], json!(403), "{}", report["detail"]);
+        let _ = std::fs::remove_dir_all(store);
+    }
+
+    /// t-76984: a cache written before the keys existed parses with no kind
+    /// and no number and writes none back; both keys round-trip, and the
+    /// number is left out when there is none.
+    #[test]
+    fn the_failure_keys_are_optional_on_read_and_round_trip() {
+        let old: super::SourceReport = serde_json::from_value(json!({
+            "provider": "openai", "source": super::OPENAI_SOURCE, "ok": false,
+            "detail": "HTTP 401 Unauthorized", "count": 0, "fetched_at": 1_790_000_000_u64, "origin": ""
+        }))
+        .expect("an old report parses");
+        let written = serde_json::to_value(&old).expect("a report serializes");
+        assert!(written.get("failure_kind").is_none(), "no kind was ever written, so none is: {written}");
+        assert!(written.get("http_status").is_none(), "{written}");
+        let failed: super::SourceReport = serde_json::from_value(json!({
+            "provider": "openai", "source": super::OPENAI_SOURCE, "ok": false,
+            "detail": "HTTP 401 Unauthorized", "count": 0, "fetched_at": 1_790_000_000_u64, "origin": "",
+            "failure_kind": "auth_rejected", "http_status": 401
+        }))
+        .expect("a new report parses");
+        let written = serde_json::to_value(&failed).expect("a report serializes");
+        assert_eq!(written["failure_kind"], json!("auth_rejected"));
+        assert_eq!(written["http_status"], json!(401));
+        assert_eq!(serde_json::from_value::<super::SourceReport>(written).expect("and reads back"), failed);
+    }
+
     /// Codex's own model list on 2026-09-23 (the window's runtime home,
     /// `models_cache.json`, rows trimmed to what the parser reads): nine
     /// rows, seven listed — and no `gpt-5.3-codex-spark`.
@@ -4928,7 +5754,7 @@ mod tests {
                     note: None,
                 })
             } else {
-                Err((source.to_string(), "skipped: not in this test".to_string()))
+                Err((source.to_string(), super::Fault::skipped("skipped: not in this test")))
             }
         })
     }
@@ -5010,7 +5836,7 @@ mod tests {
         assert!(super::overlay(&fresh, UpdatePolicy::Pinned).orphaned.is_empty());
 
         let failed = super::refresh_with(Some(&fresh), &[super::OPENAI_SOURCE], now + 60, &[], |source| {
-            Err((source.to_string(), "HTTP 502 Bad Gateway".to_string()))
+            Err((source.to_string(), super::Fault::http(reqwest::StatusCode::BAD_GATEWAY, "HTTP 502 Bad Gateway")))
         });
         assert_eq!(
             super::withdrawn_since_in(&failed, "gpt-5.3-codex-spark"),
@@ -5018,7 +5844,7 @@ mod tests {
             "a failed list keeps its marks"
         );
         let skipped = super::refresh_with(Some(&fresh), &[super::OPENAI_SOURCE], now + 120, &[], |source| {
-            Err((source.to_string(), "skipped: no ChatGPT login".to_string()))
+            Err((source.to_string(), super::Fault::skipped("skipped: no ChatGPT login")))
         });
         assert!(skipped.withdrawn.is_empty(), "a skipped list knows nothing");
     }
@@ -5069,13 +5895,15 @@ mod tests {
             assert!(url.starts_with("https://"), "{}: {url}", row.key);
             assert!(url.to_ascii_lowercase().contains("models"), "{}: {url}", row.key);
             assert!(!(row.configured)(), "{}: nothing is configured here", row.key);
-            let (key, detail) = (row.ask)().expect_err("no credential, no rows");
+            let (key, fault) = (row.ask)().expect_err("no credential, no rows");
             assert_eq!(key, row.key);
             assert!(
-                detail.starts_with("skipped: ") && detail.contains(row.absent),
-                "{}: {detail}",
-                row.key
+                fault.detail.starts_with("skipped: ") && fault.detail.contains(row.absent),
+                "{}: {}",
+                row.key,
+                fault.detail
             );
+            assert_eq!((fault.kind, fault.http_status), (super::FailureKind::NoCredentials, None), "{}", row.key);
             for (marker, words) in row.refusals {
                 assert!(!marker.is_empty() && !words.is_empty(), "{}", row.key);
             }
@@ -5131,16 +5959,16 @@ mod tests {
         };
         assert_eq!(refused.0, super::XAI_SOURCE);
         assert!(
-            refused.1.starts_with("HTTP 403 Forbidden: no subscription or credits on this xAI account"),
+            refused.1.detail.starts_with("HTTP 403 Forbidden: no subscription or credits on this xAI account"),
             "{}",
-            refused.1
+            refused.1.detail
         );
-        assert!(!refused.1.contains("xai-test-key"), "the key never reaches a report line");
+        assert!(!refused.1.detail.contains("xai-test-key"), "the key never reaches a report line");
         let refreshed = super::refresh_with(None, &[super::XAI_SOURCE], 1_790_121_000, &[], |source| {
             if source == super::XAI_SOURCE {
                 Err(refused.clone())
             } else {
-                Err((source.to_string(), "skipped: not in this test".to_string()))
+                Err((source.to_string(), super::Fault::skipped("skipped: not in this test")))
             }
         });
         let report = refreshed
@@ -5192,9 +6020,10 @@ mod tests {
                 r#"{"https://auth.x.ai::acct-1":{"key":"grok-session-bearer","expires_at":"2020-01-01T00:00:00Z"}}"#,
             )
             .unwrap();
-            let (_, detail) = super::xai_models().expect_err("an expired login lists nothing");
-            assert!(detail.starts_with("xAI credential present but not usable: "), "{detail}");
-            assert!(detail.contains("grok login"), "{detail}");
+            let (_, fault) = super::xai_models().expect_err("an expired login lists nothing");
+            assert!(fault.detail.starts_with("xAI credential present but not usable: "), "{}", fault.detail);
+            assert!(fault.detail.contains("grok login"), "{}", fault.detail);
+            assert_eq!(fault.kind, super::FailureKind::CredentialUnusable);
         }
         let heads = server.join().unwrap();
         assert_eq!(heads.len(), 1, "the expired login asked nothing");
@@ -5368,9 +6197,12 @@ mod tests {
         };
         super::refresh_with(previous, &every, now, selected, |source| match (source, registry, keyed) {
             (super::ANTIGRAVITY_SOURCE, Ok(document), _) => Ok(answered(source, antigravity_rows(document, source))),
-            (super::ANTIGRAVITY_SOURCE, Err(words), _) => Err((source.to_string(), words.to_string())),
+            (super::ANTIGRAVITY_SOURCE, Err(words), _) => {
+                let fault = if words.starts_with("skipped:") { super::Fault::skipped(words) } else { super::Fault::unknown(words) };
+                Err((source.to_string(), fault))
+            }
             (super::GOOGLE_API_SOURCE, _, Some(rows)) => Ok(answered(source, rows.to_vec())),
-            (other, _, _) => Err((other.to_string(), "skipped: not asked in this test".to_string())),
+            (other, _, _) => Err((other.to_string(), super::Fault::skipped("skipped: not asked in this test"))),
         })
     }
 

@@ -291,6 +291,21 @@ pub fn resolve_codex_home() -> Option<CodexHome> {
     ide_codex_home().map(CodexHome::ide_managed)
 }
 
+/// 자격을 계정 폴더가 아니라 사람의 홈(또는 zo 제 저장소)에서 읽을 때,
+/// 모델 조회 보고가 적는 저장소 이름.
+pub const OWN_HOME_STORE: &str = "home";
+
+/// 이 프로세스가 ChatGPT(Codex) 로그인을 읽는 저장소 — 모델 조회 보고의
+/// 이름표. [`resolve_codex_home`] 이 홈을 답하면 `CODEX_HOME:<폴더>`, 아니면
+/// [`OWN_HOME_STORE`]. 비밀은 읽지 않는다.
+#[must_use]
+pub fn codex_store_label() -> String {
+    resolve_codex_home().map_or_else(
+        || OWN_HOME_STORE.to_string(),
+        |home| format!("{CODEX_HOME_ENV}:{}", home.path.display()),
+    )
+}
+
 impl CodexHome {
     fn ide_managed(path: PathBuf) -> Self {
         Self {
