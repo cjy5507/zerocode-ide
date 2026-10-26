@@ -1130,7 +1130,6 @@ fn team_inbox_delivery_acked_and_cursor_advances_after_successful_turn() {
 /// the update is redelivered on the next turn).
 #[test]
 fn team_inbox_delivery_failed_with_retry_after_failing_turn() {
-    let _env = team_inbox_env();
     struct FailingApiClient;
     impl ApiClient for FailingApiClient {
         fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1138,6 +1137,7 @@ fn team_inbox_delivery_failed_with_retry_after_failing_turn() {
         }
     }
 
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-failed");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
@@ -1330,7 +1330,6 @@ fn team_inbox_trace_records_load_inject_and_ack_on_successful_turn() {
 /// failed for retry) while the turn error still surfaces.
 #[test]
 fn team_inbox_internal_subturn_does_not_settle_outer_pending_batch() {
-    let _env = team_inbox_env();
     use std::future::Future;
     use std::pin::Pin;
 
@@ -1370,6 +1369,7 @@ fn team_inbox_internal_subturn_does_not_settle_outer_pending_batch() {
         }
     }
 
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-internal-subturn");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
@@ -1532,7 +1532,6 @@ fn team_inbox_stop_loop_followup_settles_previous_leg_batch() {
 }
 #[test]
 fn team_inbox_trace_records_fail_settle_on_failing_turn() {
-    let _env = team_inbox_env();
     struct FailingApiClient;
     impl ApiClient for FailingApiClient {
         fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1540,6 +1539,7 @@ fn team_inbox_trace_records_fail_settle_on_failing_turn() {
         }
     }
 
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-trace-failed");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
@@ -1583,9 +1583,9 @@ fn team_inbox_trace_records_fail_settle_on_failing_turn() {
 #[cfg(unix)]
 #[test]
 fn team_inbox_trace_records_mark_injected_failure_when_store_readonly() {
-    let _env = team_inbox_env();
     use std::os::unix::fs::PermissionsExt;
 
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-trace-readonly");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
