@@ -122,6 +122,7 @@ impl RuntimeRequest {
             Self::LandBatch { .. } => "land_batch",
             Self::PersonSettle { .. } => "person_settle",
             Self::SeatNeverOpened { .. } => "seat_never_opened",
+            Self::SeatNeverReady { .. } => "seat_never_ready",
             Self::Federation(_) => "federation",
             Self::PrepareEffect { .. } => "prepare_effect",
             Self::HandoverSplit { .. } => "handover_split",

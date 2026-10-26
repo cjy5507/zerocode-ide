@@ -11796,16 +11796,23 @@ fn carried(
                         actor,
                         minted.as_deref(),
                         now_ms,
-                        "this request was already carried out — read worker-list for the worker it started",
+                        "this request's pane was already cut once and its worker may still be getting ready — look it up with worker-list --run <the run the request named> (the plain worker-list shows only your own run), and ask again under the same --retry-request name, never a new one",
                     );
                 }
-                Ok((BeginEffect::Refused(_), _)) => {
-                    return roll_back_the_seat(
-                        actor,
-                        minted.as_deref(),
-                        now_ms,
-                        "this request was already refused for good — ask again under a new name",
-                    );
+                Ok((BeginEffect::Refused(refusal), _)) => {
+                    /* A refusal is not always final: a worker that never became
+                     * ready leaves a retry floor a moment past its failure, and
+                     * a request that arrives before that floor is refused with
+                     * `retryable`. Naming a new request there would seat a
+                     * second worker beside the first once the floor passes. */
+                    let why = match (refusal.retryable(), refusal.retry_not_before_ms()) {
+                        (true, Some(floor)) => format!(
+                            "this request's first attempt just failed and may be asked again from {floor} ms on — wait until then and ask again under the same --retry-request name, never a new one; until then look it up with worker-list --run <the run the request named>"
+                        ),
+                        (true, None) => "this request's first attempt just failed and may be asked again shortly — wait a moment and ask again under the same --retry-request name, never a new one; until then look it up with worker-list --run <the run the request named>".to_string(),
+                        (false, _) => "this request was already refused for good".to_string(),
+                    };
+                    return roll_back_the_seat(actor, minted.as_deref(), now_ms, &why);
                 }
                 Ok((BeginEffect::Reconcile(permit), _)) => {
                     /* An earlier attempt of this very request is still open in
@@ -11999,7 +12006,14 @@ fn carried(
                      * A failed waiter owns host cleanup. We defensively remove
                      * the recorded seat if it still names this term so a fake
                      * or future host cannot leave a ghost table row behind. */
-                    if let Err(failure) = host.await_worker_ready(term) {
+                    /* A restore waits here, with its split still open in the
+                     * journal: it is a window-start road, it is retried under
+                     * the same name, and a failed wait must settle it as
+                     * retryable, which an applied split cannot be. A summons
+                     * waits after the split is settled, below (t-76680). */
+                    if reseating.is_some()
+                        && let Err(failure) = host.await_worker_ready(term)
+                    {
                         let destination = lease.binding().destination_pane().to_string();
                         {
                             let mut tables = crate::agent_teams::teams();
@@ -12054,6 +12068,7 @@ fn carried(
                             );
                         }
                     };
+                    let operation_id = result.operation_id().to_string();
                     let outcome = digest(
                         b"zerocode.orchestration.split-applied.v1",
                         &[result.operation_id().as_bytes(), &term.to_le_bytes()],
@@ -12099,6 +12114,37 @@ fn carried(
                         return refused_by_runtime(why);
                     }
                     rang(true);
+                    /* The pane is cut and the split is settled as applied: the
+                     * journal lets one pane be cut at a time, and cutting is
+                     * all this walk was. Waiting for the new worker's TUI can
+                     * take minutes (a login screen, a slow start), and holding
+                     * the split open through it made every other seat's
+                     * summons answer "another pane is still being cut" until
+                     * it ended (t-76680). The wait is the summoner's own: a
+                     * worker that never gets ready is closed and refused here
+                     * with its reason, its seat row goes back, and the split
+                     * stops counting as carried out: the pane is gone, so the
+                     * same request name may cut again — the beat asks under
+                     * one name until it works (t-76890). */
+                    if reseating.is_none()
+                        && let Err(failure) = host.await_worker_ready(term)
+                    {
+                        {
+                            let mut tables = crate::agent_teams::teams();
+                            if let Some(team) = tables.get_mut(team_id)
+                                && team.term_of(&new_pane) == Some(term)
+                            {
+                                team.remove_pane(&new_pane);
+                            }
+                        }
+                        return roll_back_the_unready_seat(
+                            actor,
+                            minted.as_deref(),
+                            &operation_id,
+                            now_ms,
+                            &failure.to_string(),
+                        );
+                    }
                     if let Some(prepared) = reseating.as_ref() {
                         // The continuation owns this pane from before the
                         // seat it is owed to is durable — the moment the mail
@@ -12773,6 +12819,32 @@ fn roll_back_the_seat(
 ) -> zerocode_hookd::TeamAnswer {
     if let Some(worker) = minted
         && let Ok((moved, _)) = actor.seat_never_opened(worker, now_ms)
+    {
+        rang(moved);
+    }
+    refused(why)
+}
+
+/// [`roll_back_the_seat`] for a pane that was cut and settled, then closed
+/// because its worker never got ready: the split `operation_id` is taken back
+/// as retryable in the same write, or the request that asked for it would
+/// meet "already cut once" under every name it can spell (t-76890).
+///
+/// Best-effort like its sibling: the refusal it rides carries the answer, and
+/// a write the store refuses leaves the row for the restart sweep.
+fn roll_back_the_unready_seat(
+    actor: &RuntimeActor,
+    minted: Option<&str>,
+    operation_id: &str,
+    now_ms: i64,
+    why: &str,
+) -> zerocode_hookd::TeamAnswer {
+    let tombstone = digest(
+        b"zerocode.orchestration.split-unready-tombstone.v1",
+        &[operation_id.as_bytes()],
+    );
+    if let Ok((moved, _)) =
+        actor.seat_never_ready(minted.unwrap_or_default(), operation_id, tombstone, now_ms)
     {
         rang(moved);
     }

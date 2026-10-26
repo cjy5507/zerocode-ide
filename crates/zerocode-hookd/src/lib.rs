@@ -310,6 +310,15 @@ impl TeamRequest {
                 && self.argv.iter().skip(1).any(|word| word == "--wait"))
     }
 
+    /// Whether this request asks the window to seat a worker: `worker-start`
+    /// and `delegate`, whose answers come after the worker's readiness.
+    #[must_use]
+    pub fn summons_a_worker(&self) -> bool {
+        self.argv
+            .first()
+            .is_some_and(|verb| verb == "worker-start" || verb == "delegate")
+    }
+
     /// How long the bridge holds this request's answer open.
     ///
     /// The ladder's middle rung, now per request: a wait that brought its own
@@ -353,21 +362,30 @@ impl TeamRequest {
         } else {
             std::time::Duration::ZERO
         };
+        // A summons is answered when the window has either seated the worker or worded why it
+        // could not, and that can come this long after the readiness budget (see the constant).
+        // The bridge that hung up at the budget handed the caller a time-out for a failure the
+        // window then worded into a closed answer (t-76890).
+        let summoning = self.summons_a_worker();
+        let report = if summoning {
+            std::time::Duration::from_millis(u64::from(
+                zerocode_core::orchestration::READY_REPORT_HEADROOM_MS,
+            ))
+        } else {
+            std::time::Duration::ZERO
+        };
         match budget {
-            Some(ms) => std::time::Duration::from_millis(ms) + preparation + BRIDGE_GRACE,
+            Some(ms) => std::time::Duration::from_millis(ms) + preparation + report + BRIDGE_GRACE,
             None if self.argv.first().is_some_and(|verb| verb == "ask") => {
                 std::time::Duration::from_millis(u64::from(
                     zerocode_core::orchestration::ASK_BUDGET_DEFAULT_MS,
                 )) + BRIDGE_GRACE
             }
-            None if self
-                .argv
-                .first()
-                .is_some_and(|verb| verb == "worker-start" || verb == "delegate") =>
-            {
+            None if summoning => {
                 std::time::Duration::from_millis(u64::from(
                     zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS,
-                )) + BRIDGE_GRACE
+                )) + report
+                    + BRIDGE_GRACE
             }
             None => TEAM_DEADLINE,
         }
@@ -1050,6 +1068,7 @@ async fn receive_team_command(State(state): State<BridgeState>, request: Request
     // request's own fact, and the only reader left after the send is this
     // handler's wait.
     let patience = team_request.deadline();
+    let summoning = team_request.summons_a_worker();
     if team_request.reserves_wait_slot() {
         let permit = match state.team_waits.try_acquire() {
             Ok(permit) => permit,
@@ -1087,6 +1106,16 @@ async fn receive_team_command(State(state): State<BridgeState>, request: Request
         // window is not cancelled by dropping this receiver and may still
         // finish. Its outcome is unknown to this layer; a retry protocol must
         // reconcile it rather than infer failure from the timeout.
+        // For a summons that is not the whole story: past the window's own readiness deadline
+        // (see `READY_REPORT_HEADROOM_MS`) the worker may still be standing, so the caller is told
+        // where to look instead of being left to ask again under a new name and cut a second pane.
+        Err(_) if summoning => refused(
+            "tmux: timed out waiting for the window — the outcome is not settled and the worker \
+             may still be coming up; read `worker-list --run <the run you summoned it into>` \
+             (the plain list shows only the run this pane is bound to, so a worker started with \
+             --run is missing from it), and to ask again repeat the original --retry-request \
+             name rather than a new one\n",
+        ),
         Err(_) => refused("tmux: timed out waiting for the window\n"),
     }
 }

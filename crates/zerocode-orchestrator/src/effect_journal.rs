@@ -917,6 +917,84 @@ impl EffectJournal {
         Ok(answer)
     }
 
+    /// Take back a split that was carried out when the pane it cut is gone
+    /// again, so the request that asked for it may cut once more.
+    ///
+    /// A split is settled `Applied` the moment the pane exists — the single
+    /// in-flight slot must not be held through the minutes a worker may take
+    /// to get ready (t-76680). A worker that never gets ready is closed and
+    /// its seat row goes back, which leaves the journal saying "this request
+    /// already cut its pane" about a pane nobody has; the same request asked
+    /// again met that answer for good (t-76890). This is the second fact, its
+    /// own record: the cut stands as it happened, and the request is
+    /// `NotStarted` and retryable from `retry_not_before_ms`, like a spawn that
+    /// failed once. Only an `Applied` split moves, in the ledger revision the
+    /// seat's return is written at, so the rows and the journal agree or
+    /// neither moves.
+    pub fn withdraw_applied(
+        &self,
+        lease: &AuthorityLease,
+        expected_revision: u64,
+        withdrawn: &LedgerProjectionV1,
+        withdrawal: &Withdrawal,
+    ) -> Result<(), EffectJournalError> {
+        if !valid_digest(&withdrawal.tombstone_digest) {
+            return Err(invalid("tombstone_digest"));
+        }
+        if withdrawal.at_ms < 0 || withdrawal.retry_not_before_ms <= withdrawal.at_ms {
+            return Err(invalid("retry_not_before_ms"));
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| EffectJournalError::Database)?;
+        require_authority(&transaction, self, lease)?;
+        let row = operation_by_id(&transaction, &withdrawal.operation_id)?
+            .ok_or(EffectJournalError::InvalidTransition)?;
+        if row.ledger_id != lease.ledger_id
+            || row.kind != HostEffectKind::Split
+            || row.state != HostEffectState::Applied
+        {
+            return Err(EffectJournalError::InvalidTransition);
+        }
+        crate::ledger_store::write(
+            &transaction,
+            &row.ledger_id,
+            expected_revision,
+            expected_revision
+                .checked_add(1)
+                .ok_or(EffectJournalError::RevisionMismatch)?,
+            withdrawn,
+            withdrawal.at_ms,
+        )?;
+        let changed = transaction
+            .execute(
+                "UPDATE host_effect_operations
+                    SET effect_state = 'not_started', result_digest = NULL,
+                        failure_kind = ?1, tombstone_digest = ?2,
+                        retryable = 1, retry_not_before_ms = ?3,
+                        updated_at_ms = ?4, settled_at_ms = ?4,
+                        row_revision = row_revision + 1
+                  WHERE operation_id = ?5 AND ledger_id = ?6
+                    AND effect_state = 'applied' AND effect_kind = 'split'
+                    AND row_revision = ?7",
+                params![
+                    withdrawal.failure.as_db(),
+                    withdrawal.tombstone_digest,
+                    withdrawal.retry_not_before_ms,
+                    withdrawal.at_ms,
+                    row.operation_id,
+                    row.ledger_id,
+                    to_sql_u64(row.row_revision)?,
+                ],
+            )
+            .map_err(|_| EffectJournalError::Database)?;
+        require_one(changed)?;
+        transaction
+            .commit()
+            .map_err(|_| EffectJournalError::Database)
+    }
+
     /// One durable stride inside a host effect that takes more than one.
     ///
     /// A split is one host action, but a lifecycle effect is several — a
@@ -1570,6 +1648,20 @@ impl EffectSettlement {
             }
         }
     }
+}
+
+/// What [`EffectJournal::withdraw_applied`] writes over a carried-out split:
+/// which operation, why it counts as not started after all, and when its
+/// request may cut again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Withdrawal {
+    pub operation_id: String,
+    pub failure: HostEffectFailure,
+    /// The proof the cut is undone, in the digest form every tombstone has.
+    pub tombstone_digest: String,
+    /// Strictly past `at_ms`: the journal's floor for a retry.
+    pub retry_not_before_ms: i64,
+    pub at_ms: i64,
 }
 
 struct RawOperationRow {
@@ -3439,6 +3531,123 @@ mod tests {
             .expect("ledger row");
         assert_eq!(ledger.revision, 2);
         assert_eq!(ledger.projection, snapshot(2, "applied"));
+    }
+
+    /// A split settled `Applied` whose pane the window then closed because the
+    /// worker never got ready is taken back as retryable: the same request
+    /// cuts again once its floor has passed, and not before (t-76890).
+    #[test]
+    fn an_applied_split_withdrawn_may_be_asked_again_after_its_floor() {
+        let fixture = Fixture::new();
+        let request = request(0x13, 0x23, HostEffectKind::Split);
+        let permit = execute(
+            fixture
+                .journal
+                .prepare(&fixture.lease, 0, &snapshot(1, "prepared"), &request, 10)
+                .expect("prepare"),
+        );
+        let first = permit.operation_id().to_string();
+        fixture
+            .journal
+            .settle(
+                &fixture.lease,
+                permit,
+                1,
+                &snapshot(2, "applied"),
+                EffectSettlement::Applied {
+                    result_digest: digest(0x73),
+                    settled_at_ms: 20,
+                },
+            )
+            .expect("settle applied");
+        let withdrawal = Withdrawal {
+            operation_id: first.clone(),
+            failure: HostEffectFailure::Unavailable,
+            tombstone_digest: digest(0x83),
+            retry_not_before_ms: 31,
+            at_ms: 30,
+        };
+        fixture
+            .journal
+            .withdraw_applied(&fixture.lease, 2, &snapshot(3, "unready"), &withdrawal)
+            .expect("withdraw");
+        let ledger = fixture
+            .journal
+            .load_ledger(&fixture.lease)
+            .expect("load ledger")
+            .expect("ledger row");
+        assert_eq!(
+            (ledger.revision, ledger.projection),
+            (3, snapshot(3, "unready")),
+            "the rows and the journal did not move together"
+        );
+        // Not before the floor: refused, not cut again.
+        let early = fixture
+            .journal
+            .prepare(&fixture.lease, 3, &snapshot(4, "early"), &request, 30)
+            .expect("early prepare");
+        let BeginEffect::Refused(refused) = early else {
+            panic!("a withdrawn split was cut again before its floor");
+        };
+        assert!(refused.retryable());
+        // Past it: a new attempt with a new operation id.
+        let again = execute(
+            fixture
+                .journal
+                .prepare(&fixture.lease, 3, &snapshot(4, "again"), &request, 31)
+                .expect("prepare again"),
+        );
+        assert_ne!(again.operation_id(), first, "the same operation was reused");
+        again.abandon("the test ends with the attempt open");
+    }
+
+    /// Only a split that was carried out can be taken back: a prepared one has
+    /// nothing to withdraw, and a refusal moves neither the row nor the ledger.
+    #[test]
+    fn only_an_applied_split_can_be_withdrawn() {
+        let fixture = Fixture::new();
+        let request = request(0x14, 0x24, HostEffectKind::Split);
+        let permit = execute(
+            fixture
+                .journal
+                .prepare(&fixture.lease, 0, &snapshot(1, "prepared"), &request, 10)
+                .expect("prepare"),
+        );
+        let withdrawal = Withdrawal {
+            operation_id: permit.operation_id().to_string(),
+            failure: HostEffectFailure::Unavailable,
+            tombstone_digest: digest(0x84),
+            retry_not_before_ms: 31,
+            at_ms: 30,
+        };
+        assert_eq!(
+            fixture
+                .journal
+                .withdraw_applied(&fixture.lease, 1, &snapshot(2, "no"), &withdrawal)
+                .expect_err("a prepared split is not applied"),
+            EffectJournalError::InvalidTransition
+        );
+        let unfloored = Withdrawal {
+            retry_not_before_ms: 30,
+            ..withdrawal
+        };
+        assert!(matches!(
+            fixture
+                .journal
+                .withdraw_applied(&fixture.lease, 1, &snapshot(2, "no"), &unfloored),
+            Err(EffectJournalError::InvalidInput { .. })
+        ));
+        assert_eq!(
+            fixture
+                .journal
+                .load_ledger(&fixture.lease)
+                .expect("load ledger")
+                .expect("ledger row")
+                .revision,
+            1,
+            "a refused withdrawal moved the ledger"
+        );
+        permit.abandon("the test ends with the attempt open");
     }
 
     #[test]

@@ -752,6 +752,100 @@ async fn the_team_queue_is_bounded_and_a_rejected_request_never_arrives_late() {
     }
 }
 
+/// One summons through the bridge, the window answering `late` after the
+/// request arrived (fake time: nothing sleeps). Returns the HTTP status and
+/// the body the caller would read.
+async fn a_summons_answered_late(argv: &'static str, late: Duration) -> (StatusCode, String) {
+    let (state, _events, mut teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let service = router(state);
+    let call = tokio::spawn(async move { service.oneshot(team_post(argv)).await });
+    let request = teams.recv().await.expect("the summons reaches the window");
+    tokio::time::sleep(late).await;
+    // A closed answer (the bridge already gave up) is the failure this pins.
+    let _ = request.answer.send(zerocode_hookd::TeamAnswer {
+        stdout: String::new(),
+        stderr: "composer never became ready\n".to_string(),
+        exit_code: 1,
+    });
+    let response = call.await.expect("handler joined").expect("a response");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("body");
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// The window words a worker's failure up to `READY_REPORT_HEADROOM_MS` after
+/// the readiness budget it was given (the provider's receipt wait, a briefing
+/// read back and typed again). The bridge answered at the budget plus three
+/// seconds, so a failure worded inside that headroom went to an answer nobody
+/// was reading and the caller saw "timed out waiting for the window" with no
+/// worker left to ask about (t-76890). Fake time, no real wait.
+#[tokio::test(start_paused = true)]
+async fn a_late_worker_failure_reaches_the_caller_with_its_reason() {
+    let budget = |ms: u32| Duration::from_millis(u64::from(ms));
+    let headroom = budget(zerocode_core::orchestration::READY_REPORT_HEADROOM_MS);
+    for (argv, ready) in [
+        (
+            "worker-start\u{1f}--agent\u{1f}claude\u{1f}",
+            budget(zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS),
+        ),
+        (
+            "worker-start\u{1f}--agent\u{1f}claude\u{1f}--timeout-ms\u{1f}180000\u{1f}",
+            budget(180_000),
+        ),
+        (
+            "delegate\u{1f}--spec\u{1f}x\u{1f}--agent\u{1f}claude\u{1f}",
+            budget(zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS),
+        ),
+    ] {
+        let (status, body) = a_summons_answered_late(argv, ready + headroom).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{argv:?}: {body}");
+        assert!(
+            body.contains("composer never became ready"),
+            "{argv:?}: the window's late reason did not reach the caller: {body}"
+        );
+    }
+}
+
+/// Past even that, a summons' time-out says where to look, and does not read
+/// like a failure to start: a caller who asked again under a new name would
+/// cut a second pane for a worker that may be standing.
+#[tokio::test(start_paused = true)]
+async fn a_summons_that_outlasts_the_bridge_is_told_where_to_look() {
+    let past_everything = Duration::from_millis(
+        u64::from(zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS)
+            + u64::from(zerocode_core::orchestration::READY_REPORT_HEADROOM_MS),
+    ) + Duration::from_secs(60);
+    let (status, body) = a_summons_answered_late(
+        "worker-start\u{1f}--agent\u{1f}claude\u{1f}",
+        past_everything,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.contains("timed out waiting for the window") && body.contains("worker-list"),
+        "a summons' time-out did not say where the worker would show: {body}"
+    );
+    // The plain list shows the run this pane is bound to, so a worker summoned
+    // with `--run B` is missing from it while standing. The answer is "not
+    // settled", points at the list of the run it was asked in, never says an
+    // absent worker did not start, and asks for a retry under the same name.
+    assert!(body.contains("not settled"), "{body}");
+    assert!(body.contains("worker-list --run"), "{body}");
+    assert!(body.contains("--retry-request"), "{body}");
+    assert!(
+        !body.contains("did not start") && !body.contains("new name"),
+        "a time-out must not turn a missing list entry into a failure: {body}"
+    );
+    // A command that is not a summons keeps its plain sentence.
+    let (_, plain) = a_summons_answered_late("list-panes\u{1f}", Duration::from_secs(60)).await;
+    assert!(
+        plain.contains("timed out waiting for the window") && !plain.contains("worker-list"),
+        "{plain}"
+    );
+}
+
 #[tokio::test]
 async fn slow_team_bodies_are_bounded_before_any_request_reaches_the_queue() {
     let (state, _events, mut teams, _browser) = BridgeState::new(TOKEN, BROWSER);

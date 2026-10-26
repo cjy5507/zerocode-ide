@@ -765,13 +765,19 @@ fn the_shim_waits_longer_than_the_window_is_allowed_to_take() {
         std::time::Duration::from_millis(1_500_000) + bridge_grace,
     );
     // A worker summons waits for launch readiness too — with the ledger's
-    // default when no flag was supplied and the caller's budget when it was.
+    // default when no flag was supplied and the caller's budget when it was —
+    // and then for the window to word a failure it only knows after the budget
+    // (t-76890): the headroom rides on both.
+    let report = std::time::Duration::from_millis(u64::from(
+        zerocode_core::orchestration::READY_REPORT_HEADROOM_MS,
+    ));
     assert!(request(&["worker-start", "--agent", "claude"]).reserves_wait_slot());
     assert_eq!(
         request(&["worker-start", "--agent", "claude"]).deadline(),
         std::time::Duration::from_millis(u64::from(
             zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS
-        )) + bridge_grace,
+        )) + report
+            + bridge_grace,
     );
     assert_eq!(
         request(&[
@@ -782,7 +788,7 @@ fn the_shim_waits_longer_than_the_window_is_allowed_to_take() {
             "120000",
         ])
         .deadline(),
-        std::time::Duration::from_millis(120_000) + bridge_grace,
+        std::time::Duration::from_millis(120_000) + report + bridge_grace,
     );
     // `delegate` is a worker summons that can also hold its answer for the worker's report
     // (t-34501): it takes the wait seat like `worker-start`, waits for readiness by default, and
@@ -793,7 +799,8 @@ fn the_shim_waits_longer_than_the_window_is_allowed_to_take() {
         request(&delegating).deadline(),
         std::time::Duration::from_millis(u64::from(
             zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS
-        )) + bridge_grace,
+        )) + report
+            + bridge_grace,
     );
     assert_eq!(
         request(&[
@@ -811,6 +818,7 @@ fn the_shim_waits_longer_than_the_window_is_allowed_to_take() {
             + std::time::Duration::from_millis(u64::from(
                 zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS
             ))
+            + report
             + bridge_grace,
     );
     // The ladder of a `delegate --wait --timeout-ms X`, at every X the ledger accepts: the window
@@ -838,11 +846,14 @@ fn the_shim_waits_longer_than_the_window_is_allowed_to_take() {
             said.as_str(),
         ])
         .deadline();
-        let window_latest = std::time::Duration::from_millis(ready + x);
+        let window_latest = std::time::Duration::from_millis(
+            ready + x + u64::from(zerocode_core::orchestration::READY_REPORT_HEADROOM_MS),
+        );
         let shim = std::time::Duration::from_secs(
             x / 1000
                 + u64::from(zerocode_core::agent_teams::SHIM_WAIT_GRACE_SECONDS)
-                + u64::from(zerocode_core::orchestration::delegate::WAIT_HEADROOM_MS) / 1000,
+                + u64::from(zerocode_core::orchestration::delegate::WAIT_HEADROOM_MS) / 1000
+                + u64::from(zerocode_core::orchestration::READY_REPORT_HEADROOM_MS) / 1000,
         );
         assert!(
             window_latest < bridge && bridge < shim,

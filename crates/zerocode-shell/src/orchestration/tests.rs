@@ -19430,6 +19430,195 @@ fn worker_readiness_runs_without_the_team_lock_and_reports_its_screen() {
     crate::agent_teams::forget_term(LEADER_TERM);
 }
 
+/// A host whose first worker waits for its readiness until the test lets it
+/// go, and whose every other worker is ready at once — the window answering
+/// slowly for ONE seat's summons (t-76680). A worker's term is its leader's
+/// plus [`Self::OFFSET`], so each seat's pane is told apart without a table.
+struct SlowReady {
+    /// The leader whose worker is the slow one.
+    slow_leader: u32,
+    /// Told once the slow worker has begun waiting for its readiness.
+    entered: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    /// What the slow worker waits on; a sender dropped counts as the go-ahead.
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    /// How the slow worker's wait ends once let go.
+    verdict: Result<(), &'static str>,
+}
+
+impl SlowReady {
+    const OFFSET: u32 = 1_000;
+}
+
+impl Host for SlowReady {
+    fn split(
+        &self,
+        _team: &str,
+        leader_term: u32,
+        _from_term: u32,
+        _pane: &str,
+        _direction: zerocode_core::agent_teams::Direction,
+        _command: &str,
+        _token: &str,
+    ) -> Option<u32> {
+        Some(leader_term + Self::OFFSET)
+    }
+    fn await_worker_ready(&self, term: u32) -> Result<(), crate::agent_teams::HostStartFailure> {
+        if term != self.slow_leader + Self::OFFSET {
+            return Ok(());
+        }
+        let _ = self
+            .entered
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .send(());
+        // A bounded wait, so a broken test fails instead of hanging; the
+        // test lets this go long before it runs out.
+        let _ = self
+            .release
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .recv_timeout(std::time::Duration::from_secs(60));
+        self.verdict
+            .map_err(|why| crate::agent_teams::HostStartFailure::new(why, None))
+    }
+    fn send(&self, _term: u32, _text: &str) -> bool {
+        true
+    }
+    fn capture(&self, _term: u32) -> Option<String> {
+        Some(String::new())
+    }
+    fn focus(&self, _term: u32) -> bool {
+        true
+    }
+    fn close(&self, _term: u32) {}
+    fn actor_for(&self, term: u32) -> Option<String> {
+        Some(test_actor(term))
+    }
+}
+
+/// Two seats summon at once while the window is slow to ready the first
+/// seat's worker. Returns the second seat's answer and the first's, in that
+/// order, and the first seat's team name.
+fn a_second_seat_summons_while_the_first_waits_for_its_worker(
+    first_leader: u32,
+    second_leader: u32,
+    verdict: Result<(), &'static str>,
+) -> (
+    zerocode_hookd::TeamAnswer,
+    zerocode_hookd::TeamAnswer,
+    String,
+) {
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let host = SlowReady {
+        slow_leader: first_leader,
+        entered: std::sync::Mutex::new(entered_tx),
+        release: std::sync::Mutex::new(release_rx),
+        verdict,
+    };
+    let first_team = format!("team-slow-ready-{first_leader}");
+    let second_team = format!("team-slow-ready-{second_leader}");
+    seat_a_team(&first_team, first_leader);
+    seat_a_team(&second_team, second_leader);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    for (team, name) in [
+        (&first_team, format!("slow-ready-{first_leader}")),
+        (&second_team, format!("slow-ready-{second_leader}")),
+    ] {
+        let opened = run(
+            &host,
+            Vec::new(),
+            team,
+            leader,
+            TEST_CAPABILITY,
+            &words(&format!("run-create --name {name}")),
+            clock(),
+        );
+        assert_eq!(opened.exit_code, 0, "{}", opened.stderr);
+    }
+    let (second, first) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            run(
+                &host,
+                Vec::new(),
+                &first_team,
+                leader,
+                TEST_CAPABILITY,
+                &words("worker-start --agent claude"),
+                clock(),
+            )
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the first worker began waiting for its readiness");
+        let second = run(
+            &host,
+            Vec::new(),
+            &second_team,
+            leader,
+            TEST_CAPABILITY,
+            &words("worker-start --agent claude"),
+            clock(),
+        );
+        drop(release_tx);
+        (second, first.join().expect("the first summons returned"))
+    });
+    (second, first, first_team)
+}
+
+/// A worker waiting to be ready is not a pane being cut: another seat's
+/// summons goes through while it waits, instead of being told "another pane
+/// is still being cut" for as long as the window is slow to answer (t-76680).
+#[test]
+fn a_seat_waiting_for_its_worker_does_not_hold_up_another_seats_summons() {
+    let _window = the_window();
+    let (second, first, _) =
+        a_second_seat_summons_while_the_first_waits_for_its_worker(91_360, 91_361, Ok(()));
+    assert_eq!(
+        second.exit_code, 0,
+        "the second seat's summons was held up by the first seat's wait: {}",
+        second.stderr
+    );
+    assert_eq!(first.exit_code, 0, "{}", first.stderr);
+    crate::agent_teams::forget_term(91_360);
+    crate::agent_teams::forget_term(91_361);
+}
+
+/// The first seat's worker never becoming ready is said to that seat with
+/// its reason, whatever the other seat was doing meanwhile — and the seat it
+/// cut leaves nothing behind (t-76680).
+#[test]
+fn a_worker_that_never_became_ready_is_refused_with_its_reason_while_others_go_on() {
+    let _window = the_window();
+    let (second, first, first_team) = a_second_seat_summons_while_the_first_waits_for_its_worker(
+        91_362,
+        91_363,
+        Err("composer never became ready"),
+    );
+    assert_eq!(
+        second.exit_code, 0,
+        "the second seat's summons was held up by the first seat's wait: {}",
+        second.stderr
+    );
+    assert_eq!(
+        first.exit_code, 1,
+        "a worker that never became ready started"
+    );
+    assert!(
+        first.stderr.contains("composer never became ready"),
+        "the reason did not come back with the refusal: {}",
+        first.stderr
+    );
+    assert!(
+        crate::agent_teams::teams()
+            .get(&first_team)
+            .is_none_or(|held| held.term_of("%2").is_none()),
+        "a refused readiness left a ghost pane in the team table"
+    );
+    crate::agent_teams::forget_term(91_362);
+    crate::agent_teams::forget_term(91_363);
+}
+
 /// A road that reads a seat has not let go of the table before it acts
 /// on what it read.
 ///
@@ -19577,6 +19766,402 @@ fn a_spawn_that_failed_once_may_be_asked_again_by_the_same_name() {
         "the second ask did not seat a worker: {}",
         second.stdout
     );
+}
+
+/// The bridge and the shim hold a summons longer than the window can take to
+/// word its failure (t-76890).
+///
+/// The window waits for a worker's readiness for the budget the caller gave,
+/// then for the provider's submission receipt, then — when a briefing has to be
+/// read back off the screen — for two watch windows and one retyped delivery
+/// (the agent's own start-up deadline plus the receipt wait); the pane may also
+/// have waited its turn to be cut. Every one of those is a constant of the
+/// crate that waits, and the bridge's `READY_REPORT_HEADROOM_MS` has to cover
+/// their sum: the bridge that hung up first answered "timed out waiting for the
+/// window", and the failure the window worded a moment later went to a closed
+/// answer while the worker row that could have told the caller was already
+/// gone. Raise any of them and this says the headroom must follow.
+#[test]
+fn the_bridge_holds_a_summons_past_the_longest_the_window_takes_to_word_a_failure() {
+    use zerocode_pty::briefing::BRIEFING_WINDOW;
+    use zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE;
+    let longest_start_up = zerocode_core::agent::AGENT_SPECS
+        .iter()
+        .filter_map(|spec| spec.ready_timeout_ms)
+        .map(|ms| std::time::Duration::from_millis(u64::from(ms)))
+        .fold(zerocode_pty::ready::TIMEOUT, std::time::Duration::max);
+    let window_after_its_budget = EFFECT_LINE_CEILING
+        + SUBMIT_RECEIPT_PATIENCE
+        + BRIEFING_WINDOW * 2
+        + longest_start_up
+        + SUBMIT_RECEIPT_PATIENCE;
+    let headroom = std::time::Duration::from_millis(u64::from(
+        zerocode_core::orchestration::READY_REPORT_HEADROOM_MS,
+    ));
+    assert!(
+        headroom >= window_after_its_budget,
+        "the bridge gives up {headroom:?} after a summons' budget, the window can take \
+         {window_after_its_budget:?}"
+    );
+    // And the request really carries it, at the default budget and a stretched one.
+    let request = |argv: &[&str]| {
+        let (answer, _wait) = tokio::sync::oneshot::channel();
+        zerocode_hookd::TeamRequest::new(
+            "team".into(),
+            "%1".into(),
+            "token".into(),
+            argv.iter().map(|word| (*word).to_string()).collect(),
+            answer,
+        )
+    };
+    for (argv, budget_ms) in [
+        (
+            vec!["worker-start", "--agent", "claude"],
+            u64::from(zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS),
+        ),
+        (
+            vec![
+                "worker-start",
+                "--agent",
+                "claude",
+                "--timeout-ms",
+                "180000",
+            ],
+            180_000,
+        ),
+    ] {
+        let window_latest = std::time::Duration::from_millis(budget_ms) + window_after_its_budget;
+        assert!(
+            request(&argv).deadline() > window_latest,
+            "{argv:?}: the bridge hangs up at {:?}, the window can still be working at \
+             {window_latest:?}",
+            request(&argv).deadline()
+        );
+    }
+}
+
+/// A worker that never became ready is not a request that must never run.
+///
+/// The pane is cut and the cut is settled before the wait for the worker
+/// (t-76680), so a ready failure used to leave the request carried out: the
+/// beat's name (`beat-{task}-{failures}`) does not move when the seat goes
+/// back, the next beat asked under the same name, and every ask met "this
+/// request's pane was already cut once" — the task and the ones behind it
+/// stood still with no screen saying why (t-76890). The ready failure is its
+/// own record on the cut: the pane is gone and the seat is back, so the same
+/// name may cut again.
+#[test]
+fn a_worker_that_never_became_ready_may_be_asked_again_by_the_same_name() {
+    // A window of its own: the shared one's clock may stand ahead of the wall's after other
+    // tests, and this one is about the order of three small numbers.
+    let (_window, _store) = PrivateWindow::boot();
+    const LEADER_TERM: u32 = 91_370;
+    let team = format!("team-unready-asked-again-{LEADER_TERM}");
+    seat_a_team(&team, LEADER_TERM);
+    let seat = zerocode_core::agent_teams::LEADER_PANE;
+    struct UnreadyOnce {
+        onto: u32,
+        refuse_one: std::sync::atomic::AtomicBool,
+    }
+    impl Host for UnreadyOnce {
+        fn split(
+            &self,
+            _team: &str,
+            _leader_term: u32,
+            _from_term: u32,
+            _pane: &str,
+            _direction: zerocode_core::agent_teams::Direction,
+            _command: &str,
+            _token: &str,
+        ) -> Option<u32> {
+            Some(self.onto)
+        }
+        fn await_worker_ready(
+            &self,
+            _term: u32,
+        ) -> Result<(), crate::agent_teams::HostStartFailure> {
+            if self
+                .refuse_one
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                Err(crate::agent_teams::HostStartFailure::new(
+                    "composer never became ready",
+                    None,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        fn send(&self, _term: u32, _text: &str) -> bool {
+            true
+        }
+        fn capture(&self, _term: u32) -> Option<String> {
+            Some(String::new())
+        }
+        fn focus(&self, _term: u32) -> bool {
+            true
+        }
+        fn close(&self, _term: u32) {}
+        fn actor_for(&self, term: u32) -> Option<String> {
+            Some(test_actor(term))
+        }
+    }
+    let host = UnreadyOnce {
+        onto: 91_371,
+        refuse_one: std::sync::atomic::AtomicBool::new(true),
+    };
+    let made = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words("run-create --name unready-asked-again"),
+        500,
+    );
+    assert_eq!(made.exit_code, 0, "{}", made.stderr);
+    let named = "worker-start --agent claude --retry-request beat-unready-asked-again-0";
+    let first_at = 1_000;
+    let first = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words(named),
+        first_at,
+    );
+    assert_eq!(first.exit_code, 1, "an unready worker started: {first:?}");
+    assert!(
+        first.stderr.contains("composer never became ready"),
+        "the reason did not come back with the refusal: {}",
+        first.stderr
+    );
+    // Before the retry floor (first_at + 1) the same request is refused, but
+    // not for good: the answer keeps the name and points at the lookup.
+    let early = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words(named),
+        first_at,
+    );
+    assert_eq!(
+        early.exit_code, 1,
+        "an early ask seated a worker: {early:?}"
+    );
+    assert!(
+        !early.stderr.contains("new name") && !early.stderr.contains("for good"),
+        "a refusal that can be retried was called final: {}",
+        early.stderr
+    );
+    assert!(
+        early.stderr.contains("same --retry-request")
+            && early.stderr.contains("worker-list --run")
+            && early.stderr.contains(&format!("{} ms", first_at + 1)),
+        "the answer does not name the floor, the same name and the lookup: {}",
+        early.stderr
+    );
+    // Strictly past the retry floor the withdrawal wrote (first_at + 1).
+    let second_at = first_at + 2;
+    let second = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words(named),
+        second_at,
+    );
+    assert_eq!(
+        second.exit_code, 0,
+        "the SAME name was refused for good after a worker that never became ready: {}",
+        second.stderr
+    );
+    let started: serde_json::Value = serde_json::from_str(&second.stdout).expect("a worker");
+    assert!(
+        started["workerId"].as_str().is_some(),
+        "the second ask did not seat a worker: {}",
+        second.stdout
+    );
+    crate::agent_teams::forget_term(91_371);
+}
+
+/// The answer to a request asked again while its first pane is still waiting
+/// for the worker must not tell the caller to ask under a new name (t-77154).
+///
+/// A caller bound to run A that asked for a worker in run B with no task has
+/// no task-level guard against a second worker. The plain `worker-list` shows
+/// run A only, so a caller told "ask under a new name" after finding nothing
+/// there would seat a second worker in run B beside the first one. The answer
+/// names the lookup that does see the first worker — `worker-list --run` the
+/// run it was asked in — and keeps the retry name.
+#[test]
+fn a_request_asked_again_while_its_worker_is_getting_ready_is_not_told_to_use_a_new_name() {
+    let (_window, _store) = PrivateWindow::boot();
+    const LEADER_TERM: u32 = 91_380;
+    let team = format!("team-replay-while-ready-{LEADER_TERM}");
+    seat_a_team(&team, LEADER_TERM);
+    let seat = zerocode_core::agent_teams::LEADER_PANE;
+    struct AsksAgainWhileReady {
+        onto: u32,
+        team: String,
+        argv: std::sync::Mutex<Vec<String>>,
+        splits: std::sync::atomic::AtomicUsize,
+        again: std::sync::Mutex<Option<zerocode_hookd::TeamAnswer>>,
+    }
+    impl Host for AsksAgainWhileReady {
+        fn split(
+            &self,
+            _team: &str,
+            _leader_term: u32,
+            _from_term: u32,
+            _pane: &str,
+            _direction: zerocode_core::agent_teams::Direction,
+            _command: &str,
+            _token: &str,
+        ) -> Option<u32> {
+            self.splits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(self.onto)
+        }
+        fn await_worker_ready(
+            &self,
+            _term: u32,
+        ) -> Result<(), crate::agent_teams::HostStartFailure> {
+            let argv = self.argv.lock().unwrap().clone();
+            let mut again = self.again.lock().unwrap();
+            if again.is_none() {
+                *again = Some(run(
+                    self,
+                    Vec::new(),
+                    &self.team,
+                    zerocode_core::agent_teams::LEADER_PANE,
+                    TEST_CAPABILITY,
+                    &argv,
+                    1_500,
+                ));
+            }
+            Ok(())
+        }
+        fn send(&self, _term: u32, _text: &str) -> bool {
+            true
+        }
+        fn capture(&self, _term: u32) -> Option<String> {
+            Some(String::new())
+        }
+        fn focus(&self, _term: u32) -> bool {
+            true
+        }
+        fn close(&self, _term: u32) {}
+        fn actor_for(&self, term: u32) -> Option<String> {
+            Some(test_actor(term))
+        }
+    }
+    let host = AsksAgainWhileReady {
+        onto: 91_381,
+        team: team.clone(),
+        argv: std::sync::Mutex::new(Vec::new()),
+        splits: std::sync::atomic::AtomicUsize::new(0),
+        again: std::sync::Mutex::new(None),
+    };
+    // Run B first, then run A: the caller ends up bound to A and names B.
+    let made_b = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words("run-create --name replay-while-ready-b"),
+        500,
+    );
+    assert_eq!(made_b.exit_code, 0, "{}", made_b.stderr);
+    let run_b = serde_json::from_str::<serde_json::Value>(&made_b.stdout).expect("a run")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    let made = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words("run-create --name replay-while-ready-a"),
+        600,
+    );
+    assert_eq!(made.exit_code, 0, "{}", made.stderr);
+    let named =
+        format!("worker-start --agent claude --run {run_b} --retry-request replay-while-ready");
+    *host.argv.lock().unwrap() = words(&named);
+    let first = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words(&named),
+        1_000,
+    );
+    assert_eq!(first.exit_code, 0, "{}", first.stderr);
+    let listing = |line: &str| {
+        let said = run(
+            &host,
+            Vec::new(),
+            &team,
+            seat,
+            TEST_CAPABILITY,
+            &words(line),
+            2_000,
+        );
+        assert_eq!(said.exit_code, 0, "`{line}`: {}", said.stderr);
+        serde_json::from_str::<serde_json::Value>(&said.stdout).expect("a roster")["workers"]
+            .as_array()
+            .expect("workers")
+            .len()
+    };
+    assert_eq!(
+        listing("worker-list"),
+        0,
+        "run A's list shows run B's worker"
+    );
+    assert_eq!(
+        listing(&format!("worker-list --run {run_b}")),
+        1,
+        "run B's list does not show the one worker"
+    );
+    assert_eq!(
+        host.splits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "asking again while the worker got ready cut a second pane"
+    );
+    let again = host
+        .again
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the host was never asked to wait for the worker");
+    assert_eq!(
+        again.exit_code, 1,
+        "the second ask seated a worker: {again:?}"
+    );
+    assert!(
+        !again.stderr.contains("new name"),
+        "the answer sends the caller to a new name, which seats a second worker: {}",
+        again.stderr
+    );
+    assert!(
+        again.stderr.contains("worker-list --run"),
+        "the answer does not name the lookup that sees the first worker: {}",
+        again.stderr
+    );
+    assert!(
+        again.stderr.contains("same --retry-request"),
+        "the answer does not keep the retry name: {}",
+        again.stderr
+    );
+    crate::agent_teams::forget_term(91_381);
 }
 
 #[test]
