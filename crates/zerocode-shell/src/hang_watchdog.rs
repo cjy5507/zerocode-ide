@@ -1303,6 +1303,38 @@ mod tests {
         assert!(machine.lines.is_empty(), "{:?}", machine.lines);
     }
 
+    /// A watch turned off and on again a beat later keeps its ten seconds
+    /// between busy lines (t-75646 r4): the request said at 2 s is not said
+    /// again 500 ms later, and nothing is said while the watch is off.
+    #[test]
+    fn a_watch_turned_off_and_on_keeps_ten_seconds_between_busy_lines() {
+        let mut machine = Machine::watching();
+        let request = machine.take("window_exiting");
+        machine.run(2_000, Some(request));
+        machine.limits.watchdog = false;
+        machine.beat(250, Some(request));
+        machine.limits.watchdog = true;
+        machine.run(9_750, Some(request));
+        machine.run(250, None);
+        assert_eq!(
+            machine.lines,
+            [
+                ActorLine::Busy {
+                    verb: "window_exiting",
+                    ms: 2_000
+                },
+                ActorLine::Busy {
+                    verb: "window_exiting",
+                    ms: 12_000
+                },
+                ActorLine::Answered {
+                    verb: "window_exiting",
+                    ms: 12_250
+                },
+            ]
+        );
+    }
+
     /// A one-second request the machine slept 30 s in the middle of is not
     /// a busy actor: the monotonic clock stops while the machine sleeps, so
     /// the request ran one second of it, wherever the sleep fell. A request
