@@ -40,12 +40,17 @@
 //! once more just before zo is asked to rewrite it, and each move goes on from
 //! the file zo's move left only when that file is the one read with the one
 //! cell, and nothing else, turned into its reference.
+//!
+//! And of one name (t-76698 r4): a settings file with a second name — a hard
+//! link, which a project folder can hold and no folder handle sees — is not
+//! read, pinned or gone on from. The file the last move left is looked at as
+//! any other, and one not as expected is said. zo's output is read by the
+//! watch without blocking and to a bound, and let go at the wait.
 
 use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -124,25 +129,109 @@ impl ZoDoor {
     }
 }
 
-/// zo's output as it comes.
+/// zo's output as it comes, read to its end or to [`PRINTED_BYTES`] and no
+/// further. It is read by the watch itself, without blocking, and let go when
+/// the door is given up: a child that left zo's group and holds the output
+/// open keeps no reader and no descriptor of the window's past the wait
+/// (t-76698 r4).
+#[cfg(unix)]
 struct Output {
-    heard: Receiver<Option<String>>,
+    pipe: Option<File>,
+    bytes: Vec<u8>,
 }
 
+#[cfg(unix)]
 impl Output {
-    fn of(mut pipe: impl Read + Send + 'static) -> std::io::Result<Self> {
-        // Not joined: a reader still held open at the wait is let go, and ends
-        // when the group's kill closes the pipe.
-        let (said, heard) = mpsc::channel();
+    fn of(pipe: impl Into<std::os::fd::OwnedFd>) -> std::io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        let pipe = File::from(pipe.into());
+        let fd = pipe.as_raw_fd();
+        // SAFETY: `fd` is the pipe just taken, open for both calls, and only
+        // its status flags are read and set.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        // SAFETY: as above.
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            pipe: Some(pipe),
+            bytes: Vec::new(),
+        })
+    }
+
+    /// As [`Answering::printed`]: waits up to `tick` for the output, then
+    /// reads what has come. An output past its bound, or one that cannot be
+    /// read, is let go and is no answer.
+    fn printed(&mut self, tick: Duration) -> Option<Option<String>> {
+        use std::os::fd::AsRawFd;
+        let Some(pipe) = self.pipe.as_mut() else {
+            return Some(None);
+        };
+        let mut ready = libc::pollfd {
+            fd: pipe.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let wait = libc::c_int::try_from(tick.as_millis()).unwrap_or(libc::c_int::MAX);
+        // SAFETY: one `pollfd`, alive for the call. What it answers is not
+        // needed: the read below finds what has come, or nothing.
+        unsafe { libc::poll(&mut ready, 1, wait) };
+        let mut chunk = [0_u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => {
+                    self.pipe = None;
+                    return Some(String::from_utf8(std::mem::take(&mut self.bytes)).ok());
+                }
+                Ok(read) => {
+                    self.bytes.extend_from_slice(&chunk[..read]);
+                    if self.bytes.len() > PRINTED_BYTES {
+                        self.close();
+                        return Some(None);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return None,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => {
+                    self.close();
+                    return Some(None);
+                }
+            }
+        }
+    }
+
+    /// The window's end of the output, closed: a writer still holding the
+    /// other end finds it broken.
+    fn close(&mut self) {
+        self.pipe = None;
+        self.bytes = Vec::new();
+    }
+}
+
+/// Elsewhere a pipe is not read without blocking: a thread reads it to its
+/// end or its bound, and is let go at the wait.
+#[cfg(not(unix))]
+struct Output {
+    heard: std::sync::mpsc::Receiver<Option<String>>,
+}
+
+#[cfg(not(unix))]
+impl Output {
+    fn of(pipe: impl Read + Send + 'static) -> std::io::Result<Self> {
+        let (said, heard) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = said.send(pipe.read_to_string(&mut text).map(|_| text).ok());
+            let mut bytes = Vec::new();
+            let read = pipe.take(PRINTED_BYTES as u64 + 1).read_to_end(&mut bytes);
+            let text = (read.is_ok() && bytes.len() <= PRINTED_BYTES)
+                .then(|| String::from_utf8(bytes).ok())
+                .flatten();
+            let _ = said.send(text);
         });
         Ok(Self { heard })
     }
 
-    /// As [`Answering::printed`].
     fn printed(&mut self, tick: Duration) -> Option<Option<String>> {
+        use std::sync::mpsc::RecvTimeoutError;
         match self.heard.recv_timeout(tick) {
             Ok(text) => Some(text),
             Err(RecvTimeoutError::Timeout) => None,
@@ -287,12 +376,16 @@ fn is_name(name: &str) -> bool {
 }
 
 /// Whether zo's `file` is the person's settings file the window pinned: its
-/// path, or a spelling of the path that stands on the very same file — never
-/// a link to it. A cell elsewhere is not the window's to read.
+/// path, or another spelling of it below the same root that stands on the
+/// very same file of one name — never a link to it. A cell elsewhere is not
+/// the window's to read. The window reads only through its own path; zo's
+/// spelling is what zo's move is handed back.
 fn is_settings_file(file: &str, settings: &SettingsFile, pinned: Pinned) -> bool {
     Path::new(file) == settings.path
-        || std::fs::symlink_metadata(file)
-            .is_ok_and(|meta| meta.file_type().is_file() && identity(&meta) == pinned.file)
+        || (SettingsFile::under(settings.root.clone(), PathBuf::from(file)).is_some()
+            && std::fs::symlink_metadata(file).is_ok_and(|meta| {
+                meta.file_type().is_file() && one_name(&meta) && identity(&meta) == pinned.file
+            }))
 }
 
 /// The person's settings file and the folder it is trusted from — the home
@@ -321,7 +414,9 @@ impl SettingsFile {
     /// The file, opened from the root a folder at a time without following a
     /// link, with the identity of the folder holding it; an error for a link
     /// anywhere below the root, a folder that is not one, or a file that is
-    /// not a plain file.
+    /// not a plain file of one name. A file with a second name — a hard link,
+    /// which no folder handle sees — may be a project's file too (t-76698
+    /// r4).
     #[cfg(unix)]
     fn open(&self) -> std::io::Result<((u64, u64), File)> {
         use std::os::unix::fs::OpenOptionsExt;
@@ -343,7 +438,8 @@ impl SettingsFile {
         }
         // Not blocking: a pipe put at the path is not waited on.
         let file = open_at(&folder, name, libc::O_NONBLOCK)?;
-        if !file.metadata()?.file_type().is_file() {
+        let meta = file.metadata()?;
+        if !meta.file_type().is_file() || !one_name(&meta) {
             return Err(std::io::ErrorKind::InvalidInput.into());
         }
         Ok((identity(&folder.metadata()?), file))
@@ -424,6 +520,20 @@ impl Pinned {
 fn identity(meta: &std::fs::Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
     (meta.dev(), meta.ino())
+}
+
+/// Whether the file has one name: a second, a hard link, can stand anywhere
+/// on the same device — in a project folder too.
+#[cfg(unix)]
+fn one_name(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.nlink() == 1
+}
+
+/// Elsewhere a move stops before a value is kept (see [`identity`]).
+#[cfg(not(unix))]
+fn one_name(_meta: &std::fs::Metadata) -> bool {
+    true
 }
 
 /// Elsewhere there is no inode to pin, and no keychain keeps a key either
@@ -517,10 +627,12 @@ pub fn keychain_service(name: &str) -> String {
 }
 
 /// The plain-text cells of the person's settings file zo lists; `None` when
-/// zo does not answer the door, or answers a row of another shape.
+/// zo does not answer the door, says the move is not supported here (no
+/// keychain to refer to, as on Windows; a zo that does not say is taken to
+/// support it), or answers a row of another shape.
 fn literals(zo: &ZoDoor, settings: &SettingsFile, pinned: Pinned) -> Option<Vec<Literal>> {
     let (code, said) = zo.ask(&["settings", "secrets", "--json"])?;
-    if code != 0 {
+    if code != 0 || said.get("supported") == Some(&Value::Bool(false)) {
         return None;
     }
     let rows = said
@@ -550,7 +662,9 @@ pub(crate) fn notice(zo: &ZoDoor, settings: &SettingsFile) -> Option<SecretNotic
 
 /// Every plain-text cell of the person's settings file, moved in the order zo
 /// listed them, stopping at the first that cannot be. Each cell after the
-/// first is read from the file the move before it left.
+/// first is read from the file the move before it left, and the file the last
+/// move left is looked at too: one not as expected stops the outcome as
+/// `unconfirmed`, under the cell zo said it moved.
 pub(crate) fn move_all(zo: &ZoDoor, settings: &SettingsFile, keys: &dyn RouterKeys) -> MoveOutcome {
     let before_any = |reason: &'static str| MoveOutcome {
         stopped: Some(Stopped {
@@ -585,6 +699,17 @@ pub(crate) fn move_all(zo: &ZoDoor, settings: &SettingsFile, keys: &dyn RouterKe
         };
         match step {
             Ok((backup, next)) => {
+                // The last cell's file is looked at as any other: one zo left
+                // other than the file read with that cell turned into its
+                // reference is not a finished move (t-76698 r4).
+                if next.is_err() && rest.as_slice().is_empty() {
+                    outcome.stopped = Some(Stopped {
+                        name: literal.name.clone(),
+                        reason: "unconfirmed",
+                        why: None,
+                        keychain_kept: true,
+                    });
+                }
                 outcome.moved.push(Moved {
                     name: literal.name,
                     backup,

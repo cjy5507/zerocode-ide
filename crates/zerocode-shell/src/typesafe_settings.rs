@@ -439,8 +439,9 @@ impl Drop for KeyItems {
     }
 }
 
-/// Whether this thread holds the window's guard over keychain items.
-#[cfg(test)]
+/// Whether this thread holds the window's guard over keychain items — asked
+/// by the secret move's tests, which run where a keychain keeps keys.
+#[cfg(all(test, unix))]
 pub(crate) fn key_items_held_here() -> bool {
     KEY_ITEMS_HERE.with(std::cell::Cell::get)
 }

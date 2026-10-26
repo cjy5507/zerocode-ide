@@ -76,6 +76,11 @@ const SETTINGS_SECRET_STOPS = Object.freeze({
     "이미 다른 곳에서 옮기는 중입니다. 끝난 뒤 설정을 다시 열어 확인해 주세요.",
     { name },
   ),
+  unconfirmed: (name) => t(
+    "settings.secrets.stop.unconfirmed",
+    "zo는 {{name}} 칸을 옮겼다고 답했지만, 남은 설정 파일이 그 칸만 참조로 바뀐 파일이 아닙니다. 설정 파일과 백업을 확인해 주세요.",
+    { name },
+  ),
   settings_busy: (name) => t(
     "settings.secrets.stop.settingsBusy",
     "다른 곳에서 설정 파일을 고치는 중이라 옮기지 못했습니다. 잠시 뒤 다시 옮겨 주세요.",
@@ -137,6 +142,14 @@ function paintSettingsSecrets() {
   say(backupNote, () => t(
     "settings.secrets.backupNote",
     "백업에는 옮기기 전의 비밀 값이 그대로 들어 있습니다. 옮긴 것이 잘 되는지 확인한 뒤 백업 파일을 지워 주세요.",
+  ));
+
+  // zo resolves a reference only when opened in a project folder.
+  const where = el("settings-secrets-where");
+  where.hidden = backups.length === 0;
+  say(where, () => t(
+    "settings.secrets.where",
+    "홈 폴더나 /(루트)에서 연 zo는 이 참조를 풀지 않아 그 MCP 서버를 띄우지 않습니다 — 프로젝트 폴더에서 zo를 여세요.",
   ));
 
   const stopped = outcome?.stopped ?? null;
