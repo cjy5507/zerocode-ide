@@ -6,6 +6,12 @@ import { installHarnessWaits } from "./harness-waits.mjs";
  * cached request cannot serve as its own receipt. No live pty or foreground
  * window participates in this test. */
 export async function testTerminalGridFit(browser, origin, ok) {
+  await terminalGridFitScene(browser, origin, ok, false);
+  await terminalGridFitScene(browser, origin,
+    (label, ...args) => ok(`without checkVisibility: ${label}`, ...args), true);
+}
+
+async function terminalGridFitScene(browser, origin, ok, withoutCheckVisibility) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   const within = (work, label) => {
     let timer;
@@ -15,7 +21,13 @@ export async function testTerminalGridFit(browser, origin, ok) {
   };
   try {
     await installHarnessWaits(page);
-    const seen = await within(page.evaluate(async () => {
+    const seen = await within(page.evaluate(async (withoutCheckVisibility) => {
+      // Safari before 17.4 has no Element.checkVisibility (macOS 14.0–14.3).
+      if (withoutCheckVisibility) {
+        Object.defineProperty(Element.prototype, "checkVisibility", {
+          configurable: true, value: undefined,
+        });
+      }
 
       const worktree = "/tmp/terminal-grid-fit";
       const sizes = new Map();
@@ -146,7 +158,7 @@ export async function testTerminalGridFit(browser, origin, ok) {
       } finally {
         window.__GRID_FIT_SETTLE__ = settle;
       }
-    }), "restoring and fitting terminals");
+    }, withoutCheckVisibility), "restoring and fitting terminals");
     console.log(`MEASURE terminal grid fit ${JSON.stringify(seen)}`);
     ok("a restored hidden tab sends no resize and a CSS-sized hidden box remains unmeasured",
       seen.hiddenResizes === 0 && seen.hiddenResizeAfterFit === 0 && seen.hiddenProbes === 0 && seen.hiddenBlind, JSON.stringify(seen));

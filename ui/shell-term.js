@@ -2009,7 +2009,12 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     // participating in layout can supply font metrics or a terminal grid.
     // Check for a CSS box without adding client-size reads to a tab switch;
     // the computed dimensions below are already the grid's layout query.
-    if (!host.isConnected || !host.checkVisibility()) return null;
+    if (!host.isConnected) return null;
+    // checkVisibility arrived in Safari 17.4; older supported WebKit builds
+    // can still tell whether the host has a laid-out CSS box.
+    const visible = typeof host.checkVisibility === "function"
+      ? host.checkVisibility() : host.getClientRects().length > 0;
+    if (!visible) return null;
     const style = getComputedStyle(host);
     const width = parseFloat(style.width);
     const height = parseFloat(style.height);

@@ -376,8 +376,8 @@ suite("native-folder-picker", ({ browser, origin, ok }) => testNativeFolderPicke
 suite("sftp", ({ browser, origin, ok }) => testSftpAndTeam(browser, origin, ok));
 suite("pane-follow", ({ browser, origin, ok }) => testPaneFollowsCwd(browser, origin, ok));
 suite("pane-strays", ({ browser, origin, ok }) => testPaneStrays(browser, origin, ok));
-// The zo panes a restart brings back, in their own workspaces (t-12063).
 suite("terminal-grid-fit", ({ browser, origin, ok }) => testTerminalGridFit(browser, origin, ok));
+// The zo panes a restart brings back, in their own workspaces (t-12063).
 suite("zo-restore", ({ browser, origin, ok }) => testZoRestore(browser, origin, ok));
 // The panes a restart opens again, where they stood, in every workspace (t-14036).
 suite("restart-same-panes", ({ browser, origin, ok }) => testRestartSamePanes(browser, origin, ok));
