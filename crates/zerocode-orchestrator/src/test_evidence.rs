@@ -2174,6 +2174,54 @@ mod tests {
         );
     }
 
+    /// What one attempt of the pipe-holder proof can speak for.
+    #[derive(Debug, PartialEq, Eq)]
+    enum HolderAttempt {
+        /// The attempt proves nothing about holders either way: it is asked
+        /// again, and six of these is the proof's own honest failure.
+        DidNotRun,
+        /// A holder existed while the deadline ran: the attempt proves.
+        Proves,
+    }
+
+    /// Only an attempt whose command started AND made its holder speaks for
+    /// holders. Under load the two-second deadline can fall after the shell's
+    /// first line but before Python has started and forked — witnessed in the
+    /// l79e gate on 2026-10-26 at load ~100, read then as "the command never
+    /// created its pipe holder" — and a holder that never existed can neither
+    /// extend the deadline nor leave evidence.
+    fn holder_attempt(command_started: bool, holder_made: bool) -> HolderAttempt {
+        if command_started && holder_made {
+            HolderAttempt::Proves
+        } else {
+            HolderAttempt::DidNotRun
+        }
+    }
+
+    /// The pid a holder forked before the deadline writes after it, if it
+    /// does so within a few seconds; `None` when no holder ever came.
+    fn late_holder(marker: &Path) -> Option<i32> {
+        for _ in 0..300 {
+            if let Some(pid) = fs::read_to_string(marker)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<i32>().ok())
+            {
+                return Some(pid);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    #[test]
+    fn only_an_attempt_that_made_its_holder_proves_anything_about_holders() {
+        assert_eq!(holder_attempt(true, true), HolderAttempt::Proves);
+        // l79e g2: the command started, the deadline came before the holder.
+        assert_eq!(holder_attempt(true, false), HolderAttempt::DidNotRun);
+        assert_eq!(holder_attempt(false, false), HolderAttempt::DidNotRun);
+        assert_eq!(holder_attempt(false, true), HolderAttempt::DidNotRun);
+    }
+
     fn prove_a_daemonized_pipe_holder_in_this_process() {
         let repository = repository(Vec::new());
         let home = tempfile::tempdir().expect("authority home");
@@ -2277,10 +2325,16 @@ mod tests {
                 command_elapsed < Duration::from_secs(5),
                 "escaped pipe holder extended the deadline: {command_elapsed:?}"
             );
-            assert!(
-                escaped.is_some(),
-                "the command never created its pipe holder"
-            );
+            if holder_attempt(true, escaped.is_some()) == HolderAttempt::DidNotRun {
+                // A holder that forked before the deadline and wrote its pid
+                // after it is reaped here, so no attempt leaves one behind.
+                if let Some(late) = late_holder(&marker) {
+                    // SAFETY: the pid was written by this attempt's own child.
+                    unsafe { libc::kill(late, libc::SIGKILL) };
+                    wait_until_gone(late);
+                }
+                continue;
+            }
             assert_eq!(
                 runner
                     .resolver(&store)
