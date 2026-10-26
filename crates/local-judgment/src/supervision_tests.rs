@@ -358,6 +358,58 @@ async fn a_status_read_that_waits_for_an_ended_runtimes_stderr_leaves_the_async_
     );
 }
 
+/// A status read made while another thread notes a runtime's end tells that
+/// end only once it is kept: the failed state it reads finds the end on disk
+/// and names it as the last end. The read here comes after the end is
+/// published and before it is kept, and the end waits for it to answer up to
+/// a few seconds, far longer than a read that does not wait takes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_status_read_while_an_end_is_noted_tells_it_only_once_it_is_kept() {
+    const WAITED: Duration = Duration::from_secs(3);
+    let fixture = supervised().await;
+    let manager = Arc::downgrade(&fixture.manager);
+    let exits = fixture.data.join("managed-judgment/server-exits.jsonl");
+    let answered = Arc::new(Mutex::new(None));
+    let answer = answered.clone();
+    test_support::before_exit_kept(&fixture.manager, move || {
+        let reader = std::thread::spawn(move || {
+            let Some(manager) = manager.upgrade() else {
+                return;
+            };
+            let read = manager.snapshot();
+            let kept = fs::read_to_string(&exits).unwrap_or_default();
+            *answer.lock().unwrap() = Some((read, kept));
+        });
+        let began = Instant::now();
+        while !reader.is_finished() && began.elapsed() < WAITED {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+    fixture.end("code 3", "");
+
+    let began = Instant::now();
+    let (read, kept) = loop {
+        if let Some(answer) = answered.lock().unwrap().take() {
+            break answer;
+        }
+        assert!(
+            began.elapsed() < SETTLE + WAITED,
+            "no status read was made while the end was noted"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert_eq!(read.server.state, "failed");
+    assert!(
+        kept.contains("\"runtime_exited\""),
+        "a status read told the end before it was kept: {kept:?}"
+    );
+    assert_eq!(
+        read.supervision.last_end.and_then(|end| end.code),
+        Some(3),
+        "a status read told the end with an earlier last end"
+    );
+}
+
 /// Records kept at the same instant by writers on different threads (a
 /// reap, a restart's attempt, a stop) each keep their line, and no staging
 /// file is left behind.
