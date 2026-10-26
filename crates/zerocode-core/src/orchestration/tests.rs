@@ -18051,6 +18051,92 @@ fn a_retained_worker_is_kept_and_still_counted_among_the_living() {
     assert!(WorkerState::Retained.is_live());
 }
 
+/// A kept worker stays kept through the next task it is handed (t-76477).
+///
+/// `dispatch` wrote `Active` over `Retained`, so the keeping was gone the
+/// moment the pane took its second task: the report that ended it then read
+/// as a plain active worker's, the window's auto-release closed the pane,
+/// and the coordinator's third dispatch found no terminal (w-76369 and
+/// w-76443, 2026-10-26).
+#[test]
+fn a_retained_worker_stays_retained_through_the_next_task_it_is_handed() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name keeping-through");
+    let first = bench.json("task-create --spec build-the-parser");
+    let first_id = first["taskId"].as_str().expect("a task id").to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent codex --task {first_id}"));
+    bench.json(&format!("worker-retain --worker {worker}"));
+    bench.json_at(&pane, "send --type worker_done --body {\"ok\":true}");
+    assert_eq!(bench.json("worker-list")["workers"][0]["state"], "retained");
+
+    let second = bench.json("task-create --spec test-the-parser");
+    let second_id = second["taskId"].as_str().expect("a task id").to_string();
+    let handed = bench.json(&format!("dispatch --task {second_id} --to {pane}"));
+    assert_eq!(handed["workerId"], worker.as_str());
+    let carrying = bench.json("worker-list");
+    assert_eq!(carrying["workers"][0]["state"], "retained");
+    assert_eq!(carrying["workers"][0]["taskId"], second_id.as_str());
+
+    // The report that ends the second task leaves the pane kept, ready for a
+    // third, and the release verbs still refuse it.
+    bench.json_at(&pane, "send --type worker_done --body {\"ok\":true}");
+    assert_eq!(bench.json("worker-list")["workers"][0]["state"], "retained");
+    let refused = bench.run(&format!("worker-release --worker {worker}"));
+    assert_eq!(refused.reply.exit_code, 1);
+    assert!(
+        refused.reply.stderr.contains("retained"),
+        "{}",
+        refused.reply.stderr
+    );
+    let third = bench.json("task-create --spec ship-the-parser");
+    let third_id = third["taskId"].as_str().expect("a task id").to_string();
+    bench.json(&format!("dispatch --task {third_id} --to {pane}"));
+
+    // What the window reads when a report lands: a kept worker's pane is not
+    // closed, an unkept one's is, and a pane the person took is never.
+    let run_id = bench.json("run-current")["runId"]
+        .as_str()
+        .expect("a run")
+        .to_string();
+    let run = bench.ledger.run_mut(&run_id).expect("the run");
+    let at = run
+        .workers
+        .iter()
+        .position(|held| held.id == worker)
+        .expect("the worker");
+    assert!(!run.workers[at].closes_pane_on_report());
+    run.workers[at].state = WorkerState::Active;
+    assert!(run.workers[at].closes_pane_on_report());
+    run.workers[at].taken_over = true;
+    assert!(!run.workers[at].closes_pane_on_report());
+}
+
+/// A worker that was never kept still goes back to `reclaimable` after its
+/// report, and a second dispatch makes it `active` again — keeping a worker
+/// is the only thing that changes that road.
+#[test]
+fn a_worker_that_was_not_kept_still_cycles_active_and_reclaimable() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name not-kept");
+    let first = bench.json("task-create --spec build-the-parser");
+    let first_id = first["taskId"].as_str().expect("a task id").to_string();
+    let (_, pane) = bench.seat(&format!("worker-start --agent codex --task {first_id}"));
+    bench.json_at(&pane, "send --type worker_done --body {\"ok\":true}");
+    assert_eq!(
+        bench.json("worker-list")["workers"][0]["state"],
+        "reclaimable"
+    );
+    let second = bench.json("task-create --spec test-the-parser");
+    let second_id = second["taskId"].as_str().expect("a task id").to_string();
+    bench.json(&format!("dispatch --task {second_id} --to {pane}"));
+    assert_eq!(bench.json("worker-list")["workers"][0]["state"], "active");
+    bench.json_at(&pane, "send --type worker_done --body {\"ok\":true}");
+    assert_eq!(
+        bench.json("worker-list")["workers"][0]["state"],
+        "reclaimable"
+    );
+}
+
 /// A summoned worker is told that finishing has a word.
 ///
 /// This is the clause that makes the loop close by itself. Without it a

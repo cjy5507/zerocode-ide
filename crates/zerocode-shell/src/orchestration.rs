@@ -343,7 +343,7 @@ pub(crate) fn seat_assignment(team: &str, pane: &str) -> Option<SeatAssignment> 
                 dispatch_id: dispatch.id.clone(),
                 checkout: worker.checkout.clone(),
                 agent: worker.agent.clone(),
-                auto_release: worker.state == WorkerState::Active && !worker.taken_over,
+                auto_release: worker.closes_pane_on_report(),
             });
         }
     }
