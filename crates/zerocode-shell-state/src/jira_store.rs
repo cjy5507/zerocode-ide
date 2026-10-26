@@ -268,8 +268,17 @@ pub struct JiraStore {
 /// opens the same inode/path, so an atomic metadata replacement cannot split
 /// contenders across different lock objects.
 struct JiraStoreLock<'a> {
-    _file: File,
+    file: File,
     _process: MutexGuard<'a, ()>,
+}
+
+impl Drop for JiraStoreLock<'_> {
+    /// Ends the flock itself rather than leaving it to the close: a launch
+    /// that forks before it execs holds a copy of the descriptor until the
+    /// exec, and a close ends the lock only when every copy is gone (t-73907).
+    fn drop(&mut self) {
+        unlock_file(&self.file);
+    }
 }
 
 impl JiraStore {
@@ -967,7 +976,7 @@ impl JiraStore {
             .map_err(|source| io_error("Jira 설정 잠금 파일을 열지 못했습니다", source))?;
         lock_file_exclusively(&file)?;
         Ok(JiraStoreLock {
-            _file: file,
+            file,
             _process: process,
         })
     }
@@ -1208,6 +1217,25 @@ fn lock_file_exclusively(file: &File) -> StoreResult<()> {
     }
 }
 
+#[cfg(unix)]
+fn unlock_file(file: &File) {
+    let _ = file.unlock();
+}
+
+/// The one byte [`lock_file_exclusively`] locked: `UnlockFile` must name the
+/// same range, which `File::unlock` does not.
+#[cfg(windows)]
+fn unlock_file(file: &File) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::UnlockFile;
+
+    // SAFETY: the raw handle remains owned by `file` for this call.
+    unsafe { UnlockFile(file.as_raw_handle() as _, 0, 0, 1, 0) };
+}
+
+#[cfg(not(any(unix, windows)))]
+fn unlock_file(_file: &File) {}
+
 #[cfg(not(any(unix, windows)))]
 fn lock_file_exclusively(_file: &File) -> StoreResult<()> {
     Err(invalid_metadata(
@@ -1314,6 +1342,28 @@ mod tests {
     use super::*;
     use crate::credential_store::{MemorySecretStore, SecretOperation, UnavailableSecretStore};
     use std::sync::{Arc, Barrier};
+
+    /// A process launch on another thread that forks before it execs holds a
+    /// copy of every descriptor until the exec, and a flock belongs to the
+    /// open file description, so a lock its holder only closed stays held by
+    /// that copy (t-73907: a child that never reached its exec kept three new
+    /// windows waiting on the settings lock). The duplicate here is that copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_of_the_lock_left_in_a_launch_does_not_hold_the_next_lock() {
+        use std::os::fd::AsRawFd as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = JiraStore::new(directory.path());
+        let held = store.lock().unwrap();
+        let inherited = held.file.try_clone().unwrap();
+        drop(held);
+        let next =
+            crate::durable_file::private_lock_file(&directory.path().join(LOCK_FILE_NAME)).unwrap();
+        let taken = unsafe { libc::flock(next.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        drop(inherited);
+        assert_eq!(taken, 0, "a lock its holder let go is still held by a copy");
+    }
 
     fn site(id: &str) -> JiraSite {
         JiraSite {

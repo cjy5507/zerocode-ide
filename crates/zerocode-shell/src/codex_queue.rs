@@ -972,6 +972,28 @@ fn capability_with(
     found
 }
 
+/// The command for `program`, under `env` alone when one is given.
+///
+/// A bare name is found on that env's own `PATH` first. std counts
+/// `env_clear` as a `PATH` change, and a bare name with a changed `PATH`
+/// makes std fork; a fork in the window can stand before its exec holding a
+/// copy of every descriptor the window has (t-73907; t-47141 for the doors
+/// `quiet_command_on_path` already serves).
+fn command_under(program: &Path, env: Option<&[(String, String)]>) -> std::process::Command {
+    let path = env.and_then(|env| {
+        env.iter()
+            .find(|(name, _)| name == "PATH")
+            .map(|(_, path)| path.as_str())
+    });
+    let mut command = crate::proc::quiet_command_on_path(program, path);
+    if let Some(env) = env {
+        command
+            .env_clear()
+            .envs(env.iter().map(|(name, value)| (name, value)));
+    }
+    command
+}
+
 fn run_bounded_command(
     program: &Path,
     args: &[String],
@@ -979,7 +1001,7 @@ fn run_bounded_command(
     env: Option<&[(String, String)]>,
     timeout: Duration,
 ) -> CommandResult {
-    let mut command = crate::proc::quiet_command(program);
+    let mut command = command_under(program, env);
     command
         .args(args)
         .stdin(Stdio::null())
@@ -987,11 +1009,6 @@ fn run_bounded_command(
         .stderr(Stdio::null());
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
-    }
-    if let Some(env) = env {
-        command
-            .env_clear()
-            .envs(env.iter().map(|(name, value)| (name, value)));
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -1099,12 +1116,10 @@ fn start_sidecar(
 ) -> Result<CodexSidecar, CodexQueueError> {
     let creator_started = crate::resource_usage::process_start_identity(std::process::id())
         .map_err(|_| CodexQueueError::SidecarIdentity)?;
-    let mut command = crate::proc::quiet_command(program);
+    let mut command = command_under(program, Some(env));
     command
         .args(["app-server", "--listen", endpoint])
         .current_dir(cwd)
-        .env_clear()
-        .envs(env.iter().map(|(name, value)| (name, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1764,6 +1779,38 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         assert_eq!(permissions.mode() & 0o077, 0);
         cleanup_runtime_dir(&runtime_dir, &socket);
+    }
+
+    /// A bare name under a launch env of its own is found on that env's
+    /// `PATH` before the start. std counts `env_clear` as a `PATH` change, and
+    /// a bare name with a changed `PATH` makes std fork; a fork in the window
+    /// can stand before its exec holding a copy of every descriptor the
+    /// window has (t-73907, and t-47141 for the `PATH` doors). The queue call
+    /// runs once per message to a Codex worker.
+    #[cfg(unix)]
+    #[test]
+    fn a_bare_program_under_its_own_env_starts_by_its_path() {
+        let env = vec![("PATH".to_string(), "/bin:/usr/bin".to_string())];
+        let command = command_under(Path::new("sh"), Some(&env));
+        assert_eq!(command.get_program(), "/bin/sh");
+        assert_eq!(
+            command
+                .get_envs()
+                .map(|(name, value)| (name.to_owned(), value.map(ToOwned::to_owned)))
+                .collect::<Vec<_>>(),
+            vec![("PATH".into(), Some("/bin:/usr/bin".into()))],
+            "the env is the launch's own and nothing else"
+        );
+        assert_eq!(
+            run_bounded_command(
+                Path::new("sh"),
+                &["-c".to_string(), "exit 0".to_string()],
+                None,
+                Some(&env),
+                Duration::from_secs(5),
+            ),
+            CommandResult::Succeeded
+        );
     }
 
     #[cfg(unix)]

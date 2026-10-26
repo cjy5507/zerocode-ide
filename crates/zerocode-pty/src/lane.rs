@@ -18,7 +18,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel, sync_channel};
 use std::time::Instant;
 
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+#[cfg(not(target_os = "macos"))]
+use portable_pty::CommandBuilder;
+use portable_pty::{MasterPty, PtySize, native_pty_system};
 
 use crate::answer::Unanswered;
 use crate::echo_shapes::ExpectedEchoes;
@@ -297,13 +299,10 @@ impl PtyLane {
             .openpty(size)
             .map_err(|error| PtyError::Open(error.to_string()))?;
 
-        let mut command = CommandBuilder::new(program);
-        for arg in args {
-            command.arg(arg);
-        }
-        if let Some(cwd) = cwd {
-            command.cwd(cwd);
-        }
+        // What changes in the inherited environment, in order: a value, or
+        // `None` to take the name out. Applied by whichever start the
+        // platform uses (see `start_child`).
+        let mut edits: Vec<(&str, Option<&str>)> = Vec::new();
         // An EMPTY value means "take this one out of the child's environment",
         // not "set it to nothing". The two differ for anything that tests
         // presence rather than truthiness — and the caller that needs this is
@@ -334,7 +333,7 @@ impl PtyLane {
             .chain(INHERITED_TERMINAL_IDENTITY)
         {
             if !env.iter().any(|(key, _)| key == marker) {
-                command.env_remove(marker);
+                edits.push((marker, None));
             }
         }
         // And what this terminal IS, said by the terminal.
@@ -350,24 +349,18 @@ impl PtyLane {
         // with a reason to say something else still says it.
         for (key, value) in DECLARED_TERMINAL {
             if !env.iter().any(|(named, _)| named == key) {
-                command.env(key, value);
+                edits.push((key, Some(value)));
             }
         }
         for (key, value) in env {
             if value.is_empty() {
-                command.env_remove(key);
+                edits.push((key, None));
             } else {
-                command.env(key, value);
+                edits.push((key, Some(value)));
             }
         }
 
-        let child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(|error| PtyError::Spawn {
-                program: program.to_string(),
-                reason: error.to_string(),
-            })?;
+        let child = start_child(&pair, program, args, cwd, &edits)?;
         // The slave handle must be dropped or the reader never sees EOF after
         // the child exits — the kernel keeps the pty open on our behalf.
         drop(pair.slave);
@@ -685,9 +678,10 @@ impl PtyLane {
     /// restoring the title leaves the last word it wrote standing forever.
     ///
     /// The comparison is against the CHILD's pid because that pid *is* its
-    /// process group: `portable_pty` spawns through `setsid`, so the child
-    /// leads the session and its group id equals its pid. Nothing needs to be
-    /// recorded at spawn for this.
+    /// process group: the child is started as a new session (`setsid`, by
+    /// `portable_pty` or by `posix_spawn` on macOS), so it leads the session
+    /// and its group id equals its pid. Nothing needs to be recorded at spawn
+    /// for this.
     ///
     /// `None` when the platform will not say — a closed or reaped descriptor
     /// answers nothing, and a platform with neither a foreground process
@@ -1261,6 +1255,67 @@ impl Drop for PtyLane {
     fn drop(&mut self) {
         let _ = kill_known_child(self.child.as_mut());
     }
+}
+
+/// Start the lane's child on the pty's slave.
+///
+/// On macOS without a fork ([`crate::posix_launch`]): a fork in a window
+/// that runs CEF can stand forever before its exec holding a copy of every
+/// descriptor the window has (t-73907). Elsewhere through `portable_pty`,
+/// whose ConPTY start on Windows forks nothing.
+#[cfg(target_os = "macos")]
+fn start_child(
+    pair: &portable_pty::PtyPair,
+    program: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+    edits: &[(&str, Option<&str>)],
+) -> Result<Box<dyn portable_pty::Child + Send + Sync>, PtyError> {
+    let spawn_error = |reason: String| PtyError::Spawn {
+        program: program.to_string(),
+        reason,
+    };
+    let tty = pair
+        .master
+        .tty_name()
+        .ok_or_else(|| PtyError::Open("the pty has no slave name".into()))?;
+    let args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+    let edits: Vec<crate::posix_launch::EnvEdit> = edits
+        .iter()
+        .map(|(key, value)| ((*key).into(), value.map(Into::into)))
+        .collect();
+    crate::posix_launch::spawn(&tty, program.as_ref(), &args, cwd, &edits)
+        .map(|child| Box::new(child) as Box<dyn portable_pty::Child + Send + Sync>)
+        .map_err(|error| spawn_error(error.to_string()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_child(
+    pair: &portable_pty::PtyPair,
+    program: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+    edits: &[(&str, Option<&str>)],
+) -> Result<Box<dyn portable_pty::Child + Send + Sync>, PtyError> {
+    let mut command = CommandBuilder::new(program);
+    for arg in args {
+        command.arg(arg);
+    }
+    if let Some(cwd) = cwd {
+        command.cwd(cwd);
+    }
+    for (key, value) in edits {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        }
+    }
+    pair.slave
+        .spawn_command(command)
+        .map_err(|error| PtyError::Spawn {
+            program: program.to_string(),
+            reason: error.to_string(),
+        })
 }
 
 fn kill_known_child(child: &mut (impl portable_pty::Child + ?Sized)) -> std::io::Result<()> {
@@ -2001,5 +2056,202 @@ mod child_termination_tests {
         kill_known_child(&mut child).unwrap();
         kill_known_child(&mut child).unwrap();
         assert_eq!(child.signals, 1);
+    }
+}
+
+/// What a lane's child gets from its start, held still while the start
+/// itself changes (t-73907: on macOS it no longer goes through a fork).
+#[cfg(all(test, unix))]
+mod launch_shape_tests {
+    use super::PtyLane;
+    use std::time::{Duration, Instant};
+
+    /// How long a test waits for what it is sure will come.
+    const PATIENCE: Duration = Duration::from_secs(20);
+
+    fn spawned(script: &str) -> PtyLane {
+        PtyLane::spawn(
+            "/bin/sh",
+            &["-c".to_string(), script.to_string()],
+            None,
+            &[],
+            24,
+            80,
+        )
+        .expect("a shell to run")
+    }
+
+    fn screen(lane: &PtyLane) -> String {
+        lane.terminal()
+            .grid()
+            .snapshot()
+            .rows
+            .iter()
+            .map(|row| row.cells.iter().map(|cell| cell.ch).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Pump until the screen shows `text`, and hand back the line it is on.
+    fn line_with(lane: &mut PtyLane, text: &str) -> String {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            lane.pump();
+            if let Some(line) = screen(lane).lines().find(|line| line.contains(text)) {
+                return line.trim().to_string();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{text:?} never came:\n{}",
+                screen(lane)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// The child leads a session of its own and the pty is its controlling
+    /// terminal, with its group in front: job control, `/dev/tty` and the
+    /// window's own foreground question all stand on these.
+    #[test]
+    fn the_child_leads_its_own_session_on_its_controlling_terminal() {
+        let mut lane = spawned(
+            "set -- $(ps -o pid=,pgid=,tpgid= -p $$); \
+             if (exec 3</dev/tty) 2>/dev/null; then t=open; else t=none; fi; \
+             echo \"SHAPE $1 $2 $3 $t\"; sleep 5",
+        );
+        let line = line_with(&mut lane, "SHAPE ");
+        let pid = lane.pid().expect("a child pid").to_string();
+        assert_eq!(
+            line,
+            format!("SHAPE {pid} {pid} {pid} open"),
+            "pid, group, terminal's group, /dev/tty"
+        );
+        assert_eq!(lane.foreground_is_child(), Some(true));
+    }
+
+    /// ^C typed into the pane reaches the child as SIGINT.
+    #[test]
+    fn an_interrupt_typed_reaches_the_child_as_sigint() {
+        let mut lane =
+            spawned("trap 'echo GOT-INT; exit 3' INT; echo READY; while :; do sleep 0.1; done");
+        line_with(&mut lane, "READY");
+        lane.write_input(b"\x03").unwrap();
+        line_with(&mut lane, "GOT-INT");
+    }
+
+    /// The child starts at the pane's size, and a resize reaches it as
+    /// SIGWINCH with the new size.
+    #[test]
+    fn the_window_size_reaches_the_child_and_a_resize_signals_it() {
+        let mut lane = spawned(
+            "trap 'echo WINCH $(stty size)' WINCH; echo SIZE $(stty size); \
+             while :; do sleep 0.1; done",
+        );
+        assert_eq!(line_with(&mut lane, "SIZE "), "SIZE 24 80");
+        lane.resize(30, 100).unwrap();
+        assert_eq!(line_with(&mut lane, "WINCH "), "WINCH 30 100");
+    }
+
+    /// A descriptor the window has open without close-on-exec does not
+    /// reach the child: nothing but the terminal on 0, 1 and 2.
+    #[test]
+    fn no_descriptor_but_the_terminal_reaches_the_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let path =
+            std::ffi::CString::new(directory.path().join("held").as_os_str().as_encoded_bytes())
+                .unwrap();
+        let held = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o600) };
+        assert!(held > 2, "open: {}", std::io::Error::last_os_error());
+        let flags = unsafe { libc::fcntl(held, libc::F_GETFD) };
+        assert_eq!(flags & libc::FD_CLOEXEC, 0, "the probe must be inheritable");
+
+        let mut lane = spawned(&format!(
+            "if {{ : <&{held}; }} 2>/dev/null; then echo FD-LEAKED; else echo FD-CLEAN; fi; sleep 5"
+        ));
+        let line = line_with(&mut lane, "FD-");
+        unsafe { libc::close(held) };
+        assert_eq!(line, "FD-CLEAN");
+    }
+}
+
+/// The lane's start on macOS runs no fork in this process (t-73907).
+///
+/// A fork in a window that runs CEF can stand forever in a libSystem fork
+/// handler before its exec, holding a copy of every descriptor the window
+/// has open. Counted with a fork handler of our own: `pthread_atfork`'s
+/// prepare step runs in the thread that forks, before the fork, and
+/// `posix_spawn` runs no fork handler at all. The count is per thread, so a
+/// launch on another test's thread does not land in this one's.
+#[cfg(all(test, target_os = "macos"))]
+mod fork_free_tests {
+    use super::PtyLane;
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    unsafe extern "C" {
+        fn pthread_atfork(
+            prepare: Option<unsafe extern "C" fn()>,
+            parent: Option<unsafe extern "C" fn()>,
+            child: Option<unsafe extern "C" fn()>,
+        ) -> libc::c_int;
+    }
+
+    thread_local! {
+        static FORKS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    unsafe extern "C" fn counted() {
+        FORKS.with(|forks| forks.set(forks.get() + 1));
+    }
+
+    fn count_forks() {
+        static REGISTERED: std::sync::Once = std::sync::Once::new();
+        REGISTERED.call_once(|| {
+            assert_eq!(unsafe { pthread_atfork(Some(counted), None, None) }, 0);
+        });
+    }
+
+    /// The control: a `pre_exec` closure is what makes std fork, and the
+    /// counter must see that fork, or the zero below proves nothing.
+    #[test]
+    fn the_counter_sees_a_fork() {
+        use std::os::unix::process::CommandExt as _;
+
+        count_forks();
+        let before = FORKS.with(Cell::get);
+        let mut command = std::process::Command::new("/usr/bin/true");
+        unsafe { command.pre_exec(|| Ok(())) };
+        assert!(command.status().unwrap().success());
+        assert_eq!(FORKS.with(Cell::get), before + 1, "a fork went uncounted");
+    }
+
+    #[test]
+    fn a_lane_starts_its_child_without_forking_this_process() {
+        count_forks();
+        let before = FORKS.with(Cell::get);
+        let mut lane = PtyLane::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "echo STARTED; sleep 5".to_string()],
+            None,
+            &[],
+            24,
+            80,
+        )
+        .expect("a shell to run");
+        let forks = FORKS.with(Cell::get) - before;
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !lane.terminal().grid().snapshot().rows.iter().any(|row| {
+            row.cells
+                .iter()
+                .map(|cell| cell.ch)
+                .collect::<String>()
+                .contains("STARTED")
+        }) {
+            assert!(Instant::now() < deadline, "the child never ran");
+            lane.pump();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(forks, 0, "the lane's start forked this process");
     }
 }

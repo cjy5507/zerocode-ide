@@ -7,11 +7,12 @@
 
 use std::convert::Infallible;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -28,6 +29,10 @@ pub const PATH_MIGRATION_RECOVERY_MARKERS: &[&str] = &[
     CORRUPT_MARKER,
     INTERRUPTED_REPLACEMENT_MARKER,
 ];
+
+const LOCK_FILE: &str = ".settings.lock";
+/// How often [`SettingsRepository::lock_free_within`] asks again.
+const LOCK_POLL: Duration = Duration::from_millis(25);
 
 static PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static UNIQUE_FILE_ID: AtomicU64 = AtomicU64::new(1);
@@ -361,7 +366,51 @@ impl SettingsRepository {
         Ok(self.root.join(relative_path))
     }
 
+    /// Where the root's cross-process lock lives.
+    #[must_use]
+    pub fn lock_path(&self) -> PathBuf {
+        self.root.join(LOCK_FILE)
+    }
+
+    /// Whether the cross-process lock comes free within `budget`. Taken and
+    /// let go at once; nothing is read or written. Every other entry point
+    /// waits on the lock for as long as its holder keeps it, which is right
+    /// for a commit stretched by a busy disk and wrong for a holder that will
+    /// never let go: on 2026-10-25 04:01 three new windows stood in that wait
+    /// behind a child that never reached its exec (t-73907). The boot asks
+    /// this first, so such a holder is named instead of waited on.
+    pub fn lock_free_within(&self, budget: Duration) -> Result<bool, SettingsError> {
+        let (_process, file, lock_path) = self.open_lock()?;
+        let until = Instant::now() + budget;
+        loop {
+            match file.try_lock() {
+                Ok(()) => {
+                    let _ = file.unlock();
+                    return Ok(true);
+                }
+                Err(TryLockError::WouldBlock) if Instant::now() < until => {
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(TryLockError::WouldBlock) => return Ok(false),
+                Err(TryLockError::Error(source)) => {
+                    return Err(io_error("lock repository", &lock_path, source));
+                }
+            }
+        }
+    }
+
     fn lock(&self) -> Result<RepositoryLock, SettingsError> {
+        let (process, file, lock_path) = self.open_lock()?;
+        file.lock()
+            .map_err(|source| io_error("lock repository", &lock_path, source))?;
+
+        Ok(RepositoryLock {
+            _process: process,
+            file,
+        })
+    }
+
+    fn open_lock(&self) -> Result<(MutexGuard<'static, ()>, File, PathBuf), SettingsError> {
         crate::durable_file::ensure_private_directory(&self.root)
             .map_err(|source| io_error("create repository root", &self.root, source))?;
 
@@ -369,16 +418,10 @@ impl SettingsRepository {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let lock_path = self.root.join(".settings.lock");
+        let lock_path = self.lock_path();
         let file = crate::durable_file::private_lock_file(&lock_path)
             .map_err(|source| io_error("open repository lock", &lock_path, source))?;
-        file.lock()
-            .map_err(|source| io_error("lock repository", &lock_path, source))?;
-
-        Ok(RepositoryLock {
-            _process: process,
-            _file: file,
-        })
+        Ok((process, file, lock_path))
     }
 
     fn prepare_target(&self, target: &Path) -> Result<(), SettingsError> {
@@ -581,7 +624,19 @@ impl SettingsError {
 
 struct RepositoryLock {
     _process: MutexGuard<'static, ()>,
-    _file: File,
+    file: File,
+}
+
+impl Drop for RepositoryLock {
+    /// Ends the flock itself rather than leaving it to the close. A launch
+    /// that forks before it execs holds a copy of this descriptor until the
+    /// exec, and a close ends the lock only when every copy is gone; an
+    /// unlock ends it for all of them (t-73907: a child that never reached
+    /// its exec kept three new windows in `flock`). The file goes before the
+    /// process mutex, which the field order alone would release first.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 enum CommitBehavior {
@@ -1705,6 +1760,30 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    /// A process launch on another thread that forks before it execs holds a
+    /// copy of every descriptor until the exec, and a flock belongs to the
+    /// open file description. On 2026-10-25 04:01 one such child never
+    /// reached its exec, and three new windows stood in `flock` behind the
+    /// copy of this lock it kept (t-73907). The duplicate here is that copy,
+    /// without a launch winning a race: letting the lock go must end it for
+    /// every copy, so another open of the lock file takes it at once.
+    #[test]
+    fn a_copy_of_the_lock_left_in_a_launch_does_not_hold_the_next_lock() {
+        let directory = tempdir().unwrap();
+        let repository = SettingsRepository::new(directory.path());
+        let held = repository.lock().unwrap();
+        let inherited = held.file.try_clone().unwrap();
+        drop(held);
+        let next = crate::durable_file::private_lock_file(&directory.path().join(".settings.lock"))
+            .unwrap();
+        let taken = next.try_lock();
+        drop(inherited);
+        assert!(
+            taken.is_ok(),
+            "a lock its holder let go is still held by a copy: {taken:?}"
+        );
     }
 
     #[cfg(unix)]

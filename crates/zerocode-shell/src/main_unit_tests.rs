@@ -9806,7 +9806,8 @@ fn an_agent_that_left_its_shell_behind_stops_being_drawn_as_running() {
     );
 
     // The syscall itself compares against the CHILD, so nothing has to be
-    // recorded at spawn — `portable_pty` spawns through `setsid`, which
+    // recorded at spawn — the child starts as a new session (`setsid`, by
+    // `portable_pty` or by `posix_spawn` on macOS), which
     // makes the child's pid its own process group.
     let asking = block_after(
         include_str!("../../../crates/zerocode-pty/src/lane.rs"),

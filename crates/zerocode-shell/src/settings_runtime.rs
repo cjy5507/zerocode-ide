@@ -3092,6 +3092,37 @@ pub(super) fn load_settings_for_boot(
     load_settings_resilient(repository)
 }
 
+/// How long the boot waits for the settings lock before it names the holder,
+/// and again after ending one. A commit stretched by a saturated disk has
+/// been measured at 20 s (t-67102), so a holder still there after this is
+/// only named, never ended, unless it is a stuck launch.
+const BOOT_SETTINGS_LOCK_BUDGET: Duration = Duration::from_secs(3);
+
+/// Before the boot's first settings read, which waits on the lock with no
+/// end: if the lock does not come free in [`BOOT_SETTINGS_LOCK_BUDGET`], end
+/// a launch of this program that never reached its exec and say who else
+/// holds it (t-73907). The reads that follow still wait on a holder that is
+/// left, but the window log has its name by then.
+pub(super) fn settle_settings_lock_for_boot(
+    repository: &settings::SettingsRepository,
+    local_data_root: &Path,
+) {
+    use zerocode_shell_state::lock_holders::{Asker, settle};
+
+    let line = match Asker::this_process() {
+        Ok(asker) => match settle(repository, BOOT_SETTINGS_LOCK_BUDGET, &asker) {
+            Ok(settled) => settled.line(&repository.lock_path()),
+            Err(error) => Some(format!("settings lock: {error}")),
+        },
+        Err(error) => Some(format!("settings lock: this program's path: {error}")),
+    };
+    if let Some(line) = line {
+        crate::crumbs::record("settings_lock", format_args!("{line}"));
+        eprintln!("zerocode-shell: {line}");
+        note_window_event(local_data_root, &line);
+    }
+}
+
 /// What the settings document last said in this process, by repository root
 /// (t-67102). A read through the repository waits on its one lock, and every
 /// settings commit holds that lock through its fsync: on 2026-10-21 05:32 a
