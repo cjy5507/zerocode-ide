@@ -415,5 +415,11 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     // nowhere in the test. Cleared on every acquisition rather than once at
     // init, because the second-brain tests set it themselves under this lock.
     std::env::remove_var(crate::second_brain::VAULT_ENV);
+    // The window exports the project's team inbox the same way
+    // (`ZO_TEAM_INBOX_STORE`), so a turn in a test run from inside a pane would
+    // read, and write, the person's own inbox instead of the one the test made
+    // under its cwd. Cleared on every acquisition for the same reason as the
+    // vault: a test sets it under this lock to check exactly that.
+    std::env::remove_var(crate::team_inbox_digest::STORE_ENV);
     guard
 }

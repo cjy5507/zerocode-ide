@@ -21,7 +21,7 @@ use serde_json::Value;
 
 pub(crate) const TEAM_INBOX_REMINDER_PREFIX: &str = "Low-trust TeamInbox updates";
 pub(crate) const DEFAULT_MAX_DELIVERY_RETRIES: u32 = 3;
-const STORE_ENV: &str = "ZO_TEAM_INBOX_STORE";
+pub(crate) const STORE_ENV: &str = "ZO_TEAM_INBOX_STORE";
 const DB_FILE: &str = "team_inbox.sqlite3";
 const JSONL_FILE: &str = "team_inbox.jsonl";
 const DEFAULT_MAX_UPDATES: usize = 8;
@@ -1664,6 +1664,21 @@ mod tests {
             .expect("cursor");
         assert_eq!(cursor, seq2);
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// A pane the window opens carries `ZO_TEAM_INBOX_STORE`, naming the person's own
+    /// inbox (t-76332). A test that holds the env lock never sees it, so the store a
+    /// turn of that test reads is the one the test made under its cwd.
+    #[test]
+    fn a_test_under_the_env_lock_reads_its_own_store_not_the_panes() {
+        let pane_store = temp_dir("pane-store");
+        {
+            let _env = crate::test_env_lock();
+            std::env::set_var(STORE_ENV, &pane_store);
+        }
+        let _env = crate::test_env_lock();
+        let cwd = temp_dir("own-cwd");
+        assert_eq!(store_root(&cwd), cwd.join(".zo").join("team_inbox"));
     }
 
     #[test]

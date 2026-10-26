@@ -331,6 +331,14 @@ fn runtime_feature_config_with_user_prompt_submit_hook(
         .clone()
 }
 
+/// The team inbox a turn reads is `<cwd>/.zo/team_inbox` unless `ZO_TEAM_INBOX_STORE`
+/// names another, and the window sets that variable in every pane it opens, naming the
+/// person's own inbox. A team inbox test holds the env lock for its length, which keeps
+/// the variable clear.
+fn team_inbox_env() -> std::sync::MutexGuard<'static, ()> {
+    crate::test_env_lock()
+}
+
 fn write_team_inbox_digest_fixture(cwd: &std::path::Path, consumer_id: &str) {
     let root = cwd.join(".zo").join("team_inbox");
     fs::create_dir_all(&root).expect("team inbox root");
@@ -425,6 +433,7 @@ impl Drop for EnvVarGuard {
 
 #[test]
 fn team_inbox_digest_reminder_injects_low_trust_summary_and_clears_per_turn() {
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-reminder");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
@@ -973,6 +982,7 @@ fn team_inbox_digest_uses_workspace_cwd_not_zo_trace_root() {
 
 #[test]
 fn team_inbox_digest_not_injected_when_user_prompt_submit_denies() {
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-denied");
     fs::create_dir_all(&cwd).expect("cwd");
     let mut runtime = user_prompt_hook_runtime(shell_snippet(
@@ -999,6 +1009,7 @@ fn team_inbox_digest_not_injected_when_user_prompt_submit_denies() {
 
 #[test]
 fn team_inbox_digest_not_injected_for_streaming_denial_or_internal_subturn() {
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-streaming-denied");
     fs::create_dir_all(&cwd).expect("cwd");
     let mut denied_runtime = user_prompt_hook_runtime(shell_snippet(
@@ -1082,6 +1093,7 @@ fn team_inbox_cursor(cwd: &std::path::Path, consumer_id: &str, channel: &str) ->
 /// its deliveries and advance the consumer cursor past the delivered update.
 #[test]
 fn team_inbox_delivery_acked_and_cursor_advances_after_successful_turn() {
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-acked");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
@@ -1125,6 +1137,7 @@ fn team_inbox_delivery_failed_with_retry_after_failing_turn() {
         }
     }
 
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-failed");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
@@ -1162,6 +1175,7 @@ fn team_inbox_delivery_failed_with_retry_after_failing_turn() {
 /// lifecycle is fail-open and never panics.
 #[test]
 fn team_inbox_write_failure_is_fail_open_and_still_injects_reminder() {
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-readonly");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
@@ -1257,6 +1271,7 @@ fn assert_no_team_inbox_trace_leak(events: &[TelemetryEvent]) {
 /// carrying only safe metadata (no raw body/summary/preview).
 #[test]
 fn team_inbox_trace_records_load_inject_and_ack_on_successful_turn() {
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-trace-acked");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
@@ -1354,6 +1369,7 @@ fn team_inbox_internal_subturn_does_not_settle_outer_pending_batch() {
         }
     }
 
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-internal-subturn");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
@@ -1407,6 +1423,7 @@ fn team_inbox_internal_subturn_does_not_settle_outer_pending_batch() {
 
 #[test]
 fn team_inbox_post_injection_persist_failure_marks_delivery_failed() {
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-persist-failure");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new().with_persistence_path(cwd.join(".zo"));
@@ -1463,6 +1480,7 @@ fn team_inbox_delivery_state_from_conn(
 /// dropping it so it is stranded in `injected` forever.
 #[test]
 fn team_inbox_stop_loop_followup_settles_previous_leg_batch() {
+    let _env = team_inbox_env();
     let turn_end_hook =
         shell_snippet(r#"printf '{"hookSpecificOutput":{"followupMessage":"followup task"}}'"#);
     let config_root = tempfile::tempdir().expect("temp config root");
@@ -1521,6 +1539,7 @@ fn team_inbox_trace_records_fail_settle_on_failing_turn() {
         }
     }
 
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-trace-failed");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
@@ -1566,6 +1585,7 @@ fn team_inbox_trace_records_fail_settle_on_failing_turn() {
 fn team_inbox_trace_records_mark_injected_failure_when_store_readonly() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-trace-readonly");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
@@ -1654,6 +1674,7 @@ fn find_team_inbox_settle_event<'a>(
 /// event — the read path is observable even when there is nothing to inject.
 #[test]
 fn team_inbox_trace_records_load_absent_when_store_missing() {
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-trace-absent");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
@@ -1701,6 +1722,7 @@ fn team_inbox_trace_records_load_absent_when_store_missing() {
 /// bounded `reason` — and must not leak store contents or panic.
 #[test]
 fn team_inbox_trace_records_load_failure_when_store_corrupt() {
+    let _env = team_inbox_env();
     let cwd = temp_workspace("team-inbox-trace-load-failure");
     fs::create_dir_all(&cwd).expect("cwd");
     let session = Session::new();
@@ -1761,6 +1783,7 @@ fn team_inbox_trace_records_load_failure_when_store_corrupt() {
 /// bounded `reason` for each terminal action and must not panic.
 #[test]
 fn team_inbox_trace_records_settle_failure_when_store_removed_after_inject() {
+    let _env = team_inbox_env();
     for action in ["ack", "fail"] {
         let cwd = temp_workspace(&format!("team-inbox-trace-settle-{action}"));
         fs::create_dir_all(&cwd).expect("cwd");
