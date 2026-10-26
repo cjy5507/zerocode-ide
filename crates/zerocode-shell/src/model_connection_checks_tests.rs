@@ -313,7 +313,10 @@ fn widest_file(path: &Path, last: usize) -> BTreeSet<String> {
 }
 
 fn kept_judgments(read: &Remembered) -> usize {
-    read.connections.values().map(|one| one.judgments.len()).sum()
+    read.connections
+        .values()
+        .map(|one| one.judgments.len())
+        .sum()
 }
 
 #[test]
@@ -322,7 +325,10 @@ fn a_write_just_inside_the_read_limit_keeps_every_check() {
     let path = dir.path().join("checks.json");
     let ids = widest_file(&path, 9);
     let before = std::fs::metadata(&path).expect("seed").len();
-    assert!(before <= MAX_BYTES, "the seed is not inside the limit: {before}");
+    assert!(
+        before <= MAX_BYTES,
+        "the seed is not inside the limit: {before}"
+    );
     // The same model answers again: the file does not grow, nothing is lost.
     let newest = format!("{:0>256}", 777);
     let wrote = remember_judgment(
@@ -333,7 +339,10 @@ fn a_write_just_inside_the_read_limit_keeps_every_check() {
     )
     .expect("a write inside the limit");
     let on_disk = std::fs::metadata(&path).expect("file").len();
-    assert!(on_disk <= MAX_BYTES, "the file passes the read limit: {on_disk}");
+    assert!(
+        on_disk <= MAX_BYTES,
+        "the file passes the read limit: {on_disk}"
+    );
     assert_eq!(kept_judgments(&wrote), 256 * 3 + 9);
     assert_eq!(read(&path, CLOCK + 10_000).connections, wrote.connections);
 }
@@ -367,20 +376,40 @@ fn a_write_past_the_read_limit_drops_the_oldest_checks_not_the_whole_file() {
     )
     .expect("a write past the limit is trimmed, not kept torn");
     let on_disk = std::fs::metadata(&path).expect("file").len();
-    assert!(on_disk <= MAX_BYTES, "the file passes the read limit: {on_disk}");
+    assert!(
+        on_disk <= MAX_BYTES,
+        "the file passes the read limit: {on_disk}"
+    );
     // What the next start reads is what the write answered with.
     let next = read(&path, CLOCK + 10_001);
     assert_eq!(next.connections, wrote.connections);
-    assert!(kept_judgments(&next) >= 256 * 3, "the next read lost the history");
+    assert!(
+        kept_judgments(&next) >= 256 * 3,
+        "the next read lost the history"
+    );
     // The oldest check went; the newest stayed.
     let c1 = &next.connections["c1"].judgments;
-    assert!(c1.iter().all(|one| one.checked_ms > CLOCK + 1), "the oldest check stayed");
+    assert!(
+        c1.iter().all(|one| one.checked_ms > CLOCK + 1),
+        "the oldest check stayed"
+    );
     let c4 = &next.connections["c4"].judgments;
-    assert_eq!(c4.last().map(|one| one.model.as_str()), Some(fresh.as_str()));
+    assert_eq!(
+        c4.last().map(|one| one.model.as_str()),
+        Some(fresh.as_str())
+    );
     // And the save after it still starts from that history.
-    let again = remember_check(&path, &check("c2", 1, Verdict::Ok, Some(4)), &ids, CLOCK + 10_002)
-        .expect("the next save");
-    assert!(kept_judgments(&again) >= 256 * 3, "the next save started empty");
+    let again = remember_check(
+        &path,
+        &check("c2", 1, Verdict::Ok, Some(4)),
+        &ids,
+        CLOCK + 10_002,
+    )
+    .expect("the next save");
+    assert!(
+        kept_judgments(&again) >= 256 * 3,
+        "the next save started empty"
+    );
 }
 
 #[test]
@@ -391,18 +420,32 @@ fn a_model_name_of_wide_characters_still_leaves_a_file_the_read_accepts() {
     // 256 four-byte characters: one name is 1 KiB, so 256 of them are a
     // quarter of a megabyte by themselves.
     for n in 0..300_u64 {
-        let model: String = std::iter::repeat_n(char::from_u32(0x1F600 + (n % 60) as u32).expect("char"), 255)
-            .chain(char::from_u32(0x1F700 + n as u32))
-            .collect();
-        remember_judgment(&path, &judgment("c1", 1, &model, Verdict::Schema), &ids, n + 1)
-            .expect("a write");
+        let model: String = std::iter::repeat_n(
+            char::from_u32(0x1F600 + (n % 60) as u32).expect("char"),
+            255,
+        )
+        .chain(char::from_u32(0x1F700 + n as u32))
+        .collect();
+        remember_judgment(
+            &path,
+            &judgment("c1", 1, &model, Verdict::Schema),
+            &ids,
+            n + 1,
+        )
+        .expect("a write");
         let on_disk = std::fs::metadata(&path).expect("file").len();
         assert!(on_disk <= MAX_BYTES, "write {n} left {on_disk} bytes");
     }
     let next = read(&path, 1_000);
-    assert!(!next.connections.is_empty(), "the next read found no record");
+    assert!(
+        !next.connections.is_empty(),
+        "the next read found no record"
+    );
     assert_eq!(
-        next.connections["c1"].judgments.last().map(|one| one.checked_ms),
+        next.connections["c1"]
+            .judgments
+            .last()
+            .map(|one| one.checked_ms),
         Some(300)
     );
 }

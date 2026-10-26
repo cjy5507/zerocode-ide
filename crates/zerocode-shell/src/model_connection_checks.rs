@@ -23,7 +23,8 @@ pub const VERSION: u32 = 1;
 /// answer was (t-76500 B).
 pub const QUIET_EVERY_MS: u64 = 6 * 60 * 60 * 1000;
 
-/// A larger file is not ours to trust; it reads as no record.
+/// A larger file is not ours to trust; it reads as no record. A write keeps
+/// to the same limit, so a write that succeeded is always read back.
 const MAX_BYTES: u64 = 256 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const MAX_JUDGMENTS: usize = 256;
@@ -167,11 +168,35 @@ fn write(
     if connections.len() > MAX_CONNECTIONS {
         return Err("model_connection_checks_full".to_string());
     }
-    let file = File {
+    let mut file = File {
         version: VERSION,
         connections,
     };
-    let bytes = serde_json::to_vec(&file).map_err(|error| error.to_string())?;
+    let mut bytes = serde_json::to_vec(&file).map_err(|error| error.to_string())?;
+    // The counts and lengths above do not bound the bytes (a model name of
+    // 256 wide characters is 1 KiB): the oldest judgment checks go until the
+    // file is one the next read accepts, never the whole record.
+    while bytes.len() as u64 > MAX_BYTES {
+        let oldest = file
+            .connections
+            .iter()
+            .flat_map(|(id, record)| {
+                record
+                    .judgments
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, kept)| (kept.checked_ms, id, index))
+            })
+            .min_by_key(|(checked_ms, _, _)| *checked_ms)
+            .map(|(_, id, index)| (id.clone(), index));
+        let Some((id, index)) = oldest else {
+            return Err("model_connection_checks_full".to_string());
+        };
+        if let Some(record) = file.connections.get_mut(&id) {
+            record.judgments.remove(index);
+        }
+        bytes = serde_json::to_vec(&file).map_err(|error| error.to_string())?;
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
