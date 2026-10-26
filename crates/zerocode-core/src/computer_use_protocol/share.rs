@@ -4,8 +4,9 @@
 //!
 //! The first time an agent acts in an app, the window asks the person once —
 //! "hand this window over?" — and a yes makes that app the shared one. Asked
-//! once a session per app: the same app is not asked again, and another app
-//! is asked when the agent turns to it. A no refuses that app. Silence (the
+//! once a session per app, unless the person ends its share: that forgets
+//! its answer and invalidates requests in flight. Another app is asked when
+//! the agent turns to it. A no refuses that app. Silence (the
 //! person away) leaves the agent working as before, unshared, so an
 //! unattended run does not stop at a card by default. When the person requires
 //! sharing, unnamed acts are refused and silence is no lasting no (t-74826):
@@ -95,6 +96,25 @@ pub fn app_key(app: &str) -> String {
 }
 
 impl Share {
+    /// End the displayed app's share, forgetting its answer. A late press
+    /// cannot end a share handed over since; requests already admitted lose
+    /// their generation even when the same app is shared again.
+    #[must_use]
+    pub fn end(&mut self, app: &str, generation: u64) -> bool {
+        if self.target() != Some(app) || self.generation != generation {
+            return false;
+        }
+        self.target = None;
+        self.answers.remove(app);
+        self.silent_at.remove(app);
+        if self.waiting.as_deref() == Some(app) {
+            self.waiting = None;
+        }
+        self.taken_back = false;
+        self.generation += 1;
+        true
+    }
+
     /// Whether an act must wait for an explicit share (off by default).
     pub fn set_required(&mut self, required: bool) {
         self.required = required;

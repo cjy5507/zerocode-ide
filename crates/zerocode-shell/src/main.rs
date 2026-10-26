@@ -3287,6 +3287,7 @@ fn main() -> ExitCode {
             computer_share_state,
             computer_take_control,
             computer_give_back,
+            cmd::settings::computer_share_end,
             computer_share_hand_over,
             computer_stop,
             computer_resume,

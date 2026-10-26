@@ -241,6 +241,7 @@ fn the_persons_controls_carry_the_person_only_mark() {
     for id in [
         "coordinator-scrim",
         "computer-band-resume",
+        "computer-band-end",
         "update-notice",
         "update-card",
     ] {
@@ -315,6 +316,7 @@ fn every_step_asks_the_share_and_the_band_is_the_persons() {
     for name in [
         "computer_take_control",
         "computer_give_back",
+        "computer_share_end",
         "computer_share_hand_over",
     ] {
         assert!(person.contains(&name.to_string()), "{name} is the person's");

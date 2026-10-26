@@ -3,6 +3,37 @@ use super::*;
 /// The window's clock when a test does not care what it reads.
 const NOW: u64 = 0;
 
+#[test]
+fn ending_a_share_forgets_only_its_app_and_moves_the_generation() {
+    let mut share = Share::default();
+    share.set_required(true);
+    share.answered("other", Answer::Shared, NOW);
+    share.answered("sample", Answer::Shared, NOW);
+    let generation = share.generation();
+    assert!(share.end("sample", generation));
+    assert_eq!(share.target(), None);
+    assert!(!share.taken_back());
+    assert!(share.required());
+    assert!(share.generation() > generation);
+    assert_eq!(
+        share.gate(act(Some("sample")), NOW),
+        Gate::Ask("sample".into())
+    );
+    assert_eq!(share.gate(act(Some("other")), NOW), Gate::Go);
+}
+
+#[test]
+fn ending_a_stale_share_changes_nothing() {
+    let mut share = Share::default();
+    share.answered("sample", Answer::Shared, NOW);
+    let generation = share.generation();
+    share.take_back();
+    let taken = share.clone();
+    assert!(!share.end("sample", generation));
+    assert!(!share.end("other", share.generation()));
+    assert_eq!(share, taken);
+}
+
 const fn act(app: Option<&str>) -> Reach<'_> {
     Reach {
         app,

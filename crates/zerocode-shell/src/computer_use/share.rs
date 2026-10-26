@@ -3,9 +3,10 @@
 //!
 //! A command is admitted here before it acts: the first act in an app asks
 //! the person once through the question popup (`computer:share`, answered by
-//! `computer_confirm_answer`), and the answer is held for the window's
-//! lifetime. The band paints the share (`computer:share-state`) and offers
-//! "take control" and "hand back"; a request admitted under one generation
+//! `computer_confirm_answer`), and the answer is held until the person ends
+//! that app's share or the window closes. The band paints the share
+//! (`computer:share-state`) and offers "take control", "hand back" and
+//! "end sharing"; a request admitted under one generation
 //! is refused at its next provider step once the person took control. With
 //! sharing required, an app whose card went unanswered waits (t-74826): the
 //! band names it and offers the hand-over (`computer_share_hand_over`), and
@@ -290,10 +291,19 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
                     Decision::Refused => Answer::Declined,
                     Decision::TimedOut => Answer::Silent,
                 };
-                with_held(|held| {
+                let answered = with_held(|held| {
+                    // A card may outlive the person's end or take-control.
+                    // Its late answer cannot restore the share they ended.
+                    if held.share.generation() != generation {
+                        return false;
+                    }
                     held.labels.insert(key.clone(), label);
                     held.share.answered(&key, answer, now_ms());
+                    true
                 });
+                if !answered {
+                    return Err(took_control());
+                }
                 tell();
             }
         }
@@ -337,6 +347,22 @@ pub(crate) fn take_control() {
 pub(crate) fn give_back() {
     with_held(|held| held.share.give_back());
     tell();
+}
+
+/// End the share the person saw on the band.
+pub(crate) fn end(app: &str, generation: u64) -> Value {
+    let ended = with_held(|held| {
+        if !held.share.end(app, generation) {
+            return false;
+        }
+        held.labels.remove(app);
+        held.panel_window = Value::Null;
+        true
+    });
+    if ended {
+        tell();
+    }
+    state()
 }
 
 /// The person hands over, from the band, the app that waits for them under

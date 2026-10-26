@@ -1595,6 +1595,14 @@ pub(crate) fn computer_give_back() {
     computer_use::share::give_back();
 }
 
+/// End the displayed share and forget that app's answer. The generation
+/// prevents a late press from ending a share handed over since.
+#[tauri::command(async)]
+pub(crate) fn computer_share_end(app: String, generation: u64) -> serde_json::Value {
+    let _crumb = crate::crumbs::Command::enter("computer_share_end");
+    computer_use::share::end(&app, generation)
+}
+
 /// The person hands over, from the band, the app an agent waits for under
 /// required sharing (t-74826): that app only, and only while it waits.
 #[tauri::command]
