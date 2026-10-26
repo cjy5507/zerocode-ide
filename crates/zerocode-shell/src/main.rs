@@ -260,7 +260,6 @@ use browser_nav_state::*;
 use browser_runtime::*;
 use cmd::judgment_latest_request;
 use cmd::note_term_detached;
-use cmd::{adopt_legacy_judgment_key, select_coding_model, zo_model_list};
 use cmd::{
     abort_conflict_operation, ack_board_agent, add_claude_account, add_codex_account, agent_icon,
     agent_launch_plans, agent_models, agent_teams_mode, agent_terms, answer_approval, answer_ask,
@@ -410,6 +409,7 @@ use cmd::{
     worktree_evidence, worktree_landing_stamp, worktree_last_agent, worktree_loss, worktree_prefs,
     worktree_stamp, write_primary_selection, write_text_file,
 };
+use cmd::{adopt_legacy_judgment_key, select_coding_model, zo_model_list};
 use cmd::{
     artifact_bundle, artifact_copy_path, artifact_counts, artifact_delete, artifact_document,
     artifact_export, artifact_feedback_record, artifact_flow, artifact_import_transcripts,
