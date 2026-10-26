@@ -226,6 +226,10 @@ fn move_slot(
 
 #[cfg(test)]
 mod tests {
+    // Most tests need a system that tells the person's own file; elsewhere
+    // only the refusals run.
+    #![cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code, unused_imports))]
+
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};

@@ -1109,10 +1109,12 @@ fn enable_all_project_flag(settings: &BTreeMap<String, JsonValue>, flag: &str) -
 }
 
 /// The documents under `<workspace>/.zo` the loader reads as the project's.
+#[cfg(unix)]
 const PROJECT_SETTINGS_DOCUMENTS: [&str; 3] = ["settings.json", "settings.local.json", "mcp.json"];
 
 /// Why a user settings file is not taken as the person's own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) enum NotPersonsOwn {
     /// Not there, not readable, or changed while it was read.
     Unreadable,
@@ -1135,6 +1137,7 @@ pub(super) enum NotPersonsOwn {
 /// changes on the way cannot put another file's servers under this file's
 /// grant. The loader, `zo settings secrets` and its move all ask here.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) struct PersonsOwnSettingsFile {
     /// Where the open file stands, as the system names it.
     pub(super) real: PathBuf,
