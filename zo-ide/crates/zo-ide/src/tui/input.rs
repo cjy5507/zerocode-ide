@@ -14,20 +14,22 @@
 //! 새 입력은 배경 스레드가 우리 waker 를 깨울 때에만 생긴다. 그러니 깨움을
 //! 받기 전의 폴링은 잠금을 건드리지 않고 `Pending` 을 돌려주면 된다.
 
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::event::{Event, EventStream};
 use futures_util::task::AtomicWaker;
 use futures_util::Stream;
+use tokio::time::{Instant, Sleep};
 
-/// 터미널이 끊겼는지 묻는 간격. 루프가 어차피 하는 폴링에 얹혀 묻기만 하므로
-/// 조용한 판이 깨는 횟수는 그대로다 — 턴 동안은 틱마다, 유휴에는 `IDLE_TEND`
-/// 마다 한 번.
+/// 터미널이 끊겼는지 묻는 간격. 흐름은 이 간격마다 스스로 깨어 묻는다 — 유휴
+/// 루프는 `IDLE_TEND` 마다만 깨므로, 루프의 폴링에 얹혀서는 닫힌 판을 그만큼
+/// 늦게 본다(t-76434). 깨어서는 묻기만 하고 안쪽 스트림은 건드리지 않는다.
 const HANG_UP_LOOK: Duration = Duration::from_millis(500);
 
 /// 안쪽 스트림에 건네는 waker 의 몫 — 깨움이 왔다는 표시와, 그 깨움을
@@ -61,8 +63,9 @@ pub struct TerminalEvents<S = EventStream> {
     /// (t-76434). 그래서 이 흐름이 끝내고, 루프들의 입력 끝 팔이 턴 취소·기록·
     /// 종료를 한다.
     hung_up: fn() -> bool,
-    /// 마지막으로 끊김을 물은 때.
-    looked: Option<Instant>,
+    /// 다음에 끊김을 물을 때. 런타임 시계의 타이머라, 아무것도 루프를 깨우지
+    /// 않아도 이 흐름이 깨운다. 첫 폴링에 건다 — 런타임 안에서만 걸 수 있다.
+    look: Option<Pin<Box<Sleep>>>,
     /// 끊김을 보고 끝났다 — 다음 폴링도 끝을 말한다.
     ended: bool,
 }
@@ -87,7 +90,7 @@ impl<S> TerminalEvents<S> {
             wakeup: Arc::new(Wakeup::default()),
             armed: false,
             hung_up,
-            looked: None,
+            look: None,
             ended: false,
         }
     }
@@ -104,12 +107,16 @@ where
         if this.ended {
             return Poll::Ready(None);
         }
-        if this.looked.is_none_or(|at| at.elapsed() >= HANG_UP_LOOK) {
-            this.looked = Some(Instant::now());
+        if this.look.as_mut().is_none_or(|look| look.as_mut().poll(cx).is_ready()) {
             if (this.hung_up)() {
                 this.ended = true;
                 return Poll::Ready(None);
             }
+            let next = Instant::now() + HANG_UP_LOOK;
+            let look = this.look.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(next)));
+            look.as_mut().reset(next);
+            // 한 번 폴링해 두어야 마감이 이 태스크를 깨운다.
+            let _ = look.as_mut().poll(cx);
         }
         // 등록이 표시 확인보다 먼저다: 확인과 등록 사이에 온 깨움이 옛
         // 태스크로 새지 않는다.
@@ -253,8 +260,8 @@ mod tests {
     }
 
     /// 틱이 서른 번, 블록이 백 번 깨워도 조용한 터미널은 한 번만 묻는다.
-    #[test]
-    fn a_quiet_terminal_is_asked_once_however_often_the_loop_wakes() {
+    #[tokio::test]
+    async fn a_quiet_terminal_is_asked_once_however_often_the_loop_wakes() {
         let terminal = Fake::default();
         let mut events = TerminalEvents::over(terminal.clone(), never_hung_up);
         for _ in 0..100 {
@@ -264,8 +271,8 @@ mod tests {
     }
 
     /// 키가 깨우면 그 폴링이 키를 읽고, 다음 폴링이 다시 기다림을 건다.
-    #[test]
-    fn a_key_is_read_on_the_wake_that_brings_it() {
+    #[tokio::test]
+    async fn a_key_is_read_on_the_wake_that_brings_it() {
         let terminal = Fake::default();
         let mut events = TerminalEvents::over(terminal.clone(), never_hung_up);
         assert!(poll(&mut events).is_pending());
@@ -307,8 +314,8 @@ mod tests {
 
     /// 한 깨움에 여러 키가 쌓였으면 비울 때까지 묻는다 — 붙여넣기 뒤의 Enter 가
     /// 다음 틱까지 밀리면 안 된다.
-    #[test]
-    fn keys_queued_behind_one_wake_are_all_read() {
+    #[tokio::test]
+    async fn keys_queued_behind_one_wake_are_all_read() {
         let terminal = Fake::default();
         let mut events = TerminalEvents::over(terminal.clone(), never_hung_up);
         assert!(poll(&mut events).is_pending());
