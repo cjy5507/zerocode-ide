@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use serde_json::{Value, json};
 use zerocode_core::computer_use::ComputerCommand;
@@ -39,7 +39,34 @@ impl Drop for Installed {
     }
 }
 
+thread_local! {
+    /// A classification held for every act on this thread, with no helper stubbed.
+    static HELD: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// While it lives, this thread's acts are classified as not aimed at a
+/// desktop browser. A test of a later road (a confirmation, a batch) holds it
+/// so it never reads whichever app the person has in front: with their Chrome
+/// frontmost, a press at a bare point is routed to the work browser before
+/// the road under test is reached.
+pub(crate) struct NotABrowser(());
+
+impl Drop for NotABrowser {
+    fn drop(&mut self) {
+        HELD.with(|held| held.set(None));
+    }
+}
+
+#[must_use]
+pub(crate) fn hold_not_a_browser() -> NotABrowser {
+    HELD.with(|held| held.set(Some(false)));
+    NotABrowser(())
+}
+
 pub(super) fn classification(params: &Value) -> Option<Option<bool>> {
+    if let Some(held) = HELD.with(Cell::get) {
+        return Some(Some(held));
+    }
     FIXTURE.with(|installed| {
         let installed = installed.borrow();
         let installed = installed.as_ref()?;

@@ -184,4 +184,4 @@ pub(super) fn registered_executable(executable: &str, commands: Option<&[String]
 }
 
 #[cfg(test)]
-pub(super) mod tests;
+pub(crate) mod tests;
