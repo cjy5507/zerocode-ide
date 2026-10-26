@@ -2170,6 +2170,37 @@ fn compaction_curation_gate_skips_an_empty_workspace_without_writing_markers() {
 }
 
 #[test]
+fn an_automatic_pass_that_promotes_nothing_leaves_the_config_home_untouched() {
+    // The curated stores live under the config home, one project folder per
+    // workspace; a pass that writes no lesson must not create one there.
+    let config_home = tempfile::tempdir().unwrap();
+    let env_lock = crate::test_env_lock();
+    with_config_home(&env_lock, config_home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path();
+        let dream_dir = cwd.join(".zo").join("dream");
+        fs::create_dir_all(&dream_dir).unwrap();
+        let seen_once = serde_json::to_string(&obs("seen once", "s1", true)).unwrap();
+        fs::write(dream_dir.join("s.jsonl"), format!("{seen_once}\n")).unwrap();
+
+        let on_compaction =
+            super::maybe_auto_dream_on_compaction(cwd, std::time::Duration::ZERO, None)
+                .unwrap()
+                .expect("the workspace has evidence, so the pass runs");
+        let at_startup = super::maybe_auto_dream(cwd, std::time::Duration::ZERO, None)
+            .unwrap()
+            .expect("an unthrottled pass runs");
+        assert!(on_compaction.is_noop() && at_startup.is_noop());
+
+        let left: Vec<_> = fs::read_dir(config_home.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert!(left.is_empty(), "nothing was promoted, yet the passes left {left:?}");
+    });
+}
+
+#[test]
 fn a_promoted_lesson_records_the_model_whose_pass_promoted_it() {
     // Observations are mined from turn logs that carry no model of their own,
     // so the honest stamp is the model running the pass — and recall compares
@@ -2579,27 +2610,32 @@ fn composite_source_merges_both_producers() {
 
 #[test]
 fn maybe_auto_dream_throttles_second_call() {
-    let _lock = crate::test_env_lock();
-    let tmp = tempfile::tempdir().unwrap();
-    let cwd = tmp.path();
-    let dream_dir = cwd.join(".zo").join("dream");
-    fs::create_dir_all(&dream_dir).unwrap();
+    let config_home = tempfile::tempdir().unwrap();
+    let env_lock = crate::test_env_lock();
+    with_config_home(&env_lock, config_home.path(), || {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        let dream_dir = cwd.join(".zo").join("dream");
+        fs::create_dir_all(&dream_dir).unwrap();
 
-    let mut log = String::new();
-    for o in [obs("auto x", "s1", true), obs("auto x", "s2", true)] {
-        log.push_str(&serde_json::to_string(&o).unwrap());
-        log.push('\n');
-    }
-    fs::write(dream_dir.join("s.jsonl"), log).unwrap();
+        let mut log = String::new();
+        for o in [obs("auto x", "s1", true), obs("auto x", "s2", true)] {
+            log.push_str(&serde_json::to_string(&o).unwrap());
+            log.push('\n');
+        }
+        fs::write(dream_dir.join("s.jsonl"), log).unwrap();
 
-    // First call (no marker) runs and promotes; marker is then stamped.
-    let first = super::maybe_auto_dream(cwd, std::time::Duration::from_secs(3600), None).unwrap();
-    assert!(first.is_some());
-    assert_eq!(first.unwrap().applied.len(), 1);
+        // First call (no marker) runs and promotes; marker is then stamped.
+        let first =
+            super::maybe_auto_dream(cwd, std::time::Duration::from_secs(3600), None).unwrap();
+        assert!(first.is_some());
+        assert_eq!(first.unwrap().applied.len(), 1);
 
-    // Immediate second call is throttled → None, no extra work.
-    let second = super::maybe_auto_dream(cwd, std::time::Duration::from_secs(3600), None).unwrap();
-    assert!(second.is_none());
+        // Immediate second call is throttled → None, no extra work.
+        let second =
+            super::maybe_auto_dream(cwd, std::time::Duration::from_secs(3600), None).unwrap();
+        assert!(second.is_none());
+    });
 }
 
 #[test]

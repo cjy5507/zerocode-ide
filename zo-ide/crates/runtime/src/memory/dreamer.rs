@@ -2557,6 +2557,13 @@ impl FsMemoryStore {
         P: FnMut(),
         F: FnMut(),
     {
+        // Taking the lock creates the store, and a store nobody wrote has
+        // nothing to age off.
+        if fs::symlink_metadata(&self.memory_dir)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Ok(Vec::new());
+        }
         let lock = acquire_memory_store_lock_with_retry(
             &self.memory_dir,
             MEMORY_STORE_LOCK_RETRY_COUNT,
