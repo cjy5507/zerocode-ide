@@ -1028,6 +1028,68 @@ impl Orchestrator {
         Ok(Some(LinesBeyond { added, removed }))
     }
 
+    /// The branches this repository's main line goes by, the ones a worker's
+    /// commits are finished in once they are in them (t-76403): the remote's
+    /// own word first (`origin/HEAD`, as `origin/main`) and the local branch
+    /// of the same name (`main`). A repository whose `origin/HEAD` was never
+    /// set is asked for the first of `fallbacks` that resolves, in order, and
+    /// answers that name alone, with its remote-tracking branch (`origin/main`
+    /// beside `main`) — a guess names a branch that exists or none.
+    ///
+    /// Only names that resolve to a commit are returned, so a caller counting
+    /// against them never meets "not found" as a reason to doubt.
+    ///
+    /// # Errors
+    ///
+    /// [`OrchestratorError::GitUnavailable`] if git cannot be run.
+    pub fn default_branches(
+        &self,
+        worktree: impl AsRef<Path>,
+        fallbacks: &[&str],
+    ) -> Result<Vec<String>, OrchestratorError> {
+        let worktree = worktree.as_ref();
+        let told = run(
+            &self.git,
+            worktree,
+            ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+        )?;
+        let mut candidates: Vec<String> = Vec::new();
+        if told.ok
+            && let Some(remote) = told
+                .stdout
+                .trim()
+                .strip_prefix("refs/remotes/")
+                .filter(|short| !short.is_empty())
+        {
+            candidates.push(remote.to_string());
+            if let Some((_, local)) = remote.split_once('/') {
+                candidates.push(local.to_string());
+            }
+        } else {
+            // The remote-tracking branch of the same name is asked beside the
+            // local one: a repository whose `origin/HEAD` was never set can
+            // have `origin/main` ahead of `main`, or no local `main` at all.
+            for name in fallbacks {
+                let mut named = Vec::with_capacity(2);
+                for candidate in [format!("origin/{name}"), (*name).to_string()] {
+                    if self.commit_of(worktree, &candidate)?.is_some() {
+                        named.push(candidate);
+                    }
+                }
+                if !named.is_empty() {
+                    return Ok(named);
+                }
+            }
+        }
+        let mut resolved = Vec::with_capacity(candidates.len());
+        for name in candidates {
+            if self.commit_of(worktree, &name)?.is_some() {
+                resolved.push(name);
+            }
+        }
+        Ok(resolved)
+    }
+
     /// The commit one name stands for, or `None` when this repository has no
     /// such name. `--quiet` so an absent ref is an exit code rather than a
     /// sentence on stderr, `--end-of-options` so a stored name cannot become
@@ -3638,6 +3700,121 @@ prunable gitdir file points to non-existent location
                 .commits_beyond(repo.path(), "--all", "wt/landed")
                 .expect("count"),
             None
+        );
+    }
+
+    /// The main line a landed head is measured against (t-76403): the remote's
+    /// own word and its local twin, else the first usual name that resolves,
+    /// and only names that resolve.
+    #[test]
+    fn default_branches_follow_the_remote_then_the_usual_names() {
+        let repo = empty_repository();
+        configure_identity(repo.path());
+        let git = |args: &[&str]| {
+            let output = Command::new(GIT_EXECUTABLE)
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        std::fs::write(repo.path().join("a.txt"), "base\n").expect("write");
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "base"]);
+        git(&["branch", "-M", "main"]);
+        let orchestrator = Orchestrator::open(repo.path()).expect("open");
+        let usual = ["main", "master", "trunk", "develop"];
+
+        // No remote word: the first usual name that resolves, alone.
+        git(&["branch", "master"]);
+        assert_eq!(
+            orchestrator
+                .default_branches(repo.path(), &usual)
+                .expect("names"),
+            vec!["main".to_string()]
+        );
+        // None resolves: no names, so nothing counts as landed.
+        assert!(
+            orchestrator
+                .default_branches(repo.path(), &["trunk", "develop"])
+                .expect("names")
+                .is_empty()
+        );
+
+        // The remote's word, and the local branch of the same name.
+        let remote_home = tempfile::tempdir().expect("tempdir");
+        let remote = remote_home.path().join("origin.git");
+        let made = Command::new(GIT_EXECUTABLE)
+            .args(["init", "-q", "--bare", "-b", "main"])
+            .arg(&remote)
+            .output()
+            .expect("git");
+        assert!(made.status.success());
+        git(&["remote", "add", "origin", &remote.to_string_lossy()]);
+        git(&["push", "-q", "origin", "main"]);
+        git(&["remote", "set-head", "origin", "main"]);
+        assert_eq!(
+            orchestrator
+                .default_branches(repo.path(), &usual)
+                .expect("names"),
+            vec!["origin/main".to_string(), "main".to_string()]
+        );
+    }
+
+    /// A repository whose `origin/HEAD` was never set (t-76403 r2): the
+    /// remote-tracking branch of the usual name is asked beside the local
+    /// one, so a head pushed to `origin/main` while the local `main` stands
+    /// behind is landed, and a clone with no local `main` at all still has a
+    /// main line.
+    #[test]
+    fn default_branches_without_the_remote_word_still_ask_the_remote_tracking_branch() {
+        let repo = empty_repository();
+        configure_identity(repo.path());
+        let git = |args: &[&str]| {
+            let output = Command::new(GIT_EXECUTABLE)
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        std::fs::write(repo.path().join("a.txt"), "base\n").expect("write");
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "base"]);
+        git(&["branch", "-M", "main"]);
+        let orchestrator = Orchestrator::open(repo.path()).expect("open");
+        let usual = ["main", "master", "trunk", "develop"];
+        let remote_home = tempfile::tempdir().expect("tempdir");
+        let remote = remote_home.path().join("no-head.git");
+        let made = Command::new(GIT_EXECUTABLE)
+            .args(["init", "-q", "--bare", "-b", "main"])
+            .arg(&remote)
+            .output()
+            .expect("git");
+        assert!(made.status.success());
+        git(&["remote", "add", "origin", &remote.to_string_lossy()]);
+        // `origin/HEAD` is never set here: only `origin/main` exists.
+        git(&["push", "-q", "origin", "main"]);
+        assert_eq!(
+            orchestrator
+                .default_branches(repo.path(), &usual)
+                .expect("names"),
+            vec!["origin/main".to_string(), "main".to_string()],
+            "the remote-tracking branch was not asked beside the local one"
+        );
+
+        // Only the remote-tracking branch is left: a clone that never made
+        // the local one.
+        git(&["checkout", "-q", "-b", "work"]);
+        git(&["branch", "-D", "main"]);
+        assert_eq!(
+            orchestrator
+                .default_branches(repo.path(), &usual)
+                .expect("names"),
+            vec!["origin/main".to_string()],
+            "a repository with only origin/main had no main line"
         );
     }
 
