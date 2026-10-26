@@ -19768,6 +19768,200 @@ fn a_spawn_that_failed_once_may_be_asked_again_by_the_same_name() {
     );
 }
 
+/// The bridge and the shim hold a summons longer than the window can take to
+/// word its failure (t-76890).
+///
+/// The window waits for a worker's readiness for the budget the caller gave,
+/// then for the provider's submission receipt, then — when a briefing has to be
+/// read back off the screen — for two watch windows and one retyped delivery
+/// (the agent's own start-up deadline plus the receipt wait); the pane may also
+/// have waited its turn to be cut. Every one of those is a constant of the
+/// crate that waits, and the bridge's `READY_REPORT_HEADROOM_MS` has to cover
+/// their sum: the bridge that hung up first answered "timed out waiting for the
+/// window", and the failure the window worded a moment later went to a closed
+/// answer while the worker row that could have told the caller was already
+/// gone. Raise any of them and this says the headroom must follow.
+#[test]
+fn the_bridge_holds_a_summons_past_the_longest_the_window_takes_to_word_a_failure() {
+    use zerocode_pty::briefing::BRIEFING_WINDOW;
+    use zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE;
+    let longest_start_up = zerocode_core::agent::AGENT_SPECS
+        .iter()
+        .filter_map(|spec| spec.ready_timeout_ms)
+        .map(|ms| std::time::Duration::from_millis(u64::from(ms)))
+        .fold(zerocode_pty::ready::TIMEOUT, std::time::Duration::max);
+    let window_after_its_budget = EFFECT_LINE_CEILING
+        + SUBMIT_RECEIPT_PATIENCE
+        + BRIEFING_WINDOW * 2
+        + longest_start_up
+        + SUBMIT_RECEIPT_PATIENCE;
+    let headroom = std::time::Duration::from_millis(u64::from(
+        zerocode_core::orchestration::READY_REPORT_HEADROOM_MS,
+    ));
+    assert!(
+        headroom >= window_after_its_budget,
+        "the bridge gives up {headroom:?} after a summons' budget, the window can take \
+         {window_after_its_budget:?}"
+    );
+    // And the request really carries it, at the default budget and a stretched one.
+    let request = |argv: &[&str]| {
+        let (answer, _wait) = tokio::sync::oneshot::channel();
+        zerocode_hookd::TeamRequest::new(
+            "team".into(),
+            "%1".into(),
+            "token".into(),
+            argv.iter().map(|word| (*word).to_string()).collect(),
+            answer,
+        )
+    };
+    for (argv, budget_ms) in [
+        (
+            vec!["worker-start", "--agent", "claude"],
+            u64::from(zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS),
+        ),
+        (
+            vec![
+                "worker-start",
+                "--agent",
+                "claude",
+                "--timeout-ms",
+                "180000",
+            ],
+            180_000,
+        ),
+    ] {
+        let window_latest = std::time::Duration::from_millis(budget_ms) + window_after_its_budget;
+        assert!(
+            request(&argv).deadline() > window_latest,
+            "{argv:?}: the bridge hangs up at {:?}, the window can still be working at \
+             {window_latest:?}",
+            request(&argv).deadline()
+        );
+    }
+}
+
+/// A worker that never became ready is not a request that must never run.
+///
+/// The pane is cut and the cut is settled before the wait for the worker
+/// (t-76680), so a ready failure used to leave the request carried out: the
+/// beat's name (`beat-{task}-{failures}`) does not move when the seat goes
+/// back, the next beat asked under the same name, and every ask met "this
+/// request's pane was already cut once" — the task and the ones behind it
+/// stood still with no screen saying why (t-76890). The ready failure is its
+/// own record on the cut: the pane is gone and the seat is back, so the same
+/// name may cut again.
+#[test]
+fn a_worker_that_never_became_ready_may_be_asked_again_by_the_same_name() {
+    // A window of its own: the shared one's clock may stand ahead of the wall's after other
+    // tests, and this one is about the order of three small numbers.
+    let (_window, _store) = PrivateWindow::boot();
+    const LEADER_TERM: u32 = 91_370;
+    let team = format!("team-unready-asked-again-{LEADER_TERM}");
+    seat_a_team(&team, LEADER_TERM);
+    let seat = zerocode_core::agent_teams::LEADER_PANE;
+    struct UnreadyOnce {
+        onto: u32,
+        refuse_one: std::sync::atomic::AtomicBool,
+    }
+    impl Host for UnreadyOnce {
+        fn split(
+            &self,
+            _team: &str,
+            _leader_term: u32,
+            _from_term: u32,
+            _pane: &str,
+            _direction: zerocode_core::agent_teams::Direction,
+            _command: &str,
+            _token: &str,
+        ) -> Option<u32> {
+            Some(self.onto)
+        }
+        fn await_worker_ready(
+            &self,
+            _term: u32,
+        ) -> Result<(), crate::agent_teams::HostStartFailure> {
+            if self
+                .refuse_one
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                Err(crate::agent_teams::HostStartFailure::new(
+                    "composer never became ready",
+                    None,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        fn send(&self, _term: u32, _text: &str) -> bool {
+            true
+        }
+        fn capture(&self, _term: u32) -> Option<String> {
+            Some(String::new())
+        }
+        fn focus(&self, _term: u32) -> bool {
+            true
+        }
+        fn close(&self, _term: u32) {}
+        fn actor_for(&self, term: u32) -> Option<String> {
+            Some(test_actor(term))
+        }
+    }
+    let host = UnreadyOnce {
+        onto: 91_371,
+        refuse_one: std::sync::atomic::AtomicBool::new(true),
+    };
+    let made = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words("run-create --name unready-asked-again"),
+        500,
+    );
+    assert_eq!(made.exit_code, 0, "{}", made.stderr);
+    let named = "worker-start --agent claude --retry-request beat-unready-asked-again-0";
+    let first_at = 1_000;
+    let first = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words(named),
+        first_at,
+    );
+    assert_eq!(first.exit_code, 1, "an unready worker started: {first:?}");
+    assert!(
+        first.stderr.contains("composer never became ready"),
+        "the reason did not come back with the refusal: {}",
+        first.stderr
+    );
+    // Strictly past the retry floor the withdrawal wrote (first_at + 1).
+    let second_at = first_at + 2;
+    let second = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words(named),
+        second_at,
+    );
+    assert_eq!(
+        second.exit_code, 0,
+        "the SAME name was refused for good after a worker that never became ready: {}",
+        second.stderr
+    );
+    let started: serde_json::Value = serde_json::from_str(&second.stdout).expect("a worker");
+    assert!(
+        started["workerId"].as_str().is_some(),
+        "the second ask did not seat a worker: {}",
+        second.stdout
+    );
+    crate::agent_teams::forget_term(91_371);
+}
+
 #[test]
 fn a_worker_preflight_refusal_reaches_the_coordinator() {
     let _window = the_window();

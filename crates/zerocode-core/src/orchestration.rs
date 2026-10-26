@@ -20135,6 +20135,21 @@ pub const WAIT_BUDGET_MIN_MS: u32 = 1_000;
 /// Readiness only (§7.2): nothing is settled when it passes.
 pub const READY_TIMEOUT_DEFAULT_MS: u32 = 60_000;
 
+/// How long past its readiness budget the window may still be settling a
+/// summoned worker before it can say why the summons failed.
+///
+/// The window's wait for a worker ends at the budget plus the receipt wait
+/// (`zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE`, 10 s); a briefing that
+/// then has to be read back off the screen and typed once more waits up to two
+/// watch windows and the agent's own start-up deadline with the receipt wait on
+/// top (`BRIEFING_WINDOW` 6 s ×2, the longest `ready_timeout_ms` 20 s, 10 s);
+/// and the pane may have waited its turn to be cut (5 s) before any of that
+/// began. A bridge or a shim that gives up at the budget alone hands the
+/// caller "timed out waiting for the window" for a failure the window was
+/// still about to word, and the worker row that would have told them is
+/// already gone (t-76890). `zerocode-shell` holds this number above that sum.
+pub const READY_REPORT_HEADROOM_MS: u32 = 60_000;
+
 /// How long an `ask` holds on when its caller does not say: ten minutes.
 ///
 /// A question blocks by DEFAULT — the alternative is a worker that fires a

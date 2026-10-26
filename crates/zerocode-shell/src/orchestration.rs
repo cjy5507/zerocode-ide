@@ -12061,6 +12061,7 @@ fn carried(
                             );
                         }
                     };
+                    let operation_id = result.operation_id().to_string();
                     let outcome = digest(
                         b"zerocode.orchestration.split-applied.v1",
                         &[result.operation_id().as_bytes(), &term.to_le_bytes()],
@@ -12114,9 +12115,10 @@ fn carried(
                      * summons answer "another pane is still being cut" until
                      * it ended (t-76680). The wait is the summoner's own: a
                      * worker that never gets ready is closed and refused here
-                     * with its reason, and its seat row goes back. The same
-                     * request name asked again meets the applied split and is
-                     * told to ask under a new name (see the replay arm). */
+                     * with its reason, its seat row goes back, and the split
+                     * stops counting as carried out: the pane is gone, so the
+                     * same request name may cut again — the beat asks under
+                     * one name until it works (t-76890). */
                     if reseating.is_none()
                         && let Err(failure) = host.await_worker_ready(term)
                     {
@@ -12128,9 +12130,10 @@ fn carried(
                                 team.remove_pane(&new_pane);
                             }
                         }
-                        return roll_back_the_seat(
+                        return roll_back_the_unready_seat(
                             actor,
                             minted.as_deref(),
+                            &operation_id,
                             now_ms,
                             &failure.to_string(),
                         );
@@ -12809,6 +12812,32 @@ fn roll_back_the_seat(
 ) -> zerocode_hookd::TeamAnswer {
     if let Some(worker) = minted
         && let Ok((moved, _)) = actor.seat_never_opened(worker, now_ms)
+    {
+        rang(moved);
+    }
+    refused(why)
+}
+
+/// [`roll_back_the_seat`] for a pane that was cut and settled, then closed
+/// because its worker never got ready: the split `operation_id` is taken back
+/// as retryable in the same write, or the request that asked for it would
+/// meet "already cut once" under every name it can spell (t-76890).
+///
+/// Best-effort like its sibling: the refusal it rides carries the answer, and
+/// a write the store refuses leaves the row for the restart sweep.
+fn roll_back_the_unready_seat(
+    actor: &RuntimeActor,
+    minted: Option<&str>,
+    operation_id: &str,
+    now_ms: i64,
+    why: &str,
+) -> zerocode_hookd::TeamAnswer {
+    let tombstone = digest(
+        b"zerocode.orchestration.split-unready-tombstone.v1",
+        &[operation_id.as_bytes()],
+    );
+    if let Ok((moved, _)) =
+        actor.seat_never_ready(minted.unwrap_or_default(), operation_id, tombstone, now_ms)
     {
         rang(moved);
     }
