@@ -8,6 +8,14 @@ use super::*;
 /// 2026-10-17T05:00:00Z: when the store's stamps are written.
 pub(super) const NOW: i64 = 1_792_213_200_000;
 
+/// A chosen folder the platform takes as absolute: `/work/product` has no
+/// drive on Windows, so it is relative there and the rule refuses it.
+const PRODUCT_FOLDER: &str = if cfg!(windows) {
+    r"C:\work\product"
+} else {
+    "/work/product"
+};
+
 /// A yes-or-no decision asking at a turn's end, keeping every rule.
 pub(super) fn yes_no(id: &str, name: &str) -> Definition {
     Definition::new(
@@ -252,7 +260,7 @@ fn limits_hold() {
         [Refusal::Folders],
     );
     assert!(
-        refused(|d| d.folders = Folders::Chosen(BTreeSet::from(["/work/product".to_string()])))
+        refused(|d| d.folders = Folders::Chosen(BTreeSet::from([PRODUCT_FOLDER.to_string()])))
             .is_empty()
     );
     for id in [

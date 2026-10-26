@@ -1,13 +1,13 @@
 import ast
 import io
-import json
 import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 
-parsed = ast.parse(json.loads(sys.argv[1]))
+with open(sys.argv[1], encoding="utf-8") as source:
+    parsed = ast.parse(source.read())
 definitions = [node for node in parsed.body if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef))
                or (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "MAX_FRAME")]
 bridge = {}

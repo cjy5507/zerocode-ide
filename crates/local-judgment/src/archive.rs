@@ -61,11 +61,20 @@ pub(crate) fn native(
                 .link_name()
                 .map_err(|_| Error::UnsafePath)?
                 .ok_or(Error::UnsafePath)?;
-            let link = relative(link.to_str().ok_or(Error::UnsafePath)?)?;
-            links.insert(
-                path.clone(),
-                path.parent().ok_or(Error::UnsafePath)?.join(link),
-            );
+            let link = link.to_str().ok_or(Error::UnsafePath)?;
+            relative(link)?;
+            let parent = path
+                .parent()
+                .and_then(Path::to_str)
+                .ok_or(Error::UnsafePath)?;
+            // Joined in the archive's own `/` form: `Path::join` writes `\` on
+            // Windows, and the copy reads this name back through `relative`.
+            let joined = if parent.is_empty() {
+                link.to_string()
+            } else {
+                format!("{parent}/{link}")
+            };
+            links.insert(path.clone(), PathBuf::from(joined));
         } else if kind.is_file() {
             if let Some(artifact) = declared.get(&path) {
                 if size != artifact.bytes {
