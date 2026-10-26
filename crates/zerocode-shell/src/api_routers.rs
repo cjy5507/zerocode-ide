@@ -1517,6 +1517,88 @@ mod tests {
         assert_eq!(refusal_detail(r#"{"error":{"code":401}}"#), None);
     }
 
+    /// A loopback gateway that refuses every probe 401 and says back the
+    /// `Authorization` value it was sent — inside a JSON message on
+    /// `/models`, as a bare body on `/raw` — with a key-shaped word beside it.
+    fn echoing_gateway() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut bytes = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&bytes).into_owned();
+                let sent = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("authorization")
+                            .then(|| value.trim().to_string())
+                    })
+                    .unwrap_or_default();
+                let echoed = format!("invalid token {sent} near fixtureShapedWord000111222333");
+                let body = if head.starts_with("GET /raw") {
+                    echoed
+                } else {
+                    serde_json::json!({"error": {"message": echoed}}).to_string()
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A refusal that says the key back (t-76028 F1): the words the probe
+    /// hands over IPC keep the status and the gateway's reason, and lose the
+    /// key, the header value it rode in and anything shaped like a key.
+    #[tokio::test]
+    async fn a_refusal_that_says_the_key_back_reaches_the_window_without_it() {
+        let base = echoing_gateway();
+        let key = "[합성-키]-echo-0f3a";
+        let auth = RouterAuth {
+            header: "Authorization".to_string(),
+            scheme: Some("Bearer".to_string()),
+        };
+        for path in ["/models", "/raw"] {
+            let refusal = test_router_endpoint(&RouterProbe {
+                base_url: &base,
+                auth: &auth,
+                key: Some(key),
+                models_path: Some(path),
+                id_field: None,
+                context_field: None,
+                client_fingerprint: None,
+                headers: None,
+            })
+            .await
+            .expect_err("a 401 is a refusal");
+            assert!(refusal.contains("HTTP 401"), "{path}: the status stays");
+            assert!(
+                refusal.contains("invalid token"),
+                "{path}: the gateway's reason stays"
+            );
+            for secret in [key, "[합성-키]", "fixtureShapedWord000111222333"] {
+                assert!(
+                    !refusal.contains(secret),
+                    "{path}: a sent or key-shaped value went over IPC"
+                );
+            }
+        }
+    }
+
     /// The window writes where zo reads: `ZO_CONFIG_HOME`, then `ZO_HOME`,
     /// then `~/.zo` — zo's own chain (runtime::config). A pane launched with
     /// `ZO_HOME` set would otherwise never see the provider the pane wrote.
