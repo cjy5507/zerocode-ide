@@ -114,38 +114,15 @@ export async function readBoardSchedule(page) {
         block: row.classList.contains("board-schedule-block"),
         col: own("--col"), cols: own("--cols") || 1, mark: own("--mark"),
         cut: row.classList.contains("is-cut"), inherited: row.classList.contains("is-inherited"),
-        steps: row.dataset.steps ?? "", act: row.dataset.act ?? "",
+        steps: row.dataset.steps ?? "", act: row.dataset.act ?? "", rideState: row.dataset.rideState ?? "",
       };
     };
-    // A gate's jobs are blocks' step cells, not blocks: the vertical view reads them off the model, in the
-    // model's order under their gate, so a scene reads the same rows either way.
-    const model = vertical
-      ? boardScheduleModel(boardScheduleAnswer, typeof deskLedger === "undefined" ? null : deskLedger?.tasks,
-        Math.floor(Date.now() / 60_000) * 60_000, boardScheduleChoice, host.clientWidth,
-        typeof deskMachine === "undefined" ? false : deskMachine?.load?.loud === true)
-      : null;
-    const modelRow = (row) => ({
-      key: row.key, state: row.state, basis: row.basis, depth: String(row.depth), expanded: null, paused: Boolean(row.paused),
-      late: Boolean(row.late), label: row.label, said: row.said, sub: row.sub, eta: row.eta, etaSub: row.etaSub, why: row.why ?? "",
-      nowLabel: row.nowLabel, aheadLabel: row.aheadLabel, from: Number(row.from.toFixed(2)), to: Number(row.to.toFixed(2)),
-      done: Number((row.done * 100).toFixed(1)), block: false, col: 0, cols: 1, mark: 0, cut: false, inherited: false,
-      steps: "", act: "",
-    });
+    // A gate's jobs are its block's step cells in the vertical view (`data-steps`); rows are read off the drawing only.
     const groups = {};
     for (const box of host.querySelectorAll(".board-schedule-group")) {
       const head = box.querySelector(".board-schedule-group-head");
       const drawn = new Map([...box.querySelectorAll(".board-schedule-row, .board-schedule-block")].map((row) => [row.dataset.key, readRow(row)]));
-      let rows = [...drawn.values()];
-      if (model && rows.length > 0) {
-        rows = [];
-        let under = false;
-        for (const row of model.groups.find((one) => one.id === box.dataset.group).rows) {
-          if (row.depth === 0) {
-            under = drawn.has(row.key);
-            if (under) rows.push(drawn.get(row.key));
-          } else if (under) rows.push(modelRow(row));
-        }
-      }
+      const rows = [...drawn.values()];
       groups[box.dataset.group] = {
         hidden: box.hidden,
         expanded: head.getAttribute("aria-expanded"),
@@ -175,6 +152,7 @@ export async function readBoardSchedule(page) {
       board: { now: host.querySelector(".board-schedule-board-now")?.textContent ?? "",
         sum: host.querySelector(".board-schedule-board-sum")?.textContent ?? "", lines },
       aheadEmpty: shown(host.querySelector(".board-schedule-ahead-empty")),
+      calLegend: host.querySelector(".board-schedule-cal-legend")?.textContent ?? "",
       elements: host.querySelectorAll("*").length,
       asked: window.__SCHEDULE_ASKED__,
     };
@@ -412,19 +390,14 @@ export async function testBoardSchedule(browser, origin, ok) {
     const heads = gates.filter((row) => row.depth === "0");
     const l61 = heads.find((row) => row.key === "gate:l61");
     // The timetable draws a gate as one block with its step cells; its jobs are read off the model under it.
-    ok("the gate in play is one running block with four step cells, its four jobs under it",
-      l61?.state === "running" && l61.block && l61.steps.split(",").length === 4
-        && gates.slice(gates.indexOf(l61) + 1, gates.indexOf(l61) + 5).every((row) => row.depth === "1" && row.key.includes("-l61")),
+    const l61jobCount = answer.jobs.filter((job) => job.gate === "l61").length;
+    ok("the gate in play is one running block whose step cells are its jobs, one each, and no job row stands under it",
+      l61?.state === "running" && l61.block && l61.steps.split(",").length === l61jobCount
+        && gates.every((row) => row.depth === "0" && row.block),
       JSON.stringify(gates.map((row) => [row.key, row.depth, row.state, row.steps])));
     const l60 = heads.find((row) => row.key === "gate:l60");
     ok("this morning's l60 is one passed block — its window measurement failed once and passed on its rerun",
       l60?.block && l60.state === "done" && /^통과 /.test(l60.said) && l60.act === "로그 →", JSON.stringify(l60));
-    const lint = gates.find((row) => row.key === "job:0-1792543560-run11955-l61z-g3a-zo-lint");
-    ok("a running job past its median says how late it is and reaches 「now」",
-      lint?.state === "running" && lint.said === "+1분 지연 중" && near(lint.to, drawn.now), JSON.stringify(lint));
-    const held = gates.find((row) => row.key.includes("l61q-g5-window"));
-    ok("a job a guard held says so, and its bar is not a start the runner will make",
-      held?.state === "held" && held.said.includes("가드"), JSON.stringify(held));
 
     /* ---- 빌드 줄: 도는 것·기다리는 것·거절된 것, 끝난 것은 최근의 몇만 ------------- */
     const line = drawn.groups.line.rows;
@@ -498,6 +471,25 @@ export async function testBoardSchedule(browser, origin, ok) {
     ok("a second press closes the log",
       await page.evaluate(() => document.querySelector("#board-view .board-schedule-log").hidden), "");
 
+    /* The queue's order and a paused line's words are read off the gate's job rows — drawn in the week chart. */
+    const zoomTo = async (zoom) => page.evaluate(async (zoom) => {
+      const button = document.querySelector(`#board-view [data-schedule-zoom="${zoom}"]`);
+      if (button.getAttribute("aria-pressed") !== "true") {
+        button.click();
+        await window.__UNTIL__(() => !boardScheduleAsking, `the ${zoom} answer`);
+      }
+      paintBoardScheduleHosts();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    }, zoom);
+    await zoomTo("week");
+    drawn = await readBoardSchedule(page);
+    const weekGates = drawn.groups.gates.rows;
+    const lint = weekGates.find((row) => row.key === "job:0-1792543560-run11955-l61z-g3a-zo-lint");
+    ok("in the week chart a running job past its median says how late it is and reaches 「now」",
+      lint?.state === "running" && lint.said === "+1분 지연 중" && near(lint.to, drawn.now), JSON.stringify(lint));
+    const held = weekGates.find((row) => row.key.includes("l61q-g5-window"));
+    ok("a job a guard held says so, and its bar is not a start the runner will make",
+      held?.state === "held" && held.said.includes("가드"), JSON.stringify(held));
     /* ---- 줄이 풀리면: 기다리는 일감이 비는 줄에 차례로 선다 -------------------------- */
     drawn = await moveScheduleLine(page, { paused: false, pause_note: null });
     const queued = (key) => [...drawn.groups.gates.rows, ...drawn.groups.line.rows].find((row) => row.key === key);
@@ -534,6 +526,7 @@ export async function testBoardSchedule(browser, origin, ok) {
     }
     drawn = await moveScheduleLine(page, { runner_lanes: answer.line.runner_lanes, quiet_wanted: false, disk_low: false });
 
+    await zoomTo("day");
     /* ---- 워커 과업을 누르면 「기록」 탭의 그 과업으로 — 넘김·검증·비용이 서는 곳 ------------ */
     await page.evaluate(() => document.querySelector('#board-view [data-key="task:run-4275/t-67102"]').click());
     const went = await page.evaluate(async () => {
@@ -869,8 +862,9 @@ export async function testBoardSchedule(browser, origin, ok) {
       beside.filter((one) => one.shown).length >= 3 && beside.every((one) => !one.shown || one.apart > 4),
       JSON.stringify(beside));
     const legend = await page.evaluate(() => document.querySelector("#board-view .board-schedule-gutter")?.dataset.tip ?? "");
-    ok("the gutter's tip says how a block reads, in the draft's words, and every column is named alone and counted",
-      legend === "막대 끝 = 지난 소요로 잰 예상 · 빗금 = 아직 안 온 구간 · 점선 = 근거 없음"
+    const blocksLegend = "칠함 = 지난·끝남 · 빗금 = 앞으로(지난 소요로 잰 예상) · 점선 = 근거 없음 · 톱니 = 범위 앞에서 시작";
+    ok("a line under the timetable says how a block reads, in the blocks' words (the gutter's tip says the same), and every column is named alone and counted",
+      legend === blocksLegend && drawn.calLegend === blocksLegend
         && drawn.groups.lanes.head === "발행" && drawn.groups.gates.head === "게이트"
         && drawn.groups.line.head === "빌드 줄" && drawn.groups.workers.head === "워커 과업"
         && /^\d+( · 차례 기다림 \d+)?( · 끝남 \d+)?$/.test(drawn.groups.workers.headSub) && drawn.groups.workers.headSub.includes("차례 기다림"),
@@ -1015,7 +1009,8 @@ export async function testBoardSchedule(browser, origin, ok) {
     const waitingCount = drawn.groups.workers.rows.filter((one) => one.state === "waiting").length;
     ok("the waiting line counts the tasks waiting to land and names the one that waited longest",
       waitingCount > 0 && lines.waiting?.big === `${waitingCount}건` && /^가장 오래 .+ \(t-\d+\)$/.test(lines.waiting.note)
-        && lines.waiting.word === "코디 차례" && lines.waiting.tone === "wait" && lines.waiting.act === "기록 →",
+        && lines.waiting.word === "코디 차례" && lines.waiting.tone === "wait" && lines.waiting.act === "기록 →"
+        && lines.waiting.whatSub === "보고·검증 뒤 · 코디 차례",
       JSON.stringify({ line: lines.waiting, waitingCount }));
     const endedCount = drawn.groups.workers.rows.filter((one) => one.state === "done" || one.state === "failed").length;
     ok("the finished line counts what ended in the range and says when the last one did",
@@ -1042,14 +1037,14 @@ export async function testBoardSchedule(browser, origin, ok) {
     const lintJob = l61jobs.find((job) => job.kind === "g3a-zo-lint");
     const buildJob = l61jobs.find((job) => job.kind === "g1-build");
     drawn = await patchScheduleJobs(page, [[lintJob.name, { tasks: ["t-67102"] }],
-      [buildJob.name, { what: "v1.1.84: t-66539/67102 ctty helper — g1-build" }]]);
+      [buildJob.name, { what: "v1.1.84: t-66539/7102 ctty helper — g1-build" }]]);
     const rode = (id) => drawn.groups.workers.rows.find((one) => one.key.endsWith(id));
     const l61head = drawn.groups.gates.rows.find((one) => one.key === "gate:l61");
     ok("a waiting task a running gate carries says so — by the job's task line or its what line, the slash form too — and its block ends where the gate is expected to",
       rode("t-67102")?.why.startsWith("l61에 실림 → 도는 중 · ") && rode("t-66539")?.why.startsWith("l61에 실림 → 도는 중 · ")
         && near(rode("t-67102").to, l61head.to) && near(rode("t-66539").to, l61head.to)
         && rode("t-67102").inherited && rode("t-67102").mark > 0 && rode("t-67102").basis === l61head.basis
-        && rode("t-67102").said.includes("l61에 실림"),
+        && rode("t-67102").said.includes("l61에 실림") && rode("t-67102").rideState === "running" && rode("t-66539").rideState === "running",
       JSON.stringify({ t67102: rode("t-67102"), t66539: rode("t-66539"), l61head }));
     lines = Object.fromEntries(drawn.board.lines.map((line) => [line.id, line]));
     ok("the waiting line then says the gate runs and how many ride it, and the gate line counts the tasks it carries",
@@ -1057,15 +1052,15 @@ export async function testBoardSchedule(browser, origin, ok) {
         && lines.gate.note.includes("과업 2건 실림"),
       JSON.stringify({ waiting: lines.waiting, gate: lines.gate }));
     const stopped = SCHEDULE_NOW - 60_000;
-    drawn = await patchScheduleJobs(page, l61jobs.map((job) => [job.name, job.state === "running"
-      ? { state: "failed", rc: 1, end_ms: stopped, secs: 60 }
-      : ["waiting", "held"].includes(job.state) ? { state: "refused", end_ms: stopped } : {}]));
+    // Only the running step fails; the steps queued behind it stay waiting and held (review P3-3).
+    drawn = await patchScheduleJobs(page, [[lintJob.name, { state: "failed", rc: 1, end_ms: stopped, secs: 60 }]]);
     lines = Object.fromEntries(drawn.board.lines.map((line) => [line.id, line]));
-    ok("when the gate fails the tasks it carries say they are stopped by it and end at 「now」; the board says 「막힘」 and the gate line's chip opens the failed job's log",
-      rode("t-67102")?.why === "l61에 실림 → 실패로 멈춤" && near(rode("t-67102").to, drawn.now) && !rode("t-67102").inherited
+    ok("one failed step stops the gate while its other steps still queue: the tasks it carries say so in the halt ink, end at 「now」, the board says 「막힘」 and the gate line's chip opens the failed job's log",
+      rode("t-67102")?.why === "l61에 실림 → 실패로 멈춤" && rode("t-67102").rideState === "failed" && near(rode("t-67102").to, drawn.now)
+        && !rode("t-67102").inherited && l61head && drawn.groups.gates.rows.find((one) => one.key === "gate:l61")?.state === "failed"
         && lines.waiting.word === "막힘" && lines.waiting.tone === "halt" && lines.gate.word === "실패" && lines.gate.tone === "halt"
-        && lines.gate.act === "로그 →" && lines.gate.note.startsWith("g3a-zo-lint · ") && lines.gate.note.includes(" 실패 · 0/4 초록 · 과업 2건 실림"),
-      JSON.stringify({ t67102: rode("t-67102"), waiting: lines.waiting, gate: lines.gate }));
+        && lines.gate.act === "로그 →" && lines.gate.note.startsWith("g3a-zo-lint 실패 · 0/4 초록 · 과업 2건 실림"),
+      JSON.stringify({ t67102: rode("t-67102"), gate: drawn.groups.gates.rows.find((one) => one.key === "gate:l61"), waiting: lines.waiting, line: lines.gate }));
     drawn = await patchScheduleJobs(page, l61jobs.map((job) => [job.name, {
       state: job.state, rc: job.rc ?? null, end_ms: job.end_ms ?? null, secs: job.secs ?? null, tasks: null, what: job.what ?? null,
     }]));
@@ -1098,16 +1093,49 @@ export async function testBoardSchedule(browser, origin, ok) {
     /* ---- 비어 있어도 넉 줄: 레인도 게이트도 과업도 없는 답 ---- */
     const emptyAnswer = await page.evaluate((now) => {
       const model = boardScheduleModel({ revision: 1, unchanged: false, read_ms: now, line: { found: false, runner_lanes: [] },
-        jobs: [], lanes: [] }, [], now, { zoom: "now", folded: new Set(), opened: new Set(), log: null }, 900, false, null, 120, 16);
+        jobs: [], lanes: [] }, [], now, { zoom: "now", folded: new Set(), opened: new Set(), log: null }, 900, false, null,
+      { hourPx: 120, tickPx: 16, leastPx: 24 });
       return { aheadEmpty: model.aheadEmpty, sum: model.board.head.sum, gutter: model.gutter.length, hours: model.hours,
         lines: model.board.lines.map((line) => [line.id, line.big, line.word, line.note, line.act, line.tone]) };
     }, SCHEDULE_NOW);
-    ok("with emptyAnswer in the range the board still has its four lines, each saying there is emptyAnswer, and the timetable says emptyAnswer is ahead",
+    ok("with nothing in the range the model's board still has its four lines, each saying there is nothing, and the timetable says nothing is ahead",
       emptyAnswer.aheadEmpty && emptyAnswer.lines[0][1] === "—" && emptyAnswer.lines[0][2] === "잡힌 것 없음" && emptyAnswer.lines[0][3] === "이 범위에 없음"
         && emptyAnswer.lines[1][1] === "—" && emptyAnswer.lines[1][3] === "이 범위에 없음" && emptyAnswer.lines[2][1] === "0건" && emptyAnswer.lines[2][2] === "없음"
         && emptyAnswer.lines[3][1] === "0건" && emptyAnswer.lines[3][3] === "이 범위에 없음" && emptyAnswer.lines.every((line) => line[4] === null && line[5] === "quiet")
         && emptyAnswer.gutter >= 4 && emptyAnswer.hours === 4 && emptyAnswer.sum === "다음 발행 없음 · 착지 대기 0",
       JSON.stringify(emptyAnswer));
+
+    // The same empty answer drawn (review P3-9): the lines, the columns' heads and the empty-future line on the screen.
+    const emptyDrawn = await page.evaluate(async (now) => {
+      const held = window.__SCHEDULE__;
+      const heldDesk = window.__DESK__;
+      window.__SCHEDULE__ = { revision: held.revision + 1, unchanged: false, read_ms: now, line: { found: false, runner_lanes: [] }, jobs: [], lanes: [] };
+      window.__DESK__ = { ...heldDesk, tasks: [] };
+      deskLedger = window.__DESK__;
+      refreshBoardSchedule();
+      await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the empty answer");
+      paintBoardScheduleHosts();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const host = document.querySelector("#board-view .task-board-schedule");
+      const out = {
+        lines: [...host.querySelectorAll(".board-schedule-line")].map((line) => [line.dataset.line, line.children[1].textContent, line.children[1].dataset.word, line.children[2].textContent]),
+        ahead: host.querySelector(".board-schedule-ahead-empty").checkVisibility(),
+        blocks: host.querySelectorAll(".board-schedule-block").length,
+        heads: [...host.querySelectorAll(".board-schedule-group-head")].map((head) => head.dataset.sub),
+      };
+      window.__SCHEDULE__ = { ...held, revision: held.revision + 2 };
+      window.__DESK__ = heldDesk;
+      deskLedger = heldDesk;
+      refreshBoardSchedule();
+      await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the restored answer");
+      paintBoardScheduleHosts();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      return out;
+    }, SCHEDULE_NOW);
+    ok("the empty range is drawn, not only modelled: four lines saying nothing, no block, every column head 「이 범위에 없음」, and the empty-future line shown",
+      emptyDrawn.lines.length === 4 && emptyDrawn.lines[0][1] === "—" && emptyDrawn.lines[1][1] === "—" && emptyDrawn.lines[2][1] === "0건"
+        && emptyDrawn.lines[3][1] === "0건" && emptyDrawn.blocks === 0 && emptyDrawn.heads.every((sub) => sub === "이 범위에 없음") && emptyDrawn.ahead,
+      JSON.stringify(emptyDrawn));
 
     /* ---- 좁은 그릇: 안내판 줄은 두 줄로, 시간표는 카드 안에서 옆으로 — 그릇은 넘치지 않고 블록은 닿는다 ---- */
     const narrow = await page.evaluate(async () => {
