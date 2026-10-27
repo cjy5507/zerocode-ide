@@ -30,7 +30,11 @@ export async function testPaneHead(browser, origin, ok) {
         for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
       };
       const settle = () => new Promise((done) => setTimeout(done, 80));
-      window.__ANSWER__.pane_log = (args) => ({ found: true, next: transcript.length, turns: transcript.slice(args.after ?? 0) });
+      const reads = new Map();
+      window.__ANSWER__.pane_log = (args) => {
+        reads.set(args.term, (reads.get(args.term) ?? 0) + 1);
+        return { found: true, next: transcript.length, turns: transcript.slice(args.after ?? 0) };
+      };
       const wires = [];
       window.__ANSWER__.wire_start = (args) => { wires.push(args); return null; };
       const seen = {};
@@ -55,8 +59,15 @@ export async function testPaneHead(browser, origin, ok) {
       seen.wires = wires.length;
       const chat = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat`);
       seen.chatShown = Boolean(chat) && !chat.hidden;
-      // In the conversation the page's own head says who; the pane's head keeps the switch.
-      seen.whoHiddenInChat = getComputedStyle(head.querySelector(".pane-head-who")).display === "none";
+      // One head line in the conversation (the draft's item 8): the page's own head says who, its
+      // model and state, and wears the pane head's conversation line and the switch beside them.
+      const shown = (node) => Boolean(node) && node.getClientRects().length > 0 && node.getBoundingClientRect().height > 0;
+      const lines = [...host.querySelectorAll(".pane-head, .chat-head")].filter(shown);
+      seen.headLinesInChat = lines.length;
+      seen.oneLineHolds = lines.length === 1 && lines[0].contains(el("view-toggle")) &&
+        Boolean(lines[0].querySelector(".pane-head-pick")) && lines[0].textContent.includes("claude-fable-5-1");
+      // The switch reads 대화 | 터미널, the draft's order.
+      seen.switchOrder = [...el("view-toggle").querySelectorAll("button")].map((button) => button.id).join(",");
       // Prose: 16 px on 24, in one column of at most 760 px; code is a fixed-width chip.
       await new Promise((done) => setTimeout(done, 300));
       const said = chat?.querySelector(".helper-turn.is-assistant .helper-said");
@@ -105,12 +116,37 @@ export async function testPaneHead(browser, origin, ok) {
       await window.__PAINTED__();
       seen.screenKept = !paneChatOn(term);
       seen.whoShownOnScreen = getComputedStyle(head.querySelector(".pane-head-who")).display !== "none";
+      const screenLines = [...host.querySelectorAll(".pane-head, .chat-head")].filter(shown);
+      seen.headLinesOnScreen = screenLines.length;
+      seen.screenLineHolds = screenLines[0] === head && head.contains(el("view-toggle")) && Boolean(head.querySelector(".pane-head-pick"));
       // A second agent pane whose question is only on its screen opens on the screen.
       const other = await openTermTab({ placement: "tab" });
       await window.__PAINTED__();
       tell("hook:agent", { term: other, state: "needs-attention", agent: "codex", session: { id: "s-head-0002" }, resumable: false });
       await window.__PAINTED__();
       seen.askOnScreen = !paneChatOn(other);
+      // What a conversation standing by default costs at rest: a pane whose agent waits is read
+      // when a hook says something moved, not once a second; one at work is followed.
+      const quiet = await openTermTab({ placement: "tab" });
+      await window.__PAINTED__();
+      tell("hook:agent", { term: quiet, state: "idle", agent: "claude", session: { id: "s-head-0003" }, resumable: true });
+      await window.__PAINTED__();
+      await settle();
+      seen.quietChat = paneChatOn(quiet);
+      const atRest = reads.get(quiet) ?? 0;
+      await new Promise((done) => setTimeout(done, 3200));
+      seen.quietReads = (reads.get(quiet) ?? 0) - atRest;
+      tell("hook:agent", { term: quiet, state: "working", agent: "claude", session: { id: "s-head-0003" }, resumable: true });
+      await window.__PAINTED__();
+      const atWork = reads.get(quiet) ?? 0;
+      await new Promise((done) => setTimeout(done, 2600));
+      seen.workingReads = (reads.get(quiet) ?? 0) - atWork;
+      tell("hook:agent", { term: quiet, state: "idle", agent: "claude", session: { id: "s-head-0003" }, resumable: true });
+      await window.__PAINTED__();
+      await settle();
+      const atEnd = reads.get(quiet) ?? 0;
+      await new Promise((done) => setTimeout(done, 2200));
+      seen.endedReads = (reads.get(quiet) ?? 0) - atEnd;
       return seen;
     }, TRANSCRIPT);
     ok(
@@ -122,8 +158,19 @@ export async function testPaneHead(browser, origin, ok) {
     ok(
       "the pane reads as its conversation by default, without a hand-over, and the person's pick of the screen survives the next hook",
       seen.chatByDefault && seen.chatPressed === "true" && seen.wires === 0 && seen.chatShown &&
-        seen.whoHiddenInChat && seen.screenKept && seen.whoShownOnScreen && seen.askOnScreen,
+        seen.screenKept && seen.whoShownOnScreen && seen.askOnScreen,
       JSON.stringify(seen),
+    );
+    ok(
+      "the conversation wears one head line holding who, the model, the conversation's line and the 대화 | 터미널 switch; the screen wears the pane's",
+      seen.headLinesInChat === 1 && seen.oneLineHolds && seen.switchOrder === "view-toggle-chat,view-toggle-term" &&
+        seen.headLinesOnScreen === 1 && seen.screenLineHolds,
+      JSON.stringify(seen),
+    );
+    ok(
+      "a conversation standing by default reads nothing while its agent waits, follows it while it works, and stops again when the turn ends",
+      seen.quietChat && seen.quietReads === 0 && seen.workingReads >= 2 && seen.endedReads === 0,
+      JSON.stringify({ quietChat: seen.quietChat, quietReads: seen.quietReads, workingReads: seen.workingReads, endedReads: seen.endedReads }),
     );
     ok(
       "the answer reads at Geist 16 on 24 in one column of at most 760 px, code in a fixed-width chip, and the composer floats under that column",
