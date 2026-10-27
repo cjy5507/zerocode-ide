@@ -16578,6 +16578,258 @@ fn the_second_brain_report_carries_the_saved_vaults_daily_ingest() {
     );
 }
 
+/// 2026-11-01, a Sunday, at 06:00 — local minutes, the scheduler's clock.
+const WEEKLY_REVIEW_SUNDAY: i64 = 20_758 * 1440 + 6 * 60;
+
+/// The weekly review's job for `vault`, as the store holds it.
+fn weekly_review_job_in(config_root: &Path, vault: &Path) -> Option<Automation> {
+    stored_automations(config_root).into_iter().find(|job| {
+        job.id == zerocode_core::second_brain::WEEKLY_REVIEW_AUTOMATION_ID
+            && Path::new(&job.workspace) == vault
+    })
+}
+
+/// Switched on, the weekly review is a window job (t-77377): zo, in the
+/// vault, on the skill's prompt, its pane closed once the turn ends — and at
+/// Sunday 06:00 by the machine's clock the scheduler finds it due. The zo
+/// cron record it used to be fired only while a zo pane sat idle in the
+/// vault, and nobody keeps one there: it never opened a turn. A machine
+/// asleep at six still owes that week's review when it wakes the same day,
+/// and not after. Switching on again leaves one job and keeps its last run.
+#[test]
+fn weekly_review_switched_on_is_a_window_job_due_in_the_vault_on_sunday_morning() {
+    let config = tempfile::tempdir().expect("config root");
+    let local = tempfile::tempdir().expect("local data");
+    let vault = tempfile::tempdir().expect("vault");
+    cmd::second_brain::set_weekly_review_in(config.path(), local.path(), vault.path(), true)
+        .expect("switch on");
+
+    let job = weekly_review_job_in(config.path(), vault.path())
+        .expect("switching on wrote no window job for the vault");
+    assert_eq!(
+        (job.enabled, job.agent.as_deref(), job.close_when_done),
+        (true, Some("zo"), true),
+        "{job:?}"
+    );
+    assert_eq!(job.workspace_mode, zerocode_core::WorkspaceMode::Existing);
+    assert_eq!(job.prompt, zerocode_core::second_brain::weekly_review_prompt(vault.path()));
+    assert!(job.armed_at.is_some(), "switching on did not arm the job");
+
+    let at = |epoch_minutes| LocalMinute { epoch_minutes };
+    assert!(job.is_due(at(WEEKLY_REVIEW_SUNDAY)), "not due at Sunday 06:00");
+    assert!(!job.is_due(at(WEEKLY_REVIEW_SUNDAY + 1)));
+    assert!(!job.is_due(at(WEEKLY_REVIEW_SUNDAY - 24 * 60)), "due on Saturday");
+    assert_eq!(
+        job.missed_run(at(WEEKLY_REVIEW_SUNDAY + 4 * 60)),
+        Some(at(WEEKLY_REVIEW_SUNDAY)),
+        "a machine woken at ten lost that week's review"
+    );
+    assert_eq!(
+        job.missed_run(at(WEEKLY_REVIEW_SUNDAY + 24 * 60 + 1)),
+        None,
+        "a review more than a day late was still made up"
+    );
+
+    // As the scheduler leaves it once that Sunday's review has run.
+    let mut rows = stored_automations(config.path());
+    rows[0].last_run_at = Some(WEEKLY_REVIEW_SUNDAY);
+    write_automations(config.path(), &rows).expect("a run consumed");
+    cmd::second_brain::set_weekly_review_in(config.path(), local.path(), vault.path(), true)
+        .expect("switch on again");
+    let rows = stored_automations(config.path());
+    assert_eq!(rows.len(), 1, "switching on twice left two jobs");
+    assert_eq!(
+        rows[0].last_run_at,
+        Some(WEEKLY_REVIEW_SUNDAY),
+        "switching on again forgot the run"
+    );
+}
+
+/// Switched off, the review's job goes, and its history with it: a job left
+/// in the list would still fire, and its rows would belong to nothing the
+/// card can turn back on (t-77377). The person's other jobs, and their
+/// history, stay.
+#[test]
+fn weekly_review_switched_off_takes_its_job_and_history_and_leaves_the_rest() {
+    let config = tempfile::tempdir().expect("config root");
+    let local = tempfile::tempdir().expect("local data");
+    let vault = tempfile::tempdir().expect("vault");
+    let vault_path = vault.path().to_string_lossy().into_owned();
+    let review = zerocode_core::second_brain::WEEKLY_REVIEW_AUTOMATION_ID;
+    write_automations(
+        config.path(),
+        &[
+            vault_job("ingest", &vault_path, INGEST_PROMPT, true, None),
+            vault_job(review, &vault_path, "주간 리뷰", true, Some(WEEKLY_REVIEW_SUNDAY)),
+        ],
+    )
+    .expect("two jobs");
+    let run = |automation_id: &str| AutomationRun {
+        id: format!("{automation_id}-run"),
+        automation_id: automation_id.to_string(),
+        scheduled_for_epoch_minutes: Some(WEEKLY_REVIEW_SUNDAY),
+        at_epoch_ms: WEEKLY_REVIEW_SUNDAY * 60_000,
+        root: vault_path.clone(),
+        term: 1,
+        made_worktree: None,
+        skipped: None,
+        failure: None,
+        missed: None,
+        ended_at_epoch_ms: None,
+        exit_code: None,
+        completed_at_epoch_ms: None,
+        result: None,
+        evidence_dir: None,
+        launch: None,
+        unwitnessed: false,
+    };
+    write_automation_runs(local.path(), &[run("ingest"), run(review)]).expect("history");
+
+    cmd::second_brain::set_weekly_review_in(config.path(), local.path(), vault.path(), false)
+        .expect("switch off");
+    let jobs: Vec<String> = stored_automations(config.path())
+        .into_iter()
+        .map(|job| job.id)
+        .collect();
+    assert_eq!(jobs, ["ingest"], "switching off left the review's job, or took another");
+    let history: Vec<String> = stored_automation_runs(local.path())
+        .into_iter()
+        .map(|row| row.automation_id)
+        .collect();
+    assert_eq!(
+        history,
+        ["ingest"],
+        "switching off left the review's history, or took another's"
+    );
+}
+
+/// The card's weekly-review line is the job's own standing (t-77377): held
+/// for the saved vault or not, on or not, when it runs next and when it last
+/// ran — the scheduler's clock, so the card and the automation list agree. A
+/// job still pointed at another vault is not this vault's review. The report
+/// carries the line only while the switch is on, and runs no process for it.
+#[test]
+fn weekly_review_card_line_is_the_jobs_next_and_last_run() {
+    use cmd::second_brain::{WeeklyReviewReceipt, weekly_review_status};
+    let vault = Path::new("/Users/me/Knowledge");
+    let now = LocalMinute {
+        epoch_minutes: WEEKLY_REVIEW_SUNDAY + 60,
+    };
+    let held = |workspace: &str, enabled: bool| Automation {
+        schedule: zerocode_core::second_brain::weekly_review_schedule(),
+        ..vault_job(
+            zerocode_core::second_brain::WEEKLY_REVIEW_AUTOMATION_ID,
+            workspace,
+            "주간 리뷰",
+            enabled,
+            Some(WEEKLY_REVIEW_SUNDAY),
+        )
+    };
+    assert_eq!(
+        weekly_review_status(vault, &[held("/Users/me/Knowledge", true)], now),
+        WeeklyReviewReceipt {
+            registered: true,
+            enabled: true,
+            next_run_at: Some(WEEKLY_REVIEW_SUNDAY + 7 * 24 * 60),
+            last_run_at: Some(WEEKLY_REVIEW_SUNDAY),
+        },
+        "the line does not say the run the job made and the one it will make"
+    );
+    assert_eq!(
+        weekly_review_status(vault, &[held("/Users/me/Knowledge", false)], now),
+        WeeklyReviewReceipt {
+            registered: true,
+            enabled: false,
+            next_run_at: None,
+            last_run_at: Some(WEEKLY_REVIEW_SUNDAY),
+        },
+        "a job switched off on the automation screen still promises a run"
+    );
+    assert!(
+        !weekly_review_status(vault, &[held("/Users/me/Old", true)], now).registered,
+        "another vault's job was taken for this vault's review"
+    );
+
+    let home = tempfile::tempdir().expect("home");
+    let config = tempfile::tempdir().expect("config root");
+    let local = tempfile::tempdir().expect("local data");
+    let saved = tempfile::tempdir().expect("vault");
+    cmd::second_brain::set_weekly_review_in(config.path(), local.path(), saved.path(), true)
+        .expect("switch on");
+    let report = |switch: bool| {
+        serde_json::to_value(cmd::second_brain::second_brain_report(
+            home.path(),
+            config.path(),
+            saved.path().to_string_lossy().into_owned(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            switch,
+        ))
+        .expect("report as json")
+    };
+    let on = report(true);
+    assert_eq!(on["weekly_review"]["registered"], true, "{on}");
+    assert!(on["weekly_review"]["next_run_at"].is_i64(), "{on}");
+    assert!(on["weekly_review"]["last_run_at"].is_null(), "{on}");
+    let off = report(false);
+    assert!(off["weekly_review"].is_null(), "{off}");
+}
+
+/// A switch an older build turned on stood for a zo cron record that never
+/// fired; at boot the window moves it to a job of its own, once (t-77377).
+/// A job already standing is left as the person may have edited it — not
+/// written again, its last run kept — and one still pointed at a vault that
+/// is no longer the saved one is pointed at this one.
+#[test]
+fn weekly_review_left_on_by_an_older_build_becomes_a_window_job_once_at_boot() {
+    let config = tempfile::tempdir().expect("config root");
+    let vault = tempfile::tempdir().expect("vault");
+    let adopt = |vault: &Path| {
+        cmd::second_brain::adopt_weekly_review_in(config.path(), vault).expect("adopt")
+    };
+    assert!(adopt(vault.path()), "a switch left on found no job and made none");
+    let made = weekly_review_job_in(config.path(), vault.path()).expect("no job after adoption");
+
+    let mut rows = stored_automations(config.path());
+    rows[0].last_run_at = Some(WEEKLY_REVIEW_SUNDAY);
+    rows[0].schedule.time = "07:30".to_string();
+    write_automations(config.path(), &rows).expect("ran, and edited by hand");
+    assert!(!adopt(vault.path()), "a boot with the job standing wrote it again");
+    let kept = weekly_review_job_in(config.path(), vault.path()).expect("job");
+    assert_eq!(
+        (kept.armed_at, kept.last_run_at, kept.schedule.time.as_str()),
+        (made.armed_at, Some(WEEKLY_REVIEW_SUNDAY), "07:30")
+    );
+
+    let moved = tempfile::tempdir().expect("the vault saved since");
+    assert!(adopt(moved.path()), "a job left on the old vault was kept there");
+    let rows = stored_automations(config.path());
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(Path::new(&rows[0].workspace), moved.path());
+    assert_eq!(
+        rows[0].prompt,
+        zerocode_core::second_brain::weekly_review_prompt(moved.path())
+    );
+}
+
+/// The card's switch writes the window's job and no zo cron record, and the
+/// boot road moves a switch an older build left on (t-77377).
+#[test]
+fn weekly_review_switch_and_boot_go_through_the_window_store() {
+    let source = shipped_backend();
+    let switch = block_after(source, "async fn set_second_brain_weekly_review(");
+    assert!(
+        switch.contains("set_weekly_review_in(") && !switch.contains("\"ensure\""),
+        "the switch still registers a zo cron record:\n{switch}"
+    );
+    let boot = block_after(source, "fn relink_saved_vault_at_boot(");
+    assert!(
+        boot.contains("adopt_weekly_review_in("),
+        "boot leaves a switch an older build turned on without a job:\n{boot}"
+    );
+}
+
 #[test]
 fn second_brain_quick_commands_are_added_once_and_scoped_to_the_vault() {
     let config = tempfile::tempdir().unwrap();

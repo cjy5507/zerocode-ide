@@ -143,6 +143,44 @@ fn review_cron_status(saved: &str, enabled: bool) -> Option<ReviewCronReceipt> {
     })
 }
 
+/// The weekly review's job as the card shows it (t-77377).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct WeeklyReviewReceipt {
+    pub(crate) registered: bool,
+    pub(crate) enabled: bool,
+    pub(crate) next_run_at: Option<i64>,
+    pub(crate) last_run_at: Option<i64>,
+}
+
+pub(crate) fn weekly_review_status(
+    vault: &Path,
+    automations: &[Automation],
+    now: LocalMinute,
+) -> WeeklyReviewReceipt {
+    let _ = (vault, automations, now);
+    WeeklyReviewReceipt {
+        registered: false,
+        enabled: false,
+        next_run_at: None,
+        last_run_at: None,
+    }
+}
+
+pub(crate) fn set_weekly_review_in(
+    config_root: &Path,
+    local_data_root: &Path,
+    vault: &Path,
+    enabled: bool,
+) -> Result<(), String> {
+    let _ = (config_root, local_data_root, vault, enabled);
+    Ok(())
+}
+
+pub(crate) fn adopt_weekly_review_in(config_root: &Path, vault: &Path) -> Result<bool, String> {
+    let _ = (config_root, vault);
+    Ok(false)
+}
+
 /// Turn the weekly review on or off: the vault's zo cron registry first
 /// (through `zo cron ensure` / `zo cron remove`), the setting only once that
 /// succeeded — a switch that reads "on" while no record stands would be the

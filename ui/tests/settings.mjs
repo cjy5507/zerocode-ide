@@ -899,7 +899,7 @@ class StatefulBackend {
         { agent: "codex", label: "Codex", path: "/Users/fixture/.codex/AGENTS.md",
           state: "missing", detail: "" },
       ],
-      // 주간 리뷰 cron — 스위치는 설정, 영수증은 볼트의 zo 등록부의 답.
+      // 주간 리뷰 — 스위치는 설정, 영수증은 창 자동화 목록이 그 일을 든 모습.
       weekly_review_enabled: false,
       weekly_review: null,
     };
@@ -1574,24 +1574,16 @@ class StatefulBackend {
         keys = ["skip_delete_automation_confirm"];
         break;
       case "set_second_brain_weekly_review": {
-        // The backend registers with `zo cron` first and writes the setting
-        // only then; the fixture answers what the vault's registry would.
+        // The backend writes the window's job first (t-77377) and the
+        // setting only then; the fixture answers what the store would hold:
+        // a job that has not run yet, due the coming Sunday at 06:00.
         const enabled = args.enabled === true;
         this.settings.second_brain_weekly_review = enabled;
         this.secondBrain = {
           ...this.secondBrain,
           weekly_review_enabled: enabled,
           weekly_review: enabled
-            ? {
-                registered: true,
-                cron_id: "cron_fixture_1",
-                schedule: "0 21 * * 6",
-                next_due_at: 1_800_000_000,
-                scheduler: "session_idle",
-                registry: "/Users/fixture/Knowledge/.zo/registries/crons.json",
-                outcome: "created",
-                error: null,
-              }
+            ? { registered: true, enabled: true, next_run_at: 29_891_880, last_run_at: null }
             : null,
         };
         keys = ["second_brain_weekly_review"];
@@ -13414,10 +13406,10 @@ await test("Second Brain detects, sets up, registers, and seeds its recurring wo
   );
   backend.secondBrainLinkFailure = null;
 
-  // 주간 리뷰를 zo cron 턴으로 — 스위치는 저장된 볼트가 있어야 살고, 켜면
-  // 백엔드가 `zo cron ensure`로 볼트의 등록부에 기록을 앉힌 뒤 설정을 쓰며,
-  // 카드는 상태를 다시 물어 영수증 줄에 스케줄러의 이름과 스케줄을 적는다.
-  // 끄면 기록이 걷히고 줄이 사라진다.
+  // 주간 리뷰를 창 자동화로(t-77377) — 스위치는 저장된 볼트가 있어야 살고, 켜면
+  // 백엔드가 볼트에서 zo로 도는 창의 일을 자동화 목록에 쓴 뒤 설정을 쓰며, 카드는
+  // 상태를 다시 물어 영수증 줄에 그 일의 다음·마지막 실행을 적는다. 끄면 일이
+  // 걷히고 줄이 사라진다.
   const switchOn = backend.calls.length;
   assert(
     await pageB.evaluate(() => document.getElementById("second-brain-weekly-review")?.disabled === false),
@@ -13425,36 +13417,59 @@ await test("Second Brain detects, sets up, registers, and seeds its recurring wo
   );
   await pageB.click("#second-brain-weekly-review");
   const turnedOn = await backend.waitForCall("B", "set_second_brain_weekly_review", switchOn);
-  assertEqual(turnedOn.args, { enabled: true }, "the switch did not ask to register the cron");
+  assertEqual(turnedOn.args, { enabled: true }, "the switch did not ask to write the review's job");
   await backend.waitForCall("B", "second_brain_status", switchOn);
-  await pageB.waitForFunction(() =>
+  const nextRun = await pageB.evaluate(() => localMinuteText(29_891_880));
+  await pageB.waitForFunction((next) =>
     document.getElementById("second-brain-weekly-review-receipt")?.hidden === false
-      && document.getElementById("second-brain-weekly-review-receipt").textContent.includes("session_idle"));
+      && document.getElementById("second-brain-weekly-review-receipt").textContent.includes(next),
+  nextRun, { timeout: 5_000 }).catch(() => {});
   const receipt = await pageB.evaluate(() => ({
     line: document.getElementById("second-brain-weekly-review-receipt").textContent,
     expected: t(
       "settings.secondBrain.reviewRegistered",
-      "{{scheduler}} 스케줄러에 등록됨 · {{schedule}} (UTC) · 다음 실행 {{when}}",
-      { scheduler: "session_idle", schedule: "0 21 * * 6", when: new Date(1_800_000_000 * 1000).toLocaleString() },
+      "창 자동화로 등록됨 · 다음 실행 {{next}} · 마지막 실행 {{last}}",
+      { next: localMinuteText(29_891_880), last: t("settings.secondBrain.reviewNever", "아직 없음") },
     ),
     checked: document.getElementById("second-brain-weekly-review").checked,
   }));
   assertEqual(
     [receipt.line, receipt.checked, backend.settings.second_brain_weekly_review],
     [receipt.expected, true, true],
-    "the receipt line does not name the scheduler and the schedule the registry answered",
+    "the receipt line does not say when the review's job runs next and last ran",
+  );
+  // 자동화 목록에서 꺼 둔 일은 그렇다고 말한다 — 켜진 스위치가 열리지 않을 턴을
+  // 약속하지 않는다.
+  backend.secondBrain = {
+    ...backend.secondBrain,
+    weekly_review: { registered: true, enabled: false, next_run_at: null, last_run_at: 29_891_880 },
+  };
+  const pausedAt = backend.calls.length;
+  await pageB.click("#second-brain-refresh");
+  await backend.waitForCall("B", "second_brain_status", pausedAt);
+  const pausedText = await pageB.evaluate(() => t(
+    "settings.secondBrain.reviewPaused",
+    "자동화 목록에서 꺼져 있습니다 · 거기서 켜거나 스위치를 껐다 다시 켜 주세요",
+  ));
+  await pageB.waitForFunction((text) =>
+    document.getElementById("second-brain-weekly-review-receipt")?.textContent === text,
+  pausedText, { timeout: 5_000 }).catch(() => {});
+  assertEqual(
+    await pageB.evaluate(() => document.getElementById("second-brain-weekly-review-receipt").textContent),
+    pausedText,
+    "a review switched off on the automation screen still reads as scheduled",
   );
   const switchOff = backend.calls.length;
   await pageB.click("#second-brain-weekly-review");
   const turnedOff = await backend.waitForCall("B", "set_second_brain_weekly_review", switchOff);
-  assertEqual(turnedOff.args, { enabled: false }, "the switch did not ask to remove the cron");
+  assertEqual(turnedOff.args, { enabled: false }, "the switch did not ask to take the review's job away");
   await pageB.waitForFunction(() =>
     document.getElementById("second-brain-weekly-review-receipt")?.hidden === true
       && document.getElementById("second-brain-weekly-review").checked === false);
   assertEqual(backend.settings.second_brain_weekly_review, false, "switching off did not clear the setting");
-  // A refusal (no zo, a zo too old for `cron`, a refused schedule) rolls the
+  // A refusal (no saved vault, a store that cannot be written) rolls the
   // switch back to what the document says: a switch reading "on" while no
-  // record stands would be the card promising a turn zo never opens.
+  // job stands would be the card promising a turn nobody opens.
   backend.rejectOnce("set_second_brain_weekly_review");
   const refusedAt = backend.calls.length;
   await pageB.click("#second-brain-weekly-review");

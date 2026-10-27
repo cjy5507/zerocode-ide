@@ -135,6 +135,18 @@ pub const WEEKLY_REVIEW_CRON_MARKER: &str = "zerocode:second-brain:weekly-review
 /// quiet hour before the week's first session.
 pub const WEEKLY_REVIEW_SCHEDULE: &str = "0 21 * * 6";
 
+/// The weekly review's job in the window's automation list (t-77377): its
+/// id, which is how the switch finds the job again and the folder its
+/// evidence would be filed under — so no colon, which no Windows folder
+/// name may carry.
+pub const WEEKLY_REVIEW_AUTOMATION_ID: &str = "second-brain-weekly-review";
+
+/// When the window runs the weekly review.
+#[must_use]
+pub fn weekly_review_schedule() -> crate::automation::Schedule {
+    crate::automation::Schedule::default()
+}
+
 /// The turn the cron opens — the skill's 「주간 리뷰」 for an absent person:
 /// read the week's log, find what the review looks for, fix links and the
 /// index only, leave one log line, ask nothing. `vault` is written in so the
@@ -717,6 +729,16 @@ mod tests {
         assert!(prompt.contains(WIKI_LOG_FILE) && prompt.contains(WIKI_INDEX_FILE));
         // Five fields, and a real minute: what zo's registry validates.
         assert_eq!(WEEKLY_REVIEW_SCHEDULE.split_whitespace().count(), 5);
+    }
+
+    /// The window runs the review at six on Sunday morning by the machine's
+    /// own clock (t-77377) — the zo registry it replaces matched UTC and
+    /// spelled that hour for Seoul alone — under an id that is a folder
+    /// name everywhere.
+    #[test]
+    fn the_weekly_review_runs_at_six_on_sunday_by_the_machines_clock() {
+        assert_eq!(weekly_review_schedule().to_cron(), "0 6 * * 0");
+        assert!(!WEEKLY_REVIEW_AUTOMATION_ID.contains([':', '/', '\\']));
     }
 
     #[test]
