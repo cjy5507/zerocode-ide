@@ -22,6 +22,13 @@ const NOW: i64 = 1_791_940_000_000;
 /// How long a test waits for a record the window writes in the background.
 const RECORD_WAIT: Duration = Duration::from_secs(60);
 
+/// The default policy's promote and answer budgets: past any git these fixtures run, however
+/// loaded the machine, so a test's answer is what git did and never how fast it did it. Under a
+/// loaded gate a main-moved promote's fast-forward outlived the real 5 s and the press said
+/// "still promoting" (l81a, 2026-10-27). The budgets are the subject only of the tests that set
+/// short ones.
+const OUT_OF_REACH: Duration = Duration::from_secs(600);
+
 fn git(dir: &Path, args: &[&str]) -> String {
     let output = lock_free_git(crate::proc::quiet_command("git"))
         .arg("-C")
@@ -188,8 +195,8 @@ fn on() -> Policy {
         enabled: true,
         pinned_base: None,
         git_budget: GIT_BUDGET,
-        promote_budget: PROMOTE_GIT_BUDGET,
-        answer_budget: ANSWER_BUDGET,
+        promote_budget: OUT_OF_REACH,
+        answer_budget: OUT_OF_REACH,
         git: PathBuf::from("git"),
     }
 }

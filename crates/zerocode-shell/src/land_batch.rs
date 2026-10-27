@@ -113,10 +113,10 @@ pub(crate) struct Policy {
     pub(crate) pinned_base: Option<String>,
     /// The budget of each git call: [`GIT_BUDGET`], or a shorter one a test injects.
     pub(crate) git_budget: Duration,
-    /// [`PROMOTE_GIT_BUDGET`], or a shorter one a test injects to outlive.
+    /// [`PROMOTE_GIT_BUDGET`], or one a test injects: shorter to outlive, or out of reach.
     pub(crate) promote_budget: Duration,
     /// How long a press on promote waits for its end before it answers "still promoting":
-    /// [`ANSWER_BUDGET`], or a shorter one a test injects.
+    /// [`ANSWER_BUDGET`], or one a test injects: shorter, or out of reach.
     pub(crate) answer_budget: Duration,
     /// The git a fast-forward runs: `git`, or a test's slow or meddling stand-in.
     pub(crate) git: PathBuf,
