@@ -1594,9 +1594,12 @@ impl Drop for PtyLane {
 /// The most times a lane asks for a pty before the failure is its answer.
 ///
 /// Each ask is a whole round of the kernel's own retry (see
-/// [`PTY_OPEN_PASSING_ERRORS`]), so five rounds is fifty reopens of
-/// `/dev/ptmx` — far past a race between a handful of opens, and still a
-/// prompt answer for an error that does not pass.
+/// [`PTY_OPEN_PASSING_ERRORS`]) — the open and its ten reopens — so five
+/// rounds is fifty-five opens of `/dev/ptmx`: far past a race between a
+/// handful of opens, and still a prompt answer for an error that does not
+/// pass. A round the race never lets go of sleeps 0.4 s in the kernel
+/// (10 ms times the sixth to the tenth reopen), so the worst a pane waits
+/// is about 2 s, against 0.4 s with one ask.
 const PTY_OPEN_ATTEMPTS: usize = 5;
 
 /// XNU's in-kernel "redrive open" (`bsd/sys/errno.h`), which `libc` does
@@ -1608,17 +1611,17 @@ const EREDRIVEOPEN: i32 = -6;
 /// The `errno`s that say a pty open lost a race and may be asked again,
 /// rather than that there is no pty to be had.
 ///
-/// `/dev/ptmx` picks a free minor number before
-/// it takes the lock that claims it (`ptmx_clone`, `bsd/kern/tty_ptmx.c`),
-/// so two opens at once can be handed the same one; the loser's `ptcopen`
-/// answers [`EREDRIVEOPEN`] (`bsd/kern/tty_dev.c`). `vn_open_auth` reopens
-/// on it ten times, pausing from the sixth, and only then lets it out —
-/// which is how gate l81e read `Os { code: -6 }` from `openpty` while a
-/// second test binary opened ptys alongside it. `ENXIO` is the same
-/// driver's answer when it cannot set the pair up (also its answer to a
-/// full pty table, where five quick asks cost nothing), and `EAGAIN` the
-/// replica's while the pair is not yet unlocked. Anything else — `EMFILE`,
-/// `EACCES` — is the answer at once.
+/// `/dev/ptmx` picks a free minor number under one hold of `DEVFS_LOCK`
+/// (`ptmx_clone`, `bsd/kern/tty_ptmx.c`) and claims it under another
+/// (`ptcopen`), so two opens at once can be handed the same one; the
+/// loser's `ptcopen` answers [`EREDRIVEOPEN`] (`bsd/kern/tty_dev.c`).
+/// `vn_open_auth` reopens on it ten times, pausing from the sixth, and
+/// only then lets it out — which is how gate l81e read `Os { code: -6 }`
+/// from `openpty` while a second test binary opened ptys alongside it.
+/// `ENXIO` is the same driver's answer when it cannot set the pair up
+/// (also its answer to a full pty table, where five quick asks cost
+/// nothing), and `EAGAIN` the replica's while the pair is not yet
+/// unlocked. Anything else — `EMFILE`, `EACCES` — is the answer at once.
 #[cfg(unix)]
 const PTY_OPEN_PASSING_ERRORS: [i32; 3] = [EREDRIVEOPEN, libc::ENXIO, libc::EAGAIN];
 /// ConPTY reports no `errno`; nothing is asked twice.
@@ -3016,28 +3019,39 @@ mod open_tests {
     use std::io;
     use std::rc::Rc;
 
-    /// A pty system that fails its first `failures` opens with `errno`,
-    /// worded exactly as `portable_pty` words a failed `openpty`
-    /// (`src/unix.rs`, `bail!("failed to openpty: {:?}", …)`), and opens
-    /// after that. It counts every ask.
-    fn opens_after(
-        failures: usize,
-        errno: i32,
+    /// `errno` worded exactly as `portable_pty` words a failed `openpty`
+    /// (`src/unix.rs`, `bail!("failed to openpty: {:?}", …)`).
+    fn worded(errno: i32) -> String {
+        format!(
+            "failed to openpty: {:?}",
+            io::Error::from_raw_os_error(errno)
+        )
+    }
+
+    /// A pty system whose `n`th ask (from 1) fails with `failure(n)`, and
+    /// opens where that is `None`. It counts every ask.
+    fn pty_system(
+        failure: impl Fn(usize) -> Option<String>,
     ) -> (impl FnMut() -> Result<(), String>, Rc<Cell<usize>>) {
         let asked = Rc::new(Cell::new(0));
         let counted = Rc::clone(&asked);
         let open = move || {
             counted.set(counted.get() + 1);
-            if counted.get() <= failures {
-                Err(format!(
-                    "failed to openpty: {:?}",
-                    io::Error::from_raw_os_error(errno)
-                ))
-            } else {
-                Ok(())
+            match failure(counted.get()) {
+                Some(reason) => Err(reason),
+                None => Ok(()),
             }
         };
         (open, asked)
+    }
+
+    /// A pty system that fails its first `failures` opens with `errno`, and
+    /// opens after that.
+    fn opens_after(
+        failures: usize,
+        errno: i32,
+    ) -> (impl FnMut() -> Result<(), String>, Rc<Cell<usize>>) {
+        pty_system(move |n| (n <= failures).then(|| worded(errno)))
     }
 
     /// A pty lost to another open at the same moment is asked for again,
@@ -3081,5 +3095,38 @@ mod open_tests {
             "{reason}"
         );
         assert_eq!(asked.get(), PTY_OPEN_ATTEMPTS);
+    }
+
+    /// A race that turns into an error asking will not change ends there,
+    /// with that error.
+    #[test]
+    fn a_race_that_turns_into_a_lasting_error_ends_there() {
+        let (open, asked) =
+            pty_system(|n| Some(worded(if n <= 2 { EREDRIVEOPEN } else { libc::EMFILE })));
+        let Err(PtyError::Open(reason)) = open_pty(open) else {
+            panic!("opened, or failed as something else");
+        };
+        assert!(
+            reason.contains(&format!("code: {},", libc::EMFILE)),
+            "{reason}"
+        );
+        assert_eq!(asked.get(), 3);
+    }
+
+    /// A failure worded any other way — here the pretty `Debug` of the
+    /// very errno a race answers — is not asked again and comes back as it
+    /// was: a reworded dependency costs the retry, not the error.
+    #[test]
+    fn a_failure_worded_otherwise_is_not_asked_again() {
+        let reworded = format!(
+            "failed to openpty: {:#?}",
+            io::Error::from_raw_os_error(EREDRIVEOPEN)
+        );
+        let (open, asked) = pty_system(|_| Some(reworded.clone()));
+        let Err(PtyError::Open(reason)) = open_pty(open) else {
+            panic!("opened, or failed as something else");
+        };
+        assert_eq!(reason, reworded);
+        assert_eq!(asked.get(), 1);
     }
 }
