@@ -1630,30 +1630,48 @@ const PTY_OPEN_PASSING_ERRORS: [i32; 3] = [EREDRIVEOPEN, libc::ENXIO, libc::EAGA
 const PTY_OPEN_PASSING_ERRORS: [i32; 0] = [];
 
 /// Ask `open` for a pty pair, again while it fails with an error in
-/// [`PTY_OPEN_PASSING_ERRORS`], at most [`PTY_OPEN_ATTEMPTS`] times.
+/// `PTY_OPEN_PASSING_ERRORS`, at most `PTY_OPEN_ATTEMPTS` times.
 ///
-/// `open` is the platform's own pty system in a lane, and a stand-in that
-/// fails the way a kernel does in the tests below. No pause between asks:
-/// the kernel already paused inside each failed one, and a pause here
-/// would only hold up the window that is opening the pane. A yield hands
-/// the processor to the open this one raced, which is what clears it.
-fn open_pty<P, E: std::fmt::Display>(
+/// `errno_of` reads the `errno` out of whatever error `open` fails with:
+/// the raw `io::Error::raw_os_error` for a caller that opens with
+/// `libc::openpty` itself, the text of a `portable_pty` failure for a lane
+/// (`open_pty`). The set of `errno`s and the bound are this one's, so no
+/// caller restates them. The last error comes back as it was.
+///
+/// No pause between asks: the kernel already paused inside each failed
+/// one, and a pause here would only hold up the window that is opening
+/// the pane. A yield hands the processor to the open this one raced, which
+/// is what clears it.
+pub fn ask_for_pty<P, E>(
     mut open: impl FnMut() -> Result<P, E>,
-) -> Result<P, PtyError> {
+    errno_of: impl Fn(&E) -> Option<i32>,
+) -> Result<P, E> {
     let mut asked = 1;
     loop {
-        let reason = match open() {
+        let error = match open() {
             Ok(pair) => return Ok(pair),
-            Err(error) => error.to_string(),
+            Err(error) => error,
         };
-        let passing =
-            os_error_code(&reason).is_some_and(|code| PTY_OPEN_PASSING_ERRORS.contains(&code));
+        let passing = errno_of(&error).is_some_and(|code| PTY_OPEN_PASSING_ERRORS.contains(&code));
         if !passing || asked == PTY_OPEN_ATTEMPTS {
-            return Err(PtyError::Open(reason));
+            return Err(error);
         }
         asked += 1;
         std::thread::yield_now();
     }
+}
+
+/// [`ask_for_pty`] for the platform's own pty system in a lane, whose
+/// failure carries its `errno` only as text, and for the stand-in that
+/// fails the way a kernel does in the tests below.
+fn open_pty<P, E: std::fmt::Display>(
+    mut open: impl FnMut() -> Result<P, E>,
+) -> Result<P, PtyError> {
+    ask_for_pty(
+        || open().map_err(|error| error.to_string()),
+        |reason| os_error_code(reason),
+    )
+    .map_err(PtyError::Open)
 }
 
 /// The `errno` in a `portable_pty` open failure.

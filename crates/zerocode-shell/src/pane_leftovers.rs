@@ -1496,13 +1496,17 @@ mod tests {
         assert!(!root.path().join(LEFT_FILE).exists());
     }
 
-    /// A terminal hangs up when its master closes, and not before
-    /// (t-77414): a leftover that ignored the window's hangup still holds
-    /// its terminal, and this is what tells that terminal from a live one.
-    /// A real pty, no process signalled.
+    /// How long a terminal may take to hang up after its last master
+    /// closed: spent in full only by a failure.
     #[cfg(target_os = "macos")]
-    #[test]
-    fn a_terminal_hangs_up_when_its_master_closes() {
+    const HANGUP_PATIENCE: Duration = Duration::from_secs(10);
+    /// The pause between two looks at a terminal that has not hung up.
+    #[cfg(target_os = "macos")]
+    const HANGUP_PROBE_PAUSE: Duration = Duration::from_millis(10);
+
+    /// One `openpty`, the descriptors it opened or the error it set.
+    #[cfg(target_os = "macos")]
+    fn raw_openpty() -> std::io::Result<(libc::c_int, libc::c_int)> {
         let (mut master, mut slave) = (-1, -1);
         // SAFETY: `openpty` writes the two descriptors; no name, settings
         // or size is asked for.
@@ -1515,7 +1519,130 @@ mod tests {
                 std::ptr::null_mut(),
             )
         };
-        assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
+        if opened == 0 {
+            // `openpty` leaves both ends open across an exec, as `portable_pty`
+            // does not: a child another test starts in between would inherit
+            // the master and hold the terminal open past its close.
+            for fd in [master, slave] {
+                // SAFETY: `fcntl` sets a flag on a descriptor opened above.
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+            }
+            Ok((master, slave))
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    /// A pty pair from `open`, as the test opens one: asked again where a
+    /// concurrent open took the pty (`zerocode_pty::ask_for_pty` owns which
+    /// errors and how often).
+    #[cfg(target_os = "macos")]
+    fn open_pair(
+        open: impl FnMut() -> std::io::Result<(libc::c_int, libc::c_int)>,
+    ) -> std::io::Result<(libc::c_int, libc::c_int)> {
+        zerocode_pty::ask_for_pty(open, std::io::Error::raw_os_error)
+    }
+
+    /// The test's pty open survives a concurrent open taking the pty it
+    /// was about to get (t-77996 review P3-5): two `-6`s from the kernel,
+    /// then a pair. Counted asks, no clock, no load.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_tests_pty_open_survives_a_lost_race() {
+        let mut asked = 0;
+        let pair = open_pair(|| {
+            asked += 1;
+            if asked <= 2 {
+                return Err(std::io::Error::from_raw_os_error(-6));
+            }
+            Ok((7, 8))
+        });
+        assert_eq!(pair.expect("the pty never opened"), (7, 8));
+        assert_eq!(asked, 3);
+    }
+
+    /// Whether `probe` answers yes before [`HANGUP_PATIENCE`] runs out.
+    /// A hangup that is already there passes at once; the patience is spent
+    /// only when it is not, and the last answer is the one returned.
+    #[cfg(target_os = "macos")]
+    fn hangs_up_within(mut probe: impl FnMut() -> bool) -> bool {
+        let end = std::time::Instant::now() + HANGUP_PATIENCE;
+        loop {
+            if probe() {
+                return true;
+            }
+            if std::time::Instant::now() >= end {
+                return false;
+            }
+            std::thread::sleep(HANGUP_PROBE_PAUSE);
+        }
+    }
+
+    /// A pty the test opens passes nothing to a child it never meant to
+    /// feed: both ends close on exec, as `portable_pty` sets them.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_tests_pty_closes_on_exec() {
+        let (master, slave) = open_pair(raw_openpty).expect("openpty");
+        let flags = |fd| {
+            // SAFETY: `fcntl` reads the flags of a descriptor opened above.
+            unsafe { libc::fcntl(fd, libc::F_GETFD) }
+        };
+        let (master_flags, slave_flags) = (flags(master), flags(slave));
+        // SAFETY: both opened above, closed once.
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+        assert!(master_flags & libc::FD_CLOEXEC != 0, "the master leaks");
+        assert!(slave_flags & libc::FD_CLOEXEC != 0, "the slave leaks");
+    }
+
+    /// A copy of the master held by something else (a child a parallel
+    /// test started in between) delays the hangup; the wait covers it. The
+    /// copy is dropped by the third probe, with no clock to race.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_hangup_held_back_by_a_copy_of_the_master_is_waited_for() {
+        let (master, slave) = open_pair(raw_openpty).expect("openpty");
+        // SAFETY: duplicates the master opened above.
+        let copy = unsafe { libc::dup(master) };
+        assert!(copy >= 0, "dup: {}", std::io::Error::last_os_error());
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `fstat` fills the struct for an open descriptor.
+        assert_eq!(unsafe { libc::fstat(slave, stat.as_mut_ptr()) }, 0);
+        // SAFETY: filled above.
+        let device = unsafe { stat.assume_init() }.st_rdev;
+        let device = u32::from_ne_bytes(device.to_ne_bytes());
+        // SAFETY: the master opened above, closed once.
+        unsafe { libc::close(master) };
+
+        let mut probes = 0;
+        let answer = hangs_up_within(|| {
+            probes += 1;
+            if probes == 3 {
+                // SAFETY: the copy duplicated above, closed once.
+                unsafe { libc::close(copy) };
+            }
+            hung_up(device)
+        });
+        // SAFETY: the slave opened above, closed once.
+        unsafe { libc::close(slave) };
+        assert!(
+            answer,
+            "a terminal whose last master closed did not hang up"
+        );
+        assert_eq!(probes, 3);
+    }
+
+    /// A terminal hangs up when its master closes, and not before
+    /// (t-77414): a leftover that ignored the window's hangup still holds
+    /// its terminal, and this is what tells that terminal from a live one.
+    /// A real pty, no process signalled.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_terminal_hangs_up_when_its_master_closes() {
+        let (master, slave) = open_pair(raw_openpty).expect("openpty");
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
         // SAFETY: `fstat` fills the struct for an open descriptor.
         assert_eq!(unsafe { libc::fstat(slave, stat.as_mut_ptr()) }, 0);
@@ -1527,7 +1654,7 @@ mod tests {
         // SAFETY: the master opened above, closed once; the slave stays
         // open, as a leftover's descriptors keep its terminal.
         unsafe { libc::close(master) };
-        let answer = hung_up(device);
+        let answer = hangs_up_within(|| hung_up(device));
         // SAFETY: the slave opened above, closed once.
         unsafe { libc::close(slave) };
         assert!(answer, "a terminal whose master closed did not hang up");
