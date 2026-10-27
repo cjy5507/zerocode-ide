@@ -119,7 +119,7 @@ mod tests {
     use super::*;
 
     fn git(repo: &Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git")
+        let out = crate::proc::quiet_command("git")
             .current_dir(repo)
             .args(args)
             .env("GIT_AUTHOR_NAME", "dev")
