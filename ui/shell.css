@@ -35236,17 +35236,22 @@ details.task-board-section > summary {
  * 도는 것은 지금까지 칠하고 그 아래 빗금, 기다림은 점선 테두리와 넘김까지의 칠, 범위 앞에서 시작한 것은
  * 톱니 윗변. 「한 주」는 가로 차트 그대로다. */
 .task-board-schedule {
-  /* 시간당 높이: 지금 앞뒤는 네 시간이 한 화면에, 하루는 스물네 시간이 한 번의 스크롤에. */
+  /* 눈금 밖 값마다 까닭(디자인 스킬 5): 시간당 높이 120px — 지금 앞뒤의 네 시간이 480px, 시험 그릇(약 590 px)의
+   * 한 화면에 든다; 홈통 4rem — 「지금 09:50」 칩(12px 글 여덟 자 + 안쪽 8px)이 선다; 열 머리 32px — 13px 글 한 줄과
+   * 위아래 8px; 열 최소 7rem — 「워커 과업 7 · 끝남 3」 머리 글; 부열 최소 5rem — 과업 id 「t-77628」 고정폭 12px
+   * 일곱 자; 시간표 최소 40rem — 홈통 + 열 넷의 최소 폭(4 + 4×7 = 32rem)에 나란히 선 블록 둘의 여유. */
   --schedule-hour: 120px;
   --schedule-gutter: 4rem;
   --schedule-col-head: 32px;
   --schedule-col-min: 7rem;
-  /* 나란히 선 블록 하나의 최소 폭: 과업 id 하나가 들어가는 자리. 열은 제 가장 넓은 묶음만큼은 넓다. */
   --schedule-subcol-min: 5rem;
   --schedule-cal-min: 40rem;
+  /* 블록의 최소 높이: 글 한 줄(16px)과 위아래 4px — 그보다 짧은 일도 한 줄은 선다. 모델이 그릇에서 읽어 겹침을 센다. */
+  --schedule-block-least: var(--space-5);
 }
 
 .task-board-schedule[data-schedule-zoom="day"] {
+  /* 하루: 스물네 시간이 960px — 한 번의 스크롤 안. */
   --schedule-hour: 40px;
 }
 
@@ -35287,6 +35292,7 @@ details.task-board-section > summary {
   --schedule-strip: transparent;
   position: relative;
   display: grid;
+  /* 무엇 9rem — 「착지 대기」 넉 자와 둘째 줄 「보고·검증 뒤 · 코디 차례」; 큰 글 11rem — 24px 시각 다섯 자와 곁의 낱말 */
   grid-template-columns: 9rem 11rem minmax(0, 1fr) auto;
   grid-template-areas: "what big note act";
   align-items: center;
@@ -35513,7 +35519,7 @@ details.task-board-section > summary {
   flex-direction: column;
   align-items: stretch;
   width: calc(100% / var(--cols) - var(--space-2));
-  height: max(var(--space-5), calc((var(--to) - var(--from)) * 1%));
+  height: max(var(--schedule-block-least), calc((var(--to) - var(--from)) * 1%));
   padding: var(--space-1) var(--space-2);
   border: 0;
   border-radius: var(--radius-xs);
@@ -35577,6 +35583,22 @@ details.task-board-section > summary {
 
 .board-schedule-block[data-why=""]::before {
   display: none;
+}
+
+/* 까닭 줄의 잉크는 실린 게이트의 상태를 따른다(review P3-4): 실패면 멈춤 색, 통과면 흐린 잉크, 돌거나 기다리면 기다림 색. */
+.board-schedule-block[data-ride-state="failed"]::before {
+  color: var(--signal-halt-ink);
+}
+
+.board-schedule-block[data-ride-state="done"]::before {
+  color: var(--ink-mist);
+}
+
+/* 시간표 아래 한 줄: 블록의 칠·빗금·점선·톱니가 무엇을 말하는지(review P3-6). */
+.board-schedule-cal-legend {
+  margin: var(--space-2) 0 0;
+  color: var(--ink-label);
+  font: var(--type-label-12);
 }
 
 /* 게이트의 단계 칸 줄: 칸 하나가 상태 점의 크기, 색이 상태(`--schedule-steps`는 모델이 지은 그라디언트). */

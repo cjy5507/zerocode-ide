@@ -66,8 +66,6 @@ const BOARD_SCHEDULE = Object.freeze({
   /* 게이트 블록의 단계 칸 줄: 칸 하나의 폭과 칸 사이 틈(CSS px) — 상태 점(10 px)과 같은 크기. */
   stepCellPx: 10,
   stepGapPx: 3,
-  /* 블록의 최소 높이(CSS px, shell.css의 `max(var(--space-5), …)`와 같은 값): 그보다 짧은 일도 한 줄은 선다. */
-  blockLeastPx: 24,
   /* 눈금 글 둘 사이에 남기는 틈(CSS px). 한 글이 차지하는 자리는 `tickRoomPx`와 (잰 글 폭 + 이 틈) 가운데
    * 큰 쪽이다 — 글꼴이 커지거나 낱말이 길어지면 자리가 따라 커진다(검토 t-69069 P3 ⑧). */
   tickGapPx: 12,
@@ -443,9 +441,11 @@ function boardScheduleJobTaskIds(job) {
   const ids = new Set((Array.isArray(job.tasks) ? job.tasks : []).map(String).filter((id) => /^t-\d+$/.test(id)));
   if (ids.size === 0 && typeof job.what === "string") {
     for (const hit of job.what.matchAll(/\bt-(\d+)((?:\/\d+)*)/g)) {
-      ids.add(`t-${hit[1]}`);
+      const base = hit[1];
+      ids.add(`t-${base}`);
       for (const more of hit[2].split("/")) {
-        if (more) ids.add(`t-${more}`);
+        // 「t-77414/495」 is t-77495: a shorter number after the slash borrows the first id's leading digits.
+        if (more) ids.add(`t-${more.length >= base.length ? more : base.slice(0, base.length - more.length) + more}`);
       }
     }
   }
@@ -613,7 +613,8 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
     const failed = count(["failed", "capped", "refused"]);
     const green = count(["passed"]);
     const parts = [...new Set(members.map((job) => job.part).filter(Boolean))].sort();
-    const state = count(["running"]) > 0 ? "running" : open > 0 ? "waiting" : failed > 0 ? "failed" : "done";
+    // A step still running keeps the gate running; a failed step stops it even while others queue (review P3-3).
+    const state = count(["running"]) > 0 ? "running" : failed > 0 ? "failed" : open > 0 ? "waiting" : "done";
     const said = state === "running"
       ? t("board.schedule.gateRunning", "{{done}}/{{total}} · {{time}} 남음", {
         done: steps.length - open, total: steps.length, time: boardScheduleSpan(end - now),
@@ -740,10 +741,12 @@ function boardScheduleTaskRows(tasks, now, landings, from, opened, link = null) 
 /* 기다리는 과업과 그것을 실은 게이트(t-77628): 게이트가 돌거나 기다리면 그 예상 끝을 물려받고 셋째 줄이
  * 「l80에 실림 → 도는 중 · 15:40 끝 예상」을 말한다. 실패했으면 지금에서 끝나고 「실패로 멈춤」, 통과했으면
  * 「코디 차례」다. 실린 게이트가 없으면 null. */
-function boardScheduleTaskRide(task, now, link) {
+function boardScheduleTaskRide(task, now, link, since) {
   const ride = link?.carried.get(task.id);
   const gate = ride ? link.gates.get(ride.gate) : null;
   if (!gate) return null;
+  // A gate that ended before this hand-in is an old story (review P3-2): it does not say why the task waits now.
+  if (["done", "failed"].includes(gate.state) && gate.end < since) return null;
   const word = gate.state === "running"
     ? t("board.schedule.whyRunning", "{{gate}}에 실림 → 도는 중 · {{time}} 끝 예상", {
       gate: gate.gate, time: boardScheduleClock(gate.end, now),
@@ -768,7 +771,7 @@ function boardScheduleTaskRow({ task, landing, start, end, known }, now, link = 
   const word = stage ? t(stage.key, stage.word) : String(task.stage);
   const since = Math.max(Number(times.verified_ms) || 0, Number(times.handed_ms) || 0, start);
   const state = BOARD_SCHEDULE_TASK_STATES[task.stage];
-  const ride = state === "waiting" ? boardScheduleTaskRide(task, now, link) : null;
+  const ride = state === "waiting" ? boardScheduleTaskRide(task, now, link, since) : null;
   const waited = boardScheduleSpan(now - since);
   const said = state === "running"
     ? t("board.schedule.taskRunning", "{{stage}} · {{time}}째", { stage: word, time: boardScheduleSpan(now - start) })
@@ -1023,7 +1026,7 @@ function boardScheduleBoardLines(groups, now) {
       },
       {
         id: "waiting", what: t("board.schedule.lineWaiting", "착지 대기"),
-        whatSub: t("board.schedule.lineWaitingSub", "검증됨 · 코디 차례"), ...waitingLine,
+        whatSub: t("board.schedule.lineWaitingSub", "보고·검증 뒤 · 코디 차례"), ...waitingLine,
       },
       { id: "ended", what: t("board.schedule.lineEnded", "끝남"), whatSub: t("board.schedule.lineEndedSub", "이 범위"), ...endedLine },
     ],
@@ -1034,7 +1037,12 @@ function boardScheduleBoardLines(groups, now) {
  * 지금, 고른 것, 축의 폭에서 DOM 없이 짓는다 — 장면 시험이 이것을 그대로 읽는다. 세로 시간표를 그리는
  * 확대면(`vertical`) 시각 홈통의 눈금(`gutter`)과 블록의 부열(`col`·`cols`)도 여기서 정한다 — 시간당
  * 높이(`hourPx`)는 CSS의 것이라 그릇이 읽어 넘긴다. */
-function boardScheduleModel(answer, tasks, now, choice, width, loud = false, measure = null, hourPx = 0, tickPx = 0) {
+function boardScheduleModel(answer, tasks, now, choice, width, loud = false, measure = null, metrics = null) {
+  // The vertical timetable's measures, read off the stylesheet by the holder: the hour's height, a tick's line
+  // height and a block's least height (review P3-8: the stylesheet holds them once).
+  const hourPx = Number(metrics?.hourPx) || 0;
+  const tickPx = Number(metrics?.tickPx) || 0;
+  const leastPx = Number(metrics?.leastPx) || 0;
   const zoom = BOARD_SCHEDULE.zooms[choice.zoom] ?? BOARD_SCHEDULE.zooms.now;
   const vertical = boardScheduleVertical(choice.zoom);
   const jobs = Array.isArray(answer?.jobs) ? answer.jobs : [];
@@ -1069,8 +1077,8 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false, mea
   const span = Math.max(1, to - from);
   const percent = (ms) => Math.min(100, Math.max(0, ((ms - from) / span) * 100));
   const seen = (row) => row.end >= from && row.start <= to;
-  // A block is at least one line tall (`blockLeastPx`): the time that height covers, for the side-by-side test.
-  const leastMs = hourPx > 0 ? (BOARD_SCHEDULE.blockLeastPx / hourPx) * 3_600_000 : 0;
+  // A block is at least one line tall (`--schedule-block-least`): the time that height covers, for the side-by-side test.
+  const leastMs = hourPx > 0 ? (leastPx / hourPx) * 3_600_000 : 0;
   const groups = BOARD_SCHEDULE_GROUPS.map((group) => {
     let { entries, more } = built[group.id];
     entries = entries.filter((entry) => seen(entry.head));
@@ -1273,7 +1281,9 @@ function boardScheduleSkeleton(host, view) {
   const aheadEmpty = boardScheduleElement("p", "board-schedule-ahead-empty");
   body.append(gutter, aheadEmpty);
   day.append(body);
-  cal.append(board, day);
+  // What a block's fill, stripes, dashes and zigzag say — one line the eye can read (review P3-6).
+  const calLegend = boardScheduleElement("p", "board-schedule-cal-legend");
+  cal.append(board, day, calLegend);
   const log = boardScheduleElement("section", "board-schedule-log");
   log.hidden = true;
   const logHead = boardScheduleElement("header", "board-schedule-log-head");
@@ -1286,7 +1296,7 @@ function boardScheduleSkeleton(host, view) {
   log.append(logHead, boardScheduleElement("pre", "board-schedule-log-lines"));
   const empty = boardScheduleElement("p", "board-schedule-empty");
   host.replaceChildren(head, chart, cal, log, empty);
-  host.__parts = { head, chart, card, band, axis, boxes, cal, boardNow, boardSum, lines, day, body, gutter, track, aheadEmpty, log, empty };
+  host.__parts = { head, chart, card, band, axis, boxes, cal, boardNow, boardSum, lines, day, body, gutter, track, aheadEmpty, calLegend, log, empty };
 }
 
 /* 행 하나: 단추 하나에 이름 · 막대 · 말. 막대의 자리는 커스텀 속성 셋(`--from`·`--to`·
@@ -1390,7 +1400,7 @@ function paintBoardScheduleBlock(node, row) {
   const actWord = boardScheduleActWord(row.act);
   const painted = [row.key, row.state, row.basis, row.tip, row.label, row.said, row.sub, row.why, row.eta, row.etaSub,
     row.nowLabel, row.aheadLabel, Boolean(row.act?.fold), Boolean(row.opened), Boolean(row.paused), Boolean(row.late),
-    Boolean(row.cut), from, to, done, mark, row.col, row.cols, steps, actWord].join("\u0000");
+    Boolean(row.cut), row.ride?.state ?? "", from, to, done, mark, row.col, row.cols, steps, actWord].join("\u0000");
   if (node.__painted === painted) return;
   node.__painted = painted;
   writeAttribute(node, "data-key", row.key);
@@ -1413,6 +1423,7 @@ function paintBoardScheduleBlock(node, row) {
   writeClass(node, "is-late", Boolean(row.late));
   writeClass(node, "is-cut", Boolean(row.cut));
   writeClass(node, "is-inherited", mark !== "");
+  writeAttribute(node, "data-ride-state", row.ride?.state ?? "");
   const [label, strip] = node.children;
   writeBoardScheduleText(label, row.title ?? row.label);
   writeAttribute(label, "data-id", row.id ?? "");
@@ -1500,10 +1511,14 @@ function paintBoardScheduleHost(host, view, now) {
   boardSchedulePainted.set(host, said);
   // The type the ticks are set in, and the hour's height, are read only when the schedule is drawn again — a
   // look that changes nothing (the same answer, minute and width) does not ask the page's style.
-  const hourPx = vertical ? parseFloat(getComputedStyle(host).getPropertyValue("--schedule-hour")) || 0 : 0;
-  const tickPx = vertical ? boardScheduleTickHeight(parts.track) : 0;
+  const styled = vertical ? getComputedStyle(host) : null;
+  const metrics = vertical ? {
+    hourPx: parseFloat(styled.getPropertyValue("--schedule-hour")) || 0,
+    tickPx: boardScheduleTickHeight(parts.track),
+    leastPx: parseFloat(styled.getPropertyValue("--schedule-block-least")) || 0,
+  } : null;
   const model = boardScheduleModel(boardScheduleAnswer, desk?.tasks, minute, boardScheduleChoice, width,
-    machine?.load?.loud === true, vertical ? null : boardScheduleTickMeasure(boardScheduleTickFont(parts.axis)), hourPx, tickPx);
+    machine?.load?.loud === true, vertical ? null : boardScheduleTickMeasure(boardScheduleTickFont(parts.axis)), metrics);
   paintBoardScheduleHead(parts.head, model);
   writeAttribute(host, "data-schedule-zoom", boardScheduleChoice.zoom);
   writeHidden(parts.chart, vertical);
@@ -1517,7 +1532,9 @@ function paintBoardScheduleHost(host, view, now) {
     writeCustomProperty(parts.body, "--now", nowAt);
     writeCustomProperty(parts.body, "--schedule-hours", model.hours.toFixed(3));
     writeCustomProperty(parts.body, "--schedule-grid", boardScheduleGridPaint(model.gutter, "bottom"));
-    writeAttribute(parts.gutter, "data-tip", t("board.schedule.legend", "막대 끝 = 지난 소요로 잰 예상 · 빗금 = 아직 안 온 구간 · 점선 = 근거 없음"));
+    const legendBlocks = t("board.schedule.legendBlocks", "칠함 = 지난·끝남 · 빗금 = 앞으로(지난 소요로 잰 예상) · 점선 = 근거 없음 · 톱니 = 범위 앞에서 시작");
+    writeAttribute(parts.gutter, "data-tip", legendBlocks);
+    writeTextContent(parts.calLegend, legendBlocks);
     writeTextContent(parts.aheadEmpty, t("board.schedule.aheadEmpty", "앞으로 잡힌 일 없음"));
     writeHidden(parts.aheadEmpty, !model.aheadEmpty);
     reconcileElementOrder(parts.chart, [parts.card, parts.band]);
