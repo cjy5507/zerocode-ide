@@ -436,7 +436,7 @@ mod tests {
     /// `assert_eq!` for what may hold a value (t-77207): a failure says `what`
     /// and shows neither side.
     fn assert_same(got: &serde_json::Value, want: &serde_json::Value, what: &str) {
-        assert_eq!(got, want, "{what}");
+        assert!(got == want, "{what}");
     }
 
     #[cfg(unix)]
