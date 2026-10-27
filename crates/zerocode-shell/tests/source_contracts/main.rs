@@ -23108,7 +23108,7 @@ mod tests {
              dead:\n{saving}"
         );
         let writes = saving
-            .find("write_automations(state.config_root(), &rows)?")
+            .find("write_automations(config_root, &rows)?")
             .expect("the save no longer writes");
         assert!(
             judged < writes,
