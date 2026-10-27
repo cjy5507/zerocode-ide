@@ -411,13 +411,14 @@ export async function testBoardSchedule(browser, origin, ok) {
     const gates = drawn.groups.gates.rows;
     const heads = gates.filter((row) => row.depth === "0");
     const l61 = heads.find((row) => row.key === "gate:l61");
-    ok("the gate in play stands open, running, its four jobs under it",
-      l61?.state === "running" && l61.expanded === "true"
+    // The timetable draws a gate as one block with its step cells; its jobs are read off the model under it.
+    ok("the gate in play is one running block with four step cells, its four jobs under it",
+      l61?.state === "running" && l61.block && l61.steps.split(",").length === 4
         && gates.slice(gates.indexOf(l61) + 1, gates.indexOf(l61) + 5).every((row) => row.depth === "1" && row.key.includes("-l61")),
-      JSON.stringify(gates.map((row) => [row.key, row.depth, row.state])));
+      JSON.stringify(gates.map((row) => [row.key, row.depth, row.state, row.steps])));
     const l60 = heads.find((row) => row.key === "gate:l60");
-    ok("this morning's l60 stands folded and passed — its window measurement failed once and passed on its rerun",
-      l60?.expanded === "false" && l60.state === "done" && /^통과 /.test(l60.said), JSON.stringify(l60));
+    ok("this morning's l60 is one passed block — its window measurement failed once and passed on its rerun",
+      l60?.block && l60.state === "done" && /^통과 /.test(l60.said) && l60.act === "로그 →", JSON.stringify(l60));
     const lint = gates.find((row) => row.key === "job:0-1792543560-run11955-l61z-g3a-zo-lint");
     ok("a running job past its median says how late it is and reaches 「now」",
       lint?.state === "running" && lint.said === "+1분 지연 중" && near(lint.to, drawn.now), JSON.stringify(lint));
@@ -474,14 +475,17 @@ export async function testBoardSchedule(browser, origin, ok) {
     ok("a group's head folds its rows away", drawn.groups.line.expanded === "false" && drawn.groups.line.rows.length === 0,
       JSON.stringify(drawn.groups.line));
     await page.evaluate(() => document.querySelector('#board-view [data-group="line"] .board-schedule-group-head').click());
+    // A gate's block has no rows to unfold (t-77628 review P2-1): a press opens the log of the job that tells its
+    // story — the step that failed, else the one running, else the one queued last.
+    const l60jobs = answer.jobs.filter((job) => job.gate === "l60");
+    const l60telling = l60jobs.slice().sort((a, b) => (Number(b.queued_ms) || 0) - (Number(a.queued_ms) || 0))[0];
     await page.evaluate(() => document.querySelector('#board-view [data-key="gate:l60"]').click());
+    await page.evaluate(() => window.__UNTIL__(() => !document.querySelector("#board-view .board-schedule-log").hidden, "the gate's log"));
     drawn = await readBoardSchedule(page);
-    const opened = drawn.groups.gates.rows;
-    const at60 = opened.findIndex((row) => row.key === "gate:l60");
-    ok("a folded gate opens on a press, its jobs under it",
-      opened[at60]?.expanded === "true" && opened[at60 + 1]?.key.includes("-l60") && opened[at60 + 1]?.depth === "1"
-        && drawn.groups.line.rows.length > 0,
-      JSON.stringify(opened.slice(at60, at60 + 3)));
+    ok("a gate block opens the log of the job that tells its story — a passed gate's last step",
+      drawn.asked.some((one) => one.log?.job === l60telling.name) && drawn.groups.line.rows.length > 0,
+      JSON.stringify({ asked: drawn.asked.at(-1), telling: l60telling.name }));
+    await page.evaluate(() => document.querySelector('#board-view [data-key="gate:l60"]').click());
 
     /* ---- 로그: 누른 일감의 끝 줄이 일정 아래 칸에 ---------------------------------- */
     await page.evaluate(() => document.querySelector('#board-view [data-key="job:1792543500-run11955-t-63492-walk"]').click());
@@ -1006,7 +1010,7 @@ export async function testBoardSchedule(browser, origin, ok) {
       JSON.stringify(lines.lane));
     ok("the gate line is the gate in play: running, its green count, and the chip that opens it",
       lines.gate?.what === "게이트 l61" && lines.gate.word === "도는 중" && /\d+\/\d+ 초록/.test(lines.gate.note)
-        && lines.gate.tone === "run" && lines.gate.act === "펴기 →",
+        && lines.gate.tone === "run" && lines.gate.act === "로그 →",
       JSON.stringify(lines.gate));
     const waitingCount = drawn.groups.workers.rows.filter((one) => one.state === "waiting").length;
     ok("the waiting line counts the tasks waiting to land and names the one that waited longest",
@@ -1067,6 +1071,29 @@ export async function testBoardSchedule(browser, origin, ok) {
     }]));
     ok("the answer restored, nothing rides the gate", !rode("t-67102")?.why && !rode("t-66539")?.why,
       JSON.stringify([rode("t-67102")?.why, rode("t-66539")?.why]));
+
+    /* ---- 안내판의 게이트 줄은 도는 게이트다 (review P2-3): 그 뒤에 줄 선 게이트가 더 늦게 시작해도 ---- */
+    const queuedGate = await page.evaluate(async (now) => {
+      const held = window.__SCHEDULE__;
+      const later = { name: "0-1792543900-run11955-l62r-g1-build", who: "run11955-l62r", state: "waiting", class: "first", lane: 1,
+        cap_secs: 1800, queued_ms: now - 60_000, start_ms: null, end_ms: null, secs: null, rc: null, kind: "g1-build", gate: "l62",
+        part: "r", what: null, expected: { secs: 600, samples: 5 } };
+      window.__SCHEDULE__ = { ...held, revision: held.revision + 1, jobs: [...held.jobs, later] };
+      refreshBoardSchedule();
+      await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the moved answer");
+      paintBoardScheduleHosts();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const line = document.querySelector('#board-view .board-schedule-line[data-line="gate"]');
+      const heads = [...document.querySelectorAll('#board-view [data-group="gates"] .board-schedule-block')].map((one) => one.dataset.key);
+      window.__SCHEDULE__ = { ...held, revision: held.revision + 2 };
+      refreshBoardSchedule();
+      await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the restored answer");
+      paintBoardScheduleHosts();
+      return { what: line.children[0].textContent, word: line.children[1].dataset.word, heads };
+    }, SCHEDULE_NOW);
+    ok("with a gate queued behind the running one, the board's gate line still names the running gate, and both stand as blocks",
+      queuedGate.what === "게이트 l61" && queuedGate.word === "도는 중" && queuedGate.heads.includes("gate:l62"),
+      JSON.stringify(queuedGate));
 
     /* ---- 비어 있어도 넉 줄: 레인도 게이트도 과업도 없는 답 ---- */
     const emptyAnswer = await page.evaluate((now) => {
