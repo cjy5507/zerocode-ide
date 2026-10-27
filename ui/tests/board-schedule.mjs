@@ -1088,6 +1088,29 @@ export async function testBoardSchedule(browser, origin, ok) {
     ok("with a gate queued behind the failed one, the board's gate line keeps the failed gate, and the queued gate's block carries no log chip (nothing of it has run)",
       behindFailed.what === "게이트 l61" && behindFailed.word === "실패" && behindFailed.l62act === "",
       JSON.stringify(behindFailed));
+    // A gate that ran after the failed one tells the newer story: passed later, the board says passed (review r3 P2).
+    const passedAfter = await page.evaluate(async (now) => {
+      const held = window.__SCHEDULE__;
+      const later = { name: "0-1792543850-run11955-l62r-g1-build", who: "run11955-l62r", state: "passed", class: "first", lane: 1,
+        cap_secs: 1800, queued_ms: now - 90_000, start_ms: now - 60_000, end_ms: now - 30_000, secs: 30, rc: 0, kind: "g1-build",
+        gate: "l62", part: "r", what: null, expected: { secs: 600, samples: 5 } };
+      window.__SCHEDULE__ = { ...held, revision: held.revision + 1, jobs: [...held.jobs, later] };
+      refreshBoardSchedule();
+      await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the moved answer");
+      paintBoardScheduleHosts();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const line = document.querySelector('#board-view .board-schedule-line[data-line="gate"]');
+      const out = { what: line.children[0].textContent, word: line.children[1].dataset.word, big: line.children[1].textContent,
+        l62act: document.querySelector('#board-view [data-key="gate:l62"]')?.dataset.act ?? null };
+      window.__SCHEDULE__ = { ...held, revision: held.revision + 2 };
+      refreshBoardSchedule();
+      await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the restored answer");
+      paintBoardScheduleHosts();
+      return out;
+    }, SCHEDULE_NOW);
+    ok("a gate that passed after the failed one takes the board's gate line — the failure is no longer the latest word — and its block opens its last job's log",
+      passedAfter.what === "게이트 l62" && passedAfter.word === "통과" && passedAfter.big === "09:49" && passedAfter.l62act === "로그 →",
+      JSON.stringify(passedAfter));
     drawn = await patchScheduleJobs(page, l61jobs.map((job) => [job.name, {
       state: job.state, rc: job.rc ?? null, end_ms: job.end_ms ?? null, secs: job.secs ?? null, tasks: null, what: job.what ?? null,
     }]));
