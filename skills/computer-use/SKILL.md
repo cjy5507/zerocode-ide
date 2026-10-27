@@ -1242,6 +1242,13 @@ a failed step in the log and is filed as a task for a person; write
 - `window_not_focused`: retry once with `--restore-window`; if still unfocused,
   stop retrying and use a semantic action or ask the user to foreground it.
 - `element_not_found`: observe again and use a fresh index.
+- `wrong_verb`: a verb of the desktop's hand (`mouse-*`, `key`, `hold-key`,
+  `type`) was given `--app`; nothing moved. These act on the whole desktop:
+  screen points, keys where the focus is. For `mouse-click`, `mouse-drag`,
+  `mouse-scroll`, `type` and `key` the message names the app's verb for the
+  same act (`click`, `drag`, `scroll`, `type-text`, `press-key` with
+  `--app`), whose points count inside that app's window. `mouse-move` and
+  `hold-key` have no app's verb: drop `--app` and give screen points.
 - `covered`: another window stands over the place and the hand did not move
   it — the message names whose app it is. The person was asked in one line
   when a person is there; do not look again or retry until it is cleared,

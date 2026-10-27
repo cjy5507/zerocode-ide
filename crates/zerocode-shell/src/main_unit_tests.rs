@@ -22711,6 +22711,39 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(envelope(&answer)["ok"], true);
     }
 
+    /// A screen-point verb given `--app` (t-73872: codex sent a point read
+    /// off the phone's picture as `mouse-click --app 'iPhone Mirroring'`) is
+    /// refused at the door before any hand moves, under the refusal's own
+    /// code, and the answer names the app's verb whose points are that
+    /// window's (t-78095).
+    #[test]
+    fn a_screen_point_verb_with_an_app_is_refused_as_the_wrong_verb() {
+        let _hand = ONE_HAND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (line, in_the_app) in [
+            (&["mouse-click", "--app", "iPhone Mirroring", "--x", "180", "--y", "165", "--json"][..], "click"),
+            (&["type", "--app", "iPhone Mirroring", "--text", "blue", "--json"], "type-text"),
+            (&["key", "--app", "iPhone Mirroring", "--key", "Return", "--json"], "press-key"),
+        ] {
+            let answer = answer_computer_command(&words(line));
+            assert_ne!(answer.exit_code, 0, "{line:?}");
+            let refused = envelope(&answer);
+            assert_eq!(refused["ok"], false, "{line:?}");
+            assert_eq!(
+                refused["error"]["code"],
+                zerocode_core::computer_use_protocol::error_code::WRONG_VERB,
+                "{line:?}"
+            );
+            let message = refused["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains(&format!(
+                    "`{} {in_the_app} --app <app>",
+                    zerocode_core::computer_use::COMPUTER_CLI
+                )),
+                "{line:?}: {message}"
+            );
+        }
+    }
+
     #[test]
     fn a_default_settings_document_does_not_allow_shared_desktop_input() {
         assert_eq!(

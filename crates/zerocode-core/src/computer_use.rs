@@ -2625,6 +2625,27 @@ impl ComputerMethod {
         matches!(self, Self::Click)
     }
 
+    /// Whether the verb is the desktop's hand: the pointer at screen points,
+    /// the keys where the focus is. It names no app (t-78095).
+    #[must_use]
+    pub const fn is_desktop_hand(self) -> bool {
+        self.moves_the_pointer() || matches!(self, Self::Key | Self::HoldKey | Self::Type)
+    }
+
+    /// The verb that does this desktop hand's act in an app it names: its
+    /// points count inside that app's window, its keys go to that app.
+    #[must_use]
+    pub const fn in_an_app(self) -> Option<Self> {
+        match self {
+            Self::MouseClick => Some(Self::Click),
+            Self::MouseDrag => Some(Self::Drag),
+            Self::MouseScroll => Some(Self::Scroll),
+            Self::Type => Some(Self::TypeText),
+            Self::Key => Some(Self::PressKey),
+            _ => None,
+        }
+    }
+
     /// The window verbs' one helper method takes the action by name.
     #[must_use]
     pub const fn window_action(self) -> Option<&'static str> {
@@ -3351,22 +3372,74 @@ impl RepeatUntil {
     }
 }
 
-/// Parse the public CLI without guessing or passing unknown flags onward.
-pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
+/// [`parse_command`] with each refusal's kind kept apart from its words: the
+/// window answers the kind as the error's code, so nobody reads it back out
+/// of the sentence.
+pub fn parse_command_coded(
+    argv: &[String],
+) -> Result<ComputerCommand, crate::computer_use_protocol::ProviderError> {
+    use crate::computer_use_protocol::ProviderError;
     let Some(verb) = argv.first().map(String::as_str) else {
-        return Err(usage());
+        return Err(ProviderError::invalid_argument(usage()));
     };
     if matches!(verb, "-h" | "--help" | "help") {
-        return Err(usage());
+        return Err(ProviderError::invalid_argument(usage()));
     }
     let Some(method) = verb_method(verb) else {
-        return Err(format!(
+        return Err(ProviderError::invalid_argument(format!(
             "unknown computer-use command `{verb}`\n\n{}",
             usage()
-        ));
+        )));
     };
-    let argv = flags_apart(argv)?;
-    let flags = flags(&argv[1..])?;
+    let argv = flags_apart(argv).map_err(ProviderError::invalid_argument)?;
+    let flags = flags(&argv[1..]).map_err(ProviderError::invalid_argument)?;
+    if method.is_desktop_hand() && flags.contains_key("app") {
+        return Err(app_on_the_desktop_hand(method));
+    }
+    parse_flags(method, flags).map_err(ProviderError::invalid_argument)
+}
+
+/// Parse the public CLI without guessing or passing unknown flags onward.
+pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
+    parse_command_coded(argv).map_err(|refusal| refusal.message)
+}
+
+/// `--app` on the desktop's hand (t-73872: a point read off an app's picture
+/// sent to `mouse-click --app`): refused before anything moves, naming the
+/// verb that takes `--app` for the same act as `--help` spells it.
+fn app_on_the_desktop_hand(method: ComputerMethod) -> crate::computer_use_protocol::ProviderError {
+    let verb = method.verb_name();
+    let (hand, there) = if method.moves_the_pointer() {
+        ("its points are screen points", "inside an app's window")
+    } else {
+        ("its keys go where the focus is", "into an app")
+    };
+    let mut message = format!("`{verb}` is the desktop's hand: {hand}, and it takes no --app");
+    let spelled = method.in_an_app().and_then(|in_app| {
+        let begins = format!("{COMPUTER_CLI} {} --app <app>", in_app.verb_name());
+        usage()
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with(&begins))
+            .map(str::to_string)
+    });
+    if let Some(spelled) = spelled {
+        message.push_str(&format!(" — {there}, use `{spelled}`"));
+        if method.moves_the_pointer() {
+            message.push_str(", whose points are window-local");
+        }
+    }
+    crate::computer_use_protocol::ProviderError::new(
+        crate::computer_use_protocol::error_code::WRONG_VERB,
+        message,
+    )
+}
+
+/// [`parse_command`] past its verb: the flags it was given, read and checked.
+fn parse_flags(
+    method: ComputerMethod,
+    flags: BTreeMap<String, Option<String>>,
+) -> Result<ComputerCommand, String> {
     let json = flags.contains_key("json");
     reject_unknown(method, &flags)?;
     if flags.contains_key("instant")
@@ -5830,6 +5903,151 @@ mod tests {
 
     fn words(input: &[&str]) -> Vec<String> {
         input.iter().map(|word| (*word).to_string()).collect()
+    }
+
+    /// A point read off an app's picture sent to the desktop's hand with
+    /// `--app` (t-73872, codex on the phone): the desktop verbs take screen
+    /// points and no app, so the line is refused as the wrong verb — its own
+    /// code, not an unknown flag — and the refusal names the verb that takes
+    /// `--app` for the same act. Every other line reads as it did.
+    #[test]
+    fn an_app_on_the_desktop_hand_is_refused_as_the_wrong_verb() {
+        use crate::computer_use_protocol::error_code;
+        for (line, in_the_app) in [
+            (
+                &[
+                    "mouse-click",
+                    "--app",
+                    "iPhone Mirroring",
+                    "--x",
+                    "180",
+                    "--y",
+                    "165",
+                ][..],
+                Some(ComputerMethod::Click),
+            ),
+            (
+                &[
+                    "mouse-drag",
+                    "--app=Notes",
+                    "--from-x",
+                    "1",
+                    "--from-y",
+                    "2",
+                    "--to-x",
+                    "3",
+                    "--to-y",
+                    "4",
+                ],
+                Some(ComputerMethod::Drag),
+            ),
+            (
+                &[
+                    "mouse-scroll",
+                    "--app",
+                    "Notes",
+                    "--x",
+                    "1",
+                    "--y",
+                    "2",
+                    "--dy",
+                    "3",
+                ],
+                Some(ComputerMethod::Scroll),
+            ),
+            (
+                &[
+                    "type",
+                    "--app",
+                    "iPhone Mirroring",
+                    "--text",
+                    "blue",
+                    "--json",
+                ],
+                Some(ComputerMethod::TypeText),
+            ),
+            (
+                &["key", "--app", "iPhone Mirroring", "--key", "Return"],
+                Some(ComputerMethod::PressKey),
+            ),
+            (
+                &["mouse-move", "--app", "Notes", "--x", "1", "--y", "2"],
+                None,
+            ),
+            (
+                &["hold-key", "--app", "Notes", "--key", "shift", "--ms", "10"],
+                None,
+            ),
+        ] {
+            let refusal = parse_command_coded(&words(line)).unwrap_err();
+            assert_eq!(refusal.code, error_code::WRONG_VERB, "{line:?}");
+            assert!(
+                refusal.message.starts_with(&format!("`{}` ", line[0]))
+                    && refusal.message.contains("no --app"),
+                "{line:?}: {}",
+                refusal.message
+            );
+            if let Some(verb) = in_the_app {
+                let spelled = format!("`{COMPUTER_CLI} {} --app <app>", verb.verb_name());
+                assert!(
+                    refusal.message.contains(&spelled),
+                    "{line:?}: {}",
+                    refusal.message
+                );
+                assert!(
+                    allowed(verb).contains(&"app"),
+                    "{} names an app",
+                    verb.verb_name()
+                );
+            }
+            assert_eq!(
+                parse_command(&words(line)).unwrap_err(),
+                refusal.message,
+                "every reader of the line reads the same words"
+            );
+        }
+        // A point inside a window goes to the app's own verb, as it did.
+        for line in [
+            &["mouse-click", "--x", "922", "--y", "226"][..],
+            &[
+                "click",
+                "--app",
+                "iPhone Mirroring",
+                "--x",
+                "180",
+                "--y",
+                "165",
+            ],
+            &["type-text", "--app", "iPhone Mirroring", "--text", "blue"],
+            &["press-key", "--app", "iPhone Mirroring", "--key", "Return"],
+            &["type", "--text", "blue"],
+            &["key", "--key", "Return"],
+        ] {
+            parse_command_coded(&words(line)).expect("read as before");
+        }
+        // Any other flag a verb does not take is still an unknown flag.
+        let unknown = parse_command_coded(&words(&[
+            "mouse-click",
+            "--x",
+            "1",
+            "--y",
+            "2",
+            "--pane",
+            "p",
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            (unknown.code.as_str(), unknown.message.as_str()),
+            (error_code::INVALID_ARGUMENT, "unknown flag --pane")
+        );
+        // A bare `--app` is a flag missing its value, read before the verb's
+        // hand is judged: nothing names an app, so no app's verb is offered.
+        let bare = parse_command_coded(&words(&["mouse-click", "--x", "1", "--y", "2", "--app"]))
+            .unwrap_err();
+        assert_eq!(
+            (bare.code.as_str(), bare.message.as_str()),
+            (error_code::INVALID_ARGUMENT, "--app needs a value")
+        );
     }
 
     /// A screen left of or above the main one has negative coordinates
