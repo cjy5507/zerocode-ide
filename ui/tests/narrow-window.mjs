@@ -146,9 +146,10 @@ const barGap = () => {
   };
 };
 
-/* Window widths just past each of the bar's thresholds: inside the bar's own
- * padding, where the window is wider than the line the container reads. */
-export const EDGE_WIDTHS = [1124, 1110, 924, 910];
+/* Window widths on both sides of each of the bar's thresholds: inside the
+ * bar's own padding, where the window is wider than the line the container
+ * reads, and one point past it, where nothing has folded yet. */
+export const EDGE_WIDTHS = [1125, 1124, 1110, 925, 924, 910];
 
 /* A crowded bar (t-77705): the Codex PTY and PR marks through their own
  * paints, the refresh button, and — with `codex` — a second gauge through the
@@ -302,10 +303,14 @@ export async function testNarrowWindow(browser, origin, ok) {
             const said = await page.evaluate(() => {
               el("sb-claude-pct").dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
               const account = el("sb-claude-account");
-              return { tip: el("sb-claude").dataset.tip ?? "", account: account.hidden ? "" : account.textContent.trim() };
+              return {
+                tip: el("sb-claude").dataset.tip ?? "",
+                account: account.hidden ? "" : account.textContent.trim(),
+                folded: getComputedStyle(account).display === "none",
+              };
             });
             ok(`a crowded bar's folded account id is on the hover (${tag})`,
-              said.account.length > 0 && said.tip.includes(said.account), JSON.stringify(said));
+              said.folded && said.account.length > 0 && said.tip.includes(said.account), JSON.stringify(said));
           }
         }
       }
