@@ -120,7 +120,9 @@ pub(crate) async fn save_api_router(
             },
             &api_routers::Keychain::of_this_machine(),
         )
-        .inspect(|_| crate::slash_catalog::forget_zo_models())
+        // A connection saved: zo lists other models, and the worker rows
+        // offer them as soon as zo has said so.
+        .inspect(|_| crate::summon_lineup::refresh())
     })
     .await
     .map_err(|error| RouterRefusal::from(error.to_string()))?
@@ -147,7 +149,7 @@ pub(crate) async fn remove_api_router(
             }
             _ => Err("settings_changed".to_string()),
         };
-        removed.inspect(|_| crate::slash_catalog::forget_zo_models())
+        removed.inspect(|_| crate::summon_lineup::refresh())
     })
     .await
     .map_err(|error| error.to_string())?

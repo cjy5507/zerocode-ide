@@ -4636,7 +4636,7 @@
               </details>
             </section>
             <section class="model-advanced-item" aria-labelledby="model-advanced-moved-title">
-              <h4 id="model-advanced-moved-title" data-i18n="settings.models.movedTitle">난이도별 워커 모델 · 라우팅 분류기</h4>
+              <h4 id="model-advanced-moved-title" data-i18n="settings.models.movedTitle">워커 모델 · 난이도 판정 방식</h4>
               <p class="settings-row-desc" data-i18n="settings.models.movedAbout">판단 모델 고르기와 관계가 없어 「오케스트레이션」 설정으로 옮겼습니다.</p>
               <div class="settings-action-row">
                 <button type="button" class="btn" id="model-open-orchestration" data-i18n="orch.title">오케스트레이션</button>
@@ -6494,61 +6494,73 @@
             <div class="orch-chips" id="orch-chips"></div>
           </div>
         </div>
-        <div class="settings-card orch-models">
-          <!-- Moved here from the model settings without a change of meaning
-               (t-75762 v2, decision 4): the rows a summons launches workers
-               with, and the classifier that decides whether the routing
-               feature is asked at all — which every zo session's turn reads,
-               not only a worker's. -->
-          <details class="settings-fold settings-jev-advanced" id="typesafe-advanced">
-            <summary data-i18n="settings.typesafe.advanced">워커 모델 · 라우팅 분류기</summary>
-            <section aria-labelledby="summon-profiles-title">
-              <h4 id="summon-profiles-title" data-i18n="settings.typesafe.profiles">난이도별 워커 모델·사고 깊이</h4>
-              <p class="settings-row-desc" data-i18n="settings.typesafe.profilesHint">비워 둔 칸은 오늘 쓸 수 있는 모델 가운데서 자동으로 고릅니다(흐린 글씨가 지금 뜨는 모델입니다). 적은 칸만 그대로 쓰고, 소환에서 직접 지정한 값은 언제나 먼저입니다.</p>
-              <div id="summon-profiles-table"></div>
-              <button type="button" id="summon-profiles-save" data-i18n="settings.typesafe.profilesSave">선택 표 저장</button>
-            </section>
-            <!-- The gate in front of the routing seat.
-                 `smart.autoClassifier` decides how a spawn's difficulty is read,
-                 whether the chat probe is called (the probing word only), and
-                 whether the routing feature is asked at all (every word but
-                 `off`, t-6346). The four words and the coupling are
-                 `zerocode_core::jev`'s (`ClassifierMode`, `ClassifierRow.reaches`,
-                 `ClassifierRow.gates`); this card spells neither. -->
-            <div class="settings-jev-classifier" id="route-classifier-card">
-              <h4 class="settings-jev-advanced-title" data-i18n="settings.classifier.title">라우팅 분류기</h4>
-              <p class="settings-notice" data-i18n="settings.classifier.everySession">모든 zo 세션에 적용 — 워커만이 아니라 zo 세션의 매 턴 모델 고르기가 이 설정을 읽습니다.</p>
-              <p class="settings-row-desc" data-i18n="settings.classifier.about">
-                zo가 과업의 난이도를 무엇으로 정할지 고릅니다. 「모델 선택 판단」은 「끔」이 아닌 모든 방식에서 판단을 요청합니다.
-              </p>
-              <label class="settings-field" data-field="md" for="route-classifier-select">
-                <span class="settings-field-copy">
-                  <span class="settings-label" data-i18n="settings.classifier.label">난이도 분류</span>
-                  <span class="settings-row-desc" data-i18n="settings.classifier.summary">
-                    낱말 표가 먼저 정하고, 고른 방식이 그 위에 무엇을 얹을지 정합니다.
-                  </span>
-                </span>
-                <!-- The options are the classifier's own words, built from what
-                     `typesafe_settings` answers (`paintClassifierModes`). -->
-                <select class="settings-input" id="route-classifier-select"></select>
-              </label>
-              <details class="settings-fold">
-                <summary data-i18n="settings.status.evidence">자세히</summary>
-                <p data-i18n="settings.classifier.detail">
-                  낱말 표는 어느 방식에서나 먼저 돌고, 어느 방식에서도 대체되지 않습니다. 「낱말만」은 거기서 끝냅니다. 「표식까지」는 과업 글에 사람이 적어 둔 레인·형태 표식을 함께 읽습니다 — 이 방식 자체는 어디에도 묻지 않습니다. 「모델에게도」는 그 위에 빠른 등급 모델 프로브 하나(출력 200토큰 안팎)를 얹어 융합하며, 실패하거나 늦으면 낱말 표의 판정이 그대로 섭니다. zo가 TypeSafe에 묻는 라우팅 판단은 이와 따로 「끔」이 아닌 모든 방식에서 턴과 하위 에이전트마다 한 번 일어나고, 그 판단이 적용되는 동안에는 판단이 확신하지 못할 때만 프로브를 부릅니다. 「끔」은 자동 라우팅 자체를 쓰지 않습니다.
-                </p>
-              </details>
-              <!-- Shown by `paintClassifierGate` when the feature this
-                   classifier gates asks while automatic routing is off: its
-                   mode is one nothing can reach (`ClassifierRow.reaches`). Which feature that is, is
-                   the backend's answer (`classifier.gates`). -->
-              <p class="settings-notice settings-notice--row" id="route-classifier-unreachable" data-jev-unreachable
-                 data-i18n="settings.typesafe.routingUnreachable" hidden>
-                자동 라우팅이 꺼져 있어 「모델 선택 판단」은 판단을 요청하지 않습니다. 「끔」이 아닌 방식을 고르면 요청합니다.
-              </p>
-              <div class="settings-status" id="orch-models-status" role="status" aria-live="polite"></div>
+        <!-- Each agent's worker model at each difficulty (t-14437), on its own
+             card since the person passed the before/after draft (2026-10-27):
+             a table, one cell per difficulty, each cell a model and an effort
+             picked from what the agent's lineup offers today — the first
+             choice of both is 「자동」, what the lineup runs there now. A pick
+             is saved at once, one cell at a time (`set_summon_profile`), and
+             the answer's row is what the next summons runs. -->
+        <div class="settings-card orch-models" id="worker-models-card">
+          <div class="orch-head">
+            <span class="orch-mark"><svg class="icon" aria-hidden="true"><use href="#i-sliders"></use></svg></span>
+            <div class="orch-title-box">
+              <div class="orch-title-row">
+                <h3 class="orch-title" id="worker-models-title" data-i18n="settings.workerModels.title">워커 모델</h3>
+                <span class="orch-pill" id="worker-models-auto"></span>
+              </div>
+              <p class="orch-note" data-i18n="settings.workerModels.about">과업 난이도마다 워커를 어느 모델·사고 깊이로 띄울지 정합니다. 자동이면 오늘 쓸 수 있는 모델 가운데 난이도에 맞는 것을 고릅니다. 고르면 바로 저장되고 다음 소환부터 적용됩니다.</p>
+            </div>
+          </div>
+          <div class="worker-models-sources">
+            <div class="worker-models-chips" id="worker-models-sources" role="list" data-i18n-aria="settings.workerModels.sources" aria-label="모델 목록"></div>
+            <div class="worker-models-actions">
+              <button class="btn" id="worker-models-all-auto" type="button" hidden data-i18n="settings.workerModels.allAuto">모두 자동으로</button>
+              <button class="btn" id="worker-models-refresh" type="button">
+                <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
+                <span data-i18n="settings.workerModels.refresh">목록 새로고침</span>
+              </button>
+            </div>
+          </div>
+          <div class="worker-models-frame">
+            <table class="worker-models-table" id="summon-profiles-table" aria-labelledby="worker-models-title"></table>
+          </div>
+          <p class="orch-summary" id="worker-models-foot"></p>
+          <div class="worker-models-next" id="worker-models-next" hidden>
+            <span class="worker-models-next-label" id="worker-models-next-label"></span>
+            <code id="worker-models-next-words"></code>
+          </div>
+          <div class="settings-status" id="orch-models-status" role="status" aria-live="polite"></div>
         </div>
-          </details>
+        <!-- The gate in front of the routing seat.
+             `smart.autoClassifier` decides how a spawn's difficulty is read,
+             whether the chat probe is called (the probing word only), and
+             whether the routing feature is asked at all (every word but
+             `off`, t-6346). The four words and the coupling are
+             `zerocode_core::jev`'s (`ClassifierMode`, `ClassifierRow.reaches`,
+             `ClassifierRow.gates`); this card spells neither — its choices
+             are built from what `typesafe_settings` answers
+             (`paintClassifierChoices`). -->
+        <div class="settings-card" id="route-classifier-card">
+          <div class="orch-head">
+            <span class="orch-mark"><svg class="icon" aria-hidden="true"><use href="#i-workflow"></use></svg></span>
+            <div class="orch-title-box">
+              <div class="orch-title-row">
+                <h3 class="orch-title" id="route-classifier-title" data-i18n="settings.classifier.title">난이도 판정 방식</h3>
+              </div>
+              <p class="orch-note" data-i18n="settings.classifier.everySession">워커 소환뿐 아니라 zo 세션의 매 턴 모델 고르기에도 적용됩니다.</p>
+            </div>
+          </div>
+          <div class="route-classifier-choices" id="route-classifier-choices" role="radiogroup" aria-labelledby="route-classifier-title"></div>
+          <!-- Shown by `paintClassifierGate` when the feature this
+               classifier gates asks while automatic routing is off: its
+               mode is one nothing can reach (`ClassifierRow.reaches`). Which feature that is, is
+               the backend's answer (`classifier.gates`). -->
+          <p class="settings-notice settings-notice--row" id="route-classifier-unreachable" data-jev-unreachable
+             data-i18n="settings.typesafe.routingUnreachable" hidden>
+            자동 라우팅이 꺼져 있어 「모델 선택 판단」은 판단을 요청하지 않습니다. 「끔」이 아닌 방식을 고르면 요청합니다.
+          </p>
+          <div class="settings-status" id="route-classifier-status" role="status" aria-live="polite"></div>
         </div>
         <!-- 조율자가 띄우는 에이전트를 어디에 담을지. 기본은 꺼짐 —
              프로세스를 네 개 더 띄우는 기능은 사람이 켜는 것이지 발견하는

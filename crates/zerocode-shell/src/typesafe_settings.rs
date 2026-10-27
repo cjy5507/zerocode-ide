@@ -272,6 +272,12 @@ pub struct TypeSafeSettings {
     /// marked: what a written row's model is picked from.
     pub summon_lineup:
         std::collections::BTreeMap<String, Vec<zerocode_core::summon_difficulty::lineup::Pick>>,
+    /// Whether each agent with rows could be summoned now — its CLI on the
+    /// launch PATH, its login — as the readiness table last saw it.
+    pub summon_agents: std::collections::BTreeMap<String, SummonAgent>,
+    /// When the lineup was read and what each source answered, and the
+    /// person's connections, usable or not.
+    pub summon_sources: crate::summon_lineup::Sources,
     /// Every row of the use table, in the table's order — what the dashboard
     /// reads each feature's standing off.
     pub switches: Vec<SwitchRow>,
@@ -280,6 +286,43 @@ pub struct TypeSafeSettings {
     pub classifier: ClassifierRow,
     /// What the editor of the person's own decisions offers and bounds.
     pub custom_decisions: CustomDecisionRules,
+}
+
+/// One agent as the readiness table last saw it (t-3996); `None` fields
+/// when nobody has looked yet — the screen then says nothing, which
+/// accuses nobody.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummonAgent {
+    /// Its CLI was on the PATH a launch would use.
+    pub installed: Option<bool>,
+    /// The login witnesses' word: `authorized`, `unauthorized`, `unknown`.
+    pub auth: Option<&'static str>,
+    /// What the witnesses saw, for a hover.
+    pub evidence: Option<String>,
+    /// It runs any provider's model (zo), so the person's connections are
+    /// its to pick from; an agent tied to one provider's CLI takes only that.
+    pub any_provider: bool,
+}
+
+impl SummonAgent {
+    fn of(agent: &str, snapshot: Option<zerocode_core::readiness::AgentReadinessSnapshot>) -> Self {
+        Self {
+            any_provider: zerocode_core::agent::agent_voice(agent)
+                .models_provider
+                .is_none(),
+            installed: snapshot.as_ref().map(|seen| {
+                matches!(
+                    seen.binary,
+                    zerocode_core::readiness::BinaryState::Present { .. }
+                )
+            }),
+            auth: snapshot.as_ref().map(|seen| seen.auth.as_str()),
+            evidence: snapshot
+                .map(|seen| seen.evidence)
+                .filter(|evidence| !evidence.is_empty()),
+        }
+    }
 }
 
 /// Every agent's launch rows against `lineup`; an agent with none is left
@@ -330,6 +373,7 @@ pub fn read_settings(
         };
     let lineup = crate::summon_lineup::snapshot();
     let now_ms = crate::usage_runtime::epoch_ms_now();
+    let summon_rows = summon_rows(&document, &lineup, now_ms);
     Ok(TypeSafeSettings {
         keys_kept_here,
         key_saved,
@@ -350,7 +394,19 @@ pub fn read_settings(
         jev: JevSwitch::of(&document),
         model: ModelRow::of(&root),
         summon_profiles: zerocode_core::summon_difficulty::written_profiles(&document),
-        summon_rows: summon_rows(&document, &lineup, now_ms),
+        // A peek: the readiness table's door for a reader that may not
+        // spawn a witness (the window's settings command looks first).
+        summon_agents: summon_rows
+            .keys()
+            .map(|agent| {
+                (
+                    agent.clone(),
+                    SummonAgent::of(agent, crate::readiness_runtime::observe(agent)),
+                )
+            })
+            .collect(),
+        summon_sources: crate::summon_lineup::sources(),
+        summon_rows,
         summon_lineup: lineup
             .lineups
             .iter()
@@ -1025,14 +1081,112 @@ pub fn set_classifier(path: &Path, mode: &str) -> Result<(), String> {
 }
 
 /// Save the editable launch table without changing any other settings.
-pub fn set_summon_profiles(path: &Path, profiles: &Value) -> Result<(), String> {
-    zerocode_core::summon_difficulty::validate_profiles(profiles)?;
-    update_smart(path, |smart| {
-        smart.insert(
-            zerocode_core::summon_difficulty::PROFILES_SETTING.to_string(),
-            profiles.clone(),
-        );
+/// Why one difficulty's row was not saved: the lineup's refusal by name
+/// (`refusal`), or the settings file's own sentence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SummonRowRefusal {
+    pub kind: &'static str,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<zerocode_core::summon_difficulty::lineup::Refusal>,
+}
+
+impl SummonRowRefusal {
+    const ROW: &'static str = "summon-row";
+
+    fn file(message: String) -> Self {
+        Self {
+            kind: "failed",
+            message,
+            refusal: None,
+        }
+    }
+}
+
+impl From<RouterRefusal> for SummonRowRefusal {
+    fn from(refusal: RouterRefusal) -> Self {
+        Self::file(refusal.message)
+    }
+}
+
+/// Write `agent`'s row at `difficulty` — or clear it back to the lineup when
+/// `written` names nothing — leaving every other row and key as it stood.
+/// The row is checked against `lineup` first (the core's
+/// [`check_written`](zerocode_core::summon_difficulty::lineup::check_written)):
+/// a model the lineup does not offer, or an effort the row's model does not
+/// take, is refused by name and nothing is written.
+///
+/// # Errors
+/// The lineup's refusal, an unknown difficulty, a `smart` value that is not
+/// an object, or an unreadable or unwritable file.
+pub fn set_summon_profile(
+    path: &Path,
+    agent: &str,
+    difficulty: &str,
+    written: &zerocode_core::summon_difficulty::Written,
+    lineup: Option<&zerocode_core::summon_difficulty::lineup::Lineup>,
+) -> Result<(), SummonRowRefusal> {
+    use zerocode_core::summon_difficulty::{self as summon, lineup::Refusal};
+    if summon::effort(difficulty).is_none() {
+        return Err(SummonRowRefusal::file(format!(
+            "{agent}: unknown difficulty {difficulty}"
+        )));
+    }
+    let mut refused: Option<Refusal> = None;
+    crate::api_routers::update_zo_settings_root(path, |root| {
+        let document = Value::Object(root.clone());
+        if let Err(refusal) =
+            summon::lineup::check_written(&document, agent, difficulty, written, lineup)
+        {
+            let message = refusal.to_string();
+            refused = Some(refusal);
+            return Err(message);
+        }
+        let mut table = summon::written_profiles(&document);
+        let rows = table
+            .as_object_mut()
+            .ok_or_else(|| format!("{}: expected an object", summon::PROFILES_SETTING))?
+            .entry(agent)
+            .or_insert_with(|| Value::Object(Map::new()));
+        let Value::Object(rows) = rows else {
+            return Err(format!("{agent}: expected an object of difficulties"));
+        };
+        if written.is_empty() {
+            rows.remove(difficulty);
+        } else {
+            rows.insert(
+                difficulty.to_string(),
+                serde_json::to_value(written).map_err(|err| err.to_string())?,
+            );
+        }
+        if rows.is_empty()
+            && let Some(table) = table.as_object_mut()
+        {
+            table.remove(agent);
+        }
+        summon::validate_profiles(&table)?;
+        let smart = root
+            .entry(SMART_SETTINGS_KEY)
+            .or_insert_with(|| Value::Object(Map::new()));
+        let Value::Object(smart) = smart else {
+            return Err(format!(
+                "settings.json의 {SMART_SETTINGS_KEY}가 JSON 객체가 아니라 바꾸지 않았습니다"
+            ));
+        };
+        if table.as_object().is_some_and(Map::is_empty) {
+            smart.remove(summon::PROFILES_SETTING);
+        } else {
+            smart.insert(summon::PROFILES_SETTING.to_string(), table);
+        }
         Ok(())
+    })
+    .map_err(|message| match refused {
+        Some(refusal) => SummonRowRefusal {
+            kind: SummonRowRefusal::ROW,
+            message,
+            refusal: Some(refusal),
+        },
+        None => SummonRowRefusal::file(message),
     })
 }
 
@@ -1920,24 +2074,94 @@ mod tests {
     }
 
     #[test]
-    fn summon_profiles_save_only_the_table_and_refuse_bad_rows() {
+    fn a_summon_row_is_written_one_at_a_time_and_cleared_back_to_the_lineup() {
+        use zerocode_core::summon_difficulty::{LADDER, PROFILES_SETTING, Written};
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("settings.json");
         let before = serde_json::json!({"smart":{"jevModel":"held"}, "theme":"dark"});
         std::fs::write(&path, before.to_string()).unwrap();
-        let profiles = zerocode_core::summon_difficulty::profiles(&Value::Null);
-        set_summon_profiles(&path, &profiles).unwrap();
-        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let read =
+            || -> Value { serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap() };
+        let high = LADDER[2].0;
+        let effort_only = Written {
+            model: None,
+            effort: Some("high".into()),
+        };
+        set_summon_profile(&path, "codex", high, &effort_only, None).unwrap();
+        let after = read();
         assert_eq!(after["theme"], before["theme"]);
         assert_eq!(after["smart"]["jevModel"], before["smart"]["jevModel"]);
         assert_eq!(
-            after["smart"][zerocode_core::summon_difficulty::PROFILES_SETTING],
-            profiles
+            after["smart"][PROFILES_SETTING],
+            serde_json::json!({"codex": {high: {"effort": "high"}}}),
+            "only the field written, the model left to the lineup"
         );
-        assert!(set_summon_profiles(&path, &serde_json::json!({"unknown":{}})).is_err());
-        let refused: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(refused, after);
+        set_summon_profile(&path, "codex", high, &Written::default(), None).unwrap();
+        assert!(
+            read()["smart"].get(PROFILES_SETTING).is_none(),
+            "the last row cleared leaves no table"
+        );
+        assert_eq!(read()["smart"]["jevModel"], before["smart"]["jevModel"]);
+        assert!(set_summon_profile(&path, "codex", "extreme", &effort_only, None).is_err());
+        assert!(set_summon_profile(&path, "unknown", high, &effort_only, None).is_err());
+    }
+
+    #[test]
+    fn a_summon_row_the_lineup_does_not_offer_is_refused_by_name_and_nothing_is_written() {
+        use zerocode_core::summon_difficulty::lineup::{Lineup, Refusal};
+        use zerocode_core::summon_difficulty::{LADDER, Written};
+        let lineup = Lineup::from_catalog(
+            &serde_json::json!({"models": [{"provider": "openai", "id": "model-a",
+                "band": "second", "rungs": ["hard"], "efforts": ["low", "high"]}]}),
+            "openai",
+        )
+        .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        let before = serde_json::json!({"theme":"dark"});
+        std::fs::write(&path, before.to_string()).unwrap();
+        let read =
+            || -> Value { serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap() };
+        let high = LADDER[2].0;
+        let cell = |model: &str, effort: Option<&str>| Written {
+            model: Some(model.into()),
+            effort: effort.map(str::to_string),
+        };
+        let refused =
+            set_summon_profile(&path, "codex", high, &cell("model-z", None), Some(&lineup))
+                .unwrap_err();
+        assert_eq!(refused.kind, "summon-row");
+        assert_eq!(
+            refused.refusal,
+            Some(Refusal::NotListed {
+                model: "model-z".into()
+            })
+        );
+        let refused = set_summon_profile(
+            &path,
+            "codex",
+            high,
+            &cell("model-a", Some("max")),
+            Some(&lineup),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            refused.refusal,
+            Some(Refusal::EffortOutside { .. })
+        ));
+        assert_eq!(read(), before, "nothing written");
+        set_summon_profile(
+            &path,
+            "codex",
+            high,
+            &cell("model-a", Some("high")),
+            Some(&lineup),
+        )
+        .unwrap();
+        assert_eq!(
+            read()["smart"]["summonProfiles"]["codex"][high],
+            serde_json::json!({"model": "model-a", "effort": "high"})
+        );
     }
 
     #[test]
@@ -2373,8 +2597,10 @@ mod tests {
         );
         assert!(card.contains("id=\"judgment-provider-kind\""));
         // The worker rows and the classifier stand on the orchestration pane
-        // (t-75762 v2, decision 4), still folded and still the only selects
-        // that name a mode.
+        // (t-75762 v2, decision 4), each on a card of its own since the
+        // person passed the before/after draft (2026-10-27): nothing folds
+        // them away, and the classifier is still the only choice that names
+        // a mode there.
         let orchestration = &page[page
             .find("<section class=\"settings-pane\" data-pane=\"orchestration\"")
             .expect("the orchestration pane")..];
@@ -2382,17 +2608,19 @@ mod tests {
         let orchestration = &orchestration[..orchestration
             .find("<section class=\"settings-pane\"")
             .expect("the next pane")];
-        let advanced = &orchestration[orchestration
-            .find("<details class=\"settings-fold settings-jev-advanced\"")
-            .expect("the advanced fold")..];
+        for card in ["id=\"worker-models-card\"", "id=\"route-classifier-card\""] {
+            let at = orchestration
+                .find(card)
+                .unwrap_or_else(|| panic!("the orchestration pane has no {card}"));
+            assert!(
+                orchestration[..at].matches("<details").count()
+                    == orchestration[..at].matches("</details>").count(),
+                "{card} stands under a fold"
+            );
+        }
         assert!(
-            advanced.contains("id=\"route-classifier-select\""),
-            "the classifier stands under the advanced fold"
-        );
-        let opening = &advanced[..advanced.find('>').expect("the fold opens")];
-        assert!(
-            !opening.contains(" open"),
-            "the advanced fold starts closed"
+            orchestration.contains("id=\"route-classifier-choices\""),
+            "the classifier's choices are on its card"
         );
         assert!(
             page.contains("id=\"jev-builtin-form\""),
@@ -3098,13 +3326,13 @@ mod tests {
     #[test]
     fn the_classifier_stands_on_the_card_and_spells_no_word_of_its_own() {
         let page = include_str!("../../../ui/index.html");
-        let select = &page[page
-            .find("id=\"route-classifier-select\"")
-            .expect("the card has no classifier switch")..];
-        let select = &select[..select.find("</select>").expect("the switch closes")];
+        let choices = &page[page
+            .find("id=\"route-classifier-choices\"")
+            .expect("the card has no classifier choices")..];
+        let choices = &choices[..choices.find("</div>").expect("the choices close")];
         assert!(
-            !select.contains("<option"),
-            "the classifier switch lists a word of its own: {select}"
+            !choices.contains("<input") && !choices.contains("<option"),
+            "the classifier lists a word of its own: {choices}"
         );
         // The row the gate stands in front of is named by the backend, so the
         // page carries a warning with no seat written into it.
@@ -3141,24 +3369,27 @@ mod tests {
             ("window commands", include_str!("cmd/typesafe.rs")),
             (
                 "pane script",
-                between(script, "function paintClassifierModes(", "\nasync function"),
+                between(
+                    script,
+                    "function paintClassifierChoices(",
+                    "\nasync function",
+                ),
             ),
             (
                 "pane script gate",
                 between(
                     script,
-                    "el(\"route-classifier-select\")?.addEventListener",
-                    "\n}",
+                    "el(\"route-classifier-choices\")?.addEventListener",
+                    "\n  });",
                 ),
             ),
-            // The classifier's part of the card, up to where the advanced
-            // fold that holds it closes.
+            // The classifier's card, up to its status line.
             (
                 "pane card",
                 between(
                     page,
                     "id=\"route-classifier-card\"",
-                    "\n          </details>",
+                    "id=\"route-classifier-status\"",
                 ),
             ),
         ];

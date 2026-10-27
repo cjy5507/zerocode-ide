@@ -6791,9 +6791,9 @@ function initTypeSafeEvents() {
     setSettingsOpen(false);
     openJevView();
   });
-  el("route-classifier-select")?.addEventListener("change", (event) => {
+  el("route-classifier-choices")?.addEventListener("change", (event) => {
     const mode = event.target.value;
-    void runKeyCardStep(WORKER_MODELS_CARD, () => invoke("set_route_classifier", { mode }), (state) => {
+    void runKeyCardStep(CLASSIFIER_CARD, () => invoke("set_route_classifier", { mode }), (state) => {
       if (!state.classifier?.reaches) {
         return t("settings.classifier.nowOff", "자동 라우팅을 껐습니다 — 「모델 선택 판단」도 판단을 요청하지 않습니다.");
       }
@@ -6802,22 +6802,23 @@ function initTypeSafeEvents() {
         : t("settings.classifier.nowQuiet", "바꿨습니다 — 이 방식은 빠른 등급 모델에게 묻지 않습니다.");
     });
   });
-  /* Only the rows somebody filled are written (t-14437): an empty model
-   * field follows today's lineup, and a filled one keeps its own effort or
-   * the one that difficulty runs at now. */
-  el("summon-profiles-save")?.addEventListener("click", () => {
-    const profiles = {};
-    el("summon-profiles-table")?.querySelectorAll('input[data-field="model"]').forEach((input) => {
-      const model = input.value.trim();
-      if (!model) return;
-      const { agent, difficulty } = input.dataset;
-      const effortInput = el("summon-profiles-table").querySelector(
-        `input[data-field="effort"][data-agent="${agent}"][data-difficulty="${difficulty}"]`);
-      const effort = effortInput?.value.trim() || effortInput?.placeholder || "";
-      (profiles[agent] ??= {})[difficulty] = { model, effort };
-    });
-    void runKeyCardStep(WORKER_MODELS_CARD, () => invoke("set_summon_profiles", { profiles }), () =>
-      t("settings.typesafe.profilesSaved", "선택 표를 저장했습니다."));
+  el("summon-profiles-table")?.addEventListener("change", workerCellChanged);
+  el("summon-profiles-table")?.addEventListener("click", (event) => {
+    const reset = event.target.closest?.(".worker-models-reset");
+    if (!reset) return;
+    // The button leaves with the written cell; the cell's model takes the focus.
+    workerFocus = { agent: reset.dataset.agent, difficulty: reset.dataset.difficulty, field: "model" };
+    void saveWorkerCell(reset.dataset.agent, reset.dataset.difficulty, null, null);
+  });
+  el("worker-models-all-auto")?.addEventListener("click", () => {
+    const cells = Object.entries(typesafeState?.summonRows ?? {}).flatMap(([agent, rows]) => rows
+      .filter((row) => row.writtenModel || row.writtenEffort)
+      .map((row) => ({ agent, difficulty: row.difficulty })));
+    void resetWorkerCells(cells);
+  });
+  el("worker-models-refresh")?.addEventListener("click", () => {
+    void runKeyCardStep(WORKER_MODELS_CARD, () => invoke("refresh_summon_lineup"), () =>
+      t("settings.workerModels.refreshed", "목록을 새로 받았습니다."));
   });
 }
 
@@ -6828,100 +6829,390 @@ function paintTypeSafeModel(state) {
   judgmentProviderController.paint(state);
 }
 
-/* What each difficulty runs today, and what a person may write over it
- * (t-14437). A field left empty follows the lineup — its placeholder is what
- * runs now — and the model field picks from the models the agent takes
- * today, the newly arrived marked; a model typed outside that list is said
- * so beside the field, so a typo never launches unnoticed. */
-function paintSummonProfiles(state) {
+/* Worker models (t-14437; the before/after draft passed 2026-10-27).
+ *
+ * One table: an agent to a row, a difficulty to a column, and in each cell a
+ * model and an effort picked from what the agent's lineup offers today —
+ * its logins' models and, for an agent that runs any provider's model, the
+ * person's own connections. The first choice of both is 「자동」, what the
+ * lineup runs there now. A pick is written at once, one cell at a time
+ * (`set_summon_profile`); the backend checks it against the same lineup,
+ * and the cell repaints from its answer — the row the next summons runs. */
+
+/* A difficulty's name and what it is for, by the ladder's own key; a key
+ * this page does not know is shown as itself. */
+const WORKER_DIFFICULTIES = Object.freeze({
+  low: () => ({ name: t("settings.workerModels.low", "쉬움"), hint: t("settings.workerModels.lowHint", "문서·번역·작은 수정") }),
+  mid: () => ({ name: t("settings.workerModels.mid", "보통"), hint: t("settings.workerModels.midHint", "일반 구현") }),
+  high: () => ({ name: t("settings.workerModels.high", "어려움"), hint: t("settings.workerModels.highHint", "설계·큰 변경") }),
+});
+
+function workerDifficulty(key) {
+  return WORKER_DIFFICULTIES[key]?.() ?? { name: key, hint: "" };
+}
+
+function workerNode(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function workerRow(state, agent, difficulty) {
+  return state?.summonRows?.[agent]?.find((row) => row.difficulty === difficulty) ?? null;
+}
+
+function workerPick(state, agent, model) {
+  return state?.summonLineup?.[agent]?.find((pick) => pick.id === model) ?? null;
+}
+
+/* The control a press in the table came from: a cell's field keeps the
+ * focus across the repaints its own save asks for (busy, then answered),
+ * the first of which disables it. */
+let workerFocus = null;
+
+function paintWorkerModels(state) {
   const table = el("summon-profiles-table");
-  if (!table || table.contains(document.activeElement)) return;
+  if (!table) return;
+  const focused = document.activeElement?.closest?.("#summon-profiles-table [data-field]");
+  const keep = focused ? { ...focused.dataset } : workerFocus;
+  const rows = state.summonRows ?? {};
+  const agents = Object.keys(rows);
+  const columns = [...new Set(agents.flatMap((agent) => rows[agent].map((row) => row.difficulty)))];
   table.replaceChildren();
-  const written = state.summonProfiles ?? {};
-  for (const [agent, rows] of Object.entries(state.summonRows ?? {})) {
-    const picks = state.summonLineup?.[agent] ?? [];
-    const list = document.createElement("datalist");
-    list.id = `summon-lineup-${agent}`;
-    for (const pick of picks) {
-      const option = document.createElement("option");
-      option.value = pick.id;
-      if (pick.fresh) option.label = t("settings.typesafe.modelNew", "새로 들어옴");
-      list.append(option);
+  const head = table.createTHead().insertRow();
+  head.append(Object.assign(workerNode("th", "", t("settings.workerModels.agent", "에이전트")), { scope: "col" }));
+  for (const difficulty of columns) {
+    const words = workerDifficulty(difficulty);
+    const cell = Object.assign(workerNode("th", "", words.name), { scope: "col" });
+    if (words.hint) cell.append(workerNode("span", "worker-models-hint", words.hint));
+    head.append(cell);
+  }
+  const body = table.createTBody();
+  for (const agent of agents) {
+    const line = body.insertRow();
+    line.dataset.agent = agent;
+    const ready = workerReadiness(state.summonAgents?.[agent]);
+    line.classList.toggle("is-unready", ready?.state === "missing" || ready?.state === "login");
+    const name = Object.assign(workerNode("th"), { scope: "row" });
+    name.append(workerAgentHead(state, agent, ready));
+    line.append(name);
+    for (const difficulty of columns) {
+      const row = rows[agent].find((one) => one.difficulty === difficulty);
+      const cell = line.insertCell();
+      // Named for the narrow table, where the cells stack under the agent.
+      cell.dataset.difficultyName = workerDifficulty(difficulty).name;
+      if (row) cell.append(workerCell(state, agent, row));
     }
-    table.append(list);
-    for (const row of rows) {
-      const mine = written[agent]?.[row.difficulty];
-      const note = document.createElement("p");
-      note.className = "settings-row-desc";
-      note.textContent = summonRowNote(row);
-      for (const field of ["model", "effort"]) {
-        const label = document.createElement("label");
-        label.className = "settings-field";
-        label.dataset.field = "md";
-        const name = document.createElement("span");
-        name.className = "settings-field-copy";
-        name.textContent = `${agent} · ${row.difficulty} · ${field}`;
-        label.append(name);
-        const input = document.createElement("input");
-        input.className = "settings-input";
-        input.value = mine?.[field] ?? "";
-        input.placeholder = row[field];
-        input.dataset.agent = agent;
-        input.dataset.difficulty = row.difficulty;
-        input.dataset.field = field;
-        input.disabled = typesafeBusy;
-        if (field === "model") {
-          input.setAttribute("list", list.id);
-          input.addEventListener("input", () => {
-            const typed = input.value.trim();
-            note.textContent = typed && picks.length && !picks.some((pick) => pick.id === typed)
-              ? t("settings.typesafe.modelOutsideList", "오늘 목록에 없는 모델입니다 — 이름을 다시 확인하세요.")
-              : summonRowNote(row);
-          });
-        }
-        label.append(input);
-        table.append(label);
+  }
+  const written = agents.flatMap((agent) => rows[agent]).filter((row) => row.writtenModel || row.writtenEffort);
+  const total = agents.reduce((sum, agent) => sum + rows[agent].length, 0);
+  const pill = el("worker-models-auto");
+  if (pill) {
+    pill.textContent = written.length
+      ? t("settings.workerModels.someWritten", "{{total}}칸 중 {{count}}칸 직접 정함", { total, count: written.length })
+      : t("settings.workerModels.allAutoNow", "{{total}}칸 모두 자동", { total });
+    pill.classList.toggle("is-on", written.length === 0);
+  }
+  const allAuto = el("worker-models-all-auto");
+  if (allAuto) {
+    allAuto.hidden = written.length === 0;
+    allAuto.disabled = typesafeBusy;
+  }
+  const refresh = el("worker-models-refresh");
+  if (refresh) refresh.disabled = typesafeBusy;
+  paintWorkerSources(state);
+  paintWorkerFoot(state);
+  workerFocus = keep && typesafeBusy ? keep : null;
+  if (keep && !typesafeBusy) {
+    table.querySelector(`[data-agent="${CSS.escape(keep.agent)}"][data-difficulty="${CSS.escape(keep.difficulty)}"][data-field="${CSS.escape(keep.field)}"]`)?.focus();
+  }
+}
+
+/* Whether the agent could be summoned now, as the readiness table last saw
+ * it — said only when somebody looked, and `unknown` accuses nobody. */
+function workerReadiness(seen) {
+  if (!seen || seen.installed == null) return null;
+  if (seen.installed === false) return { state: "missing", word: t("settings.workerModels.notInstalled", "설치 안 됨") };
+  if (seen.auth === "unauthorized") return { state: "login", word: t("settings.agents.loginNeeded", "로그인 필요") };
+  if (seen.auth === "authorized") return { state: "ready", word: t("settings.workerModels.ready", "준비됨") };
+  return null;
+}
+
+function workerAgentHead(state, agent, ready) {
+  const box = workerNode("div", "worker-models-agent");
+  box.append(workerNode("span", "worker-models-agent-name", agentName(agent)));
+  const meta = workerNode("span", "worker-models-agent-meta");
+  if (ready) {
+    const badge = workerNode("span", "worker-models-agent-state", ready.word);
+    badge.dataset.state = ready.state;
+    badge.dataset.tip = state.summonAgents?.[agent]?.evidence ?? "";
+    meta.append(badge);
+  }
+  const picks = state.summonLineup?.[agent] ?? [];
+  const linked = picks.filter((pick) => pick.connection).length;
+  meta.append(workerNode("span", "", linked
+    ? t("settings.workerModels.countLinked", "모델 {{count}}개 · 연결 {{linked}}개", { count: picks.length - linked, linked })
+    : t("settings.workerModels.count", "모델 {{count}}개", { count: picks.length })));
+  box.append(meta);
+  return box;
+}
+
+function workerOption(value, label, selected) {
+  const option = workerNode("option", "", label);
+  option.value = value;
+  option.selected = selected;
+  return option;
+}
+
+function workerGroup(label, picks, chosen) {
+  const group = document.createElement("optgroup");
+  group.label = label;
+  for (const pick of picks) {
+    const label = pick.fresh ? `${pick.id} · ${t("settings.typesafe.modelNew", "새로 들어옴")}` : pick.id;
+    group.append(workerOption(pick.id, label, pick.id === chosen));
+  }
+  return group;
+}
+
+/* One cell: the model, then the effort, each first offering 「자동」 — what
+ * the row runs when that field is left to the lineup — and a line under
+ * them saying who chose it, or what moved under a choice the person made. */
+function workerCell(state, agent, row) {
+  const difficulty = workerDifficulty(row.difficulty).name;
+  const who = agentName(agent);
+  const written = Boolean(row.writtenModel || row.writtenEffort);
+  const warning = workerCellWarning(row);
+  const cell = workerNode("div", "worker-models-cell");
+  cell.classList.toggle("is-written", written);
+  cell.classList.toggle("is-warned", Boolean(warning));
+  const auto = (value) => value ? t("settings.workerModels.auto", "자동 · {{value}}", { value }) : t("settings.workerModels.autoPlain", "자동");
+
+  const model = workerNode("select", "settings-input worker-models-model");
+  Object.assign(model.dataset, { agent, difficulty: row.difficulty, field: "model" });
+  model.setAttribute("aria-label", t("settings.workerModels.modelLabel", "{{agent}} {{difficulty}} 모델", { agent: who, difficulty }));
+  model.append(workerOption("", auto(row.autoModel), !row.writtenModel));
+  const picks = state.summonLineup?.[agent] ?? [];
+  const own = picks.filter((pick) => !pick.connection);
+  const fit = own.filter((pick) => pick.fits.includes(row.difficulty));
+  const other = own.filter((pick) => !pick.fits.includes(row.difficulty));
+  if (fit.length) model.append(workerGroup(t("settings.workerModels.fits", "{{difficulty}}에 맞는 모델", { difficulty }), fit, row.writtenModel));
+  if (other.length) model.append(workerGroup(t("settings.workerModels.others", "그 밖의 모델"), other, row.writtenModel));
+  if (state.summonAgents?.[agent]?.anyProvider) {
+    for (const connection of state.summonSources?.connections ?? []) {
+      const linked = picks.filter((pick) => pick.connection && pick.provider === connection.name);
+      if (connection.usable && linked.length) {
+        model.append(workerGroup(t("settings.workerModels.connection", "연결 · {{name}}", { name: connection.name }), linked, row.writtenModel));
+      } else if (!connection.usable && connection.models.length) {
+        // A connection without its key is listed and offers nothing.
+        const group = document.createElement("optgroup");
+        group.label = t("settings.workerModels.connectionKeyless", "연결 · {{name}} — 키 필요", { name: connection.name });
+        for (const id of connection.models) group.append(Object.assign(workerOption(id, id, false), { disabled: true }));
+        model.append(group);
       }
-      table.append(note);
     }
   }
-  el("summon-profiles-save").disabled = typesafeBusy;
+  if (row.writtenModel && !picks.some((pick) => pick.id === row.writtenModel)) {
+    // A model the person wrote stays theirs when the list moves under it.
+    const group = document.createElement("optgroup");
+    group.label = t("settings.workerModels.unlistedGroup", "목록에 없는 모델");
+    group.append(workerOption(row.writtenModel, row.writtenModel, true));
+    model.append(group);
+  }
+  model.classList.toggle("is-auto", !row.writtenModel);
+
+  const effort = workerNode("select", "settings-input worker-models-effort");
+  Object.assign(effort.dataset, { agent, difficulty: row.difficulty, field: "effort" });
+  effort.setAttribute("aria-label", t("settings.workerModels.effortLabel", "{{agent}} {{difficulty}} 사고 깊이", { agent: who, difficulty }));
+  // 「자동」 for the effort is the difficulty's effort inside the model: what
+  // the row runs at now while no effort is written, else what clearing it
+  // brings back — known for the lineup's model, not for a written one.
+  const autoEffort = !row.writtenEffort ? row.effort : row.writtenModel ? null : row.autoEffort;
+  effort.append(workerOption("", auto(autoEffort), !row.writtenEffort));
+  const takes = [...(workerPick(state, agent, row.model)?.efforts ?? [row.effort])];
+  if (row.writtenEffort && !takes.includes(row.writtenEffort)) takes.push(row.writtenEffort);
+  for (const word of takes) effort.append(workerOption(word, word, word === row.writtenEffort));
+  effort.classList.toggle("is-auto", !row.writtenEffort);
+
+  for (const select of [model, effort]) select.disabled = typesafeBusy;
+  const fields = workerNode("div", "worker-models-fields");
+  fields.append(model, effort);
+  const foot = workerNode("div", "worker-models-cell-foot");
+  foot.append(workerNode("span", "worker-models-said", warning ?? (written
+    ? t("settings.workerModels.written", "직접 정함")
+    : t("settings.workerModels.autoNow", "자동"))));
+  if (written) {
+    const reset = workerNode("button", "worker-models-reset", t("settings.workerModels.reset", "자동으로"));
+    reset.type = "button";
+    Object.assign(reset.dataset, { agent, difficulty: row.difficulty });
+    reset.disabled = typesafeBusy;
+    reset.setAttribute("aria-label", t("settings.workerModels.resetLabel", "{{agent}} {{difficulty}}을(를) 자동으로", { agent: who, difficulty }));
+    foot.append(reset);
+  }
+  cell.append(fields, foot);
+  return cell;
 }
 
-/* One difficulty's line under its fields: who decided it, and the newly
- * arrived models it could run instead. */
-function summonRowNote(row) {
-  const auto = t("settings.typesafe.rowAuto", "자동 — 지금은 {{model}} · {{effort}}로 뜹니다.", { model: row.model, effort: row.effort });
-  const said = row.from === "person"
-    ? t("settings.typesafe.rowWritten", "직접 적은 모델입니다. 비우면 자동으로 돌아갑니다.")
-    : auto;
-  const fresh = (row.candidates ?? []).filter((candidate) => candidate.fresh).map((candidate) => candidate.model);
-  const placed = summonRowTier(row);
-  const told = placed ? `${said} ${placed}` : said;
-  return fresh.length
-    ? `${told} ${t("settings.typesafe.rowFresh", "새로 들어온 모델: {{models}}", { models: fresh.join(", ") })}`
-    : told;
+/* What moved under a choice the person made: the model left the list, an
+ * older release of it, or an effort the model does not take. A row the
+ * lineup chose says nothing — it follows the list by itself. */
+function workerCellWarning(row) {
+  const standing = row.standing?.kind;
+  if (row.writtenModel && standing === "unlisted") return t("settings.workerModels.unlisted", "공급자 목록에서 빠진 모델입니다");
+  if (row.writtenModel && standing === "superseded") {
+    return row.standing.by
+      ? t("settings.workerModels.superseded", "새 버전이 있습니다: {{model}}", { model: row.standing.by })
+      : t("settings.workerModels.supersededPlain", "이전 세대 모델입니다");
+  }
+  if (row.writtenModel && standing === "missing") return t("settings.workerModels.missing", "오늘 목록에 없는 모델입니다");
+  if (row.writtenEffort && row.effortClamped) {
+    const words = { from: row.effortClamped.from, to: row.effortClamped.to };
+    return row.effort === row.effortClamped.to
+      ? t("settings.workerModels.effortBrought", "이 모델은 {{from}}을(를) 받지 않아 {{to}}(으)로 뜹니다", words)
+      : t("settings.workerModels.effortOutside", "이 모델이 받지 않는 사고 깊이입니다({{to}}까지)", words);
+  }
+  return null;
 }
 
-/* Who put the row's model in its tier, and how sure that was (t-45961): the
- * Jev seat's judgment, the fact rule, or — for a model that arrived after
- * the judgment — the fact rule until the next one. A row the person wrote,
- * or one the lineup says nothing about, says nothing here. */
-const PERMILLE_PER_PERCENT = 10;
-function summonRowTier(row) {
-  if (row.from === "person") return "";
-  if (row.tierFrom === "jev") {
-    const confidence = Math.round((row.tierConfidencePermille ?? 0) / PERMILLE_PER_PERCENT);
-    return t("settings.typesafe.rowTierJev", "이 모델의 등급은 Jev 판정입니다(확신도 {{confidence}}%).", { confidence });
+/* Where today's list came from: each login's answer by the words the model
+ * settings say it with (`MODEL_LOGINS`, `MODEL_FAILURE_KINDS`), then each of
+ * the person's connections. */
+function paintWorkerSources(state) {
+  const host = el("worker-models-sources");
+  if (!host) return;
+  host.replaceChildren();
+  const sources = state.summonSources ?? {};
+  const providers = new Map();
+  for (const report of sources.reports ?? []) {
+    const provider = ZO_REPORT_PROVIDER[report.provider] ?? report.provider;
+    providers.set(provider, [...(providers.get(provider) ?? []), report]);
   }
-  if (row.tierFrom === "provisional") {
-    return t("settings.typesafe.rowTierProvisional", "지난 판정 뒤에 들어온 모델이라, 다음 판정 때까지 사실 규칙에 따른 임시 등급입니다.");
+  const chip = (name, said, ready) => {
+    const node = workerNode("span", "orch-chip");
+    node.setAttribute("role", "listitem");
+    node.classList.toggle("is-ready", ready);
+    node.append(workerNode("span", "orch-chip-name", name));
+    if (said) node.append(workerNode("span", "orch-chip-state", said));
+    host.append(node);
+  };
+  for (const [provider, own] of providers) {
+    const name = MODEL_LOGINS[provider]?.() ?? t("settings.models.login.other", "{{provider}} 로그인", { provider });
+    const answered = own.find((report) => report.ok);
+    if (answered) {
+      chip(name, modelReportAge(answered.age), true);
+    } else if (own.every((report) => report.skipped)) {
+      chip(name, t("settings.workerModels.loginMissing", "로그인 안 됨"), false);
+    } else {
+      const kind = own.find((report) => report.failure)?.failure;
+      chip(name, (MODEL_FAILURE_KINDS[kind] ?? MODEL_FAILURE_KINDS.unknown)(), false);
+    }
   }
-  if (row.tierFrom === "facts") {
-    return t("settings.typesafe.rowTierFacts", "이 모델의 등급은 사실 규칙으로 정했습니다. Jev 판정은 없습니다.");
+  for (const connection of sources.connections ?? []) {
+    chip(t("settings.workerModels.connection", "연결 · {{name}}", { name: connection.name }), connection.usable
+      ? t("settings.workerModels.count", "모델 {{count}}개", { count: connection.models.length })
+      : t("settings.workerModels.keyNeeded", "키 필요"), connection.usable);
   }
-  return "";
+  if (!host.childElementCount) chip(t("settings.workerModels.notRead", "목록을 아직 받지 않았습니다"), "", false);
 }
+
+/* One line under the table: who placed the lineup's models in their tiers,
+ * said once rather than under every cell, and what a connection's model is
+ * offered at. */
+function paintWorkerFoot(state) {
+  const foot = el("worker-models-foot");
+  if (!foot) return;
+  const rows = Object.values(state.summonRows ?? {}).flat().filter((row) => !row.writtenModel && row.tierFrom);
+  const basis = [...new Set(rows.map((row) => row.tierFrom))].map((from) => ({
+    jev: () => t("settings.workerModels.tierJev", "Jev 판정"),
+    provisional: () => t("settings.workerModels.tierProvisional", "다음 Jev 판정까지의 임시 사실 규칙"),
+    facts: () => t("settings.workerModels.tierFacts", "사실 규칙(이름·세대)"),
+  })[from]?.()).filter(Boolean);
+  const linked = Object.values(state.summonLineup ?? {}).flat().some((pick) => pick.connection);
+  foot.textContent = [
+    basis.length ? t("settings.workerModels.tierBasis", "자동으로 고른 모델의 등급은 {{basis}}로 정했습니다.", { basis: basis.join(", ") }) : "",
+    linked ? t("settings.workerModels.connectionEfforts", "연결된 API 모델은 받는 사고 깊이를 알리지 않아 에이전트의 기본 단계를 보여 줍니다.") : "",
+  ].filter(Boolean).join(" ");
+  foot.hidden = !foot.textContent;
+}
+
+/* The words the next summons puts on the agent's command line for a row the
+ * person just saved — the backend's own spelling of them (`row.launch`). */
+function paintWorkerNext(agent, row) {
+  const box = el("worker-models-next");
+  if (!box) return;
+  box.hidden = !row?.launch?.length;
+  if (box.hidden) return;
+  el("worker-models-next-label").textContent = t("settings.workerModels.next", "다음 소환 — {{agent}} · {{difficulty}}", { agent: agentName(agent), difficulty: workerDifficulty(row.difficulty).name });
+  el("worker-models-next-words").textContent = row.launch.join(" ");
+}
+
+/* A refusal of one cell, in this page's words: the lineup's by name, any
+ * other the backend's own sentence. */
+function workerRowRefusal(error) {
+  const refusal = error?.refusal;
+  if (refusal?.kind === "notListed") {
+    return t("settings.workerModels.notListed", "{{model}}은(는) 오늘 목록에 없는 모델이라 저장하지 않았습니다.", { model: refusal.model });
+  }
+  if (refusal?.kind === "effortOutside") {
+    return t("settings.workerModels.effortRefused", "{{model}}은(는) {{takes}}만 받아 {{effort}}(으)로 저장하지 않았습니다.", { model: refusal.model, takes: refusal.takes.join(", "), effort: refusal.effort });
+  }
+  return failureOf(error).message;
+}
+
+/* Write one cell — empty fields follow the lineup — and say what the next
+ * summons at that difficulty now runs. */
+function saveWorkerCell(agent, difficulty, model, effort, note = "") {
+  return runKeyCardStep(WORKER_MODELS_CARD, async () => {
+    try {
+      return await invoke("set_summon_profile", { agent, difficulty, model, effort });
+    } catch (error) {
+      throw Object.assign(new Error(workerRowRefusal(error)), { kind: "failed" });
+    }
+  }, (state) => {
+    const row = workerRow(state, agent, difficulty);
+    paintWorkerNext(agent, row);
+    const said = row
+      ? t("settings.workerModels.saved", "저장했습니다 — 다음 {{agent}} {{difficulty}} 소환부터 {{model}} · {{effort}}", {
+        agent: agentName(agent), difficulty: workerDifficulty(difficulty).name, model: row.model, effort: row.effort,
+      })
+      : t("settings.workerModels.savedPlain", "저장했습니다.");
+    return note ? `${said} ${note}` : said;
+  });
+}
+
+/* A pick in a cell. A model whose list does not hold the effort written for
+ * the one before lets that effort go back to 「자동」 and says so. */
+function workerCellChanged(event) {
+  const select = event.target.closest?.("select[data-field]");
+  const row = select && workerRow(typesafeState, select.dataset.agent, select.dataset.difficulty);
+  if (!row) return;
+  const { agent, difficulty, field } = select.dataset;
+  workerFocus = { agent, difficulty, field };
+  let model = row.writtenModel ?? null;
+  let effort = row.writtenEffort ?? null;
+  let note = "";
+  if (field === "model") {
+    model = select.value || null;
+    const takes = workerPick(typesafeState, agent, model ?? row.autoModel)?.efforts;
+    if (effort && takes && !takes.includes(effort)) {
+      note = t("settings.workerModels.effortReset", "이 모델은 {{effort}}을(를) 받지 않아 사고 깊이를 자동으로 돌렸습니다.", { effort });
+      effort = null;
+    }
+  } else {
+    effort = select.value || null;
+  }
+  void saveWorkerCell(agent, difficulty, model, effort, note);
+}
+
+async function resetWorkerCells(cells) {
+  for (const { agent, difficulty } of cells) await saveWorkerCell(agent, difficulty, null, null);
+}
+
+/* A read of the lineup finished — a refresh, a connection saved, the hourly
+ * one — while the page that shows it is open: paint what it holds. */
+listen("summon-lineup:read", () => {
+  if (!settingsView.hidden && settingsPane === "orchestration" && !typesafeBusy) void refreshTypeSafe();
+});
 
 /* One seat's row of the backend's answer, by the use's own name. The words a
  * mode is spelled with are the Jev use table's; this page reads only what a
@@ -6942,22 +7233,35 @@ function jevSeatChoice(state, seat) {
  * spelled nowhere else. What this page reads off a choice is whether the
  * classifier runs at all, whether it reads markers a person wrote, and whether
  * it calls a probe — and the last of those is also whether the routing seat
- * below is ever asked anything. */
-function paintClassifierModes(select, choices) {
-  select.replaceChildren();
-  for (const choice of choices) {
-    const option = document.createElement("option");
-    option.value = choice.mode;
+ * below is ever asked anything. Each is a card with what it does under its
+ * name, so the four are told apart without opening anything. */
+function paintClassifierChoices(host, classifier) {
+  host.replaceChildren();
+  for (const choice of classifier.modes ?? []) {
+    let name;
+    let about;
     if (!choice.runs) {
-      option.textContent = t("settings.classifier.modeOff", "끔 — 자동 라우팅을 쓰지 않음");
+      name = t("settings.classifier.modeOff", "끔");
+      about = t("settings.classifier.offAbout", "자동 라우팅을 쓰지 않습니다.");
     } else if (choice.probes) {
-      option.textContent = t("settings.classifier.modeProbed", "낱말 + 모델에게도 물음");
+      name = t("settings.classifier.modeProbed", "키워드 + 빠른 모델 확인");
+      about = t("settings.classifier.probedAbout", "빠른 모델에 한 번 더 묻습니다(출력 약 200토큰). 늦거나 실패하면 키워드 판정을 씁니다.");
     } else if (choice.markers) {
-      option.textContent = t("settings.classifier.modeMarkers", "낱말 + 과업에 적힌 표식");
+      name = t("settings.classifier.modeMarkers", "키워드 + 과업 표시");
+      about = t("settings.classifier.markersAbout", "사람이 과업에 적어 둔 표시도 읽습니다. 어디에도 묻지 않습니다.");
     } else {
-      option.textContent = t("settings.classifier.modeWords", "낱말만");
+      name = t("settings.classifier.modeWords", "키워드만");
+      about = t("settings.classifier.wordsAbout", "과업 글의 키워드로 정합니다. 어디에도 묻지 않습니다.");
     }
-    select.appendChild(option);
+    const card = workerNode("label", "route-classifier-choice");
+    const input = workerNode("input");
+    input.type = "radio";
+    input.name = "route-classifier";
+    input.value = choice.mode;
+    input.checked = choice.mode === classifier.mode;
+    input.disabled = typesafeBusy;
+    card.append(input, workerNode("span", "route-classifier-name", name), workerNode("span", "route-classifier-about", about));
+    host.append(card);
   }
 }
 
@@ -6967,12 +7271,8 @@ function paintClassifierModes(select, choices) {
  * beside the classifier, which is what changes it. */
 function paintClassifierGate(state) {
   const classifier = state.classifier;
-  const select = el("route-classifier-select");
-  if (select && classifier) {
-    paintClassifierModes(select, classifier.modes ?? []);
-    select.value = classifier.mode;
-    select.disabled = typesafeBusy;
-  }
+  const host = el("route-classifier-choices");
+  if (host && classifier) paintClassifierChoices(host, classifier);
   const notice = el("route-classifier-unreachable");
   if (notice) {
     // The feature is reached under every word but `off` (t-6346); the
@@ -7069,7 +7369,7 @@ function paintTypeSafe(state) {
     if (button) button.disabled = typesafeBusy || !state.keySaved;
   }
   paintTypeSafeModel(state);
-  paintSummonProfiles(state);
+  paintWorkerModels(state);
   paintClassifierGate(state);
   paintTypeSafeSave();
   // The dashboard wears the same switch and reads the same features; a press
@@ -7107,6 +7407,13 @@ const WORKER_MODELS_CARD = {
   paint: (state) => paintTypeSafe(state),
   say: (text, evidence) => paintSettingsStatus(el("orch-models-status"), judgmentProviderController.failure(text) ?? text, evidence),
   standing: (state) => typesafeStanding(state),
+};
+
+/* The classifier stands on its own card beside the worker models and
+ * answers there; the rest of its hands are the TypeSafe card's. */
+const CLASSIFIER_CARD = {
+  ...WORKER_MODELS_CARD,
+  say: (text, evidence) => paintSettingsStatus(el("route-classifier-status"), judgmentProviderController.failure(text) ?? text, evidence),
 };
 
 /* The switch at the judgment card's head answers beside itself (t-75762

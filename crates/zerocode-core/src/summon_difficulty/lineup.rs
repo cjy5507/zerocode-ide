@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{LADDER, PROFILES_SETTING, Profile};
+use super::{LADDER, PROFILES_SETTING, Profile, Written};
 use crate::capabilities::EFFORT_ORDER;
 use crate::jev::SMART_SETTINGS_KEY;
 
@@ -117,6 +117,10 @@ pub struct LiveModel {
     /// The source stopped listing it; kept only because a session had it
     /// selected.
     pub unlisted: bool,
+    /// When the source first left it out, epoch seconds, when zo says.
+    pub unlisted_since: Option<i64>,
+    /// A model of one of the person's own connections (`customProviders`).
+    pub connection: bool,
     /// The newer release of its own line that stands in its place, when the
     /// classifier superseded it and said which (`supersededBy`, t-46882);
     /// `None` for a current model, a twin of the same release, and an older
@@ -269,6 +273,8 @@ impl Lineup {
                 efforts: None,
                 builtin: true,
                 unlisted: false,
+                unlisted_since: None,
+                connection: true,
                 superseded_by: None,
             });
         all.models.extend(custom);
@@ -309,6 +315,8 @@ impl Lineup {
                     unlisted: row
                         .get("unlistedSince")
                         .is_some_and(|since| !since.is_null()),
+                    unlisted_since: row.get("unlistedSince").and_then(Value::as_i64),
+                    connection: false,
                     superseded_by: row
                         .get("supersededBy")
                         .and_then(Value::as_str)
@@ -381,25 +389,95 @@ impl Lineup {
     }
 
     /// Every live model, the newly arrived marked — what a person picks a
-    /// written row's model from.
+    /// written row's model from, with what each takes and where it fits.
     #[must_use]
     pub fn picks(&self, agent: &str, seen: Option<&Seen>, now_ms: i64) -> Vec<Pick> {
         self.models
             .iter()
             .filter(|model| !model.folded())
-            .map(|model| Pick {
-                id: model.id.clone(),
-                fresh: seen.is_some_and(|seen| seen.fresh(agent, &model.id, now_ms)),
+            .map(|model| {
+                let (efforts, efforts_known) = efforts_of(agent, model);
+                Pick {
+                    id: model.id.clone(),
+                    fresh: seen.is_some_and(|seen| seen.fresh(agent, &model.id, now_ms)),
+                    provider: model.provider.clone(),
+                    connection: model.connection,
+                    efforts,
+                    efforts_known,
+                    fits: model.difficulties().into_iter().collect(),
+                }
             })
             .collect()
     }
+
+    /// Where `model` stands in this lineup today.
+    #[must_use]
+    pub fn standing(&self, model: &str) -> Standing {
+        match self.find(model) {
+            None => Standing::Missing,
+            Some(held) if held.unlisted => Standing::Unlisted {
+                since: held.unlisted_since,
+            },
+            Some(held) if held.band == Some(Band::Superseded) => Standing::Superseded {
+                by: held.superseded_by.clone(),
+            },
+            Some(_) => Standing::Listed,
+        }
+    }
+}
+
+/// The efforts `model` may run at for `agent`, lowest first, and whether
+/// that is the model's own word: a model that names none (a connection's)
+/// is offered the agent's ladder, what a summons launches it at anyway.
+fn efforts_of(agent: &str, model: &LiveModel) -> (Vec<String>, bool) {
+    model.efforts.clone().map_or_else(
+        || {
+            (
+                crate::orchestration::ladder_efforts(agent)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                false,
+            )
+        },
+        |own| (own, true),
+    )
 }
 
 /// One model a person can pick for a written row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Pick {
     pub id: String,
     pub fresh: bool,
+    /// The provider key its row names, or the connection's name.
+    pub provider: String,
+    /// One of the person's own connections (`customProviders`), not a login.
+    pub connection: bool,
+    /// What a written effort may be for it, lowest first.
+    pub efforts: Vec<String>,
+    /// `efforts` is the model's own list; otherwise the agent's ladder.
+    pub efforts_known: bool,
+    /// The difficulties the lineup offers it at.
+    pub fits: Vec<&'static str>,
+}
+
+/// Where a row's model stands in today's lineup — what a row the person
+/// wrote is warned by when the provider moved under it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Standing {
+    Listed,
+    /// The source stopped listing it, since (epoch seconds) when zo says.
+    Unlisted {
+        since: Option<i64>,
+    },
+    /// An older release of its line; `by` is the release that stands.
+    Superseded {
+        by: Option<String>,
+    },
+    /// The lineup does not hold it at all.
+    Missing,
 }
 
 /// Every model this window has seen in an agent's lineup, and when first.
@@ -541,6 +619,29 @@ pub struct Row {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort_clamped: Option<Clamp>,
     pub candidates: Vec<Candidate>,
+    /// What runs here once the person's row is cleared — the lineup's or
+    /// the table's pair; `None` when neither has a model for it.
+    pub auto_model: Option<String>,
+    pub auto_effort: Option<String>,
+    /// The fields the person wrote; `None` where the lineup fills it.
+    pub written_model: Option<String>,
+    pub written_effort: Option<String>,
+    /// Where the row's model stands in today's lineup; `None` when no
+    /// lineup was read.
+    pub standing: Option<Standing>,
+    /// The words a summons puts on the agent's command line for this row
+    /// (`--model …`, and the effort the way this agent's CLI takes it).
+    pub launch: Vec<String>,
+}
+
+/// One road's answer for a row: its pair, and where each half came from.
+#[derive(Clone)]
+struct Picked {
+    model: String,
+    effort: String,
+    from: Source,
+    effort_rule: EffortRule,
+    effort_clamped: Option<Clamp>,
 }
 
 impl Row {
@@ -630,6 +731,12 @@ fn build(
             .map(|row| serde_json::from_value::<Profile>(row.clone()).map_err(|e| e.to_string()))
             .transpose()
     };
+    let read_written = |difficulty: &str| -> Result<Option<Written>, String> {
+        written
+            .and_then(|rows| rows.get(difficulty))
+            .map(|row| serde_json::from_value::<Written>(row.clone()).map_err(|e| e.to_string()))
+            .transpose()
+    };
     // An agent of every provider (zo) falls back to the provider of the
     // model its own settings run, when its lineup lists that model.
     let home = root
@@ -643,7 +750,9 @@ fn build(
             continue;
         }
         let shipped = read(defaults.get(agent), difficulty)?;
-        let person = read(written, difficulty)?.filter(|row| Some(row) != shipped.as_ref());
+        // A saved row equal to the shipped one is the shipped one.
+        let person = read_written(difficulty)?
+            .filter(|row| !row.is_empty() && (row.whole().is_none() || row.whole() != shipped));
         // The default effort for the difficulty: the shipped table's word —
         // data, overridden by a person's row — and the agent's own ladder
         // (the measured launch table's word, ceiling included) only where the
@@ -656,66 +765,79 @@ fn build(
                 |row| (row.effort.clone(), EffortRule::Table),
             )
         });
-        let (model, effort, from, effort_rule, effort_clamped) = if let Some(person) = person {
-            super::launchable(agent, &person)?;
-            let clamped = lineup
-                .and_then(|held| held.find(&person.model))
-                .and_then(|held| held.clamp(&person.effort))
-                .map(|to| Clamp {
-                    from: person.effort.clone(),
-                    to,
-                });
-            (
-                person.model,
-                person.effort,
-                Source::Person,
-                EffortRule::Written,
-                clamped,
-            )
-        } else if let Some((pick, (wanted, rule))) =
-            lineup
-                .zip(default_effort.clone())
-                .and_then(|(held, wanted)| {
-                    let rung = Rung::of(difficulty)?;
-                    let by_rung = held
-                        .models
-                        .iter()
-                        .filter(|model| !model.folded() && model.rungs.contains(&rung))
-                        .min_by_key(|model| home.as_ref() != Some(&model.provider));
-                    // No model for the rung: the table's model stands while it is
-                    // live here; only a folded one gives way to what
-                    // the lineup offers at this difficulty.
-                    let table_stands = shipped.as_ref().is_some_and(|row| held.live(&row.model));
-                    let pick = by_rung.or_else(|| {
-                        (!table_stands)
-                            .then(|| offered(held, difficulty).next())
-                            .flatten()
-                    })?;
-                    Some((pick, wanted))
-                })
-        {
+        // What runs here when nobody wrote a row: the lineup's model for the
+        // rung, else the table's while it is live.
+        let auto = if let Some((pick, (wanted, rule))) = lineup
+            .zip(default_effort.clone())
+            .and_then(|(held, wanted)| {
+                let rung = Rung::of(difficulty)?;
+                let by_rung = held
+                    .models
+                    .iter()
+                    .filter(|model| !model.folded() && model.rungs.contains(&rung))
+                    .min_by_key(|model| home.as_ref() != Some(&model.provider));
+                // No model for the rung: the table's model stands while it is
+                // live here; only a folded one gives way to what
+                // the lineup offers at this difficulty.
+                let table_stands = shipped.as_ref().is_some_and(|row| held.live(&row.model));
+                let pick = by_rung.or_else(|| {
+                    (!table_stands)
+                        .then(|| offered(held, difficulty).next())
+                        .flatten()
+                })?;
+                Some((pick, wanted))
+            }) {
             let (effort, rule, clamped) = pick.effort_at(&wanted, rule);
-            (pick.id.clone(), effort, Source::Lineup, rule, clamped)
-        } else if let Some(table) =
-            shipped.filter(|row| lineup.is_none_or(|held| held.live(&row.model)))
+            Some(Picked {
+                model: pick.id.clone(),
+                effort,
+                from: Source::Lineup,
+                effort_rule: rule,
+                effort_clamped: clamped,
+            })
+        } else if let Some(table) = shipped
+            .clone()
+            .filter(|row| lineup.is_none_or(|held| held.live(&row.model)))
         {
             let clamped = lineup
                 .and_then(|held| held.find(&table.model))
                 .and_then(|held| held.clamp(&table.effort));
             let effort = clamped.clone().unwrap_or_else(|| table.effort.clone());
-            (
-                table.model,
+            Some(Picked {
+                model: table.model,
                 effort,
-                Source::Table,
-                EffortRule::Table,
-                clamped.map(|to| Clamp {
+                from: Source::Table,
+                effort_rule: EffortRule::Table,
+                effort_clamped: clamped.map(|to| Clamp {
                     from: table.effort,
                     to,
                 }),
-            )
+            })
         } else {
-            continue;
+            None
         };
+        let picked = match person.as_ref() {
+            Some(person) => {
+                super::written_launchable(agent, person)?;
+                match written_pick(person, auto.as_ref(), default_effort.clone(), lineup) {
+                    Some(picked) => picked,
+                    // No pair to run: an effort written alone with no model
+                    // here to ride, or a model with no effort to run at.
+                    None => continue,
+                }
+            }
+            None => match auto.clone() {
+                Some(auto) => auto,
+                None => continue,
+            },
+        };
+        let Picked {
+            model,
+            effort,
+            from,
+            effort_rule,
+            effort_clamped,
+        } = picked;
         let candidates = match (lineup, default_effort.as_ref()) {
             (Some(held), Some((wanted, rule))) => offered(held, difficulty)
                 .filter(|candidate| candidate.id != held.canonical(&model))
@@ -733,6 +855,12 @@ fn build(
             band: held.and_then(|held| held.band),
             tier_from: held.and_then(|held| held.tier_from),
             tier_confidence_permille: held.and_then(|held| held.tier_confidence_permille),
+            standing: lineup.map(|held| held.standing(&model)),
+            launch: crate::orchestration::launch_words(agent, &model, &effort).unwrap_or_default(),
+            auto_model: auto.as_ref().map(|auto| auto.model.clone()),
+            auto_effort: auto.map(|auto| auto.effort),
+            written_model: person.as_ref().and_then(|person| person.model.clone()),
+            written_effort: person.and_then(|person| person.effort),
             model,
             effort,
             from,
@@ -742,6 +870,163 @@ fn build(
         });
     }
     Ok(rows)
+}
+
+/// The pair a person's row runs at: each field as written, the other the
+/// lineup's. `None` when there is no pair: an effort written alone where no
+/// model runs here, or a model written alone for an agent with no effort.
+fn written_pick(
+    person: &Written,
+    auto: Option<&Picked>,
+    default_effort: Option<(String, EffortRule)>,
+    lineup: Option<&Lineup>,
+) -> Option<Picked> {
+    match (&person.model, &person.effort) {
+        // Both written: the row stands as written, and only says when the
+        // effort is outside what the model accepts.
+        (Some(model), Some(effort)) => Some(Picked {
+            model: model.clone(),
+            effort: effort.clone(),
+            from: Source::Person,
+            effort_rule: EffortRule::Written,
+            effort_clamped: lineup
+                .and_then(|held| held.find(model))
+                .and_then(|held| held.clamp(effort))
+                .map(|to| Clamp {
+                    from: effort.clone(),
+                    to,
+                }),
+        }),
+        // A model alone runs at the difficulty's effort, inside its range.
+        (Some(model), None) => {
+            let (wanted, rule) = default_effort?;
+            let (effort, effort_rule, effort_clamped) =
+                match lineup.and_then(|held| held.find(model)) {
+                    Some(held) => held.effort_at(&wanted, rule),
+                    None => (wanted, rule, None),
+                };
+            Some(Picked {
+                model: model.clone(),
+                effort,
+                from: Source::Person,
+                effort_rule,
+                effort_clamped,
+            })
+        }
+        // An effort alone rides the lineup's model, inside that model's
+        // range: the model may move under it, a launch outside may not.
+        (None, Some(effort)) => {
+            let auto = auto?;
+            let clamped = lineup
+                .and_then(|held| held.find(&auto.model))
+                .and_then(|held| held.clamp(effort));
+            Some(Picked {
+                model: auto.model.clone(),
+                effort: clamped.clone().unwrap_or_else(|| effort.clone()),
+                from: auto.from,
+                effort_rule: EffortRule::Written,
+                effort_clamped: clamped.map(|to| Clamp {
+                    from: effort.clone(),
+                    to,
+                }),
+            })
+        }
+        (None, None) => auto.cloned(),
+    }
+}
+
+/// Why a row a person is about to save is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Refusal {
+    /// A model the agent's lineup does not offer today.
+    NotListed { model: String },
+    /// An effort the row's model does not take; `takes` is what it does.
+    #[serde(rename_all = "camelCase")]
+    EffortOutside {
+        effort: String,
+        model: String,
+        takes: Vec<String>,
+    },
+    /// What no lineup could launch ([`super::written_launchable`]).
+    Unlaunchable { reason: String },
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotListed { model } => write!(f, "{model} is not in today's lineup"),
+            Self::EffortOutside {
+                effort,
+                model,
+                takes,
+            } => write!(f, "{model} takes {} — not {effort}", takes.join(", ")),
+            Self::Unlaunchable { reason } => f.write_str(reason),
+        }
+    }
+}
+
+/// Check the row `written` a person is about to save for `agent` at
+/// `difficulty` into the settings `root`, against today's lineup. A field
+/// already written may stay as it is — a model the provider since withdrew
+/// keeps its row until the person moves it — but a field that changes must
+/// be a model the lineup offers and an effort that model takes. An empty row
+/// (back to the lineup) always passes; with no lineup read, only what could
+/// launch at all is checked.
+///
+/// # Errors
+/// The [`Refusal`] that names what is wrong.
+pub fn check_written(
+    root: &Value,
+    agent: &str,
+    difficulty: &str,
+    written: &Written,
+    lineup: Option<&Lineup>,
+) -> Result<(), Refusal> {
+    if written.is_empty() {
+        return Ok(());
+    }
+    super::written_launchable(agent, written).map_err(|reason| Refusal::Unlaunchable { reason })?;
+    let Some(held) = lineup else {
+        return Ok(());
+    };
+    let before = row_at(root, agent, difficulty, Some(held), None, 0)
+        .ok()
+        .flatten();
+    let kept_model = before.as_ref().and_then(|row| row.written_model.clone());
+    let kept_effort = before.as_ref().and_then(|row| row.written_effort.clone());
+    if let Some(model) = &written.model
+        && kept_model.as_ref() != Some(model)
+        && !held.live(model)
+    {
+        return Err(Refusal::NotListed {
+            model: model.clone(),
+        });
+    }
+    let unchanged = written.model == kept_model && written.effort == kept_effort;
+    if let Some(effort) = &written.effort
+        && !unchanged
+    {
+        // The model the effort rides: the one written, else what runs here
+        // when nobody wrote a model.
+        let model = written
+            .model
+            .clone()
+            .or_else(|| before.as_ref().and_then(|row| row.auto_model.clone()));
+        if let Some(model) = model
+            && let Some(found) = held.find(&model)
+        {
+            let (takes, _) = efforts_of(agent, found);
+            if !takes.contains(effort) {
+                return Err(Refusal::EffortOutside {
+                    effort: effort.clone(),
+                    model,
+                    takes,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The live models `lineup` offers at `difficulty`, the ones whose rung it
@@ -1206,6 +1491,177 @@ mod tests {
             "the one effort it accepts"
         );
         assert_eq!(one.highest_effort(), Some("minimal"));
+    }
+
+    /// What a person picks from (the settings screen's lists): every live
+    /// model with the efforts it takes — a connection's model, which names
+    /// none, the agent's ladder — where it fits, and whose it is.
+    #[test]
+    fn a_pick_carries_what_it_takes_where_it_fits_and_whose_it_is() {
+        let catalog = json!({
+            "models": [
+                {"provider": "claude", "id": "model-a", "band": "second", "rungs": ["hard"], "efforts": ["low", "high"]},
+                {"provider": "claude", "id": "model-gone", "band": "rest", "rungs": ["easy"], "unlistedSince": 1_790_000_000},
+            ],
+            "customProviders": [{"name": "custom-a", "models": ["custom-a/model-x"], "usable": true}],
+        });
+        let all = Lineup::from_catalog_all(&catalog).unwrap();
+        let picks = all.picks("zo", None, NOW);
+        let ids: Vec<&str> = picks.iter().map(|pick| pick.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["model-a", "custom-a/model-x"],
+            "a folded model is nobody's pick"
+        );
+        assert_eq!(picks[0].efforts, ["low", "high"]);
+        assert!(picks[0].efforts_known);
+        assert_eq!(picks[0].fits, [HIGH]);
+        assert!(!picks[0].connection);
+        assert_eq!(picks[1].provider, "custom-a");
+        assert!(picks[1].connection);
+        assert!(!picks[1].efforts_known);
+        assert_eq!(
+            picks[1].efforts,
+            crate::orchestration::ladder_efforts("zo"),
+            "a connection's model is offered at the agent's ladder"
+        );
+        assert_eq!(
+            all.standing("model-gone"),
+            Standing::Unlisted {
+                since: Some(1_790_000_000)
+            }
+        );
+        assert_eq!(all.standing("model-a"), Standing::Listed);
+        assert_eq!(all.standing("model-none"), Standing::Missing);
+    }
+
+    /// A row may leave either field to the lineup (the settings screen's
+    /// 「자동」): a model written alone runs at the difficulty's effort inside
+    /// what it takes, an effort written alone rides the lineup's model inside
+    /// what that takes, and every row says what 「자동」 would run.
+    #[test]
+    fn a_row_written_by_half_takes_the_other_half_from_the_lineup() {
+        let mut hard = m("model-a", "second", &["hard"]);
+        hard.efforts = Some(&["low", "medium", "high"]);
+        let mut easy = m("model-b", "rest", &["easy"]);
+        easy.efforts = Some(&["low", "medium", "high", "max"]);
+        let held = lineup(&[hard, easy]);
+        let rows = read(
+            &settings(json!({"claude": {
+                HIGH: {"effort": "low"},
+                LOW: {"model": "model-a"},
+            }})),
+            Some(&held),
+            None,
+        );
+        let high = row(&rows, HIGH);
+        assert_eq!(
+            (high.model.as_str(), high.effort.as_str()),
+            ("model-a", "low")
+        );
+        assert_eq!(high.from, Source::Lineup, "the model is still the lineup's");
+        assert_eq!(high.effort_rule, EffortRule::Written);
+        assert_eq!(high.written_effort.as_deref(), Some("low"));
+        assert_eq!(high.written_model, None);
+        assert_eq!(high.auto_model.as_deref(), Some("model-a"));
+        assert_eq!(
+            high.auto_effort.as_deref(),
+            Some("high"),
+            "the table's max, inside the model's range"
+        );
+        let low = row(&rows, LOW);
+        assert_eq!(
+            (low.model.as_str(), low.effort.as_str()),
+            ("model-a", "medium"),
+            "the table's word for the difficulty"
+        );
+        assert_eq!(low.from, Source::Person);
+        assert_eq!(low.auto_model.as_deref(), Some("model-b"));
+        assert_eq!(low.launch, ["--model", "model-a", "--effort", "medium"]);
+        assert_eq!(low.standing, Some(Standing::Listed));
+        // An effort written alone is brought inside the model it rides.
+        let rows = read(
+            &settings(json!({"claude": {HIGH: {"effort": "max"}}})),
+            Some(&held),
+            None,
+        );
+        let high = row(&rows, HIGH);
+        assert_eq!(high.effort, "high");
+        assert_eq!(
+            high.effort_clamped,
+            Some(Clamp {
+                from: "max".into(),
+                to: "high".into()
+            })
+        );
+    }
+
+    /// The save door's check (the settings screen writes one row at a time):
+    /// a model the lineup does not offer, or an effort the row's model does
+    /// not take, is refused by name; a field already written may stay; an
+    /// empty row always passes; with no lineup only launching is checked.
+    #[test]
+    fn a_row_is_checked_against_the_lineup_before_it_is_saved() {
+        let mut hard = m("model-a", "second", &["hard"]);
+        hard.efforts = Some(&["low", "medium", "high"]);
+        let mut gone = m("model-gone", "rest", &["easy"]);
+        gone.unlisted = true;
+        let held = lineup(&[hard, gone]);
+        let cell = |model: Option<&str>, effort: Option<&str>| Written {
+            model: model.map(str::to_string),
+            effort: effort.map(str::to_string),
+        };
+        let check = |root: &Value, written: &Written| {
+            check_written(root, "claude", HIGH, written, Some(&held))
+        };
+        let none = Value::Null;
+        assert_eq!(check(&none, &cell(Some("model-a"), Some("high"))), Ok(()));
+        assert_eq!(
+            check(&none, &cell(Some("model-z"), None)),
+            Err(Refusal::NotListed {
+                model: "model-z".into()
+            })
+        );
+        assert_eq!(
+            check(&none, &cell(Some("model-gone"), None)),
+            Err(Refusal::NotListed {
+                model: "model-gone".into()
+            }),
+            "a withdrawn model is nobody's new choice"
+        );
+        let outside = Err(Refusal::EffortOutside {
+            effort: "max".into(),
+            model: "model-a".into(),
+            takes: vec!["low".into(), "medium".into(), "high".into()],
+        });
+        assert_eq!(check(&none, &cell(Some("model-a"), Some("max"))), outside);
+        assert_eq!(
+            check(&none, &cell(None, Some("max"))),
+            outside,
+            "an effort alone is checked against the lineup's model"
+        );
+        assert_eq!(check(&none, &Written::default()), Ok(()));
+        assert!(matches!(
+            check_written(&none, "claude", HIGH, &cell(Some("two words"), None), None),
+            Err(Refusal::Unlaunchable { .. })
+        ));
+        assert_eq!(
+            check_written(
+                &none,
+                "claude",
+                HIGH,
+                &cell(Some("model-z"), Some("ultra")),
+                None
+            ),
+            Ok(()),
+            "no lineup: nothing to check against"
+        );
+        let kept = settings(json!({"claude": {HIGH: {"model": "model-gone", "effort": "high"}}}));
+        assert_eq!(
+            check(&kept, &cell(Some("model-gone"), Some("medium"))),
+            Ok(()),
+            "a model already written stays while its effort moves"
+        );
     }
 
     /// The measurement a person reads (t-14437 criterion 8): today's rows

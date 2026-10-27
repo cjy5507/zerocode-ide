@@ -26741,6 +26741,111 @@ fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin(
     }
 }
 
+/// The settings screen writes one cell at a time and may leave either
+/// field to the lineup (2026-10-27). What it shows as the next summons'
+/// words is what a summons puts on the agent's command line: an effort
+/// written alone rides the default model, a model written alone runs at the
+/// difficulty's effort, both written run as written.
+#[test]
+fn a_row_the_settings_screen_wrote_is_what_the_summons_launches() {
+    struct Screen {
+        root: serde_json::Value,
+        tuning: std::sync::Mutex<Vec<String>>,
+    }
+    impl Launcher for Screen {
+        fn command_for(
+            &self,
+            agent: &str,
+            prompt: &str,
+            tuning: &[String],
+        ) -> Result<String, String> {
+            *self.tuning.lock().unwrap() = tuning.to_vec();
+            Catalog(&["codex", "claude"]).command_for(agent, prompt, tuning)
+        }
+        fn difficulty_profile(
+            &self,
+            agent: &str,
+            difficulty: &str,
+            _: [&str; 3],
+        ) -> Result<Option<crate::summon_difficulty::lineup::Row>, String> {
+            crate::summon_difficulty::lineup::row_at(&self.root, agent, difficulty, None, None, 0)
+        }
+        fn choose_assign(
+            &self,
+            asked: &crate::summon_assign::AssignAsk,
+            _: [&str; 3],
+        ) -> crate::summon_assign::Receipts {
+            crate::summon_assign::Receipts {
+                difficulty: asked
+                    .difficulty
+                    .as_ref()
+                    .map(|_| serde_json::json!({"chosen":"low", "applied":true})),
+                model: None,
+                ..Default::default()
+            }
+        }
+    }
+    let low = crate::summon_difficulty::LADDER[0].0;
+    let default = crate::summon_difficulty::profile(&serde_json::Value::Null, "codex", low)
+        .unwrap()
+        .unwrap();
+    for (cell, model, effort) in [
+        (
+            serde_json::json!({"effort": "high"}),
+            default.model.as_str(),
+            "high",
+        ),
+        (
+            serde_json::json!({"model": "gpt-custom"}),
+            "gpt-custom",
+            default.effort.as_str(),
+        ),
+        (
+            serde_json::json!({"model": "gpt-custom", "effort": "xhigh"}),
+            "gpt-custom",
+            "xhigh",
+        ),
+    ] {
+        let root = serde_json::json!({"smart": {"summonProfiles": {"codex": {low: cell}}}});
+        let shown = crate::summon_difficulty::lineup::row_at(&root, "codex", low, None, None, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (shown.model.as_str(), shown.effort.as_str()),
+            (model, effort),
+            "{cell}"
+        );
+        let screen = Screen {
+            root,
+            tuning: std::sync::Mutex::default(),
+        };
+        let mut bench = Bench::new();
+        bench.json("run-create --name screen");
+        let planned = planned_on(
+            &mut bench.ledger,
+            &mut bench.team,
+            &screen,
+            "worker-start --agent codex --prompt translate",
+            bench.clock + 1,
+        );
+        assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+        let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
+        assert_eq!(
+            (reply["model"].as_str(), reply["effort"].as_str()),
+            (Some(model), Some(effort)),
+            "{cell}"
+        );
+        let tuning = screen.tuning.lock().unwrap().clone();
+        assert!(
+            tuning
+                .windows(shown.launch.len())
+                .any(|words| words == shown.launch.as_slice()),
+            "the screen showed {:?}, the summons launched with {tuning:?}",
+            shown.launch
+        );
+    }
+}
+
 /// t-14437: a model nobody typed reaches the coordinator — agent-list names
 /// every difficulty's launch row with today's other offers (a new arrival
 /// marked `fresh`), and a summons that leaves the model open says where its

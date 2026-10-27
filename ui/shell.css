@@ -21916,33 +21916,6 @@ progress:indeterminate::-webkit-progress-bar {
   text-decoration-thickness: var(--jev-link-hover-thickness);
 }
 
-.settings-jev-advanced {
-  margin: var(--space-3) var(--space-4) 0;
-}
-
-/* What the fold holds is fields, not the quiet paragraph a fold holds
- * elsewhere on this screen: they keep their own size, ink and width. */
-.settings-jev-advanced > :not(summary) {
-  max-width: none;
-  color: inherit;
-  font-size: inherit;
-}
-
-.settings-jev-classifier {
-  display: grid;
-  gap: var(--space-1);
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
-  border-top: var(--rule-width) solid var(--edge-rule);
-}
-
-.settings-jev-advanced-title {
-  margin: 0;
-  color: var(--ink-chalk);
-  font-size: var(--text-sm);
-  font-weight: var(--jev-weight-strong);
-}
-
 /* A row whose mode nothing can reach says so where the mode is, not in a
  * banner at the top of the card — `.settings-notice`'s own amber, which this
  * screen already uses for "set, but not in force yet". Squared to the row's
@@ -27507,6 +27480,281 @@ input[type="search"]::-webkit-search-cancel-button {
 
 .orch-chip.is-ready .orch-chip-state {
   color: var(--signal-ready);
+}
+
+/* ---- worker models: an agent to a row, a difficulty to a column ----------
+ * Full-bleed rows divided by rules, the way every table here is drawn; a
+ * cell the person chose wears an edge, and a choice the list moved under
+ * wears the caution edge with its words under it. */
+.worker-models-sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.worker-models-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.worker-models-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* The table measures its own width: where three cells of a model and an
+ * effort do not fit side by side, each agent's cells stack under its name,
+ * each named by its difficulty — nothing scrolls out of reach. */
+.worker-models-frame {
+  margin-top: var(--space-3);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-border-small);
+  container-type: inline-size;
+}
+
+.worker-models-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+/* The agent's column holds its name and two short words. */
+.worker-models-table thead th:first-child {
+  width: 18%;
+}
+
+.worker-models-table th,
+.worker-models-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  text-align: left;
+  vertical-align: top;
+}
+
+.worker-models-table tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.worker-models-table thead th {
+  font: var(--type-label-12);
+  color: var(--ink-mist);
+}
+
+/* 640px: below it a difficulty's cell is narrower than a model id beside
+ * its effort, so the row stacks. */
+@container (max-width: 640px) {
+  .worker-models-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .worker-models-table tbody tr {
+    display: grid;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: var(--rule-width) solid var(--edge-rule);
+  }
+
+  .worker-models-table tbody tr:last-child {
+    border-bottom: 0;
+  }
+
+  .worker-models-table tbody th,
+  .worker-models-table tbody td {
+    display: block;
+    padding: 0;
+    border-bottom: 0;
+  }
+
+  .worker-models-table tbody td::before {
+    content: attr(data-difficulty-name);
+    display: block;
+    margin-bottom: var(--space-1);
+    font: var(--type-label-12);
+    color: var(--ink-mist);
+  }
+}
+
+.worker-models-hint {
+  display: block;
+  font-size: var(--text-3xs);
+  font-weight: 400;
+  color: var(--ink-mist);
+}
+
+.worker-models-agent {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.worker-models-agent-name {
+  font: var(--type-label-13);
+  color: var(--ink-chalk);
+}
+
+.worker-models-agent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  font-size: var(--text-3xs);
+  font-weight: 400;
+  color: var(--ink-mist);
+}
+
+.worker-models-agent-state[data-state="ready"] {
+  color: var(--signal-ready);
+}
+
+.worker-models-agent-state[data-state="login"],
+.worker-models-agent-state[data-state="missing"] {
+  color: var(--signal-wait);
+}
+
+.worker-models-cell {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  margin: calc(var(--space-1) * -1);
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 0 0 var(--rule-width) transparent;
+  transition: box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.worker-models-cell.is-written {
+  box-shadow: inset 0 0 0 var(--rule-width) var(--edge-mark);
+}
+
+.worker-models-cell.is-warned {
+  box-shadow: inset 0 0 0 var(--rule-width) var(--signal-wait);
+}
+
+.worker-models-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, max-content);
+  gap: var(--space-1);
+}
+
+.worker-models-fields .settings-input {
+  width: 100%;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.worker-models-fields .settings-input.is-auto {
+  color: var(--ink-mist);
+}
+
+.worker-models-cell-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-3xs);
+  color: var(--ink-mist);
+  word-break: var(--prose-word-break);
+}
+
+.worker-models-cell.is-written .worker-models-said {
+  color: var(--ink-chalk);
+}
+
+.worker-models-cell.is-warned .worker-models-said {
+  color: var(--signal-wait);
+}
+
+.worker-models-reset {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: var(--jev-link-offset);
+  cursor: pointer;
+  transition: text-decoration-thickness var(--motion-fast) var(--ease-standard);
+}
+
+.worker-models-reset:hover {
+  text-decoration-thickness: var(--jev-link-hover-thickness);
+}
+
+.worker-models-next {
+  display: grid;
+  gap: var(--space-1);
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-border-small);
+}
+
+.worker-models-next-label {
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+}
+
+.worker-models-next code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ink-chalk);
+  overflow-wrap: anywhere;
+}
+
+/* The routing classifier's four ways, each a card naming what it does. */
+.route-classifier-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.route-classifier-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  column-gap: var(--space-2);
+  row-gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-border-small);
+  cursor: pointer;
+  transition: box-shadow var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+}
+
+.route-classifier-choice:hover {
+  background-color: color-mix(in srgb, var(--surface-raised) 50%, transparent);
+}
+
+.route-classifier-choice:has(input:checked) {
+  box-shadow: inset 0 0 0 var(--rule-width) var(--ink-chalk);
+}
+
+.route-classifier-choice:has(input:focus-visible) {
+  outline: 2px solid var(--ink-chalk);
+  outline-offset: 2px;
+}
+
+.route-classifier-name {
+  font: var(--type-label-13);
+  color: var(--ink-chalk);
+}
+
+.route-classifier-about {
+  grid-column: 2;
+  font-size: var(--text-2xs);
+  line-height: var(--leading-body);
+  color: var(--ink-mist);
+  word-break: var(--prose-word-break);
 }
 
 /* ---- Computer Use --------------------------------------------------------- */

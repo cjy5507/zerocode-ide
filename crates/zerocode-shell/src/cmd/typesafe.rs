@@ -3,7 +3,7 @@ use crate::api_routers::{self, Keychain, RouterRefusal};
 use crate::jev_scope;
 use crate::typesafe_settings::{
     self, CustomDecisions, DayBudget, DecisionDraft, DecisionRefusal, DraftCheck, SeatNumbers,
-    TypeSafeCheck, TypeSafeSettings,
+    SummonRowRefusal, TypeSafeCheck, TypeSafeSettings,
 };
 use tauri::State;
 
@@ -20,8 +20,14 @@ fn settings_now() -> Result<TypeSafeSettings, RouterRefusal> {
 }
 
 /// Whether a key could be kept here, whether one is saved, and the switch.
+/// The worker rows say whether each agent could be summoned now, so the
+/// agents a summons tunes are looked at first — at a look's freshness, the
+/// picker's — and the answer peeks at what that look left.
 #[tauri::command(async)]
 pub(crate) fn typesafe_settings() -> Result<TypeSafeSettings, RouterRefusal> {
+    for agent in crate::summon_lineup::tunable_agents() {
+        let _ = crate::readiness_runtime::ensure(agent, zerocode_core::readiness::Purpose::Display);
+    }
     settings_now()
 }
 
@@ -214,11 +220,41 @@ pub(crate) fn set_route_classifier(mode: String) -> Result<TypeSafeSettings, Rou
     settings_now()
 }
 
+/// Write one agent's worker model at one difficulty — a field left empty
+/// follows the lineup, both empty clear the row — checked against the
+/// lineup this window holds; the answer's row is what the next summons runs.
 #[tauri::command(async)]
-pub(crate) fn set_summon_profiles(
-    profiles: serde_json::Value,
-) -> Result<TypeSafeSettings, RouterRefusal> {
-    typesafe_settings::set_summon_profiles(&settings_path()?, &profiles)?;
+pub(crate) fn set_summon_profile(
+    agent: String,
+    difficulty: String,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Result<TypeSafeSettings, SummonRowRefusal> {
+    let word = |value: Option<String>| {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let written = zerocode_core::summon_difficulty::Written {
+        model: word(model),
+        effort: word(effort),
+    };
+    let lineup = crate::summon_lineup::snapshot();
+    typesafe_settings::set_summon_profile(
+        &settings_path()?,
+        &agent,
+        &difficulty,
+        &written,
+        lineup.lineups.get(&agent),
+    )?;
+    Ok(settings_now()?)
+}
+
+/// Read every agent's lineup again now, zo asked afresh, and answer with
+/// what that read holds: the worker rows' 「목록 새로고침」.
+#[tauri::command(async)]
+pub(crate) fn refresh_summon_lineup() -> Result<TypeSafeSettings, RouterRefusal> {
+    crate::summon_lineup::refresh_and_wait();
     settings_now()
 }
 

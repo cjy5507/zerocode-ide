@@ -18847,6 +18847,15 @@ pub fn model_words(agent: &str, model: &str) -> Result<Vec<String>, String> {
     launch_tuning(agent, Some(model), None)
 }
 
+/// The launch words for `model` at `effort` — what a summons of `agent`
+/// puts on the command line for a settings row, as that screen shows it.
+///
+/// # Errors
+/// As [`model_words`], and an agent with no measured effort ride.
+pub fn launch_words(agent: &str, model: &str, effort: &str) -> Result<Vec<String>, String> {
+    launch_tuning(agent, Some(model), Some(effort))
+}
+
 /// Say which launch choices this summons left to the agent CLI.
 ///
 /// This follows `TUNABLE`, the same measured capability table that validates

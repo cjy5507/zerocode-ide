@@ -25,6 +25,36 @@ pub struct Profile {
     pub effort: String,
 }
 
+/// One difficulty's row as a person wrote it. Either field may be left to
+/// the lineup, which fills it at every read: a model written alone runs at
+/// the difficulty's effort brought inside what it accepts, and an effort
+/// written alone rides the lineup's model, brought inside what that accepts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Written {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl Written {
+    /// Neither field written: the row follows the lineup whole.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.model.is_none() && self.effort.is_none()
+    }
+
+    /// The row as the launch profile it names, when both fields are written.
+    #[must_use]
+    pub fn whole(&self) -> Option<Profile> {
+        Some(Profile {
+            model: self.model.clone()?,
+            effort: self.effort.clone()?,
+        })
+    }
+}
+
 #[must_use]
 pub fn profiles(root: &Value) -> Value {
     root.get(crate::jev::SMART_SETTINGS_KEY)
@@ -61,9 +91,9 @@ pub fn validate_profiles(table: &Value) -> Result<(), String> {
             if effort(difficulty).is_none() {
                 return Err(format!("{agent}: unknown difficulty {difficulty}"));
             }
-            let profile: Profile =
+            let written: Written =
                 serde_json::from_value(row.clone()).map_err(|e| format!("{agent}: {e}"))?;
-            launchable(agent, &profile)?;
+            written_launchable(agent, &written)?;
         }
     }
     Ok(())
@@ -72,10 +102,22 @@ pub fn validate_profiles(table: &Value) -> Result<(), String> {
 /// Whether `profile` can launch `agent` at all — the refusal a person's row
 /// gets before it runs, whatever the lineup says.
 pub fn launchable(agent: &str, profile: &Profile) -> Result<(), String> {
-    if profile.model.trim().is_empty()
-        || profile.effort.trim().is_empty()
-        || profile.model.chars().any(char::is_whitespace)
-        || profile.effort.chars().any(char::is_whitespace)
+    written_launchable(
+        agent,
+        &Written {
+            model: Some(profile.model.clone()),
+            effort: Some(profile.effort.clone()),
+        },
+    )
+}
+
+/// [`launchable`] for a row that may leave a field to the lineup: what is
+/// written must be one word, and a row writes at least one field.
+pub fn written_launchable(agent: &str, written: &Written) -> Result<(), String> {
+    let word = |value: &str| !value.trim().is_empty() && !value.chars().any(char::is_whitespace);
+    if written.is_empty()
+        || !written.model.as_deref().is_none_or(word)
+        || !written.effort.as_deref().is_none_or(word)
     {
         return Err(format!(
             "{PROFILES_SETTING}: model and effort must be nonempty"
@@ -83,8 +125,9 @@ pub fn launchable(agent: &str, profile: &Profile) -> Result<(), String> {
     }
     // An agent that runs any provider's model (zo) may name another CLI's
     // model; one tied to its own provider may not.
-    if crate::orchestration::native_agent(&profile.model).is_some_and(|native| native != agent)
-        && !crate::orchestration::runs_model(agent, &profile.model)
+    if let Some(model) = written.model.as_deref()
+        && crate::orchestration::native_agent(model).is_some_and(|native| native != agent)
+        && !crate::orchestration::runs_model(agent, model)
     {
         return Err(format!("{agent}: model belongs to another agent"));
     }
@@ -261,6 +304,18 @@ mod tests {
         );
         changed["codex"][LADDER[0].0]["effort"] = json!("");
         assert!(validate_profiles(&changed).is_err());
+    }
+    #[test]
+    fn a_written_row_may_leave_a_field_to_the_lineup_but_not_both() {
+        let mut table = json!({"codex": {
+            LADDER[0].0: {"effort": "high"},
+            LADDER[2].0: {"model": "gpt-test-profile"},
+        }});
+        validate_profiles(&table).unwrap();
+        table["codex"][LADDER[1].0] = json!({});
+        assert!(validate_profiles(&table).is_err(), "a row writes something");
+        table["codex"][LADDER[1].0] = json!({"model": "gpt-test-profile", "note": "x"});
+        assert!(validate_profiles(&table).is_err(), "and nothing else");
     }
     #[test]
     fn a_pin_is_context_and_cannot_award_success() {

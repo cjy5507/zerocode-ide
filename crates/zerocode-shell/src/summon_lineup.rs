@@ -15,7 +15,8 @@
 //! once in a line of its own, and so is one that folded.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::Emitter;
@@ -33,6 +34,13 @@ pub(crate) const CHANGED_EVENT: &str = "summon-lineup:changed";
 /// ([`superseded`]), for the words the window puts beside a pane's model
 /// (t-46882).
 pub(crate) const SUPERSEDED_EVENT: &str = "summon-lineup:superseded";
+/// What every finished read says, so a screen showing the lineup repaints:
+/// the epoch milliseconds it was read at.
+pub(crate) const READ_EVENT: &str = "summon-lineup:read";
+/// How long a person's 「목록 새로고침」 waits for the read it asked for —
+/// zo's own wait for its catalog (`slash_catalog::MODELS_WAIT`) and room
+/// for the read already running before it.
+const REFRESH_WAIT: Duration = Duration::from_secs(150);
 
 /// Every lineup and the book, as a reader takes them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -41,11 +49,57 @@ pub(crate) struct Snapshot {
     pub(crate) seen: Seen,
 }
 
+/// What the read that made the held lineups was told about where they came
+/// from: when, each source's report as the window keeps it (a failed one
+/// carries only its diagnosis), and the person's connections, usable or not.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Sources {
+    pub(crate) read_at_ms: Option<i64>,
+    pub(crate) reports: Vec<Report>,
+    pub(crate) connections: Vec<Connection>,
+}
+
+/// One source's answer to the read: a provider's list, or why there was
+/// none — by the window's diagnosis (`slash_catalog::diagnosed`), never the
+/// provider's own words.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Report {
+    pub(crate) provider: String,
+    pub(crate) source: String,
+    pub(crate) ok: bool,
+    pub(crate) count: u64,
+    /// How old zo says the answer is (`"6m old"`).
+    pub(crate) age: Option<String>,
+    /// Skipped for want of a credential: there is no login to read.
+    pub(crate) skipped: bool,
+    /// The window's word for any other failure (`auth`, `network`, …).
+    pub(crate) failure: Option<String>,
+}
+
+/// One of the person's own connections (`customProviders`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Connection {
+    pub(crate) name: String,
+    /// zo can reach it — its key is there; a connection without one is
+    /// listed and offers nothing.
+    pub(crate) usable: bool,
+    pub(crate) models: Vec<String>,
+}
+
 #[derive(Default)]
 struct Held {
     read_at_ms: Option<i64>,
     snapshot: Snapshot,
+    sources: Sources,
     reading: bool,
+    /// Somebody asked for a read while one was running: read once more
+    /// after it, so the answer postdates the ask.
+    again: bool,
+    /// Reads finished since boot — what a waiter counts.
+    finished: u64,
 }
 
 /// Where a read looks: the home zo is installed under, and the window's
@@ -58,6 +112,12 @@ struct Roots {
 fn held() -> &'static Mutex<Held> {
     static HELD: OnceLock<Mutex<Held>> = OnceLock::new();
     HELD.get_or_init(Mutex::default)
+}
+
+/// Rung at every finished read, for [`refresh_and_wait`].
+fn finished() -> &'static Condvar {
+    static FINISHED: Condvar = Condvar::new();
+    &FINISHED
 }
 
 static ROOTS: OnceLock<Roots> = OnceLock::new();
@@ -103,28 +163,17 @@ fn read_in_background(now_ms: i64) {
     let spawned = std::thread::Builder::new()
         .name("summon-lineup".into())
         .spawn(move || {
-            let lineups =
-                lineups_of(|agent| crate::slash_catalog::agent_lineup(agent, &roots.home));
-            let path = roots.config_root.join(SEEN_FILE);
-            let mut seen = load_seen(&path);
-            let changes = observe(&mut seen, &lineups, now_ms);
-            if !changes.is_empty() {
-                let _ = save_seen(&path, &seen);
-            }
-            let said = superseded(&lineups);
-            {
+            let mut now_ms = now_ms;
+            loop {
+                read_once(roots, now_ms);
                 let mut held = held()
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                held.snapshot = Snapshot { lineups, seen };
-                held.read_at_ms = Some(now_ms);
-                held.reading = false;
-            }
-            if let Some(app) = WINDOW.get() {
-                if !changes.is_empty() {
-                    let _ = app.emit(CHANGED_EVENT, &changes);
+                if !std::mem::take(&mut held.again) {
+                    held.reading = false;
+                    break;
                 }
-                let _ = app.emit(SUPERSEDED_EVENT, &said);
+                now_ms = crate::usage_runtime::epoch_ms_now();
             }
         });
     if spawned.is_err() {
@@ -133,6 +182,173 @@ fn read_in_background(now_ms: i64) {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .reading = false;
     }
+}
+
+/// One read: every agent's lineup and what zo said of its sources, laid
+/// against the book, held, and told to the window.
+fn read_once(roots: &Roots, now_ms: i64) {
+    let lineups = lineups_of(|agent| crate::slash_catalog::agent_lineup(agent, &roots.home));
+    // The same cached catalog the lineups were read from — never a second
+    // `zo models` run.
+    let sources = sources_of(&crate::slash_catalog::zo_model_list(&roots.home), now_ms);
+    let path = roots.config_root.join(SEEN_FILE);
+    let mut seen = load_seen(&path);
+    let changes = observe(&mut seen, &lineups, now_ms);
+    if !changes.is_empty() {
+        let _ = save_seen(&path, &seen);
+    }
+    let said = superseded(&lineups);
+    {
+        let mut held = held()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.snapshot = Snapshot { lineups, seen };
+        held.sources = sources;
+        held.read_at_ms = Some(now_ms);
+        held.finished += 1;
+    }
+    finished().notify_all();
+    if let Some(app) = WINDOW.get() {
+        if !changes.is_empty() {
+            let _ = app.emit(CHANGED_EVENT, &changes);
+        }
+        let _ = app.emit(SUPERSEDED_EVENT, &said);
+        let _ = app.emit(READ_EVENT, now_ms);
+    }
+}
+
+/// Read again now, whatever the age of what is held: a person's
+/// 「목록 새로고침」, a connection saved or removed. zo's catalog is forgotten
+/// first, so the read asks zo rather than the window's cache; a read already
+/// running finishes and is followed by this one.
+pub(crate) fn refresh() {
+    crate::slash_catalog::forget_zo_models();
+    {
+        let mut held = held()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.reading {
+            held.again = true;
+            return;
+        }
+    }
+    read_in_background(crate::usage_runtime::epoch_ms_now());
+}
+
+/// [`refresh`], and wait — up to [`REFRESH_WAIT`] — for the read that
+/// postdates it; the settings screen answers with what that read holds.
+pub(crate) fn refresh_and_wait() {
+    if ROOTS.get().is_none() {
+        return;
+    }
+    let target = {
+        let held = held()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A read already running answers an ask made before it began; the
+        // one after it is the one asked for.
+        held.finished + if held.reading { 2 } else { 1 }
+    };
+    refresh();
+    let held = held()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _ = finished()
+        .wait_timeout_while(held, REFRESH_WAIT, |held| held.finished < target)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+}
+
+/// What the held read was told about its sources.
+pub(crate) fn sources() -> Sources {
+    held()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .sources
+        .clone()
+}
+
+/// The settings screen's part of zo's list ([`crate::slash_catalog::zo_model_list`]):
+/// each report's diagnosis and every connection, nothing else of either.
+fn sources_of(list: &serde_json::Value, now_ms: i64) -> Sources {
+    let rows = |key: &str| {
+        list.get(key)
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let word = |row: &serde_json::Value, key: &str| {
+        row.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Sources {
+        read_at_ms: Some(now_ms),
+        reports: rows("reports")
+            .iter()
+            .map(|row| {
+                let diagnosis = row.get("diagnosis");
+                Report {
+                    provider: word(row, "provider"),
+                    source: word(row, "source"),
+                    ok: row
+                        .get("ok")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    count: row
+                        .get("count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                    age: row
+                        .get("age")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    skipped: diagnosis
+                        .and_then(|diagnosis| diagnosis.get("skipped"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    failure: diagnosis
+                        .and_then(|diagnosis| diagnosis.get("kind"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                }
+            })
+            .collect(),
+        connections: rows("customProviders")
+            .iter()
+            .map(|row| Connection {
+                name: word(row, "name"),
+                usable: row
+                    .get("usable")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                models: row
+                    .get("models")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect(),
+            })
+            .filter(|connection| !connection.name.is_empty())
+            .collect(),
+    }
+}
+
+/// Every agent a summons tunes a model and an effort for at a difficulty —
+/// the ones a lineup is read for and the settings screen has rows for.
+pub(crate) fn tunable_agents() -> impl Iterator<Item = &'static str> {
+    zerocode_core::agent::AGENT_SPECS
+        .iter()
+        .map(|spec| spec.id)
+        .filter(|agent| {
+            zerocode_core::orchestration::difficulty_effort(
+                agent,
+                zerocode_core::summon_difficulty::LADDER[0].0,
+            )
+            .is_some()
+        })
 }
 
 /// Every release `lineups` hold as superseded, by agent, and the one that
@@ -175,16 +391,8 @@ pub(crate) fn current_release(snapshot: &Snapshot, agent: &str, model: &str) -> 
 /// The lineup of every agent that takes a model at a difficulty and drives
 /// one provider — `read` is the catalog road, a test's synthetic one.
 fn lineups_of(read: impl Fn(&str) -> Option<Lineup>) -> BTreeMap<String, Lineup> {
-    zerocode_core::agent::AGENT_SPECS
-        .iter()
-        .filter(|spec| {
-            zerocode_core::orchestration::difficulty_effort(
-                spec.id,
-                zerocode_core::summon_difficulty::LADDER[0].0,
-            )
-            .is_some()
-        })
-        .filter_map(|spec| Some((spec.id.to_string(), read(spec.id)?)))
+    tunable_agents()
+        .filter_map(|agent| Some((agent.to_string(), read(agent)?)))
         .collect()
 }
 
@@ -304,6 +512,49 @@ mod tests {
             None,
             "no lineup"
         );
+    }
+
+    /// What the worker rows say beside the lineup: each source's answer —
+    /// a failed one only by the window's diagnosis — and every connection, a
+    /// keyless one too, with nothing else of either (no credential store,
+    /// no failure detail, no key variable).
+    #[test]
+    fn the_rows_hear_each_sources_answer_and_every_connection() {
+        let list = json!({
+            "reports": [
+                {"provider": "anthropic", "source": "anthropic-api", "ok": true, "count": 14,
+                 "age": "6m old", "credentialStore": "CLAUDE_CONFIG_DIR:/Users/dev/x"},
+                {"provider": "xai", "source": "xai-api", "ok": false, "count": 0,
+                 "diagnosis": {"status": null, "kind": null, "skipped": true}},
+                {"provider": "openai", "source": "chatgpt-backend", "ok": false, "count": 0,
+                 "diagnosis": {"status": 401, "kind": "auth", "skipped": false}},
+            ],
+            "customProviders": [
+                {"name": "custom-a", "usable": true, "models": ["custom-a/model-x"],
+                 "credentialEnvVars": ["ZEROCODE_ROUTER_CUSTOM_A_KEY"]},
+                {"name": "custom-b", "usable": false, "models": ["custom-b/model-y"]},
+            ],
+        });
+        let said = serde_json::to_value(sources_of(&list, 7)).unwrap();
+        assert_eq!(
+            said,
+            json!({
+                "readAtMs": 7,
+                "reports": [
+                    {"provider": "anthropic", "source": "anthropic-api", "ok": true, "count": 14,
+                     "age": "6m old", "skipped": false, "failure": null},
+                    {"provider": "xai", "source": "xai-api", "ok": false, "count": 0,
+                     "age": null, "skipped": true, "failure": null},
+                    {"provider": "openai", "source": "chatgpt-backend", "ok": false, "count": 0,
+                     "age": null, "skipped": false, "failure": "auth"},
+                ],
+                "connections": [
+                    {"name": "custom-a", "usable": true, "models": ["custom-a/model-x"]},
+                    {"name": "custom-b", "usable": false, "models": ["custom-b/model-y"]},
+                ],
+            })
+        );
+        assert_eq!(sources_of(&json!({}), 1).connections, Vec::new());
     }
 
     #[test]

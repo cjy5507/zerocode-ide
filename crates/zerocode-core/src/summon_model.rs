@@ -748,6 +748,12 @@ mod tests {
                     fresh: true,
                 },
             ],
+            auto_model: Some("model-a".into()),
+            auto_effort: Some("medium".into()),
+            written_model: None,
+            written_effort: None,
+            standing: None,
+            launch: Vec::new(),
         };
         let mut records = BTreeMap::new();
         records.insert(
