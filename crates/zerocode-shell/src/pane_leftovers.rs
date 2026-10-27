@@ -785,8 +785,58 @@ fn looked_up_by_the_kernel(pid: u32) -> Lookup {
 /// host will not name or open is not said to have hung up.
 #[cfg(target_os = "macos")]
 fn hung_up(dev: u32) -> bool {
-    let _ = dev;
-    false
+    unsafe extern "C" {
+        fn devname_r(
+            dev: libc::dev_t,
+            kind: libc::mode_t,
+            buf: *mut libc::c_char,
+            len: libc::c_int,
+        ) -> *mut libc::c_char;
+    }
+    let mut name = [0 as libc::c_char; 64];
+    let Ok(len) = libc::c_int::try_from(name.len()) else {
+        return false;
+    };
+    // SAFETY: `devname_r` writes at most `len` bytes into `name`, NUL
+    // included, and answers null or a pointer into it.
+    let named = unsafe {
+        devname_r(
+            libc::dev_t::from_ne_bytes(dev.to_ne_bytes()),
+            libc::S_IFCHR,
+            name.as_mut_ptr(),
+            len,
+        )
+    };
+    if named.is_null() {
+        return false;
+    }
+    // SAFETY: a non-null answer is a NUL-terminated name inside `name`.
+    let name = unsafe { std::ffi::CStr::from_ptr(named) };
+    let mut path = b"/dev/".to_vec();
+    path.extend_from_slice(name.to_bytes());
+    let Ok(path) = std::ffi::CString::new(path) else {
+        return false;
+    };
+    // SAFETY: a path open; the descriptor is closed below.
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return false;
+    }
+    let mut asked = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one pollfd, no wait.
+    let answered = unsafe { libc::poll(&raw mut asked, 1, 0) };
+    // SAFETY: the descriptor opened above, closed once.
+    unsafe { libc::close(fd) };
+    answered > 0 && asked.revents & libc::POLLHUP != 0
 }
 
 /// Elsewhere the window reads no process, so nothing is ever collected,
