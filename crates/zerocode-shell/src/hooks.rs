@@ -716,15 +716,27 @@ fn mirror_bin() -> Option<PathBuf> {
 /// ^C reached no group. Named once at boot, before any pane opens. A window
 /// with no mirror beside it — a development build of the window's binary
 /// alone — starts its panes straight, as every start did before, and its
-/// log says so.
+/// log says so. So does one whose mirror was built before this road and
+/// cannot answer the question `launch_through` asks first: named, it would
+/// leave its marker in every pane's program, and a nested agent launch
+/// under it would start past the mirror's guard (t-77495).
 #[cfg(target_os = "macos")]
 pub(crate) fn launch_panes_through_the_mirror(local_data_root: &Path) {
     match mirror_bin().filter(|bin| bin.is_file()) {
         Some(bin) => {
-            zerocode_pty::launch_through(
+            let shown = bin.display().to_string();
+            if !zerocode_pty::launch_through(
                 bin,
                 Some(local_data_root.join(crate::system_runtime::WINDOW_LOG)),
-            );
+            ) {
+                crate::note_window_event(
+                    local_data_root,
+                    &format!(
+                        "pane launch: {shown} does not answer as a pane's helper — panes start \
+                         without a controlling terminal"
+                    ),
+                );
+            }
         }
         None => crate::note_window_event(
             local_data_root,

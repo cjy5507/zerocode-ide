@@ -24,9 +24,11 @@
 //!
 //! - **A pane's start, when the window asks.** On macOS every pane's program
 //!   starts through this binary (`zerocode_pty::launch_through`, t-77414):
-//!   with `ZEROCODE_CTTY_EXEC` in its environment it makes the pane's
-//!   terminal its controlling terminal and `exec`s the program, before any
-//!   of the above is looked at.
+//!   started by a lane, with `ZEROCODE_CTTY_EXEC` in its environment, it
+//!   makes the pane's terminal its controlling terminal and `exec`s the
+//!   program, before any of the above is looked at. The same marker merely
+//!   inherited — an older helper left it — is taken out, and the run goes
+//!   through the tee and the guard as any other (t-77495).
 //!
 //! The window learns about the run through the same loopback bridge the hook
 //! scripts use — a form POST with the pane's own coordinates from the

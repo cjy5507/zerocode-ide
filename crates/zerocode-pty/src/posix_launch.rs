@@ -35,6 +35,15 @@
 //! 0 its controlling terminal and becomes the program by `exec`: the same
 //! process, the same pid and beginning, and still no fork.
 //!
+//! Two things a helper has to be for that (t-77495, Codex t-77467). It has
+//! to know the road: one that does not — a mirror built before it, which
+//! starts its first argument and leaves the marker for every launch under
+//! the program — is not named, since it cannot answer the question
+//! [`launch_through`] asks first. And the deployed mirror is signed with the
+//! hardened runtime, so dyld takes every `DYLD_*` out of its environment
+//! before its `main` runs: those travel past it under another name
+//! ([`CTTY_DYLD_WRAP`]) and get their own back before the program starts.
+//!
 //! How the program, its directory and `SHELL` are chosen follows
 //! `portable_pty::CommandBuilder::as_command` exactly, so a lane's child
 //! sees the same start it saw before.
@@ -77,10 +86,32 @@ pub(crate) type EnvEdit = (OsString, Option<OsString>);
 
 /// What tells a helper it is starting a pane's program (t-77414), set to the
 /// name the program is started under — its `argv[0]` — and taken out before
-/// the program starts. In the environment rather than among the arguments,
-/// so a helper built before this road, which reads its first argument as the
-/// program, still starts the program, only without the terminal.
+/// the program starts. It counts only beside the helper's own `argv[0]`
+/// being [`CTTY_EXEC_ARG0`], which no process passes on: a marker some older
+/// helper left behind is inherited by everything the program starts, and on
+/// its own it would turn the next call of a helper — the mirror's tee and
+/// its orchestration guard — into a start of whatever that call names
+/// (t-77495).
 pub const CTTY_EXEC_ENV: &str = "ZEROCODE_CTTY_EXEC";
+
+/// The `argv[0]` a lane starts its helper under, the other half of
+/// [`CTTY_EXEC_ENV`].
+const CTTY_EXEC_ARG0: &str = "zerocode-ctty-exec";
+
+/// The question [`launch_through`] asks a helper before naming it: set, a
+/// helper that knows the road writes [`CTTY_PROBE_ANSWER`] and ends with 0.
+/// A mirror built before the road reads no environment and is handed no
+/// argument, so it ends at once, saying its program is missing.
+pub const CTTY_PROBE_ENV: &str = "ZEROCODE_CTTY_PROBE";
+
+const CTTY_PROBE_ANSWER: &str = "zerocode-ctty-exec 1";
+
+/// The prefix a `DYLD_*` name travels under past the helper — so
+/// `DYLD_LIBRARY_PATH` as `ZEROCODE_CTTY_DYLD_LIBRARY_PATH` — given back its
+/// own name before the program starts. dyld takes every `DYLD_*` out of a
+/// hardened binary's environment, the deployed mirror's among them, and a
+/// pane given one in the settings' environment field lost it (t-77495).
+pub const CTTY_DYLD_WRAP: &str = "ZEROCODE_CTTY_";
 
 /// Where the helper writes its one line when the terminal could not become
 /// the program's — the window's log. Taken out before the program starts.
@@ -97,15 +128,52 @@ static HELPER: OnceLock<Helper> = OnceLock::new();
 /// Start every lane's child through `helper` from now on: an executable
 /// whose `main` calls [`serve_ctty_exec`] before anything else. `log` is
 /// the file its one line goes to when `TIOCSCTTY` fails. Named once per
-/// process; `false` when one was named already. A process that names none
+/// process; `false` when one was named already, or when `helper` does not
+/// answer [`CTTY_PROBE_ENV`] — it does not know the road, and a lane
+/// started through it would keep the marker. A process that names none
 /// starts its children straight, with no controlling terminal.
 pub fn launch_through(helper: PathBuf, log: Option<PathBuf>) -> bool {
+    if HELPER.get().is_some() || !serves_ctty_exec(&helper) {
+        return false;
+    }
     HELPER
         .set(Helper {
             program: helper,
             log,
         })
         .is_ok()
+}
+
+/// Whether `helper` answers [`CTTY_PROBE_ENV`] as [`serve_ctty_exec`] does.
+/// One start of it, which ends at once whether it knows the road or not.
+fn serves_ctty_exec(helper: &Path) -> bool {
+    std::process::Command::new(helper)
+        .env(CTTY_PROBE_ENV, "1")
+        .env_remove(CTTY_EXEC_ENV)
+        .env_remove(CTTY_LOG_ENV)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|out| out.status.success() && out.stdout == CTTY_PROBE_ANSWER.as_bytes())
+}
+
+/// The name a [`CTTY_DYLD_WRAP`]-ped name had, when `name` is one.
+fn unwrapped(name: &OsStr) -> Option<&OsStr> {
+    name.as_bytes()
+        .strip_prefix(CTTY_DYLD_WRAP.as_bytes())
+        .filter(|original| original.starts_with(b"DYLD_"))
+        .map(OsStr::from_bytes)
+}
+
+/// Every `DYLD_*` name in `env` under its [`CTTY_DYLD_WRAP`]-ped one.
+fn wrap_dyld(env: &mut [(OsString, OsString)]) {
+    for (name, _) in env {
+        if name.as_bytes().starts_with(b"DYLD_") {
+            let mut wrapped = OsString::from(CTTY_DYLD_WRAP);
+            wrapped.push(&*name);
+            *name = wrapped;
+        }
+    }
 }
 
 /// The helper's side of [`launch_through`]: when this process was started
@@ -118,11 +186,30 @@ pub fn launch_through(helper: PathBuf, log: Option<PathBuf>) -> bool {
 /// as it would have without the helper, and the log gets one line. A program
 /// that cannot be started ends this process with 127 and says why on the
 /// pane, as a shell does.
+///
+/// Asked [`CTTY_PROBE_ENV`], it answers and ends. A marker with no
+/// [`CTTY_EXEC_ARG0`] beside it was left by another helper: it is taken out
+/// of this process's environment, so nothing this process starts holds it,
+/// and this returns to the binary's own road.
+///
+/// Called first in `main`, before the process starts a thread: it changes
+/// the process's environment.
 pub fn serve_ctty_exec() {
+    if std::env::var_os(CTTY_PROBE_ENV).is_some() {
+        use std::io::Write as _;
+        let mut out = io::stdout();
+        let _ = out.write_all(CTTY_PROBE_ANSWER.as_bytes());
+        let _ = out.flush();
+        std::process::exit(0);
+    }
     let Some(name) = std::env::var_os(CTTY_EXEC_ENV) else {
         return;
     };
-    let mut args = std::env::args_os().skip(1);
+    let mut args = std::env::args_os();
+    if args.next().as_deref() != Some(OsStr::new(CTTY_EXEC_ARG0)) {
+        forget_leftovers();
+        return;
+    }
     let Some(program) = args.next() else {
         eprintln!("zerocode: {CTTY_EXEC_ENV} is set, and no program was named");
         std::process::exit(127);
@@ -137,14 +224,35 @@ pub fn serve_ctty_exec() {
         }
     }
     use std::os::unix::process::CommandExt as _;
-    let error = std::process::Command::new(&program)
+    let mut command = std::process::Command::new(&program);
+    command
         .arg0(name)
         .args(args)
         .env_remove(CTTY_EXEC_ENV)
-        .env_remove(CTTY_LOG_ENV)
-        .exec();
+        .env_remove(CTTY_LOG_ENV);
+    for (wrapped, value) in std::env::vars_os() {
+        if let Some(original) = unwrapped(&wrapped) {
+            command.env(original, value).env_remove(&wrapped);
+        }
+    }
+    let error = command.exec();
     eprintln!("zerocode: {}: {error}", Path::new(&program).display());
     std::process::exit(127);
+}
+
+/// Take what an older helper left in this environment out of it: the
+/// markers and the wrapped `DYLD_*` names, which that helper never gave
+/// back, so the program it started ran without them already.
+fn forget_leftovers() {
+    let names: Vec<OsString> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| name == CTTY_EXEC_ENV || name == CTTY_LOG_ENV || unwrapped(name).is_some())
+        .collect();
+    for name in names {
+        // SAFETY: `serve_ctty_exec` is called first in `main`, before the
+        // process has a second thread to read the environment.
+        unsafe { std::env::remove_var(name) };
+    }
 }
 
 /// One line in the window's log, in its own shape — milliseconds since the
@@ -220,12 +328,16 @@ fn spawn_with(
     let resolved = search_path(program, &dir, lookup("PATH").as_deref())?;
     env.retain(|(named, _)| named != "SHELL");
     env.push(("SHELL".into(), shell.into_os_string()));
-    env.retain(|(named, _)| named != CTTY_EXEC_ENV && named != CTTY_LOG_ENV);
+    env.retain(|(named, _)| {
+        named != CTTY_EXEC_ENV && named != CTTY_LOG_ENV && unwrapped(named).is_none()
+    });
 
-    // Through a helper, the helper is what starts, with the program's path
-    // as its first argument and the program's own name in its environment.
+    // Through a helper, the helper is what starts, under its own `argv[0]`,
+    // with the program's path as its first argument, and the program's own
+    // name and its `DYLD_*` values in its environment.
     let (path, mut argv) = match helper {
         Some(helper) => {
+            wrap_dyld(&mut env);
             env.push((CTTY_EXEC_ENV.into(), program.to_os_string()));
             if let Some(log) = &helper.log {
                 env.push((CTTY_LOG_ENV.into(), log.clone().into_os_string()));
@@ -233,7 +345,7 @@ fn spawn_with(
             (
                 c_string(helper.program.as_os_str().as_bytes())?,
                 vec![
-                    c_string(helper.program.as_os_str().as_bytes())?,
+                    c_string(CTTY_EXEC_ARG0.as_bytes())?,
                     c_string(resolved.as_os_str().as_bytes())?,
                 ],
             )
@@ -556,5 +668,44 @@ impl ChildKiller for Hangup {
 
     fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
         Box::new(Hangup(self.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the helper is handed holds no `DYLD_*` name — dyld would take
+    /// it from a hardened helper — and every value comes back under its own
+    /// name, with no wrapped name left (t-77495).
+    #[test]
+    fn a_dyld_value_crosses_the_helper_under_another_name() {
+        let mut env: Vec<(OsString, OsString)> = vec![
+            ("DYLD_LIBRARY_PATH".into(), "/opt/lib".into()),
+            ("PATH".into(), "/bin".into()),
+            ("DYLD_INSERT_LIBRARIES".into(), "/opt/a.dylib".into()),
+        ];
+        wrap_dyld(&mut env);
+        assert!(
+            env.iter()
+                .all(|(name, _)| !name.as_bytes().starts_with(b"DYLD_")),
+            "{env:?}"
+        );
+        let given_back: Vec<(&OsStr, &OsString)> = env
+            .iter()
+            .filter_map(|(name, value)| unwrapped(name).map(|original| (original, value)))
+            .collect();
+        assert_eq!(
+            given_back,
+            [
+                (OsStr::new("DYLD_LIBRARY_PATH"), &OsString::from("/opt/lib")),
+                (
+                    OsStr::new("DYLD_INSERT_LIBRARIES"),
+                    &OsString::from("/opt/a.dylib")
+                ),
+            ]
+        );
+        assert_eq!(unwrapped(OsStr::new(CTTY_EXEC_ENV)), None);
+        assert_eq!(unwrapped(OsStr::new("ZEROCODE_CTTY_PATH")), None);
     }
 }
