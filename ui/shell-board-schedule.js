@@ -676,6 +676,8 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
       // When the gate was queued last: the moment its latest job was put on the line.
       queuedAt: Math.max(0, ...members.map((job) => Number(job.queued_ms) || 0)),
       startedAt, lastStart,
+      // The waiting gate's one time word, for the rows of the tasks it carries as well (t-77931 P2): "" = unknown.
+      startWord,
     };
     entries.push({
       head: boardScheduleRow({
@@ -777,10 +779,11 @@ function boardScheduleTaskRide(task, now, link, since) {
       gate: gate.gate, time: boardScheduleClock(gate.end, now),
     })
     : gate.state === "waiting"
-      ? gate.unknown
+      // The gate's own time word — its next waiting step's expected start, never its first attempt's past start.
+      ? gate.unknown || !gate.startWord
         ? t("board.schedule.whyWaitingUnknown", "{{gate}}에 실림 → 차례 기다림 · 시작 모름", { gate: gate.gate })
         : t("board.schedule.whyWaiting", "{{gate}}에 실림 → 차례 기다림 · {{time}} 시작 예상", {
-          gate: gate.gate, time: boardScheduleClock(gate.start, now),
+          gate: gate.gate, time: gate.startWord,
         })
       : gate.state === "failed"
         ? t("board.schedule.whyFailed", "{{gate}}에 실림 → 실패로 멈춤", { gate: gate.gate })
