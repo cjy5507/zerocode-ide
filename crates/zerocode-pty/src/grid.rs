@@ -5574,6 +5574,170 @@ mod tests {
         assert_eq!(term.grid().line(0), "a   ef");
     }
 
+    /// The glyph after a move up or down from the last column lands on the
+    /// row the program moved to.
+    ///
+    /// A glyph written into the last column leaves the cursor waiting to
+    /// wrap. `CSI A` and `CSI B` end that wait in xterm and in tmux: the
+    /// cursor is on the last column of its new row, and the next glyph
+    /// overwrites it. The grid kept the wait, so the next glyph wrapped
+    /// onto the row BELOW the one the program asked for — one cell in the
+    /// wrong row, and the program's picture of the screen one row off from
+    /// then on (t-77350, against tmux 3.6a with the same bytes).
+    #[test]
+    fn a_move_up_or_down_from_the_last_column_keeps_the_next_glyph_on_its_row() {
+        let mut term = Terminal::new(10, 24);
+        term.feed(b"\x1b[3;24Hx\x1b[Ay");
+        assert_eq!(term.grid().cell(1, 23).map(|c| c.ch), Some('y'));
+        assert_eq!(term.grid().line(2), format!("{}x", " ".repeat(23)));
+
+        let mut term = Terminal::new(10, 24);
+        term.feed(b"\x1b[3;24Hx\x1b[By");
+        assert_eq!(term.grid().cell(3, 23).map(|c| c.ch), Some('y'));
+        assert_eq!(term.grid().line(4), "");
+    }
+
+    /// `CSI A` and `CSI B` stop at the scroll region's edge when they start
+    /// inside it, and at the screen's edge when they start outside it —
+    /// xterm's rule and tmux's.
+    #[test]
+    fn a_cursor_move_up_or_down_stops_at_the_region_it_started_in() {
+        let moved = |bytes: &[u8]| {
+            let mut term = Terminal::new(10, 24);
+            term.feed(b"\x1b[4;8r");
+            term.feed(bytes);
+            term.grid().cursor()
+        };
+        assert_eq!(moved(b"\x1b[6;1H\x1b[9A"), (3, 0));
+        assert_eq!(moved(b"\x1b[6;1H\x1b[9B"), (7, 0));
+        assert_eq!(moved(b"\x1b[2;1H\x1b[9A"), (0, 0));
+        assert_eq!(moved(b"\x1b[9;1H\x1b[9B"), (9, 0));
+    }
+
+    /// A line feed below the scroll region moves the cursor down a row and
+    /// scrolls nothing; on the screen's last row it stays put. The region
+    /// only scrolls when the cursor is ON its bottom row. Reading "at or
+    /// below the bottom" scrolled the region under a cursor that was not in
+    /// it, and the line the program wrote next landed a row too high.
+    #[test]
+    fn a_line_feed_below_the_region_moves_down_without_scrolling_it() {
+        let mut term = Terminal::new(10, 24);
+        term.feed(b"\x1b[3;1Hkeep\x1b[2;5r\x1b[8;1Ha\nb");
+        assert_eq!(term.grid().line(2), "keep");
+        assert_eq!(term.grid().line(7), "a");
+        assert_eq!(term.grid().line(8), " b");
+
+        // The same through an autowrap.
+        let mut term = Terminal::new(10, 24);
+        term.feed(b"\x1b[2;5r\x1b[8;20Habcdefgh");
+        assert_eq!(term.grid().line(7), format!("{}abcde", " ".repeat(19)));
+        assert_eq!(term.grid().line(8), "fgh");
+
+        // On the last row, below the region: nothing moves.
+        let mut term = Terminal::new(10, 24);
+        term.feed(b"\x1b[1;1Htop\x1b[2;5r\x1b[10;1Ha\nb");
+        assert_eq!(term.grid().line(0), "top");
+        assert_eq!(term.grid().line(9), "ab");
+    }
+
+    /// `ESC M` above the scroll region moves up a row and scrolls nothing;
+    /// on the first row it stays put.
+    #[test]
+    fn a_reverse_index_above_the_region_moves_up_without_scrolling_it() {
+        let mut term = Terminal::new(10, 24);
+        term.feed(b"\x1b[4;8r\x1b[2;1Ha\x1bMb");
+        assert_eq!(term.grid().line(0), " b");
+        assert_eq!(term.grid().line(1), "a");
+
+        let mut term = Terminal::new(10, 24);
+        term.feed(b"\x1b[5;1Hmid\x1b[4;8r\x1b[1;1Ha\x1bMb");
+        assert_eq!(term.grid().line(0), "ab");
+        assert_eq!(term.grid().line(4), "mid");
+    }
+
+    /// A region whose top is not above its bottom is no region, and the
+    /// sequence that asked for it changes nothing — the cursor included.
+    /// Homing the cursor anyway sent the next write to the top-left corner.
+    #[test]
+    fn an_empty_scroll_region_is_ignored_and_the_cursor_stays() {
+        for set in [b"\x1b[3;3r".as_slice(), b"\x1b[6;2r"] {
+            let mut term = Terminal::new(10, 24);
+            term.feed(b"\x1b[5;5Hab");
+            term.feed(set);
+            term.feed(b"c");
+            assert_eq!(term.grid().line(4), "    abc");
+            assert_eq!(term.grid().line(0), "");
+        }
+    }
+
+    /// A resize lets go of the scroll region, as xterm and tmux do. Kept, a
+    /// region set for the old height can name rows the new screen no longer
+    /// has: a line feed then walked the cursor off the bottom, and the text
+    /// after it was written nowhere.
+    #[test]
+    fn a_resize_lets_go_of_the_scroll_region() {
+        let mut term = Terminal::new(10, 24);
+        term.feed(b"top\x1b[2;8r");
+        term.grid_mut().resize(6, 24);
+        term.feed(b"\x1b[6;1Hx\ny");
+        assert_eq!(term.grid().cursor(), (5, 2));
+        assert_eq!(term.grid().line(5), " y");
+        assert_eq!(term.grid().line(4), "x");
+
+        let mut term = Terminal::new(10, 24);
+        term.feed(b"top\x1b[3;6r");
+        term.grid_mut().resize(12, 24);
+        term.feed(b"\x1b[12;1H\nB");
+        assert_eq!(term.grid().line(11), "B");
+        assert_eq!(term.grid().line(0), "", "the whole screen scrolled");
+    }
+
+    /// Erasing with a background colour set paints the erased cells in it.
+    ///
+    /// `TERM=xterm-256color` promises `bce` (back-colour erase), and
+    /// programs lean on the promise: they set a background and clear to
+    /// the end of the line instead of writing the spaces. Erased to plain
+    /// cells, a coloured bar shows only where text was written. Every road
+    /// that opens blank cells takes the background and nothing else — not
+    /// the foreground, not reverse, not a link — which is what tmux 3.6a
+    /// draws for the same bytes.
+    #[test]
+    fn erasing_with_a_background_set_paints_the_erased_cells_with_it() {
+        let blue = Color::Indexed(4);
+        let bg_of = |bytes: &[u8], row: usize, col: usize| {
+            let mut term = Terminal::new(10, 24);
+            term.feed(b"\x1b[2;1Habcdef");
+            term.feed(bytes);
+            term.feed(b"\x1b[0m");
+            term.grid().cell(row, col).expect("on screen").style
+        };
+        let painted = CellStyle {
+            bg: blue,
+            ..CellStyle::default()
+        };
+        for (what, bytes, row, col) in [
+            ("EL", b"\x1b[2;3H\x1b[31;1;44m\x1b[K".as_slice(), 1, 20),
+            ("EL 1", b"\x1b[2;10H\x1b[44m\x1b[1K", 1, 0),
+            ("EL 2", b"\x1b[44m\x1b[2K", 1, 23),
+            ("ED", b"\x1b[8;3H\x1b[44m\x1b[J", 9, 5),
+            ("ED 2", b"\x1b[44m\x1b[2J", 5, 5),
+            ("ECH", b"\x1b[2;3H\x1b[44m\x1b[4X", 1, 4),
+            ("ICH", b"\x1b[2;2H\x1b[44m\x1b[2@", 1, 2),
+            ("DCH", b"\x1b[2;2H\x1b[44m\x1b[2P", 1, 23),
+            ("IL", b"\x1b[2;1H\x1b[44m\x1b[L", 1, 10),
+            ("DL", b"\x1b[2;1H\x1b[44m\x1b[M", 9, 10),
+            ("SU", b"\x1b[44m\x1b[S", 9, 0),
+            ("SD", b"\x1b[44m\x1b[T", 0, 0),
+            ("LF", b"\x1b[10;1H\x1b[44m\n", 9, 3),
+            ("RI", b"\x1b[1;1H\x1b[44m\x1bM", 0, 3),
+            ("region LF", b"\x1b[3;6r\x1b[6;1H\x1b[44m\n", 5, 3),
+        ] {
+            assert_eq!(bg_of(bytes, row, col), painted, "{what}");
+        }
+        // Reverse is not a background: the erased cells stay plain.
+        assert!(bg_of(b"\x1b[2;3H\x1b[7m\x1b[K", 1, 20).is_plain());
+    }
+
     /// A program that hides the cursor gets a hidden cursor.
     ///
     /// `CSI ?25l` is what a TUI sends before it redraws, and `?25h` when it
