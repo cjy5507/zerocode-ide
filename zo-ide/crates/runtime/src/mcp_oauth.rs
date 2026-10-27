@@ -1539,6 +1539,11 @@ mod tests {
             .and_then(|probe| probe.local_addr())
             .expect("a free loopback port")
             .port();
+        // Another socket on the machine takes the port the moment it is free
+        // and does not listen there, which leaves every connect refused, as
+        // gate l82f g3b1's were for 10 s.
+        #[cfg(unix)]
+        let _taker = take_port(port);
         let (sender, answer) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = sender.send(wait_for_callback(port));
@@ -1570,6 +1575,20 @@ mod tests {
             .expect("the redirect completed the callback");
         assert_eq!(callback.code.as_deref(), Some("the-code"));
         assert_eq!(callback.state.as_deref(), Some("the-state"));
+    }
+
+    /// A socket bound to `port` on the loopback address without listening,
+    /// when the port is free to take; dropping it gives the port back.
+    #[cfg(unix)]
+    fn take_port(port: u16) -> Option<std::os::fd::OwnedFd> {
+        use std::os::fd::AsRawFd as _;
+
+        use nix::sys::socket::{AddressFamily, SockFlag, SockType, SockaddrIn, bind, socket};
+
+        let taker = socket(AddressFamily::Inet, SockType::Stream, SockFlag::empty(), None)
+            .expect("socket");
+        bind(taker.as_raw_fd(), &SockaddrIn::new(127, 0, 0, 1, port)).ok()?;
+        Some(taker)
     }
 
     // --- Discovery test harness -------------------------------------------
