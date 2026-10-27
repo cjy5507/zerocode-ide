@@ -316,6 +316,127 @@ async function testNarrowFolds(browser, origin, ok) {
   }
 }
 
+/* 17 — under 760 px the strip is the tab on stage and one menu of every tab
+ * (「탭 N」); under 480 px the strip's other controls fold into that menu too.
+ * The menu's rows exist only while it is open. The widths are named tokens a
+ * later fold (the panels' rails) reads too, and the rules fold at those. */
+async function testTabMenuFold(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1000, height: 900 });
+    await standChrome(page);
+    // The checkout on stage holds two of the three tabs; one of them is in front.
+    await page.evaluate(() => setActiveTab(el("tabstrip").querySelector(".tab").dataset.tab));
+    await frames(page);
+    const read = () => page.evaluate(() => {
+      const strip = el("tabstrip");
+      const shown = (node) => node !== null && node.getClientRects().length > 0 && node.getBoundingClientRect().width > 2;
+      const opener = strip.querySelector(".tab-menu");
+      return {
+        tabs: [...strip.querySelectorAll(".tab")].map((tab) => ({ active: tab.classList.contains("is-active"), shown: shown(tab) })),
+        opener: shown(opener),
+        openerWords: opener?.textContent.trim() ?? null,
+        openerPopup: opener?.getAttribute("aria-haspopup") ?? null,
+        openerExpanded: opener?.getAttribute("aria-expanded") ?? null,
+        add: shown(strip.querySelector(".tab-new")),
+        // The opener stands whole inside its strip, not scrolled past its end.
+        openerWhole: opener !== null && opener.getBoundingClientRect().right <= strip.getBoundingClientRect().right + 1,
+        menuRows: el("sidebar-menu").childElementCount,
+      };
+    });
+    const at1000 = await read();
+    ok("at 1000 px the tabs fold to marks and no tab menu stands (시안 17)",
+      !at1000.opener && at1000.tabs.length === 2 && at1000.tabs.every((tab) => tab.shown), JSON.stringify(at1000));
+
+    await page.setViewportSize({ width: 760, height: 900 });
+    await frames(page);
+    const at760 = await read();
+    ok("at 760 px the strip is the tab on stage and one 「탭 N」 menu (시안 17)",
+      at760.opener && at760.openerWhole && at760.openerWords === "탭 2" && at760.openerPopup === "menu" && at760.openerExpanded === "false" &&
+        at760.tabs.filter((tab) => tab.shown).length === 1 && at760.tabs.find((tab) => tab.active)?.shown === true,
+      JSON.stringify(at760));
+    ok("the tab menu has no rows while it is closed", at760.menuRows === 0, JSON.stringify(at760));
+
+    await page.focus("#tabstrip .tab-menu");
+    await page.keyboard.press("Enter");
+    await frames(page);
+    const open = await page.evaluate(() => {
+      const menu = el("sidebar-menu");
+      const rows = [...menu.querySelectorAll('[role="menuitemradio"]')];
+      return {
+        visible: !menu.hidden,
+        rows: rows.map((row) => row.textContent.trim()),
+        checked: rows.filter((row) => row.getAttribute("aria-checked") === "true").length,
+        focusInside: menu.contains(document.activeElement),
+        expanded: el("tabstrip").querySelector(".tab-menu").getAttribute("aria-expanded"),
+      };
+    });
+    ok("Enter on the opener lists every tab of the strip, the one on stage checked, with the keyboard inside",
+      open.visible && open.rows.length === 2 && open.checked === 1 && open.focusInside && open.expanded === "true",
+      JSON.stringify(open));
+
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => el("sidebar-menu").childElementCount === 0, null, { timeout: 2000 }).catch(() => {});
+    const shut = await page.evaluate(() => ({
+      rows: el("sidebar-menu").childElementCount,
+      focusBack: document.activeElement === el("tabstrip").querySelector(".tab-menu"),
+      expanded: el("tabstrip").querySelector(".tab-menu").getAttribute("aria-expanded"),
+    }));
+    ok("Escape closes the menu, empties it and hands the keyboard back to its opener",
+      shut.rows === 0 && shut.focusBack && shut.expanded === "false", JSON.stringify(shut));
+
+    await page.keyboard.press("Enter");
+    await frames(page);
+    const picked = await page.evaluate(() => {
+      const onStage = () => el("tabstrip").querySelector(".tab.is-active")?.dataset.tab ?? null;
+      const before = onStage();
+      const row = [...el("sidebar-menu").querySelectorAll('[role="menuitemradio"]')].find((one) => one.getAttribute("aria-checked") === "false");
+      row.click();
+      return { before };
+    });
+    await frames(page);
+    picked.after = await page.evaluate(() => el("tabstrip").querySelector(".tab.is-active")?.dataset.tab ?? null);
+    ok("a row of the menu puts its tab on stage", picked.after !== null && picked.after !== picked.before, JSON.stringify(picked));
+
+    await page.setViewportSize({ width: 480, height: 900 });
+    await frames(page);
+    const at480 = await read();
+    await page.click("#tabstrip .tab-menu");
+    await frames(page);
+    const tail = await page.evaluate(() => [...el("sidebar-menu").querySelectorAll('[role="menuitem"]')].map((row) => row.textContent.trim()));
+    await page.keyboard.press("Escape");
+    ok("at 480 px the strip keeps the tab on stage and its menu, and the new-terminal control folds into that menu (시안 17)",
+      at480.opener && at480.openerWhole && !at480.add && at480.tabs.filter((tab) => tab.shown).length === 1 && tail.some((words) => words.startsWith("새 터미널")),
+      JSON.stringify({ at480, tail }));
+
+    const widths = await page.evaluate(() => {
+      const root = getComputedStyle(document.documentElement);
+      const token = (name) => root.getPropertyValue(name).trim();
+      const folds = new Set();
+      const visit = (rules) => {
+        for (const rule of rules) {
+          if (rule instanceof CSSMediaRule && /\.tab-menu|\.tab-new/.test(rule.cssText)) folds.add(rule.conditionText);
+          else if (rule.cssRules) visit(rule.cssRules);
+        }
+      };
+      for (const sheet of document.styleSheets) {
+        try { visit(sheet.cssRules); } catch { /* a sheet from elsewhere */ }
+      }
+      return {
+        tokens: ["--fold-panel-rail", "--fold-sidebar-rail", "--fold-tab-menu", "--fold-tab-only"].map(token),
+        folds: [...folds],
+      };
+    });
+    ok("the fold widths are named tokens — 1360, 1000, 760 and 480 px — and the tab menu folds at the last two",
+      widths.tokens.join() === "1360px,1000px,760px,480px" &&
+        widths.folds.length === 2 && widths.folds.every((when) => [widths.tokens[2], widths.tokens[3]].some((width) => when.includes(width))),
+      JSON.stringify(widths));
+    ok("the tab menu scene raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
 /* Both themes: what this pass turned quiet still reads (WCAG 4.5:1 for words). */
 async function testQuietContrast(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
@@ -379,6 +500,7 @@ export async function testChromeGeist(browser, origin, ok) {
   await testStatusGauges(browser, origin, ok);
   await testBoardHead(browser, origin, ok);
   await testNarrowFolds(browser, origin, ok);
+  await testTabMenuFold(browser, origin, ok);
   await testQuietContrast(browser, origin, ok);
 }
 
