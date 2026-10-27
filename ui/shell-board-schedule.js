@@ -949,8 +949,10 @@ function boardScheduleBoardLines(groups, now) {
 
   // 2. The gate: the one that started last in the range.
   const gateHeads = rows("gates").slice().sort((a, b) => b.start - a.start);
-  const gate = gateHeads.find((row) => row.state === "running") ?? gateHeads.find((row) => row.state === "failed")
-    ?? gateHeads[0] ?? null;
+  // The gate running; else, of the gates that ran (passed or failed), the one that started last — a pass after a
+  // failure is the newer word (review r3 P2); else the one queued last.
+  const gate = gateHeads.find((row) => row.state === "running")
+    ?? gateHeads.find((row) => row.state === "failed" || row.state === "done") ?? gateHeads[0] ?? null;
   const facts = gate?.facts ?? null;
   const gateLine = gate && facts
     ? {
