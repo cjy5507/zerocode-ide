@@ -6443,6 +6443,9 @@ function prunePanes(node, keep) {
  * this host's slots and keep their scrollback — the same reason `updateStage`
  * moves a surface rather than drawing a second one. */
 const paneHosts = new Map();
+/* Each agent tab's head (2차 B, `paintPaneHead`), by tab: the first child of
+ * its host through every re-render of the tree below it. */
+const paneHeads = new Map();
 
 function paneHost(tab) {
   const held = paneHosts.get(tab.id);
@@ -6467,12 +6470,7 @@ function paneHost(tab) {
       if (paneModeOf(tab, host) !== host.dataset.paneMode) {
         renderPanes(tab);
       } else {
-        for (const term of paneLeaves(tab.layout)) {
-          const view = termViews.get(term);
-          if (!view || view.host.hidden) continue;
-          view.measure();
-          resizeTermTab(term);
-        }
+        remeasurePanes(tab);
       }
     }, SIDEBAR_REFLOW_DEBOUNCE_MS);
   }).observe(host);
@@ -6494,7 +6492,21 @@ function paneModeOf(tab, host) {
   return chain.length * PANE_MIN_GRID_WIDTH > width ? "grid" : "split";
 }
 
+/* Every shell of the tab that is on screen measures its room again and tells its program. */
+function remeasurePanes(tab) {
+  for (const term of paneLeaves(tab.layout)) {
+    const view = termViews.get(term);
+    if (!view || view.host.hidden) continue;
+    view.measure();
+    resizeTermTab(term);
+  }
+}
+
 function dropPaneHost(id) {
+  // The view switch may stand in this tab's head; it goes home before the head does.
+  const toggle = el("view-toggle");
+  if (paneHeads.get(id)?.contains(toggle)) el("view-toggle-home").appendChild(toggle);
+  paneHeads.delete(id);
   paneHosts.get(id)?.remove();
   paneHosts.delete(id);
 }
@@ -6994,7 +7006,9 @@ function renderPanes(tab) {
   // that still fits keeps the split renderer, its measured divider and its
   // drag; so does every hand-built shape (`paneModeOf`).
   const mode = paneModeOf(tab, host);
+  const head = paneHeads.get(tab.id);
   host.replaceChildren(
+    ...(head ? [head] : []),
     mode === "grid"
       ? paneGridEl(tab, uniformVerticalChainLeaves(tab.layout))
       : paneNodeEl(tab, tab.layout),
@@ -7006,12 +7020,7 @@ function renderPanes(tab) {
   // Every visible shell measures again: what changed is how much room each of
   // them has, and a grid sized for the old room paints for columns that are
   // not there.
-  for (const term of paneLeaves(tab.layout)) {
-    const view = termViews.get(term);
-    if (!view || view.host.hidden) continue;
-    view.measure();
-    resizeTermTab(term);
-  }
+  remeasurePanes(tab);
   // Every road that changes the shape ends here — split, prune, title,
   // expand, equalize — so this is the one place the file learns about all of
   // them. Orca persists a snapshot at each of those verbs individually

@@ -56078,15 +56078,14 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       await window.__PAINTED__();
       const toggle = el("view-toggle");
       seen.hiddenBeforeAgent = toggle.hidden;
-      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false });
-      await window.__PAINTED__();
-      seen.shownForAgent = !toggle.hidden;
       // The pane's transcript, answered the way the backend reads it: the turns
       // after the page's cursor (the tail on the first read) and the cursor past
       // them. A read that finds nothing new brings nothing, so the page's quick
       // follow ends there as it does on a real file — an answer that repeated
       // the three turns on every read was news every 160 ms, and the follow
-      // never stopped (t-9741).
+      // never stopped (t-9741). On file before the agent's first report: the
+      // pane opens on its conversation at that report (2차 B), as a real
+      // transcript is there by then.
       const transcript = [
         { role: "user", text: "Wallet 결제 레시피 만들어줘" },
         { role: "tool", text: "Bash · zerocode-browser open http://admin.internal.example/login", tool: { name: "Bash", kind: "bash" } },
@@ -56097,6 +56096,9 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
         next: transcript.length,
         turns: transcript.slice(args.after ?? 0),
       });
+      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false });
+      await window.__PAINTED__();
+      seen.shownForAgent = !toggle.hidden;
       const view = termViews.get(term);
       const slot = document.querySelector(`.pane-slot[data-term="${term}"]`);
       const t0 = performance.now();
@@ -56277,7 +56279,11 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
         if (args.term !== long) return answerLog(args);
         if (reads === 0) firstAfter = args.after;
         reads += 1;
-        return chunks[Math.min(args.after ?? 0, 2)];
+        // Past the end the file has nothing new, as the backend answers it: a
+        // read the page owes after another (a hook's beside the opening one)
+        // must not be handed the last chunk twice.
+        if ((args.after ?? 0) >= chunks.length) return { found: true, next: chunks.length, more: false, skipped: false, turns: [] };
+        return chunks[args.after ?? 0];
       };
       const long = await openTermTab({ placement: "tab" });
       const bornAgo = 60 * 60 * 1000;

@@ -53411,6 +53411,110 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   white-space: nowrap;
 }
 
+/* The switch's home in the title bar lays nothing out of its own. */
+.view-toggle-home {
+  display: contents;
+}
+
+/* An agent tab's head: above its panes, the tree under it taking the rest. */
+.panes:has(> .pane-head) {
+  flex-direction: column;
+}
+
+.pane-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  min-height: var(--control-height-sm);
+  padding: var(--space-1) var(--space-3);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: var(--surface-deck);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.pane-head-who {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* In the conversation the page's own head says who; this one keeps the line and the switch. */
+.pane-head.is-chat .pane-head-who {
+  display: none;
+}
+
+.pane-head-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-head-model {
+  flex: none;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-border);
+  font: var(--type-label-12-mono);
+}
+
+.pane-head-state,
+.pane-head-pick {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* What the agent is doing: a dot whose shape is the state's — filled while it
+ * works, a ring while it waits on the person — and the word beside it. */
+.pane-head-state::before {
+  content: "";
+  display: inline-block;
+  width: var(--dot-size);
+  height: var(--dot-size);
+  margin-right: var(--space-1);
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 var(--rule-width) currentColor;
+  vertical-align: middle;
+}
+
+.pane-head-state[data-state="working"]::before {
+  background: var(--signal-ready);
+  box-shadow: none;
+}
+
+.pane-head-state[data-state="needs-attention"] {
+  color: var(--call);
+}
+
+.pane-head-pick {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pane-head-view {
+  flex: none;
+  margin-left: auto;
+}
+
+/* The answer read as prose: Geist copy-16 in one column of `--reading-column`,
+ * centred in the list's room; the dock, measured by the same token, floats
+ * under it on the same axis. */
+.is-chat-page .helper-turn.is-assistant .helper-said {
+  font: var(--type-copy-16);
+}
+
+.is-chat-page .helper-body > .helper-turns {
+  padding-inline: max(var(--helper-gutter, var(--chat-list-pad-x)), calc((100% - var(--reading-column)) / 2));
+}
+
 @media (prefers-reduced-motion: reduce) {
   .your-turn,
   .your-turn-list,

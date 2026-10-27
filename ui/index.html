@@ -970,11 +970,16 @@
       <div class="titlebar-right" data-drag-surface>
         <!-- The active pane's view: its screen, or its conversation drawn from
              the agent's own transcript — one segment, hidden where the pane runs
-             no agent. `paintViewToggle` paints it; a click is `setPaneChat`. -->
+             no agent. `paintViewToggle` paints it; a click is `setPaneChat`.
+             2차 B: it stands in the head of the agent's tab, beside the pane it
+             speaks for (`paintPaneHead`); this is only its home, where a wire's
+             page — which has no panes — keeps it. -->
+        <span class="view-toggle-home" id="view-toggle-home">
         <div class="segment view-toggle" id="view-toggle" role="group" data-i18n-aria="view.toggleLabel" aria-label="보기" hidden>
           <button class="segment-btn is-active" id="view-toggle-term" type="button" aria-pressed="true" data-i18n-title="view.terminalTip" data-tip="터미널 화면 보기"><span class="view-toggle-glyph" aria-hidden="true">&gt;_</span><span data-i18n="view.terminal">터미널</span></button>
           <button class="segment-btn" id="view-toggle-chat" type="button" aria-pressed="false" data-i18n-title="view.conversationTip" data-tip="대화로 보기"><span class="view-toggle-glyph" aria-hidden="true">◐</span><span data-i18n="view.conversation">대화</span></button>
         </div>
+        </span>
         <!-- Orca's `▷ 명령` sits here. Ours runs the thing this product
              already has a setting for — a terminal on the configured
              command, or your shell when you have not named one. The label

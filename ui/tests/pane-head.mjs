@@ -38,7 +38,7 @@ export async function testPaneHead(browser, origin, ok) {
       await window.__PAINTED__();
       const host = document.querySelector(`.pane-slot[data-term="${term}"]`)?.closest(".panes");
       seen.headBeforeAgent = Boolean(host?.querySelector(":scope > .pane-head:not([hidden])"));
-      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-head-0001", resumable: true, model: "claude-fable-5-1" });
+      tell("hook:agent", { term, state: "working", agent: "claude", session: { id: "s-head-0001" }, resumable: true, model: "claude-fable-5-1" });
       await window.__PAINTED__();
       await settle();
       const head = host.querySelector(":scope > .pane-head");
@@ -73,19 +73,19 @@ export async function testPaneHead(browser, origin, ok) {
       const dock = chat?.querySelector(".worker-composer");
       const dockBox = dock?.getBoundingClientRect();
       const turnBox = turn?.getBoundingClientRect();
-      seen.dockRadius = dock ? getComputedStyle(dock).borderTopLeftRadius : "";
+      seen.dockRadius = dock ? getComputedStyle(dock).borderBottomLeftRadius : "";
       seen.dockAligned = dockBox && turnBox ? Math.abs(dockBox.left - turnBox.left) <= 1 && dockBox.width <= 761 : false;
       // The person picks the screen: it stays theirs through the next hook event.
       el("view-toggle-term").click();
       await settle();
-      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-head-0001", resumable: true });
+      tell("hook:agent", { term, state: "working", agent: "claude", session: { id: "s-head-0001" }, resumable: true });
       await window.__PAINTED__();
       seen.screenKept = !paneChatOn(term);
       seen.whoShownOnScreen = getComputedStyle(head.querySelector(".pane-head-who")).display !== "none";
       // A second agent pane whose question is only on its screen opens on the screen.
       const other = await openTermTab({ placement: "tab" });
       await window.__PAINTED__();
-      tell("hook:agent", { term: other, state: "needs-attention", agent: "codex", session: "s-head-0002", resumable: false });
+      tell("hook:agent", { term: other, state: "needs-attention", agent: "codex", session: { id: "s-head-0002" }, resumable: false });
       await window.__PAINTED__();
       seen.askOnScreen = !paneChatOn(other);
       return seen;

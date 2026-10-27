@@ -12184,7 +12184,10 @@ function flushAgentPaint() {
   // 것이고, 지금 그림에 담겼다고 볼 수 없다.
   const due = { ...agentPaintDue };
   for (const surface of Object.keys(agentPaintDue)) agentPaintDue[surface] = false;
-  if (due.tabs) renderTabs();
+  if (due.tabs) {
+    renderTabs();
+    paintShownPaneHeads();
+  }
   // The card is the rows AND the dot on the row above them: one agent moving
   // is one workspace changing what it says, and drawing half of that would
   // leave a card reading "작업 중" under a dot that had gone quiet.
@@ -12465,6 +12468,7 @@ listen("hook:agent", (event) => {
   } else {
     paneAsks.delete(term);
   }
+  if (agent && !(asking && !shaped)) standPaneConversation(term);
   if (paneChatOn(term)) {
     if (asking && !shaped) setPaneChat(term, false);
     else if ((paneAsks.get(term)?.sig ?? null) !== askBefore) paintPaneChat(term);
@@ -12498,7 +12502,9 @@ listen("hook:agent", (event) => {
   // tried now — between turns; mid-turn `handPaneToWire` waits for the end.
   if (named) {
     const chat = paneChats.get(term);
-    if (chat?.on && !chat.handing && wireRowFor(term)) void handPaneToWire(term);
+    // Only a conversation the person turned to (the switch): the one a pane
+    // stands in by default is read, never handed over (2차 B).
+    if (chat?.on && chat.chosen && !chat.handing && wireRowFor(term)) void handPaneToWire(term);
   }
   // A state change in the pane the person is already looking at is seen the
   // moment it happens — without this, working in the front tab still grew an
@@ -13574,6 +13580,10 @@ function paintViewToggle() {
   const term = activeAgentTerm();
   const wire = activeWireTab();
   seg.hidden = term === null && wire === null;
+  // Beside the pane it speaks for, in its tab's head; a wire's page has no
+  // panes and keeps it at home in the title bar.
+  const home = term === null ? el("view-toggle-home") : paintPaneHead(currentTab(), term).querySelector(".pane-head-view");
+  if (seg.parentElement !== home) home.appendChild(seg);
   if (seg.hidden) return;
   // A wire tab that continues a pane's conversation IS its 「대화」.
   const on = wire !== null || paneChatOn(term);
@@ -13591,12 +13601,103 @@ el("view-toggle-term").addEventListener("click", () => {
     return;
   }
   const term = activeAgentTerm();
-  if (term !== null) void setPaneChat(term, false);
+  if (term === null) return;
+  paneChatOf(term).chosen = true;
+  void setPaneChat(term, false);
 });
 el("view-toggle-chat").addEventListener("click", () => {
   const term = activeAgentTerm();
-  if (term !== null) void setPaneChat(term, true);
+  if (term === null) return;
+  paneChatOf(term).chosen = true;
+  void setPaneChat(term, true);
 });
+
+/* 2차 B (item 9): an agent's pane reads as its conversation — the transcript
+ * view, not handed to a wire — until the person picks a side with the switch,
+ * which is then theirs for the pane's life. */
+function standPaneConversation(term) {
+  const held = paneChats.get(term);
+  if (held?.on || held?.chosen) return;
+  void setPaneChat(term, true, { wire: false });
+}
+
+/* ---- 판 머리 (2차 B, item 8) ----
+ *
+ * A terminal tab whose pane runs an agent wears a head above its panes: who
+ * the agent is, the model it runs, what it is doing, the conversation it holds
+ * (`paintPaneHeadPick`) and the 터미널 | 대화 switch — beside the pane it
+ * speaks for. In the conversation the page's own head (t-22100) says who, so
+ * this one keeps the line and the switch there. Built once per tab, the first
+ * time an agent is in front in it, and re-laid with the tab's tree. */
+function paneHeadNode() {
+  const head = document.createElement("div");
+  head.className = "pane-head";
+  const who = document.createElement("span");
+  who.className = "pane-head-who";
+  const name = document.createElement("strong");
+  name.className = "pane-head-name";
+  const model = document.createElement("span");
+  model.className = "pane-head-model";
+  const state = document.createElement("span");
+  state.className = "pane-head-state";
+  who.append(agentMarkNode("pane-head-mark", ""), name, model, state);
+  const pick = document.createElement("span");
+  pick.className = "pane-head-pick";
+  pick.hidden = true;
+  const view = document.createElement("span");
+  view.className = "pane-head-view";
+  head.append(who, pick, view);
+  return head;
+}
+
+function paintPaneHead(tab, term) {
+  let head = paneHeads.get(tab.id);
+  if (!head) {
+    head = paneHeadNode();
+    paneHeads.set(tab.id, head);
+    // Above the tree, which stays as it is — its slots hold the screens and
+    // the conversation — and whose shells measure the room the head left.
+    paneHost(tab).prepend(head);
+    remeasurePanes(tab);
+  }
+  const agent = paneAgents.get(term) ?? "";
+  head.classList.toggle("is-chat", paneChatOn(term));
+  writeTextContent(head.querySelector(".pane-head-mark"), agentVoice(agent).glyph);
+  writeTextContent(head.querySelector(".pane-head-name"), agentPaneName(tab, term, agent) || tabLabel(tab));
+  const model = paneModelWords(term);
+  const pill = head.querySelector(".pane-head-model");
+  writeHidden(pill, model.text === "");
+  writeTextContent(pill, model.text);
+  writeAttribute(pill, "data-tip", model.tip);
+  const state = hookStates.get(term) ?? "idle";
+  const chip = head.querySelector(".pane-head-state");
+  writeAttribute(chip, "data-state", state);
+  writeTextContent(chip, bucketWord(state === "needs-attention" ? "attention" : state));
+  paintPaneHeadPick(head, term);
+  return head;
+}
+
+/* The one line that says which conversation this pane holds — the session its
+ * agent named, the one a 「계속」 resumes. t-68069 writes here why a resume
+ * picked it; until a hook names a session the line stands empty. */
+function paintPaneHeadPick(head, term) {
+  const pick = head.querySelector(".pane-head-pick");
+  const session = paneSessions.get(term)?.session?.id ?? "";
+  writeHidden(pick, session === "");
+  writeTextContent(pick, session ? t("paneHead.pick", "대화 {{session}}", { session: shortSession(session) }) : "");
+  writeAttribute(pick, "data-tip", session);
+}
+
+/* The heads on screen say what the hooks last said — on the beat the tab strip
+ * repaints, so a busy agent costs one paint a frame, not one per event. */
+function paintShownPaneHeads() {
+  for (const [id, head] of paneHeads) {
+    if (head.parentElement?.hidden !== false) continue;
+    const tab = tabs.find((one) => one.id === id);
+    const term = tab ? activePaneOf(tab) : null;
+    if (term !== null && paneAgents.has(term)) paintPaneHead(tab, term);
+  }
+}
 
 /* Stand the pane's conversation in its slot, or take it down — called from the
  * stage's per-slot pass, so a page is shown exactly when its screen would have

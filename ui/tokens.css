@@ -2641,8 +2641,11 @@
   --chat-bubble-pad-x: 6px;
   --chat-bubble-pad-y: 4px;
   --chat-bubble-gap: 4px;
-  --chat-radius-composer: 8px;
-  --chat-prose-size: var(--text-sm);
+  /* IDE design pass 2 (B, items 9 and 11): the composer floats as the round box
+   * of what floats, and the prose is read at Geist copy-16 (`--type-copy-16`),
+   * 16 on a 24 line. */
+  --chat-radius-composer: var(--radius-xl);
+  --chat-prose-size: var(--text-lg);
   --chat-prose-leading: 1.5;
   --chat-dot: 7px;
   --chat-dot-halo: 3px;
@@ -2703,7 +2706,7 @@
    * default face (WebKit: Times, and AppleMyungjo for Hangul — the serif
    * the person saw on 2026-09-23, t-6323 A0). */
   --chat-dock-inset: 16px;
-  --chat-dock-max: 680px;
+  --chat-dock-max: var(--reading-column);
   /* The dock's watched height, written on the page by `chatDockNode`; a page
    * without a dock keeps the extension's 40px alone. */
   --chat-dock-h: 0px;
