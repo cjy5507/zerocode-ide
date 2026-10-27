@@ -8653,7 +8653,28 @@ function terminalThemePalette() {
   const selected = light ? termPrefs.theme_light : termPrefs.theme_dark;
   const custom = customTerminalTheme(selected);
   if (custom) return { ...(catalog[fallback] ?? {}), ...(custom.terminal ?? {}) };
-  return catalog[selected] ?? catalog[fallback] ?? null;
+  const name = catalog[selected] ? selected : fallback;
+  const palette = catalog[name] ?? null;
+  return palette && name === fallback ? onWindowGround(palette, light) : palette;
+}
+
+/* 시안 10 「바탕 한 장」 (t-78107): the treatment's default theme draws its
+ * screen on the ground the conversation stands on — the window's floor —
+ * not on its own grey, which was the centre of the window alone in another
+ * material (the person's 10-27 photo: #1d1e24 inside #151515). Only where the
+ * theme's treatment is the window's: a dark theme kept under a light window
+ * keeps its ground, or its palette would stand on a white it was not tuned
+ * for. A theme the person picked, and a background they set, are theirs and
+ * come over this. The cursor's glyph ink is the screen's, so it moves along. */
+function onWindowGround(palette, light) {
+  if (light !== (document.documentElement.dataset.theme === "light")) return palette;
+  const ground = normalizedHexColor(
+    getComputedStyle(document.documentElement).getPropertyValue("--chat-ground"),
+    null,
+  );
+  if (ground === null) return palette;
+  const cursorAccent = palette.cursorAccent === palette.background ? ground : palette.cursorAccent;
+  return { ...palette, background: ground, cursorAccent };
 }
 
 function terminalAnsiColorKeys() {

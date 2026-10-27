@@ -1234,14 +1234,16 @@
   --traffic-light-inset: 78px;
 
   /* Terminal screen — content, not chrome. The programs inside paint for a
-   * dark terminal, so this surface does NOT flip with the app theme; these
-   * two literals deliberately restate the dark abyss/chalk pair. Terminal
-   * theme import (Warp/Ghostty, docs/reverse/orca-ui-inventory.md 4절) will
-   * replace this block wholesale. */
-  --term-screen-bg: #282c34;
+   * dark terminal, so this surface does NOT flip with the app theme. Its
+   * ground is the conversation's, the window's floor (시안 10 「바탕 한
+   * 장」, t-78107): the default theme's own grey made the centre the one
+   * plane of another material. The terminal theme (`applyTerminalPalette`)
+   * binds this block once its prefs arrive, onto the same floor unless the
+   * person picked another theme. */
+  --term-screen-bg: var(--chat-ground);
   --term-screen-fg: #ffffff;
   --term-cursor: #ffffff;
-  --term-cursor-accent: #282c34;
+  --term-cursor-accent: var(--term-screen-bg);
   --term-selection-bg: #5a7898;
   --term-selection-fg: #ffffff;
 
@@ -3217,10 +3219,10 @@
    * "bright white" slots have to render DARK or a program that asks for white
    * writes invisibly — which is what every light terminal theme does, and the
    * reason this block is not the dark one with two values swapped. */
-  --term-screen-bg: #ffffff;
+  --term-screen-bg: var(--chat-ground);
   --term-screen-fg: #2e3434;
   --term-cursor: #2e3434;
-  --term-cursor-accent: #ffffff;
+  --term-cursor-accent: var(--term-screen-bg);
   --term-selection-bg: #accef7;
   --term-selection-fg: #2e3434;
   --term-0: #2e3436;

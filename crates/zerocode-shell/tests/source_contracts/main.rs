@@ -2247,10 +2247,10 @@ mod tests {
         let cells = block_after_css(styles, ".term {");
         let markup = include_str!("../../../../ui/index.html");
 
-        // 값은 Orca의 기본 다크 테마(Ghostty Default Style Dark,
-        // store-BgJxB0hr.js:122) 실측 — 자체 남색조(#101418)는 앱의 중립
-        // 회색 체계와 색조가 어긋나 "터미널만 다른 앱"으로 읽혔다.
-        for role in ["--term-screen-bg: #282c34;", "--term-screen-fg: #ffffff;"] {
+        // 바탕은 대화 보기와 같은 창의 바닥(시안 10 「바탕 한 장」, t-78107) —
+        // 기본 테마의 회색(#282c34)은 가운데만 다른 재질로 띄웠다. 글자는
+        // Orca의 기본 다크 테마(Ghostty Default Style Dark) 실측 그대로.
+        for role in ["--term-screen-bg: var(--chat-ground);", "--term-screen-fg: #ffffff;"] {
             assert!(
                 root.contains(role),
                 "the terminal contrast pair is missing `{role}`"
