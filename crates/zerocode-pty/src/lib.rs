@@ -43,7 +43,7 @@ pub use input::{
 };
 pub use lane::{
     DECLARED_TERMINAL, GroupPrograms, INHERITED_SESSION_MARKERS, INHERITED_TERMINAL_IDENTITY,
-    PTY_OUTPUT_BYTE_BUDGET, PtyError, PtyLane, Pumped,
+    PTY_OUTPUT_BYTE_BUDGET, PtyError, PtyLane, Pumped, ask_for_pty,
 };
 #[cfg(target_os = "macos")]
 pub use posix_launch::{

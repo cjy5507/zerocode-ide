@@ -1496,6 +1496,14 @@ mod tests {
         assert!(!root.path().join(LEFT_FILE).exists());
     }
 
+    /// How long a terminal may take to hang up after its last master
+    /// closed: spent in full only by a failure.
+    #[cfg(target_os = "macos")]
+    const HANGUP_PATIENCE: Duration = Duration::from_secs(10);
+    /// The pause between two looks at a terminal that has not hung up.
+    #[cfg(target_os = "macos")]
+    const HANGUP_PROBE_PAUSE: Duration = Duration::from_millis(10);
+
     /// One `openpty`, the descriptors it opened or the error it set.
     #[cfg(target_os = "macos")]
     fn raw_openpty() -> std::io::Result<(libc::c_int, libc::c_int)> {
@@ -1512,18 +1520,27 @@ mod tests {
             )
         };
         if opened == 0 {
+            // `openpty` leaves both ends open across an exec, as `portable_pty`
+            // does not: a child another test starts in between would inherit
+            // the master and hold the terminal open past its close.
+            for fd in [master, slave] {
+                // SAFETY: `fcntl` sets a flag on a descriptor opened above.
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+            }
             Ok((master, slave))
         } else {
             Err(std::io::Error::last_os_error())
         }
     }
 
-    /// A pty pair from `open`, as the test opens one.
+    /// A pty pair from `open`, as the test opens one: asked again where a
+    /// concurrent open took the pty (`zerocode_pty::ask_for_pty` owns which
+    /// errors and how often).
     #[cfg(target_os = "macos")]
     fn open_pair(
-        mut open: impl FnMut() -> std::io::Result<(libc::c_int, libc::c_int)>,
+        open: impl FnMut() -> std::io::Result<(libc::c_int, libc::c_int)>,
     ) -> std::io::Result<(libc::c_int, libc::c_int)> {
-        open()
+        zerocode_pty::ask_for_pty(open, std::io::Error::raw_os_error)
     }
 
     /// The test's pty open survives a concurrent open taking the pty it
@@ -1544,11 +1561,21 @@ mod tests {
         assert_eq!(asked, 3);
     }
 
-    /// Whether `probe` answers yes, which in the red form of this helper is
-    /// the first answer only.
+    /// Whether `probe` answers yes before [`HANGUP_PATIENCE`] runs out.
+    /// A hangup that is already there passes at once; the patience is spent
+    /// only when it is not, and the last answer is the one returned.
     #[cfg(target_os = "macos")]
     fn hangs_up_within(mut probe: impl FnMut() -> bool) -> bool {
-        probe()
+        let end = std::time::Instant::now() + HANGUP_PATIENCE;
+        loop {
+            if probe() {
+                return true;
+            }
+            if std::time::Instant::now() >= end {
+                return false;
+            }
+            std::thread::sleep(HANGUP_PROBE_PAUSE);
+        }
     }
 
     /// A pty the test opens passes nothing to a child it never meant to
@@ -1627,7 +1654,7 @@ mod tests {
         // SAFETY: the master opened above, closed once; the slave stays
         // open, as a leftover's descriptors keep its terminal.
         unsafe { libc::close(master) };
-        let answer = hung_up(device);
+        let answer = hangs_up_within(|| hung_up(device));
         // SAFETY: the slave opened above, closed once.
         unsafe { libc::close(slave) };
         assert!(answer, "a terminal whose master closed did not hang up");
