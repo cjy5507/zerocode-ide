@@ -53309,6 +53309,9 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 
 .your-turn-chord {
   font: var(--type-label-12-mono);
+  /* On the filled allow its keys are the button's own ink, not the page's grey. */
+  color: inherit;
+  border-color: currentColor;
 }
 
 .your-turn-words {
@@ -53490,6 +53493,9 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 }
 
 .pane-head-pick {
+  /* The one part that gives way when the pane is narrow: the line shortens,
+   * the switch keeps its place. */
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
