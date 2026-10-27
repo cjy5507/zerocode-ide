@@ -3,7 +3,9 @@
 //! The ledger runs no git, so the window asks before the plan and hands the answers in beside the
 //! receipt files it reads for a report ([`zerocode_core::orchestration::evidence::ReceiptFiles`]).
 //! The ledger then judges only what was said here: a commit git does not know, or one the base
-//! does not hold, is refused there, never guessed.
+//! does not hold, is refused there, never guessed. A question git gave no answer to — it did not
+//! start, or ran past [`GIT_BUDGET`] — is left out, so the ledger says git was not asked instead
+//! of saying the commit is unknown.
 
 use std::path::Path;
 use std::time::Duration;
@@ -24,24 +26,39 @@ pub(crate) fn see(
     base: Option<&str>,
     tags: Option<&str>,
 ) -> CommitsSeen {
+    see_with(&LocalVcs, repo, commits, base, tags)
+}
+
+/// [`see`], asking `vcs`. A base or a commit git gave no answer for is left out.
+fn see_with(
+    vcs: &dyn Vcs,
+    repo: &Path,
+    commits: &[String],
+    base: Option<&str>,
+    tags: Option<&str>,
+) -> CommitsSeen {
     let mut seen = CommitsSeen {
         repo: repo.display().to_string(),
-        base: base.map(|name| BaseSeen {
-            name: name.to_string(),
-            head: resolve(repo, name),
+        base: base.and_then(|name| {
+            resolve(vcs, repo, name).map(|head| BaseSeen {
+                name: name.to_string(),
+                head,
+            })
         }),
         tags: tags.map(str::to_string),
         commits: Default::default(),
     };
     let base_head = seen.base.as_ref().and_then(|base| base.head.clone());
     for named in commits {
-        let full = resolve(repo, named);
+        let Some(full) = resolve(vcs, repo, named) else {
+            continue;
+        };
         let in_base = match (&full, &base_head) {
-            (Some(full), Some(head)) => holds(repo, head, full),
+            (Some(full), Some(head)) => holds(vcs, repo, head, full),
             _ => None,
         };
         let tag = match (&full, tags) {
-            (Some(full), Some(tags)) if in_base != Some(false) => first_tag(repo, full, tags),
+            (Some(full), Some(tags)) if in_base != Some(false) => first_tag(vcs, repo, full, tags),
             _ => None,
         };
         seen.insert(named, CommitSeen { full, in_base, tag });
@@ -49,23 +66,24 @@ pub(crate) fn see(
     seen
 }
 
-/// The commit `name` names in `repo`, in full; `None` when git knows no such commit.
-fn resolve(repo: &Path, name: &str) -> Option<String> {
+/// The commit `name` names in `repo`, in full: `Some(None)` when git knows no such commit, and
+/// `None` when git gave no answer at all.
+fn resolve(vcs: &dyn Vcs, repo: &Path, name: &str) -> Option<Option<String>> {
     let asked = format!("{name}^{{commit}}");
-    match LocalVcs.try_within(
+    match vcs.try_within(
         repo,
         &["rev-parse", "--verify", "--quiet", &asked],
         GIT_BUDGET,
     ) {
-        Within::Said(full) => Some(full.trim().to_string()).filter(|full| !full.is_empty()),
-        Within::Refused(_) | Within::Silent => None,
+        Within::Said(full) => Some(Some(full.trim().to_string()).filter(|full| !full.is_empty())),
+        Within::Refused(_) | Within::Silent => Some(None),
     }
 }
 
 /// Whether `head` holds `commit` — git's own answer, by exit code: 0 it does, 1 it does not, and
 /// anything else is no answer.
-fn holds(repo: &Path, head: &str, commit: &str) -> Option<bool> {
-    match LocalVcs.text_and_code(repo, &["merge-base", "--is-ancestor", commit, head]) {
+fn holds(vcs: &dyn Vcs, repo: &Path, head: &str, commit: &str) -> Option<bool> {
+    match vcs.text_and_code(repo, &["merge-base", "--is-ancestor", commit, head]) {
         Ok((0, _)) => Some(true),
         Ok((1, _)) => Some(false),
         _ => None,
@@ -73,8 +91,8 @@ fn holds(repo: &Path, head: &str, commit: &str) -> Option<bool> {
 }
 
 /// The first tag matching `tags`, in version order, that holds `commit`.
-fn first_tag(repo: &Path, commit: &str, tags: &str) -> Option<String> {
-    match LocalVcs.try_within(
+fn first_tag(vcs: &dyn Vcs, repo: &Path, commit: &str, tags: &str) -> Option<String> {
+    match vcs.try_within(
         repo,
         &[
             "tag",
@@ -186,5 +204,57 @@ mod tests {
         let blind = see(repo, std::slice::from_ref(&released), Some("nope"), None);
         assert_eq!(blind.base.as_ref().and_then(|base| base.head.clone()), None);
         assert_eq!(blind.commit(&released).map(|one| one.in_base), Some(None));
+    }
+
+    /// A git that never answers: it did not start, or ran past its budget.
+    struct Silent;
+
+    impl Vcs for Silent {
+        fn text(&self, _root: &Path, _args: &[&str]) -> Result<String, String> {
+            Err("git did not start".to_string())
+        }
+
+        fn text_and_code(&self, _root: &Path, _args: &[&str]) -> Result<(i32, String), String> {
+            Err("git did not start".to_string())
+        }
+
+        fn try_within_max(
+            &self,
+            _root: &Path,
+            _args: &[&str],
+            _budget: Duration,
+            _max: Option<usize>,
+        ) -> Within {
+            Within::Silent
+        }
+
+        fn clone(
+            &self,
+            _url: &str,
+            _into: &Path,
+            _say: &mut dyn FnMut(zerocode_core::clone::CloneStep),
+        ) -> Result<(), String> {
+            Err("git did not start".to_string())
+        }
+    }
+
+    /// No answer is not an answer: a commit or a base git said nothing about is left out, so the
+    /// ledger says git was not asked rather than that the commit is not one.
+    #[test]
+    fn a_git_that_says_nothing_leaves_its_commits_out_instead_of_calling_them_unknown() {
+        let commit = "0123456789abcdef0123456789abcdef01234567".to_string();
+        let seen = see_with(
+            &Silent,
+            Path::new("/Users/dev/repo"),
+            std::slice::from_ref(&commit),
+            Some("main"),
+            Some("v*"),
+        );
+        assert_eq!(seen.commit(&commit), None, "{seen:?}");
+        assert_eq!(seen.base, None, "{seen:?}");
+        assert_eq!(
+            seen.repo,
+            Path::new("/Users/dev/repo").display().to_string()
+        );
     }
 }
