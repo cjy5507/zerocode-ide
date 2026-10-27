@@ -525,13 +525,7 @@ pub const NAMING_PROMPT_SEARCH_BYTES: u64 = 4 * 1024 * 1024;
 /// the hook's prompt gets ([`prompt_words_in_parsed`]).
 #[must_use]
 pub fn last_naming_prompt(path: &Path) -> Option<String> {
-    let tail = Tail::read_within(path, NAMING_PROMPT_SEARCH_BYTES)?;
-    tail.lines().rev().find_map(|line| {
-        let typed = typed_prompt(line.trim())?;
-        let unframed = without_pasted_frames(&typed);
-        let prompt = past_the_envelopes(&unframed).trim();
-        names_the_turn(prompt).then(|| clamp(prompt))
-    })
+    last_naming_prompt_words(path).map(|prompt| clamp(&prompt))
 }
 
 /// [`last_naming_prompt`]'s prompt whole, not clamped for a card — what a
@@ -540,7 +534,13 @@ pub fn last_naming_prompt(path: &Path) -> Option<String> {
 /// cuts them.
 #[must_use]
 pub fn last_naming_prompt_words(path: &Path) -> Option<String> {
-    last_naming_prompt(path)
+    let tail = Tail::read_within(path, NAMING_PROMPT_SEARCH_BYTES)?;
+    tail.lines().rev().find_map(|line| {
+        let typed = typed_prompt(line.trim())?;
+        let unframed = without_pasted_frames(&typed);
+        let prompt = past_the_envelopes(&unframed).trim();
+        names_the_turn(prompt).then(|| prompt.to_string())
+    })
 }
 
 /// Whether a person typed the prompt the CLI numbered `prompt_id`, from that

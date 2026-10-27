@@ -94,6 +94,14 @@ impl BriefingWatch {
     }
 }
 
+/// `text` without what a pane's drawing adds to words: whitespace, control
+/// characters, and the bars a composer wraps its text in.
+fn bare(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control() && !"│┃|".contains(*c))
+        .collect()
+}
+
 /// How many of the briefing's own characters are looked for on the screen.
 const PROBE_CHARS: usize = 24;
 
@@ -107,11 +115,6 @@ const PROBE_CHARS: usize = 24;
 /// pane wrapped across rows is still found. A briefing with no visible
 /// characters is nothing to look for, and shows.
 pub fn briefing_shows(screen: &str, briefing: &str) -> bool {
-    let bare = |text: &str| -> String {
-        text.chars()
-            .filter(|c| !c.is_whitespace() && !c.is_control() && !"│┃|".contains(*c))
-            .collect()
-    };
     let words = bare(briefing);
     let probe: String = words.chars().take(PROBE_CHARS).collect();
     if probe.is_empty() {
@@ -136,7 +139,7 @@ pub fn briefing_shows(screen: &str, briefing: &str) -> bool {
 /// briefing from another launch's, whose window preamble is the same text.
 /// Whitespace is ignored on both sides, as on a screen.
 pub fn prompt_is_briefing(prompt: &str, briefing: &str) -> bool {
-    briefing_shows(prompt, briefing)
+    bare(prompt).contains(&bare(briefing))
 }
 
 /// How often the screen is read while the watch waits.
@@ -246,8 +249,20 @@ pub fn confirm(
     }
 }
 
+/// Which of the provider's own words said a launch took its briefing when
+/// its submission receipt did not come by the deadline (t-78356).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Witness {
+    /// The receipt, heard after its deadline.
+    LateReceipt,
+    /// A turn the pane's hooks reported.
+    ReportedTurn,
+    /// The briefing in the provider's own transcript.
+    Transcript,
+}
+
 /// Whether a briefing whose submission receipt never arrived by its deadline
-/// was taken all the same (t-78356).
+/// was taken all the same, and which word said so (t-78356).
 ///
 /// Asked before a launch is torn down as unacknowledged: a receipt rides one
 /// hook post, and a post lost or late under load is a worker at work killed
@@ -255,8 +270,16 @@ pub fn confirm(
 /// receipt heard after all, a turn its hooks reported, the prompt its own
 /// transcript recorded. The screen does not: a briefing left unsent in its
 /// composer shows on it exactly as one that was taken does.
-pub fn taken_without_receipt(pane: &mut impl BriefingPane) -> bool {
-    pane.submitted() || pane.working() || pane.recorded()
+pub fn taken_without_receipt(pane: &mut impl BriefingPane) -> Option<Witness> {
+    if pane.submitted() {
+        Some(Witness::LateReceipt)
+    } else if pane.working() {
+        Some(Witness::ReportedTurn)
+    } else if pane.recorded() {
+        Some(Witness::Transcript)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -486,19 +509,22 @@ mod tests {
     /// of the provider's own words is enough to keep that worker.
     #[test]
     fn a_worker_at_work_whose_receipt_never_came_was_taken() {
-        for (heard, working, recorded) in [
-            (true, false, false),
-            (false, true, false),
-            (false, false, true),
+        for (heard, working, recorded, witness) in [
+            (true, false, false, Witness::LateReceipt),
+            (false, true, false, Witness::ReportedTurn),
+            (false, false, true, Witness::Transcript),
+            (true, true, true, Witness::LateReceipt),
+            (false, true, true, Witness::ReportedTurn),
         ] {
             let mut pane = Unreceipted {
                 heard,
                 working,
                 recorded,
             };
-            assert!(
+            assert_eq!(
                 taken_without_receipt(&mut pane),
-                "heard {heard}, working {working}, recorded {recorded}: torn down"
+                Some(witness),
+                "heard {heard}, working {working}, recorded {recorded}"
             );
         }
     }
@@ -512,7 +538,7 @@ mod tests {
             working: false,
             recorded: false,
         };
-        assert!(!taken_without_receipt(&mut pane));
+        assert_eq!(taken_without_receipt(&mut pane), None);
     }
 
     /// Two launch briefings share the window's preamble and part at their

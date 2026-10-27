@@ -1043,16 +1043,21 @@ impl TeamWindow {
             submitted: heard_since,
             at_deadline: true,
         };
-        let taken = zerocode_pty::briefing::taken_without_receipt(&mut pane);
-        if taken {
-            note_window_event(
-                state.local_data_root(),
-                &format!(
-                    "term {term} seated without its submission receipt: its provider reported taking the briefing"
-                ),
-            );
-        }
-        taken
+        let Some(witness) = zerocode_pty::briefing::taken_without_receipt(&mut pane) else {
+            return false;
+        };
+        // Which word seated it is kept, so the lost receipts can be counted
+        // by what still told the window.
+        let said = match witness {
+            zerocode_pty::briefing::Witness::LateReceipt => "its receipt heard after the deadline",
+            zerocode_pty::briefing::Witness::ReportedTurn => "a turn its hooks reported",
+            zerocode_pty::briefing::Witness::Transcript => "its transcript holding the briefing",
+        };
+        note_window_event(
+            state.local_data_root(),
+            &format!("term {term} seated without its submission receipt: {said}"),
+        );
+        true
     }
 }
 
@@ -1107,15 +1112,20 @@ fn briefing_turn_reported(
     turn_started_at: Option<i64>,
     state_started_at: i64,
 ) -> bool {
-    let _ = (turn_started_at, state_started_at);
-    briefing_work_reported(state, session_boundary)
+    match state {
+        zerocode_core::hook::HookState::Done => {
+            !session_boundary && turn_started_at.is_some_and(|started| started < state_started_at)
+        }
+        _ => briefing_work_reported(state, session_boundary),
+    }
 }
 
 /// Whether the provider's own transcript at `transcript` took `briefing` as
 /// the prompt that opened its turn (t-78356): the record a CLI writes for a
 /// prompt it took, read whether or not its submit hook ever reached the
-/// window. Its newest naming prompt is asked, past the frames around a paste,
-/// and must show the briefing's own words.
+/// window. Its newest naming prompt is asked whole, past the frames around a
+/// paste, and must hold all of the briefing's words: another launch's
+/// briefing shares this one's preamble and parts only at its task.
 fn briefing_recorded(transcript: &std::path::Path, briefing: &str) -> bool {
     zerocode_core::transcript::last_naming_prompt_words(transcript)
         .is_some_and(|prompt| zerocode_pty::briefing::prompt_is_briefing(&prompt, briefing))
