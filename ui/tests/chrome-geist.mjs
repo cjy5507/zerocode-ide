@@ -169,6 +169,26 @@ async function testChromeSidebarAndTabs(browser, origin, ok) {
     });
     ok("the resting line is a button that opens the projects it stands for",
       opened.isButton && opened.expanded === "true" && opened.headers === 2, JSON.stringify(opened));
+    // Its spoken name keeps the count and the names apart: 「쉬는 프로젝트 5 ·
+    // newbcr …」, not 「…5newbcr」 (review t-78487, P3-5).
+    const restingName = await page.getByRole("button", { name: /^쉬는 프로젝트 5 · newbcr · Obsidian/ }).count();
+    ok("the resting line's spoken name says the count, then the names", restingName === 1, String(restingName));
+
+    // A tab waiting on the person says it in words as well as its ring (시안 2:
+    // the shape and the word together; review t-78487, P3-2).
+    const waiting = await page.evaluate(async () => {
+      const tab = [...tabs.values()].find((one) => one.kind === "term" && paneAgents.get(tabAgentTerm(one)));
+      const term = tabAgentTerm(tab);
+      for (const handler of window.__LISTENERS__["hook:agent"] ?? []) {
+        handler({ payload: { term, state: "needs-attention", agent: paneAgents.get(term), session: `s-${term}` } });
+      }
+      await window.__PAINTED__();
+      const node = el("tabstrip").querySelector(`.tab[data-tab="${CSS.escape(String(tab.id))}"]`);
+      return { classes: node?.className ?? null, tip: node?.dataset.tip ?? null, word: t("board.attention", "확인 필요") };
+    });
+    ok("a tab waiting on the person says 확인 필요 in its tip, beside its ring",
+      /\bis-waiting\b/.test(waiting.classes ?? "") && (waiting.tip ?? "").split(" · ").includes(waiting.word),
+      JSON.stringify(waiting));
     ok("the chrome scene raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
