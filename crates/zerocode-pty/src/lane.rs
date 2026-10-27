@@ -295,9 +295,7 @@ impl PtyLane {
             pixel_width: 0,
             pixel_height: 0,
         };
-        let pair = native_pty_system()
-            .openpty(size)
-            .map_err(|error| PtyError::Open(error.to_string()))?;
+        let pair = open_pty(|| native_pty_system().openpty(size))?;
 
         // What changes in the inherited environment, in order: a value, or
         // `None` to take the name out. Applied by whichever start the
@@ -1591,6 +1589,20 @@ impl Drop for PtyLane {
     fn drop(&mut self) {
         let _ = kill_known_child(self.child.as_mut());
     }
+}
+
+/// The most times a lane asks for a pty before the failure is its answer.
+#[allow(dead_code)]
+const PTY_OPEN_ATTEMPTS: usize = 5;
+
+/// Ask `open` for a pty pair.
+///
+/// `open` is the platform's own pty system in a lane, and a stand-in that
+/// fails the way a kernel does in the tests below.
+fn open_pty<P, E: std::fmt::Display>(
+    mut open: impl FnMut() -> Result<P, E>,
+) -> Result<P, PtyError> {
+    open().map_err(|error| PtyError::Open(error.to_string()))
 }
 
 /// Start the lane's child on the pty's slave.
@@ -2934,5 +2946,84 @@ mod group_tests {
             !os.asked.borrow().contains(&agent),
             "the member past the bound was read"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod open_tests {
+    use super::{PTY_OPEN_ATTEMPTS, PtyError, open_pty};
+    use std::cell::Cell;
+    use std::io;
+    use std::rc::Rc;
+
+    /// `EREDRIVEOPEN`, XNU's in-kernel "open again", as gate l81e read it
+    /// out of `openpty` (`Os { code: -6 }`).
+    const REDRIVE_OPEN: i32 = -6;
+
+    /// A pty system that fails its first `failures` opens with `errno`,
+    /// worded exactly as `portable_pty` words a failed `openpty`
+    /// (`src/unix.rs`, `bail!("failed to openpty: {:?}", …)`), and opens
+    /// after that. It counts every ask.
+    fn opens_after(
+        failures: usize,
+        errno: i32,
+    ) -> (impl FnMut() -> Result<(), String>, Rc<Cell<usize>>) {
+        let asked = Rc::new(Cell::new(0));
+        let counted = Rc::clone(&asked);
+        let open = move || {
+            counted.set(counted.get() + 1);
+            if counted.get() <= failures {
+                Err(format!(
+                    "failed to openpty: {:?}",
+                    io::Error::from_raw_os_error(errno)
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        (open, asked)
+    }
+
+    /// A pty lost to another open at the same moment is asked for again,
+    /// and the lane opens.
+    #[test]
+    fn a_pty_lost_to_a_concurrent_open_is_asked_for_again() {
+        for errno in [REDRIVE_OPEN, libc::ENXIO, libc::EAGAIN] {
+            let failures = PTY_OPEN_ATTEMPTS - 1;
+            let (open, asked) = opens_after(failures, errno);
+            assert!(
+                open_pty(open).is_ok(),
+                "errno {errno}: the pty never opened"
+            );
+            assert_eq!(asked.get(), failures + 1, "errno {errno}");
+        }
+    }
+
+    /// An error that asking again will not change is the answer at once.
+    #[test]
+    fn an_error_that_will_not_pass_is_not_asked_again() {
+        for errno in [libc::EMFILE, libc::EACCES] {
+            let (open, asked) = opens_after(usize::MAX, errno);
+            let Err(PtyError::Open(reason)) = open_pty(open) else {
+                panic!("errno {errno}: opened, or failed as something else");
+            };
+            assert!(reason.contains(&format!("code: {errno},")), "{reason}");
+            assert_eq!(asked.get(), 1, "errno {errno}");
+        }
+    }
+
+    /// A race that never clears ends at the bound, with the kernel's own
+    /// words.
+    #[test]
+    fn a_race_that_never_clears_ends_at_the_bound() {
+        let (open, asked) = opens_after(usize::MAX, REDRIVE_OPEN);
+        let Err(PtyError::Open(reason)) = open_pty(open) else {
+            panic!("opened, or failed as something else");
+        };
+        assert!(
+            reason.contains(&format!("code: {REDRIVE_OPEN},")),
+            "{reason}"
+        );
+        assert_eq!(asked.get(), PTY_OPEN_ATTEMPTS);
     }
 }
