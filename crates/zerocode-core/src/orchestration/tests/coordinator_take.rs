@@ -11,6 +11,7 @@ use crate::orchestration::coordinator_take::{
     BaseSeen, CommitSeen, CommitsSeen, carrier_generation, coordinator_carrier,
 };
 use crate::orchestration::evidence::ReceiptFiles;
+use crate::orchestration::settle::{Left, left_behind};
 
 /// A commit that is on `main`, in release `v1.0.1`.
 const LANDED: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
@@ -266,6 +267,60 @@ fn a_task_with_no_attempt_takes_a_coordinators_attempt() {
     assert_eq!(handed["source"], LANDED);
     assert_eq!(row(&bench, &task).status, TaskStatus::Completed);
     sound(&bench, "its hand-in");
+
+    // Handed in with no base named, it waits for the review `task-update` writes, and a backfill
+    // says so instead of proving the commit over again.
+    let listed = json_seeing(&mut bench, "task-backfill", git_says());
+    let rows = listed["rows"].as_array().expect("rows");
+    let mine = rows
+        .iter()
+        .find(|one| one["taskId"] == task.as_str())
+        .unwrap_or_else(|| panic!("{task} is not listed: {listed}"));
+    assert_eq!(mine["write"], serde_json::Value::Null, "{mine}");
+    assert!(
+        mine["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("handed in") && why.contains("task-update")),
+        "{mine}"
+    );
+    assert_eq!(listed["ready"], 0, "{listed}");
+}
+
+/// The seat's open attempt carries its task as a live worker's attempt does: the settle's reading
+/// — the desk, the flow and the person's press all draw it — does not stand the task up for a
+/// look, however quiet it has been. An attempt of a seat that sat before carries nothing, and
+/// stays for a look until the next take ends it.
+#[test]
+fn the_seats_open_attempt_carries_its_task_and_an_earlier_sittings_does_not() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name carried");
+    let task = task_of(&mut bench, "by-hand");
+    bench.json(&format!("task-take --task {task}"));
+    let read = left_behind(&bench.ledger.runs()[0], bench.clock);
+    assert_eq!(read.get(task.as_str()), None, "{read:?}");
+
+    bench.clock += SETTLE_QUIET_DAYS * 86_400_000 + 1;
+    let read = left_behind(&bench.ledger.runs()[0], bench.clock);
+    assert_eq!(
+        read.get(task.as_str()),
+        None,
+        "a quiet week does not end an attempt the seat still carries: {read:?}"
+    );
+
+    let at = bench.clock;
+    bench.ledger.runs[0]
+        .coordinator
+        .as_mut()
+        .expect("a seat")
+        .vacated_ms = Some(at);
+    let run = bench.ledger.runs()[0].id.clone();
+    bench.json(&format!("run-use {run}"));
+    let read = left_behind(&bench.ledger.runs()[0], bench.clock);
+    assert_eq!(
+        read.get(task.as_str()),
+        Some(&Left::Look),
+        "an earlier sitting's attempt is nobody's now: {read:?}"
+    );
 }
 
 /// ② A worker still carrying the task keeps it: the coordinator stops it first.
@@ -433,6 +488,27 @@ fn a_workers_pane_can_neither_take_nor_hand_in() {
     }
     assert_eq!(bench.ledger.runs()[0].dispatches.len(), attempts);
     assert!(newest(&bench, &mine).is_open() && newest(&bench, &mine).source.is_none());
+
+    // Nor can another team's leader, naming the run: it is neither a worker here nor the seat.
+    let run = bench.ledger.runs()[0].id.clone();
+    let mut stranger = Team::new("team-2", "stranger", 70);
+    std::mem::swap(&mut bench.team, &mut stranger);
+    for line in [
+        format!("task-take --run {run} --task {other}"),
+        format!("hand-in --run {run} --task {mine} --head {LANDED} --body {{\"ok\":true}}"),
+        format!("task-backfill --run {run} --apply"),
+    ] {
+        let refused = refusal_seeing(
+            &mut bench,
+            agent_teams::LEADER_PANE,
+            &line,
+            Some(git_says()),
+        );
+        assert!(refused.contains("not that seat"), "`{line}`: {refused}");
+    }
+    std::mem::swap(&mut bench.team, &mut stranger);
+    assert_eq!(bench.ledger.runs()[0].dispatches.len(), attempts);
+    assert!(newest(&bench, &mine).is_open() && newest(&bench, &mine).source.is_none());
 }
 
 /// ⑤ The backfill lists first and writes only what git proves: merged where the commit is in
@@ -467,7 +543,13 @@ fn a_backfill_lists_then_writes_only_what_git_proves() {
     let unreleased = finished_by_hand(
         &mut bench,
         "unreleased",
-        &format!("{{\"merged\":\"{UNRELEASED}\"}}"),
+        &format!("{{\"merged\":\"{UNRELEASED}\",\"verified\":true}}"),
+    );
+    // A list of commits, read from its end: the last one named is the one believed first.
+    let listed_commits = finished_by_hand(
+        &mut bench,
+        "listed-commits",
+        &format!("{{\"commits\":[\"{ASIDE}\",\"{UNRELEASED}\"]}}"),
     );
     let nothing = finished_by_hand(&mut bench, "nothing", "{\"note\":\"no-commit-here\"}");
     let aside = finished_by_hand(
@@ -491,7 +573,7 @@ fn a_backfill_lists_then_writes_only_what_git_proves() {
     sound(&bench, "the fixture");
 
     let attempts = bench.ledger.runs()[0].dispatches.len();
-    let results: Vec<String> = [&landed, &unreleased, &closed]
+    let results: Vec<String> = [&landed, &unreleased, &closed, &listed_commits]
         .iter()
         .map(|task| row(&bench, task).result.to_string())
         .collect();
@@ -528,6 +610,10 @@ fn a_backfill_lists_then_writes_only_what_git_proves() {
     assert_eq!(second["write"].get("deployed"), None, "{second}");
     assert_eq!(second["write"].get("verified"), None, "{second}");
     assert_eq!(second["verified"], "unknown");
+    let from_a_list = of(&listed_commits);
+    assert_eq!(from_a_list["commit"], UNRELEASED, "{from_a_list}");
+    assert_eq!(from_a_list["foundUnder"], "commits", "{from_a_list}");
+    assert_eq!(from_a_list["write"]["merged"], true, "{from_a_list}");
     assert!(
         of(&nothing)["why"]
             .as_str()
@@ -544,7 +630,8 @@ fn a_backfill_lists_then_writes_only_what_git_proves() {
             .is_some_and(|why| why.contains("not a commit"))
     );
     assert_eq!(of(&closed)["write"]["merged"], true);
-    assert_eq!(listed["ready"], 3);
+    assert_eq!(listed["ready"], 4);
+    assert_eq!(listed["repo"], REPO);
     assert_eq!(
         bench.ledger.runs()[0].dispatches.len(),
         attempts,
@@ -560,14 +647,22 @@ fn a_backfill_lists_then_writes_only_what_git_proves() {
         .filter_map(serde_json::Value::as_str)
         .collect();
     done.sort_unstable();
-    let mut expected = vec![landed.as_str(), unreleased.as_str(), closed.as_str()];
+    let mut expected = vec![
+        landed.as_str(),
+        unreleased.as_str(),
+        closed.as_str(),
+        listed_commits.as_str(),
+    ];
     expected.sort_unstable();
     assert_eq!(done, expected);
     sound(&bench, "the backfill");
 
     let run = &bench.ledger.runs()[0];
     let generation = the_generation(&bench);
-    for (task, original) in [&landed, &unreleased, &closed].into_iter().zip(&results) {
+    for (task, original) in [&landed, &unreleased, &closed, &listed_commits]
+        .into_iter()
+        .zip(&results)
+    {
         let attempt = run.newest_attempt(task).expect("the backfill's attempt");
         assert_eq!(attempt.worker, coordinator_carrier(generation));
         assert!(!attempt.is_open());
@@ -588,11 +683,24 @@ fn a_backfill_lists_then_writes_only_what_git_proves() {
             assert_eq!(kept, Some(value), "{task} lost {key}: {now}");
         }
         assert_eq!(now["backfill"]["by"], "task-backfill", "{now}");
+        assert_eq!(
+            now["backfill"]["repo"], REPO,
+            "the note names the checkout git was asked in: {now}"
+        );
     }
     let first = run.review_of(run.task(&landed).expect("the task"));
     assert!(first.verified && first.deployed, "{first:?}");
     let second = run.review_of(run.task(&unreleased).expect("the task"));
     assert!(!second.verified && !second.deployed, "{second:?}");
+    // The worker's own `"verified":true` was never a review: with no review task named, it is
+    // kept under `backfill.replaced` and no longer stands at the top, where the seat's review is
+    // read.
+    let now: serde_json::Value =
+        serde_json::from_str(run.task(&unreleased).expect("the task").result.as_str())
+            .expect("a JSON result");
+    assert_eq!(now.get("verified"), None, "{now}");
+    assert_eq!(now["backfill"]["replaced"]["verified"], true, "{now}");
+    assert_eq!(now["backfill"]["verified"], "unknown", "{now}");
     assert_eq!(
         run.task(&closed).expect("the task").status,
         TaskStatus::Closed
