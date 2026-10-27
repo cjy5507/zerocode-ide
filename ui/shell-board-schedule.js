@@ -608,6 +608,17 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
       if (!held || (Number(job.queued_ms) || 0) >= (Number(held.queued_ms) || 0)) latest.set(step, job);
     }
     const steps = [...latest.values()];
+    // The present attempt (t-77851·t-77880): where its earliest step began — the words 「걸림」 and the gate's
+    // length measure from here — and where its latest step began — the board compares gates by this, so a gate run
+    // again under the same name, or one step of it run again, is the newer story. No step begun yet: null.
+    const begun = steps.map((job) => Number(job.start_ms) || 0).filter((ms) => ms > 0);
+    const startedAt = begun.length > 0 ? Math.min(...begun) : null;
+    const lastStart = begun.length > 0 ? Math.max(...begun) : null;
+    const began = startedAt ?? start;
+    // The planned start of the next step, for a gate waiting between its steps (`placed` keeps `members`' order).
+    const planned = new Map(members.map((job, i) => [job.name, placed[i]]));
+    const ahead = steps.filter((job) => job.state === "waiting").map((job) => planned.get(job.name)?.start).filter(Number.isFinite);
+    const nextStart = ahead.length > 0 ? Math.min(...ahead) : start;
     const count = (states) => steps.filter((job) => states.includes(job.state)).length;
     const open = count(["running", "waiting", "held"]);
     const failed = count(["failed", "capped", "refused"]);
@@ -630,9 +641,9 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
             count: open, time: boardScheduleClock(start, now),
           })
         : state === "failed"
-          ? t("board.schedule.gateFailed", "실패 {{count}}개 · {{time}}", { count: failed, time: boardScheduleSpan(end - start) })
+          ? t("board.schedule.gateFailed", "실패 {{count}}개 · {{time}}", { count: failed, time: boardScheduleSpan(end - began) })
           : t("board.schedule.gatePassed", "통과 {{count}}개 · {{time}}", {
-            count: steps.length, time: boardScheduleSpan(end - start),
+            count: steps.length, time: boardScheduleSpan(end - began),
           });
     const opened = choice.opened.has(gate) || (open > 0 && !choice.opened.has(`-${gate}`));
     // The bar's two names (the passed draft's 「12개 초록」): what ended, or the step running and the steps after it.
@@ -655,16 +666,13 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
     // A gate none of whose steps has run tells no story yet: no job, no chip (review r2 P3-1).
     const telling = failedJob ?? steps.find((job) => job.state === "running")
       ?? members.filter((job) => Number(job.end_ms) > 0).sort((a, b) => Number(b.end_ms) - Number(a.end_ms))[0] ?? null;
-    const begun = steps.map((job) => Number(job.start_ms) || 0).filter((ms) => ms > 0);
     const facts = {
       gate, state, start, end, basis, unknown, green, total: steps.length, failed,
       failedKinds: kinds(["failed", "capped", "refused"]), failedJob: failedJob?.name ?? null,
       logJob: telling?.name ?? null, carried, opened,
       // When the gate was queued last: the moment its latest job was put on the line.
       queuedAt: Math.max(0, ...members.map((job) => Number(job.queued_ms) || 0)),
-      // When the gate's present attempt began: the earliest start among its steps' last jobs. A gate run again under
-      // the same name is compared by this attempt, not by its first (t-77851 P2); no step started yet → null.
-      startedAt: begun.length > 0 ? Math.min(...begun) : null,
+      startedAt, lastStart,
     };
     entries.push({
       head: boardScheduleRow({
@@ -678,8 +686,11 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
           : state === "waiting"
             ? stall
               ? t("board.schedule.startUnknown", "시작 모름")
-              : t("board.schedule.startsAt", "{{time}} 시작 예상", { time: boardScheduleClock(start, now) })
-            : t("board.schedule.took", "{{time}} 걸림", { time: boardScheduleSpan(end - start) }),
+              : startedAt !== null
+                // Between its steps the gate's first step is past: the next step's expected start is the word (t-77880).
+                ? t("board.schedule.nextStepAt", "다음 단계 {{time}} 시작 예상", { time: boardScheduleClock(nextStart, now) })
+                : t("board.schedule.startsAt", "{{time}} 시작 예상", { time: boardScheduleClock(start, now) })
+            : t("board.schedule.took", "{{time}} 걸림", { time: boardScheduleSpan(end - began) }),
         nowLabel: state === "done"
           ? t("board.schedule.gateBarPassed", "{{count}}개 초록", { count: steps.length })
           : state === "failed"
@@ -953,13 +964,13 @@ function boardScheduleBoardLines(groups, now) {
       act: lastLane?.act ?? null, actWord: lastLane ? logWord : "",
     };
 
-  // 2. The gate, by one rule (review r4, t-77851): the gate with a step running; else, of the gates that actually
-  // started — a step finished or failed — the one whose present attempt began last (passed, failed or waiting between
-  // steps); else the one queued last. A pass after a failure is the newer word; a gate between its steps is still the
-  // story in play; a gate run again under the same name is its new attempt, not its first. Two attempts begun at the
-  // same moment are decided, not left to the rows' order: the failed one, then the one between steps, then the passed,
-  // then the higher gate number.
-  const attempt = (row) => row.facts?.startedAt ?? row.start;
+  // 2. The gate, by one rule (review r4·r5, t-77851·t-77880): the gate with a step running; else, of the gates that
+  // actually started — a step finished or failed — the one whose latest step began last (passed, failed or waiting
+  // between steps); else the one queued last. A pass after a failure is the newer word; a gate between its steps is
+  // still the story in play; a gate run again under the same name, or one step of it run again, is the newer story,
+  // not its first attempt. Two gates whose latest steps began at the same moment are decided, not left to the rows'
+  // order: the failed one, then the one between steps, then the passed, then the higher gate number.
+  const attempt = (row) => row.facts?.lastStart ?? row.start;
   const told = { failed: 3, waiting: 2, done: 1 };
   const number = (row) => Number(String(row.facts?.gate ?? "").match(/\d+/)?.[0]) || 0;
   const decided = (a, b) => (told[b.state] ?? 0) - (told[a.state] ?? 0) || number(b) - number(a)
