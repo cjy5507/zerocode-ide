@@ -31,6 +31,9 @@ pub(crate) struct SecondBrainReport {
     /// What the vault's zo cron registry says about that record — only read
     /// while the switch is on, because reading it is a `zo` process.
     weekly_review: Option<ReviewCronReceipt>,
+    /// The saved vault's daily raw ingest: the card's 「매일 취합」 line
+    /// (t-77381). `None` while no vault is saved.
+    daily_ingest: Option<DailyIngestReport>,
 }
 
 /* ---- the weekly review as a cron turn -------------------------------------
@@ -323,13 +326,57 @@ fn obsidian_is_installed(home: &Path) -> bool {
     }
 }
 
+/* ---- the daily ingest, as the card reads it --------------------------------
+ *
+ * The 「raw 자동 취합」 template (`AUTO_TEMPLATES` in `ui/shell-settings.js`)
+ * is a window automation whose workspace is the vault, and the record keeps
+ * no template id. So the vault's daily ingest is the job that works in the
+ * saved vault and whose prompt names `raw/` — the shape the template writes,
+ * and the shape an ingest prompt a person writes for themselves takes. When
+ * that job was switched off on 10-19 the card said nothing, and the vault
+ * went eight days without an ingest before anybody asked (t-77381). */
+
+/// The saved vault's daily ingest: the card's 「매일 취합」 line.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct DailyIngestReport {
+    /// The job, or `None` when no job ingests the vault — the card's switch
+    /// then makes one from the template instead of turning one on.
+    pub(crate) automation_id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) enabled: bool,
+    /// Local minutes since the epoch of its last run; `None` if it never ran.
+    pub(crate) last_run_at: Option<i64>,
+    /// The first occurrence the job left unmade since it last ran or was
+    /// switched on, once that is more than a day old: on, and still a day
+    /// behind its schedule.
+    pub(crate) overdue_since: Option<i64>,
+}
+
+/// The daily ingest of `vault` among `automations`, at `now`. Of several jobs
+/// that ingest it, one that is on, and of those the one that ran last.
+pub(crate) fn daily_ingest_report(
+    vault: &Path,
+    automations: &[Automation],
+    now: LocalMinute,
+) -> DailyIngestReport {
+    let _ = (vault, automations, now);
+    DailyIngestReport {
+        automation_id: None,
+        name: None,
+        enabled: false,
+        last_run_at: None,
+        overdue_since: None,
+    }
+}
+
 /// The card's whole answer. `guides` is the caller's because the two roads
 /// that ask for it are asking different questions — status READS the agents'
 /// global instructions, 「다시 연결」 and 세팅 WRITE them — and computing it
 /// here as well would walk `PATH` for every agent a second time on the roads
 /// that already know.
-fn second_brain_report(
+pub(crate) fn second_brain_report(
     home: &Path,
+    config_root: &Path,
     saved_path: String,
     selected_path: Option<String>,
     guides: Vec<zerocode_core::second_brain::GuideOutcome>,
@@ -344,6 +391,10 @@ fn second_brain_report(
     // The SAVED vault's registry, like the guides: the record lives where the
     // vault is, not where somebody is still browsing.
     let weekly_review = review_cron_status(&saved_path, weekly_review_enabled);
+    // The SAVED vault's ingest as well: the job works where the vault is.
+    let daily_ingest = saved_vault(&saved_path).map(|vault| {
+        daily_ingest_report(&vault, &stored_automations(config_root), local_minute_now())
+    });
     SecondBrainReport {
         vault: selected.map(|path| zerocode_core::second_brain::inspect(Path::new(&path))),
         guides,
@@ -356,6 +407,7 @@ fn second_brain_report(
         skill_installs: Vec::new(),
         weekly_review_enabled,
         weekly_review,
+        daily_ingest,
     }
 }
 
@@ -400,7 +452,7 @@ pub(crate) async fn second_brain_status(
             &agents,
         );
         let copies = second_brain_copies(&home, &launched, &agents);
-        second_brain_report(&home, saved, path, guides, copies, weekly)
+        second_brain_report(&home, &config_root, saved, path, guides, copies, weekly)
     })
     .await
     .map_err(|join| join.to_string())
@@ -482,6 +534,7 @@ pub(crate) async fn second_brain_setup(
     )?;
     let mut report = second_brain_report(
         &home,
+        state.config_root(),
         saved_path,
         None,
         work.guides,
@@ -518,7 +571,7 @@ pub(crate) async fn second_brain_link(
         let agents = installed_agents();
         let guides = link_saved_vault(&home, &launched, &saved, &agents);
         let copies = second_brain_copies(&home, &launched, &agents);
-        second_brain_report(&home, saved, None, guides, copies, weekly)
+        second_brain_report(&home, &config_root, saved, None, guides, copies, weekly)
     })
     .await
     .map_err(|join| join.to_string())

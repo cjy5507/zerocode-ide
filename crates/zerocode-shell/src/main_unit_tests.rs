@@ -16370,6 +16370,214 @@ fn a_quick_command_is_refused_before_it_is_stored() {
     assert!(validate_quick_command(&typed_at_agent).is_err());
 }
 
+/// The 「raw 자동 취합」 template's prompt, as the person's own job carries it.
+const INGEST_PROMPT: &str =
+    "raw/에 있지만 wiki/에 아직 반영되지 않은 항목을 모두 취합하고 wiki/log.md에 기록해 줘.";
+
+/// `nightly_job`, working in `workspace` on `prompt`.
+fn vault_job(
+    id: &str,
+    workspace: &str,
+    prompt: &str,
+    enabled: bool,
+    last_run_at: Option<i64>,
+) -> Automation {
+    Automation {
+        id: id.to_string(),
+        name: id.to_string(),
+        workspace: workspace.to_string(),
+        prompt: prompt.to_string(),
+        ..nightly_job(enabled, last_run_at)
+    }
+}
+
+/// The card's 「매일 취합」 is the job that works in the saved vault and whose
+/// prompt names `raw/` — the shape the 「raw 자동 취합」 template writes, since
+/// the record keeps no template id (t-77381). A job in another folder is not
+/// it, nor one in the vault that does other work; of two, the one that is on.
+#[test]
+fn the_daily_ingest_is_the_vault_job_whose_prompt_names_raw() {
+    let vault = Path::new("/Users/fixture/Knowledge");
+    let now = LocalMinute {
+        epoch_minutes: 20_000 * 24 * 60 + 10 * 60,
+    };
+    let elsewhere = vault_job(
+        "elsewhere",
+        "/Users/fixture/Other",
+        INGEST_PROMPT,
+        true,
+        None,
+    );
+    let release = vault_job(
+        "release",
+        "/Users/fixture/Knowledge",
+        "출시를 막는 위험과 남은 후속 작업을 정리해 주세요.",
+        true,
+        None,
+    );
+    let off = vault_job(
+        "off",
+        "/Users/fixture/Knowledge/",
+        INGEST_PROMPT,
+        false,
+        Some(now.epoch_minutes - 3 * 24 * 60),
+    );
+
+    let none =
+        cmd::second_brain::daily_ingest_report(vault, &[elsewhere.clone(), release.clone()], now);
+    assert_eq!(
+        (none.automation_id, none.enabled, none.overdue_since),
+        (None, false, None),
+        "a job in another folder, or one in the vault doing other work, is no daily ingest"
+    );
+
+    let found =
+        cmd::second_brain::daily_ingest_report(vault, &[elsewhere, release, off.clone()], now);
+    assert_eq!(
+        found.automation_id.as_deref(),
+        Some("off"),
+        "the vault written with a trailing slash is still the vault"
+    );
+    assert!(!found.enabled);
+    assert_eq!(found.last_run_at, off.last_run_at);
+    assert_eq!(
+        found.overdue_since, None,
+        "a job that is off is said to be off, not late"
+    );
+
+    let on = vault_job(
+        "on",
+        "/Users/fixture/Knowledge",
+        INGEST_PROMPT,
+        true,
+        Some(now.epoch_minutes - 7 * 60),
+    );
+    let picked = cmd::second_brain::daily_ingest_report(vault, &[off, on], now);
+    assert_eq!(
+        (
+            picked.automation_id.as_deref(),
+            picked.enabled,
+            picked.overdue_since
+        ),
+        (Some("on"), true, None),
+        "of two ingest jobs the one that is on is the vault's"
+    );
+}
+
+/// The job is late once an occurrence it left unmade is more than a day old
+/// (t-77381). The floor is the night it last ran or the moment it was switched
+/// on — the floor the missed count reads — and an occurrence a few hours old
+/// is only today's turn not taken yet.
+#[test]
+fn a_daily_ingest_a_day_behind_its_schedule_is_overdue_and_one_on_time_is_not() {
+    const DAY: i64 = 24 * 60;
+    let vault = Path::new("/Users/fixture/Knowledge");
+    let at = |days: i64, hours: i64| 20_000 * DAY + days * DAY + hours * 60;
+    let late = |job: &Automation, now: i64| {
+        cmd::second_brain::daily_ingest_report(
+            vault,
+            std::slice::from_ref(job),
+            LocalMinute { epoch_minutes: now },
+        )
+        .overdue_since
+    };
+    let ran = |last: i64| {
+        vault_job(
+            "ingest",
+            "/Users/fixture/Knowledge",
+            INGEST_PROMPT,
+            true,
+            Some(last),
+        )
+    };
+
+    assert_eq!(
+        late(&ran(at(0, 3)), at(0, 10)),
+        None,
+        "it ran at 03:00 today"
+    );
+    assert_eq!(
+        late(&ran(at(-1, 3)), at(0, 10)),
+        None,
+        "today's 03:00 is seven hours old: not a day late yet"
+    );
+    assert_eq!(
+        late(&ran(at(-2, 3)), at(0, 10)),
+        Some(at(-1, 3)),
+        "yesterday's 03:00 went unmade and is 31 hours old"
+    );
+
+    let rearmed = Automation {
+        armed_at: Some(at(0, 9)),
+        ..ran(at(-8, 3))
+    };
+    assert_eq!(
+        late(&rearmed, at(0, 10)),
+        None,
+        "the nights it was off are not lateness"
+    );
+    assert_eq!(
+        late(&rearmed, at(1, 4) + 30),
+        None,
+        "the first turn after switching on is an hour and a half old"
+    );
+    assert_eq!(
+        late(&rearmed, at(2, 4)),
+        Some(at(1, 3)),
+        "a day after that turn went unmade, the job is late"
+    );
+
+    let off = Automation {
+        enabled: false,
+        ..ran(at(-8, 3))
+    };
+    assert_eq!(late(&off, at(0, 10)), None, "off is said as off");
+}
+
+/// The report the card paints carries the SAVED vault's daily ingest, read
+/// from the window's own automations (t-77381). A folder somebody is only
+/// browsing has none: with no saved vault there is no job to look for.
+#[test]
+fn the_second_brain_report_carries_the_saved_vaults_daily_ingest() {
+    let home = tempfile::tempdir().expect("home");
+    let config_root = tempfile::tempdir().expect("config root");
+    let vault = tempfile::tempdir().expect("vault");
+    let vault_path = vault.path().to_string_lossy().into_owned();
+    write_automations(
+        config_root.path(),
+        &[vault_job("ingest", &vault_path, INGEST_PROMPT, false, None)],
+    )
+    .expect("write automations");
+
+    let saved = serde_json::to_value(cmd::second_brain::second_brain_report(
+        home.path(),
+        config_root.path(),
+        vault_path.clone(),
+        None,
+        Vec::new(),
+        Vec::new(),
+        false,
+    ))
+    .expect("report as json");
+    assert_eq!(saved["daily_ingest"]["automation_id"], "ingest", "{saved}");
+    assert_eq!(saved["daily_ingest"]["enabled"], false, "{saved}");
+
+    let browsing = serde_json::to_value(cmd::second_brain::second_brain_report(
+        home.path(),
+        config_root.path(),
+        String::new(),
+        Some(vault_path),
+        Vec::new(),
+        Vec::new(),
+        false,
+    ))
+    .expect("report as json");
+    assert!(
+        browsing["daily_ingest"].is_null(),
+        "a vault only being browsed has no daily ingest: {browsing}"
+    );
+}
+
 #[test]
 fn second_brain_quick_commands_are_added_once_and_scoped_to_the_vault() {
     let config = tempfile::tempdir().unwrap();
