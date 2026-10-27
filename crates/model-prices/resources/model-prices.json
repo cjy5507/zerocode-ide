@@ -34,6 +34,7 @@
     "rows": [
       { "ids": ["claude-fable-5-1"], "input": 10.0, "output": 50.0, "cache_read_rate": 0.025, "note": "Reads a cached prefix at $0.25 per million, a fortieth of input and a quarter of Fable 5's rate (claude-api skill, shared/model-migration.md, Migrating to Claude Fable 5.1 -> Pricing)." },
       { "ids": ["claude-fable-5"], "input": 10.0, "output": 50.0 },
+      { "ids": ["claude-opus-5-5"], "input": 4.0, "output": 20.0, "cache_read_rate": 0.05, "note": "Reads a cached prefix at $0.20 per million, a twentieth of input (platform.claude.com/docs/en/about-claude/pricing, read 2026-10-28: footnote 2, 0.05x on Opus 5.5 and Sonnet 5.5). Without this row the id bills at Opus 5's row, a quarter over on input and twice over on every read." },
       { "ids": ["claude-opus-5"], "input": 5.0, "output": 25.0 },
       { "ids": ["claude-opus-4-8"], "input": 5.0, "output": 25.0, "prices_unknown_members_of": ["opus-4"] },
       { "ids": ["claude-opus-4-7"], "input": 5.0, "output": 25.0 },
@@ -41,9 +42,11 @@
       { "ids": ["claude-opus-4-5"], "input": 5.0, "output": 25.0 },
       { "ids": ["claude-opus-4-1"], "input": 15.0, "output": 75.0 },
       { "ids": ["claude-opus-4"], "input": 15.0, "output": 75.0, "legacy_base": true, "note": "The ORIGINAL Opus 4 bills at three times the modern Opus rate (claude-model-pricing.ts:31-32); an old id normalised onto the modern row would under-report by two thirds, and a future point release matched here would be over-charged three times, so the shape is strict." },
+      { "ids": ["claude-sonnet-5-5"], "input": 2.0, "output": 10.0, "cache_read_rate": 0.05, "note": "Reads a cached prefix at $0.10 per million, a twentieth of input (platform.claude.com/docs/en/about-claude/pricing, read 2026-10-28: footnote 2)." },
       { "ids": ["claude-sonnet-5"], "input": 3.0, "output": 15.0, "intro": { "input": 2.0, "output": 10.0, "through": "2026-08-31" }, "note": "The one row with a date on it: $2/$10 through 2026-08-31 is the vendor's own launch price, billed on the day a message was sent. After the window closes the row stops applying by itself." },
       { "ids": ["claude-sonnet-4-6"], "input": 3.0, "output": 15.0, "prices_unknown_members_of": ["sonnet-4"] },
       { "ids": ["claude-sonnet-4-5"], "input": 3.0, "output": 15.0 },
+      { "ids": ["claude-haiku-5-5"], "input": 0.1, "output": 0.5, "note": "The price for a prompt up to 100,000 tokens (platform.claude.com/docs/en/about-claude/pricing, read 2026-10-28). A prompt over that pays $0.50/$2.50 for the whole request; this table prices a model, not a request, so that tier is not here." },
       { "ids": ["claude-haiku-4-5"], "input": 1.0, "output": 5.0 }
     ]
   },
