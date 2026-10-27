@@ -490,7 +490,10 @@ mod tests {
             fs::create_dir_all(&root).expect("create temp dir");
             let script = root.join("fake-formatter.sh");
             let child_pid_file = root.join("child.pid");
-            fs::write(&script, "#!/bin/sh\n(sleep 30) &\necho $! > \"$1\"\nwait\n")
+            // The shell takes longer than the budget to arm, as /bin/sh does
+            // under heavy load (l82a g3b1), and its grandchild outlives any
+            // wait here unless the group kill ends it.
+            fs::write(&script, "#!/bin/sh\nsleep 1\n(sleep 3600) &\necho $! > \"$1\"\nwait\n")
                 .expect("write formatter script");
             let mut perms = fs::metadata(&script)
                 .expect("script metadata")
@@ -502,7 +505,7 @@ mod tests {
             let result = run_formatter_with_timeout(
                 script.to_str().expect("utf-8 script path"),
                 &[child_pid_file.to_str().expect("utf-8 pid path")],
-                Duration::from_millis(1_000),
+                Duration::from_millis(250),
             );
 
             assert!(result.is_none(), "timed-out formatter returns no result");
