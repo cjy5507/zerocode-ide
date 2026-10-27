@@ -2605,15 +2605,14 @@
   --chat-shadow: 0 1px 2px rgb(0 0 0 / 10%);
   /* The permission mode's reach, one colour each (the extension's send by
    * `[data-permission-mode]`): edits taken without asking invert the send
-   * (ink on ground), a planning session wears the window's accent, a
-   * bypassed session the halt colour — the one destructive state this
-   * product colours. */
+   * (ink on ground), a planning session wears the window's accent. A session
+   * that asks nothing wears no colour — red is this window's word for a
+   * failure — and its composer chip says it by a triangle and the CLI's word
+   * instead (IDE design pass 2, item 11). */
   --chat-reach-edits: var(--ink-chalk);
   --chat-reach-edits-ink: var(--surface-deck);
   --chat-reach-plan: var(--ai-accent);
   --chat-reach-plan-ink: var(--surface-abyss);
-  --chat-reach-bypass: var(--signal-halt);
-  --chat-reach-bypass-ink: var(--chat-send-ink);
   /* How tall the plan on an approval card stands before it scrolls on its
    * own — a little over the composer's own cap (200px), so a plan of a dozen
    * steps is read in place while the two answers stay in reach. The
@@ -3368,8 +3367,6 @@
   --chat-reach-edits-ink: var(--surface-deck);
   --chat-reach-plan: var(--ai-accent);
   --chat-reach-plan-ink: var(--surface-abyss);
-  --chat-reach-bypass: var(--signal-halt);
-  --chat-reach-bypass-ink: var(--chat-send-ink);
   --chat-dot-done: #3f9a5f;
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 3%, transparent);

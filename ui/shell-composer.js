@@ -108,7 +108,7 @@ function composerReachOf(run) {
 }
 
 /* `data-permission-reach` on a node, or nothing at all for the asking mode
- * — a rule that matches the attribute matches only a reach that colours. */
+ * — a rule that colours names the reach it colours. */
 function wearReach(node, reach) {
   if (reach) node.setAttribute("data-permission-reach", reach);
   else node.removeAttribute("data-permission-reach");
@@ -808,6 +808,8 @@ function paintComposerModeChip(chip, run, spec) {
   writeHidden(chip, !shown);
   if (!shown) return;
   writeTextContent(chip.querySelector(".worker-composer-pill-words"), permissionModeWords(mode, spec));
+  // A session that asks nothing keeps it in sight by a mark, not a colour.
+  writeAttribute(chip.querySelector("use"), "href", composerReachOf(run) === "bypass" ? "#i-alert" : "#i-shield");
   const tip = run.wire
     ? road.canChangeMode()
       ? t("composer.mode.wireTip", "권한 모드 바꾸기 (선의 다음 모드)")

@@ -16466,7 +16466,9 @@ details[open] > .helper-cap::after {
 
 /* The permission mode's reach, worn as one colour by the send, the focus
  * ring and the spinner's mark (the extension's `[data-permission-mode]`).
- * A mode that asks wears no attribute, and the agent's own colour. */
+ * A mode that asks wears no attribute, and the agent's own colour; a mode
+ * that asks nothing wears its attribute and no colour (the chip's triangle
+ * says it, `paintComposerModeChip`). */
 .worker-composer[data-permission-reach="edits"],
 .helper-status[data-permission-reach="edits"] {
   --chat-reach: var(--chat-reach-edits);
@@ -16479,13 +16481,7 @@ details[open] > .helper-cap::after {
   --chat-reach-ink: var(--chat-reach-plan-ink);
 }
 
-.worker-composer[data-permission-reach="bypass"],
-.helper-status[data-permission-reach="bypass"] {
-  --chat-reach: var(--chat-reach-bypass);
-  --chat-reach-ink: var(--chat-reach-bypass-ink);
-}
-
-.worker-composer[data-permission-reach] .worker-composer-send:not(.is-stop) {
+.worker-composer:is([data-permission-reach="edits"], [data-permission-reach="plan"]) .worker-composer-send:not(.is-stop) {
   background: var(--chat-reach);
   color: var(--chat-reach-ink);
 }
