@@ -8847,7 +8847,7 @@ fn a_refusal_never_carries_the_credential_it_was_pushed_with() {
 /// private use area; our stack named none, so every powerline separator
 /// and every agent TUI's icon came out tofu — the first thing anyone sees.
 /// The file cannot come across (a woff2 is an asset, and assets do not
-/// ship), so what is pinned is the NAMES: anyone with a patched face
+/// ship — Geist is the one the person let in), so what is pinned is the NAMES: anyone with a patched face
 /// installed gets their prompt today.
 ///
 /// **The caret.** Block, blinking on a one-second step, hollow on the pane

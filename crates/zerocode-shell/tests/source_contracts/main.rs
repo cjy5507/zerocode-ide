@@ -2473,8 +2473,10 @@ mod tests {
     /// BlinkMacSystemFont, "Segoe UI", sans-serif` with a bundled
     /// Geist-Variable @font-face (:23531, :23510), and hands
     /// `--font-mono: "SF Mono", SFMono-Regular, ui-monospace…` beside it
-    /// (:23533). The face that renders is the one measured; the woff2 itself
-    /// is an asset and never ships.
+    /// (:23533). The face that renders is the one measured. Since 2026-10-28
+    /// the window ships Geist and Geist Mono itself (t-78107, the one asset the
+    /// person let in), so Geist Mono leads the mono stack and the measured
+    /// tail follows it unchanged.
     ///
     /// Pinned here because a near-miss on shape or type reads as an imitation
     /// exactly the way a near-miss on colour does, and neither says so.
@@ -2527,7 +2529,7 @@ mod tests {
         );
         assert!(
             root.contains(
-                "--font-mono: \"SF Mono\", SFMono-Regular, ui-monospace, \"Cascadia Code\""
+                "--font-mono: \"Geist Mono\", \"SF Mono\", SFMono-Regular, ui-monospace, \"Cascadia Code\""
             ),
             "the mono face stopped being the measured `--font-mono` stack"
         );
@@ -5929,9 +5931,10 @@ mod tests {
     /// `flex flex-col overflow-hidden` (components/sidebar/index.tsx:110)
     /// holding a fixed nav that ENDS in the palette's search button
     /// (SidebarNav.tsx:305) and STARTS with the setup entry (:109), a fixed
-    /// header whose title is the grouping's own name — bare `'Projects'` /
+    /// header whose title is the grouping's own name — `'Projects'` /
     /// `'Workspaces'`, stamped on `data-sidebar-section-title`
-    /// (SidebarHeader.tsx:21,28) — one scrolling list viewport
+    /// (SidebarHeader.tsx:21,28), said in the person's language since the
+    /// passed Geist draft (t-78107, 시안 7) — one scrolling list viewport
     /// (VirtualizedWorktreeViewport.tsx:352), and a fixed toolbar whose right
     /// pair is the crosshair and the board toggle wearing `aria-pressed`
     /// (SidebarToolbar.tsx:78-119). The board door used to be a nav row and
@@ -5994,7 +5997,8 @@ mod tests {
         let window = window_source();
         let heading = block_after(window, "function paintSidebarTitle() {");
         assert!(
-            heading.contains("\"Projects\" : \"Workspaces\"")
+            heading.contains("SIDEBAR_SECTION_WORDS[section]")
+                && heading.contains("t(key, word)")
                 && heading.contains("dataset.sidebarSectionTitle"),
             "the heading is not the grouping's own bare name:\n{heading}"
         );
@@ -7801,7 +7805,7 @@ mod tests {
     fn a_workspace_dot_repaints_without_rebuilding_the_list() {
         let window = window_source();
 
-        let shape = block_after(window, "function worktreeListShape(held) {");
+        let shape = block_after(window, "function worktreeListShape(held, resting) {");
         assert!(
             shape.contains("(held.get(worktree.path) ?? []).length"),
             "the shape guard cannot see a session appearing, so the row it \
@@ -16250,11 +16254,11 @@ mod tests {
             "a title change draws the strip on the frame path again:\n{naming}"
         );
         let leaves = block_after(window, "function writeTermTitleLeaves(term) {");
-        // The strip's words for a tab are its name after its pane's role (t-45938),
-        // written by the strip's own painter and by this guarded leaf alike.
+        // The strip's words for a tab are its name (t-78107: the role moved to
+        // the tip), written by the strip's own painter and this guarded leaf alike.
         assert!(
             leaves.contains("if (agentPaintDue.tabs || agentPaintDue.cards) return false;")
-                && leaves.contains("writeTextContent(label, tabStripWords(tab));")
+                && leaves.contains("writeTextContent(label, tabLabel(tab));")
                 && leaves.contains("writeTextContent(fit.name, fit.primary);")
                 && !leaves.contains("renderTabs()")
                 && !leaves.contains("paintWorktreeAgents()"),
@@ -17221,7 +17225,7 @@ mod tests {
         // and everything else has to be inside. (See
         // `a_workspace_dot_repaints_without_rebuilding_the_list` for the other
         // half: what left the shape has to have arrived on the paint road.)
-        let shape = block_after(window, "function worktreeListShape(held) {");
+        let shape = block_after(window, "function worktreeListShape(held, resting) {");
         assert!(
             shape.contains("closedProjects.has(project.path)")
                 && shape.contains("(held.get(worktree.path) ?? []).length")
