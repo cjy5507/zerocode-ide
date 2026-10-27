@@ -1459,6 +1459,55 @@ mod tests {
         std::fs::remove_dir_all(home).ok();
     }
 
+    /// A connection that brings nothing does not cost the login: a browser can
+    /// open one before the redirect and hold it (a preconnect), or open one and
+    /// close it unused, and the redirect on the next one still completes the
+    /// callback. macOS hands an accepted socket the listener's non-blocking
+    /// mode, so reading the first connection as it came failed with
+    /// `WouldBlock`.
+    #[test]
+    fn a_connection_that_brings_nothing_does_not_cost_the_callback() {
+        use std::io::Write as _;
+        use std::net::{Shutdown, TcpStream};
+        use std::time::{Duration, Instant};
+
+        let port = TcpListener::bind("127.0.0.1:0")
+            .and_then(|probe| probe.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let (sender, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(wait_for_callback(port));
+        });
+        let connect = || {
+            let until = Instant::now() + Duration::from_secs(10);
+            loop {
+                match TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => break stream,
+                    Err(error) => {
+                        assert!(Instant::now() < until, "the callback never listened: {error}");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        };
+
+        let _preconnect = connect();
+        let unused = connect();
+        unused.shutdown(Shutdown::Write).expect("close the unused connection");
+        let mut redirect = connect();
+        redirect
+            .write_all(b"GET /callback?code=the-code&state=the-state HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .expect("send the redirect");
+
+        let callback = answer
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the callback answered within 20 s")
+            .expect("the redirect completed the callback");
+        assert_eq!(callback.code.as_deref(), Some("the-code"));
+        assert_eq!(callback.state.as_deref(), Some("the-state"));
+    }
+
     // --- Discovery test harness -------------------------------------------
 
     fn unix_now_secs() -> u64 {
