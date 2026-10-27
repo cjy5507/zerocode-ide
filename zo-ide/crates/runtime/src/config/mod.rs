@@ -586,8 +586,9 @@ impl ConfigLoader {
     }
 
     /// The loader with the person's home folder given, for a test that
-    /// stands a fake one beside its workspace.
-    #[cfg(test)]
+    /// stands a fake one beside its workspace. Only the macOS/Linux
+    /// `mcp_references` `loaded` tests call it.
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     #[must_use]
     pub(crate) fn with_person_home(mut self, home: impl Into<PathBuf>) -> Self {
         self.person_home = Some(home.into());
