@@ -2755,20 +2755,33 @@ pub(crate) mod tests {
     /// and without one, reaches the core's parser whole.
     #[test]
     fn no_hand_action_sends_an_app_to_a_screen_point_verb() {
-        for fields in [
+        let table = [
             json!({"action": "left_click", "coordinate": [180, 165]}),
-            json!({"action": "double_click", "coordinate": [180, 165]}),
             json!({"action": "right_click", "coordinate": [180, 165]}),
+            json!({"action": "middle_click", "coordinate": [180, 165]}),
+            json!({"action": "double_click", "coordinate": [180, 165]}),
+            json!({"action": "triple_click", "coordinate": [180, 165]}),
             json!({"action": "mouse_move", "coordinate": [180, 165]}),
             json!({"action": "left_click_drag", "start_coordinate": [10, 20], "coordinate": [30, 40]}),
             json!({"action": "scroll", "coordinate": [180, 165], "scroll_direction": "down"}),
             json!({"action": "key", "text": "Return"}),
             json!({"action": "hold_key", "text": "shift", "duration": 0.1}),
             json!({"action": "type", "text": "blue"}),
-        ] {
+        ];
+        // Every hand action zo has is in the table: a new one fails here
+        // until it is.
+        let named = |fields: &Value| fields["action"].as_str().unwrap_or_default().to_string();
+        let mut hands: Vec<String> =
+            ACTIONS.iter().filter(|(_, method)| method.is_desktop_hand()).map(|(action, _)| (*action).to_string()).collect();
+        let mut tabled: Vec<String> = table.iter().map(named).collect();
+        hands.sort();
+        tabled.sort();
+        assert_eq!(hands, tabled);
+        for fields in table {
+            let action = named(&fields);
+            let method = ACTIONS.iter().find(|(name, _)| *name == action).map(|(_, method)| *method).expect("a zo action");
             for app in [None, Some("iPhone Mirroring")] {
                 let mut fields = fields.clone();
-                let action = fields["action"].as_str().unwrap_or_default().to_string();
                 if let Some(app) = app {
                     fields["app"] = json!(app);
                     if app_scoped_action(&action) {
@@ -2777,9 +2790,13 @@ pub(crate) mod tests {
                 }
                 let argv = match argv_for(&input(fields.clone())) {
                     // An app on an action that names none (a move, a held
-                    // key) is zo's own refusal, before any line is sent.
-                    Err(ToolError::InvalidInput(_)) if app.is_some() && !app_scoped_action(&action) => continue,
-                    argv => argv.expect("a hand action"),
+                    // key) is zo's own refusal, before any line is sent —
+                    // the same verbs the core names no app verb for.
+                    Err(ToolError::InvalidInput(why)) if app.is_some() && why.starts_with("`app` is not supported by") => {
+                        assert_eq!(method.in_an_app(), None, "{fields}: {why}");
+                        continue;
+                    }
+                    argv => argv.unwrap_or_else(|error| panic!("{fields}: {error:?}")),
                 };
                 assert!(app.is_none() || app_scoped_action(&action), "{fields}: {argv:?}");
                 let command = zerocode_core::computer_use::parse_command_coded(&argv)
