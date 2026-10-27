@@ -659,6 +659,8 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
       gate, state, start, end, basis, unknown, green, total: steps.length, failed,
       failedKinds: kinds(["failed", "capped", "refused"]), failedJob: failedJob?.name ?? null,
       logJob: telling?.name ?? null, carried, opened,
+      // When the gate was queued last: the moment its latest job was put on the line.
+      queuedAt: Math.max(0, ...members.map((job) => Number(job.queued_ms) || 0)),
     };
     entries.push({
       head: boardScheduleRow({
@@ -947,12 +949,13 @@ function boardScheduleBoardLines(groups, now) {
       act: lastLane?.act ?? null, actWord: lastLane ? logWord : "",
     };
 
-  // 2. The gate: the one that started last in the range.
+  // 2. The gate, by one rule (review r4): the gate with a step running; else, of the gates that actually started —
+  // a step finished or failed — the one that started last (passed, failed or waiting between steps); else the one
+  // queued last. A pass after a failure is the newer word; a gate between its steps is still the story in play.
   const gateHeads = rows("gates").slice().sort((a, b) => b.start - a.start);
-  // The gate running; else, of the gates that ran (passed or failed), the one that started last — a pass after a
-  // failure is the newer word (review r3 P2); else the one queued last.
-  const gate = gateHeads.find((row) => row.state === "running")
-    ?? gateHeads.find((row) => row.state === "failed" || row.state === "done") ?? gateHeads[0] ?? null;
+  const started = (row) => Boolean(row.facts?.logJob);
+  const queuedLast = gateHeads.slice().sort((a, b) => (b.facts?.queuedAt ?? 0) - (a.facts?.queuedAt ?? 0))[0] ?? null;
+  const gate = gateHeads.find((row) => row.state === "running") ?? gateHeads.find(started) ?? queuedLast;
   const facts = gate?.facts ?? null;
   const gateLine = gate && facts
     ? {
