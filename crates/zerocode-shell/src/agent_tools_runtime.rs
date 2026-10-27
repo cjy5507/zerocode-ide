@@ -987,7 +987,7 @@ impl TeamWindow {
             state: &state,
             term,
             briefing: &pending.briefing,
-            glyph,
+            glyph: Some(glyph),
             agent,
             deadline,
             submitted: pending.submitted.is_some(),
@@ -1018,6 +1018,40 @@ impl TeamWindow {
         );
         Some(format!("briefing not delivered (브리핑 미전달): {why}"))
     }
+
+    /// Whether a fresh launch whose submission receipt the deadline did not
+    /// bring was taken all the same (t-78356): the receipt heard since, a
+    /// turn the pane's hooks reported, or the briefing in the provider's own
+    /// transcript ([`zerocode_pty::briefing::taken_without_receipt`]). The
+    /// screen is not asked — a briefing standing unsent in its composer shows
+    /// there like one that was taken (w-78343).
+    fn taken_without_receipt(&self, term: TermId, pending: &PendingWorkerReadiness) -> bool {
+        let state = self.app.state::<AppState>();
+        let agent = state.agent_terms().get(&term).copied();
+        let heard_since = pending
+            .submitted
+            .as_ref()
+            .is_some_and(|receipt| receipt.try_recv().is_ok());
+        let mut pane = LaunchPane {
+            state: &state,
+            term,
+            briefing: &pending.briefing,
+            glyph: pending.composer,
+            agent,
+            deadline: ready_timeout_for(agent),
+            submitted: heard_since,
+        };
+        let taken = zerocode_pty::briefing::taken_without_receipt(&mut pane);
+        if taken {
+            note_window_event(
+                state.local_data_root(),
+                &format!(
+                    "term {term} seated without its submission receipt: its provider reported taking the briefing"
+                ),
+            );
+        }
+        taken
+    }
 }
 
 /// A worker's pane as the briefing watch reads and types at it (t-74381,
@@ -1026,11 +1060,14 @@ struct LaunchPane<'a> {
     state: &'a AppState,
     term: TermId,
     briefing: &'a str,
-    glyph: char,
+    /// The composer glyph the retype waits for; a launch asked only what its
+    /// provider said ([`TeamWindow::taken_without_receipt`]) types nothing.
+    glyph: Option<char>,
     agent: Option<&'static str>,
     /// The agent's own readiness deadline, which the retype pays.
     deadline: Duration,
-    /// `await_prompt_submission` already accepted this launch's receipt.
+    /// This launch's receipt was heard — by `await_prompt_submission`, or
+    /// after its deadline ([`TeamWindow::taken_without_receipt`]).
     submitted: bool,
 }
 
@@ -1052,8 +1089,8 @@ fn briefing_work_reported(state: zerocode_core::hook::HookState, session_boundar
 /// window. Its newest naming prompt is asked, past the frames around a paste,
 /// and must show the briefing's own words.
 fn briefing_recorded(transcript: &std::path::Path, briefing: &str) -> bool {
-    let _ = (transcript, briefing);
-    false
+    zerocode_core::transcript::last_naming_prompt(transcript)
+        .is_some_and(|prompt| zerocode_pty::briefing::briefing_shows(&prompt, briefing))
 }
 
 impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
@@ -1066,6 +1103,15 @@ impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
             .pane_states()
             .get(&self.term)
             .is_some_and(|pane| briefing_work_reported(pane.state, pane.session_boundary))
+    }
+
+    fn recorded(&mut self) -> bool {
+        let transcript = self
+            .state
+            .pane_sessions()
+            .get(&self.term)
+            .and_then(|session| session.transcript_path.clone());
+        transcript.is_some_and(|path| briefing_recorded(std::path::Path::new(&path), self.briefing))
     }
 
     fn screen(&mut self) -> Option<String> {
@@ -1092,7 +1138,7 @@ impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
             PromptDelivery::with_deadlines(
                 self.briefing.to_string(),
                 true,
-                zerocode_pty::ReadySignal::Rest(Some(self.glyph)),
+                zerocode_pty::ReadySignal::Rest(self.glyph),
                 Instant::now(),
                 ready_quiet_for(self.agent),
                 self.deadline,
@@ -1948,6 +1994,25 @@ impl agent_teams::Host for TeamWindow {
             None
         };
         if accepted && undelivered.is_none() && state.terminals().contains_key(&term) {
+            state.worker_readiness().remove(&term);
+            return Ok(());
+        }
+        // A fresh worker whose receipt the deadline did not bring may be at
+        // work all the same (t-78356): the receipt rides one hook post, and
+        // w-78348's never reached the window while it read files for 58 s
+        // after taking its briefing — this road then killed it. What its
+        // provider said of itself is asked first; a briefing nothing took
+        // (w-78343, unsent in its composer) still fails below.
+        if entered
+            && terminal_is_live
+            && !accepted
+            && !pending.restoring
+            && self.taken_without_receipt(term, &pending)
+            && state.terminals().contains_key(&term)
+        {
+            state.worker_prompt_submits().remove(&term);
+            state.deliveries().remove(&term);
+            state.delivery_waiters().remove(&term);
             state.worker_readiness().remove(&term);
             return Ok(());
         }

@@ -245,8 +245,7 @@ pub fn confirm(
 /// transcript recorded. The screen does not: a briefing left unsent in its
 /// composer shows on it exactly as one that was taken does.
 pub fn taken_without_receipt(pane: &mut impl BriefingPane) -> bool {
-    let _ = pane;
-    false
+    pane.submitted() || pane.working() || pane.recorded()
 }
 
 #[cfg(test)]
