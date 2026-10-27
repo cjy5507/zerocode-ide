@@ -1630,12 +1630,12 @@ const PTY_OPEN_PASSING_ERRORS: [i32; 3] = [EREDRIVEOPEN, libc::ENXIO, libc::EAGA
 const PTY_OPEN_PASSING_ERRORS: [i32; 0] = [];
 
 /// Ask `open` for a pty pair, again while it fails with an error in
-/// [`PTY_OPEN_PASSING_ERRORS`], at most [`PTY_OPEN_ATTEMPTS`] times.
+/// `PTY_OPEN_PASSING_ERRORS`, at most `PTY_OPEN_ATTEMPTS` times.
 ///
 /// `errno_of` reads the `errno` out of whatever error `open` fails with:
 /// the raw `io::Error::raw_os_error` for a caller that opens with
 /// `libc::openpty` itself, the text of a `portable_pty` failure for a lane
-/// ([`open_pty`]). The set of `errno`s and the bound are this one's, so no
+/// (`open_pty`). The set of `errno`s and the bound are this one's, so no
 /// caller restates them. The last error comes back as it was.
 ///
 /// No pause between asks: the kernel already paused inside each failed
