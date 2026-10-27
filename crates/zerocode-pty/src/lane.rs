@@ -1592,17 +1592,77 @@ impl Drop for PtyLane {
 }
 
 /// The most times a lane asks for a pty before the failure is its answer.
-#[allow(dead_code)]
+///
+/// Each ask is a whole round of the kernel's own retry (see
+/// [`PTY_OPEN_PASSING_ERRORS`]), so five rounds is fifty reopens of
+/// `/dev/ptmx` — far past a race between a handful of opens, and still a
+/// prompt answer for an error that does not pass.
 const PTY_OPEN_ATTEMPTS: usize = 5;
 
-/// Ask `open` for a pty pair.
+/// XNU's in-kernel "redrive open" (`bsd/sys/errno.h`), which `libc` does
+/// not name because it is not meant to leave the kernel. It does: see
+/// [`PTY_OPEN_PASSING_ERRORS`].
+#[cfg(unix)]
+const EREDRIVEOPEN: i32 = -6;
+
+/// The `errno`s that say a pty open lost a race and may be asked again,
+/// rather than that there is no pty to be had.
+///
+/// `/dev/ptmx` picks a free minor number before
+/// it takes the lock that claims it (`ptmx_clone`, `bsd/kern/tty_ptmx.c`),
+/// so two opens at once can be handed the same one; the loser's `ptcopen`
+/// answers [`EREDRIVEOPEN`] (`bsd/kern/tty_dev.c`). `vn_open_auth` reopens
+/// on it ten times, pausing from the sixth, and only then lets it out —
+/// which is how gate l81e read `Os { code: -6 }` from `openpty` while a
+/// second test binary opened ptys alongside it. `ENXIO` is the same
+/// driver's answer when it cannot set the pair up (also its answer to a
+/// full pty table, where five quick asks cost nothing), and `EAGAIN` the
+/// replica's while the pair is not yet unlocked. Anything else — `EMFILE`,
+/// `EACCES` — is the answer at once.
+#[cfg(unix)]
+const PTY_OPEN_PASSING_ERRORS: [i32; 3] = [EREDRIVEOPEN, libc::ENXIO, libc::EAGAIN];
+/// ConPTY reports no `errno`; nothing is asked twice.
+#[cfg(not(unix))]
+const PTY_OPEN_PASSING_ERRORS: [i32; 0] = [];
+
+/// Ask `open` for a pty pair, again while it fails with an error in
+/// [`PTY_OPEN_PASSING_ERRORS`], at most [`PTY_OPEN_ATTEMPTS`] times.
 ///
 /// `open` is the platform's own pty system in a lane, and a stand-in that
-/// fails the way a kernel does in the tests below.
+/// fails the way a kernel does in the tests below. No pause between asks:
+/// the kernel already paused inside each failed one, and a pause here
+/// would only hold up the window that is opening the pane. A yield hands
+/// the processor to the open this one raced, which is what clears it.
 fn open_pty<P, E: std::fmt::Display>(
     mut open: impl FnMut() -> Result<P, E>,
 ) -> Result<P, PtyError> {
-    open().map_err(|error| PtyError::Open(error.to_string()))
+    let mut asked = 1;
+    loop {
+        let reason = match open() {
+            Ok(pair) => return Ok(pair),
+            Err(error) => error.to_string(),
+        };
+        let passing =
+            os_error_code(&reason).is_some_and(|code| PTY_OPEN_PASSING_ERRORS.contains(&code));
+        if !passing || asked == PTY_OPEN_ATTEMPTS {
+            return Err(PtyError::Open(reason));
+        }
+        asked += 1;
+        std::thread::yield_now();
+    }
+}
+
+/// The `errno` in a `portable_pty` open failure.
+///
+/// Its error carries the `io::Error` only as text — `bail!("failed to
+/// openpty: {:?}", …)` — so the code is read back out of the `Debug` form,
+/// `Os { code: -6, kind: …`. Text worded any other way gives `None`, which
+/// is never asked again: a reworded dependency costs the retry, not the
+/// error.
+fn os_error_code(reason: &str) -> Option<i32> {
+    const CODE: &str = "Os { code: ";
+    let after = &reason[reason.find(CODE)? + CODE.len()..];
+    after[..after.find(',')?].parse().ok()
 }
 
 /// Start the lane's child on the pty's slave.
@@ -2951,14 +3011,10 @@ mod group_tests {
 
 #[cfg(all(test, unix))]
 mod open_tests {
-    use super::{PTY_OPEN_ATTEMPTS, PtyError, open_pty};
+    use super::{EREDRIVEOPEN, PTY_OPEN_ATTEMPTS, PtyError, open_pty};
     use std::cell::Cell;
     use std::io;
     use std::rc::Rc;
-
-    /// `EREDRIVEOPEN`, XNU's in-kernel "open again", as gate l81e read it
-    /// out of `openpty` (`Os { code: -6 }`).
-    const REDRIVE_OPEN: i32 = -6;
 
     /// A pty system that fails its first `failures` opens with `errno`,
     /// worded exactly as `portable_pty` words a failed `openpty`
@@ -2988,7 +3044,7 @@ mod open_tests {
     /// and the lane opens.
     #[test]
     fn a_pty_lost_to_a_concurrent_open_is_asked_for_again() {
-        for errno in [REDRIVE_OPEN, libc::ENXIO, libc::EAGAIN] {
+        for errno in [EREDRIVEOPEN, libc::ENXIO, libc::EAGAIN] {
             let failures = PTY_OPEN_ATTEMPTS - 1;
             let (open, asked) = opens_after(failures, errno);
             assert!(
@@ -3016,12 +3072,12 @@ mod open_tests {
     /// words.
     #[test]
     fn a_race_that_never_clears_ends_at_the_bound() {
-        let (open, asked) = opens_after(usize::MAX, REDRIVE_OPEN);
+        let (open, asked) = opens_after(usize::MAX, EREDRIVEOPEN);
         let Err(PtyError::Open(reason)) = open_pty(open) else {
             panic!("opened, or failed as something else");
         };
         assert!(
-            reason.contains(&format!("code: {REDRIVE_OPEN},")),
+            reason.contains(&format!("code: {EREDRIVEOPEN},")),
             "{reason}"
         );
         assert_eq!(asked.get(), PTY_OPEN_ATTEMPTS);
