@@ -719,6 +719,62 @@ mod tests {
         assert_eq!(all.len(), 5, "only the conversations belong in the list");
     }
 
+    /// l80a (m-77613): each of these points `ZO_CONFIG_HOME` elsewhere for a
+    /// moment. Holding only their own lock, one could land inside another
+    /// test's no-home trust save and read-back, which then read back `{}`.
+    #[test]
+    fn tests_that_move_the_config_home_wait_for_the_env_lock() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+        let movers: [(&'static str, fn()); 4] = [
+            (
+                "empty_session_root_falls_back_to_scoped_zo_paths",
+                empty_session_root_falls_back_to_scoped_zo_paths,
+            ),
+            (
+                "project_sessions_persist_outside_the_working_tree",
+                project_sessions_persist_outside_the_working_tree,
+            ),
+            (
+                "global_project_sessions_are_repo_distinct_and_readable",
+                global_project_sessions_are_repo_distinct_and_readable,
+            ),
+            (
+                "limited_listing_fills_the_page_with_conversations",
+                limited_listing_fills_the_page_with_conversations,
+            ),
+        ];
+        let (report_done, done) = mpsc::channel();
+        let held = crate::test_env_lock();
+        let threads: Vec<_> = movers
+            .into_iter()
+            .map(|(name, mover)| {
+                let report_done = report_done.clone();
+                let thread = std::thread::spawn(move || {
+                    mover();
+                    let _ = report_done.send(name);
+                });
+                (name, thread)
+            })
+            .collect();
+        drop(report_done);
+        // A mover that does not wait for the env lock is done long before this.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let mut ran_under_the_lock = Vec::new();
+        while let Ok(name) = done.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            ran_under_the_lock.push(name);
+        }
+        drop(held);
+        for (name, thread) in threads {
+            thread.join().unwrap_or_else(|_| panic!("{name} failed"));
+        }
+        ran_under_the_lock.sort_unstable();
+        assert!(
+            ran_under_the_lock.is_empty(),
+            "moved ZO_CONFIG_HOME while another test held the env lock: {ran_under_the_lock:?}"
+        );
+    }
+
     /// t-2947 — the listing reads transcript heads, and every row it shows
     /// is the row the whole-session loader showed: pinned over the synthetic
     /// corpus, capped and uncapped.

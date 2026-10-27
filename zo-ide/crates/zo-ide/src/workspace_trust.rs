@@ -833,4 +833,51 @@ mod tests {
             },
         );
     }
+
+    /// l80a (m-77613): a session-root pin moved `ZO_CONFIG_HOME` between the
+    /// no-home save above and its read-back, and the read came back `{}`.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_root_pinned_beside_a_no_home_save_waits_for_its_read_back() {
+        use super::{load_trust_store, save_trust_store};
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (say_pinned, heard_pinned) = mpsc::channel();
+        let (let_go, wait_for_let_go) = mpsc::channel::<()>();
+        let guard = crate::test_env_lock();
+        let pinner = with_env_paths(
+            &[
+                ("ZO_CONFIG_HOME", None),
+                ("ZO_HOME", None),
+                ("HOME", None),
+            ],
+            || {
+                let store = std::collections::BTreeMap::from([(
+                    "/project".to_string(),
+                    "prompt".to_string(),
+                )]);
+                save_trust_store(&store);
+                let pinner = std::thread::spawn(move || {
+                    let pin = crate::SessionRootPin::new(
+                        "trust-read-back",
+                        &session_corpus::CorpusSpec::REAL_MIX.with_sessions(1),
+                    );
+                    let _ = say_pinned.send(());
+                    let _ = wait_for_let_go.recv_timeout(Duration::from_secs(5));
+                    drop(pin);
+                });
+                // A pin that does not wait for the env lock is in place long before this.
+                let _ = heard_pinned.recv_timeout(Duration::from_millis(500));
+                assert_eq!(
+                    load_trust_store(),
+                    store,
+                    "no-home fallback writes must be visible to canonical reads"
+                );
+                pinner
+            },
+        );
+        drop(guard);
+        let _ = let_go.send(());
+        pinner.join().expect("the pin's thread");
+    }
 }
