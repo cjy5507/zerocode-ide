@@ -53515,12 +53515,158 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   padding-inline: max(var(--helper-gutter, var(--chat-list-pad-x)), calc((100% - var(--reading-column)) / 2));
 }
 
+/* 쌓인 일: the right column's first tab. Its number is the commits not in main —
+ * a quiet grey count, not a colour. */
+.activity-count {
+  position: absolute;
+  top: var(--space-1);
+  right: 0;
+  min-width: var(--space-4);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--surface-raised);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-size: var(--text-3xs);
+  line-height: var(--space-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.pile {
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  overflow-y: auto;
+  color: var(--ink-chalk);
+  font: var(--type-copy-13);
+}
+
+.pile[hidden] {
+  display: none;
+}
+
+.pile-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.pile-title {
+  font: var(--type-heading-14);
+  letter-spacing: var(--tracking-heading-14);
+}
+
+.pile-project,
+.pile-section-count,
+.pile-release-state,
+.pile-repo-changed,
+.pile-total-words {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.pile-section {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.pile-section-head {
+  display: flex;
+  justify-content: space-between;
+  margin: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-weight: 600;
+}
+
+.pile-release,
+.pile-total,
+.pile-repo,
+.pile-repo-changed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.pile-release-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.pile-total-count {
+  font: var(--type-heading-24);
+  letter-spacing: var(--tracking-heading-24);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A branch not in main: its name in the repository's own face, how far behind
+ * main when it runs far, its commits — one row, a door to that checkout. */
+.pile-branch {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-1) 0;
+  border: 0;
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: none;
+  color: var(--ink-chalk);
+  font: var(--type-label-12-mono);
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.pile-branch:hover {
+  color: var(--ink-mist);
+}
+
+.pile-branch:focus-visible,
+.pile-scm:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.pile-branch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pile-branch-behind {
+  flex: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.pile-branch-count {
+  flex: none;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.pile-repo {
+  font: var(--type-label-12-mono);
+}
+
+.pile-scm {
+  justify-self: start;
+  padding: var(--space-1) var(--space-2);
+  font: var(--type-label-12);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .your-turn,
   .your-turn-list,
   .your-turn-inbox,
   .your-turn-group-head,
-  .your-turn-row {
+  .your-turn-row,
+  .pile-branch {
     transition: none;
   }
 }
