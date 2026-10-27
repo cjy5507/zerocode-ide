@@ -968,10 +968,10 @@ coordinator seat (a worker's pane is refused):
   `task-backfill` for closed work that landed.
 - `hand-in --task <id> --head <commit> --body '{"ok":true,"summary":"…"}' [--base main]
   [--checkout <path>] --retry-request handin-<id>` hands one commit in on the seat's own
-  open attempt, once. The window asks git in `--checkout` (default: the pane's project)
-  that the commit exists — and, with `--base`, that the ref holds it — before the ledger
-  writes it; a commit git does not know, or one the base does not hold, is refused and
-  nothing is written. The attempt's source is the full hash git resolved; the letter it
+  open attempt, once. The window asks git in `--checkout` (an absolute path; default: the
+  pane's project) that the commit exists — and, with `--base`, that the ref holds it —
+  before the ledger writes it; a commit git does not know, or one the base does not hold,
+  is refused and nothing is written. The attempt's source is the full hash git resolved; the letter it
   leaves is a `worker_done` from the run's address, in the log and in no inbox.
 - Then review it exactly as any other: `task-update --task <id> --attempt <the take's
   dispatchId> --source <the hand-in's source> --result '{"verified":true,…}'`.
