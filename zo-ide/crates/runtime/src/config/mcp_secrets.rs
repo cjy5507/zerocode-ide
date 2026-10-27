@@ -433,6 +433,12 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("json")
     }
 
+    /// `assert_eq!` for what may hold a value (t-77207): a failure says `what`
+    /// and shows neither side.
+    fn assert_same(got: &serde_json::Value, want: &serde_json::Value, what: &str) {
+        assert_eq!(got, want, "{what}");
+    }
+
     #[cfg(unix)]
     fn mode(path: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt as _;
@@ -465,6 +471,25 @@ mod tests {
         );
     }
 
+    /// t-77207: the document comparisons printed both documents when they
+    /// failed, the literal in them. A failed comparison says what failed and
+    /// shows no value.
+    #[test]
+    fn a_failed_comparison_says_what_failed_and_shows_no_value() {
+        let before: serde_json::Value = serde_json::from_str(DOCUMENT).expect("json");
+        let mut after = before.clone();
+        after["model"] = serde_json::json!("sonnet");
+        let failed = std::panic::catch_unwind(|| assert_same(&after, &before, "everything else is as it was"))
+            .expect_err("the documents differ");
+        let said = failed
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failed.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(said.contains("everything else is as it was"), "the failure says what failed");
+        assert!(!said.contains(LITERAL), "a failed comparison showed the value");
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_move_rewrites_the_slot_atomically_keeps_an_owner_only_backup_and_the_rest_of_the_document() {
@@ -485,14 +510,15 @@ mod tests {
         .expect("moved");
 
         let after = json(&path);
-        assert_eq!(
-            after["mcpServers"]["github"]["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"],
-            "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+        assert_same(
+            &after["mcpServers"]["github"]["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"],
+            &serde_json::json!("${GITHUB_PERSONAL_ACCESS_TOKEN}"),
+            "the slot holds the reference",
         );
         let mut expected = before.clone();
         expected["mcpServers"]["github"]["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"] =
             serde_json::json!("${GITHUB_PERSONAL_ACCESS_TOKEN}");
-        assert_eq!(after, expected, "everything else is as it was");
+        assert_same(&after, &expected, "everything else is as it was");
         assert_eq!(backup.parent(), path.parent(), "the backup sits beside the file");
         assert!(
             backup

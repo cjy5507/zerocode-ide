@@ -321,6 +321,12 @@ mod tests {
         }
     }
 
+    /// `assert_eq!` for what may hold a value (t-77207): a failure says `what`
+    /// and shows neither side.
+    fn assert_same(got: &Value, want: &Value, what: &str) {
+        assert_eq!(got, want, "{what}");
+    }
+
 
     const TOKEN_PATH: &str = r#"["mcpServers","github","env","GITHUB_PERSONAL_ACCESS_TOKEN"]"#;
 
@@ -361,6 +367,25 @@ mod tests {
         assert_eq!(absent.code, 1);
         assert_eq!(absent.json["resolves"], json!(false));
         assert!(absent.json["why"].as_str().is_some_and(|why| !why.is_empty()), "{}", absent.json);
+    }
+
+    /// t-77207: what the move wrote was compared with `assert_eq!`, which on a
+    /// failure printed the slot, literal and all. A failed comparison says what
+    /// failed and shows no value.
+    #[test]
+    fn a_failed_comparison_says_what_failed_and_shows_no_value() {
+        let held = json!(LITERAL);
+        let failed = std::panic::catch_unwind(|| {
+            assert_same(&held, &json!("${GITHUB_PERSONAL_ACCESS_TOKEN}"), "the slot holds the reference");
+        })
+        .expect_err("a value is not a reference");
+        let said = failed
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failed.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(said.contains("the slot holds the reference"), "the failure says what failed");
+        assert!(!said.contains(LITERAL), "a failed comparison showed the value");
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -407,9 +432,10 @@ mod tests {
         assert!(Path::new(backup).is_file(), "{backup}");
         let after: Value = serde_json::from_str(&std::fs::read_to_string(scratch.home_settings()).expect("home"))
             .expect("json");
-        assert_eq!(
-            after["mcpServers"]["github"]["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"],
-            json!("${GITHUB_PERSONAL_ACCESS_TOKEN}")
+        assert_same(
+            &after["mcpServers"]["github"]["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"],
+            &json!("${GITHUB_PERSONAL_ACCESS_TOKEN}"),
+            "the slot holds the reference",
         );
         assert_eq!(after["model"], json!("opus"));
 
