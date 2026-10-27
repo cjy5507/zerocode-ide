@@ -180,7 +180,11 @@ pub(crate) fn spawn(
     cwd: Option<&Path>,
     edits: &[EnvEdit],
 ) -> io::Result<SpawnedChild> {
-    let _ = HELPER.get();
+    if let Some(helper) = HELPER.get()
+        && let Ok(child) = spawn_with(tty, program, args, cwd, edits, Some(helper))
+    {
+        return Ok(child);
+    }
     spawn_with(tty, program, args, cwd, edits, None)
 }
 

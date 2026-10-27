@@ -708,6 +708,32 @@ fn mirror_bin() -> Option<PathBuf> {
     )
 }
 
+/// Start every pane's program through the mirror (t-77414), which makes the
+/// pane's terminal its controlling terminal and then becomes the program:
+/// a spawn alone leaves `zsh` and `zo` with none, so the window going sent
+/// them no hangup — five zo processes went on spinning after a restart,
+/// each holding its conversation — a resize signalled nothing they ran, and
+/// ^C reached no group. Named once at boot, before any pane opens. A window
+/// with no mirror beside it — a development build of the window's binary
+/// alone — starts its panes straight, as every start did before, and its
+/// log says so.
+#[cfg(target_os = "macos")]
+pub(crate) fn launch_panes_through_the_mirror(local_data_root: &Path) {
+    match mirror_bin().filter(|bin| bin.is_file()) {
+        Some(bin) => {
+            zerocode_pty::launch_through(
+                bin,
+                Some(local_data_root.join(crate::system_runtime::WINDOW_LOG)),
+            );
+        }
+        None => crate::note_window_event(
+            local_data_root,
+            "pane launch: no zerocode-mirror beside the window — panes start without a \
+             controlling terminal",
+        ),
+    }
+}
+
 /// Whether a nested run can be mirrored RIGHT NOW.
 ///
 /// [`mirror_shims`] answers once for the window's lifetime, because the shims

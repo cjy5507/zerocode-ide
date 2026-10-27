@@ -3493,6 +3493,10 @@ fn main() -> ExitCode {
             if let Err(error) = crash::begin(crash_root) {
                 note_window_event(crash_root, &format!("crash boot: {error}"));
             }
+            // Before any pane opens: every pane's program starts with its
+            // terminal as its controlling one (t-77414).
+            #[cfg(target_os = "macos")]
+            hooks::launch_panes_through_the_mirror(crash_root);
             // What the last window's panes left running without a terminal
             // (t-76434): ended before the panes it would hold out of their
             // conversations come back, on a thread of its own.
