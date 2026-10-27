@@ -131,26 +131,37 @@ const barWords = () => {
   };
 };
 
-/* The bar's own gap and the token it should be at the width the page is now. */
+/* The bar's own gap and the token it should be at the width the page is now.
+ * The width is the bar's content box — what its container query reads — so
+ * the gap closes exactly where the account line folds to its numbers. */
 const barGap = () => {
   const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  const width = document.querySelector(".statusbar").getBoundingClientRect().width;
+  const bar = document.querySelector(".statusbar");
+  const style = getComputedStyle(bar);
+  const width = bar.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
   return {
-    gap: getComputedStyle(document.querySelector(".statusbar")).columnGap,
+    width,
+    gap: style.columnGap,
     want: token(width <= 900 ? "--space-2" : width <= 1100 ? "--space-3" : "--space-4"),
   };
 };
 
-/* A crowded bar (t-77705): the Codex PTY mark through its own paint, a PR
- * mark in the catalog's words, the refresh button, and — with `codex` — a
- * second gauge through the real usage paint. */
+/* Window widths just past each of the bar's thresholds: inside the bar's own
+ * padding, where the window is wider than the line the container reads. */
+export const EDGE_WIDTHS = [1124, 1110, 924, 910];
+
+/* A crowded bar (t-77705): the Codex PTY and PR marks through their own
+ * paints, the refresh button, and — with `codex` — a second gauge through the
+ * real usage paint. */
 async function crowd(page, codex) {
   await page.evaluate(async (codex) => {
     codexPtyFallbacks.set(7, "the native route was refused");
     paintCodexPtyFallbacks();
-    const mark = el("sb-scm-notices");
-    mark.hidden = false;
-    el("sb-scm-notices-label").textContent = t("checks.observe.mark", "PR 조건 {{count}}", { count: 2 });
+    scmStanding = [
+      { id: "pr-123", kind: "mergeable", number: 123, checkout: "zerocode" },
+      { id: "pr-124", kind: "ci", number: 124, checkout: "zerocode" },
+    ];
+    paintScmMark();
     el("sb-usage-refresh").hidden = false;
     if (codex) {
       const hour = 3_600_000;
@@ -260,6 +271,15 @@ export async function testNarrowWindow(browser, origin, ok) {
       ok(`an item that fits again drops the words it was shortened by (${locale})`,
         stale.narrow.includes("overlong") && !stale.after.includes("overlong"), JSON.stringify(stale));
 
+      // The gap closes where the numbers fold, not 24 px of padding later:
+      // the window just past each threshold still folds (t-77705 review).
+      for (const width of EDGE_WIDTHS) {
+        await page.setViewportSize({ width, height: 700 });
+        await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+        const gap = await page.evaluate(barGap);
+        ok(`the bar's gaps are the width's (${locale}, ${width} pt)`, gap.gap === gap.want, JSON.stringify(gap));
+      }
+
       // A crowded bar (t-77705): with a mark, and with a mark and a second
       // gauge, nothing lies past the edge, the bar keeps one line, every mark
       // stays on it and named, and the first gauge's numbers stay whole.
@@ -275,8 +295,18 @@ export async function testNarrowWindow(browser, origin, ok) {
           ok(`a crowded bar keeps inside the window on one line (${tag})`,
             m.clipped === 0 && m.statusRows === 1, JSON.stringify(m));
           ok(`a crowded bar keeps every mark on it (${tag})`,
-            on.every((one) => one.on) && on[0].name.length > 0, JSON.stringify(on));
+            on.every((one) => one.on && one.name.length > 0), JSON.stringify(on));
           ok(`a crowded bar keeps its numbers whole (${tag})`, words.whole, JSON.stringify(words));
+          if (width <= 800) {
+            // What folded is on the hover, the account's short id included.
+            const said = await page.evaluate(() => {
+              el("sb-claude-pct").dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+              const account = el("sb-claude-account");
+              return { tip: el("sb-claude").dataset.tip ?? "", account: account.hidden ? "" : account.textContent.trim() };
+            });
+            ok(`a crowded bar's folded account id is on the hover (${tag})`,
+              said.account.length > 0 && said.tip.includes(said.account), JSON.stringify(said));
+          }
         }
       }
       ok(`the window raises no browser errors (${locale})`, faults.length === 0, faults.join("\n"));
