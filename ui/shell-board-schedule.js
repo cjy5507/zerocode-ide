@@ -14,7 +14,14 @@
  *
  * 그림은 부품 하나다(`paintBoardScheduleHost`): 어느 그릇에 담겨도 그 그릇의 폭으로
  * 접힌다(shell.css 「일정」 절의 `@container board-schedule`). 그릇은 작업 상황판의 네 탭
- * 가운데 「일정」의 블록이다(shell-board-now.js의 `BOARD_TABS`, t-67607의 시안 B). */
+ * 가운데 「일정」의 블록이다(shell-board-now.js의 `BOARD_TABS`, t-67607의 시안 B).
+ *
+ * 그림은 둘이다(t-77628, 사람이 통과시킨 시안 B p-e7e48c0f0a3959fa): 「지금 앞뒤」와 「하루」는 출발
+ * 안내판 넉 줄(다음 발행 · 게이트 · 착지 대기 · 끝남 — 큰 시각이나 수 하나, 색 띠와 낱말, 행동 칩)과
+ * 캘린더 하루 보기식 세로 시간표(열 넷, 시간이 아래로, 「지금」 가로선, 겹치면 나란히)이고, 「한 주」는
+ * 가로 막대 차트 그대로다. 모델은 하나(`boardScheduleModel`)이고 그 행이 막대도 블록도 된다. 기다리는
+ * 과업은 그것을 실은 게이트를 안다 — 일감의 `# task:` 줄이나 `what` 줄의 과업 id로 — 그래서 왜 기다리는지
+ * 말하고, 게이트가 돌면 그 예상 끝을 물려받는다. */
 
 /* 일정의 박자와 범위, 한 표. */
 const BOARD_SCHEDULE = Object.freeze({
@@ -52,6 +59,15 @@ const BOARD_SCHEDULE = Object.freeze({
    * 거리 안에 선 눈금은 글을 감추고 시간 선만 남긴다 — 시안 v2의 칩은 정시 글 곁에 서지, 그 위에
    * 겹치지 않는다(t-71840). */
   nowChipPx: 48,
+  /* 세로 시간표의 홈통(t-77628): 눈금 글 하나의 자리(높이, CSS px)와 「지금 hh:mm」 칩의 높이. 칩과 눈금 글의
+   * 반높이를 더한 거리 안에 든 눈금은 글을 감춘다 — 축의 규칙 그대로, 세로로. */
+  calTickRoomPx: 28,
+  calChipPx: 18,
+  /* 게이트 블록의 단계 칸 줄: 칸 하나의 폭과 칸 사이 틈(CSS px) — 상태 점(10 px)과 같은 크기. */
+  stepCellPx: 10,
+  stepGapPx: 3,
+  /* 블록의 최소 높이(CSS px, shell.css의 `max(var(--space-5), …)`와 같은 값): 그보다 짧은 일도 한 줄은 선다. */
+  blockLeastPx: 24,
   /* 눈금 글 둘 사이에 남기는 틈(CSS px). 한 글이 차지하는 자리는 `tickRoomPx`와 (잰 글 폭 + 이 틈) 가운데
    * 큰 쪽이다 — 글꼴이 커지거나 낱말이 길어지면 자리가 따라 커진다(검토 t-69069 P3 ⑧). */
   tickGapPx: 12,
@@ -419,6 +435,65 @@ function boardScheduleJobLabel(name) {
   return String(name).replace(/^[09]-/, "").replace(/^\d{9,11}-/, "");
 }
 
+/* 일감이 실은 과업의 id(t-77628): `# task:` 줄(`tasks`)이 있으면 그것, 없으면 `# what:` 줄에 적힌
+ * 「t-77350 grid + t-77414/77495/77530 ctty helper」 꼴 — 빗금 뒤의 수는 앞 id의 접두를 생략한 것이다.
+ * 지금 줄의 일감은 `# task:` 줄을 적지 않아 `what`이 유일한 길이고, 게이트 도구가 그 줄을 적게 되면
+ * 창은 바꿀 것이 없다. */
+function boardScheduleJobTaskIds(job) {
+  const ids = new Set((Array.isArray(job.tasks) ? job.tasks : []).map(String).filter((id) => /^t-\d+$/.test(id)));
+  if (ids.size === 0 && typeof job.what === "string") {
+    for (const hit of job.what.matchAll(/\bt-(\d+)((?:\/\d+)*)/g)) {
+      ids.add(`t-${hit[1]}`);
+      for (const more of hit[2].split("/")) {
+        if (more) ids.add(`t-${more}`);
+      }
+    }
+  }
+  return ids;
+}
+
+/* 과업 id → 그 과업을 실은 게이트. 둘 이상이 실었으면 가장 나중에 넣은 일감의 게이트다. */
+function boardScheduleTaskGates(jobs) {
+  const carried = new Map();
+  for (const job of jobs) {
+    if (!job.gate) continue;
+    const at = Number(job.queued_ms) || Number(job.start_ms) || 0;
+    for (const id of boardScheduleJobTaskIds(job)) {
+      const held = carried.get(id);
+      if (!held || at >= held.at) carried.set(id, { gate: job.gate, at });
+    }
+  }
+  return carried;
+}
+
+/* 같은 열에서 시간이 겹치는 블록은 캘린더처럼 나란히 선다(t-77628): 시작 차례로 걸으며 겹치는 것끼리 한
+ * 묶음이고, 묶음 안에서는 먼저 비는 부열에 선다. 부열의 수는 묶음의 것이라, 혼자인 블록은 열을 다 쓴다.
+ * 블록은 글 한 줄보다 낮아지지 않으므로(`leastMs`: 그 최소 높이가 덮는 시간) 2분짜리 둘이 3분 간격으로 서면
+ * 그림에서는 겹친다 — 겹침은 그린 길이로 센다. 같은 입력이면 같은 자리다. 행에 `col`·`cols`를 적는다. */
+function boardScheduleSubColumns(rows, leastMs = 0) {
+  const until = (row) => Math.max(row.end, row.start + Math.max(1, leastMs));
+  let cluster = [];
+  let reach = -Infinity;
+  const place = () => {
+    const ends = [];
+    for (const row of cluster) {
+      let col = ends.findIndex((end) => end <= row.start);
+      if (col < 0) col = ends.push(row.start) - 1;
+      ends[col] = until(row);
+      row.col = col;
+    }
+    for (const row of cluster) row.cols = ends.length;
+    cluster = [];
+  };
+  for (const row of rows) {
+    if (cluster.length > 0 && row.start >= reach) place();
+    cluster.push(row);
+    reach = Math.max(reach, until(row));
+  }
+  if (cluster.length > 0) place();
+  return rows;
+}
+
 function boardScheduleJobRow(job, plan, now, stall, depth) {
   const place = plan.get(job.name);
   const start = Number(job.start_ms) || place?.start || Number(job.end_ms) || now;
@@ -511,7 +586,8 @@ function boardScheduleLaneRows(lanes, now) {
 }
 
 /* 결합 게이트: 이름의 `-l<NN>` 토막마다 머리 한 행과, 펴면 바로 아래에 서는 그 일감들. 도는 일감이나
- * 기다리는 일감이 있는 게이트는 처음부터 펴져 있다. */
+ * 기다리는 일감이 있는 게이트는 처음부터 펴져 있다. 머리 행은 제 단계들의 상태(`steps`, 세로 시간표의
+ * 단계 칸 줄)와 사실 한 벌(`facts`: 안내판과 기다리는 과업이 읽는다)을 함께 든다. */
 function boardScheduleGateRows(jobs, plan, now, choice, stall) {
   const gates = new Map();
   for (const job of jobs) {
@@ -535,6 +611,7 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
     const count = (states) => steps.filter((job) => states.includes(job.state)).length;
     const open = count(["running", "waiting", "held"]);
     const failed = count(["failed", "capped", "refused"]);
+    const green = count(["passed"]);
     const parts = [...new Set(members.map((job) => job.part).filter(Boolean))].sort();
     const state = count(["running"]) > 0 ? "running" : open > 0 ? "waiting" : failed > 0 ? "failed" : "done";
     const said = state === "running"
@@ -560,13 +637,26 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
       : state === "failed"
         ? t("board.schedule.gateFailedCount", "실패 {{count}}개", { count: failed })
         : `${steps.length - open}/${steps.length}`;
+    const basis = placed.some((row) => row.basis === "cap") ? "cap" : "history";
+    const unknown = state === "waiting" && Boolean(stall);
+    // The tasks the gate carries, by its jobs' `# task:` lines or their `what` lines (t-77628).
+    const carried = new Set();
+    for (const job of members) {
+      for (const id of boardScheduleJobTaskIds(job)) carried.add(id);
+    }
+    const failedJob = steps.find((job) => ["failed", "capped", "refused"].includes(job.state)) ?? null;
+    const facts = {
+      gate, state, start, end, basis, unknown, green, total: steps.length, failed,
+      failedKinds: kinds(["failed", "capped", "refused"]), failedJob: failedJob?.name ?? null,
+      carried, opened,
+    };
     entries.push({
       head: boardScheduleRow({
         key: `gate:${gate}`, label: t("board.schedule.gateName", "{{gate}} 결합 게이트", { gate }),
         tip: [parts.join("·"), ...members.map((job) => job.name)].filter(Boolean).join(" · "), start, end, state,
-        basis: placed.some((row) => row.basis === "cap") ? "cap" : "history", said,
+        basis, said,
         sub: boardScheduleSub(state, tally, state === "done" || state === "failed" ? boardScheduleClock(end, now) : ""),
-        eta: boardScheduleEndWord(state, end, now, state === "waiting" && Boolean(stall)),
+        eta: boardScheduleEndWord(state, end, now, unknown),
         etaSub: state === "running"
           ? t("board.schedule.left", "{{time}} 남음", { time: boardScheduleSpan(end - now) })
           : state === "waiting"
@@ -581,8 +671,12 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
             : kinds(["running"]).join(" · "),
         aheadLabel: kinds(["waiting", "held"]).join(" · "),
         act: { fold: gate, opened }, opened, paused: Boolean(stall) && state === "waiting",
+        // The step cells of the vertical timetable's gate block, in the steps' order.
+        steps: steps.map((job) => BOARD_SCHEDULE_JOB_STATES[job.state] ?? "idle"),
+        facts,
       }),
       rows: opened ? placed : [],
+      facts,
     });
   }
   return entries;
@@ -617,8 +711,10 @@ function boardScheduleTaskEnd(times, landing) {
 /* 워커 과업: 데스크가 읽은 원장의 과업 가운데 시각을 가진 것. 막대는 첫 시도의 시작부터 — 도는 것과
  * 기다리는 것은 지금까지, 끝난 것은 그 끝(`boardScheduleTaskEnd`)까지 — 서고, 그 안에 넘김과 검증의
  * 자리를 표시한다. 끝난 것은 범위 안에서 가장 최근에 끝난 몇만 행이 되고 나머지는 수다. `landings`는
- * 일정의 답이 git에서 읽어 온 착지·발행이다(과업 id마다). */
-function boardScheduleTaskRows(tasks, now, landings, from, opened) {
+ * 일정의 답이 git에서 읽어 온 착지·발행이다(과업 id마다). `link`는 게이트와의 이음(t-77628): 과업 id →
+ * 실은 게이트(`carried`), 게이트 → 그 사실(`gates`) — 기다리는 과업이 왜 기다리는지와, 실린 게이트가
+ * 돌면 그 예상 끝을 물려받는다. */
+function boardScheduleTaskRows(tasks, now, landings, from, opened, link = null) {
   const moving = [];
   const ended = [];
   for (const task of Array.isArray(tasks) ? tasks : []) {
@@ -634,19 +730,47 @@ function boardScheduleTaskRows(tasks, now, landings, from, opened) {
     if (end >= from) ended.push({ task, landing, start, end, known: at !== null });
   }
   const { kept, more } = boardScheduleEndedKept(ended, opened);
-  return { rows: [...kept, ...moving].map((one) => boardScheduleTaskRow(one, now)), more };
+  return { rows: [...kept, ...moving].map((one) => boardScheduleTaskRow(one, now, link)), more };
 }
 
-function boardScheduleTaskRow({ task, landing, start, end, known }, now) {
+/* 기다리는 과업과 그것을 실은 게이트(t-77628): 게이트가 돌거나 기다리면 그 예상 끝을 물려받고 셋째 줄이
+ * 「l80에 실림 → 도는 중 · 15:40 끝 예상」을 말한다. 실패했으면 지금에서 끝나고 「실패로 멈춤」, 통과했으면
+ * 「코디 차례」다. 실린 게이트가 없으면 null. */
+function boardScheduleTaskRide(task, now, link) {
+  const ride = link?.carried.get(task.id);
+  const gate = ride ? link.gates.get(ride.gate) : null;
+  if (!gate) return null;
+  const word = gate.state === "running"
+    ? t("board.schedule.whyRunning", "{{gate}}에 실림 → 도는 중 · {{time}} 끝 예상", {
+      gate: gate.gate, time: boardScheduleClock(gate.end, now),
+    })
+    : gate.state === "waiting"
+      ? gate.unknown
+        ? t("board.schedule.whyWaitingUnknown", "{{gate}}에 실림 → 차례 기다림 · 시작 모름", { gate: gate.gate })
+        : t("board.schedule.whyWaiting", "{{gate}}에 실림 → 차례 기다림 · {{time}} 시작 예상", {
+          gate: gate.gate, time: boardScheduleClock(gate.start, now),
+        })
+      : gate.state === "failed"
+        ? t("board.schedule.whyFailed", "{{gate}}에 실림 → 실패로 멈춤", { gate: gate.gate })
+        : t("board.schedule.whyPassed", "{{gate}} 통과 → 코디 차례", { gate: gate.gate });
+  const inherits = ["running", "waiting"].includes(gate.state) && gate.end > now;
+  return { gate: gate.gate, state: gate.state, end: inherits ? gate.end : now, basis: inherits ? gate.basis : "history",
+    inherits, word, act: gate.failedJob ? { log: { job: gate.failedJob } } : { fold: gate.gate, opened: gate.opened } };
+}
+
+function boardScheduleTaskRow({ task, landing, start, end, known }, now, link = null) {
   const times = task.times;
   const stage = DESK_STAGES.find((one) => one.id === task.stage);
   const word = stage ? t(stage.key, stage.word) : String(task.stage);
   const since = Math.max(Number(times.verified_ms) || 0, Number(times.handed_ms) || 0, start);
   const state = BOARD_SCHEDULE_TASK_STATES[task.stage];
+  const ride = state === "waiting" ? boardScheduleTaskRide(task, now, link) : null;
+  const waited = boardScheduleSpan(now - since);
   const said = state === "running"
     ? t("board.schedule.taskRunning", "{{stage}} · {{time}}째", { stage: word, time: boardScheduleSpan(now - start) })
     : state === "waiting"
-      ? t("board.schedule.taskWaiting", "{{stage}} · 기다린 지 {{time}}", { stage: word, time: boardScheduleSpan(now - since) })
+      ? [t("board.schedule.taskWaiting", "{{stage}} · 기다린 지 {{time}}", { stage: word, time: waited }), ride?.word]
+        .filter(Boolean).join(" · ")
       : known
         ? t("board.schedule.taskLanded", "{{stage}} · {{time}} 걸림", { stage: word, time: boardScheduleSpan(end - start) })
         : t("board.schedule.taskNoEnd", "{{stage}} · 끝 기록 없음", { stage: word });
@@ -658,15 +782,20 @@ function boardScheduleTaskRow({ task, landing, start, end, known }, now) {
   const carrier = deskTaskCarrier(task);
   const handed = boardScheduleMoment(times.handed_ms);
   const over = BOARD_SCHEDULE_ENDED_STATES.includes(state);
+  // A waiting task carried by a gate still running ends where the gate is expected to (t-77628).
+  const until = ride?.inherits ? ride.end : end;
   return boardScheduleRow({
-    key: `task:${task.run}/${task.id}`, label: `${task.id} ${task.title}`,
+    key: `task:${task.run}/${task.id}`, label: `${task.id} ${task.title}`, id: task.id, title: task.title,
     tip: [`${task.id} · ${task.title}`, task.run, t("board.schedule.tipTask",
       "시작 {{start}} · 넘김 {{handed}} · 검증 {{verified}} · 착지 {{landed}} · 발행 {{released}}", {
         start: clock(times.started_ms), handed: clock(times.handed_ms), verified: clock(times.verified_ms),
         landed: clock(landing?.landed_ms ?? times.landed_ms), released: clock(landing?.released_ms),
       })].filter(Boolean).join(" · "),
-    start, end, state, said,
+    start, end: until, state, said, basis: ride?.inherits ? ride.basis : "history",
     sub: boardScheduleSub(state, carrier?.worker, word, over && known ? boardScheduleClock(end, now) : ""),
+    why: ride?.word ?? "",
+    ride: ride ? { gate: ride.gate, state: ride.state, inherits: ride.inherits } : null,
+    waitedMs: state === "waiting" ? now - since : 0,
     // The end cell speaks the way the Now tab's does: how long it has run, 「대기」, or that it ended.
     eta: state === "running"
       ? t("board.schedule.since", "{{time}}째", { time: boardScheduleSpan(now - start) })
@@ -676,15 +805,15 @@ function boardScheduleTaskRow({ task, landing, start, end, known }, now) {
     etaSub: state === "running"
       ? ""
       : state === "waiting"
-        ? t("board.schedule.waited", "기다린 지 {{time}}", { time: boardScheduleSpan(now - since) })
+        ? t("board.schedule.waited", "기다린 지 {{time}}", { time: waited })
         : known
           ? t("board.schedule.took", "{{time}} 걸림", { time: boardScheduleSpan(end - start) })
           : t("board.schedule.lost", "끝 기록 없음"),
     // A finished bar carries its stage; one waiting is filled to its hand-in and dashed from there, named by its stage.
     nowLabel: over ? word : "",
     aheadLabel: state === "waiting" ? word : "",
-    doneShare: state === "waiting" && handed !== null && end > start
-      ? Math.min(1, Math.max(0, (handed - start) / (end - start))) : null,
+    doneShare: state === "waiting" && handed !== null && until > start
+      ? Math.min(1, Math.max(0, (handed - start) / (until - start))) : null,
     act: { task: { run: task.run, id: task.id, stage: task.stage } },
   });
 }
@@ -696,6 +825,12 @@ let boardScheduleCanvas = null;
 function boardScheduleTickFont(axis) {
   const tick = axis.querySelector(".board-schedule-tick");
   return tick ? getComputedStyle(tick).font : getComputedStyle(axis).getPropertyValue("--type-label-12-mono").trim();
+}
+
+/* 홈통의 눈금 글 한 줄의 높이(CSS px): 서 있는 눈금의 줄 높이, 아직 없으면 0 — 자리는 그보다 작지 않다. */
+function boardScheduleTickHeight(track) {
+  const tick = track.querySelector(".board-schedule-tick");
+  return tick ? parseFloat(getComputedStyle(tick).lineHeight) || 0 : 0;
 }
 
 function boardScheduleTickMeasure(font) {
@@ -757,10 +892,146 @@ function boardScheduleTicks(from, to, width, zoom, measure = null) {
   return { ticks: sparsest.filter((_, at) => at % every === 0), room };
 }
 
-/* 그릴 것 한 벌: 보이는 범위, 눈금, 묶음 넷과 그 행들. 백엔드의 답과 데스크의 과업,
- * 지금, 고른 것, 축의 폭에서 DOM 없이 짓는다 — 장면 시험이 이것을 그대로 읽는다. */
-function boardScheduleModel(answer, tasks, now, choice, width, loud = false, measure = null) {
+/* 세로 시간표를 그리는 확대(t-77628): 「지금 앞뒤」와 「하루」. 「한 주」는 가로 막대 그대로다 — 캘린더
+ * 주간 보기(날짜 7열)는 다음 판의 것이다. */
+function boardScheduleVertical(zoomId) {
+  return zoomId !== "week";
+}
+
+/* 안내판의 넉 줄(t-77628) — 공항 출발 안내판의 문법: 한 줄에 무엇 · 큰 글(시각이나 수) 하나 · 낱말 · 비고 · 행동.
+ * 다음 발행, 게이트, 착지 대기, 끝남. 줄은 비어도 남고 「—」·「이 범위에 없음」을 말한다. 수는 시간표의 행
+ * 목록에서 센다 — 따로 세지 않는다. */
+function boardScheduleBoardLines(groups, now) {
+  const group = (id) => groups.find((one) => one.id === id);
+  const rows = (id) => (group(id)?.rows ?? []).filter((row) => row.depth === 0);
+  const clock = (ms) => boardScheduleClock(ms, now);
+  const notInRange = t("board.schedule.notInRange", "이 범위에 없음");
+  const logWord = t("board.schedule.actLog", "로그 →");
+  const recordWord = t("board.schedule.actRecord", "기록 →");
+  const stateWord = (state) => (state === "running"
+    ? t(BOARD_RUN_STATES.run.key, BOARD_RUN_STATES.run.word)
+    : state === "waiting"
+      ? t(BOARD_RUN_STATES.queue.key, BOARD_RUN_STATES.queue.word)
+      : state === "failed" ? t("board.schedule.wordFailed", "실패") : t("board.schedule.wordPassed", "통과"));
+  const tones = { running: "run", waiting: "wait", failed: "halt", done: "done" };
+
+  // 1. The next release: the lane running, else the last one that ended in the range.
+  const lanes = rows("lanes");
+  const running = lanes.find((row) => row.state === "running") ?? null;
+  const lastLane = lanes.filter((row) => row.state !== "running").sort((a, b) => b.end - a.end)[0] ?? null;
+  const lane = running
+    ? {
+      tone: running.late ? "wait" : "run", big: running.eta, word: running.etaSub,
+      note: [running.sub, running.basis === "none" ? t("board.schedule.basisNone", "근거 없음") : ""].filter(Boolean).join(" · "),
+      act: running.act, actWord: logWord,
+    }
+    : {
+      tone: "quiet", big: "—", word: t("board.schedule.none", "잡힌 것 없음"),
+      note: lastLane
+        ? t("board.schedule.lastLane", "마지막 {{name}} {{time}} · {{verdict}}", {
+          name: lastLane.label, time: clock(lastLane.end), verdict: lastLane.nowLabel,
+        })
+        : notInRange,
+      act: lastLane?.act ?? null, actWord: lastLane ? logWord : "",
+    };
+
+  // 2. The gate: the one that started last in the range.
+  const gate = rows("gates").slice().sort((a, b) => b.start - a.start)[0] ?? null;
+  const facts = gate?.facts ?? null;
+  const gateLine = gate && facts
+    ? {
+      tone: tones[gate.state] ?? "quiet", name: facts.gate,
+      big: gate.state === "done" || gate.state === "failed" ? clock(gate.end) : gate.eta, word: stateWord(gate.state),
+      note: [
+        facts.failedKinds.length > 0
+          ? t("board.schedule.failedStep", "{{kind}} 실패", { kind: facts.failedKinds.join(" · ") }) : "",
+        t("board.schedule.gateDone", "{{done}}/{{total}} 초록", { done: facts.green, total: facts.total }),
+        facts.carried.size > 0 ? t("board.schedule.carriedCount", "과업 {{count}}건 실림", { count: facts.carried.size }) : "",
+        gate.etaSub,
+      ].filter(Boolean).join(" · "),
+      act: facts.failedJob ? { log: { job: facts.failedJob } } : gate.act,
+      actWord: facts.failedJob ? logWord : t("board.schedule.actOpen", "펴기 →"),
+    }
+    : { tone: "quiet", name: "", big: "—", word: "", note: notInRange, act: null, actWord: "" };
+
+  // 3. Tasks waiting to land, and what they wait for.
+  const waiting = rows("workers").filter((row) => row.state === "waiting");
+  const oldest = waiting.slice().sort((a, b) => b.waitedMs - a.waitedMs)[0] ?? null;
+  const rides = waiting.filter((row) => row.ride);
+  const byGate = new Map();
+  for (const row of rides) byGate.set(row.ride.gate, (byGate.get(row.ride.gate) ?? 0) + 1);
+  const [topGate, topCount] = [...byGate].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0] ?? [null, 0];
+  const topState = rides.find((row) => row.ride.gate === topGate)?.ride.state ?? null;
+  const blocked = rides.some((row) => row.ride.state === "failed");
+  const gating = rides.some((row) => ["running", "waiting"].includes(row.ride.state));
+  const waitingLine = {
+    tone: waiting.length === 0 ? "quiet" : blocked ? "halt" : "wait",
+    big: t("board.schedule.countOf", "{{count}}건", { count: waiting.length }),
+    word: waiting.length === 0
+      ? t("board.schedule.noneWaiting", "없음")
+      : blocked
+        ? t("board.schedule.blocked", "막힘")
+        : gating ? t("board.schedule.gateRunningWord", "게이트 도는 중") : t("board.schedule.coordTurn", "코디 차례"),
+    note: oldest
+      ? [
+        t("board.schedule.oldest", "가장 오래 {{time}} ({{id}})", { time: boardScheduleSpan(oldest.waitedMs), id: oldest.id }),
+        topGate
+          ? t("board.schedule.carriedBy", "{{count}}건 {{gate}}에 실림 → {{state}}", {
+            count: topCount, gate: topGate, state: stateWord(topState),
+          })
+          : "",
+      ].filter(Boolean).join(" · ")
+      : "",
+    act: oldest?.act ?? null, actWord: oldest ? recordWord : "",
+  };
+
+  // 4. What ended in the range, the folded ones counted in.
+  const ended = rows("workers").filter((row) => BOARD_SCHEDULE_ENDED_STATES.includes(row.state));
+  const endedCount = ended.length + (group("workers")?.more ?? 0);
+  const last = ended.slice().sort((a, b) => b.end - a.end)[0] ?? null;
+  const endedLine = {
+    tone: endedCount > 0 ? "done" : "quiet",
+    big: t("board.schedule.countOf", "{{count}}건", { count: endedCount }),
+    word: t(BOARD_RUN_STATES.done.key, BOARD_RUN_STATES.done.word),
+    note: last
+      ? t("board.schedule.lastEnded", "마지막 {{time}} · {{stage}}", { time: clock(last.end), stage: last.nowLabel })
+      : notInRange,
+    act: endedCount > 0 ? { history: true } : null, actWord: endedCount > 0 ? recordWord : "",
+  };
+
+  return {
+    head: {
+      now: t("board.schedule.nowClock", "지금 {{time}}", { time: clock(now) }),
+      sum: [
+        running
+          ? t("board.schedule.boardLaneAt", "다음 발행 {{time}}", { time: running.eta })
+          : t("board.schedule.boardLaneNone", "다음 발행 없음"),
+        gate ? t("board.schedule.boardGate", "게이트 {{word}}", { word: gateLine.word }) : "",
+        t("board.schedule.boardWaiting", "착지 대기 {{count}}", { count: waiting.length }),
+      ].filter(Boolean).join(" · "),
+    },
+    lines: [
+      { id: "lane", what: t("board.schedule.lineLane", "다음 발행"), whatSub: t("board.schedule.lineLaneSub", "발행 레인"), ...lane },
+      {
+        id: "gate", what: [t("board.schedule.lineGate", "게이트"), gateLine.name].filter(Boolean).join(" "),
+        whatSub: t("board.schedule.lineGateSub", "결합 게이트"), ...gateLine,
+      },
+      {
+        id: "waiting", what: t("board.schedule.lineWaiting", "착지 대기"),
+        whatSub: t("board.schedule.lineWaitingSub", "검증됨 · 코디 차례"), ...waitingLine,
+      },
+      { id: "ended", what: t("board.schedule.lineEnded", "끝남"), whatSub: t("board.schedule.lineEndedSub", "이 범위"), ...endedLine },
+    ],
+  };
+}
+
+/* 그릴 것 한 벌: 보이는 범위, 눈금, 묶음 넷과 그 행들, 안내판 넉 줄. 백엔드의 답과 데스크의 과업,
+ * 지금, 고른 것, 축의 폭에서 DOM 없이 짓는다 — 장면 시험이 이것을 그대로 읽는다. 세로 시간표를 그리는
+ * 확대면(`vertical`) 시각 홈통의 눈금(`gutter`)과 블록의 부열(`col`·`cols`)도 여기서 정한다 — 시간당
+ * 높이(`hourPx`)는 CSS의 것이라 그릇이 읽어 넘긴다. */
+function boardScheduleModel(answer, tasks, now, choice, width, loud = false, measure = null, hourPx = 0, tickPx = 0) {
   const zoom = BOARD_SCHEDULE.zooms[choice.zoom] ?? BOARD_SCHEDULE.zooms.now;
+  const vertical = boardScheduleVertical(choice.zoom);
   const jobs = Array.isArray(answer?.jobs) ? answer.jobs : [];
   const lanes = Array.isArray(answer?.lanes) ? answer.lanes : [];
   const facts = answer?.line ?? {};
@@ -770,14 +1041,17 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false, mea
   const anchor = boardScheduleAnchor(zoom, now);
   const from = anchor - zoom.beforeMs;
   const opened = (group) => choice.opened.has(`ended:${group}`);
+  // The gates first: the tasks they carry read their facts (t-77628).
+  const gates = boardScheduleGateRows(jobs, plan, now, choice, stall);
+  const link = { carried: boardScheduleTaskGates(jobs), gates: new Map(gates.map((entry) => [entry.facts.gate, entry.facts])) };
   // The line and the workers fold their finished rows before they build them; lanes and gates are few.
   const line = boardScheduleLineRows(jobs, plan, now, stall, from, opened("line"));
-  const workers = boardScheduleTaskRows(tasks, now, answer?.landings, from, opened("workers"));
+  const workers = boardScheduleTaskRows(tasks, now, answer?.landings, from, opened("workers"), link);
   // Each group as entries: a row, and the rows standing under it (a gate's jobs).
   const alone = (row) => ({ head: row, rows: [] });
   const built = {
     lanes: { entries: boardScheduleLaneRows(lanes, now).map(alone), more: null },
-    gates: { entries: boardScheduleGateRows(jobs, plan, now, choice, stall), more: null },
+    gates: { entries: gates, more: null },
     line: { entries: line.rows.map(alone), more: line.more },
     workers: { entries: workers.rows.map(alone), more: workers.more },
   };
@@ -790,6 +1064,8 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false, mea
   const span = Math.max(1, to - from);
   const percent = (ms) => Math.min(100, Math.max(0, ((ms - from) / span) * 100));
   const seen = (row) => row.end >= from && row.start <= to;
+  // A block is at least one line tall (`blockLeastPx`): the time that height covers, for the side-by-side test.
+  const leastMs = hourPx > 0 ? (BOARD_SCHEDULE.blockLeastPx / hourPx) * 3_600_000 : 0;
   const groups = BOARD_SCHEDULE_GROUPS.map((group) => {
     let { entries, more } = built[group.id];
     entries = entries.filter((entry) => seen(entry.head));
@@ -808,16 +1084,32 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false, mea
       // 적는다 — 값은 바꾸지 않는다(코디 m-67652).
       said: loud && row.depth === 0 && ["running", "waiting"].includes(row.state)
         ? t("board.schedule.loud", "{{said}} · 부하 높음·늦어질 수 있음", { said: row.said }) : row.said,
+      // A block cut at the range's start says since when (t-77628); the chart's rows keep their words.
+      sub: vertical && row.depth === 0 && row.start < from
+        ? [row.sub, t("board.schedule.fromAt", "{{time}}부터", { time: boardScheduleClock(row.start, now) })].filter(Boolean).join(" · ")
+        : row.sub,
       from: percent(row.start),
       to: percent(Math.max(row.end, row.start)),
       done: row.doneShare ?? (row.state === "running" && row.end > row.start
         ? Math.min(1, Math.max(0, (now - row.start) / (row.end - row.start))) : row.state === "waiting" ? 0 : 1),
+      // The vertical timetable's block (t-77628): cut at the top when it began before the range, and the
+      // share of a waiting task's block that is the gate's time still ahead.
+      cut: row.start < from,
+      mark: row.ride?.inherits && row.end > row.start
+        ? Math.min(1, Math.max(0, (now - row.start) / (row.end - row.start))) : null,
+      col: 0,
+      cols: 1,
     }));
+    const heads = boardScheduleSubColumns(rows.filter((row) => row.depth === 0), leastMs);
     return {
       id: group.id,
       label: t(group.key, group.word),
       folded: choice.folded.has(group.id),
-      count: rows.filter((row) => row.depth === 0).length,
+      count: heads.length,
+      waiting: heads.filter((row) => ["waiting", "held"].includes(row.state)).length,
+      ended: heads.filter((row) => BOARD_SCHEDULE_ENDED_STATES.includes(row.state)).length + more,
+      // The most sub-columns one cluster of the column needs: the column is at least that many narrow ones wide.
+      subcols: Math.max(1, ...heads.map((row) => row.cols)),
       rows,
       more,
       moreOpened: opened(group.id),
@@ -828,10 +1120,28 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false, mea
   const nowAt = percent(now);
   const axis = boardScheduleTicks(from, to, width, zoom, measure);
   const covers = (axis.room + BOARD_SCHEDULE.nowChipPx) / 2;
-  return { from, to, now, nowAt, ticks: axis.ticks.map((tick) => {
-    const at = percent(tick.at);
-    return { ...tick, at, covered: (Math.abs(at - nowAt) / 100) * width < covers };
-  }), groups, stall, heading };
+  // The vertical gutter's ticks are counted by its height, as the axis's by its width (t-71840's rule).
+  const hours = span / 3_600_000;
+  const height = hourPx > 0 ? hours * hourPx : 0;
+  const tickRoom = Math.max(BOARD_SCHEDULE.calTickRoomPx, Math.ceil(tickPx + BOARD_SCHEDULE.tickGapPx));
+  const gutter = vertical && height > 0
+    ? boardScheduleTicks(from, to, height, { ticksMs: zoom.ticksMs, tickRoomPx: tickRoom })
+    : { ticks: [], room: tickRoom };
+  const chipReach = (gutter.room + BOARD_SCHEDULE.calChipPx) / 2;
+  return {
+    from, to, now, nowAt, groups, stall, heading, vertical, hours,
+    ticks: axis.ticks.map((tick) => {
+      const at = percent(tick.at);
+      return { ...tick, at, covered: (Math.abs(at - nowAt) / 100) * width < covers };
+    }),
+    gutter: gutter.ticks.map((tick) => {
+      const at = percent(tick.at);
+      return { ...tick, at, covered: (Math.abs(at - nowAt) / 100) * height < chipReach };
+    }),
+    board: boardScheduleBoardLines(groups, now),
+    // Nothing moving is expected to end after now: the timetable says so under the 「now」 line.
+    aheadEmpty: latest <= now,
+  };
 }
 
 /* ---- 그림 ----------------------------------------------------------------------- */
@@ -843,9 +1153,34 @@ function boardScheduleElement(tag, className, text = "") {
   return node;
 }
 
-/* 그릇의 뼈대: 머리(확대와 줄의 사정), 차트(눈금·「지금」 선·묶음 넷), 로그 칸, 빈 말.
- * 한 번 짓고 키로 살아남는다. */
-function boardScheduleSkeleton(host) {
+/* 행이나 블록이나 안내판의 줄을 누르면: 게이트를 펴거나 접고, 로그를 열고, 과업은 「기록」 탭으로. */
+function boardScheduleAct(view, act) {
+  if (!act) return;
+  if (act.fold) {
+    const gate = act.fold;
+    boardScheduleChoice.opened.delete(gate);
+    boardScheduleChoice.opened.delete(`-${gate}`);
+    boardScheduleChoice.opened.add(act.opened ? `-${gate}` : gate);
+    noteBoardScheduleChoice();
+    paintBoardScheduleHosts();
+  } else if (act.log) openBoardScheduleLog(act.log);
+  else if (act.task) openBoardScheduleTask(view, act.task);
+  else if (act.history) chooseBoardTab(view, "history", false);
+}
+
+/* 행동 칩의 말: 로그가 열리는지, 기록 탭으로 가는지, 게이트가 펴지는지 — 손이 닿은 행이 말한다(t-77628). */
+function boardScheduleActWord(act) {
+  if (!act) return "";
+  if (act.log) return t("board.schedule.actLog", "로그 →");
+  if (act.task || act.history) return t("board.schedule.actRecord", "기록 →");
+  if (act.fold) return act.opened ? t("board.schedule.actFold", "접기 →") : t("board.schedule.actOpen", "펴기 →");
+  return "";
+}
+
+/* 그릇의 뼈대: 머리(확대와 줄의 사정), 가로 차트(눈금·「지금」 선), 안내판과 세로 시간표(t-77628), 묶음 넷,
+ * 로그 칸, 빈 말. 한 번 짓고 키로 살아남는다. 묶음 상자 넷은 하나뿐이고, 확대에 따라 가로 차트와 세로
+ * 시간표 사이를 옮겨 다닌다 — 한 주는 차트의 행으로, 지금 앞뒤와 하루는 시간표의 열로 선다. */
+function boardScheduleSkeleton(host, view) {
   const head = boardScheduleElement("div", "board-schedule-head");
   const zoom = boardScheduleElement("div", "board-mode board-schedule-zoom");
   zoom.setAttribute("role", "group");
@@ -875,6 +1210,7 @@ function boardScheduleSkeleton(host) {
   axis.__now = boardScheduleElement("span", "board-schedule-now");
   band.append(axis);
   chart.append(card, band);
+  const boxes = [];
   for (const group of BOARD_SCHEDULE_GROUPS) {
     const box = boardScheduleElement("div", "board-schedule-group");
     box.dataset.group = group.id;
@@ -898,8 +1234,39 @@ function boardScheduleSkeleton(host) {
       paintBoardScheduleHosts();
     };
     box.append(fold, rows, more);
-    chart.append(box);
+    boxes.push(box);
   }
+  chart.append(...boxes);
+  // The departure board and the vertical timetable (t-77628, the person's draft B).
+  const cal = boardScheduleElement("section", "board-schedule-cal");
+  const board = boardScheduleElement("div", "board-schedule-board");
+  const boardHead = boardScheduleElement("header", "board-schedule-board-head");
+  const boardNow = boardScheduleElement("strong", "board-schedule-board-now");
+  const boardSum = boardScheduleElement("span", "board-schedule-board-sum");
+  boardHead.append(boardNow, boardSum);
+  board.append(boardHead);
+  const lines = [];
+  for (const id of ["lane", "gate", "waiting", "ended"]) {
+    const line = boardScheduleElement("button", "board-schedule-line");
+    line.type = "button";
+    line.dataset.line = id;
+    line.append(boardScheduleElement("span", "board-schedule-line-what"), boardScheduleElement("span", "board-schedule-line-big"),
+      boardScheduleElement("span", "board-schedule-line-note"));
+    line.onclick = () => boardScheduleAct(view, line.__act);
+    lines.push(line);
+  }
+  board.append(...lines);
+  const day = boardScheduleElement("div", "board-schedule-day");
+  const body = boardScheduleElement("div", "board-schedule-cal-body");
+  const gutter = boardScheduleElement("div", "board-schedule-gutter");
+  gutter.setAttribute("aria-hidden", "true");
+  const track = boardScheduleElement("div", "board-schedule-gutter-track");
+  track.__now = boardScheduleElement("span", "board-schedule-now");
+  gutter.append(boardScheduleElement("span", "board-schedule-gutter-head"), track);
+  const aheadEmpty = boardScheduleElement("p", "board-schedule-ahead-empty");
+  body.append(gutter, aheadEmpty);
+  day.append(body);
+  cal.append(board, day);
   const log = boardScheduleElement("section", "board-schedule-log");
   log.hidden = true;
   const logHead = boardScheduleElement("header", "board-schedule-log-head");
@@ -910,7 +1277,9 @@ function boardScheduleSkeleton(host) {
   };
   logHead.append(boardScheduleElement("strong", "board-schedule-log-title"), close);
   log.append(logHead, boardScheduleElement("pre", "board-schedule-log-lines"));
-  host.replaceChildren(head, chart, log, boardScheduleElement("p", "board-schedule-empty"));
+  const empty = boardScheduleElement("p", "board-schedule-empty");
+  host.replaceChildren(head, chart, cal, log, empty);
+  host.__parts = { head, chart, card, band, axis, boxes, cal, boardNow, boardSum, lines, day, body, gutter, track, aheadEmpty, log, empty };
 }
 
 /* 행 하나: 단추 하나에 이름 · 막대 · 말. 막대의 자리는 커스텀 속성 셋(`--from`·`--to`·
@@ -920,20 +1289,20 @@ function boardScheduleRowNode(view) {
   row.type = "button";
   row.append(boardScheduleElement("span", "board-schedule-label"), boardScheduleElement("span", "board-schedule-bar"),
     boardScheduleElement("span", "board-schedule-said"));
-  row.onclick = () => {
-    const act = row.__row?.act;
-    if (!act) return;
-    if (act.fold) {
-      const gate = act.fold;
-      boardScheduleChoice.opened.delete(gate);
-      boardScheduleChoice.opened.delete(`-${gate}`);
-      boardScheduleChoice.opened.add(act.opened ? `-${gate}` : gate);
-      noteBoardScheduleChoice();
-      paintBoardScheduleHosts();
-    } else if (act.log) openBoardScheduleLog(act.log);
-    else if (act.task) openBoardScheduleTask(view, act.task);
-  };
+  row.onclick = () => boardScheduleAct(view, row.__row?.act);
   return row;
+}
+
+/* 블록 하나(t-77628): 단추 하나에 이름(`<b>`, id는 가상 요소) — 요소 둘. 게이트의 블록만 단계 칸 줄(`<i>`)을
+ * 하나 더 든다. 둘째 줄·셋째 줄·행동 칩은 `data-*`를 읽는 가상 요소다. 자리는 커스텀 속성(`--from`·`--to`:
+ * 범위의 퍼센트, `--col`·`--cols`: 부열)이고 CSS가 시간당 높이로 푼다. */
+function boardScheduleBlockNode(view, steps) {
+  const block = boardScheduleElement("button", "board-schedule-block");
+  block.type = "button";
+  block.append(boardScheduleElement("b", "board-schedule-label"));
+  if (steps) block.append(boardScheduleElement("i", "board-schedule-steps"));
+  block.onclick = () => boardScheduleAct(view, block.__row?.act);
+  return block;
 }
 
 /* 행의 글은 있는 글 노드의 `data`만 바꾼다. `textContent`로 노드를 갈아 끼우면 창
@@ -986,70 +1355,215 @@ function paintBoardScheduleRow(node, row) {
   writeAttribute(bar, "data-ahead-label", row.aheadLabel);
 }
 
-/* 그릇 하나를 그린다. 답·데스크·분·고른 것·언어·축의 폭이 지난번과 같으면 아무것도
- * 쓰지 않는다 — 조용한 박자는 DOM을 건드리지 않는다. 막대와 「지금」 선은 분 단위의
- * 지금에 선다: 같은 분 안의 박자는 바뀐 행만 고쳐 쓰고 막대 하나 옮기지 않는다
- * (t-67482: 밀리초의 지금으로는 박자마다 막대 몇 개가 반올림 경계를 넘어 다시 쓰였다).
- * 눈금 수는 축의 폭으로 센다. 넓은 그릇의 축은 이름 칸과 말 칸을 뺀 자리라, 그릇 폭으로
- * 세면 1440 px 창의 축 약 450 px에 세 시간 눈금 여덟이 붙어 섰다(t-67482). */
-function paintBoardScheduleHost(host, view, now) {
-  if (!boardScheduleBuilt.has(host)) {
-    boardScheduleSkeleton(host);
-    boardScheduleBuilt.add(host);
+/* 게이트 블록의 단계 칸 줄: 칸 하나가 10 px, 틈 3 px — 요소가 아니라 그라디언트 하나다. 상태는 칸의 색이고
+ * 블록의 둘째 줄이 같은 것을 수로 말한다. */
+const BOARD_SCHEDULE_STEP_INKS = Object.freeze({
+  done: "var(--signal-ready)", failed: "var(--signal-halt)", running: "var(--status-dot-run)",
+  waiting: "var(--edge-mark)", held: "var(--edge-mark)", idle: "var(--edge-mark)",
+});
+
+function boardScheduleStepsPaint(steps) {
+  const cell = BOARD_SCHEDULE.stepCellPx;
+  const gap = BOARD_SCHEDULE.stepGapPx;
+  const stops = steps.map((state, index) => {
+    const ink = BOARD_SCHEDULE_STEP_INKS[state] ?? BOARD_SCHEDULE_STEP_INKS.idle;
+    const start = index * (cell + gap);
+    return `transparent ${start}px, ${ink} ${start}px, ${ink} ${start + cell}px, transparent ${start + cell}px`;
+  });
+  return { image: `linear-gradient(to right, ${stops.join(", ")})`, width: `${steps.length * (cell + gap) - gap}px` };
+}
+
+function paintBoardScheduleBlock(node, row) {
+  node.__row = row;
+  const from = row.from.toFixed(2);
+  const to = row.to.toFixed(2);
+  const done = (row.done * 100).toFixed(1);
+  const mark = row.mark === null || row.mark === undefined ? "" : (row.mark * 100).toFixed(1);
+  const steps = Array.isArray(row.steps) ? row.steps.join(",") : "";
+  const actWord = boardScheduleActWord(row.act);
+  const painted = [row.key, row.state, row.basis, row.tip, row.label, row.said, row.sub, row.why, row.eta, row.etaSub,
+    row.nowLabel, row.aheadLabel, Boolean(row.act?.fold), Boolean(row.opened), Boolean(row.paused), Boolean(row.late),
+    Boolean(row.cut), from, to, done, mark, row.col, row.cols, steps, actWord].join("\u0000");
+  if (node.__painted === painted) return;
+  node.__painted = painted;
+  writeAttribute(node, "data-key", row.key);
+  writeAttribute(node, "data-bar-state", row.state);
+  writeAttribute(node, "data-basis", row.basis);
+  writeAttribute(node, "data-depth", "0");
+  writeAttribute(node, "data-tip", row.tip);
+  writeAttribute(node, "data-said", row.said);
+  writeAttribute(node, "data-why", row.why ?? "");
+  writeAttribute(node, "data-eta", row.eta);
+  writeAttribute(node, "data-eta-sub", row.etaSub);
+  writeAttribute(node, "data-now-label", row.nowLabel);
+  writeAttribute(node, "data-ahead-label", row.aheadLabel);
+  writeAttribute(node, "data-steps", steps);
+  writeAttribute(node, "data-act", actWord);
+  writeAttribute(node, "aria-label", [row.label, row.sub, row.said].filter(Boolean).join(" · "));
+  if (row.act?.fold) writeAttribute(node, "aria-expanded", String(Boolean(row.opened)));
+  else if (node.hasAttribute("aria-expanded")) node.removeAttribute("aria-expanded");
+  writeClass(node, "is-paused", Boolean(row.paused));
+  writeClass(node, "is-late", Boolean(row.late));
+  writeClass(node, "is-cut", Boolean(row.cut));
+  writeClass(node, "is-inherited", mark !== "");
+  const [label, strip] = node.children;
+  writeBoardScheduleText(label, row.title ?? row.label);
+  writeAttribute(label, "data-id", row.id ?? "");
+  writeAttribute(label, "data-sub", row.sub);
+  writeCustomProperty(node, "--from", from);
+  writeCustomProperty(node, "--to", to);
+  writeCustomProperty(node, "--done", done);
+  writeCustomProperty(node, "--mark", mark === "" ? "0" : mark);
+  writeCustomProperty(node, "--col", String(row.col ?? 0));
+  writeCustomProperty(node, "--cols", String(row.cols ?? 1));
+  if (strip && Array.isArray(row.steps)) {
+    const paint = boardScheduleStepsPaint(row.steps);
+    writeCustomProperty(strip, "--schedule-steps", paint.image);
+    writeCustomProperty(strip, "--schedule-steps-width", paint.width);
   }
-  const [head, chart, log, empty] = host.children;
-  const [card, band, ...boxes] = chart.children;
-  const axis = band.firstElementChild;
-  const width = axis.clientWidth;
-  const desk = typeof deskLedger === "undefined" ? null : deskLedger;
-  // The machine strip's own reading (`machine_load`, shell-board.js): read, never asked a second time.
-  const machine = typeof deskMachine === "undefined" ? null : deskMachine;
-  const minute = Math.floor(now / BOARD_SCHEDULE.clockMs) * BOARD_SCHEDULE.clockMs;
-  const said = [boardScheduleAnswer, desk, machine, minute, boardScheduleChoiceRevision,
-    document.documentElement.lang, width];
-  const before = boardSchedulePainted.get(host);
-  if (before && before.every((one, at) => one === said[at])) return;
-  boardSchedulePainted.set(host, said);
-  // The type the ticks are set in is read only when the schedule is drawn again — a look that changes nothing
-  // (the same answer, minute and width) does not ask the page's style.
-  const model = boardScheduleModel(boardScheduleAnswer, desk?.tasks, minute, boardScheduleChoice, width,
-    machine?.load?.loud === true, boardScheduleTickMeasure(boardScheduleTickFont(axis)));
-  paintBoardScheduleHead(head, model);
-  const [named, count, legend] = card.children;
-  writeTextContent(named, model.heading);
-  writeTextContent(count, String(model.groups.reduce((sum, group) => sum + group.count, 0)));
-  writeTextContent(legend, t("board.schedule.legend", "막대 끝 = 지난 소요로 잰 예상 · 빗금 = 아직 안 온 구간 · 점선 = 근거 없음"));
-  const ticks = [...axis.children].filter((node) => node !== axis.__now);
-  reconcileElementOrder(axis, [...model.ticks.map((tick, at) => {
-    const node = ticks[at] ?? boardScheduleElement("span", "board-schedule-tick");
+}
+
+/* 눈금 하나하나를 축이나 홈통에 세운다: 글, 자리(`--at`), 칩 밑에 들면 글만 감춤. 안 그리는 쪽은 비운다. */
+function paintBoardScheduleTicks(axis, ticks) {
+  const held = [...axis.children].filter((node) => node !== axis.__now);
+  reconcileElementOrder(axis, [...ticks.map((tick, at) => {
+    const node = held[at] ?? boardScheduleElement("span", "board-schedule-tick");
     writeTextContent(node, tick.label);
     writeCustomProperty(node, "--at", tick.at.toFixed(2));
     writeClass(node, "is-covered", tick.covered);
     return node;
   }), axis.__now]);
-  writeTextContent(axis.__now, t("board.schedule.nowLine", "지금"));
-  writeCustomProperty(chart, "--now", model.nowAt.toFixed(2));
-  // The track's hour lines (the draft's quarter rules): one line on each tick, drawn by every row's track.
-  writeCustomProperty(chart, "--schedule-grid", model.ticks.length === 0 ? "none" : `linear-gradient(to right, ${model.ticks
-    .map((tick) => {
-      const at = `${tick.at.toFixed(2)}%`;
-      return `transparent ${at}, var(--edge-rule) ${at}, var(--edge-rule) calc(${at} + var(--rule-width)), transparent calc(${at} + var(--rule-width))`;
-    }).join(", ")})`);
+}
+
+/* 눈금마다 선 하나: 가로 차트는 트랙의 왼→오른쪽, 세로 시간표는 위→아래. 카드(차트)나 몸통(시간표)에 둔다. */
+function boardScheduleGridPaint(ticks, direction) {
+  if (ticks.length === 0) return "none";
+  return `linear-gradient(to ${direction}, ${ticks.map((tick) => {
+    const at = `${tick.at.toFixed(2)}%`;
+    return `transparent ${at}, var(--edge-rule) ${at}, var(--edge-rule) calc(${at} + var(--rule-width)), transparent calc(${at} + var(--rule-width))`;
+  }).join(", ")})`;
+}
+
+/* 안내판 넉 줄을 쓴다(t-77628): 줄마다 무엇·큰 글·낱말·비고·색 띠·행동 칩. */
+function paintBoardScheduleBoard(parts, board) {
+  writeTextContent(parts.boardNow, board.head.now);
+  writeTextContent(parts.boardSum, board.head.sum);
+  for (const [index, line] of board.lines.entries()) {
+    const node = parts.lines[index];
+    node.__act = line.act;
+    const painted = [line.tone, line.what, line.whatSub, line.big, line.word, line.note, line.actWord].join("\u0000");
+    if (node.__painted === painted) continue;
+    node.__painted = painted;
+    const [what, big, note] = node.children;
+    writeBoardScheduleText(what, line.what);
+    writeAttribute(what, "data-sub", line.whatSub);
+    writeBoardScheduleText(big, line.big);
+    writeAttribute(big, "data-word", line.word);
+    writeBoardScheduleText(note, line.note);
+    writeAttribute(node, "data-tone", line.tone);
+    writeAttribute(node, "data-act", line.actWord);
+    writeAttribute(node, "aria-label", [line.what, line.big, line.word, line.note].filter(Boolean).join(" · "));
+  }
+}
+
+/* 그릇 하나를 그린다. 답·데스크·분·고른 것·언어·폭이 지난번과 같으면 아무것도
+ * 쓰지 않는다 — 조용한 박자는 DOM을 건드리지 않는다. 막대와 「지금」 선은 분 단위의
+ * 지금에 선다: 같은 분 안의 박자는 바뀐 행만 고쳐 쓰고 막대 하나 옮기지 않는다
+ * (t-67482: 밀리초의 지금으로는 박자마다 막대 몇 개가 반올림 경계를 넘어 다시 쓰였다).
+ * 눈금 수는 축의 폭으로 센다. 넓은 그릇의 축은 이름 칸과 말 칸을 뺀 자리라, 그릇 폭으로
+ * 세면 1440 px 창의 축 약 450 px에 세 시간 눈금 여덟이 붙어 섰다(t-67482).
+ * 한 주는 가로 차트에, 지금 앞뒤와 하루는 안내판과 세로 시간표에 그린다(t-77628): 묶음 상자
+ * 넷을 그쪽으로 옮기고, 행이나 블록을 키로 맞춘다 — 다른 종류의 노드는 다시 짓는다. */
+function paintBoardScheduleHost(host, view, now) {
+  if (!boardScheduleBuilt.has(host)) {
+    boardScheduleSkeleton(host, view);
+    boardScheduleBuilt.add(host);
+  }
+  const parts = host.__parts;
+  const vertical = boardScheduleVertical(boardScheduleChoice.zoom);
+  const width = vertical ? host.clientWidth : parts.axis.clientWidth;
+  const desk = typeof deskLedger === "undefined" ? null : deskLedger;
+  // The machine strip's own reading (`machine_load`, shell-board.js): read, never asked a second time.
+  const machine = typeof deskMachine === "undefined" ? null : deskMachine;
+  const minute = Math.floor(now / BOARD_SCHEDULE.clockMs) * BOARD_SCHEDULE.clockMs;
+  const said = [boardScheduleAnswer, desk, machine, minute, boardScheduleChoiceRevision,
+    document.documentElement.lang, width, vertical];
+  const before = boardSchedulePainted.get(host);
+  if (before && before.every((one, at) => one === said[at])) return;
+  boardSchedulePainted.set(host, said);
+  // The type the ticks are set in, and the hour's height, are read only when the schedule is drawn again — a
+  // look that changes nothing (the same answer, minute and width) does not ask the page's style.
+  const hourPx = vertical ? parseFloat(getComputedStyle(host).getPropertyValue("--schedule-hour")) || 0 : 0;
+  const tickPx = vertical ? boardScheduleTickHeight(parts.track) : 0;
+  const model = boardScheduleModel(boardScheduleAnswer, desk?.tasks, minute, boardScheduleChoice, width,
+    machine?.load?.loud === true, vertical ? null : boardScheduleTickMeasure(boardScheduleTickFont(parts.axis)), hourPx, tickPx);
+  paintBoardScheduleHead(parts.head, model);
+  writeAttribute(host, "data-schedule-zoom", boardScheduleChoice.zoom);
+  writeHidden(parts.chart, vertical);
+  writeHidden(parts.cal, !vertical);
+  const nowAt = model.nowAt.toFixed(2);
+  if (vertical) {
+    paintBoardScheduleBoard(parts, model.board);
+    paintBoardScheduleTicks(parts.axis, []);
+    paintBoardScheduleTicks(parts.track, model.gutter);
+    writeTextContent(parts.track.__now, model.board.head.now);
+    writeCustomProperty(parts.body, "--now", nowAt);
+    writeCustomProperty(parts.body, "--schedule-hours", model.hours.toFixed(3));
+    writeCustomProperty(parts.body, "--schedule-grid", boardScheduleGridPaint(model.gutter, "bottom"));
+    writeAttribute(parts.gutter, "data-tip", t("board.schedule.legend", "막대 끝 = 지난 소요로 잰 예상 · 빗금 = 아직 안 온 구간 · 점선 = 근거 없음"));
+    writeTextContent(parts.aheadEmpty, t("board.schedule.aheadEmpty", "앞으로 잡힌 일 없음"));
+    writeHidden(parts.aheadEmpty, !model.aheadEmpty);
+    reconcileElementOrder(parts.chart, [parts.card, parts.band]);
+    reconcileElementOrder(parts.body, [parts.gutter, ...parts.boxes, parts.aheadEmpty]);
+  } else {
+    const [named, count, legend] = parts.card.children;
+    writeTextContent(named, model.heading);
+    writeTextContent(count, String(model.groups.reduce((sum, group) => sum + group.count, 0)));
+    writeTextContent(legend, t("board.schedule.legend", "막대 끝 = 지난 소요로 잰 예상 · 빗금 = 아직 안 온 구간 · 점선 = 근거 없음"));
+    paintBoardScheduleTicks(parts.track, []);
+    paintBoardScheduleTicks(parts.axis, model.ticks);
+    writeTextContent(parts.axis.__now, t("board.schedule.nowLine", "지금"));
+    writeCustomProperty(parts.chart, "--now", nowAt);
+    // The track's hour lines (the draft's quarter rules): one line on each tick, drawn by every row's track.
+    writeCustomProperty(parts.chart, "--schedule-grid", boardScheduleGridPaint(model.ticks, "right"));
+    reconcileElementOrder(parts.body, [parts.gutter, parts.aheadEmpty]);
+    reconcileElementOrder(parts.chart, [parts.card, parts.band, ...parts.boxes]);
+  }
+  const queueWord = t(BOARD_RUN_STATES.queue.key, BOARD_RUN_STATES.queue.word);
+  const doneWord = t(BOARD_RUN_STATES.done.key, BOARD_RUN_STATES.done.word);
   let shown = 0;
   for (const [index, group] of model.groups.entries()) {
-    const box = boxes[index];
+    const box = parts.boxes[index];
     const [fold, list, more] = box.children;
     writeBoardScheduleText(fold, group.label);
+    // The column's head counts its blocks (t-77628): 「7 · 차례 기다림 4 · 끝남 3」 — a zero is left out —, or that
+    // the range holds none. The column is at least as wide as its widest cluster of blocks standing side by side.
+    writeAttribute(fold, "data-sub", !vertical ? ""
+      : group.count === 0 && group.more === 0
+        ? t("board.schedule.notInRange", "이 범위에 없음")
+        : [String(group.count), group.waiting > 0 ? `${queueWord} ${group.waiting}` : "", group.ended > 0 ? `${doneWord} ${group.ended}` : ""]
+          .filter(Boolean).join(" · "));
+    writeCustomProperty(box, "--schedule-subcols", String(vertical ? group.subcols : 1));
     writeAttribute(fold, "aria-expanded", String(!group.folded));
-    writeHidden(box, group.rows.length === 0 && group.more === 0);
-    const held = new Map([...list.children].map((node) => [node.dataset.key, node]));
-    const rows = group.folded ? [] : group.rows;
+    // A column stays when it is empty — the timetable's four columns are its grammar; a chart's group folds away.
+    writeHidden(box, !vertical && group.rows.length === 0 && group.more === 0);
+    const kind = vertical ? "board-schedule-block" : "board-schedule-row";
+    const held = new Map([...list.children].filter((node) => node.classList.contains(kind)).map((node) => [node.dataset.key, node]));
+    const rows = group.folded ? [] : vertical ? group.rows.filter((row) => row.depth === 0) : group.rows;
     reconcileElementOrder(list, rows.map((row) => {
+      if (vertical) {
+        const steps = Array.isArray(row.steps);
+        let node = held.get(row.key);
+        if (node && Boolean(node.children[1]) !== steps) node = null;
+        node ??= boardScheduleBlockNode(view, steps);
+        paintBoardScheduleBlock(node, row);
+        return node;
+      }
       const node = held.get(row.key) ?? boardScheduleRowNode(view);
       paintBoardScheduleRow(node, row);
       return node;
     }));
-    writeHidden(list, rows.length === 0);
+    writeHidden(list, rows.length === 0 && !vertical);
     const moreWords = group.more === 0 || group.folded ? ""
       : group.moreOpened
         ? t("board.schedule.lessEnded", "끝난 {{count}}개 접기", { count: group.more })
@@ -1059,10 +1573,10 @@ function paintBoardScheduleHost(host, view, now) {
     writeHidden(more, moreWords === "");
     shown += group.rows.length;
   }
-  writeTextContent(empty, shown > 0 ? ""
+  writeTextContent(parts.empty, shown > 0 ? ""
     : boardScheduleAnswer ? t("board.schedule.empty", "이 범위에 일정이 없어요") : t("board.schedule.reading", "읽는 중…"));
-  writeHidden(empty, shown !== 0);
-  paintBoardScheduleLog(log);
+  writeHidden(parts.empty, shown !== 0);
+  paintBoardScheduleLog(parts.log);
 }
 
 /* 확대 하나의 말 — 단추와 카드 머리가 같은 말을 쓴다. 지금 앞뒤의 카드는 시안 v2의 이름 그대로

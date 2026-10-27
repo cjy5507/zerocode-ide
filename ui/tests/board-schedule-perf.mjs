@@ -6,6 +6,9 @@
  * 지금을 기준으로 지어, 시계를 고정하지 않고도 같은 그림이 선다 — 쉬는 CPU는 실제 시계(1분마다
  * 「지금」 선을 옮기는 박자까지)로 재야 한다.
  *
+ * 그림은 둘이다(t-77628): 「하루」는 안내판과 세로 시간표(블록 — 게이트의 일감은 블록 안의 단계 칸이라 50행
+ * 픽스처가 블록 40개로 선다), 「한 주」는 가로 막대 차트(행 50개). 둘 다 재고 둘 다 예산 안이어야 한다.
+ *
  * 네 수:
  *   1. 그림 ms — 그릇을 처음 그리는 한 번(요소를 짓는다)과, 답이 움직인 박자의 다시 그리기(행
  *      하나의 상태가 바뀜), 각각 그 뒤의 강제 레이아웃까지. 다시 그리기는 p50·p95.
@@ -135,12 +138,18 @@ async function measure(page, { polls, idleSecs }) {
     const tab = () => document.querySelector('#board-view [data-board-tab-button="schedule"]');
     await window.__UNTIL__(() => tab()?.checkVisibility(), "the schedule's tab");
     tab().click();
-    await window.__UNTIL__(() => document.querySelectorAll("#board-view .board-schedule-row").length >= 50, "fifty rows", 5000);
+    await window.__UNTIL__(() => document.querySelectorAll("#board-view .board-schedule-block").length >= 40, "forty blocks", 5000);
   });
-  const paint = await page.evaluate(async (polls) => {
+  // One drawing's weight: the first paint and the moved beats, in the zoom asked for.
+  const paintFor = (zoom, least) => page.evaluate(async ({ polls, zoom, least }) => {
     const view = document.querySelector("#board-view");
     const host = view.querySelector(".task-board-schedule");
     const settle = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    if (boardScheduleChoice.zoom !== zoom) {
+      document.querySelector(`#board-view [data-schedule-zoom="${zoom}"]`).click();
+      await window.__UNTIL__(() => !boardScheduleAsking, "the zoom's answer");
+      await window.__UNTIL__(() => host.querySelectorAll(".board-schedule-row, .board-schedule-block").length >= least, `${least} rows`, 5000);
+    }
     // The first paint of a holder: its elements built, then laid out.
     boardSchedulePainted.delete(host);
     boardScheduleBuilt.delete(host);
@@ -150,7 +159,7 @@ async function measure(page, { polls, idleSecs }) {
     paintBoardScheduleHost(host, view, Date.now());
     host.getBoundingClientRect();
     const first = performance.now() - began;
-    const rows = host.querySelectorAll(".board-schedule-row").length;
+    const rows = host.querySelectorAll(".board-schedule-row, .board-schedule-block").length;
     const elements = host.querySelectorAll("*").length;
     // A beat whose answer moved: one row's state, then layout.
     const moved = [];
@@ -166,6 +175,14 @@ async function measure(page, { polls, idleSecs }) {
       host.getBoundingClientRect();
       moved.push(performance.now() - began);
     }
+    return { first, rows, elements, moved };
+  }, { polls, zoom, least });
+  const week = await paintFor("week", 50);
+  const day = await paintFor("day", 40);
+  const paint = await page.evaluate(async () => {
+    const view = document.querySelector("#board-view");
+    const host = view.querySelector(".task-board-schedule");
+    const settle = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     // A quiet beat: the command says unchanged, and nothing is written. Kept off a minute's turn,
     // when the view moves its 「now」 line on purpose.
     while (Date.now() % 60_000 > 55_000) await new Promise((done) => setTimeout(done, 200));
@@ -182,8 +199,8 @@ async function measure(page, { polls, idleSecs }) {
     await settle();
     records.push(...watch.takeRecords());
     watch.disconnect();
-    return { first, rows, elements, moved, quiet, writes: records.length };
-  }, polls);
+    return { quiet, writes: records.length };
+  });
   // The idle cost: the schedule's tab open, then the board's 「now」 tab, each for idleSecs.
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("Performance.enable");
@@ -198,7 +215,7 @@ async function measure(page, { polls, idleSecs }) {
   const open = await idle();
   await page.evaluate(() => document.querySelector('#board-view [data-board-tab-button="now"]').click());
   const closed = await idle();
-  return { ...paint, idleOpenPercent: open, idleClosedPercent: closed, idleDeltaPercent: open - closed };
+  return { ...day, week, ...paint, idleOpenPercent: open, idleClosedPercent: closed, idleDeltaPercent: open - closed };
 }
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
@@ -221,6 +238,14 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
       firstPaintMs: Number(result.first.toFixed(2)),
       movedPaintP50Ms: Number(median(result.moved).toFixed(2)),
       movedPaintP95Ms: Number(quantile(result.moved, 0.95).toFixed(2)),
+      // The week's chart (rows), beside the day's timetable (blocks) the fields above read.
+      week: {
+        rows: result.week.rows,
+        elements: result.week.elements,
+        firstPaintMs: Number(result.week.first.toFixed(2)),
+        movedPaintP50Ms: Number(median(result.week.moved).toFixed(2)),
+        movedPaintP95Ms: Number(quantile(result.week.moved, 0.95).toFixed(2)),
+      },
       quietBeatMs: Number(result.quiet.toFixed(2)),
       quietWrites: result.writes,
       idleOpenPercent: Number(result.idleOpenPercent.toFixed(3)),
@@ -231,10 +256,14 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
     console.log(JSON.stringify(summary, null, 2));
     if (json) writeFileSync(json, `${JSON.stringify(summary, null, 2)}\n`);
     const fail = [
-      summary.rows < 50 && `rows ${summary.rows} < 50`,
-      summary.elements > budget.elements && `elements ${summary.elements} > ${budget.elements}`,
+      summary.rows < 40 && `day blocks ${summary.rows} < 40`,
+      summary.week.rows < 50 && `week rows ${summary.week.rows} < 50`,
+      summary.elements > budget.elements && `day elements ${summary.elements} > ${budget.elements}`,
+      summary.week.elements > budget.elements && `week elements ${summary.week.elements} > ${budget.elements}`,
       summary.movedPaintP50Ms > budget.movedPaintP50Ms
-        && `a moved beat paints in ${summary.movedPaintP50Ms} ms > ${budget.movedPaintP50Ms} ms`,
+        && `a moved beat of the day view paints in ${summary.movedPaintP50Ms} ms > ${budget.movedPaintP50Ms} ms`,
+      summary.week.movedPaintP50Ms > budget.movedPaintP50Ms
+        && `a moved beat of the week view paints in ${summary.week.movedPaintP50Ms} ms > ${budget.movedPaintP50Ms} ms`,
       summary.quietWrites !== 0 && `a quiet beat wrote ${summary.quietWrites} times`,
       summary.idleDeltaPercent > budget.idleDeltaPercent
         && `the open view costs ${summary.idleDeltaPercent} % CPU idle > ${budget.idleDeltaPercent} %`,

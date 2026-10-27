@@ -18,6 +18,10 @@ import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.
 import { installBoardWaits } from "./board-waits.mjs";
 import { BOARD_SCHEDULE_BUDGET } from "./board-schedule-perf.mjs";
 
+/* 한 행이나 한 블록: 「한 주」는 가로 차트의 행(`.board-schedule-row`), 「지금 앞뒤」와 「하루」는 세로 시간표의
+ * 블록(`.board-schedule-block`, t-77628)이다. 둘 다 같은 자료(`data-*`와 커스텀 속성)를 들어, 장면은 둘을 한
+ * 모양으로 읽는다(`readBoardSchedule`). */
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = resolve(HERE, "fixtures/board-schedule");
 /* 2026-10-21 09:50:00 KST — the fixture's moment. */
@@ -70,7 +74,7 @@ export async function openBoardSchedule(page) {
     const tab = () => document.querySelector('#board-view [data-board-tab-button="schedule"]');
     await window.__UNTIL__(() => tab()?.checkVisibility(), "the schedule's tab");
     tab().click();
-    await window.__UNTIL__(() => document.querySelector("#board-view .board-schedule-row"), "the schedule's rows", 5000);
+    await window.__UNTIL__(() => document.querySelector("#board-view .board-schedule-row, #board-view .board-schedule-block"), "the schedule's rows", 5000);
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
   });
 }
@@ -80,43 +84,97 @@ export async function openBoardSchedule(page) {
 export async function readBoardSchedule(page) {
   return page.evaluate(() => {
     const host = document.querySelector("#board-view .task-board-schedule");
+    const vertical = host.dataset.scheduleZoom !== "week";
     const chart = host.querySelector(".board-schedule-chart");
+    const body = host.querySelector(".board-schedule-cal-body");
+    const shown = (node) => node?.checkVisibility() ?? false;
+    // A row or a block, in the one shape: the words and the place the view wrote on it.
+    const readRow = (row) => {
+      const bar = row.querySelector(".board-schedule-bar") ?? row;
+      const said = row.querySelector(".board-schedule-said");
+      const label = row.querySelector(".board-schedule-label");
+      const own = (name) => Number(row.style.getPropertyValue(name) || 0);
+      return {
+        key: row.dataset.key, state: row.dataset.barState, basis: row.dataset.basis, depth: row.dataset.depth,
+        expanded: row.getAttribute("aria-expanded"), paused: row.classList.contains("is-paused"),
+        late: row.classList.contains("is-late"),
+        label: label.dataset.id ? `${label.dataset.id} ${label.textContent}` : label.textContent,
+        // The row's sentence; before the draft's cells (t-71840) it was the words cell's own text.
+        said: row.dataset.said ?? said?.textContent ?? "",
+        // The passed draft's cells (t-71840): the line under the name, the end cell's two lines, the bar's two names.
+        sub: label.dataset.sub ?? "",
+        eta: said ? said.textContent : row.dataset.eta ?? "",
+        etaSub: said ? said.dataset.sub ?? "" : row.dataset.etaSub ?? "",
+        why: row.dataset.why ?? "",
+        nowLabel: bar.dataset.nowLabel ?? "",
+        aheadLabel: bar.dataset.aheadLabel ?? "",
+        from: Number(bar.style.getPropertyValue("--from")), to: Number(bar.style.getPropertyValue("--to")),
+        done: Number(bar.style.getPropertyValue("--done")),
+        // The vertical timetable's block (t-77628): its sub-column, its cut top, the gate's time it inherited.
+        block: row.classList.contains("board-schedule-block"),
+        col: own("--col"), cols: own("--cols") || 1, mark: own("--mark"),
+        cut: row.classList.contains("is-cut"), inherited: row.classList.contains("is-inherited"),
+        steps: row.dataset.steps ?? "", act: row.dataset.act ?? "",
+      };
+    };
+    // A gate's jobs are blocks' step cells, not blocks: the vertical view reads them off the model, in the
+    // model's order under their gate, so a scene reads the same rows either way.
+    const model = vertical
+      ? boardScheduleModel(boardScheduleAnswer, typeof deskLedger === "undefined" ? null : deskLedger?.tasks,
+        Math.floor(Date.now() / 60_000) * 60_000, boardScheduleChoice, host.clientWidth,
+        typeof deskMachine === "undefined" ? false : deskMachine?.load?.loud === true)
+      : null;
+    const modelRow = (row) => ({
+      key: row.key, state: row.state, basis: row.basis, depth: String(row.depth), expanded: null, paused: Boolean(row.paused),
+      late: Boolean(row.late), label: row.label, said: row.said, sub: row.sub, eta: row.eta, etaSub: row.etaSub, why: row.why ?? "",
+      nowLabel: row.nowLabel, aheadLabel: row.aheadLabel, from: Number(row.from.toFixed(2)), to: Number(row.to.toFixed(2)),
+      done: Number((row.done * 100).toFixed(1)), block: false, col: 0, cols: 1, mark: 0, cut: false, inherited: false,
+      steps: "", act: "",
+    });
     const groups = {};
     for (const box of host.querySelectorAll(".board-schedule-group")) {
       const head = box.querySelector(".board-schedule-group-head");
+      const drawn = new Map([...box.querySelectorAll(".board-schedule-row, .board-schedule-block")].map((row) => [row.dataset.key, readRow(row)]));
+      let rows = [...drawn.values()];
+      if (model && rows.length > 0) {
+        rows = [];
+        let under = false;
+        for (const row of model.groups.find((one) => one.id === box.dataset.group).rows) {
+          if (row.depth === 0) {
+            under = drawn.has(row.key);
+            if (under) rows.push(drawn.get(row.key));
+          } else if (under) rows.push(modelRow(row));
+        }
+      }
       groups[box.dataset.group] = {
         hidden: box.hidden,
         expanded: head.getAttribute("aria-expanded"),
         head: head.textContent,
+        headSub: head.dataset.sub ?? "",
         more: box.querySelector(".board-schedule-more").hidden ? "" : box.querySelector(".board-schedule-more").textContent,
         moreExpanded: box.querySelector(".board-schedule-more").getAttribute("aria-expanded"),
-        rows: [...box.querySelectorAll(".board-schedule-row")].map((row) => {
-          const bar = row.querySelector(".board-schedule-bar");
-          return {
-            key: row.dataset.key, state: row.dataset.barState, basis: row.dataset.basis, depth: row.dataset.depth,
-            expanded: row.getAttribute("aria-expanded"), paused: row.classList.contains("is-paused"),
-            label: row.querySelector(".board-schedule-label").textContent,
-            // The row's sentence; before the draft's cells (t-71840) it was the words cell's own text.
-            said: row.dataset.said ?? row.querySelector(".board-schedule-said").textContent,
-            // The passed draft's cells (t-71840): the line under the name, the end cell's two lines, the bar's two names.
-            sub: row.querySelector(".board-schedule-label").dataset.sub ?? "",
-            eta: row.querySelector(".board-schedule-said").textContent,
-            etaSub: row.querySelector(".board-schedule-said").dataset.sub ?? "",
-            nowLabel: bar.dataset.nowLabel ?? "",
-            aheadLabel: bar.dataset.aheadLabel ?? "",
-            from: Number(bar.style.getPropertyValue("--from")), to: Number(bar.style.getPropertyValue("--to")),
-            done: Number(bar.style.getPropertyValue("--done")),
-          };
-        }),
+        rows,
       };
     }
+    const lines = [...host.querySelectorAll(".board-schedule-line")].map((line) => {
+      const [what, big, note] = line.children;
+      return { id: line.dataset.line, tone: line.dataset.tone, what: what.textContent, whatSub: what.dataset.sub ?? "",
+        big: big.textContent, word: big.dataset.word ?? "", note: note.textContent, act: line.dataset.act ?? "" };
+    });
     return {
       groups,
-      title: host.querySelector(".board-schedule-title")?.textContent ?? "",
-      chip: host.querySelector(".board-schedule-now")?.textContent ?? "",
-      now: Number(chart.style.getPropertyValue("--now")),
-      ticks: [...host.querySelectorAll(".board-schedule-tick")].map((tick) => tick.textContent),
+      vertical,
+      title: vertical
+        ? host.querySelector(".board-schedule-board-now")?.textContent ?? ""
+        : host.querySelector(".board-schedule-title")?.textContent ?? "",
+      chip: [...host.querySelectorAll(".board-schedule-now")].find(shown)?.textContent ?? "",
+      now: Number((vertical ? body : chart).style.getPropertyValue("--now")),
+      hours: Number(body.style.getPropertyValue("--schedule-hours") || 0),
+      ticks: [...host.querySelectorAll(".board-schedule-tick")].filter(shown).map((tick) => tick.textContent),
       note: host.querySelector(".board-schedule-note").hidden ? "" : host.querySelector(".board-schedule-note").textContent,
+      board: { now: host.querySelector(".board-schedule-board-now")?.textContent ?? "",
+        sum: host.querySelector(".board-schedule-board-sum")?.textContent ?? "", lines },
+      aheadEmpty: shown(host.querySelector(".board-schedule-ahead-empty")),
       elements: host.querySelectorAll("*").length,
       asked: window.__SCHEDULE_ASKED__,
     };
@@ -148,6 +206,22 @@ async function patchScheduleLane(page, version, patch) {
     paintBoardScheduleHosts();
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
   }, { version, patch });
+  return readBoardSchedule(page);
+}
+
+/* Jobs of the answer changed by name (`[[name, patch], …]`), a new revision, and what the view drew once the
+ * moved answer stood. A patch value of null clears the field. */
+async function patchScheduleJobs(page, edits) {
+  await page.evaluate(async (edits) => {
+    const held = window.__SCHEDULE__;
+    const byName = new Map(edits);
+    window.__SCHEDULE__ = { ...held, revision: held.revision + 1,
+      jobs: held.jobs.map((job) => (byName.has(job.name) ? { ...job, ...byName.get(job.name) } : job)) };
+    refreshBoardSchedule();
+    await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the moved answer");
+    paintBoardScheduleHosts();
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  }, edits);
   return readBoardSchedule(page);
 }
 
@@ -301,7 +375,7 @@ export async function testBoardSchedule(browser, origin, ok) {
     await page.keyboard.press("ArrowRight");
     const fresh = await page.evaluate(async (since) => {
       await window.__UNTIL__(() => !document.querySelector("#board-view .task-board-schedule").hidden
-        && document.querySelector("#board-view .board-schedule-row"), "the schedule again");
+        && document.querySelector("#board-view .board-schedule-row, #board-view .board-schedule-block"), "the schedule again");
       await window.__UNTIL__(() => !boardScheduleAsking, "the reopened tab's answer");
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
       return window.__SCHEDULE_ASKED__.slice(since).filter((one) => one.known === null);
@@ -530,9 +604,10 @@ export async function testBoardSchedule(browser, origin, ok) {
           }
           paintBoardScheduleHosts();
           await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-          const boxes = [...host.querySelectorAll(".board-schedule-tick")]
-            .map((tick) => tick.getBoundingClientRect()).sort((a, b) => a.left - b.left);
-          return boxes.slice(1).map((box, at) => Math.round(box.left - boxes[at].right));
+          const vertical = zoom !== "week";
+          const boxes = [...host.querySelectorAll(".board-schedule-tick")].filter((tick) => tick.checkVisibility())
+            .map((tick) => tick.getBoundingClientRect()).sort((a, b) => (vertical ? a.top - b.top : a.left - b.left));
+          return boxes.slice(1).map((box, at) => Math.round(vertical ? box.top - boxes[at].bottom : box.left - boxes[at].right));
         }, { zoom, width });
         if (gaps.length === 0 || gaps.some((gap) => gap <= 4)) crowded.push({ zoom, width, gaps });
       }
@@ -565,10 +640,12 @@ export async function testBoardSchedule(browser, origin, ok) {
               }
               paintBoardScheduleHosts();
               await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-              const boxes = [...host.querySelectorAll(".board-schedule-tick:not(.is-covered)")]
-                .map((tick) => tick.getBoundingClientRect()).sort((a, b) => a.left - b.left);
-              return { count: host.querySelectorAll(".board-schedule-tick").length,
-                gaps: boxes.slice(1).map((box, at) => Math.round(box.left - boxes[at].right)) };
+              const vertical = zoom !== "week";
+              const boxes = [...host.querySelectorAll(".board-schedule-tick:not(.is-covered)")].filter((tick) => tick.checkVisibility())
+                .map((tick) => tick.getBoundingClientRect()).sort((a, b) => (vertical ? a.top - b.top : a.left - b.left));
+              // Every tick the active axis drew counts, a covered one too — it keeps its line on the track.
+              return { count: [...host.querySelectorAll(".board-schedule-tick")].filter((tick) => tick.checkVisibility()).length,
+                gaps: boxes.slice(1).map((box, at) => Math.round(vertical ? box.top - boxes[at].bottom : box.left - boxes[at].right)) };
             }, { tongue, zoom, width });
             if (seen.count === 0 || seen.gaps.some((gap) => gap <= 4)) narrowCrowded.push({ big, tongue, zoom, width, ...seen });
           }
@@ -592,13 +669,14 @@ export async function testBoardSchedule(browser, origin, ok) {
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
       const host = document.querySelector("#board-view .task-board-schedule");
       const surface = host.closest(".task-board-surface");
-      const rows = [...host.querySelectorAll(".board-schedule-row")];
+      const rows = [...host.querySelectorAll(".board-schedule-row, .board-schedule-block")];
       const unreached = [];
       for (const row of rows) {
-        row.scrollIntoView({ block: "nearest" });
+        row.scrollIntoView({ block: "nearest", inline: "nearest" });
         const seat = surface.getBoundingClientRect();
         const box = row.getBoundingClientRect();
-        if (box.top < seat.top - 1 || box.bottom > seat.bottom + 1 || box.width < 200) unreached.push(row.dataset.key);
+        const narrow = row.classList.contains("board-schedule-row") ? box.width < 200 : box.width < 40;
+        if (box.top < seat.top - 1 || box.bottom > seat.bottom + 1 || narrow) unreached.push(row.dataset.key);
       }
       surface.scrollTop = 0;
       return {
@@ -696,6 +774,12 @@ export async function testBoardSchedule(browser, origin, ok) {
     const row = (id) => workerRows.find((one) => one.key === `task:run-4275/${id}`);
     const at = (hours) => placed(SCHEDULE_NOW + hours * HOUR, from, to);
     const over = workerRows.filter((one) => one.state === "done" || one.state === "failed");
+    /* 겹치는 블록은 나란히 (t-77628): 도는 것과 기다리는 것이 열을 나누고, 혼자인 것은 열을 다 쓴다. */
+    ok("blocks that overlap in time stand side by side — the running and the waiting task share their column, a task alone keeps it whole",
+      row("t-80010")?.cols === 2 && row("t-80011")?.cols === 2 && row("t-80010").col !== row("t-80011").col
+        && row("t-80003")?.cols === 1 && row("t-80002")?.cols === 2 && row("t-80005")?.cols === 2
+        && workerRows.every((one) => one.block && one.col < one.cols),
+      JSON.stringify(workerRows.map((one) => [one.key, one.col, one.cols])));
     ok("no finished task's bar reaches 「now」",
       over.length > 0 && over.every((one) => one.to < drawn.now - 0.5),
       JSON.stringify(over.filter((one) => one.to >= drawn.now - 0.5).map((one) => [one.key, one.to, one.said])));
@@ -763,28 +847,30 @@ export async function testBoardSchedule(browser, origin, ok) {
       drawn.asked.some((one) => one.known === null && one.fromMs === hourFrom) && drawn.ticks.length >= 4
         && drawn.ticks.every((tick) => /^\d{2}:00$/.test(tick))
         && hours.every((hour, index) => index === 0 || hour === (hours[index - 1] + 1) % 24)
-        && drawn.chip === "지금" && drawn.title === "지금 도는 일",
+        && /^지금 \d{2}:\d{2}$/.test(drawn.chip) && drawn.title === drawn.chip && drawn.vertical,
       JSON.stringify({ ticks: drawn.ticks, chip: drawn.chip, title: drawn.title, asked: drawn.asked.slice(-2) }));
     // The draft's chip stands beside 「10:00」, never on it: an hour the chip would sit on keeps its line on the
     // track and hides its words, and every hour's words that show stand clear of the chip.
     const beside = await page.evaluate(() => {
       const host = document.querySelector("#board-view .task-board-schedule");
-      const chip = host.querySelector(".board-schedule-now").getBoundingClientRect();
-      return [...host.querySelectorAll(".board-schedule-tick")].map((tick) => {
+      const chip = [...host.querySelectorAll(".board-schedule-now")].find((one) => one.checkVisibility()).getBoundingClientRect();
+      // The gutter's ticks stand over and under the chip (t-77628): the distance is vertical.
+      return [...host.querySelectorAll(".board-schedule-tick")].filter((tick) => tick.checkVisibility()).map((tick) => {
         const box = tick.getBoundingClientRect();
         return { label: tick.textContent, shown: getComputedStyle(tick).visibility !== "hidden",
-          apart: Math.round(Math.max(chip.left - box.right, box.left - chip.right)) };
+          apart: Math.round(Math.max(chip.top - box.bottom, box.top - chip.bottom)) };
       });
     });
     ok("the 「지금」 chip covers no hour's words: an hour under it keeps its line and hides its label",
       beside.filter((one) => one.shown).length >= 3 && beside.every((one) => !one.shown || one.apart > 4),
       JSON.stringify(beside));
-    const legend = await page.evaluate(() => document.querySelector("#board-view .board-schedule-legend")?.textContent ?? "");
-    ok("the card's head says how a bar reads, in the draft's words, and every group is named alone",
+    const legend = await page.evaluate(() => document.querySelector("#board-view .board-schedule-gutter")?.dataset.tip ?? "");
+    ok("the gutter's tip says how a block reads, in the draft's words, and every column is named alone and counted",
       legend === "막대 끝 = 지난 소요로 잰 예상 · 빗금 = 아직 안 온 구간 · 점선 = 근거 없음"
         && drawn.groups.lanes.head === "발행" && drawn.groups.gates.head === "게이트"
-        && drawn.groups.line.head === "빌드 줄" && drawn.groups.workers.head === "워커 과업",
-      JSON.stringify({ legend, heads: Object.values(drawn.groups).map((group) => group.head) }));
+        && drawn.groups.line.head === "빌드 줄" && drawn.groups.workers.head === "워커 과업"
+        && /^\d+( · 차례 기다림 \d+)?( · 끝남 \d+)?$/.test(drawn.groups.workers.headSub) && drawn.groups.workers.headSub.includes("차례 기다림"),
+      JSON.stringify({ legend, heads: Object.values(drawn.groups).map((group) => [group.head, group.headSub]) }));
     const nowLane = laneOf(drawn.groups.lanes.rows, "1.1.83");
     ok("the running lane names the stage it is in inside its bar and the stages ahead in its stripes, the end on the right",
       drawn.groups.lanes.rows.length === 1 && nowLane?.nowLabel === "gate-root"
@@ -809,7 +895,7 @@ export async function testBoardSchedule(browser, origin, ok) {
       JSON.stringify({ carried, reviewing }));
     const look = await page.evaluate(async () => {
       const host = document.querySelector("#board-view .task-board-schedule");
-      if (!host.querySelector(".board-schedule-legend")) return { sizes: [], dark: { drawn: NaN }, bright: { drawn: NaN } };
+      if (!host.querySelector(".board-schedule-block")) return { sizes: [], dark: { drawn: NaN }, bright: { drawn: NaN } };
       // A theme flip eases every colour that carries a transition (the group head's, 150 ms): the words are
       // read once those have settled, not in the frame the flip asked for them. `getAnimations()` flushes the
       // styles first, so the transitions the flip starts are among the ones waited on.
@@ -846,24 +932,43 @@ export async function testBoardSchedule(browser, origin, ok) {
         probe.style.background = `var(${token})`;
         return getComputedStyle(probe).backgroundColor;
       };
-      const pick = (selector, pseudo = null) => getComputedStyle(host.querySelector(selector), pseudo);
+      const pick = (selector, pseudo = null) => {
+        const node = host.querySelector(selector);
+        return node ? getComputedStyle(node, pseudo) : null;
+      };
+      // The vertical view's words (t-77628): the board's lines on the card, a column's head and the ticks on the
+      // band, a block's name on every fill it stands on, its second and third lines on the well, the chips.
       const read = () => {
-        const deck = getComputedStyle(host.querySelector(".board-schedule-chart")).backgroundColor;
-        const band = pick(".board-schedule-group-head").backgroundColor;
-        return {
-          name: ratio(pick(".board-schedule-label").color, deck),
-          sub: ratio(pick(".board-schedule-label", "::after").color, deck),
-          end: ratio(pick(".board-schedule-said").color, deck),
-          endSub: ratio(pick(".board-schedule-said", "::after").color, deck),
-          legend: ratio(pick(".board-schedule-legend").color, deck),
-          group: ratio(pick(".board-schedule-group-head").color, band),
-          tick: ratio(pick(".board-schedule-tick").color, band),
-          chip: ratio(pick(".board-schedule-now").color, pick(".board-schedule-now").backgroundColor),
-          running: ratio(pick(".board-schedule-bar", "::before").color, fill("--schedule-run-fill")),
-          done: ratio(pick(".board-schedule-bar", "::before").color, fill("--schedule-done-fill")),
-          halted: ratio(pick(".board-schedule-bar", "::before").color, fill("--schedule-halt-fill")),
-          ahead: ratio(pick(".board-schedule-bar", "::after").color, fill("--surface-well")),
+        const deck = getComputedStyle(host.querySelector(".board-schedule-board")).backgroundColor;
+        const band = getComputedStyle(host.querySelector(".board-schedule-gutter")).backgroundColor;
+        const well = fill("--surface-well");
+        const name = pick(".board-schedule-block .board-schedule-label").color;
+        const chip = pick(".board-schedule-gutter-track .board-schedule-now");
+        const act = pick(".board-schedule-block", "::after");
+        const out = {
+          what: ratio(pick(".board-schedule-line-what").color, deck),
+          whatSub: ratio(pick(".board-schedule-line-what", "::after").color, deck),
+          word: ratio(pick(".board-schedule-line-big", "::after").color, deck),
+          note: ratio(pick(".board-schedule-line-note").color, deck),
+          group: ratio(pick(".board-schedule-cal-body .board-schedule-group-head").color, band),
+          groupSub: ratio(pick(".board-schedule-cal-body .board-schedule-group-head", "::after").color, band),
+          tick: ratio(pick(".board-schedule-gutter-track .board-schedule-tick").color, band),
+          chip: ratio(chip.color, chip.backgroundColor),
+          act: ratio(act.color, act.backgroundColor),
+          nameWorked: ratio(name, fill("--schedule-worked-fill")),
+          nameRunning: ratio(name, fill("--schedule-run-fill")),
+          nameDone: ratio(name, fill("--schedule-done-fill")),
+          nameHalted: ratio(name, fill("--schedule-halt-fill")),
+          nameWell: ratio(name, well),
+          id: ratio(pick(".board-schedule-block .board-schedule-label", "::before").color, well),
+          sub: ratio(pick(".board-schedule-block .board-schedule-label", "::after").color, well),
+          why: ratio(pick(".board-schedule-block", "::before").color, well),
         };
+        for (const tone of ["halt", "wait", "done", "quiet", "run"]) {
+          const big = pick(`.board-schedule-line[data-tone="${tone}"] .board-schedule-line-big`);
+          if (big) out[`big-${tone}`] = ratio(big.color, deck);
+        }
+        return out;
       };
       const sizes = new Set();
       for (const node of host.querySelectorAll("*")) {
@@ -892,6 +997,126 @@ export async function testBoardSchedule(browser, origin, ok) {
     ok("every word on the schedule reads at 4.5 : 1 or more in both themes, the bar's names on their fills included",
       faint.length === 0, JSON.stringify({ faint, dark: look.dark, light: look.bright }));
     ok("the schedule speaks in at most four type sizes", look.sizes.length <= 4, JSON.stringify(look.sizes));
+
+    /* ---- 안내판 넉 줄 (t-77628): 다음 발행 · 게이트 · 착지 대기 · 끝남 — 큰 글 하나, 낱말, 비고, 행동 칩 ---- */
+    let lines = Object.fromEntries(drawn.board.lines.map((line) => [line.id, line]));
+    ok("the board's first line is the lane running: its expected end as a clock, the time left beside it, the stage in its note",
+      /^\d{2}:\d{2}$/.test(lines.lane?.big ?? "") && /남음$/.test(lines.lane.word) && lines.lane.note.includes("gate-root")
+        && lines.lane.tone === "run" && lines.lane.act === "로그 →",
+      JSON.stringify(lines.lane));
+    ok("the gate line is the gate in play: running, its green count, and the chip that opens it",
+      lines.gate?.what === "게이트 l61" && lines.gate.word === "도는 중" && /\d+\/\d+ 초록/.test(lines.gate.note)
+        && lines.gate.tone === "run" && lines.gate.act === "펴기 →",
+      JSON.stringify(lines.gate));
+    const waitingCount = drawn.groups.workers.rows.filter((one) => one.state === "waiting").length;
+    ok("the waiting line counts the tasks waiting to land and names the one that waited longest",
+      waitingCount > 0 && lines.waiting?.big === `${waitingCount}건` && /^가장 오래 .+ \(t-\d+\)$/.test(lines.waiting.note)
+        && lines.waiting.word === "코디 차례" && lines.waiting.tone === "wait" && lines.waiting.act === "기록 →",
+      JSON.stringify({ line: lines.waiting, waitingCount }));
+    const endedCount = drawn.groups.workers.rows.filter((one) => one.state === "done" || one.state === "failed").length;
+    ok("the finished line counts what ended in the range and says when the last one did",
+      lines.ended?.big === `${endedCount}건` && lines.ended.word === "끝남"
+        && (endedCount === 0 ? lines.ended.note === "이 범위에 없음" : /^마지막 \d{2}:\d{2} · /.test(lines.ended.note)),
+      JSON.stringify({ line: lines.ended, endedCount }));
+    ok("the board's head is the clock and one line of the three answers",
+      drawn.board.now === drawn.chip && drawn.board.sum.startsWith("다음 발행 ") && drawn.board.sum.includes("게이트 도는 중")
+        && drawn.board.sum.endsWith(`착지 대기 ${waitingCount}`),
+      JSON.stringify(drawn.board));
+    ok("with a lane running the timetable does not say nothing is ahead", drawn.aheadEmpty === false, String(drawn.aheadEmpty));
+    ok("the vertical view stays within the element budget", drawn.elements <= BOARD_SCHEDULE_BUDGET.elements, String(drawn.elements));
+
+    /* ---- 범위 앞에서 시작한 블록은 윗변이 톱니이고 언제부터인지 말한다 ---- */
+    const blocks = Object.values(drawn.groups).flatMap((group) => group.rows.filter((one) => one.block));
+    const cutBlocks = blocks.filter((one) => one.cut);
+    ok("a block that began before the range is cut at the top and says since when; one that began inside is not",
+      cutBlocks.length > 0 && cutBlocks.every((one) => /부터$/.test(one.sub) && one.from === 0)
+        && blocks.filter((one) => !one.cut).every((one) => !/부터$/.test(one.sub)),
+      JSON.stringify(blocks.map((one) => [one.key, one.cut, one.from, one.sub])));
+
+    /* ---- 과업↔게이트 (t-77628): 일감의 `# task:` 줄이나 `what` 줄이 적은 과업 id ---- */
+    const l61jobs = answer.jobs.filter((job) => job.gate === "l61");
+    const lintJob = l61jobs.find((job) => job.kind === "g3a-zo-lint");
+    const buildJob = l61jobs.find((job) => job.kind === "g1-build");
+    drawn = await patchScheduleJobs(page, [[lintJob.name, { tasks: ["t-67102"] }],
+      [buildJob.name, { what: "v1.1.84: t-66539/67102 ctty helper — g1-build" }]]);
+    const rode = (id) => drawn.groups.workers.rows.find((one) => one.key.endsWith(id));
+    const l61head = drawn.groups.gates.rows.find((one) => one.key === "gate:l61");
+    ok("a waiting task a running gate carries says so — by the job's task line or its what line, the slash form too — and its block ends where the gate is expected to",
+      rode("t-67102")?.why.startsWith("l61에 실림 → 도는 중 · ") && rode("t-66539")?.why.startsWith("l61에 실림 → 도는 중 · ")
+        && near(rode("t-67102").to, l61head.to) && near(rode("t-66539").to, l61head.to)
+        && rode("t-67102").inherited && rode("t-67102").mark > 0 && rode("t-67102").basis === l61head.basis
+        && rode("t-67102").said.includes("l61에 실림"),
+      JSON.stringify({ t67102: rode("t-67102"), t66539: rode("t-66539"), l61head }));
+    lines = Object.fromEntries(drawn.board.lines.map((line) => [line.id, line]));
+    ok("the waiting line then says the gate runs and how many ride it, and the gate line counts the tasks it carries",
+      lines.waiting.word === "게이트 도는 중" && lines.waiting.note.includes("2건 l61에 실림 → 도는 중")
+        && lines.gate.note.includes("과업 2건 실림"),
+      JSON.stringify({ waiting: lines.waiting, gate: lines.gate }));
+    const stopped = SCHEDULE_NOW - 60_000;
+    drawn = await patchScheduleJobs(page, l61jobs.map((job) => [job.name, job.state === "running"
+      ? { state: "failed", rc: 1, end_ms: stopped, secs: 60 }
+      : ["waiting", "held"].includes(job.state) ? { state: "refused", end_ms: stopped } : {}]));
+    lines = Object.fromEntries(drawn.board.lines.map((line) => [line.id, line]));
+    ok("when the gate fails the tasks it carries say they are stopped by it and end at 「now」; the board says 「막힘」 and the gate line's chip opens the failed job's log",
+      rode("t-67102")?.why === "l61에 실림 → 실패로 멈춤" && near(rode("t-67102").to, drawn.now) && !rode("t-67102").inherited
+        && lines.waiting.word === "막힘" && lines.waiting.tone === "halt" && lines.gate.word === "실패" && lines.gate.tone === "halt"
+        && lines.gate.act === "로그 →" && lines.gate.note.startsWith("g3a-zo-lint · ") && lines.gate.note.includes(" 실패 · 0/4 초록 · 과업 2건 실림"),
+      JSON.stringify({ t67102: rode("t-67102"), waiting: lines.waiting, gate: lines.gate }));
+    drawn = await patchScheduleJobs(page, l61jobs.map((job) => [job.name, {
+      state: job.state, rc: job.rc ?? null, end_ms: job.end_ms ?? null, secs: job.secs ?? null, tasks: null, what: job.what ?? null,
+    }]));
+    ok("the answer restored, nothing rides the gate", !rode("t-67102")?.why && !rode("t-66539")?.why,
+      JSON.stringify([rode("t-67102")?.why, rode("t-66539")?.why]));
+
+    /* ---- 비어 있어도 넉 줄: 레인도 게이트도 과업도 없는 답 ---- */
+    const emptyAnswer = await page.evaluate((now) => {
+      const model = boardScheduleModel({ revision: 1, unchanged: false, read_ms: now, line: { found: false, runner_lanes: [] },
+        jobs: [], lanes: [] }, [], now, { zoom: "now", folded: new Set(), opened: new Set(), log: null }, 900, false, null, 120, 16);
+      return { aheadEmpty: model.aheadEmpty, sum: model.board.head.sum, gutter: model.gutter.length, hours: model.hours,
+        lines: model.board.lines.map((line) => [line.id, line.big, line.word, line.note, line.act, line.tone]) };
+    }, SCHEDULE_NOW);
+    ok("with emptyAnswer in the range the board still has its four lines, each saying there is emptyAnswer, and the timetable says emptyAnswer is ahead",
+      emptyAnswer.aheadEmpty && emptyAnswer.lines[0][1] === "—" && emptyAnswer.lines[0][2] === "잡힌 것 없음" && emptyAnswer.lines[0][3] === "이 범위에 없음"
+        && emptyAnswer.lines[1][1] === "—" && emptyAnswer.lines[1][3] === "이 범위에 없음" && emptyAnswer.lines[2][1] === "0건" && emptyAnswer.lines[2][2] === "없음"
+        && emptyAnswer.lines[3][1] === "0건" && emptyAnswer.lines[3][3] === "이 범위에 없음" && emptyAnswer.lines.every((line) => line[4] === null && line[5] === "quiet")
+        && emptyAnswer.gutter >= 4 && emptyAnswer.hours === 4 && emptyAnswer.sum === "다음 발행 없음 · 착지 대기 0",
+      JSON.stringify(emptyAnswer));
+
+    /* ---- 좁은 그릇: 안내판 줄은 두 줄로, 시간표는 카드 안에서 옆으로 — 그릇은 넘치지 않고 블록은 닿는다 ---- */
+    const narrow = await page.evaluate(async () => {
+      const host = document.querySelector("#board-view .task-board-schedule");
+      host.style.width = "400px";
+      paintBoardScheduleHosts();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const line = host.querySelector(".board-schedule-line");
+      const day = host.querySelector(".board-schedule-day");
+      const block = [...host.querySelectorAll(".board-schedule-block")].at(-1);
+      block.scrollIntoView({ block: "nearest", inline: "nearest" });
+      const seat = day.getBoundingClientRect();
+      const box = block.getBoundingClientRect();
+      const out = { areas: getComputedStyle(line).gridTemplateAreas, dayScroll: day.scrollWidth, dayClient: day.clientWidth,
+        hostScroll: host.scrollWidth, hostClient: host.clientWidth, reached: box.left >= seat.left - 1 && box.right <= seat.right + 1 };
+      day.scrollLeft = 0;
+      host.style.width = "";
+      paintBoardScheduleHosts();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      return out;
+    });
+    ok("in a narrow holder the board's lines fold to two rows and the timetable scrolls sideways inside its card — the holder never overflows and every block is reachable",
+      narrow.areas.includes("note note") && narrow.dayScroll > narrow.dayClient && narrow.hostScroll <= narrow.hostClient + 1 && narrow.reached,
+      JSON.stringify(narrow));
+
+    /* ---- 키보드: 블록은 단추라 초점이 서고, 서면 할 일과 제 말을 말한다. (Enter의 활성화는 창의 키 처리가
+     * 가로채 행도 블록도 시험 창에서 눌리지 않는다 — 블록 이전부터 같았고, 이 과업 밖이다.) ---- */
+    const typed = await page.evaluate(() => {
+      const block = document.querySelector('#board-view [data-key="job:1792543500-run11955-t-63492-walk"]');
+      block.focus();
+      return { focused: document.activeElement === block, tag: block.tagName, act: block.dataset.act,
+        label: block.getAttribute("aria-label"), ring: getComputedStyle(block).outlineStyle };
+    });
+    ok("a block takes keyboard focus: a button that says its action and its words",
+      typed.focused && typed.tag === "BUTTON" && typed.act === "로그 →" && typed.label.includes("walk") && typed.label.includes("25분"),
+      JSON.stringify(typed));
 
     ok("the schedule raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
