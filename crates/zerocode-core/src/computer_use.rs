@@ -3410,12 +3410,9 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
 fn app_on_the_desktop_hand(method: ComputerMethod) -> crate::computer_use_protocol::ProviderError {
     let verb = method.verb_name();
     let (hand, there) = if method.moves_the_pointer() {
-        (
-            "its points are screen points",
-            "a point inside an app's window",
-        )
+        ("its points are screen points", "inside an app's window")
     } else {
-        ("its keys go where the focus is", "keys for an app")
+        ("its keys go where the focus is", "into an app")
     };
     let mut message = format!("`{verb}` is the desktop's hand: {hand}, and it takes no --app");
     let spelled = method.in_an_app().and_then(|in_app| {
@@ -3427,7 +3424,7 @@ fn app_on_the_desktop_hand(method: ComputerMethod) -> crate::computer_use_protoc
             .map(str::to_string)
     });
     if let Some(spelled) = spelled {
-        message.push_str(&format!(" — {there} is `{spelled}`"));
+        message.push_str(&format!(" — {there}, use `{spelled}`"));
         if method.moves_the_pointer() {
             message.push_str(", whose points are window-local");
         }
