@@ -655,12 +655,16 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
     // A gate none of whose steps has run tells no story yet: no job, no chip (review r2 P3-1).
     const telling = failedJob ?? steps.find((job) => job.state === "running")
       ?? members.filter((job) => Number(job.end_ms) > 0).sort((a, b) => Number(b.end_ms) - Number(a.end_ms))[0] ?? null;
+    const begun = steps.map((job) => Number(job.start_ms) || 0).filter((ms) => ms > 0);
     const facts = {
       gate, state, start, end, basis, unknown, green, total: steps.length, failed,
       failedKinds: kinds(["failed", "capped", "refused"]), failedJob: failedJob?.name ?? null,
       logJob: telling?.name ?? null, carried, opened,
       // When the gate was queued last: the moment its latest job was put on the line.
       queuedAt: Math.max(0, ...members.map((job) => Number(job.queued_ms) || 0)),
+      // When the gate's present attempt began: the earliest start among its steps' last jobs. A gate run again under
+      // the same name is compared by this attempt, not by its first (t-77851 P2); no step started yet → null.
+      startedAt: begun.length > 0 ? Math.min(...begun) : null,
     };
     entries.push({
       head: boardScheduleRow({
@@ -949,12 +953,21 @@ function boardScheduleBoardLines(groups, now) {
       act: lastLane?.act ?? null, actWord: lastLane ? logWord : "",
     };
 
-  // 2. The gate, by one rule (review r4): the gate with a step running; else, of the gates that actually started —
-  // a step finished or failed — the one that started last (passed, failed or waiting between steps); else the one
-  // queued last. A pass after a failure is the newer word; a gate between its steps is still the story in play.
-  const gateHeads = rows("gates").slice().sort((a, b) => b.start - a.start);
+  // 2. The gate, by one rule (review r4, t-77851): the gate with a step running; else, of the gates that actually
+  // started — a step finished or failed — the one whose present attempt began last (passed, failed or waiting between
+  // steps); else the one queued last. A pass after a failure is the newer word; a gate between its steps is still the
+  // story in play; a gate run again under the same name is its new attempt, not its first. Two attempts begun at the
+  // same moment are decided, not left to the rows' order: the failed one, then the one between steps, then the passed,
+  // then the higher gate number.
+  const attempt = (row) => row.facts?.startedAt ?? row.start;
+  const told = { failed: 3, waiting: 2, done: 1 };
+  const number = (row) => Number(String(row.facts?.gate ?? "").match(/\d+/)?.[0]) || 0;
+  const decided = (a, b) => (told[b.state] ?? 0) - (told[a.state] ?? 0) || number(b) - number(a)
+    || String(b.facts?.gate ?? "").localeCompare(String(a.facts?.gate ?? ""));
+  const gateHeads = rows("gates").slice().sort((a, b) => attempt(b) - attempt(a) || decided(a, b));
   const started = (row) => Boolean(row.facts?.logJob);
-  const queuedLast = gateHeads.slice().sort((a, b) => (b.facts?.queuedAt ?? 0) - (a.facts?.queuedAt ?? 0))[0] ?? null;
+  const queuedLast = gateHeads.slice()
+    .sort((a, b) => (b.facts?.queuedAt ?? 0) - (a.facts?.queuedAt ?? 0) || decided(a, b))[0] ?? null;
   const gate = gateHeads.find((row) => row.state === "running") ?? gateHeads.find(started) ?? queuedLast;
   const facts = gate?.facts ?? null;
   const gateLine = gate && facts
