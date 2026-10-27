@@ -307,7 +307,8 @@ pub(crate) fn temp_dir(label: &str) -> std::path::PathBuf {
 /// A synthetic session store pinned as this process's `ZO_SESSION_ROOT` for
 /// one test (t-2947): writes the corpus, then holds the env lock while the
 /// config home and session root point at it, and puts the environment back
-/// when dropped.
+/// when dropped. The env lock is not reentrant: a test that already holds
+/// `test_env_lock()` and builds a pin on its own thread waits on itself.
 #[cfg(test)]
 pub(crate) struct SessionRootPin {
     pub(crate) root: PathBuf,
