@@ -292,7 +292,7 @@ async function testNarrowFolds(browser, origin, ok) {
   try {
     await page.setViewportSize({ width: 1440, height: 900 });
     await standChrome(page);
-    const read = () => page.evaluate(() => [...document.querySelectorAll(".tab")].map((tab) => {
+    const read = () => page.evaluate(() => [...el("tabstrip").querySelectorAll(".tab")].map((tab) => {
       const label = tab.querySelector(".tab-label");
       return {
         active: tab.classList.contains("is-active"),
@@ -304,11 +304,12 @@ async function testNarrowFolds(browser, origin, ok) {
     await page.setViewportSize({ width: 1000, height: 900 });
     await frames(page);
     const narrow = await read();
+    const strip = await page.evaluate(() => Math.round(el("tabstrip").getBoundingClientRect().width));
     ok("a wide window shows every tab's name (시안 17)", wide.every((tab) => tab.shown), JSON.stringify(wide));
-    ok("at 1000 px the tabs not on stage fold to their mark and keep their spoken name; the one on stage keeps its name (시안 17)",
-      narrow.filter((tab) => !tab.active).every((tab) => !tab.shown && tab.spoken) &&
+    ok("in a 1000 px window the title bar's strip folds the tabs not on stage to their mark, keeping their spoken name; the one on stage keeps its name (시안 17)",
+      strip <= 560 && narrow.filter((tab) => !tab.active).every((tab) => !tab.shown && tab.spoken) &&
         narrow.filter((tab) => tab.active).every((tab) => tab.shown),
-      JSON.stringify(narrow));
+      JSON.stringify({ strip, narrow }));
     ok("the fold scene raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();

@@ -4811,20 +4811,24 @@ function buildTabNode(tab, group) {
  * spoken, the launch ledger from the moment of the spawn. */
 function tabAgentSlug(tab) {
   const term = tabAgentTerm(tab);
-  return term === null ? null : paneSessions.get(term)?.agent ?? paneAgents.get(term);
+  return term === null ? null : termAgentSlug(term);
 }
 
+function termAgentSlug(term) {
+  return paneSessions.get(term)?.agent ?? paneAgents.get(term) ?? null;
+}
+
+/* The pane a tab's agent speaks from — the first that names one. */
 function tabAgentTerm(tab) {
   // A restored tab not woken yet has no panes to ask (t-20078).
   if (tab.kind !== "term" || tab.asleep) return null;
-  return paneLeaves(tab.layout).find((term) => paneSessions.get(term)?.agent ?? paneAgents.get(term)) ?? null;
+  return paneLeaves(tab.layout).find(termAgentSlug) ?? null;
 }
 
-/* How long the tab's agent has been at it (t-78107, 시안 2), on the sidebar
- * row's own clock (`agentRowAgo`) so the two never disagree. Repainted with
- * the strip — no clock of its own. */
-function tabAgeWords(tab) {
-  const term = tabAgentTerm(tab);
+/* How long the agent in `term` has been at it (t-78107, 시안 2), on the
+ * sidebar row's own clock (`agentRowAgo`) so the two never disagree.
+ * Repainted with the strip — no clock of its own. */
+function termAgeWords(term) {
   return term === null ? "" : agentRowAgo({ term, state: hookStates.get(term) ?? "working" });
 }
 
@@ -4837,6 +4841,8 @@ function paintTabNode(node, tab) {
   // at the strip it IS the same sentence — one arrives over a socket and the
   // other through a hook.
   const said = hookStateOfTab(tab);
+  const lead = tabAgentTerm(tab);
+  const ago = termAgeWords(lead);
   const classes = [
     "tab",
     tab.kind === "lane" ? `is-lane ${slotClass(focusedId)}` : "",
@@ -4861,6 +4867,7 @@ function paintTabNode(node, tab) {
     said === "needs-attention" && !tabHushed(tab) ? "is-waiting" : "",
     said === "working" ? "is-streaming" : "",
     tab.color ? "has-color" : "",
+    ago ? "has-age" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -4893,7 +4900,6 @@ function paintTabNode(node, tab) {
   const wording = tabLabel(tab) + turn;
   if (label.textContent !== wording) label.textContent = wording;
   const age = node.querySelector(".tab-age");
-  const ago = tabAgeWords(tab);
   if (age.textContent !== ago) age.textContent = ago;
   // 이 탭의 판이 발행하고 아직 아무도 열지 않은 페이지(t-11958).
   paintTabUnseen(node, tab);
@@ -4907,7 +4913,7 @@ function paintTabNode(node, tab) {
   // never a rebuild. Swapped only when the answer changes, so a render is
   // not a refetch and the node under the pointer holds still.
   const wearing = node.querySelector(".tab-kind");
-  const slug = tabAgentSlug(tab);
+  const slug = lead === null ? null : termAgentSlug(lead);
   // Keyed by the agent AND the domain its mark comes from. A pane resumed at
   // boot is painted before the catalog has answered, so the first face is the
   // letter tile with no domain to fetch — and a key of the slug alone would
@@ -5081,8 +5087,24 @@ function addTabButton(pane, group) {
  *
  * Nodes are kept by tab id and reordered in place. Only a tab whose SHAPE
  * changed — pinned, or a different kind — is built again. */
+/* A strip that changes width moves every tab — its tabs fold and unfold at
+ * a width (t-78107, 시안 17) — and the tab in front can land behind the fade
+ * with no change of tab to reveal it again. One observer for every strip. */
+const tabStripWatch = new ResizeObserver((entries) => {
+  for (const { target } of entries) {
+    const pane = [...groups.values()].find((one) => one.strip === target);
+    if (!pane) continue;
+    pane.revealedTab = null;
+    revealActiveTab(pane);
+  }
+});
+
 function renderPane(pane, group) {
   const strip = pane.strip;
+  if (!pane.stripWatched) {
+    tabStripWatch.observe(strip);
+    pane.stripWatched = true;
+  }
   const held = (pane.tabNodes ??= new Map());
   const wanted = paneTabs(group);
   const seen = new Set();
@@ -5161,19 +5183,6 @@ function revealActiveTab(pane) {
   if (box.left < view.left + fade) strip.scrollLeft -= view.left + fade - box.left;
   else if (box.right > view.right - fade) strip.scrollLeft += box.right - (view.right - fade);
 }
-
-/* A window crossing the width where the tabs not on stage fold to their mark
- * (t-78107, 시안 17; shell.css `@media (max-width: 1000px)` — a media query
- * cannot read a custom property, so the number stands in both) moves every
- * tab, and the tab in front can land behind the fade with no change of tab to
- * reveal it again. */
-matchMedia("(max-width: 1000px)").addEventListener("change", () => {
-  for (const group of stageGroups()) {
-    const pane = groupOf(group);
-    pane.revealedTab = null;
-    revealActiveTab(pane);
-  }
-});
 
 /* Dragging a tab to reorder it, measured from Orca rather than guessed.
  *

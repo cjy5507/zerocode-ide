@@ -5549,6 +5549,8 @@ function collapseStageGroup(group) {
       held.emulatorView._emulatorResizeObserver = null;
       held.emulatorView._emulatorTab = null;
     }
+    // The strip watcher holds its strip the same way (t-78107).
+    tabStripWatch.unobserve(held.strip);
     held.el.remove();
     groups.delete(group);
   }

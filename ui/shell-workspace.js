@@ -1839,7 +1839,7 @@ function paintWorktreeActive() {
  * still re-read (it can genuinely change under us, and that read is one round
  * trip), but the rebuild is now skipped when what it would build is what is
  * already standing. */
-function worktreeListShape(held) {
+function worktreeListShape(held, resting) {
   // The 표시 menu's view choices are shape: any of them changing changes what
   // a rebuild would BUILD, even when every row below would read the same.
   const parts = [
@@ -1847,7 +1847,7 @@ function worktreeListShape(held) {
       // PR 레인의 소속은 리뷰 지도에서 파생된다 — 지도가 움직이면 세대가
       // 오르고, 세대가 곧 shape다(상태 모드의 activityGeneration과 같은 결).
       `|${reviewGeneration}|${[...closedStateGroups].sort().join(",")}`,
-    `R${[...restingProjectPaths(listedProjects())].join(",")}|${restingProjectsOpen}`,
+    `R${[...resting].join(",")}|${restingProjectsOpen}`,
   ];
   for (const project of listedProjects()) {
     // `external` is what `externalWorktreeCard` is built from — a prompt about
@@ -3592,9 +3592,10 @@ function makeStateGroupHeader(group) {
  * node is replaced, so the anchor is the section's name, not the element. */
 function foldWithScrollAnchor(headerRow, flip) {
   const scroller = headerRow.closest(".sidebar-scroll");
-  const anchor = headerRow.dataset.stateGroup
-    ? `.proj-row[data-state-group="${CSS.escape(headerRow.dataset.stateGroup)}"]`
-    : `.proj-row[data-project-path="${CSS.escape(headerRow.dataset.projectPath ?? "")}"]`;
+  const anchor = headerRow.classList.contains("proj-resting") ? ".proj-resting"
+    : headerRow.dataset.stateGroup
+      ? `.proj-row[data-state-group="${CSS.escape(headerRow.dataset.stateGroup)}"]`
+      : `.proj-row[data-project-path="${CSS.escape(headerRow.dataset.projectPath ?? "")}"]`;
   const was = scroller ? headerRow.getBoundingClientRect().top : null;
   flip();
   void refreshWorktrees().then(() => {
@@ -5771,13 +5772,9 @@ let restingProjectsOpen = false;
 
 function restingProjectPaths(listed) {
   if (sidebarGroupBy !== "repo" || !startupProjectFoldsReady) return new Set();
-  const busy = new Set(detachedAgents.values());
-  for (const tab of tabs) {
-    if (tab.kind === "term" && paneLeaves(tab.layout).some(termHoldsAgent)) busy.add(tab.worktree);
-  }
   return new Set(listed
     .filter((project) => closedProjects.has(project.path) && project.path !== activeProjectPath
-      && !project.worktrees.some((worktree) => worktree.active || busy.has(worktree.path)))
+      && !project.worktrees.some((worktree) => worktree.active || worktreeAgentRows(worktree.path).length > 0))
     .map((project) => project.path));
 }
 
@@ -5797,10 +5794,9 @@ function restingProjectsRow(resting) {
   names.textContent = resting.map((project) => project.name).join(" · ");
   row.append(twist, word, names);
   row.dataset.tip = t("sidebar.restingProjectsTip", "에이전트가 없는 접힌 프로젝트입니다 — 누르면 펼칩니다");
-  row.addEventListener("click", () => {
+  row.addEventListener("click", () => foldWithScrollAnchor(row, () => {
     restingProjectsOpen = !restingProjectsOpen;
-    void refreshWorktrees();
-  });
+  }));
   return row;
 }
 
@@ -5990,7 +5986,9 @@ async function refreshWorktrees() {
   // selected, or what the agents inside them are doing, and every one of those
   // is a class on a row that already exists. A workspace click used to rebuild
   // every project header, every row and every listener under them to say that.
-  const shape = worktreeListShape(held);
+  // Which projects rest, once a refresh: the shape and the rows below read it.
+  const resting = restingProjectPaths(listed);
+  const shape = worktreeListShape(held, resting);
   if (shape === worktreeListDrawn && worktreeList.firstElementChild) {
     // Shape equality keeps the existing DOM. A cache entry can still be
     // missing (for example after a resumed conversation) or stale, so the
@@ -6036,15 +6034,11 @@ async function refreshWorktrees() {
   }
   // The resting line stands after the projects at work, and the projects it
   // stands for follow it while it is open.
-  const resting = restingProjectPaths(listed);
   const restingList = listed.filter((project) => resting.has(project.path));
-  const restingRow = restingList.length > 0 ? restingProjectsRow(restingList) : null;
-  const drawnProjects = [
-    ...listed.filter((project) => !resting.has(project.path)),
-    ...(restingProjectsOpen ? restingList : []),
-  ];
-  for (const project of sidebarGroupBy === "repo" ? drawnProjects : []) {
-    if (restingRow && !restingRow.isConnected && resting.has(project.path)) worktreeList.appendChild(restingRow);
+  const working = listed.filter((project) => !resting.has(project.path));
+  const drawnProjects = [...working, ...(restingProjectsOpen ? restingList : [])];
+  for (const [at, project] of (sidebarGroupBy === "repo" ? drawnProjects : []).entries()) {
+    if (at === working.length) worktreeList.appendChild(restingProjectsRow(restingList));
     const projectNode = document.createElement("div");
     projectNode.className = "proj";
     projectNode.dataset.projectPath = project.path;
@@ -6076,7 +6070,7 @@ async function refreshWorktrees() {
     projectNode.append(makeProjectHeader(project), children);
     worktreeList.appendChild(projectNode);
   }
-  if (restingRow && !restingRow.isConnected) worktreeList.appendChild(restingRow);
+  if (restingList.length > 0 && !restingProjectsOpen) worktreeList.appendChild(restingProjectsRow(restingList));
 
   // 절이 모두 판에 앉은 다음에야 창을 잰다 — 범위는 실제 자리에서 나온다.
   renderSidebarWindows();

@@ -60,9 +60,10 @@ function measure() {
     scrolls: strip.scrollWidth > strip.clientWidth,
     narrowest: Math.round(Math.min(...nodes.map((node) => box(node).width))),
     minWidth: parseFloat(getComputedStyle(nodes[0]).minWidth),
-    // A narrow window folds the tabs not on stage to their mark (t-78107, 시안 17); the one on stage keeps the floor.
+    // A narrow strip folds the tabs not on stage to their mark (t-78107, 시안 17); the one on stage keeps the floor.
     floor: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--tab-min-width")),
     front: Math.round(box(strip.querySelector(".tab.is-active")).width),
+    narrow: strip.getBoundingClientRect().width <= 560,
     folded: nodes.filter((node) => !node.classList.contains("is-active"))
       .every((node) => getComputedStyle(node.querySelector(".tab-label")).clipPath !== "none"),
     ellipsis: getComputedStyle(label).textOverflow === "ellipsis",
@@ -89,7 +90,7 @@ export async function testTabstripOverflow(browser, origin, ok) {
         open = count;
         for (const width of WIDTHS) {
           await page.setViewportSize({ width, height: 860 });
-          // The window answers a resize on its next frame (a media query's change, t-78107).
+          // The window answers a resize on its next frame (the strip's observer, t-78107).
           await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
           const m = await page.evaluate(measure);
           base ??= m;
@@ -102,11 +103,11 @@ export async function testTabstripOverflow(browser, origin, ok) {
             m.rightInside && m.rightWidth === base.rightWidth, JSON.stringify(m));
           ok(`the tab in front is never behind the fade (${tag})`,
             m.shown.last && m.shown.first && m.shown.middle, JSON.stringify(m.shown));
-          if (m.scrolls && width > 1000) {
+          if (m.scrolls && !m.narrow) {
             ok(`tabs shrink to their floor before the strip scrolls (${tag})`,
               m.narrowest === m.minWidth && m.ellipsis && m.closeKept, JSON.stringify(m));
-          } else if (width <= 1000) {
-            ok(`a narrow window folds the tabs not on stage to their mark and keeps the floor for the one in front (${tag})`,
+          } else if (m.narrow) {
+            ok(`a narrow strip folds the tabs not on stage to their mark and keeps the floor for the one in front (${tag})`,
               m.folded && m.front >= m.floor && m.ellipsis && m.closeKept, JSON.stringify(m));
           }
           if (count === 60 && (width === 800 || width === 720)) {

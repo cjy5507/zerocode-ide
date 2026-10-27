@@ -2798,20 +2798,19 @@ svg.wt-agent-dot {
 }
 
 /* What git says about the work (t-22104), a second chip beside the ledger's
- * word and never in its colours alone: 반영됨 is ready ink, 미반영 N is the wait
- * ink, 확인 필요 is the halt ink, and a checkout with nothing of its own yet
- * stays the plane's quiet ink. 정리 가능 is the one chip that is a button. */
+ * word and never in its colours alone: 반영됨 is ready ink, 확인 필요 is the
+ * halt ink, and 미반영 N and a checkout with nothing of its own yet stay the
+ * plane's quiet ink (t-78107). 정리 가능 is the one chip that is a button. */
 .wt-landing[data-landing="landed"] {
   color: var(--signal-ready-ink);
 }
 
 /* 2차 A (t-78107, 시안 6): unlanded is a quiet number, not a lit badge. The
  * amber stood on every branch with work in it — eight at once in the person's
- * 10-27 photo — and a colour that is always on says nothing. The count stays;
- * the box and the wait ink go. A clash below keeps the halt ink: that one
- * stops a landing. */
+ * 10-27 photo — and a colour that is always on says nothing. The count keeps
+ * the plane's quiet ink (below) and loses its box. A clash keeps the halt
+ * ink: that one stops a landing. */
 .wt-landing[data-landing="ahead"] {
-  color: color-mix(in srgb, var(--nav-plane-ink) 70%, transparent);
   border-color: transparent;
   background: none;
 }
@@ -2821,12 +2820,13 @@ svg.wt-agent-dot {
 }
 
 /* A merge that would clash (t-34501): the halt ink 확인 필요 uses, and heavier, so it is the one
- * chip in the list that reads as a stop. Far behind without a clash keeps the wait ink above. */
+ * chip in the list that reads as a stop. Far behind without a clash stays the quiet unlanded number. */
 .wt-landing[data-landing="conflict"] {
   color: var(--signal-halt-ink);
   font-weight: 600;
 }
 
+.wt-landing[data-landing="ahead"],
 .wt-landing[data-landing="none"],
 .wt-landing[data-landing="pending"] {
   color: color-mix(in srgb, var(--nav-plane-ink) 70%, transparent);
@@ -6496,6 +6496,9 @@ body.is-dragging-pane {
  * (docs/reverse/orca-ui-inventory.md 1-e). Overflow is a scroll and nothing
  * else — Orca has no tab menu, and neither does this. */
 .tabstrip {
+  /* Its own width decides when its tabs fold (t-78107, 시안 17) — a split
+   * pane's strip is narrower than the window it sits in. */
+  container: tabstrip / inline-size;
   display: flex;
   align-items: stretch;
   min-height: var(--tabstrip-height);
@@ -6698,12 +6701,12 @@ body.is-dragging-pane {
   box-shadow: inset 0 0 0 var(--status-dot-ring) var(--signal-you);
 }
 
-/* 2차 A (t-78107, 시안 17): a narrow window folds the tabs that are not on
+/* 2차 A (t-78107, 시안 17): a narrow strip folds the tabs that are not on
  * stage to their mark, state dot and age — the name stays the tab's spoken
- * name (visually hidden, never removed) and its tip. The title bar is the
- * window's own row, so the window's width is the bar's (the status bar's
- * thresholds say the same, t-77705). */
-@media (max-width: 1000px) {
+ * name (visually hidden, never removed) and its tip. 560 px is the title
+ * bar's strip in a 1000 px window with both side panels open, the width the
+ * passed draft folds at. */
+@container tabstrip (max-width: 560px) {
   .tab:not(.is-active) .tab-label {
     position: absolute;
     width: 1px;
@@ -6725,17 +6728,15 @@ body.is-dragging-pane {
 }
 
 /* The age rides right after the name, so the label sizes to its words and
- * the close control takes the slack. */
-.tab:has(.tab-age:not(:empty)) .tab-label {
+ * the close control takes the slack. `has-age` is the paint's word for it —
+ * a `:has()` here was asked again on every tab of the strip each repaint. */
+.tab.has-age .tab-label {
   flex: 0 1 auto;
-}
-
-.tab:has(.tab-age:not(:empty)) .tab-age {
-  margin-inline-end: auto;
 }
 
 .tab-age {
   flex: none;
+  margin-inline-end: auto;
   color: var(--ink-mist);
   font: var(--type-label-12-mono);
   font-variant-numeric: tabular-nums;
