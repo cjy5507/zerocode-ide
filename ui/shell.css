@@ -35409,12 +35409,14 @@ details.task-board-section > summary {
 }
 
 /* 세로 시간표 — 카드 하나: 홈통(정시 글과 「지금」 칩)과 열 넷. 열은 묶음 상자 그대로다. */
-/* 열의 최소 폭(나란히 선 블록 수 × 블록 최소 폭)이 카드보다 넓어지면 어느 그릇에서든 옆으로 민다 — 잘리지 않는다. */
+/* 열의 최소 폭(나란히 선 블록 수 × 블록 최소 폭)이 카드보다 넓어지면 어느 그릇에서든 옆으로 민다 — 잘리지 않는다.
+ * `overflow`의 두 값은 가로·세로 차례다(review r2 P1: 거꾸로 적어 어느 그릇에서도 안 밀렸다). */
 .board-schedule-day {
   border-radius: var(--radius-sm);
   background: var(--surface-deck);
   box-shadow: var(--shadow-border-small);
-  overflow: hidden auto;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .board-schedule-cal-body {

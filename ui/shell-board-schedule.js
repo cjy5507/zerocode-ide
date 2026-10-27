@@ -599,7 +599,7 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
   for (const [gate, members] of gates) {
     const placed = members.map((job) => boardScheduleJobRow(job, plan, now, stall, 1));
     const start = Math.min(...placed.map((row) => row.start));
-    const end = Math.max(...placed.map((row) => row.end));
+    const reach = Math.max(...placed.map((row) => row.end));
     // A step's last job speaks for it: a step that failed and passed on its rerun passed.
     const latest = new Map();
     for (const job of members) {
@@ -615,6 +615,10 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
     const parts = [...new Set(members.map((job) => job.part).filter(Boolean))].sort();
     // A step still running keeps the gate running; a failed step stops it even while others queue (review P3-3).
     const state = count(["running"]) > 0 ? "running" : failed > 0 ? "failed" : open > 0 ? "waiting" : "done";
+    // A stopped gate ends where its last finished step ended — the steps queued behind it will not run (review r2 P2);
+    // a gate still going reaches the expected end of its steps.
+    const finished = members.map((job) => Number(job.end_ms)).filter((ms) => Number.isFinite(ms) && ms > 0);
+    const end = state === "failed" ? (finished.length > 0 ? Math.max(...finished) : now) : reach;
     const said = state === "running"
       ? t("board.schedule.gateRunning", "{{done}}/{{total}} · {{time}} 남음", {
         done: steps.length - open, total: steps.length, time: boardScheduleSpan(end - now),
@@ -648,8 +652,9 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
     const failedJob = steps.find((job) => ["failed", "capped", "refused"].includes(job.state)) ?? null;
     // The job that tells the gate's story (t-77628 review P2-1): the step that failed, else the one running,
     // else the one queued last — a block and the board's line open its log, since a block holds no rows to unfold.
+    // A gate none of whose steps has run tells no story yet: no job, no chip (review r2 P3-1).
     const telling = failedJob ?? steps.find((job) => job.state === "running")
-      ?? steps.slice().sort((a, b) => (Number(b.queued_ms) || 0) - (Number(a.queued_ms) || 0))[0] ?? null;
+      ?? members.filter((job) => Number(job.end_ms) > 0).sort((a, b) => Number(b.end_ms) - Number(a.end_ms))[0] ?? null;
     const facts = {
       gate, state, start, end, basis, unknown, green, total: steps.length, failed,
       failedKinds: kinds(["failed", "capped", "refused"]), failedJob: failedJob?.name ?? null,
@@ -944,7 +949,8 @@ function boardScheduleBoardLines(groups, now) {
 
   // 2. The gate: the one that started last in the range.
   const gateHeads = rows("gates").slice().sort((a, b) => b.start - a.start);
-  const gate = gateHeads.find((row) => row.state === "running") ?? gateHeads[0] ?? null;
+  const gate = gateHeads.find((row) => row.state === "running") ?? gateHeads.find((row) => row.state === "failed")
+    ?? gateHeads[0] ?? null;
   const facts = gate?.facts ?? null;
   const gateLine = gate && facts
     ? {
@@ -1109,7 +1115,7 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false, mea
       // share of a waiting task's block that is the gate's time still ahead.
       cut: row.start < from,
       // A gate's block cannot unfold its jobs (the timetable draws heads only): it opens its telling job's log.
-      act: vertical && row.depth === 0 && row.act?.fold && row.facts?.logJob ? { log: { job: row.facts.logJob } } : row.act,
+      act: vertical && row.depth === 0 && row.act?.fold ? (row.facts?.logJob ? { log: { job: row.facts.logJob } } : null) : row.act,
       mark: row.ride?.inherits && row.end > row.start
         ? Math.min(1, Math.max(0, (now - row.start) / (row.end - row.start))) : null,
       col: 0,
