@@ -2153,9 +2153,10 @@ impl Drop for EnvVarGuard {
     }
 }
 
+// `ZO_STREAM_IDLE_TIMEOUT_MS` is process-wide and other modules' tests set it
+// too, so these tests serialise on the crate's one env lock.
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    crate::test_env_lock()
 }
 
 fn streaming_request() -> MessageRequest {
@@ -2377,13 +2378,10 @@ async fn gemini_restart_reopen_is_bounded_by_the_wallclock_budget() {
     let _guard = env_lock();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let server_hits = hits.clone();
 
     let server = tokio::spawn(async move {
         // First stream opens and goes silent pre-commit.
         let (mut first, _) = listener.accept().await.unwrap();
-        server_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut scratch = [0u8; 1024];
         let _ = first.read(&mut scratch).await;
         first
@@ -2391,13 +2389,11 @@ async fn gemini_restart_reopen_is_bounded_by_the_wallclock_budget() {
             .await
             .unwrap();
         first.flush().await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
 
         // Reopen: accept the connection but never answer it. Without the
         // remaining-window timeout around the reopen this would park the
         // stream indefinitely (the shared client has no blanket timeout).
         let (mut second, _) = listener.accept().await.unwrap();
-        server_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _ = second.read(&mut scratch).await;
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     });
@@ -2414,10 +2410,12 @@ async fn gemini_restart_reopen_is_bounded_by_the_wallclock_budget() {
     let mut stream = open_test_stream(&client, &url, body).await;
     // Shrink the restart window so the never-answered reopen fails out in
     // test time instead of the production 120s ceiling.
-    stream.max_restart_wallclock = std::time::Duration::from_millis(500);
+    let window = std::time::Duration::from_millis(500);
+    stream.max_restart_wallclock = window;
 
     let started = std::time::Instant::now();
     let error = stream.next_event().await.expect_err("reopen must time out");
+    let waited = started.elapsed();
     assert!(
         matches!(
             &error,
@@ -2428,11 +2426,22 @@ async fn gemini_restart_reopen_is_bounded_by_the_wallclock_budget() {
         "expected exhausted wrapper around stream_restart_timeout, got: {error:?}"
     );
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
-        "reopen wait must be bounded by the restart window, took {:?}",
-        started.elapsed()
+        waited < std::time::Duration::from_secs(5),
+        "reopen wait must be bounded by the restart window, took {waited:?}"
     );
-    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // The window is wall clock and opens at the first restart, so the
+    // client must have waited all of it out since then. A stall inside it
+    // (a paused or starved test process) spends what is left wherever it
+    // lands, even before the reopen has connected, so whether the server got
+    // to accept the reopen is no part of the bound (t-77484 F1).
+    let spent = stream
+        .restart_window_start
+        .expect("the restart opens the window")
+        .elapsed();
+    assert!(
+        spent >= window,
+        "the client gave up on the reopen before its window had passed, {spent:?} after it opened"
+    );
     server.abort();
 }
 
