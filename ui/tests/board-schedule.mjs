@@ -1061,6 +1061,33 @@ export async function testBoardSchedule(browser, origin, ok) {
         && lines.waiting.word === "막힘" && lines.waiting.tone === "halt" && lines.gate.word === "실패" && lines.gate.tone === "halt"
         && lines.gate.act === "로그 →" && lines.gate.note.startsWith("g3a-zo-lint 실패 · 0/4 초록 · 과업 2건 실림"),
       JSON.stringify({ t67102: rode("t-67102"), gate: drawn.groups.gates.rows.find((one) => one.key === "gate:l61"), waiting: lines.waiting, line: lines.gate }));
+    const failedGate = drawn.groups.gates.rows.find((one) => one.key === "gate:l61");
+    ok("a gate stopped by a failure ends where its last finished step ended — never ahead of 「now」 — and the board's big clock is that moment",
+      failedGate && failedGate.to <= drawn.now + 0.01 && lines.gate.big === "09:49" && failedGate.sub.includes("09:49"),
+      JSON.stringify({ to: failedGate?.to, now: drawn.now, big: lines.gate.big, sub: failedGate?.sub }));
+    // With a gate queued behind the failed one, the board still names the failed gate (review r2 P3-2).
+    const behindFailed = await page.evaluate(async (now) => {
+      const held = window.__SCHEDULE__;
+      const later = { name: "0-1792543900-run11955-l62r-g1-build", who: "run11955-l62r", state: "waiting", class: "first", lane: 1,
+        cap_secs: 1800, queued_ms: now - 60_000, start_ms: null, end_ms: null, secs: null, rc: null, kind: "g1-build", gate: "l62",
+        part: "r", what: null, expected: { secs: 600, samples: 5 } };
+      window.__SCHEDULE__ = { ...held, revision: held.revision + 1, jobs: [...held.jobs, later] };
+      refreshBoardSchedule();
+      await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the moved answer");
+      paintBoardScheduleHosts();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const line = document.querySelector('#board-view .board-schedule-line[data-line="gate"]');
+      const out = { what: line.children[0].textContent, word: line.children[1].dataset.word,
+        l62act: document.querySelector('#board-view [data-key="gate:l62"]')?.dataset.act ?? null };
+      window.__SCHEDULE__ = { ...held, revision: held.revision + 2 };
+      refreshBoardSchedule();
+      await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the restored answer");
+      paintBoardScheduleHosts();
+      return out;
+    }, SCHEDULE_NOW);
+    ok("with a gate queued behind the failed one, the board's gate line keeps the failed gate, and the queued gate's block carries no log chip (nothing of it has run)",
+      behindFailed.what === "게이트 l61" && behindFailed.word === "실패" && behindFailed.l62act === "",
+      JSON.stringify(behindFailed));
     drawn = await patchScheduleJobs(page, l61jobs.map((job) => [job.name, {
       state: job.state, rc: job.rc ?? null, end_ms: job.end_ms ?? null, secs: job.secs ?? null, tasks: null, what: job.what ?? null,
     }]));
@@ -1080,14 +1107,15 @@ export async function testBoardSchedule(browser, origin, ok) {
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
       const line = document.querySelector('#board-view .board-schedule-line[data-line="gate"]');
       const heads = [...document.querySelectorAll('#board-view [data-group="gates"] .board-schedule-block')].map((one) => one.dataset.key);
+      const l62act = document.querySelector('#board-view [data-key="gate:l62"]')?.dataset.act ?? null;
       window.__SCHEDULE__ = { ...held, revision: held.revision + 2 };
       refreshBoardSchedule();
       await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the restored answer");
       paintBoardScheduleHosts();
-      return { what: line.children[0].textContent, word: line.children[1].dataset.word, heads };
+      return { what: line.children[0].textContent, word: line.children[1].dataset.word, heads, l62act };
     }, SCHEDULE_NOW);
-    ok("with a gate queued behind the running one, the board's gate line still names the running gate, and both stand as blocks",
-      queuedGate.what === "게이트 l61" && queuedGate.word === "도는 중" && queuedGate.heads.includes("gate:l62"),
+    ok("with a gate queued behind the running one, the board's gate line still names the running gate, both stand as blocks, and the queued one carries no log chip",
+      queuedGate.what === "게이트 l61" && queuedGate.word === "도는 중" && queuedGate.heads.includes("gate:l62") && queuedGate.l62act === "",
       JSON.stringify(queuedGate));
 
     /* ---- 비어 있어도 넉 줄: 레인도 게이트도 과업도 없는 답 ---- */
@@ -1150,6 +1178,7 @@ export async function testBoardSchedule(browser, origin, ok) {
       const seat = day.getBoundingClientRect();
       const box = block.getBoundingClientRect();
       const out = { areas: getComputedStyle(line).gridTemplateAreas, dayScroll: day.scrollWidth, dayClient: day.clientWidth,
+        overflowX: getComputedStyle(day).overflowX, overflowY: getComputedStyle(day).overflowY,
         hostScroll: host.scrollWidth, hostClient: host.clientWidth, reached: box.left >= seat.left - 1 && box.right <= seat.right + 1 };
       day.scrollLeft = 0;
       host.style.width = "";
@@ -1158,8 +1187,34 @@ export async function testBoardSchedule(browser, origin, ok) {
       return out;
     });
     ok("in a narrow holder the board's lines fold to two rows and the timetable scrolls sideways inside its card — the holder never overflows and every block is reachable",
-      narrow.areas.includes("note note") && narrow.dayScroll > narrow.dayClient && narrow.hostScroll <= narrow.hostClient + 1 && narrow.reached,
+      narrow.areas.includes("note note") && narrow.dayScroll > narrow.dayClient && narrow.hostScroll <= narrow.hostClient + 1 && narrow.reached
+        && narrow.overflowX === "auto" && narrow.overflowY === "hidden",
       JSON.stringify(narrow));
+
+    const wheeled = await page.evaluate(async () => {
+      const host = document.querySelector("#board-view .task-board-schedule");
+      host.style.width = "400px";
+      paintBoardScheduleHosts();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const day = host.querySelector(".board-schedule-day");
+      day.scrollLeft = 0;
+      const box = day.getBoundingClientRect();
+      return { x: box.left + 100, y: box.top + 60 };
+    });
+    await page.mouse.move(wheeled.x, wheeled.y);
+    await page.mouse.wheel(300, 0);
+    const scrolled = await page.evaluate(async () => {
+      await new Promise((done) => setTimeout(done, 200));
+      const host = document.querySelector("#board-view .task-board-schedule");
+      const day = host.querySelector(".board-schedule-day");
+      const left = day.scrollLeft;
+      day.scrollLeft = 0;
+      host.style.width = "";
+      paintBoardScheduleHosts();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      return left;
+    });
+    ok("a person's wheel moves the timetable sideways in a narrow holder", scrolled > 0, String(scrolled));
 
     /* ---- 키보드: 블록은 단추라 초점이 서고, 서면 할 일과 제 말을 말한다. (Enter의 활성화는 창의 키 처리가
      * 가로채 행도 블록도 시험 창에서 눌리지 않는다 — 블록 이전부터 같았고, 이 과업 밖이다.) ---- */
