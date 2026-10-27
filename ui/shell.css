@@ -14834,8 +14834,8 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 
 /* 인라인 코드는 둥근 칩 — 블록(`pre`) 안의 코드는 제 우물의 옷을 입는다. 차례
  * 목록의 명령도 같은 칩이다. */
-.is-chat-page .helper-said :not(pre) > code,
-.your-turn-mono {
+.your-turn-mono,
+.is-chat-page .helper-said :not(pre) > code {
   padding: 0 0.35em;
   border-radius: var(--radius-sm);
   background: var(--chat-chip-bg);
