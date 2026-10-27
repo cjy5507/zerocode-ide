@@ -37364,7 +37364,8 @@ ok(
   "the pane's own conversation floats its composer in the extension's centered dock — inset from the pane's edges, no wider than the token, the composer as wide as the dock, and inside the pane and on screen when it narrows — the measure a helper's page stood before it got a footer",
   paneDock.stands && paneDock.paneWidth === 1200 &&
     paneDock.dockWidth === paneDock.wantDockWidth && paneDock.dockWidth > 0 &&
-    paneDock.dockWidth < paneDock.columnWidth &&
+    // No wider than the reading column it floats under (2차 B: the same 760 px axis).
+    paneDock.dockWidth <= paneDock.columnWidth &&
     paneDock.dockCentered && paneDock.composerOnAxis &&
     paneDock.narrowWidth === 420 && paneDock.composerInside && paneDock.composerOn,
   JSON.stringify(paneDock),
