@@ -6910,9 +6910,11 @@ body.is-dragging-pane {
 
 @media (max-width: 480px) {
   /* Back and forward keep their chords; the view switch and the run control
-   * keep their glyphs and say their words to a reader and on their tips. */
+   * keep their glyphs and say their words to a reader and on their tips. The
+   * tab's age gives its room to the name it follows. */
   .tab-new,
-  .titlebar-nav {
+  .titlebar-nav,
+  .tab-age {
     display: none;
   }
 

@@ -342,6 +342,9 @@ async function testTabMenuFold(browser, origin, ok) {
         add: shown(strip.querySelector(".tab-new")),
         // The opener stands whole inside its strip, not scrolled past its end.
         openerWhole: opener !== null && opener.getBoundingClientRect().right <= strip.getBoundingClientRect().right + 1,
+        // The tab in front still says its (short) name whole.
+        frontNamed: ((label) => label !== null && label.getBoundingClientRect().width > 0 &&
+          label.scrollWidth <= label.clientWidth + 1)(strip.querySelector(".tab.is-front .tab-label")),
         menuRows: el("sidebar-menu").childElementCount,
       };
     });
@@ -407,7 +410,7 @@ async function testTabMenuFold(browser, origin, ok) {
     const tail = await page.evaluate(() => [...el("sidebar-menu").querySelectorAll('[role="menuitem"]')].map((row) => row.textContent.trim()));
     await page.keyboard.press("Escape");
     ok("at 480 px the strip keeps the tab on stage and its menu, and the new-terminal control folds into that menu (시안 17)",
-      at480.opener && at480.openerWhole && !at480.add && at480.tabs.filter((tab) => tab.shown).length === 1 && tail.some((words) => words.startsWith("새 터미널")),
+      at480.opener && at480.openerWhole && at480.frontNamed && !at480.add && at480.tabs.filter((tab) => tab.shown).length === 1 && tail.some((words) => words.startsWith("새 터미널")),
       JSON.stringify({ at480, tail }));
 
     // A split: the leaf without the window's active tab still shows its own.
