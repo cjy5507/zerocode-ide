@@ -273,7 +273,14 @@ function saveWorktreeLabel() {
  * another column is how a person loses their place. */
 let menuOpener = null;
 
+/* An opener that says it has a menu (`aria-expanded`) says whether its menu
+ * is the one up — on every road that closes or replaces it (t-78107). */
+function markMenuOpener(open) {
+  if (menuOpener?.hasAttribute("aria-expanded")) menuOpener.setAttribute("aria-expanded", String(open));
+}
+
 function closeSidebarMenu() {
+  markMenuOpener(false);
   closing(sidebarMenu, () => sidebarMenu.replaceChildren());
 }
 
@@ -373,7 +380,9 @@ function openSidebarMenu(x, y, items, opener = null) {
   // rows and delete them, or leave the previous menu's rows above them for
   // whatever reads the menu next.
   sidebarMenu.replaceChildren();
+  markMenuOpener(false);
   menuOpener = opener;
+  markMenuOpener(true);
   for (const item of items) {
     if (item.separator) {
       const rule = document.createElement("div");
@@ -438,9 +447,11 @@ function openSidebarMenu(x, y, items, opener = null) {
     // Orca's own filter rows keep their dropdown up the same way. A row that
     // DOES something stays a menuitem and closes, as before.
     const stays = item.check === true || item.toggle === true;
-    button.setAttribute("role", stays ? "menuitemcheckbox" : "menuitem");
-    if (stays) {
-      button.classList.add(item.check ? "is-check" : "is-toggle");
+    // A row that is one of a set — which tab is on stage — is a radio: it
+    // wears the check row's tick and, like any choice, closes the menu.
+    button.setAttribute("role", stays ? "menuitemcheckbox" : item.choice ? "menuitemradio" : "menuitem");
+    if (stays || item.choice) {
+      button.classList.add(item.toggle ? "is-toggle" : "is-check");
       button.setAttribute("aria-checked", item.checked ? "true" : "false");
     }
     // 자기 위의 스위치를 한정하는 줄은 그 밑에 들여 서고, 그 스위치보다
@@ -458,7 +469,7 @@ function openSidebarMenu(x, y, items, opener = null) {
     // 켜진 줄만 체크를 보인다 — 자리는 모든 줄이 갖는다. The GitHub filter
     // menu's rule (markGithubFilterRow), held here too so a tick arriving
     // never re-rags the labels beside it.
-    if (item.check) {
+    if (item.check || item.choice) {
       const tick = document.createElement("span");
       tick.className = "sidebar-menu-tick";
       tick.innerHTML = icon("check");

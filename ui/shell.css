@@ -6707,7 +6707,7 @@ body.is-dragging-pane {
  * bar's strip in a 1000 px window with both side panels open, the width the
  * passed draft folds at. */
 @container tabstrip (max-width: 560px) {
-  .tab:not(.is-active) .tab-label {
+  .tab:not(.is-front) .tab-label {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -6716,13 +6716,13 @@ body.is-dragging-pane {
     white-space: nowrap;
   }
 
-  .tab:not(.is-active) {
+  .tab:not(.is-front) {
     flex: none;
     min-width: 0;
   }
 
   /* The tab on stage keeps room for its name — the folded ones gave it theirs. */
-  .tab.is-active {
+  .tab.is-front {
     flex: none;
   }
 }
@@ -6821,7 +6821,10 @@ body.is-dragging-pane {
 }
 
 .tab-detached:hover,
-.tab-detached:focus-visible {
+.tab-detached:focus-visible,
+.tab-menu:hover,
+.tab-menu:focus-visible,
+.tab-menu[aria-expanded="true"] {
   background: var(--row-hover);
   color: var(--ink-chalk);
 }
@@ -6858,6 +6861,70 @@ body.is-dragging-pane {
 .tab-new:focus-visible {
   background: var(--row-hover);
   color: var(--ink-chalk);
+}
+
+/* 2차 A (t-78107, 시안 17): 「탭 N ⌄」, the strip's one menu of its tabs. It
+ * wears the pill's quiet face and stands only in a window under
+ * `--fold-tab-menu`; its rows exist while its menu is up. */
+.tab-menu {
+  display: none;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  height: var(--tabstrip-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  cursor: pointer;
+}
+
+.tab-menu .icon {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  transform: rotate(90deg);
+}
+
+/* 2차 A (t-78107, 시안 17): under `--fold-tab-menu` the strip is the tab on
+ * stage and its menu; under `--fold-tab-only` the + folds into that menu as
+ * its last row and the title bar gives the strip the room its other controls
+ * held. The tabs leave the strip, not the document — every one is a row of
+ * the menu. */
+@media (max-width: 760px) {
+  .tab:not(.is-front) {
+    display: none;
+  }
+
+  /* The tab on stage gives up its width before the menu does: its name
+   * ends in an ellipsis, the way to every tab stays whole. */
+  .tab.is-front {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .tab-menu {
+    display: flex;
+  }
+}
+
+@media (max-width: 480px) {
+  /* Back and forward keep their chords; the view switch and the run control
+   * keep their glyphs and say their words to a reader and on their tips. */
+  .tab-new,
+  .titlebar-nav {
+    display: none;
+  }
+
+  .titlebar-right .segment-btn > :not(.view-toggle-glyph),
+  .chrome-run-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 
 /* The stage terminal: the lane's TUI, full-bleed — the tmux answer. Fills
@@ -27376,6 +27443,7 @@ select {
 .tab,
 .tab-close,
 .tab-detached,
+.tab-menu,
 .tab-new,
 .task-chip,
 .task-close,

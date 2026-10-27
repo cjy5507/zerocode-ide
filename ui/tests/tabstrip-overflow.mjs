@@ -66,6 +66,10 @@ function measure() {
     narrow: strip.getBoundingClientRect().width <= 560,
     folded: nodes.filter((node) => !node.classList.contains("is-active"))
       .every((node) => getComputedStyle(node.querySelector(".tab-label")).clipPath !== "none"),
+    // Under 760 px the strip is the tab in front and one menu of them all (시안 17).
+    menu: getComputedStyle(strip.querySelector(".tab-menu")).display !== "none",
+    frontOnly: nodes.filter((node) => node.getClientRects().length > 0).length === 1,
+    frontClose: box(strip.querySelector(".tab.is-active").querySelector(".tab-close, .tab-pin")).width > 0,
     ellipsis: getComputedStyle(label).textOverflow === "ellipsis",
     closeKept: nodes.every((node) => node.querySelector(".tab-close, .tab-pin") &&
       box(node.querySelector(".tab-close, .tab-pin")).width > 0),
@@ -103,7 +107,10 @@ export async function testTabstripOverflow(browser, origin, ok) {
             m.rightInside && m.rightWidth === base.rightWidth, JSON.stringify(m));
           ok(`the tab in front is never behind the fade (${tag})`,
             m.shown.last && m.shown.first && m.shown.middle, JSON.stringify(m.shown));
-          if (m.scrolls && !m.narrow) {
+          if (m.menu) {
+            ok(`under 760 px the strip is the tab in front, at its floor, and the menu of every tab (${tag})`,
+              m.frontOnly && m.front >= m.floor && m.ellipsis && m.frontClose, JSON.stringify(m));
+          } else if (m.scrolls && !m.narrow) {
             ok(`tabs shrink to their floor before the strip scrolls (${tag})`,
               m.narrowest === m.minWidth && m.ellipsis && m.closeKept, JSON.stringify(m));
           } else if (m.narrow) {
@@ -116,8 +123,11 @@ export async function testTabstripOverflow(browser, origin, ok) {
         }
       }
 
-      // The keyboard's way through the tabs lands on a tab the person can see.
-      await page.setViewportSize({ width: 720, height: 860 });
+      // The keyboard's way through the tabs lands on a tab the person can see —
+      // in the narrowest window that still scrolls a strip of tabs (under 760 px
+      // the strip is one tab and its menu).
+      await page.setViewportSize({ width: 800, height: 860 });
+      await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
       await page.evaluate(() => setActiveTab(el("tabstrip").querySelector(".tab").dataset.tab));
       await page.keyboard.down("Control");
       await page.keyboard.press("Shift+Tab");

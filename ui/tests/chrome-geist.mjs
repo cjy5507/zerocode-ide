@@ -295,7 +295,8 @@ async function testNarrowFolds(browser, origin, ok) {
     const read = () => page.evaluate(() => [...el("tabstrip").querySelectorAll(".tab")].map((tab) => {
       const label = tab.querySelector(".tab-label");
       return {
-        active: tab.classList.contains("is-active"),
+        // The tab its leaf shows: the window's active tab, or the leaf's last.
+        active: tab.classList.contains("is-front"),
         shown: label.getBoundingClientRect().width > 2,
         spoken: label.textContent.length > 0 && getComputedStyle(label).display !== "none",
       };
@@ -408,6 +409,31 @@ async function testTabMenuFold(browser, origin, ok) {
     ok("at 480 px the strip keeps the tab on stage and its menu, and the new-terminal control folds into that menu (시안 17)",
       at480.opener && at480.openerWhole && !at480.add && at480.tabs.filter((tab) => tab.shown).length === 1 && tail.some((words) => words.startsWith("새 터미널")),
       JSON.stringify({ at480, tail }));
+
+    // A split: the leaf without the window's active tab still shows its own.
+    await page.setViewportSize({ width: 760, height: 900 });
+    await frames(page);
+    const split = await page.evaluate(async () => {
+      const pane = splitStageBesideFocused("horizontal");
+      await openTermTab({ placement: "tab" });
+      const fresh = currentTab();
+      fresh.pane = pane;
+      await openTermTab({ placement: "tab" });
+      const front = currentTab();
+      front.pane = pane;
+      setActiveTab(el("tabstrip").querySelector(".tab").dataset.tab);
+      renderTabs();
+      await window.__PAINTED__();
+      return pane;
+    });
+    await frames(page);
+    const strips = await page.evaluate(() => [...document.querySelectorAll(".tabstrip")].map((strip) => ({
+      shown: [...strip.querySelectorAll(".tab")].filter((tab) => tab.getClientRects().length > 0).length,
+      opener: strip.querySelector(".tab-menu")?.textContent.trim() ?? null,
+    })));
+    ok("in a split at 760 px each leaf's strip shows its own front tab and its own menu",
+      split !== null && strips.length === 2 && strips.every((strip) => strip.shown === 1 && strip.opener === "탭 2"),
+      JSON.stringify({ split, strips }));
 
     const widths = await page.evaluate(() => {
       const root = getComputedStyle(document.documentElement);

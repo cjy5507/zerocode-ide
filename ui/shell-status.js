@@ -4847,6 +4847,9 @@ function paintTabNode(node, tab) {
     "tab",
     tab.kind === "lane" ? `is-lane ${slotClass(focusedId)}` : "",
     tab.id === activeTabId ? "is-active" : "",
+    // The tab its own leaf shows — in a split, a leaf without the window's
+    // active tab still shows one, and a folded strip keeps that one in sight.
+    groups.get(tab.pane)?.frontTabId === tab.id ? "is-front" : "",
     // Unsaved edits, on the tab rather than only in the header — the header
     // belongs to the file you are looking at, and the one you have to be
     // told about is the one you are not.
@@ -5076,6 +5079,71 @@ function addTabButton(pane, group) {
   return add;
 }
 
+/* 2차 A (t-78107, 시안 17): 「탭 N ⌄」 — in a window under `--fold-tab-menu`
+ * the strip shows the tab on stage and this, whose menu names every tab of
+ * the strip and, last, the new-terminal door the + folds into under
+ * `--fold-tab-only`. The rows are built as the menu opens and dropped as it
+ * closes (`openSidebarMenu`); the control itself stands hidden by the
+ * stylesheet in a wider window. */
+function tabMenuButton(pane, group) {
+  if (pane.tabMenu) return pane.tabMenu;
+  const opener = document.createElement("button");
+  opener.type = "button";
+  opener.className = "tab-menu";
+  opener.setAttribute("aria-haspopup", "menu");
+  opener.setAttribute("aria-expanded", "false");
+  // Enter and Space on it open its menu; they are not the staged terminal's.
+  opener.dataset.keyboardOwner = "true";
+  opener.innerHTML = `<span class="tab-menu-count"></span>${icon("chevron")}`;
+  const open = () => {
+    focusedPane = group;
+    if (!sidebarMenu.hidden && menuOpener === opener) return closeSidebarMenu();
+    const box = opener.getBoundingClientRect();
+    openSidebarMenu(box.left, box.bottom + 4, tabMenuRows(pane, group, opener), opener);
+  };
+  // The title bar hands a press to macOS on mousedown, as the + found.
+  opener.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    open();
+  });
+  opener.addEventListener("click", (event) => {
+    if (event.detail > 0) return;
+    open();
+  });
+  pane.tabMenu = opener;
+  return opener;
+}
+
+function tabMenuRows(pane, group, opener) {
+  const rows = paneTabs(group).map((tab) => ({
+    choice: true,
+    checked: tab.id === pane.frontTabId,
+    label: tabLabel(tab),
+    run: () => setActiveTab(tab.id),
+  }));
+  rows.push({ separator: true }, {
+    label: t("terminal.new", "새 터미널"),
+    action: "terminal.newTab",
+    run: () => {
+      focusedPane = group;
+      openTabCreate(opener, "tab-menu");
+    },
+  });
+  return rows;
+}
+
+function paintTabMenuButton(pane, group, count) {
+  const opener = tabMenuButton(pane, group);
+  const words = t("terminal.tabMenu", "탭 {{n}}", { n: count });
+  const said = opener.firstElementChild;
+  if (said.textContent !== words) said.textContent = words;
+  const tip = t("terminal.tabMenuTip", "이 판의 탭 모두");
+  if (opener.dataset.tip !== tip) opener.dataset.tip = tip;
+  return opener;
+}
+
 /* The strip, reconciled rather than rebuilt.
  *
  * This threw every node away and made them again on each render — and a
@@ -5107,6 +5175,7 @@ function renderPane(pane, group) {
   }
   const held = (pane.tabNodes ??= new Map());
   const wanted = paneTabs(group);
+  pane.frontTabId = activeTabIn(group)?.id ?? null;
   const seen = new Set();
   for (const [at, tab] of wanted.entries()) {
     seen.add(tab.id);
@@ -5140,6 +5209,7 @@ function renderPane(pane, group) {
     });
     pill.setAttribute("aria-label", pill.dataset.tip);
   }
+  const menu = paintTabMenuButton(pane, group, wanted.length);
   const add = addTabButton(pane, group);
   const addChord = optionalShortcutLabel("terminal.newTab");
   const addTip = addChord === null
@@ -5148,13 +5218,15 @@ function renderPane(pane, group) {
   if (add.dataset.tip !== addTip) add.dataset.tip = addTip;
   const addLabel = t("terminal.newTab", "새 터미널");
   if (add.getAttribute("aria-label") !== addLabel) add.setAttribute("aria-label", addLabel);
-  // Both tail pieces settle in one move, and only when either is out of
+  // The tail pieces settle in one move, and only when one is out of
   // place. Appending each on its own — "the pill last, then the add last" —
   // had them evict each other on every render: two nodes moved, four
   // childList mutations and a relayout of the strip on every agent-paint
   // beat, with nothing on the strip having changed (the freeze probe's
   // `#tabstrip childList×236` over sixty frames).
-  if (strip.lastElementChild !== add || add.previousElementSibling !== pill) strip.append(pill, add);
+  if (strip.lastElementChild !== add || add.previousElementSibling !== pill || pill.previousElementSibling !== menu) {
+    strip.append(menu, pill, add);
+  }
   revealActiveTab(pane);
   // Every strip in the tree stays visible: a group with no tabs has already
   // folded out of the tree (`collapseStageGroup`), so the only empty strip

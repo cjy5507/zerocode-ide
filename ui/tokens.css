@@ -803,6 +803,18 @@
   --statusbar-height: 24px;
   --panel-folded-height: 26vh;
 
+  /* 2차 A (t-78107, 시안 17): the window widths the passed draft folds at —
+   * the right panel to a counted rail, the sidebar to a rail of marks, the
+   * tabs to one menu, and at the last only the tab on stage and that menu.
+   * A media or container query cannot read a custom property, so the rules
+   * that fold write these numbers out and a scene (chrome-geist.mjs) holds
+   * them to these names. The two rails are a later task's; the tab strip
+   * folds at the last two. */
+  --fold-panel-rail: 1360px;
+  --fold-sidebar-rail: 1000px;
+  --fold-tab-menu: 760px;
+  --fold-tab-only: 480px;
+
   /* A status dot — the smallest mark that still reads as deliberate. */
   --dot-size: 5px;
   /* 상태를 나르는 점의 치수. `--dot-size`와 다른 이름인 이유는 다른 것을
