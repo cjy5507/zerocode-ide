@@ -4284,28 +4284,45 @@ document.addEventListener("focusout", hideTip);
  * not on every paint — and only when something is actually shortened, so a
  * wide window's tooltips stay exactly what they were. The paint resets a
  * segment's own tip, so the first line is read back before the sentence is
- * appended. */
+ * appended — and an item that is whole again gets that first line back
+ * (t-77705: a model that fit after the window widened kept the old model's
+ * name on its tip). */
 function explainBarWords(event) {
   const node = event.target.closest?.(".sb-claude, .sb-item, .sb-usage-roster");
   if (!node || !event.currentTarget.contains(node)) return;
   const cut = (one) => !one.hidden && (one.scrollWidth > one.clientWidth + 1 || getComputedStyle(one).display === "none");
-  // A usage segment speaks as its figure and its next-account words; any other
+  // A usage segment speaks as its figure and its next-account words, and the
+  // roster — what the keyboard reaches — as every shown gauge's; any other
   // item speaks as its own text.
-  const spoken = node.matches(".sb-claude")
-    ? [...node.querySelectorAll(".sb-claude-pct, .sb-claude-next")].filter((one) => !one.hidden)
+  const spoken = node.matches(".sb-claude, .sb-usage-roster")
+    ? [...node.querySelectorAll(
+      node.matches(".sb-claude")
+        ? ".sb-claude-pct, .sb-claude-next"
+        : ".sb-claude:not([hidden]) :is(.sb-claude-pct, .sb-claude-next)",
+    )].filter((one) => !one.hidden)
     : [node];
   const shortened = spoken.some(cut);
   const full = spoken.map((one) => one.textContent.replace(/\s+/g, " ").trim()).filter(Boolean).join(" — ");
-  if (!shortened || !full) return;
   const held = node.dataset.tip ?? "";
-  const base = held === node.dataset.tipMade ? (node.dataset.tipBase ?? "") : held;
+  const made = held !== "" && held === node.dataset.tipMade;
+  const base = made ? (node.dataset.tipBase ?? "") : held;
+  if (!shortened || !full) {
+    if (made && base) node.dataset.tip = base;
+    else if (made) delete node.dataset.tip;
+    delete node.dataset.tipBase;
+    delete node.dataset.tipMade;
+    return;
+  }
   const tip = base && base !== full ? `${base} — ${full}` : full;
   node.dataset.tipBase = base;
   node.dataset.tipMade = tip;
   node.dataset.tip = tip;
 }
 
+/* The keyboard reaches the same words (t-77705): the bar's own `focusin`
+ * runs before the document's, which shows the focused control's tip at once. */
 document.querySelector(".statusbar").addEventListener("pointerover", explainBarWords);
+document.querySelector(".statusbar").addEventListener("focusin", explainBarWords);
 
 /* ---- the toast layer ----
  *

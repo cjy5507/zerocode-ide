@@ -22381,7 +22381,8 @@ progress:indeterminate::-webkit-progress-bar {
  * then ellipsis on whatever still does not fit. The right-hand figures (memory,
  * terminals, ports, awake) never shrink — they are what the bar is for when
  * everything else has given way. What was shortened is read off the item's
- * hover (`explainBarWords`). */
+ * hover (`explainBarWords`). Below 800px the numbers the account line came
+ * down to are the last of it to give, and a crowded bar folds further (t-77705). */
 .statusbar {
   min-width: 0;
   white-space: nowrap;
@@ -22450,10 +22451,6 @@ progress:indeterminate::-webkit-progress-bar {
 }
 
 @container statusbar (max-width: 1100px) {
-  .statusbar {
-    gap: var(--space-3);
-  }
-
   .sb-claude-pct.has-short {
     display: none;
   }
@@ -22464,12 +22461,67 @@ progress:indeterminate::-webkit-progress-bar {
 }
 
 @container statusbar (max-width: 900px) {
+  .sb-usage-bar {
+    width: 32px;
+  }
+}
+
+/* The bar's own gaps close as it narrows (t-77705). They sat inside
+ * `@container statusbar`, which never reaches the bar: an element cannot query
+ * itself. The bar is the window's bottom row and is never inside a pane or a
+ * split, so its own width is the window's, and a media query is how the bar
+ * reads it. */
+@media (max-width: 1100px) {
+  .statusbar {
+    gap: var(--space-3);
+  }
+}
+
+@media (max-width: 900px) {
   .statusbar {
     gap: var(--space-2);
   }
+}
 
-  .sb-usage-bar {
-    width: 32px;
+/* A crowded bar (t-77705): a Codex PTY or PR mark, or a second gauge, takes
+ * the room the account line folded into, and the line gives way further,
+ * least important first. Beside a mark the meters go — the numbers say the
+ * same — and the mark is its icon (sooner beside a second gauge), its words
+ * staying its name and its hover. Below 800px the account line's numbers are
+ * the last of it to give — the model's and the project's names give before
+ * them — and a crowded bar keeps only the first gauge's: the meters, the
+ * account's short id and the later gauges' figures fold. What folded is on
+ * the item's hover and in the usage window. */
+@container statusbar (max-width: 1100px) {
+  .statusbar:has(> .sb-codex-route:not([hidden]), > .sb-scm-notices:not([hidden])) .sb-usage-bar {
+    display: none;
+  }
+
+  .statusbar:has(> .sb-usage-roster > .sb-claude:not([hidden]) ~ .sb-claude:not([hidden]))
+    :is(.sb-codex-route, .sb-scm-notices) > span {
+    display: none;
+  }
+}
+
+@container statusbar (max-width: 900px) {
+  .sb-codex-route > span,
+  .sb-scm-notices > span {
+    display: none;
+  }
+}
+
+@container statusbar (max-width: 800px) {
+  .statusbar > .sb-usage-roster {
+    flex-shrink: 0;
+  }
+
+  .statusbar:is(
+      :has(> .sb-codex-route:not([hidden])),
+      :has(> .sb-scm-notices:not([hidden])),
+      :has(> .sb-usage-roster > .sb-claude:not([hidden]) ~ .sb-claude:not([hidden]))
+    )
+    :is(.sb-usage-bar, .sb-claude-account, .sb-claude:not([hidden]) ~ .sb-claude .sb-figure) {
+    display: none;
   }
 }
 
