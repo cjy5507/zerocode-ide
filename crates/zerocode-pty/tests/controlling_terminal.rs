@@ -15,6 +15,12 @@
 //! and a stand-in for the window (`window`), which leaves without closing
 //! its lane so the kernel closes the master, as when the window goes.
 //! Hence its own `main` (`harness = false`). No real agent runs.
+//!
+//! As the helper it also stands in for the deployed mirror's two sides the
+//! window cannot see from here (t-77495): dyld takes every `DYLD_*` out of a
+//! helper signed with the hardened runtime before its `main` runs
+//! (`forget_dyld` does the same), and a mirror built before the
+//! road (`OLD_MIRROR`) starts its first argument and knows no marker.
 
 fn main() {
     #[cfg(target_os = "macos")]
@@ -46,15 +52,50 @@ mod macos {
     ];
     static SEEN: [AtomicBool; 4] = [const { AtomicBool::new(false) }; 4];
 
+    /// A mirror built before the road (t-77414), in its own words: its first
+    /// argument is the program, and the environment is not its business.
+    const OLD_MIRROR: &str = "#!/bin/sh\n\
+        [ \"$#\" -gt 0 ] || { echo 'zerocode-mirror: real binary path missing' >&2; exit 127; }\n\
+        real=$1\n\
+        shift\n\
+        exec \"$real\" \"$@\"\n";
+
     pub(super) fn main() {
+        // Called as a helper, this binary is a hardened one: dyld has taken
+        // every `DYLD_*` out before `main`.
+        if std::env::var_os(zerocode_pty::CTTY_EXEC_ENV).is_some() {
+            forget_dyld();
+        }
         // The helper's side, first, as the mirror's `main` does.
         zerocode_pty::serve_ctty_exec();
         let args: Vec<OsString> = std::env::args_os().skip(1).collect();
         match args.first().and_then(|first| first.to_str()) {
             Some("program") => program(&args[1..]),
             Some("window") => window(&args[1..]),
+            Some("old-window") => old_window(&args[1..]),
+            Some("leftover") => leftover(&args[1..]),
             _ => run_cases(),
         }
+    }
+
+    /// What dyld does to a hardened binary's environment before its `main`.
+    fn forget_dyld() {
+        let names: Vec<OsString> = std::env::vars_os()
+            .map(|(name, _)| name)
+            .filter(|name| name.as_encoded_bytes().starts_with(b"DYLD_"))
+            .collect();
+        for name in names {
+            // SAFETY: first thing in `main`, before this process has a
+            // second thread.
+            unsafe { std::env::remove_var(name) };
+        }
+    }
+
+    /// The environment's helper names and `DYLD_*` names, as `NAME=value`.
+    fn launch_env(vars: impl Iterator<Item = (OsString, OsString)>) -> Vec<String> {
+        vars.map(|(name, value)| format!("{}={}", name.to_string_lossy(), value.to_string_lossy()))
+            .filter(|pair| pair.starts_with("ZEROCODE_CTTY") || pair.starts_with("DYLD_"))
+            .collect()
     }
 
     fn exe() -> PathBuf {
@@ -122,6 +163,9 @@ mod macos {
             "dev-tty {}",
             if fd >= 0 { "opens" } else { "none" }
         ));
+        for pair in launch_env(std::env::vars_os()) {
+            say(format!("env {pair}"));
+        }
         let mut child = grandchild.then(|| {
             let mut below = report.clone().into_os_string();
             below.push(".grandchild");
@@ -191,6 +235,45 @@ mod macos {
         std::process::exit(0);
     }
 
+    /// `old-window <report> <helper>`: names `helper` and says whether it
+    /// was taken, then starts a program on a lane, says whether it stood,
+    /// and closes the lane.
+    fn old_window(args: &[OsString]) {
+        let report = PathBuf::from(&args[0]);
+        let named = zerocode_pty::launch_through(
+            PathBuf::from(&args[1]),
+            Some(report.with_extension("log")),
+        );
+        println!("named {named}");
+        let lane = spawn_program(&report, false);
+        let stood = wait_for(|| lines_of(&report).iter().any(|line| line == "ready"));
+        println!("stood {stood}");
+        std::io::stdout().flush().expect("stdout");
+        drop(lane);
+        std::process::exit(0);
+    }
+
+    /// `leftover <report>`: what a mirror's own road — its tee and its
+    /// guard — reaches after the helper's side has had its look: one line
+    /// to say so, then what a program this process starts holds.
+    fn leftover(args: &[OsString]) {
+        let report = PathBuf::from(&args[0]);
+        let started = std::process::Command::new("/usr/bin/env")
+            .output()
+            .expect("env");
+        let mut lines = vec!["own road".to_string()];
+        lines.extend(
+            String::from_utf8_lossy(&started.stdout)
+                .lines()
+                .filter_map(|line| line.split_once('='))
+                .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+                .map(|pair| launch_env(std::iter::once(pair)))
+                .flat_map(|pairs| pairs.into_iter().map(|pair| format!("env {pair}"))),
+        );
+        std::fs::write(&report, lines.join("\n") + "\n").expect("the report");
+        std::process::exit(0);
+    }
+
     // ---- the cases ----
 
     /// One case: its own folder in, why it failed out.
@@ -202,7 +285,7 @@ mod macos {
         // t-77414. Counted, not asserted — they say what the platform does.
         let before = census(scratch.path(), "direct");
         assert!(zerocode_pty::launch_through(exe(), None));
-        let cases: [(&str, Case); 5] = [
+        let cases: [(&str, Case); 8] = [
             (
                 "a_program_that_never_opens_its_terminal_holds_it_as_controlling",
                 a_program_that_never_opens_its_terminal_holds_it_as_controlling,
@@ -222,6 +305,18 @@ mod macos {
             (
                 "an_interrupt_and_a_suspend_reach_the_front_group",
                 an_interrupt_and_a_suspend_reach_the_front_group,
+            ),
+            (
+                "a_helper_from_before_the_road_is_not_named",
+                a_helper_from_before_the_road_is_not_named,
+            ),
+            (
+                "a_leftover_marker_does_not_make_a_call_a_pane_start",
+                a_leftover_marker_does_not_make_a_call_a_pane_start,
+            ),
+            (
+                "a_dyld_value_reaches_the_program_past_a_hardened_helper",
+                a_dyld_value_reaches_the_program_past_a_hardened_helper,
             ),
         ];
         let mut failed = 0;
@@ -368,6 +463,116 @@ mod macos {
         check(
             wait_for(|| lines_of(&below).iter().any(|line| line == "signal TSTP")),
             format!("the grandchild got no SIGTSTP: {:?}", lines_of(&below)),
+        )
+    }
+
+    /// A mirror built before the road is not named the lanes' helper: it
+    /// cannot answer the window's question, so the lanes start straight, as
+    /// before the road. Named, it started the program but left the marker in
+    /// its environment, and a nested launch under the program then took the
+    /// mirror's helper side past its guard (t-77495, Codex t-77467:
+    /// refused with 2 without the marker, run with 0 with it).
+    fn a_helper_from_before_the_road_is_not_named(folder: &Path) -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let old = folder.join("zerocode-mirror");
+        std::fs::write(&old, OLD_MIRROR).map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+        let report = folder.join("report");
+        let out = std::process::Command::new(exe())
+            .arg("old-window")
+            .arg(&report)
+            .arg(&old)
+            .output()
+            .map_err(|error| error.to_string())?;
+        let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let lines = lines_of(&report);
+        check(
+            said.lines().next() == Some("named false"),
+            format!(
+                "the old mirror was {said:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )?;
+        check(
+            said.lines().nth(1) == Some("stood true"),
+            format!("the program did not start: {lines:?}"),
+        )?;
+        check(
+            !lines
+                .iter()
+                .any(|line| line.starts_with("env ZEROCODE_CTTY")),
+            format!("a marker reached the program: {lines:?}"),
+        )
+    }
+
+    /// A marker that outlived its helper — every launch under the program
+    /// inherits it — does not make the next call of a helper a pane's start:
+    /// the helper side takes it out and returns, the binary goes its own
+    /// road (the mirror's: its tee and its guard), and nothing of it reaches
+    /// what that road starts (t-77495).
+    fn a_leftover_marker_does_not_make_a_call_a_pane_start(folder: &Path) -> Result<(), String> {
+        let report = folder.join("report");
+        let out = std::process::Command::new(exe())
+            .arg("leftover")
+            .arg(&report)
+            .env(zerocode_pty::CTTY_EXEC_ENV, "/bin/sh")
+            .env(zerocode_pty::CTTY_LOG_ENV, folder.join("log"))
+            .env("ZEROCODE_CTTY_DYLD_LIBRARY_PATH", folder)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| error.to_string())?;
+        let lines = lines_of(&report);
+        check(
+            out.status.success() && lines.first().is_some_and(|line| line == "own road"),
+            format!(
+                "the call became a start ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )?;
+        check(
+            !lines
+                .iter()
+                .any(|line| line.starts_with("env ZEROCODE_CTTY")),
+            format!("a marker went on: {lines:?}"),
+        )
+    }
+
+    /// A `DYLD_*` value given to a pane — the settings' environment field
+    /// carries one — reaches its program, though a hardened helper holds
+    /// none ([`forget_dyld`]); and the name it travelled under past the
+    /// helper goes no further (t-77495).
+    fn a_dyld_value_reaches_the_program_past_a_hardened_helper(
+        folder: &Path,
+    ) -> Result<(), String> {
+        let report = folder.join("report");
+        let libraries = folder.join("libraries");
+        std::fs::create_dir_all(&libraries).map_err(|error| error.to_string())?;
+        let value = libraries.to_str().ok_or("a UTF-8 folder")?.to_string();
+        let lane = PtyLane::spawn(
+            &exe_str(),
+            &[
+                "program".to_string(),
+                report.to_str().ok_or("a UTF-8 report")?.to_string(),
+            ],
+            None,
+            &[("DYLD_LIBRARY_PATH".to_string(), value.clone())],
+            24,
+            80,
+        )
+        .map_err(|error| error.to_string())?;
+        let lines = wait_for_line(&report, "ready");
+        drop(lane);
+        check(
+            lines.contains(&format!("env DYLD_LIBRARY_PATH={value}")),
+            format!("the value did not reach the program: {lines:?}"),
+        )?;
+        check(
+            !lines
+                .iter()
+                .any(|line| line.starts_with("env ZEROCODE_CTTY")),
+            format!("a helper name went on: {lines:?}"),
         )
     }
 
