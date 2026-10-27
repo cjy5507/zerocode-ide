@@ -178,7 +178,10 @@ fn a_coordinator_takes_hands_in_and_reviews_work_a_worker_left_without_a_hand_in
     let taken = bench.json(&format!(
         "task-take --task {task} --from {stopped} --why worker-left-it"
     ));
-    let mine = taken["dispatchId"].as_str().expect("an attempt").to_string();
+    let mine = taken["dispatchId"]
+        .as_str()
+        .expect("an attempt")
+        .to_string();
     assert_ne!(mine, stopped);
     assert_eq!(taken["retryOf"], stopped.as_str());
     assert_eq!(taken["status"], "dispatched");
@@ -188,7 +191,10 @@ fn a_coordinator_takes_hands_in_and_reviews_work_a_worker_left_without_a_hand_in
         coordinator_carrier(generation),
         "the attempt is the seat's, under its generation"
     );
-    assert_eq!(carrier_generation(&newest(&bench, &task).worker), Some(generation));
+    assert_eq!(
+        carrier_generation(&newest(&bench, &task).worker),
+        Some(generation)
+    );
     assert!(newest(&bench, &task).is_open());
     sound(&bench, "task-take");
 
@@ -313,7 +319,10 @@ fn a_hand_in_is_refused_unless_git_answered_for_its_commit_on_the_seats_own_atte
         &format!("hand-in --task {task} --head {LANDED} {body}"),
         Some(git_says()),
     );
-    assert!(refused.contains(super::super::coordinator_take::TAKE_VERB), "{refused}");
+    assert!(
+        refused.contains(super::super::coordinator_take::TAKE_VERB),
+        "{refused}"
+    );
 
     bench.json(&format!("task-take --task {task}"));
     for (line, seen, says) in [
@@ -338,7 +347,9 @@ fn a_hand_in_is_refused_unless_git_answered_for_its_commit_on_the_seats_own_atte
             "--head",
         ),
         (
-            format!("hand-in --task {task} --head {LANDED} --body {{\"ok\":true,\"head\":\"{ASIDE}\"}}"),
+            format!(
+                "hand-in --task {task} --head {LANDED} --body {{\"ok\":true,\"head\":\"{ASIDE}\"}}"
+            ),
             Some(git_says()),
             "body's head",
         ),
@@ -349,7 +360,10 @@ fn a_hand_in_is_refused_unless_git_answered_for_its_commit_on_the_seats_own_atte
         ),
     ] {
         let refused = refusal_seeing(&mut bench, leader, &line, seen);
-        assert!(refused.contains(says), "`{line}` refused without {says:?}: {refused}");
+        assert!(
+            refused.contains(says),
+            "`{line}` refused without {says:?}: {refused}"
+        );
         let attempt = newest(&bench, &task);
         assert!(
             attempt.is_open() && attempt.source.is_none(),
@@ -378,7 +392,9 @@ fn a_hand_in_is_refused_unless_git_answered_for_its_commit_on_the_seats_own_atte
     let old = newest(&bench, &task).id.clone();
     let taken = bench.json(&format!("task-take --task {task} --from {old}"));
     assert_eq!(taken["closed"], old.as_str());
-    let old_row = bench.ledger.runs()[0].dispatch(&old).expect("the old attempt");
+    let old_row = bench.ledger.runs()[0]
+        .dispatch(&old)
+        .expect("the old attempt");
     assert!(!old_row.is_open() && old_row.succeeded.is_none());
     sound(&bench, "a take-over between generations");
 
@@ -454,7 +470,11 @@ fn a_backfill_lists_then_writes_only_what_git_proves() {
         &format!("{{\"merged\":\"{UNRELEASED}\"}}"),
     );
     let nothing = finished_by_hand(&mut bench, "nothing", "{\"note\":\"no-commit-here\"}");
-    let aside = finished_by_hand(&mut bench, "aside", &format!("{{\"mergeHead\":\"{ASIDE}\"}}"));
+    let aside = finished_by_hand(
+        &mut bench,
+        "aside",
+        &format!("{{\"mergeHead\":\"{ASIDE}\"}}"),
+    );
     let unknown = finished_by_hand(
         &mut bench,
         "unknown",
@@ -508,9 +528,21 @@ fn a_backfill_lists_then_writes_only_what_git_proves() {
     assert_eq!(second["write"].get("deployed"), None, "{second}");
     assert_eq!(second["write"].get("verified"), None, "{second}");
     assert_eq!(second["verified"], "unknown");
-    assert!(of(&nothing)["why"].as_str().is_some_and(|why| why.contains("names no commit")));
-    assert!(of(&aside)["why"].as_str().is_some_and(|why| why.contains("not in main")));
-    assert!(of(&unknown)["why"].as_str().is_some_and(|why| why.contains("not a commit")));
+    assert!(
+        of(&nothing)["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("names no commit"))
+    );
+    assert!(
+        of(&aside)["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("not in main"))
+    );
+    assert!(
+        of(&unknown)["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("not a commit"))
+    );
     assert_eq!(of(&closed)["write"]["merged"], true);
     assert_eq!(listed["ready"], 3);
     assert_eq!(
@@ -543,13 +575,16 @@ fn a_backfill_lists_then_writes_only_what_git_proves() {
         assert!(review.merged, "{task}: {review:?}");
         assert_eq!(review.author, ReviewAuthor::Coordinator);
         assert_eq!(review.attempt.as_deref(), Some(attempt.id.as_str()));
-        // The original is kept: every key it had that is not a review key reads as it did.
+        // The original is kept: every key it had reads as it did — a review key under
+        // `backfill.replaced`, where it is no longer read as the seat's review.
         let now: serde_json::Value =
             serde_json::from_str(run.task(task).expect("the task").result.as_str())
                 .expect("a JSON result");
         let was: serde_json::Value = serde_json::from_str(original).expect("JSON");
         for (key, value) in was.as_object().expect("an object") {
-            let kept = now.get(key).or_else(|| now["backfill"]["replaced"].get(key));
+            let kept = now["backfill"]["replaced"]
+                .get(key)
+                .or_else(|| now.get(key));
             assert_eq!(kept, Some(value), "{task} lost {key}: {now}");
         }
         assert_eq!(now["backfill"]["by"], "task-backfill", "{now}");
@@ -558,7 +593,10 @@ fn a_backfill_lists_then_writes_only_what_git_proves() {
     assert!(first.verified && first.deployed, "{first:?}");
     let second = run.review_of(run.task(&unreleased).expect("the task"));
     assert!(!second.verified && !second.deployed, "{second:?}");
-    assert_eq!(run.task(&closed).expect("the task").status, TaskStatus::Closed);
+    assert_eq!(
+        run.task(&closed).expect("the task").status,
+        TaskStatus::Closed
+    );
     for untouched in [&nothing, &aside, &unknown] {
         assert!(
             run.newest_attempt(untouched)

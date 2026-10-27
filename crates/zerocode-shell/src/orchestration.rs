@@ -11035,6 +11035,52 @@ fn read_receipts(argv: &[String]) -> zerocode_core::orchestration::evidence::Rec
     files
 }
 
+/// What git says about the commits a coordinator's `hand-in` or `task-backfill` names (t-78075),
+/// read here, outside the ledger, so the ledger judges what git said and never runs it.
+///
+/// The checkout asked is `--checkout` when the verb names one, else the project the caller's
+/// pane works in. A backfill's commits are the ones its run's results name, read off the ledger
+/// as it stands; the plan reads the same rows again and judges only commits asked about here.
+/// `None` for every other verb, and when there is no checkout to ask in.
+fn read_commits(
+    argv: &[String],
+    root: Option<&str>,
+    (team, pane): (&str, &str),
+    caller: Option<&str>,
+) -> Option<zerocode_core::orchestration::coordinator_take::CommitsSeen> {
+    use zerocode_core::orchestration::coordinator_take::{
+        BACKFILL_VERB, DEFAULT_BASE, HAND_IN_VERB, RELEASE_TAGS, backfill_commits,
+    };
+    let arg = |flag| crate::agent_tools_runtime::orchestration_arg(argv, flag);
+    let verb = argv.first().map(String::as_str)?;
+    if verb != HAND_IN_VERB && verb != BACKFILL_VERB {
+        return None;
+    }
+    let repo = std::path::PathBuf::from(arg("--checkout").or(root)?);
+    if verb == HAND_IN_VERB {
+        let head = arg("--head")?.to_string();
+        return Some(crate::commit_witness::see(
+            &repo,
+            &[head],
+            arg("--base"),
+            None,
+        ));
+    }
+    let run_id = arg("--run")
+        .map(str::to_string)
+        .or_else(|| bound_run(team, pane, caller))?;
+    let held = runtime()?;
+    let image = held.actor.view().ok()?;
+    let ledger = cached_ledger(&held, &image).ok()?;
+    let commits = backfill_commits(ledger.run(&run_id)?);
+    Some(crate::commit_witness::see(
+        &repo,
+        &commits,
+        Some(arg("--base").unwrap_or(DEFAULT_BASE)),
+        Some(arg("--tags").unwrap_or(RELEASE_TAGS)),
+    ))
+}
+
 /// The first bytes of one receipt, when it is a plain file that reads as text.
 /// A link is not followed: `symlink_metadata` describes the link itself.
 fn read_receipt_text(path: &str) -> Option<String> {
@@ -11168,11 +11214,17 @@ fn run_seated(
         Ok(gate) => gate,
         Err(why) => return refused(why),
     };
+    let commits = read_commits(
+        argv,
+        gate.root.as_deref(),
+        (team_id, pane),
+        caller.as_deref(),
+    );
     let command =
         match PlanCommand::checked(argv.to_vec(), team_id, pane, pane_token, caller, now_ms)
             .and_then(|command| command.with_project_scope(gate.root.clone()))
         {
-            Ok(command) => command.with_receipts(read_receipts(argv)),
+            Ok(command) => command.with_receipts(read_receipts(argv).with_commits(commits)),
             Err(why) => return refused_by_runtime(why),
         };
     /* What comes back has already been carried out against the rows AND made
