@@ -20,6 +20,9 @@ pub(super) enum LegacyMigration {
     SettingsDocument,
     ProjectSettings,
     AgentLaunch,
+    /// The weekly review's switch an older build turned on, moved to the
+    /// window's job once (t-77713).
+    WeeklyReviewJob,
 }
 
 impl LegacyMigration {
@@ -28,6 +31,7 @@ impl LegacyMigration {
             Self::SettingsDocument => "settings-document-v1",
             Self::ProjectSettings => "project-settings-v1",
             Self::AgentLaunch => "agent-launch-v1",
+            Self::WeeklyReviewJob => "weekly-review-job-v1",
         }
     }
 }

@@ -333,14 +333,16 @@ impl Automation {
     /// Returns the most recent missed minute within the grace window, or
     /// `None`. Only the most recent: a laptop shut for a week owes its owner
     /// one run of the nightly job, not seven. Orca models the same idea as
-    /// `missedRunGraceMinutes`.
+    /// `missedRunGraceMinutes`. Nothing from before the job was last switched
+    /// on or saved ([`Automation::armed_at`]) is owed — the floor
+    /// [`Automation::missed_past_grace`] counts from (t-77713).
     #[must_use]
     pub fn missed_run(&self, now: LocalMinute) -> Option<LocalMinute> {
         if !self.enabled {
             return None;
         }
         let cron = Cron::parse(&self.schedule.to_cron())?;
-        let last = self.last_run_at.unwrap_or(i64::MIN);
+        let last = self.last_run_at.max(self.armed_at).unwrap_or(i64::MIN);
         let grace = i64::from(self.missed_run_grace_minutes);
         // Walk back through the grace window, newest first, and stop at the
         // first minute the expression names. Starting at `now - 1`: the

@@ -150,19 +150,34 @@ pub(crate) fn adopt_weekly_review_in(config_root: &Path, vault: &Path) -> Result
     Ok(true)
 }
 
-/// At boot, the review's job as the saved switch says (t-77377). Answers
-/// whether it wrote the job, so the old zo cron record is retired.
+/// At boot, the review's job as the saved switch says (t-77377). A switch an
+/// older build turned on is moved to a job once, and the move is written in
+/// the legacy-migration ledger (t-77713): after it a boot writes no job where
+/// none stands — one deleted on the automation screen stays deleted — and
+/// only follows a job still on the vault saved before. Answers whether it
+/// wrote the job, so the old zo cron record is retired.
 pub(crate) fn weekly_review_at_boot(
     settings: &settings::SettingsRepository,
     config_root: &Path,
     vault: &Path,
     switch_on: bool,
 ) -> Result<bool, String> {
-    let _ = settings;
     if !switch_on {
         return Ok(false);
     }
-    adopt_weekly_review_in(config_root, vault)
+    if legacy_migration_completed(settings, LegacyMigration::WeeklyReviewJob)? {
+        let elsewhere = stored_automations(config_root).iter().any(|job| {
+            job.id == zerocode_core::second_brain::WEEKLY_REVIEW_AUTOMATION_ID
+                && Path::new(&job.workspace) != vault
+        });
+        if !elsewhere {
+            return Ok(false);
+        }
+        return adopt_weekly_review_in(config_root, vault);
+    }
+    let wrote = adopt_weekly_review_in(config_root, vault)?;
+    complete_legacy_migration(settings, LegacyMigration::WeeklyReviewJob)?;
+    Ok(wrote)
 }
 
 /// Take away the zo cron record the weekly review was before it was a window
@@ -218,8 +233,12 @@ pub(crate) async fn set_second_brain_weekly_review(
     };
     let config_root = state.config_root().to_path_buf();
     let local_data_root = state.local_data_root().to_path_buf();
+    let settings = state.settings().clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         set_weekly_review_in(&config_root, &local_data_root, &vault, enabled)?;
+        // A switch turned with this build leaves no older switch for a boot
+        // to move: a job deleted on the automation screen stays deleted.
+        complete_legacy_migration(&settings, LegacyMigration::WeeklyReviewJob)?;
         retire_review_cron(&vault);
         Ok(())
     })
@@ -394,7 +413,8 @@ pub(crate) struct DailyIngestReport {
 }
 
 /// The daily ingest of `vault` among `automations`, at `now`. Of several jobs
-/// that ingest it, one that is on, and of those the one that ran last.
+/// that ingest it, one that is on, and of those the one that ran last. The
+/// weekly review reads `raw/` too, and is not one (t-77713).
 pub(crate) fn daily_ingest_report(
     vault: &Path,
     automations: &[Automation],
@@ -402,7 +422,11 @@ pub(crate) fn daily_ingest_report(
 ) -> DailyIngestReport {
     let Some(job) = automations
         .iter()
-        .filter(|job| Path::new(&job.workspace) == vault && names_raw(&job.prompt))
+        .filter(|job| {
+            Path::new(&job.workspace) == vault
+                && names_raw(&job.prompt)
+                && job.id != zerocode_core::second_brain::WEEKLY_REVIEW_AUTOMATION_ID
+        })
         .max_by_key(|job| (job.enabled, job.last_run_at))
     else {
         return DailyIngestReport {
