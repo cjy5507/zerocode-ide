@@ -53103,7 +53103,9 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .your-turn:focus-visible,
 .your-turn-list:focus-visible,
 .pile-branch:focus-visible,
-.pile-scm:focus-visible {
+.pile-scm:focus-visible,
+.pile-cleanup:focus-visible,
+.pile-more:focus-visible {
   outline: var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
 }
@@ -53638,6 +53640,8 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .pile-section-count,
 .pile-release-state,
 .pile-repo-changed,
+.pile-checks,
+.pile-note,
 .pile-total-words {
   color: var(--ink-mist);
   font: var(--type-label-12);
@@ -53658,9 +53662,12 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 }
 
 .pile-release,
+.pile-gate,
 .pile-total,
 .pile-repo,
-.pile-repo-changed {
+.pile-repo-changed,
+.pile-checks,
+.pile-note {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -53725,10 +53732,40 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   font: var(--type-label-12-mono);
 }
 
-.pile-scm {
+.pile-scm,
+.pile-more {
   justify-self: start;
   padding: var(--space-1) var(--space-2);
   font: var(--type-label-12);
+}
+
+/* One bar per branch not in main, as long as its commits, in the meter's grey. */
+.pile-bar {
+  display: flex;
+  gap: var(--pile-bar-gap);
+  height: var(--pile-bar-height);
+}
+
+.pile-bar > i {
+  border-radius: var(--radius-xs);
+  background: var(--meter-fill);
+}
+
+.pile-cleanup {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  cursor: pointer;
+}
+
+.pile-cleanup:hover {
+  text-decoration: underline;
+}
+
+.pile-commits {
+  display: grid;
 }
 
 @media (prefers-reduced-motion: reduce) {

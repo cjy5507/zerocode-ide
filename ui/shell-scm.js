@@ -264,7 +264,7 @@ function setActivityItem(name) {
   paintActivityTabs();
   // 쌓인 일 is drawn while it is up and holds nothing once another tab takes the column.
   if (name === "pile") paintStackedWork();
-  else el("activity-pile").replaceChildren();
+  else leaveStackedWork();
   // Arriving at source control pays whatever a refresh deferred while nobody
   // was looking — see `refreshScm`.
   if (name === "scm") {
@@ -389,12 +389,41 @@ el("toggle-aside").addEventListener("click", () => setPanelFolded("aside", !fold
 
 /* ---- 쌓인 일: what is piling up in the project on screen (2차 B, item 12) ----
  *
- * Three facts this window already holds, read where they are kept and drawn in
- * one column before the source-control list: the release lane the status bar
- * reads (`releaseLane`), the checkouts git says are not in main
- * (`worktree.landing`, the sidebar's own answer) and the branch against its
- * upstream (`upstreamState`, `scmEntries`). Nothing is asked for here, and the
- * panel holds no node while its tab is not up. */
+ * Facts this window already holds, read where they are kept and drawn in one
+ * column before the source-control list: the release lane the status bar reads
+ * (`releaseLane`), the checkouts git says are not in main (`worktree.landing`,
+ * the sidebar's own answer) and whether an agent window holds them, the branch
+ * against its upstream (`upstreamState`, `scmEntries`) and its review's checks
+ * (`checksReport`). The one thing asked is the last commits — `git_history`,
+ * once when the tab comes up and again when the branch's head moves. The panel
+ * holds no node while its tab is not up. */
+
+/* As many commits as the draft lists; the rest are source control's. */
+const PILE_COMMITS = 9;
+/* The last commits as `git_history` answered them, and the head they were asked at. */
+let pileHistory = null;
+let pileHistoryHead = null;
+
+async function askPileHistory(head) {
+  pileHistoryHead = head;
+  let history = null;
+  try {
+    history = await invoke("git_history", { limit: PILE_COMMITS });
+  } catch {
+    // No repository: the section says nothing rather than an error.
+  }
+  if (pileHistoryHead !== head || el("activity-pile").hidden) return;
+  pileHistory = { rows: (history?.rows ?? []).filter((row) => row.kind !== "incoming-changes" && row.kind !== "outgoing-changes"), more: history?.has_more === true };
+  paintStackedWork();
+}
+
+/* The tab went down: its nodes and the commits it asked for go with it. */
+function leaveStackedWork() {
+  el("activity-pile").replaceChildren();
+  pileDrawn = "";
+  pileHistory = null;
+  pileHistoryHead = null;
+}
 
 /* The checkouts of the project on screen whose commits are not in main yet. */
 function unlandedCheckouts(project = projectOfWorktree(activeWorktreePath) ?? projects[0]) {
@@ -428,29 +457,45 @@ function paintStackedWork() {
   const project = projectOfWorktree(activeWorktreePath) ?? projects[0];
   const checkouts = unlandedCheckouts(project);
   const lane = releaseLane && typeof releaseLane === "object" ? releaseLane : null;
+  const branchHead = scmCompareContext?.head ?? "";
+  if (pileHistoryHead !== branchHead) void askPileHistory(branchHead);
+  const checks = checksReport?.checks ?? null;
   const drawing = JSON.stringify([locale, project?.name, lane?.sha, lane?.version, lane?.phase, deskReleaseVerdict(lane ?? {}),
-    checkouts.map((worktree) => [worktree.path, worktree.branch, worktree.landing]),
-    scmCompareContext?.head, upstreamState?.upstream, scmEntries.length]);
+    checkouts.map((worktree) => [worktree.path, worktree.branch, worktree.landing, worktreeAgentRows(worktree.path).length]),
+    branchHead, upstreamState?.upstream, scmEntries.length, checks && checksTally(checks),
+    pileHistory?.rows.map((row) => row.item.id), pileHistory?.more]);
   if (drawing === pileDrawn && panel.childElementCount > 0) return;
   pileDrawn = drawing;
   const head = deskElement("header", "pile-head");
-  head.append(deskElement("strong", "pile-title", t("pile.title", "쌓인 일")), deskElement("span", "pile-project", project?.name ?? ""));
-  panel.replaceChildren(head, ...[pileReleaseSection(lane), pileUnlandedSection(checkouts), pileRepositorySection()].filter(Boolean));
+  // When these facts were read: the panel redraws only when one of them moves.
+  const now = Date.now();
+  head.append(deskElement("strong", "pile-title", t("pile.title", "쌓인 일")),
+    deskElement("span", "pile-project", [project?.name, boardClock(now, now)].filter(Boolean).join(" · ")));
+  head.lastChild.classList.add("pile-when");
+  panel.replaceChildren(head, ...[pileReleaseSection(lane), pileUnlandedSection(checkouts), pileRepositorySection(checks),
+    pileCommitsSection()].filter(Boolean));
 }
 
 /* The release lane, as the build line's card says it: its version, its verdict
- * and the step it is on. A lane that never ran says nothing. */
+ * and the step it is on, then the gate's line. The window holds no gate job
+ * outside the board's schedule, so that line says a dash rather than a guess;
+ * the count is of the lines that say something. */
 function pileReleaseSection(lane) {
-  if (!lane?.sha) return null;
-  const verdict = DESK_RELEASE_VERDICTS[deskReleaseVerdict(lane)];
-  const row = deskElement("p", "pile-release");
-  const version = lane.version ? `v${lane.version}` : String(lane.sha).slice(0, SHORT_COMMIT_LENGTH);
-  // The verdict wears the board's own status dot (`.board-state[data-dot]`) beside its word.
-  const state = deskElement("span", "board-state pile-release-state",
-    [t(verdict.key, verdict.word), lane.phase ? deskReleasePhaseWord(String(lane.phase)) : ""].filter(Boolean).join(" · "));
-  state.dataset.dot = verdict.dot;
-  row.append(deskElement("strong", "pile-release-title", `${t("board.now.lineRelease", "새 버전 발행")} ${version}`), state);
-  return pileSectionNode(t("pile.release", "발행 · 게이트"), null, [row]);
+  const rows = [];
+  if (lane?.sha) {
+    const verdict = DESK_RELEASE_VERDICTS[deskReleaseVerdict(lane)];
+    const row = deskElement("p", "pile-release");
+    const version = lane.version ? `v${lane.version}` : String(lane.sha).slice(0, SHORT_COMMIT_LENGTH);
+    // The verdict wears the board's own status dot (`.board-state[data-dot]`) beside its word.
+    const state = deskElement("span", "board-state pile-release-state",
+      [t(verdict.key, verdict.word), lane.phase ? deskReleasePhaseWord(String(lane.phase)) : ""].filter(Boolean).join(" · "));
+    state.dataset.dot = verdict.dot;
+    row.append(deskElement("strong", "pile-release-title", `${t("board.now.lineRelease", "새 버전 발행")} ${version}`), state);
+    rows.push(row);
+  }
+  const gate = deskElement("p", "pile-gate");
+  gate.append(deskElement("strong", "pile-release-title", t("pile.gate", "게이트 일감")), deskElement("span", "pile-release-state", "—"));
+  return pileSectionNode(t("pile.release", "발행 · 게이트"), rows.length, [...rows, gate]);
 }
 
 /* The work not in main: the sum, then each branch with its commits and, when
@@ -462,6 +507,14 @@ function pileUnlandedSection(checkouts) {
   const total = deskElement("p", "pile-total");
   total.append(deskElement("strong", "pile-total-count", String(commits)),
     deskElement("span", "pile-total-words", t("pile.total", "커밋 · 가지 {{branches}}", { branches: checkouts.length })));
+  // A bar for each branch, as long as its commits.
+  const bar = deskElement("div", "pile-bar");
+  bar.setAttribute("aria-hidden", "true");
+  for (const worktree of checkouts) {
+    const part = document.createElement("i");
+    part.style.flexGrow = String(worktree.landing.ahead ?? 0);
+    bar.append(part);
+  }
   const rows = checkouts.map((worktree) => {
     const { landing } = worktree;
     const row = deskElement("button", "pile-branch");
@@ -475,20 +528,61 @@ function pileUnlandedSection(checkouts) {
     row.addEventListener("click", () => void activateWorktree(worktree.path));
     return row;
   });
-  return pileSectionNode(t("pile.unlanded", "미반영"), null, [total, ...rows]);
+  return pileSectionNode(t("pile.unlanded", "미반영"), null, [total, bar, ...rows, pileUnseatedNode(checkouts)].filter(Boolean));
 }
 
-/* The branch against its upstream and the files changed — the source-control
- * list's own facts — and the door to that list. */
-function pileRepositorySection() {
+/* The branches no agent window holds, and the door to the review that cleans
+ * them up (`openCleanup`, the sidebar's own). */
+function pileUnseatedNode(checkouts) {
+  const unseated = checkouts.filter((worktree) => worktreeAgentRows(worktree.path).length === 0).length;
+  if (unseated === 0) return null;
+  const note = deskElement("p", "pile-note", unseated === checkouts.length
+    ? t("pile.unseatedAll", "{{count}} 가지 모두 에이전트 창 없음", { count: unseated })
+    : t("pile.unseatedSome", "{{count}} 가지 에이전트 창 없음", { count: unseated }));
+  const door = deskElement("button", "pile-cleanup", t("pile.cleanup", "정리하기 →"));
+  door.type = "button";
+  door.addEventListener("click", () => openCleanup());
+  note.append(door);
+  return note;
+}
+
+/* The branch against its upstream, the files changed and the review's checks —
+ * the source-control list's own facts — and the door to that list. Checks the
+ * window has not read say a dash. */
+function pileRepositorySection(checks) {
   const branch = scmRefLabel(scmCompareContext?.head ?? "") || "HEAD";
   const upstream = upstreamState?.upstream ?? "";
   const line = deskElement("p", "pile-repo", upstream ? `${branch} → ${upstream}` : branch);
   const changed = deskElement("p", "pile-repo-changed", t("pile.changed", "바뀐 파일 {{count}}", { count: scmEntries.length }));
+  const said = (checks ?? []).length > 0
+    ? checksTally(checks).filter(([, count]) => count > 0).map(([, count, word]) => `${count} ${word}`).join(" · ")
+    : "—";
+  const verdict = deskElement("p", "pile-checks", `${t("pile.checks", "자동 확인")} · ${said}`);
   const door = deskElement("button", "btn pile-scm", t("pile.openScm", "소스 컨트롤 열기"));
   door.type = "button";
   door.addEventListener("click", () => setActivityItem("scm"));
-  return pileSectionNode(t("pile.repository", "저장소"), null, [line, changed, door]);
+  return pileSectionNode(t("pile.repository", "저장소"), null, [line, changed, verdict, door]);
+}
+
+/* The last commits, drawn by source control's own row (`historyRow`: the graph,
+ * the subject, its refs, opened into its files in place), and the way to the
+ * rest of them there. */
+function pileCommitsSection() {
+  if (!pileHistory || pileHistory.rows.length === 0) return null;
+  const list = deskElement("div", "pile-commits");
+  list.append(...pileHistory.rows.map(historyRow));
+  const rows = [list];
+  if (pileHistory.more) {
+    const more = deskElement("button", "btn pile-more", t("pile.more", "더 보기"));
+    more.type = "button";
+    more.addEventListener("click", () => {
+      setActivityItem("scm");
+      if (scmFolded.has("history")) toggleScmFold("history");
+    });
+    rows.push(more);
+  }
+  const count = `${pileHistory.rows.length}${pileHistory.more ? "+" : ""}`;
+  return pileSectionNode(t("pile.commits", "커밋"), count, rows);
 }
 
 /* ---- where the branch stands against its upstream ----
@@ -4569,30 +4663,27 @@ function paintFixAction(checks) {
   el("pr-fix-split").hidden = broken.length === 0;
 }
 
+/* A review's checks in three counts, each with its word — the summary row's,
+ * and 쌓인 일's line about the repository. */
+function checksTally(checks) {
+  const count = (verdicts) => checks.filter((check) => verdicts.includes(checkVerdict(check))).length;
+  return [
+    ["pass", count(["success"]), t("checks.passing", "통과")],
+    ["fail", count(["failure", "cancelled", "timed_out", "action_required"]), t("checks.failing", "실패")],
+    ["wait", count(["pending"]), t("checks.pending", "대기")],
+  ];
+}
+
 /* The summary row: three counts and the fold. */
 function paintChecksSummary(checks) {
   const row = el("checks-sum");
   row.hidden = checks.length === 0;
   row.setAttribute("aria-expanded", checksExpanded ? "true" : "false");
   el("checks-fold").classList.toggle("is-folded", !checksExpanded);
-  const tally = {
-    pass: checks.filter((check) => checkVerdict(check) === "success").length,
-    fail: checks.filter((check) =>
-      ["failure", "cancelled", "timed_out", "action_required"].includes(
-        checkVerdict(check),
-      ),
-    ).length,
-    wait: checks.filter((check) => checkVerdict(check) === "pending").length,
-  };
-  const words = {
-    pass: t("checks.passing", "통과"),
-    fail: t("checks.failing", "실패"),
-    wait: t("checks.pending", "대기"),
-  };
-  for (const [name, count] of Object.entries(tally)) {
+  for (const [name, count, word] of checksTally(checks)) {
     const span = el(`checks-${name}`);
     span.hidden = count === 0;
-    span.textContent = `${count} ${words[name]}`;
+    span.textContent = `${count} ${word}`;
   }
   el("checks-spin").hidden = !checksLoading;
 }

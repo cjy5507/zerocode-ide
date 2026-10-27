@@ -840,6 +840,9 @@
   /* Over the stage and its scrims, with the chat preview, under the tab switcher (100). */
   --your-turn-list-layer: 90;
   --reading-column: 760px;
+  /* 쌓인 일's bar of the branches not in main: the draft's 6 px, 2 px apart. */
+  --pile-bar-height: 6px;
+  --pile-bar-gap: 2px;
 
   /* The finder is WIDER than a dialog, which reverses what this file used to
    * argue.
