@@ -125,7 +125,7 @@ struct FormatterOutput {
 
 fn run_formatter(cmd: &str, args: &[&str], budget: Option<Duration>) -> Option<FormatterOutput> {
     match budget {
-        Some(budget) => run_formatter_with_timeout(cmd, args, budget),
+        Some(budget) => run_formatter_with_timeout(cmd, args, budget, || {}),
         None => Command::new(cmd)
             .args(args)
             .output()
@@ -137,10 +137,15 @@ fn run_formatter(cmd: &str, args: &[&str], budget: Option<Duration>) -> Option<F
     }
 }
 
+/// `budget` counts from when `start_budget` returns, the formatter already
+/// running: at once when formatting, and only once the timeout test's
+/// formatter has armed its scenario, which a shell slowed by load would
+/// otherwise not reach within the budget.
 fn run_formatter_with_timeout(
     cmd: &str,
     args: &[&str],
     budget: Duration,
+    start_budget: impl FnOnce(),
 ) -> Option<FormatterOutput> {
     if budget.is_zero() {
         return None;
@@ -187,6 +192,7 @@ fn run_formatter_with_timeout(
     };
     #[cfg(unix)]
     let child_pid = child.id();
+    start_budget();
     let started = Instant::now();
 
     let status = loop {
@@ -476,71 +482,80 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// How long a failing timeout test waits for its formatter to arm, or for
+    /// the group it ended to be gone. A passing run never waits it out: each
+    /// wait ends at its event, however loaded the machine is.
+    #[cfg(unix)]
+    const SCENARIO_BOUND: Duration = Duration::from_secs(60);
+
     #[cfg(unix)]
     #[test]
     fn formatter_timeout_kills_process_group() {
         use std::os::unix::fs::PermissionsExt;
 
-        // Under heavy parallel load shell startup can outlast the formatter
-        // budget, so the grandchild pid file is never written and that run
-        // proves nothing about group kill. Retry with a fresh scenario
-        // instead of flaking on the missing pid file.
-        for attempt in 0..3 {
-            let root = unique_temp_path(&format!("timeout-{attempt}"));
-            fs::create_dir_all(&root).expect("create temp dir");
-            let script = root.join("fake-formatter.sh");
-            let child_pid_file = root.join("child.pid");
-            fs::write(&script, "#!/bin/sh\n(sleep 30) &\necho $! > \"$1\"\nwait\n")
-                .expect("write formatter script");
-            let mut perms = fs::metadata(&script)
-                .expect("script metadata")
-                .permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script, perms).expect("chmod formatter script");
+        let root = unique_temp_path("timeout");
+        fs::create_dir_all(&root).expect("create temp dir");
+        let script = root.join("fake-formatter.sh");
+        let child_pid_file = root.join("child.pid");
+        // The shell takes longer than the budget to arm, as /bin/sh does
+        // under heavy load (l82a g3b1), and its grandchild outlives any wait
+        // here unless the group kill ends it.
+        fs::write(&script, "#!/bin/sh\nsleep 1\n(sleep 3600) &\necho $! > \"$1\"\nwait\n")
+            .expect("write formatter script");
+        let mut perms = fs::metadata(&script)
+            .expect("script metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).expect("chmod formatter script");
 
-            let started = Instant::now();
-            let result = run_formatter_with_timeout(
-                script.to_str().expect("utf-8 script path"),
-                &[child_pid_file.to_str().expect("utf-8 pid path")],
-                Duration::from_millis(1_000),
-            );
-
-            assert!(result.is_none(), "timed-out formatter returns no result");
-            assert!(
-                started.elapsed() < Duration::from_secs(10),
-                "timeout should return promptly, not wait out the formatter"
-            );
-
-            let recorded_pid = fs::read_to_string(&child_pid_file)
-                .ok()
-                .and_then(|raw| raw.trim().parse::<i32>().ok());
-            let Some(child_pid) = recorded_pid else {
-                // The shell was killed before recording the grandchild pid:
-                // the scenario never armed. Try again.
-                let _ = fs::remove_dir_all(&root);
-                continue;
-            };
-
-            let mut alive = true;
-            for _ in 0..40 {
-                let still_alive = process_exists(child_pid);
-                if !still_alive {
-                    alive = false;
-                    break;
+        let mut budget_started: Option<Instant> = None;
+        let result = run_formatter_with_timeout(
+            script.to_str().expect("utf-8 script path"),
+            &[child_pid_file.to_str().expect("utf-8 pid path")],
+            Duration::from_millis(250),
+            || {
+                let arming = Instant::now();
+                while recorded_pid(&child_pid_file).is_none() && arming.elapsed() < SCENARIO_BOUND {
+                    std::thread::sleep(Duration::from_millis(10));
                 }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            if alive {
-                kill_process(child_pid);
-            }
+                budget_started = Some(Instant::now());
+            },
+        );
+        let returned = Instant::now();
+
+        assert!(result.is_none(), "timed-out formatter returns no result");
+        assert!(
+            budget_started.is_some_and(|started| returned.duration_since(started) < Duration::from_secs(10)),
+            "timeout should return promptly, not wait out the formatter"
+        );
+        let Some(child_pid) = recorded_pid(&child_pid_file) else {
             let _ = fs::remove_dir_all(&root);
-            assert!(
-                !alive,
-                "formatter timeout must kill the formatter process group"
-            );
-            return;
+            panic!("formatter script never recorded the grandchild pid within {SCENARIO_BOUND:?}");
+        };
+
+        let ending = Instant::now();
+        while process_exists(child_pid) && ending.elapsed() < SCENARIO_BOUND {
+            std::thread::sleep(Duration::from_millis(50));
         }
-        panic!("formatter script never recorded the grandchild pid in 3 attempts");
+        let alive = process_exists(child_pid);
+        if alive {
+            kill_process(child_pid);
+        }
+        let _ = fs::remove_dir_all(&root);
+        assert!(
+            !alive,
+            "formatter timeout must kill the formatter process group"
+        );
+    }
+
+    /// The grandchild's pid, once the script has written it whole.
+    #[cfg(unix)]
+    fn recorded_pid(path: &Path) -> Option<i32> {
+        let raw = fs::read_to_string(path).ok()?;
+        if !raw.ends_with('\n') {
+            return None;
+        }
+        raw.trim().parse().ok()
     }
 
     #[cfg(unix)]
