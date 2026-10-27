@@ -55981,10 +55981,12 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // A page nobody has been answered on does not list `/copy` — a row
       // that would do nothing when it is pressed is not drawn at all. A pane's
       // conversation that holds only the person's words is such a page.
+      // On file before the agent's first report: the pane stands in its
+      // conversation at that report and reads the transcript then.
+      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
       const quietTerm = await openTermTab({ placement: "tab" });
       tell("hook:agent", { term: quietTerm, state: "idle", agent: "claude", session: "s-quiet", resumable: false, model: "claude-fable-5-1" });
       await window.__PAINTED__();
-      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
       el("view-toggle-chat").click();
       await settle(150);
       const quietBox = document.querySelector(`.pane-slot[data-term="${quietTerm}"] .pane-chat .worker-composer-box`);
