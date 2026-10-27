@@ -35,14 +35,6 @@ fn ensure_valid_cwd() {
     }
 }
 
-fn restore_env(key: &str, value: Option<String>) {
-    if let Some(value) = value {
-        std::env::set_var(key, value);
-    } else {
-        std::env::remove_var(key);
-    }
-}
-
 /// Names, to a fresh run of this test binary, the root it is to work in.
 const OWN_ROOT_ENV: &str = "ZO_PROMPT_TEST_OWN_ROOT";
 
@@ -63,7 +55,16 @@ fn no_global_homes(root: &Path) -> Vec<(&'static str, PathBuf)> {
 
 /// Runs `body` on `root` with `vars` set, and with `root` as the working
 /// directory when `enter`, the way a prompt test hands the loader homes of its
-/// own; then removes `root`.
+/// own — in a fresh run of this test binary that runs `test` alone — then
+/// removes `root` once that run has exited.
+///
+/// `HOME`, `ZO_CONFIG_HOME` and the working directory belong to the whole
+/// process. Set in this one, they reach every test running beside this one
+/// while `body` runs, and one that writes under the config home it reads, or
+/// starts a child from the working directory, lands inside `root`; on Windows
+/// a rename in flight or a child's working directory there fails the removal
+/// with os error 32 (t-77514). Given to the child as it starts, they never
+/// exist in this process at all.
 fn with_root_exported(
     test: &str,
     root: &Path,
@@ -71,27 +72,40 @@ fn with_root_exported(
     enter: bool,
     body: impl FnOnce(&Path),
 ) {
-    let _guard = env_lock();
+    if own_root().is_some() {
+        let _guard = env_lock();
+        body(root);
+        return;
+    }
     fs::create_dir_all(root).expect("root dir");
-    ensure_valid_cwd();
-    let previous_cwd = std::env::current_dir().expect("cwd");
-    let previous: Vec<_> = vars
-        .iter()
-        .map(|(key, _)| (*key, std::env::var(key).ok()))
-        .collect();
+    let module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_crate, path)| path);
+    let mut child = std::process::Command::new(std::env::current_exe().expect("this test binary"));
+    child
+        .arg(format!("{module}::{test}"))
+        .args(["--exact", "--nocapture", "--test-threads=1"])
+        .env(OWN_ROOT_ENV, root)
+        .current_dir(if enter {
+            root
+        } else {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+        });
     for (key, value) in vars {
-        std::env::set_var(key, value);
+        child.env(key, value);
     }
-    if enter {
-        std::env::set_current_dir(root).expect("change cwd");
-    }
-    body(root);
-    if enter {
-        std::env::set_current_dir(previous_cwd).expect("restore cwd");
-    }
-    for (key, value) in previous {
-        restore_env(key, value);
-    }
+    let output = {
+        // The child starts from this process's environment as it stands; the
+        // lock keeps another test's export out of that copy.
+        let _guard = env_lock();
+        child.output().expect("run the test alone")
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains(" 1 passed;"),
+        "{test}, run alone:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     fs::remove_dir_all(root).unwrap_or_else(|error| panic!("{test}: cleanup temp dir: {error}"));
 }
 
