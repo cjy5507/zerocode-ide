@@ -14624,9 +14624,10 @@ ok(
   "the bar counts this project's ports, and the rail grows no new icon",
   ports.onBar === "1" &&
     // The vault is the one rail member Orca itself has (activityItems:
-    // explorer, vault, …) — the guard is against PORTS growing an icon.
+    // explorer, vault, …), and 쌓인 일 leads the rail (2차 B) — the guard is
+    // against PORTS growing an icon.
     ports.railIcons.join(",") ===
-      "activity-files-tab,activity-vault-tab,activity-scm-tab,activity-search-tab,activity-checks-tab,activity-term-tab",
+      "activity-pile-tab,activity-files-tab,activity-vault-tab,activity-scm-tab,activity-search-tab,activity-checks-tab,activity-term-tab",
   JSON.stringify({ onBar: ports.onBar, railIcons: ports.railIcons }),
 );
 ok(

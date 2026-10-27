@@ -13574,6 +13574,9 @@ async function setPaneChat(term, on, { wire = true } = {}) {
     // view: the wire is asked for again — a session the hooks had not yet
     // named, a wire that was refused, may be there now. Until 2026-09-21 a
     // pane that once fell to the transcript view never tried the wire again.
+    // The transcript is read again too: a conversation at rest is not followed
+    // (`helperPageFollowed`), and a press is a look at it now.
+    if (on) void pollHelperPages();
     if (on && wire && !held.handing) void handPaneToWire(term);
     return;
   }
