@@ -6175,7 +6175,7 @@ const rowBox = await page.evaluate(() => {
   const root = getComputedStyle(document.documentElement);
   const leading = Number.parseFloat(root.getPropertyValue("--term-leading"));
   const size = Number.parseFloat(root.getPropertyValue("--term-font-size"));
-  const stack = root.getPropertyValue("--font-mono").trim();
+  const stack = root.getPropertyValue("--font-mono-system").trim();
   const ctx = document.createElement("canvas").getContext("2d");
   ctx.font = `${size}px ${stack}`;
   const box = ctx.measureText("W");
@@ -16414,16 +16414,20 @@ const sidebarHeading = await page.evaluate(async () => {
   seen.status = read();
   setSidebarView({ groupBy: "repo" });
   seen.back = read();
+  // The suite's language at this point, whichever it is.
+  seen.projects = `${t("sidebar.sectionProjects", "프로젝트")}/projects`;
+  seen.workspaces = `${t("sidebar.sectionWorkspaces", "워크스페이스")}/workspaces`;
   delete window.__ANSWER__.set_sidebar_view;
   await new Promise((done) => setTimeout(done, 80));
   return seen;
 });
 ok(
   "the sidebar heading is the grouping's name, stamped and said in the person's language (t-78107)",
-  sidebarHeading.repo === "프로젝트/projects" &&
-    sidebarHeading.flat === "워크스페이스/workspaces" &&
-    sidebarHeading.status === "워크스페이스/workspaces" &&
-    sidebarHeading.back === "프로젝트/projects",
+  sidebarHeading.repo === sidebarHeading.projects &&
+    sidebarHeading.flat === sidebarHeading.workspaces &&
+    sidebarHeading.status === sidebarHeading.workspaces &&
+    sidebarHeading.back === sidebarHeading.projects &&
+    !sidebarHeading.projects.startsWith("sidebar."),
   JSON.stringify(sidebarHeading),
 );
 

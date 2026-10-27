@@ -13703,7 +13703,7 @@ body.is-dragging-pane {
   height: calc(100% - 2 * var(--term-inset-y, 0px));
   overflow: hidden;
   color: var(--term-screen-fg);
-  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono);
+  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono-system);
   font-variant-ligatures: none;
   font-feature-settings: "liga" 0, "calt" 0;
   /* Both from the cell token, never from the UI scale — see `--term-font-size`.
@@ -13776,7 +13776,7 @@ body.is-dragging-pane {
   justify-content: center;
   background: var(--term-screen-bg);
   color: var(--term-screen-fg);
-  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono);
+  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono-system);
   font-size: var(--term-font-size);
   line-height: 1;
   cursor: pointer;
@@ -14439,7 +14439,7 @@ body.mod-held .term-link,
   overflow: hidden;
   isolation: isolate;
   white-space: pre;
-  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono);
+  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono-system);
   font-size: var(--term-font-size);
   font-weight: var(--term-weight);
   line-height: var(--term-leading);
@@ -18194,7 +18194,7 @@ button.helper-sib:hover {
    * moment it committed. The same stack `.term` and `.term-caret` name, for
    * the same reason they name it: the cell the renderer measured is a glyph
    * in THIS face. */
-  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono);
+  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono-system);
   font-variant-ligatures: none;
   font-feature-settings: "liga" 0, "calt" 0;
   font-size: var(--term-font-size);

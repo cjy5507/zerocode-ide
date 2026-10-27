@@ -2475,8 +2475,8 @@ mod tests {
     /// `--font-mono: "SF Mono", SFMono-Regular, ui-monospace…` beside it
     /// (:23533). The face that renders is the one measured. Since 2026-10-28
     /// the window ships Geist and Geist Mono itself (t-78107, the one asset the
-    /// person let in), so Geist Mono leads the mono stack and the measured
-    /// tail follows it unchanged.
+    /// person let in), so Geist Mono leads the window's mono words over the
+    /// measured stack, which the terminal and the editor keep reading.
     ///
     /// Pinned here because a near-miss on shape or type reads as an imitation
     /// exactly the way a near-miss on colour does, and neither says so.
@@ -2529,8 +2529,8 @@ mod tests {
         );
         assert!(
             root.contains(
-                "--font-mono: \"Geist Mono\", \"SF Mono\", SFMono-Regular, ui-monospace, \"Cascadia Code\""
-            ),
+                "--font-mono-system: \"SF Mono\", SFMono-Regular, ui-monospace, \"Cascadia Code\""
+            ) && root.contains("--font-mono: \"Geist Mono\", var(--font-mono-system);"),
             "the mono face stopped being the measured `--font-mono` stack"
         );
         // The Korean fallback is ours and stays: nothing in the measured
@@ -16602,7 +16602,7 @@ mod tests {
                 && styles.contains("background: var(--term-cursor);")
                 && styles.contains("var(--term-cursor-accent)")
                 && styles
-                    .contains("font-family: var(--term-font-choice, \"SF Mono\"), var(--font-mono);")
+                    .contains("font-family: var(--term-font-choice, \"SF Mono\"), var(--font-mono-system);")
                 && styles.contains("font-feature-settings: \"liga\" 0, \"calt\" 0;")
                 && styles.contains(":root[data-term-ligatures=\"on\"] .term")
                 && styles.contains("font-feature-settings: \"liga\" 1, \"calt\" 1;")
@@ -16936,7 +16936,7 @@ mod tests {
             "installed font suggestions lost their single native owner"
         );
         assert!(
-            window.contains("var(--editor-font-family, var(--font-mono))")
+            window.contains("var(--editor-font-family, var(--font-mono-system))")
                 && window.contains("function applyEditorFontFamily() {")
                 && window.contains("held.editor.requestMeasure();")
                 && window.contains("held.merge.a.requestMeasure();")

@@ -500,8 +500,8 @@
    * and pinning it to the PUA with `unicode-range`
    * (I18nProvider-0D3bXbhN.css:23900-23907). That file does not come across:
    * the one exception to "assets never ship" the person made (2026-10-28) is
-   * Geist and Geist Mono, which lead this stack — the Nerd Font tail is a
-   * decision still open in the ledger (1-em).
+   * Geist and Geist Mono — the Nerd Font tail is a decision still open in the
+   * ledger (1-em).
    *
    * The names still buy most of it back: anyone who has installed a patched
    * face gets their prompt rendered today, and anyone who has not is exactly
@@ -510,9 +510,15 @@
    * above do not cover, never the face that draws ordinary text. The symbols-
    * only face leads the tail because it is the one that carries nothing but
    * those codepoints and so can never capture a letter. */
-  --font-mono: "Geist Mono", "SF Mono", SFMono-Regular, ui-monospace, "Cascadia Code",
+  --font-mono-system: "SF Mono", SFMono-Regular, ui-monospace, "Cascadia Code",
     Menlo, Consolas, "Liberation Mono", "Symbols Nerd Font Mono",
     "MesloLGS NF", "JetBrainsMono Nerd Font", "Hack Nerd Font", monospace;
+  /* The window's own mono words lead with the shipped Geist Mono (t-78107).
+   * The terminal and the editor read the system stack above, under the face
+   * the person chose: their rows are sized to that face's box (`--term-leading`),
+   * and a webfont reached as a fallback would change both without anyone
+   * having chosen it. */
+  --font-mono: "Geist Mono", var(--font-mono-system);
 
   /* Type scale */
   /* The scale had no step below 11px, so every dense surface was assigned one

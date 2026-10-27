@@ -8874,7 +8874,7 @@ fn the_terminal_wears_the_options_orca_ships() {
     // A patched face by name, before the generic and after the Latin
     // stack — a fallback for the codepoints above it do not carry, never
     // the face that draws ordinary text.
-    let mono = block_after(tokens, "--font-mono:");
+    let mono = block_after(tokens, "--font-mono-system:");
     for face in [
         "\"Symbols Nerd Font Mono\"",
         "\"MesloLGS NF\"",
