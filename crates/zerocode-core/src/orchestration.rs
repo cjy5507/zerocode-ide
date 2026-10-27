@@ -38,6 +38,7 @@
 pub mod attempt_time;
 mod completion;
 pub mod coordinator_handover;
+pub mod coordinator_take;
 pub mod delegate;
 pub mod evidence;
 pub mod gate_reuse;
@@ -954,9 +955,10 @@ pub struct ReviewFacts {
     /// and nothing was handed in for a review to name
     /// ([`Run::handed_nothing_in`], the settle pass's own reading). A review
     /// binds to the newest attempt's source and `task-update` refuses one of
-    /// an attempt that handed nothing in, so nothing a coordinator can still
-    /// do would move this — the board says 완료 — 검토 기록 없음 instead of
-    /// 검증 대기 (t-19328, t-15558 slice 2).
+    /// an attempt that handed nothing in, so short of an attempt of its own
+    /// that hands something in ([`coordinator_take`], t-78075) nothing a
+    /// coordinator can do would move this — the board says 완료 — 검토 기록
+    /// 없음 instead of 검증 대기 (t-19328, t-15558 slice 2).
     ///
     /// The ledger's reading of the attempts each time it is asked: never a
     /// thing anybody wrote and never stored, so a later attempt that hands
@@ -1032,10 +1034,7 @@ impl ReviewFacts {
                 .is_some_and(|text| !text.trim().is_empty() && text.trim() != "false")
         };
         let sha = |value: &serde_json::Value| value.as_str().and_then(commit_named);
-        let verified_keys = ["verified", "reviewedBy", "coordinatorTests", "testedHead"];
-        let merged_keys = ["merged", "mergeHead", "mergedInto"];
-        // A coordinator's mark that there is no code to land (research, a review, a design).
-        let nothing_keys = ["nothingToLand", "noCodeChange"];
+        let [_, merged_keys, nothing_keys] = REVIEW_KEY_GROUPS;
         // Explicit decisions override older metadata left on the result.
         let verified = map.get("verified").map_or_else(
             || map.get("reviewedBy").is_some_and(named),
@@ -1049,16 +1048,11 @@ impl ReviewFacts {
             |value| value.as_bool() == Some(true) || sha(value).is_some(),
         );
         let merge_head = candidate_head.filter(|_| merged);
-        let deployed = map.get("deployed").and_then(serde_json::Value::as_bool) == Some(true);
+        let deployed = map.get(DEPLOYED_KEY).and_then(serde_json::Value::as_bool) == Some(true);
         let nothing_to_land = nothing_keys
             .iter()
             .any(|key| map.get(*key).and_then(serde_json::Value::as_bool) == Some(true));
-        let written = verified_keys
-            .iter()
-            .chain(merged_keys.iter())
-            .chain(nothing_keys.iter())
-            .chain(["deployed"].iter())
-            .any(|key| map.contains_key(*key));
+        let written = review_keys().any(|key| map.contains_key(key));
         Self {
             verified,
             merged,
@@ -1069,6 +1063,26 @@ impl ReviewFacts {
             ..Self::default()
         }
     }
+}
+
+/// The keys a review is written under, as [`ReviewFacts::from_result`] reads them: the ones that
+/// say the work was checked, the ones that say it landed, and a coordinator's mark that there is
+/// no code to land (research, a review, a design).
+const REVIEW_KEY_GROUPS: [&[&str]; 3] = [
+    &["verified", "reviewedBy", "coordinatorTests", "testedHead"],
+    &["merged", "mergeHead", "mergedInto"],
+    &["nothingToLand", "noCodeChange"],
+];
+
+/// The key that says the work shipped.
+const DEPLOYED_KEY: &str = "deployed";
+
+/// Every key whose presence in a result is a review written ([`ReviewFacts::written`]).
+fn review_keys() -> impl Iterator<Item = &'static str> {
+    REVIEW_KEY_GROUPS
+        .iter()
+        .flat_map(|group| group.iter().copied())
+        .chain(std::iter::once(DEPLOYED_KEY))
 }
 
 /// The key a worker's report names the commit it hands in under — read by
@@ -6932,6 +6946,8 @@ fn changes_the_ledger(verb: &str, words: &Words) -> bool {
         "retention" => words.value("--days").is_some() || words.has("--sweep"),
         // Listing what would be settled changes nothing; applying it does.
         "task-settle" => words.has("--apply"),
+        // Listing what git proves changes nothing; writing it does.
+        coordinator_take::BACKFILL_VERB => words.has("--apply"),
         // Reading the batches changes nothing; every press hands the window work whose
         // records come back as receipts.
         land_batch::LAND_BATCH_VERB => land_batch::presses(words),
@@ -7544,39 +7560,7 @@ impl Ledger {
             .ok_or_else(|| format!("unknown run: {run_id}"))?;
         let id = message.id.clone();
         if let Some(ok) = worker_done {
-            let ended = message.created_ms;
-            /* The body is the WORKER's writing, whatever keys it carries: the
-             * dispatch names the worker where it resolves, and the signature
-             * the report wore stands in where it does not (t-6815). */
-            let author = match message.dispatch.as_deref().and_then(|id| run.dispatch(id)) {
-                Some(held) => ResultAuthor::Worker {
-                    worker: held.worker.clone(),
-                    dispatch: Some(held.id.clone()),
-                },
-                None => ResultAuthor::Worker {
-                    worker: message.from.clone(),
-                    dispatch: message.dispatch.clone(),
-                },
-            };
-            if let Some(dispatch_id) = message.dispatch.clone() {
-                /* What the attempt handed in — the commit its report named,
-                 * or the report itself — written on the attempt the report
-                 * ends, so a coordinator's review is bound to the thing it
-                 * looked at and not merely to the task's name (t-6815). Only
-                 * an OPEN attempt takes one: the report that ended it is the
-                 * hand-in, and nothing after can rewrite it. */
-                if let Some(held) = run
-                    .dispatches
-                    .iter_mut()
-                    .find(|one| one.id == dispatch_id && one.is_open())
-                {
-                    held.source = Some(handed_in_source(message.body.as_str(), &id));
-                }
-                Self::close_dispatch(run, &dispatch_id, Some(ok), ended);
-            }
-            if let Some(task_id) = message.task.clone() {
-                Self::finish_task(run, &task_id, ok, &message.body, author);
-            }
+            Self::settle_report(run, &message, ok);
         }
         /* Asked AFTER the completion above has shut the dispatch, and that
          * order is the whole guard.
@@ -7808,6 +7792,47 @@ impl Ledger {
                     message: message_id.to_string(),
                 });
             }
+        }
+    }
+
+    /// What a report that ends an attempt writes: what the attempt handed in,
+    /// the attempt's end and the task's ending — for a worker's `worker_done`
+    /// ([`Self::send`]) and a coordinator's hand-in on its own attempt
+    /// ([`coordinator_take`]) alike, so neither can write one of the three
+    /// another way.
+    fn settle_report(run: &mut Run, message: &Message, ok: bool) {
+        let ended = message.created_ms;
+        /* The body is the WORKER's writing, whatever keys it carries: the
+         * dispatch names the worker where it resolves, and the signature
+         * the report wore stands in where it does not (t-6815). */
+        let author = match message.dispatch.as_deref().and_then(|id| run.dispatch(id)) {
+            Some(held) => ResultAuthor::Worker {
+                worker: held.worker.clone(),
+                dispatch: Some(held.id.clone()),
+            },
+            None => ResultAuthor::Worker {
+                worker: message.from.clone(),
+                dispatch: message.dispatch.clone(),
+            },
+        };
+        if let Some(dispatch_id) = message.dispatch.clone() {
+            /* What the attempt handed in — the commit its report named,
+             * or the report itself — written on the attempt the report
+             * ends, so a coordinator's review is bound to the thing it
+             * looked at and not merely to the task's name (t-6815). Only
+             * an OPEN attempt takes one: the report that ended it is the
+             * hand-in, and nothing after can rewrite it. */
+            if let Some(held) = run
+                .dispatches
+                .iter_mut()
+                .find(|one| one.id == dispatch_id && one.is_open())
+            {
+                held.source = Some(handed_in_source(message.body.as_str(), &message.id));
+            }
+            Self::close_dispatch(run, &dispatch_id, Some(ok), ended);
+        }
+        if let Some(task_id) = message.task.clone() {
+            Self::finish_task(run, &task_id, ok, &message.body, author);
         }
     }
 
@@ -10290,6 +10315,11 @@ impl Ledger {
                             run.id, dispatch.id
                         ));
                     }
+                    /* A coordinator's own attempt (t-78075) is carried by its
+                     * seat, named with the seat's generation — no worker row
+                     * is behind it, and none is asked for. */
+                    (None, _)
+                        if coordinator_take::carrier_generation(&dispatch.worker).is_some() => {}
                     (None, _) => named(&workers, "dispatch's worker", &dispatch.worker)?,
                 }
                 if dispatch
@@ -10432,7 +10462,13 @@ impl Ledger {
                 // A federated dispatch's carrier is the far machine: the
                 // relay closes it, not a local seat, so an open one with no
                 // local worker is its NORMAL shape, not a stranded attempt.
-                .filter(|held| held.is_open() && held.remote.is_none())
+                // A coordinator's own attempt is carried by its seat, and
+                // the seat's hand-in or the next sitting's take closes it.
+                .filter(|held| {
+                    held.is_open()
+                        && held.remote.is_none()
+                        && coordinator_take::carrier_generation(&held.worker).is_none()
+                })
             {
                 if !run
                     .workers
@@ -19217,6 +19253,31 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         Doing::Mutation,
     ),
     (
+        coordinator_take::TAKE_VERB,
+        "--task <id> [--from <attempt>] [--why <line>] · the coordinator seat opens an attempt of \
+         its own on a task — work a worker left without a hand-in, or work done by hand; a worker \
+         still carrying it is stopped first, an attempt an earlier sitting of the seat took is ended",
+        Doing::Mutation,
+    ),
+    (
+        coordinator_take::HAND_IN_VERB,
+        "--task <id> --head <commit> --body <json> [--base <ref>] [--checkout <path>] · the \
+         coordinator seat hands a commit in on its own open attempt, once: the window asks git \
+         that the commit exists (and, with --base, that the ref holds it) before the ledger \
+         writes it; review it after with task-update --attempt --source",
+        Doing::Mutation,
+    ),
+    (
+        coordinator_take::BACKFILL_VERB,
+        "[--base <ref>] [--tags <glob>] [--checkout <path>] [--apply] · the finished tasks no \
+         review stands on whose result names a commit: listed with what git proves (merged when \
+         --base, default main, holds it; deployed when a release tag, default v*, holds it, \
+         named; verified only when a review task the result names passed) or why not; --apply, \
+         from the coordinator seat, writes the attempt, hand-in and review, keeping the original \
+         result beside them",
+        Doing::Policy,
+    ),
+    (
         "gate-create",
         "--task <id> --question <text> [--options <json-array>] · put a decision in front of a task",
         Doing::Mutation,
@@ -21231,6 +21292,11 @@ const BOUNDED_INPUT: &[(&str, Destination)] = &[
     ("--declaration", Destination::Name),
     ("--marker", Destination::Prose),
     ("--marker-source", Destination::Name),
+    // A coordinator's take, hand-in and backfill (t-78075): a line, a ref, a glob, a path.
+    ("--why", Destination::Prose),
+    ("--base", Destination::Name),
+    ("--tags", Destination::Name),
+    ("--checkout", Destination::Prose),
     // A landing check's words (t-34501 stage 3): a commit, a check id, numbers, a log path.
     ("--head", Destination::Name),
     ("--record", Destination::Name),
@@ -23906,6 +23972,37 @@ fn plan_inner(
             let run_id = bound(ledger, &words, &caller, &seat)?;
             gate_reuse::decide(
                 ledger, team, &run_id, verb, &words, pane, actor, now_ms, job,
+            )?
+        }
+
+        /* A coordinator's own attempt (t-78075). The hand-in and the backfill judge
+         * what git said, read by the window before the plan beside the receipt files. */
+        coordinator_take::TAKE_VERB => {
+            let run_id = bound(ledger, &words, &caller, &seat)?;
+            coordinator_take::take(ledger, team, pane, &words, &run_id, now_ms)?
+        }
+        coordinator_take::HAND_IN_VERB => {
+            let run_id = bound(ledger, &words, &caller, &seat)?;
+            coordinator_take::hand_in(
+                ledger,
+                team,
+                pane,
+                &words,
+                &run_id,
+                receipts.commits(),
+                now_ms,
+            )?
+        }
+        coordinator_take::BACKFILL_VERB => {
+            let run_id = bound(ledger, &words, &caller, &seat)?;
+            coordinator_take::backfill(
+                ledger,
+                team,
+                pane,
+                &words,
+                &run_id,
+                receipts.commits(),
+                now_ms,
             )?
         }
 

@@ -953,6 +953,41 @@ attempts each time it is asked and is never written down: a new attempt that
 hands something in takes it back, and a task with a review written, a decision
 standing or an attempt still open is never read this way.
 
+### Work the coordinator took over or did by hand
+
+A review names an attempt and the source it handed in, so work a worker left
+without a hand-in — or work the coordinator did itself — needs an attempt of the
+coordinator's own before it can be reviewed. Three verbs, all from the live
+coordinator seat (a worker's pane is refused):
+
+- `task-take --task <id> [--from <attempt>] [--why '<line>'] --retry-request take-<id>`
+  opens an attempt carried by the seat (its `workerId` reads `coordinator@g<generation>`).
+  A worker still carrying the task is refused — `worker-stop` it first. An attempt an
+  earlier sitting of the seat took (a window restart, a `run-takeover`) is ended by the
+  take. A task with no attempt at all takes one too. A closed task is refused; use
+  `task-backfill` for closed work that landed.
+- `hand-in --task <id> --head <commit> --body '{"ok":true,"summary":"…"}' [--base main]
+  [--checkout <path>] --retry-request handin-<id>` hands one commit in on the seat's own
+  open attempt, once. The window asks git in `--checkout` (an absolute path; default: the
+  pane's project) that the commit exists — and, with `--base`, that the ref holds it —
+  before the ledger writes it; a commit git does not know, or one the base does not hold,
+  is refused and nothing is written. The attempt's source is the full hash git resolved; the letter it
+  leaves is a `worker_done` from the run's address, in the log and in no inbox.
+- Then review it exactly as any other: `task-update --task <id> --attempt <the take's
+  dispatchId> --source <the hand-in's source> --result '{"verified":true,…}'`.
+
+`task-backfill [--base main] [--tags 'v*'] [--checkout <path>]` lists the completed and
+closed tasks no review stands on whose result names a commit (`mergeHead`, `merged`,
+`landed.mergeHead`, `commits[]` …), with what git proves for each: `merged` when the base
+holds the commit, `deployed` when a release tag holds it (the tag is named), `verified`
+only when the result names a review task whose own review passed — otherwise
+`"verified":"unknown"`, never a pass nobody recorded — and, for every task it cannot
+write, why (no commit named, not in the base, git does not know it, an attempt handed
+something in). Read the list first; `--apply --retry-request backfill-<run>` writes the
+listed rows (attempt, hand-in, review) from the coordinator seat, one task's failure
+never stopping the others. The original result is kept: its keys stay, a review key it
+held moves under `backfill.replaced`, and `backfill.by` reads `task-backfill`.
+
 ## Decision gates
 
 When a slice reaches a decision that is a person's or the coordinator's to

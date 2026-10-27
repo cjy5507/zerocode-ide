@@ -11035,6 +11035,85 @@ fn read_receipts(argv: &[String]) -> zerocode_core::orchestration::evidence::Rec
     files
 }
 
+/// What git says about the commits a coordinator's `hand-in` or `task-backfill` names (t-78075),
+/// read here, outside the ledger, so the ledger judges what git said and never runs it.
+///
+/// The checkout asked is `--checkout` when the verb names one, else the project the caller's
+/// pane works in. A backfill's commits are the ones its run's results name, read off the ledger
+/// as it stands; the plan reads the same rows again and judges only commits asked about here.
+/// `Ok(None)` for every other verb, and when there is no checkout to ask in.
+///
+/// What would reach git as it was typed is refused here, before git is asked: a value that starts
+/// with `-` (git could read it as an option), a `--head` that names no commit, and a `--checkout`
+/// that is not an absolute path (it would be found from the window's own folder, not the
+/// caller's).
+fn read_commits(
+    argv: &[String],
+    root: Option<&str>,
+    (team, pane): (&str, &str),
+    caller: Option<&str>,
+) -> Result<Option<zerocode_core::orchestration::coordinator_take::CommitsSeen>, String> {
+    use zerocode_core::orchestration::commit_named;
+    use zerocode_core::orchestration::coordinator_take::{
+        BACKFILL_VERB, DEFAULT_BASE, HAND_IN_VERB, RELEASE_TAGS, backfill_commits,
+    };
+    let arg = |flag| crate::agent_tools_runtime::orchestration_arg(argv, flag);
+    let Some(verb) = argv
+        .first()
+        .map(String::as_str)
+        .filter(|verb| *verb == HAND_IN_VERB || *verb == BACKFILL_VERB)
+    else {
+        return Ok(None);
+    };
+    for flag in ["--head", "--base", "--tags"] {
+        if let Some(value) = arg(flag).filter(|value| value.trim_start().starts_with('-')) {
+            return Err(format!(
+                "{flag} {value:?} starts with '-', which git would read as an option — name a ref"
+            ));
+        }
+    }
+    let checkout = arg("--checkout");
+    if let Some(path) = checkout.filter(|path| !std::path::Path::new(path).is_absolute()) {
+        return Err(format!(
+            "--checkout names a checkout by its absolute path, and {path:?} is not one"
+        ));
+    }
+    let Some(repo) = checkout.or(root).map(std::path::PathBuf::from) else {
+        return Ok(None);
+    };
+    if verb == HAND_IN_VERB {
+        let Some(named) = arg("--head") else {
+            return Ok(None);
+        };
+        let head = commit_named(named).ok_or_else(|| {
+            format!("--head names a commit, seven hex digits or more, and {named:?} is not one")
+        })?;
+        return Ok(Some(crate::commit_witness::see(
+            &repo,
+            &[head],
+            arg("--base"),
+            None,
+        )));
+    }
+    let named = || {
+        let run_id = arg("--run")
+            .map(str::to_string)
+            .or_else(|| bound_run(team, pane, caller))?;
+        let held = runtime()?;
+        let image = held.actor.view().ok()?;
+        let ledger = cached_ledger(&held, &image).ok()?;
+        Some(backfill_commits(ledger.run(&run_id)?))
+    };
+    Ok(named().map(|commits| {
+        crate::commit_witness::see(
+            &repo,
+            &commits,
+            Some(arg("--base").unwrap_or(DEFAULT_BASE)),
+            Some(arg("--tags").unwrap_or(RELEASE_TAGS)),
+        )
+    }))
+}
+
 /// The first bytes of one receipt, when it is a plain file that reads as text.
 /// A link is not followed: `symlink_metadata` describes the link itself.
 fn read_receipt_text(path: &str) -> Option<String> {
@@ -11168,11 +11247,20 @@ fn run_seated(
         Ok(gate) => gate,
         Err(why) => return refused(why),
     };
+    let commits = match read_commits(
+        argv,
+        gate.root.as_deref(),
+        (team_id, pane),
+        caller.as_deref(),
+    ) {
+        Ok(commits) => commits,
+        Err(why) => return refused(why),
+    };
     let command =
         match PlanCommand::checked(argv.to_vec(), team_id, pane, pane_token, caller, now_ms)
             .and_then(|command| command.with_project_scope(gate.root.clone()))
         {
-            Ok(command) => command.with_receipts(read_receipts(argv)),
+            Ok(command) => command.with_receipts(read_receipts(argv).with_commits(commits)),
             Err(why) => return refused_by_runtime(why),
         };
     /* What comes back has already been carried out against the rows AND made

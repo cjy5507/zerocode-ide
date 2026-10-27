@@ -110,20 +110,38 @@ fn job_of_receipt(path: &str) -> Option<&str> {
     path.file_stem()?.to_str()
 }
 
-/// What the window read of the receipt files a report names, keyed by the path
-/// exactly as the payload names it. A path that could not be read is absent, and
-/// a report that names an absent receipt is refused.
+/// What the window read for a verb before the ledger judges it: the receipt files
+/// a report names, keyed by the path exactly as the payload names it, and what git
+/// said about the commits a hand-in or a backfill names
+/// ([`super::coordinator_take::CommitsSeen`]). A path that could not be read is
+/// absent, and a report that names an absent receipt is refused.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ReceiptFiles(BTreeMap<String, String>);
+pub struct ReceiptFiles {
+    files: BTreeMap<String, String>,
+    commits: Option<super::coordinator_take::CommitsSeen>,
+}
 
 impl ReceiptFiles {
     pub fn insert(&mut self, path: impl Into<String>, text: impl Into<String>) {
-        self.0.insert(path.into(), text.into());
+        self.files.insert(path.into(), text.into());
     }
 
     #[must_use]
     pub fn get(&self, path: &str) -> Option<&str> {
-        self.0.get(path).map(String::as_str)
+        self.files.get(path).map(String::as_str)
+    }
+
+    /// The same reading, with what git said about the commits the verb names.
+    #[must_use]
+    pub fn with_commits(mut self, commits: Option<super::coordinator_take::CommitsSeen>) -> Self {
+        self.commits = commits;
+        self
+    }
+
+    /// What git said about the commits the verb names; `None` when the window asked nothing.
+    #[must_use]
+    pub fn commits(&self) -> Option<&super::coordinator_take::CommitsSeen> {
+        self.commits.as_ref()
     }
 }
 

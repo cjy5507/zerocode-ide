@@ -98,6 +98,7 @@ mod code_sign_clone;
 mod codex_accounts;
 mod codex_queue;
 mod codex_tokens;
+mod commit_witness;
 mod composer_empty;
 mod computer_use;
 mod conversation_wake;
