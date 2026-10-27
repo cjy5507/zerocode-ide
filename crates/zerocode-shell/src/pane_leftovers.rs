@@ -41,6 +41,12 @@
 //! not proven, or not ended by the KILL, stays written down for the next
 //! window to look at again.
 //!
+//! A terminal whose other end is gone counts as none (t-77414). Panes start
+//! with their terminal as their controlling one, so the window going sends
+//! each session a hangup; a leftover that ignored it still holds that
+//! terminal, closed master and all, and it is the same leftover as one that
+//! never had a terminal.
+//!
 //! Process groups and signals are Unix's; on Windows no group is collected
 //! and nothing is signalled, and the pane's ConPTY closing is all that ends
 //! its agent there, as before.
@@ -105,7 +111,9 @@ impl PaneGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Seen {
     pub(crate) parent: u32,
-    /// Whether it has a controlling terminal.
+    /// Whether it has a controlling terminal that still has its other end:
+    /// for a process handed to launchd, one whose master is closed — the
+    /// window that held it gone — is none (`hung_up`).
     pub(crate) terminal: bool,
     pub(crate) started_us: u64,
     /// The process group it is in.
@@ -753,10 +761,14 @@ fn looked_up_by_the_kernel(pid: u32) -> Lookup {
         .ok()
         .filter(|len| *len > 0)
         .map(|len| String::from_utf8_lossy(&path[..len]).into_owned());
+    // `e_tdev` is NODEV (all bits set) for a process with no terminal. Only
+    // an orphan's terminal is asked whether it hung up: that is the one
+    // question the answer serves ([`proven`]), and a live pane's terminal is
+    // not opened from here.
+    let has_terminal = info.e_tdev != u32::MAX && info.e_tdev != 0;
     Lookup::Seen(Seen {
         parent: info.pbi_ppid,
-        // `e_tdev` is NODEV (all bits set) for a process with no terminal.
-        terminal: info.e_tdev != u32::MAX && info.e_tdev != 0,
+        terminal: has_terminal && !(info.pbi_ppid == LAUNCHD && hung_up(info.e_tdev)),
         started_us: info
             .pbi_start_tvsec
             .saturating_mul(1_000_000)
@@ -765,6 +777,16 @@ fn looked_up_by_the_kernel(pid: u32) -> Lookup {
         owner: info.pbi_uid,
         exe,
     })
+}
+
+/// Whether the terminal device `dev` has lost its other end (t-77414): its
+/// master closed. Opened by name with no claim on it (`O_NOCTTY`) and asked
+/// once without waiting; only such a terminal answers `POLLHUP`, and one the
+/// host will not name or open is not said to have hung up.
+#[cfg(target_os = "macos")]
+fn hung_up(dev: u32) -> bool {
+    let _ = dev;
+    false
 }
 
 /// Elsewhere the window reads no process, so nothing is ever collected,
@@ -1422,5 +1444,43 @@ mod tests {
         assert_eq!(read_note(root.path()), groups);
         write_left(root.path(), &[]).expect("removed");
         assert!(!root.path().join(LEFT_FILE).exists());
+    }
+
+    /// A terminal hangs up when its master closes, and not before
+    /// (t-77414): a leftover that ignored the window's hangup still holds
+    /// its terminal, and this is what tells that terminal from a live one.
+    /// A real pty, no process signalled.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_terminal_hangs_up_when_its_master_closes() {
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: `openpty` writes the two descriptors; no name, settings
+        // or size is asked for.
+        let opened = unsafe {
+            libc::openpty(
+                &raw mut master,
+                &raw mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `fstat` fills the struct for an open descriptor.
+        assert_eq!(unsafe { libc::fstat(slave, stat.as_mut_ptr()) }, 0);
+        // SAFETY: filled above.
+        let device = unsafe { stat.assume_init() }.st_rdev;
+        let device = u32::from_ne_bytes(device.to_ne_bytes());
+
+        assert!(!hung_up(device), "a terminal whose master is open hung up");
+        // SAFETY: the master opened above, closed once; the slave stays
+        // open, as a leftover's descriptors keep its terminal.
+        unsafe { libc::close(master) };
+        let answer = hung_up(device);
+        // SAFETY: the slave opened above, closed once.
+        unsafe { libc::close(slave) };
+        assert!(answer, "a terminal whose master closed did not hang up");
+        assert!(!hung_up(u32::MAX), "no device is not a hung-up terminal");
     }
 }
