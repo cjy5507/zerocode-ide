@@ -6132,7 +6132,7 @@ pub(super) fn answer_computer_command_with(
     workspace: Option<&Path>,
     typer: &mut dyn computer_use::enter::Typer,
 ) -> zerocode_hookd::TeamAnswer {
-    use zerocode_core::computer_use::{ComputerMethod, parse_command, usage};
+    use zerocode_core::computer_use::{ComputerMethod, parse_command_coded, usage};
 
     if argv
         .first()
@@ -6141,9 +6141,9 @@ pub(super) fn answer_computer_command_with(
         return computer_said(format!("{}\n", usage()));
     }
     let wants_json = argv.iter().any(|word| word == "--json");
-    let mut command = match parse_command(argv) {
+    let mut command = match parse_command_coded(argv) {
         Ok(command) => command,
-        Err(error) => return computer_cli_error(wants_json, "invalid_argument", &error),
+        Err(refusal) => return computer_cli_error(wants_json, &refusal.code, &refusal.message),
     };
     if let Some(refusal) = refused_at_the_door(&command) {
         return refusal;
