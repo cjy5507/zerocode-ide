@@ -987,10 +987,11 @@ impl TeamWindow {
             state: &state,
             term,
             briefing: &pending.briefing,
-            glyph,
+            glyph: Some(glyph),
             agent,
             deadline,
             submitted: pending.submitted.is_some(),
+            at_deadline: false,
         };
         let why = match confirm(
             &mut pane,
@@ -1018,6 +1019,46 @@ impl TeamWindow {
         );
         Some(format!("briefing not delivered (브리핑 미전달): {why}"))
     }
+
+    /// Whether a fresh launch whose submission receipt the deadline did not
+    /// bring was taken all the same (t-78356): the receipt heard since, a
+    /// turn the pane's hooks reported, or the briefing in the provider's own
+    /// transcript ([`zerocode_pty::briefing::taken_without_receipt`]). The
+    /// screen is not asked — a briefing standing unsent in its composer shows
+    /// there like one that was taken (w-78343).
+    fn taken_without_receipt(&self, term: TermId, pending: &PendingWorkerReadiness) -> bool {
+        let state = self.app.state::<AppState>();
+        let agent = state.agent_terms().get(&term).copied();
+        let heard_since = pending
+            .submitted
+            .as_ref()
+            .is_some_and(|receipt| receipt.try_recv().is_ok());
+        let mut pane = LaunchPane {
+            state: &state,
+            term,
+            briefing: &pending.briefing,
+            glyph: pending.composer,
+            agent,
+            deadline: ready_timeout_for(agent),
+            submitted: heard_since,
+            at_deadline: true,
+        };
+        let Some(witness) = zerocode_pty::briefing::taken_without_receipt(&mut pane) else {
+            return false;
+        };
+        // Which word seated it is kept, so the lost receipts can be counted
+        // by what still told the window.
+        let said = match witness {
+            zerocode_pty::briefing::Witness::LateReceipt => "its receipt heard after the deadline",
+            zerocode_pty::briefing::Witness::ReportedTurn => "a turn its hooks reported",
+            zerocode_pty::briefing::Witness::Transcript => "its transcript holding the briefing",
+        };
+        note_window_event(
+            state.local_data_root(),
+            &format!("term {term} seated without its submission receipt: {said}"),
+        );
+        true
+    }
 }
 
 /// A worker's pane as the briefing watch reads and types at it (t-74381,
@@ -1026,12 +1067,20 @@ struct LaunchPane<'a> {
     state: &'a AppState,
     term: TermId,
     briefing: &'a str,
-    glyph: char,
+    /// The composer glyph the retype waits for; a launch asked only what its
+    /// provider said ([`TeamWindow::taken_without_receipt`]) types nothing.
+    glyph: Option<char>,
     agent: Option<&'static str>,
     /// The agent's own readiness deadline, which the retype pays.
     deadline: Duration,
-    /// `await_prompt_submission` already accepted this launch's receipt.
+    /// This launch's receipt was heard — by `await_prompt_submission`, or
+    /// after its deadline ([`TeamWindow::taken_without_receipt`]).
     submitted: bool,
+    /// Asked once at the receipt's deadline rather than watched
+    /// ([`TeamWindow::taken_without_receipt`]): a rest its hooks reported
+    /// counts only when it ended a turn they saw run
+    /// ([`briefing_turn_reported`]).
+    at_deadline: bool,
 }
 
 /// SessionStart also initializes the turn clock, so that clock alone proves
@@ -1046,6 +1095,42 @@ fn briefing_work_reported(state: zerocode_core::hook::HookState, session_boundar
     }
 }
 
+/// Whether the hooks of a pane whose receipt never came reported a turn it
+/// ran (t-78356), from its row: the state, whether a rest is a session
+/// boundary, when the turn began and when the state was entered.
+///
+/// Stricter than [`briefing_work_reported`] on a rest: a `Notification`
+/// whose words say the agent parked at its prompt ("waiting for your
+/// input") reads as `Done`, and a pane that never took its briefing parks
+/// there too. A rest counts only when it ended a turn the hooks saw begin
+/// before it — after a rest the next report starts the turn's clock, so a
+/// rest reported straight after another rest began its turn as it began
+/// itself.
+fn briefing_turn_reported(
+    state: zerocode_core::hook::HookState,
+    session_boundary: bool,
+    turn_started_at: Option<i64>,
+    state_started_at: i64,
+) -> bool {
+    match state {
+        zerocode_core::hook::HookState::Done => {
+            !session_boundary && turn_started_at.is_some_and(|started| started < state_started_at)
+        }
+        _ => briefing_work_reported(state, session_boundary),
+    }
+}
+
+/// Whether the provider's own transcript at `transcript` took `briefing` as
+/// the prompt that opened its turn (t-78356): the record a CLI writes for a
+/// prompt it took, read whether or not its submit hook ever reached the
+/// window. Its newest naming prompt is asked whole, past the frames around a
+/// paste, and must hold all of the briefing's words: another launch's
+/// briefing shares this one's preamble and parts only at its task.
+fn briefing_recorded(transcript: &std::path::Path, briefing: &str) -> bool {
+    zerocode_core::transcript::last_naming_prompt_words(transcript)
+        .is_some_and(|prompt| zerocode_pty::briefing::prompt_is_briefing(&prompt, briefing))
+}
+
 impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
     fn submitted(&mut self) -> bool {
         self.submitted || crate::human_input::taken(self.term) > 0
@@ -1055,7 +1140,27 @@ impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
         self.state
             .pane_states()
             .get(&self.term)
-            .is_some_and(|pane| briefing_work_reported(pane.state, pane.session_boundary))
+            .is_some_and(|pane| {
+                if self.at_deadline {
+                    briefing_turn_reported(
+                        pane.state,
+                        pane.session_boundary,
+                        pane.turn_started_at,
+                        pane.state_started_at,
+                    )
+                } else {
+                    briefing_work_reported(pane.state, pane.session_boundary)
+                }
+            })
+    }
+
+    fn recorded(&mut self) -> bool {
+        let transcript = self
+            .state
+            .pane_sessions()
+            .get(&self.term)
+            .and_then(|session| session.transcript_path.clone());
+        transcript.is_some_and(|path| briefing_recorded(std::path::Path::new(&path), self.briefing))
     }
 
     fn screen(&mut self) -> Option<String> {
@@ -1082,7 +1187,7 @@ impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
             PromptDelivery::with_deadlines(
                 self.briefing.to_string(),
                 true,
-                zerocode_pty::ReadySignal::Rest(Some(self.glyph)),
+                zerocode_pty::ReadySignal::Rest(self.glyph),
                 Instant::now(),
                 ready_quiet_for(self.agent),
                 self.deadline,
@@ -1938,6 +2043,25 @@ impl agent_teams::Host for TeamWindow {
             None
         };
         if accepted && undelivered.is_none() && state.terminals().contains_key(&term) {
+            state.worker_readiness().remove(&term);
+            return Ok(());
+        }
+        // A fresh worker whose receipt the deadline did not bring may be at
+        // work all the same (t-78356): the receipt rides one hook post, and
+        // w-78348's never reached the window while it read files for 58 s
+        // after taking its briefing — this road then killed it. What its
+        // provider said of itself is asked first; a briefing nothing took
+        // (w-78343, unsent in its composer) still fails below.
+        if entered
+            && terminal_is_live
+            && !accepted
+            && !pending.restoring
+            && self.taken_without_receipt(term, &pending)
+            && state.terminals().contains_key(&term)
+        {
+            state.worker_prompt_submits().remove(&term);
+            state.deliveries().remove(&term);
+            state.delivery_waiters().remove(&term);
             state.worker_readiness().remove(&term);
             return Ok(());
         }
@@ -8925,8 +9049,140 @@ pub(super) fn write_agent_screenshot(
 // the shipped code, and that marker must open `mod tests` (shipped_backend).
 #[cfg(test)]
 mod tests {
-    use super::briefing_work_reported;
+    use super::{briefing_recorded, briefing_turn_reported, briefing_work_reported};
     use zerocode_core::hook::HookState;
+
+    /// A launch briefing as the window types it: its preamble, the same for
+    /// every worker, then the task's own words.
+    fn briefing(task: &str) -> String {
+        format!(
+            "You are a worker in this window's orchestration, carrying task {task}. When your work is done, run: zerocode-orc send --type worker_done --retry-request done-{task}. Now do this: read the auto-format test."
+        )
+    }
+
+    /// The record Claude Code 2.1.311 wrote for w-78348's briefing (10-28
+    /// 04:07:30), its words framed as a paste, after the session's own lines.
+    fn claude_transcript(prompt: Option<&str>) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        let mut file = tempfile::NamedTempFile::new().expect("a transcript");
+        let mut lines = vec![
+            serde_json::json!({"type": "custom-title", "customTitle": "zc-run-w-1"}),
+            serde_json::json!({"type": "permission-mode", "permissionMode": "bypassPermissions"}),
+        ];
+        if let Some(prompt) = prompt {
+            lines.push(serde_json::json!({
+                "type": "user",
+                "promptId": "p-1",
+                "message": {
+                    "role": "user",
+                    "content": format!("\n\n<pasted_content id=\"e859\">\n{prompt}\n</pasted_content id=\"e859\">\n"),
+                },
+                "origin": {"kind": "human"},
+                "promptSource": "typed",
+            }));
+            lines.push(serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "읽는 중"}]},
+            }));
+            // w-78348's file held five of these after its briefing: a tool's
+            // result rides the user role and is not a prompt.
+            lines.push(serde_json::json!({
+                "type": "user",
+                "promptId": "p-1",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "fn auto_format_times_out() {}"}],
+                },
+            }));
+        }
+        for line in lines {
+            writeln!(file, "{line}").expect("a transcript line");
+        }
+        file
+    }
+
+    #[test]
+    fn a_briefing_its_provider_recorded_was_taken() {
+        let mine = briefing("t-2");
+        let taken = claude_transcript(Some(&mine));
+        assert!(briefing_recorded(taken.path(), &mine));
+    }
+
+    #[test]
+    fn a_transcript_without_the_briefing_took_nothing() {
+        let mine = briefing("t-2");
+        let untouched = claude_transcript(None);
+        assert!(!briefing_recorded(untouched.path(), &mine));
+        let other = claude_transcript(Some("summarise the diff for me"));
+        assert!(!briefing_recorded(other.path(), &mine));
+        let missing = untouched.path().with_extension("gone");
+        assert!(!briefing_recorded(&missing, &mine));
+    }
+
+    /// Another launch's briefing shares this one's preamble and ends the
+    /// same way; only its task differs, past where a card cuts a prompt.
+    /// A transcript that took that briefing took nothing of this one
+    /// (t-78356 review P2).
+    #[test]
+    fn another_tasks_briefing_in_the_transcript_is_not_this_one() {
+        let mine = briefing("t-2");
+        let theirs = claude_transcript(Some(&briefing("t-1")));
+        assert!(!briefing_recorded(theirs.path(), &mine));
+    }
+
+    /// A pane's row after `reports` — (state, session boundary, ms) — folded
+    /// as the hook loop folds them (`pane_runtime.rs` `note_pane_state`):
+    /// (state, session boundary, turn started at, state started at).
+    fn pane_after(reports: &[(HookState, bool, i64)]) -> (HookState, bool, Option<i64>, i64) {
+        let mut row: Option<(HookState, bool, Option<i64>, i64)> = None;
+        for &(state, boundary, now) in reports {
+            let state_started_at = zerocode_core::hook::state_clock(
+                row.map(|(held, _, _, since)| (held, since)),
+                state,
+                now,
+            );
+            let turn_started_at = zerocode_core::notify::turn_started_after(
+                row.map(|(held, _, turn, _)| (held, turn)),
+                state,
+                now,
+            );
+            row = Some((
+                state,
+                zerocode_core::hook::done_provenance(state, boundary),
+                turn_started_at,
+                state_started_at,
+            ));
+        }
+        row.expect("a report")
+    }
+
+    fn turn_reported(reports: &[(HookState, bool, i64)]) -> bool {
+        let (state, boundary, turn, since) = pane_after(reports);
+        briefing_turn_reported(state, boundary, turn, since)
+    }
+
+    /// At the receipt's deadline a rest counts only when it ended a turn the
+    /// hooks saw run. A `Notification` that says the agent parked at its
+    /// prompt reads as `Done`, and a briefing left unsent in its composer
+    /// parks there too (t-78356 review P3).
+    #[test]
+    fn a_parked_notice_is_no_turn_taken_at_the_receipts_deadline() {
+        let started = (HookState::Done, true, 10);
+        let parked = (HookState::Done, false, 70);
+        assert!(!turn_reported(&[started]));
+        assert!(!turn_reported(&[started, parked]));
+        assert!(!turn_reported(&[(HookState::Idle, false, 10), parked]));
+        assert!(!turn_reported(&[parked]));
+        let work = (HookState::Working, false, 20);
+        assert!(turn_reported(&[started, work]));
+        assert!(turn_reported(&[
+            started,
+            (HookState::NeedsAttention, false, 20)
+        ]));
+        let finished = (HookState::Done, false, 30);
+        assert!(turn_reported(&[started, work, finished]));
+        assert!(turn_reported(&[started, work, finished, parked]));
+    }
 
     #[test]
     fn a_worker_briefing_accepts_a_real_turn_but_not_a_session_boundary() {
