@@ -112,6 +112,7 @@ import { testKeybindingText } from "./keybinding-text.mjs";
 import { testTerminalCloseResult } from "./terminal-close-result.mjs";
 import { testPermissionCard } from "./permission-card.mjs";
 import { testAnswerDoor } from "./answer-door.mjs";
+import { testYourTurn } from "./your-turn.mjs";
 import { testSelfAct } from "./self-act.mjs";
 import { testComputerShare } from "./computer-share.mjs";
 import { testExplain } from "./explain.mjs";
@@ -293,6 +294,7 @@ suite("toast-clear-of-drawer", ({ browser, origin, ok }) => testToastClearOfDraw
 suite("skills-pickers", ({ browser, origin, ok }) => testSkillsPickers(browser, origin, ok));
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
 suite("answer-door", ({ browser, origin, ok }) => testAnswerDoor(browser, origin, ok));
+suite("your-turn", ({ browser, origin, ok }) => testYourTurn(browser, origin, ok));
 /* ZeroCode's own window as a Computer Use target: the page's half (t-73906). */
 suite("self-act", ({ browser, origin, ok }) => testSelfAct(browser, origin, ok));
 /* One window shared with an agent: the card and the band (t-73906). */
