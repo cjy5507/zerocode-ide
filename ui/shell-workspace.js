@@ -273,10 +273,11 @@ function saveWorktreeLabel() {
  * another column is how a person loses their place. */
 let menuOpener = null;
 
-/* An opener that says it has a menu (`aria-expanded`) says whether its menu
- * is the one up — on every road that closes or replaces it (t-78107). */
+/* An opener that says it has a menu (`aria-haspopup`) says whether its menu
+ * is the one up — on every road that closes or replaces it (t-78107). Only
+ * those: a folder row's `aria-expanded` is its own fold, not its menu. */
 function markMenuOpener(open) {
-  if (menuOpener?.hasAttribute("aria-expanded")) menuOpener.setAttribute("aria-expanded", String(open));
+  if (menuOpener?.hasAttribute("aria-haspopup")) menuOpener.setAttribute("aria-expanded", String(open));
 }
 
 function closeSidebarMenu() {
@@ -1914,6 +1915,10 @@ const closedProjects = new Set();
 // keep their usual behavior, and a manual fold/unfold always takes ownership.
 const startupFoldProjects = new Set();
 let startupProjectFoldsReady = false;
+// The projects the person folded by hand in this window. They keep their
+// header where the hand left it (the fold's scroll anchor stands on it), and
+// join the resting line only from the next start (t-78107, 시안 7).
+const handFoldedProjects = new Set();
 
 function seedStartupProjectFolds(catalog) {
   for (const project of catalog) {
@@ -3106,6 +3111,8 @@ el("project-open").addEventListener("click", () => setAddProject(true));
 
 function setEveryProjectClosed(closed) {
   startupFoldProjects.clear();
+  // Everything put away at once rests at once.
+  handFoldedProjects.clear();
   for (const project of projects) {
     if (closed) closedProjects.add(project.path);
     else closedProjects.delete(project.path);
@@ -3738,8 +3745,13 @@ function makeProjectHeader(project) {
     // different header under the hand.
     foldWithScrollAnchor(row, () => {
       startupFoldProjects.delete(project.path);
-      if (closedProjects.has(project.path)) closedProjects.delete(project.path);
-      else closedProjects.add(project.path);
+      if (closedProjects.has(project.path)) {
+        closedProjects.delete(project.path);
+        handFoldedProjects.delete(project.path);
+      } else {
+        closedProjects.add(project.path);
+        handFoldedProjects.add(project.path);
+      }
     });
   });
   // The header drags to reorder — the original's repo-header drag
@@ -5774,8 +5786,9 @@ function listedProjects() {
   );
 }
 
-/* 2차 A (t-78107, 시안 7): the projects that rest — folded, not the one this
- * window stands in, and holding no agent — stand as ONE line, 「쉬는 프로젝트
+/* 2차 A (t-78107, 시안 7): the projects that rest — folded but not by the
+ * person's hand in this window, not the one this window stands in, and
+ * holding no agent — stand as ONE line, 「쉬는 프로젝트
  * 10 · newbcr · Obsidian …」, not ten headers. Only once the startup restore
  * has spoken (`startupProjectFoldsReady`): before that every project is folded
  * on purpose and none has said yet whether it holds work. */
@@ -5784,7 +5797,8 @@ let restingProjectsOpen = false;
 function restingProjectPaths(listed) {
   if (sidebarGroupBy !== "repo" || !startupProjectFoldsReady) return new Set();
   return new Set(listed
-    .filter((project) => closedProjects.has(project.path) && project.path !== activeProjectPath
+    .filter((project) => closedProjects.has(project.path) && !handFoldedProjects.has(project.path)
+      && project.path !== activeProjectPath
       && !project.worktrees.some((worktree) => worktree.active || worktreeAgentRows(worktree.path).length > 0))
     .map((project) => project.path));
 }
