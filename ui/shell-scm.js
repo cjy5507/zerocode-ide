@@ -517,16 +517,16 @@ function pileUnlandedSection(checkouts, unseated) {
   }
   const rows = checkouts.map((worktree) => {
     const { landing } = worktree;
-    const row = deskElement("button", "pile-branch");
-    row.type = "button";
-    row.append(deskElement("span", "pile-branch-name", worktree.branch || worktreeDisplayName(worktree)));
+    const branch = deskElement("button", "pile-branch");
+    branch.type = "button";
+    branch.append(deskElement("span", "pile-branch-name", worktree.branch || worktreeDisplayName(worktree)));
     if (landing.far_behind === true && Number.isFinite(landing.behind)) {
-      row.append(deskElement("span", "pile-branch-behind",
+      branch.append(deskElement("span", "pile-branch-behind",
         t("worktree.landBehind", "{{ref}}보다 {{count}} 뒤", { ref: landingRefName(landing.compare_ref ?? ""), count: landing.behind })));
     }
-    row.append(deskElement("span", "pile-branch-count", String(landing.ahead ?? 0)));
-    row.addEventListener("click", () => void activateWorktree(worktree.path));
-    return row;
+    branch.append(deskElement("span", "pile-branch-count", String(landing.ahead ?? 0)));
+    branch.addEventListener("click", () => void activateWorktree(worktree.path));
+    return branch;
   });
   return pileSectionNode(t("pile.unlanded", "미반영"), null, [total, bar, ...rows, pileUnseatedNode(checkouts, unseated)].filter(Boolean));
 }
@@ -3208,7 +3208,15 @@ async function refreshHistory() {
     return;
   }
   const rows = history?.rows ?? [];
-  host.replaceChildren(...historyNodes(rows));
+  host.replaceChildren();
+  for (const row of rows) {
+    host.appendChild(historyRow(row));
+    // A rebuild puts back what the person had open — the panel refills from
+    // the sheet cache without asking git anything twice.
+    if (!isHistoryBoundary(row) && historyExpanded.has(row.item.id)) {
+      host.appendChild(historyFilesPanel(row.item));
+    }
+  }
   historyTitle.hidden = false;
   el("scm-history-count").textContent = historyCountWords(rows, history?.has_more);
   more.hidden = !history?.has_more || historyLimit >= HISTORY_LIMIT_MAX;
@@ -4683,10 +4691,24 @@ function paintChecksSummary(checks) {
   row.hidden = checks.length === 0;
   row.setAttribute("aria-expanded", checksExpanded ? "true" : "false");
   el("checks-fold").classList.toggle("is-folded", !checksExpanded);
-  for (const [name, count, word] of checksTally(checks)) {
+  const tally = {
+    pass: checks.filter((check) => checkVerdict(check) === "success").length,
+    fail: checks.filter((check) =>
+      ["failure", "cancelled", "timed_out", "action_required"].includes(
+        checkVerdict(check),
+      ),
+    ).length,
+    wait: checks.filter((check) => checkVerdict(check) === "pending").length,
+  };
+  const words = {
+    pass: t("checks.passing", "통과"),
+    fail: t("checks.failing", "실패"),
+    wait: t("checks.pending", "대기"),
+  };
+  for (const [name, count] of Object.entries(tally)) {
     const span = el(`checks-${name}`);
     span.hidden = count === 0;
-    span.textContent = `${count} ${word}`;
+    span.textContent = `${count} ${words[name]}`;
   }
   el("checks-spin").hidden = !checksLoading;
 }

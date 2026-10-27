@@ -2108,20 +2108,20 @@ function yourTurnShellNode(tag, className, card, now, open = null) {
  * inside it, and a control holds no other control. */
 function yourTurnRowNode(card, now) {
   const open = () => openTurnConversation(card);
-  const { node: row, kind, draft } = yourTurnShellNode("div", "your-turn-row", card, now, open);
-  row.addEventListener("click", open);
+  const { node: turn, kind, draft } = yourTurnShellNode("div", "your-turn-row", card, now, open);
+  turn.addEventListener("click", open);
   const line = document.createElement("span");
   line.className = "your-turn-row-line";
   line.textContent = cardAskLine(card) || card.said || "";
-  row.append(line);
+  turn.append(line);
   if (kind === "permission") {
     const acts = document.createElement("span");
     acts.className = "your-turn-row-acts";
     acts.append(yourTurnAllowNode(card, draft, false), yourTurnDenyNode(card, draft));
-    row.append(acts);
+    turn.append(acts);
   }
-  if (draft.refusal) row.append(yourTurnRefusalNode(draft));
-  return row;
+  if (draft.refusal) turn.append(yourTurnRefusalNode(draft));
+  return turn;
 }
 
 /* ---- the list dropped from the chip ---- */
