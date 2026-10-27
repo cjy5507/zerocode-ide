@@ -5,6 +5,31 @@
  * "what state". Everything else belongs to the titanium material ramp or a
  * 1px rule. */
 
+/* Geist ships with the window (2026-10-28, the person: 「글꼴 넣고…」 — the
+ * first exception to "assets never ship"). Before this the stack below named
+ * Geist and every machine without it installed drew the system face, so the
+ * passed design (p-6893560125c34552) was never what anyone saw. One variable
+ * file per family covers every weight the type styles ask for; `swap` keeps
+ * the first frame on the system face instead of holding text invisible.
+ * vercel/geist-font v1.8.2, OFL 1.1 (fonts/OFL.txt). Relative URLs, so the
+ * test harness's file:// and http:// pages load the same files the window
+ * does. */
+@font-face {
+  font-family: "Geist";
+  src: url("fonts/Geist-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("fonts/GeistMono-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --computer-permission-granted-mark: "✓";
   --computer-permission-denied-mark: "○";
@@ -455,11 +480,11 @@
    * fallback (I18nProvider-DPbv01TU.css:103); the app overrides it further
    * down: `--app-font-family: "Geist", -apple-system, BlinkMacSystemFont,
    * "Segoe UI", sans-serif` (:23531), backed by a bundled Geist-Variable
-   * @font-face (:23510). So Geist leads here too. The FILE does not come
-   * across — a woff2 is an asset and assets never ship (repo rule); the name
-   * resolves where Geist is installed and falls to the same system faces
-   * Orca names where it is not. The Korean fallback is ours, appended
-   * because nothing in the measured stack carries Hangul. */
+   * @font-face (:23510). So Geist leads here too, and since 2026-10-28 the
+   * file ships beside it (the @font-face at the top of this file); the
+   * system faces after it draw the first frame and any glyph Geist lacks.
+   * The Korean fallback is ours, appended because nothing in the measured
+   * stack carries Hangul. */
   --font-ui: var(--font-ui-choice, "Geist"), -apple-system, BlinkMacSystemFont, "Segoe UI",
     "Apple SD Gothic Neo", sans-serif;
   --font-display: var(--font-ui);
@@ -473,10 +498,10 @@
    *
    * Orca closes this by BUNDLING `SymbolsNerdFontMono-Regular.woff2` (1.18MB)
    * and pinning it to the PUA with `unicode-range`
-   * (I18nProvider-0D3bXbhN.css:23900-23907). The file cannot come across — a
-   * woff2 is an asset and assets never ship (the same repo rule that keeps
-   * Geist to a name above); whether to make this rule's first exception is a
-   * decision left open in the ledger (1-em), not one taken here.
+   * (I18nProvider-0D3bXbhN.css:23900-23907). That file does not come across:
+   * the one exception to "assets never ship" the person made (2026-10-28) is
+   * Geist and Geist Mono, which lead this stack — the Nerd Font tail is a
+   * decision still open in the ledger (1-em).
    *
    * The names still buy most of it back: anyone who has installed a patched
    * face gets their prompt rendered today, and anyone who has not is exactly
@@ -485,7 +510,7 @@
    * above do not cover, never the face that draws ordinary text. The symbols-
    * only face leads the tail because it is the one that carries nothing but
    * those codepoints and so can never capture a letter. */
-  --font-mono: "SF Mono", SFMono-Regular, ui-monospace, "Cascadia Code",
+  --font-mono: "Geist Mono", "SF Mono", SFMono-Regular, ui-monospace, "Cascadia Code",
     Menlo, Consolas, "Liberation Mono", "Symbols Nerd Font Mono",
     "MesloLGS NF", "JetBrainsMono Nerd Font", "Hack Nerd Font", monospace;
 
