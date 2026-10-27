@@ -1791,7 +1791,7 @@ impl Ui {
         let context_left = context_used_tokens.and_then(|used_tokens| {
             crate::status_format::context_left_percent(
                 used_tokens,
-                self.context_window.get(&self.model, api::context_window_for_model),
+                self.context_window.get(&self.model, compaction_ceiling),
             )
         });
         let dream = crate::dream::last_pass_line();
@@ -2868,7 +2868,7 @@ impl Ui {
         let context_left = context_used_tokens.and_then(|used_tokens| {
             crate::status_format::context_left_percent(
                 used_tokens,
-                self.context_window.get(&self.model, api::context_window_for_model),
+                self.context_window.get(&self.model, compaction_ceiling),
             )
         });
         let (model, model_note) = self.footer_model();
@@ -8591,6 +8591,27 @@ mod tests {
         );
     }
 
+    /// The footer's "context left" counts down to the session's compaction,
+    /// not to the end of the model's window: 300k of a 1M Claude window is
+    /// 70% of the window left but under half of the way to the fold at 520k.
+    #[test]
+    fn the_footer_counts_context_down_to_the_compaction_ceiling() {
+        let model = "claude-opus-5";
+        let window = api::context_window_for_model(model);
+        let ceiling = super::compaction_ceiling(model);
+        assert!(ceiling > 0 && ceiling < window, "ceiling {ceiling} of window {window}");
+
+        let mut ui = test_ui();
+        ui.sync_model_display(model);
+        ui.usage_known = true;
+        ui.ctx_tokens = ceiling / 2;
+        let footer = ui.passive_footer_line().plain();
+        assert!(footer.contains("50% context left"), "footer was {footer:?}");
+        ui.ctx_tokens = ceiling;
+        let footer = ui.passive_footer_line().plain();
+        assert!(footer.contains("0% context left"), "at the ceiling the session folds: {footer:?}");
+    }
+
     /// A swap on the wire moves the footer's model field and names the reason
     /// (2026-09-10: the transcript said "retrying with the latest Opus model"
     /// while the footer kept saying the Fable session model). The next request
@@ -9861,9 +9882,24 @@ mod footer_key_tests {
     }
 }
 
-/// The context window of the model the footer shows, resolved when the model
-/// changes rather than on every paint: resolving walks the alias table, a
-/// third of a streamed answer's paint time (t-48216).
+/// The input-token count the footer's "context left" counts down to: where
+/// this model's session compacts (`runtime::auto_compaction_threshold_for_model`),
+/// not the model's whole window. Against the whole window a 1M-token model
+/// read 70% left at 300k while its session folded at 520k and began trimming
+/// old tool results at 416k, so the footer never said a fold was near. A
+/// settings `autoCompactThresholdPercent` is the live runtime's alone and is
+/// not read here.
+fn compaction_ceiling(model: &str) -> u64 {
+    u64::from(runtime::auto_compaction_threshold_for_model(
+        Some(model),
+        api::context_window_for_model(model),
+    ))
+}
+
+/// The footer's context ceiling ([`compaction_ceiling`]) for the model it
+/// shows, resolved when the model changes rather than on every paint:
+/// resolving walks the alias table, a third of a streamed answer's paint
+/// time (t-48216).
 #[derive(Default)]
 struct ModelWindow {
     resolved: std::cell::RefCell<Option<(String, u64)>>,
