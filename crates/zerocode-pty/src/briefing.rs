@@ -128,6 +128,17 @@ pub fn briefing_shows(screen: &str, briefing: &str) -> bool {
         || seen.to_lowercase().contains("[pasted")
 }
 
+/// Whether `prompt` — a prompt the provider recorded taking, whole — is
+/// `briefing` itself (t-78356).
+///
+/// A screen shows a briefing's head or tail ([`briefing_shows`]); a
+/// recorded prompt holds all of its words, and only all of them tell this
+/// briefing from another launch's, whose window preamble is the same text.
+/// Whitespace is ignored on both sides, as on a screen.
+pub fn prompt_is_briefing(prompt: &str, briefing: &str) -> bool {
+    briefing_shows(prompt, briefing)
+}
+
 /// How often the screen is read while the watch waits.
 const LOOK_EVERY: Duration = Duration::from_millis(100);
 
@@ -502,6 +513,26 @@ mod tests {
             recorded: false,
         };
         assert!(!taken_without_receipt(&mut pane));
+    }
+
+    /// Two launch briefings share the window's preamble and part at their
+    /// task: a recorded prompt is this briefing only when it holds all of
+    /// this briefing's words (t-78356).
+    #[test]
+    fn a_recorded_prompt_is_this_briefing_only_whole() {
+        let briefing = |task: &str| {
+            format!(
+                "You are a worker in this window's orchestration, carrying task {task}.\n\
+                 When your work is done, run: zerocode-orc send --type worker_done.\n\
+                 Now do this: read the auto-format test."
+            )
+        };
+        let mine = briefing("t-2");
+        let rewrapped = mine.replace('\n', "\n\n  ");
+        assert!(prompt_is_briefing(&mine, &mine));
+        assert!(prompt_is_briefing(&rewrapped, &mine));
+        assert!(!prompt_is_briefing(&briefing("t-1"), &mine));
+        assert!(!prompt_is_briefing("summarise the diff for me", &mine));
     }
 
     #[test]
