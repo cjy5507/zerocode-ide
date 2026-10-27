@@ -3595,6 +3595,7 @@ fn main() -> ExitCode {
             cmd::second_brain::relink_saved_vault_at_boot(
                 saved_vault,
                 weekly_review,
+                app.state::<AppState>().settings().clone(),
                 app.state::<AppState>().config_root().to_path_buf(),
                 local_data_root.clone(),
             );

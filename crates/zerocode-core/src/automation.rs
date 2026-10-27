@@ -1586,6 +1586,28 @@ mod tests {
         );
     }
 
+    /// Switched on after its hour, a job does not make that hour up (t-77713
+    /// F3). The floor that keeps the nights before [`Automation::armed_at`]
+    /// out of the missed count keeps them out of the make-up too: with a day
+    /// of grace, the weekly review switched on any Sunday morning opened a
+    /// turn the next minute. Armed before its hour, the job still owes it.
+    #[test]
+    fn a_job_switched_on_after_its_hour_does_not_make_it_up() {
+        let mut job = nightly();
+        job.armed_at = Some(at(2026, 5, 4, 3, 10).epoch_minutes);
+        assert!(
+            job.missed_run(at(2026, 5, 4, 3, 30)).is_none(),
+            "the 03:00 run, before the job was switched on at 03:10, was made up"
+        );
+
+        job.armed_at = Some(at(2026, 5, 4, 2, 50).epoch_minutes);
+        assert_eq!(
+            job.missed_run(at(2026, 5, 4, 3, 30)),
+            Some(at(2026, 5, 4, 3, 0)),
+            "a job armed before its hour no longer made that hour up"
+        );
+    }
+
     /// Past the grace an occurrence is not run, and it is not forgotten.
     ///
     /// The grace decides what is still worth running; it must not also decide

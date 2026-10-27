@@ -150,6 +150,21 @@ pub(crate) fn adopt_weekly_review_in(config_root: &Path, vault: &Path) -> Result
     Ok(true)
 }
 
+/// At boot, the review's job as the saved switch says (t-77377). Answers
+/// whether it wrote the job, so the old zo cron record is retired.
+pub(crate) fn weekly_review_at_boot(
+    settings: &settings::SettingsRepository,
+    config_root: &Path,
+    vault: &Path,
+    switch_on: bool,
+) -> Result<bool, String> {
+    let _ = settings;
+    if !switch_on {
+        return Ok(false);
+    }
+    adopt_weekly_review_in(config_root, vault)
+}
+
 /// Take away the zo cron record the weekly review was before it was a window
 /// job, so it cannot also open a turn from a zo pane idle in the vault.
 /// Best-effort: a machine without `zo` holds no such record, and a vault that
@@ -680,10 +695,11 @@ fn link_saved_vault(
 /// too ([`skills_runtime::window_agent_homes`]), named on the thread so the
 /// account store is not read on the boot path. On the same thread, a weekly
 /// review an older build switched on becomes the window's job
-/// ([`adopt_weekly_review_in`]).
+/// ([`weekly_review_at_boot`]).
 pub(crate) fn relink_saved_vault_at_boot(
     saved: String,
     weekly_review: bool,
+    settings: Arc<settings::SettingsRepository>,
     config_root: PathBuf,
     local_data_root: PathBuf,
 ) {
@@ -698,7 +714,9 @@ pub(crate) fn relink_saved_vault_at_boot(
         .spawn(move || {
             // A switch an older build turned on stood for a zo cron record
             // that never fired: it becomes the window's job, once (t-77377).
-            if weekly_review && adopt_weekly_review_in(&config_root, &vault).unwrap_or(false) {
+            if weekly_review_at_boot(&settings, &config_root, &vault, weekly_review)
+                .unwrap_or(false)
+            {
                 retire_review_cron(&vault);
             }
             let launched = skills_runtime::window_agent_homes(&config_root, &local_data_root);

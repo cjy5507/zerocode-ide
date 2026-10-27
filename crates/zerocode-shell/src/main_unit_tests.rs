@@ -16578,6 +16578,47 @@ fn the_second_brain_report_carries_the_saved_vaults_daily_ingest() {
     );
 }
 
+/// The weekly review works in the vault and its prompt names `raw/` — it
+/// reads what the ingest left there — but it is not the daily ingest
+/// (t-77713 F1). Taken for one, it showed 「켜짐」 for an ingest switched off,
+/// and hid a day-late ingest behind its weekly schedule.
+#[test]
+fn the_weekly_review_is_not_the_daily_ingest_though_its_prompt_names_raw() {
+    let vault = Path::new("/Users/fixture/Knowledge");
+    let now = LocalMinute {
+        epoch_minutes: 20_000 * 24 * 60 + 10 * 60,
+    };
+    let review = Automation {
+        schedule: zerocode_core::second_brain::weekly_review_schedule(),
+        ..vault_job(
+            zerocode_core::second_brain::WEEKLY_REVIEW_AUTOMATION_ID,
+            "/Users/fixture/Knowledge",
+            &zerocode_core::second_brain::weekly_review_prompt(vault),
+            true,
+            Some(now.epoch_minutes - 60),
+        )
+    };
+    let off = vault_job(
+        "off",
+        "/Users/fixture/Knowledge",
+        INGEST_PROMPT,
+        false,
+        Some(now.epoch_minutes - 3 * 24 * 60),
+    );
+
+    let found = cmd::second_brain::daily_ingest_report(vault, &[review.clone(), off], now);
+    assert_eq!(
+        (found.automation_id.as_deref(), found.enabled),
+        (Some("off"), false),
+        "the weekly review was taken for the daily ingest, and an ingest that is off read 「켜짐」"
+    );
+    let alone = cmd::second_brain::daily_ingest_report(vault, &[review], now);
+    assert_eq!(
+        alone.automation_id, None,
+        "a vault holding only the weekly review was said to have a daily ingest"
+    );
+}
+
 /// 2026-11-01, a Sunday, at 06:00 — local minutes, the scheduler's clock.
 const WEEKLY_REVIEW_SUNDAY: i64 = 20_758 * 1440 + 6 * 60;
 
@@ -16595,7 +16636,8 @@ fn weekly_review_job_in(config_root: &Path, vault: &Path) -> Option<Automation> 
 /// cron record it used to be fired only while a zo pane sat idle in the
 /// vault, and nobody keeps one there: it never opened a turn. A machine
 /// asleep at six still owes that week's review when it wakes the same day,
-/// and not after. Switching on again leaves one job and keeps its last run.
+/// and not after; one switched on after six that Sunday owes none (t-77713
+/// F3). Switching on again leaves one job and keeps its last run.
 #[test]
 fn weekly_review_switched_on_is_a_window_job_due_in_the_vault_on_sunday_morning() {
     let config = tempfile::tempdir().expect("config root");
@@ -16619,15 +16661,28 @@ fn weekly_review_switched_on_is_a_window_job_due_in_the_vault_on_sunday_morning(
     assert!(job.is_due(at(WEEKLY_REVIEW_SUNDAY)), "not due at Sunday 06:00");
     assert!(!job.is_due(at(WEEKLY_REVIEW_SUNDAY + 1)));
     assert!(!job.is_due(at(WEEKLY_REVIEW_SUNDAY - 24 * 60)), "due on Saturday");
+    // Switching on armed the job at the minute this test ran; the make-up is
+    // asked of the job armed at fixed minutes instead — the week before, and
+    // that Sunday at eight, after the review's hour.
+    let armed = |minute| Automation {
+        armed_at: Some(minute),
+        ..job.clone()
+    };
+    let week_before = armed(WEEKLY_REVIEW_SUNDAY - 7 * 24 * 60);
     assert_eq!(
-        job.missed_run(at(WEEKLY_REVIEW_SUNDAY + 4 * 60)),
+        week_before.missed_run(at(WEEKLY_REVIEW_SUNDAY + 4 * 60)),
         Some(at(WEEKLY_REVIEW_SUNDAY)),
         "a machine woken at ten lost that week's review"
     );
     assert_eq!(
-        job.missed_run(at(WEEKLY_REVIEW_SUNDAY + 24 * 60 + 1)),
+        week_before.missed_run(at(WEEKLY_REVIEW_SUNDAY + 24 * 60 + 1)),
         None,
         "a review more than a day late was still made up"
+    );
+    assert_eq!(
+        armed(WEEKLY_REVIEW_SUNDAY + 2 * 60).missed_run(at(WEEKLY_REVIEW_SUNDAY + 4 * 60)),
+        None,
+        "a review switched on at eight that Sunday opened a turn for six at once"
     );
 
     // As the scheduler leaves it once that Sunday's review has run.
@@ -16813,8 +16868,51 @@ fn weekly_review_left_on_by_an_older_build_becomes_a_window_job_once_at_boot() {
     );
 }
 
+/// A review deleted on the automation screen stays deleted (t-77713 F2). The
+/// first boot of this build moves a switch an older build left on and writes
+/// down that it did; a later boot has nothing left to move, so a job the
+/// person took away is not written back — the card says it is missing, and
+/// the switch brings it back. A job still on the vault saved before is still
+/// that vault's review, and a later boot moves it to the saved one.
+#[test]
+fn weekly_review_deleted_on_the_automation_screen_stays_deleted_across_boots() {
+    let settings_root = tempfile::tempdir().expect("settings root");
+    let settings = settings::SettingsRepository::new(settings_root.path());
+    let config = tempfile::tempdir().expect("config root");
+    let local = tempfile::tempdir().expect("local data");
+    let vault = tempfile::tempdir().expect("vault");
+    let boot = || {
+        cmd::second_brain::weekly_review_at_boot(&settings, config.path(), vault.path(), true)
+            .expect("boot")
+    };
+
+    assert!(boot(), "the first boot did not move the switch an older build left on");
+    assert!(weekly_review_job_in(config.path(), vault.path()).is_some());
+
+    delete_automation_and_run_history(
+        config.path(),
+        local.path(),
+        zerocode_core::second_brain::WEEKLY_REVIEW_AUTOMATION_ID,
+    )
+    .expect("deleted on the automation screen");
+    assert!(!boot(), "a boot wrote back the review the person deleted");
+    assert!(
+        weekly_review_job_in(config.path(), vault.path()).is_none(),
+        "the deleted review came back at boot"
+    );
+
+    let before = tempfile::tempdir().expect("the vault saved before");
+    cmd::second_brain::set_weekly_review_in(config.path(), local.path(), before.path(), true)
+        .expect("switched on for the vault saved before");
+    assert!(boot(), "a review left on the vault saved before stayed there");
+    assert!(weekly_review_job_in(config.path(), vault.path()).is_some());
+    assert!(weekly_review_job_in(config.path(), before.path()).is_none());
+}
+
 /// The card's switch writes the window's job and no zo cron record, and the
-/// boot road moves a switch an older build left on (t-77377).
+/// boot road moves a switch an older build left on (t-77377) — once: a switch
+/// turned with this build leaves no older switch for a boot to move, and says
+/// so (t-77713 F2).
 #[test]
 fn weekly_review_switch_and_boot_go_through_the_window_store() {
     let source = shipped_backend();
@@ -16823,9 +16921,13 @@ fn weekly_review_switch_and_boot_go_through_the_window_store() {
         switch.contains("set_weekly_review_in(") && !switch.contains("\"ensure\""),
         "the switch still registers a zo cron record:\n{switch}"
     );
+    assert!(
+        switch.contains("LegacyMigration::WeeklyReviewJob"),
+        "a switch turned with this build leaves a later boot an older switch to move:\n{switch}"
+    );
     let boot = block_after(source, "fn relink_saved_vault_at_boot(");
     assert!(
-        boot.contains("adopt_weekly_review_in("),
+        boot.contains("weekly_review_at_boot("),
         "boot leaves a switch an older build turned on without a job:\n{boot}"
     );
 }
