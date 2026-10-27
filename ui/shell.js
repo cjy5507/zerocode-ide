@@ -12582,6 +12582,7 @@ listen("hook:agent", (event) => {
   // 선다(그리는 문과 보내는 문은 여전히 따로다).
   settleComposerQueuesFor(term);
   agentClock.sync();
+  helperClock.sync();
   // A conversation view asked for mid-turn is handed to the wire now that the
   // turn is over — if the person still has it up.
   const chat = paneChats.get(term);
@@ -14008,8 +14009,17 @@ function activeHelperPage() {
   return null;
 }
 
+/* A pane's own transcript is followed while its agent is at work. Between turns
+ * nothing writes it but a turn, and every turn's start and end come as a hook
+ * that reads the page at once (`hook:agent`) — so a conversation that stands
+ * by default costs nothing at rest (2차 B; was a `pane_log` a second). A
+ * helper's file and a wire's log tell no hook, and are followed while shown. */
+function helperPageFollowed(tab) {
+  return tab !== null && (tab.worker.helper?.id !== PANE_LOG_ID || isMidTurn(hookStates.get(tab.worker.term)));
+}
+
 const helperClock = idlePoller({
-  wanted: () => activeHelperPage() !== null,
+  wanted: () => helperPageFollowed(activeHelperPage()),
   every: HELPER_POLL_MS,
   tick: () => void pollHelperPages(),
 });

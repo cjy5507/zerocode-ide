@@ -131,7 +131,9 @@ export async function testPaneHead(browser, origin, ok) {
       await window.__PAINTED__();
       tell("hook:agent", { term: quiet, state: "idle", agent: "claude", session: { id: "s-head-0003" }, resumable: true });
       await window.__PAINTED__();
-      await settle();
+      // The read the page owes at once, and the one quick follow after news (160 ms), are over.
+      const settled = () => new Promise((done) => setTimeout(done, 400));
+      await settled();
       seen.quietChat = paneChatOn(quiet);
       const atRest = reads.get(quiet) ?? 0;
       await new Promise((done) => setTimeout(done, 3200));
@@ -143,7 +145,7 @@ export async function testPaneHead(browser, origin, ok) {
       seen.workingReads = (reads.get(quiet) ?? 0) - atWork;
       tell("hook:agent", { term: quiet, state: "idle", agent: "claude", session: { id: "s-head-0003" }, resumable: true });
       await window.__PAINTED__();
-      await settle();
+      await settled();
       const atEnd = reads.get(quiet) ?? 0;
       await new Promise((done) => setTimeout(done, 2200));
       seen.endedReads = (reads.get(quiet) ?? 0) - atEnd;

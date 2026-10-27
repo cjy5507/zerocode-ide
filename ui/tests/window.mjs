@@ -55804,12 +55804,15 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // At REST between turns: what a composer says and does while a turn is
       // out is the queue's business (`composer-queue`), and a box that says
       // 「대기열에 추가」 would hide the two words this suite is about.
-      const term = await openTermTab({ placement: "tab" });
-      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-chips", resumable: false, model: "claude-fable-5-1", permission_mode: "bypassPermissions" });
-      await window.__PAINTED__();
+      // On file before the agent's report: the pane stands in its conversation at that
+      // report and reads the transcript then — a pane at rest is not read again until a
+      // hook says something moved.
       window.__ANSWER__.pane_log = () => ({ found: true, next: 2, turns: [
         { role: "user", text: "hi" }, { role: "assistant", text: "hello" },
       ] });
+      const term = await openTermTab({ placement: "tab" });
+      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-chips", resumable: false, model: "claude-fable-5-1", permission_mode: "bypassPermissions" });
+      await window.__PAINTED__();
       el("view-toggle-chat").click();
       await settle(150);
       const chat = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat`);
