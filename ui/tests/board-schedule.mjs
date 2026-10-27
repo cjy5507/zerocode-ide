@@ -1141,6 +1141,49 @@ export async function testBoardSchedule(browser, origin, ok) {
       queuedGate.what === "게이트 l61" && queuedGate.word === "도는 중" && queuedGate.heads.includes("gate:l62") && queuedGate.l62act === "",
       JSON.stringify(queuedGate));
 
+    /* ---- 안내판 게이트 줄의 규칙 — 한 문장, 여덟 경우의 표 (review r4): 「도는 단계가 있는 게이트 → 없으면 실제로
+     * 시작한(끝난 단계가 하나라도 있는) 게이트 가운데 시작이 가장 늦은 것(통과·실패·단계 사이 대기) → 없으면 마지막으로
+     * 줄 선 것」. 줄이 멈춘 픽스처라 기다리는 일감의 계획 시작은 모두 「지금」이다 — 「마지막으로 줄 선 것」은 넣은 시각이다. ---- */
+    const gateTable = await page.evaluate((now) => {
+      const base = boardScheduleAnswer;
+      const l61 = base.jobs.filter((job) => job.gate === "l61");
+      const minute = 60_000;
+      const job = (name, state, start, end, kind, extra = {}) => ({ name, who: "run11955-l62r", state, class: "first", lane: 1, cap_secs: 1800,
+        queued_ms: now - 10 * minute, start_ms: start, end_ms: end, secs: end && start ? Math.round((end - start) / 1000) : null,
+        rc: state === "passed" ? 0 : state === "failed" ? 1 : null, kind, gate: "l62", part: "r", what: null,
+        expected: { secs: 600, samples: 5 }, ...extra });
+      const l61as = (how) => l61.map((one) => (how === "failed"
+        ? (one.kind === "g3a-zo-lint" ? { ...one, state: "failed", rc: 1, end_ms: now - minute, secs: 60 } : one)
+        : how === "passed"
+          ? { ...one, state: "passed", rc: 0, start_ms: one.start_ms ?? now - 8 * minute, end_ms: now - 4 * minute, secs: 240 }
+          : how === "waiting" ? { ...one, state: "waiting", start_ms: null, end_ms: null, secs: null, rc: null } : one));
+      const l62 = {
+        queued: [job("0-1792543900-run11955-l62r-g1-build", "waiting", null, null, "g1-build", { queued_ms: now - minute })],
+        passed: [job("0-1792543850-run11955-l62r-g1-build", "passed", now - minute, now - 30_000, "g1-build")],
+        between: [job("0-1792543850-run11955-l62r-g1-build", "passed", now - 2 * minute, now - minute, "g1-build"),
+          job("0-1792543851-run11955-l62r-g2-tests", "waiting", null, null, "g2-tests")],
+        running: [job("0-1792543850-run11955-l62r-g1-build", "running", now - minute, null, "g1-build")],
+      };
+      const cases = [
+        ["① l61 실패 + l62 대기(시작 안 함)", "failed", "queued", "l61", "실패"],
+        ["② l61 실패 → l62 통과", "failed", "passed", "l62", "통과"],
+        ["③ l61 통과 → l62 단계 사이 대기", "passed", "between", "l62", "차례 기다림"],
+        ["④ l61 통과 → l62 도는 중", "passed", "running", "l62", "도는 중"],
+        ["⑤ l61 도는 중 + l62 대기", "running", "queued", "l61", "도는 중"],
+        ["⑥ 모두 대기(시작 안 함) → 마지막으로 줄 선 것", "waiting", "queued", "l62", "차례 기다림"],
+        ["⑦ l61 실패 → l62 단계 사이 대기", "failed", "between", "l62", "차례 기다림"],
+        ["⑧ 범위 안에 게이트 없음", "none", "none", "", ""],
+      ];
+      const choice = { zoom: "now", folded: new Set(), opened: new Set(), log: null };
+      return cases.map(([name, how61, how62, gate, word]) => {
+        const jobs = [...(how61 === "none" ? [] : l61as(how61)), ...(how62 === "none" ? [] : l62[how62])];
+        const line = boardScheduleModel({ ...base, jobs, lanes: [] }, [], now, choice, 900).board.lines[1];
+        return { name, want: [gate, word], got: [line.name, line.word], ok: line.name === gate && line.word === word };
+      });
+    }, SCHEDULE_NOW);
+    ok("the board's gate line follows one rule in all eight cases — running first, then the gate that actually started and started last, then the one queued last",
+      gateTable.every((row) => row.ok), JSON.stringify(gateTable.filter((row) => !row.ok)));
+
     /* ---- 비어 있어도 넉 줄: 레인도 게이트도 과업도 없는 답 ---- */
     const emptyAnswer = await page.evaluate((now) => {
       const model = boardScheduleModel({ revision: 1, unchanged: false, read_ms: now, line: { found: false, runner_lanes: [] },
