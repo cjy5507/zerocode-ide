@@ -11042,12 +11042,18 @@ fn read_receipts(argv: &[String]) -> zerocode_core::orchestration::evidence::Rec
 /// pane works in. A backfill's commits are the ones its run's results name, read off the ledger
 /// as it stands; the plan reads the same rows again and judges only commits asked about here.
 /// `Ok(None)` for every other verb, and when there is no checkout to ask in.
+///
+/// What would reach git as it was typed is refused here, before git is asked: a value that starts
+/// with `-` (git could read it as an option), a `--head` that names no commit, and a `--checkout`
+/// that is not an absolute path (it would be found from the window's own folder, not the
+/// caller's).
 fn read_commits(
     argv: &[String],
     root: Option<&str>,
     (team, pane): (&str, &str),
     caller: Option<&str>,
 ) -> Result<Option<zerocode_core::orchestration::coordinator_take::CommitsSeen>, String> {
+    use zerocode_core::orchestration::commit_named;
     use zerocode_core::orchestration::coordinator_take::{
         BACKFILL_VERB, DEFAULT_BASE, HAND_IN_VERB, RELEASE_TAGS, backfill_commits,
     };
@@ -11059,7 +11065,19 @@ fn read_commits(
     else {
         return Ok(None);
     };
+    for flag in ["--head", "--base", "--tags"] {
+        if let Some(value) = arg(flag).filter(|value| value.trim_start().starts_with('-')) {
+            return Err(format!(
+                "{flag} {value:?} starts with '-', which git would read as an option — name a ref"
+            ));
+        }
+    }
     let checkout = arg("--checkout");
+    if let Some(path) = checkout.filter(|path| !std::path::Path::new(path).is_absolute()) {
+        return Err(format!(
+            "--checkout names a checkout by its absolute path, and {path:?} is not one"
+        ));
+    }
     let Some(repo) = checkout.or(root).map(std::path::PathBuf::from) else {
         return Ok(None);
     };
@@ -11067,7 +11085,9 @@ fn read_commits(
         let Some(named) = arg("--head") else {
             return Ok(None);
         };
-        let head = named.to_string();
+        let head = commit_named(named).ok_or_else(|| {
+            format!("--head names a commit, seven hex digits or more, and {named:?} is not one")
+        })?;
         return Ok(Some(crate::commit_witness::see(
             &repo,
             &[head],
