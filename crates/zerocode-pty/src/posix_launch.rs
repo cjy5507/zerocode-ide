@@ -94,7 +94,7 @@ pub(crate) type EnvEdit = (OsString, Option<OsString>);
 /// What tells a helper it is starting a pane's program (t-77414), set to the
 /// name the program is started under — its `argv[0]` — and taken out before
 /// the program starts. It counts only beside the helper's own `argv[0]`
-/// being [`CTTY_EXEC_ARG0`], which no process passes on: a marker some older
+/// being `CTTY_EXEC_ARG0`, which no process passes on: a marker some older
 /// helper left behind is inherited by everything the program starts, and on
 /// its own it would turn the next call of a helper — the mirror's tee and
 /// its orchestration guard — into a start of whatever that call names
@@ -106,7 +106,7 @@ pub const CTTY_EXEC_ENV: &str = "ZEROCODE_CTTY_EXEC";
 const CTTY_EXEC_ARG0: &str = "zerocode-ctty-exec";
 
 /// The question [`launch_through`] asks a helper before naming it: set, a
-/// helper that knows the road writes [`CTTY_PROBE_ANSWER`] and ends with 0.
+/// helper that knows the road writes `CTTY_PROBE_ANSWER` and ends with 0.
 /// A mirror built before the road reads no environment and is handed no
 /// argument, so it ends at once, saying its program is missing.
 pub const CTTY_PROBE_ENV: &str = "ZEROCODE_CTTY_PROBE";
@@ -122,7 +122,7 @@ const CTTY_PROBE_ANSWER: &str = "zerocode-ctty-exec 1";
 /// A name the pane was given that already has that shape is wrapped once
 /// more, so no wrapped name lands on one of the pane's own, and the helper
 /// takes one prefix off each: everything comes back as it was given
-/// ([`wraps`]). A start with no helper wraps nothing and takes nothing out
+/// (`wraps`). A start with no helper wraps nothing and takes nothing out
 /// (t-77530, Codex t-77525: a person's `ZEROCODE_CTTY_DYLD_*` was taken
 /// out on every road).
 pub const CTTY_DYLD_WRAP: &str = "ZEROCODE_CTTY_";
@@ -166,7 +166,7 @@ static NAMING: OnceLock<Arc<Naming>> = OnceLock::new();
 /// answers in time — one that does not know the road would keep the marker
 /// in every lane's program. When it is not named, `unnamed` hears why, on
 /// that thread, after the question's process is ended and reaped. A lane
-/// started before the answer waits for it ([`spawn`]). Asked once per
+/// started before the answer waits for it (`spawn`). Asked once per
 /// process; `false` when it was asked already. A process that names none
 /// starts its children straight, with no controlling terminal.
 pub fn launch_through(
@@ -411,7 +411,7 @@ fn wrap_dyld(env: &mut [(OsString, OsString)]) {
 /// pane, as a shell does.
 ///
 /// Asked [`CTTY_PROBE_ENV`], it answers and ends. A marker with no
-/// [`CTTY_EXEC_ARG0`] beside it was left by another helper: it is taken out
+/// `CTTY_EXEC_ARG0` beside it was left by another helper: it is taken out
 /// of this process's environment, so nothing this process starts holds it,
 /// and this returns to the binary's own road.
 ///
