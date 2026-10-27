@@ -95,6 +95,10 @@ const SEAT_TRIES: u32 = 10;
 const SEAT_WAIT: Duration = Duration::from_millis(50);
 /// How often the waiting road looks at the socket and at the cancel flag.
 const CONSENT_POLL: Duration = Duration::from_millis(100);
+/// How long an accepted connection may stay silent before it is let go — a
+/// browser opens sockets it never sends on (a preconnect), and the redirect
+/// arrives on another. A real redirect's request line comes with its connection.
+const REQUEST_WAIT: Duration = Duration::from_secs(2);
 
 /// A refresh is asked for this many seconds before expiry, so a token that
 /// dies mid-request is renewed before the request rather than after it.
@@ -761,12 +765,17 @@ impl Flow {
     /// The redirect's authorization code, or `None` when the person cancelled.
     fn await_code(&self, cancelled: &AtomicBool) -> Result<Option<String>, String> {
         let deadline = Instant::now() + CONSENT_CEILING;
-        let mut stream = loop {
+        let (mut stream, target) = loop {
             if cancelled.load(Ordering::Relaxed) {
                 return Ok(None);
             }
             match self.listener.accept() {
-                Ok((stream, _)) => break stream,
+                Ok((mut stream, _)) => {
+                    // A connection that says nothing is not the redirect.
+                    if let Some(target) = request_target(&mut stream) {
+                        break (stream, target);
+                    }
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
                         return Err("Google 로그인이 시간 안에 끝나지 않았습니다".to_string());
@@ -776,19 +785,6 @@ impl Flow {
                 Err(error) => return Err(error.to_string()),
             }
         };
-        // The request line is all this needs, and 8 KiB is more than a
-        // redirect's whole header block; a body is never read.
-        let mut buffer = [0_u8; 8192];
-        let read = stream
-            .read(&mut buffer)
-            .map_err(|error| error.to_string())?;
-        let request = String::from_utf8_lossy(&buffer[..read]);
-        let target = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or_default()
-            .to_string();
         let answer = self.attempt.code_of(&target);
         // The browser is answered either way — a hung tab reads as a hung
         // sign-in — and the page never carries the code it just delivered.
@@ -809,6 +805,43 @@ impl Flow {
         let _ = stream.write_all(response.as_bytes());
         answer.map(Some)
     }
+}
+
+/// The request line's target, read off one accepted connection — or `None`
+/// when it closes or stays silent past [`REQUEST_WAIT`] first.
+///
+/// On macOS an accepted socket inherits the listener's non-blocking mode, and
+/// a read made before the browser's bytes land answers `WouldBlock`, so the
+/// connection is made blocking with a bounded wait. The request line is all
+/// this needs and 8 KiB is more than a redirect's whole header block; a body
+/// is never read.
+fn request_target(stream: &mut std::net::TcpStream) -> Option<String> {
+    stream.set_nonblocking(false).ok()?;
+    stream.set_read_timeout(Some(REQUEST_WAIT)).ok()?;
+    let mut buffer = [0_u8; 8192];
+    let mut filled = 0;
+    while filled < buffer.len() {
+        let read = stream.read(&mut buffer[filled..]).ok()?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+        if buffer[..filled].windows(2).any(|pair| pair == b"\r\n") {
+            break;
+        }
+    }
+    if filled == 0 {
+        return None;
+    }
+    let request = String::from_utf8_lossy(&buffer[..filled]);
+    Some(
+        request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or_default()
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
