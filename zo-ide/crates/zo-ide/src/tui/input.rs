@@ -59,7 +59,8 @@ enum Watch {
     /// 지켜볼 터미널이 없거나 반응기가 그 fd 를 받지 않았다 — 판이 닫혀도 이
     /// 흐름은 모른다.
     Off,
-    /// 아직 걸지 않았다 — 반응기는 런타임 안에서만 쓸 수 있어 첫 폴링에 건다.
+    /// 아직 걸지 않았다 — 반응기는 런타임 안에서만 쓸 수 있어 런타임 안의 첫
+    /// 폴링에 건다.
     Unarmed(OwnedFd),
     Armed(AsyncFd<OwnedFd>),
 }
@@ -76,6 +77,12 @@ impl Watch {
             // 기다리는 동안 닫힌 터미널을 읽게 된다.
             if super::tty::hung_up_on(terminal.as_fd()) {
                 return true;
+            }
+            // `AsyncFd` 는 런타임 밖에서 걸면 오류가 아니라 패닉이다. 런타임 밖의
+            // 폴링은 걸지 않고 두며, 닫힘은 다음 폴링이 다시 본다.
+            if tokio::runtime::Handle::try_current().is_err() {
+                *self = Self::Unarmed(terminal);
+                return false;
             }
             if let Ok(armed) = AsyncFd::with_interest(terminal, Interest::READABLE) {
                 *self = Self::Armed(armed);
