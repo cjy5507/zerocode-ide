@@ -35242,9 +35242,9 @@ details.task-board-section > summary {
    * 한 화면에 든다; 홈통 4rem — 「지금 09:50」 칩(12px 글 여덟 자 + 안쪽 8px)이 선다; 열 머리 32px — 13px 글 한 줄과
    * 위아래 8px; 열 최소 7rem — 「워커 과업 7 · 끝남 3」 머리 글; 부열 최소 5rem — 과업 id 「t-77628」 고정폭 12px
    * 일곱 자; 시간표 최소 40rem — 홈통 + 열 넷의 최소 폭(4 + 4×7 = 32rem)에 나란히 선 블록 둘의 여유. */
-  --schedule-hour: 120px;
+  --schedule-hour: var(--schedule-hour-now);
   --schedule-gutter: 4rem;
-  --schedule-col-head: 32px;
+  --schedule-col-head: var(--head-height);
   --schedule-col-min: 7rem;
   --schedule-subcol-min: 5rem;
   --schedule-cal-min: 40rem;
@@ -35254,7 +35254,7 @@ details.task-board-section > summary {
 
 .task-board-schedule[data-schedule-zoom="day"] {
   /* 하루: 스물네 시간이 960px — 한 번의 스크롤 안. */
-  --schedule-hour: 40px;
+  --schedule-hour: var(--schedule-hour-day);
 }
 
 .board-schedule-chart[hidden],

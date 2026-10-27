@@ -556,6 +556,11 @@
   --board-intro-after: 20px;
   --board-tab-height: 48px;
   --board-gap-small: 6px;
+  /* The schedule tab's vertical timetable (t-77628): the height of one hour. At the 「지금」 zoom the four
+   * hours around now stand 480px, one screen of the test holder; at the 「하루」 zoom twenty-four hours
+   * stand 960px, one scroll. The column head is the head height (--head-height). */
+  --schedule-hour-now: 120px;
+  --schedule-hour-day: 40px;
   /* The draft's status dots (t-70028): a filled dot beside its word, the way
    * the Vercel deployment list the draft quotes draws a state — running in
    * Geist's "warning" amber, waiting its turn in accents-2 grey ringed by the
