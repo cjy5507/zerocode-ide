@@ -194,6 +194,9 @@ fn computer_use_info_plist() -> String {
 const UI_FILES: &[&str] = &[
     "favicon.ico",
     "favicon.png",
+    "fonts/Geist-Variable.woff2",
+    "fonts/GeistMono-Variable.woff2",
+    "fonts/OFL.txt",
     "index.html",
     "shell-boot.js",
     "shell-browser.js",

@@ -1812,7 +1812,7 @@ function editorThemeExtension() {
       fontSize: "var(--editor-font-size, var(--text-xs))",
     },
     ".cm-scroller": {
-      fontFamily: "var(--editor-font-family, var(--font-mono))",
+      fontFamily: "var(--editor-font-family, var(--font-mono-system))",
       lineHeight: "1.5",
     },
     ".cm-content": { padding: "var(--space-3) 0", caretColor: "var(--editor-cursor)" },

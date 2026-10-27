@@ -11817,7 +11817,7 @@ function writeTermTitleLeaves(term) {
   const fit = fittedAgentRowWords(rowNode, rows[at]);
   if (fit === null || fit.foldedSummary) return false;
 
-  writeTextContent(label, tabStripWords(tab));
+  writeTextContent(label, tabLabel(tab));
   writeTextContent(fit.name, fit.primary);
   if (fit.said !== null) writeTextContent(fit.said, fit.secondary);
   return true;

@@ -8651,9 +8651,27 @@ function terminalThemePalette() {
     ? termPrefsSpec.theme_defaults.light
     : termPrefsSpec.theme_defaults.dark;
   const selected = light ? termPrefs.theme_light : termPrefs.theme_dark;
+  // The default, and the base a custom theme lays its own colours over.
+  const base = catalog[fallback] ? onWindowGround(catalog[fallback], light) : null;
   const custom = customTerminalTheme(selected);
-  if (custom) return { ...(catalog[fallback] ?? {}), ...(custom.terminal ?? {}) };
-  return catalog[selected] ?? catalog[fallback] ?? null;
+  if (custom) return { ...(base ?? {}), ...(custom.terminal ?? {}) };
+  return selected !== fallback && catalog[selected] ? catalog[selected] : base;
+}
+
+/* 시안 10 「바탕 한 장」 (t-78107): the treatment's default theme draws its
+ * screen on the conversation's ground, the window's floor, not on its own
+ * grey. Only where the theme's treatment is the window's — a dark theme kept
+ * under a light window keeps its ground. A theme the person picked and a
+ * background they set come over this; the cursor's glyph ink moves along. */
+function onWindowGround(palette, light) {
+  if (light !== (document.documentElement.dataset.theme === "light")) return palette;
+  const ground = normalizedHexColor(
+    getComputedStyle(document.documentElement).getPropertyValue("--chat-ground"),
+    null,
+  );
+  if (ground === null) return palette;
+  const cursorAccent = palette.cursorAccent === palette.background ? ground : palette.cursorAccent;
+  return { ...palette, background: ground, cursorAccent };
 }
 
 function terminalAnsiColorKeys() {

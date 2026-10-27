@@ -273,7 +273,15 @@ function saveWorktreeLabel() {
  * another column is how a person loses their place. */
 let menuOpener = null;
 
+/* An opener that says it has a menu (`aria-haspopup`) says whether its menu
+ * is the one up — on every road that closes or replaces it (t-78107). Only
+ * those: a folder row's `aria-expanded` is its own fold, not its menu. */
+function markMenuOpener(open) {
+  if (menuOpener?.hasAttribute("aria-haspopup")) menuOpener.setAttribute("aria-expanded", String(open));
+}
+
 function closeSidebarMenu() {
+  markMenuOpener(false);
   closing(sidebarMenu, () => sidebarMenu.replaceChildren());
 }
 
@@ -373,7 +381,9 @@ function openSidebarMenu(x, y, items, opener = null) {
   // rows and delete them, or leave the previous menu's rows above them for
   // whatever reads the menu next.
   sidebarMenu.replaceChildren();
+  markMenuOpener(false);
   menuOpener = opener;
+  markMenuOpener(true);
   for (const item of items) {
     if (item.separator) {
       const rule = document.createElement("div");
@@ -438,9 +448,11 @@ function openSidebarMenu(x, y, items, opener = null) {
     // Orca's own filter rows keep their dropdown up the same way. A row that
     // DOES something stays a menuitem and closes, as before.
     const stays = item.check === true || item.toggle === true;
-    button.setAttribute("role", stays ? "menuitemcheckbox" : "menuitem");
-    if (stays) {
-      button.classList.add(item.check ? "is-check" : "is-toggle");
+    // A row that is one of a set — which tab is on stage — is a radio: it
+    // wears the check row's tick and, like any choice, closes the menu.
+    button.setAttribute("role", stays ? "menuitemcheckbox" : item.choice ? "menuitemradio" : "menuitem");
+    if (stays || item.choice) {
+      button.classList.add(item.toggle ? "is-toggle" : "is-check");
       button.setAttribute("aria-checked", item.checked ? "true" : "false");
     }
     // 자기 위의 스위치를 한정하는 줄은 그 밑에 들여 서고, 그 스위치보다
@@ -458,7 +470,7 @@ function openSidebarMenu(x, y, items, opener = null) {
     // 켜진 줄만 체크를 보인다 — 자리는 모든 줄이 갖는다. The GitHub filter
     // menu's rule (markGithubFilterRow), held here too so a tick arriving
     // never re-rags the labels beside it.
-    if (item.check) {
+    if (item.check || item.choice) {
       const tick = document.createElement("span");
       tick.className = "sidebar-menu-tick";
       tick.innerHTML = icon("check");
@@ -1839,7 +1851,7 @@ function paintWorktreeActive() {
  * still re-read (it can genuinely change under us, and that read is one round
  * trip), but the rebuild is now skipped when what it would build is what is
  * already standing. */
-function worktreeListShape(held) {
+function worktreeListShape(held, resting) {
   // The 표시 menu's view choices are shape: any of them changing changes what
   // a rebuild would BUILD, even when every row below would read the same.
   const parts = [
@@ -1847,6 +1859,7 @@ function worktreeListShape(held) {
       // PR 레인의 소속은 리뷰 지도에서 파생된다 — 지도가 움직이면 세대가
       // 오르고, 세대가 곧 shape다(상태 모드의 activityGeneration과 같은 결).
       `|${reviewGeneration}|${[...closedStateGroups].sort().join(",")}`,
+    `R${[...resting].join(",")}|${restingProjectsOpen}`,
   ];
   for (const project of listedProjects()) {
     // `external` is what `externalWorktreeCard` is built from — a prompt about
@@ -1902,6 +1915,10 @@ const closedProjects = new Set();
 // keep their usual behavior, and a manual fold/unfold always takes ownership.
 const startupFoldProjects = new Set();
 let startupProjectFoldsReady = false;
+// The projects the person folded by hand in this window. They keep their
+// header where the hand left it (the fold's scroll anchor stands on it), and
+// join the resting line only from the next start (t-78107, 시안 7).
+const handFoldedProjects = new Set();
 
 function seedStartupProjectFolds(catalog) {
   for (const project of catalog) {
@@ -3094,6 +3111,8 @@ el("project-open").addEventListener("click", () => setAddProject(true));
 
 function setEveryProjectClosed(closed) {
   startupFoldProjects.clear();
+  // Everything put away at once rests at once.
+  handFoldedProjects.clear();
   for (const project of projects) {
     if (closed) closedProjects.add(project.path);
     else closedProjects.delete(project.path);
@@ -3424,18 +3443,26 @@ function setSidebarView(patch) {
   });
 }
 
-/* The column's heading is the grouping's name. Orca writes it as bare
- * strings — `groupBy === 'repo' ? 'Projects' : 'Workspaces'` — untranslated
- * in every locale, and stamps the choice on `data-sidebar-section-title`
- * (SidebarHeader.tsx:21,28); both follow the menu's groupBy through the one
- * writer above. The markup's default says Projects because `repo` is the
- * default grouping (ui.ts:2061 in the original, `sidebarGroupBy`'s own
- * initializer here) — hydration to anything else repaints. */
+/* The column's heading is the grouping's name, stamped on
+ * `data-sidebar-section-title` the way Orca's is (SidebarHeader.tsx:21,28);
+ * both follow the menu's groupBy through the one writer above. Orca writes
+ * the words as bare English; here they are the person's language (t-78107,
+ * 시안 7: 「Projects」 was the one English word over a Korean column), and the
+ * team view's switch stands beside them — 「프로젝트 | 팀 보기」. The markup's
+ * default is the `repo` grouping's — hydration to anything else repaints. */
+const SIDEBAR_SECTION_WORDS = Object.freeze({
+  projects: { key: "sidebar.sectionProjects", word: "프로젝트" },
+  workspaces: { key: "sidebar.sectionWorkspaces", word: "워크스페이스" },
+});
+
 function paintSidebarTitle() {
-  const projects = sidebarGroupBy === "repo";
+  const section = sidebarGroupBy === "repo" ? "projects" : "workspaces";
+  const { key, word } = SIDEBAR_SECTION_WORDS[section];
   const title = el("sidebar-title");
-  title.textContent = projects ? "Projects" : "Workspaces";
-  title.dataset.sidebarSectionTitle = projects ? "projects" : "workspaces";
+  title.dataset.i18n = key;
+  title.dataset.i18nSource = word;
+  title.textContent = t(key, word);
+  title.dataset.sidebarSectionTitle = section;
 }
 
 function setSidebarGroupBy(mode) {
@@ -3583,9 +3610,10 @@ function makeStateGroupHeader(group) {
  * node is replaced, so the anchor is the section's name, not the element. */
 function foldWithScrollAnchor(headerRow, flip) {
   const scroller = headerRow.closest(".sidebar-scroll");
-  const anchor = headerRow.dataset.stateGroup
-    ? `.proj-row[data-state-group="${CSS.escape(headerRow.dataset.stateGroup)}"]`
-    : `.proj-row[data-project-path="${CSS.escape(headerRow.dataset.projectPath ?? "")}"]`;
+  const anchor = headerRow.classList.contains("proj-resting") ? ".proj-resting"
+    : headerRow.dataset.stateGroup
+      ? `.proj-row[data-state-group="${CSS.escape(headerRow.dataset.stateGroup)}"]`
+      : `.proj-row[data-project-path="${CSS.escape(headerRow.dataset.projectPath ?? "")}"]`;
   const was = scroller ? headerRow.getBoundingClientRect().top : null;
   flip();
   void refreshWorktrees().then(() => {
@@ -3717,8 +3745,13 @@ function makeProjectHeader(project) {
     // different header under the hand.
     foldWithScrollAnchor(row, () => {
       startupFoldProjects.delete(project.path);
-      if (closedProjects.has(project.path)) closedProjects.delete(project.path);
-      else closedProjects.add(project.path);
+      if (closedProjects.has(project.path)) {
+        closedProjects.delete(project.path);
+        handFoldedProjects.delete(project.path);
+      } else {
+        closedProjects.add(project.path);
+        handFoldedProjects.add(project.path);
+      }
     });
   });
   // The header drags to reorder — the original's repo-header drag
@@ -5753,6 +5786,48 @@ function listedProjects() {
   );
 }
 
+/* 2차 A (t-78107, 시안 7): the projects that rest — folded but not by the
+ * person's hand in this window, not the one this window stands in, and
+ * holding no agent — stand as ONE line, 「쉬는 프로젝트
+ * 10 · newbcr · Obsidian …」, not ten headers. Only once the startup restore
+ * has spoken (`startupProjectFoldsReady`): before that every project is folded
+ * on purpose and none has said yet whether it holds work. */
+let restingProjectsOpen = false;
+
+function restingProjectPaths(listed) {
+  if (sidebarGroupBy !== "repo" || !startupProjectFoldsReady) return new Set();
+  return new Set(listed
+    .filter((project) => closedProjects.has(project.path) && !handFoldedProjects.has(project.path)
+      && project.path !== activeProjectPath
+      && !project.worktrees.some((worktree) => worktree.active || worktreeAgentRows(worktree.path).length > 0))
+    .map((project) => project.path));
+}
+
+function restingProjectsRow(resting) {
+  const fold = document.createElement("button");
+  fold.type = "button";
+  fold.className = "proj-resting";
+  fold.setAttribute("aria-expanded", String(restingProjectsOpen));
+  const twist = document.createElement("span");
+  twist.className = "twist";
+  twist.innerHTML = icon("chevron", restingProjectsOpen);
+  const word = document.createElement("span");
+  word.className = "proj-resting-word";
+  word.textContent = t("sidebar.restingProjects", "쉬는 프로젝트 {{count}}", { count: resting.length });
+  const names = document.createElement("span");
+  names.className = "proj-resting-names";
+  names.textContent = resting.map((project) => project.name).join(" · ");
+  fold.append(twist, word, names);
+  // Spoken apart: the gap between the count and the names is drawn, not
+  // written, and the line read whole ran them together (「…5newbcr」).
+  fold.setAttribute("aria-label", `${word.textContent} · ${names.textContent}`);
+  fold.dataset.tip = t("sidebar.restingProjectsTip", "에이전트가 없는 접힌 프로젝트입니다 — 누르면 펼칩니다");
+  fold.addEventListener("click", () => foldWithScrollAnchor(fold, () => {
+    restingProjectsOpen = !restingProjectsOpen;
+  }));
+  return fold;
+}
+
 async function refreshWorktrees() {
   const generation = ++worktreeRefreshGeneration;
   let nextProjects;
@@ -5939,7 +6014,9 @@ async function refreshWorktrees() {
   // selected, or what the agents inside them are doing, and every one of those
   // is a class on a row that already exists. A workspace click used to rebuild
   // every project header, every row and every listener under them to say that.
-  const shape = worktreeListShape(held);
+  // Which projects rest, once a refresh: the shape and the rows below read it.
+  const resting = restingProjectPaths(listed);
+  const shape = worktreeListShape(held, resting);
   if (shape === worktreeListDrawn && worktreeList.firstElementChild) {
     // Shape equality keeps the existing DOM. A cache entry can still be
     // missing (for example after a resumed conversation) or stale, so the
@@ -5983,7 +6060,13 @@ async function refreshWorktrees() {
     groupNode.append(makeStateGroupHeader(group), children);
     worktreeList.appendChild(groupNode);
   }
-  for (const project of sidebarGroupBy === "repo" ? listed : []) {
+  // The resting line stands after the projects at work, and the projects it
+  // stands for follow it while it is open.
+  const restingList = listed.filter((project) => resting.has(project.path));
+  const working = listed.filter((project) => !resting.has(project.path));
+  const drawnProjects = [...working, ...(restingProjectsOpen ? restingList : [])];
+  for (const [at, project] of (sidebarGroupBy === "repo" ? drawnProjects : []).entries()) {
+    if (at === working.length) worktreeList.appendChild(restingProjectsRow(restingList));
     const projectNode = document.createElement("div");
     projectNode.className = "proj";
     projectNode.dataset.projectPath = project.path;
@@ -6015,6 +6098,7 @@ async function refreshWorktrees() {
     projectNode.append(makeProjectHeader(project), children);
     worktreeList.appendChild(projectNode);
   }
+  if (restingList.length > 0 && !restingProjectsOpen) worktreeList.appendChild(restingProjectsRow(restingList));
 
   // 절이 모두 판에 앉은 다음에야 창을 잰다 — 범위는 실제 자리에서 나온다.
   renderSidebarWindows();
@@ -6123,7 +6207,7 @@ sidebarTeamSwitch.type = "button";
 sidebarTeamSwitch.className = "team-switch";
 sidebarTeamSwitch.hidden = true;
 sidebarTeamSwitch.addEventListener("click", () => setSidebarView({ layout: "team" }));
-sidebarScroller.insertBefore(sidebarTeamSwitch, worktreeList);
+el("sidebar-title").after(sidebarTeamSwitch);
 sidebarScroller.insertBefore(sidebarTeam, worktreeList);
 
 /* What the team view read on the ledger's beat: the workers still summoned (`ledger_agents`, the answer the

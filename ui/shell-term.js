@@ -5549,6 +5549,8 @@ function collapseStageGroup(group) {
       held.emulatorView._emulatorResizeObserver = null;
       held.emulatorView._emulatorTab = null;
     }
+    // The strip watcher holds its strip the same way (t-78107).
+    tabStripWatch.unobserve(held.strip);
     held.el.remove();
     groups.delete(group);
   }
@@ -9455,35 +9457,10 @@ const TAB_GLYPH = {
   emulator: "phone",
 };
 
-/* What the strip writes on a tab (t-45938): its name, after the role its pane
- * plays — 「코디 · …」, 「워커 · …」, 「사람 · …」 — the word its sidebar row
- * wears, so the strip tells the coordinator's tab from a worker's without the
- * board. A tab holding the coordinator's pane is the coordinator's, whatever
- * else is split into it; any other tab speaks for its one pane. Only the strip
- * leads with the role: everything else that names a tab (a crumb, a sentence)
- * names the work.
- *
- * And it counts (t-67936): a tab holding two runs' coordinators reads
- * 「코디 2 · …」. The tab the 2026-10-21 13:24:35 close took held two
- * coordinators and read as one; its tip names them (`termTabTip`). */
-function tabStripWords(tab) {
-  const label = tabLabel(tab);
-  const role = tabRole(tab);
-  if (!role) return label;
-  const panes = paneLeaves(tab.layout).filter((term) => paneRole(term)?.kind === role.kind).length;
-  const word = panes > 1
-    ? t("agent.role.count", "{{role}} {{n}}", { role: paneRoleWord(role), n: panes })
-    : paneRoleWord(role);
-  return t("agent.role.tab", "{{role}} · {{label}}", { role: word, label });
-}
-
-function tabRole(tab) {
-  if (tab.kind !== "term" || tab.asleep) return null;
-  const leaves = paneLeaves(tab.layout);
-  const roles = leaves.map(paneRole).filter(Boolean);
-  return roles.find((role) => role.kind === "coordinator") ?? (leaves.length === 1 ? roles[0] ?? null : null);
-}
-
+/* A tab's role — the coordinator's, a worker's — is said on its tip and its
+ * sidebar row, not before its name (t-78107, 시안 「또렷한 Geist」 2: the strip
+ * says the work and its state; 「코디 · …」 had taken a third of every
+ * tab). `termTabTip` names the seats a tab holds (t-45938, t-67936). */
 function tabLabel(tab) {
   // 표와 노트북은 그 파일 자체이지 파생된 판이 아니다 — 이름만 단다(1-g39·1-g40).
   if (

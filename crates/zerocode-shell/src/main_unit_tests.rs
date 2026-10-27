@@ -8847,7 +8847,7 @@ fn a_refusal_never_carries_the_credential_it_was_pushed_with() {
 /// private use area; our stack named none, so every powerline separator
 /// and every agent TUI's icon came out tofu — the first thing anyone sees.
 /// The file cannot come across (a woff2 is an asset, and assets do not
-/// ship), so what is pinned is the NAMES: anyone with a patched face
+/// ship — Geist is the one the person let in), so what is pinned is the NAMES: anyone with a patched face
 /// installed gets their prompt today.
 ///
 /// **The caret.** Block, blinking on a one-second step, hollow on the pane
@@ -8874,7 +8874,7 @@ fn the_terminal_wears_the_options_orca_ships() {
     // A patched face by name, before the generic and after the Latin
     // stack — a fallback for the codepoints above it do not carry, never
     // the face that draws ordinary text.
-    let mono = block_after(tokens, "--font-mono:");
+    let mono = block_after(tokens, "--font-mono-system:");
     for face in [
         "\"Symbols Nerd Font Mono\"",
         "\"MesloLGS NF\"",
