@@ -14830,8 +14830,10 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   height: var(--chat-code-copy-icon);
 }
 
-/* 인라인 코드는 둥근 칩 — 블록(`pre`) 안의 코드는 제 우물의 옷을 입는다. */
-.is-chat-page .helper-said :not(pre) > code {
+/* 인라인 코드는 둥근 칩 — 블록(`pre`) 안의 코드는 제 우물의 옷을 입는다. 차례
+ * 목록의 명령도 같은 칩이다. */
+.is-chat-page .helper-said :not(pre) > code,
+.your-turn-mono {
   padding: 0 0.35em;
   border-radius: var(--radius-sm);
   background: var(--chat-chip-bg);
@@ -53092,7 +53094,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
     box-shadow var(--motion-fast) var(--ease-standard);
 }
 
-.your-turn:hover {
+.your-turn:not(.is-live):hover {
   color: var(--ink-chalk);
 }
 
@@ -53119,14 +53121,30 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   font-variant-numeric: tabular-nums;
 }
 
+/* Lit, the draft's filled pill: white words, a white dot and a chevron down —
+ * up while the list hangs open. */
 .your-turn.is-live {
-  color: var(--call);
-  background: color-mix(in srgb, var(--call-ground) 40%, transparent);
-  box-shadow: 0 0 0 var(--rule-width) color-mix(in srgb, var(--call) 45%, transparent);
+  color: var(--call-on-solid);
+  background: var(--call-solid);
+  box-shadow: none;
 }
 
 .your-turn.is-live .your-turn-dot {
-  background: var(--call);
+  background: currentColor;
+  box-shadow: none;
+}
+
+.your-turn-chevron {
+  display: none;
+}
+
+.your-turn.is-live .your-turn-chevron {
+  display: block;
+  transform: rotate(90deg);
+}
+
+.your-turn.is-live[aria-expanded="true"] .your-turn-chevron {
+  transform: rotate(-90deg);
 }
 
 /* A narrow window keeps the dot and the number; the word stays the name a
@@ -53145,7 +53163,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 /* The list dropped from the chip, hung from its edge and kept inside the window. */
 .your-turn-list {
   position: fixed;
-  z-index: 90;
+  z-index: var(--your-turn-list-layer);
   top: calc(var(--your-turn-top, 0px) + var(--space-1));
   left: clamp(
     var(--space-4),
@@ -53198,7 +53216,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 }
 
 .your-turn-item:focus-visible,
-.your-turn-row:focus-visible {
+.your-turn-row-name:focus-visible {
   outline: var(--focus-ring);
   outline-offset: calc(-1 * var(--focus-ring-offset));
 }
@@ -53257,6 +53275,15 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   white-space: nowrap;
 }
 
+/* A row's name is its door to the conversation: a button that reads as the name. */
+.your-turn-row-name {
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: start;
+  cursor: pointer;
+}
+
 .your-turn-agent {
   flex: none;
 }
@@ -53274,15 +53301,6 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   margin: 0;
   color: var(--ink-chalk);
   font: var(--type-label-14);
-}
-
-/* A command or a path, as the fixed-width chip it is in the conversation too. */
-.your-turn-mono {
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-xs);
-  background: var(--surface-raised);
-  box-shadow: var(--shadow-border);
-  font: var(--type-label-12-mono);
 }
 
 .your-turn-acts,
@@ -53359,6 +53377,12 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--call-ground) 30%, transparent);
   box-shadow: 0 0 0 var(--rule-width) color-mix(in srgb, var(--call) 35%, transparent);
+}
+
+.your-turn-group-top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
 }
 
 .your-turn-group-head {

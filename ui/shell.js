@@ -1951,9 +1951,10 @@ function putTurnAway(card) {
   paintYourTurn();
 }
 
-/* Everything a turn's drawing depends on, so an unchanged repaint builds nothing. */
-function yourTurnsDrawing(turns) {
-  return JSON.stringify([locale, turns.map((card) => {
+/* Everything a turn's drawing depends on, so an unchanged repaint builds nothing —
+ * the minute among them, so 「N분 전」 moves on the agent clock's beat and no oftener. */
+function yourTurnsDrawing(turns, now = Date.now()) {
+  return JSON.stringify([locale, Math.floor(now / 60_000), turns.map((card) => {
     const key = yourTurnKey(card);
     const draft = yourTurnDrafts.get(key);
     return [key, card.heading, card.changed_at, draft?.sending, draft?.refusal, draft?.index, draft?.selections];
@@ -1967,7 +1968,7 @@ function paintYourTurn() {
   const turns = yourTurns(now);
   writeClass(el("your-turn"), "is-live", turns.length > 0);
   writeTextContent(el("your-turn-count"), String(turns.length));
-  const drawing = yourTurnsDrawing(turns);
+  const drawing = yourTurnsDrawing(turns, now);
   paintYourTurnGroup(turns, drawing);
   if (!el("your-turn-list").hidden) paintYourTurnList(turns, drawing);
 }
@@ -1985,17 +1986,19 @@ function yourTurnButton(className, words, run) {
 }
 
 /* Kind, name, agent and age — the one line every turn opens with. The kind is
- * a word and a shape (`data-kind`), never the colour alone. */
-function yourTurnHeadNode(card, kind, now) {
+ * a word and a shape (`data-kind`), never the colour alone. A sidebar row's name
+ * is the button that opens the turn's conversation. */
+function yourTurnHeadNode(card, kind, now, open = null) {
   const head = document.createElement("span");
   head.className = "your-turn-head";
   const mark = document.createElement("span");
   mark.className = "your-turn-kind";
   mark.dataset.kind = kind;
   mark.textContent = yourTurnKindWord(kind);
-  const name = document.createElement("strong");
-  name.className = "your-turn-name";
-  name.textContent = card.heading || card.agent;
+  const words = card.heading || card.agent;
+  const name = open
+    ? yourTurnButton("your-turn-name your-turn-row-name", words, open)
+    : Object.assign(document.createElement("strong"), { className: "your-turn-name", textContent: words });
   const agent = document.createElement("span");
   agent.className = "your-turn-agent";
   agent.textContent = card.agent;
@@ -2025,11 +2028,22 @@ function yourTurnDenyNode(card, draft) {
   return deny;
 }
 
+function openTurnConversation(card) {
+  closeYourTurnList({ restoreFocus: false });
+  void openBoardConversation(card);
+}
+
 function yourTurnOpenNode(card) {
-  return yourTurnButton("btn your-turn-open", t("yourTurn.open", "대화 열기"), () => {
-    closeYourTurnList({ restoreFocus: false });
-    void openBoardConversation(card);
-  });
+  return yourTurnButton("btn your-turn-open", t("yourTurn.open", "대화 열기"), () => openTurnConversation(card));
+}
+
+/* 「가장 오래 N분」 — how long the oldest of the turns has waited. */
+function yourTurnOldestNode(turns, now) {
+  const oldest = Math.min(...turns.map((card) => card.changed_at || card.at || now));
+  const age = document.createElement("span");
+  age.className = "your-turn-age";
+  age.textContent = turns.length > 0 ? t("yourTurn.oldest", "가장 오래 {{age}}", { age: agoWord(oldest, now) }) : "";
+  return age;
 }
 
 function yourTurnRefusalNode(draft) {
@@ -2052,35 +2066,43 @@ function paintYourTurnGroup(turns, drawing) {
     return;
   }
   const now = Date.now();
-  const head = yourTurnButton("your-turn-group-head", t("yourTurn.group", "당신 차례 {{count}}", { count: turns.length }),
-    () => openYourTurnList());
+  const head = document.createElement("div");
+  head.className = "your-turn-group-top";
+  head.append(yourTurnButton("your-turn-group-head", t("yourTurn.group", "당신 차례 {{count}}", { count: turns.length }),
+    () => openYourTurnList()), yourTurnOldestNode(turns, now));
   host.replaceChildren(head, ...turns.map((card) => yourTurnRowNode(card, now)));
 }
 
 /* What a sidebar row and a list item share: the node, its kind and the line
  * it opens with. */
-function yourTurnShellNode(tag, className, card, now) {
+function yourTurnShellNode(tag, className, card, now, open = null) {
   const kind = yourTurnKind(card);
   const node = document.createElement(tag);
   node.className = className;
   node.dataset.kind = kind;
   // Its answers are the person's: an agent pressing in the window never makes them (t-73906).
   node.dataset.personOnly = "";
-  node.append(yourTurnHeadNode(card, kind, now));
+  node.append(yourTurnHeadNode(card, kind, now, open));
   return { node, kind, draft: yourTurnDraft(card) };
 }
 
+/* A sidebar row opens its conversation — a press anywhere on it, or its name for
+ * the keyboard. It is no button itself: a permission's allow and deny stand
+ * inside it, and a control holds no other control. */
 function yourTurnRowNode(card, now) {
-  const { node: row, kind, draft } = yourTurnShellNode("div", "your-turn-row", card, now);
-  actsAsButton(row, () => openYourTurnList(yourTurnKey(card)));
+  const open = () => openTurnConversation(card);
+  const { node: row, kind, draft } = yourTurnShellNode("div", "your-turn-row", card, now, open);
+  row.addEventListener("click", open);
   const line = document.createElement("span");
   line.className = "your-turn-row-line";
   line.textContent = cardAskLine(card) || card.said || "";
-  const acts = document.createElement("span");
-  acts.className = "your-turn-row-acts";
-  if (kind === "permission") acts.append(yourTurnAllowNode(card, draft, false), yourTurnDenyNode(card, draft));
-  acts.append(yourTurnOpenNode(card));
-  row.append(line, acts);
+  row.append(line);
+  if (kind === "permission") {
+    const acts = document.createElement("span");
+    acts.className = "your-turn-row-acts";
+    acts.append(yourTurnAllowNode(card, draft, false), yourTurnDenyNode(card, draft));
+    row.append(acts);
+  }
   if (draft.refusal) row.append(yourTurnRefusalNode(draft));
   return row;
 }
@@ -2155,10 +2177,7 @@ function paintYourTurnList(turns, drawing = yourTurnsDrawing(turns)) {
   head.className = "your-turn-list-head";
   const title = document.createElement("strong");
   title.textContent = t("yourTurn.group", "당신 차례 {{count}}", { count: turns.length });
-  const oldest = Math.min(...turns.map((card) => card.changed_at || card.at || now));
-  const age = document.createElement("span");
-  age.className = "your-turn-age";
-  age.textContent = turns.length > 0 ? t("yourTurn.oldest", "가장 오래 {{age}}", { age: agoWord(oldest, now) }) : "";
+  const age = yourTurnOldestNode(turns, now);
   const inbox = yourTurnButton("your-turn-inbox", t("yourTurn.inbox", "받은 편지함에서 모두 보기"), () => {
     closeYourTurnList({ restoreFocus: false });
     openInboxView({ tab: "blocked" });
@@ -2171,7 +2190,7 @@ function paintYourTurnList(turns, drawing = yourTurnsDrawing(turns)) {
     })];
   const keys = document.createElement("p");
   keys.className = "your-turn-keys";
-  keys.textContent = t("yourTurn.keys", "1–9 고르기 · N 나중에 10분 · ↑↓ 다음 차례 · Esc 닫기");
+  keys.textContent = yourTurnKeysWords(turns);
   list.replaceChildren(head, ...body, keys);
   restoreYourTurnFocus(list, kept);
 }
@@ -2210,6 +2229,14 @@ function yourTurnPermissionNode(card) {
     box.append(" ", mono);
   }
   return box;
+}
+
+/* The keys the list answers to. A number picks as far as the choices the
+ * questions here hold (at most nine), and is not said when none has choices. */
+function yourTurnKeysWords(turns) {
+  const most = Math.min(9, Math.max(0, ...turns.map((card) => card.ask_prompt?.questions?.[0]?.options?.length ?? 0)));
+  const rest = t("yourTurn.keys", "N 나중에 10분 · ↑↓ 다음 차례 · Esc 닫기");
+  return most > 0 ? `${t("yourTurn.keysPick", "1–{{most}} 고르기", { most })} · ${rest}` : rest;
 }
 
 /* A question asked in prose: its sentence, a field and a send. */
@@ -12384,9 +12411,10 @@ const agentClock = idlePoller({
       void refreshPaneAgentSnapshot();
     }
     paintLaneSubagentClocks();
-    // A turn put away comes back on this beat once its ten minutes are up:
-    // whatever it waits on is an agent, so the beat is already running.
-    if (yourTurnLater.size > 0) paintYourTurn();
+    // The turns' ages move on this beat, and a turn put away comes back on it
+    // once its ten minutes are up: whatever waits is an agent, so the beat is
+    // already running. A beat inside the same minute builds nothing.
+    if (attentionCards.length > 0) paintYourTurn();
   },
 });
 
