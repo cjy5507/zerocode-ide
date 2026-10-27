@@ -1149,9 +1149,9 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   /* A grid item in the stack: without this the names' unwrapped width
    * would widen the whole list. */
   min-width: 0;
-  min-height: 28px;
+  min-height: var(--control-height-sm);
   margin-top: var(--space-2);
-  padding: 0 8px 0 var(--nav-inset);
+  padding: 0 var(--space-2) 0 var(--nav-inset);
   border: 0;
   border-radius: var(--radius-edge);
   box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
@@ -6911,7 +6911,7 @@ body.is-dragging-pane {
   display: none;
   flex: none;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   height: var(--tabstrip-height);
   padding: 0 var(--space-2);
   border: 0;
