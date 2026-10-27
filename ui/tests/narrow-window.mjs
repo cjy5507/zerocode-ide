@@ -119,10 +119,56 @@ export function measure() {
   };
 }
 
-/* The bar's account line as words, at the width the page is now. */
-const barWords = () => ({
-  figure: (getComputedStyle(el("sb-claude-pct")).display === "none" ? el("sb-claude-pct").nextElementSibling : el("sb-claude-pct")).innerText.trim(),
-  next: getComputedStyle(el("sb-claude-next")).display !== "none",
+/* The bar's account line as words, at the width the page is now — and whether
+ * the figure it shows is whole on screen, not cut by an ellipsis (innerText
+ * reads the whole string either way). */
+const barWords = () => {
+  const shown = getComputedStyle(el("sb-claude-pct")).display === "none" ? el("sb-claude-pct").nextElementSibling : el("sb-claude-pct");
+  return {
+    figure: shown.innerText.trim(),
+    whole: shown.clientWidth > 0 && shown.scrollWidth <= shown.clientWidth + 1,
+    next: getComputedStyle(el("sb-claude-next")).display !== "none",
+  };
+};
+
+/* The bar's own gap and the token it should be at the width the page is now. */
+const barGap = () => {
+  const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const width = document.querySelector(".statusbar").getBoundingClientRect().width;
+  return {
+    gap: getComputedStyle(document.querySelector(".statusbar")).columnGap,
+    want: token(width <= 900 ? "--space-2" : width <= 1100 ? "--space-3" : "--space-4"),
+  };
+};
+
+/* A crowded bar (t-77705): the Codex PTY mark through its own paint, a PR
+ * mark in the catalog's words, the refresh button, and — with `codex` — a
+ * second gauge through the real usage paint. */
+async function crowd(page, codex) {
+  await page.evaluate(async (codex) => {
+    codexPtyFallbacks.set(7, "the native route was refused");
+    paintCodexPtyFallbacks();
+    const mark = el("sb-scm-notices");
+    mark.hidden = false;
+    el("sb-scm-notices-label").textContent = t("checks.observe.mark", "PR 조건 {{count}}", { count: 2 });
+    el("sb-usage-refresh").hidden = false;
+    if (codex) {
+      const hour = 3_600_000;
+      window.__CODEX_USAGE__ = {
+        provider: "codex", account: null, status: "ok", error: null, updated_at: Date.now(),
+        session: { used_percent: 35, window_minutes: 300, resets_at: Date.now() + 4.2 * hour },
+        weekly: { used_percent: 61, window_minutes: 10080, resets_at: Date.now() + 51 * hour },
+      };
+      await refreshCodexUsage(false);
+    }
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  }, codex);
+}
+
+/* Each mark on the bar: on screen inside the window, and still named. */
+const marks = () => ["sb-codex-route", "sb-scm-notices"].map((id) => {
+  const r = el(id).getBoundingClientRect();
+  return { id, on: r.width > 0 && r.right <= innerWidth, name: el(id).getAttribute("aria-label") ?? "" };
 });
 
 export async function testNarrowWindow(browser, origin, ok) {
@@ -136,7 +182,11 @@ export async function testNarrowWindow(browser, origin, ok) {
         await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
         const m = await page.evaluate(measure);
         const words = await page.evaluate(barWords);
+        const gap = await page.evaluate(barGap);
         rows.push({ locale, width, ...m, words });
+        // The bar's own gaps close with the window (t-77705): they sat in a
+        // container query on the bar itself, which an element cannot make.
+        ok(`the bar's gaps are the width's (${locale}, ${width} pt)`, gap.gap === gap.want, JSON.stringify(gap));
         const tag = `${locale}, ${width} pt`;
         if (width <= 1000) {
           ok(`nothing lies past the window's right edge (${tag})`, m.clipped === 0, JSON.stringify(m));
@@ -151,6 +201,8 @@ export async function testNarrowWindow(browser, origin, ok) {
         if (width <= 1100) {
           ok(`a narrow bar says the account line as its numbers (${tag})`,
             /^\d+% · \d+% · \d+%$/.test(words.figure) && !words.next, JSON.stringify(words));
+          // Whole: the numbers are the last of the line to give (t-77705).
+          ok(`a narrow bar's numbers are whole (${tag})`, words.whole, JSON.stringify(words));
         }
       }
 
@@ -174,6 +226,59 @@ export async function testNarrowWindow(browser, origin, ok) {
       });
       ok(`a shortened account line is spoken whole on hover (${locale})`,
         tip.tip.endsWith(tip.full) && tip.full.length > 20, JSON.stringify(tip));
+
+      // The keyboard reaches the same sentence (t-77705): the roster, focused,
+      // shows its tip at once, and the tip carries the folded figure.
+      const keyed = await page.evaluate(() => {
+        el("sb-usage-roster").focus();
+        const shown = document.querySelector(".tooltip");
+        const said = shown.hidden ? "" : shown.textContent;
+        el("sb-usage-roster").blur();
+        return { said, figure: el("sb-claude-pct").textContent };
+      });
+      ok(`a shortened account line is spoken whole to the keyboard (${locale})`,
+        keyed.figure.length > 20 && keyed.said.includes(keyed.figure), JSON.stringify(keyed));
+
+      // An item that fits again drops the words it was shortened by (t-77705):
+      // the model's tip named the old model after the window widened.
+      const stale = await page.evaluate(async () => {
+        const frames = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        const model = el("sb-model");
+        const was = model.textContent;
+        model.textContent = `claude-opus-5-5 · auto · ${"overlong ".repeat(12)}`;
+        await frames();
+        model.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+        const narrow = model.dataset.tip ?? "";
+        model.textContent = "claude-sonnet-5-5";
+        await frames();
+        model.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+        const after = model.dataset.tip ?? "";
+        model.textContent = was;
+        await frames();
+        return { narrow, after };
+      });
+      ok(`an item that fits again drops the words it was shortened by (${locale})`,
+        stale.narrow.includes("overlong") && !stale.after.includes("overlong"), JSON.stringify(stale));
+
+      // A crowded bar (t-77705): with a mark, and with a mark and a second
+      // gauge, nothing lies past the edge, the bar keeps one line, every mark
+      // stays on it and named, and the first gauge's numbers stay whole.
+      for (const codex of [false, true]) {
+        await crowd(page, codex);
+        for (const width of NARROW_WIDTHS) {
+          await page.setViewportSize({ width, height: 700 });
+          await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+          const m = await page.evaluate(measure);
+          const words = await page.evaluate(barWords);
+          const on = await page.evaluate(marks);
+          const tag = `${locale}, ${width} pt, ${codex ? "a mark and a second gauge" : "a mark"}`;
+          ok(`a crowded bar keeps inside the window on one line (${tag})`,
+            m.clipped === 0 && m.statusRows === 1, JSON.stringify(m));
+          ok(`a crowded bar keeps every mark on it (${tag})`,
+            on.every((one) => one.on) && on[0].name.length > 0, JSON.stringify(on));
+          ok(`a crowded bar keeps its numbers whole (${tag})`, words.whole, JSON.stringify(words));
+        }
+      }
       ok(`the window raises no browser errors (${locale})`, faults.length === 0, faults.join("\n"));
     } finally {
       await page.close();
