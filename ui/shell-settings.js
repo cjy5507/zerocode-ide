@@ -8651,21 +8651,18 @@ function terminalThemePalette() {
     ? termPrefsSpec.theme_defaults.light
     : termPrefsSpec.theme_defaults.dark;
   const selected = light ? termPrefs.theme_light : termPrefs.theme_dark;
+  // The default, and the base a custom theme lays its own colours over.
+  const base = catalog[fallback] ? onWindowGround(catalog[fallback], light) : null;
   const custom = customTerminalTheme(selected);
-  if (custom) return { ...(catalog[fallback] ?? {}), ...(custom.terminal ?? {}) };
-  const name = catalog[selected] ? selected : fallback;
-  const palette = catalog[name] ?? null;
-  return palette && name === fallback ? onWindowGround(palette, light) : palette;
+  if (custom) return { ...(base ?? {}), ...(custom.terminal ?? {}) };
+  return selected !== fallback && catalog[selected] ? catalog[selected] : base;
 }
 
 /* 시안 10 「바탕 한 장」 (t-78107): the treatment's default theme draws its
- * screen on the ground the conversation stands on — the window's floor —
- * not on its own grey, which was the centre of the window alone in another
- * material (the person's 10-27 photo: #1d1e24 inside #151515). Only where the
- * theme's treatment is the window's: a dark theme kept under a light window
- * keeps its ground, or its palette would stand on a white it was not tuned
- * for. A theme the person picked, and a background they set, are theirs and
- * come over this. The cursor's glyph ink is the screen's, so it moves along. */
+ * screen on the conversation's ground, the window's floor, not on its own
+ * grey. Only where the theme's treatment is the window's — a dark theme kept
+ * under a light window keeps its ground. A theme the person picked and a
+ * background they set come over this; the cursor's glyph ink moves along. */
 function onWindowGround(palette, light) {
   if (light !== (document.documentElement.dataset.theme === "light")) return palette;
   const ground = normalizedHexColor(

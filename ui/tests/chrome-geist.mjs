@@ -205,7 +205,6 @@ async function testChromeSidebarAndTabs(browser, origin, ok) {
 async function testBranchLineRoom(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
-    await page.setViewportSize({ width: 1280, height: 900 });
     await standChrome(page);
     for (const width of [1280, 1000]) {
       await page.setViewportSize({ width, height: 900 });

@@ -2618,7 +2618,9 @@ svg.wt-agent-dot {
    * the branch's 91 px of words 52 at 1280 px, 「에이전트」, and 32 at 1000
    * (review t-78487, P2-1). The chip's tail is what the ellipsis takes now,
    * and its tooltip says it whole. */
-  grid-template-columns: minmax(0, max-content) minmax(0, 1fr) repeat(4, minmax(0, max-content));
+  --wt-branch-track: minmax(0, max-content);
+  --wt-spare-track: minmax(0, 1fr);
+  grid-template-columns: var(--wt-branch-track) var(--wt-spare-track) repeat(4, minmax(0, max-content));
   align-items: center;
 }
 
@@ -2626,7 +2628,8 @@ svg.wt-agent-dot {
  * (sidebar-landing-state): on that row the chips are sized first, up to two
  * thirds of the line, and the branch keeps the third. */
 .wt-titlebox:has(.wt-landing[data-landing="conflict"]) {
-  grid-template-columns: minmax(calc(100% / 3), 1fr) 0 repeat(4, minmax(0, max-content));
+  --wt-branch-track: minmax(calc(100% / 3), 1fr);
+  --wt-spare-track: 0;
 }
 
 .wt-titlebox > .wt-topline {
