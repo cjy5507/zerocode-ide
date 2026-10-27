@@ -2863,6 +2863,9 @@ impl TerminalGrid {
         self.cols = cols;
         self.cursor_row = self.cursor_row.min(rows - 1);
         self.cursor_col = self.cursor_col.min(cols - 1);
+        // The region was set for the old height and can name rows this
+        // screen no longer has; xterm and tmux let go of it here too.
+        self.scroll_region = None;
         self.dirty = true;
         // Row *n* now means something else, so no accumulated shift can bridge
         // this. The consumer has to take the next delta as absolute.
@@ -2922,8 +2925,22 @@ impl TerminalGrid {
     fn recycled_row(&self, displaced: Option<Vec<Cell>>) -> Vec<Cell> {
         let mut row = displaced.unwrap_or_default();
         row.clear();
-        row.resize(self.cols, Cell::default());
+        row.resize(self.cols, self.blank());
         row
+    }
+
+    /// The cell an erase, a scroll or an insert opens: blank, in the pen's
+    /// background and nothing else of it. `TERM=xterm-256color` promises
+    /// `bce`, and programs lean on it — they set a background and clear to
+    /// the end of the line rather than writing the spaces.
+    fn blank(&self) -> Cell {
+        Cell {
+            style: CellStyle {
+                bg: self.pen.bg,
+                ..CellStyle::default()
+            },
+            ..Cell::default()
+        }
     }
 
     fn scroll_up(&mut self) {
@@ -3000,23 +3017,27 @@ impl TerminalGrid {
         }
     }
 
+    /// Down a row, scrolling the region only when the cursor is ON its
+    /// bottom row. Below the region the cursor just moves down, and on the
+    /// screen's last row it stays: nothing outside a region scrolls.
     fn newline(&mut self) {
         let (_, bottom) = self.region();
-        if self.cursor_row >= bottom {
+        if self.cursor_row == bottom {
             self.scroll_up();
-        } else {
+        } else if self.cursor_row + 1 < self.rows {
             self.cursor_row += 1;
         }
     }
 
     /// Move up a row, scrolling the region backwards at its top — `ESC M`.
+    /// The mirror of [`Self::newline`]: above the region it only moves.
     fn reverse_index(&mut self) {
         let (top, _) = self.region();
-        if self.cursor_row > top {
+        if self.cursor_row == top {
+            self.rotate_region_down();
+        } else if self.cursor_row > 0 {
             self.cursor_row -= 1;
-            return;
         }
-        self.rotate_region_down();
     }
 
     /// Move every row in the scrolling region up one, blanking the row that
@@ -3155,16 +3176,17 @@ impl TerminalGrid {
             return;
         }
         let count = count.min(self.cols - col);
+        let blank = self.blank();
         let line = &mut self.cells[row];
         if open {
             for _ in 0..count {
                 line.pop();
-                line.insert(col, Cell::default());
+                line.insert(col, blank);
             }
         } else {
             for _ in 0..count {
                 line.remove(col);
-                line.push(Cell::default());
+                line.push(blank);
             }
         }
         // A pair split down the middle by the slide is no longer a pair.
@@ -3197,9 +3219,10 @@ impl TerminalGrid {
         for offset in 0..count {
             self.break_cluster_at(row, col + offset, 0);
         }
+        let blank = self.blank();
         if let Some(line) = self.cells.get_mut(row) {
             for cell in line.iter_mut().skip(col).take(count) {
-                *cell = Cell::default();
+                *cell = blank;
             }
         }
     }
@@ -3799,12 +3822,13 @@ impl TerminalGrid {
     }
 
     fn erase_in_display(&mut self, mode: u16) {
+        let blank = self.blank();
         match mode {
             // Cursor to end of screen.
             0 => {
                 self.erase_in_line(0);
                 for row in (self.cursor_row + 1)..self.rows {
-                    self.cells[row].fill(Cell::default());
+                    self.cells[row].fill(blank);
                     self.wrap[row] = None;
                     self.folds[row] = None;
                     self.mark_row(row);
@@ -3813,7 +3837,7 @@ impl TerminalGrid {
             // Start of screen to cursor.
             1 => {
                 for row in 0..self.cursor_row {
-                    self.cells[row].fill(Cell::default());
+                    self.cells[row].fill(blank);
                     self.folds[row] = None;
                     self.mark_row(row);
                 }
@@ -3827,7 +3851,7 @@ impl TerminalGrid {
             // Whole screen. `2` keeps the cursor, `3` also drops scrollback.
             2 | 3 => {
                 for row in 0..self.rows {
-                    self.cells[row].fill(Cell::default());
+                    self.cells[row].fill(blank);
                 }
                 self.wrap.fill(None);
                 self.folds.fill(None);
@@ -3858,23 +3882,24 @@ impl TerminalGrid {
         if matches!(mode, 0 | 1) {
             self.break_cluster_at(row, col, 0);
         }
+        let blank = self.blank();
         let Some(line) = self.cells.get_mut(row) else {
             return;
         };
         match mode {
             0 => {
                 for cell in line.iter_mut().skip(col) {
-                    *cell = Cell::default();
+                    *cell = blank;
                 }
             }
             1 => {
                 for cell in line.iter_mut().take(col + 1) {
-                    *cell = Cell::default();
+                    *cell = blank;
                 }
             }
             2 => {
                 for cell in line.iter_mut() {
-                    *cell = Cell::default();
+                    *cell = blank;
                 }
             }
             _ => {}
@@ -4250,16 +4275,30 @@ impl Perform for TerminalGrid {
                     }
                 }
             }
+            // Up and down stop at the region's edge when they start inside
+            // it, and they end a wait to wrap: the cursor is on the last
+            // column of its new row, not past it (xterm and tmux both).
             (false, 'A') => {
                 self.end_grapheme();
+                let (top, _) = self.region();
+                let floor = if self.cursor_row >= top { top } else { 0 };
                 self.cursor_row = self
                     .cursor_row
-                    .saturating_sub(first_param(params, 1) as usize);
+                    .saturating_sub(first_param(params, 1) as usize)
+                    .max(floor);
+                self.cursor_col = self.cursor_col.min(self.cols - 1);
             }
             (false, 'B') => {
                 self.end_grapheme();
+                let (_, bottom) = self.region();
+                let ceiling = if self.cursor_row <= bottom {
+                    bottom
+                } else {
+                    self.rows - 1
+                };
                 let step = first_param(params, 1) as usize;
-                self.cursor_row = (self.cursor_row + step).min(self.rows - 1);
+                self.cursor_row = (self.cursor_row + step).min(ceiling);
+                self.cursor_col = self.cursor_col.min(self.cols - 1);
             }
             (false, 'C') => {
                 self.end_grapheme();
@@ -4341,7 +4380,12 @@ impl Perform for TerminalGrid {
                     .unwrap_or(self.rows as u16) as usize;
                 let top = top.saturating_sub(1).min(self.rows - 1);
                 let bottom = bottom.saturating_sub(1).min(self.rows - 1);
-                self.scroll_region = if top < bottom && (top, bottom) != (0, self.rows - 1) {
+                // A top that is not above the bottom is no region at all,
+                // and the sequence changes nothing — the cursor included.
+                if top >= bottom {
+                    return;
+                }
+                self.scroll_region = if (top, bottom) != (0, self.rows - 1) {
                     Some((top, bottom))
                 } else {
                     None
