@@ -5804,10 +5804,10 @@ function restingProjectPaths(listed) {
 }
 
 function restingProjectsRow(resting) {
-  const row = document.createElement("button");
-  row.type = "button";
-  row.className = "proj-resting";
-  row.setAttribute("aria-expanded", String(restingProjectsOpen));
+  const fold = document.createElement("button");
+  fold.type = "button";
+  fold.className = "proj-resting";
+  fold.setAttribute("aria-expanded", String(restingProjectsOpen));
   const twist = document.createElement("span");
   twist.className = "twist";
   twist.innerHTML = icon("chevron", restingProjectsOpen);
@@ -5817,15 +5817,15 @@ function restingProjectsRow(resting) {
   const names = document.createElement("span");
   names.className = "proj-resting-names";
   names.textContent = resting.map((project) => project.name).join(" · ");
-  row.append(twist, word, names);
+  fold.append(twist, word, names);
   // Spoken apart: the gap between the count and the names is drawn, not
   // written, and the line read whole ran them together (「…5newbcr」).
-  row.setAttribute("aria-label", `${word.textContent} · ${names.textContent}`);
-  row.dataset.tip = t("sidebar.restingProjectsTip", "에이전트가 없는 접힌 프로젝트입니다 — 누르면 펼칩니다");
-  row.addEventListener("click", () => foldWithScrollAnchor(row, () => {
+  fold.setAttribute("aria-label", `${word.textContent} · ${names.textContent}`);
+  fold.dataset.tip = t("sidebar.restingProjectsTip", "에이전트가 없는 접힌 프로젝트입니다 — 누르면 펼칩니다");
+  fold.addEventListener("click", () => foldWithScrollAnchor(fold, () => {
     restingProjectsOpen = !restingProjectsOpen;
   }));
-  return row;
+  return fold;
 }
 
 async function refreshWorktrees() {

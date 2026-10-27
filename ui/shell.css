@@ -12275,7 +12275,8 @@ body.is-dragging-pane {
  * the fill is a conic sweep, the hole a radial mask, the value the
  * `--gauge-value` the paint writes (0–100). Grey on grey until the window is
  * nearly spent; then the ring and the figure take the wait ink, never the
- * halt ink, which is for a failure. */
+ * halt ink, which is for a failure. The hole's opaque stop is `--ink-chalk`:
+ * a mask reads only alpha, so it is not one more colour literal. */
 .sb-usage-bar {
   width: var(--gauge-size);
   height: var(--gauge-size);
@@ -12287,7 +12288,7 @@ body.is-dragging-pane {
   mask: radial-gradient(
     farthest-side,
     transparent calc(100% - var(--gauge-stroke)),
-    #000 calc(100% - var(--gauge-stroke))
+    var(--ink-chalk) calc(100% - var(--gauge-stroke))
   );
 }
 
