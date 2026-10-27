@@ -513,6 +513,8 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   flex: 1 1 0;
   min-width: 0;
   min-height: 0;
+  /* Its head keeps one line however narrow the pane (`.chat-head-pane`). */
+  container: pane-chat / inline-size;
 }
 
 .is-arriving {
@@ -53453,11 +53455,6 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   min-width: 0;
 }
 
-/* In the conversation the page's own head says who; this one keeps the line and the switch. */
-.pane-head.is-chat .pane-head-who {
-  display: none;
-}
-
 .pane-head-name {
   min-width: 0;
   overflow: hidden;
@@ -53512,6 +53509,83 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .pane-head-view {
   flex: none;
   margin-left: auto;
+}
+
+/* The conversation line and the switch, one part wherever it stands. */
+.pane-head-line {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.pane-head[hidden] {
+  display: none;
+}
+
+/* In the conversation's own head (t-22100), at its right beside the tally. */
+.chat-head-pane {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.chat-head-pane:empty {
+  display: none;
+}
+
+.chat-tally:not([hidden]) + .chat-head-pane {
+  margin-left: 0;
+}
+
+.chat-head-pane > .pane-head-line {
+  gap: var(--space-2);
+}
+
+/* A narrow pane keeps the head on one line: the conversation's line gives way
+ * first, the switch says itself by its glyphs (its words stay its name), then
+ * the model's pill folds — the composer's chip still says it. */
+@container pane-chat (max-width: 560px) {
+  .chat-head-pane .pane-head-pick {
+    display: none;
+  }
+
+  .chat-head-pane .view-toggle .segment-btn > :not(.view-toggle-glyph) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+@container pane-chat (max-width: 400px) {
+  .chat-head > .worker-meta > .chat-model {
+    display: none;
+  }
+}
+
+/* The narrowest lets the state's clock and the wide gutter go. */
+@container pane-chat (max-width: 280px) {
+  .is-chat-page .worker-head.chat-head {
+    padding-inline: var(--space-2);
+  }
+
+  .chat-head .chat-run > .worker-elapsed {
+    display: none;
+  }
+
+  /* The state's chip gives way after the name; the mark and the switch stay. */
+  .chat-head .chat-run {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+  }
 }
 
 /* The answer read as prose — Geist's copy-16 through the prose tokens

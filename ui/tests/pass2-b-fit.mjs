@@ -23,7 +23,8 @@ const SURFACES = Object.freeze({
   chip: "#your-turn",
   list: "#your-turn-list",
   group: "#your-turn-group",
-  head: ".pane-head:not([hidden])",
+  // The pane's head line: the tab's head on the screen, the conversation's own in the conversation.
+  head: ".pane-head:not([hidden]), .pane-chat:not(.is-behind) .chat-head",
   pile: "#activity-pile",
 });
 

@@ -45,12 +45,15 @@ export async function testPaneHead(browser, origin, ok) {
       tell("hook:agent", { term, state: "working", agent: "claude", session: { id: "s-head-0001" }, resumable: true, model: "claude-fable-5-1" });
       await window.__PAINTED__();
       await settle();
+      // The head stands first in the tab; its line (the conversation's line and the
+      // switch) travels to the conversation's own head while that stands.
       const head = host.querySelector(":scope > .pane-head");
-      seen.headFirst = host.firstElementChild === head && !head.hidden;
-      seen.toggleInHead = head.contains(el("view-toggle")) && !el("view-toggle").hidden;
+      const line = head.__line;
+      seen.headFirst = host.firstElementChild === head;
+      seen.toggleInHead = line.contains(el("view-toggle")) && !el("view-toggle").hidden;
       seen.toggleOffTitlebar = !document.querySelector(".titlebar").contains(el("view-toggle"));
-      seen.pickSlot = Boolean(head.querySelector("#pane-head-pick, .pane-head-pick"));
-      seen.pick = head.querySelector(".pane-head-pick")?.textContent ?? "";
+      seen.pickSlot = Boolean(line.querySelector(".pane-head-pick"));
+      seen.pick = line.querySelector(".pane-head-pick")?.textContent ?? "";
       seen.model = head.querySelector(".pane-head-model")?.textContent ?? "";
       seen.state = head.querySelector(".pane-head-state")?.textContent ?? "";
       // The conversation stands by default — read, not handed to a wire.
@@ -61,7 +64,9 @@ export async function testPaneHead(browser, origin, ok) {
       seen.chatShown = Boolean(chat) && !chat.hidden;
       // One head line in the conversation (the draft's item 8): the page's own head says who, its
       // model and state, and wears the pane head's conversation line and the switch beside them.
-      const shown = (node) => Boolean(node) && node.getClientRects().length > 0 && node.getBoundingClientRect().height > 0;
+      // A conversation set behind its pane's screen is clipped to nothing (`.is-behind`).
+      const shown = (node) => Boolean(node) && !node.closest(".is-behind") && node.getClientRects().length > 0 &&
+        node.getBoundingClientRect().height > 0;
       const lines = [...host.querySelectorAll(".pane-head, .chat-head")].filter(shown);
       seen.headLinesInChat = lines.length;
       seen.oneLineHolds = lines.length === 1 && lines[0].contains(el("view-toggle")) &&

@@ -13601,20 +13601,26 @@ function activeAgentTerm() {
   return term !== null && paneAgents.has(term) ? term : null;
 }
 
+/* The switch, held by node: it travels with its pane's head line, which a
+ * conversation's head can take out of the document when that head is rebuilt
+ * or goes (`placePaneHeadLine`) — and a lookup by id finds nothing then. The
+ * next paint puts it back where it belongs. */
+const viewToggle = el("view-toggle");
+
 function paintViewToggle() {
-  const seg = el("view-toggle");
+  const seg = viewToggle;
   const term = activeAgentTerm();
   const wire = activeWireTab();
   seg.hidden = term === null && wire === null;
   // Beside the pane it speaks for, in its tab's head; a wire's page has no
   // panes and keeps it at home in the title bar.
-  const home = term === null ? el("view-toggle-home") : paintPaneHead(currentTab(), term).querySelector(".pane-head-view");
+  const home = term === null ? el("view-toggle-home") : paintPaneHead(currentTab(), term).__line.querySelector(".pane-head-view");
   if (seg.parentElement !== home) home.appendChild(seg);
   if (seg.hidden) return;
   // A wire tab that continues a pane's conversation IS its 「대화」.
   const on = wire !== null || paneChatOn(term);
   for (const [id, pressed] of [["view-toggle-term", !on], ["view-toggle-chat", on]]) {
-    const button = el(id);
+    const button = seg.querySelector(`#${id}`);
     button.classList.toggle("is-active", pressed);
     button.setAttribute("aria-pressed", String(pressed));
   }
@@ -13651,10 +13657,12 @@ function standPaneConversation(term) {
  *
  * A terminal tab whose pane runs an agent wears a head above its panes: who
  * the agent is, the model it runs, what it is doing, the conversation it holds
- * (`paintPaneHeadPick`) and the 터미널 | 대화 switch — beside the pane it
- * speaks for. In the conversation the page's own head (t-22100) says who, so
- * this one keeps the line and the switch there. Built once per tab, the first
- * time an agent is in front in it, and re-laid with the tab's tree. */
+ * (`paintPaneHeadPick`) and the 대화 | 터미널 switch — beside the pane it
+ * speaks for. In the conversation the page's own head (t-22100) says who, the
+ * model, the state and its clock, so the line and the switch move into it and
+ * this head steps aside: one line, as the draft draws it (`placePaneHeadLine`).
+ * Built once per tab, the first time an agent is in front in it, and re-laid
+ * with the tab's tree. */
 function paneHeadNode() {
   const head = document.createElement("div");
   head.className = "pane-head";
@@ -13672,7 +13680,12 @@ function paneHeadNode() {
   pick.hidden = true;
   const view = document.createElement("span");
   view.className = "pane-head-view";
-  head.append(who, pick, view);
+  // The part that travels to the conversation's head; held here wherever it stands.
+  const line = document.createElement("span");
+  line.className = "pane-head-line";
+  line.append(pick, view);
+  head.__line = line;
+  head.append(who, line);
   return head;
 }
 
@@ -13687,7 +13700,6 @@ function paintPaneHead(tab, term) {
     remeasurePanes(tab);
   }
   const agent = paneAgents.get(term) ?? "";
-  head.classList.toggle("is-chat", paneChatOn(term));
   writeTextContent(head.querySelector(".pane-head-mark"), agentVoice(agent).glyph);
   writeTextContent(head.querySelector(".pane-head-name"), agentPaneName(tab, term, agent) || tabLabel(tab));
   const model = paneModelWords(term);
@@ -13700,14 +13712,31 @@ function paintPaneHead(tab, term) {
   writeAttribute(chip, "data-state", state);
   writeTextContent(chip, bucketWord(state === "needs-attention" ? "attention" : state));
   paintPaneHeadPick(head, term);
+  placePaneHeadLine(tab, term);
   return head;
+}
+
+/* The tab head's line and switch stand in the conversation's own head while the
+ * pane in front wears its conversation, and the tab head steps aside; on the
+ * screen they come home. The shells below re-measure only when the head's room
+ * changes. A head rebuilt by its page (`paintPaneChat`) takes the line again. */
+function placePaneHeadLine(tab, term) {
+  const head = paneHeads.get(tab.id);
+  if (!head || activePaneOf(tab) !== term) return;
+  const page = paneChatOn(term) ? paneChats.get(term)?.host?.__helperPage : null;
+  const dock = page?.head.querySelector(".chat-head-pane") ?? head;
+  if (head.__line.parentElement !== dock) dock.append(head.__line);
+  const aside = dock !== head;
+  if (head.hidden === aside) return;
+  head.hidden = aside;
+  remeasurePanes(tab);
 }
 
 /* The one line that says which conversation this pane holds — the session its
  * agent named, the one a 「계속」 resumes. t-68069 writes here why a resume
  * picked it; until a hook names a session the line stands empty. */
 function paintPaneHeadPick(head, term) {
-  const pick = head.querySelector(".pane-head-pick");
+  const pick = head.__line.querySelector(".pane-head-pick");
   const session = paneSessions.get(term)?.session?.id ?? "";
   writeHidden(pick, session === "");
   writeTextContent(pick, session ? t("paneHead.pick", "대화 {{session}}", { session: shortSession(session) }) : "");
@@ -13839,6 +13868,8 @@ function paintPaneChat(term) {
     workerClock.sync();
   }
   paintHelperPage(held.host, held.tab);
+  const owner = tabOfTerm(term);
+  if (owner) placePaneHeadLine(owner, term);
   // The composer's send is a stop while the turn is out and the send again
   // when it ends — the state it reads (`run.status`) moved here, so it is
   // repainted here; a hook's chip repaint ran before the state landed.
@@ -15742,7 +15773,9 @@ function updateWorkerHead(head, run) {
 function chatHeadNode(run) {
   const head = document.createElement("header");
   head.className = "worker-head chat-head";
+  // The agent's mark is its picture; its name rides it for a screen reader.
   const mark = agentMarkNode("worker-mark", "");
+  mark.setAttribute("role", "img");
   const name = document.createElement("span");
   name.className = "worker-name";
   const meta = document.createElement("span");
@@ -15763,7 +15796,11 @@ function chatHeadNode(run) {
   const tally = document.createElement("span");
   tally.className = "chat-tally";
   tally.hidden = true;
-  meta.append(model, chip, tally, focusViewButtonNode());
+  meta.append(model, chip, tally);
+  // A pane's own conversation: where its tab head's line and switch stand while
+  // it is the pane in front, so the two heads read as one (`placePaneHeadLine`).
+  if (run.helper?.id === PANE_LOG_ID) meta.append(Object.assign(document.createElement("span"), { className: "chat-head-pane" }));
+  meta.append(focusViewButtonNode());
   head.append(mark, name, meta);
   updateChatHead(head, run);
   return head;
@@ -15773,7 +15810,9 @@ function chatHeadNode(run) {
  * costs no mutation. The clock says THIS turn's time while the agent works
  * (`workerElapsedWords`) and nothing between turns. */
 function updateChatHead(head, run) {
-  writeTextContent(head.querySelector(".worker-mark"), agentVoice(run.agent).glyph);
+  const mark = head.querySelector(".worker-mark");
+  writeTextContent(mark, agentVoice(run.agent).glyph);
+  writeAttribute(mark, "aria-label", agentName(run.agent));
   const focus = head.querySelector(".worker-focus");
   if (focus) writeAttribute(focus, "aria-pressed", focusViewOn() ? "true" : "false");
   writeTextContent(head.querySelector(".worker-name"), run.name);

@@ -279,6 +279,11 @@ export function nowContrast(scopeSelector = "#board-view :is(.board-now-tabs, .t
       const ink = over(parse(getComputedStyle(node).color), ground);
       const [high, low] = [lum(ink), lum(ground)].sort((a, b) => b - a);
       const ratio = (high + 0.05) / (low + 0.05);
+      // A glyph that stands for a picture (an agent's mark) is a graphic: WCAG 1.4.11 asks 3:1 of it.
+      if (node.closest('[role="img"]')) {
+        if (ratio < 3) below.push(`${node.className || node.tagName}: ${node.textContent.trim().slice(0, 24)} ${ratio.toFixed(2)}`);
+        continue;
+      }
       if (ratio < min) { min = ratio; where = node.textContent.trim().slice(0, 24); }
       if (ratio < 4.5) below.push(`${node.className || node.tagName}: ${node.textContent.trim().slice(0, 24)} ${ratio.toFixed(2)}`);
     }

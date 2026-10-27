@@ -6503,9 +6503,9 @@ function remeasurePanes(tab) {
 }
 
 function dropPaneHost(id) {
-  // The view switch may stand in this tab's head; it goes home before the head does.
-  const toggle = el("view-toggle");
-  if (paneHeads.get(id)?.contains(toggle)) el("view-toggle-home").appendChild(toggle);
+  // The view switch may stand in this tab's head line — in the head, or in its
+  // pane's conversation head (`placePaneHeadLine`); it goes home before either does.
+  if (paneHeads.get(id)?.__line.contains(viewToggle)) el("view-toggle-home").appendChild(viewToggle);
   paneHeads.delete(id);
   paneHosts.get(id)?.remove();
   paneHosts.delete(id);
