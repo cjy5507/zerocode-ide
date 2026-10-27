@@ -4291,14 +4291,14 @@ function explainBarWords(event) {
   const node = event.target.closest?.(".sb-claude, .sb-item, .sb-usage-roster");
   if (!node || !event.currentTarget.contains(node)) return;
   const cut = (one) => !one.hidden && (one.scrollWidth > one.clientWidth + 1 || getComputedStyle(one).display === "none");
-  // A usage segment speaks as its figure and its next-account words, and the
-  // roster — what the keyboard reaches — as every shown gauge's; any other
-  // item speaks as its own text.
+  // A usage segment speaks as its account's short id, its figure and its
+  // next-account words, and the roster — what the keyboard reaches — as every
+  // shown gauge's; any other item speaks as its own text.
   const spoken = node.matches(".sb-claude, .sb-usage-roster")
     ? [...node.querySelectorAll(
       node.matches(".sb-claude")
-        ? ".sb-claude-pct, .sb-claude-next"
-        : ".sb-claude:not([hidden]) :is(.sb-claude-pct, .sb-claude-next)",
+        ? ".sb-claude-account, .sb-claude-pct, .sb-claude-next"
+        : ".sb-claude:not([hidden]) :is(.sb-claude-account, .sb-claude-pct, .sb-claude-next)",
     )].filter((one) => !one.hidden)
     : [node];
   const shortened = spoken.some(cut);

@@ -22470,14 +22470,16 @@ progress:indeterminate::-webkit-progress-bar {
  * `@container statusbar`, which never reaches the bar: an element cannot query
  * itself. The bar is the window's bottom row and is never inside a pane or a
  * split, so its own width is the window's, and a media query is how the bar
- * reads it. */
-@media (max-width: 1100px) {
+ * reads it. The container reads the bar's content box, 24px narrower than the
+ * window (its inline padding, 2 × --space-3), so each threshold here is the
+ * container's 1100 and 900 plus 24 — the gap closes where the line folds. */
+@media (max-width: 1124px) {
   .statusbar {
     gap: var(--space-3);
   }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 924px) {
   .statusbar {
     gap: var(--space-2);
   }
