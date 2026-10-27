@@ -13,13 +13,17 @@
  * the first frame on the system face instead of holding text invisible.
  * vercel/geist-font v1.8.2, OFL 1.1 (fonts/OFL.txt). Relative URLs, so the
  * test harness's file:// and http:// pages load the same files the window
- * does. */
+ * does. The range leaves Hangul and CJK out: Geist carries none, and asked
+ * first for every one of those letters it cost the week schedule's moved
+ * paint 2.85 -> 3.2 ms (p50, board-schedule-perf); named, the letters go
+ * straight to their own face and the paint is back at 2.85 ms. */
 @font-face {
   font-family: "Geist";
   src: url("fonts/Geist-Variable.woff2") format("woff2");
   font-weight: 100 900;
   font-style: normal;
   font-display: swap;
+  unicode-range: U+0000-10FF, U+1200-2FFF;
 }
 
 @font-face {
@@ -28,6 +32,7 @@
   font-weight: 100 900;
   font-style: normal;
   font-display: swap;
+  unicode-range: U+0000-10FF, U+1200-2FFF;
 }
 
 :root {
