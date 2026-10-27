@@ -103,6 +103,11 @@ pub mod error_code {
     /// A mobile mark no longer names the same pressable control on that look.
     pub const PIN_BROKEN: &str = "pin_broken";
     pub const INVALID_ARGUMENT: &str = "invalid_argument";
+    /// `--app` on a verb of the desktop's hand — the pointer in screen
+    /// points, the keys where the focus is — which names no app (t-78095).
+    /// Nothing was pressed; the message names the verb that takes `--app`
+    /// for the same act, whose points count inside that app's window.
+    pub const WRONG_VERB: &str = "wrong_verb";
     pub const APP_NOT_FOUND: &str = "app_not_found";
     pub const APP_BLOCKED: &str = "app_blocked";
     /// A control of ZeroCode's own window the window never presses for an

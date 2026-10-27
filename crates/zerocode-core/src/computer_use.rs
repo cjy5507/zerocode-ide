@@ -3351,6 +3351,15 @@ impl RepeatUntil {
     }
 }
 
+/// [`parse_command`] with each refusal's kind kept apart from its words: the
+/// window answers the kind as the error's code, so nobody reads it back out
+/// of the sentence.
+pub fn parse_command_coded(
+    argv: &[String],
+) -> Result<ComputerCommand, crate::computer_use_protocol::ProviderError> {
+    parse_command(argv).map_err(crate::computer_use_protocol::ProviderError::invalid_argument)
+}
+
 /// Parse the public CLI without guessing or passing unknown flags onward.
 pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
     let Some(verb) = argv.first().map(String::as_str) else {
@@ -5830,6 +5839,143 @@ mod tests {
 
     fn words(input: &[&str]) -> Vec<String> {
         input.iter().map(|word| (*word).to_string()).collect()
+    }
+
+    /// A point read off an app's picture sent to the desktop's hand with
+    /// `--app` (t-73872, codex on the phone): the desktop verbs take screen
+    /// points and no app, so the line is refused as the wrong verb — its own
+    /// code, not an unknown flag — and the refusal names the verb that takes
+    /// `--app` for the same act. Every other line reads as it did.
+    #[test]
+    fn an_app_on_the_desktop_hand_is_refused_as_the_wrong_verb() {
+        use crate::computer_use_protocol::error_code;
+        for (line, in_the_app) in [
+            (
+                &[
+                    "mouse-click",
+                    "--app",
+                    "iPhone Mirroring",
+                    "--x",
+                    "180",
+                    "--y",
+                    "165",
+                ][..],
+                Some(ComputerMethod::Click),
+            ),
+            (
+                &[
+                    "mouse-drag",
+                    "--app=Notes",
+                    "--from-x",
+                    "1",
+                    "--from-y",
+                    "2",
+                    "--to-x",
+                    "3",
+                    "--to-y",
+                    "4",
+                ],
+                Some(ComputerMethod::Drag),
+            ),
+            (
+                &[
+                    "mouse-scroll",
+                    "--app",
+                    "Notes",
+                    "--x",
+                    "1",
+                    "--y",
+                    "2",
+                    "--dy",
+                    "3",
+                ],
+                Some(ComputerMethod::Scroll),
+            ),
+            (
+                &[
+                    "type",
+                    "--app",
+                    "iPhone Mirroring",
+                    "--text",
+                    "blue",
+                    "--json",
+                ],
+                Some(ComputerMethod::TypeText),
+            ),
+            (
+                &["key", "--app", "iPhone Mirroring", "--key", "Return"],
+                Some(ComputerMethod::PressKey),
+            ),
+            (
+                &["mouse-move", "--app", "Notes", "--x", "1", "--y", "2"],
+                None,
+            ),
+            (
+                &["hold-key", "--app", "Notes", "--key", "shift", "--ms", "10"],
+                None,
+            ),
+        ] {
+            let refusal = parse_command_coded(&words(line)).unwrap_err();
+            assert_eq!(refusal.code, error_code::WRONG_VERB, "{line:?}");
+            assert!(
+                refusal.message.starts_with(&format!("`{}` ", line[0]))
+                    && refusal.message.contains("no --app"),
+                "{line:?}: {}",
+                refusal.message
+            );
+            if let Some(verb) = in_the_app {
+                let spelled = format!("`{COMPUTER_CLI} {} --app <app>", verb.verb_name());
+                assert!(
+                    refusal.message.contains(&spelled),
+                    "{line:?}: {}",
+                    refusal.message
+                );
+                assert!(
+                    allowed(verb).contains(&"app"),
+                    "{} names an app",
+                    verb.verb_name()
+                );
+            }
+            assert_eq!(
+                parse_command(&words(line)).unwrap_err(),
+                refusal.message,
+                "every reader of the line reads the same words"
+            );
+        }
+        // A point inside a window goes to the app's own verb, as it did.
+        for line in [
+            &["mouse-click", "--x", "922", "--y", "226"][..],
+            &[
+                "click",
+                "--app",
+                "iPhone Mirroring",
+                "--x",
+                "180",
+                "--y",
+                "165",
+            ],
+            &["type-text", "--app", "iPhone Mirroring", "--text", "blue"],
+            &["press-key", "--app", "iPhone Mirroring", "--key", "Return"],
+            &["type", "--text", "blue"],
+            &["key", "--key", "Return"],
+        ] {
+            parse_command_coded(&words(line)).expect("read as before");
+        }
+        // Any other flag a verb does not take is still an unknown flag.
+        let unknown = parse_command_coded(&words(&[
+            "mouse-click",
+            "--x",
+            "1",
+            "--y",
+            "2",
+            "--pane",
+            "p",
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            (unknown.code.as_str(), unknown.message.as_str()),
+            (error_code::INVALID_ARGUMENT, "unknown flag --pane")
+        );
     }
 
     /// A screen left of or above the main one has negative coordinates
