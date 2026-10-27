@@ -76,7 +76,8 @@ fn resolve(vcs: &dyn Vcs, repo: &Path, name: &str) -> Option<Option<String>> {
         GIT_BUDGET,
     ) {
         Within::Said(full) => Some(Some(full.trim().to_string()).filter(|full| !full.is_empty())),
-        Within::Refused(_) | Within::Silent => Some(None),
+        Within::Refused(_) => Some(None),
+        Within::Silent => None,
     }
 }
 
