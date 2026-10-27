@@ -304,15 +304,10 @@ pub(crate) fn temp_dir(label: &str) -> std::path::PathBuf {
     path
 }
 
-#[cfg(test)]
-pub(crate) fn test_cwd_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
 /// A synthetic session store pinned as this process's `ZO_SESSION_ROOT` for
-/// one test (t-2947): takes the cwd lock, isolates the config home, writes the
-/// corpus, and puts the environment back when dropped.
+/// one test (t-2947): writes the corpus, then holds the env lock while the
+/// config home and session root point at it, and puts the environment back
+/// when dropped.
 #[cfg(test)]
 pub(crate) struct SessionRootPin {
     pub(crate) root: PathBuf,
@@ -328,9 +323,6 @@ pub(crate) struct SessionRootPin {
 #[cfg(test)]
 impl SessionRootPin {
     pub(crate) fn new(tag: &str, spec: &session_corpus::CorpusSpec) -> Self {
-        let guard = test_cwd_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock after epoch")
@@ -350,6 +342,7 @@ impl SessionRootPin {
         for session in manifest.iter().take(spec.head_window) {
             crate::resume::write_session_cwd_if_missing(&session.path, &cwd).expect("cwd sidecar");
         }
+        let guard = test_env_lock();
         let prior_root = env::var_os("ZO_SESSION_ROOT");
         let prior_home = env::var_os("ZO_CONFIG_HOME");
         env::set_var("ZO_CONFIG_HOME", &home);

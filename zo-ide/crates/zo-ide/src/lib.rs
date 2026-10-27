@@ -91,7 +91,7 @@ pub use status_format::{
 };
 
 #[cfg(test)]
-pub(crate) use support::{test_cwd_lock, test_env_lock, SessionRootPin};
+pub(crate) use support::{test_env_lock, SessionRootPin};
 
 /// The binary's first act is to adopt the router keys the window handed it:
 /// done any later, a thread may already be reading the environment, and every

@@ -562,9 +562,7 @@ mod tests {
 
     #[test]
     fn empty_session_root_falls_back_to_scoped_zo_paths() {
-        let _guard = crate::test_cwd_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::test_env_lock();
         let prior_root = std::env::var_os("ZO_SESSION_ROOT");
         let prior_config_home = std::env::var_os("ZO_CONFIG_HOME");
         let home = std::env::temp_dir().join(format!("zo-empty-root-{}", std::process::id()));
@@ -595,9 +593,7 @@ mod tests {
     fn project_sessions_persist_outside_the_working_tree() {
         // `sessions_path_for` honors `ZO_SESSION_ROOT`/`ZO_CONFIG_HOME`;
         // share the env lock with the rehydration test that sets it.
-        let _guard = crate::test_cwd_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::test_env_lock();
         // Pin a deterministic global home so the assertions don't depend on the
         // developer's real `~/.zo`. `ZO_SESSION_ROOT` would short-circuit
         // `sessions_path_for`, so make sure it is unset for this case.
@@ -634,9 +630,7 @@ mod tests {
     /// slug carries a readable stem so `~/.zo/projects/` stays browsable.
     #[test]
     fn global_project_sessions_are_repo_distinct_and_readable() {
-        let _guard = crate::test_cwd_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::test_env_lock();
         let prior_root = std::env::var_os("ZO_SESSION_ROOT");
         std::env::remove_var("ZO_SESSION_ROOT");
         let prior_config_home = std::env::var_os("ZO_CONFIG_HOME");
@@ -676,9 +670,7 @@ mod tests {
     fn limited_listing_fills_the_page_with_conversations() {
         use super::list_managed_sessions_limited;
 
-        let _guard = crate::test_cwd_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::test_env_lock();
         // Isolate from the developer's real `~/.zo` (global dir) and pin an
         // explicit, empty session root we fully control.
         let prior_config_home = std::env::var_os("ZO_CONFIG_HOME");

@@ -1643,9 +1643,7 @@ mod measure {
             eprintln!("ZO_SESSION_ROOT unset; nothing measured");
             return;
         };
-        let _guard = crate::test_cwd_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::test_env_lock();
         // Only the root under measurement: an empty config home keeps the
         // developer's own per-project store out of the numbers.
         let home = std::env::temp_dir().join(format!("zo-measure-home-{}", std::process::id()));
