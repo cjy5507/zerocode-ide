@@ -143,6 +143,12 @@ pub trait BriefingPane {
     fn working(&mut self) -> bool {
         false
     }
+    /// The provider's own record of the conversation holds this briefing as
+    /// a prompt it took — its transcript, written whether or not the hook
+    /// that carries the receipt ever reached the window (t-78356).
+    fn recorded(&mut self) -> bool {
+        false
+    }
     /// The pane's scrollback and visible text; `None` once the pane is gone.
     fn screen(&mut self) -> Option<String>;
     /// Type the briefing once more, and say where that delivery's outcome
@@ -227,6 +233,20 @@ pub fn confirm(
             }
         }
     }
+}
+
+/// Whether a briefing whose submission receipt never arrived by its deadline
+/// was taken all the same (t-78356).
+///
+/// Asked before a launch is torn down as unacknowledged: a receipt rides one
+/// hook post, and a post lost or late under load is a worker at work killed
+/// for the window's deafness. Only the provider's own words count here — the
+/// receipt heard after all, a turn its hooks reported, the prompt its own
+/// transcript recorded. The screen does not: a briefing left unsent in its
+/// composer shows on it exactly as one that was taken does.
+pub fn taken_without_receipt(pane: &mut impl BriefingPane) -> bool {
+    let _ = pane;
+    false
 }
 
 #[cfg(test)]
@@ -414,6 +434,75 @@ mod tests {
             WatchStep::Waiting
         );
         assert_eq!(watch.poll(true, submitted), WatchStep::Taken);
+    }
+
+    /// A pane whose receipt never came, as the launch road finds it at the
+    /// deadline: what its provider said of itself, and a screen that must not
+    /// be asked.
+    struct Unreceipted {
+        heard: bool,
+        working: bool,
+        recorded: bool,
+    }
+
+    impl BriefingPane for Unreceipted {
+        fn submitted(&mut self) -> bool {
+            self.heard
+        }
+
+        fn working(&mut self) -> bool {
+            self.working
+        }
+
+        fn recorded(&mut self) -> bool {
+            self.recorded
+        }
+
+        fn screen(&mut self) -> Option<String> {
+            panic!("a briefing standing unsent shows like one that was taken")
+        }
+
+        fn retype(&mut self) -> Receiver<Outcome> {
+            panic!("a launch at its deadline is not typed at again")
+        }
+
+        fn withdraw(&mut self) {
+            panic!("a launch at its deadline has no retype to withdraw")
+        }
+    }
+
+    /// w-78348 (10-28 04:07): the briefing went in at 04:07:30, the worker
+    /// read files for 58 s, and the receipt never reached the window — each
+    /// of the provider's own words is enough to keep that worker.
+    #[test]
+    fn a_worker_at_work_whose_receipt_never_came_was_taken() {
+        for (heard, working, recorded) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let mut pane = Unreceipted {
+                heard,
+                working,
+                recorded,
+            };
+            assert!(
+                taken_without_receipt(&mut pane),
+                "heard {heard}, working {working}, recorded {recorded}: torn down"
+            );
+        }
+    }
+
+    /// w-78343 (10-28 04:06): the briefing stood in the composer, unsent, and
+    /// nothing the provider said was a prompt taken — still a failed launch.
+    #[test]
+    fn a_briefing_nothing_took_is_still_not_taken() {
+        let mut pane = Unreceipted {
+            heard: false,
+            working: false,
+            recorded: false,
+        };
+        assert!(!taken_without_receipt(&mut pane));
     }
 
     #[test]

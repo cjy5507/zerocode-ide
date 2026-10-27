@@ -1046,6 +1046,16 @@ fn briefing_work_reported(state: zerocode_core::hook::HookState, session_boundar
     }
 }
 
+/// Whether the provider's own transcript at `transcript` took `briefing` as
+/// the prompt that opened its turn (t-78356): the record a CLI writes for a
+/// prompt it took, read whether or not its submit hook ever reached the
+/// window. Its newest naming prompt is asked, past the frames around a paste,
+/// and must show the briefing's own words.
+fn briefing_recorded(transcript: &std::path::Path, briefing: &str) -> bool {
+    let _ = (transcript, briefing);
+    false
+}
+
 impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
     fn submitted(&mut self) -> bool {
         self.submitted || crate::human_input::taken(self.term) > 0
@@ -8925,8 +8935,57 @@ pub(super) fn write_agent_screenshot(
 // the shipped code, and that marker must open `mod tests` (shipped_backend).
 #[cfg(test)]
 mod tests {
-    use super::briefing_work_reported;
+    use super::{briefing_recorded, briefing_work_reported};
     use zerocode_core::hook::HookState;
+
+    const BRIEFING: &str = "You are a worker in this window's orchestration, carrying task T-1. Now do this: read the auto-format test.";
+
+    /// The record Claude Code 2.1.311 wrote for w-78348's briefing (10-28
+    /// 04:07:30), its words framed as a paste, after the session's own lines.
+    fn claude_transcript(prompt: Option<&str>) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        let mut file = tempfile::NamedTempFile::new().expect("a transcript");
+        let mut lines = vec![
+            serde_json::json!({"type": "custom-title", "customTitle": "zc-run-w-1"}),
+            serde_json::json!({"type": "permission-mode", "permissionMode": "bypassPermissions"}),
+        ];
+        if let Some(prompt) = prompt {
+            lines.push(serde_json::json!({
+                "type": "user",
+                "promptId": "p-1",
+                "message": {
+                    "role": "user",
+                    "content": format!("\n\n<pasted_content id=\"e859\">\n{prompt}\n</pasted_content id=\"e859\">\n"),
+                },
+                "origin": {"kind": "human"},
+                "promptSource": "typed",
+            }));
+            lines.push(serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "읽는 중"}]},
+            }));
+        }
+        for line in lines {
+            writeln!(file, "{line}").expect("a transcript line");
+        }
+        file
+    }
+
+    #[test]
+    fn a_briefing_its_provider_recorded_was_taken() {
+        let taken = claude_transcript(Some(BRIEFING));
+        assert!(briefing_recorded(taken.path(), BRIEFING));
+    }
+
+    #[test]
+    fn a_transcript_without_the_briefing_took_nothing() {
+        let untouched = claude_transcript(None);
+        assert!(!briefing_recorded(untouched.path(), BRIEFING));
+        let other = claude_transcript(Some("summarise the diff for me"));
+        assert!(!briefing_recorded(other.path(), BRIEFING));
+        let missing = untouched.path().with_extension("gone");
+        assert!(!briefing_recorded(&missing, BRIEFING));
+    }
 
     #[test]
     fn a_worker_briefing_accepts_a_real_turn_but_not_a_session_boundary() {
