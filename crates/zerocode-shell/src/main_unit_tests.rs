@@ -21830,6 +21830,15 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         .find(":root[data-theme=\"light\"] {")
         .expect("the light treatment block is gone from ui/tokens.css");
     let (dark, light) = tokens.split_at(light_at);
+    // A session that asks no permission wears no colour — red is the window's
+    // word for a failure, and the composer's chip says it by a triangle — so
+    // the bypass reach has no token (IDE design pass 2, item 11).
+    for gone in ["reach-bypass", "reach-bypass-ink"] {
+        assert!(
+            !tokens.contains(&format!("\n  --chat-{gone}:")),
+            "--chat-{gone} came back; the bypass reach wears no colour"
+        );
+    }
     for name in [
         "ground",
         "bubble",
@@ -21850,8 +21859,6 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "reach-edits-ink",
         "reach-plan",
         "reach-plan-ink",
-        "reach-bypass",
-        "reach-bypass-ink",
         // The approved conversation (t-22100): a step's argument, the rail's tick.
         "arg-ink",
         "rail-tick",
@@ -22323,12 +22330,43 @@ fn the_conversation_wears_the_extensions_own_measures() {
         ("agent-send-claude", var("--app-claude-clay-button-orange")),
         ("chat-send-ink", var("--app-claude-ivory")),
     ];
+    // A token may name a scale step (`var(--radius-xl)`); it is read at the
+    // step's own value, one hop.
+    let resolved = |name: &str| -> String {
+        let raw = token(name);
+        match raw
+            .strip_prefix("var(--")
+            .and_then(|inner| inner.strip_suffix(')'))
+        {
+            Some(step) => token(step),
+            None => raw,
+        }
+    };
+    // Where the passed design (p-6893560125c34552, items 4 and 9) leaves the
+    // panel on purpose: the reading column is 760px, not the panel's 680px,
+    // and the composer's corners are 12px, not 8px. The panel's number stays
+    // pinned beside the approved one, so a panel that moves retires the entry.
+    let approved: [(&str, &str, &str); 2] = [
+        ("chat-dock-max", "760px", "680px"),
+        ("chat-radius-composer", "12px", "8px"),
+    ];
     let mut drifted = Vec::new();
     for (name, want) in &pairs {
-        let have = token(name);
-        if measure(&have) != measure(want) {
+        let have = resolved(name);
+        let wanted = match approved.iter().find(|(token_name, _, _)| token_name == name) {
+            Some((_, ours, panels)) => {
+                if measure(want) != measure(panels) {
+                    drifted.push(format!(
+                        "the panel's stylesheet now says `{want}` for --{name}, not `{panels}` — retire the approved `{ours}`"
+                    ));
+                }
+                (*ours).to_string()
+            }
+            None => want.clone(),
+        };
+        if measure(&have) != measure(&wanted) {
             drifted.push(format!(
-                "--{name} is `{have}`, the panel's stylesheet says `{want}`"
+                "--{name} is `{have}`, the panel's stylesheet says `{wanted}`"
             ));
         }
     }
