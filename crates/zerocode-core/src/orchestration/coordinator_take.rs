@@ -114,6 +114,7 @@ const LANDED_COMMIT_KEYS: &[&str] = &[
     "mergeCommit",
     "merge",
     "commit",
+    "commits",
     "sha",
     "head",
     "tip",
@@ -721,6 +722,8 @@ pub fn backfill_commits(run: &Run) -> Vec<String> {
 
 /// What git proves for one finished task.
 struct Proven {
+    /// The checkout git was asked in.
+    repo: String,
     /// The commit as git resolved it, and the key the result named it under.
     commit: String,
     under: String,
@@ -802,6 +805,7 @@ fn prove(
                     })
                     .collect();
                 return Ok(Proven {
+                    repo: seen.repo.clone(),
                     commit: full.clone(),
                     under: one.under.clone(),
                     tag: tag.clone(),
@@ -843,6 +847,7 @@ fn backfilled_result(original: &str, proven: &Proven, base: &BaseSeen, now_ms: i
     let mut note = serde_json::json!({
         "by": BACKFILL_VERB,
         "atMs": now_ms,
+        "repo": proven.repo,
         "base": base.name,
         "baseHead": base.head,
         "commit": proven.commit,

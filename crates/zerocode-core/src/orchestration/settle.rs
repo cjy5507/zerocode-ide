@@ -26,6 +26,7 @@
 
 use std::collections::HashMap;
 
+use super::coordinator_take::carrier_generation;
 use super::land_batch::PressedBy;
 use super::*;
 
@@ -123,7 +124,8 @@ pub fn left_behind_by(
     now_ms: i64,
     awaits: impl Fn(&Task) -> bool,
 ) -> HashMap<&str, Left> {
-    let live = run.coordinator_live().is_some();
+    let seated = run.coordinator_live().map(|seat| seat.generation);
+    let live = seated.is_some();
     let owned = |task: &Task| live && now_ms.saturating_sub(last_touched_ms(run, task)) < QUIET_MS;
     let mut left: HashMap<&str, Left> = HashMap::new();
     for task in &run.tasks {
@@ -138,9 +140,14 @@ pub fn left_behind_by(
                     .filter(|held| held.task == task.id && held.is_open())
                     .peekable();
                 if open.peek().is_some() {
+                    // A live worker carries its attempt, and so does the live
+                    // seat its own (`task-take`); an earlier sitting's attempt
+                    // is nobody's until the next take ends it.
                     let carried = open.any(|held| {
                         run.worker(&held.worker)
                             .is_some_and(|worker| worker.state.still_summoned())
+                            || carrier_generation(&held.worker)
+                                .is_some_and(|generation| seated == Some(generation))
                     });
                     (!carried).then_some(Left::Look)
                 } else if task.status == TaskStatus::Dispatched {
