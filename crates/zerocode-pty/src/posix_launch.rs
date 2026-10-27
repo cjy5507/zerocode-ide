@@ -54,6 +54,7 @@ use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use portable_pty::{Child, ChildKiller, ExitStatus};
 
@@ -125,16 +126,45 @@ struct Helper {
 
 static HELPER: OnceLock<Helper> = OnceLock::new();
 
+/// How long the window's question to a helper may take before the helper
+/// is passed over: a mirror answers in 3 ms, 144 ms the first time after an
+/// update copied it (Codex t-77525, measured 10-27).
+pub const CTTY_PROBE_LIMIT: Duration = Duration::from_secs(2);
+
 /// Start every lane's child through `helper` from now on: an executable
 /// whose `main` calls [`serve_ctty_exec`] before anything else. `log` is
 /// the file its one line goes to when `TIOCSCTTY` fails. Named once per
-/// process; `false` when one was named already, or when `helper` does not
+/// process; `false` when one was named already. When `helper` does not
 /// answer [`CTTY_PROBE_ENV`] — it does not know the road, and a lane
-/// started through it would keep the marker. A process that names none
-/// starts its children straight, with no controlling terminal.
-pub fn launch_through(helper: PathBuf, log: Option<PathBuf>) -> bool {
-    if HELPER.get().is_some() || !serves_ctty_exec(&helper) {
+/// started through it would keep the marker — `unnamed` hears why. A
+/// process that names none starts its children straight, with no
+/// controlling terminal.
+pub fn launch_through(
+    helper: PathBuf,
+    log: Option<PathBuf>,
+    unnamed: impl FnOnce(String) + Send + 'static,
+) -> bool {
+    launch_through_within(helper, log, CTTY_PROBE_LIMIT, unnamed)
+}
+
+/// [`launch_through`] with a limit of the caller's, for a test that cannot
+/// wait out [`CTTY_PROBE_LIMIT`].
+#[doc(hidden)]
+pub fn launch_through_within(
+    helper: PathBuf,
+    log: Option<PathBuf>,
+    _limit: Duration,
+    unnamed: impl FnOnce(String) + Send + 'static,
+) -> bool {
+    if HELPER.get().is_some() {
         return false;
+    }
+    if !serves_ctty_exec(&helper) {
+        unnamed(format!(
+            "{} does not answer as a pane's helper",
+            helper.display()
+        ));
+        return true;
     }
     HELPER
         .set(Helper {
@@ -707,5 +737,41 @@ mod tests {
         );
         assert_eq!(unwrapped(OsStr::new(CTTY_EXEC_ENV)), None);
         assert_eq!(unwrapped(OsStr::new("ZEROCODE_CTTY_PATH")), None);
+    }
+
+    /// A person's own name of the wrapped shape — given in the settings'
+    /// environment field — crosses the helper as given, beside a `DYLD_*`
+    /// value the window wraps into the very same name: the helper gets
+    /// back only what the window wrapped (Codex t-77525).
+    #[test]
+    fn a_persons_name_of_the_wrapped_shape_crosses_the_helper_as_given() {
+        let mut given: Vec<(OsString, OsString)> = [
+            ("DYLD_LIBRARY_PATH", "/opt/lib"),
+            ("ZEROCODE_CTTY_DYLD_LIBRARY_PATH", "user-own"),
+            ("ZEROCODE_CTTY_DYLD_REVIEW_CUSTOM", "user-setting"),
+            ("ZEROCODE_CTTY_ZEROCODE_CTTY_DYLD_X", "deep"),
+            ("ZEROCODE_CTTY_NOT_DYLD", "keep-this"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.into(), value.into()))
+        .collect();
+        let mut env = given.clone();
+        wrap_dyld(&mut env);
+        // What a hardened helper holds.
+        env.retain(|(name, _)| !name.as_bytes().starts_with(b"DYLD_"));
+        let mut names: Vec<&OsString> = env.iter().map(|(name, _)| name).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), env.len(), "two values under one name: {env:?}");
+        let mut back: Vec<(OsString, OsString)> = env
+            .into_iter()
+            .map(|(name, value)| match unwrapped(&name) {
+                Some(original) => (original.to_os_string(), value),
+                None => (name, value),
+            })
+            .collect();
+        back.sort();
+        given.sort();
+        assert_eq!(back, given);
     }
 }

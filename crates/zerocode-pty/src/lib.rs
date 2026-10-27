@@ -47,7 +47,8 @@ pub use lane::{
 };
 #[cfg(target_os = "macos")]
 pub use posix_launch::{
-    CTTY_DYLD_WRAP, CTTY_EXEC_ENV, CTTY_LOG_ENV, CTTY_PROBE_ENV, launch_through, serve_ctty_exec,
+    CTTY_DYLD_WRAP, CTTY_EXEC_ENV, CTTY_LOG_ENV, CTTY_PROBE_ENV, CTTY_PROBE_LIMIT, launch_through,
+    launch_through_within, serve_ctty_exec,
 };
 pub use readers::{
     FrameReaders, Look, READER_SHARE_FRAMES, READER_SHARE_SCREENS, RENOTIFY_AFTER, ShareOf,

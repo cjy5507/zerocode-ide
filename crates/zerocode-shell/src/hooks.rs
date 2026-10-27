@@ -724,19 +724,17 @@ fn mirror_bin() -> Option<PathBuf> {
 pub(crate) fn launch_panes_through_the_mirror(local_data_root: &Path) {
     match mirror_bin().filter(|bin| bin.is_file()) {
         Some(bin) => {
-            let shown = bin.display().to_string();
-            if !zerocode_pty::launch_through(
+            let root = local_data_root.to_path_buf();
+            zerocode_pty::launch_through(
                 bin,
                 Some(local_data_root.join(crate::system_runtime::WINDOW_LOG)),
-            ) {
-                crate::note_window_event(
-                    local_data_root,
-                    &format!(
-                        "pane launch: {shown} does not answer as a pane's helper — panes start \
-                         without a controlling terminal"
-                    ),
-                );
-            }
+                move |why| {
+                    crate::note_window_event(
+                        &root,
+                        &format!("pane launch: {why} — panes start without a controlling terminal"),
+                    );
+                },
+            );
         }
         None => crate::note_window_event(
             local_data_root,
