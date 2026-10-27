@@ -567,6 +567,10 @@
   --badge-height: 24px;
   --tab-underline-width: 2px;
   --status-dot-size: 10px;
+  /* A provider's gauge on the status bar (t-78107, 시안 13): Geist's Gauge as a
+   * 14px ring with a 2px stroke, in place of the 48×6 meter. */
+  --gauge-size: 14px;
+  --gauge-stroke: 2px;
   --focus-ring: 2px solid var(--ink-chalk);
   --focus-ring-offset: 2px;
   /* The rest of the draft's own measures (t-70028, the person on 10-22: 「시안대로
@@ -580,6 +584,10 @@
   --board-row-pad-block: 10px;
   --board-intro-after: 20px;
   --board-tab-height: 48px;
+  /* The board's search in its title row (t-78107, 시안 15): the passed draft's
+   * 460px field, never more than 42% of the row the title and the mode
+   * segment share. */
+  --board-head-find-width: min(460px, 42%);
   --board-gap-small: 6px;
   /* The schedule tab's vertical timetable (t-77628): the height of one hour. At the 「지금」 zoom the four
    * hours around now stand 480px, one screen of the test holder; at the 「하루」 zoom twenty-four hours
@@ -2593,7 +2601,9 @@
    * 이 묶음에서 온다. 값은 이미 있는 역할에서 섞으므로 라이트 블록이 같은
    * 이름을 제 값으로 다시 맨다. 기하(반경·단 폭·크기·줄간)는 색이 아니라
    * 여기 한 번만 선다. */
-  --chat-ground: var(--surface-deck);
+  /* 2차 A (시안 10): the floor, so the centre stands one step under the
+   * panels around it as Geist's material order has it, not as a lighter slab. */
+  --chat-ground: var(--surface-abyss);
   --chat-bubble: var(--surface-raised);
   --chat-bubble-ink: var(--ink-chalk);
   --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
@@ -3357,7 +3367,7 @@
   /* 채팅 페이지의 색, 종이 위에서(t-2973). 상자는 흰 바닥에 괘선 한 줄, 칩과
    * 알약은 더 옅게, 보내기는 검은 원에 흰 화살 — 기하는 다크 블록의 것을
    * 그대로 물려받는다. */
-  --chat-ground: var(--surface-deck);
+  --chat-ground: var(--surface-abyss);
   --chat-bubble: var(--surface-raised);
   --chat-bubble-ink: var(--ink-chalk);
   --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 7%, transparent);

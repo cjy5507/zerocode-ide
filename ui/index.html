@@ -1184,12 +1184,11 @@
         </nav>
 
         <div class="panel-head">
-          <!-- The heading is the grouping's name, not a translated label:
-               Orca writes `groupBy === 'repo' ? 'Projects' : 'Workspaces'` as
-               bare strings and stamps the choice on a data attribute
-               (SidebarHeader.tsx:21,28). `paintSidebarTitle` keeps both in
+          <!-- The heading is the grouping's name, stamped on a data attribute
+               the way Orca's is (SidebarHeader.tsx:21,28), and said in the
+               person's language (t-78107). `paintSidebarTitle` keeps both in
                step with the menu's groupBy choice. -->
-          <h2 class="panel-title" id="sidebar-title" data-sidebar-section-title="projects">Projects</h2>
+          <h2 class="panel-title" id="sidebar-title" data-sidebar-section-title="projects" data-i18n="sidebar.sectionProjects">프로젝트</h2>
           <!-- Orca's three project controls: workspace display options, add
                repository, and create workspace. -->
           <div class="panel-acts">
@@ -7794,7 +7793,7 @@
         <!-- The account the figure belongs to — the default's short id, read
              as its own login (t-46106). Hidden while no reading names one. -->
         <span class="sb-figure sb-claude-account" id="sb-claude-account" hidden></span>
-        <span class="sb-usage-bar" id="sb-claude-bar" hidden><span class="sb-usage-fill" id="sb-claude-fill"></span></span>
+        <span class="sb-usage-bar" id="sb-claude-bar" aria-hidden="true" hidden></span>
         <span class="sb-figure sb-claude-pct" id="sb-claude-pct" hidden></span>
         <!-- The next account and its room, beside the selected one's figure,
              with the auto-switch word (t-7538). Hidden while there is no
@@ -7808,14 +7807,14 @@
            should not carry a permanently empty segment. -->
       <span class="sb-claude" id="sb-codex" hidden>
         <span class="sb-claude-ico" id="sb-codex-ico"></span>
-        <span class="sb-usage-bar" id="sb-codex-bar" hidden><span class="sb-usage-fill" id="sb-codex-fill"></span></span>
+        <span class="sb-usage-bar" id="sb-codex-bar" aria-hidden="true" hidden></span>
         <span class="sb-figure sb-claude-pct" id="sb-codex-pct" hidden></span>
         <svg class="icon sb-claude-warn" id="sb-codex-warn" hidden aria-hidden="true"><use href="#i-alert"></use></svg>
       </span>
       <!-- Antigravity reads the Google login saved by zo. -->
       <span class="sb-claude" id="sb-antigravity" hidden>
         <span class="sb-claude-ico" id="sb-antigravity-ico"></span>
-        <span class="sb-usage-bar" id="sb-antigravity-bar" hidden><span class="sb-usage-fill" id="sb-antigravity-fill"></span></span>
+        <span class="sb-usage-bar" id="sb-antigravity-bar" aria-hidden="true" hidden></span>
         <span class="sb-figure sb-claude-pct" id="sb-antigravity-pct" hidden></span>
         <svg class="icon sb-claude-warn" id="sb-antigravity-warn" hidden aria-hidden="true"><use href="#i-alert"></use></svg>
       </span>
@@ -7825,7 +7824,7 @@
            segment. -->
       <span class="sb-claude" id="sb-kimi" hidden>
         <span class="sb-claude-ico" id="sb-kimi-ico"></span>
-        <span class="sb-usage-bar" id="sb-kimi-bar" hidden><span class="sb-usage-fill" id="sb-kimi-fill"></span></span>
+        <span class="sb-usage-bar" id="sb-kimi-bar" aria-hidden="true" hidden></span>
         <span class="sb-figure sb-claude-pct" id="sb-kimi-pct" hidden></span>
         <svg class="icon sb-claude-warn" id="sb-kimi-warn" hidden aria-hidden="true"><use href="#i-alert"></use></svg>
       </span>
@@ -7834,7 +7833,7 @@
            carries that name and a snapshot read as somebody else is dropped. -->
       <span class="sb-claude" id="sb-grok" hidden>
         <span class="sb-claude-ico" id="sb-grok-ico"></span>
-        <span class="sb-usage-bar" id="sb-grok-bar" hidden><span class="sb-usage-fill" id="sb-grok-fill"></span></span>
+        <span class="sb-usage-bar" id="sb-grok-bar" aria-hidden="true" hidden></span>
         <span class="sb-figure sb-claude-pct" id="sb-grok-pct" hidden></span>
         <svg class="icon sb-claude-warn" id="sb-grok-warn" hidden aria-hidden="true"><use href="#i-alert"></use></svg>
       </span>
@@ -7843,7 +7842,7 @@
            an API. Hidden until a session cookie is on file. -->
       <span class="sb-claude" id="sb-opencode-go" hidden>
         <span class="sb-claude-ico" id="sb-opencode-go-ico"></span>
-        <span class="sb-usage-bar" id="sb-opencode-go-bar" hidden><span class="sb-usage-fill" id="sb-opencode-go-fill"></span></span>
+        <span class="sb-usage-bar" id="sb-opencode-go-bar" aria-hidden="true" hidden></span>
         <span class="sb-figure sb-claude-pct" id="sb-opencode-go-pct" hidden></span>
         <svg class="icon sb-claude-warn" id="sb-opencode-go-warn" hidden aria-hidden="true"><use href="#i-alert"></use></svg>
       </span>

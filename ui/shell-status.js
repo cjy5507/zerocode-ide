@@ -1335,18 +1335,20 @@ function paintProviderSegment(provider) {
     // 색조는 사용량의 것이다 — 여기엔 사용량이 없으므로 앞 스캔이 남긴 색을
     // 들고 있어서는 안 된다.
     delete figure.dataset.tone;
+    delete segment.dataset.tone;
     segment.dataset.tip = tip;
     return;
   }
   const tight = tightestUsage(usage);
   const usedPct = tight.window.used_percent;
   const displayedPct = displayedUsagePercentage(usedPct);
-  const fill = el(`${provider.prefix}-fill`);
-  fill.style.width = `${displayedPct}%`;
-  // Urgency belongs in the detailed panel. The always-visible status rail is
-  // deliberately neutral so a healthy quota does not turn the whole footer
-  // into an alert surface as it approaches a reset.
-  delete fill.dataset.tone;
+  el(`${provider.prefix}-bar`).style.setProperty("--gauge-value", String(displayedPct));
+  // The rail stays grey until a window is nearly spent (t-78107, 시안 13): only
+  // past the panel's own hot line does the segment turn amber — and never red,
+  // which this window keeps for a failure. Judged on what is SPENT, whichever
+  // way the person reads the figures.
+  if (usageTone(usedPct) === "hot") segment.dataset.tone = "warn";
+  else delete segment.dataset.tone;
   // 신판 실측(Image #81): verbose의 창 하나는 「N% 사용 <리셋 카운트다운>」이고
   // (Fable 창만 제 이름), 창들은 ·로 나란하다 — 창 라벨(wk·5h)이 아니라
   // 카운트다운이 꼬리인 것이 실측이 우리와 갈리던 자리다.
@@ -4172,6 +4174,7 @@ const tipNode = document.createElement("div");
 // (`<section class="permission tip">`), and taking that name would restyle a
 // dialog this has nothing to do with.
 tipNode.className = "tooltip";
+tipNode.id = "window-tooltip";
 tipNode.setAttribute("role", "tooltip");
 tipNode.hidden = true;
 document.body.append(tipNode);
@@ -4179,11 +4182,23 @@ document.body.append(tipNode);
 let tipTimer = null;
 let tipAnchor = null;
 
+/* The pill is the anchor's description while it shows (t-77830): a screen
+ * reader on a focused status-bar item heard its name and not the sentence
+ * the narrow bar folded into the tip. Added beside whatever the anchor
+ * already names, and taken back when the pill goes. */
+function describeByTip(anchor, on) {
+  const ids = (anchor.getAttribute("aria-describedby") ?? "").split(/\s+/).filter((id) => id && id !== tipNode.id);
+  if (on) ids.push(tipNode.id);
+  if (ids.length > 0) anchor.setAttribute("aria-describedby", ids.join(" "));
+  else anchor.removeAttribute("aria-describedby");
+}
+
 function hideTip() {
   if (tipTimer !== null) {
     clearTimeout(tipTimer);
     tipTimer = null;
   }
+  if (tipAnchor) describeByTip(tipAnchor, false);
   tipAnchor = null;
   tipNode.hidden = true;
 }
@@ -4234,8 +4249,10 @@ function showTip(anchor) {
   // an empty `title` used to. Drawing an empty pill would be worse than the
   // attribute being absent.
   if (!words || !anchor.isConnected) return hideTip();
+  if (tipAnchor && tipAnchor !== anchor) describeByTip(tipAnchor, false);
   tipAnchor = anchor;
   tipNode.textContent = words;
+  describeByTip(anchor, true);
   // Measured off-screen first: `hidden` is `display: none`, which has no box
   // to measure, and the entrance animation restarts from the same toggle.
   tipNode.style.left = "0";
@@ -4718,7 +4735,7 @@ function buildTabNode(tab, group) {
   // (rename-file-Bs2nv9pa.js:6325, :6397).
   node.innerHTML =
     '<span class="tab-dot"></span><span class="tab-kind"></span>' +
-    '<span class="tab-label"></span>' +
+    '<span class="tab-label"></span><span class="tab-age"></span>' +
     (tab.pinned
       ? '<span class="tab-pin" aria-hidden="true"></span>'
       : '<button class="tab-close">×</button>');
@@ -4793,12 +4810,22 @@ function buildTabNode(tab, group) {
  * one is this side's honest equivalent: the session ledger once a hook has
  * spoken, the launch ledger from the moment of the spawn. */
 function tabAgentSlug(tab) {
-  if (tab.kind !== "term") return null;
-  for (const term of paneLeaves(tab.layout)) {
-    const named = paneSessions.get(term)?.agent ?? paneAgents.get(term);
-    if (named) return named;
-  }
-  return null;
+  const term = tabAgentTerm(tab);
+  return term === null ? null : paneSessions.get(term)?.agent ?? paneAgents.get(term);
+}
+
+function tabAgentTerm(tab) {
+  // A restored tab not woken yet has no panes to ask (t-20078).
+  if (tab.kind !== "term" || tab.asleep) return null;
+  return paneLeaves(tab.layout).find((term) => paneSessions.get(term)?.agent ?? paneAgents.get(term)) ?? null;
+}
+
+/* How long the tab's agent has been at it (t-78107, 시안 2), on the sidebar
+ * row's own clock (`agentRowAgo`) so the two never disagree. Repainted with
+ * the strip — no clock of its own. */
+function tabAgeWords(tab) {
+  const term = tabAgentTerm(tab);
+  return term === null ? "" : agentRowAgo({ term, state: hookStates.get(term) ?? "working" });
 }
 
 /* Everything about a tab that a render can have changed, onto a node that
@@ -4863,8 +4890,11 @@ function paintTabNode(node, tab) {
   const turn = tab.asleep && tab.wakeOrder
     ? ` \u00b7 ${t("tab.wakingOrder", "깨우는 중 — {{n}}번째", { n: tab.wakeOrder })}`
     : "";
-  const wording = tabStripWords(tab) + turn;
+  const wording = tabLabel(tab) + turn;
   if (label.textContent !== wording) label.textContent = wording;
+  const age = node.querySelector(".tab-age");
+  const ago = tabAgeWords(tab);
+  if (age.textContent !== ago) age.textContent = ago;
   // 이 탭의 판이 발행하고 아직 아무도 열지 않은 페이지(t-11958).
   paintTabUnseen(node, tab);
   // A tab holding an agent leads with the agent's identity, not the shell
@@ -5131,6 +5161,19 @@ function revealActiveTab(pane) {
   if (box.left < view.left + fade) strip.scrollLeft -= view.left + fade - box.left;
   else if (box.right > view.right - fade) strip.scrollLeft += box.right - (view.right - fade);
 }
+
+/* A window crossing the width where the tabs not on stage fold to their mark
+ * (t-78107, 시안 17; shell.css `@media (max-width: 1000px)` — a media query
+ * cannot read a custom property, so the number stands in both) moves every
+ * tab, and the tab in front can land behind the fade with no change of tab to
+ * reveal it again. */
+matchMedia("(max-width: 1000px)").addEventListener("change", () => {
+  for (const group of stageGroups()) {
+    const pane = groupOf(group);
+    pane.revealedTab = null;
+    revealActiveTab(pane);
+  }
+});
 
 /* Dragging a tab to reorder it, measured from Orca rather than guessed.
  *

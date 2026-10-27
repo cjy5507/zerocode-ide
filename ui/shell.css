@@ -826,12 +826,21 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
  * reading size rather than three. */
 .nav-rows {
   display: flex;
-  flex-direction: column;
+  /* 2차 A (t-78107, 시안 「또렷한 Geist」 3): the seven destinations wrap in
+   * their own words onto two lines instead of standing seven rows tall — the
+   * column's top went from 245 px to about 106, and the agents at work start
+   * that much higher. The setup entry and the search keep a line each. */
+  flex-flow: row wrap;
   /* The layer's own inset, now that the column has none: `gap-0.5 px-2 pt-2
    * pb-1` (SidebarNav.tsx:106). The bottom is the shallow side because the
    * header below brings its own `mt-2`. */
   gap: 2px;
   padding: var(--space-2) var(--space-2) var(--space-1);
+}
+
+.nav-rows > .guide-entry,
+.nav-rows > .nav-search {
+  flex-basis: 100%;
 }
 
 /* In its original seat the setup entry is the nav's FIRST row
@@ -843,6 +852,7 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 
 .nav-row {
   display: flex;
+  flex: none;
   align-items: center;
   gap: var(--nav-gutter);
   /* 28px, the height a repository and a workspace row are drawn at. These are
@@ -1127,6 +1137,54 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   line-height: 1;
   outline: none;
   cursor: pointer;
+}
+
+/* 2차 A (t-78107, 시안 7): the projects that rest, as one quiet line under
+ * the ones at work — the count, then their names until the line runs out. */
+.proj-resting {
+  display: flex;
+  align-items: center;
+  gap: var(--nav-gutter);
+  width: 100%;
+  /* A grid item in the stack: without this the names' unwrapped width
+   * would widen the whole list. */
+  min-width: 0;
+  min-height: 28px;
+  margin-top: var(--space-2);
+  padding: 0 8px 0 var(--nav-inset);
+  border: 0;
+  border-radius: var(--radius-edge);
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.proj-resting:hover,
+.proj-resting:focus-visible {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+.proj-resting-word {
+  flex: none;
+  white-space: nowrap;
+}
+
+.proj-resting-names {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .proj-row:hover,
@@ -1572,8 +1630,9 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   opacity: 0.6;
 }
 
+/* Beside the heading it switches from (t-78107, 시안 7), not over the list. */
 .team-switch {
-  margin: var(--space-1) var(--space-1) var(--space-1) 0;
+  margin: var(--space-2) auto 0 var(--space-2);
 }
 
 .team-row {
@@ -2532,6 +2591,45 @@ svg.wt-agent-dot {
   min-width: 0;
 }
 
+/* 2차 A (t-78107, 시안 5): the name first, over the whole line — the chips
+ * (기본, the ledger's word, the landing count, the quota wall) join the
+ * branch line under it, at its right end. The name was cut to 「Trace
+ * judgment provi…」 by chips that said less than it did. `display: contents`
+ * lets the top line's parts take places in the box's grid without moving a
+ * node, so every reader of `.wt-title` and `.wt-landing` reads what it did. */
+.wt-titlebox {
+  display: grid;
+  /* The branch, then one track for each chip that can stand (기본, the
+   * ledger's word, the landing count, the wall). A chip that is not there
+   * takes no width, so the gap rides the chip, not the grid. */
+  grid-template-columns: minmax(0, 1fr) repeat(4, minmax(0, max-content));
+  align-items: center;
+}
+
+.wt-titlebox > .wt-topline {
+  display: contents;
+}
+
+.wt-titlebox .wt-title {
+  grid-row: 1;
+  grid-column: 1 / -1;
+}
+
+.wt-titlebox > .wt-branch {
+  grid-row: 2;
+  grid-column: 1;
+  overflow: hidden;
+}
+
+.wt-titlebox .wt-default,
+.wt-titlebox .wt-phase,
+.wt-titlebox .wt-landing,
+.wt-titlebox .wt-wall {
+  grid-row: 2;
+  max-width: none;
+  margin-inline-start: var(--space-1);
+}
+
 .wt-title,
 .wt-branch-name {
   overflow: hidden;
@@ -2707,8 +2805,15 @@ svg.wt-agent-dot {
   color: var(--signal-ready-ink);
 }
 
+/* 2차 A (t-78107, 시안 6): unlanded is a quiet number, not a lit badge. The
+ * amber stood on every branch with work in it — eight at once in the person's
+ * 10-27 photo — and a colour that is always on says nothing. The count stays;
+ * the box and the wait ink go. A clash below keeps the halt ink: that one
+ * stops a landing. */
 .wt-landing[data-landing="ahead"] {
-  color: var(--signal-wait-ink);
+  color: color-mix(in srgb, var(--nav-plane-ink) 70%, transparent);
+  border-color: transparent;
+  background: none;
 }
 
 .wt-landing[data-landing="check"] {
@@ -6576,6 +6681,68 @@ body.is-dragging-pane {
 .tab.is-waiting .tab-label,
 .tab.is-blocked .tab-label {
   color: var(--ink-chalk);
+}
+
+/* 2차 A (t-78107, 시안 2): the tab says its agent's state by shape before
+ * its name — a filled dot while it works, a hollow blue ring while it waits
+ * on the person (blue is spent on what is yours to answer and nothing else) —
+ * and how long it has been at it after the name. The role word that led the
+ * name moved to the tip. */
+.tab.is-streaming .tab-dot {
+  visibility: visible;
+  background: var(--signal-ready);
+}
+
+.tab.is-waiting .tab-dot {
+  background: none;
+  box-shadow: inset 0 0 0 var(--status-dot-ring) var(--signal-you);
+}
+
+/* 2차 A (t-78107, 시안 17): a narrow window folds the tabs that are not on
+ * stage to their mark, state dot and age — the name stays the tab's spoken
+ * name (visually hidden, never removed) and its tip. The title bar is the
+ * window's own row, so the window's width is the bar's (the status bar's
+ * thresholds say the same, t-77705). */
+@media (max-width: 1000px) {
+  .tab:not(.is-active) .tab-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .tab:not(.is-active) {
+    flex: none;
+    min-width: 0;
+  }
+
+  /* The tab on stage keeps room for its name — the folded ones gave it theirs. */
+  .tab.is-active {
+    flex: none;
+  }
+}
+
+/* The age rides right after the name, so the label sizes to its words and
+ * the close control takes the slack. */
+.tab:has(.tab-age:not(:empty)) .tab-label {
+  flex: 0 1 auto;
+}
+
+.tab:has(.tab-age:not(:empty)) .tab-age {
+  margin-inline-end: auto;
+}
+
+.tab-age {
+  flex: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.tab-age:empty {
+  display: none;
 }
 
 /* The close control is quiet until it can be used — but it KEEPS ITS PLACE.
@@ -11989,22 +12156,33 @@ body.is-dragging-pane {
   height: 12px;
 }
 
+/* 2차 A (t-78107, 시안 13): each provider wears Geist's Gauge — a ring, filled
+ * clockwise by the tightest window — where a 48×6 meter stood. One element:
+ * the fill is a conic sweep, the hole a radial mask, the value the
+ * `--gauge-value` the paint writes (0–100). Grey on grey until the window is
+ * nearly spent; then the ring and the figure take the wait ink, never the
+ * halt ink, which is for a failure. */
 .sb-usage-bar {
-  width: 48px;
-  height: 6px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--meter-track);
+  width: var(--gauge-size);
+  height: var(--gauge-size);
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--gauge-ink, var(--ink-mist)) calc(var(--gauge-value, 0) * 1%),
+    var(--meter-track) 0
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - var(--gauge-stroke)),
+    #000 calc(100% - var(--gauge-stroke))
+  );
 }
 
-.sb-usage-fill {
-  /* Block, or a span's width/height are suggestions: the track is a flex
-   * item and sizes, the fill inside it is not and vanished — a grey bar
-   * that never showed its colour. */
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  background: var(--meter-fill);
+.sb-claude[data-tone="warn"] {
+  --gauge-ink: var(--signal-wait);
+}
+
+.sb-claude[data-tone="warn"] .sb-figure {
+  color: var(--signal-wait-ink);
 }
 
 .sb-claude-warn {
@@ -22457,12 +22635,6 @@ progress:indeterminate::-webkit-progress-bar {
 
   .sb-pct-short {
     display: inline;
-  }
-}
-
-@container statusbar (max-width: 900px) {
-  .sb-usage-bar {
-    width: 32px;
   }
 }
 
@@ -37163,6 +37335,46 @@ details.task-board-section > summary {
   flex: 1 1 auto;
   max-width: none;
   margin-left: 0;
+}
+
+/* 2차 A (t-78107, 시안 15): the task board's head is three layers, not five.
+ * The search, the only thing this toolbar holds on the task view, stands in
+ * the title row's right end (the head keeps that room free), and the
+ * schedule's range stands at the tab row's right end — the content starts a
+ * hundred pixels higher. The nav strip stays under the head (the selector
+ * contract). A narrow board keeps both in rows of their own. */
+@container board (min-width: 700px) {
+  .is-task-board > .agent-graph-head {
+    padding-inline-end: calc(var(--board-head-find-width) + var(--space-5) + var(--space-4));
+  }
+
+  .is-task-board > .agent-relations-toolbar {
+    grid-row: 1;
+    align-self: center;
+    justify-self: end;
+    width: var(--board-head-find-width);
+    margin-inline-end: var(--space-5);
+    padding: 0;
+    border-bottom: 0;
+    background: none;
+  }
+
+  /* The surface's padding box starts at the tab row (the tabs pull up over
+   * its gutter), so half a tab row down is the row's middle. */
+  .is-task-board .task-board-surface[data-board-tab="schedule"] {
+    position: relative;
+  }
+
+  .is-task-board .task-board-surface[data-board-tab="schedule"] .board-schedule-zoom {
+    position: absolute;
+    top: calc(var(--board-tab-height) / 2);
+    right: var(--board-gutter);
+    transform: translateY(-50%);
+  }
+
+  .is-task-board .board-schedule-head:has(> .board-schedule-note[hidden]) {
+    margin-bottom: 0;
+  }
 }
 
 /* 범위 선택은 폴더 아이콘을 단 상자이고 (시안의 scope-select), 상자 안의

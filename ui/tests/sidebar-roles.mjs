@@ -210,7 +210,8 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
       JSON.stringify(lines),
     );
 
-    /* ⑥ — the tab strip leads with the same word. The strip paints the checkout in front, so each is put in front in turn. */
+    /* ⑥ — the tab strip says the work, and its tip says the role (t-78107, 시안 2: 「코디 · …」 before every name took
+     * a third of the tab). The strip paints the checkout in front, so each is put in front in turn. */
     const strip = await page.evaluate(async (terms) => {
       const front = activeWorktreePath;
       const read = {};
@@ -219,7 +220,8 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
         activeWorktreePath = tab.worktree;
         renderTabs();
         await window.__PAINTED__();
-        read[term] = document.querySelector(`.tab[data-tab="${CSS.escape(tab.id)}"] .tab-label`)?.textContent ?? null;
+        const node = document.querySelector(`.tab[data-tab="${CSS.escape(tab.id)}"]`);
+        read[term] = { label: node?.querySelector(".tab-label")?.textContent ?? null, tip: node?.dataset.tip ?? "" };
       }
       activeWorktreePath = front;
       renderTabs();
@@ -227,10 +229,12 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
       return read;
     }, [9501, 9502, 9503, 9504]);
     ok(
-      "a tab leads with the same role word as its row — 코디 ·, 워커 · (also for the taken-over worker) — and a tab nobody seated keeps its plain name",
-      strip[9501]?.startsWith(`${words.coordinator} · `) && strip[9502]?.startsWith(`${words.worker} · `) &&
-        strip[9503]?.startsWith(`${words.worker} · `) && strip[9504] !== null &&
-        ![words.coordinator, words.worker].some((word) => strip[9504].startsWith(`${word} · `)),
+      "a tab's name leads with no role word, and its tip names the role its row wears — 코디, 워커 (also for the taken-over worker) — while a tab nobody seated keeps its plain name and says no role (t-78107)",
+      [9501, 9502, 9503, 9504].every((term) => strip[term]?.label !== null &&
+        ![words.coordinator, words.worker].some((word) => strip[term].label.startsWith(`${word} · `))) &&
+        strip[9501].tip.includes(words.coordinator) && strip[9502].tip.includes(words.worker) &&
+        strip[9503].tip.includes(words.worker) &&
+        ![words.coordinator, words.worker].some((word) => strip[9504].tip.includes(word)),
       JSON.stringify(strip),
     );
 

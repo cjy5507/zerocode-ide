@@ -1847,6 +1847,7 @@ function worktreeListShape(held) {
       // PR 레인의 소속은 리뷰 지도에서 파생된다 — 지도가 움직이면 세대가
       // 오르고, 세대가 곧 shape다(상태 모드의 activityGeneration과 같은 결).
       `|${reviewGeneration}|${[...closedStateGroups].sort().join(",")}`,
+    `R${[...restingProjectPaths(listedProjects())].join(",")}|${restingProjectsOpen}`,
   ];
   for (const project of listedProjects()) {
     // `external` is what `externalWorktreeCard` is built from — a prompt about
@@ -3424,18 +3425,26 @@ function setSidebarView(patch) {
   });
 }
 
-/* The column's heading is the grouping's name. Orca writes it as bare
- * strings — `groupBy === 'repo' ? 'Projects' : 'Workspaces'` — untranslated
- * in every locale, and stamps the choice on `data-sidebar-section-title`
- * (SidebarHeader.tsx:21,28); both follow the menu's groupBy through the one
- * writer above. The markup's default says Projects because `repo` is the
- * default grouping (ui.ts:2061 in the original, `sidebarGroupBy`'s own
- * initializer here) — hydration to anything else repaints. */
+/* The column's heading is the grouping's name, stamped on
+ * `data-sidebar-section-title` the way Orca's is (SidebarHeader.tsx:21,28);
+ * both follow the menu's groupBy through the one writer above. Orca writes
+ * the words as bare English; here they are the person's language (t-78107,
+ * 시안 7: 「Projects」 was the one English word over a Korean column), and the
+ * team view's switch stands beside them — 「프로젝트 | 팀 보기」. The markup's
+ * default is the `repo` grouping's — hydration to anything else repaints. */
+const SIDEBAR_SECTION_WORDS = Object.freeze({
+  projects: { key: "sidebar.sectionProjects", word: "프로젝트" },
+  workspaces: { key: "sidebar.sectionWorkspaces", word: "워크스페이스" },
+});
+
 function paintSidebarTitle() {
-  const projects = sidebarGroupBy === "repo";
+  const section = sidebarGroupBy === "repo" ? "projects" : "workspaces";
+  const { key, word } = SIDEBAR_SECTION_WORDS[section];
   const title = el("sidebar-title");
-  title.textContent = projects ? "Projects" : "Workspaces";
-  title.dataset.sidebarSectionTitle = projects ? "projects" : "workspaces";
+  title.dataset.i18n = key;
+  title.dataset.i18nSource = word;
+  title.textContent = t(key, word);
+  title.dataset.sidebarSectionTitle = section;
 }
 
 function setSidebarGroupBy(mode) {
@@ -5753,6 +5762,48 @@ function listedProjects() {
   );
 }
 
+/* 2차 A (t-78107, 시안 7): the projects that rest — folded, not the one this
+ * window stands in, and holding no agent — stand as ONE line, 「쉬는 프로젝트
+ * 10 · newbcr · Obsidian …」, not ten headers. Only once the startup restore
+ * has spoken (`startupProjectFoldsReady`): before that every project is folded
+ * on purpose and none has said yet whether it holds work. */
+let restingProjectsOpen = false;
+
+function restingProjectPaths(listed) {
+  if (sidebarGroupBy !== "repo" || !startupProjectFoldsReady) return new Set();
+  const busy = new Set(detachedAgents.values());
+  for (const tab of tabs) {
+    if (tab.kind === "term" && paneLeaves(tab.layout).some(termHoldsAgent)) busy.add(tab.worktree);
+  }
+  return new Set(listed
+    .filter((project) => closedProjects.has(project.path) && project.path !== activeProjectPath
+      && !project.worktrees.some((worktree) => worktree.active || busy.has(worktree.path)))
+    .map((project) => project.path));
+}
+
+function restingProjectsRow(resting) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "proj-resting";
+  row.setAttribute("aria-expanded", String(restingProjectsOpen));
+  const twist = document.createElement("span");
+  twist.className = "twist";
+  twist.innerHTML = icon("chevron", restingProjectsOpen);
+  const word = document.createElement("span");
+  word.className = "proj-resting-word";
+  word.textContent = t("sidebar.restingProjects", "쉬는 프로젝트 {{count}}", { count: resting.length });
+  const names = document.createElement("span");
+  names.className = "proj-resting-names";
+  names.textContent = resting.map((project) => project.name).join(" · ");
+  row.append(twist, word, names);
+  row.dataset.tip = t("sidebar.restingProjectsTip", "에이전트가 없는 접힌 프로젝트입니다 — 누르면 펼칩니다");
+  row.addEventListener("click", () => {
+    restingProjectsOpen = !restingProjectsOpen;
+    void refreshWorktrees();
+  });
+  return row;
+}
+
 async function refreshWorktrees() {
   const generation = ++worktreeRefreshGeneration;
   let nextProjects;
@@ -5983,7 +6034,17 @@ async function refreshWorktrees() {
     groupNode.append(makeStateGroupHeader(group), children);
     worktreeList.appendChild(groupNode);
   }
-  for (const project of sidebarGroupBy === "repo" ? listed : []) {
+  // The resting line stands after the projects at work, and the projects it
+  // stands for follow it while it is open.
+  const resting = restingProjectPaths(listed);
+  const restingList = listed.filter((project) => resting.has(project.path));
+  const restingRow = restingList.length > 0 ? restingProjectsRow(restingList) : null;
+  const drawnProjects = [
+    ...listed.filter((project) => !resting.has(project.path)),
+    ...(restingProjectsOpen ? restingList : []),
+  ];
+  for (const project of sidebarGroupBy === "repo" ? drawnProjects : []) {
+    if (restingRow && !restingRow.isConnected && resting.has(project.path)) worktreeList.appendChild(restingRow);
     const projectNode = document.createElement("div");
     projectNode.className = "proj";
     projectNode.dataset.projectPath = project.path;
@@ -6015,6 +6076,7 @@ async function refreshWorktrees() {
     projectNode.append(makeProjectHeader(project), children);
     worktreeList.appendChild(projectNode);
   }
+  if (restingRow && !restingRow.isConnected) worktreeList.appendChild(restingRow);
 
   // 절이 모두 판에 앉은 다음에야 창을 잰다 — 범위는 실제 자리에서 나온다.
   renderSidebarWindows();
@@ -6123,7 +6185,7 @@ sidebarTeamSwitch.type = "button";
 sidebarTeamSwitch.className = "team-switch";
 sidebarTeamSwitch.hidden = true;
 sidebarTeamSwitch.addEventListener("click", () => setSidebarView({ layout: "team" }));
-sidebarScroller.insertBefore(sidebarTeamSwitch, worktreeList);
+el("sidebar-title").after(sidebarTeamSwitch);
 sidebarScroller.insertBefore(sidebarTeam, worktreeList);
 
 /* What the team view read on the ledger's beat: the workers still summoned (`ledger_agents`, the answer the
