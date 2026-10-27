@@ -1951,10 +1951,11 @@ function putTurnAway(card) {
   paintYourTurn();
 }
 
-/* Everything a turn's drawing depends on, so an unchanged repaint builds nothing —
- * the minute among them, so 「N분 전」 moves on the agent clock's beat and no oftener. */
-function yourTurnsDrawing(turns, now = Date.now()) {
-  return JSON.stringify([locale, Math.floor(now / 60_000), turns.map((card) => {
+/* Everything a turn's drawing depends on, so an unchanged repaint builds nothing.
+ * The ages are not in it: they move in place on the clock's beat (`paintYourTurnAges`),
+ * so a field being typed in is never rebuilt under the person's hands. */
+function yourTurnsDrawing(turns) {
+  return JSON.stringify([locale, turns.map((card) => {
     const key = yourTurnKey(card);
     const draft = yourTurnDrafts.get(key);
     return [key, card.heading, card.changed_at, draft?.sending, draft?.refusal, draft?.index, draft?.selections];
@@ -1968,7 +1969,7 @@ function paintYourTurn() {
   const turns = yourTurns(now);
   writeClass(el("your-turn"), "is-live", turns.length > 0);
   writeTextContent(el("your-turn-count"), String(turns.length));
-  const drawing = yourTurnsDrawing(turns, now);
+  const drawing = yourTurnsDrawing(turns);
   paintYourTurnGroup(turns, drawing);
   if (!el("your-turn-list").hidden) paintYourTurnList(turns, drawing);
 }
@@ -2002,11 +2003,30 @@ function yourTurnHeadNode(card, kind, now, open = null) {
   const agent = document.createElement("span");
   agent.className = "your-turn-agent";
   agent.textContent = card.agent;
+  head.append(mark, name, agent, yourTurnAgeNode(card.changed_at || card.at || now, now));
+  return head;
+}
+
+/* An age that moves on the clock's beat in place: the moment it counts from
+ * rides the node, and an `oldest` one says it in the head's words. */
+function yourTurnAgeNode(at, now, oldest = false) {
   const age = document.createElement("span");
   age.className = "your-turn-age";
-  age.textContent = agoWord(card.changed_at || card.at || now, now);
-  head.append(mark, name, agent, age);
-  return head;
+  age.dataset.at = String(at);
+  if (oldest) age.dataset.oldest = "";
+  writeYourTurnAge(age, now);
+  return age;
+}
+
+function writeYourTurnAge(age, now) {
+  const words = agoWord(Number(age.dataset.at), now);
+  writeTextContent(age, "oldest" in age.dataset ? t("yourTurn.oldest", "가장 오래 {{age}}", { age: words }) : words);
+}
+
+function paintYourTurnAges(now = Date.now()) {
+  for (const host of [el("your-turn-group"), el("your-turn-list")]) {
+    for (const age of host.querySelectorAll(".your-turn-age[data-at]")) writeYourTurnAge(age, now);
+  }
 }
 
 function yourTurnAllowNode(card, draft, chord) {
@@ -2037,13 +2057,10 @@ function yourTurnOpenNode(card) {
   return yourTurnButton("btn your-turn-open", t("yourTurn.open", "대화 열기"), () => openTurnConversation(card));
 }
 
-/* 「가장 오래 N분」 — how long the oldest of the turns has waited. */
+/* 「가장 오래 N분」 — how long the oldest of the turns has waited; nothing at none. */
 function yourTurnOldestNode(turns, now) {
-  const oldest = Math.min(...turns.map((card) => card.changed_at || card.at || now));
-  const age = document.createElement("span");
-  age.className = "your-turn-age";
-  age.textContent = turns.length > 0 ? t("yourTurn.oldest", "가장 오래 {{age}}", { age: agoWord(oldest, now) }) : "";
-  return age;
+  if (turns.length === 0) return Object.assign(document.createElement("span"), { className: "your-turn-age" });
+  return yourTurnAgeNode(Math.min(...turns.map((card) => card.changed_at || card.at || now)), now, true);
 }
 
 function yourTurnRefusalNode(draft) {
@@ -2109,7 +2126,7 @@ function yourTurnRowNode(card, now) {
 
 /* ---- the list dropped from the chip ---- */
 
-function openYourTurnList(focusKey = null) {
+function openYourTurnList() {
   const list = el("your-turn-list");
   const chip = el("your-turn");
   // Hung from the chip's own edge, wherever the title bar has put it — read
@@ -2125,7 +2142,7 @@ function openYourTurnList(focusKey = null) {
   yourTurnListDrawn = "";
   paintYourTurnList(yourTurns());
   const items = [...list.querySelectorAll(".your-turn-item")];
-  (items.find((item) => item.dataset.key === focusKey) ?? items[0] ?? list).focus();
+  (items[0] ?? list).focus();
 }
 
 function closeYourTurnList({ restoreFocus = true } = {}) {
@@ -12361,6 +12378,8 @@ function reconcilePaneAgentSnapshot(panes) {
   // Otherwise a matching push takes the listener's same-state early return
   // and leaves (for example) the door badge on its pre-snapshot count.
   if (changed) scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
+  // A repaired turn is followed or let go as a pushed one is (`helperPageFollowed`).
+  if (changed) helperClock.sync();
   return changed;
 }
 
@@ -12411,10 +12430,11 @@ const agentClock = idlePoller({
       void refreshPaneAgentSnapshot();
     }
     paintLaneSubagentClocks();
-    // The turns' ages move on this beat, and a turn put away comes back on it
-    // once its ten minutes are up: whatever waits is an agent, so the beat is
-    // already running. A beat inside the same minute builds nothing.
-    if (attentionCards.length > 0) paintYourTurn();
+    // A turn put away comes back on this beat once its ten minutes are up, and
+    // the turns' ages move on it in place: whatever waits is an agent, so the
+    // beat is already running.
+    if (yourTurnLater.size > 0) paintYourTurn();
+    if (attentionCards.length > 0) paintYourTurnAges();
   },
 });
 
@@ -13606,21 +13626,21 @@ function activeAgentTerm() {
  * or goes (`placePaneHeadLine`) — and a lookup by id finds nothing then. The
  * next paint puts it back where it belongs. */
 const viewToggle = el("view-toggle");
+const viewToggleButtons = [el("view-toggle-term"), el("view-toggle-chat")];
 
 function paintViewToggle() {
-  const seg = viewToggle;
   const term = activeAgentTerm();
   const wire = activeWireTab();
-  seg.hidden = term === null && wire === null;
+  viewToggle.hidden = term === null && wire === null;
   // Beside the pane it speaks for, in its tab's head; a wire's page has no
   // panes and keeps it at home in the title bar.
   const home = term === null ? el("view-toggle-home") : paintPaneHead(currentTab(), term).__line.querySelector(".pane-head-view");
-  if (seg.parentElement !== home) home.appendChild(seg);
-  if (seg.hidden) return;
+  if (viewToggle.parentElement !== home) home.appendChild(viewToggle);
+  if (viewToggle.hidden) return;
   // A wire tab that continues a pane's conversation IS its 「대화」.
   const on = wire !== null || paneChatOn(term);
-  for (const [id, pressed] of [["view-toggle-term", !on], ["view-toggle-chat", on]]) {
-    const button = seg.querySelector(`#${id}`);
+  for (const button of viewToggleButtons) {
+    const pressed = (button.id === "view-toggle-chat") === on;
     button.classList.toggle("is-active", pressed);
     button.setAttribute("aria-pressed", String(pressed));
   }
@@ -13695,9 +13715,10 @@ function paintPaneHead(tab, term) {
     head = paneHeadNode();
     paneHeads.set(tab.id, head);
     // Above the tree, which stays as it is — its slots hold the screens and
-    // the conversation — and whose shells measure the room the head left.
+    // the conversation. It stands aside until `placePaneHeadLine` says where
+    // the line goes, so the shells below measure the room it leaves once.
+    head.hidden = true;
     paneHost(tab).prepend(head);
-    remeasurePanes(tab);
   }
   const agent = paneAgents.get(term) ?? "";
   writeTextContent(head.querySelector(".pane-head-mark"), agentVoice(agent).glyph);

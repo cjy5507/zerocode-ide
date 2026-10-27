@@ -413,14 +413,13 @@ async function askPileHistory(head) {
     // No repository: the section says nothing rather than an error.
   }
   if (pileHistoryHead !== head || el("activity-pile").hidden) return;
-  pileHistory = { rows: (history?.rows ?? []).filter((row) => row.kind !== "incoming-changes" && row.kind !== "outgoing-changes"), more: history?.has_more === true };
+  pileHistory = { rows: (history?.rows ?? []).filter((row) => !isHistoryBoundary(row)), more: history?.has_more === true };
   paintStackedWork();
 }
 
 /* The tab went down: its nodes and the commits it asked for go with it. */
 function leaveStackedWork() {
   el("activity-pile").replaceChildren();
-  pileDrawn = "";
   pileHistory = null;
   pileHistoryHead = null;
 }
@@ -459,10 +458,12 @@ function paintStackedWork() {
   const lane = releaseLane && typeof releaseLane === "object" ? releaseLane : null;
   const branchHead = scmCompareContext?.head ?? "";
   if (pileHistoryHead !== branchHead) void askPileHistory(branchHead);
-  const checks = checksReport?.checks ?? null;
+  const checks = checksReport?.checks ?? [];
+  const tally = checksTally(checks).filter(([, count]) => count > 0);
+  const unseated = checkouts.filter((worktree) => worktreeAgentRows(worktree.path).length === 0).length;
   const drawing = JSON.stringify([locale, project?.name, lane?.sha, lane?.version, lane?.phase, deskReleaseVerdict(lane ?? {}),
-    checkouts.map((worktree) => [worktree.path, worktree.branch, worktree.landing, worktreeAgentRows(worktree.path).length]),
-    branchHead, upstreamState?.upstream, scmEntries.length, checks && checksTally(checks),
+    checkouts.map((worktree) => [worktree.path, worktree.branch, worktree.landing]), unseated,
+    branchHead, upstreamState?.upstream, scmEntries.length, tally.map(([name, count]) => [name, count]),
     pileHistory?.rows.map((row) => row.item.id), pileHistory?.more]);
   if (drawing === pileDrawn && panel.childElementCount > 0) return;
   pileDrawn = drawing;
@@ -470,10 +471,9 @@ function paintStackedWork() {
   // When these facts were read: the panel redraws only when one of them moves.
   const now = Date.now();
   head.append(deskElement("strong", "pile-title", t("pile.title", "쌓인 일")),
-    deskElement("span", "pile-project", [project?.name, boardClock(now, now)].filter(Boolean).join(" · ")));
-  head.lastChild.classList.add("pile-when");
-  panel.replaceChildren(head, ...[pileReleaseSection(lane), pileUnlandedSection(checkouts), pileRepositorySection(checks),
-    pileCommitsSection()].filter(Boolean));
+    deskElement("span", "pile-project pile-when", [project?.name, boardClock(now, now)].filter(Boolean).join(" · ")));
+  panel.replaceChildren(head, ...[pileReleaseSection(lane), pileUnlandedSection(checkouts, unseated),
+    pileRepositorySection(tally), pileCommitsSection()].filter(Boolean));
 }
 
 /* The release lane, as the build line's card says it: its version, its verdict
@@ -485,7 +485,7 @@ function pileReleaseSection(lane) {
   if (lane?.sha) {
     const verdict = DESK_RELEASE_VERDICTS[deskReleaseVerdict(lane)];
     const row = deskElement("p", "pile-release");
-    const version = lane.version ? `v${lane.version}` : String(lane.sha).slice(0, SHORT_COMMIT_LENGTH);
+    const version = deskReleaseVersionWord(lane);
     // The verdict wears the board's own status dot (`.board-state[data-dot]`) beside its word.
     const state = deskElement("span", "board-state pile-release-state",
       [t(verdict.key, verdict.word), lane.phase ? deskReleasePhaseWord(String(lane.phase)) : ""].filter(Boolean).join(" · "));
@@ -501,7 +501,7 @@ function pileReleaseSection(lane) {
 /* The work not in main: the sum, then each branch with its commits and, when
  * it runs far behind, how far — the sidebar's own words for it. A row opens
  * that checkout. */
-function pileUnlandedSection(checkouts) {
+function pileUnlandedSection(checkouts, unseated) {
   if (checkouts.length === 0) return null;
   const commits = unlandedCommitCount(checkouts);
   const total = deskElement("p", "pile-total");
@@ -528,13 +528,12 @@ function pileUnlandedSection(checkouts) {
     row.addEventListener("click", () => void activateWorktree(worktree.path));
     return row;
   });
-  return pileSectionNode(t("pile.unlanded", "미반영"), null, [total, bar, ...rows, pileUnseatedNode(checkouts)].filter(Boolean));
+  return pileSectionNode(t("pile.unlanded", "미반영"), null, [total, bar, ...rows, pileUnseatedNode(checkouts, unseated)].filter(Boolean));
 }
 
 /* The branches no agent window holds, and the door to the review that cleans
  * them up (`openCleanup`, the sidebar's own). */
-function pileUnseatedNode(checkouts) {
-  const unseated = checkouts.filter((worktree) => worktreeAgentRows(worktree.path).length === 0).length;
+function pileUnseatedNode(checkouts, unseated) {
   if (unseated === 0) return null;
   const note = deskElement("p", "pile-note", unseated === checkouts.length
     ? t("pile.unseatedAll", "{{count}} 가지 모두 에이전트 창 없음", { count: unseated })
@@ -549,14 +548,12 @@ function pileUnseatedNode(checkouts) {
 /* The branch against its upstream, the files changed and the review's checks —
  * the source-control list's own facts — and the door to that list. Checks the
  * window has not read say a dash. */
-function pileRepositorySection(checks) {
+function pileRepositorySection(tally) {
   const branch = scmRefLabel(scmCompareContext?.head ?? "") || "HEAD";
   const upstream = upstreamState?.upstream ?? "";
   const line = deskElement("p", "pile-repo", upstream ? `${branch} → ${upstream}` : branch);
   const changed = deskElement("p", "pile-repo-changed", t("pile.changed", "바뀐 파일 {{count}}", { count: scmEntries.length }));
-  const said = (checks ?? []).length > 0
-    ? checksTally(checks).filter(([, count]) => count > 0).map(([, count, word]) => `${count} ${word}`).join(" · ")
-    : "—";
+  const said = tally.map(([, count, word]) => `${count} ${word}`).join(" · ") || "—";
   const verdict = deskElement("p", "pile-checks", `${t("pile.checks", "자동 확인")} · ${said}`);
   const door = deskElement("button", "btn pile-scm", t("pile.openScm", "소스 컨트롤 열기"));
   door.type = "button";
@@ -570,7 +567,7 @@ function pileRepositorySection(checks) {
 function pileCommitsSection() {
   if (!pileHistory || pileHistory.rows.length === 0) return null;
   const list = deskElement("div", "pile-commits");
-  list.append(...pileHistory.rows.map(historyRow));
+  list.append(...historyNodes(pileHistory.rows));
   const rows = [list];
   if (pileHistory.more) {
     const more = deskElement("button", "btn pile-more", t("pile.more", "더 보기"));
@@ -581,8 +578,7 @@ function pileCommitsSection() {
     });
     rows.push(more);
   }
-  const count = `${pileHistory.rows.length}${pileHistory.more ? "+" : ""}`;
-  return pileSectionNode(t("pile.commits", "커밋"), count, rows);
+  return pileSectionNode(t("pile.commits", "커밋"), historyCountWords(pileHistory.rows, pileHistory.more), rows);
 }
 
 /* ---- where the branch stands against its upstream ----
@@ -3212,25 +3208,9 @@ async function refreshHistory() {
     return;
   }
   const rows = history?.rows ?? [];
-  host.replaceChildren();
-  for (const row of rows) {
-    host.appendChild(historyRow(row));
-    // A rebuild puts back what the person had open — the panel refills from
-    // the sheet cache without asking git anything twice.
-    if (row.kind !== "incoming-changes" && row.kind !== "outgoing-changes" &&
-        historyExpanded.has(row.item.id)) {
-      host.appendChild(historyFilesPanel(row.item));
-    }
-  }
+  host.replaceChildren(...historyNodes(rows));
   historyTitle.hidden = false;
-  // The little number beside COMMITS — commits only, never the seam rows,
-  // wearing a `+` while more history exists past the page (Orca's own head).
-  const commits = rows.filter(
-    (row) => row.kind !== "incoming-changes" && row.kind !== "outgoing-changes",
-  ).length;
-  el("scm-history-count").textContent = commits
-    ? `${commits}${history?.has_more ? "+" : ""}`
-    : "";
+  el("scm-history-count").textContent = historyCountWords(rows, history?.has_more);
   more.hidden = !history?.has_more || historyLimit >= HISTORY_LIMIT_MAX;
 }
 
@@ -3242,13 +3222,34 @@ el("scm-history-refresh").addEventListener("click", () => {
   void refreshHistory();
 });
 
+/* Incoming/Outgoing Changes: the seam where this history stops being local,
+ * drawn among the commits but not one of them. */
+function isHistoryBoundary(row) {
+  return row.kind === "incoming-changes" || row.kind === "outgoing-changes";
+}
+
+/* The little number beside a list of commits — commits only, never the seam
+ * rows, wearing a `+` while more history exists past the page (Orca's own head). */
+function historyCountWords(rows, more) {
+  const commits = rows.filter((row) => !isHistoryBoundary(row)).length;
+  return commits ? `${commits}${more ? "+" : ""}` : "";
+}
+
+/* The rows of a history, each commit the person had open put back open under
+ * it — refilled from the sheet cache without asking git anything twice. */
+function historyNodes(rows) {
+  return rows.flatMap((row) => !isHistoryBoundary(row) && historyExpanded.has(row.item.id)
+    ? [historyRow(row), historyFilesPanel(row.item)]
+    : [historyRow(row)]);
+}
+
 /* One commit's row: graph cell, subject, badges — Orca's
  * `[auto minmax(0,1fr) auto]` grid. The boundary rows (Incoming/Outgoing
  * Changes) mute their words the way Orca greys them: they are not commits,
  * they are the seam where this history stops being local. */
 function historyRow(row) {
   const item = row.item;
-  const boundary = row.kind === "incoming-changes" || row.kind === "outgoing-changes";
+  const boundary = isHistoryBoundary(row);
   // A commit row is a real button — it opens into its files (Orca's own
   // expand, GitHistoryRow's `onToggleExpand`). The boundary rows stay plain:
   // Incoming/Outgoing are seams, not commits, and a seam has no files.
@@ -4322,6 +4323,8 @@ function checkStamp(iso) {
 /* ---- drawing ---- */
 
 function paintChecks() {
+  // 쌓인 일 says the checks too, while its tab is up (its drawing skips a repeat).
+  if (!el("activity-pile").hidden) paintStackedWork();
   const report = checksReport;
   const checks = report?.checks ?? [];
   paintReviewHead(report);
