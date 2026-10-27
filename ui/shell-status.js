@@ -4841,6 +4841,9 @@ function paintTabNode(node, tab) {
   // at the strip it IS the same sentence — one arrives over a socket and the
   // other through a hook.
   const said = hookStateOfTab(tab);
+  // A pane whose ring the notify seat took away is not marked as waiting
+  // either (t-6043): the mark is the ring's twin on the strip.
+  const waiting = said === "needs-attention" && !tabHushed(tab);
   const lead = tabAgentTerm(tab);
   const ago = termAgeWords(lead);
   const classes = [
@@ -4865,9 +4868,7 @@ function paintTabNode(node, tab) {
     tab.kind === "term" && paneLeaves(tab.layout).some((term) => bellRang.has(term))
       ? "is-bell"
       : "",
-    // A pane whose ring the notify seat took away is not marked as waiting
-    // either (t-6043): the mark is the ring's twin on the strip.
-    said === "needs-attention" && !tabHushed(tab) ? "is-waiting" : "",
+    waiting ? "is-waiting" : "",
     said === "working" ? "is-streaming" : "",
     tab.color ? "has-color" : "",
     ago ? "has-age" : "",
@@ -4946,7 +4947,9 @@ function paintTabNode(node, tab) {
     tab.kind === "lane"
       ? (lane?.session_id ?? "")
       : tab.kind === "term"
-        ? termTabTip(tab)
+        // The ring said in words too (시안 2: the shape and the word together),
+        // the word the sidebar's row wears for the same state.
+        ? [waiting ? bucketWord("attention") : "", termTabTip(tab)].filter(Boolean).join(" · ")
         : (tab.path ?? "");
   if (node.dataset.tip !== tip) node.dataset.tip = tip;
 }

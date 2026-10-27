@@ -5818,6 +5818,9 @@ function restingProjectsRow(resting) {
   names.className = "proj-resting-names";
   names.textContent = resting.map((project) => project.name).join(" · ");
   row.append(twist, word, names);
+  // Spoken apart: the gap between the count and the names is drawn, not
+  // written, and the line read whole ran them together (「…5newbcr」).
+  row.setAttribute("aria-label", `${word.textContent} · ${names.textContent}`);
   row.dataset.tip = t("sidebar.restingProjectsTip", "에이전트가 없는 접힌 프로젝트입니다 — 누르면 펼칩니다");
   row.addEventListener("click", () => foldWithScrollAnchor(row, () => {
     restingProjectsOpen = !restingProjectsOpen;
