@@ -6040,6 +6040,14 @@ mod tests {
             (unknown.code.as_str(), unknown.message.as_str()),
             (error_code::INVALID_ARGUMENT, "unknown flag --pane")
         );
+        // A bare `--app` is a flag missing its value, read before the verb's
+        // hand is judged: nothing names an app, so no app's verb is offered.
+        let bare = parse_command_coded(&words(&["mouse-click", "--x", "1", "--y", "2", "--app"]))
+            .unwrap_err();
+        assert_eq!(
+            (bare.code.as_str(), bare.message.as_str()),
+            (error_code::INVALID_ARGUMENT, "--app needs a value")
+        );
     }
 
     /// A screen left of or above the main one has negative coordinates

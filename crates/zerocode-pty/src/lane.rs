@@ -1598,8 +1598,9 @@ impl Drop for PtyLane {
 /// rounds is fifty-five opens of `/dev/ptmx`: far past a race between a
 /// handful of opens, and still a prompt answer for an error that does not
 /// pass. A round the race never lets go of sleeps 0.4 s in the kernel
-/// (10 ms times the sixth to the tenth reopen), so the worst a pane waits
-/// is about 2 s, against 0.4 s with one ask.
+/// (the nth reopen from the sixth sleeps n × 10 ms: 60 + 70 + 80 + 90 +
+/// 100 ms), so the worst a pane waits is about 2 s, against 0.4 s with one
+/// ask.
 const PTY_OPEN_ATTEMPTS: usize = 5;
 
 /// XNU's in-kernel "redrive open" (`bsd/sys/errno.h`), which `libc` does
