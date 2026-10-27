@@ -175,6 +175,123 @@ async function testChromeSidebarAndTabs(browser, origin, ok) {
   }
 }
 
+/* 5 — the line under a name is read, not cut to a syllable: the branch's own
+ * words and the chips beside them share the line, so neither takes it all.
+ * At 1280 px the chip 「미반영 6 · main보다 20 뒤」 took 129 px of the
+ * stack row and left its words 52 of the 91 px they need — 「에이전트」 —
+ * and at 1000 px 32 (review t-78487, P2-1). The share asked: the words
+ * whole, or at least a third of the line — the chips' news keeps the rest
+ * (sidebar-landing-state). */
+async function testBranchLineRoom(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await standChrome(page);
+    for (const width of [1280, 1000]) {
+      await page.setViewportSize({ width, height: 900 });
+      await frames(page);
+      const rows = await page.evaluate(() => [...document.querySelectorAll(".wt-row")].flatMap((row) => {
+        const line = row.querySelector(".wt-titlebox > .wt-branch");
+        if (!line || line.hidden || line.offsetParent === null) return [];
+        const box = row.querySelector(".wt-titlebox").getBoundingClientRect().width;
+        const chip = row.querySelector(".wt-landing");
+        // What the line's words take whole: its parts give way inside it, so
+        // the line itself never reads as cut.
+        const wants = [...line.children].filter((part) => !part.hidden && part.offsetParent !== null).reduce((sum, part) => {
+          const style = getComputedStyle(part);
+          return sum + part.scrollWidth + parseFloat(style.marginLeft) + parseFloat(style.marginRight);
+        }, 0);
+        return [{
+          path: row.dataset.worktreePath,
+          line: line.clientWidth,
+          wants: Math.round(wants),
+          box: Math.round(box),
+          chip: chip && getComputedStyle(chip).display !== "none" ? chip.clientWidth : 0,
+        }];
+      }));
+      ok(`at ${width} px every branch line under a name keeps its words whole or a third of the line, never a syllable (시안 5)`,
+        rows.length >= 2 && rows.every((one) => one.line + 1 >= Math.min(one.wants, one.box / 3)),
+        JSON.stringify(rows));
+    }
+    ok("the branch line scene raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* 10 — one ground: the terminal on the default theme stands on the floor the
+ * conversation does, not on the theme's lighter grey — the person's 10-27
+ * photo showed the centre alone in another material (#1d1e24 inside #151515).
+ * A theme the person picked keeps its own ground, and the shell is told the
+ * ground it is drawn on (OSC 11, t-73869). */
+async function testOneGround(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await standChrome(page);
+    // `picked`: a colour the reading resolves beside the screen's, so both
+    // compare as the same computed form.
+    const read = (picked = null) => page.evaluate(async (picked) => {
+      await window.__PAINTED__();
+      // One written form for every colour: the screen's ground is a
+      // color-mix (the window's opacity), its gutter a plain var.
+      const pen = document.createElement("canvas").getContext("2d");
+      const ink = (css) => {
+        const probe = document.createElement("i");
+        probe.style.color = css ?? "";
+        document.body.appendChild(probe);
+        const value = getComputedStyle(probe).color;
+        probe.remove();
+        const mixed = value.match(/^color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)\)$/);
+        pen.fillStyle = mixed ? `rgb(${mixed.slice(1).map((one) => Math.round(Number(one) * 255)).join(", ")})` : value;
+        return pen.fillStyle;
+      };
+      const screen = document.querySelector(".pane-slot > .terminal");
+      const panes = document.querySelector(".panes");
+      const reported = window.__REPORTED_GROUNDS__.at(-1) ?? null;
+      return {
+        screen: screen ? ink(getComputedStyle(screen).backgroundColor) : null,
+        panes: panes ? ink(getComputedStyle(panes).backgroundColor) : null,
+        chat: ink("var(--chat-ground)"),
+        floor: ink("var(--surface-abyss)"),
+        reported: reported ? ink(reported) : null,
+        picked: picked ? ink(picked) : null,
+      };
+    }, picked);
+    await page.evaluate(() => {
+      window.__REPORTED_GROUNDS__ = [];
+      window.__ANSWER__.report_terminal_colors = ({ report }) => { window.__REPORTED_GROUNDS__.push(report.background); return null; };
+      // Told again, as on a fresh start: the palette reports only a change.
+      terminalPaletteSignature = "";
+      applyTheme();
+    });
+    const dark = await read();
+    await page.evaluate(() => { document.documentElement.dataset.theme = "light"; applyTerminalPalette(); });
+    const light = await read();
+    const picked = await page.evaluate(() => {
+      delete document.documentElement.dataset.theme;
+      const themes = termPrefsSpec.terminal_themes;
+      const fallback = themes[termPrefsSpec.theme_defaults.dark];
+      const name = Object.keys(themes).find((one) => themes[one].background !== fallback.background);
+      termPrefs.theme_dark = name;
+      applyTerminalPalette();
+      return { name, background: themes[name].background };
+    });
+    const chosen = await read(picked.background);
+    ok("the terminal on the default theme stands on the conversation's ground, the floor, in both treatments (시안 10)",
+      dark.screen === dark.chat && dark.panes === dark.chat && dark.chat === dark.floor &&
+        light.screen === light.chat && light.panes === light.chat,
+      JSON.stringify({ dark, light }));
+    ok("the shell is told the ground the terminal is drawn on (OSC 11)",
+      dark.reported === dark.screen && light.reported === light.screen, JSON.stringify({ dark, light }));
+    ok("a theme the person picked keeps its own ground",
+      chosen.screen === chosen.picked && chosen.reported === chosen.picked, JSON.stringify({ picked, chosen }));
+    ok("the ground scene raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
 /* 13 — a 14 px ring per provider, amber only past the hot line, never red —
  * and t-77830: the tip a focused bar item shows reaches a screen reader. */
 async function testStatusGauges(browser, origin, ok) {
@@ -526,6 +643,8 @@ async function testQuietContrast(browser, origin, ok) {
 export async function testChromeGeist(browser, origin, ok) {
   await testGeistShips(browser, origin, ok);
   await testChromeSidebarAndTabs(browser, origin, ok);
+  await testBranchLineRoom(browser, origin, ok);
+  await testOneGround(browser, origin, ok);
   await testStatusGauges(browser, origin, ok);
   await testBoardHead(browser, origin, ok);
   await testNarrowFolds(browser, origin, ok);
