@@ -922,6 +922,41 @@ impl ChildKiller for Hangup {
 mod tests {
     use super::*;
 
+    /// The line a failed question leaves is said once the answer is written
+    /// and the lock is let go. Said under the lock, a window log that does
+    /// not take the write held every lane waiting on the answer past the
+    /// question's limit — 4.4 s against a 2 s limit (t-77569).
+    #[test]
+    fn a_failed_question_is_said_with_the_answer_written_and_the_lock_let_go() {
+        for answer in [
+            Err("the helper did not answer".to_string()),
+            Ok(Helper {
+                program: PathBuf::from("/helper"),
+                log: None,
+            }),
+        ] {
+            let naming = Arc::new(Naming {
+                answer: OnceLock::new(),
+                lock: Mutex::new(()),
+                answered: Condvar::new(),
+                limit: Duration::ZERO,
+                deadline: Instant::now(),
+            });
+            let seen = Arc::new(Mutex::new(None));
+            let (watched, record) = (Arc::clone(&naming), Arc::clone(&seen));
+            naming.settle(answer, move |_| {
+                let free = watched.lock.try_lock().is_ok();
+                let written = watched.answer.get().is_some();
+                *record.lock().unwrap_or_else(PoisonError::into_inner) = Some((free, written));
+            });
+            assert_eq!(
+                *seen.lock().unwrap_or_else(PoisonError::into_inner),
+                Some((true, true)),
+                "(lock free, answer written) as the line was said"
+            );
+        }
+    }
+
     /// What the helper is handed holds no `DYLD_*` name — dyld would take
     /// it from a hardened helper — and every value comes back under its own
     /// name, with no wrapped name left (t-77495).
