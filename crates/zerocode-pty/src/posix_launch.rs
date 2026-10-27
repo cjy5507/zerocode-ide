@@ -247,25 +247,32 @@ impl Naming {
     /// Write the answer down and wake every lane waiting on it. An answer
     /// in after the limit is no answer: a lane that gave up waiting has
     /// started straight already, and every later one starts as it did.
+    ///
+    /// The line a failed question leaves is said after the lock is let go:
+    /// it is a write to the window's log, and a write that does not return
+    /// would hold every waiting lane past the limit (t-77569).
     fn settle(&self, answer: Result<Helper, String>, unnamed: impl FnOnce(String)) {
-        let _held = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
-        let helper = match answer {
-            Ok(helper) if Instant::now() < self.deadline => Some(helper),
-            Ok(helper) => {
-                unnamed(format!(
-                    "{} answered after {:?}",
-                    helper.program.display(),
-                    self.limit
-                ));
-                None
-            }
-            Err(why) => {
-                unnamed(why);
-                None
-            }
+        let said = {
+            let _held = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+            let (helper, said) = match answer {
+                Ok(helper) if Instant::now() < self.deadline => (Some(helper), None),
+                Ok(helper) => {
+                    let late = format!(
+                        "{} answered after {:?}",
+                        helper.program.display(),
+                        self.limit
+                    );
+                    (None, Some(late))
+                }
+                Err(why) => (None, Some(why)),
+            };
+            let _ = self.answer.set(helper);
+            self.answered.notify_all();
+            said
         };
-        let _ = self.answer.set(helper);
-        self.answered.notify_all();
+        if let Some(said) = said {
+            unnamed(said);
+        }
     }
 
     /// The helper a lane starts through: the answer, waited for until the
