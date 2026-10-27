@@ -1141,13 +1141,17 @@ export async function testBoardSchedule(browser, origin, ok) {
       queuedGate.what === "게이트 l61" && queuedGate.word === "도는 중" && queuedGate.heads.includes("gate:l62") && queuedGate.l62act === "",
       JSON.stringify(queuedGate));
 
-    /* ---- 안내판 게이트 줄의 규칙 — 한 문장, 여덟 경우의 표 (review r4): 「도는 단계가 있는 게이트 → 없으면 실제로
-     * 시작한(끝난 단계가 하나라도 있는) 게이트 가운데 시작이 가장 늦은 것(통과·실패·단계 사이 대기) → 없으면 마지막으로
-     * 줄 선 것」. 줄이 멈춘 픽스처라 기다리는 일감의 계획 시작은 모두 「지금」이다 — 「마지막으로 줄 선 것」은 넣은 시각이다. ---- */
+    /* ---- 안내판 게이트 줄의 규칙 — 한 문장, 열넷 경우의 표 (review r4, t-77851): 「도는 단계가 있는 게이트 → 없으면
+     * 실제로 시작한(끝난 단계가 하나라도 있는) 게이트 가운데 지금 시도의 시작이 가장 늦은 것(통과·실패·단계 사이 대기)
+     * → 없으면 마지막으로 줄 선 것」. 시도의 시작은 단계마다 마지막 일감 가운데 가장 이른 시작이다 — 같은 이름으로 다시
+     * 도는 게이트는 첫 시도가 아니라 지금 시도로 비교된다(⑨·⑩). 시작이 같으면 실패 > 단계 사이 > 통과, 그다음 이름의
+     * 수가 큰 것(⑫). ⑥은 계획이 l62를 l61 뒤에 세워 시작 차례만으로도 맞는 경우고, 「마지막으로 줄 선 것」 갈래 자체는
+     * 계획 시작이 같은 ⑪이 고정한다 — 줄이 둘 비어 있어 둘 다 지금 서고, 나중에 줄 선 쪽이 번호는 작다. ---- */
     const gateTable = await page.evaluate((now) => {
       const base = boardScheduleAnswer;
       const l61 = base.jobs.filter((job) => job.gate === "l61");
       const minute = 60_000;
+      const second = 1_000;
       const job = (name, state, start, end, kind, extra = {}) => ({ name, who: "run11955-l62r", state, class: "first", lane: 1, cap_secs: 1800,
         queued_ms: now - 10 * minute, start_ms: start, end_ms: end, secs: end && start ? Math.round((end - start) / 1000) : null,
         rc: state === "passed" ? 0 : state === "failed" ? 1 : null, kind, gate: "l62", part: "r", what: null,
@@ -1161,27 +1165,55 @@ export async function testBoardSchedule(browser, origin, ok) {
         queued: [job("0-1792543900-run11955-l62r-g1-build", "waiting", null, null, "g1-build", { queued_ms: now - minute })],
         passed: [job("0-1792543850-run11955-l62r-g1-build", "passed", now - minute, now - 30_000, "g1-build")],
         between: [job("0-1792543850-run11955-l62r-g1-build", "passed", now - 2 * minute, now - minute, "g1-build"),
-          job("0-1792543851-run11955-l62r-g2-tests", "waiting", null, null, "g2-tests")],
+          job("0-1792543851-run11955-l62r-g2-tests", "waiting", null, null, "g2-tests", { lane: null })],
         running: [job("0-1792543850-run11955-l62r-g1-build", "running", now - minute, null, "g1-build")],
       };
+      const mix = (how61, how62) => [...l61as(how61), ...l62[how62]];
+      // ⑨·⑩: l61's first attempt failed at its lint three minutes ago, l62 passed after it, and l61 was queued again
+      // 80 s ago under the same name — every step once more, so each step's last job is the new attempt's.
+      const l61first = l61.filter((one) => one.kind === "g3a-zo-lint")
+        .map((one) => ({ ...one, state: "failed", rc: 1, end_ms: now - 3 * minute, secs: 110 }));
+      const l62before = [job("0-1792543680-run11955-l62r-g1-build", "passed", now - 2 * minute, now - 90 * second, "g1-build")];
+      const l61s = (kind, state, start, end, extra = {}) => job(`0-1792543720-run11955-l61s-${kind}`, state, start, end, kind,
+        { gate: "l61", who: "run11955-l61s", lane: start ? 2 : null, queued_ms: now - 80 * second, ...extra });
+      const again = (how) => [
+        l61s("g3a-zo-lint", "passed", now - 75 * second, now - 60 * second),
+        how === "failed" ? l61s("g1-build", "failed", now - 60 * second, now - 30 * second) : l61s("g1-build", "waiting", null, null),
+        l61s("g2-tests", "waiting", null, null),
+        l61s("g5-window-실측", "held", null, null),
+      ];
+      // ⑪: one waiting job each, different owners, two lanes free — both are planned to start now; l61 was queued last.
+      const queuedOnly = (gate, who, queuedAt, kind) => job(`0-${Math.round(queuedAt / 1000)}-${who}-${kind}`, "waiting", null, null, kind,
+        { gate, who, lane: null, queued_ms: queuedAt });
+      const l61late = [queuedOnly("l61", "run11955-l61r", now - minute, "g3a-zo-lint")];
+      const l62early = [queuedOnly("l62", "run11955-l62r", now - 4 * minute, "g1-build")];
+      // ⑫: l62's first step began at the very millisecond l61's lint did, and l62 waits between its steps while l61 failed.
+      const sameStart = l61.find((one) => one.kind === "g3a-zo-lint").start_ms;
+      const l62same = [job("0-1792543569-run11955-l62r-g1-build", "passed", sameStart, now - minute, "g1-build"),
+        job("0-1792543570-run11955-l62r-g2-tests", "waiting", null, null, "g2-tests", { lane: null })];
       const cases = [
-        ["① l61 실패 + l62 대기(시작 안 함)", "failed", "queued", "l61", "실패"],
-        ["② l61 실패 → l62 통과", "failed", "passed", "l62", "통과"],
-        ["③ l61 통과 → l62 단계 사이 대기", "passed", "between", "l62", "차례 기다림"],
-        ["④ l61 통과 → l62 도는 중", "passed", "running", "l62", "도는 중"],
-        ["⑤ l61 도는 중 + l62 대기", "running", "queued", "l61", "도는 중"],
-        ["⑥ 모두 대기(시작 안 함) → 마지막으로 줄 선 것", "waiting", "queued", "l62", "차례 기다림"],
-        ["⑦ l61 실패 → l62 단계 사이 대기", "failed", "between", "l62", "차례 기다림"],
-        ["⑧ 범위 안에 게이트 없음", "none", "none", "", ""],
+        ["① l61 실패 + l62 대기(시작 안 함)", mix("failed", "queued"), "l61", "실패"],
+        ["② l61 실패 → l62 통과", mix("failed", "passed"), "l62", "통과"],
+        ["③ l61 통과 → l62 단계 사이 대기", mix("passed", "between"), "l62", "차례 기다림"],
+        ["④ l61 통과 → l62 도는 중", mix("passed", "running"), "l62", "도는 중"],
+        ["⑤ l61 도는 중 + l62 대기", mix("running", "queued"), "l61", "도는 중"],
+        ["⑥ 모두 대기(시작 안 함) → 마지막으로 줄 선 것", mix("waiting", "queued"), "l62", "차례 기다림"],
+        ["⑦ l61 실패 → l62 단계 사이 대기", mix("failed", "between"), "l62", "차례 기다림"],
+        ["⑧ 범위 안에 게이트 없음", [], "", ""],
+        ["⑨ l61 실패 → l62 통과 → l61 재시도가 l62 뒤에 실패", [...l61first, ...l62before, ...again("failed")], "l61", "실패"],
+        ["⑩ l61 실패 → l62 통과 → l61 재시도가 단계 사이 대기", [...l61first, ...l62before, ...again("between")], "l61", "차례 기다림"],
+        ["⑪ 모두 대기, 계획 시작 같음 → 나중에 줄 선 l61 (배열 l62, l61)", [...l62early, ...l61late], "l61", "차례 기다림"],
+        ["⑪′ 같은 것, 배열 l61, l62", [...l61late, ...l62early], "l61", "차례 기다림"],
+        ["⑫ 시도 시작 같음: l61 실패 · l62 단계 사이 → 실패가 먼저 (배열 l62, l61)", [...l62same, ...l61as("failed")], "l61", "실패"],
+        ["⑫′ 같은 것, 배열 l61, l62", [...l61as("failed"), ...l62same], "l61", "실패"],
       ];
       const choice = { zoom: "now", folded: new Set(), opened: new Set(), log: null };
-      return cases.map(([name, how61, how62, gate, word]) => {
-        const jobs = [...(how61 === "none" ? [] : l61as(how61)), ...(how62 === "none" ? [] : l62[how62])];
+      return cases.map(([name, jobs, gate, word]) => {
         const line = boardScheduleModel({ ...base, jobs, lanes: [] }, [], now, choice, 900).board.lines[1];
         return { name, want: [gate, word], got: [line.name, line.word], ok: line.name === gate && line.word === word };
       });
     }, SCHEDULE_NOW);
-    ok("the board's gate line follows one rule in all eight cases — running first, then the gate that actually started and started last, then the one queued last",
+    ok("the board's gate line follows one rule in all fourteen cases — running first, then the gate whose present attempt started last (a gate run again is its new attempt), then the one queued last; a tie is decided, not the rows' order",
       gateTable.every((row) => row.ok), JSON.stringify(gateTable.filter((row) => !row.ok)));
 
     /* ---- 비어 있어도 넉 줄: 레인도 게이트도 과업도 없는 답 ---- */
