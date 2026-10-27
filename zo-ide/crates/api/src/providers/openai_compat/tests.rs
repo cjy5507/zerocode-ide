@@ -1892,7 +1892,13 @@ async fn openai_compat_restart_budget_exhausted_surfaces_error() {
         .await
         .expect("open stream");
 
-    let error = stream.next_event().await.expect_err("budget exhausted");
+    // The server never ends a stream on its own, so each wait is bounded: a
+    // broken idle timer or restart must fail this test, not hang it.
+    let bound = std::time::Duration::from_secs(10);
+    let error = tokio::time::timeout(bound, stream.next_event())
+        .await
+        .expect("the idle timeout must end the held streams")
+        .expect_err("budget exhausted");
     assert!(
         matches!(
             error,
@@ -1902,7 +1908,10 @@ async fn openai_compat_restart_budget_exhausted_surfaces_error() {
         "expected idle-timeout after restart budget exhausted"
     );
     let _ = done.send(());
-    server.await.unwrap();
+    tokio::time::timeout(bound, server)
+        .await
+        .expect("the server must have seen both streams")
+        .unwrap();
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
@@ -2007,6 +2016,8 @@ async fn openai_compat_committed_stream_propagates_instead_of_restarting() {
     let addr = listener.local_addr().unwrap();
     let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let server_hits = hits.clone();
+    let (done, finished) = tokio::sync::oneshot::channel::<()>();
+    let bound = std::time::Duration::from_secs(10);
 
     let server = tokio::spawn(async move {
         let (mut conn, _) = listener.accept().await.unwrap();
@@ -2020,12 +2031,13 @@ async fn openai_compat_committed_stream_propagates_instead_of_restarting() {
             .await
             .unwrap();
         conn.flush().await.unwrap();
-        // Hold the connection open far past the idle window: the test asserts
-        // that the IDLE TIMEOUT ends the stream, and a 600 ms hold raced it —
+        // Hold the connection open until the test is done: the test asserts
+        // that the IDLE TIMEOUT ends the stream, and a fixed hold raced it —
         // under load the client read "partial" late, the server had already
-        // hung up, and EOF arrived where the timeout was expected. The task is
-        // aborted at the end of the test.
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        // hung up, and EOF arrived where the timeout was expected (600 ms,
+        // then 30 s; t-77341).
+        let _ = finished.await;
+        drop(conn);
     });
 
     let _idle = EnvVarGuard::set(crate::providers::STREAM_IDLE_TIMEOUT_ENV, Some("300"));
@@ -2052,7 +2064,10 @@ async fn openai_compat_committed_stream_propagates_instead_of_restarting() {
         }
     }
     assert!(saw_partial, "stream must surface the committing text delta");
-    let error = stream.next_event().await.expect_err("post-commit error");
+    let error = tokio::time::timeout(bound, stream.next_event())
+        .await
+        .expect("the idle timeout must end the held stream")
+        .expect_err("post-commit error");
     assert!(
         matches!(
             error,
@@ -2062,7 +2077,11 @@ async fn openai_compat_committed_stream_propagates_instead_of_restarting() {
         "post-commit idle must propagate"
     );
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
-    server.abort();
+    let _ = done.send(());
+    tokio::time::timeout(bound, server)
+        .await
+        .expect("the server must be released")
+        .unwrap();
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -2076,6 +2095,8 @@ async fn openai_compat_restart_reopen_is_bounded_by_the_wallclock_budget() {
     let addr = listener.local_addr().unwrap();
     let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let server_hits = hits.clone();
+    let (done, finished) = tokio::sync::oneshot::channel::<()>();
+    let bound = std::time::Duration::from_secs(10);
 
     let server = tokio::spawn(async move {
         // First stream opens and goes silent pre-commit.
@@ -2093,10 +2114,13 @@ async fn openai_compat_restart_reopen_is_bounded_by_the_wallclock_budget() {
         // Reopen: accept the connection but never answer it. Without the
         // remaining-window timeout around the reopen this would park the
         // stream indefinitely (the shared client has no blanket timeout).
+        // Both sockets stay open until the test is done, so no EOF from this
+        // side can beat the restart window on a loaded machine (t-77341).
         let (mut second, _) = listener.accept().await.unwrap();
         server_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _ = second.read(&mut scratch).await;
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let _ = finished.await;
+        drop((first, second));
     });
 
     let _idle = EnvVarGuard::set(crate::providers::STREAM_IDLE_TIMEOUT_ENV, Some("300"));
@@ -2116,7 +2140,10 @@ async fn openai_compat_restart_reopen_is_bounded_by_the_wallclock_budget() {
     stream.max_restart_wallclock = std::time::Duration::from_millis(500);
 
     let started = std::time::Instant::now();
-    let error = stream.next_event().await.expect_err("reopen must time out");
+    let error = tokio::time::timeout(bound, stream.next_event())
+        .await
+        .expect("the restart window must end the reopen wait")
+        .expect_err("reopen must time out");
     assert!(
         matches!(
             &error,
@@ -2131,7 +2158,11 @@ async fn openai_compat_restart_reopen_is_bounded_by_the_wallclock_budget() {
         started.elapsed()
     );
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
-    server.abort();
+    let _ = done.send(());
+    tokio::time::timeout(bound, server)
+        .await
+        .expect("the server must be released")
+        .unwrap();
 }
 
 #[allow(clippy::await_holding_lock)]
