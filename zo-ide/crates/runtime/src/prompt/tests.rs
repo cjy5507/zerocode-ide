@@ -43,6 +43,58 @@ fn restore_env(key: &str, value: Option<String>) {
     }
 }
 
+/// Names, to a fresh run of this test binary, the root it is to work in.
+const OWN_ROOT_ENV: &str = "ZO_PROMPT_TEST_OWN_ROOT";
+
+/// The root a fresh run of one test was handed; `None` in an ordinary run.
+fn own_root() -> Option<PathBuf> {
+    std::env::var_os(OWN_ROOT_ENV).map(PathBuf::from)
+}
+
+/// The homes a skill test points away from the person's own, so none of their
+/// global or provider skills reaches the index.
+fn no_global_homes(root: &Path) -> Vec<(&'static str, PathBuf)> {
+    vec![
+        ("HOME", root.join("home")),
+        ("ZO_CONFIG_HOME", root.join("missing-zo-global")),
+        ("ZO_HOME", root.join("missing-zo-home")),
+    ]
+}
+
+/// Runs `body` on `root` with `vars` set, and with `root` as the working
+/// directory when `enter`, the way a prompt test hands the loader homes of its
+/// own; then removes `root`.
+fn with_root_exported(
+    test: &str,
+    root: &Path,
+    vars: &[(&str, PathBuf)],
+    enter: bool,
+    body: impl FnOnce(&Path),
+) {
+    let _guard = env_lock();
+    fs::create_dir_all(root).expect("root dir");
+    ensure_valid_cwd();
+    let previous_cwd = std::env::current_dir().expect("cwd");
+    let previous: Vec<_> = vars
+        .iter()
+        .map(|(key, _)| (*key, std::env::var(key).ok()))
+        .collect();
+    for (key, value) in vars {
+        std::env::set_var(key, value);
+    }
+    if enter {
+        std::env::set_current_dir(root).expect("change cwd");
+    }
+    body(root);
+    if enter {
+        std::env::set_current_dir(previous_cwd).expect("restore cwd");
+    }
+    for (key, value) in previous {
+        restore_env(key, value);
+    }
+    fs::remove_dir_all(root).unwrap_or_else(|error| panic!("{test}: cleanup temp dir: {error}"));
+}
+
 #[test]
 fn discovers_instruction_files_from_ancestor_chain() {
     let root = temp_dir();
@@ -860,223 +912,211 @@ fn split_real_built_prompt_preserves_identity_and_caches_context_trust_label() {
 
 #[test]
 fn discovers_project_skill_frontmatter_without_loading_body_into_prompt() {
-    let _guard = env_lock();
-    let root = temp_dir();
-    let nested = root.join("apps").join("api");
-    let zo_skill = root.join(".zo").join("skills").join("review");
-    let nested_zo_skill = nested.join(".zo").join("skills").join("debug");
-    let global_skill = root.join("zo-global").join("skills").join("global-help");
-    let claude_skill = nested.join(".other-tool").join("skills").join("design");
-    fs::create_dir_all(&zo_skill).expect("zo skill dir");
-    fs::create_dir_all(&nested_zo_skill).expect("nested zo skill dir");
-    fs::create_dir_all(&global_skill).expect("global skill dir");
-    fs::create_dir_all(&claude_skill).expect("claude skill dir");
-    fs::write(
-        zo_skill.join("SKILL.md"),
-        "---\nname: code-review\ndescription: Review code changes carefully\n---\n\nSECRET REVIEW BODY\n",
-    )
-    .expect("write zo skill");
-    fs::write(
-        nested_zo_skill.join("SKILL.md"),
-        "---\ndescription: Diagnose runtime failures\n---\n\nSECRET DEBUG BODY\n",
-    )
-    .expect("write nested zo skill");
-    fs::write(
-        global_skill.join("SKILL.md"),
-        "---\nname: global-help\ndescription: Zo global guidance\n---\n\nSECRET GLOBAL BODY\n",
-    )
-    .expect("write global skill");
-    // Zo paths ONLY: `.other-tool/skills` is deliberately not read. Adopting a
-    // Claude Code skill means placing (or symlinking) it under a zo root.
-    fs::write(
-        claude_skill.join("SKILL.md"),
-        "---\nname: ui-design\ndescription: Must stay out of Zo\n---\n\nSECRET DESIGN BODY\n",
-    )
-    .expect("write claude skill");
+    let root = own_root().unwrap_or_else(temp_dir);
+    let homes = [
+        ("HOME", root.join("home")),
+        ("ZO_CONFIG_HOME", root.join("zo-global")),
+        ("ZO_HOME", root.join("missing-zo-home")),
+    ];
+    with_root_exported(
+        "discovers_project_skill_frontmatter_without_loading_body_into_prompt",
+        &root,
+        &homes,
+        false,
+        |root| {
+            let nested = root.join("apps").join("api");
+            let zo_skill = root.join(".zo").join("skills").join("review");
+            let nested_zo_skill = nested.join(".zo").join("skills").join("debug");
+            let global_skill = root.join("zo-global").join("skills").join("global-help");
+            let claude_skill = nested.join(".other-tool").join("skills").join("design");
+            fs::create_dir_all(&zo_skill).expect("zo skill dir");
+            fs::create_dir_all(&nested_zo_skill).expect("nested zo skill dir");
+            fs::create_dir_all(&global_skill).expect("global skill dir");
+            fs::create_dir_all(&claude_skill).expect("claude skill dir");
+            fs::write(
+                zo_skill.join("SKILL.md"),
+                "---\nname: code-review\ndescription: Review code changes carefully\n---\n\nSECRET REVIEW BODY\n",
+            )
+            .expect("write zo skill");
+            fs::write(
+                nested_zo_skill.join("SKILL.md"),
+                "---\ndescription: Diagnose runtime failures\n---\n\nSECRET DEBUG BODY\n",
+            )
+            .expect("write nested zo skill");
+            fs::write(
+                global_skill.join("SKILL.md"),
+                "---\nname: global-help\ndescription: Zo global guidance\n---\n\nSECRET GLOBAL BODY\n",
+            )
+            .expect("write global skill");
+            // Zo paths ONLY: `.other-tool/skills` is deliberately not read. Adopting a
+            // Claude Code skill means placing (or symlinking) it under a zo root.
+            fs::write(
+                claude_skill.join("SKILL.md"),
+                "---\nname: ui-design\ndescription: Must stay out of Zo\n---\n\nSECRET DESIGN BODY\n",
+            )
+            .expect("write claude skill");
 
-    let original_home = std::env::var("HOME").ok();
-    let original_zo_config_home = std::env::var("ZO_CONFIG_HOME").ok();
-    let original_zo_home = std::env::var("ZO_HOME").ok();
-    std::env::set_var("HOME", root.join("home"));
-    std::env::set_var("ZO_CONFIG_HOME", root.join("zo-global"));
-    std::env::set_var("ZO_HOME", root.join("missing-zo-home"));
+            let context = ProjectContext::discover(&nested, "2026-05-31").expect("context should load");
+            assert_eq!(
+                context
+                    .skills_index
+                    .iter()
+                    .map(|entry| (
+                        entry.name.as_str(),
+                        entry.description.as_deref().unwrap_or_default()
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("debug", "Diagnose runtime failures"),
+                    ("code-review", "Review code changes carefully"),
+                    ("global-help", "Zo global guidance")
+                ]
+            );
 
-    let context = ProjectContext::discover(&nested, "2026-05-31").expect("context should load");
-    assert_eq!(
-        context
-            .skills_index
-            .iter()
-            .map(|entry| (
-                entry.name.as_str(),
-                entry.description.as_deref().unwrap_or_default()
-            ))
-            .collect::<Vec<_>>(),
-        vec![
-            ("debug", "Diagnose runtime failures"),
-            ("code-review", "Review code changes carefully"),
-            ("global-help", "Zo global guidance")
-        ]
+            let prompt = SystemPromptBuilder::new()
+                .with_project_context(context)
+                .build()
+                .join("\n\n");
+            assert!(prompt.contains("# Available skills"));
+            assert!(prompt.contains("code-review"));
+            assert!(prompt.contains("Diagnose runtime failures"));
+            assert!(prompt.contains("global-help"));
+            assert!(!prompt.contains("ui-design"));
+            assert!(!prompt.contains(".other-tool/skills"));
+            assert!(
+                !prompt.contains("SECRET REVIEW BODY")
+                    && !prompt.contains("SECRET DEBUG BODY")
+                    && !prompt.contains("SECRET GLOBAL BODY")
+                    && !prompt.contains("SECRET DESIGN BODY"),
+                "skill bodies should stay on disk until the Skill tool loads a selected skill"
+            );
+        },
     );
-
-    let prompt = SystemPromptBuilder::new()
-        .with_project_context(context)
-        .build()
-        .join("\n\n");
-    assert!(prompt.contains("# Available skills"));
-    assert!(prompt.contains("code-review"));
-    assert!(prompt.contains("Diagnose runtime failures"));
-    assert!(prompt.contains("global-help"));
-    assert!(!prompt.contains("ui-design"));
-    assert!(!prompt.contains(".other-tool/skills"));
-    assert!(
-        !prompt.contains("SECRET REVIEW BODY")
-            && !prompt.contains("SECRET DEBUG BODY")
-            && !prompt.contains("SECRET GLOBAL BODY")
-            && !prompt.contains("SECRET DESIGN BODY"),
-        "skill bodies should stay on disk until the Skill tool loads a selected skill"
-    );
-
-    restore_env("HOME", original_home);
-    restore_env("ZO_CONFIG_HOME", original_zo_config_home);
-    restore_env("ZO_HOME", original_zo_home);
-    fs::remove_dir_all(root).expect("cleanup temp dir");
 }
 
 #[test]
 fn proposed_project_skills_are_not_auto_discovered() {
-    let _guard = env_lock();
-    let root = temp_dir();
-    let active_skill = root.join(".zo").join("skills").join("active");
-    let proposed_skill = root.join(".zo").join("skills").join("draft");
-    fs::create_dir_all(&active_skill).expect("active skill dir");
-    fs::create_dir_all(&proposed_skill).expect("proposed skill dir");
-    fs::write(
-        active_skill.join("SKILL.md"),
-        "---\nname: active-skill\ndescription: Ready to use\n---\n\nACTIVE BODY\n",
-    )
-    .expect("write active skill");
-    fs::write(
-        proposed_skill.join("SKILL.md"),
-        "---\nname: draft-skill\ndescription: Not approved yet\nstate: proposed\n---\n\nDRAFT BODY\n",
-    )
-    .expect("write proposed skill");
+    let root = own_root().unwrap_or_else(temp_dir);
+    let homes = no_global_homes(&root);
+    with_root_exported(
+        "proposed_project_skills_are_not_auto_discovered",
+        &root,
+        &homes,
+        false,
+        |root| {
+            let active_skill = root.join(".zo").join("skills").join("active");
+            let proposed_skill = root.join(".zo").join("skills").join("draft");
+            fs::create_dir_all(&active_skill).expect("active skill dir");
+            fs::create_dir_all(&proposed_skill).expect("proposed skill dir");
+            fs::write(
+                active_skill.join("SKILL.md"),
+                "---\nname: active-skill\ndescription: Ready to use\n---\n\nACTIVE BODY\n",
+            )
+            .expect("write active skill");
+            fs::write(
+                proposed_skill.join("SKILL.md"),
+                "---\nname: draft-skill\ndescription: Not approved yet\nstate: proposed\n---\n\nDRAFT BODY\n",
+            )
+            .expect("write proposed skill");
 
-    let original_home = std::env::var("HOME").ok();
-    let original_zo_config_home = std::env::var("ZO_CONFIG_HOME").ok();
-    let original_zo_home = std::env::var("ZO_HOME").ok();
-    std::env::set_var("HOME", root.join("home"));
-    std::env::set_var("ZO_CONFIG_HOME", root.join("missing-zo-global"));
-    std::env::set_var("ZO_HOME", root.join("missing-zo-home"));
+            let context = ProjectContext::discover(root, "2026-05-31").expect("context should load");
+            assert_eq!(
+                context
+                    .skills_index
+                    .iter()
+                    .map(|entry| entry.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["active-skill"]
+            );
 
-    let context = ProjectContext::discover(&root, "2026-05-31").expect("context should load");
-    assert_eq!(
-        context
-            .skills_index
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["active-skill"]
+            let prompt = SystemPromptBuilder::new()
+                .with_project_context(context)
+                .build()
+                .join("\n\n");
+            assert!(prompt.contains("active-skill"));
+            assert!(!prompt.contains("draft-skill"));
+            assert!(!prompt.contains("DRAFT BODY"));
+        },
     );
-
-    let prompt = SystemPromptBuilder::new()
-        .with_project_context(context)
-        .build()
-        .join("\n\n");
-    assert!(prompt.contains("active-skill"));
-    assert!(!prompt.contains("draft-skill"));
-    assert!(!prompt.contains("DRAFT BODY"));
-
-    restore_env("HOME", original_home);
-    restore_env("ZO_CONFIG_HOME", original_zo_config_home);
-    restore_env("ZO_HOME", original_zo_home);
-    fs::remove_dir_all(root).expect("cleanup temp dir");
 }
 
 #[test]
 fn active_project_skills_are_discovered_after_review() {
-    let _guard = env_lock();
-    let root = temp_dir();
-    let active_skill = root.join(".zo").join("skills").join("review-loop");
-    fs::create_dir_all(&active_skill).expect("active skill dir");
-    fs::write(
-        active_skill.join("SKILL.md"),
-        "---\nname: review-loop\ndescription: Approved review loop\nstate: active\n---\n\nAPPROVED BODY\n",
-    )
-    .expect("write active skill");
+    let root = own_root().unwrap_or_else(temp_dir);
+    let homes = no_global_homes(&root);
+    with_root_exported(
+        "active_project_skills_are_discovered_after_review",
+        &root,
+        &homes,
+        false,
+        |root| {
+            let active_skill = root.join(".zo").join("skills").join("review-loop");
+            fs::create_dir_all(&active_skill).expect("active skill dir");
+            fs::write(
+                active_skill.join("SKILL.md"),
+                "---\nname: review-loop\ndescription: Approved review loop\nstate: active\n---\n\nAPPROVED BODY\n",
+            )
+            .expect("write active skill");
 
-    let original_home = std::env::var("HOME").ok();
-    let original_zo_config_home = std::env::var("ZO_CONFIG_HOME").ok();
-    let original_zo_home = std::env::var("ZO_HOME").ok();
-    std::env::set_var("HOME", root.join("home"));
-    std::env::set_var("ZO_CONFIG_HOME", root.join("missing-zo-global"));
-    std::env::set_var("ZO_HOME", root.join("missing-zo-home"));
+            let context = ProjectContext::discover(root, "2026-05-31").expect("context should load");
+            assert_eq!(
+                context
+                    .skills_index
+                    .iter()
+                    .map(|entry| (
+                        entry.name.as_str(),
+                        entry.description.as_deref().unwrap_or_default()
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![("review-loop", "Approved review loop")]
+            );
 
-    let context = ProjectContext::discover(&root, "2026-05-31").expect("context should load");
-    assert_eq!(
-        context
-            .skills_index
-            .iter()
-            .map(|entry| (
-                entry.name.as_str(),
-                entry.description.as_deref().unwrap_or_default()
-            ))
-            .collect::<Vec<_>>(),
-        vec![("review-loop", "Approved review loop")]
+            let prompt = SystemPromptBuilder::new()
+                .with_project_context(context)
+                .build()
+                .join("\n\n");
+            assert!(prompt.contains("# Available skills"));
+            assert!(prompt.contains("review-loop"));
+            assert!(prompt.contains("Approved review loop"));
+            assert!(!prompt.contains("APPROVED BODY"));
+        },
     );
-
-    let prompt = SystemPromptBuilder::new()
-        .with_project_context(context)
-        .build()
-        .join("\n\n");
-    assert!(prompt.contains("# Available skills"));
-    assert!(prompt.contains("review-loop"));
-    assert!(prompt.contains("Approved review loop"));
-    assert!(!prompt.contains("APPROVED BODY"));
-
-    restore_env("HOME", original_home);
-    restore_env("ZO_CONFIG_HOME", original_zo_config_home);
-    restore_env("ZO_HOME", original_zo_home);
-    fs::remove_dir_all(root).expect("cleanup temp dir");
 }
 
 #[test]
 fn parses_skill_trigger_frontmatter_for_auto_routing() {
     use super::{discover_skills, SkillInvocationMode};
 
-    let _guard = env_lock();
-    let root = temp_dir();
-    let skill_dir = root.join(".zo").join("skills").join("render-perf");
-    fs::create_dir_all(&skill_dir).expect("skill dir");
-    fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: render-perf\ndescription: Optimize TUI rendering\nstate: active\ninvocation: auto\nkeywords:\n  - smooth rendering\n  - reveal\npaths:\n  - crates/zo-cli/src/tui/app/reveal.rs\nexcludes:\n  - react\n---\n\nBODY STAYS ON DISK\n",
-    )
-    .expect("write skill");
+    let root = own_root().unwrap_or_else(temp_dir);
+    let homes = no_global_homes(&root);
+    with_root_exported(
+        "parses_skill_trigger_frontmatter_for_auto_routing",
+        &root,
+        &homes,
+        false,
+        |root| {
+            let skill_dir = root.join(".zo").join("skills").join("render-perf");
+            fs::create_dir_all(&skill_dir).expect("skill dir");
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                "---\nname: render-perf\ndescription: Optimize TUI rendering\nstate: active\ninvocation: auto\nkeywords:\n  - smooth rendering\n  - reveal\npaths:\n  - crates/zo-cli/src/tui/app/reveal.rs\nexcludes:\n  - react\n---\n\nBODY STAYS ON DISK\n",
+            )
+            .expect("write skill");
 
-    let original_home = std::env::var("HOME").ok();
-    let original_zo_config_home = std::env::var("ZO_CONFIG_HOME").ok();
-    let original_zo_home = std::env::var("ZO_HOME").ok();
-    std::env::set_var("HOME", root.join("home"));
-    std::env::set_var("ZO_CONFIG_HOME", root.join("missing-zo-global"));
-    std::env::set_var("ZO_HOME", root.join("missing-zo-home"));
-
-    let skills = discover_skills(&root);
-    let entry = skills
-        .iter()
-        .find(|entry| entry.name == "render-perf")
-        .expect("render-perf skill discovered");
-    assert_eq!(entry.invocation_mode, SkillInvocationMode::Auto);
-    assert_eq!(entry.triggers.keywords, vec!["smooth rendering", "reveal"]);
-    assert_eq!(
-        entry.triggers.paths,
-        vec!["crates/zo-cli/src/tui/app/reveal.rs"]
+            let skills = discover_skills(root);
+            let entry = skills
+                .iter()
+                .find(|entry| entry.name == "render-perf")
+                .expect("render-perf skill discovered");
+            assert_eq!(entry.invocation_mode, SkillInvocationMode::Auto);
+            assert_eq!(entry.triggers.keywords, vec!["smooth rendering", "reveal"]);
+            assert_eq!(
+                entry.triggers.paths,
+                vec!["crates/zo-cli/src/tui/app/reveal.rs"]
+            );
+            assert_eq!(entry.triggers.excludes, vec!["react"]);
+        },
     );
-    assert_eq!(entry.triggers.excludes, vec!["react"]);
-
-    restore_env("HOME", original_home);
-    restore_env("ZO_CONFIG_HOME", original_zo_config_home);
-    restore_env("ZO_HOME", original_zo_home);
-    fs::remove_dir_all(root).expect("cleanup temp dir");
 }
 
 #[test]
@@ -1158,72 +1198,77 @@ fn skills_index_compacts_only_the_prompt_copy_of_long_descriptions() {
 
 #[test]
 fn discovers_and_injects_persistent_memory_locator() {
-    let _guard = env_lock();
-    let root = temp_dir();
-    let nested = root.join("nested").join("cwd");
-    fs::create_dir_all(root.join(".git")).expect("git dir");
-    fs::create_dir_all(&nested).expect("nested dir");
-    let config_home = root.join("zo-home");
-    let original_zo_config_home = std::env::var("ZO_CONFIG_HOME").ok();
-    std::env::set_var("ZO_CONFIG_HOME", &config_home);
-    let memory_dir = crate::memory::paths::memory_write_dir(&root, false);
-    fs::create_dir_all(&memory_dir).expect("memory dir");
-    fs::write(
-        memory_dir.join("MEMORY.md"),
-        "- [Auth](auth.md) — JWT lives in httpOnly cookies\n",
-    )
-    .expect("write memory index");
+    let root = own_root().unwrap_or_else(temp_dir);
+    let homes = [("ZO_CONFIG_HOME", root.join("zo-home"))];
+    with_root_exported(
+        "discovers_and_injects_persistent_memory_locator",
+        &root,
+        &homes,
+        false,
+        |root| {
+            let nested = root.join("nested").join("cwd");
+            fs::create_dir_all(root.join(".git")).expect("git dir");
+            fs::create_dir_all(&nested).expect("nested dir");
+            let config_home = root.join("zo-home");
+            let memory_dir = crate::memory::paths::memory_write_dir(root, false);
+            fs::create_dir_all(&memory_dir).expect("memory dir");
+            fs::write(
+                memory_dir.join("MEMORY.md"),
+                "- [Auth](auth.md) — JWT lives in httpOnly cookies\n",
+            )
+            .expect("write memory index");
 
-    let context = ProjectContext::discover(&nested, "2026-05-31").expect("context should load");
-    let memory = context
-        .memory_index
-        .clone()
-        .expect("memory index should be discovered from the global project root");
-    assert!(memory.content.contains("JWT lives in httpOnly cookies"));
-    assert!(memory.path.starts_with(&config_home));
+            let context = ProjectContext::discover(&nested, "2026-05-31").expect("context should load");
+            let memory = context
+                .memory_index
+                .clone()
+                .expect("memory index should be discovered from the global project root");
+            assert!(memory.content.contains("JWT lives in httpOnly cookies"));
+            assert!(memory.path.starts_with(&config_home));
 
-    let prompt = SystemPromptBuilder::new()
-        .with_project_context(context)
-        .build()
-        .join("\n\n");
-    assert!(
-        prompt.contains("# Persistent project memory"),
-        "the memory locator should be rendered as a dynamic section"
+            let prompt = SystemPromptBuilder::new()
+                .with_project_context(context)
+                .build()
+                .join("\n\n");
+            assert!(
+                prompt.contains("# Persistent project memory"),
+                "the memory locator should be rendered as a dynamic section"
+            );
+            assert!(prompt.contains("/memory/MEMORY.md"));
+            assert!(prompt.contains("global per-project memory store"));
+            assert!(prompt.contains("NOT a session transcript, live todo list, or current task-plan store"));
+            assert!(prompt.contains("session_recall"));
+            assert!(prompt.contains("/resume"));
+            assert!(prompt.contains("(1 entries)"));
+            assert!(
+                !prompt.contains("JWT lives in httpOnly cookies"),
+                "query-aware request recall owns pointer-line injection; the base prompt stays compact"
+            );
+        },
     );
-    assert!(prompt.contains("/memory/MEMORY.md"));
-    assert!(prompt.contains("global per-project memory store"));
-    assert!(prompt.contains("NOT a session transcript, live todo list, or current task-plan store"));
-    assert!(prompt.contains("session_recall"));
-    assert!(prompt.contains("/resume"));
-    assert!(prompt.contains("(1 entries)"));
-    assert!(
-        !prompt.contains("JWT lives in httpOnly cookies"),
-        "query-aware request recall owns pointer-line injection; the base prompt stays compact"
-    );
-
-    restore_env("ZO_CONFIG_HOME", original_zo_config_home);
-    fs::remove_dir_all(root).expect("cleanup temp dir");
 }
 
 #[test]
 fn empty_memory_index_is_ignored() {
-    let _guard = env_lock();
-    let root = temp_dir();
-    let config_home = root.join("zo-home");
-    let original_zo_config_home = std::env::var("ZO_CONFIG_HOME").ok();
-    std::env::set_var("ZO_CONFIG_HOME", &config_home);
-    let memory_dir = crate::memory::paths::memory_write_dir(&root, false);
-    fs::create_dir_all(&memory_dir).expect("memory dir");
-    fs::write(memory_dir.join("MEMORY.md"), "   \n").expect("write blank index");
+    let root = own_root().unwrap_or_else(temp_dir);
+    let homes = [("ZO_CONFIG_HOME", root.join("zo-home"))];
+    with_root_exported(
+        "empty_memory_index_is_ignored",
+        &root,
+        &homes,
+        false,
+        |root| {
+            let memory_dir = crate::memory::paths::memory_write_dir(root, false);
+            fs::create_dir_all(&memory_dir).expect("memory dir");
+            fs::write(memory_dir.join("MEMORY.md"), "   \n").expect("write blank index");
 
-    let context = ProjectContext::discover(&root, "2026-05-31").expect("context should load");
-    assert!(
-        context.memory_index.is_none(),
-        "a blank MEMORY.md must not be injected"
+            let context = ProjectContext::discover(root, "2026-05-31").expect("context should load");
+            assert!(
+                context.memory_index.is_none(),
+                "a blank MEMORY.md must not be injected"
+            );
+        },
     );
-
-    restore_env("ZO_CONFIG_HOME", original_zo_config_home);
-    fs::remove_dir_all(root).expect("cleanup temp dir");
 }
 
 #[test]
@@ -1432,45 +1477,145 @@ fn discover_with_git_gathers_status_but_not_diff_for_tracked_changes() {
 
 #[test]
 fn load_system_prompt_reads_context_files_and_config() {
-    let root = temp_dir();
-    fs::create_dir_all(root.join(".zo")).expect("zo dir");
-    fs::write(root.join("context.md"), "Project rules").expect("write instructions");
-    fs::write(
-        root.join(".zo").join("settings.json"),
-        r#"{"permissionMode":"acceptEdits"}"#,
-    )
-    .expect("write settings");
+    let root = own_root().unwrap_or_else(temp_dir);
+    let homes = [
+        ("HOME", root.clone()),
+        ("ZO_CONFIG_HOME", root.join("missing-home")),
+    ];
+    with_root_exported(
+        "load_system_prompt_reads_context_files_and_config",
+        &root,
+        &homes,
+        true,
+        |root| {
+            fs::create_dir_all(root.join(".zo")).expect("zo dir");
+            fs::write(root.join("context.md"), "Project rules").expect("write instructions");
+            fs::write(
+                root.join(".zo").join("settings.json"),
+                r#"{"permissionMode":"acceptEdits"}"#,
+            )
+            .expect("write settings");
 
-    let _guard = env_lock();
-    ensure_valid_cwd();
-    let previous = std::env::current_dir().expect("cwd");
-    let original_home = std::env::var("HOME").ok();
-    let original_zo_home = std::env::var("ZO_CONFIG_HOME").ok();
-    std::env::set_var("HOME", &root);
-    std::env::set_var("ZO_CONFIG_HOME", root.join("missing-home"));
-    std::env::set_current_dir(&root).expect("change cwd");
-    let prompt = super::load_system_prompt(&root, "2026-03-31", "linux", "6.8", None)
-        .expect("system prompt should load")
-        .join(
-            "
+            let prompt = super::load_system_prompt(root, "2026-03-31", "linux", "6.8", None)
+                .expect("system prompt should load")
+                .join("\n\n");
+            assert!(prompt.contains("Project rules"));
+            assert!(prompt.contains("permissionMode"));
+        },
+    );
+}
 
-",
-        );
-    std::env::set_current_dir(previous).expect("restore cwd");
-    if let Some(value) = original_home {
-        std::env::set_var("HOME", value);
-    } else {
-        std::env::remove_var("HOME");
+/// t-77514's scene, twenty times in one run. A prompt test hands the loader its
+/// root through `HOME`, `ZO_CONFIG_HOME` and the working directory, while a test
+/// beside it reads those same process-wide values and acts on what it finds: it
+/// writes under the config home through a temporary file and a rename, and
+/// starts a child from the working directory, as a hook does. On Windows either
+/// one, in flight inside the root, failed the root's removal with os error 32.
+/// The root must never reach the test beside it, and every root must come away
+/// whole.
+#[test]
+fn twenty_prompt_loads_never_hand_their_root_to_a_test_beside_them() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    const TEST: &str = "twenty_prompt_loads_never_hand_their_root_to_a_test_beside_them";
+
+    fn load(root: &Path) {
+        fs::write(root.join("context.md"), "Project rules").expect("write instructions");
+        let prompt = super::load_system_prompt(root, "2026-03-31", "linux", "6.8", None)
+            .expect("system prompt should load")
+            .join("\n\n");
+        assert!(prompt.contains("Project rules"));
     }
-    if let Some(value) = original_zo_home {
-        std::env::set_var("ZO_CONFIG_HOME", value);
-    } else {
-        std::env::remove_var("ZO_CONFIG_HOME");
+
+    fn homes(root: &Path) -> [(&'static str, PathBuf); 2] {
+        [
+            ("HOME", root.to_path_buf()),
+            ("ZO_CONFIG_HOME", root.join("missing-home")),
+        ]
     }
 
-    assert!(prompt.contains("Project rules"));
-    assert!(prompt.contains("permissionMode"));
-    fs::remove_dir_all(root).expect("cleanup temp dir");
+    fn a_child_from_the_working_directory() -> std::process::Command {
+        let (program, args) = if cfg!(windows) {
+            ("cmd", ["/C", "exit 0"])
+        } else {
+            ("sh", ["-c", ":"])
+        };
+        let mut command = std::process::Command::new(program);
+        command.args(args);
+        command
+    }
+
+    /// Stops the test beside the loads however this one ends.
+    struct Stop(Arc<AtomicBool>);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    if let Some(root) = own_root() {
+        with_root_exported(TEST, &root, &homes(&root), true, load);
+        return;
+    }
+
+    let roots = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+    let reached = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+    let done = Arc::new(AtomicBool::new(false));
+    let stop = Stop(Arc::clone(&done));
+    let beside = std::thread::spawn({
+        let (roots, reached) = (Arc::clone(&roots), Arc::clone(&reached));
+        move || {
+            while !done.load(Ordering::SeqCst) {
+                let places = [
+                    std::env::var_os("HOME").map(PathBuf::from),
+                    std::env::var_os("ZO_CONFIG_HOME").map(PathBuf::from),
+                    std::env::current_dir().ok(),
+                ];
+                for place in places.into_iter().flatten() {
+                    let inside = roots
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .iter()
+                        .any(|root| place.starts_with(root));
+                    if !inside {
+                        continue;
+                    }
+                    reached
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(place.clone());
+                    if fs::create_dir_all(&place).is_ok() {
+                        let staged = place.join("beside.tmp");
+                        if fs::write(&staged, "beside").is_ok() {
+                            let _ = fs::rename(&staged, place.join("beside"));
+                        }
+                    }
+                    let _ = a_child_from_the_working_directory().status();
+                }
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+        }
+    });
+
+    for _ in 0..20 {
+        let root = temp_dir();
+        roots.lock().expect("roots").push(root.clone());
+        with_root_exported(TEST, &root, &homes(&root), true, load);
+    }
+    drop(stop);
+    beside.join().expect("the test beside the loads");
+
+    let reached = reached.lock().expect("reached");
+    assert!(
+        reached.is_empty(),
+        "a test running beside the loads reached {} of their places, first {}",
+        reached.len(),
+        reached[0].display()
+    );
+    for root in roots.lock().expect("roots").iter() {
+        assert!(!root.exists(), "{} was left behind", root.display());
+    }
 }
 
 /// A sub-agent's prompt carries no `git status` snapshot; the main loop's does
@@ -1522,63 +1667,54 @@ fn a_subagent_prompt_skips_the_git_status_snapshot_the_main_prompt_carries() {
 /// (`load_system_prompt`)에는 절대 실리지 않는다.
 #[test]
 fn output_style_applies_to_main_prompt_only() {
-    let _guard = env_lock();
-    ensure_valid_cwd();
-    let root = temp_dir();
-    fs::create_dir_all(root.join(".zo")).expect("zo dir");
-    fs::write(
-        root.join(".zo").join("settings.json"),
-        r#"{"outputStyle":"concise"}"#,
-    )
-    .expect("write settings");
+    let root = own_root().unwrap_or_else(temp_dir);
+    let homes = [
+        ("HOME", root.clone()),
+        ("ZO_CONFIG_HOME", root.join("missing-home")),
+    ];
+    with_root_exported(
+        "output_style_applies_to_main_prompt_only",
+        &root,
+        &homes,
+        true,
+        |root| {
+            fs::create_dir_all(root.join(".zo")).expect("zo dir");
+            fs::write(
+                root.join(".zo").join("settings.json"),
+                r#"{"outputStyle":"concise"}"#,
+            )
+            .expect("write settings");
 
-    let previous = std::env::current_dir().expect("cwd");
-    let original_home = std::env::var("HOME").ok();
-    let original_zo_home = std::env::var("ZO_CONFIG_HOME").ok();
-    std::env::set_var("HOME", &root);
-    std::env::set_var("ZO_CONFIG_HOME", root.join("missing-home"));
-    std::env::set_current_dir(&root).expect("change cwd");
+            let main_prompt =
+                super::load_system_prompt_for_main(root, "2026-03-31", "linux", "6.8", None)
+                    .expect("main prompt should load")
+                    .join("\n\n");
+            let subagent_prompt = super::load_system_prompt(root, "2026-03-31", "linux", "6.8", None)
+                .expect("subagent prompt should load")
+                .join("\n\n");
 
-    let main_prompt = super::load_system_prompt_for_main(&root, "2026-03-31", "linux", "6.8", None)
-        .expect("main prompt should load")
-        .join("\n\n");
-    let subagent_prompt = super::load_system_prompt(&root, "2026-03-31", "linux", "6.8", None)
-        .expect("subagent prompt should load")
-        .join("\n\n");
-
-    std::env::set_current_dir(previous).expect("restore cwd");
-    if let Some(value) = original_home {
-        std::env::set_var("HOME", value);
-    } else {
-        std::env::remove_var("HOME");
-    }
-    if let Some(value) = original_zo_home {
-        std::env::set_var("ZO_CONFIG_HOME", value);
-    } else {
-        std::env::remove_var("ZO_CONFIG_HOME");
-    }
-
-    assert!(
-        main_prompt.contains("# Output Style: concise"),
-        "main prompt must carry the configured style"
+            assert!(
+                main_prompt.contains("# Output Style: concise"),
+                "main prompt must carry the configured style"
+            );
+            assert!(
+                main_prompt.contains("concise mode"),
+                "style prompt body must be injected"
+            );
+            assert!(
+                main_prompt.contains("# Response Style Contract"),
+                "main prompt must carry the provider-neutral response contract"
+            );
+            assert!(
+                subagent_prompt.contains("# Response Style Contract"),
+                "sub-agent prompt keeps the baseline response contract even without a selected style"
+            );
+            assert!(
+                !subagent_prompt.contains("# Output Style"),
+                "sub-agent prompt must stay unstyled"
+            );
+        },
     );
-    assert!(
-        main_prompt.contains("concise mode"),
-        "style prompt body must be injected"
-    );
-    assert!(
-        main_prompt.contains("# Response Style Contract"),
-        "main prompt must carry the provider-neutral response contract"
-    );
-    assert!(
-        subagent_prompt.contains("# Response Style Contract"),
-        "sub-agent prompt keeps the baseline response contract even without a selected style"
-    );
-    assert!(
-        !subagent_prompt.contains("# Output Style"),
-        "sub-agent prompt must stay unstyled"
-    );
-    fs::remove_dir_all(root).expect("cleanup temp dir");
 }
 
 #[test]
