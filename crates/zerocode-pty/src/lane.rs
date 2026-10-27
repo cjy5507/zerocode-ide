@@ -2566,14 +2566,22 @@ mod launch_shape_tests {
 
     /// A descriptor the window has open without close-on-exec does not
     /// reach the child: nothing but the terminal on 0, 1 and 2.
+    ///
+    /// The probe sits at 100 or above. `/bin/sh` (bash) opens 10 and 11 of
+    /// its own before it runs a word, so a probe that landed on one of them —
+    /// which tests opening descriptors on other threads decide — read as a
+    /// leak that was bash's own (FD-LEAKED once in a parallel run, 10-27).
     #[test]
     fn no_descriptor_but_the_terminal_reaches_the_child() {
         let directory = tempfile::tempdir().unwrap();
         let path =
             std::ffi::CString::new(directory.path().join("held").as_os_str().as_encoded_bytes())
                 .unwrap();
-        let held = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o600) };
-        assert!(held > 2, "open: {}", std::io::Error::last_os_error());
+        let opened = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o600) };
+        assert!(opened > 2, "open: {}", std::io::Error::last_os_error());
+        let held = unsafe { libc::fcntl(opened, libc::F_DUPFD, 100) };
+        unsafe { libc::close(opened) };
+        assert!(held >= 100, "dup: {}", std::io::Error::last_os_error());
         let flags = unsafe { libc::fcntl(held, libc::F_GETFD) };
         assert_eq!(flags & libc::FD_CLOEXEC, 0, "the probe must be inheritable");
 
