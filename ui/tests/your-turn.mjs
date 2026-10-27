@@ -1,4 +1,6 @@
+import { createRequire } from "node:module";
 import { openWindowTestPage } from "./window-boot.mjs";
+import { axeViolations } from "./settings-quality.mjs";
 
 /* 「당신 차례」 — the chip, the list that drops from it, and the group at the top
  * of the sidebar (IDE design pass 2, B: items 1, 4 and 14 of the passed draft
@@ -70,17 +72,26 @@ export async function testYourTurn(browser, origin, ok) {
       seen.idleText = node.textContent.replace(/\s+/g, " ").trim();
       seen.idleLive = node.classList.contains("is-live");
       seen.idleColor = getComputedStyle(node.querySelector(".your-turn-count")).color;
+      seen.idleGround = getComputedStyle(node).backgroundColor;
+      const idleChevron = node.querySelector(".your-turn-chevron");
+      seen.idleChevron = Boolean(idleChevron) && getComputedStyle(idleChevron).display !== "none";
       await window.__setTurns(window.__turnCards());
       seen.liveText = node.textContent.replace(/\s+/g, " ").trim();
       seen.live = node.classList.contains("is-live");
       const probe = document.createElement("span");
-      probe.style.color = "var(--signal-you)";
+      probe.style.color = "var(--ink-on-solid)";
+      probe.style.background = "var(--signal-you-solid)";
       document.body.appendChild(probe);
-      seen.blue = getComputedStyle(probe).color;
+      seen.onSolid = getComputedStyle(probe).color;
+      seen.solid = getComputedStyle(probe).backgroundColor;
       probe.remove();
       // The colour eases in over the shared motion pair; read it once it has.
       await new Promise((done) => setTimeout(done, 250));
+      // The draft's lit chip: a filled you-blue pill, its words and count white, a chevron down.
       seen.liveColor = getComputedStyle(node.querySelector(".your-turn-count")).color;
+      seen.liveGround = getComputedStyle(node).backgroundColor;
+      const chevron = node.querySelector(".your-turn-chevron");
+      seen.chevron = Boolean(chevron) && getComputedStyle(chevron).display !== "none" && chevron.getBoundingClientRect().width > 0;
       // A shape beside the colour: a ring at nothing, a filled dot when something waits.
       seen.dotFilled = getComputedStyle(node.querySelector(".your-turn-dot")).backgroundColor !== "rgba(0, 0, 0, 0)";
       seen.leftOfTabs = node.getBoundingClientRect().right <= document.getElementById("tabstrip").getBoundingClientRect().left + 1;
@@ -88,10 +99,11 @@ export async function testYourTurn(browser, origin, ok) {
       return seen;
     });
     ok(
-      "the chip reads the attention column: grey and 0 at nothing, blue with the count and its words when three wait",
-      chip.exists && chip.idleText.endsWith("0") && !chip.idleLive && chip.idleColor !== chip.blue &&
-        chip.live && chip.liveText.endsWith("3") && chip.liveColor === chip.blue && chip.dotFilled &&
-        chip.leftOfTabs && chip.listBuilt === 0,
+      "the chip reads the attention column: a grey ring and 0 at nothing, a filled you-blue pill with white words, the count and a chevron when three wait",
+      chip.exists && chip.idleText.endsWith("0") && !chip.idleLive && chip.idleColor !== chip.onSolid &&
+        chip.idleGround !== chip.solid && !chip.idleChevron &&
+        chip.live && chip.liveText.endsWith("3") && chip.liveColor === chip.onSolid && chip.liveGround === chip.solid &&
+        chip.chevron && chip.dotFilled && chip.leftOfTabs && chip.listBuilt === 0,
       JSON.stringify(chip),
     );
 
@@ -106,6 +118,8 @@ export async function testYourTurn(browser, origin, ok) {
       seen.items = window.__items().map((item) => item.dataset.kind);
       seen.options = [...window.__items()[0].querySelectorAll(".board-ask-option")].map((one) => one.textContent.replace(/\s+/g, " ").trim());
       seen.focusInList = host.contains(document.activeElement);
+      // The keys say as many choices as the questions hold, not a fixed 1–9.
+      seen.keys = host.querySelector(".your-turn-keys")?.textContent ?? "";
       window.__press("ArrowDown");
       seen.afterDown = document.activeElement?.closest(".your-turn-item")?.dataset.kind ?? null;
       window.__press("ArrowUp");
@@ -121,7 +135,7 @@ export async function testYourTurn(browser, origin, ok) {
       "the list opens under the chip with a question, a permission and a prose question, walks with ↑↓, and Esc empties it and gives the focus back",
       list.open && list.expanded === "true" && list.items.join(",") === "question,permission,question" &&
         list.options.length === 3 && list.options[0].startsWith("1") && list.options[0].includes("짧은 판으로") &&
-        list.focusInList && list.afterDown === "permission" && list.afterUp === "question" &&
+        list.focusInList && list.keys.includes("1–3") && !list.keys.includes("1–9") && list.afterDown === "permission" && list.afterUp === "question" &&
         list.closedHidden && list.closedChildren === 0 && list.focusBack,
       JSON.stringify(list),
     );
@@ -235,12 +249,29 @@ export async function testYourTurn(browser, origin, ok) {
     );
 
     /* The sidebar group: there while something waits, gone at nothing. */
+    await page.evaluate(() => window.__setTurns(window.__turnCards()));
+    // No control inside another: a row is not a button around its allow and deny.
+    const axeModule = createRequire(import.meta.url)("@axe-core/playwright");
+    const groupViolations = await axeViolations(page, axeModule.default ?? axeModule, "#your-turn-group")
+      .catch((error) => [String(error)]);
     const group = await page.evaluate(async () => {
       const seen = {};
-      await window.__setTurns(window.__turnCards());
       const host = window.__group();
       seen.shown = host && !host.hidden;
       seen.rows = [...(host?.querySelectorAll(".your-turn-row") ?? [])].map((row) => row.dataset.kind);
+      // The draft's group: its head says how long the oldest has waited; a row opens its
+      // conversation itself, and only a permission wears buttons — allow and deny.
+      seen.head = host?.querySelector(".your-turn-group-head")?.parentElement?.textContent.replace(/\s+/g, " ") ?? "";
+      seen.openButtons = host?.querySelectorAll(".your-turn-open").length ?? -1;
+      seen.rowButtons = [...(host?.querySelectorAll(".your-turn-row") ?? [])].map((row) => row.querySelectorAll("button").length);
+      seen.rowRoles = [...(host?.querySelectorAll(".your-turn-row") ?? [])].map((row) => row.getAttribute("role"));
+      const opened = [];
+      const real = openBoardConversation;
+      openBoardConversation = async (card) => { opened.push(card.pane); };
+      host.querySelector(".your-turn-row[data-kind=question] .your-turn-row-name")?.click();
+      host.querySelector(".your-turn-row[data-kind=permission]")?.click();
+      openBoardConversation = real;
+      seen.opened = opened;
       seen.aboveProjects = host && host.compareDocumentPosition(document.getElementById("sidebar-title")) & Node.DOCUMENT_POSITION_FOLLOWING;
       window.__APPROVED__ = null;
       host.querySelector(".your-turn-row[data-kind=permission] .your-turn-deny")?.click();
@@ -251,6 +282,13 @@ export async function testYourTurn(browser, origin, ok) {
       seen.goneChildren = host.childElementCount;
       return seen;
     });
+    ok(
+      "the sidebar group nests no control in another (axe), says the oldest wait, and a row opens its conversation with only allow and deny as buttons",
+      groupViolations.length === 0 && group.head.includes("가장 오래") && group.openButtons === 0 &&
+        group.rowButtons.join(",") === "1,3,1" && group.rowRoles.every((role) => role !== "button") &&
+        group.opened.join(",") === "term:6,term:7",
+      JSON.stringify({ groupViolations, ...group }),
+    );
     ok(
       "the sidebar's top group lists the agents waiting, answers a permission from its row, and leaves nothing behind at nothing",
       group.shown && group.rows.join(",") === "question,permission,question" && Boolean(group.aboveProjects) &&
@@ -280,15 +318,15 @@ export async function testYourTurn(browser, origin, ok) {
       await window.__setTurns(window.__turnCards());
       const node = window.__chip();
       const probe = document.createElement("span");
-      probe.style.color = "var(--signal-you)";
+      probe.style.background = "var(--signal-you-solid)";
       document.body.appendChild(probe);
-      const blue = getComputedStyle(probe).color;
+      const blue = getComputedStyle(probe).backgroundColor;
       probe.remove();
       node.click();
       await window.__settle();
       const seen = {
         blue,
-        color: await new Promise((done) => setTimeout(() => done(getComputedStyle(node.querySelector(".your-turn-count")).color), 250)),
+        color: await new Promise((done) => setTimeout(() => done(getComputedStyle(node).backgroundColor), 250)),
         motion: getComputedStyle(node).transitionDuration,
         listMotion: getComputedStyle(window.__list()).transitionDuration,
       };
