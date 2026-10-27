@@ -30,11 +30,11 @@
 //! says `applied: false` either way — so the ledger can be read back for how
 //! often the switch actually changed anything.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -400,7 +400,7 @@ pub(super) fn settle(cwd: &Path, attempt: &str, query: &str, hits: Vec<MemoryHit
     // so the label a turn with no judgment writes is still named for the row
     // this reading leaves (`reading_fingerprints`).
     let key = reading_fingerprints(query, &hits[..hits.len().min(MAX_RERANK_CANDIDATES)]);
-    let read = if seat_acts(cwd, mode) {
+    let read = if seat_acts(cwd, mode) && !missed_wall_last(cwd) {
         apply(cwd, query, hits, &label)
     } else {
         fire(cwd, query, &hits, RERANK_SHADOW_DEADLINE, None, Arc::clone(&label));
@@ -534,8 +534,46 @@ fn fire(
     shared_agent_runtime().spawn(run(shot, answer))
 }
 
+/// Projects whose last waited judgment missed [`RERANK_APPLY_DEADLINE`].
+///
+/// Each miss spends the whole wall in front of a request, and a judge that
+/// missed it once mostly misses it again: a remote judge seated on
+/// 2026-10-27 timed out on all 42 waited recalls that day, 1.5 s apiece,
+/// a third of the requests the window sent. While a project is here its
+/// recalls take the record-only road and nothing waits. The first of those
+/// answered inside the wall takes the project off, so the next recall waits
+/// again.
+fn missed_walls() -> &'static Mutex<HashSet<PathBuf>> {
+    static MISSED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    MISSED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn missed_wall_last(cwd: &Path) -> bool {
+    missed_walls().lock().is_ok_and(|missed| missed.contains(cwd))
+}
+
+fn note_missed_wall(cwd: &Path, missed: bool) {
+    if let Ok(mut walls) = missed_walls().lock() {
+        if missed {
+            walls.insert(cwd.to_path_buf());
+        } else {
+            walls.remove(cwd);
+        }
+    }
+}
+
+/// Whether a record-only judgment would have been read had a turn waited:
+/// sent and answered, inside the apply road's wall. A memo hit sent
+/// nothing, so it says nothing about the judge's pace.
+fn answered_inside_the_wall(row: &RerankShadowRow) -> bool {
+    !row.cached
+        && row.outcome == RERANK_OUTCOME_ANSWERED
+        && row.elapsed_ms <= zerocode_core::jev::RECALL_APPLY_DEADLINE_MS
+}
+
 /// A recall whose mode acts: the judgment is asked on the shared runtime and
-/// the turn waits for it up to [`RERANK_APPLY_DEADLINE`].
+/// the turn waits for it up to [`RERANK_APPLY_DEADLINE`] — unless the last
+/// one it waited for missed that wall ([`missed_walls`]).
 ///
 /// Recall's order is what comes back from every ending but one — a judgment
 /// that arrived in time, checked out, and could be proved a permutation of what
@@ -544,9 +582,22 @@ fn fire(
 fn apply(cwd: &Path, query: &str, hits: Vec<MemoryHit>, label: &ReadingSlot) -> Vec<MemoryHit> {
     let (answer, judged) = sync_channel(0);
     fire(cwd, query, &hits, RERANK_APPLY_DEADLINE, Some(answer), Arc::clone(label));
-    let Ok((mut row, door)) = judged.recv_timeout(RERANK_APPLY_DEADLINE) else {
-        return hits;
+    let (mut row, door) = match judged.recv_timeout(RERANK_APPLY_DEADLINE) {
+        Ok(judged) => judged,
+        Err(RecvTimeoutError::Timeout) => {
+            note_missed_wall(cwd, true);
+            return hits;
+        }
+        // The task ended without a row (its door would not open): nothing
+        // was waited out, so nothing says the judge is slow.
+        Err(RecvTimeoutError::Disconnected) => return hits,
     };
+    // The judgment's own clock is this same wall, so its timeout row can be
+    // handed over at the wall itself: a judgment that used the wall up
+    // missed it as surely as one that never came.
+    if row.elapsed_ms >= zerocode_core::jev::RECALL_APPLY_DEADLINE_MS {
+        note_missed_wall(cwd, true);
+    }
     let read = door.permits_application_for(cwd, &RECALL).then(|| row
         .judged
         .as_ref()
@@ -572,6 +623,9 @@ async fn run(shot: Shot, answer: Option<RowSender>) {
     // this order, and a wall it is waited inside is the one thing a second
     // request can buy.
     let row = judge(&door, client.as_ref(), &query, &hits, deadline, answer.is_some()).await;
+    if answer.is_none() && answered_inside_the_wall(&row) {
+        note_missed_wall(&cwd, false);
+    }
     let Some(row) = kept(row, door, answer).await else {
         return;
     };
@@ -2538,6 +2592,53 @@ mod tests {
         });
 
         assert_eq!(slugs(&read), slugs(&hits), "Jev never makes an order worse");
+    }
+
+    /// A judgment that missed the wall does not hold the next recall too:
+    /// that one is asked on the record-only road and reads recall's order at
+    /// once, where every recall used to wait the whole wall out again.
+    #[test]
+    fn a_recall_after_a_missed_wall_does_not_wait_for_the_judgment() {
+        let mock = Mock::silent();
+        let hits = three();
+
+        machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let first = std::time::Instant::now();
+            let read = settle(cwd, "which note answers this (missed wall, first)", hits.to_vec());
+            assert!(first.elapsed() >= RERANK_APPLY_DEADLINE, "the first recall waits the wall out");
+            assert_eq!(slugs(&read), slugs(&hits));
+
+            let second = std::time::Instant::now();
+            let read = settle(cwd, "which note answers this (missed wall, second)", hits.to_vec());
+            let waited = second.elapsed();
+            assert!(waited < RERANK_APPLY_DEADLINE / 3, "the next recall must not wait: {waited:?}");
+            assert_eq!(slugs(&read), slugs(&hits));
+        });
+    }
+
+    /// The first record-only judgment answered inside the wall puts the wait
+    /// back, and the recall after it reads the judgment's order again.
+    #[test]
+    fn an_answer_inside_the_wall_puts_the_wait_back() {
+        let mock = Mock::serving(200, reply_for(&[0, 3, 1]));
+        let hits = three();
+
+        let (read, rows) = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            note_missed_wall(cwd, true);
+            let read = settle(cwd, "which note answers this (wall back, first)", hits.to_vec());
+            assert_eq!(slugs(&read), slugs(&hits), "recall's order while the wall stands missed");
+            let waited = std::time::Instant::now();
+            while rows(cwd).is_empty() && waited.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(!missed_wall_last(cwd), "an answer inside the wall took the project off");
+            let read = settle(cwd, "which note answers this (wall back, second)", hits.to_vec());
+            (read, rows(cwd))
+        });
+
+        assert_eq!(slugs(&read), ["wiki/b", "wiki/c"], "the judgment's order is read again");
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].applied && rows[1].applied);
     }
 
     /// A reply that fails the contract's checks is discarded whole, on the

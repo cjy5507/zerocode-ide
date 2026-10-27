@@ -81,9 +81,28 @@ pub fn run_blocking<F: Future>(fut: F) -> F::Output {
     }
 }
 
+/// Start `fut` on a runtime that keeps driving it after the synchronous
+/// caller moves on, and hand back its handle.
+///
+/// The ambient runtime when it is multi-thread, else the private fallback
+/// runtime — for [`run_blocking`]'s reason: a `current_thread` runtime's
+/// tasks progress only while its owner thread is parked in `block_on`, so a
+/// task spawned there and then waited on through [`run_blocking`] would
+/// never run.
+pub fn spawn_detached<F>(fut: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => handle.spawn(fut),
+        _ => fallback_runtime().spawn(fut),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::run_blocking;
+    use super::{run_blocking, spawn_detached};
 
     /// Exercises the fallback runtime's time driver: if `fallback_runtime`
     /// ever loses `enable_all`, this sleep panics with "no reactor running".
@@ -166,5 +185,30 @@ mod tests {
             .await
             .expect("spawn_blocking join");
         assert_eq!(out, 42);
+    }
+
+    /// A detached task runs on while its caller is parked in a bounded wait
+    /// on another future, and its handle hands the value over afterwards —
+    /// with no ambient runtime, and under a `current_thread` one whose owner
+    /// thread is the one waiting.
+    #[test]
+    fn a_detached_task_finishes_after_its_callers_wait_ends() {
+        use std::time::Duration;
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let mut task = spawn_detached(async move {
+            let _ = released.await;
+            probe().await
+        });
+        let early = run_blocking(async { tokio::time::timeout(Duration::from_millis(20), &mut task).await });
+        assert!(early.is_err(), "the task is still waiting for its release");
+        release.send(()).expect("the task holds the other end");
+        assert_eq!(run_blocking(task).expect("the task ran to its end"), 42);
+
+        let owner = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
+        let value = owner.block_on(async {
+            let task = spawn_detached(probe());
+            tokio::task::spawn_blocking(move || run_blocking(task)).await.expect("the helper thread")
+        });
+        assert_eq!(value.expect("the task ran on the fallback runtime"), 42);
     }
 }

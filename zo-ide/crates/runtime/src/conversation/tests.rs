@@ -626,6 +626,253 @@ fn an_unseated_turn_clears_a_note_the_seat_left() {
     assert!(!request_has_current_turn_skill_note(&mut runtime));
 }
 
+/// A suggestion seat whose judgment lands only when the test releases it,
+/// and says when it has.
+struct HeldSkillSuggestionSeat {
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    landed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl HeldSkillSuggestionSeat {
+    fn held() -> (Self, tokio::sync::oneshot::Sender<()>, Arc<std::sync::atomic::AtomicBool>) {
+        let (release, released) = tokio::sync::oneshot::channel();
+        let landed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seat = Self { release: Mutex::new(Some(released)), landed: Arc::clone(&landed) };
+        (seat, release, landed)
+    }
+}
+
+impl crate::skill_rank::SkillSuggestionSeat for HeldSkillSuggestionSeat {
+    fn suggest(&self, _request: String) -> futures_util::future::BoxFuture<'_, Option<String>> {
+        let released = self.release.lock().expect("release lock").take();
+        let landed = Arc::clone(&self.landed);
+        Box::pin(async move {
+            if let Some(released) = released {
+                let _ = released.await;
+            }
+            landed.store(true, Ordering::SeqCst);
+            Some(crate::skill_rank::suggestion_note(Some("docx")))
+        })
+    }
+
+    fn finish(&self, _turn: &[crate::session::ConversationMessage]) {}
+}
+
+fn wait_until_landed(landed: &std::sync::atomic::AtomicBool) {
+    let started = std::time::Instant::now();
+    while !landed.load(Ordering::SeqCst) {
+        assert!(started.elapsed() < Duration::from_secs(5), "the released judgment never landed");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn a_skill_judgment_past_the_turn_start_wait_rides_the_turns_next_request() {
+    let mut runtime = recall_hint_runtime(Session::new());
+    runtime.session.push_user_text("Create a Word document").expect("user message");
+    let (seat, release, _landed) = HeldSkillSuggestionSeat::held();
+    runtime.set_skill_suggestion_seat(Some(Arc::new(seat)));
+
+    let started = std::time::Instant::now();
+    runtime.inject_skill_suggestion("Create a Word document");
+    let waited = started.elapsed();
+    assert!(
+        waited >= super::TURN_START_JUDGMENT_WAIT && waited < super::TURN_START_JUDGMENT_WAIT * 4,
+        "the turn waits the turn-start wait and no longer, not the judgment's ten-second wall: {waited:?}"
+    );
+    assert!(!request_has_current_turn_skill_note(&mut runtime), "the first request leaves without it");
+
+    release.send(()).expect("the judgment is still waiting");
+    let released = std::time::Instant::now();
+    while !runtime.pending_turn_notes.iter().all(|late| late.judged.is_finished()) {
+        assert!(released.elapsed() < Duration::from_secs(5), "the released judgment never landed");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(request_has_current_turn_skill_note(&mut runtime), "the next request of the turn carries it");
+    assert!(runtime.pending_turn_notes.is_empty());
+}
+
+/// A file-pick seat whose judgment lands only when the test releases it.
+struct HeldFilePickSeat {
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+impl crate::FilePickSeat for HeldFilePickSeat {
+    fn suggest(&self, _ask: crate::FilePickAsk) -> futures_util::future::BoxFuture<'_, Option<crate::FilePickHint>> {
+        let released = self.release.lock().expect("release lock").take();
+        Box::pin(async move {
+            if let Some(released) = released {
+                let _ = released.await;
+            }
+            Some(crate::FilePickHint {
+                text: format!("{} \"src/target.rs\" (suggestions; verify or ignore).", crate::FILE_PICK_NOTE_PREFIX),
+            })
+        })
+    }
+
+    fn label(&self, _attempt: &str, _edited_paths: &[String], _search_calls_before_first_edit: Option<usize>) {}
+}
+
+/// The file pick and the skill suggestion share one turn-start wait: two
+/// slow judgments hold the first request for that wait once, not once each,
+/// and both notes ride the next request after they land.
+#[test]
+fn the_turn_start_judgments_share_one_wait() {
+    let mut runtime = recall_hint_runtime(Session::new());
+    let (file_release, file_released) = tokio::sync::oneshot::channel();
+    runtime.set_file_pick_seat(Some(Arc::new(HeldFilePickSeat { release: Mutex::new(Some(file_released)) })));
+    let (seat, skill_release, _landed) = HeldSkillSuggestionSeat::held();
+    runtime.set_skill_suggestion_seat(Some(Arc::new(seat)));
+    let input = "Please fix the parser in src/target.rs";
+
+    let started = std::time::Instant::now();
+    runtime.run_user_prompt_submit_for_streaming_user_entry(input).expect("the turn proceeds");
+    let waited = started.elapsed();
+    assert!(
+        waited >= super::TURN_START_JUDGMENT_WAIT && waited < super::TURN_START_JUDGMENT_WAIT * 3 / 2,
+        "two judgments wait one turn-start wait, not one each: {waited:?}"
+    );
+    assert_eq!(runtime.pending_turn_notes.len(), 2);
+
+    file_release.send(()).expect("the file pick is still waiting");
+    skill_release.send(()).expect("the skill judgment is still waiting");
+    let released = std::time::Instant::now();
+    while !runtime.pending_turn_notes.iter().all(|late| late.judged.is_finished()) {
+        assert!(released.elapsed() < Duration::from_secs(5), "the released judgments never landed");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    runtime.session.push_user_text(input).expect("the turn's message");
+    let request = runtime.build_request(None).expect("the next request");
+    let carried = |prefix: &str| request.messages.iter().any(|message| {
+        message.role == MessageRole::System && message.blocks.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text } if text.contains(prefix))
+        })
+    });
+    assert!(carried(crate::FILE_PICK_NOTE_PREFIX), "the file pick rides the next request");
+    assert!(carried(crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX), "so does the skill note");
+}
+
+#[test]
+fn a_late_skill_note_does_not_outlive_its_turn() {
+    let mut runtime = recall_hint_runtime(Session::new());
+    runtime.session.push_user_text("Create a Word document").expect("first turn message");
+    let (seat, release, landed) = HeldSkillSuggestionSeat::held();
+    runtime.set_skill_suggestion_seat(Some(Arc::new(seat)));
+    runtime.inject_skill_suggestion("Create a Word document");
+    assert_eq!(runtime.pending_turn_notes.len(), 1);
+
+    runtime.set_skill_suggestion_seat(None);
+    runtime.session.push_user_text("Something else").expect("second turn message");
+    runtime.clear_turn_start_transient_reminders();
+    release.send(()).expect("the first turn's judgment is still waiting");
+    wait_until_landed(&landed);
+
+    assert!(runtime.pending_turn_notes.is_empty());
+    assert!(!request_has_current_turn_skill_note(&mut runtime), "the next turn never reads it");
+    assert_no_transient_skill_note(&runtime);
+}
+
+/// A suggestion seat that answers a fixed time after it is asked.
+struct DelayedSkillSuggestionSeat {
+    delay: Duration,
+}
+
+impl crate::skill_rank::SkillSuggestionSeat for DelayedSkillSuggestionSeat {
+    fn suggest(&self, _request: String) -> futures_util::future::BoxFuture<'_, Option<String>> {
+        let delay = self.delay;
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            Some(crate::skill_rank::suggestion_note(Some("docx")))
+        })
+    }
+
+    fn finish(&self, _turn: &[crate::session::ConversationMessage]) {}
+}
+
+/// Both judgments are asked before the turn waits: a file pick that uses
+/// the whole wait does not start the skill judgment at its end, where an
+/// answer well inside the wait would still miss the first request.
+#[test]
+fn a_slow_file_pick_does_not_keep_a_quick_skill_note_off_the_first_request() {
+    let mut runtime = recall_hint_runtime(Session::new());
+    let (_file_release, file_released) = tokio::sync::oneshot::channel::<()>();
+    runtime.set_file_pick_seat(Some(Arc::new(HeldFilePickSeat { release: Mutex::new(Some(file_released)) })));
+    runtime.set_skill_suggestion_seat(Some(Arc::new(DelayedSkillSuggestionSeat {
+        delay: super::TURN_START_JUDGMENT_WAIT / 8,
+    })));
+
+    runtime
+        .run_user_prompt_submit_for_streaming_user_entry("Please fix the parser in src/target.rs")
+        .expect("the turn proceeds");
+
+    assert!(
+        runtime
+            .transient_reminders
+            .iter()
+            .any(|reminder| reminder.starts_with(crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX)),
+        "the quick skill note rides the first request: {:?}",
+        runtime.transient_reminders
+    );
+    assert_eq!(runtime.pending_turn_notes.len(), 1, "only the file pick is still out");
+}
+
+/// A judgment that missed the wait is still asked on the next turn, but
+/// the next turn's first request does not wait for it.
+#[test]
+fn a_judge_that_missed_the_wait_is_not_waited_for_on_the_next_turn() {
+    let mut runtime = recall_hint_runtime(Session::new());
+    runtime.session.push_user_text("Create a Word document").expect("first turn message");
+    let (seat, _first_release, _first_landed) = HeldSkillSuggestionSeat::held();
+    runtime.set_skill_suggestion_seat(Some(Arc::new(seat)));
+    runtime.inject_skill_suggestion("Create a Word document");
+
+    runtime.session.push_user_text("Create another one").expect("second turn message");
+    runtime.clear_turn_start_transient_reminders();
+    let (seat, _second_release, _second_landed) = HeldSkillSuggestionSeat::held();
+    runtime.set_skill_suggestion_seat(Some(Arc::new(seat)));
+    let started = std::time::Instant::now();
+    runtime.inject_skill_suggestion("Create another one");
+    let waited = started.elapsed();
+
+    assert!(waited < super::TURN_START_JUDGMENT_WAIT / 4, "the second turn does not wait: {waited:?}");
+    assert_eq!(runtime.pending_turn_notes.len(), 1, "the judgment is still asked");
+}
+
+/// One answer inside the wait, even one nobody waited for, puts the wait
+/// back for the next turn.
+#[test]
+fn a_judge_back_inside_the_wait_is_waited_for_again() {
+    let mut runtime = recall_hint_runtime(Session::new());
+    runtime.session.push_user_text("Create a Word document").expect("first turn message");
+    let (seat, _held_release, _held_landed) = HeldSkillSuggestionSeat::held();
+    runtime.set_skill_suggestion_seat(Some(Arc::new(seat)));
+    runtime.inject_skill_suggestion("Create a Word document");
+
+    runtime.session.push_user_text("Create another one").expect("second turn message");
+    runtime.clear_turn_start_transient_reminders();
+    runtime.set_skill_suggestion_seat(Some(Arc::new(FixedSkillSuggestionSeat {
+        asked: Arc::new(Mutex::new(Vec::new())),
+        finished: Arc::new(Mutex::new(0)),
+        note: Some(crate::skill_rank::suggestion_note(Some("docx"))),
+    })));
+    runtime.inject_skill_suggestion("Create another one");
+    let asked = std::time::Instant::now();
+    while !runtime.pending_turn_notes.iter().all(|note| note.judged.is_finished()) {
+        assert!(asked.elapsed() < Duration::from_secs(5), "the quick judgment never landed");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    runtime.session.push_user_text("And a third").expect("third turn message");
+    runtime.clear_turn_start_transient_reminders();
+    let (seat, _third_release, _third_landed) = HeldSkillSuggestionSeat::held();
+    runtime.set_skill_suggestion_seat(Some(Arc::new(seat)));
+    let started = std::time::Instant::now();
+    runtime.inject_skill_suggestion("And a third");
+    let waited = started.elapsed();
+
+    assert!(waited >= super::TURN_START_JUDGMENT_WAIT, "the third turn waits again: {waited:?}");
+}
+
 #[test]
 fn verify_intent_defaults_to_other_and_is_installed_per_turn() {
     // Every host that never installs a probed intent — headless, serve,

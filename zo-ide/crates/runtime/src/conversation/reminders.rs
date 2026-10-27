@@ -545,6 +545,9 @@ where
     /// Clear per-turn prompt additions before running prompt-submit policy so a
     /// denied or failed hook cannot leak stale context into the next request.
     pub(super) fn clear_turn_start_transient_reminders(&mut self) {
+        // A judgment the last turn's requests never saw land belongs to that
+        // turn: dropping its handle lets it finish and write its row unread.
+        self.drop_pending_turn_notes();
         self.replace_transient_system_reminder_by_prefix(EMPTY_STREAM_RETRY_REMINDER_PREFIX, None);
         // Start each turn without stale plan/state/hook reminders; they are
         // refreshed later from durable state / threshold checks when relevant.

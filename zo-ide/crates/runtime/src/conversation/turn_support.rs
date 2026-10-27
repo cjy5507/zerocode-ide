@@ -476,6 +476,7 @@ where
         &mut self,
         tool_choice: Option<::api::ToolChoice>,
     ) -> Result<ApiRequest, RuntimeError> {
+        self.collect_turn_start_notes();
         let wire_reminders = self.request_wire_reminders();
         // Persist the reminder set into the transcript BEFORE the overflow
         // guard, so the guard's session estimate covers it, and pass an empty

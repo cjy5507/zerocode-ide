@@ -637,6 +637,37 @@ struct FilePickPendingTurn {
     message_count_before: usize,
 }
 
+/// The longest a turn's first request waits for its turn-start judgments
+/// (the file pick and the skill suggestion, together). The window's hook
+/// holds a turn-start brief to the same 800 ms of its 1.5 s reply. The
+/// judgments' own walls are 1.5 s and ten seconds, and on 2026-10-27 a
+/// remote judge spent both in front of the first token while the first
+/// request sat unsent: the skill suggestion answered in 6.6–6.8 s, and the
+/// file pick timed out at 1.5 s on every turn it was asked. A judgment that
+/// lands later rides the turn's next request instead ([`PendingTurnNote`]),
+/// and a judgment that keeps landing later is not waited for at all
+/// ([`ConversationRuntime::slow_turn_notes`]).
+const TURN_START_JUDGMENT_WAIT: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// A turn-start judgment not yet installed. Every one is asked before the
+/// first request waits, so they run side by side; the first request that
+/// finds it landed carries its note, as a reminder behind the newest cache
+/// breakpoint like every other turn note. A new turn drops it unread, and
+/// the judgment still writes its own row.
+#[derive(Debug)]
+struct PendingTurnNote {
+    prefix: &'static str,
+    judged: tokio::task::JoinHandle<TurnNote>,
+}
+
+/// What a turn-start judgment answered, and whether it answered inside
+/// [`TURN_START_JUDGMENT_WAIT`] of being asked.
+#[derive(Debug)]
+struct TurnNote {
+    text: Option<String>,
+    in_time: bool,
+}
+
 #[allow(clippy::struct_excessive_bools)] // each bool is an independent feature gate threaded from settings, not a state machine
 pub struct ConversationRuntime<C, T> {
     session: Session,
@@ -726,6 +757,14 @@ pub struct ConversationRuntime<C, T> {
     file_pick_seat: Option<Arc<dyn crate::FilePickSeat>>,
     skill_suggestion_seat: Option<Arc<dyn crate::skill_rank::SkillSuggestionSeat>>,
     skill_suggestion_turn_start: Option<usize>,
+    /// This turn's turn-start judgments not yet installed.
+    pending_turn_notes: Vec<PendingTurnNote>,
+    /// The turn-start judgments, by note prefix, whose last answer came
+    /// after [`TURN_START_JUDGMENT_WAIT`]. The first request does not wait
+    /// for these; one answer inside the wait puts the wait back. A judge
+    /// that is always late would otherwise cost every turn the whole wait
+    /// and still miss its first request.
+    slow_turn_notes: HashSet<&'static str>,
     /// The start-of-turn reading awaiting its actual edited-file label.
     file_pick_pending_turn: Option<FilePickPendingTurn>,
     /// Seated beside the tools and handed each shell command before it runs
@@ -1798,6 +1837,8 @@ where
             file_pick_seat: None,
             skill_suggestion_seat: None,
             skill_suggestion_turn_start: None,
+            pending_turn_notes: Vec::new(),
+            slow_turn_notes: HashSet::new(),
             file_pick_pending_turn: None,
             tool_guard_seat: None,
             max_iterations: default_max_iterations(),
@@ -1984,8 +2025,18 @@ where
 
     /// Ask the installed file-pick seat at the one public turn boundary. A
     /// recording mode returns without waiting; an acting mode may give the
-    /// agent one line to consider before the request is sent.
+    /// agent one line to consider before the request is sent — waited for
+    /// as long as [`Self::wait_for_turn_start_notes`] waits, and otherwise
+    /// carried by a later request of the turn. The turn boundary asks both
+    /// judgments before it waits, so only tests ask this one alone.
+    #[cfg(test)]
     fn inject_file_pick_hint(&mut self, user_input: &str) {
+        self.ask_file_pick(user_input);
+        self.wait_for_turn_start_notes();
+    }
+
+    /// [`Self::inject_file_pick_hint`] without the wait.
+    fn ask_file_pick(&mut self, user_input: &str) {
         self.finish_file_pick_turn();
         self.replace_transient_system_reminder_by_prefix(
             crate::FILE_PICK_NOTE_PREFIX,
@@ -2003,13 +2054,9 @@ where
             session_id: self.session.session_id.clone(),
             request: user_input.to_string(),
         };
-        let hint = ::api::sync_bridge::run_blocking(seat.suggest(ask));
-        if let Some(hint) = hint {
-            self.replace_transient_system_reminder_by_prefix(
-                crate::FILE_PICK_NOTE_PREFIX,
-                Some(&hint.text),
-            );
-        }
+        self.ask_turn_start_note(crate::FILE_PICK_NOTE_PREFIX, async move {
+            seat.suggest(ask).await.map(|hint| hint.text)
+        });
         self.file_pick_pending_turn = Some(FilePickPendingTurn {
             attempt,
             message_count_before: self.session.messages.len(),
@@ -2018,16 +2065,125 @@ where
 
     /// Ask about skills at the public turn boundary, including turns whose
     /// prompt index fits. Recording mode keeps the existing hint unchanged.
+    ///
+    /// The turn waits [`TURN_START_JUDGMENT_WAIT`] at most; a judgment still
+    /// out then is left running and rides a later request of this turn.
     fn inject_skill_suggestion(&mut self, user_input: &str) {
+        self.ask_skill_suggestion(user_input);
+        self.wait_for_turn_start_notes();
+    }
+
+    /// [`Self::inject_skill_suggestion`] without the wait.
+    fn ask_skill_suggestion(&mut self, user_input: &str) {
         self.finish_skill_suggestion_turn();
-        let note = self.skill_suggestion_seat.as_ref().map(Arc::clone).and_then(|seat| {
-            self.skill_suggestion_turn_start = Some(self.session.messages.len());
-            ::api::sync_bridge::run_blocking(seat.suggest(user_input.to_string()))
+        let prefix = crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX;
+        self.replace_transient_system_reminder_by_prefix(prefix, None);
+        let Some(seat) = self.skill_suggestion_seat.as_ref().map(Arc::clone) else {
+            return;
+        };
+        self.skill_suggestion_turn_start = Some(self.session.messages.len());
+        let request = user_input.to_string();
+        self.ask_turn_start_note(prefix, async move { seat.suggest(request).await });
+    }
+
+    /// Start a turn-start judgment without waiting for it. It is timed from
+    /// here, so its [`TurnNote::in_time`] matches the wait it is held to.
+    fn ask_turn_start_note<F>(&mut self, prefix: &'static str, judgment: F)
+    where
+        F: std::future::Future<Output = Option<String>> + Send + 'static,
+    {
+        let asked = std::time::Instant::now();
+        let judged = ::api::sync_bridge::spawn_detached(async move {
+            let text = judgment.await;
+            TurnNote { text, in_time: asked.elapsed() <= TURN_START_JUDGMENT_WAIT }
         });
-        self.replace_transient_system_reminder_by_prefix(
-            crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX,
-            note.as_deref(),
-        );
+        self.pending_turn_notes.push(PendingTurnNote { prefix, judged });
+    }
+
+    /// Hold the turn's first request until every judgment asked so far has
+    /// landed or [`TURN_START_JUDGMENT_WAIT`] has passed, and install the
+    /// notes that landed. The judgments were all asked before this, so two
+    /// of them hold the request one wait, not one each. One in
+    /// [`Self::slow_turn_notes`] is not waited for, only taken if it has
+    /// already landed; one that misses the wait joins that set.
+    fn wait_for_turn_start_notes(&mut self) {
+        // Nothing asked, nothing to wait for — and no runtime to block on: a
+        // turn with no seats must stay callable from inside a runtime.
+        if self.pending_turn_notes.is_empty() {
+            return;
+        }
+        let until = std::time::Instant::now() + TURN_START_JUDGMENT_WAIT;
+        let slow = &self.slow_turn_notes;
+        let pending = &mut self.pending_turn_notes;
+        // The timers are made inside the async block: `timeout_at` binds its
+        // timer when it is built, and a caller with no runtime has none to bind.
+        let landed: Vec<Option<Option<TurnNote>>> = ::api::sync_bridge::run_blocking(async {
+            let mut landed = Vec::with_capacity(pending.len());
+            for note in pending.iter_mut() {
+                let deadline = if slow.contains(note.prefix) { std::time::Instant::now() } else { until };
+                // `Timeout` polls the judgment before its timer, so one that
+                // has already landed is taken even past the deadline.
+                let waited = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut note.judged).await;
+                landed.push(waited.ok().map(Result::ok));
+            }
+            landed
+        });
+        let mut landed = landed.into_iter();
+        for note in std::mem::take(&mut self.pending_turn_notes) {
+            if let Some(joined) = landed.next().flatten() {
+                self.install_turn_note(note.prefix, joined);
+            } else {
+                self.slow_turn_notes.insert(note.prefix);
+                self.pending_turn_notes.push(note);
+            }
+        }
+    }
+
+    /// Put each turn-start note that has landed since the last request into
+    /// this request's reminders. A judgment still out stays pending.
+    pub(super) fn collect_turn_start_notes(&mut self) {
+        if self.pending_turn_notes.is_empty() {
+            return;
+        }
+        let (landed, pending): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_turn_notes)
+            .into_iter()
+            .partition(|note| note.judged.is_finished());
+        self.pending_turn_notes = pending;
+        for mut note in landed {
+            let joined = futures_util::FutureExt::now_or_never(&mut note.judged).and_then(Result::ok);
+            self.install_turn_note(note.prefix, joined);
+        }
+    }
+
+    /// Drop the last turn's judgments unread. One that has landed still says
+    /// whether its judge keeps inside the wait.
+    pub(super) fn drop_pending_turn_notes(&mut self) {
+        for mut note in std::mem::take(&mut self.pending_turn_notes) {
+            if !note.judged.is_finished() {
+                continue;
+            }
+            if let Some(Ok(landed)) = futures_util::FutureExt::now_or_never(&mut note.judged) {
+                self.note_turn_note_pace(note.prefix, landed.in_time);
+            }
+        }
+    }
+
+    /// Install a landed judgment's note; `None` is a judgment that failed
+    /// before it could answer.
+    fn install_turn_note(&mut self, prefix: &'static str, joined: Option<TurnNote>) {
+        let text = joined.and_then(|note| {
+            self.note_turn_note_pace(prefix, note.in_time);
+            note.text
+        });
+        self.replace_transient_system_reminder_by_prefix(prefix, text.as_deref());
+    }
+
+    fn note_turn_note_pace(&mut self, prefix: &'static str, in_time: bool) {
+        if in_time {
+            self.slow_turn_notes.remove(prefix);
+        } else {
+            self.slow_turn_notes.insert(prefix);
+        }
     }
 
     pub(super) fn finish_skill_suggestion_turn(&mut self) {
@@ -2090,8 +2246,9 @@ where
                 // covers the whole streaming dispatcher.
                 self.inject_verified_state_reminder();
                 self.install_turn_budget_continuation_reminder();
-                self.inject_file_pick_hint(user_input);
-                self.inject_skill_suggestion(user_input);
+                self.ask_file_pick(user_input);
+                self.ask_skill_suggestion(user_input);
+                self.wait_for_turn_start_notes();
                 Ok(())
             }
             PromptSubmitDecision::Denied { reason } => Err(StreamingTurnError::runtime(

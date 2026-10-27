@@ -1355,6 +1355,7 @@ where
             )
             .await;
             let recall_attached = !recall_section.is_empty();
+            self.collect_turn_start_notes();
             let mut wire_reminders = self.transient_reminders.clone();
             wire_reminders.extend(recall_section);
             // Persist the reminder set as a trailing System transcript message
