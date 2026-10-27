@@ -5018,16 +5018,6 @@ function refreshChrome() {
   // The lane's tab carries what a lane header used to: which agent, which
   // session, and whether it is waiting for someone.
   renderTabs();
-
-  const waiting = order.filter((id) => {
-    const held = lanes.get(id);
-    return held && ["awaiting_permission", "blocked"].includes(held.lane.state);
-  });
-  attention.hidden = waiting.length === 0;
-  if (waiting.length > 0) {
-    attention.className = `attention ${slotClass(waiting[0])}`;
-    attentionCount.textContent = t("session.waiting", "{{count}}개 대기", { count: waiting.length });
-  }
 }
 
 function upsertLane(lane) {

@@ -769,7 +769,7 @@ function askDraftFor(card) {
  * conversation view keeps one with its page — the same shape, so the panels
  * read either. `repaint` is the surface's own repaint (the board's when
  * unset); `instead` is the conversation's third road on a permission card. */
-function askDraftOf(card, sig, { repaint = null, instead = null, answer = null, base = "" } = {}) {
+function askDraftOf(card, sig, { repaint = null, instead = null, answer = null, base = "", delivered = null } = {}) {
   return {
     sig,
     index: 0,
@@ -783,6 +783,11 @@ function askDraftOf(card, sig, { repaint = null, instead = null, answer = null, 
     // The road an answer takes when it is not the board's keystroke road:
     // a wire's card answers the agent's request itself.
     answer,
+    // What the surface does once the answer was taken, before the hook's next
+    // event says so (the turn list counts it off at once), and the refusal's
+    // words, which a surface that keeps the question in view says beside it.
+    delivered,
+    refusal: "",
     // Where the card's prose measures its relative paths from — a plan names
     // the files it will touch, and those names are links off this checkout.
     // The board's own cards have none; their prose resolves to nothing.
@@ -879,11 +884,29 @@ function submitAsk(card, draft) {
   const road = draft.answer
     ? draft.answer(selections)
     : invoke("answer_ask", { term, agent: card.agent, prompt: card.ask_prompt, selections }, { hand: handNow() });
-  road.catch((error) => {
-    draft.sending = false;
-    showError(answerRefusalWords(error));
-    repaintAsk(draft);
-  });
+  road.then(() => draft.delivered?.(), (error) => refuseAsk(draft, error));
+}
+
+/* An answer that did not go in: the panel is usable again, and the person is
+ * told why — in a toast, and beside the question for a surface that shows it. */
+function refuseAsk(draft, error) {
+  draft.sending = false;
+  draft.refusal = answerRefusalWords(error);
+  showError(draft.refusal);
+  repaintAsk(draft);
+}
+
+/* Answer a permission request a card prepared: the keystroke road for a pane
+ * (`answer_approval`), the request itself for a wire (`draft.answer`). The
+ * panel goes quiet at once, as Orca's does (`onChoose` → `sendRaw`). */
+function decideApproval(card, draft, choice, message = null) {
+  const term = Number(card.pane.slice(card.pane.indexOf(":") + 1));
+  const decide = draft.answer ?? ((allow) => invoke("answer_approval", { term, allow }, { hand: handNow() }));
+  draft.sending = true;
+  draft.open = false;
+  draft.refusal = "";
+  decide(choice, message).then(() => draft.delivered?.(), (error) => refuseAsk(draft, error));
+  repaintAsk(draft);
 }
 
 /* The answer panel, unfolded from the amber box — Orca's ask card
@@ -1090,10 +1113,8 @@ function approvalPanelNode(card, draft) {
   if (feedback) panel.appendChild(feedback);
   const acts = document.createElement("span");
   acts.className = "board-approve-acts";
-  const term = Number(card.pane.slice(card.pane.indexOf(":") + 1));
   // The board's card answers the TUI by keystroke; a wire's card answers the
   // request itself (`draft.answer`, the option's id).
-  const decide = draft.answer ?? ((allow) => invoke("answer_approval", { term, allow }, { hand: handNow() }));
   const act = (label, choice, kind, { then = null, says = null } = {}) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -1102,14 +1123,7 @@ function approvalPanelNode(card, draft) {
     button.textContent = label;
     button.onclick = (event) => {
       event.stopPropagation();
-      draft.sending = true;
-      draft.open = false;
-      decide(choice, says?.() || null).catch((error) => {
-        draft.sending = false;
-        showError(answerRefusalWords(error));
-        repaintAsk(draft);
-      });
-      repaintAsk(draft);
+      decideApproval(card, draft, choice, says?.() || null);
       then?.();
     };
     return button;
@@ -1758,6 +1772,8 @@ function updateActionHub(answer) {
 
   const hubBadge = el("action-hub-badge");
   if (hubBadge) hubBadge.textContent = String(stuck);
+  forgetGoneTurns();
+  paintYourTurn();
 
   const scrim = el("action-hub-scrim");
   if (scrim && !scrim.hidden) {
@@ -1842,6 +1858,463 @@ window.closeActionHub = closeActionHub;
 
 el("action-hub-close")?.addEventListener("click", closeActionHub);
 el("action-hub-dismiss")?.addEventListener("click", closeActionHub);
+
+/* ---- 당신 차례: the chip, the list it drops, the sidebar group (2차 B) ----
+ *
+ * 「지금 누가 나를 필요로 하는가?」 where the eye lands first: one chip by the
+ * wordmark, the list it drops, and a group at the top of the sidebar. All three
+ * read `attentionCards` — the attention column the dock badge counts
+ * (`applyBoardBadge`) — so no surface keeps a second count of what waits.
+ *
+ * An answer takes the roads a board card already takes, through the backend's
+ * answer door, which types only while the pane still shows the question
+ * (`submitAsk` → `answer_ask`, `decideApproval` → `answer_approval`). A question
+ * asked in prose has no menu to answer: its words go in the composer's way
+ * (`deliverToPane`), and only to a pane that is not mid-turn (`composerWorking`).
+ * A refusal of either kind is said beside the question and never counted as
+ * sent. Nothing here is built while nothing waits or the list is shut. */
+
+/* How long N puts a turn away. */
+const YOUR_TURN_LATER_MS = 10 * 60_000;
+/* Turns put away, by turn: until when. */
+const yourTurnLater = new Map();
+/* Turns answered from here that the column still lists: the hook that moves the
+ * pane on lands a beat after the keys, and a chip that waited for it would say
+ * the answer went nowhere. Dropped once the column stops listing the turn. */
+const yourTurnAnswered = new Set();
+/* One draft per turn — the picks, the words typed, the refusal — kept across
+ * repaints and dropped with the turn. */
+const yourTurnDrafts = new Map();
+/* What the group and the list last drew: a repaint that would draw the same
+ * turns builds nothing. */
+let yourTurnGroupDrawn = "";
+let yourTurnListDrawn = "";
+
+/* A turn is a pane and the question it stands on: the same pane asking the
+ * next thing is a new turn, with a fresh draft and no put-away. */
+function yourTurnKey(card) {
+  return `${card.pane}\n${askSignature(card)}\n${card.ask ?? ""}`;
+}
+
+function yourTurnKind(card) {
+  if (card.approval) return "permission";
+  if (card.ask_prompt || card.ask) return "question";
+  return card.state === "failed" ? "failed" : "waiting";
+}
+
+function yourTurnKindWord(kind) {
+  switch (kind) {
+    case "permission":
+      return t("yourTurn.kindPermission", "권한");
+    case "question":
+      return t("yourTurn.kindQuestion", "질문");
+    case "failed":
+      return t("yourTurn.kindFailed", "실패");
+    default:
+      return t("yourTurn.kindWaiting", "기다림");
+  }
+}
+
+function yourTurns(now = Date.now()) {
+  return attentionCards.filter((card) => {
+    const key = yourTurnKey(card);
+    return !yourTurnAnswered.has(key) && (yourTurnLater.get(key) ?? 0) <= now;
+  });
+}
+
+/* What the column stopped listing leaves every ledger here with it, and a turn
+ * put away whose ten minutes are up comes back. */
+function forgetGoneTurns(now = Date.now()) {
+  const listed = new Set(attentionCards.map(yourTurnKey));
+  for (const key of yourTurnAnswered) if (!listed.has(key)) yourTurnAnswered.delete(key);
+  for (const [key, until] of yourTurnLater) if (!listed.has(key) || until <= now) yourTurnLater.delete(key);
+  for (const key of yourTurnDrafts.keys()) if (!listed.has(key)) yourTurnDrafts.delete(key);
+}
+
+function yourTurnDraft(card) {
+  const key = yourTurnKey(card);
+  let draft = yourTurnDrafts.get(key);
+  if (!draft) {
+    draft = askDraftOf(card, askSignature(card), { repaint: paintYourTurn, delivered: () => countTurnAnswered(key) });
+    yourTurnDrafts.set(key, draft);
+  }
+  return draft;
+}
+
+function countTurnAnswered(key) {
+  yourTurnAnswered.add(key);
+  yourTurnDrafts.delete(key);
+  paintYourTurn();
+}
+
+function putTurnAway(card) {
+  yourTurnLater.set(yourTurnKey(card), Date.now() + YOUR_TURN_LATER_MS);
+  paintYourTurn();
+}
+
+/* Everything a turn's drawing depends on, so an unchanged repaint builds nothing. */
+function yourTurnsDrawing(turns) {
+  return JSON.stringify([locale, turns.map((card) => {
+    const key = yourTurnKey(card);
+    const draft = yourTurnDrafts.get(key);
+    return [key, card.heading, card.changed_at, draft?.sending, draft?.refusal, draft?.index, draft?.selections];
+  })]);
+}
+
+function paintYourTurn() {
+  if (isPopout) return;
+  const turns = yourTurns();
+  const chip = el("your-turn");
+  chip.classList.toggle("is-live", turns.length > 0);
+  writeTextContent(el("your-turn-count"), String(turns.length));
+  paintYourTurnGroup(turns);
+  if (!el("your-turn-list").hidden) paintYourTurnList(turns);
+}
+
+function yourTurnButton(className, words, run) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = words;
+  button.onclick = (event) => {
+    event.stopPropagation();
+    run();
+  };
+  return button;
+}
+
+/* Kind, name, agent and age — the one line every turn opens with. The kind is
+ * a word and a shape (`data-kind`), never the colour alone. */
+function yourTurnHeadNode(card, kind, now) {
+  const head = document.createElement("span");
+  head.className = "your-turn-head";
+  const mark = document.createElement("span");
+  mark.className = "your-turn-kind";
+  mark.dataset.kind = kind;
+  mark.textContent = yourTurnKindWord(kind);
+  const name = document.createElement("strong");
+  name.className = "your-turn-name";
+  name.textContent = card.heading || card.agent;
+  const agent = document.createElement("span");
+  agent.className = "your-turn-agent";
+  agent.textContent = card.agent;
+  const age = document.createElement("span");
+  age.className = "your-turn-age";
+  age.textContent = agoWord(card.changed_at || card.at || now, now);
+  head.append(mark, name, agent, age);
+  return head;
+}
+
+function yourTurnAllowNode(card, draft, chord) {
+  const allow = yourTurnButton("btn btn--primary your-turn-allow", t("yourTurn.allow", "허락"),
+    () => decideApproval(card, draft, true));
+  if (chord) {
+    const keys = document.createElement("kbd");
+    keys.className = "your-turn-chord";
+    keys.textContent = chordLabel("mod+enter");
+    allow.append(keys);
+  }
+  allow.disabled = draft.sending;
+  return allow;
+}
+
+function yourTurnDenyNode(card, draft) {
+  const deny = yourTurnButton("btn your-turn-deny", t("yourTurn.deny", "거절"), () => decideApproval(card, draft, false));
+  deny.disabled = draft.sending;
+  return deny;
+}
+
+function yourTurnOpenNode(card) {
+  return yourTurnButton("btn your-turn-open", t("yourTurn.open", "대화 열기"), () => {
+    closeYourTurnList({ restoreFocus: false });
+    void openBoardConversation(card);
+  });
+}
+
+function yourTurnRefusalNode(draft) {
+  const said = document.createElement("p");
+  said.className = "your-turn-refusal";
+  said.setAttribute("role", "status");
+  said.textContent = draft.refusal;
+  return said;
+}
+
+/* ---- the sidebar group ---- */
+
+function paintYourTurnGroup(turns) {
+  const host = el("your-turn-group");
+  const drawing = yourTurnsDrawing(turns);
+  if (drawing === yourTurnGroupDrawn) return;
+  yourTurnGroupDrawn = drawing;
+  host.hidden = turns.length === 0;
+  if (host.hidden) {
+    host.replaceChildren();
+    return;
+  }
+  const now = Date.now();
+  const head = yourTurnButton("your-turn-group-head", t("yourTurn.group", "당신 차례 {{count}}", { count: turns.length }),
+    () => openYourTurnList());
+  host.replaceChildren(head, ...turns.map((card) => yourTurnRowNode(card, now)));
+}
+
+function yourTurnRowNode(card, now) {
+  const kind = yourTurnKind(card);
+  const draft = yourTurnDraft(card);
+  const row = document.createElement("div");
+  row.className = "your-turn-row";
+  row.dataset.kind = kind;
+  // Its answers are the person's: an agent pressing in the window never makes them (t-73906).
+  row.dataset.personOnly = "";
+  actsAsButton(row, () => openYourTurnList(yourTurnKey(card)));
+  const line = document.createElement("span");
+  line.className = "your-turn-row-line";
+  line.textContent = cardAskLine(card) || card.said || "";
+  const acts = document.createElement("span");
+  acts.className = "your-turn-row-acts";
+  if (kind === "permission") acts.append(yourTurnAllowNode(card, draft, false), yourTurnDenyNode(card, draft));
+  acts.append(yourTurnOpenNode(card));
+  row.append(yourTurnHeadNode(card, kind, now), line, acts);
+  if (draft.refusal) row.append(yourTurnRefusalNode(draft));
+  return row;
+}
+
+/* ---- the list dropped from the chip ---- */
+
+function openYourTurnList(focusKey = null) {
+  const list = el("your-turn-list");
+  const chip = el("your-turn");
+  if (list.hidden) {
+    list.hidden = false;
+    chip.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", closeYourTurnListOutside, true);
+  }
+  // Hung from the chip's own edge, wherever the title bar has put it.
+  const box = chip.getBoundingClientRect();
+  list.style.setProperty("--your-turn-top", `${Math.round(box.bottom)}px`);
+  list.style.setProperty("--your-turn-left", `${Math.round(box.left)}px`);
+  yourTurnListDrawn = "";
+  paintYourTurnList(yourTurns());
+  const items = [...list.querySelectorAll(".your-turn-item")];
+  (items.find((item) => item.dataset.key === focusKey) ?? items[0] ?? list).focus();
+}
+
+function closeYourTurnList({ restoreFocus = true } = {}) {
+  const list = el("your-turn-list");
+  if (list.hidden) return;
+  list.hidden = true;
+  list.replaceChildren();
+  yourTurnListDrawn = "";
+  el("your-turn").setAttribute("aria-expanded", "false");
+  document.removeEventListener("pointerdown", closeYourTurnListOutside, true);
+  if (restoreFocus) el("your-turn").focus();
+}
+
+function closeYourTurnListOutside(event) {
+  if (el("your-turn-list").contains(event.target) || el("your-turn").contains(event.target)) return;
+  closeYourTurnList({ restoreFocus: false });
+}
+
+/* Where the focus stood before a rebuild, said by turn rather than by node. */
+function yourTurnFocusOf(list) {
+  const active = document.activeElement;
+  const item = list.contains(active) ? active.closest(".your-turn-item") : null;
+  if (!item) return null;
+  const items = [...list.querySelectorAll(".your-turn-item")];
+  return { key: item.dataset.key, at: items.indexOf(item), field: active.matches(".your-turn-field") };
+}
+
+function restoreYourTurnFocus(list, kept) {
+  if (!kept) return;
+  const items = [...list.querySelectorAll(".your-turn-item")];
+  const item = items.find((one) => one.dataset.key === kept.key);
+  const field = kept.field ? item?.querySelector(".your-turn-field") : null;
+  if (field) {
+    field.focus();
+    field.setSelectionRange(field.value.length, field.value.length);
+    return;
+  }
+  // The turn just answered left: the one that took its place, else the list.
+  (item ?? items[Math.min(kept.at, items.length - 1)] ?? list).focus();
+}
+
+function paintYourTurnList(turns) {
+  const list = el("your-turn-list");
+  const drawing = yourTurnsDrawing(turns);
+  if (drawing === yourTurnListDrawn) return;
+  yourTurnListDrawn = drawing;
+  const kept = yourTurnFocusOf(list);
+  const now = Date.now();
+  const head = document.createElement("div");
+  head.className = "your-turn-list-head";
+  const title = document.createElement("strong");
+  title.textContent = t("yourTurn.group", "당신 차례 {{count}}", { count: turns.length });
+  const oldest = Math.min(...turns.map((card) => card.changed_at || card.at || now));
+  const age = document.createElement("span");
+  age.className = "your-turn-age";
+  age.textContent = turns.length > 0 ? t("yourTurn.oldest", "가장 오래 {{age}}", { age: agoWord(oldest, now) }) : "";
+  const inbox = yourTurnButton("your-turn-inbox", t("yourTurn.inbox", "받은 편지함에서 모두 보기"), () => {
+    closeYourTurnList({ restoreFocus: false });
+    openInboxView({ tab: "blocked" });
+  });
+  head.append(title, age, inbox);
+  const body = turns.length > 0
+    ? turns.map((card) => yourTurnItemNode(card, now))
+    : [Object.assign(document.createElement("p"), {
+      className: "your-turn-empty", textContent: t("board.now.headClear", "지금 답할 일이 없습니다"),
+    })];
+  const keys = document.createElement("p");
+  keys.className = "your-turn-keys";
+  keys.textContent = t("yourTurn.keys", "1–9 고르기 · N 나중에 10분 · ↑↓ 다음 차례 · Esc 닫기");
+  list.replaceChildren(head, ...body, keys);
+  restoreYourTurnFocus(list, kept);
+}
+
+function yourTurnItemNode(card, now) {
+  const kind = yourTurnKind(card);
+  const draft = yourTurnDraft(card);
+  const item = document.createElement("article");
+  item.className = "your-turn-item";
+  item.tabIndex = 0;
+  item.dataset.kind = kind;
+  item.dataset.key = yourTurnKey(card);
+  // Its answers are the person's: an agent pressing in the window never makes them (t-73906).
+  item.dataset.personOnly = "";
+  item.append(yourTurnHeadNode(card, kind, now));
+  const acts = document.createElement("div");
+  acts.className = "your-turn-acts";
+  if (kind === "permission") {
+    item.append(yourTurnPermissionNode(card));
+    acts.append(yourTurnAllowNode(card, draft, true), yourTurnDenyNode(card, draft));
+  } else if (card.ask_prompt) {
+    draft.open = true;
+    item.append(askPanelNode(card, draft));
+  } else if (kind === "question") {
+    item.append(yourTurnWordsNode(card, draft));
+  } else if (card.said) {
+    item.append(Object.assign(document.createElement("p"), { className: "your-turn-question", textContent: card.said }));
+  }
+  acts.append(yourTurnOpenNode(card));
+  item.append(acts);
+  if (draft.refusal) item.append(yourTurnRefusalNode(draft));
+  return item;
+}
+
+function yourTurnPermissionNode(card) {
+  const box = document.createElement("p");
+  box.className = "your-turn-question";
+  box.textContent = t("board.approve.title", "{{tool}} 허용할까요?", { tool: card.approval.tool });
+  if (card.approval.summary) {
+    const mono = document.createElement("code");
+    mono.className = "your-turn-mono";
+    mono.textContent = card.approval.summary;
+    box.append(" ", mono);
+  }
+  return box;
+}
+
+/* A question asked in prose: its sentence, a field and a send. */
+function yourTurnWordsNode(card, draft) {
+  const box = document.createElement("div");
+  box.className = "your-turn-words";
+  const question = document.createElement("p");
+  question.className = "your-turn-question";
+  question.textContent = card.ask;
+  const field = document.createElement("input");
+  field.type = "text";
+  field.className = "your-turn-field";
+  field.placeholder = t("board.ask.typeAnswer", "답을 입력");
+  field.setAttribute("aria-label", field.placeholder);
+  field.value = draft.other[0] ?? "";
+  field.disabled = draft.sending;
+  field.oninput = () => {
+    draft.other[0] = field.value;
+  };
+  field.onkeydown = (event) => {
+    if (event.key !== "Enter" || event.isComposing) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void sendTurnWords(card, draft);
+  };
+  const send = yourTurnButton("btn your-turn-send", t("board.ask.send", "답 보내기"), () => void sendTurnWords(card, draft));
+  send.disabled = draft.sending;
+  box.append(question, field, send);
+  return box;
+}
+
+async function sendTurnWords(card, draft) {
+  const words = (draft.other[0] ?? "").trim();
+  const { term } = boardCardDestination(card);
+  if (!words || term === null || draft.sending) return;
+  if (composerWorking({ term })) {
+    draft.refusal = t("yourTurn.busy", "이 판은 지금 글을 받을 수 없어요 — 에이전트가 일하는 중입니다");
+    paintYourTurn();
+    return;
+  }
+  draft.sending = true;
+  draft.refusal = "";
+  paintYourTurn();
+  try {
+    await deliverToPane(term, words);
+    draft.delivered?.();
+  } catch (error) {
+    refuseAsk(draft, error);
+  }
+}
+
+/* The list's keys: a number picks a choice (and answers, when one choice is the
+ * answer), ⌘↵ allows, N puts the turn away, ↑↓ walk, Esc shuts. A key typed in
+ * a field stays the field's. */
+function yourTurnListKey(event) {
+  const list = el("your-turn-list");
+  const stop = () => {
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  if (event.key === "Escape") {
+    stop();
+    closeYourTurnList();
+    return;
+  }
+  const items = [...list.querySelectorAll(".your-turn-item")];
+  const item = event.target.closest?.(".your-turn-item") ?? null;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    stop();
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    items[(items.indexOf(item) + step + items.length) % items.length]?.focus();
+    return;
+  }
+  if (!item || event.target.matches("input, textarea")) return;
+  const card = yourTurns().find((one) => yourTurnKey(one) === item.dataset.key);
+  if (!card) return;
+  const draft = yourTurnDraft(card);
+  const plain = !event.metaKey && !event.ctrlKey && !event.altKey;
+  if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && card.approval) {
+    stop();
+    if (!draft.sending) decideApproval(card, draft, true);
+    return;
+  }
+  const question = card.ask_prompt?.questions?.[draft.index];
+  const at = Number(event.key) - 1;
+  if (plain && question && /^[1-9]$/.test(event.key) && at < question.options.length) {
+    stop();
+    if (draft.sending) return;
+    pickAskOption(draft, question, at);
+    // One choice is the answer; several wait for the send.
+    if (question.multi_select) repaintAsk(draft);
+    else confirmAsk(card, draft, true);
+    return;
+  }
+  if (plain && (event.key === "n" || event.key === "N")) {
+    stop();
+    putTurnAway(card);
+  }
+}
+
+el("your-turn").addEventListener("click", () => {
+  if (el("your-turn-list").hidden) openYourTurnList();
+  else closeYourTurnList();
+});
+el("your-turn-list").addEventListener("keydown", yourTurnListKey);
 
 window.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.shiftKey && (event.key === "a" || event.key === "A")) {
@@ -7275,12 +7748,16 @@ function taskBoardStageWord(group, rows) {
   return row ? ledgerReviewWord(row) : "";
 }
 
+/* What a waiting card asks, in one line: the question, else the permission's summary. */
+function cardAskLine(card) {
+  return agentGraphCleanText(card.ask_prompt?.questions?.[0]?.question || card.ask || card.approval?.summary);
+}
+
 function taskBoardActivity(entry) {
   const { card, facts } = entry;
   if (facts.phase === "goal" || facts.phase === "loop") return facts.phaseWord;
   if (facts.state === "needs-attention") {
-    return agentGraphCleanText(card.ask_prompt?.questions?.[0]?.question || card.ask ||
-      card.approval?.summary) || t("board.tasks.needsInput", "진행하려면 확인이 필요해요.");
+    return cardAskLine(card) || t("board.tasks.needsInput", "진행하려면 확인이 필요해요.");
   }
   if (facts.state === "failed") return t("board.tasks.failed", "실행에 실패했어요. 마지막 기록을 확인해 주세요.");
   if (facts.state === "working" && card.ledger === "orphaned") {
@@ -11904,6 +12381,12 @@ const agentClock = idlePoller({
       void refreshPaneAgentSnapshot();
     }
     paintLaneSubagentClocks();
+    // A turn put away comes back on this beat once its ten minutes are up:
+    // whatever it waits on is an agent, so the beat is already running.
+    if (yourTurnLater.size > 0) {
+      forgetGoneTurns();
+      paintYourTurn();
+    }
   },
 });
 

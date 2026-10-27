@@ -8123,6 +8123,8 @@ function setLocale(code) {
   // And the ask popup, if one is up. The agent behind it is blocked until it
   // is answered, so it is the last surface that can afford to be left behind.
   paintAsk();
+  // The chip's turns are drawn in words; shell.js, which owns them, loads last.
+  if (typeof paintYourTurn === "function") paintYourTurn();
   // 근거 화면도 제 말을 직접 짓는다 — 상태 딱지, 신선도, 그리고 「시험 결과가
   // 아니다」라는 유보 문장까지. 떠 있지 않으면 아무것도 하지 않는다.
   paintWorktreeEvidence();

@@ -919,6 +919,15 @@
          which is what --traffic-light-inset is for. -->
     <header class="titlebar" data-drag-surface>
       <span class="wordmark" id="titlebar-app-name" data-drag-surface>ZO</span>
+      <!-- 2차 B: who needs the person now, as one number by the wordmark. It is
+           the attention column the dock badge reads (`applyBoardBadge`), and a
+           press drops the list of those turns (`openYourTurnList`). Grey with a
+           ring at nothing, the you-blue with a filled dot when something waits. -->
+      <button class="your-turn" id="your-turn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="your-turn-list" data-keyboard-owner="true">
+        <span class="your-turn-dot" aria-hidden="true"></span>
+        <span class="your-turn-label" data-i18n="yourTurn.label">당신 차례</span>
+        <span class="your-turn-count" id="your-turn-count">0</span>
+      </button>
       <span class="project" id="project" data-drag-surface></span>
       <span class="branch" id="branch" data-drag-surface hidden></span>
 
@@ -959,9 +968,6 @@
       <div class="tabstrip" id="tabstrip" role="tablist" data-drag-surface data-i18n-aria="tab.label" aria-label="탭"></div>
 
       <div class="titlebar-right" data-drag-surface>
-        <span class="attention" id="attention" hidden>
-          <span class="attention-dot"></span><span id="attention-count"></span>
-        </span>
         <!-- The active pane's view: its screen, or its conversation drawn from
              the agent's own transcript — one segment, hidden where the pane runs
              no agent. `paintViewToggle` paints it; a click is `setPaneChat`. -->
@@ -994,6 +1000,12 @@
         </button>
       </div>
     </header>
+
+    <!-- 2차 B: the turns, dropped from the chip. Empty while closed — every
+         row is built when it opens and dropped when it closes (`paintYourTurnList`).
+         It owns its keys (`data-keyboard-owner`): a number, ⌘↵, N and the arrows
+         answer a turn here instead of falling through to the terminal. -->
+    <div class="your-turn-list" id="your-turn-list" role="dialog" aria-labelledby="your-turn" tabindex="-1" data-keyboard-owner="true" hidden></div>
 
     <!-- Orca's Control+Tab switcher is a read-only preview while Control is
          held. The selected tab is committed only when Control is released. -->
@@ -1182,6 +1194,11 @@
             <span class="nav-search-keys" id="sidebar-search-keys" aria-hidden="true"></span>
           </button>
         </nav>
+
+        <!-- 2차 B: the agents a question or a permission is waiting on, above the
+             projects. Rows are built while something waits and gone at nothing
+             (`paintYourTurnGroup`). -->
+        <section class="your-turn-group" id="your-turn-group" data-i18n-aria="yourTurn.label" aria-label="당신 차례" data-keyboard-owner="true" hidden></section>
 
         <div class="panel-head">
           <!-- The heading is the grouping's name, not a translated label:

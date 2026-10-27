@@ -566,24 +566,6 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   gap: var(--space-3);
 }
 
-.attention {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--text-2xs);
-  color: var(--ink-mist);
-}
-
-/* The waiting dot borrows the hue of the lane that needs the person — one of
- * the five sanctioned places lane colour may appear. */
-.attention-dot {
-  width: var(--dot-size);
-  height: var(--dot-size);
-  border-radius: 50%;
-  background: var(--lane, var(--ink-mist));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--lane, var(--ink-mist)) 18%, transparent);
-}
-
 /* The two panel toggles. Each is drawn as the panel it governs — a frame with
  * one edge filled — rather than as an arrow, which has to be read twice
  * before it says which side it means. */
@@ -53083,5 +53065,358 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 
   .ds-cell {
     border-right: 0;
+  }
+}
+
+/* ==== 2차 B — 당신 차례 · 판 머리 · 읽는 글 · 떠 있는 입력 칸 · 쌓인 일 ========
+ *
+ * IDE design pass 2, part B (t-78111), from the passed draft p-6893560125c34552.
+ * The one blue (`--call`) is spent on what waits on the person and nowhere
+ * else; every kind says itself in a word and a shape beside the colour. */
+
+/* The chip by the wordmark: a ring and 0 in grey at nothing, a filled dot and
+ * the count in the you-blue when something waits. */
+.your-turn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  box-shadow: var(--shadow-border);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.your-turn:hover {
+  color: var(--ink-chalk);
+}
+
+.your-turn:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.your-turn-dot {
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 var(--rule-width) currentColor;
+}
+
+.your-turn-count {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.your-turn.is-live {
+  color: var(--call);
+  background: color-mix(in srgb, var(--call-ground) 40%, transparent);
+  box-shadow: 0 0 0 var(--rule-width) color-mix(in srgb, var(--call) 45%, transparent);
+}
+
+.your-turn.is-live .your-turn-dot {
+  background: var(--call);
+}
+
+/* A narrow window keeps the dot and the number; the word stays the name a
+ * screen reader reads. */
+@media (max-width: 900px) {
+  .your-turn-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+/* The list dropped from the chip, hung from its edge and kept inside the window. */
+.your-turn-list {
+  position: fixed;
+  z-index: 90;
+  top: calc(var(--your-turn-top, 0px) + var(--space-1));
+  left: clamp(
+    var(--space-4),
+    var(--your-turn-left, 0px),
+    calc(100vw - var(--your-turn-list-width) - var(--space-4))
+  );
+  width: var(--your-turn-list-width);
+  max-height: calc(100vh - var(--your-turn-top, 0px) - var(--space-6));
+  overflow-y: auto;
+  border-radius: var(--radius-xl);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border), var(--shadow-drop);
+  color: var(--ink-chalk);
+  font: var(--type-copy-13);
+  transition: opacity var(--motion-fast) var(--ease-standard);
+}
+
+.your-turn-list[hidden] {
+  display: none;
+}
+
+.your-turn-list:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.your-turn-list-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+}
+
+.your-turn-list-head strong {
+  font: var(--type-heading-14);
+  letter-spacing: var(--tracking-heading-14);
+}
+
+.your-turn-inbox {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.your-turn-inbox:hover {
+  color: var(--ink-chalk);
+}
+
+.your-turn-item {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+}
+
+.your-turn-item:focus-visible,
+.your-turn-row:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-offset));
+}
+
+.your-turn-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+/* The kind: a ring for a question, a filled square for a permission, a cross
+ * for a failure — the word beside it either way. */
+.your-turn-kind {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--call);
+  font-weight: 600;
+}
+
+.your-turn-kind::before {
+  content: "";
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 var(--rule-width) currentColor;
+}
+
+.your-turn-kind[data-kind="permission"]::before {
+  border-radius: var(--radius-xs);
+  background: currentColor;
+}
+
+.your-turn-kind[data-kind="failed"] {
+  color: var(--signal-halt);
+}
+
+.your-turn-kind[data-kind="failed"]::before {
+  content: "×";
+  width: auto;
+  height: auto;
+  box-shadow: none;
+}
+
+.your-turn-kind[data-kind="waiting"] {
+  color: var(--ink-mist);
+}
+
+.your-turn-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.your-turn-agent {
+  flex: none;
+}
+
+.your-turn-age {
+  flex: none;
+  margin-left: auto;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.your-turn-question {
+  margin: 0;
+  color: var(--ink-chalk);
+  font: var(--type-label-14);
+}
+
+/* A command or a path, as the fixed-width chip it is in the conversation too. */
+.your-turn-mono {
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-border);
+  font: var(--type-label-12-mono);
+}
+
+.your-turn-acts,
+.your-turn-row-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.your-turn-list .btn,
+.your-turn-row .btn {
+  padding: var(--space-1) var(--space-2);
+  font: var(--type-label-12);
+  font-weight: 500;
+}
+
+.your-turn-chord {
+  font: var(--type-label-12-mono);
+}
+
+.your-turn-words {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2);
+}
+
+.your-turn-words .your-turn-question {
+  grid-column: 1 / -1;
+}
+
+.your-turn-field {
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: var(--surface-abyss);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.your-turn-field:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 0;
+}
+
+/* Words that did not go in: caution, not failure — an amber edge and the
+ * sentence, never a red. */
+.your-turn-refusal {
+  margin: 0;
+  padding-left: var(--space-2);
+  border-left: var(--space-1) solid var(--signal-wait);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+}
+
+.your-turn-keys,
+.your-turn-empty {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+/* The sidebar's top group: who waits, one row each, answered in place. */
+.your-turn-group {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0 var(--space-2) var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--call-ground) 30%, transparent);
+  box-shadow: 0 0 0 var(--rule-width) color-mix(in srgb, var(--call) 35%, transparent);
+}
+
+.your-turn-group[hidden] {
+  display: none;
+}
+
+.your-turn-group-head {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--call);
+  font: var(--type-label-12);
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.your-turn-group-head:hover {
+  color: var(--ink-chalk);
+}
+
+.your-turn-row {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.your-turn-row:hover {
+  background: var(--row-hover);
+}
+
+.your-turn-row-line {
+  overflow: hidden;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .your-turn,
+  .your-turn-list,
+  .your-turn-inbox,
+  .your-turn-group-head,
+  .your-turn-row {
+    transition: none;
   }
 }

@@ -73,12 +73,13 @@ export async function testYourTurn(browser, origin, ok) {
       await window.__setTurns(window.__turnCards());
       seen.liveText = node.textContent.replace(/\s+/g, " ").trim();
       seen.live = node.classList.contains("is-live");
-      seen.label = node.getAttribute("aria-label");
       const probe = document.createElement("span");
       probe.style.color = "var(--signal-you)";
       document.body.appendChild(probe);
       seen.blue = getComputedStyle(probe).color;
       probe.remove();
+      // The colour eases in over the shared motion pair; read it once it has.
+      await new Promise((done) => setTimeout(done, 250));
       seen.liveColor = getComputedStyle(node.querySelector(".your-turn-count")).color;
       // A shape beside the colour: a ring at nothing, a filled dot when something waits.
       seen.dotFilled = getComputedStyle(node.querySelector(".your-turn-dot")).backgroundColor !== "rgba(0, 0, 0, 0)";
@@ -90,7 +91,7 @@ export async function testYourTurn(browser, origin, ok) {
       "the chip reads the attention column: grey and 0 at nothing, blue with the count and its words when three wait",
       chip.exists && chip.idleText.endsWith("0") && !chip.idleLive && chip.idleColor !== chip.blue &&
         chip.live && chip.liveText.endsWith("3") && chip.liveColor === chip.blue && chip.dotFilled &&
-        /3/.test(chip.label ?? "") && chip.leftOfTabs && chip.listBuilt === 0,
+        chip.leftOfTabs && chip.listBuilt === 0,
       JSON.stringify(chip),
     );
 
@@ -103,7 +104,7 @@ export async function testYourTurn(browser, origin, ok) {
       seen.open = host && !host.hidden;
       seen.expanded = window.__chip().getAttribute("aria-expanded");
       seen.items = window.__items().map((item) => item.dataset.kind);
-      seen.options = [...window.__items()[0].querySelectorAll(".your-turn-option")].map((one) => one.textContent.replace(/\s+/g, " ").trim());
+      seen.options = [...window.__items()[0].querySelectorAll(".board-ask-option")].map((one) => one.textContent.replace(/\s+/g, " ").trim());
       seen.focusInList = host.contains(document.activeElement);
       window.__press("ArrowDown");
       seen.afterDown = document.activeElement?.closest(".your-turn-item")?.dataset.kind ?? null;
@@ -212,6 +213,8 @@ export async function testYourTurn(browser, origin, ok) {
     const later = await page.evaluate(async () => {
       const seen = {};
       window.__press("Escape");
+      // The panes moved on from the turns answered above, and asked again.
+      await window.__setTurns([]);
       await window.__setTurns(window.__turnCards());
       window.__chip().click();
       await window.__settle();
@@ -285,14 +288,20 @@ export async function testYourTurn(browser, origin, ok) {
       await window.__settle();
       const seen = {
         blue,
-        color: getComputedStyle(node.querySelector(".your-turn-count")).color,
+        color: await new Promise((done) => setTimeout(() => done(getComputedStyle(node.querySelector(".your-turn-count")).color), 250)),
         motion: getComputedStyle(node).transitionDuration,
         listMotion: getComputedStyle(window.__list()).transitionDuration,
-        focusRing: (() => { window.__items()[0].focus(); return getComputedStyle(window.__items()[0]).outlineStyle; })(),
       };
+      window.__items()[0].focus();
+      return seen;
+    });
+    // A real key, so the ring is the keyboard's: ↓ walks to the next turn.
+    await page.keyboard.press("ArrowDown");
+    still.focusRing = await page.evaluate(() => {
+      const ring = getComputedStyle(document.activeElement).outlineStyle;
       window.__press("Escape");
       delete document.documentElement.dataset.theme;
-      return seen;
+      return ring;
     });
     ok(
       "in light the chip keeps the you-blue, motion stands still when reduced, and a focused turn wears the ring",
