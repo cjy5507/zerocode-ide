@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,8 +21,8 @@ use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 
 use crate::sse::SseParser;
 use crate::types::{
-    ContextManagementResponse, MessageDeltaEvent, MessageRequest, MessageResponse,
-    ReasoningRequest, StreamEvent, Usage,
+    CacheCreation, ContextManagementResponse, MessageDeltaEvent, MessageRequest, MessageResponse,
+    MessageStartEvent, ReasoningRequest, StreamEvent, Usage,
 };
 
 /// Rewrite a request's thinking/effort shape to match what the target model's
@@ -622,6 +622,32 @@ pub struct AnthropicClient {
     prompt_cache: Option<PromptCache>,
     last_prompt_cache_record: Arc<Mutex<Option<PromptCacheRecord>>>,
     retry_notice: Option<RetryNoticeCallback>,
+    /// Set on the foreground conversation's client only
+    /// ([`Self::with_idle_refresh`]); see [`IdleRefresh`].
+    idle_refresh: Option<Arc<IdleRefresh>>,
+}
+
+/// While the conversation is idle, its last request is re-sent with
+/// `max_tokens: 0` just before its cache entry would expire, as many times as
+/// [`crate::cache_policy`] finds cheaper than letting the entry go. Each
+/// refresh is billed as a read of the prefix; the person who comes back finds
+/// the conversation still cached instead of paying for it to be written again.
+#[derive(Debug)]
+struct IdleRefresh {
+    /// Requests sent so far. A refresh compares the count it was scheduled
+    /// at before it goes: once a newer request is out, that request owns the
+    /// entry and schedules its own.
+    sent: AtomicU64,
+    schedule: RefreshSchedule,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RefreshSchedule {
+    /// The cache policy's plan for the request's model and marker lifetime.
+    Planned,
+    /// A fixed pause and count, for a harness that cannot wait out a real
+    /// lifetime.
+    Fixed { every: Duration, refreshes: u32 },
 }
 
 impl fmt::Debug for AnthropicClient {
@@ -763,6 +789,7 @@ impl AnthropicClient {
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
             retry_notice: None,
+            idle_refresh: None,
         }
     }
 
@@ -781,6 +808,7 @@ impl AnthropicClient {
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
             retry_notice: None,
+            idle_refresh: None,
         }
     }
 
@@ -951,6 +979,31 @@ impl AnthropicClient {
         self
     }
 
+    /// Refresh this client's cache entry while its conversation is idle
+    /// (`IdleRefresh`). For the foreground conversation's client only: a
+    /// sub-agent's conversation ends with its task, so nobody comes back to
+    /// what a refresh would keep.
+    #[must_use]
+    pub fn with_idle_refresh(self) -> Self {
+        self.with_refresh_schedule(RefreshSchedule::Planned)
+    }
+
+    /// [`Self::with_idle_refresh`] on a fixed schedule: `refreshes` refreshes,
+    /// `every` apart, after each request — for a harness that cannot wait out
+    /// a real cache lifetime.
+    #[must_use]
+    pub fn with_idle_refresh_every(self, every: Duration, refreshes: u32) -> Self {
+        self.with_refresh_schedule(RefreshSchedule::Fixed { every, refreshes })
+    }
+
+    fn with_refresh_schedule(mut self, schedule: RefreshSchedule) -> Self {
+        self.idle_refresh = Some(Arc::new(IdleRefresh {
+            sent: AtomicU64::new(0),
+            schedule,
+        }));
+        self
+    }
+
     #[must_use]
     pub fn prompt_cache_stats(&self) -> Option<PromptCacheStats> {
         self.prompt_cache.as_ref().map(PromptCache::stats)
@@ -1087,9 +1140,11 @@ impl AnthropicClient {
         request: &MessageRequest,
     ) -> Result<MessageStream, ApiError> {
         self.ensure_authenticated_for_request()?;
+        let sent_at = tokio::time::Instant::now();
         let response = self
             .send_with_retry(&request.clone().with_streaming())
             .await?;
+        self.schedule_idle_refresh(request, sent_at);
         let rate_limit = ratelimit_from_headers(response.headers());
         // OAuth-first: publish the unified-window reading process-wide so the
         // sub-agent headroom gate / starvation labels see live quota.
@@ -1107,6 +1162,7 @@ impl AnthropicClient {
             request: request.clone(),
             prompt_cache: self.prompt_cache.clone(),
             latest_usage: None,
+            start_cache_creation: None,
             usage_recorded: false,
             last_prompt_cache_record: Arc::clone(&self.last_prompt_cache_record),
             client: self.clone(),
@@ -1114,6 +1170,91 @@ impl AnthropicClient {
             restart_attempts: 0,
             restart_started_at: None,
         })
+    }
+
+    /// Start refreshing `request`'s cache entry for as long as the
+    /// conversation stays idle after it ([`IdleRefresh`]). The entry was
+    /// written or read when `request` reached the provider, a moment after
+    /// `sent_at`, so timing from `sent_at` errs early.
+    fn schedule_idle_refresh(&self, request: &MessageRequest, sent_at: tokio::time::Instant) {
+        let Some(idle) = self.idle_refresh.clone() else {
+            return;
+        };
+        let scheduled_at = idle.sent.fetch_add(1, Ordering::SeqCst) + 1;
+        // Only the conversation markers' entries are worth keeping: without
+        // them nothing past the system prompt was cached.
+        let Some(ttl) = crate::prompt_cache::conversation_marker_lifetime(&request.messages) else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let refresh = MessageRequest {
+            max_tokens: 0,
+            stream: false,
+            ..request.clone()
+        };
+        let client = self.for_refresh();
+        handle.spawn(async move {
+            let (every, refreshes) = match idle.schedule {
+                RefreshSchedule::Fixed { every, refreshes } => (every, Some(refreshes)),
+                RefreshSchedule::Planned => (crate::cache_policy::CachePlan { ttl, refreshes: 0 }.refresh_every(), None),
+            };
+            let mut touched = sent_at;
+            let mut done = 0_u32;
+            loop {
+                tokio::time::sleep_until(touched + every).await;
+                // Asked at each wake, not once: the record of pauses may
+                // still have been loading when the request went out.
+                let allowed = refreshes
+                    .unwrap_or_else(|| crate::cache_policy::conversation_refreshes(&refresh.model, ttl));
+                if done >= allowed || idle.sent.load(Ordering::SeqCst) != scheduled_at {
+                    return;
+                }
+                touched = tokio::time::Instant::now();
+                if client.refresh_cache(&refresh).await.is_err() {
+                    return;
+                }
+                done += 1;
+            }
+        });
+    }
+
+    /// A copy of this client for refreshes, without the hooks a turn hangs on
+    /// it. A refresh outlives its turn by minutes, and a turn's hook holds that
+    /// turn's channels: the runtime bridge's retry notice owns the render
+    /// sender, so a copy that kept it held the turn open until the refresh
+    /// ended — the next prompt queued behind a turn that had already settled.
+    fn for_refresh(&self) -> Self {
+        let mut client = self.clone();
+        client.retry_notice = None;
+        client.session_tracer = None;
+        client
+    }
+
+    /// Send one refresh and record it. A request the provider refuses
+    /// outright (a 4xx other than a rate limit) refuses every later one too,
+    /// so refreshes stop for the process.
+    async fn refresh_cache(&self, refresh: &MessageRequest) -> Result<(), ApiError> {
+        if let Some(parked) = Self::parked_window_refusal() {
+            return Err(parked);
+        }
+        let sent = match self.send_raw_request(refresh, None).await {
+            Ok((response, _)) => expect_success(response).await,
+            Err(error) => Err(error),
+        };
+        let response = sent.inspect_err(|error| {
+            if let ApiError::Api { status, .. } = error {
+                if status.is_client_error() && *status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    crate::cache_policy::note_refresh_refused();
+                }
+            }
+        })?;
+        let response = response.json::<MessageResponse>().await.map_err(ApiError::from)?;
+        if let Some(prompt_cache) = &self.prompt_cache {
+            prompt_cache.record_refresh(refresh, &response.usage);
+        }
+        Ok(())
     }
 
     pub async fn exchange_oauth_code(
@@ -2293,6 +2434,10 @@ pub struct MessageStream {
     request: MessageRequest,
     prompt_cache: Option<PromptCache>,
     latest_usage: Option<Usage>,
+    /// The TTL split of the cache write, as `message_start` reported it: the
+    /// split rides that event's usage, and the `message_delta` usage the
+    /// ledger records may come without it.
+    start_cache_creation: Option<CacheCreation>,
     usage_recorded: bool,
     last_prompt_cache_record: Arc<Mutex<Option<PromptCacheRecord>>>,
     /// The owning client, kept so a pre-commit transport fault can transparently
@@ -2487,12 +2632,17 @@ impl MessageStream {
 
     fn observe_event(&mut self, event: &StreamEvent) {
         match event {
+            StreamEvent::MessageStart(MessageStartEvent { message }) => {
+                self.start_cache_creation = message.usage.cache_creation;
+            }
             StreamEvent::MessageDelta(MessageDeltaEvent {
                 usage,
                 context_management,
                 ..
             }) => {
-                self.latest_usage = Some(*usage);
+                let mut usage = *usage;
+                usage.cache_creation = usage.cache_creation.or(self.start_cache_creation);
+                self.latest_usage = Some(usage);
                 if let Some(event) = context_edit_analytics_event(
                     self.request_id.as_deref(),
                     context_management.as_ref(),

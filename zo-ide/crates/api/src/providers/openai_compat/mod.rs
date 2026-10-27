@@ -1117,13 +1117,7 @@ impl StreamState {
                     stop_reason: None,
                     stop_sequence: None,
                     stop_details: None,
-                    usage: Usage {
-                        input_tokens: 0,
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
-                        output_tokens: 0,
-                        output_tokens_details: None,
-                    },
+                    usage: Usage::default(),
                     request_id: None,
                     thought_signature: None,
                     reasoning_replay: None,
@@ -1139,6 +1133,7 @@ impl StreamState {
                 cache_read_input_tokens: cache_read_tokens(self.config, &usage),
                 output_tokens: usage.completion_tokens,
                 output_tokens_details: None,
+                cache_creation: None,
             });
         }
 
@@ -1270,6 +1265,7 @@ impl StreamState {
                     cache_read_input_tokens: 0,
                     output_tokens: 0,
                     output_tokens_details: None,
+                    cache_creation: None,
                 }),
                 context_management: None,
             }));
@@ -1917,6 +1913,7 @@ fn normalize_response(
                 .as_ref()
                 .map_or(0, |usage| usage.completion_tokens),
             output_tokens_details: None,
+            cache_creation: None,
         },
         request_id: None,
         thought_signature: None,

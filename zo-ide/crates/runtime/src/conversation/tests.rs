@@ -8534,6 +8534,7 @@ fn a_changed_reminder_request_rolls_instead_of_moving_the_cache_anchor() {
         cache_read_input_tokens: 1,
         output_tokens: 1,
         output_tokens_details: None,
+        cache_creation: None,
     };
 
     let _ = cache.record_usage(&first, &usage);
@@ -10976,6 +10977,7 @@ fn anthropic_output_tokens_details_reach_persisted_assistant_session_row() {
                 output_tokens_details: Some(core_types::OutputTokensDetails {
                     thinking_tokens: 312,
                 }),
+                cache_creation: None,
             };
             Ok(vec![
                 AssistantEvent::TextDelta("answer".to_string()),

@@ -159,7 +159,7 @@ pub use settings::{
     JEV_CHALLENGER_SETTING, JEV_COMMAND_GUARD_SETTING, JEV_COMPACTION_SETTING, JEV_FILE_PICK_SETTING,
     JEV_MENTION_RERANK_SETTING, JEV_PATCH_REVIEW_SETTING, JEV_TOOL_TEXT_GUARD_SETTING,
     RERANK_SHADOW_SETTING, SKILL_SEARCH_SETTING, SKILL_SUGGESTION_SETTING,
-    conversation_anchor_ttl_for, conversation_anchor_ttl_from_root, CACHE_ANCHOR_TTL_ENV,
+    cache_settings_for, cache_settings_from_root, CACHE_ANCHOR_TTL_ENV,
     smart_deep_tier_models, smart_deep_tier_models_for, smart_exec_swap, smart_setting_defaults,
     smart_turn_routing_and_inventory_for, smart_turn_routing_for, DeepTierModelsSetting,
     HostOrchestration, PlanShadowSettings,

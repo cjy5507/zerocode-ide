@@ -71,6 +71,7 @@ fn fake_message_start() -> StreamEvent {
                 cache_read_input_tokens: 0,
                 output_tokens: 0,
                 output_tokens_details: None,
+                cache_creation: None,
             },
             request_id: None,
             thought_signature: None,
@@ -117,6 +118,7 @@ fn message_delta(stop_reason: &str, output_tokens: u32) -> StreamEvent {
             cache_read_input_tokens: 0,
             output_tokens,
             output_tokens_details: None,
+            cache_creation: None,
         },
         context_management: None,
     })

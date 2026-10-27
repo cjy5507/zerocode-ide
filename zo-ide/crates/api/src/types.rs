@@ -814,7 +814,7 @@ pub enum OutputContentBlock {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u32,
     #[serde(default)]
@@ -824,6 +824,22 @@ pub struct Usage {
     pub output_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens_details: Option<OutputTokensDetails>,
+    /// How `cache_creation_input_tokens` splits by lifetime, when the
+    /// provider says (Anthropic's `usage.cache_creation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation: Option<CacheCreation>,
+}
+
+/// The cache write of one response split by the TTL it was written at. A
+/// one-hour write is billed at 2.0× the input price and a five-minute one at
+/// 1.25×, so a request whose markers mix the two cannot be priced from
+/// `cache_creation_input_tokens` alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheCreation {
+    #[serde(default)]
+    pub ephemeral_5m_input_tokens: u32,
+    #[serde(default)]
+    pub ephemeral_1h_input_tokens: u32,
 }
 
 impl Usage {
@@ -1231,6 +1247,7 @@ mod tests {
             cache_read_input_tokens: 3,
             output_tokens: 4,
             output_tokens_details: None,
+            cache_creation: None,
         };
 
         assert_eq!(usage.total_tokens(), 19);
@@ -1262,6 +1279,7 @@ mod tests {
             cache_read_input_tokens: 0,
             output_tokens: 4,
             output_tokens_details: None,
+            cache_creation: None,
         };
 
         let wire = serde_json::to_value(usage).expect("usage should serialize");
@@ -1290,6 +1308,7 @@ mod tests {
             output_tokens_details: Some(OutputTokensDetails {
                 thinking_tokens: 312,
             }),
+            cache_creation: None,
         };
         let current_wire = serde_json::to_value(current).expect("current usage should serialize");
         let legacy: LegacyUsage =
@@ -1352,6 +1371,7 @@ mod tests {
                 cache_read_input_tokens: 200_000,
                 output_tokens: 500_000,
                 output_tokens_details: None,
+                cache_creation: None,
             },
             request_id: None,
             thought_signature: None,

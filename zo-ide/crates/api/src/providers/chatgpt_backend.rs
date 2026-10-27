@@ -1447,6 +1447,7 @@ impl ResponsesStreamState {
             cache_read_input_tokens,
             output_tokens: usage_field(usage, "output_tokens"),
             output_tokens_details: None,
+            cache_creation: None,
         };
         let mut events: Vec<StreamEvent> =
             self.completed_output_deltas(event).into_iter().collect();
@@ -1583,6 +1584,7 @@ const fn zero_usage() -> Usage {
         cache_read_input_tokens: 0,
         output_tokens: 0,
         output_tokens_details: None,
+        cache_creation: None,
     }
 }
 
@@ -3677,6 +3679,7 @@ fn parse_responses_response(value: &Value, model: &str, session_id: &str) -> Mes
                 cache_read_input_tokens,
                 output_tokens: usage_field(usage, "output_tokens"),
                 output_tokens_details: None,
+                cache_creation: None,
             }
         },
         request_id: None,

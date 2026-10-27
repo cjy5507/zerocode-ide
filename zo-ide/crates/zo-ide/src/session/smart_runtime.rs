@@ -276,10 +276,15 @@ pub(crate) fn install_smart_turn(
         runtime.api_client().model(),
         assessment.complexity,
     );
-    // The conversation anchor marker's TTL for this turn's requests — a
-    // process-wide declaration like attendance, read from the same settings
-    // roots. Sub-agent clients keep the short markers regardless.
-    runtime::declare_conversation_anchor_ttl(tools::conversation_anchor_ttl_for(cwd));
+    // The conversation cache for this turn's requests — process-wide
+    // declarations like attendance, read from the same settings roots. The
+    // markers' lifetime is planned for the model this turn runs on (or the
+    // one the settings name); sub-agent clients keep the short markers
+    // regardless.
+    api::declare_cache_settings(tools::cache_settings_for(cwd));
+    runtime::declare_conversation_anchor_ttl(
+        api::conversation_cache_plan(runtime.api_client().model()).ttl,
+    );
     let orchestration = routing.orchestration;
     let plan_shadow = (routing.plan.shadow || routing.plan.apply).then(|| {
         Arc::new(plan_shadow_turn(

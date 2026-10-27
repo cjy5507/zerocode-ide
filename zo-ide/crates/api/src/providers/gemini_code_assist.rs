@@ -1232,6 +1232,7 @@ impl GeminiStreamState {
                 cache_read_input_tokens: 0,
                 output_tokens: 0,
                 output_tokens_details: None,
+                cache_creation: None,
             },
         }
     }
@@ -1330,6 +1331,7 @@ impl GeminiStreamState {
                     cache_read_input_tokens: 0,
                     output_tokens: 0,
                     output_tokens_details: None,
+                    cache_creation: None,
                 },
                 request_id: self.request_id.clone(),
                 // Unknown at start; the signature rides on the closing delta.
@@ -2551,6 +2553,7 @@ fn usage_from_response(response: &Value) -> Usage {
         output_tokens: usage_field(usage, "candidatesTokenCount")
             .saturating_add(usage_field(usage, "thoughtsTokenCount")),
         output_tokens_details: None,
+        cache_creation: None,
     }
 }
 

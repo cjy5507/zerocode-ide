@@ -435,6 +435,7 @@ pub fn record_non_anthropic_prompt_cache_usage(
             cache_read_input_tokens: usage.cache_read_input_tokens,
             output_tokens: usage.output_tokens,
             output_tokens_details: None,
+            cache_creation: None,
         },
     );
     if let Some(event) = prompt_cache_record_to_event(record) {
@@ -541,6 +542,7 @@ mod helper_tests {
             cache_read_input_tokens: 0,
             output_tokens,
             output_tokens_details: None,
+            cache_creation: None,
         }
     }
 

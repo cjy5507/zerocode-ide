@@ -814,32 +814,50 @@ pub(super) fn merged_settings_root_from(loader: &runtime::ConfigLoader) -> Optio
 }
 
 /// The environment override for the anchor marker's TTL, for a harness or an
-/// A/B that must not edit a settings file.
+/// A/B that must not edit a settings file: `auto`, `5m` or `1h`.
 pub const CACHE_ANCHOR_TTL_ENV: &str = "ZO_CACHE_ANCHOR_TTL";
 
-/// The conversation anchor marker's TTL policy for a turn under `cwd`:
-/// [`CACHE_ANCHOR_TTL_ENV`] when set, else `cache.anchorTtl` from the merged
-/// settings (`"5m"` / `"1h"`), else five minutes — r21's choice, kept as
-/// the default until the ledger has judged the 1h anchor
-/// (`runtime::mark_conversation_cache_breakpoints` docs, 2026-09-16).
+/// The conversation cache settings for a turn under `cwd`.
+///
+/// The lifetime is [`CACHE_ANCHOR_TTL_ENV`] when set, else `cache.anchorTtl`
+/// from the merged settings, else `auto`: planned per model from the recorded
+/// pauses and the price table (`api::conversation_cache_plan`). `5m` or `1h`
+/// names a lifetime instead — since 2026-10-27 `1h` puts the hour on the
+/// rolling marker too, because an hour on the anchor alone kept nothing alive
+/// (`runtime::mark_conversation_cache_breakpoints` docs).
+///
+/// `cache.refresh: false` stops the idle conversation's refreshes, for a
+/// person who wants no request sent while they are away.
 #[must_use]
-pub fn conversation_anchor_ttl_for(cwd: &Path) -> runtime::ConversationAnchorTtl {
-    let from_env = std::env::var(CACHE_ANCHOR_TTL_ENV)
+pub fn cache_settings_for(cwd: &Path) -> api::CacheSettings {
+    let mut settings = cache_settings_from_root(merged_settings_root(cwd).as_ref());
+    if let Some(ttl) = std::env::var(CACHE_ANCHOR_TTL_ENV)
         .ok()
-        .and_then(|label| runtime::ConversationAnchorTtl::from_label(&label));
-    from_env.unwrap_or_else(|| conversation_anchor_ttl_from_root(merged_settings_root(cwd).as_ref()))
+        .and_then(|label| api::TtlChoice::from_label(&label))
+    {
+        settings.ttl = ttl;
+    }
+    settings
 }
 
-/// The pure half of [`conversation_anchor_ttl_for`]: the policy a merged
-/// settings document declares under `cache.anchorTtl`, five minutes when it
-/// declares none or spells one the ladder does not know.
+/// The pure half of [`cache_settings_for`]: what a merged settings document
+/// declares under `cache`. A missing key or a word the ladder does not know
+/// keeps the default rather than guessing.
 #[must_use]
-pub fn conversation_anchor_ttl_from_root(root: Option<&Value>) -> runtime::ConversationAnchorTtl {
-    root.and_then(|root| root.get("cache"))
-        .and_then(|cache| cache.get("anchorTtl"))
-        .and_then(Value::as_str)
-        .and_then(runtime::ConversationAnchorTtl::from_label)
-        .unwrap_or_default()
+pub fn cache_settings_from_root(root: Option<&Value>) -> api::CacheSettings {
+    let cache = root.and_then(|root| root.get("cache"));
+    let defaults = api::CacheSettings::default();
+    api::CacheSettings {
+        ttl: cache
+            .and_then(|cache| cache.get("anchorTtl"))
+            .and_then(Value::as_str)
+            .and_then(api::TtlChoice::from_label)
+            .unwrap_or(defaults.ttl),
+        refresh: cache
+            .and_then(|cache| cache.get("refresh"))
+            .and_then(Value::as_bool)
+            .unwrap_or(defaults.refresh),
+    }
 }
 
 /// The foreground Architect EXEC-swap policy from merged

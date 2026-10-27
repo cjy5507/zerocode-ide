@@ -1417,9 +1417,13 @@ fn build_provider_client(
     };
 
     if let ProviderClient::Anthropic(client) = client {
+        // The session's own conversation: its cache entry is refreshed while
+        // the person is away, as the cache policy plans (sub-agents build
+        // their clients elsewhere and never refresh).
         let mut client = client
             .with_base_url(api::read_base_url())
-            .with_prompt_cache(PromptCache::new(session_id));
+            .with_prompt_cache(PromptCache::new(session_id))
+            .with_idle_refresh();
 
         // The OAuth beta header is first-party-only; Bedrock/Vertex gateways
         // replace the auth chain entirely and would reject it.

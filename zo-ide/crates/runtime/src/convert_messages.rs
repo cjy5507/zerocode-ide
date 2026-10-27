@@ -718,20 +718,62 @@ pub fn is_persisted_reminder_text(text: &str) -> bool {
 /// It is an opt-in ([`declare_conversation_anchor_ttl`], from the host's
 /// `cache.anchorTtl` setting) until the ledger has judged it: the `ttl`
 /// column of every request row records which policy it ran under, so the
-/// soak reads straight off the ledger. The rolling marker keeps the 5-minute
-/// TTL under every policy, which is why the break classifier's window does
-/// not move with the anchor: a 5-to-60-minute gap under a 1h anchor now
-/// costs the tail alone, and a longer gap is a TTL expiry under both.
+/// soak reads straight off the ledger.
 ///
-/// Sub-agents never take the long anchor
+/// # …but only if the tail was written to (2026-10-27)
+///
+/// The soak judged it, and the anchor alone outlived nothing. Six weeks of
+/// this machine's ledger (Opus, 48k requests) break on 47% of 5–6 minute
+/// gaps and on 64–76% of every longer band up to the hour, and a broken
+/// request reads 3% of its prefix: the 1h system blocks and no
+/// conversation. Claude Code over the same weeks breaks on 0.3–3.6%, and
+/// 79% of its writes are one-hour writes.
+///
+/// The reason is where the anchor stands. It marks the previous request's
+/// tail, and that entry was written by the previous request's ROLLING
+/// marker, at five minutes. A one-hour marker that hits an entry writes
+/// nothing — under Anthropic's mixed-TTL billing only the span past the
+/// highest hit is written, and the anchor stands at that hit — so the entry
+/// stays a five-minute one and dies with the tail. The anchor's hour was
+/// bought only on a break, where it bills the whole rewrite (the anchor
+/// back to the system blocks) at the one-hour price, 2.0× instead of 1.25×,
+/// and no later request marks that position again.
+///
+/// So the declared TTL now goes on BOTH conversation markers: the rolling
+/// marker writes the entry the next request's anchor reads, and only a
+/// rolling write at an hour gives the anchor an hour to read. The premium
+/// is paid on every write's new span; what it buys is that a 5–60 minute
+/// gap reads the conversation back instead of rewriting it. The break
+/// classifier judges a request after an all-`1h` one against an hour
+/// (`api` `expiry_window_secs`).
+///
+/// # Planned, with refreshes (2026-10-28)
+///
+/// Neither lifetime is written down any more. The host declares the one
+/// `api::conversation_cache_plan` finds cheapest for the turn's model, from
+/// two weeks of this machine's recorded pauses and the price table — unless
+/// `cache.anchorTtl` names one. The plan weighs a third way across a pause:
+/// keep the five-minute entry and, while the conversation is idle, re-send
+/// its last request with `max_tokens: 0` before the entry expires (the
+/// foreground client's idle refresh), billed as a read of the prefix. On
+/// this machine's fourteen days to 2026-10-28 that came out cheapest for
+/// every priced model — at Opus 5.5 rates, five minutes with up to ten
+/// refreshes cost 15,888 input-token equivalents a request against 20,577
+/// with none and 22,733 for the hour — so the markers stay at five minutes
+/// and the refreshes carry the pause.
+///
+/// Sub-agents never take the long policy
 /// ([`mark_conversation_cache_breakpoints_short_lived`]): a spawn's tail dies
 /// within minutes, so the premium would buy nothing.
 pub fn mark_conversation_cache_breakpoints(messages: &mut [InputMessage]) {
-    mark_breakpoints_with_ttl(
-        messages,
-        &conversation_anchor_ttl().cache_control(),
-        &api::CacheControl::ephemeral(),
-    );
+    mark_conversation_cache_breakpoints_at(messages, conversation_anchor_ttl());
+}
+
+/// Both conversation markers at `ttl` — the declared policy's body, apart so
+/// a test can name the policy instead of declaring it process-wide.
+fn mark_conversation_cache_breakpoints_at(messages: &mut [InputMessage], ttl: ConversationAnchorTtl) {
+    let marker = ttl.cache_control();
+    mark_breakpoints_with_ttl(messages, &marker, &marker);
 }
 
 /// The sub-agent variant: both markers at the 5-minute TTL regardless of the
@@ -743,54 +785,20 @@ pub fn mark_conversation_cache_breakpoints_short_lived(messages: &mut [InputMess
     mark_breakpoints_with_ttl(messages, &short, &short);
 }
 
-/// How long the ANCHOR conversation marker asks the provider to keep the
-/// prefix it stands on. The rolling marker always asks for five minutes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ConversationAnchorTtl {
-    /// r21's choice: one gap's worth, the cheapest write.
-    #[default]
-    FiveMinutes,
-    /// The opt-in under soak: the prefix survives a person's break.
-    OneHour,
-}
-
-impl ConversationAnchorTtl {
-    /// Both policies, the one place the set is enumerated.
-    pub const ALL: [ConversationAnchorTtl; 2] = [Self::FiveMinutes, Self::OneHour];
-
-    /// The label a setting spells (`5m` / `1h`) — the same words the
-    /// provider's `ttl` field and the ledger's `ttl` column use.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::FiveMinutes => "5m",
-            Self::OneHour => "1h",
-        }
-    }
-
-    /// The policy a label names, `None` for anything else.
-    #[must_use]
-    pub fn from_label(label: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|ttl| ttl.label().eq_ignore_ascii_case(label.trim()))
-    }
-
-    /// The marker this policy puts on the anchor.
-    #[must_use]
-    pub fn cache_control(self) -> api::CacheControl {
-        match self {
-            Self::FiveMinutes => api::CacheControl::ephemeral(),
-            Self::OneHour => api::CacheControl::ephemeral_1h(),
-        }
-    }
-}
+/// How long the conversation markers ask the provider to keep the prefix
+/// they stand on. Named for the anchor, whose survival is the point, but
+/// carried by the rolling marker too: the anchor reads what the rolling
+/// marker wrote (see [`mark_conversation_cache_breakpoints`]). The lifetimes,
+/// their labels and their markers are the cache policy's
+/// ([`api::CacheTtl`]); this is the name the runtime has always used.
+pub use api::CacheTtl as ConversationAnchorTtl;
 
 /// The declared anchor policy for this process; zero is the default.
 static CONVERSATION_ANCHOR_TTL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// Declare the anchor marker's TTL for this process. The plain host calls
-/// this on the way into every turn from its settings, like
+/// this on the way into every turn with the lifetime the cache plan chose for
+/// the turn's model (or the one its settings name), like
 /// [`crate::declare_attendance`]; sub-agent clients ignore it by
 /// construction (they call the short-lived marking).
 pub fn declare_conversation_anchor_ttl(ttl: ConversationAnchorTtl) {
@@ -1393,21 +1401,16 @@ mod cache_marking_tests {
         let mut converted = convert_messages(&messages);
         super::mark_conversation_cache_breakpoints(&mut converted);
 
-        // The anchor follows the declared policy (five minutes unless a host
-        // declared otherwise); the ROLLING marker is the one the classifier's
-        // window must mirror, under every policy.
-        assert_eq!(
-            block_cache(&converted[0].content[0]),
-            Some(&super::conversation_anchor_ttl().cache_control()),
-            "anchor carries the declared anchor TTL"
-        );
+        // Both markers follow the declared policy (five minutes unless a host
+        // declared otherwise): the anchor reads what the rolling marker wrote.
+        let declared = Some(super::conversation_anchor_ttl().cache_control());
+        assert_eq!(block_cache(&converted[0].content[0]), declared.as_ref(), "anchor carries the declared TTL");
         assert!(block_cache(&converted[1].content[0]).is_none());
-        assert_eq!(
-            block_cache(&converted[2].content[0]),
-            Some(&api::CacheControl::ephemeral()),
-            "rolling marker must carry the 5-minute TTL"
-        );
+        assert_eq!(block_cache(&converted[2].content[0]), declared.as_ref(), "so does the rolling marker");
 
+        // The classifier's default window is the five-minute policy's; a
+        // request whose markers all asked for an hour widens it to an hour
+        // from its own ledger label (`api` `expiry_window_secs`).
         assert_eq!(
             api::PromptCacheConfig::default().prompt_ttl,
             std::time::Duration::from_secs(5 * 60),
@@ -1421,10 +1424,7 @@ mod cache_marking_tests {
         // timestamp the data does not carry. Asserted here, on the real output
         // of the marking function, because `api` cannot call back into
         // `runtime` to test the pairing from its own side.
-        let expected_label = match super::conversation_anchor_ttl() {
-            super::ConversationAnchorTtl::FiveMinutes => "5m",
-            super::ConversationAnchorTtl::OneHour => "1h+5m",
-        };
+        let expected_label = super::conversation_anchor_ttl().label();
         assert_eq!(
             api::conversation_marker_ttl(&converted),
             expected_label,
@@ -1450,13 +1450,15 @@ mod cache_marking_tests {
     /// anchor forward would otherwise silently relabel every row written after
     /// it, and `docs/analysis/marker-instrument-r30.md`'s tables would be
     /// reading a word that no longer means what they say it means.
-    /// The two markers do different jobs, so they may carry different
-    /// lifetimes: a long anchor keeps the conversation prefix across a
-    /// person's break while the rolling tail stays cheap; sub-agents keep
-    /// both short. The ledger label tells the two policies apart, and the
-    /// labels round-trip through the setting's own spelling.
+    /// The long policy writes BOTH conversation markers at an hour, because
+    /// the anchor only ever stands on the entry the last rolling marker wrote
+    /// and an hour-long marker that hits an entry writes nothing: an anchor
+    /// alone at an hour (the `1h+5m` split, which the marking function can
+    /// still place) kept nothing alive past five minutes. Sub-agents keep
+    /// both short. The ledger label tells the policies apart, and the labels
+    /// round-trip through the setting's own spelling.
     #[test]
-    fn the_anchor_may_outlive_the_rolling_marker_and_a_sub_agent_never_takes_the_long_one() {
+    fn the_long_policy_writes_both_markers_long_and_a_sub_agent_never_takes_it() {
         let messages = vec![
             ConversationMessage::user_text("first prompt"),
             ConversationMessage::assistant(vec![ContentBlock::Text {
@@ -1465,16 +1467,22 @@ mod cache_marking_tests {
             ConversationMessage::user_text("third prompt"),
         ];
 
-        let mut long_anchor = convert_messages(&messages);
-        super::mark_breakpoints_with_ttl(
-            &mut long_anchor,
-            &api::CacheControl::ephemeral_1h(),
-            &api::CacheControl::ephemeral(),
-        );
-        assert_eq!(block_cache(&long_anchor[0].content[0]), Some(&api::CacheControl::ephemeral_1h()));
-        assert!(block_cache(&long_anchor[1].content[0]).is_none());
-        assert_eq!(block_cache(&long_anchor[2].content[0]), Some(&api::CacheControl::ephemeral()));
-        assert_eq!(api::conversation_marker_ttl(&long_anchor), "1h+5m", "the ledger tells the policies apart");
+        let mut long = convert_messages(&messages);
+        super::mark_conversation_cache_breakpoints_at(&mut long, super::ConversationAnchorTtl::OneHour);
+        assert_eq!(block_cache(&long[0].content[0]), Some(&api::CacheControl::ephemeral_1h()));
+        assert!(block_cache(&long[1].content[0]).is_none());
+        assert_eq!(block_cache(&long[2].content[0]), Some(&api::CacheControl::ephemeral_1h()));
+        assert_eq!(api::conversation_marker_ttl(&long), "1h", "the ledger tells the policies apart");
+
+        let mut default = convert_messages(&messages);
+        super::mark_conversation_cache_breakpoints_at(&mut default, super::ConversationAnchorTtl::FiveMinutes);
+        assert_eq!(block_cache(&default[0].content[0]), Some(&api::CacheControl::ephemeral()));
+        assert_eq!(block_cache(&default[2].content[0]), Some(&api::CacheControl::ephemeral()));
+        assert_eq!(api::conversation_marker_ttl(&default), "5m");
+
+        let mut split = convert_messages(&messages);
+        super::mark_breakpoints_with_ttl(&mut split, &api::CacheControl::ephemeral_1h(), &api::CacheControl::ephemeral());
+        assert_eq!(api::conversation_marker_ttl(&split), "1h+5m", "the old anchor-only rows stay readable");
 
         let mut short = convert_messages(&messages);
         super::mark_conversation_cache_breakpoints_short_lived(&mut short);

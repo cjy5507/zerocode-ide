@@ -3495,24 +3495,28 @@ fn the_decision_mode_is_off_unless_a_person_writes_a_known_mode() {
     }
 }
 
-/// The anchor marker's TTL is a setting with two spellings and a safe
-/// default: five minutes unless `cache.anchorTtl` says `1h`, and an unknown
-/// word falls back rather than guesses.
+/// The cache settings: the lifetime is planned unless `cache.anchorTtl`
+/// names one, refreshes are on unless `cache.refresh` is `false`, and an
+/// unknown word keeps the default rather than guesses.
 #[test]
-fn cache_anchor_ttl_reads_the_setting_and_defaults_to_five_minutes() {
-    use runtime::ConversationAnchorTtl;
+fn cache_settings_read_the_setting_and_default_to_a_planned_lifetime_with_refreshes() {
+    use api::{CacheSettings, CacheTtl, TtlChoice};
     let read = |json: &str| {
         let root: serde_json::Value = serde_json::from_str(json).unwrap();
-        super::conversation_anchor_ttl_from_root(Some(&root))
+        super::cache_settings_from_root(Some(&root))
     };
-    assert_eq!(super::conversation_anchor_ttl_from_root(None), ConversationAnchorTtl::FiveMinutes);
-    assert_eq!(read("{}"), ConversationAnchorTtl::FiveMinutes);
-    assert_eq!(read(r#"{"cache":{}}"#), ConversationAnchorTtl::FiveMinutes);
-    assert_eq!(read(r#"{"cache":{"anchorTtl":"1h"}}"#), ConversationAnchorTtl::OneHour);
-    assert_eq!(read(r#"{"cache":{"anchorTtl":"1H"}}"#), ConversationAnchorTtl::OneHour);
-    assert_eq!(read(r#"{"cache":{"anchorTtl":"5m"}}"#), ConversationAnchorTtl::FiveMinutes);
-    assert_eq!(read(r#"{"cache":{"anchorTtl":"2h"}}"#), ConversationAnchorTtl::FiveMinutes);
-    assert_eq!(read(r#"{"cache":{"anchorTtl":60}}"#), ConversationAnchorTtl::FiveMinutes);
+    let planned = CacheSettings { ttl: TtlChoice::Planned, refresh: true };
+    assert_eq!(super::cache_settings_from_root(None), planned);
+    assert_eq!(read("{}"), planned);
+    assert_eq!(read(r#"{"cache":{}}"#), planned);
+    assert_eq!(read(r#"{"cache":{"anchorTtl":"auto"}}"#), planned);
+    assert_eq!(read(r#"{"cache":{"anchorTtl":"1h"}}"#).ttl, TtlChoice::Fixed(CacheTtl::OneHour));
+    assert_eq!(read(r#"{"cache":{"anchorTtl":"1H"}}"#).ttl, TtlChoice::Fixed(CacheTtl::OneHour));
+    assert_eq!(read(r#"{"cache":{"anchorTtl":"5m"}}"#).ttl, TtlChoice::Fixed(CacheTtl::FiveMinutes));
+    assert_eq!(read(r#"{"cache":{"anchorTtl":"2h"}}"#), planned);
+    assert_eq!(read(r#"{"cache":{"anchorTtl":60}}"#), planned);
+    assert_eq!(read(r#"{"cache":{"refresh":false}}"#), CacheSettings { refresh: false, ..planned });
+    assert_eq!(read(r#"{"cache":{"refresh":"no"}}"#), planned);
 }
 
 #[test]

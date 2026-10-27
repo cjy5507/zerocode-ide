@@ -450,6 +450,7 @@ mod tests {
                         cache_read_input_tokens: 0,
                         output_tokens: 2,
                         output_tokens_details: None,
+                        cache_creation: None,
                     },
                     context_management: None,
                 }),

@@ -999,10 +999,11 @@ impl ProviderRuntimeClient {
         // Anchor-plus-rolling conversation-prefix breakpoints. Without them
         // only the system blocks below ever cache, so every iteration re-bills
         // its full transcript as uncached input — the dominant cost of a
-        // tool-heavy agent loop. The foreground turn's anchor follows the
-        // host's declared policy (`cache.anchorTtl`: a 1h anchor survives a
-        // person's break); a sub-agent's tail dies within minutes, so its
-        // markers stay at five minutes under every policy.
+        // tool-heavy agent loop. The foreground turn's markers follow the
+        // lifetime the host declared (planned per model by
+        // `api::conversation_cache_plan`, or named by `cache.anchorTtl`); a
+        // sub-agent's tail dies within minutes, so its markers stay at five
+        // minutes under every policy and are never refreshed.
         if self.agent_identity.is_some() {
             runtime::mark_conversation_cache_breakpoints_short_lived(&mut messages);
         } else {
@@ -2496,6 +2497,7 @@ mod tests {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
                 output_tokens_details: None,
+                cache_creation: None,
             },
             request_id: None,
             thought_signature: Some("SIG_AGENT_NON_STREAM".to_string()),

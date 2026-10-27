@@ -1356,6 +1356,7 @@ async fn eof_buffered_message_delta_is_observed_and_traced() {
             cache_read_input_tokens: 0,
             output_tokens: 3,
             output_tokens_details: None,
+            cache_creation: None,
         }),
         "EOF frame must pass through observe_event"
     );

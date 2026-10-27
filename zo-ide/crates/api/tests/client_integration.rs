@@ -383,6 +383,267 @@ async fn stream_message_parses_sse_events_with_tool_use() {
     std::env::remove_var("ZO_CONFIG_HOME");
 }
 
+/// The TTL split of the cache write rides `message_start`, while the usage
+/// the ledger records is the `message_delta` one, which comes without it:
+/// the stream carries the split across, and the request row keeps the
+/// one-hour part.
+#[tokio::test]
+// Single-threaded test; the env lock across `.await` only serialises env access.
+#[allow(clippy::await_holding_lock)]
+async fn stream_message_records_the_one_hour_part_of_the_cache_write() {
+    let _guard = env_lock();
+    let temp_root = std::env::temp_dir().join(format!(
+        "api-stream-ttl-split-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::env::set_var("ZO_CONFIG_HOME", &temp_root);
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let sse = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_split\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-7-sonnet-latest\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":241200,\"cache_read_input_tokens\":9500,\"cache_creation\":{\"ephemeral_5m_input_tokens\":1200,\"ephemeral_1h_input_tokens\":240000},\"output_tokens\":0}}}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":241200,\"cache_read_input_tokens\":9500,\"output_tokens\":5}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let Some(server) = spawn_server(
+        state.clone(),
+        vec![http_response("200 OK", "text/event-stream", sse)],
+    )
+    .await
+    else {
+        return;
+    };
+
+    let client = ApiClient::new("test-key")
+        .with_base_url(server.base_url())
+        .with_prompt_cache(PromptCache::new("ttl-split-session"));
+    let mut stream = client
+        .stream_message(&sample_request(false))
+        .await
+        .expect("stream should start");
+    while stream.next_event().await.expect("stream event should parse").is_some() {}
+
+    let rows = api::read_request_ledger(&api::PromptCachePaths::for_session("ttl-split-session").requests_path);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].cache_creation, 241_200);
+    assert_eq!(rows[0].cache_creation_1h, Some(240_000));
+
+    std::fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    std::env::remove_var("ZO_CONFIG_HOME");
+}
+
+/// A request whose newest message carries a conversation cache marker, as the
+/// foreground conversation's requests do.
+fn marked_request() -> MessageRequest {
+    let mut request = sample_request(false);
+    if let Some(InputContentBlock::Text { cache_control, .. }) = request.messages[0].content.first_mut() {
+        *cache_control = Some(api::CacheControl::ephemeral());
+    }
+    request
+}
+
+const REFRESH_SSE: &str = concat!(
+    "event: message_start\n",
+    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_live\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-5-5\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":200000,\"cache_read_input_tokens\":0,\"output_tokens\":0}}}\n\n",
+    "event: message_delta\n",
+    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":200000,\"cache_read_input_tokens\":0,\"output_tokens\":5}}\n\n",
+    "event: message_stop\n",
+    "data: {\"type\":\"message_stop\"}\n\n",
+    "data: [DONE]\n\n"
+);
+
+fn refresh_reply() -> String {
+    http_response(
+        "200 OK",
+        "application/json",
+        "{\"id\":\"msg_refresh\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-5-5\",\"stop_reason\":\"max_tokens\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":200000,\"output_tokens\":0}}",
+    )
+}
+
+fn isolated_config_home(tag: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "api-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::env::set_var("ZO_CONFIG_HOME", &root);
+    root
+}
+
+async fn wait_for_requests(state: &Arc<Mutex<Vec<CapturedRequest>>>, count: usize) {
+    let started = std::time::Instant::now();
+    while state.lock().await.len() < count {
+        assert!(started.elapsed() < Duration::from_secs(10), "only {} requests arrived", state.lock().await.len());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// While the conversation is idle, its last request goes out again with
+/// `max_tokens: 0` and nothing else changed — the same prefix, so the
+/// provider reads the cache entry and its lifetime starts over — as many
+/// times as the schedule allows, each recorded as a refresh row.
+#[tokio::test]
+// Single-threaded test; the env lock across `.await` only serialises env access.
+#[allow(clippy::await_holding_lock)]
+async fn an_idle_conversation_refreshes_its_cache_entry_with_its_last_request() {
+    let _guard = env_lock();
+    let temp_root = isolated_config_home("idle-refresh");
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let Some(server) = spawn_server(
+        state.clone(),
+        vec![http_response("200 OK", "text/event-stream", REFRESH_SSE), refresh_reply(), refresh_reply(), refresh_reply()],
+    )
+    .await
+    else {
+        return;
+    };
+
+    let client = ApiClient::new("test-key")
+        .with_base_url(server.base_url())
+        .with_prompt_cache(PromptCache::new("idle-refresh-session"))
+        .with_idle_refresh_every(Duration::from_millis(50), 2);
+    let mut stream = client.stream_message(&marked_request()).await.expect("stream should start");
+    while stream.next_event().await.expect("stream event should parse").is_some() {}
+    wait_for_requests(&state, 3).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let captured = state.lock().await.clone();
+    assert_eq!(captured.len(), 3, "the request and two refreshes, no third");
+    let body = |at: usize| serde_json::from_str::<serde_json::Value>(&captured[at].body).expect("json body");
+    let live = body(0);
+    for at in [1, 2] {
+        let refresh = body(at);
+        assert_eq!(refresh["max_tokens"], json!(0), "{refresh}");
+        assert_ne!(refresh["stream"], json!(true), "a refresh is not streamed: {refresh}");
+        assert_eq!(refresh["messages"], live["messages"], "the same prefix");
+        assert_eq!(refresh["system"], live["system"]);
+        assert_eq!(refresh["tools"], live["tools"]);
+    }
+    let rows = api::read_request_ledger(&api::PromptCachePaths::for_session("idle-refresh-session").requests_path);
+    assert_eq!(rows.iter().filter(|row| row.refresh).count(), 2, "{rows:?}");
+    assert_eq!(rows.iter().filter(|row| !row.refresh).count(), 1, "{rows:?}");
+
+    std::fs::remove_dir_all(temp_root).ok();
+    std::env::remove_var("ZO_CONFIG_HOME");
+}
+
+/// A newer request owns the cache entry: the refreshes scheduled after the
+/// older one never go, and only the newer one's are sent.
+#[tokio::test]
+// Single-threaded test; the env lock across `.await` only serialises env access.
+#[allow(clippy::await_holding_lock)]
+async fn a_newer_request_cancels_the_older_requests_refreshes() {
+    let _guard = env_lock();
+    let temp_root = isolated_config_home("refresh-cancel");
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let Some(server) = spawn_server(
+        state.clone(),
+        vec![
+            http_response("200 OK", "text/event-stream", REFRESH_SSE),
+            http_response("200 OK", "text/event-stream", REFRESH_SSE),
+            refresh_reply(),
+            refresh_reply(),
+        ],
+    )
+    .await
+    else {
+        return;
+    };
+
+    let client = ApiClient::new("test-key")
+        .with_base_url(server.base_url())
+        .with_prompt_cache(PromptCache::new("refresh-cancel-session"))
+        .with_idle_refresh_every(Duration::from_millis(200), 1);
+    for _ in 0..2 {
+        let mut stream = client.stream_message(&marked_request()).await.expect("stream should start");
+        while stream.next_event().await.expect("stream event should parse").is_some() {}
+    }
+    wait_for_requests(&state, 3).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let captured = state.lock().await.clone();
+    assert_eq!(captured.len(), 3, "two requests and the newer one's single refresh");
+    std::fs::remove_dir_all(temp_root).ok();
+    std::env::remove_var("ZO_CONFIG_HOME");
+}
+
+/// A pending refresh does not hold the turn open. The runtime bridge hangs a
+/// retry notice on each turn's client that owns the turn's render sender; a
+/// refresh that kept that hook kept the sender, so the turn never saw its
+/// channel close and the next prompt queued behind a turn that had settled.
+#[tokio::test]
+// Single-threaded test; the env lock across `.await` only serialises env access.
+#[allow(clippy::await_holding_lock)]
+async fn a_pending_refresh_does_not_hold_the_turns_channel_open() {
+    let _guard = env_lock();
+    let temp_root = isolated_config_home("refresh-detached");
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let Some(server) = spawn_server(
+        state.clone(),
+        vec![http_response("200 OK", "text/event-stream", REFRESH_SSE), refresh_reply()],
+    )
+    .await
+    else {
+        return;
+    };
+
+    let (render_tx, mut render_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let client = ApiClient::new("test-key")
+        .with_base_url(server.base_url())
+        .with_idle_refresh_every(Duration::from_secs(60), 1)
+        .with_retry_notice_callback(move |_notice| {
+            let _ = render_tx.send(());
+        });
+    let mut stream = client.stream_message(&marked_request()).await.expect("stream should start");
+    while stream.next_event().await.expect("stream event should parse").is_some() {}
+    drop(stream);
+    drop(client);
+
+    let closed = tokio::time::timeout(Duration::from_secs(2), render_rx.recv()).await;
+    assert!(matches!(closed, Ok(None)), "the turn's channel closes while the refresh waits: {closed:?}");
+    std::fs::remove_dir_all(temp_root).ok();
+    std::env::remove_var("ZO_CONFIG_HOME");
+}
+
+/// A request with no conversation marker cached nothing past the system
+/// prompt, so nothing is refreshed after it.
+#[tokio::test]
+// Single-threaded test; the env lock across `.await` only serialises env access.
+#[allow(clippy::await_holding_lock)]
+async fn a_request_without_a_conversation_marker_is_not_refreshed() {
+    let _guard = env_lock();
+    let temp_root = isolated_config_home("refresh-unmarked");
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let Some(server) = spawn_server(
+        state.clone(),
+        vec![http_response("200 OK", "text/event-stream", REFRESH_SSE), refresh_reply()],
+    )
+    .await
+    else {
+        return;
+    };
+
+    let client = ApiClient::new("test-key")
+        .with_base_url(server.base_url())
+        .with_idle_refresh_every(Duration::from_millis(50), 1);
+    let mut stream = client.stream_message(&sample_request(false)).await.expect("stream should start");
+    while stream.next_event().await.expect("stream event should parse").is_some() {}
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert_eq!(state.lock().await.len(), 1, "no refresh");
+    std::fs::remove_dir_all(temp_root).ok();
+    std::env::remove_var("ZO_CONFIG_HOME");
+}
+
 #[tokio::test]
 async fn retries_retryable_failures_before_succeeding() {
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));

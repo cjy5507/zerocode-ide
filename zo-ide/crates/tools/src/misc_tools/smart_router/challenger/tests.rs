@@ -110,6 +110,7 @@ impl Scripted {
             cache_read_input_tokens: 0,
             output_tokens: 120,
             output_tokens_details: None,
+            cache_creation: None,
         }
     }
 
@@ -1018,6 +1019,7 @@ fn the_reservation_is_a_ceiling_and_the_settlement_is_the_bill() {
             cache_read_input_tokens: 20,
             output_tokens: 120,
             output_tokens_details: None,
+            cache_creation: None,
         }),
         left: true,
         status: runtime::OUTCOME_COMPLETED,

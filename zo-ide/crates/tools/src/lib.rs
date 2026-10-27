@@ -168,7 +168,7 @@ pub use misc_tools::{
     JUDGMENT_ROW_KIND, STEP_EFFORT_FILE, STEP_EFFORT_SETTING, STEP_JUDGMENT_DEADLINE,
 };
 pub use misc_tools::{
-    build_plan_shadow, conversation_anchor_ttl_for, conversation_anchor_ttl_from_root,
+    build_plan_shadow, cache_settings_for, cache_settings_from_root,
     model_options_for, model_price_for, plan_cohort_for_turn, plan_priors_for, plan_shadow_path,
     record_plan_shadow, switch_candidates, CACHE_ANCHOR_TTL_ENV,
     PlanShadowActual, PlanShadowCandidate, PlanShadowInputs, PlanShadowRow,

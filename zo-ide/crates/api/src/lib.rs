@@ -1,6 +1,7 @@
 // First, so the sign-in macros are in scope for every module after it.
 #[macro_use]
 pub mod sign_in;
+mod cache_policy;
 mod client;
 mod credential;
 mod connection_keys;
@@ -25,6 +26,11 @@ pub use client::{
     openai_login_configured, read_xai_base_url, resolve_openai_oauth_explained,
     resolve_openai_oauth_fresh, resolve_saved_oauth_token, resolve_startup_auth_source,
 };
+pub use cache_policy::{
+    cheapest_plan, cheapest_refreshes, conversation_cache_plan, conversation_refreshes,
+    declare_cache_settings, CachePlan, CacheRates, CacheSettings, CacheTtl, IdleGap, IdleProfile,
+    TtlChoice, PROFILE_WINDOW, REFRESH_LEAD,
+};
 pub use core_types::{RateLimitSnapshot, RateLimitWindow, RateLimitWindowKind};
 pub use credential::CredentialMiss;
 pub use managed_account::{ManagedAccountUpdate, ManagedProvider};
@@ -38,7 +44,7 @@ pub use prompt_cache::{
     break_row_axis, summarize_cache_ledger, CacheBreakLedgerRow, CacheLedgerSummary,
     DivergedWireMessage, MarkerRecord, NoAxisBreakCause, PromptCache, PromptCacheConfig,
     PromptCacheDoctorSummary, PromptCachePaths, PromptCacheRecord, PromptCacheStats,
-    RequestLedgerRow, SweepMarker,
+    RequestLedgerRow, SweepMarker, SUB_AGENT_ID_PREFIX,
     WireMessageShape,
     LOW_CACHE_HIT_STREAK_WARNING_THRESHOLD, MARKER_SLOT_ANCHOR, MARKER_SLOT_ROLLING,
     MARKER_SLOT_SYSTEM, NON_MESSAGE_MARKER_INDEX, PROMPT_CACHE_CAP_TRIM_MIN_IDLE_DAYS,
@@ -151,7 +157,7 @@ pub use systemone::{
     SYSTEMONE_MAX_RETRIES, SYSTEMONE_MODEL, SYSTEMONE_PATH, SYSTEMONE_RETRY_BASE_DELAY,
 };
 pub use types::{
-    CacheControl, ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent,
+    CacheControl, CacheCreation, ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent,
     ContentBlockStopEvent, DocumentSource, EffortLevel, ImageSource, InputContentBlock,
     InputMessage, MessageDelta, MessageDeltaEvent, MessageRequest, MessageResponse,
     MessageStartEvent, MessageStopEvent, OutputConfig, OutputContentBlock, StopDetails,

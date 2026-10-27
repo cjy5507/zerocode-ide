@@ -38,7 +38,11 @@ const DEFAULT_COMPLETION_TTL_SECS: u64 = 30;
 /// while running at 1h, and buying the distinction back means paying the 2.0x
 /// write premium on every request — the trade
 /// `mark_conversation_cache_breakpoints` measured and declined.
-const DEFAULT_PROMPT_TTL_SECS: u64 = 5 * 60;
+///
+/// A request whose conversation markers all asked for an hour (the `1h`
+/// policy, `cache.anchorTtl`) is judged against an hour instead
+/// ([`expiry_window_secs`]): its entries were written to live that long.
+const DEFAULT_PROMPT_TTL_SECS: u64 = crate::cache_policy::CacheTtl::FiveMinutes.lifetime().as_secs();
 const DEFAULT_BREAK_MIN_DROP: u32 = 2_000;
 const MAX_SANITIZED_LENGTH: usize = 80;
 const REQUEST_FINGERPRINT_VERSION: u32 = 1;
@@ -892,6 +896,29 @@ impl PromptCache {
         }
     }
 
+    /// Record a refresh ([`RequestLedgerRow::refresh`]). It is not a turn, so
+    /// no break is judged and the next request is still compared with the
+    /// last real one; but the entry now lives from this moment, so the
+    /// expiry window the next request is judged by starts here.
+    pub fn record_refresh(&self, request: &MessageRequest, usage: &Usage) {
+        let mut inner = self.lock();
+        if let Some(previous) = inner.previous.as_mut() {
+            previous.observed_at_unix_secs = now_unix_secs();
+        }
+        persist_state(&inner);
+        let mut row = request_ledger_row(
+            inner.stats.tracked_requests,
+            &inner.config.session_id,
+            request,
+            usage,
+            request.messages.len(),
+            false,
+            MarkerColumns::default(),
+        );
+        row.refresh = true;
+        append_request_row(&inner.paths, &row);
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, PromptCacheInner> {
         self.inner
             .lock()
@@ -976,6 +1003,13 @@ struct TrackedPromptState {
     /// file loads with an empty table.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     warm_prefixes: BTreeMap<String, WarmPrefix>,
+    /// The TTL label this request's conversation markers asked for
+    /// ([`conversation_marker_ttl`]): how long the entries it wrote were to
+    /// live, so the window the NEXT request's break is judged against
+    /// ([`expiry_window_secs`]). `#[serde(default)]` so an older state file
+    /// loads with no label, which is the five-minute window.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    conversation_ttl: String,
 }
 
 /// What one wire model still has cached for this session, as of the last
@@ -996,7 +1030,7 @@ pub struct WarmPrefix {
 /// TTL-bearing marker (the non-Anthropic encoders never serialize one):
 /// five minutes, the provider-neutral floor the r21 TTL study settled on for
 /// the rolling conversation markers. A marker that names a TTL wins.
-const DEFAULT_WARM_TTL_SECS: u64 = 300;
+const DEFAULT_WARM_TTL_SECS: u64 = crate::cache_policy::CacheTtl::FiveMinutes.lifetime().as_secs();
 
 /// The shortest lifetime a request's markers asked for, in seconds: `"5m"`
 /// → 300, `"1h"` → 3600, a mixed `"5m+1h"` → the shorter (the conversation
@@ -1004,11 +1038,8 @@ const DEFAULT_WARM_TTL_SECS: u64 = 300;
 fn warm_ttl_secs(marker_ttl_label: &str) -> u64 {
     marker_ttl_label
         .split('+')
-        .filter_map(|label| match label.trim() {
-            "5m" => Some(300),
-            "1h" => Some(3600),
-            _ => None,
-        })
+        .filter_map(crate::cache_policy::CacheTtl::from_label)
+        .map(|ttl| ttl.lifetime().as_secs())
         .min()
         .unwrap_or(DEFAULT_WARM_TTL_SECS)
 }
@@ -1036,6 +1067,7 @@ impl TrackedPromptState {
             // Filled by the recorder from the previous state; a bare
             // fingerprint knows no other model's prefix.
             warm_prefixes: BTreeMap::new(),
+            conversation_ttl: hashes.conversation_ttl.clone(),
         }
     }
 
@@ -1117,6 +1149,9 @@ struct RequestFingerprints {
     /// positions, which `cache_breakpoints` already carries, and
     /// `session-state.json` is rewritten whole on every request.
     markers: Vec<MarkerRecord>,
+    /// [`conversation_marker_ttl`] of this request, persisted as
+    /// [`TrackedPromptState::conversation_ttl`].
+    conversation_ttl: String,
 }
 
 impl RequestFingerprints {
@@ -1145,6 +1180,7 @@ impl RequestFingerprints {
             cache_breakpoints: cache_breakpoint_indices(&request.messages),
             marker_roles: marker_roles(&request.messages),
             markers: request_markers(request),
+            conversation_ttl: conversation_marker_ttl(&request.messages),
         }
     }
 }
@@ -1421,6 +1457,13 @@ fn marker_movement(previous: Option<&[usize]>, current: &[usize]) -> &'static st
 /// is the one place [`MarkerRecord`] (one entry per message, the last marked
 /// block) would round off.
 #[must_use]
+pub(crate) fn conversation_marker_lifetime(messages: &[InputMessage]) -> Option<crate::cache_policy::CacheTtl> {
+    conversation_marker_ttl(messages)
+        .split('+')
+        .filter_map(crate::cache_policy::CacheTtl::from_label)
+        .min_by_key(|ttl| ttl.lifetime())
+}
+
 pub fn conversation_marker_ttl(messages: &[InputMessage]) -> String {
     let mut ttls: Vec<&str> = messages
         .iter()
@@ -1701,7 +1744,7 @@ fn pure_append_break_event(
     elapsed: u64,
     model: &str,
 ) -> CacheBreakEvent {
-    let (unexpected, reason) = if elapsed > config.prompt_ttl.as_secs() {
+    let (unexpected, reason) = if elapsed > expiry_window_secs(config, previous) {
         (
             false,
             format!(
@@ -1732,6 +1775,24 @@ fn pure_append_break_event(
         tools_removed: Vec::new(),
         model: model.to_string(),
         provider: provider_family_for_model(model).to_string(),
+    }
+}
+
+/// Seconds the entries `previous` wrote were asked to live: an hour when
+/// every conversation marker it carried asked for an hour, else the
+/// configured prompt TTL (five minutes). A drop inside that window is not an
+/// expiry. The previous request's label, not this one's, because a cache
+/// entry lives as long as the marker that WROTE it asked.
+///
+/// A mixed `1h+5m` request (the anchor-only policy before 2026-10-27) keeps
+/// the five-minute window: its anchor sat on the entry the rolling marker
+/// wrote at five minutes, so its one-hour marker kept nothing alive.
+fn expiry_window_secs(config: &PromptCacheConfig, previous: &TrackedPromptState) -> u64 {
+    let hour = crate::cache_policy::CacheTtl::OneHour;
+    if previous.conversation_ttl == hour.label() {
+        config.prompt_ttl.as_secs().max(hour.lifetime().as_secs())
+    } else {
+        config.prompt_ttl.as_secs()
     }
 }
 
@@ -1832,7 +1893,7 @@ fn detect_cache_break(
     );
 
     let (unexpected, reason) = if reasons.is_empty() {
-        if elapsed > config.prompt_ttl.as_secs() {
+        if elapsed > expiry_window_secs(config, previous) {
             (
                 false,
                 format!("possible prompt cache TTL expiry after {elapsed}s"),
@@ -2488,6 +2549,16 @@ pub struct RequestLedgerRow {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub provider: String,
     pub cache_creation: u32,
+    /// The part of `cache_creation` the provider wrote at the one-hour TTL
+    /// (`usage.cache_creation.ephemeral_1h_input_tokens`); the rest was
+    /// written at five minutes. The cost identity's write multiplier is 2.0
+    /// on this part and 1.25 on the rest, so a row under a mixed-TTL policy
+    /// — the 1h anchor — cannot be priced without it. `None`, and off the
+    /// line, when the response did not split its write or wrote nothing at
+    /// one hour, which read the same: every written token at the five-minute
+    /// price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_1h: Option<u32>,
     pub cache_read: u32,
     /// `usage.input_tokens` — the fully re-billed remainder no cache covered.
     pub input_uncached: u32,
@@ -2594,6 +2665,18 @@ pub struct RequestLedgerRow {
     /// route record that only carries the router's RECOMMENDATION.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub effort: String,
+    /// A refresh, not a turn: the conversation's last request re-sent with
+    /// `max_tokens: 0` to keep its cache entry alive while the person is away
+    /// (`cache_policy`). Billed like any request, so it has a row;
+    /// never a pause in the record that plans the refreshes. Absent on every
+    /// other row.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub refresh: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// `skip_serializing_if` for [`RequestLedgerRow::read_drop`]: most requests do
@@ -2602,6 +2685,7 @@ pub struct RequestLedgerRow {
 fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
+
 
 /// One line of the per-request cache-break ledger (`breaks.jsonl`): which
 /// request's cache reads DROPPED, on which fingerprint axis, and by how much.
@@ -2914,6 +2998,7 @@ pub fn read_break_ledger(breaks_path: &Path) -> Vec<CacheBreakLedgerRow> {
 /// function is already at five, and the three belong together — they are one
 /// reading of one request's markers, and `moved` is meaningless without the
 /// positions `markers` carries.
+#[derive(Default)]
 struct MarkerColumns {
     markers: Vec<MarkerRecord>,
     moved: &'static str,
@@ -2966,6 +3051,10 @@ fn request_ledger_row(
         model: request.model.clone(),
         provider: provider_family_for_model(&request.model).to_string(),
         cache_creation: usage.cache_creation_input_tokens,
+        cache_creation_1h: usage
+            .cache_creation
+            .map(|split| split.ephemeral_1h_input_tokens)
+            .filter(|tokens| *tokens > 0),
         cache_read: usage.cache_read_input_tokens,
         input_uncached: usage.input_tokens,
         output: usage.output_tokens,
@@ -2977,6 +3066,7 @@ fn request_ledger_row(
         read_drop: markers.read_drop,
         attempt: attempt_for_session(session_id),
         effort: request_effort_label(request),
+        refresh: false,
     }
 }
 
@@ -3292,6 +3382,23 @@ fn cache_roots() -> Vec<PathBuf> {
         .collect()
 }
 
+/// The id prefix a sub-agent's session carries, and with it the directory its
+/// ledger rows land in. The agent tools mint ids with it; the record of a
+/// person's pauses (`recorded_foreground_gaps`) leaves those directories
+/// out, because a spawn's conversation ends when its task does.
+pub const SUB_AGENT_ID_PREFIX: &str = "agent-";
+
+/// This machine's foreground Anthropic conversations since `since`, as pauses
+/// ([`crate::cache_policy::idle_gaps_under`]).
+pub(crate) fn recorded_foreground_gaps(since: std::time::SystemTime) -> Vec<crate::cache_policy::IdleGap> {
+    crate::cache_policy::idle_gaps_under(
+        &base_cache_root(),
+        crate::providers::ProviderKind::Anthropic.rate_limit_key(),
+        since,
+        SUB_AGENT_ID_PREFIX,
+    )
+}
+
 fn base_cache_root() -> PathBuf {
     cache_roots()
         .into_iter()
@@ -3369,6 +3476,7 @@ mod tests {
                 cache_read_input_tokens: 6_000,
                 output_tokens: 0,
                 output_tokens_details: None,
+                cache_creation: None,
             },
         );
         let current = TrackedPromptState::from_usage(
@@ -3379,6 +3487,7 @@ mod tests {
                 cache_read_input_tokens: 1_000,
                 output_tokens: 0,
                 output_tokens_details: None,
+                cache_creation: None,
             },
         );
         let event = detect_cache_break(
@@ -3443,6 +3552,7 @@ mod tests {
             cache_read_input_tokens: cache_read,
             output_tokens: 7,
             output_tokens_details: None,
+            cache_creation: None,
         }
     }
 
@@ -3480,6 +3590,83 @@ mod tests {
         assert_eq!(row.input_uncached, 2);
         assert_eq!(row.message_count, 1);
         assert!(!row.broke, "a first request has nothing to break from");
+    }
+
+    /// A refresh leaves a row marked as one and restarts the lifetime the next
+    /// request is judged by: a read that drops ten minutes after the last
+    /// real request but two after a refresh is not a five-minute expiry, it is
+    /// a break nobody expected.
+    #[test]
+    fn a_refresh_is_recorded_and_restarts_the_expiry_window() {
+        let _env = test_env_lock();
+        let home = CacheHome::new("refresh-row");
+        let cache = PromptCache::new(home.session.clone());
+        let _ = cache.record_usage(&sample_request_with_messages(&["a", "b"]), &plain_usage(0, 50_000, 2));
+        let ten_minutes_ago = super::now_unix_secs().saturating_sub(10 * 60);
+        cache
+            .lock()
+            .previous
+            .as_mut()
+            .expect("the first request is tracked")
+            .observed_at_unix_secs = ten_minutes_ago;
+
+        cache.record_refresh(&sample_request_with_messages(&["a", "b"]), &plain_usage(0, 50_000, 2));
+        let record = cache.record_usage(&sample_request_with_messages(&["a", "b", "c"]), &plain_usage(0, 1_000, 2));
+
+        let rows = home.requests();
+        assert_eq!(rows.iter().map(|row| row.refresh).collect::<Vec<_>>(), vec![false, true, false], "{rows:?}");
+        let event = record.cache_break.expect("the read dropped");
+        assert!(event.unexpected, "the refresh kept the entry alive: {}", event.reason);
+        assert!(!event.reason.contains("TTL"), "{}", event.reason);
+    }
+
+    /// The one-hour part of a write is on the row, so a request under the 1h
+    /// anchor is priced at the multiplier it was billed at. A row whose
+    /// write was all five-minute leaves the column off and reads the same.
+    #[test]
+    fn a_request_ledger_row_keeps_the_one_hour_part_of_its_write() {
+        let _env = test_env_lock();
+        let home = CacheHome::new("request-ledger-one-hour");
+        let cache = PromptCache::new(home.session.clone());
+        let split = |hour: u32, five: u32| Usage {
+            cache_creation: Some(crate::types::CacheCreation {
+                ephemeral_5m_input_tokens: five,
+                ephemeral_1h_input_tokens: hour,
+            }),
+            ..plain_usage(hour + five, 9_500, 3)
+        };
+
+        let _ = cache.record_usage(&sample_request("hello"), &split(240_000, 1_200));
+        let _ = cache.record_usage(&sample_request("hello again"), &split(0, 1_400));
+
+        let rows = home.requests();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!((rows[0].cache_creation, rows[0].cache_creation_1h), (241_200, Some(240_000)));
+        assert_eq!(rows[1].cache_creation_1h, None, "nothing written at one hour, nothing on the line");
+        let written = std::fs::read_to_string(PromptCachePaths::for_session(&home.session).requests_path)
+            .expect("the ledger");
+        assert_eq!(written.matches("cache_creation_1h").count(), 1, "{written}");
+    }
+
+    /// Anthropic's usage carries the split as `cache_creation`; a provider
+    /// that sends none leaves it `None`.
+    #[test]
+    fn a_usage_reads_the_providers_ttl_split() {
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "input_tokens": 3,
+            "cache_creation_input_tokens": 241_200,
+            "cache_read_input_tokens": 9_500,
+            "cache_creation": {"ephemeral_5m_input_tokens": 1_200, "ephemeral_1h_input_tokens": 240_000},
+            "output_tokens": 1
+        }))
+        .expect("an Anthropic usage");
+        assert_eq!(
+            usage.cache_creation,
+            Some(crate::types::CacheCreation { ephemeral_5m_input_tokens: 1_200, ephemeral_1h_input_tokens: 240_000 })
+        );
+        let plain: Usage = serde_json::from_value(serde_json::json!({"input_tokens": 1, "output_tokens": 1}))
+            .expect("a usage with no split");
+        assert_eq!(plain.cache_creation, None);
     }
 
     /// Two writers share one session, and the ledger must not lose either.
@@ -3883,12 +4070,16 @@ mod tests {
     ///
     /// The ceiling is what makes that argument keep holding: a column added
     /// later has to fit, or has to move this number and re-do the arithmetic
-    /// in `docs/analysis/cache-remeasure-r22.md`. It last moved on 2026-09-15,
+    /// in `docs/analysis/cache-remeasure-r22.md`. It moved on 2026-09-15,
     /// when the attempt/effort join columns took the worst case from 360 to
-    /// 404 bytes; the arithmetic is re-done in that document's §5.
+    /// 404 bytes; the arithmetic is re-done in that document's §5. It moved
+    /// again on 2026-10-27, for `cache_creation_1h`: the worst case went from
+    /// 420 to 447 bytes, about 11 MB a month at ~24,700 rows. The column is
+    /// left off every row that wrote nothing at one hour, which is every row
+    /// under the five-minute default.
     #[test]
     fn a_request_ledger_row_stays_small_enough_to_keep_forever() {
-        const CEILING_BYTES: usize = 420;
+        const CEILING_BYTES: usize = 450;
 
         let marker = |index: i32, slot: &str, role: &str, ttl: &str| super::MarkerRecord {
             index,
@@ -3902,6 +4093,7 @@ mod tests {
             model: "claude-opus-5".to_string(),
             provider: "anthropic".to_string(),
             cache_creation: 999_999,
+            cache_creation_1h: Some(999_999),
             cache_read: 999_999,
             input_uncached: 999_999,
             output: 999_999,
@@ -3928,6 +4120,9 @@ mod tests {
             // A legacy thinking budget is the longer of the two spellings; a
             // level is at most `medium`.
             effort: "budget:32000".to_string(),
+            // A refresh row carries the flag but nothing a turn adds — no
+            // output, no movement, no drop — so it stays far under this.
+            refresh: false,
         };
         let line = serde_json::to_string(&row).expect("row serializes") + "\n";
         println!("request ledger row: {} bytes — {line}", line.len());
@@ -4331,6 +4526,7 @@ mod tests {
             cache_read_input_tokens: cache_read,
             output_tokens: 0,
             output_tokens_details: None,
+            cache_creation: None,
         };
         let _ = cache.record_usage(&sample_request_with_messages(&["a", "b"]), &usage_with_read(50_000));
         note_context_trim(&session, 12_345);
@@ -4375,6 +4571,7 @@ mod tests {
                     cache_read_input_tokens: cache_read,
                     output_tokens: 0,
                     output_tokens_details: None,
+                    cache_creation: None,
                 },
             )
         };
@@ -4443,6 +4640,7 @@ mod tests {
                     cache_read_input_tokens: cache_read,
                     output_tokens: 0,
                     output_tokens_details: None,
+                    cache_creation: None,
                 },
             )
         };
@@ -4523,6 +4721,7 @@ mod tests {
                     cache_read_input_tokens: cache_read,
                     output_tokens: 0,
                     output_tokens_details: None,
+                    cache_creation: None,
                 },
             )
         };
@@ -4611,6 +4810,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 output_tokens: 0,
                 output_tokens_details: None,
+                cache_creation: None,
             },
         );
         let event = detect_cache_break(
@@ -4642,6 +4842,7 @@ mod tests {
                 cache_read_input_tokens: 6_000,
                 output_tokens: 0,
                 output_tokens_details: None,
+                cache_creation: None,
             },
         );
         let current = TrackedPromptState::from_usage(
@@ -4652,6 +4853,7 @@ mod tests {
                 cache_read_input_tokens: 1_000,
                 output_tokens: 0,
                 output_tokens_details: None,
+                cache_creation: None,
             },
         );
         // The two single-message requests differ at message index 0, matching
@@ -4697,6 +4899,7 @@ mod tests {
             cache_read_input_tokens: cr,
             output_tokens: 5,
             output_tokens_details: None,
+            cache_creation: None,
         };
 
         // req1: baseline (no previous → no break).
@@ -4820,6 +5023,7 @@ mod tests {
             cache_read_input_tokens: cr,
             output_tokens: 5,
             output_tokens_details: None,
+            cache_creation: None,
         };
 
         // Anthropic leg: a warm request, then a byte-stable read collapse.
@@ -5621,6 +5825,7 @@ mod tests {
             cache_breakpoints: Vec::new(),
             marker_roles: Vec::new(),
             warm_prefixes: std::collections::BTreeMap::new(),
+            conversation_ttl: String::new(),
         };
         let row_for = |event: &super::CacheBreakEvent| CacheBreakLedgerRow {
             seq: 1,
@@ -5676,6 +5881,24 @@ mod tests {
             row_for(&event).no_axis_cause(),
             Some(super::NoAxisBreakCause::TtlExpiry)
         );
+
+        // The same gap after a request whose conversation markers all asked
+        // for an hour is not an expiry: those entries were to live an hour.
+        let hour_base = TrackedPromptState { conversation_ttl: "1h".to_string(), ..base.clone() };
+        let event = super::detect_cache_break(&config, Some(&hour_base), &expired, None, 2, TEST_MODEL)
+            .expect("a break inside the hour");
+        assert!(event.unexpected, "{}", event.reason);
+        // Past the hour it is one again; and the anchor-only mix keeps the
+        // five-minute window, because its anchor stood on a five-minute entry.
+        let mut past_the_hour = cold.clone();
+        past_the_hour.observed_at_unix_secs = base.observed_at_unix_secs + 60 * 60 + 60;
+        let event = super::detect_cache_break(&config, Some(&hour_base), &past_the_hour, None, 2, TEST_MODEL)
+            .expect("a break past the hour");
+        assert!(!event.unexpected);
+        let mixed_base = TrackedPromptState { conversation_ttl: "1h+5m".to_string(), ..base.clone() };
+        let event = super::detect_cache_break(&config, Some(&mixed_base), &expired, None, 2, TEST_MODEL)
+            .expect("a break after the anchor-only mix");
+        assert!(!event.unexpected);
 
         // Fingerprint bump: our own schema version changed.
         let mut bumped = cold.clone();
@@ -6159,6 +6382,7 @@ mod tests {
                 cache_read_input_tokens: 1,
                 output_tokens: 5,
                 output_tokens_details: None,
+                cache_creation: None,
             };
             for _ in 0..5 {
                 let record = cache.record_usage(&request, &tiny_usage);
@@ -6394,6 +6618,7 @@ mod tests {
             cache_read_input_tokens: 100,
             output_tokens: 10,
             output_tokens_details: None,
+            cache_creation: None,
         }
     }
 
@@ -6404,6 +6629,7 @@ mod tests {
             cache_read_input_tokens: 60_000,
             output_tokens: 10,
             output_tokens_details: None,
+            cache_creation: None,
         }
     }
 
@@ -6462,6 +6688,7 @@ mod tests {
                 cache_read_input_tokens,
                 output_tokens,
                 output_tokens_details: None,
+                cache_creation: None,
             },
             request_id: Some("req_test".to_string()),
             thought_signature: None,
