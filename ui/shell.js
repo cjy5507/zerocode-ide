@@ -1772,7 +1772,6 @@ function updateActionHub(answer) {
 
   const hubBadge = el("action-hub-badge");
   if (hubBadge) hubBadge.textContent = String(stuck);
-  forgetGoneTurns();
   paintYourTurn();
 
   const scrim = el("action-hub-scrim");
@@ -1963,12 +1962,14 @@ function yourTurnsDrawing(turns) {
 
 function paintYourTurn() {
   if (isPopout) return;
-  const turns = yourTurns();
-  const chip = el("your-turn");
-  chip.classList.toggle("is-live", turns.length > 0);
+  const now = Date.now();
+  forgetGoneTurns(now);
+  const turns = yourTurns(now);
+  writeClass(el("your-turn"), "is-live", turns.length > 0);
   writeTextContent(el("your-turn-count"), String(turns.length));
-  paintYourTurnGroup(turns);
-  if (!el("your-turn-list").hidden) paintYourTurnList(turns);
+  const drawing = yourTurnsDrawing(turns);
+  paintYourTurnGroup(turns, drawing);
+  if (!el("your-turn-list").hidden) paintYourTurnList(turns, drawing);
 }
 
 function yourTurnButton(className, words, run) {
@@ -2041,9 +2042,8 @@ function yourTurnRefusalNode(draft) {
 
 /* ---- the sidebar group ---- */
 
-function paintYourTurnGroup(turns) {
+function paintYourTurnGroup(turns, drawing) {
   const host = el("your-turn-group");
-  const drawing = yourTurnsDrawing(turns);
   if (drawing === yourTurnGroupDrawn) return;
   yourTurnGroupDrawn = drawing;
   host.hidden = turns.length === 0;
@@ -2057,14 +2057,21 @@ function paintYourTurnGroup(turns) {
   host.replaceChildren(head, ...turns.map((card) => yourTurnRowNode(card, now)));
 }
 
-function yourTurnRowNode(card, now) {
+/* What a sidebar row and a list item share: the node, its kind and the line
+ * it opens with. */
+function yourTurnShellNode(tag, className, card, now) {
   const kind = yourTurnKind(card);
-  const draft = yourTurnDraft(card);
-  const row = document.createElement("div");
-  row.className = "your-turn-row";
-  row.dataset.kind = kind;
+  const node = document.createElement(tag);
+  node.className = className;
+  node.dataset.kind = kind;
   // Its answers are the person's: an agent pressing in the window never makes them (t-73906).
-  row.dataset.personOnly = "";
+  node.dataset.personOnly = "";
+  node.append(yourTurnHeadNode(card, kind, now));
+  return { node, kind, draft: yourTurnDraft(card) };
+}
+
+function yourTurnRowNode(card, now) {
+  const { node: row, kind, draft } = yourTurnShellNode("div", "your-turn-row", card, now);
   actsAsButton(row, () => openYourTurnList(yourTurnKey(card)));
   const line = document.createElement("span");
   line.className = "your-turn-row-line";
@@ -2073,7 +2080,7 @@ function yourTurnRowNode(card, now) {
   acts.className = "your-turn-row-acts";
   if (kind === "permission") acts.append(yourTurnAllowNode(card, draft, false), yourTurnDenyNode(card, draft));
   acts.append(yourTurnOpenNode(card));
-  row.append(yourTurnHeadNode(card, kind, now), line, acts);
+  row.append(line, acts);
   if (draft.refusal) row.append(yourTurnRefusalNode(draft));
   return row;
 }
@@ -2083,15 +2090,16 @@ function yourTurnRowNode(card, now) {
 function openYourTurnList(focusKey = null) {
   const list = el("your-turn-list");
   const chip = el("your-turn");
+  // Hung from the chip's own edge, wherever the title bar has put it — read
+  // before the list stands, so the read lays nothing out.
+  const box = chip.getBoundingClientRect();
+  list.style.setProperty("--your-turn-top", `${Math.round(box.bottom)}px`);
+  list.style.setProperty("--your-turn-left", `${Math.round(box.left)}px`);
   if (list.hidden) {
     list.hidden = false;
     chip.setAttribute("aria-expanded", "true");
     document.addEventListener("pointerdown", closeYourTurnListOutside, true);
   }
-  // Hung from the chip's own edge, wherever the title bar has put it.
-  const box = chip.getBoundingClientRect();
-  list.style.setProperty("--your-turn-top", `${Math.round(box.bottom)}px`);
-  list.style.setProperty("--your-turn-left", `${Math.round(box.left)}px`);
   yourTurnListDrawn = "";
   paintYourTurnList(yourTurns());
   const items = [...list.querySelectorAll(".your-turn-item")];
@@ -2137,9 +2145,8 @@ function restoreYourTurnFocus(list, kept) {
   (item ?? items[Math.min(kept.at, items.length - 1)] ?? list).focus();
 }
 
-function paintYourTurnList(turns) {
+function paintYourTurnList(turns, drawing = yourTurnsDrawing(turns)) {
   const list = el("your-turn-list");
-  const drawing = yourTurnsDrawing(turns);
   if (drawing === yourTurnListDrawn) return;
   yourTurnListDrawn = drawing;
   const kept = yourTurnFocusOf(list);
@@ -2170,16 +2177,9 @@ function paintYourTurnList(turns) {
 }
 
 function yourTurnItemNode(card, now) {
-  const kind = yourTurnKind(card);
-  const draft = yourTurnDraft(card);
-  const item = document.createElement("article");
-  item.className = "your-turn-item";
+  const { node: item, kind, draft } = yourTurnShellNode("article", "your-turn-item", card, now);
   item.tabIndex = 0;
-  item.dataset.kind = kind;
   item.dataset.key = yourTurnKey(card);
-  // Its answers are the person's: an agent pressing in the window never makes them (t-73906).
-  item.dataset.personOnly = "";
-  item.append(yourTurnHeadNode(card, kind, now));
   const acts = document.createElement("div");
   acts.className = "your-turn-acts";
   if (kind === "permission") {
@@ -12386,10 +12386,7 @@ const agentClock = idlePoller({
     paintLaneSubagentClocks();
     // A turn put away comes back on this beat once its ten minutes are up:
     // whatever it waits on is an agent, so the beat is already running.
-    if (yourTurnLater.size > 0) {
-      forgetGoneTurns();
-      paintYourTurn();
-    }
+    if (yourTurnLater.size > 0) paintYourTurn();
   },
 });
 

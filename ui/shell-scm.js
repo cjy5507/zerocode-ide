@@ -397,8 +397,7 @@ el("toggle-aside").addEventListener("click", () => setPanelFolded("aside", !fold
  * panel holds no node while its tab is not up. */
 
 /* The checkouts of the project on screen whose commits are not in main yet. */
-function unlandedCheckouts() {
-  const project = projectOfWorktree(activeWorktreePath) ?? projects[0];
+function unlandedCheckouts(project = projectOfWorktree(activeWorktreePath) ?? projects[0]) {
   return (project?.worktrees ?? []).filter((worktree) => !worktree.is_main && worktree.landing?.state === "unlanded");
 }
 
@@ -413,65 +412,66 @@ function paintStackedWorkCount() {
   writeTextContent(count, commits === 0 ? "" : String(commits));
 }
 
-function pileNode(tag, className, text = "") {
-  const node = document.createElement(tag);
-  node.className = className;
-  if (text) node.textContent = text;
-  return node;
-}
-
 function pileSectionNode(title, count, rows) {
-  const section = pileNode("section", "pile-section");
-  const head = pileNode("h3", "pile-section-head", title);
-  if (count !== null) head.append(pileNode("span", "pile-section-count", String(count)));
+  const section = deskElement("section", "pile-section");
+  const head = deskElement("h3", "pile-section-head", title);
+  if (count !== null) head.append(deskElement("span", "pile-section-count", String(count)));
   section.append(head, ...rows);
   return section;
 }
 
+/* What the panel last drew: a repaint over the same facts builds nothing. */
+let pileDrawn = "";
+
 function paintStackedWork() {
   const panel = el("activity-pile");
   const project = projectOfWorktree(activeWorktreePath) ?? projects[0];
-  const head = pileNode("header", "pile-head");
-  head.append(pileNode("strong", "pile-title", t("pile.title", "쌓인 일")), pileNode("span", "pile-project", project?.name ?? ""));
-  panel.replaceChildren(head, ...[pileReleaseSection(), pileUnlandedSection(), pileRepositorySection()].filter(Boolean));
+  const checkouts = unlandedCheckouts(project);
+  const lane = releaseLane && typeof releaseLane === "object" ? releaseLane : null;
+  const drawing = JSON.stringify([locale, project?.name, lane?.sha, lane?.version, lane?.phase, deskReleaseVerdict(lane ?? {}),
+    checkouts.map((worktree) => [worktree.path, worktree.branch, worktree.landing]),
+    scmCompareContext?.head, upstreamState?.upstream, scmEntries.length]);
+  if (drawing === pileDrawn && panel.childElementCount > 0) return;
+  pileDrawn = drawing;
+  const head = deskElement("header", "pile-head");
+  head.append(deskElement("strong", "pile-title", t("pile.title", "쌓인 일")), deskElement("span", "pile-project", project?.name ?? ""));
+  panel.replaceChildren(head, ...[pileReleaseSection(lane), pileUnlandedSection(checkouts), pileRepositorySection()].filter(Boolean));
 }
 
 /* The release lane, as the build line's card says it: its version, its verdict
  * and the step it is on. A lane that never ran says nothing. */
-function pileReleaseSection() {
-  const lane = releaseLane;
-  if (!lane || typeof lane !== "object" || !lane.sha) return null;
+function pileReleaseSection(lane) {
+  if (!lane?.sha) return null;
   const verdict = DESK_RELEASE_VERDICTS[deskReleaseVerdict(lane)];
-  const row = pileNode("p", "pile-release");
+  const row = deskElement("p", "pile-release");
   const version = lane.version ? `v${lane.version}` : String(lane.sha).slice(0, SHORT_COMMIT_LENGTH);
   // The verdict wears the board's own status dot (`.board-state[data-dot]`) beside its word.
-  const state = pileNode("span", "board-state pile-release-state",
+  const state = deskElement("span", "board-state pile-release-state",
     [t(verdict.key, verdict.word), lane.phase ? deskReleasePhaseWord(String(lane.phase)) : ""].filter(Boolean).join(" · "));
   state.dataset.dot = verdict.dot;
-  row.append(pileNode("strong", "pile-release-title", `${t("board.now.lineRelease", "새 버전 발행")} ${version}`), state);
+  row.append(deskElement("strong", "pile-release-title", `${t("board.now.lineRelease", "새 버전 발행")} ${version}`), state);
   return pileSectionNode(t("pile.release", "발행 · 게이트"), null, [row]);
 }
 
 /* The work not in main: the sum, then each branch with its commits and, when
  * it runs far behind, how far — the sidebar's own words for it. A row opens
  * that checkout. */
-function pileUnlandedSection() {
-  const checkouts = unlandedCheckouts();
+function pileUnlandedSection(checkouts) {
   if (checkouts.length === 0) return null;
   const commits = unlandedCommitCount(checkouts);
-  const total = pileNode("p", "pile-total");
-  total.append(pileNode("strong", "pile-total-count", String(commits)),
-    pileNode("span", "pile-total-words", t("pile.total", "커밋 · 가지 {{branches}}", { branches: checkouts.length })));
+  const total = deskElement("p", "pile-total");
+  total.append(deskElement("strong", "pile-total-count", String(commits)),
+    deskElement("span", "pile-total-words", t("pile.total", "커밋 · 가지 {{branches}}", { branches: checkouts.length })));
   const rows = checkouts.map((worktree) => {
     const { landing } = worktree;
-    const row = pileNode("button", "pile-branch");
+    const row = deskElement("button", "pile-branch");
     row.type = "button";
-    row.append(pileNode("span", "pile-branch-name", worktree.branch || worktreeDisplayName(worktree)));
+    row.append(deskElement("span", "pile-branch-name", worktree.branch || worktreeDisplayName(worktree)));
     if (landing.far_behind === true && Number.isFinite(landing.behind)) {
-      row.append(pileNode("span", "pile-branch-behind",
+      row.append(deskElement("span", "pile-branch-behind",
         t("worktree.landBehind", "{{ref}}보다 {{count}} 뒤", { ref: landingRefName(landing.compare_ref ?? ""), count: landing.behind })));
     }
-    row.append(pileNode("span", "pile-branch-count", String(landing.ahead ?? 0)));
+    row.append(deskElement("span", "pile-branch-count", String(landing.ahead ?? 0)));
     row.addEventListener("click", () => void activateWorktree(worktree.path));
     return row;
   });
@@ -483,9 +483,9 @@ function pileUnlandedSection() {
 function pileRepositorySection() {
   const branch = scmRefLabel(scmCompareContext?.head ?? "") || "HEAD";
   const upstream = upstreamState?.upstream ?? "";
-  const line = pileNode("p", "pile-repo", upstream ? `${branch} → ${upstream}` : branch);
-  const changed = pileNode("p", "pile-repo-changed", t("pile.changed", "바뀐 파일 {{count}}", { count: scmEntries.length }));
-  const door = pileNode("button", "btn pile-scm", t("pile.openScm", "소스 컨트롤 열기"));
+  const line = deskElement("p", "pile-repo", upstream ? `${branch} → ${upstream}` : branch);
+  const changed = deskElement("p", "pile-repo-changed", t("pile.changed", "바뀐 파일 {{count}}", { count: scmEntries.length }));
+  const door = deskElement("button", "btn pile-scm", t("pile.openScm", "소스 컨트롤 열기"));
   door.type = "button";
   door.addEventListener("click", () => setActivityItem("scm"));
   return pileSectionNode(t("pile.repository", "저장소"), null, [line, changed, door]);

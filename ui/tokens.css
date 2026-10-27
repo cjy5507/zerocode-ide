@@ -532,9 +532,6 @@
   --type-label-14: 400 var(--text-md) / 20px var(--font-ui);
   --type-label-13: 400 var(--text-sm) / 16px var(--font-ui);
   --type-copy-13: 400 var(--text-sm) / 18px var(--font-ui);
-  /* Geist's copy-16: prose a person reads at length — an agent's answer in the
-   * conversation view (IDE design pass 2, item 9). */
-  --type-copy-16: 400 var(--text-lg) / 24px var(--font-ui);
   --type-label-12: 400 var(--text-xs) / 16px var(--font-ui);
   --type-label-13-mono: 400 var(--text-sm) / 20px var(--font-mono);
   --type-label-12-mono: 400 var(--text-xs) / 16px var(--font-mono);
@@ -2641,8 +2638,8 @@
   --chat-bubble-pad-y: 4px;
   --chat-bubble-gap: 4px;
   /* IDE design pass 2 (B, items 9 and 11): the composer floats as the round box
-   * of what floats, and the prose is read at Geist copy-16 (`--type-copy-16`),
-   * 16 on a 24 line. */
+   * of what floats, and the prose is read at Geist's copy-16 — 16 on a 24
+   * line (`--chat-prose-leading`). */
   --chat-radius-composer: var(--radius-xl);
   --chat-prose-size: var(--text-lg);
   --chat-prose-leading: 1.5;

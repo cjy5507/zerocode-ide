@@ -53096,12 +53096,18 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   color: var(--ink-chalk);
 }
 
-.your-turn:focus-visible {
+.your-turn:focus-visible,
+.your-turn-list:focus-visible,
+.pile-branch:focus-visible,
+.pile-scm:focus-visible {
   outline: var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
 }
 
-.your-turn-dot {
+/* One ring of a dot for every state mark here; a state fills it or reshapes it. */
+.your-turn-dot,
+.your-turn-kind::before,
+.pane-head-state::before {
   width: var(--dot-size);
   height: var(--dot-size);
   border-radius: 50%;
@@ -53154,16 +53160,6 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   box-shadow: var(--shadow-border), var(--shadow-drop);
   color: var(--ink-chalk);
   font: var(--type-copy-13);
-  transition: opacity var(--motion-fast) var(--ease-standard);
-}
-
-.your-turn-list[hidden] {
-  display: none;
-}
-
-.your-turn-list:focus-visible {
-  outline: var(--focus-ring);
-  outline-offset: var(--focus-ring-offset);
 }
 
 .your-turn-list-head {
@@ -53229,10 +53225,6 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 
 .your-turn-kind::before {
   content: "";
-  width: var(--dot-size);
-  height: var(--dot-size);
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 var(--rule-width) currentColor;
 }
 
 .your-turn-kind[data-kind="permission"]::before {
@@ -53369,10 +53361,6 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   box-shadow: 0 0 0 var(--rule-width) color-mix(in srgb, var(--call) 35%, transparent);
 }
 
-.your-turn-group[hidden] {
-  display: none;
-}
-
 .your-turn-group-head {
   justify-self: start;
   padding: 0;
@@ -53464,8 +53452,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   font: var(--type-label-12-mono);
 }
 
-.pane-head-state,
-.pane-head-pick {
+.pane-head-state {
   flex: none;
   white-space: nowrap;
 }
@@ -53475,11 +53462,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .pane-head-state::before {
   content: "";
   display: inline-block;
-  width: var(--dot-size);
-  height: var(--dot-size);
   margin-right: var(--space-1);
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 var(--rule-width) currentColor;
   vertical-align: middle;
 }
 
@@ -53499,6 +53482,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pane-head-view {
@@ -53506,13 +53490,10 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   margin-left: auto;
 }
 
-/* The answer read as prose: Geist copy-16 in one column of `--reading-column`,
- * centred in the list's room; the dock, measured by the same token, floats
- * under it on the same axis. */
-.is-chat-page .helper-turn.is-assistant .helper-said {
-  font: var(--type-copy-16);
-}
-
+/* The answer read as prose — Geist's copy-16 through the prose tokens
+ * (`--chat-prose-size`, `--chat-prose-leading`) — in one column of
+ * `--reading-column`, centred in the list's room; the dock, measured by the
+ * same token, floats under it on the same axis. */
 .is-chat-page .helper-body > .helper-turns {
   padding-inline: max(var(--helper-gutter, var(--chat-list-pad-x)), calc((100% - var(--reading-column)) / 2));
 }
@@ -53542,10 +53523,6 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   overflow-y: auto;
   color: var(--ink-chalk);
   font: var(--type-copy-13);
-}
-
-.pile[hidden] {
-  display: none;
 }
 
 .pile-head {
@@ -53627,12 +53604,6 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   color: var(--ink-mist);
 }
 
-.pile-branch:focus-visible,
-.pile-scm:focus-visible {
-  outline: var(--focus-ring);
-  outline-offset: var(--focus-ring-offset);
-}
-
 .pile-branch-name {
   min-width: 0;
   overflow: hidden;
@@ -53664,7 +53635,6 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 
 @media (prefers-reduced-motion: reduce) {
   .your-turn,
-  .your-turn-list,
   .your-turn-inbox,
   .your-turn-group-head,
   .your-turn-row,
