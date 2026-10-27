@@ -1521,11 +1521,18 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
  * person's 10-21 pass of draft B) 2xs is 12px, a step over the 11px branch
  * line it sits in, and at its own line height it grew the row by 1.4px. */
 .wt-unseated {
-  flex: none;
+  /* Takes what the line has left after the folder's name before it, and
+   * elides there: a short line cuts the note, not the name to a letter
+   * (t-78107). From nothing, so the name is laid first; the line still
+   * measures the note whole when it sizes itself. */
+  flex: 1 1 0;
+  min-width: 0;
   margin-inline-start: var(--space-1);
+  overflow: hidden;
   color: var(--ink-mist);
   font-size: var(--text-2xs);
   line-height: 1;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -2599,11 +2606,27 @@ svg.wt-agent-dot {
  * node, so every reader of `.wt-title` and `.wt-landing` reads what it did. */
 .wt-titlebox {
   display: grid;
-  /* The branch, then one track for each chip that can stand (기본, the
-   * ledger's word, the landing count, the wall). A chip that is not there
-   * takes no width, so the gap rides the chip, not the grid. */
-  grid-template-columns: minmax(0, 1fr) repeat(4, minmax(0, max-content));
+  /* The branch, the room left over, then one track for each chip that can
+   * stand (기본, the ledger's word, the landing count, the wall). A chip that
+   * is not there takes no width, so the gap rides the chip, not the grid.
+   *
+   * The branch and the chips are each sized to their words and share a short
+   * line evenly — the grid grows every such track by the same step until it
+   * holds its words — and the room left over stands between them, so the
+   * chips keep the right end. With the branch alone on the `1fr` track every
+   * chip took its whole width first: a 129 px 「미반영 6 · main보다 20 뒤」 left
+   * the branch's 91 px of words 52 at 1280 px, 「에이전트」, and 32 at 1000
+   * (review t-78487, P2-1). The chip's tail is what the ellipsis takes now,
+   * and its tooltip says it whole. */
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr) repeat(4, minmax(0, max-content));
   align-items: center;
+}
+
+/* A clash and its count are the one news an even share could cut
+ * (sidebar-landing-state): on that row the chips are sized first, up to two
+ * thirds of the line, and the branch keeps the third. */
+.wt-titlebox:has(.wt-landing[data-landing="conflict"]) {
+  grid-template-columns: minmax(calc(100% / 3), 1fr) 0 repeat(4, minmax(0, max-content));
 }
 
 .wt-titlebox > .wt-topline {
@@ -2628,6 +2651,24 @@ svg.wt-agent-dot {
   grid-row: 2;
   max-width: none;
   margin-inline-start: var(--space-1);
+}
+
+/* Each chip in its own track past the room left over, in the order they
+ * stand in the row. */
+.wt-titlebox .wt-default {
+  grid-column: 3;
+}
+
+.wt-titlebox .wt-phase {
+  grid-column: 4;
+}
+
+.wt-titlebox .wt-landing {
+  grid-column: 5;
+}
+
+.wt-titlebox .wt-wall {
+  grid-column: 6;
 }
 
 .wt-title,
