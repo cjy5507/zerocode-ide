@@ -902,7 +902,30 @@ async fn parse_token_response(response: reqwest::Response) -> io::Result<OAuthTo
 /// Timeout for the OAuth callback listener (120 seconds).
 const OAUTH_CALLBACK_TIMEOUT_SECS: u64 = 120;
 
+/// A callback connection that sends this much without ending its first line
+/// is not bringing the redirect.
+const OAUTH_CALLBACK_LINE_LIMIT: usize = 8 * 1024;
+
+/// Connections held at once while none has brought the redirect; one more
+/// lets the oldest go.
+const OAUTH_CALLBACK_HELD_LIMIT: usize = 32;
+
+/// What a held callback connection has brought so far.
+enum RequestLine {
+    /// Its first line is whole.
+    Whole(String),
+    /// Not yet.
+    Partial,
+    /// It closed, broke, or ran past [`OAUTH_CALLBACK_LINE_LIMIT`].
+    Gone,
+}
+
 /// Wait for an OAuth callback on the loopback address.
+///
+/// A browser can open a connection before the redirect and send nothing on
+/// it yet (a preconnect), or open one and close it unused, so every accepted
+/// connection is held and read without waiting: the first to bring a whole
+/// request line is the redirect.
 fn wait_for_callback(port: u16) -> io::Result<core_types::OAuthCallbackParams> {
     let listener = TcpListener::bind(format!("127.0.0.1:{port}"))?;
     // Use non-blocking + poll loop to enforce a deadline on accept().
@@ -911,33 +934,50 @@ fn wait_for_callback(port: u16) -> io::Result<core_types::OAuthCallbackParams> {
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(OAUTH_CALLBACK_TIMEOUT_SECS);
 
-    let (mut stream, _addr) = loop {
-        match listener.accept() {
-            Ok(conn) => break conn,
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if std::time::Instant::now() >= deadline {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!(
-                            "OAuth callback timed out after {OAUTH_CALLBACK_TIMEOUT_SECS}s \
-                             — no browser redirect received on port {port}"
-                        ),
-                    ));
+    let mut held: Vec<(std::net::TcpStream, Vec<u8>)> = Vec::new();
+    let (mut stream, first_line) = 'redirect: loop {
+        loop {
+            match listener.accept() {
+                // macOS hands an accepted socket the listener's non-blocking
+                // mode and Linux does not: set it, so no read waits.
+                Ok((stream, _addr)) => {
+                    if stream.set_nonblocking(true).is_ok() {
+                        if held.len() == OAUTH_CALLBACK_HELD_LIMIT {
+                            drop(held.remove(0));
+                        }
+                        held.push((stream, Vec::new()));
+                    }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
         }
+        let mut index = 0;
+        while index < held.len() {
+            let (stream, received) = &mut held[index];
+            let status = read_request_line(stream, received);
+            match status {
+                RequestLine::Whole(line) => break 'redirect (held.remove(index).0, line),
+                RequestLine::Partial => index += 1,
+                RequestLine::Gone => drop(held.remove(index)),
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "OAuth callback timed out after {OAUTH_CALLBACK_TIMEOUT_SECS}s \
+                     — no browser redirect received on port {port}"
+                ),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     };
 
-    let mut buf = vec![0u8; 4096];
-    let n = io::Read::read(&mut stream, &mut buf)?;
-    let request = String::from_utf8_lossy(&buf[..n]);
-
-    let first_line = request.lines().next().unwrap_or("");
     let target = first_line.split_whitespace().nth(1).unwrap_or("/callback");
 
     // Send a minimal response before parsing
+    stream.set_nonblocking(false)?;
     let response_body = "Authentication complete. You may close this tab.";
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
@@ -947,6 +987,30 @@ fn wait_for_callback(port: u16) -> io::Result<core_types::OAuthCallbackParams> {
 
     parse_oauth_callback_request_target(target)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Read what `stream` has brought without waiting, and say whether its first
+/// line is whole.
+fn read_request_line(stream: &mut std::net::TcpStream, received: &mut Vec<u8>) -> RequestLine {
+    let mut chunk = [0u8; 1024];
+    loop {
+        if let Some(end) = received.iter().position(|&byte| byte == b'\n') {
+            let line = String::from_utf8_lossy(&received[..end]);
+            return RequestLine::Whole(line.trim_end_matches('\r').to_string());
+        }
+        if received.len() > OAUTH_CALLBACK_LINE_LIMIT {
+            return RequestLine::Gone;
+        }
+        match io::Read::read(stream, &mut chunk) {
+            Ok(0) => return RequestLine::Gone,
+            Ok(n) => received.extend_from_slice(&chunk[..n]),
+            Err(error) => match error.kind() {
+                io::ErrorKind::WouldBlock => return RequestLine::Partial,
+                io::ErrorKind::Interrupted => {}
+                _ => return RequestLine::Gone,
+            },
+        }
+    }
 }
 
 /// Drive an async HTTP future from the synchronous MCP OAuth entry points.
