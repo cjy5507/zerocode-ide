@@ -1255,6 +1255,61 @@ mod tests {
         }
     }
 
+    /// A connection that says nothing does not end the sign-in.
+    ///
+    /// A browser opens sockets it never sends on (a preconnect), and the
+    /// redirect arrives on another; on macOS the accepted socket also inherits
+    /// the waiting seat's non-blocking mode, so a read made before the
+    /// redirect's bytes land answered `WouldBlock` and the sign-in failed with
+    /// it (l81g, 2026-10-27). Here the silent connection closes its side first,
+    /// so nothing waits on a clock: the first read of it is an end, not a request.
+    #[test]
+    fn a_connection_that_says_nothing_is_let_go_and_the_redirect_after_it_signs_in() {
+        let (lease, listener) = crate::test_host::quiet_ports::QuietPort::claim(bind_seat);
+        let port = lease.port();
+        listener
+            .set_nonblocking(true)
+            .expect("the seat waits without blocking");
+        let flow = Flow {
+            attempt: Attempt::new().expect("attempt"),
+            listener,
+        };
+        let state = flow.attempt.expected_state.clone();
+        let silent = std::net::TcpStream::connect(("127.0.0.1", port)).expect("a preconnect");
+        silent
+            .shutdown(std::net::Shutdown::Write)
+            .expect("the preconnect says nothing");
+        let browser = std::thread::spawn(move || {
+            let mut redirect =
+                std::net::TcpStream::connect(("127.0.0.1", port)).expect("the redirect");
+            // Only a hang guard: the answer comes as soon as the seat takes it.
+            redirect
+                .set_read_timeout(Some(Duration::from_secs(60)))
+                .expect("a bounded read");
+            write!(
+                redirect,
+                "GET /oauth-callback?code=c-1&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            )
+            .expect("the redirect is sent");
+            let mut page = String::new();
+            redirect.read_to_string(&mut page).expect("the page");
+            page
+        });
+        let cancelled = AtomicBool::new(false);
+        let code = flow.await_code(&cancelled);
+        // The seat closes before the browser is waited for: a sign-in that
+        // ended without taking the redirect leaves it unanswered in the
+        // backlog, and closing the seat ends its read instead of hanging here.
+        drop(flow);
+        drop(silent);
+        assert_eq!(code, Ok(Some("c-1".to_string())));
+        let page = browser.join().expect("the browser");
+        assert!(
+            page.starts_with("HTTP/1.1 200 OK") && !page.contains("c-1"),
+            "{page}"
+        );
+    }
+
     /// A redirect is accepted only when it is THIS attempt's answer.
     #[test]
     fn a_redirect_is_refused_unless_it_carries_this_attempts_state() {
