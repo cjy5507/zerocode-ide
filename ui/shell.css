@@ -50,6 +50,12 @@ body {
   position: relative;
   isolation: isolate;
   display: grid;
+  /* One column that is the window's width and no more. Left implicit, the
+   * column is as wide as its widest row's min-content — a status bar with a
+   * long account line made the whole grid wider than the window, and the
+   * title bar's right buttons, the right panel and the bar's own right end
+   * all stood past the edge (t-77622). */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: var(--titlebar-height) minmax(0, 1fr) var(--statusbar-height);
   background:
     radial-gradient(900px 440px at 10% -18%, var(--ambient-mint), transparent 70%),
@@ -10474,6 +10480,23 @@ body.is-dragging-pane {
 .scm-pr-new .icon {
   width: 14px;
   height: 14px;
+}
+
+/* The panel can be as narrow as 155px beside a 1000pt window (t-77622): the
+ * door gives way — its words end in an ellipsis — before the search and the
+ * more-actions buttons that end the row are pushed past the panel's edge. */
+.scm-head-row > .scm-pr-new,
+.scm-head-row > .scm-review {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.scm-pr-new > span,
+.scm-review-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* These selectors deliberately outrank the window-wide `.btn` primitive,
@@ -22347,6 +22370,107 @@ progress:indeterminate::-webkit-progress-bar {
 .sb-claude-account {
   font-family: var(--font-mono);
   opacity: 0.7;
+}
+
+/* ---- the bar keeps one line (t-77622) ----
+ *
+ * On a laptop's own screen the account line, the model, the context count and
+ * the resource figures are longer than the window. The bar measures ITSELF
+ * (a container, not the window) and gives way in this order, least important
+ * first: the next-account words, then the account line down to each window's number,
+ * then ellipsis on whatever still does not fit. The right-hand figures (memory,
+ * terminals, ports, awake) never shrink — they are what the bar is for when
+ * everything else has given way. What was shortened is read off the item's
+ * hover (`explainBarWords`). */
+.statusbar {
+  min-width: 0;
+  white-space: nowrap;
+  container: statusbar / inline-size;
+}
+
+.statusbar > :not(.sb-spacer) {
+  flex: none;
+}
+
+.statusbar > .sb-usage-roster {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* The roster itself is not clipped — its figures end in ellipsis one by one;
+ * a clip on the button re-rasterizes its text, and a wide window must come out
+ * as it did, pixel for pixel. */
+.statusbar > #sb-project,
+.statusbar > #sb-model {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Who gives first, by weight: the account line, then the model's name, then
+ * the project's. The context count is the figure a person came for (the photo
+ * broke exactly it onto a second line) and never gives. */
+.statusbar > .sb-usage-roster {
+  flex-shrink: 6;
+}
+
+.statusbar > #sb-model {
+  flex-shrink: 4;
+}
+
+.statusbar > #sb-project {
+  flex-shrink: 2;
+}
+
+.sb-usage-roster .sb-claude {
+  min-width: 0;
+}
+
+.sb-usage-roster .sb-figure {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sb-pct-short {
+  display: none;
+}
+
+.sb-claude-ico,
+.sb-usage-bar,
+.sb-claude-warn {
+  flex: none;
+}
+
+@container statusbar (max-width: 1280px) {
+  .sb-claude-next {
+    display: none;
+  }
+}
+
+@container statusbar (max-width: 1100px) {
+  .statusbar {
+    gap: var(--space-3);
+  }
+
+  .sb-claude-pct.has-short {
+    display: none;
+  }
+
+  .sb-pct-short {
+    display: inline;
+  }
+}
+
+@container statusbar (max-width: 900px) {
+  .statusbar {
+    gap: var(--space-2);
+  }
+
+  .sb-usage-bar {
+    width: 32px;
+  }
 }
 
 .account-pick {

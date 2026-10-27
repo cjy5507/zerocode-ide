@@ -1265,6 +1265,27 @@ function paintProviderGlyph(provider) {
   ico.replaceChildren(usageProviderIcon(provider));
 }
 
+/* 좁은 막대의 짧은 꼴(t-77622): 「21% · 92% · 4%」. 긴 말(`figure`) 곁에 같은 숫자만
+ * 든 형제 하나를 두고, 어느 쪽이 서는지는 막대의 폭이 정한다(shell.css의
+ * `@container statusbar`). 긴 말은 한 덩이 글자 그대로 둔다 — 마디를 쪼개면 같은
+ * 글자도 낱낱이 다시 짜여 넓은 창의 그림이 반 픽셀씩 달라진다. 숫자 없는 말(로그인
+ * 필요 같은)은 짧은 꼴이 없다. */
+function paintUsageShort(figure, spoken) {
+  let short = figure.nextElementSibling?.classList.contains("sb-pct-short") ? figure.nextElementSibling : null;
+  if (spoken === null) {
+    short?.remove();
+    figure.classList.remove("has-short");
+    return;
+  }
+  if (!short) {
+    short = document.createElement("span");
+    short.className = "sb-figure sb-pct-short";
+    figure.after(short);
+  }
+  if (short.textContent !== spoken) short.textContent = spoken;
+  figure.classList.add("has-short");
+}
+
 function paintProviderSegment(provider) {
   paintProviderGlyph(provider);
   // Claude's figure says whose it is: the default account's short id before
@@ -1310,6 +1331,7 @@ function paintProviderSegment(provider) {
   if (state.kind !== "usage") {
     const { said, tip } = usageSegmentWord(provider, usage, state);
     figure.textContent = said;
+    paintUsageShort(figure, null);
     // 색조는 사용량의 것이다 — 여기엔 사용량이 없으므로 앞 스캔이 남긴 색을
     // 들고 있어서는 안 된다.
     delete figure.dataset.tone;
@@ -1331,9 +1353,10 @@ function paintProviderSegment(provider) {
   // A named bucket wears its NAME first and no window tail — `Pro 80% 사용`
   // — because the name is what distinguishes it, where an unnamed window is
   // told apart by which window it is.
+  const sections = segmentUsageSections(usage);
   figure.textContent = statusBarUsageMode === "compact"
     ? `${displayedPct}% ` + statusUsageWindowLabel(tight)
-    : segmentUsageSections(usage)
+    : sections
       .map((section) => {
         const spent = spokenUsagePercentage(section.window.used_percent);
         if (section.named) return `${section.label} ${spent}`;
@@ -1341,6 +1364,17 @@ function paintProviderSegment(provider) {
         return `${spent} ${tail}`;
       })
       .join(" · ");
+  paintUsageShort(
+    figure,
+    statusBarUsageMode === "compact"
+      ? `${displayedPct}%`
+      : sections
+        .map((section) => {
+          const pct = `${displayedUsagePercentage(section.window.used_percent)}%`;
+          return section.named ? `${section.label} ${pct}` : pct;
+        })
+        .join(" · "),
+  );
   delete figure.dataset.tone;
   // 로그인이 돌아오면 호버도 돌아온다: 위 갈래가 세그먼트의 말을 바꿔 두므로,
   // 수치가 서는 이 갈래가 그것을 되돌리지 않으면 고쳐진 뒤에도 옛 이유가 남는다.
@@ -4241,6 +4275,37 @@ document.addEventListener("focusin", (event) => {
 });
 
 document.addEventListener("focusout", hideTip);
+
+/* A bar item the narrow window shortened says all of it on hover (t-77622).
+ *
+ * The status bar gives way by swapping the account line for its numbers and
+ * dropping the next-account words and then by ellipsis, so the full sentence is the item's own text
+ * content (a figure the bar swapped for its short form is only display:none). It is written onto `data-tip` at the moment the pointer arrives —
+ * not on every paint — and only when something is actually shortened, so a
+ * wide window's tooltips stay exactly what they were. The paint resets a
+ * segment's own tip, so the first line is read back before the sentence is
+ * appended. */
+function explainBarWords(event) {
+  const node = event.target.closest?.(".sb-claude, .sb-item, .sb-usage-roster");
+  if (!node || !event.currentTarget.contains(node)) return;
+  const cut = (one) => !one.hidden && (one.scrollWidth > one.clientWidth + 1 || getComputedStyle(one).display === "none");
+  // A usage segment speaks as its figure and its next-account words; any other
+  // item speaks as its own text.
+  const spoken = node.matches(".sb-claude")
+    ? [...node.querySelectorAll(".sb-claude-pct, .sb-claude-next")].filter((one) => !one.hidden)
+    : [node];
+  const shortened = spoken.some(cut);
+  const full = spoken.map((one) => one.textContent.replace(/\s+/g, " ").trim()).filter(Boolean).join(" — ");
+  if (!shortened || !full) return;
+  const held = node.dataset.tip ?? "";
+  const base = held === node.dataset.tipMade ? (node.dataset.tipBase ?? "") : held;
+  const tip = base && base !== full ? `${base} — ${full}` : full;
+  node.dataset.tipBase = base;
+  node.dataset.tipMade = tip;
+  node.dataset.tip = tip;
+}
+
+document.querySelector(".statusbar").addEventListener("pointerover", explainBarWords);
 
 /* ---- the toast layer ----
  *
