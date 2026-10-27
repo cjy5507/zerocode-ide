@@ -63,6 +63,8 @@ export async function testStackedWork(browser, origin, ok) {
       const panel = document.getElementById("activity-pile");
       seen.tabFirst = tab?.parentElement?.firstElementChild === tab;
       seen.count = document.getElementById("activity-pile-count")?.textContent ?? "";
+      // The draft's word tab: 「쌓인 일 8」, not an icon with a badge.
+      seen.tabWords = tab?.textContent.replace(/\s+/g, " ").trim() ?? "";
       seen.emptyWhileClosed = panel ? panel.hidden && panel.childElementCount === 0 : false;
       tab?.click();
       await window.__PAINTED__();
@@ -101,7 +103,7 @@ export async function testStackedWork(browser, origin, ok) {
     });
     ok(
       "the right column's first tab counts what has not landed, and its panel is built only while it is up",
-      seen.tabFirst && seen.count === "8" && seen.emptyWhileClosed && seen.open && seen.selected === "true" && seen.emptiedOnLeave,
+      seen.tabFirst && seen.count === "8" && seen.tabWords === "쌓인 일 8" && seen.emptyWhileClosed && seen.open && seen.selected === "true" && seen.emptiedOnLeave,
       JSON.stringify(seen),
     );
     ok(

@@ -53598,20 +53598,31 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   padding-inline: max(var(--helper-gutter, var(--chat-list-pad-x)), calc((100% - var(--reading-column)) / 2));
 }
 
-/* 쌓인 일: the right column's first tab. Its number is the commits not in main —
- * a quiet grey count, not a colour. */
-.activity-count {
-  position: absolute;
-  top: var(--space-1);
-  right: 0;
-  min-width: var(--space-4);
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-pill);
-  background: var(--surface-raised);
-  color: var(--ink-mist);
+/* 쌓인 일: the right column's first tab, the one that says its name — 「쌓인 일
+ * 24」, the draft's word tab. Its number is the commits not in main, a quiet
+ * grey count, not a colour. */
+.activity-tabset #activity-pile-tab {
+  display: inline-flex;
+  flex: 0 1 auto;
+  gap: var(--space-1);
+  width: auto;
+  max-width: none;
+  padding-inline: var(--space-2);
   font: var(--type-label-12);
-  font-size: var(--text-3xs);
-  line-height: var(--space-4);
+  font-weight: 500;
+  letter-spacing: normal;
+  white-space: nowrap;
+}
+
+.activity-pile-words {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-count {
+  color: var(--ink-mist);
+  font: var(--type-label-12-mono);
   font-variant-numeric: tabular-nums;
 }
 
