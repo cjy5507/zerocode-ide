@@ -20,7 +20,7 @@ export const CHIP_WORDS = Object.freeze({
 
 /* The attention column as the backend's grouping returns it: a question with
  * choices, a permission, and a question asked in prose. */
-const installTurns = () => {
+export const installTurns = () => {
   const ago = (minutes) => Date.now() - minutes * 60_000;
   window.__turnCards = () => [
     { pane: "term:6", agent: "zo", state: "needs-attention", heading: "한국어설명",

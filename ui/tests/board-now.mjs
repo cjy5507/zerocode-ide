@@ -228,8 +228,9 @@ function boardFirstScreen() {
 
 /* Every word on the Now tab against what it is drawn on — the draft's own contrast reckoning
  * (reports/t-67561/src/common.js): the text's colour over the grounds stacked under it, up to the
- * first opaque one. A disabled control is left out, as WCAG leaves it. A page function. */
-function nowContrast() {
+ * first opaque one. A disabled control is left out, as WCAG leaves it. A page function; another
+ * surface's scene hands it the selector of its own scope. */
+export function nowContrast(scopeSelector = "#board-view :is(.board-now-tabs, .task-board-intro, .task-board-desk)") {
   const parse = (value) => {
     let found = /^rgba?\(([^)]+)\)$/.exec(value);
     if (found) {
@@ -266,8 +267,7 @@ function nowContrast() {
     for (let at = layers.length - 1; at >= 0; at -= 1) ground = over(layers[at], ground);
     return ground;
   };
-  const view = document.querySelector("#board-view");
-  const scope = [...view.querySelectorAll(".board-now-tabs, .task-board-intro, .task-board-desk")];
+  const scope = [...document.querySelectorAll(scopeSelector)];
   let min = 99;
   let where = "";
   const below = [];

@@ -16,29 +16,35 @@ import { openWindowTestPage } from "./window-boot.mjs";
  *
  *   WINDOW_SUITES=stacked-work node ui/tests/window.mjs */
 
+/* Two unlanded checkouts (six commits, and two that run twenty behind main),
+ * a landed one, and a release lane at its gate. A page function. */
+export async function standPile() {
+  const root = projects[0].path;
+  const base = projects[0];
+  const landing = (ahead, extra = {}) => ({ state: "unlanded", ahead, dirty: false, compare_ref: "origin/main", ...extra });
+  window.__ANSWER__.project_catalog = () => [{
+    ...base,
+    worktrees: [
+      ...base.worktrees,
+      { path: `${root}-stack`, branch: "zo/v1199-stack", is_main: false, active: false, is_folder: false,
+        ownership: "zerocode-managed", external_hidden: false, landing: landing(6) },
+      { path: `${root}-weekly`, branch: "zo/v1199-weekly-review", is_main: false, active: false, is_folder: false,
+        ownership: "zerocode-managed", external_hidden: false, landing: landing(2, { far_behind: true, behind: 20 }) },
+      { path: `${root}-done`, branch: "zo/landed", is_main: false, active: false, is_folder: false,
+        ownership: "zerocode-managed", external_hidden: false, landing: { state: "landed", ahead: 0, dirty: false, compare_ref: "origin/main" } },
+    ],
+  }];
+  await refreshWorktrees();
+  absorbReleaseStatus({ status: { sha: "ca1ffcf0d1", version: "1.1.98", phase: "gate", started_at: new Date(Date.now() - 60_000).toISOString(),
+    updated_at: new Date().toISOString(), phases: [] } });
+}
+
 export async function testStackedWork(browser, origin, ok) {
   const { page } = await openWindowTestPage(browser, origin);
   try {
+    await page.evaluate(standPile);
     const seen = await page.evaluate(async () => {
       const seen = {};
-      const root = projects[0].path;
-      const base = projects[0];
-      const landing = (ahead, extra = {}) => ({ state: "unlanded", ahead, dirty: false, compare_ref: "origin/main", ...extra });
-      window.__ANSWER__.project_catalog = () => [{
-        ...base,
-        worktrees: [
-          ...base.worktrees,
-          { path: `${root}-stack`, branch: "zo/v1199-stack", is_main: false, active: false, is_folder: false,
-            ownership: "zerocode-managed", external_hidden: false, landing: landing(6) },
-          { path: `${root}-weekly`, branch: "zo/v1199-weekly-review", is_main: false, active: false, is_folder: false,
-            ownership: "zerocode-managed", external_hidden: false, landing: landing(2, { far_behind: true, behind: 20 }) },
-          { path: `${root}-done`, branch: "zo/landed", is_main: false, active: false, is_folder: false,
-            ownership: "zerocode-managed", external_hidden: false, landing: { state: "landed", ahead: 0, dirty: false, compare_ref: "origin/main" } },
-        ],
-      }];
-      await refreshWorktrees();
-      absorbReleaseStatus({ status: { sha: "ca1ffcf0d1", version: "1.1.98", phase: "gate", started_at: new Date(Date.now() - 60_000).toISOString(),
-        updated_at: new Date().toISOString(), phases: [] } });
       const tab = document.getElementById("activity-pile-tab");
       const panel = document.getElementById("activity-pile");
       seen.tabFirst = tab?.parentElement?.firstElementChild === tab;
