@@ -11,7 +11,7 @@ use zerocode_core::orchestration::{Draft, Ledger, MessageKind, Priority, Text, w
 
 use super::cost_book::CostBook;
 use super::desk::desk_snapshot;
-use super::read_receipts;
+use super::{read_commits, read_receipts};
 
 /// A receipt path that is absolute on this platform (the product names only
 /// absolute evidence paths; the Unix spelling has no drive on Windows).
@@ -176,4 +176,66 @@ fn a_task_with_conditions_shows_their_states_and_its_last_reports_notes_on_the_d
     assert_eq!(row.hand_in.decisions.as_deref(), Some("keep the parser"));
     assert_eq!(row.hand_in.next.as_deref(), Some("review"));
     assert_eq!(row.hand_in.blocked, None);
+}
+
+/// t-78075: what a coordinator's `hand-in` or `task-backfill` would hand git as it was typed is
+/// refused here, before git is asked and before the ledger plans — a value git could read as an
+/// option, a `--head` that names no commit, a `--checkout` found from the window's own folder.
+#[test]
+fn the_window_refuses_what_git_would_read_as_an_option_before_git_is_asked() {
+    let folder = tempfile::tempdir().expect("a temp folder");
+    let repo = folder.path().display().to_string();
+    let repo = repo.as_str();
+    let head = "0123456789abcdef0123456789abcdef01234567";
+    let argv = |words: &[&str], checkout: &str| -> Vec<String> {
+        words
+            .iter()
+            .chain(&["--checkout", checkout])
+            .map(|word| (*word).to_string())
+            .collect()
+    };
+    let refused_words: [(&[&str], &str, &str); 5] = [
+        (&["hand-in", "--head", "--all"], repo, "--head"),
+        (
+            &["hand-in", "--head", head, "--base", "--output=x"],
+            repo,
+            "--base",
+        ),
+        (
+            &["task-backfill", "--tags", "--format=%(refname)"],
+            repo,
+            "--tags",
+        ),
+        (
+            &["hand-in", "--head", "not-a-commit"],
+            repo,
+            "seven hex digits",
+        ),
+        (&["hand-in", "--head", head], "repo", "absolute path"),
+    ];
+    for (words, checkout, says) in refused_words {
+        let Err(refused) = read_commits(&argv(words, checkout), None, (TEAM, "%1"), None) else {
+            panic!("{words:?} in {checkout} reached git");
+        };
+        assert!(
+            refused.contains(says),
+            "{words:?} refused without {says:?}: {refused}"
+        );
+    }
+
+    // What is well formed is asked, in the checkout named.
+    let asked = read_commits(
+        &argv(&["hand-in", "--head", head], repo),
+        None,
+        (TEAM, "%1"),
+        None,
+    )
+    .expect("a well-formed hand-in is asked")
+    .expect("git was asked");
+    assert_eq!(asked.repo, repo);
+    assert_eq!(
+        read_commits(&["task-list".to_string()], Some(repo), (TEAM, "%1"), None),
+        Ok(None),
+        "another verb asks git nothing"
+    );
 }
