@@ -920,14 +920,20 @@ enum RequestLine {
     Gone,
 }
 
-/// Wait for an OAuth callback on the loopback address.
+/// Wait for an OAuth callback on the loopback `port`.
+fn wait_for_callback(port: u16) -> io::Result<core_types::OAuthCallbackParams> {
+    wait_for_callback_on(&TcpListener::bind(format!("127.0.0.1:{port}"))?)
+}
+
+/// Wait for an OAuth callback on `listener`, already bound on the loopback
+/// address, so nothing else can take its port first.
 ///
 /// A browser can open a connection before the redirect and send nothing on
 /// it yet (a preconnect), or open one and close it unused, so every accepted
 /// connection is held and read without waiting: the first to bring a whole
 /// request line is the redirect.
-fn wait_for_callback(port: u16) -> io::Result<core_types::OAuthCallbackParams> {
-    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))?;
+fn wait_for_callback_on(listener: &TcpListener) -> io::Result<core_types::OAuthCallbackParams> {
+    let port = listener.local_addr()?.port();
     // Use non-blocking + poll loop to enforce a deadline on accept().
     listener.set_nonblocking(true)?;
 
@@ -1533,12 +1539,12 @@ mod tests {
     fn a_connection_that_brings_nothing_does_not_cost_the_callback() {
         use std::io::Write as _;
         use std::net::{Shutdown, TcpStream};
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
-        let port = TcpListener::bind("127.0.0.1:0")
-            .and_then(|probe| probe.local_addr())
-            .expect("a free loopback port")
-            .port();
+        // The test hands the callback the listener it bound: a port it let go
+        // of could be taken before the callback listened there.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let port = listener.local_addr().expect("the listener's address").port();
         // Another socket on the machine takes the port the moment it is free
         // and does not listen there, which leaves every connect refused, as
         // gate l82f g3b1's were for 10 s.
@@ -1546,19 +1552,15 @@ mod tests {
         let _taker = take_port(port);
         let (sender, answer) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = sender.send(wait_for_callback(port));
+            let _ = sender.send(wait_for_callback_on(&listener));
         });
         let connect = || {
-            let until = Instant::now() + Duration::from_secs(10);
-            loop {
-                match TcpStream::connect(("127.0.0.1", port)) {
-                    Ok(stream) => break stream,
-                    Err(error) => {
-                        assert!(Instant::now() < until, "the callback never listened: {error}");
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                }
-            }
+            TcpStream::connect(("127.0.0.1", port)).unwrap_or_else(|error| {
+                panic!(
+                    "the callback stopped listening ({error}); it answered {:?}",
+                    answer.recv_timeout(Duration::from_secs(10))
+                )
+            })
         };
 
         let _preconnect = connect();
