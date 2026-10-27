@@ -19448,6 +19448,17 @@ button.helper-sib:hover {
   border-left: 0;
 }
 
+/* The daily ingest says one thing about the whole vault: a row of its own. */
+.second-brain-facts > #second-brain-ingest-field {
+  grid-column: 1 / -1;
+  border-top: var(--rule-width) solid var(--edge-rule);
+  border-left: 0;
+}
+
+#second-brain-ingest[data-state="warn"] {
+  color: var(--signal-wait-ink);
+}
+
 .integration-context-action {
   min-width: 0;
   color: var(--ink-mist);

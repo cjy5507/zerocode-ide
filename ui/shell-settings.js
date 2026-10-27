@@ -10145,7 +10145,21 @@ function normalizeSecondBrainReport(answer) {
           error: answer.weekly_review.error == null ? null : String(answer.weekly_review.error),
         }
       : null,
+    dailyIngest: answer?.daily_ingest && typeof answer.daily_ingest === "object"
+      ? {
+          automationId: answer.daily_ingest.automation_id == null
+            ? null
+            : String(answer.daily_ingest.automation_id),
+          enabled: answer.daily_ingest.enabled === true,
+          lastRunAt: localMinuteOrNull(answer.daily_ingest.last_run_at),
+          overdueSince: localMinuteOrNull(answer.daily_ingest.overdue_since),
+        }
+      : null,
   };
+}
+
+function localMinuteOrNull(value) {
+  return value != null && Number.isFinite(Number(value)) ? Number(value) : null;
 }
 
 /* 주간 리뷰 스위치와 그 영수증 줄. 스위치는 설정(`second_brain_weekly_review`)을
@@ -10314,6 +10328,91 @@ function paintSecondBrain() {
   el("second-brain-link").disabled = secondBrainLoading || !secondBrainReport?.savedPath;
   paintSecondBrainWeeklyReview();
   paintSecondBrainRawCapture();
+  paintSecondBrainIngest();
+}
+
+/* 저장된 볼트의 매일 취합(t-77381): 꺼졌거나, 켜져 있어도 하루 넘게 밀렸으면
+ * 경고색 줄과 경고가 그렇다고 말한다. 「켜기」는 꺼진 것을 켤 때만 선다. */
+function paintSecondBrainIngest() {
+  const ingest = secondBrainReport?.dailyIngest ?? null;
+  const off = ingest !== null && !ingest.enabled;
+  const late = ingest !== null && ingest.enabled && ingest.overdueSince !== null;
+  el("second-brain-ingest-field").hidden = ingest === null;
+  const line = el("second-brain-ingest");
+  line.dataset.state = off || late ? "warn" : "ok";
+  say(line, () => {
+    if (ingest === null || off) return t("auto.off", "꺼짐");
+    if (late) {
+      return t("settings.secondBrain.ingestLate", "{{since}}부터 밀림", {
+        since: localMinuteText(ingest.overdueSince),
+      });
+    }
+    return ingest.lastRunAt === null
+      ? t("settings.secondBrain.ingestOn", "켜짐")
+      : t("settings.secondBrain.ingestLast", "켜짐 · 마지막 {{at}}", {
+        at: localMinuteText(ingest.lastRunAt),
+      });
+  });
+  el("second-brain-ingest-warning").hidden = !(off || late);
+  say(el("second-brain-ingest-warning-text"), () => {
+    if (late) {
+      return t(
+        "settings.secondBrain.ingestLateWarning",
+        "매일 취합이 하루 넘게 돌지 않았습니다. 그사이 raw/에 들어온 항목은 아직 wiki/에 없습니다.",
+      );
+    }
+    return ingest?.automationId
+      ? t(
+        "settings.secondBrain.ingestOffWarning",
+        "매일 취합이 꺼져 있어 raw/에 들어온 항목이 wiki/에 반영되지 않습니다.",
+      )
+      : t(
+        "settings.secondBrain.ingestMissingWarning",
+        "이 볼트를 매일 취합하는 자동화가 없어 raw/에 들어온 항목이 wiki/에 반영되지 않습니다.",
+      );
+  });
+  const turnOn = el("second-brain-ingest-on");
+  turnOn.hidden = !off;
+  turnOn.disabled = secondBrainLoading;
+}
+
+/* Local minutes since the epoch, read as the wall clock they encode (see
+ * `whenNext`). */
+function localMinuteText(minutes) {
+  return new Date(minutes * 60000).toLocaleString(undefined, {
+    timeZone: "UTC",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/* 「켜기」: 볼트의 취합 자동화를 켜고, 없으면 「raw 자동 취합」 템플릿으로 저장된
+ * 볼트에 하나를 만든다. 자동화 목록도 같은 답으로 고쳐 그린다. */
+async function turnOnSecondBrainIngest() {
+  const ingest = secondBrainReport?.dailyIngest ?? null;
+  const vault = secondBrainReport?.savedPath ?? "";
+  if (ingest === null || !vault) return;
+  const button = el("second-brain-ingest-on");
+  button.disabled = true;
+  try {
+    if (ingest.automationId) {
+      automations = await invoke("enable_automation", { id: ingest.automationId, enabled: true });
+    } else {
+      if (agentRows.length === 0) await refreshAgents();
+      const automation = newAutomationDraft({ ...AUTO_TEMPLATES["raw-ingest"](), workspace: vault });
+      automations = await invoke("save_automation", { automation });
+    }
+    paintAutomations();
+  } catch (error) {
+    secondBrainError = String(error);
+    paintSecondBrain();
+    return;
+  } finally {
+    button.disabled = false;
+  }
+  await refreshSecondBrain(el("second-brain-path").value || null);
 }
 
 /* 이 카드가 백엔드에 묻는 모든 길은 같은 모양이다: 세대를 올리고, 기다리는
@@ -10358,6 +10457,7 @@ el("second-brain-new").addEventListener("click", () => void chooseSecondBrainFol
 el("second-brain-refresh").addEventListener("click", () => {
   void refreshSecondBrain(el("second-brain-path").value || null);
 });
+el("second-brain-ingest-on").addEventListener("click", () => void turnOnSecondBrainIngest());
 el("second-brain-detected").addEventListener("change", (event) => {
   if (event.target.value) void refreshSecondBrain(event.target.value);
 });

@@ -5324,7 +5324,18 @@
                 <dt data-i18n="settings.secondBrain.skill">스킬</dt>
                 <dd id="second-brain-skill" data-i18n="settings.integrations.unchecked">확인 전</dd>
               </div>
+              <!-- 저장된 볼트의 매일 취합(t-77381). 10-19에 꺼진 「raw 자동 취합」은
+                   여드레 동안 아무 데도 보이지 않았다. 꺼졌거나 하루 넘게 밀리면 이 줄과
+                   아래 경고가 말한다. -->
+              <div id="second-brain-ingest-field" hidden>
+                <dt data-i18n="settings.secondBrain.dailyIngest">매일 취합</dt>
+                <dd id="second-brain-ingest"></dd>
+              </div>
             </dl>
+            <p class="integration-empty" id="second-brain-ingest-warning" role="status" aria-live="polite" hidden>
+              <span id="second-brain-ingest-warning-text"></span>
+              <button class="integration-context-action" id="second-brain-ingest-on" type="button" data-i18n="settings.secondBrain.ingestTurnOn">켜기</button>
+            </p>
             <!-- 산문 절반의 lint: 스킬의 주간 리뷰를 볼트의 zo cron 등록부에 앉힌다.
                  볼트를 연 zo 판이 쉬는 동안 유휴 드라이버(t-2901)가 턴을 열고,
                  영수증 줄이 그 스케줄러를 이름 짓는다. 옵트인이다. -->

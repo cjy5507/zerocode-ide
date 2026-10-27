@@ -359,14 +359,51 @@ pub(crate) fn daily_ingest_report(
     automations: &[Automation],
     now: LocalMinute,
 ) -> DailyIngestReport {
-    let _ = (vault, automations, now);
+    let Some(job) = automations
+        .iter()
+        .filter(|job| Path::new(&job.workspace) == vault && names_raw(&job.prompt))
+        .max_by_key(|job| (job.enabled, job.last_run_at))
+    else {
+        return DailyIngestReport {
+            automation_id: None,
+            name: None,
+            enabled: false,
+            last_run_at: None,
+            overdue_since: None,
+        };
+    };
     DailyIngestReport {
-        automation_id: None,
-        name: None,
-        enabled: false,
-        last_run_at: None,
-        overdue_since: None,
+        automation_id: Some(job.id.clone()),
+        name: Some(job.name.clone()),
+        enabled: job.enabled,
+        last_run_at: job.last_run_at,
+        overdue_since: first_unmade_turn(job).filter(|turn| now.epoch_minutes - turn > 24 * 60),
     }
+}
+
+/// The first occurrence after the job last ran or was switched on, the floor
+/// `Automation::missed_past_grace` counts from; `None` while it is off or has
+/// neither.
+fn first_unmade_turn(job: &Automation) -> Option<i64> {
+    if !job.enabled {
+        return None;
+    }
+    let floor = job.last_run_at.max(job.armed_at)?;
+    zerocode_core::Cron::parse(&job.schedule.to_cron())?
+        .next_after(LocalMinute {
+            epoch_minutes: floor.saturating_add(1),
+        })
+        .map(|turn| turn.epoch_minutes)
+}
+
+/// Whether `prompt` names the vault's `raw/` folder as a word of its own.
+fn names_raw(prompt: &str) -> bool {
+    prompt.match_indices("raw/").any(|(at, _)| {
+        !prompt[..at]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric)
+    })
 }
 
 /// The card's whole answer. `guides` is the caller's because the two roads
