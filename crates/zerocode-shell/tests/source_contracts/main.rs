@@ -2250,7 +2250,10 @@ mod tests {
         // 바탕은 대화 보기와 같은 창의 바닥(시안 10 「바탕 한 장」, t-78107) —
         // 기본 테마의 회색(#282c34)은 가운데만 다른 재질로 띄웠다. 글자는
         // Orca의 기본 다크 테마(Ghostty Default Style Dark) 실측 그대로.
-        for role in ["--term-screen-bg: var(--chat-ground);", "--term-screen-fg: #ffffff;"] {
+        for role in [
+            "--term-screen-bg: var(--chat-ground);",
+            "--term-screen-fg: #ffffff;",
+        ] {
             assert!(
                 root.contains(role),
                 "the terminal contrast pair is missing `{role}`"
