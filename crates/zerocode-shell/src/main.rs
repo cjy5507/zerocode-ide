@@ -36,11 +36,11 @@ use zerocode_core::computer_use::RUN_EVIDENCE_DIR_ENV;
 use zerocode_core::host::{self, Fs, Host, Within};
 use zerocode_core::{
     AgentKind, Automation, AutomationFailureRecord, AutomationFailureStage, AutomationRun,
-    CheckDetails, CheckRun, ComposerClear, Cron, DiffNote, Lane, LaneId, LocalMinute, PaneKey,
-    RUNS_KEPT_PER_AUTOMATION, ReadyMark, RunTrigger, WorktreeTask, agent_may_be_saved,
-    agent_presence, agent_spec, born_worktrees, close_unwitnessed, commit_failure, leaves_evidence,
-    mark_completed, mark_ended, occurrence_recorded, prune_final_runs, record_run,
-    reuse_normalized, should_run_precheck,
+    CheckDetails, CheckRun, ComposerClear, Cron, DiffNote, Lane, LaneId, LocalMinute, MissedRecord,
+    MissedRuns, PaneKey, RUNS_KEPT_PER_AUTOMATION, ReadyMark, RunTrigger, WorktreeTask,
+    agent_may_be_saved, agent_presence, agent_spec, born_worktrees, close_unwitnessed,
+    commit_failure, leaves_evidence, mark_completed, mark_ended, newest_recorded_occurrence,
+    occurrence_recorded, prune_final_runs, record_run, reuse_normalized, should_run_precheck,
 };
 use zerocode_harness::{Client, method};
 use zerocode_lane::{

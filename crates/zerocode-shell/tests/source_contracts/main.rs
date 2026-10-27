@@ -18473,7 +18473,9 @@ mod tests {
     /// Three more with the evidence folder: the agent's completion and its
     /// last words (unknown at birth), and the folder itself — whose name is
     /// the start instant, taken before the spawn now, because the folder has
-    /// to exist before the shell that is told about it does.
+    /// to exist before the shell that is told about it does. And one for the
+    /// gap rows of t-77376: a night the window was not running is a row in
+    /// this ledger too, so a run that did start says it is not one.
     #[test]
     fn a_run_is_written_down_and_the_ledger_is_the_only_provenance() {
         let backend = shipped_backend();
@@ -18497,6 +18499,7 @@ mod tests {
             "            made_worktree: made.as_ref().map(|path| path.display().to_string()),",
             "            skipped: None,",
             "            failure: None,",
+            "            missed: None,",
             "            ended_at_epoch_ms: None,",
             "            exit_code: None,",
             "            completed_at_epoch_ms: None,",

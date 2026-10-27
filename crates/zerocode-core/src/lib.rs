@@ -165,10 +165,11 @@ pub use agent_exit::{
 pub use agent_lineage::{Lineage, ROOT_LINEAGE};
 pub use automation::{
     Automation, AutomationFailureRecord, AutomationFailureStage, AutomationRun, Cadence, Cron,
-    EvidencePolicy, LocalMinute, PrecheckOutcome, PrecheckRecord, RUNS_KEPT_PER_AUTOMATION,
-    RunTrigger, Schedule, WorkspaceMode, agent_may_be_saved, born_worktrees, close_unwitnessed,
-    failed_occurrence_recorded, leaves_evidence, mark_completed, mark_ended, occurrence_recorded,
-    prune_final_runs, record_run, reuse_normalized, should_run_precheck,
+    EvidencePolicy, LocalMinute, MissedRecord, MissedRuns, PrecheckOutcome, PrecheckRecord,
+    RUNS_KEPT_PER_AUTOMATION, RunTrigger, Schedule, WorkspaceMode, agent_may_be_saved,
+    born_worktrees, close_unwitnessed, failed_occurrence_recorded, leaves_evidence, mark_completed,
+    mark_ended, newest_recorded_occurrence, occurrence_recorded, prune_final_runs, record_run,
+    reuse_normalized, should_run_precheck,
 };
 pub use capabilities::{AgentCapabilities, agent_capabilities};
 pub use checks::{

@@ -15886,6 +15886,65 @@ ok(
   JSON.stringify(skippedRun),
 );
 
+/* A night the window was not running for is a row too (t-77376).
+ *
+ * Past the grace nothing is run, and before this nothing was written either,
+ * so the morning after a night the window was shut read exactly like a quiet
+ * night. The row says how many went by and when the first was, in the
+ * reader's language. Like a skip it offers no shell, because none was opened:
+ * its placeholder term below IS on the stage, so only the gap can be what
+ * withholds the button. */
+const missedRun = await page.evaluate(async () => {
+  const stored = window.__ANSWER__.list_automation_runs;
+  const lastMs = 1770000600000;
+  const last = 29_500_000;
+  window.__ANSWER__.list_automation_runs = (args) => [
+    {
+      id: `${lastMs}-missed-a1`, automation_id: "a1", at_epoch_ms: lastMs,
+      scheduled_for_epoch_minutes: last, root: "/tmp/moved-to-wt/side", term: 8802,
+      made_worktree: null, skipped: null, failure: null,
+      missed: { count: 3, first_epoch_minutes: last - 2 * 24 * 60 },
+    },
+    ...stored(args),
+  ];
+  setLocale("en");
+  closeAutoForm();
+  document.getElementById("nav-automations").click();
+  await new Promise((done) => setTimeout(done, 200));
+  document.querySelectorAll(".auto-row")[0].click();
+  await new Promise((done) => setTimeout(done, 250));
+  document.getElementById("auto-runs-tab").click();
+  const read = () =>
+    [...document.querySelectorAll(".auto-run-row")].map((row) => ({
+      said: row.querySelector(".auto-run-missed")?.textContent ?? null,
+      why: row.querySelector(".auto-run-missed")?.dataset.tip ?? null,
+      back: Boolean(row.querySelector(".auto-run-open")),
+    }));
+  const english = read();
+  setLocale("ko");
+  paintAutomationRuns();
+  const korean = read();
+  setLocale("en");
+  window.__ANSWER__.list_automation_runs = stored;
+  return {
+    english,
+    korean,
+    liveTab: Boolean(tabOfTerm(8802)),
+    first: runClock(lastMs - 2 * 24 * 60 * 60_000),
+  };
+});
+ok(
+  "a night the window was not running for says so, how many and since when, and offers no shell",
+  missedRun.liveTab &&
+    missedRun.english.length === 3 &&
+    missedRun.english[0].said === "Missed 3 runs — the window was not running" &&
+    missedRun.korean[0].said === "놓침 3회 — 그 시각에 창이 돌지 않음" &&
+    missedRun.english[0].why.includes(missedRun.first) &&
+    !missedRun.english[0].back &&
+    missedRun.english[1].said === null && missedRun.english[1].back,
+  JSON.stringify(missedRun),
+);
+
 /* And a run that FINISHED says which of the three it is.
  *
  * The ledger held only beginnings until the pump started stamping the end of

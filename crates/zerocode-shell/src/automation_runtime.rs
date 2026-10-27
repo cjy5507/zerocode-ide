@@ -394,6 +394,7 @@ pub(super) fn remember_automation_failure(
             error: error.clone(),
             worktree_cleanup_error,
         }),
+        missed: None,
         ended_at_epoch_ms: Some(at_epoch_ms),
         exit_code: None,
         completed_at_epoch_ms: None,
@@ -877,6 +878,7 @@ pub(super) fn start_automation(
             made_worktree: made.as_ref().map(|path| path.display().to_string()),
             skipped: None,
             failure: None,
+            missed: None,
             ended_at_epoch_ms: None,
             exit_code: None,
             completed_at_epoch_ms: None,
@@ -1009,6 +1011,7 @@ pub(super) fn remember_reused_run(
             made_worktree: None,
             skipped: None,
             failure: None,
+            missed: None,
             // The shell it joined is still open, and the pump will stamp this
             // row when that shell exits, the same as any other run's.
             ended_at_epoch_ms: None,
@@ -1080,6 +1083,7 @@ pub(super) fn skipped_run(
             output: ran.output.clone(),
         }),
         failure: None,
+        missed: None,
         // No shell was opened, so none of it ended. The row is already final
         // — `skipped` is what says so — and a second way to say the same
         // thing is a second thing to disagree with it.
@@ -1210,6 +1214,23 @@ fn close_runs_nobody_saw_end(state: &AppState) {
             forget_run_evidence(&local_data_root, &forgotten);
         }
     }
+}
+
+pub(super) fn remember_missed_runs(
+    config_root: &Path,
+    local_data_root: &Path,
+    automation_id: &str,
+    now: LocalMinute,
+    now_epoch_ms: i64,
+) -> Result<Option<MissedRuns>, String> {
+    let _ = (
+        config_root,
+        local_data_root,
+        automation_id,
+        now,
+        now_epoch_ms,
+    );
+    Ok(None)
 }
 
 pub(super) fn tick_automations(app: &AppHandle, now: LocalMinute) {

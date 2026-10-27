@@ -257,6 +257,12 @@ pub struct Automation {
     /// Local minutes-since-epoch of the last run, or `None` if never.
     #[serde(default)]
     pub last_run_at: Option<i64>,
+    /// Local minutes-since-epoch of the last save or switch-on. No occurrence
+    /// before it is ever reported missed: the job was off then, or its
+    /// schedule said something else. `None` on records written before the
+    /// field, whose floor is their last run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub armed_at: Option<i64>,
 }
 
 const fn yes() -> bool {
@@ -271,6 +277,11 @@ const fn precheck_seconds() -> u32 {
 const fn grace_minutes() -> u32 {
     60
 }
+
+/// How far back [`Automation::missed_past_grace`] counts: a month, so a
+/// monthly job's one occurrence is still found, while a window shut since
+/// spring does not walk a year of minutes on the tick that wakes it.
+pub const MISSED_LOOKBACK_MINUTES: i64 = 31 * 24 * 60;
 
 impl Automation {
     /// Refuse a schedule that cannot run where and how it says it will.
@@ -360,6 +371,16 @@ impl Automation {
         Cron::parse(&self.schedule.to_cron())?.next_after(LocalMinute {
             epoch_minutes: floor,
         })
+    }
+
+    #[must_use]
+    pub fn missed_past_grace(
+        &self,
+        now: LocalMinute,
+        recorded_through: Option<i64>,
+    ) -> Option<MissedRuns> {
+        let _ = (now, recorded_through);
+        None
     }
 }
 
@@ -530,6 +551,25 @@ pub struct AutomationFailureRecord {
     pub worktree_cleanup_error: Option<String>,
 }
 
+/// The occurrences a row stands for when the window was not running for
+/// them and the grace window closed before any could be made up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissedRecord {
+    /// How many went unrun, the row's own occurrence included.
+    pub count: u32,
+    /// The earliest of them. The row's `scheduled_for_epoch_minutes` is the
+    /// latest, the one that fences the gap.
+    pub first_epoch_minutes: i64,
+}
+
+/// One gap's unrun occurrences, as the scheduler counted them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissedRuns {
+    pub first: LocalMinute,
+    pub last: LocalMinute,
+    pub count: u32,
+}
+
 /// One firing of a scheduled job, as it is remembered afterwards.
 ///
 /// Orca loads a target's runs beside its automations — one `Promise.all` over
@@ -591,6 +631,14 @@ pub struct AutomationRun {
     /// terminal in the same way `skipped` is; no shell exists to finish it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<AutomationFailureRecord>,
+    /// The gap this row records, when it records one rather than a firing.
+    /// Terminal like `skipped`: nothing started, so nothing will end.
+    ///
+    /// A field of its own and not an [`AutomationFailureStage`]: a build that
+    /// meets a stage it does not know fails to read the whole ledger and
+    /// starts it again empty, while a field it does not know is passed over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missed: Option<MissedRecord>,
     /// When the shell this run opened was SEEN to finish.
     ///
     /// **Absence is "no ending was witnessed", not "still running".** The
@@ -900,6 +948,22 @@ pub fn failed_occurrence_recorded(
             && run.failure.is_some()
             && occurrence_recorded(std::slice::from_ref(run), automation_id, minute)
     })
+}
+
+/// The latest occurrence any of this job's rows consumed, read the way
+/// [`occurrence_recorded`] reads a row.
+#[must_use]
+pub fn newest_recorded_occurrence(runs: &[AutomationRun], automation_id: &str) -> Option<i64> {
+    runs.iter()
+        .filter(|run| run.automation_id == automation_id)
+        .filter_map(|run| {
+            run.scheduled_for_epoch_minutes.or_else(|| {
+                run.failure
+                    .as_ref()
+                    .map(|failure| failure.scheduled_for_epoch_minutes)
+            })
+        })
+        .max()
 }
 
 /// A wall-clock minute, in the local timezone, as minutes since the epoch.
@@ -1398,6 +1462,7 @@ mod tests {
             precheck_timeout_seconds: 60,
             missed_run_grace_minutes: 60,
             last_run_at: None,
+            armed_at: None,
         }
     }
 
@@ -1475,6 +1540,212 @@ mod tests {
         );
     }
 
+    /// Past the grace an occurrence is not run, and it is not forgotten.
+    ///
+    /// The grace decides what is still worth running; it must not also decide
+    /// what is remembered. A nightly job whose window was shut at 03:00 and
+    /// opened at 09:00 used to have a history that said nothing about the
+    /// night (t-77376). The boundary is exact: the last minute of the grace
+    /// is still the make-up's, the next one is the gap's.
+    #[test]
+    fn an_occurrence_past_the_grace_is_missed_and_one_inside_it_is_still_made_up() {
+        let mut job = nightly();
+        job.last_run_at = Some(at(2026, 5, 3, 3, 0).epoch_minutes);
+
+        let opened = at(2026, 5, 4, 9, 0);
+        assert!(
+            job.missed_run(opened).is_none(),
+            "too late to make up is unchanged"
+        );
+        assert_eq!(
+            job.missed_past_grace(opened, None),
+            Some(MissedRuns {
+                first: at(2026, 5, 4, 3, 0),
+                last: at(2026, 5, 4, 3, 0),
+                count: 1,
+            }),
+        );
+
+        let edge = at(2026, 5, 4, 4, 0);
+        assert_eq!(job.missed_run(edge), Some(at(2026, 5, 4, 3, 0)));
+        assert!(
+            job.missed_past_grace(edge, None).is_none(),
+            "an occurrence still inside the grace was called missed"
+        );
+        assert!(job.missed_run(at(2026, 5, 4, 4, 1)).is_none());
+        assert_eq!(
+            job.missed_past_grace(at(2026, 5, 4, 4, 1), None)
+                .map(|gap| gap.count),
+            Some(1)
+        );
+    }
+
+    /// A week away is one gap, not seven, with its first and last nights.
+    #[test]
+    fn a_gap_of_several_nights_is_one_count() {
+        let mut job = nightly();
+        job.last_run_at = Some(at(2026, 5, 1, 3, 0).epoch_minutes);
+        assert_eq!(
+            job.missed_past_grace(at(2026, 5, 8, 12, 0), None),
+            Some(MissedRuns {
+                first: at(2026, 5, 2, 3, 0),
+                last: at(2026, 5, 8, 3, 0),
+                count: 7,
+            }),
+        );
+    }
+
+    /// A gap once written is a floor, the way the last run is: the same
+    /// nights are never counted twice, and the next one starts a new gap.
+    #[test]
+    fn a_written_gap_is_not_counted_twice() {
+        let mut job = nightly();
+        job.last_run_at = Some(at(2026, 5, 1, 3, 0).epoch_minutes);
+        let now = at(2026, 5, 3, 12, 0);
+        let gap = job.missed_past_grace(now, None).expect("two nights");
+        let written = Some(gap.last.epoch_minutes);
+        assert!(
+            job.missed_past_grace(now, written).is_none(),
+            "the same gap was counted again"
+        );
+        let next = job
+            .missed_past_grace(at(2026, 5, 4, 12, 0), written)
+            .expect("one more night");
+        assert_eq!((next.first, next.count), (at(2026, 5, 4, 3, 0), 1));
+    }
+
+    /// Off is not missed. Nights before the job was last switched on, or
+    /// saved under a new schedule, are not the window's to answer for; a job
+    /// switched off has none; and a record with no floor at all starts
+    /// nowhere rather than at the beginning of time.
+    #[test]
+    fn nights_before_the_job_was_armed_are_not_missed() {
+        let mut job = nightly();
+        job.last_run_at = Some(at(2026, 5, 1, 3, 0).epoch_minutes);
+        job.armed_at = Some(at(2026, 5, 6, 10, 0).epoch_minutes);
+        let gap = job
+            .missed_past_grace(at(2026, 5, 8, 12, 0), None)
+            .expect("the nights since it was switched on");
+        assert_eq!((gap.first, gap.count), (at(2026, 5, 7, 3, 0), 2));
+
+        job.enabled = false;
+        assert!(job.missed_past_grace(at(2026, 5, 8, 12, 0), None).is_none());
+
+        let never = nightly();
+        assert!(
+            never
+                .missed_past_grace(at(2026, 5, 8, 12, 0), None)
+                .is_none()
+        );
+    }
+
+    /// The count reaches back a month and no further: a window shut since
+    /// January does not walk every minute since on the tick that wakes it.
+    #[test]
+    fn a_gap_is_counted_no_further_back_than_the_lookback() {
+        let mut job = nightly();
+        job.last_run_at = Some(at(2026, 1, 1, 3, 0).epoch_minutes);
+        // The newest minute past the grace is 05-04 10:59, so the month
+        // opens at 04-03 11:00 and its first 03:00 is the 4th of April.
+        let gap = job
+            .missed_past_grace(at(2026, 5, 4, 12, 0), None)
+            .expect("months of nights");
+        assert_eq!(
+            gap,
+            MissedRuns {
+                first: at(2026, 4, 4, 3, 0),
+                last: at(2026, 5, 4, 3, 0),
+                count: 31,
+            }
+        );
+    }
+
+    /// The ledger's newest occurrence is read the way the fence reads a row:
+    /// the run-level value, or the failure's on rows from before it existed.
+    #[test]
+    fn the_newest_recorded_occurrence_reads_every_kind_of_row() {
+        let failed_before_the_field = AutomationRun {
+            scheduled_for_epoch_minutes: None,
+            failure: Some(AutomationFailureRecord {
+                stage: AutomationFailureStage::Spawn,
+                scheduled_for_epoch_minutes: 40,
+                error: "spawn failed".into(),
+                worktree_cleanup_error: None,
+            }),
+            ..ran("a1", 9)
+        };
+        let ledger = vec![ran("a1", 5), failed_before_the_field, ran("b2", 70)];
+        assert_eq!(newest_recorded_occurrence(&ledger, "a1"), Some(40));
+        assert_eq!(newest_recorded_occurrence(&ledger, "b2"), Some(70));
+        assert_eq!(newest_recorded_occurrence(&ledger, "c3"), None);
+    }
+
+    /// A gap row is final the moment it is written: it opened no shell, so
+    /// there is no ending to wait for. The boot sweep leaves it alone rather
+    /// than stamping it as a run nobody saw end, and the cap may forget it
+    /// like any other finished row.
+    #[test]
+    fn a_gap_row_is_final_and_the_sweep_leaves_it_alone() {
+        let gap = |nth: i64| AutomationRun {
+            missed: Some(MissedRecord {
+                count: 1,
+                first_epoch_minutes: nth,
+            }),
+            launch: None,
+            ..ran("a1", nth)
+        };
+        let mut runs = vec![gap(1)];
+        assert_eq!(
+            close_unwitnessed(&mut runs, 99, |_| false),
+            0,
+            "a gap row was closed as if its shell had been lost"
+        );
+        assert_eq!(runs, vec![gap(1)]);
+
+        let mut many: Vec<AutomationRun> = (0..3).map(gap).collect();
+        let forgotten = prune_final_runs(&mut many, 2);
+        assert_eq!(
+            forgotten
+                .iter()
+                .map(|run| run.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a1-0"],
+            "a gap row was kept as if it were still running"
+        );
+    }
+
+    /// A gap is a field a build that does not know it passes over, so a
+    /// ledger with one still reads there; a stage it does not know would
+    /// fail the whole ledger, which then reads as empty and is replaced by
+    /// the next write. And a row with no gap writes no key at all.
+    #[test]
+    fn a_gap_row_stays_readable_by_a_build_that_does_not_know_gaps() {
+        #[derive(Deserialize)]
+        struct OlderRow {
+            id: String,
+            failure: Option<AutomationFailureRecord>,
+        }
+        let gap = AutomationRun {
+            missed: Some(MissedRecord {
+                count: 3,
+                first_epoch_minutes: 7,
+            }),
+            ..ran("a1", 9)
+        };
+        let text = serde_json::to_string(&[&gap]).expect("serialise");
+        let older: Vec<OlderRow> =
+            serde_json::from_str(&text).expect("a build without gaps lost the ledger");
+        assert_eq!(older[0].id, "a1-9");
+        assert!(older[0].failure.is_none());
+        let back: Vec<AutomationRun> = serde_json::from_str(&text).expect("read back");
+        assert_eq!(back, vec![gap]);
+        assert!(
+            !serde_json::to_string(&ran("a1", 2))
+                .expect("serialise")
+                .contains("missed")
+        );
+    }
+
     /// The next occurrence agrees with the matcher that found it.
     #[test]
     fn the_next_run_is_a_minute_the_expression_names() {
@@ -1525,6 +1796,7 @@ mod tests {
             made_worktree: None,
             skipped: None,
             failure: None,
+            missed: None,
             // Started and not yet seen to stop, which is what every row in a
             // ledger looks like for as long as its shell is open.
             ended_at_epoch_ms: None,

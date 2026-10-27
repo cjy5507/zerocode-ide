@@ -14866,6 +14866,7 @@ fn deleting_an_automation_keeps_other_jobs_and_generated_worktrees() {
         precheck_timeout_seconds: 60,
         missed_run_grace_minutes: 60,
         last_run_at: None,
+        armed_at: None,
     };
     let run = |id: &str, automation_id: &str, made_worktree: Option<String>| AutomationRun {
         id: id.to_string(),
@@ -14877,6 +14878,7 @@ fn deleting_an_automation_keeps_other_jobs_and_generated_worktrees() {
         made_worktree,
         skipped: None,
         failure: None,
+        missed: None,
         ended_at_epoch_ms: Some(2),
         exit_code: Some(0),
         completed_at_epoch_ms: None,
@@ -14947,6 +14949,7 @@ fn concurrent_automation_mutations_merge_and_a_delete_tombstones_stale_runs() {
         precheck_timeout_seconds: 60,
         missed_run_grace_minutes: 60,
         last_run_at: None,
+        armed_at: None,
     };
     let run = |suffix: &str, minute: i64| AutomationRun {
         id: format!("{id}-{suffix}"),
@@ -14958,6 +14961,7 @@ fn concurrent_automation_mutations_merge_and_a_delete_tombstones_stale_runs() {
         made_worktree: None,
         skipped: None,
         failure: None,
+        missed: None,
         ended_at_epoch_ms: None,
         exit_code: None,
         completed_at_epoch_ms: None,
@@ -15058,6 +15062,7 @@ fn concurrent_automation_mutations_merge_and_a_delete_tombstones_stale_runs() {
         "fn delete_automation_and_run_history(",
         "fn set_automation_enabled_in(",
         "fn remember_run(",
+        "fn remember_missed_runs(",
     ] {
         let body = block_after(source, mutation);
         assert!(
@@ -15075,6 +15080,180 @@ fn concurrent_automation_mutations_merge_and_a_delete_tombstones_stale_runs() {
         starting.contains("claim_automation_run(state.config_root(), &automation.id)?")
             && !starting.contains("automation_store_domain()"),
         "precheck/worktree/spawn can run while holding the automation store lock:\n{starting}"
+    );
+}
+
+/// A nightly 03:00 job with an hour of grace, for the gap tests.
+fn nightly_job(enabled: bool, last_run_at: Option<i64>) -> Automation {
+    Automation {
+        id: "nightly".to_string(),
+        name: "nightly".to_string(),
+        enabled,
+        workspace: "/tmp/work".to_string(),
+        workspace_mode: zerocode_core::WorkspaceMode::Existing,
+        base_branch: None,
+        agent: None,
+        prompt: String::new(),
+        command: String::new(),
+        reuse_session: false,
+        evidence: zerocode_core::EvidencePolicy::Prompt,
+        close_when_done: false,
+        schedule: zerocode_core::Schedule {
+            cadence: zerocode_core::Cadence::Daily,
+            time: "03:00".into(),
+            day_of_week: 1,
+            custom: String::new(),
+        },
+        precheck: String::new(),
+        precheck_timeout_seconds: 60,
+        missed_run_grace_minutes: 60,
+        last_run_at,
+        armed_at: None,
+    }
+}
+
+/// A gap the window slept through is one row, and it spends nothing.
+///
+/// The tick only notices; this is the write. One row for the whole gap, with
+/// its count and its first night, dated at its last night so the history and
+/// the calendar put it where a reader looks. The schedule's last run stays
+/// where it was, because nothing ran. The same gap is written once, and a job
+/// switched off or deleted since the tick read the documents gets nothing
+/// (t-77376).
+#[test]
+fn a_gap_the_window_slept_through_is_one_row_that_spends_nothing() {
+    let config = tempfile::tempdir().expect("automation config");
+    let local = tempfile::tempdir().expect("automation history");
+    let day = 24 * 60;
+    // Ran at 03:00 on day 0; the window next opens at noon on day 3.
+    let ran = 20_000 * day + 3 * 60;
+    let job = nightly_job(true, Some(ran));
+    write_automations(config.path(), std::slice::from_ref(&job)).expect("definition");
+    write_automation_runs(local.path(), &[]).expect("empty ledger");
+    let now = LocalMinute {
+        epoch_minutes: ran + 3 * day + 9 * 60,
+    };
+    // Twenty-five seconds into the minute: the row is dated on the minute.
+    let now_ms = now.epoch_minutes * 60_000 + 25_000;
+
+    let gap = remember_missed_runs(config.path(), local.path(), &job.id, now, now_ms)
+        .expect("write")
+        .expect("three nights went by");
+    assert_eq!(
+        (gap.first.epoch_minutes, gap.last.epoch_minutes, gap.count),
+        (ran + day, ran + 3 * day, 3)
+    );
+    let rows = stored_automation_runs(local.path());
+    assert_eq!(rows.len(), 1, "one gap became {} rows", rows.len());
+    let row = &rows[0];
+    assert_eq!(
+        row.missed,
+        Some(MissedRecord {
+            count: 3,
+            first_epoch_minutes: ran + day,
+        })
+    );
+    assert_eq!(row.scheduled_for_epoch_minutes, Some(ran + 3 * day));
+    assert_eq!(
+        row.at_epoch_ms,
+        (ran + 3 * day) * 60_000,
+        "the row is not dated at its last night"
+    );
+    assert_eq!(row.term, FLOAT_TERM);
+    assert!(row.launch.is_none() && row.ended_at_epoch_ms.is_none());
+    assert!(row.skipped.is_none() && row.failure.is_none());
+    assert_eq!(
+        stored_automations(config.path())[0].last_run_at,
+        Some(ran),
+        "a night nothing ran spent the schedule"
+    );
+
+    assert!(
+        remember_missed_runs(config.path(), local.path(), &job.id, now, now_ms)
+            .expect("write")
+            .is_none()
+    );
+    assert_eq!(
+        stored_automation_runs(local.path()).len(),
+        1,
+        "the same gap was written twice"
+    );
+
+    let later = LocalMinute {
+        epoch_minutes: now.epoch_minutes + 2 * day,
+    };
+    let later_ms = later.epoch_minutes * 60_000;
+    set_automation_enabled_in(config.path(), &job.id, false).expect("switch off");
+    assert!(
+        remember_missed_runs(config.path(), local.path(), &job.id, later, later_ms)
+            .expect("write")
+            .is_none(),
+        "a job switched off was reported missed"
+    );
+    delete_automation_and_run_history(config.path(), local.path(), &job.id).expect("delete");
+    assert!(
+        remember_missed_runs(config.path(), local.path(), &job.id, later, later_ms)
+            .expect("write")
+            .is_none()
+    );
+    assert!(
+        stored_automation_runs(local.path()).is_empty(),
+        "a deleted job grew history again"
+    );
+
+    let ticking = block_after(shipped_backend(), "fn tick_automations(");
+    let noticed = ticking.find("remember_missed_runs(");
+    assert!(
+        noticed.is_some() && noticed < ticking.find("start_automation("),
+        "the tick does not write the gap down before it fires the next run:\n{ticking}"
+    );
+}
+
+/// Switching a job on arms it, and nothing else moves the mark.
+///
+/// Nights while a job was off are not the window's to answer for, so the
+/// switch that turns it on is the floor of its next gap. Switching on a job
+/// that is already on, or off, says nothing new about its past. A save arms
+/// it as well, because a new schedule's past is not the old one's (t-77376).
+#[test]
+fn switching_a_job_on_arms_it_and_nothing_else_moves_the_mark() {
+    let config = tempfile::tempdir().expect("automation config");
+    let job = nightly_job(false, None);
+    write_automations(config.path(), std::slice::from_ref(&job)).expect("definition");
+    let before = local_minute_now().epoch_minutes;
+    set_automation_enabled_in(config.path(), &job.id, true).expect("switch on");
+    let armed = stored_automations(config.path())[0]
+        .armed_at
+        .expect("switching on did not arm the job");
+    assert!(
+        (before..=local_minute_now().epoch_minutes).contains(&armed),
+        "armed at {armed}, not when it was switched on"
+    );
+
+    let marked = Automation {
+        enabled: true,
+        armed_at: Some(7),
+        ..job.clone()
+    };
+    write_automations(config.path(), std::slice::from_ref(&marked)).expect("marked");
+    set_automation_enabled_in(config.path(), &job.id, true).expect("on again");
+    assert_eq!(
+        stored_automations(config.path())[0].armed_at,
+        Some(7),
+        "switching on a job that was on moved the mark"
+    );
+    set_automation_enabled_in(config.path(), &job.id, false).expect("switch off");
+    assert_eq!(
+        stored_automations(config.path())[0].armed_at,
+        Some(7),
+        "switching a job off moved the mark"
+    );
+
+    let saving = block_after(shipped_backend(), "fn save_automation(");
+    assert!(
+        saving.contains("automation.armed_at = Some(local_minute_now().epoch_minutes);"),
+        "a save does not arm the job, so nights under its old schedule can be reported \
+         missed:\n{saving}"
     );
 }
 
