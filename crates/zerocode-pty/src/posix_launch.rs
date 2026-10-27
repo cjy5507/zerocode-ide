@@ -44,6 +44,12 @@
 //! before its `main` runs: those travel past it under another name
 //! ([`CTTY_DYLD_WRAP`]) and get their own back before the program starts.
 //!
+//! The question is asked on a thread of its own, within
+//! [`CTTY_PROBE_LIMIT`] (t-77530, Codex t-77525): asked on the window's main
+//! thread with no limit, a mirror that did not answer held the boot short
+//! of its first paint for as long as it stood. A pane started before the
+//! answer waits for it, never past the limit, and then starts straight.
+//!
 //! How the program, its directory and `SHELL` are chosen follows
 //! `portable_pty::CommandBuilder::as_command` exactly, so a lane's child
 //! sees the same start it saw before.
@@ -53,8 +59,8 @@ use std::io;
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use portable_pty::{Child, ChildKiller, ExitStatus};
 
@@ -112,6 +118,13 @@ const CTTY_PROBE_ANSWER: &str = "zerocode-ctty-exec 1";
 /// own name before the program starts. dyld takes every `DYLD_*` out of a
 /// hardened binary's environment, the deployed mirror's among them, and a
 /// pane given one in the settings' environment field lost it (t-77495).
+///
+/// A name the pane was given that already has that shape is wrapped once
+/// more, so no wrapped name lands on one of the pane's own, and the helper
+/// takes one prefix off each: everything comes back as it was given
+/// ([`wraps`]). A start with no helper wraps nothing and takes nothing out
+/// (t-77530, Codex t-77525: a person's `ZEROCODE_CTTY_DYLD_*` was taken
+/// out on every road).
 pub const CTTY_DYLD_WRAP: &str = "ZEROCODE_CTTY_";
 
 /// Where the helper writes its one line when the terminal could not become
@@ -124,21 +137,38 @@ struct Helper {
     log: Option<PathBuf>,
 }
 
-static HELPER: OnceLock<Helper> = OnceLock::new();
+/// How much of a helper's answer is read: more than the answer is a wrong
+/// one already.
+const CTTY_PROBE_READ: u64 = 64;
 
 /// How long the window's question to a helper may take before the helper
 /// is passed over: a mirror answers in 3 ms, 144 ms the first time after an
 /// update copied it (Codex t-77525, measured 10-27).
 pub const CTTY_PROBE_LIMIT: Duration = Duration::from_secs(2);
 
+/// The question [`launch_through`] put to a helper, and its answer once in.
+struct Naming {
+    answer: OnceLock<Option<Helper>>,
+    lock: Mutex<()>,
+    answered: Condvar,
+    limit: Duration,
+    deadline: Instant,
+}
+
+static NAMING: OnceLock<Arc<Naming>> = OnceLock::new();
+
 /// Start every lane's child through `helper` from now on: an executable
 /// whose `main` calls [`serve_ctty_exec`] before anything else. `log` is
-/// the file its one line goes to when `TIOCSCTTY` fails. Named once per
-/// process; `false` when one was named already. When `helper` does not
-/// answer [`CTTY_PROBE_ENV`] — it does not know the road, and a lane
-/// started through it would keep the marker — `unnamed` hears why. A
-/// process that names none starts its children straight, with no
-/// controlling terminal.
+/// the file its one line goes to when `TIOCSCTTY` fails.
+///
+/// Returns at once: the helper is first asked [`CTTY_PROBE_ENV`] on a
+/// thread of its own, within [`CTTY_PROBE_LIMIT`], and named only when it
+/// answers in time — one that does not know the road would keep the marker
+/// in every lane's program. When it is not named, `unnamed` hears why, on
+/// that thread, after the question's process is ended and reaped. A lane
+/// started before the answer waits for it ([`spawn`]). Asked once per
+/// process; `false` when it was asked already. A process that names none
+/// starts its children straight, with no controlling terminal.
 pub fn launch_through(
     helper: PathBuf,
     log: Option<PathBuf>,
@@ -153,52 +183,215 @@ pub fn launch_through(
 pub fn launch_through_within(
     helper: PathBuf,
     log: Option<PathBuf>,
-    _limit: Duration,
+    limit: Duration,
     unnamed: impl FnOnce(String) + Send + 'static,
 ) -> bool {
-    if HELPER.get().is_some() {
-        return false;
-    }
-    if !serves_ctty_exec(&helper) {
-        unnamed(format!(
-            "{} does not answer as a pane's helper",
-            helper.display()
-        ));
-        return true;
-    }
-    HELPER
-        .set(Helper {
-            program: helper,
-            log,
-        })
-        .is_ok()
+    let mut asked = false;
+    NAMING.get_or_init(|| {
+        asked = true;
+        Naming::ask(helper, log, limit, unnamed)
+    });
+    asked
 }
 
-/// Whether `helper` answers [`CTTY_PROBE_ENV`] as [`serve_ctty_exec`] does.
-/// One start of it, which ends at once whether it knows the road or not.
-fn serves_ctty_exec(helper: &Path) -> bool {
-    std::process::Command::new(helper)
+impl Naming {
+    /// Put the question to `helper` on a thread of its own, and answer the
+    /// naming it will settle.
+    fn ask(
+        helper: PathBuf,
+        log: Option<PathBuf>,
+        limit: Duration,
+        unnamed: impl FnOnce(String) + Send + 'static,
+    ) -> Arc<Self> {
+        let naming = Arc::new(Self {
+            answer: OnceLock::new(),
+            lock: Mutex::new(()),
+            answered: Condvar::new(),
+            limit,
+            deadline: Instant::now() + limit,
+        });
+        // Shared, so a thread that will not start still leaves the words.
+        let question = Arc::new(Mutex::new(Some((helper, log, unnamed))));
+        let asking = Arc::clone(&naming);
+        let taken = Arc::clone(&question);
+        let started = std::thread::Builder::new()
+            .name("zerocode-ctty-probe".to_string())
+            .spawn(move || {
+                let question = taken.lock().unwrap_or_else(PoisonError::into_inner).take();
+                if let Some((helper, log, unnamed)) = question {
+                    let answer = probe(&helper, asking.deadline, asking.limit).map(|()| Helper {
+                        program: helper,
+                        log,
+                    });
+                    asking.settle(answer, unnamed);
+                }
+            });
+        if let Err(error) = started {
+            let question = question
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some((helper, _, unnamed)) = question {
+                naming.settle(
+                    Err(format!(
+                        "{} was not asked: no thread to ask on: {error}",
+                        helper.display()
+                    )),
+                    unnamed,
+                );
+            }
+        }
+        naming
+    }
+
+    /// Write the answer down and wake every lane waiting on it. An answer
+    /// in after the limit is no answer: a lane that gave up waiting has
+    /// started straight already, and every later one starts as it did.
+    fn settle(&self, answer: Result<Helper, String>, unnamed: impl FnOnce(String)) {
+        let _held = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let helper = match answer {
+            Ok(helper) if Instant::now() < self.deadline => Some(helper),
+            Ok(helper) => {
+                unnamed(format!(
+                    "{} answered after {:?}",
+                    helper.program.display(),
+                    self.limit
+                ));
+                None
+            }
+            Err(why) => {
+                unnamed(why);
+                None
+            }
+        };
+        let _ = self.answer.set(helper);
+        self.answered.notify_all();
+    }
+
+    /// The helper a lane starts through: the answer, waited for until the
+    /// question's limit at the latest; none once the limit is past with no
+    /// answer in. The same lock as [`Naming::settle`], so no lane starts
+    /// straight while a later one starts through a helper named after it.
+    fn helper(&self) -> Option<&Helper> {
+        if let Some(answer) = self.answer.get() {
+            return answer.as_ref();
+        }
+        let mut held = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if let Some(answer) = self.answer.get() {
+                return answer.as_ref();
+            }
+            let left = self.deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            held = self
+                .answered
+                .wait_timeout(held, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
+/// Whether `helper` answers [`CTTY_PROBE_ENV`] as [`serve_ctty_exec`] does,
+/// by `deadline`; why not when it does not. It starts in a group of its
+/// own, and a question still open at the deadline ends the group before
+/// its process is reaped — every road reaps it.
+fn probe(helper: &Path, deadline: Instant, limit: Duration) -> Result<(), String> {
+    use std::io::Read as _;
+    use std::os::unix::process::CommandExt as _;
+    let shown = helper.display();
+    let mut child = std::process::Command::new(helper)
         .env(CTTY_PROBE_ENV, "1")
         .env_remove(CTTY_EXEC_ENV)
         .env_remove(CTTY_LOG_ENV)
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
-        .is_ok_and(|out| out.status.success() && out.stdout == CTTY_PROBE_ANSWER.as_bytes())
+        .process_group(0)
+        .spawn()
+        .map_err(|error| format!("{shown} does not start: {error}"))?;
+    // Read on a thread of its own, so the wait for it has a limit. All of
+    // it comes when the helper ends; a process it left holding the pipe
+    // outside its group would keep only that thread.
+    let (told, said) = std::sync::mpsc::channel();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = std::thread::Builder::new()
+            .name("zerocode-ctty-probe-read".to_string())
+            .spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = (&mut out).take(CTTY_PROBE_READ).read_to_end(&mut bytes);
+                let _ = told.send(bytes);
+            });
+    }
+    let said = said.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    let ended = said
+        .as_ref()
+        .ok()
+        .and_then(|_| ended_by(&mut child, deadline));
+    if ended.is_none() {
+        if let Ok(group) = libc::pid_t::try_from(child.id()) {
+            // SAFETY: the question leads its own group and is not reaped
+            // yet, so that group is still the question's.
+            unsafe { libc::killpg(group, libc::SIGKILL) };
+        }
+        let _ = child.wait();
+    }
+    match (said, ended) {
+        (Ok(_), Some(status)) if !status.success() => Err(format!(
+            "{shown} ended with {status}, not as a pane's helper"
+        )),
+        (Ok(said), Some(_)) if said != CTTY_PROBE_ANSWER.as_bytes() => Err(format!(
+            "{shown} answered {:?}, not as a pane's helper",
+            String::from_utf8_lossy(&said)
+        )),
+        (Ok(_), Some(_)) => Ok(()),
+        _ => Err(format!("{shown} did not answer within {limit:?}")),
+    }
+}
+
+/// How `child` ended, when it ends by `deadline`; looked at every
+/// millisecond, which the answer it gave has made a matter of one look.
+fn ended_by(
+    child: &mut std::process::Child,
+    deadline: Instant,
+) -> Option<std::process::ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Whether the window wraps `name` on a start through a helper: a `DYLD_*`
+/// name, or one of those wrapped any number of times over — a name the
+/// pane was given that a wrapped one would land on ([`CTTY_DYLD_WRAP`]).
+fn wraps(name: &[u8]) -> bool {
+    let mut name = name;
+    while let Some(inner) = name.strip_prefix(CTTY_DYLD_WRAP.as_bytes()) {
+        name = inner;
+    }
+    name.starts_with(b"DYLD_")
 }
 
 /// The name a [`CTTY_DYLD_WRAP`]-ped name had, when `name` is one.
 fn unwrapped(name: &OsStr) -> Option<&OsStr> {
     name.as_bytes()
         .strip_prefix(CTTY_DYLD_WRAP.as_bytes())
-        .filter(|original| original.starts_with(b"DYLD_"))
+        .filter(|original| wraps(original))
         .map(OsStr::from_bytes)
 }
 
-/// Every `DYLD_*` name in `env` under its [`CTTY_DYLD_WRAP`]-ped one.
+/// Every name in `env` the window [`wraps`] under its
+/// [`CTTY_DYLD_WRAP`]-ped one.
 fn wrap_dyld(env: &mut [(OsString, OsString)]) {
     for (name, _) in env {
-        if name.as_bytes().starts_with(b"DYLD_") {
+        if wraps(name.as_bytes()) {
             let mut wrapped = OsString::from(CTTY_DYLD_WRAP);
             wrapped.push(&*name);
             *name = wrapped;
@@ -260,23 +453,42 @@ pub fn serve_ctty_exec() {
         .args(args)
         .env_remove(CTTY_EXEC_ENV)
         .env_remove(CTTY_LOG_ENV);
-    for (wrapped, value) in std::env::vars_os() {
-        if let Some(original) = unwrapped(&wrapped) {
-            command.env(original, value).env_remove(&wrapped);
-        }
+    for (name, value) in given_back(std::env::vars_os()) {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
     }
     let error = command.exec();
     eprintln!("zerocode: {}: {error}", Path::new(&program).display());
     std::process::exit(127);
 }
 
-/// Take what an older helper left in this environment out of it: the
-/// markers and the wrapped `DYLD_*` names, which that helper never gave
-/// back, so the program it started ran without them already.
+/// What the helper gives the program back, in order: every name the window
+/// wrapped taken out, then each value under the name it had — which may be
+/// one of the names just taken out, when the pane was given a name of the
+/// wrapped shape.
+fn given_back(vars: impl Iterator<Item = (OsString, OsString)>) -> Vec<EnvEdit> {
+    let mut edits = Vec::new();
+    let mut back = Vec::new();
+    for (name, value) in vars {
+        if let Some(original) = unwrapped(&name) {
+            back.push((original.to_os_string(), Some(value)));
+            edits.push((name, None));
+        }
+    }
+    edits.extend(back);
+    edits
+}
+
+/// Take the markers an older helper left in this environment out of it.
+/// A name of the wrapped shape stays: the window wraps only on a start
+/// through a helper, which gives every one back, so here it is one the
+/// person gave.
 fn forget_leftovers() {
     let names: Vec<OsString> = std::env::vars_os()
         .map(|(name, _)| name)
-        .filter(|name| name == CTTY_EXEC_ENV || name == CTTY_LOG_ENV || unwrapped(name).is_some())
+        .filter(|name| name == CTTY_EXEC_ENV || name == CTTY_LOG_ENV)
         .collect();
     for name in names {
         // SAFETY: `serve_ctty_exec` is called first in `main`, before the
@@ -311,6 +523,13 @@ fn note_untaken(log: &Path, program: &Path, error: &io::Error) {
 /// path since it was named) is passed over for the program itself: a pane
 /// with no controlling terminal is the pane every start had before, a pane
 /// with no program is none.
+///
+/// Started while the helper's question is open, a pane waits for the
+/// answer, never past the question's limit, and then starts straight
+/// ([`Naming::helper`]). Panes start on the window's command threads,
+/// never its main one; the panes a boot brings back start after its first
+/// paint, which the question no longer holds, so with a helper that
+/// answers in its usual 3 ms they come through it.
 pub(crate) fn spawn(
     tty: &Path,
     program: &OsStr,
@@ -318,7 +537,7 @@ pub(crate) fn spawn(
     cwd: Option<&Path>,
     edits: &[EnvEdit],
 ) -> io::Result<SpawnedChild> {
-    if let Some(helper) = HELPER.get()
+    if let Some(helper) = NAMING.get().and_then(|naming| naming.helper())
         && let Ok(child) = spawn_with(tty, program, args, cwd, edits, Some(helper))
     {
         return Ok(child);
@@ -358,9 +577,7 @@ fn spawn_with(
     let resolved = search_path(program, &dir, lookup("PATH").as_deref())?;
     env.retain(|(named, _)| named != "SHELL");
     env.push(("SHELL".into(), shell.into_os_string()));
-    env.retain(|(named, _)| {
-        named != CTTY_EXEC_ENV && named != CTTY_LOG_ENV && unwrapped(named).is_none()
-    });
+    env.retain(|(named, _)| named != CTTY_EXEC_ENV && named != CTTY_LOG_ENV);
 
     // Through a helper, the helper is what starts, under its own `argv[0]`,
     // with the program's path as its first argument, and the program's own
@@ -763,13 +980,13 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), env.len(), "two values under one name: {env:?}");
-        let mut back: Vec<(OsString, OsString)> = env
-            .into_iter()
-            .map(|(name, value)| match unwrapped(&name) {
-                Some(original) => (original.to_os_string(), value),
-                None => (name, value),
-            })
-            .collect();
+        let mut back = env.clone();
+        for (name, value) in given_back(env.into_iter()) {
+            back.retain(|(named, _)| *named != name);
+            if let Some(value) = value {
+                back.push((name, value));
+            }
+        }
         back.sort();
         given.sort();
         assert_eq!(back, given);

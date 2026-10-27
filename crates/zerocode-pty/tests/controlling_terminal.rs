@@ -926,11 +926,9 @@ mod macos {
         }
         let mut window = command.spawn().map_err(|error| error.to_string())?;
         let done = wait_for(|| lines_of(&report).iter().any(|line| line == "done"));
-        if !done {
-            if let Ok(group) = libc::pid_t::try_from(window.id()) {
-                // SAFETY: the group this case's own window leads, unreaped.
-                unsafe { libc::killpg(group, libc::SIGKILL) };
-            }
+        if !done && let Ok(group) = libc::pid_t::try_from(window.id()) {
+            // SAFETY: the group this case's own window leads, unreaped.
+            unsafe { libc::killpg(group, libc::SIGKILL) };
         }
         let _ = window.wait();
         let lines = lines_of(&report);
