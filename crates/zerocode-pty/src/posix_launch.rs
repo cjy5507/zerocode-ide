@@ -14,13 +14,26 @@
 //! did has a spawn attribute or file action that does the same:
 //!
 //! - `POSIX_SPAWN_SETSID` makes the child a session and group leader;
-//! - opening the pty's slave by path as descriptor 0 then makes the slave its
-//!   controlling terminal, as an open by a session leader with none does on
-//!   BSD (what `TIOCSCTTY` did), and 1 and 2 are copies of it;
+//! - the pty's slave is opened by path as descriptor 0, and 1 and 2 are
+//!   copies of it;
 //! - `POSIX_SPAWN_CLOEXEC_DEFAULT` closes every other descriptor;
 //! - `POSIX_SPAWN_SETSIGDEF` and `POSIX_SPAWN_SETSIGMASK` reset the signals the
 //!   closure reset (plus `SIGPIPE`, which std resets for every child) and
 //!   empty the mask.
+//!
+//! What none of them does is `TIOCSCTTY`: the open a spawn's file action
+//! makes leaves the child with no controlling terminal (measured 2026-10-27
+//! on macOS 26.3: `/bin/sleep` started this way stands with no terminal and
+//! outlives its master closing). A program that opens its terminal again by
+//! name takes it then — Node does, so `claude` and `agy` had one — and one
+//! that does not — `zsh`, which opens with `O_NOCTTY`, and `zo` — never has
+//! one: the window going sends it no hangup, a resize sends nothing to what
+//! it runs, and ^C reaches no group (t-77414: five zo processes went on
+//! spinning after a restart, each holding its conversation). So when a
+//! helper is named ([`launch_through`]), the spawn starts the helper on the
+//! terminal instead, and the helper ([`serve_ctty_exec`]) makes descriptor
+//! 0 its controlling terminal and becomes the program by `exec`: the same
+//! process, the same pid and beginning, and still no fork.
 //!
 //! How the program, its directory and `SHELL` are chosen follows
 //! `portable_pty::CommandBuilder::as_command` exactly, so a lane's child
@@ -31,6 +44,7 @@ use std::io;
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 use portable_pty::{Child, ChildKiller, ExitStatus};
 
@@ -61,13 +75,122 @@ const DEFAULT_SIGNALS: [c_int; 7] = [
 /// take the name out.
 pub(crate) type EnvEdit = (OsString, Option<OsString>);
 
-/// Start `program` with `args` on the pty whose slave is `tty`.
+/// What tells a helper it is starting a pane's program (t-77414), set to the
+/// name the program is started under — its `argv[0]` — and taken out before
+/// the program starts. In the environment rather than among the arguments,
+/// so a helper built before this road, which reads its first argument as the
+/// program, still starts the program, only without the terminal.
+pub const CTTY_EXEC_ENV: &str = "ZEROCODE_CTTY_EXEC";
+
+/// Where the helper writes its one line when the terminal could not become
+/// the program's — the window's log. Taken out before the program starts.
+pub const CTTY_LOG_ENV: &str = "ZEROCODE_CTTY_LOG";
+
+/// The helper every lane's child starts through, once named.
+struct Helper {
+    program: PathBuf,
+    log: Option<PathBuf>,
+}
+
+static HELPER: OnceLock<Helper> = OnceLock::new();
+
+/// Start every lane's child through `helper` from now on: an executable
+/// whose `main` calls [`serve_ctty_exec`] before anything else. `log` is
+/// the file its one line goes to when `TIOCSCTTY` fails. Named once per
+/// process; `false` when one was named already. A process that names none
+/// starts its children straight, with no controlling terminal.
+pub fn launch_through(helper: PathBuf, log: Option<PathBuf>) -> bool {
+    HELPER
+        .set(Helper {
+            program: helper,
+            log,
+        })
+        .is_ok()
+}
+
+/// The helper's side of [`launch_through`]: when this process was started
+/// as a lane's helper, it makes descriptor 0 — the pane's terminal, which
+/// the spawn opened — its controlling terminal, and becomes the program in
+/// this same process, so the pid and beginning the window wrote down stay
+/// the program's. Otherwise it returns at once.
+///
+/// A terminal that will not be taken does not stop the program: it starts
+/// as it would have without the helper, and the log gets one line. A program
+/// that cannot be started ends this process with 127 and says why on the
+/// pane, as a shell does.
+pub fn serve_ctty_exec() {
+    let Some(name) = std::env::var_os(CTTY_EXEC_ENV) else {
+        return;
+    };
+    let mut args = std::env::args_os().skip(1);
+    let Some(program) = args.next() else {
+        eprintln!("zerocode: {CTTY_EXEC_ENV} is set, and no program was named");
+        std::process::exit(127);
+    };
+    // SAFETY: `TIOCSCTTY` takes no argument beyond the descriptor, and its
+    // answer is all that is read.
+    let taken = unsafe { libc::ioctl(0, libc::c_ulong::from(libc::TIOCSCTTY), 0) };
+    if taken != 0 {
+        let error = io::Error::last_os_error();
+        if let Some(log) = std::env::var_os(CTTY_LOG_ENV) {
+            note_untaken(Path::new(&log), Path::new(&program), &error);
+        }
+    }
+    use std::os::unix::process::CommandExt as _;
+    let error = std::process::Command::new(&program)
+        .arg0(name)
+        .args(args)
+        .env_remove(CTTY_EXEC_ENV)
+        .env_remove(CTTY_LOG_ENV)
+        .exec();
+    eprintln!("zerocode: {}: {error}", Path::new(&program).display());
+    std::process::exit(127);
+}
+
+/// One line in the window's log, in its own shape — milliseconds since the
+/// epoch, then the words — and in one write, which `O_APPEND` keeps whole.
+fn note_untaken(log: &Path, program: &Path, error: &io::Error) {
+    use std::io::Write as _;
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis());
+    let line = format!(
+        "{millis} pane launch: {} starts without a controlling terminal: {error}\n",
+        program.display()
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+/// Start `program` with `args` on the pty whose slave is `tty` — through
+/// the helper when one is named ([`launch_through`]), so the slave becomes
+/// its controlling terminal. A helper that will not start (gone from its
+/// path since it was named) is passed over for the program itself: a pane
+/// with no controlling terminal is the pane every start had before, a pane
+/// with no program is none.
 pub(crate) fn spawn(
     tty: &Path,
     program: &OsStr,
     args: &[OsString],
     cwd: Option<&Path>,
     edits: &[EnvEdit],
+) -> io::Result<SpawnedChild> {
+    let _ = HELPER.get();
+    spawn_with(tty, program, args, cwd, edits, None)
+}
+
+fn spawn_with(
+    tty: &Path,
+    program: &OsStr,
+    args: &[OsString],
+    cwd: Option<&Path>,
+    edits: &[EnvEdit],
+    helper: Option<&Helper>,
 ) -> io::Result<SpawnedChild> {
     let mut env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     for (key, value) in edits {
@@ -93,8 +216,29 @@ pub(crate) fn spawn(
     let resolved = search_path(program, &dir, lookup("PATH").as_deref())?;
     env.retain(|(named, _)| named != "SHELL");
     env.push(("SHELL".into(), shell.into_os_string()));
+    env.retain(|(named, _)| named != CTTY_EXEC_ENV && named != CTTY_LOG_ENV);
 
-    let mut argv = vec![c_string(program.as_bytes())?];
+    // Through a helper, the helper is what starts, with the program's path
+    // as its first argument and the program's own name in its environment.
+    let (path, mut argv) = match helper {
+        Some(helper) => {
+            env.push((CTTY_EXEC_ENV.into(), program.to_os_string()));
+            if let Some(log) = &helper.log {
+                env.push((CTTY_LOG_ENV.into(), log.clone().into_os_string()));
+            }
+            (
+                c_string(helper.program.as_os_str().as_bytes())?,
+                vec![
+                    c_string(helper.program.as_os_str().as_bytes())?,
+                    c_string(resolved.as_os_str().as_bytes())?,
+                ],
+            )
+        }
+        None => (
+            c_string(resolved.as_os_str().as_bytes())?,
+            vec![c_string(program.as_bytes())?],
+        ),
+    };
     for arg in args {
         argv.push(c_string(arg.as_bytes())?);
     }
@@ -107,7 +251,6 @@ pub(crate) fn spawn(
             c_string(&pair)
         })
         .collect::<io::Result<Vec<_>>>()?;
-    let path = c_string(resolved.as_os_str().as_bytes())?;
     let tty = c_string(tty.as_os_str().as_bytes())?;
     let dir = c_string(dir.as_os_str().as_bytes())?;
 

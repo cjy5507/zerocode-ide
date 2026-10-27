@@ -35,3 +35,9 @@ tempfile = { workspace = true }
 [[bench]]
 name = "pty_hotpath"
 harness = false
+
+# Its own `main`: the binary is also the helper its lanes start through and
+# the synthetic programs they run (t-77414).
+[[test]]
+name = "controlling_terminal"
+harness = false

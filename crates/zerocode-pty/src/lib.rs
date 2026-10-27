@@ -45,6 +45,8 @@ pub use lane::{
     DECLARED_TERMINAL, GroupPrograms, INHERITED_SESSION_MARKERS, INHERITED_TERMINAL_IDENTITY,
     PTY_OUTPUT_BYTE_BUDGET, PtyError, PtyLane, Pumped,
 };
+#[cfg(target_os = "macos")]
+pub use posix_launch::{CTTY_EXEC_ENV, CTTY_LOG_ENV, launch_through, serve_ctty_exec};
 pub use readers::{
     FrameReaders, Look, READER_SHARE_FRAMES, READER_SHARE_SCREENS, RENOTIFY_AFTER, ShareOf,
 };
