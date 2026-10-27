@@ -417,6 +417,22 @@ impl Bench {
         argv: Vec<String>,
         readings: &[(&str, &str)],
     ) -> Decided {
+        let mut receipts = crate::orchestration::evidence::ReceiptFiles::default();
+        for (path, text) in readings {
+            receipts.insert(*path, *text);
+        }
+        self.at_argv_with(pane, argv, &receipts)
+    }
+
+    /// The same, with everything the window read before the plan — the
+    /// receipt files and what git said about the commits the verb names
+    /// (t-78075).
+    fn at_argv_with(
+        &mut self,
+        pane: &str,
+        argv: Vec<String>,
+        receipts: &crate::orchestration::evidence::ReceiptFiles,
+    ) -> Decided {
         self.clock += 1;
         let argv = named_if_it_has_to_be(argv, self.clock);
         // Read before the team is borrowed for the call. A test actor is
@@ -426,10 +442,6 @@ impl Bench {
             .actor
             .clone()
             .unwrap_or_else(|| bench_actor(&self.team.id, pane));
-        let mut receipts = crate::orchestration::evidence::ReceiptFiles::default();
-        for (path, text) in readings {
-            receipts.insert(*path, *text);
-        }
         let gate_context = matches!(
             argv.first().map(String::as_str),
             Some(
@@ -446,7 +458,7 @@ impl Bench {
             pane,
             self.clock,
             Some(&who),
-            &receipts,
+            receipts,
             gate_context,
         );
         if let Effect::WorkerTerminal {
@@ -25344,6 +25356,9 @@ mod attempt_time;
 /// (`tests/closed.rs`).
 mod closed;
 mod completion;
+/// t-78075: a coordinator's own attempt — take, hand in, review — and the
+/// backfill of landed work (`tests/coordinator_take.rs`).
+mod coordinator_take;
 /// t-26587: a success report must show the evidence of each pass condition
 /// its task wrote (`tests/evidence.rs`).
 mod evidence;

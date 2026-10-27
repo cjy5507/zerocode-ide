@@ -38,6 +38,7 @@
 pub mod attempt_time;
 mod completion;
 pub mod coordinator_handover;
+pub mod coordinator_take;
 pub mod delegate;
 pub mod evidence;
 pub mod gate_reuse;
