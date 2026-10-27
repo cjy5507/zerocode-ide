@@ -250,18 +250,60 @@ mod tests {
         Pin::new(events).poll_next(&mut cx)
     }
 
-    /// 창이 판을 닫으면 키가 하나도 오지 않아도 흐름이 끝나고, 끝난 흐름은
-    /// 끝난 채다. 닫힌 터미널에는 읽을 것이 없으니 안쪽은 묻지 않는다.
+    /// 늦은 닫힘을 기다리는 상한 — 통과는 닫힘이 보이는 즉시이고, 이 상한은 실패에만
+    /// 쓴다. 닫힘이 늦는 것은 주 끝이 열린 동안 병렬 시험이 띄운 자식이 그 사본을
+    /// 물려받아(`openpty` 의 두 끝은 상속된다) 제가 끝날 때까지 쥘 때다(l81d).
     #[cfg(unix)]
-    #[test]
-    fn a_terminal_that_hung_up_ends_the_stream() {
+    const HANG_UP_BOUND: Duration = Duration::from_secs(60);
+
+    /// 창이 판을 닫으면 키가 하나도 오지 않아도 흐름이 끝나고, 끝난 흐름은
+    /// 끝난 채다. 닫힌 터미널에는 읽을 것이 없으니 끝을 본 폴링은 안쪽을 묻지 않는다.
+    /// 닫힘은 한 번의 폴링이 아니라 반응기의 소식으로 기다린다(`HANG_UP_BOUND`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_terminal_that_hung_up_ends_the_stream() {
         let pty = open_pty();
         drop(pty.master);
         let terminal = Fake::default();
         let mut events = TerminalEvents::over(terminal.clone()).watching(pty.slave);
-        assert!(matches!(poll(&mut events), Poll::Ready(None)));
+        let ended = tokio::time::timeout(
+            HANG_UP_BOUND,
+            std::future::poll_fn(|cx| {
+                let asked = terminal.polls();
+                Pin::new(&mut events).poll_next(cx).map(|item| (item.is_none(), terminal.polls() - asked))
+            }),
+        )
+        .await;
+        assert!(matches!(ended, Ok((true, 0))), "the hung-up terminal did not end the stream unread: {ended:?}");
         assert!(matches!(poll(&mut events), Poll::Ready(None)), "an ended stream came back");
-        assert_eq!(terminal.polls(), 0, "a hung-up terminal was read");
+    }
+
+    /// 런타임 밖의 폴링도 패닉하지 않는다 — 반응기는 런타임 안에서만 걸 수 있으니
+    /// 살아 있는 판은 걸지 않은 채 기다리고, 닫힘은 다음 폴링이 본다. 안쪽은 처음 한
+    /// 번만 묻는다(l81d: 닫힘이 첫 폴링에 아직 안 보이자 런타임 밖에서 반응기에 걸려다
+    /// 패닉했다).
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_polled_outside_a_runtime_neither_panics_nor_misses_its_hang_up() {
+        let pty = open_pty();
+        let terminal = Fake::default();
+        let mut events = TerminalEvents::over(terminal.clone()).watching(pty.slave);
+        assert!(poll(&mut events).is_pending(), "a live terminal ended the stream");
+
+        drop(pty.master);
+        let until = std::time::Instant::now() + HANG_UP_BOUND;
+        let ended = loop {
+            match poll(&mut events) {
+                Poll::Pending => {
+                    assert!(std::time::Instant::now() < until, "no later poll saw the hang-up");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                ready @ Poll::Ready(_) => break ready,
+            }
+        };
+        assert!(matches!(ended, Poll::Ready(None)), "the hang-up did not end the stream: {ended:?}");
+        assert!(matches!(poll(&mut events), Poll::Ready(None)), "an ended stream came back");
+        assert_eq!(terminal.polls(), 1, "a later poll asked the terminal again");
     }
 
     /// 흐름을 폴링하는 태스크가 깨워진 횟수.
@@ -317,9 +359,18 @@ mod tests {
         let closed = tokio::time::Instant::now();
         drop(pty.master);
         // 기다리지 않고 양보한다: 멈춘 시계는 같은 스레드의 깨움이 와도 다음 타이머까지
-        // 스스로 가지만(tokio current_thread), 양보는 반응기만 한 번 돌린다.
-        tokio::task::yield_now().await;
-        assert!(woke.count() > 0, "the closed pane did not wake the loop");
+        // 스스로 가지만(tokio current_thread), 양보는 반응기만 한 번 돌린다. 닫힘이 늦으면
+        // (`HANG_UP_BOUND`) 진짜 시계로 잠깐씩 쉬며 다시 양보한다 — 멈춘 시계는 그동안에도
+        // 가지 않는다.
+        let until = std::time::Instant::now() + HANG_UP_BOUND;
+        loop {
+            tokio::task::yield_now().await;
+            if woke.count() > 0 {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "the closed pane did not wake the loop");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(
             matches!(Pin::new(&mut events).poll_next(&mut cx), Poll::Ready(None)),
             "the closed pane did not end the stream"

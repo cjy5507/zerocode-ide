@@ -132,11 +132,15 @@ mod tests {
     }
 
     /// A pty whose other end is open has not hung up; once that end closes,
-    /// the way the window closes a pane, it has.
+    /// the way the window closes a pane, it has — once every copy of it has
+    /// closed. A child a parallel test spawned while the end was open inherited
+    /// one (`openpty` hands both ends over inheritable) and holds it until the
+    /// child exits, so the hang-up is waited for, not looked at once (l81d).
     #[cfg(unix)]
     #[test]
     fn a_pty_has_hung_up_once_its_other_end_closes() {
         use std::os::fd::AsFd as _;
+        use std::time::{Duration, Instant};
 
         let pty = nix::pty::openpty(
             None::<&nix::pty::Winsize>,
@@ -145,9 +149,10 @@ mod tests {
         .expect("open a pty");
         assert!(!super::hung_up_on(pty.slave.as_fd()), "a live pty has not hung up");
         drop(pty.master);
-        assert!(
-            super::hung_up_on(pty.slave.as_fd()),
-            "a pty whose other end closed has hung up"
-        );
+        let until = Instant::now() + Duration::from_secs(60);
+        while !super::hung_up_on(pty.slave.as_fd()) {
+            assert!(Instant::now() < until, "a pty whose other end closed has hung up");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
