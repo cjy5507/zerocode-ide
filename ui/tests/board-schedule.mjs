@@ -1141,14 +1141,17 @@ export async function testBoardSchedule(browser, origin, ok) {
       queuedGate.what === "게이트 l61" && queuedGate.word === "도는 중" && queuedGate.heads.includes("gate:l62") && queuedGate.l62act === "",
       JSON.stringify(queuedGate));
 
-    /* ---- 안내판 게이트 줄의 규칙 — 한 문장, 열여덟 경우의 표 (review r4·r5, t-77851·t-77880): 「도는 단계가 있는 게이트
+    /* ---- 안내판 게이트 줄의 규칙 — 한 문장, 스물한 경우의 표 (review r4~r6, t-77851·t-77880·t-77892): 「도는 단계가 있는 게이트
      * → 없으면 실제로 시작한(끝난 단계가 하나라도 있는) 게이트 가운데 마지막 활동이 가장 늦은 것(통과·실패·단계 사이 대기)
      * → 없으면 마지막으로 줄 선 것」. 마지막 활동은 단계마다 마지막 일감 가운데 가장 늦은 시작이다 — 같은 이름으로 다시
      * 도는 게이트는 첫 시도가 아니라 지금 시도로(⑨·⑩), 한 단계만 다시 돈 것도 그 단계로(⑮) 비교된다. 같으면 실패 > 단계
      * 사이 > 통과, 그다음 이름의 수가 큰 것(⑫·⑬·⑭) — 묶음 안 행 차례(시작, 키)와 갈리는 동점이라야 규칙을 고정한다.
      * ⑥은 계획이 l62를 l61 뒤에 세워 시작 차례만으로도 맞는 경우고, 「마지막으로 줄 선 것」 갈래는 계획 시작이 같은 ⑪과
      * 줄 선 시각이 같은 ⑰이 고정한다. 줄의 「걸림」은 지금 시도의 시작부터고(⑯, 픽스처 l56 15:51 → 58분), 단계 사이에서는
-     * 첫 단계의 지난 시각이 아니라 다음 단계의 예상을 말한다(⑱, 픽스처 l56 14:56). ---- */
+     * 첫 단계의 지난 시각이 아니라 다음 단계의 예상을 말한다(⑱, 픽스처 l56 14:56). 두 레인에 겹쳐 돈 게이트는 늦게 시작한
+     * 쪽이다 — 늦게 끝난 쪽이 아니다(⑲; 끝으로 비교하면 ⑦·⑬이 깨진다 — 코디가 둔 선택, t-77892 P3-1). 기다리는 게이트의
+     * 시간 글은 한 곳에서 짓는다: 행의 said(aria)와 etaSub가 같은 시각을 말하고, 그 시각은 남은 waiting 단계의 가장 이른 예상
+     * 시작이다 — 재시도가 줄만 섰으면 그 계획(⑳, 첫 시도의 08:10이 아님), held만 남았으면 「시작 모름」(㉑). ---- */
     const gateTable = await page.evaluate((now) => {
       const base = boardScheduleAnswer;
       const l61 = base.jobs.filter((job) => job.gate === "l61");
@@ -1206,6 +1209,27 @@ export async function testBoardSchedule(browser, origin, ok) {
       ];
       // ⑰: two gates queued at the same moment on one lane — l10's job stands first by name, so l9 is planned later.
       const bothQueued = [queuedOnly("l9", "run11955-l9r", now - minute, "g1-build"), queuedOnly("l10", "run11955-l10r", now - minute, "g1-build")];
+      // ⑲ (t-77892 C2, a choice kept): on lane 1 l61 passed its build (-100 → -70 min) and its tests (-70 → -65); on
+      // lane 2 l62 passed its build (-90 → -80) and its tests began at -75 and failed at -30. The rule compares the
+      // latest step's start, so l61 (-70) wins over l62 (-75) although l62 failed later — comparing ends would break ⑦
+      // and ⑬. The row pins the choice.
+      const overlapped = [
+        l61r("g1-build", "passed", at(100), at(70), { queued_ms: at(101) }), l61r("g2-tests", "passed", at(70), at(65), { queued_ms: at(101) }),
+        job("0-1792538400-run11955-l62r-g1-build", "passed", at(90), at(80), "g1-build", { lane: 2, queued_ms: at(91) }),
+        job("0-1792538401-run11955-l62r-g2-tests", "failed", at(75), at(30), "g2-tests", { lane: 2, queued_ms: at(91) }),
+      ];
+      // ⑳ (t-77892 D′): l61 failed its build 90 minutes ago and was queued again a minute ago; nothing of the new attempt
+      // has begun, so the gate's start is the new attempt's planned start — now, with a lane free — not the build's 08:10.
+      const queuedAgain = [
+        l61r("g1-build", "failed", at(100), at(90), { queued_ms: at(101) }),
+        l61r("g1-build", "waiting", null, null, { queued_ms: now - minute, lane: null }),
+      ];
+      // ㉑ (t-77892 H1): l61 passed its build and only a held step remains — the guard holds it, no lane plans it — so the
+      // start is unknown, not the build's past start.
+      const heldOnly = [
+        l61r("g1-build", "passed", at(20), at(10), { queued_ms: at(21) }),
+        l61r("g2-tests", "held", null, null, { queued_ms: at(21), lane: null }),
+      ];
       // ⑯·⑱: the fixture's real l56 (its second attempt) and l57, cut to a moment — a job not yet begun waits, one not
       // yet ended runs. At 15:51:40 KST the second attempt's tests have just failed; at 14:56:40 it waits between steps.
       const cut = (gates, moment) => base.jobs.filter((one) => gates.includes(one.gate) && Number(one.queued_ms) <= moment).map((one) => {
@@ -1237,17 +1261,27 @@ export async function testBoardSchedule(browser, origin, ok) {
           want: ["l56", "실패"], note: (note) => note.includes("58분") },
         { name: "⑰ 줄 선 시각 같음, 줄 하나라 l10이 먼저 서고 l9는 뒤 → 수가 큰 l10", jobs: bothQueued, lanes: [1], want: ["l10", "차례 기다림"] },
         { name: "⑱ 픽스처 14:56 — l56 둘째 시도 단계 사이, 첫 단계의 13:15가 아니라 다음 단계의 예상", jobs: cut(["l56", "l57"], betweenAt), at: betweenAt,
-          paused: false, want: ["l56", "차례 기다림"], note: (note) => note.includes("다음 단계") && !note.includes("13:15") },
+          paused: false, want: ["l56", "차례 기다림"], note: (note) => note.endsWith("다음 단계 14:56 시작 예상"),
+          said: (said) => said === "대기 3개 · 14:56 시작 예상" },
+        { name: "⑲ 두 레인에 겹침: l61 g2가 나중에 시작해 먼저 통과, l62 g2가 먼저 시작해 늦게 실패 → 늦게 시작한 l61(선택)", jobs: overlapped, want: ["l61", "통과"] },
+        { name: "⑳ l61 실패 → 재시도가 줄만 섬 → 시작 예상은 새 시도의 계획(지금), 첫 시도의 08:10이 아님", jobs: queuedAgain, paused: false,
+          want: ["l61", "차례 기다림"], note: (note) => note.endsWith("09:50 시작 예상") && !note.includes("다음 단계"),
+          said: (said) => said === "대기 1개 · 09:50 시작 예상" },
+        { name: "㉑ l61 g1 통과 · 남은 단계는 held만 → 시작 모름(지난 09:30이 아님)", jobs: heldOnly, paused: false,
+          want: ["l61", "차례 기다림"], note: (note) => note.endsWith("시작 모름"), said: (said) => said === "대기 1개 · 시작 모름" },
       ];
       const choice = { zoom: "now", folded: new Set(), opened: new Set(), log: null };
       return cases.map((one) => {
         const line = { ...base.line, runner_lanes: one.lanes ?? base.line.runner_lanes, paused: one.paused ?? base.line.paused };
-        const got = boardScheduleModel({ ...base, line, jobs: one.jobs, lanes: [] }, [], one.at ?? now, choice, 900).board.lines[1];
-        const ok = got.name === one.want[0] && got.word === one.want[1] && (one.note ? one.note(got.note) : true);
-        return { name: one.name, want: one.want, got: [got.name, got.word, got.note], ok };
+        const model = boardScheduleModel({ ...base, line, jobs: one.jobs, lanes: [] }, [], one.at ?? now, choice, 900);
+        const got = model.board.lines[1];
+        const head = model.groups.find((group) => group.id === "gates")?.rows.find((row) => row.key === `gate:${one.want[0]}`) ?? null;
+        const ok = got.name === one.want[0] && got.word === one.want[1] && (one.note ? one.note(got.note) : true)
+          && (one.said ? head !== null && one.said(head.said) : true);
+        return { name: one.name, want: one.want, got: [got.name, got.word, got.note, head?.said ?? null], ok };
       });
     }, SCHEDULE_NOW);
-    ok("the board's gate line follows one rule in all eighteen cases — running first, then the gate whose latest step began last (a gate or a step run again is its new attempt), then the one queued last; a tie is decided, and the line's time words measure the present attempt",
+    ok("the board's gate line follows one rule in all twenty-one cases — running first, then the gate whose latest step began last (a gate or a step run again is its new attempt; on two lanes the later start, not the later end), then the one queued last; a tie is decided, and a waiting gate's row and line say one present-attempt time, never a past moment as an expected start",
       gateTable.every((row) => row.ok), JSON.stringify(gateTable.filter((row) => !row.ok)));
 
     /* ---- 비어 있어도 넉 줄: 레인도 게이트도 과업도 없는 답 ---- */
