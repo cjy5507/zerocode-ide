@@ -759,6 +759,31 @@ mod tests {
         );
     }
 
+    /// The 5.5 releases price at rows of their own, not at their family's 5.0
+    /// row: Opus 5.5 and Sonnet 5.5 read a cached prefix at a twentieth of
+    /// input, which is what a cache policy weighs a refresh against a rewrite
+    /// with.
+    #[test]
+    fn the_five_point_five_releases_price_at_their_own_rows() {
+        for (model, expected) in [
+            ("claude-opus-5-5", "claude-opus-5-5"),
+            ("claude-opus-5.5", "claude-opus-5-5"),
+            ("claude-sonnet-5-5", "claude-sonnet-5-5"),
+            ("claude-haiku-5-5", "claude-haiku-5-5"),
+            ("claude-opus-5", "claude-opus-5"),
+            ("claude-sonnet-5", "claude-sonnet-5"),
+        ] {
+            assert_eq!(anthropic_key(model), Some(expected), "{model}");
+        }
+        let rates = |model: &str| {
+            let rate = anthropic_rate(model).expect("priced");
+            (rate.input, rate.output, rate.cache_read)
+        };
+        assert_eq!(rates("claude-opus-5-5"), (4.0, 20.0, 0.05));
+        assert_eq!(rates("claude-sonnet-5-5"), (2.0, 10.0, 0.05));
+        assert_eq!(rates("claude-haiku-5-5"), (0.1, 0.5, 0.1));
+    }
+
     /// The one shape both vendors fold into: Anthropic's cache buckets are its
     /// input rate times the table's multiples (with a row's own read multiple
     /// kept), OpenAI reads at `cached_input` and writes at no premium, and a
