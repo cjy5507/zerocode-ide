@@ -10779,7 +10779,7 @@ fn the_pr_grouping_stands_orcas_lanes_and_the_headers_pin() {
          review no longer counts as a new shape:\n{refreshing}"
     );
     assert!(
-        block_after(window, "function worktreeListShape(held) {").contains("${reviewGeneration}"),
+        block_after(window, "function worktreeListShape(held, resting) {").contains("${reviewGeneration}"),
         "the shape guard is blind to review movement — a merged PR keeps \
          its old lane until something else rebuilds"
     );
