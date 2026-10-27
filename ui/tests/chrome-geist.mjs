@@ -1,6 +1,8 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { installBoardWaits } from "./board-waits.mjs";
+import { boardScheduleFixture, installBoardSchedule, openBoardSchedule, SCHEDULE_NOW } from "./board-schedule.mjs";
 
 /* The window's chrome in the passed design 「또렷한 Geist」 (p-6893560125c34552,
  * the person 2026-10-28 02:5x; t-78107). Each scene below is one item of the
@@ -42,8 +44,341 @@ async function testGeistShips(browser, origin, ok) {
   }
 }
 
+/* The person's 10-27 window, in fixtures: a project at work with checkouts
+ * whose commits are not in main, five projects resting, one more at work,
+ * and agents in three tabs. Nobody's pane or file is read. */
+async function standChrome(page) {
+  await page.waitForFunction(() => projectsRead);
+  await page.evaluate(async () => {
+    setLocale("ko", { persist: false });
+    const tell = (name, payload) => { for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload }); };
+    const now = Date.now();
+    const unlanded = (ahead, over = {}) => ({ state: "unlanded", detached: false, ahead, dirty: false, dirty_checked_ms: now,
+      compare_ref: "origin/main", ref_updated_ms: now - 3_600_000, ...over });
+    const checkout = (path, branch, over = {}) => ({ path, branch, is_main: false, active: false, is_folder: false,
+      ownership: "zerocode-managed", external_hidden: false, last_activity_ms: now, ...over });
+    const resting = ["newbcr", "Obsidian", "ReguProof", "y", "zerocode-landing"];
+    window.__ANSWER__.project_catalog = () => [
+      { name: "zerocode", path: "/z", worktrees: [
+        checkout("/z", "main", { is_main: true, active: true }),
+        checkout("/z/wt/judgment", "wt/t-1/trace-judgment-provider-a-long-name-that-the-chips-used-to-cut", { landing: unlanded(3) }),
+        checkout("/z/wt/stack", "zo/v1199-stack", { landing: unlanded(6, { behind: 20, far_behind: true }) }),
+      ] },
+      ...resting.map((name) => ({ name, path: `/p/${name}`, worktrees: [checkout(`/p/${name}`, "main", { is_main: true })] })),
+      { name: "work", path: "/w", worktrees: [checkout("/w", "main", { is_main: true })] },
+    ];
+    window.__ANSWER__.set_sidebar_view = () => null;
+    setEveryProjectClosed(false);
+    startupProjectFoldsReady = true;
+    for (const name of resting) closedProjects.add(`/p/${name}`);
+    setSidebarView({ groupBy: "repo" });
+    for (const [worktree, agent] of [["/z", "claude"], ["/z", "zo"], ["/w", "zo"]]) {
+      const term = await openTermTab({ placement: "tab" });
+      tabOfTerm(term).worktree = worktree;
+      paneAgents.set(term, agent);
+      tell("hook:agent", { term, state: "working", agent, session: `s-${term}` });
+    }
+    await refreshWorktrees();
+    renderTabs();
+    await window.__PAINTED__();
+  });
+  await frames(page);
+}
+
+/* 2 · 3 · 5 · 6 · 7 · 10 of the design, read off one laid-out window. */
+async function testChromeSidebarAndTabs(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await standChrome(page);
+    const seen = await page.evaluate(() => {
+      const box = (node) => node.getBoundingClientRect();
+      const token = (name) => {
+        const probe = document.createElement("i");
+        probe.style.color = `var(${name})`;
+        document.body.appendChild(probe);
+        const value = getComputedStyle(probe).color;
+        probe.remove();
+        return value;
+      };
+      const nav = document.querySelector(".nav-rows");
+      const rows = [...nav.querySelectorAll(":scope > .nav-row")].filter((row) => !row.hidden);
+      const lines = new Set(rows.map((row) => Math.round(box(row).top)));
+      const tab = [...document.querySelectorAll(".tab")].find((one) => one.querySelector(".tab-age")?.textContent);
+      const label = tab?.querySelector(".tab-label");
+      const age = tab?.querySelector(".tab-age");
+      const dot = tab?.querySelector(".tab-dot");
+      const row = document.querySelector('.wt-row[data-worktree-path="/z/wt/judgment"]');
+      const title = row?.querySelector(".wt-title");
+      const chip = row?.querySelector(".wt-landing");
+      const chipStyle = chip ? getComputedStyle(chip) : null;
+      const resting = document.querySelector(".proj-resting");
+      return {
+        navLines: lines.size,
+        navRows: rows.length,
+        navHeight: Math.round(box(nav).height),
+        tabAge: age?.textContent ?? null,
+        ageAfterName: label && age ? Math.round(box(age).left - box(label).right) : null,
+        dotShown: dot ? getComputedStyle(dot).visibility === "visible" : false,
+        dotInk: dot ? getComputedStyle(dot).backgroundColor : null,
+        ready: token("--signal-ready"),
+        titleWhole: title ? title.scrollWidth <= title.clientWidth + 1 || box(title).width > box(row.querySelector(".wt-titlebox")).width - 2 : false,
+        chipUnderTitle: chip && title ? box(chip).top >= box(title).bottom - 1 : false,
+        chipInk: chipStyle?.color ?? null,
+        chipBorder: chipStyle?.borderTopColor ?? null,
+        wait: token("--signal-wait-ink"),
+        restingRows: document.querySelectorAll(".proj-resting").length,
+        restingWord: resting?.querySelector(".proj-resting-word")?.textContent ?? null,
+        restingHeaders: ["newbcr", "Obsidian"].filter((name) => document.querySelector(`.proj-row[data-project-path="/p/${name}"]`)).length,
+        workHeader: Boolean(document.querySelector('.proj-row[data-project-path="/w"]')),
+        heading: el("sidebar-title").textContent,
+        chatGround: token("--chat-ground"),
+        floor: token("--surface-abyss"),
+      };
+    });
+    ok("the seven destinations stand on two lines, not seven (시안 3)",
+      seen.navLines === 2 && seen.navRows >= 6, JSON.stringify(seen));
+    ok("a tab with an agent wears its state dot and how long it has run, right after its name (시안 2)",
+      seen.dotShown && seen.dotInk === seen.ready && /^(now|\d+[mhd])$/.test(seen.tabAge ?? "") && seen.ageAfterName !== null && seen.ageAfterName < 12,
+      JSON.stringify(seen));
+    ok("a checkout's name takes its whole line and its chips stand under it (시안 5)",
+      seen.titleWhole && seen.chipUnderTitle, JSON.stringify(seen));
+    ok("unlanded is a quiet number — not the wait ink, no box (시안 6)",
+      seen.chipInk !== null && seen.chipInk !== seen.wait && seen.chipBorder === "rgba(0, 0, 0, 0)", JSON.stringify(seen));
+    ok("the resting projects stand as one line, the projects at work keep their headers (시안 7)",
+      seen.restingRows === 1 && seen.restingWord === "쉬는 프로젝트 5" && seen.restingHeaders === 0 && seen.workHeader,
+      JSON.stringify(seen));
+    ok("the sidebar heading speaks the person's language (시안 7)", seen.heading === "프로젝트", seen.heading);
+    ok("the conversation stands on the floor, one step under the panels (시안 10)",
+      seen.chatGround === seen.floor, JSON.stringify(seen));
+
+    // The resting line opens with a press and with the keyboard, and says so.
+    const opened = await page.evaluate(async () => {
+      const row = document.querySelector(".proj-resting");
+      if (!row) return { expanded: null, headers: 0, isButton: false };
+      row.focus();
+      row.click();
+      await new Promise((done) => setTimeout(done, 50));
+      await window.__PAINTED__();
+      const again = document.querySelector(".proj-resting");
+      return {
+        expanded: again?.getAttribute("aria-expanded"),
+        headers: ["newbcr", "Obsidian"].filter((name) => document.querySelector(`.proj-row[data-project-path="/p/${name}"]`)).length,
+        isButton: again?.tagName === "BUTTON",
+      };
+    });
+    ok("the resting line is a button that opens the projects it stands for",
+      opened.isButton && opened.expanded === "true" && opened.headers === 2, JSON.stringify(opened));
+    ok("the chrome scene raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* 13 — a 14 px ring per provider, amber only past the hot line, never red —
+ * and t-77830: the tip a focused bar item shows reaches a screen reader. */
+async function testStatusGauges(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const seen = await page.evaluate(async () => {
+      const hour = 3_600_000;
+      const now = Date.now();
+      window.__USAGE__ = { provider: "claude", account: null, status: "ok", error: null, updated_at: now,
+        session: { used_percent: 12, window_minutes: 300, resets_at: now + 4 * hour },
+        weekly: { used_percent: 20, window_minutes: 10080, resets_at: now + 100 * hour } };
+      window.__CODEX_USAGE__ = { provider: "codex", account: null, status: "ok", error: null, updated_at: now,
+        session: { used_percent: 12, window_minutes: 300, resets_at: now + 4 * hour },
+        weekly: { used_percent: 99, window_minutes: 10080, resets_at: now + 142 * hour } };
+      await refreshClaudeUsage(false);
+      await refreshCodexUsage(false);
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const token = (name) => {
+        const probe = document.createElement("i");
+        probe.style.color = `var(${name})`;
+        document.body.appendChild(probe);
+        const value = getComputedStyle(probe).color;
+        probe.remove();
+        return value;
+      };
+      const face = (id) => {
+        const gauge = el(`${id}-bar`);
+        const style = getComputedStyle(gauge);
+        return {
+          size: [gauge.offsetWidth, gauge.offsetHeight],
+          round: style.borderRadius,
+          value: gauge.style.getPropertyValue("--gauge-value"),
+          sweep: style.backgroundImage,
+          tone: el(id).dataset.tone ?? null,
+          ink: getComputedStyle(el(`${id}-pct`)).color,
+        };
+      };
+      return { claude: face("sb-claude"), codex: face("sb-codex"), wait: token("--signal-wait-ink"),
+        halt: token("--signal-halt-ink"), size: getComputedStyle(document.documentElement).getPropertyValue("--gauge-size").trim() };
+    });
+    ok("each provider wears a ring the size of the gauge token, filled by its tightest window",
+      seen.claude.size.join() === "14,14" && seen.size === "14px" && seen.claude.round === "50%" &&
+        seen.claude.value === "20" && seen.codex.value === "99" && seen.claude.sweep.startsWith("conic-gradient"),
+      JSON.stringify(seen));
+    ok("only the nearly spent provider is amber, and not red even at 99 %",
+      seen.claude.tone === null && seen.codex.tone === "warn" && seen.codex.ink === seen.wait &&
+        seen.codex.ink !== seen.halt && seen.claude.ink !== seen.wait,
+      JSON.stringify(seen));
+
+    // t-77830: focused, the roster's tip is its description; blurred, it is not.
+    const cdp = await page.context().newCDPSession(page);
+    await page.evaluate(() => el("sb-usage-roster").focus());
+    const { root } = await cdp.send("DOM.getDocument");
+    const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector: "#sb-usage-roster" });
+    const { nodes } = await cdp.send("Accessibility.getPartialAXTree", { nodeId, fetchRelatives: false });
+    const described = await page.evaluate(() => ({
+      by: el("sb-usage-roster").getAttribute("aria-describedby") ?? "",
+      tip: document.querySelector(".tooltip")?.textContent ?? "",
+    }));
+    const description = nodes[0]?.description?.value ?? "";
+    await page.evaluate(() => el("sb-usage-roster").blur());
+    const after = await page.evaluate(() => el("sb-usage-roster").getAttribute("aria-describedby"));
+    ok("a focused status-bar item's tip reaches the accessibility tree as its description (t-77830)",
+      described.tip.length > 0 && description === described.tip && described.by.split(" ").includes("window-tooltip"),
+      JSON.stringify({ described, description }));
+    ok("the description goes with the tip (t-77830)", after === null, String(after));
+    ok("the gauge scene raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* 15 — the task board's head in three layers: the search in the title row,
+ * the schedule's range in the tab row, and the nav strip between them. */
+async function testBoardHead(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await installBoardWaits(page);
+    await page.clock.setFixedTime(new Date(SCHEDULE_NOW));
+    await page.evaluate(installBoardSchedule, await boardScheduleFixture());
+    await openBoardSchedule(page);
+    const read = () => page.evaluate(() => {
+      const box = (selector) => document.querySelector(`#board-view ${selector}`)?.getBoundingClientRect() ?? null;
+      const head = box(".agent-graph-head");
+      const search = box(".board-search");
+      const tabs = box(".board-now-tabs");
+      const zoom = box(".board-schedule-zoom");
+      const content = box(".board-schedule-head + *") ?? box(".board-schedule-chart");
+      const mid = (r) => r.top + r.height / 2;
+      return {
+        searchInHead: search.top >= head.top && search.bottom <= head.bottom,
+        zoomInTabs: Math.abs(mid(zoom) - mid(tabs)) <= 1 && zoom.right <= tabs.right,
+        zoomClearOfTabs: [...document.querySelectorAll("#board-view .board-now-tab")]
+          .every((tab) => tab.getBoundingClientRect().right <= zoom.left),
+        headToTabsEnd: Math.round(tabs.bottom - head.top),
+      };
+    });
+    const wide = await read();
+    ok("the board's search stands in its title row and the schedule's range in its tab row (시안 15)",
+      wide.searchInHead && wide.zoomInTabs && wide.zoomClearOfTabs, JSON.stringify(wide));
+    ok("the board's head is three layers, about 136 px from its top to the end of its tabs (시안 15)",
+      wide.headToTabsEnd <= 140, JSON.stringify(wide));
+    ok("the board head scene raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* 17 — a narrow window folds the tabs not on stage to their mark: the name
+ * leaves the eye and stays the tab's spoken name. */
+async function testNarrowFolds(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await standChrome(page);
+    const read = () => page.evaluate(() => [...document.querySelectorAll(".tab")].map((tab) => {
+      const label = tab.querySelector(".tab-label");
+      return {
+        active: tab.classList.contains("is-active"),
+        shown: label.getBoundingClientRect().width > 2,
+        spoken: label.textContent.length > 0 && getComputedStyle(label).display !== "none",
+      };
+    }));
+    const wide = await read();
+    await page.setViewportSize({ width: 1000, height: 900 });
+    await frames(page);
+    const narrow = await read();
+    ok("a wide window shows every tab's name (시안 17)", wide.every((tab) => tab.shown), JSON.stringify(wide));
+    ok("at 1000 px the tabs not on stage fold to their mark and keep their spoken name; the one on stage keeps its name (시안 17)",
+      narrow.filter((tab) => !tab.active).every((tab) => !tab.shown && tab.spoken) &&
+        narrow.filter((tab) => tab.active).every((tab) => tab.shown),
+      JSON.stringify(narrow));
+    ok("the fold scene raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* Both themes: what this pass turned quiet still reads (WCAG 4.5:1 for words). */
+async function testQuietContrast(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await standChrome(page);
+    for (const theme of ["dark", "light"]) {
+      const ratios = await page.evaluate(async (theme) => {
+        // The harness holds the window's clock still, so an eased colour change
+        // would be read at its first frame: the colours are read at rest.
+        if (!document.getElementById("contrast-at-rest")) {
+          const rest = document.createElement("style");
+          rest.id = "contrast-at-rest";
+          rest.textContent = "* { transition: none !important; }";
+          document.head.append(rest);
+        }
+        document.documentElement.dataset.theme = theme;
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        // `color-mix()` resolves to `color(srgb r g b / a)` on a 0–1 scale.
+        const rgb = (value) => {
+          const [r, g, b, a = 1] = value.replace(/^color\(srgb/, "").match(/[\d.]+/g).map(Number);
+          const scale = value.startsWith("color(") ? 255 : 1;
+          return [r * scale, g * scale, b * scale, a];
+        };
+        const groundOf = (node) => {
+          for (let at = node; at; at = at.parentElement) {
+            const [r, g, b, a] = rgb(getComputedStyle(at).backgroundColor);
+            if (a > 0.99) return [r, g, b];
+          }
+          return [0, 0, 0];
+        };
+        const lum = ([r, g, b]) => {
+          const c = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+          return 0.2126 * c(r) + 0.7152 * c(g) + 0.0722 * c(b);
+        };
+        const ratio = (node) => {
+          const ground = groundOf(node);
+          const [r, g, b, a] = rgb(getComputedStyle(node).color);
+          const ink = [r * a + ground[0] * (1 - a), g * a + ground[1] * (1 - a), b * a + ground[2] * (1 - a)];
+          const [hi, lo] = [lum(ink), lum(ground)].sort((x, y) => y - x);
+          return Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100;
+        };
+        return {
+          unlanded: ratio(document.querySelector('.wt-row[data-worktree-path="/z/wt/judgment"] .wt-landing')),
+          resting: ratio(document.querySelector(".proj-resting")),
+          heading: ratio(el("sidebar-title")),
+        };
+      }, theme);
+      ok(`the quiet unlanded number, the resting line and the heading read at 4.5:1 or more (${theme})`,
+        Object.values(ratios).every((value) => value >= 4.5), JSON.stringify(ratios));
+    }
+    ok("the contrast scene raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
 export async function testChromeGeist(browser, origin, ok) {
   await testGeistShips(browser, origin, ok);
+  await testChromeSidebarAndTabs(browser, origin, ok);
+  await testStatusGauges(browser, origin, ok);
+  await testBoardHead(browser, origin, ok);
+  await testNarrowFolds(browser, origin, ok);
+  await testQuietContrast(browser, origin, ok);
 }
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1] ?? "")).href) {
