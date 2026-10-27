@@ -2625,6 +2625,27 @@ impl ComputerMethod {
         matches!(self, Self::Click)
     }
 
+    /// Whether the verb is the desktop's hand: the pointer at screen points,
+    /// the keys where the focus is. It names no app (t-78095).
+    #[must_use]
+    pub const fn is_desktop_hand(self) -> bool {
+        self.moves_the_pointer() || matches!(self, Self::Key | Self::HoldKey | Self::Type)
+    }
+
+    /// The verb that does this desktop hand's act in an app it names: its
+    /// points count inside that app's window, its keys go to that app.
+    #[must_use]
+    pub const fn in_an_app(self) -> Option<Self> {
+        match self {
+            Self::MouseClick => Some(Self::Click),
+            Self::MouseDrag => Some(Self::Drag),
+            Self::MouseScroll => Some(Self::Scroll),
+            Self::Type => Some(Self::TypeText),
+            Self::Key => Some(Self::PressKey),
+            _ => None,
+        }
+    }
+
     /// The window verbs' one helper method takes the action by name.
     #[must_use]
     pub const fn window_action(self) -> Option<&'static str> {
@@ -3357,25 +3378,71 @@ impl RepeatUntil {
 pub fn parse_command_coded(
     argv: &[String],
 ) -> Result<ComputerCommand, crate::computer_use_protocol::ProviderError> {
-    parse_command(argv).map_err(crate::computer_use_protocol::ProviderError::invalid_argument)
+    use crate::computer_use_protocol::ProviderError;
+    let Some(verb) = argv.first().map(String::as_str) else {
+        return Err(ProviderError::invalid_argument(usage()));
+    };
+    if matches!(verb, "-h" | "--help" | "help") {
+        return Err(ProviderError::invalid_argument(usage()));
+    }
+    let Some(method) = verb_method(verb) else {
+        return Err(ProviderError::invalid_argument(format!(
+            "unknown computer-use command `{verb}`\n\n{}",
+            usage()
+        )));
+    };
+    let argv = flags_apart(argv).map_err(ProviderError::invalid_argument)?;
+    let flags = flags(&argv[1..]).map_err(ProviderError::invalid_argument)?;
+    if method.is_desktop_hand() && flags.contains_key("app") {
+        return Err(app_on_the_desktop_hand(method));
+    }
+    parse_flags(method, flags).map_err(ProviderError::invalid_argument)
 }
 
 /// Parse the public CLI without guessing or passing unknown flags onward.
 pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
-    let Some(verb) = argv.first().map(String::as_str) else {
-        return Err(usage());
+    parse_command_coded(argv).map_err(|refusal| refusal.message)
+}
+
+/// `--app` on the desktop's hand (t-73872: a point read off an app's picture
+/// sent to `mouse-click --app`): refused before anything moves, naming the
+/// verb that takes `--app` for the same act as `--help` spells it.
+fn app_on_the_desktop_hand(method: ComputerMethod) -> crate::computer_use_protocol::ProviderError {
+    let verb = method.verb_name();
+    let (hand, there) = if method.moves_the_pointer() {
+        (
+            "its points are screen points",
+            "a point inside an app's window",
+        )
+    } else {
+        ("its keys go where the focus is", "keys for an app")
     };
-    if matches!(verb, "-h" | "--help" | "help") {
-        return Err(usage());
+    let mut message = format!("`{verb}` is the desktop's hand: {hand}, and it takes no --app");
+    let spelled = method.in_an_app().and_then(|in_app| {
+        let begins = format!("{COMPUTER_CLI} {} --app <app>", in_app.verb_name());
+        usage()
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with(&begins))
+            .map(str::to_string)
+    });
+    if let Some(spelled) = spelled {
+        message.push_str(&format!(" — {there} is `{spelled}`"));
+        if method.moves_the_pointer() {
+            message.push_str(", whose points are window-local");
+        }
     }
-    let Some(method) = verb_method(verb) else {
-        return Err(format!(
-            "unknown computer-use command `{verb}`\n\n{}",
-            usage()
-        ));
-    };
-    let argv = flags_apart(argv)?;
-    let flags = flags(&argv[1..])?;
+    crate::computer_use_protocol::ProviderError::new(
+        crate::computer_use_protocol::error_code::WRONG_VERB,
+        message,
+    )
+}
+
+/// [`parse_command`] past its verb: the flags it was given, read and checked.
+fn parse_flags(
+    method: ComputerMethod,
+    flags: BTreeMap<String, Option<String>>,
+) -> Result<ComputerCommand, String> {
     let json = flags.contains_key("json");
     reject_unknown(method, &flags)?;
     if flags.contains_key("instant")
