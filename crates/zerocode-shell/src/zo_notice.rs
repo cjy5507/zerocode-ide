@@ -167,6 +167,10 @@ mod tests {
                     Err(error) => panic!("accept: {error}"),
                 }
             };
+            // On macOS the accepted stream inherits the listener's non-blocking
+            // mode, and a read before the notice's bytes land answered
+            // `WouldBlock` (l81g g2c): the fixture's peer is waited for.
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
             stream.set_write_timeout(Some(HANG_GUARD)).unwrap();
             let mut line = String::new();
