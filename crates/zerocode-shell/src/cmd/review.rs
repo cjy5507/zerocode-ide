@@ -285,9 +285,10 @@ pub(crate) fn list_automations(state: State<'_, AppState>) -> Vec<AutomationRow>
             let next = automation
                 .next_unconsumed_run(now)
                 .map(|minute| minute.epoch_minutes);
+            // A gap row stands for nights it did not run.
             let runs = history
                 .iter()
-                .filter(|run| run.automation_id == automation.id)
+                .filter(|run| run.automation_id == automation.id && run.missed.is_none())
                 .count();
             AutomationRow {
                 cron: automation.schedule.to_cron(),
@@ -324,6 +325,9 @@ pub(crate) fn save_automation(
     // firing ignores it. Storing the truth means the two agree.
     automation.reuse_session =
         reuse_normalized(automation.workspace_mode, automation.reuse_session);
+    // A save arms the job: what the schedule said before it is not something
+    // this schedule can have missed.
+    automation.armed_at = Some(local_minute_now().epoch_minutes);
     let automation_id = automation.id.clone();
     let mut domain = automation_store_domain();
     let mut rows = stored_automations(state.config_root());

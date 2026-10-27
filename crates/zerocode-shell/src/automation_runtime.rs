@@ -944,7 +944,10 @@ pub(super) fn live_session_of(
         .iter()
         .rev()
         .filter(|run| {
-            run.automation_id == automation.id && run.skipped.is_none() && run.failure.is_none()
+            run.automation_id == automation.id
+                && run.skipped.is_none()
+                && run.failure.is_none()
+                && run.missed.is_none()
         })
         .filter(|run| run.root == here)
         .map(|run| run.term)
@@ -1216,6 +1219,14 @@ fn close_runs_nobody_saw_end(state: &AppState) {
     }
 }
 
+/// Write down a gap the window was not running through: one row for all of
+/// it, which runs nothing and spends no schedule.
+///
+/// The gap is counted again here, under the store lock, from the documents
+/// as they are now: the tick read both before this, and a job deleted,
+/// switched off or already written up since owns no new row. `last_run_at`
+/// is left where it was. The row's occurrence fences the gap in the ledger,
+/// and the schedule's last run is still the last time it ran.
 pub(super) fn remember_missed_runs(
     config_root: &Path,
     local_data_root: &Path,
@@ -1223,14 +1234,65 @@ pub(super) fn remember_missed_runs(
     now: LocalMinute,
     now_epoch_ms: i64,
 ) -> Result<Option<MissedRuns>, String> {
-    let _ = (
-        config_root,
-        local_data_root,
-        automation_id,
-        now,
-        now_epoch_ms,
+    let _store = automation_store_domain();
+    let Some(automation) = stored_automations(config_root)
+        .into_iter()
+        .find(|held| held.id == automation_id)
+    else {
+        return Ok(None);
+    };
+    let mut history = stored_automation_runs(local_data_root);
+    let recorded = newest_recorded_occurrence(&history, automation_id);
+    let Some(gap) = automation.missed_past_grace(now, recorded) else {
+        return Ok(None);
+    };
+    let row = missed_run_row(&automation, gap, now, now_epoch_ms);
+    let forgotten = record_run(&mut history, row, RUNS_KEPT_PER_AUTOMATION);
+    write_automation_runs(local_data_root, &history)?;
+    forget_run_evidence(local_data_root, &forgotten);
+    artifact_runtime::forget_evidence(
+        &forgotten
+            .iter()
+            .filter_map(|run| run.evidence_dir.as_deref().map(PathBuf::from))
+            .collect::<Vec<_>>(),
     );
-    Ok(None)
+    Ok(Some(gap))
+}
+
+/// The history row for a gap, dated at its last night, the one a reader goes
+/// looking for. `term` is `FLOAT_TERM` for the reason a skip's is: no shell
+/// was opened. The id names the job as well as the minute, because two jobs
+/// due at the same 19:00 miss it together.
+fn missed_run_row(
+    automation: &Automation,
+    gap: MissedRuns,
+    now: LocalMinute,
+    now_epoch_ms: i64,
+) -> AutomationRun {
+    let minutes_back = now.epoch_minutes - gap.last.epoch_minutes;
+    let at_epoch_ms = (now_epoch_ms.div_euclid(60_000) - minutes_back) * 60_000;
+    AutomationRun {
+        id: format!("{at_epoch_ms}-missed-{}", automation.id),
+        automation_id: automation.id.clone(),
+        scheduled_for_epoch_minutes: Some(gap.last.epoch_minutes),
+        at_epoch_ms,
+        root: automation.workspace.clone(),
+        term: FLOAT_TERM,
+        made_worktree: None,
+        skipped: None,
+        failure: None,
+        missed: Some(MissedRecord {
+            count: gap.count,
+            first_epoch_minutes: gap.first.epoch_minutes,
+        }),
+        ended_at_epoch_ms: None,
+        exit_code: None,
+        completed_at_epoch_ms: None,
+        result: None,
+        evidence_dir: None,
+        launch: None,
+        unwitnessed: false,
+    }
 }
 
 pub(super) fn tick_automations(app: &AppHandle, now: LocalMinute) {
@@ -1238,6 +1300,35 @@ pub(super) fn tick_automations(app: &AppHandle, now: LocalMinute) {
     close_runs_nobody_saw_end(&state);
     let history = stored_automation_runs(state.local_data_root());
     for automation in stored_automations(state.config_root()) {
+        // Told the way a skip is, as a row to refresh the list for and not as
+        // an alarm: a laptop shut overnight is not a fault, and a toast every
+        // morning would make the scheduler something to switch off.
+        let recorded = newest_recorded_occurrence(&history, &automation.id);
+        if automation.missed_past_grace(now, recorded).is_some() {
+            match remember_missed_runs(
+                state.config_root(),
+                state.local_data_root(),
+                &automation.id,
+                now,
+                now_epoch_ms(),
+            ) {
+                Ok(Some(_)) => {
+                    let _ = app.emit(
+                        "automation:skipped",
+                        AutomationSkipped {
+                            id: automation.id.clone(),
+                        },
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!(
+                        "자동화 {}: 놓친 실행을 적지 못했습니다: {error}",
+                        automation.name
+                    );
+                }
+            }
+        }
         let due = if automation.is_due(now) {
             Some(now)
         } else {
@@ -1288,7 +1379,8 @@ pub(super) fn tick_automations(app: &AppHandle, now: LocalMinute) {
     }
 }
 
-/// Switch one on or off without touching anything else about it.
+/// Switch one on or off without touching anything else about it, except that
+/// switching it on arms it: the nights it was off are not nights it missed.
 pub(super) fn set_automation_enabled_in(
     config_root: &Path,
     id: &str,
@@ -1299,6 +1391,9 @@ pub(super) fn set_automation_enabled_in(
     let Some(held) = rows.iter_mut().find(|held| held.id == id) else {
         return Err(format!("자동화 {id}을(를) 찾지 못했습니다"));
     };
+    if enabled && !held.enabled {
+        held.armed_at = Some(local_minute_now().epoch_minutes);
+    }
     held.enabled = enabled;
     write_automations(config_root, &rows)?;
     domain.current_or_mint(id);

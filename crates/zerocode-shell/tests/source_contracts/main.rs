@@ -18540,11 +18540,11 @@ mod tests {
         assert!(
             listing.contains("    let history = stored_automation_runs(state.local_data_root());")
                 && listing.contains(
-                    "            let runs = history\n                .iter()\n                .filter(|run| run.automation_id == automation.id)\n                .count();"
+                    "            let runs = history\n                .iter()\n                .filter(|run| run.automation_id == automation.id && run.missed.is_none())\n                .count();"
                 ),
-            "a row no longer says how many times its job has run, so a schedule \
-             that has never worked reads the same as one that runs \
-             nightly:\n{listing}"
+            "a row no longer says how many times its job has run, or counts the \
+             nights it did not run as runs, so a schedule that has never worked \
+             reads the same as one that runs nightly:\n{listing}"
         );
 
         // The history one job can show, newest first — the question it answers
@@ -19018,11 +19018,14 @@ mod tests {
         );
 
         // The window tells the two apart, and asks about the skip FIRST — a
-        // stopped firing's term is a placeholder, not a shell to jump to.
+        // stopped firing's term is a placeholder, not a shell to jump to, and
+        // so is a missed night's (t-77376).
         let painting = block_after(window, "function paintAutomationRuns() {");
         assert!(
-            painting.contains("    const tab = run.skipped ? null : tabOfTerm(run.term);"),
-            "the list offers a way into a shell a stopped firing never \
+            painting.contains(
+                "    const tab = run.skipped || run.missed ? null : tabOfTerm(run.term);"
+            ),
+            "the list offers a way into a shell a stopped firing or a missed night never \
              opened:\n{painting}"
         );
         assert!(
@@ -19217,10 +19220,11 @@ mod tests {
 
         let listing = block_after(window, "function paintAutomationRuns() {");
         assert!(
-            listing.contains("    const tab = run.skipped ? null : tabOfTerm(run.term);")
-                && listing.contains("    const openableTab = run.failure ? null : tab;")
+            listing.contains(
+                "    const tab = run.skipped || run.missed ? null : tabOfTerm(run.term);"
+            ) && listing.contains("    const openableTab = run.failure ? null : tab;")
                 && listing.contains("    if (openableTab) {"),
-            "the way back is offered for skipped/failed runs or without a live \
+            "the way back is offered for skipped/missed/failed runs or without a live \
              shell, which mounts a fresh tab around a dead pty:\n{listing}"
         );
         assert!(

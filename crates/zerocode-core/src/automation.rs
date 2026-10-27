@@ -373,14 +373,56 @@ impl Automation {
         })
     }
 
+    /// The occurrences that went by with nothing to run them and are now
+    /// past making up, or `None`.
+    ///
+    /// [`Self::missed_run`] makes up the newest occurrence still inside the
+    /// grace window; an older one used to vanish without a row, so the
+    /// morning after a night the window was shut its history said nothing at
+    /// all (t-77376). These are the ones to write down instead.
+    ///
+    /// Counted after the latest of three floors, none of them a missed night:
+    /// the last consumed occurrence, the newest one the ledger already holds
+    /// (`recorded_through`, which is how a written gap stays written once),
+    /// and [`Self::armed_at`]. With none of them known there is nowhere to
+    /// count from, and nothing is reported.
     #[must_use]
     pub fn missed_past_grace(
         &self,
         now: LocalMinute,
         recorded_through: Option<i64>,
     ) -> Option<MissedRuns> {
-        let _ = (now, recorded_through);
-        None
+        if !self.enabled {
+            return None;
+        }
+        let floor = [self.last_run_at, self.armed_at, recorded_through]
+            .into_iter()
+            .flatten()
+            .max()?;
+        let cron = Cron::parse(&self.schedule.to_cron())?;
+        // The newest minute already out of reach: `missed_run` still owns the
+        // grace window, and `is_due` owns `now`.
+        let newest = now.epoch_minutes - i64::from(self.missed_run_grace_minutes) - 1;
+        let oldest = floor
+            .saturating_add(1)
+            .max(newest - MISSED_LOOKBACK_MINUTES + 1);
+        (oldest..=newest)
+            .map(|epoch_minutes| LocalMinute { epoch_minutes })
+            .filter(|minute| cron.matches(*minute))
+            .fold(None, |gap: Option<MissedRuns>, minute| {
+                Some(match gap {
+                    Some(seen) => MissedRuns {
+                        last: minute,
+                        count: seen.count + 1,
+                        ..seen
+                    },
+                    None => MissedRuns {
+                        first: minute,
+                        last: minute,
+                        count: 1,
+                    },
+                })
+            })
     }
 }
 
@@ -734,7 +776,10 @@ pub fn mark_completed(
 pub const RUNS_KEPT_PER_AUTOMATION: usize = 100;
 
 fn run_is_final(run: &AutomationRun) -> bool {
-    run.skipped.is_some() || run.failure.is_some() || run.ended_at_epoch_ms.is_some()
+    run.skipped.is_some()
+        || run.failure.is_some()
+        || run.missed.is_some()
+        || run.ended_at_epoch_ms.is_some()
 }
 
 /// Keep the newest `cap` final rows per automation without pruning live runs.
@@ -854,6 +899,7 @@ pub fn close_unwitnessed(
     for run in runs.iter_mut() {
         if run.skipped.is_some()
             || run.failure.is_some()
+            || run.missed.is_some()
             || run.ended_at_epoch_ms.is_some()
             || is_live(run.term)
         {

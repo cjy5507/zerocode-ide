@@ -10865,8 +10865,9 @@ function paintAutomationCalendar() {
     if (historyRunsOnDate.length > 0) {
       const dots = document.createElement("div");
       dots.className = "auto-cal-dots";
-      const hasSuccess = historyRunsOnDate.some((r) => !r.failure);
+      const hasSuccess = historyRunsOnDate.some((r) => !r.failure && !r.missed);
       const hasFail = historyRunsOnDate.some((r) => r.failure);
+      const hasMissed = historyRunsOnDate.some((r) => r.missed);
       if (hasSuccess) {
         const dot = document.createElement("span");
         dot.className = "auto-cal-dot is-success";
@@ -10877,6 +10878,12 @@ function paintAutomationCalendar() {
         const dot = document.createElement("span");
         dot.className = "auto-cal-dot is-fail";
         dot.dataset.tip = t("auto.hasFail", "실패한 실행 있음");
+        dots.appendChild(dot);
+      }
+      if (hasMissed) {
+        const dot = document.createElement("span");
+        dot.className = "auto-cal-dot is-missed";
+        dot.dataset.tip = t("auto.hasMissed", "놓친 실행 있음");
         dots.appendChild(dot);
       }
       head.appendChild(dots);
@@ -11072,6 +11079,7 @@ function paintCalendarSelectedPanel(rows) {
     for (const run of historyRunsOnSelected) {
       const parentAuto = automations.find((a) => a.id === run.automation_id);
       const isFail = Boolean(run.failure);
+      const isMissed = Boolean(run.missed);
       const hItem = document.createElement("div");
       hItem.className = "auto-cal-selected-item";
 
@@ -11079,7 +11087,7 @@ function paintCalendarSelectedPanel(rows) {
       left.className = "auto-cal-selected-left";
 
       const dot = document.createElement("span");
-      dot.className = `auto-cal-dot ${isFail ? "is-fail" : "is-success"}`;
+      dot.className = `auto-cal-dot ${isFail ? "is-fail" : isMissed ? "is-missed" : "is-success"}`;
       dot.style.width = "8px";
       dot.style.height = "8px";
       dot.style.flex = "none";
@@ -11093,7 +11101,12 @@ function paintCalendarSelectedPanel(rows) {
 
       const subSpan = document.createElement("span");
       subSpan.className = "auto-cal-selected-sub";
-      subSpan.textContent = `${isFail ? t("auto.runError", "실행 실패") : t("auto.runSuccess", "실행 완료")} · ${basename(run.root || "")}`;
+      const verdict = isFail
+        ? t("auto.runError", "실행 실패")
+        : isMissed
+          ? t("auto.runMissed", "놓침 — 그 시각에 창이 돌지 않음")
+          : t("auto.runSuccess", "실행 완료");
+      subSpan.textContent = `${verdict} · ${basename(run.root || "")}`;
 
       info.append(nameSpan, subSpan);
       left.append(dot, info);
@@ -11233,6 +11246,20 @@ function paintAutomationRuns() {
           : `exit ${run.skipped.exit_code ?? "?"}`,
         run.skipped.output,
       ].filter(Boolean).join("\n");
+    } else if (run.missed) {
+      // Nights the window was not running for (t-77376). The row is dated at
+      // the last of them; the first is in the tip.
+      state.className = "auto-run-missed";
+      if (run.missed.count > 1) {
+        state.textContent = t("auto.runMissedMany", "놓침 {{n}}회 — 그 시각에 창이 돌지 않음", {
+          n: run.missed.count,
+        });
+        const first = run.at_epoch_ms
+          - (run.scheduled_for_epoch_minutes - run.missed.first_epoch_minutes) * 60000;
+        state.dataset.tip = t("auto.runMissedFirst", "처음 놓친 회차 {{at}}", { at: runClock(first) });
+      } else {
+        state.textContent = t("auto.runMissed", "놓침 — 그 시각에 창이 돌지 않음");
+      }
     } else if (run.ended_at_epoch_ms) {
       state.className = "auto-run-ended";
       if (run.exit_code === 0) {
@@ -11278,7 +11305,7 @@ function paintAutomationRuns() {
     }
     const actions = document.createElement("span");
     actions.className = "auto-run-actions";
-    const tab = run.skipped ? null : tabOfTerm(run.term);
+    const tab = run.skipped || run.missed ? null : tabOfTerm(run.term);
     const openableTab = run.failure ? null : tab;
     if (openableTab) {
       const open = document.createElement("button");

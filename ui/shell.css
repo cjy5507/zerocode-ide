@@ -24334,6 +24334,10 @@ progress:indeterminate::-webkit-progress-bar {
   background: var(--diff-del);
 }
 
+.auto-cal-dot.is-missed {
+  background: var(--signal-wait);
+}
+
 .auto-cal-history-section {
   display: flex;
   flex-direction: column;
@@ -25247,6 +25251,15 @@ progress:indeterminate::-webkit-progress-bar {
  * because those two are the row's answer to "and then what happened" and only
  * one of them is ever true. */
 .auto-run-skipped {
+  flex: none;
+  color: var(--ink-chalk);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+/* A night the window was not running for, in that same slot and the same
+ * quiet ink: nothing ran, and nothing failed. */
+.auto-run-missed {
   flex: none;
   color: var(--ink-chalk);
   font-size: var(--text-2xs);
