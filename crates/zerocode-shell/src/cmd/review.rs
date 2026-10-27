@@ -301,7 +301,8 @@ pub(crate) fn list_automations(state: State<'_, AppState>) -> Vec<AutomationRow>
         .collect()
 }
 
-/// Add a job or replace one, by id.
+/// Add a job or replace one, by id — through [`save_automation_in`], the
+/// door every writer of a job uses.
 ///
 /// # Errors
 ///
@@ -311,8 +312,19 @@ pub(crate) fn list_automations(state: State<'_, AppState>) -> Vec<AutomationRow>
 #[tauri::command(async)]
 pub(crate) fn save_automation(
     state: State<'_, AppState>,
-    mut automation: Automation,
+    automation: Automation,
 ) -> Result<Vec<AutomationRow>, String> {
+    save_automation_in(state.config_root(), automation)?;
+    Ok(list_automations(state))
+}
+
+/// The save behind [`save_automation`], for every writer of a job: the second
+/// brain's weekly review is written through it too (t-77377), so it is
+/// checked, armed and locked like one the person typed.
+pub(crate) fn save_automation_in(
+    config_root: &Path,
+    mut automation: Automation,
+) -> Result<(), String> {
     let cron = automation.schedule.to_cron();
     if Cron::parse(&cron).is_none() {
         return Err(format!("일정을 읽을 수 없습니다: {cron}"));
@@ -330,7 +342,7 @@ pub(crate) fn save_automation(
     automation.armed_at = Some(local_minute_now().epoch_minutes);
     let automation_id = automation.id.clone();
     let mut domain = automation_store_domain();
-    let mut rows = stored_automations(state.config_root());
+    let mut rows = stored_automations(config_root);
     // And which agent, on the same terms the editor offers: a first save may
     // only name one this build knows, while an edit keeps the unrecognised id
     // it was already carrying. The rule and its reasoning live in
@@ -355,14 +367,14 @@ pub(crate) fn save_automation(
         }
         None => rows.push(automation),
     }
-    write_automations(state.config_root(), &rows)?;
+    write_automations(config_root, &rows)?;
     if is_new {
         domain.replace_incarnation(&automation_id);
     } else {
         domain.current_or_mint(&automation_id);
     }
     drop(domain);
-    Ok(list_automations(state))
+    Ok(())
 }
 
 /// Take a job off the schedule for good, together with its run history.

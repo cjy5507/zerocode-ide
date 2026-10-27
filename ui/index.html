@@ -5336,15 +5336,15 @@
               <span id="second-brain-ingest-warning-text"></span>
               <button class="integration-context-action" id="second-brain-ingest-on" type="button" data-i18n="settings.secondBrain.ingestTurnOn">켜기</button>
             </p>
-            <!-- 산문 절반의 lint: 스킬의 주간 리뷰를 볼트의 zo cron 등록부에 앉힌다.
-                 볼트를 연 zo 판이 쉬는 동안 유휴 드라이버(t-2901)가 턴을 열고,
-                 영수증 줄이 그 스케줄러를 이름 짓는다. 옵트인이다. -->
+            <!-- 산문 절반의 lint: 스킬의 주간 리뷰를 창 자동화로 돌린다(t-77377).
+                 매주 일요일 06:00 볼트에서 zo 턴을 열고 끝나면 판을 닫으며,
+                 영수증 줄이 그 일의 다음·마지막 실행을 말한다. 옵트인이다. -->
             <label class="settings-check" id="second-brain-weekly-review-field">
               <input type="checkbox" id="second-brain-weekly-review" />
-              <span class="settings-label" data-i18n="settings.secondBrain.weeklyReview">주간 리뷰를 zo cron 턴으로 실행</span>
+              <span class="settings-label" data-i18n="settings.secondBrain.weeklyReview">주간 리뷰를 창 자동화로 실행</span>
             </label>
             <p class="settings-hint" data-i18n="settings.secondBrain.weeklyReviewHint">
-              볼트를 연 zo 판이 쉬는 동안 매주 한 번 스킬의 주간 리뷰를 돌려 색인·링크만 고치고 wiki/log.md에 한 줄을 남깁니다.
+              매주 일요일 06:00 볼트에서 zo 턴을 열어 스킬의 주간 리뷰로 색인·링크만 고치고 wiki/log.md에 한 줄을 남깁니다. 실행 기록은 자동화 목록에 남습니다.
             </p>
             <p class="settings-hint" id="second-brain-weekly-review-receipt" role="status" aria-live="polite" hidden></p>
             <!-- raw 받은편지함(t-43992): 에이전트가 이 창의 브라우저로 통째로 읽은 바깥

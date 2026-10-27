@@ -3583,16 +3583,18 @@ fn main() -> ExitCode {
             // Where the second brain is, before anything can open a pane. Every
             // later settings write republishes it (`mutate_settings`); this one
             // read is what carries the last run's answer across a restart.
-            let saved_vault = load_settings_resilient(app.state::<AppState>().settings())
-                .document
-                .second_brain_vault;
+            let settings = load_settings_resilient(app.state::<AppState>().settings()).document;
+            let weekly_review = settings.second_brain_weekly_review;
+            let saved_vault = settings.second_brain_vault;
             hooks::publish_second_brain_vault(&saved_vault);
             // And the agents' global instructions say the same: the block
             // setup wrote, written again for a vault saved before this road
             // existed or an agent installed since — idempotent, off the boot
-            // path.
+            // path. A weekly review an older build switched on becomes the
+            // window's job on the same road (t-77377).
             cmd::second_brain::relink_saved_vault_at_boot(
                 saved_vault,
+                weekly_review,
                 app.state::<AppState>().config_root().to_path_buf(),
                 local_data_root.clone(),
             );

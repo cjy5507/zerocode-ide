@@ -124,16 +124,12 @@ pub const CLAUDE_INCLUDE: &str = "@AGENTS.md\n";
 /// of them sets and the others never find.
 pub const VAULT_ENV: &str = "ZEROCODE_SECOND_BRAIN";
 
-/// The name the weekly review's cron record carries in a zo cron registry —
-/// its `description`, which is how the window finds its own record again
-/// (`zo cron ensure|show|remove --description`). Spelled here and nowhere
-/// else, like the guide markers below.
+/// The name the weekly review carried in a vault's zo cron registry — its
+/// `description` — before the window ran it (t-77377). Kept to find that
+/// record and retire it (`zo cron remove --description`), and in the
+/// prompt, where it names the run. Spelled here and nowhere else, like the
+/// guide markers below.
 pub const WEEKLY_REVIEW_CRON_MARKER: &str = "zerocode:second-brain:weekly-review";
-
-/// When the weekly review fires — five-field cron, **UTC minutes** (zo's
-/// registry matches UTC): Saturday 21:00 UTC is Sunday 06:00 in Seoul, a
-/// quiet hour before the week's first session.
-pub const WEEKLY_REVIEW_SCHEDULE: &str = "0 21 * * 6";
 
 /// The weekly review's job in the window's automation list (t-77377): its
 /// id, which is how the switch finds the job again and the folder its
@@ -141,13 +137,22 @@ pub const WEEKLY_REVIEW_SCHEDULE: &str = "0 21 * * 6";
 /// name may carry.
 pub const WEEKLY_REVIEW_AUTOMATION_ID: &str = "second-brain-weekly-review";
 
-/// When the window runs the weekly review.
+/// When the window runs the weekly review: Sunday at 06:00, a quiet hour
+/// before the week's first session. The window's scheduler reads the
+/// machine's own clock, so this is the person's Sunday morning wherever the
+/// machine is; the zo registry it replaces matched UTC, and its
+/// `0 21 * * 6` was that hour in Seoul alone.
 #[must_use]
 pub fn weekly_review_schedule() -> crate::automation::Schedule {
-    crate::automation::Schedule::default()
+    crate::automation::Schedule {
+        cadence: crate::automation::Cadence::Weekly,
+        time: "06:00".to_string(),
+        day_of_week: 0,
+        custom: String::new(),
+    }
 }
 
-/// The turn the cron opens — the skill's 「주간 리뷰」 for an absent person:
+/// The turn the review's job opens — the skill's 「주간 리뷰」 for an absent person:
 /// read the week's log, find what the review looks for, fix links and the
 /// index only, leave one log line, ask nothing. `vault` is written in so the
 /// turn does not have to trust its environment to know where the brain is.
@@ -727,8 +732,6 @@ mod tests {
         assert!(prompt.contains("정확히 한 줄"));
         assert!(prompt.contains("질문하지 말고"));
         assert!(prompt.contains(WIKI_LOG_FILE) && prompt.contains(WIKI_INDEX_FILE));
-        // Five fields, and a real minute: what zo's registry validates.
-        assert_eq!(WEEKLY_REVIEW_SCHEDULE.split_whitespace().count(), 5);
     }
 
     /// The window runs the review at six on Sunday morning by the machine's

@@ -18397,7 +18397,7 @@ mod tests {
             "automation launch precedence drifted:\n{starting}"
         );
 
-        let saving = block_after(backend, "fn save_automation(");
+        let saving = block_after(backend, "fn save_automation_in(");
         assert!(
             saving.contains("automation.validate_for_save()?;"),
             "blank workspace/prompt or invalid custom quoting can be stored"
@@ -19103,7 +19103,7 @@ mod tests {
 
         // Normalised on the way in as well as at the firing, so the switch the
         // form shows and the behaviour the job gets cannot disagree.
-        let saving = block_after(shipped, "fn save_automation(");
+        let saving = block_after(shipped, "fn save_automation_in(");
         assert!(
             saving.contains(
                 &[
@@ -23049,7 +23049,7 @@ mod tests {
     #[test]
     fn a_schedule_that_will_not_parse_is_refused_at_the_door() {
         let backend = shipped_backend();
-        let saving = block_after(backend, "fn save_automation(");
+        let saving = block_after(backend, "fn save_automation_in(");
         assert!(
             saving.contains("Cron::parse(&cron).is_none()") && saving.contains("return Err("),
             "an unparseable schedule is stored:\n{saving}"
@@ -23081,7 +23081,13 @@ mod tests {
     #[test]
     fn an_agent_this_build_cannot_resolve_is_refused_at_the_door() {
         let backend = shipped_backend();
-        let saving = block_after(backend, "fn save_automation(");
+        let saving = block_after(backend, "fn save_automation_in(");
+
+        assert!(
+            block_after(backend, "fn save_automation(")
+                .contains("    save_automation_in(state.config_root(), automation)?;"),
+            "the editor's save no longer goes through the door these lines pin"
+        );
 
         // The guard is pinned WHOLE — its lines, their order, and their exact
         // indentation at the function's own depth — because substring pins

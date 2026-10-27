@@ -10133,16 +10133,9 @@ function normalizeSecondBrainReport(answer) {
     weeklyReview: answer?.weekly_review && typeof answer.weekly_review === "object"
       ? {
           registered: answer.weekly_review.registered === true,
-          cronId: answer.weekly_review.cron_id == null ? null : String(answer.weekly_review.cron_id),
-          schedule: answer.weekly_review.schedule == null ? null : String(answer.weekly_review.schedule),
-          nextDueAt: Number.isFinite(Number(answer.weekly_review.next_due_at))
-            && answer.weekly_review.next_due_at != null
-            ? Number(answer.weekly_review.next_due_at)
-            : null,
-          scheduler: answer.weekly_review.scheduler == null ? null : String(answer.weekly_review.scheduler),
-          registry: answer.weekly_review.registry == null ? null : String(answer.weekly_review.registry),
-          outcome: answer.weekly_review.outcome == null ? null : String(answer.weekly_review.outcome),
-          error: answer.weekly_review.error == null ? null : String(answer.weekly_review.error),
+          enabled: answer.weekly_review.enabled === true,
+          nextRunAt: localMinuteOrNull(answer.weekly_review.next_run_at),
+          lastRunAt: localMinuteOrNull(answer.weekly_review.last_run_at),
         }
       : null,
     dailyIngest: answer?.daily_ingest && typeof answer.daily_ingest === "object"
@@ -10163,8 +10156,9 @@ function localMinuteOrNull(value) {
 }
 
 /* 주간 리뷰 스위치와 그 영수증 줄. 스위치는 설정(`second_brain_weekly_review`)을
- * 비추고, 줄은 볼트의 zo 등록부가 답한 것을 — 어느 스케줄러가 언제 여는지 — 그대로
- * 말한다. 켜져 있는데 기록이 없으면 그렇다고 말한다; 켜진 스위치가 열리지 않을
+ * 비추고, 줄은 창의 자동화 목록이 그 일을 어떻게 들고 있는지를 — 다음에 언제
+ * 돌고 마지막에 언제 돌았는지를 — 그대로 말한다(t-77377). 켜져 있는데 일이
+ * 없거나 자동화 목록에서 꺼져 있으면 그렇다고 말한다; 켜진 스위치가 열리지 않을
  * 턴을 약속하는 것이 이 카드가 하지 않을 일이다. */
 function paintSecondBrainWeeklyReview() {
   const box = el("second-brain-weekly-review");
@@ -10178,22 +10172,27 @@ function paintSecondBrainWeeklyReview() {
     return;
   }
   line.hidden = false;
-  if (receipt?.error) {
-    say(line, () => t("settings.secondBrain.reviewFailed", "주간 리뷰 cron을 확인하지 못했습니다: {{detail}}", {
-      detail: receipt.error,
-    }));
-  } else if (receipt?.registered) {
+  if (receipt?.registered && receipt.enabled) {
     say(line, () => t(
       "settings.secondBrain.reviewRegistered",
-      "{{scheduler}} 스케줄러에 등록됨 · {{schedule}} (UTC) · 다음 실행 {{when}}",
+      "창 자동화로 등록됨 · 다음 실행 {{next}} · 마지막 실행 {{last}}",
       {
-        scheduler: receipt.scheduler ?? "?",
-        schedule: receipt.schedule ?? "?",
-        when: receipt.nextDueAt === null ? "?" : new Date(receipt.nextDueAt * 1000).toLocaleString(),
+        next: receipt.nextRunAt === null ? "?" : localMinuteText(receipt.nextRunAt),
+        last: receipt.lastRunAt === null
+          ? t("settings.secondBrain.reviewNever", "아직 없음")
+          : localMinuteText(receipt.lastRunAt),
       },
     ));
+  } else if (receipt?.registered) {
+    say(line, () => t(
+      "settings.secondBrain.reviewPaused",
+      "자동화 목록에서 꺼져 있습니다 · 거기서 켜거나 스위치를 껐다 다시 켜 주세요",
+    ));
   } else {
-    say(line, () => t("settings.secondBrain.reviewMissing", "볼트의 zo cron 등록부에 기록이 없습니다 · 스위치를 껐다 다시 켜 주세요"));
+    say(line, () => t(
+      "settings.secondBrain.reviewMissing",
+      "자동화 목록에 주간 리뷰가 없습니다 · 스위치를 껐다 다시 켜 주세요",
+    ));
   }
 }
 
@@ -10467,8 +10466,8 @@ el("second-brain-link").addEventListener("click", () => {
 });
 el("second-brain-install").addEventListener("click", () => openExternal(OBSIDIAN_URL));
 el("second-brain-weekly-review").addEventListener("change", (event) => {
-  // 그림이 먼저, 쓰기는 그 뒤 — 다른 스위치와 같다. 백엔드는 zo가 볼트의
-  // 등록부에 기록을 앉힌 뒤에야 설정을 쓰고, 거절되면 스냅샷이 스위치를
+  // 그림이 먼저, 쓰기는 그 뒤 — 다른 스위치와 같다. 백엔드는 창의 일을 자동화
+  // 목록에 쓰거나 걷은 뒤에야 설정을 쓰고, 거절되면 스냅샷이 스위치를
   // 되돌린다. 성공하면 상태를 다시 물어 영수증 줄을 채운다.
   const enabled = event.target.checked;
   secondBrainWeeklyReview = enabled;

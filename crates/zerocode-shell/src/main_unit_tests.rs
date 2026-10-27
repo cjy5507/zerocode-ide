@@ -15058,7 +15058,7 @@ fn concurrent_automation_mutations_merge_and_a_delete_tombstones_stale_runs() {
 
     let source = shipped_backend();
     for mutation in [
-        "fn save_automation(",
+        "fn save_automation_in(",
         "fn delete_automation_and_run_history(",
         "fn set_automation_enabled_in(",
         "fn remember_run(",
@@ -15249,7 +15249,7 @@ fn switching_a_job_on_arms_it_and_nothing_else_moves_the_mark() {
         "switching a job off moved the mark"
     );
 
-    let saving = block_after(shipped_backend(), "fn save_automation(");
+    let saving = block_after(shipped_backend(), "fn save_automation_in(");
     assert!(
         saving.contains("automation.armed_at = Some(local_minute_now().epoch_minutes);"),
         "a save does not arm the job, so nights under its old schedule can be reported \

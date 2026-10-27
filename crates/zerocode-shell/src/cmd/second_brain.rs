@@ -26,88 +26,143 @@ pub(crate) struct SecondBrainReport {
     /// What each copy of the second-brain skill is, in every home an installed
     /// agent reads, the window's own among them: the card's 「스킬」 line.
     skill_copies: Vec<zerocode_core::skill_install::SkillCopy>,
-    /// The opt-in: the skill's weekly review as a zo cron turn in the vault.
+    /// The opt-in: the skill's weekly review as a window job in the vault.
     weekly_review_enabled: bool,
-    /// What the vault's zo cron registry says about that record — only read
-    /// while the switch is on, because reading it is a `zo` process.
-    weekly_review: Option<ReviewCronReceipt>,
+    /// What the window's automation list holds of that job — only while the
+    /// switch is on.
+    weekly_review: Option<WeeklyReviewReceipt>,
     /// The saved vault's daily raw ingest: the card's 「매일 취합」 line
     /// (t-77381). `None` while no vault is saved.
     daily_ingest: Option<DailyIngestReport>,
 }
 
-/* ---- the weekly review as a cron turn -------------------------------------
+/* ---- the weekly review as a window job ------------------------------------
  *
  * The prose half of the lint (`second_brain_lint` is the deterministic half):
- * the skill's 「주간 리뷰」, opened as a turn by the idle-time driver zo landed
- * in t-2901. The record is a zo cron in the VAULT's registry
- * (`<vault>/.zo/registries/crons.json`), so whichever zo pane is idle in the
- * vault project fires it. The window never writes that file: `zo cron` does,
- * with the registry's own merge, lock and tombstone rules, and answers a JSON
- * receipt that names the scheduler. What is spelled here is nothing — the
- * marker, the schedule and the prompt are `zerocode_core::second_brain`'s. */
+ * the skill's 「주간 리뷰」, run by the window's own scheduler as one more job
+ * in its automation list — the vault as its workspace, zo as its agent, its
+ * pane closed once the turn ends (t-77377). It was a zo cron record in the
+ * vault's registry, which fired only while a zo pane sat idle in the vault,
+ * and nobody keeps one there: the record never opened a turn. A window job
+ * fires whenever the window runs, writes its history, says when it was
+ * missed, and is listed with the person's other jobs. What is spelled here is
+ * nothing — the id, the schedule and the prompt are
+ * `zerocode_core::second_brain`'s. */
 
-/// The weekly review's standing in the vault's zo cron registry, as the card
-/// shows it. `scheduler` is zo's own `automatic_scheduler_status` — the
-/// receipt names who fires the record rather than promising a turn.
-#[derive(Clone, Serialize)]
-pub(crate) struct ReviewCronReceipt {
-    registered: bool,
-    cron_id: Option<String>,
-    schedule: Option<String>,
-    next_due_at: Option<u64>,
-    scheduler: Option<String>,
-    registry: Option<String>,
-    outcome: Option<String>,
-    /// Why the record could not be read or written, when it could not: no
-    /// `zo`, a `zo` too old to know `cron`, a refused schedule.
-    error: Option<String>,
+/// The weekly review's job as the card shows it: whether the window holds it
+/// for the saved vault, whether it is on, and when it runs next and ran last —
+/// local minutes, the scheduler's own clock, so the card and the automation
+/// list say the same.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct WeeklyReviewReceipt {
+    pub(crate) registered: bool,
+    pub(crate) enabled: bool,
+    pub(crate) next_run_at: Option<i64>,
+    pub(crate) last_run_at: Option<i64>,
 }
 
-impl ReviewCronReceipt {
-    fn from_receipt(value: &serde_json::Value) -> Self {
-        let text = |key: &str| {
-            value
-                .get(key)
-                .and_then(|held| held.as_str())
-                .map(str::to_string)
-        };
-        Self {
-            registered: value
-                .get("registered")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            cron_id: text("cron_id"),
-            schedule: text("schedule"),
-            next_due_at: value.get("next_due_at").and_then(serde_json::Value::as_u64),
-            scheduler: text("automatic_scheduler_status"),
-            registry: text("registry"),
-            outcome: text("outcome"),
-            error: None,
-        }
+/// The job's standing for the card, from the store: a job switched off or
+/// deleted on the automation screen says so here rather than the card
+/// promising a run, and one still pointed at another vault is not this
+/// vault's review.
+pub(crate) fn weekly_review_status(
+    vault: &Path,
+    automations: &[Automation],
+    now: LocalMinute,
+) -> WeeklyReviewReceipt {
+    let job = automations.iter().find(|job| {
+        job.id == zerocode_core::second_brain::WEEKLY_REVIEW_AUTOMATION_ID
+            && Path::new(&job.workspace) == vault
+    });
+    WeeklyReviewReceipt {
+        registered: job.is_some(),
+        enabled: job.is_some_and(|job| job.enabled),
+        next_run_at: job
+            .and_then(|job| job.next_unconsumed_run(now))
+            .map(|turn| turn.epoch_minutes),
+        last_run_at: job.and_then(|job| job.last_run_at),
     }
+}
 
-    fn failed(error: String) -> Self {
-        Self {
-            registered: false,
-            cron_id: None,
-            schedule: None,
-            next_due_at: None,
-            scheduler: None,
-            registry: None,
-            outcome: None,
-            error: Some(error),
-        }
+/// The weekly review as a window job in `vault`: a fresh zo session each
+/// week, its pane closed once the turn ends — the review asks nothing and
+/// nobody is watching. A day of grace where a job's default is an hour:
+/// Sunday 06:00 is an hour a laptop is often shut, a review opened when it
+/// wakes that day is still the week's, and the next one is six days off.
+fn weekly_review_job(vault: &Path) -> Automation {
+    Automation {
+        id: zerocode_core::second_brain::WEEKLY_REVIEW_AUTOMATION_ID.to_string(),
+        name: "세컨드 브레인 주간 리뷰".to_string(),
+        enabled: true,
+        workspace: vault.to_string_lossy().into_owned(),
+        workspace_mode: zerocode_core::WorkspaceMode::Existing,
+        base_branch: None,
+        agent: Some("zo".to_string()),
+        prompt: zerocode_core::second_brain::weekly_review_prompt(vault),
+        command: String::new(),
+        reuse_session: false,
+        schedule: zerocode_core::second_brain::weekly_review_schedule(),
+        precheck: String::new(),
+        precheck_timeout_seconds: 60,
+        missed_run_grace_minutes: 24 * 60,
+        evidence: zerocode_core::EvidencePolicy::Prompt,
+        close_when_done: true,
+        last_run_at: None,
+        armed_at: None,
     }
+}
+
+/// The switch's store half, off the async thread. On writes the job through
+/// the automation editor's own save — checked, armed and locked like one the
+/// person typed, its last run kept — and off takes it away with its history,
+/// by the door the editor's delete uses.
+pub(crate) fn set_weekly_review_in(
+    config_root: &Path,
+    local_data_root: &Path,
+    vault: &Path,
+    enabled: bool,
+) -> Result<(), String> {
+    if enabled {
+        super::review::save_automation_in(config_root, weekly_review_job(vault))
+    } else {
+        delete_automation_and_run_history(
+            config_root,
+            local_data_root,
+            zerocode_core::second_brain::WEEKLY_REVIEW_AUTOMATION_ID,
+        )
+    }
+}
+
+/// At boot, a switch an older build turned on: it stood for a zo cron record
+/// that never fired, and this build's switch stands for a job. Writes the job
+/// when none stands for `vault` — one already there is left as the person may
+/// have edited it — and answers whether it wrote, so the old record is
+/// retired once.
+pub(crate) fn adopt_weekly_review_in(config_root: &Path, vault: &Path) -> Result<bool, String> {
+    let standing = stored_automations(config_root).iter().any(|job| {
+        job.id == zerocode_core::second_brain::WEEKLY_REVIEW_AUTOMATION_ID
+            && Path::new(&job.workspace) == vault
+    });
+    if standing {
+        return Ok(false);
+    }
+    super::review::save_automation_in(config_root, weekly_review_job(vault))?;
+    Ok(true)
+}
+
+/// Take away the zo cron record the weekly review was before it was a window
+/// job, so it cannot also open a turn from a zo pane idle in the vault.
+/// Best-effort: a machine without `zo` holds no such record, and a vault that
+/// never had one answers that nothing was removed.
+fn retire_review_cron(vault: &Path) {
+    let marker = zerocode_core::second_brain::WEEKLY_REVIEW_CRON_MARKER;
+    let _ = zo_cron(vault, &["remove", "--description", marker]);
 }
 
 /// Run `zo cron <args>` in `cwd` and read its JSON receipt. `Command::output`
-/// waits the child — no bare child is left for the reaper to find — and the
-/// prompt travels as one argument: argv never meets a shell, so a prompt of
-/// paragraphs is one string end to end.
+/// waits the child — no bare child is left for the reaper to find.
 fn zo_cron(cwd: &Path, args: &[&str]) -> Result<serde_json::Value, String> {
-    let zo = zerocode_pty::ZoBinary::discover()
-        .ok_or("zo를 찾을 수 없습니다 — 주간 리뷰 cron은 zo가 볼트의 등록부에 씁니다")?;
+    let zo = zerocode_pty::ZoBinary::discover().ok_or("zo를 찾을 수 없습니다")?;
     let output = crate::proc::quiet_command(&zo.path)
         .arg("cron")
         .args(args)
@@ -128,64 +183,11 @@ fn zo_cron(cwd: &Path, args: &[&str]) -> Result<serde_json::Value, String> {
         .map_err(|error| format!("zo cron의 영수증을 읽지 못했습니다: {error}"))
 }
 
-/// The record's standing for the card: nothing while the switch is off (no
-/// process is spawned for a feature nobody turned on), the registry's answer
-/// while it is on, and the reason as a receipt when the answer cannot be had.
-fn review_cron_status(saved: &str, enabled: bool) -> Option<ReviewCronReceipt> {
-    if !enabled {
-        return None;
-    }
-    let vault = saved_vault(saved)?;
-    let marker = zerocode_core::second_brain::WEEKLY_REVIEW_CRON_MARKER;
-    Some(match zo_cron(&vault, &["show", "--description", marker]) {
-        Ok(receipt) => ReviewCronReceipt::from_receipt(&receipt),
-        Err(error) => ReviewCronReceipt::failed(error),
-    })
-}
-
-/// The weekly review's job as the card shows it (t-77377).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct WeeklyReviewReceipt {
-    pub(crate) registered: bool,
-    pub(crate) enabled: bool,
-    pub(crate) next_run_at: Option<i64>,
-    pub(crate) last_run_at: Option<i64>,
-}
-
-pub(crate) fn weekly_review_status(
-    vault: &Path,
-    automations: &[Automation],
-    now: LocalMinute,
-) -> WeeklyReviewReceipt {
-    let _ = (vault, automations, now);
-    WeeklyReviewReceipt {
-        registered: false,
-        enabled: false,
-        next_run_at: None,
-        last_run_at: None,
-    }
-}
-
-pub(crate) fn set_weekly_review_in(
-    config_root: &Path,
-    local_data_root: &Path,
-    vault: &Path,
-    enabled: bool,
-) -> Result<(), String> {
-    let _ = (config_root, local_data_root, vault, enabled);
-    Ok(())
-}
-
-pub(crate) fn adopt_weekly_review_in(config_root: &Path, vault: &Path) -> Result<bool, String> {
-    let _ = (config_root, vault);
-    Ok(false)
-}
-
-/// Turn the weekly review on or off: the vault's zo cron registry first
-/// (through `zo cron ensure` / `zo cron remove`), the setting only once that
-/// succeeded — a switch that reads "on" while no record stands would be the
-/// card promising a turn zo never opens. `ensure` is idempotent on zo's side,
-/// so turning it on twice leaves one record.
+/// Turn the weekly review on or off: the window's job first, the setting only
+/// once that is written — a switch that reads "on" while no job stands would
+/// be the card promising a turn nobody opens. Either way the zo cron record
+/// the review used to be is retired, so it cannot also fire from a zo pane
+/// idle in the vault.
 #[tauri::command]
 pub(crate) async fn set_second_brain_weekly_review(
     app: AppHandle,
@@ -199,25 +201,11 @@ pub(crate) async fn set_second_brain_weekly_review(
     let Some(vault) = saved_vault(&saved) else {
         return Err(VAULT_FIRST.to_string());
     };
+    let config_root = state.config_root().to_path_buf();
+    let local_data_root = state.local_data_root().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let marker = zerocode_core::second_brain::WEEKLY_REVIEW_CRON_MARKER;
-        if enabled {
-            let prompt = zerocode_core::second_brain::weekly_review_prompt(&vault);
-            zo_cron(
-                &vault,
-                &[
-                    "ensure",
-                    "--description",
-                    marker,
-                    "--schedule",
-                    zerocode_core::second_brain::WEEKLY_REVIEW_SCHEDULE,
-                    "--prompt",
-                    &prompt,
-                ],
-            )?;
-        } else {
-            zo_cron(&vault, &["remove", "--description", marker])?;
-        }
+        set_weekly_review_in(&config_root, &local_data_root, &vault, enabled)?;
+        retire_review_cron(&vault);
         Ok(())
     })
     .await
@@ -463,13 +451,23 @@ pub(crate) fn second_brain_report(
         .filter(|path| !path.trim().is_empty())
         .or_else(|| (!saved_path.is_empty()).then(|| saved_path.clone()))
         .or_else(|| vaults.first().map(|vault| vault.path.clone()));
-    // The SAVED vault's registry, like the guides: the record lives where the
-    // vault is, not where somebody is still browsing.
-    let weekly_review = review_cron_status(&saved_path, weekly_review_enabled);
-    // The SAVED vault's ingest as well: the job works where the vault is.
-    let daily_ingest = saved_vault(&saved_path).map(|vault| {
-        daily_ingest_report(&vault, &stored_automations(config_root), local_minute_now())
-    });
+    // The SAVED vault's jobs, like the guides: they work where the vault is,
+    // not where somebody is still browsing. The weekly review's only while its
+    // switch is on.
+    let saved = saved_vault(&saved_path);
+    let automations = if saved.is_some() {
+        stored_automations(config_root)
+    } else {
+        Vec::new()
+    };
+    let now = local_minute_now();
+    let weekly_review = saved
+        .as_deref()
+        .filter(|_| weekly_review_enabled)
+        .map(|vault| weekly_review_status(vault, &automations, now));
+    let daily_ingest = saved
+        .as_deref()
+        .map(|vault| daily_ingest_report(vault, &automations, now));
     SecondBrainReport {
         vault: selected.map(|path| zerocode_core::second_brain::inspect(Path::new(&path))),
         guides,
@@ -680,21 +678,29 @@ fn link_saved_vault(
 /// a fact about that vault alone. What went wrong, if anything, the card says
 /// the next time it is opened. The window's own agent homes get the block
 /// too ([`skills_runtime::window_agent_homes`]), named on the thread so the
-/// account store is not read on the boot path.
+/// account store is not read on the boot path. On the same thread, a weekly
+/// review an older build switched on becomes the window's job
+/// ([`adopt_weekly_review_in`]).
 pub(crate) fn relink_saved_vault_at_boot(
     saved: String,
+    weekly_review: bool,
     config_root: PathBuf,
     local_data_root: PathBuf,
 ) {
-    if saved_vault(&saved).is_none() {
+    let Some(vault) = saved_vault(&saved) else {
         return;
-    }
+    };
     let Some(home) = dirs::home_dir() else {
         return;
     };
     let _ = std::thread::Builder::new()
         .name("second-brain-link".into())
         .spawn(move || {
+            // A switch an older build turned on stood for a zo cron record
+            // that never fired: it becomes the window's job, once (t-77377).
+            if weekly_review && adopt_weekly_review_in(&config_root, &vault).unwrap_or(false) {
+                retire_review_cron(&vault);
+            }
             let launched = skills_runtime::window_agent_homes(&config_root, &local_data_root);
             let _ = link_saved_vault(&home, &launched, &saved, &installed_agents());
         });
