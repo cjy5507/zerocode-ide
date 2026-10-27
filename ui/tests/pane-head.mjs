@@ -75,6 +75,29 @@ export async function testPaneHead(browser, origin, ok) {
       const turnBox = turn?.getBoundingClientRect();
       seen.dockRadius = dock ? getComputedStyle(dock).borderBottomLeftRadius : "";
       seen.dockAligned = dockBox && turnBox ? Math.abs(dockBox.left - turnBox.left) <= 1 && dockBox.width <= 761 : false;
+      // A session that asks nothing says so by a triangle and the CLI's word, and no colour:
+      // red is the window's word for a failure.
+      tell("hook:agent", { term, state: "idle", agent: "claude", session: { id: "s-head-0001" }, resumable: true, permission_mode: "bypassPermissions" });
+      await window.__PAINTED__();
+      await settle();
+      const mode = dock?.querySelector(".worker-composer-mode");
+      seen.modeShown = Boolean(mode) && !mode.hidden;
+      seen.modeMark = mode?.querySelector("use")?.getAttribute("href") ?? "";
+      seen.modeWords = mode?.textContent ?? "";
+      const probe = document.createElement("span");
+      probe.style.background = "var(--signal-halt)";
+      dock.appendChild(probe);
+      const halt = getComputedStyle(probe).backgroundColor;
+      probe.style.background = "var(--chat-send-bg)";
+      const send = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      // Read once the send has eased from the stop's colour to its own.
+      await new Promise((done) => setTimeout(done, 400));
+      const sendButton = dock?.querySelector(".worker-composer-send:not(.is-stop)");
+      seen.sendGround = sendButton ? getComputedStyle(sendButton).backgroundColor : "";
+      seen.sendNotHalt = seen.sendGround !== halt && seen.sendGround === send;
+      seen.modeInk = mode ? getComputedStyle(mode).color : "";
+      seen.modeNotHalt = seen.modeInk !== halt;
       // The person picks the screen: it stays theirs through the next hook event.
       el("view-toggle-term").click();
       await settle();
@@ -108,6 +131,12 @@ export async function testPaneHead(browser, origin, ok) {
         seen.columnWidth > 760 && /mono|Menlo|SF Mono/i.test(seen.codeFont) && seen.codeGround !== "rgba(0, 0, 0, 0)" &&
         seen.dockRadius === "12px" && seen.dockAligned,
       JSON.stringify(seen),
+    );
+    ok(
+      "a session that asks no permission says so on the composer by a triangle and the CLI's own word, in no colour",
+      seen.modeShown && seen.modeMark === "#i-alert" && seen.modeWords.includes("Bypass permissions") &&
+        seen.sendNotHalt && seen.modeNotHalt,
+      JSON.stringify({ modeShown: seen.modeShown, modeMark: seen.modeMark, modeWords: seen.modeWords, sendGround: seen.sendGround, modeInk: seen.modeInk }),
     );
   } finally { await page.close(); }
 }
