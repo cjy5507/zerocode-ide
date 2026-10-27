@@ -114,6 +114,7 @@ import { testPermissionCard } from "./permission-card.mjs";
 import { testAnswerDoor } from "./answer-door.mjs";
 import { testYourTurn } from "./your-turn.mjs";
 import { testPaneHead } from "./pane-head.mjs";
+import { testStackedWork } from "./stacked-work.mjs";
 import { testSelfAct } from "./self-act.mjs";
 import { testComputerShare } from "./computer-share.mjs";
 import { testExplain } from "./explain.mjs";
@@ -297,6 +298,7 @@ suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin
 suite("answer-door", ({ browser, origin, ok }) => testAnswerDoor(browser, origin, ok));
 suite("your-turn", ({ browser, origin, ok }) => testYourTurn(browser, origin, ok));
 suite("pane-head", ({ browser, origin, ok }) => testPaneHead(browser, origin, ok));
+suite("stacked-work", ({ browser, origin, ok }) => testStackedWork(browser, origin, ok));
 /* ZeroCode's own window as a Computer Use target: the page's half (t-73906). */
 suite("self-act", ({ browser, origin, ok }) => testSelfAct(browser, origin, ok));
 /* One window shared with an agent: the card and the band (t-73906). */
