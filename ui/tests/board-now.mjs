@@ -228,8 +228,9 @@ function boardFirstScreen() {
 
 /* Every word on the Now tab against what it is drawn on — the draft's own contrast reckoning
  * (reports/t-67561/src/common.js): the text's colour over the grounds stacked under it, up to the
- * first opaque one. A disabled control is left out, as WCAG leaves it. A page function. */
-function nowContrast() {
+ * first opaque one. A disabled control is left out, as WCAG leaves it. A page function; another
+ * surface's scene hands it the selector of its own scope. */
+export function nowContrast(scopeSelector = "#board-view :is(.board-now-tabs, .task-board-intro, .task-board-desk)") {
   const parse = (value) => {
     let found = /^rgba?\(([^)]+)\)$/.exec(value);
     if (found) {
@@ -266,8 +267,7 @@ function nowContrast() {
     for (let at = layers.length - 1; at >= 0; at -= 1) ground = over(layers[at], ground);
     return ground;
   };
-  const view = document.querySelector("#board-view");
-  const scope = [...view.querySelectorAll(".board-now-tabs, .task-board-intro, .task-board-desk")];
+  const scope = [...document.querySelectorAll(scopeSelector)];
   let min = 99;
   let where = "";
   const below = [];
@@ -279,6 +279,12 @@ function nowContrast() {
       const ink = over(parse(getComputedStyle(node).color), ground);
       const [high, low] = [lum(ink), lum(ground)].sort((a, b) => b - a);
       const ratio = (high + 0.05) / (low + 0.05);
+      // A glyph that is itself a picture (an agent's mark, `role="img"`) is a graphic:
+      // WCAG 1.4.11 asks 3:1 of it, and it is still reported when below.
+      if (node.matches('[role="img"]')) {
+        if (ratio < 3) below.push(`${node.className || node.tagName}: ${node.textContent.trim().slice(0, 24)} ${ratio.toFixed(2)}`);
+        continue;
+      }
       if (ratio < min) { min = ratio; where = node.textContent.trim().slice(0, 24); }
       if (ratio < 4.5) below.push(`${node.className || node.tagName}: ${node.textContent.trim().slice(0, 24)} ${ratio.toFixed(2)}`);
     }

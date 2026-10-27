@@ -769,7 +769,7 @@ function askDraftFor(card) {
  * conversation view keeps one with its page — the same shape, so the panels
  * read either. `repaint` is the surface's own repaint (the board's when
  * unset); `instead` is the conversation's third road on a permission card. */
-function askDraftOf(card, sig, { repaint = null, instead = null, answer = null, base = "" } = {}) {
+function askDraftOf(card, sig, { repaint = null, instead = null, answer = null, base = "", delivered = null } = {}) {
   return {
     sig,
     index: 0,
@@ -783,6 +783,11 @@ function askDraftOf(card, sig, { repaint = null, instead = null, answer = null, 
     // The road an answer takes when it is not the board's keystroke road:
     // a wire's card answers the agent's request itself.
     answer,
+    // What the surface does once the answer was taken, before the hook's next
+    // event says so (the turn list counts it off at once), and the refusal's
+    // words, which a surface that keeps the question in view says beside it.
+    delivered,
+    refusal: "",
     // Where the card's prose measures its relative paths from — a plan names
     // the files it will touch, and those names are links off this checkout.
     // The board's own cards have none; their prose resolves to nothing.
@@ -879,11 +884,29 @@ function submitAsk(card, draft) {
   const road = draft.answer
     ? draft.answer(selections)
     : invoke("answer_ask", { term, agent: card.agent, prompt: card.ask_prompt, selections }, { hand: handNow() });
-  road.catch((error) => {
-    draft.sending = false;
-    showError(answerRefusalWords(error));
-    repaintAsk(draft);
-  });
+  road.then(() => draft.delivered?.(), (error) => refuseAsk(draft, error));
+}
+
+/* An answer that did not go in: the panel is usable again, and the person is
+ * told why — in a toast, and beside the question for a surface that shows it. */
+function refuseAsk(draft, error) {
+  draft.sending = false;
+  draft.refusal = answerRefusalWords(error);
+  showError(draft.refusal);
+  repaintAsk(draft);
+}
+
+/* Answer a permission request a card prepared: the keystroke road for a pane
+ * (`answer_approval`), the request itself for a wire (`draft.answer`). The
+ * panel goes quiet at once, as Orca's does (`onChoose` → `sendRaw`). */
+function decideApproval(card, draft, choice, message = null) {
+  const term = Number(card.pane.slice(card.pane.indexOf(":") + 1));
+  const decide = draft.answer ?? ((allow) => invoke("answer_approval", { term, allow }, { hand: handNow() }));
+  draft.sending = true;
+  draft.open = false;
+  draft.refusal = "";
+  decide(choice, message).then(() => draft.delivered?.(), (error) => refuseAsk(draft, error));
+  repaintAsk(draft);
 }
 
 /* The answer panel, unfolded from the amber box — Orca's ask card
@@ -1090,10 +1113,8 @@ function approvalPanelNode(card, draft) {
   if (feedback) panel.appendChild(feedback);
   const acts = document.createElement("span");
   acts.className = "board-approve-acts";
-  const term = Number(card.pane.slice(card.pane.indexOf(":") + 1));
   // The board's card answers the TUI by keystroke; a wire's card answers the
   // request itself (`draft.answer`, the option's id).
-  const decide = draft.answer ?? ((allow) => invoke("answer_approval", { term, allow }, { hand: handNow() }));
   const act = (label, choice, kind, { then = null, says = null } = {}) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -1102,14 +1123,7 @@ function approvalPanelNode(card, draft) {
     button.textContent = label;
     button.onclick = (event) => {
       event.stopPropagation();
-      draft.sending = true;
-      draft.open = false;
-      decide(choice, says?.() || null).catch((error) => {
-        draft.sending = false;
-        showError(answerRefusalWords(error));
-        repaintAsk(draft);
-      });
-      repaintAsk(draft);
+      decideApproval(card, draft, choice, says?.() || null);
       then?.();
     };
     return button;
@@ -1758,6 +1772,7 @@ function updateActionHub(answer) {
 
   const hubBadge = el("action-hub-badge");
   if (hubBadge) hubBadge.textContent = String(stuck);
+  paintYourTurn();
 
   const scrim = el("action-hub-scrim");
   if (scrim && !scrim.hidden) {
@@ -1842,6 +1857,508 @@ window.closeActionHub = closeActionHub;
 
 el("action-hub-close")?.addEventListener("click", closeActionHub);
 el("action-hub-dismiss")?.addEventListener("click", closeActionHub);
+
+/* ---- 당신 차례: the chip, the list it drops, the sidebar group (2차 B) ----
+ *
+ * 「지금 누가 나를 필요로 하는가?」 where the eye lands first: one chip by the
+ * wordmark, the list it drops, and a group at the top of the sidebar. All three
+ * read `attentionCards` — the attention column the dock badge counts
+ * (`applyBoardBadge`) — so no surface keeps a second count of what waits.
+ *
+ * An answer takes the roads a board card already takes, through the backend's
+ * answer door, which types only while the pane still shows the question
+ * (`submitAsk` → `answer_ask`, `decideApproval` → `answer_approval`). A question
+ * asked in prose has no menu to answer: its words go in the composer's way
+ * (`deliverToPane`), and only to a pane that is not mid-turn (`composerWorking`).
+ * A refusal of either kind is said beside the question and never counted as
+ * sent. Nothing here is built while nothing waits or the list is shut. */
+
+/* How long N puts a turn away. */
+const YOUR_TURN_LATER_MS = 10 * 60_000;
+/* Turns put away, by turn: until when. */
+const yourTurnLater = new Map();
+/* Turns answered from here that the column still lists: the hook that moves the
+ * pane on lands a beat after the keys, and a chip that waited for it would say
+ * the answer went nowhere. Dropped once the column stops listing the turn. */
+const yourTurnAnswered = new Set();
+/* One draft per turn — the picks, the words typed, the refusal — kept across
+ * repaints and dropped with the turn. */
+const yourTurnDrafts = new Map();
+/* What the group and the list last drew: a repaint that would draw the same
+ * turns builds nothing. */
+let yourTurnGroupDrawn = "";
+let yourTurnListDrawn = "";
+
+/* A turn is a pane and the question it stands on: the same pane asking the
+ * next thing is a new turn, with a fresh draft and no put-away. */
+function yourTurnKey(card) {
+  return `${card.pane}\n${askSignature(card)}\n${card.ask ?? ""}`;
+}
+
+function yourTurnKind(card) {
+  if (card.approval) return "permission";
+  if (card.ask_prompt || card.ask) return "question";
+  return card.state === "failed" ? "failed" : "waiting";
+}
+
+function yourTurnKindWord(kind) {
+  switch (kind) {
+    case "permission":
+      return t("yourTurn.kindPermission", "권한");
+    case "question":
+      return t("yourTurn.kindQuestion", "질문");
+    case "failed":
+      return t("yourTurn.kindFailed", "실패");
+    default:
+      return t("yourTurn.kindWaiting", "기다림");
+  }
+}
+
+function yourTurns(now = Date.now()) {
+  return attentionCards.filter((card) => {
+    const key = yourTurnKey(card);
+    return !yourTurnAnswered.has(key) && (yourTurnLater.get(key) ?? 0) <= now;
+  });
+}
+
+/* What the column stopped listing leaves every ledger here with it, and a turn
+ * put away whose ten minutes are up comes back. */
+function forgetGoneTurns(now = Date.now()) {
+  const listed = new Set(attentionCards.map(yourTurnKey));
+  for (const key of yourTurnAnswered) if (!listed.has(key)) yourTurnAnswered.delete(key);
+  for (const [key, until] of yourTurnLater) if (!listed.has(key) || until <= now) yourTurnLater.delete(key);
+  for (const key of yourTurnDrafts.keys()) if (!listed.has(key)) yourTurnDrafts.delete(key);
+}
+
+function yourTurnDraft(card) {
+  const key = yourTurnKey(card);
+  let draft = yourTurnDrafts.get(key);
+  if (!draft) {
+    draft = askDraftOf(card, askSignature(card), { repaint: paintYourTurn, delivered: () => countTurnAnswered(key) });
+    yourTurnDrafts.set(key, draft);
+  }
+  return draft;
+}
+
+function countTurnAnswered(key) {
+  yourTurnAnswered.add(key);
+  yourTurnDrafts.delete(key);
+  paintYourTurn();
+}
+
+function putTurnAway(card) {
+  yourTurnLater.set(yourTurnKey(card), Date.now() + YOUR_TURN_LATER_MS);
+  paintYourTurn();
+}
+
+/* Everything a turn's drawing depends on, so an unchanged repaint builds nothing.
+ * The ages are not in it: they move in place on the clock's beat (`paintYourTurnAges`),
+ * so a field being typed in is never rebuilt under the person's hands. */
+function yourTurnsDrawing(turns) {
+  return JSON.stringify([locale, turns.map((card) => {
+    const key = yourTurnKey(card);
+    const draft = yourTurnDrafts.get(key);
+    return [key, card.heading, card.changed_at, draft?.sending, draft?.refusal, draft?.index, draft?.selections];
+  })]);
+}
+
+function paintYourTurn() {
+  if (isPopout) return;
+  const now = Date.now();
+  forgetGoneTurns(now);
+  const turns = yourTurns(now);
+  writeClass(el("your-turn"), "is-live", turns.length > 0);
+  writeTextContent(el("your-turn-count"), String(turns.length));
+  const drawing = yourTurnsDrawing(turns);
+  paintYourTurnGroup(turns, drawing);
+  if (!el("your-turn-list").hidden) paintYourTurnList(turns, drawing);
+}
+
+function yourTurnButton(className, words, run) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = words;
+  button.onclick = (event) => {
+    event.stopPropagation();
+    run();
+  };
+  return button;
+}
+
+/* Kind, name, agent and age — the one line every turn opens with. The kind is
+ * a word and a shape (`data-kind`), never the colour alone. A sidebar row's name
+ * is the button that opens the turn's conversation. */
+function yourTurnHeadNode(card, kind, now, open = null) {
+  const head = document.createElement("span");
+  head.className = "your-turn-head";
+  const mark = document.createElement("span");
+  mark.className = "your-turn-kind";
+  mark.dataset.kind = kind;
+  mark.textContent = yourTurnKindWord(kind);
+  const words = card.heading || card.agent;
+  const name = open
+    ? yourTurnButton("your-turn-name your-turn-row-name", words, open)
+    : Object.assign(document.createElement("strong"), { className: "your-turn-name", textContent: words });
+  const agent = document.createElement("span");
+  agent.className = "your-turn-agent";
+  agent.textContent = card.agent;
+  head.append(mark, name, agent, yourTurnAgeNode(card.changed_at || card.at || now, now));
+  return head;
+}
+
+/* An age that moves on the clock's beat in place: the moment it counts from
+ * rides the node, and an `oldest` one says it in the head's words. */
+function yourTurnAgeNode(at, now, oldest = false) {
+  const age = document.createElement("span");
+  age.className = "your-turn-age";
+  age.dataset.at = String(at);
+  if (oldest) age.dataset.oldest = "";
+  writeYourTurnAge(age, now);
+  return age;
+}
+
+function writeYourTurnAge(age, now) {
+  const words = agoWord(Number(age.dataset.at), now);
+  writeTextContent(age, "oldest" in age.dataset ? t("yourTurn.oldest", "가장 오래 {{age}}", { age: words }) : words);
+}
+
+function paintYourTurnAges(now = Date.now()) {
+  for (const host of [el("your-turn-group"), el("your-turn-list")]) {
+    for (const age of host.querySelectorAll(".your-turn-age[data-at]")) writeYourTurnAge(age, now);
+  }
+}
+
+function yourTurnAllowNode(card, draft, chord) {
+  const allow = yourTurnButton("btn btn--primary your-turn-allow", t("yourTurn.allow", "허락"),
+    () => decideApproval(card, draft, true));
+  if (chord) {
+    const keys = document.createElement("kbd");
+    keys.className = "your-turn-chord";
+    keys.textContent = chordLabel("mod+enter");
+    allow.append(keys);
+  }
+  allow.disabled = draft.sending;
+  return allow;
+}
+
+function yourTurnDenyNode(card, draft) {
+  const deny = yourTurnButton("btn your-turn-deny", t("yourTurn.deny", "거절"), () => decideApproval(card, draft, false));
+  deny.disabled = draft.sending;
+  return deny;
+}
+
+function openTurnConversation(card) {
+  closeYourTurnList({ restoreFocus: false });
+  void openBoardConversation(card);
+}
+
+function yourTurnOpenNode(card) {
+  return yourTurnButton("btn your-turn-open", t("yourTurn.open", "대화 열기"), () => openTurnConversation(card));
+}
+
+/* 「가장 오래 N분」 — how long the oldest of the turns has waited; nothing at none. */
+function yourTurnOldestNode(turns, now) {
+  if (turns.length === 0) return Object.assign(document.createElement("span"), { className: "your-turn-age" });
+  return yourTurnAgeNode(Math.min(...turns.map((card) => card.changed_at || card.at || now)), now, true);
+}
+
+function yourTurnRefusalNode(draft) {
+  const said = document.createElement("p");
+  said.className = "your-turn-refusal";
+  said.setAttribute("role", "status");
+  said.textContent = draft.refusal;
+  return said;
+}
+
+/* ---- the sidebar group ---- */
+
+function paintYourTurnGroup(turns, drawing) {
+  const host = el("your-turn-group");
+  if (drawing === yourTurnGroupDrawn) return;
+  yourTurnGroupDrawn = drawing;
+  host.hidden = turns.length === 0;
+  if (host.hidden) {
+    host.replaceChildren();
+    return;
+  }
+  const now = Date.now();
+  const head = document.createElement("div");
+  head.className = "your-turn-group-top";
+  head.append(yourTurnButton("your-turn-group-head", t("yourTurn.group", "당신 차례 {{count}}", { count: turns.length }),
+    () => openYourTurnList()), yourTurnOldestNode(turns, now));
+  host.replaceChildren(head, ...turns.map((card) => yourTurnRowNode(card, now)));
+}
+
+/* What a sidebar row and a list item share: the node, its kind and the line
+ * it opens with. */
+function yourTurnShellNode(tag, className, card, now, open = null) {
+  const kind = yourTurnKind(card);
+  const node = document.createElement(tag);
+  node.className = className;
+  node.dataset.kind = kind;
+  // Its answers are the person's: an agent pressing in the window never makes them (t-73906).
+  node.dataset.personOnly = "";
+  node.append(yourTurnHeadNode(card, kind, now, open));
+  return { node, kind, draft: yourTurnDraft(card) };
+}
+
+/* A sidebar row opens its conversation — a press anywhere on it, or its name for
+ * the keyboard. It is no button itself: a permission's allow and deny stand
+ * inside it, and a control holds no other control. */
+function yourTurnRowNode(card, now) {
+  const open = () => openTurnConversation(card);
+  const { node: turn, kind, draft } = yourTurnShellNode("div", "your-turn-row", card, now, open);
+  turn.addEventListener("click", open);
+  const line = document.createElement("span");
+  line.className = "your-turn-row-line";
+  line.textContent = cardAskLine(card) || card.said || "";
+  turn.append(line);
+  if (kind === "permission") {
+    const acts = document.createElement("span");
+    acts.className = "your-turn-row-acts";
+    acts.append(yourTurnAllowNode(card, draft, false), yourTurnDenyNode(card, draft));
+    turn.append(acts);
+  }
+  if (draft.refusal) turn.append(yourTurnRefusalNode(draft));
+  return turn;
+}
+
+/* ---- the list dropped from the chip ---- */
+
+function openYourTurnList() {
+  const list = el("your-turn-list");
+  const chip = el("your-turn");
+  // Hung from the chip's own edge, wherever the title bar has put it — read
+  // before the list stands, so the read lays nothing out.
+  const box = chip.getBoundingClientRect();
+  list.style.setProperty("--your-turn-top", `${Math.round(box.bottom)}px`);
+  list.style.setProperty("--your-turn-left", `${Math.round(box.left)}px`);
+  if (list.hidden) {
+    list.hidden = false;
+    chip.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", closeYourTurnListOutside, true);
+  }
+  yourTurnListDrawn = "";
+  paintYourTurnList(yourTurns());
+  const items = [...list.querySelectorAll(".your-turn-item")];
+  (items[0] ?? list).focus();
+}
+
+function closeYourTurnList({ restoreFocus = true } = {}) {
+  const list = el("your-turn-list");
+  if (list.hidden) return;
+  list.hidden = true;
+  list.replaceChildren();
+  yourTurnListDrawn = "";
+  el("your-turn").setAttribute("aria-expanded", "false");
+  document.removeEventListener("pointerdown", closeYourTurnListOutside, true);
+  if (restoreFocus) el("your-turn").focus();
+}
+
+function closeYourTurnListOutside(event) {
+  if (el("your-turn-list").contains(event.target) || el("your-turn").contains(event.target)) return;
+  closeYourTurnList({ restoreFocus: false });
+}
+
+/* Where the focus stood before a rebuild, said by turn rather than by node. */
+function yourTurnFocusOf(list) {
+  const active = document.activeElement;
+  const item = list.contains(active) ? active.closest(".your-turn-item") : null;
+  if (!item) return null;
+  const items = [...list.querySelectorAll(".your-turn-item")];
+  return { key: item.dataset.key, at: items.indexOf(item), field: active.matches(".your-turn-field") };
+}
+
+function restoreYourTurnFocus(list, kept) {
+  if (!kept) return;
+  const items = [...list.querySelectorAll(".your-turn-item")];
+  const item = items.find((one) => one.dataset.key === kept.key);
+  const field = kept.field ? item?.querySelector(".your-turn-field") : null;
+  if (field) {
+    field.focus();
+    field.setSelectionRange(field.value.length, field.value.length);
+    return;
+  }
+  // The turn just answered left: the one that took its place, else the list.
+  (item ?? items[Math.min(kept.at, items.length - 1)] ?? list).focus();
+}
+
+function paintYourTurnList(turns, drawing = yourTurnsDrawing(turns)) {
+  const list = el("your-turn-list");
+  if (drawing === yourTurnListDrawn) return;
+  yourTurnListDrawn = drawing;
+  const kept = yourTurnFocusOf(list);
+  const now = Date.now();
+  const head = document.createElement("div");
+  head.className = "your-turn-list-head";
+  const title = document.createElement("strong");
+  title.textContent = t("yourTurn.group", "당신 차례 {{count}}", { count: turns.length });
+  const age = yourTurnOldestNode(turns, now);
+  const inbox = yourTurnButton("your-turn-inbox", t("yourTurn.inbox", "받은 편지함에서 모두 보기"), () => {
+    closeYourTurnList({ restoreFocus: false });
+    openInboxView({ tab: "blocked" });
+  });
+  head.append(title, age, inbox);
+  const body = turns.length > 0
+    ? turns.map((card) => yourTurnItemNode(card, now))
+    : [Object.assign(document.createElement("p"), {
+      className: "your-turn-empty", textContent: t("board.now.headClear", "지금 답할 일이 없습니다"),
+    })];
+  const keys = document.createElement("p");
+  keys.className = "your-turn-keys";
+  keys.textContent = yourTurnKeysWords(turns);
+  list.replaceChildren(head, ...body, keys);
+  restoreYourTurnFocus(list, kept);
+}
+
+function yourTurnItemNode(card, now) {
+  const { node: item, kind, draft } = yourTurnShellNode("article", "your-turn-item", card, now);
+  item.tabIndex = 0;
+  item.dataset.key = yourTurnKey(card);
+  const acts = document.createElement("div");
+  acts.className = "your-turn-acts";
+  if (kind === "permission") {
+    item.append(yourTurnPermissionNode(card));
+    acts.append(yourTurnAllowNode(card, draft, true), yourTurnDenyNode(card, draft));
+  } else if (card.ask_prompt) {
+    draft.open = true;
+    item.append(askPanelNode(card, draft));
+  } else if (kind === "question") {
+    item.append(yourTurnWordsNode(card, draft));
+  } else if (card.said) {
+    item.append(Object.assign(document.createElement("p"), { className: "your-turn-question", textContent: card.said }));
+  }
+  acts.append(yourTurnOpenNode(card));
+  item.append(acts);
+  if (draft.refusal) item.append(yourTurnRefusalNode(draft));
+  return item;
+}
+
+function yourTurnPermissionNode(card) {
+  const box = document.createElement("p");
+  box.className = "your-turn-question";
+  box.textContent = t("board.approve.title", "{{tool}} 허용할까요?", { tool: card.approval.tool });
+  if (card.approval.summary) {
+    const mono = document.createElement("code");
+    mono.className = "your-turn-mono";
+    mono.textContent = card.approval.summary;
+    box.append(" ", mono);
+  }
+  return box;
+}
+
+/* The keys the list answers to. A number picks as far as the choices the
+ * questions here hold (at most nine), and is not said when none has choices. */
+function yourTurnKeysWords(turns) {
+  const most = Math.min(9, Math.max(0, ...turns.map((card) => card.ask_prompt?.questions?.[0]?.options?.length ?? 0)));
+  const rest = t("yourTurn.keys", "N 나중에 10분 · ↑↓ 다음 차례 · Esc 닫기");
+  return most > 0 ? `${t("yourTurn.keysPick", "1–{{most}} 고르기", { most })} · ${rest}` : rest;
+}
+
+/* A question asked in prose: its sentence, a field and a send. */
+function yourTurnWordsNode(card, draft) {
+  const box = document.createElement("div");
+  box.className = "your-turn-words";
+  const question = document.createElement("p");
+  question.className = "your-turn-question";
+  question.textContent = card.ask;
+  const field = document.createElement("input");
+  field.type = "text";
+  field.className = "your-turn-field";
+  field.placeholder = t("board.ask.typeAnswer", "답을 입력");
+  field.setAttribute("aria-label", field.placeholder);
+  field.value = draft.other[0] ?? "";
+  field.disabled = draft.sending;
+  field.oninput = () => {
+    draft.other[0] = field.value;
+  };
+  field.onkeydown = (event) => {
+    if (event.key !== "Enter" || event.isComposing) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void sendTurnWords(card, draft);
+  };
+  const send = yourTurnButton("btn your-turn-send", t("board.ask.send", "답 보내기"), () => void sendTurnWords(card, draft));
+  send.disabled = draft.sending;
+  box.append(question, field, send);
+  return box;
+}
+
+async function sendTurnWords(card, draft) {
+  const words = (draft.other[0] ?? "").trim();
+  const { term } = boardCardDestination(card);
+  if (!words || term === null || draft.sending) return;
+  if (composerWorking({ term })) {
+    draft.refusal = t("yourTurn.busy", "이 판은 지금 글을 받을 수 없어요 — 에이전트가 일하는 중입니다");
+    paintYourTurn();
+    return;
+  }
+  draft.sending = true;
+  draft.refusal = "";
+  paintYourTurn();
+  try {
+    await deliverToPane(term, words);
+    draft.delivered?.();
+  } catch (error) {
+    refuseAsk(draft, error);
+  }
+}
+
+/* The list's keys: a number picks a choice (and answers, when one choice is the
+ * answer), ⌘↵ allows, N puts the turn away, ↑↓ walk, Esc shuts. A key typed in
+ * a field stays the field's. */
+function yourTurnListKey(event) {
+  const list = el("your-turn-list");
+  const stop = () => {
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  if (event.key === "Escape") {
+    stop();
+    closeYourTurnList();
+    return;
+  }
+  const items = [...list.querySelectorAll(".your-turn-item")];
+  const item = event.target.closest?.(".your-turn-item") ?? null;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    stop();
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    items[(items.indexOf(item) + step + items.length) % items.length]?.focus();
+    return;
+  }
+  if (!item || event.target.matches("input, textarea")) return;
+  const card = yourTurns().find((one) => yourTurnKey(one) === item.dataset.key);
+  if (!card) return;
+  const draft = yourTurnDraft(card);
+  const plain = !event.metaKey && !event.ctrlKey && !event.altKey;
+  if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && card.approval) {
+    stop();
+    if (!draft.sending) decideApproval(card, draft, true);
+    return;
+  }
+  const question = card.ask_prompt?.questions?.[draft.index];
+  const at = Number(event.key) - 1;
+  if (plain && question && /^[1-9]$/.test(event.key) && at < question.options.length) {
+    stop();
+    if (draft.sending) return;
+    pickAskOption(draft, question, at);
+    // One choice is the answer; several wait for the send.
+    if (question.multi_select) repaintAsk(draft);
+    else confirmAsk(card, draft, true);
+    return;
+  }
+  if (plain && (event.key === "n" || event.key === "N")) {
+    stop();
+    putTurnAway(card);
+  }
+}
+
+el("your-turn").addEventListener("click", () => {
+  if (el("your-turn-list").hidden) openYourTurnList();
+  else closeYourTurnList();
+});
+el("your-turn-list").addEventListener("keydown", yourTurnListKey);
 
 window.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.shiftKey && (event.key === "a" || event.key === "A")) {
@@ -7275,12 +7792,16 @@ function taskBoardStageWord(group, rows) {
   return row ? ledgerReviewWord(row) : "";
 }
 
+/* What a waiting card asks, in one line: the question, else the permission's summary. */
+function cardAskLine(card) {
+  return agentGraphCleanText(card.ask_prompt?.questions?.[0]?.question || card.ask || card.approval?.summary);
+}
+
 function taskBoardActivity(entry) {
   const { card, facts } = entry;
   if (facts.phase === "goal" || facts.phase === "loop") return facts.phaseWord;
   if (facts.state === "needs-attention") {
-    return agentGraphCleanText(card.ask_prompt?.questions?.[0]?.question || card.ask ||
-      card.approval?.summary) || t("board.tasks.needsInput", "진행하려면 확인이 필요해요.");
+    return cardAskLine(card) || t("board.tasks.needsInput", "진행하려면 확인이 필요해요.");
   }
   if (facts.state === "failed") return t("board.tasks.failed", "실행에 실패했어요. 마지막 기록을 확인해 주세요.");
   if (facts.state === "working" && card.ledger === "orphaned") {
@@ -11707,7 +12228,10 @@ function flushAgentPaint() {
   // 것이고, 지금 그림에 담겼다고 볼 수 없다.
   const due = { ...agentPaintDue };
   for (const surface of Object.keys(agentPaintDue)) agentPaintDue[surface] = false;
-  if (due.tabs) renderTabs();
+  if (due.tabs) {
+    renderTabs();
+    paintShownPaneHeads();
+  }
   // The card is the rows AND the dot on the row above them: one agent moving
   // is one workspace changing what it says, and drawing half of that would
   // leave a card reading "작업 중" under a dot that had gone quiet.
@@ -11854,6 +12378,8 @@ function reconcilePaneAgentSnapshot(panes) {
   // Otherwise a matching push takes the listener's same-state early return
   // and leaves (for example) the door badge on its pre-snapshot count.
   if (changed) scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
+  // A repaired turn is followed or let go as a pushed one is (`helperPageFollowed`).
+  if (changed) helperClock.sync();
   return changed;
 }
 
@@ -11904,6 +12430,11 @@ const agentClock = idlePoller({
       void refreshPaneAgentSnapshot();
     }
     paintLaneSubagentClocks();
+    // A turn put away comes back on this beat once its ten minutes are up, and
+    // the turns' ages move on it in place: whatever waits is an agent, so the
+    // beat is already running.
+    if (yourTurnLater.size > 0) paintYourTurn();
+    if (attentionCards.length > 0) paintYourTurnAges();
   },
 });
 
@@ -11982,6 +12513,7 @@ listen("hook:agent", (event) => {
   } else {
     paneAsks.delete(term);
   }
+  if (agent && !(asking && !shaped)) standPaneConversation(term);
   if (paneChatOn(term)) {
     if (asking && !shaped) setPaneChat(term, false);
     else if ((paneAsks.get(term)?.sig ?? null) !== askBefore) paintPaneChat(term);
@@ -12015,7 +12547,9 @@ listen("hook:agent", (event) => {
   // tried now — between turns; mid-turn `handPaneToWire` waits for the end.
   if (named) {
     const chat = paneChats.get(term);
-    if (chat?.on && !chat.handing && wireRowFor(term)) void handPaneToWire(term);
+    // Only a conversation the person turned to (the switch): the one a pane
+    // stands in by default is read, never handed over (2차 B).
+    if (chat?.on && chat.chosen && !chat.handing && wireRowFor(term)) void handPaneToWire(term);
   }
   // A state change in the pane the person is already looking at is seen the
   // moment it happens — without this, working in the front tab still grew an
@@ -12068,6 +12602,7 @@ listen("hook:agent", (event) => {
   // 선다(그리는 문과 보내는 문은 여전히 따로다).
   settleComposerQueuesFor(term);
   agentClock.sync();
+  helperClock.sync();
   // A conversation view asked for mid-turn is handed to the wire now that the
   // turn is over — if the person still has it up.
   const chat = paneChats.get(term);
@@ -13039,6 +13574,9 @@ async function setPaneChat(term, on, { wire = true } = {}) {
     // view: the wire is asked for again — a session the hooks had not yet
     // named, a wire that was refused, may be there now. Until 2026-09-21 a
     // pane that once fell to the transcript view never tried the wire again.
+    // The transcript is read again too: a conversation at rest is not followed
+    // (`helperPageFollowed`), and a press is a look at it now.
+    if (on) void pollHelperPages();
     if (on && wire && !held.handing) void handPaneToWire(term);
     return;
   }
@@ -13086,16 +13624,26 @@ function activeAgentTerm() {
   return term !== null && paneAgents.has(term) ? term : null;
 }
 
+/* The switch, held by node: it travels with its pane's head line, which a
+ * conversation's head can take out of the document when that head is rebuilt
+ * or goes (`placePaneHeadLine`) — and a lookup by id finds nothing then. The
+ * next paint puts it back where it belongs. */
+const viewToggle = el("view-toggle");
+const viewToggleButtons = [el("view-toggle-term"), el("view-toggle-chat")];
+
 function paintViewToggle() {
-  const seg = el("view-toggle");
   const term = activeAgentTerm();
   const wire = activeWireTab();
-  seg.hidden = term === null && wire === null;
-  if (seg.hidden) return;
+  viewToggle.hidden = term === null && wire === null;
+  // Beside the pane it speaks for, in its tab's head; a wire's page has no
+  // panes and keeps it at home in the title bar.
+  const home = term === null ? el("view-toggle-home") : paintPaneHead(currentTab(), term).__line.querySelector(".pane-head-view");
+  if (viewToggle.parentElement !== home) home.appendChild(viewToggle);
+  if (viewToggle.hidden) return;
   // A wire tab that continues a pane's conversation IS its 「대화」.
   const on = wire !== null || paneChatOn(term);
-  for (const [id, pressed] of [["view-toggle-term", !on], ["view-toggle-chat", on]]) {
-    const button = el(id);
+  for (const button of viewToggleButtons) {
+    const pressed = (button.id === "view-toggle-chat") === on;
     button.classList.toggle("is-active", pressed);
     button.setAttribute("aria-pressed", String(pressed));
   }
@@ -13108,12 +13656,127 @@ el("view-toggle-term").addEventListener("click", () => {
     return;
   }
   const term = activeAgentTerm();
-  if (term !== null) void setPaneChat(term, false);
+  if (term === null) return;
+  paneChatOf(term).chosen = true;
+  void setPaneChat(term, false);
 });
 el("view-toggle-chat").addEventListener("click", () => {
   const term = activeAgentTerm();
-  if (term !== null) void setPaneChat(term, true);
+  if (term === null) return;
+  paneChatOf(term).chosen = true;
+  void setPaneChat(term, true);
 });
+
+/* 2차 B (item 9): an agent's pane reads as its conversation — the transcript
+ * view, not handed to a wire — until the person picks a side with the switch,
+ * which is then theirs for the pane's life. */
+function standPaneConversation(term) {
+  const held = paneChats.get(term);
+  if (held?.on || held?.chosen) return;
+  void setPaneChat(term, true, { wire: false });
+}
+
+/* ---- 판 머리 (2차 B, item 8) ----
+ *
+ * A terminal tab whose pane runs an agent wears a head above its panes: who
+ * the agent is, the model it runs, what it is doing, the conversation it holds
+ * (`paintPaneHeadPick`) and the 대화 | 터미널 switch — beside the pane it
+ * speaks for. In the conversation the page's own head (t-22100) says who, the
+ * model, the state and its clock, so the line and the switch move into it and
+ * this head steps aside: one line, as the draft draws it (`placePaneHeadLine`).
+ * Built once per tab, the first time an agent is in front in it, and re-laid
+ * with the tab's tree. */
+function paneHeadNode() {
+  const head = document.createElement("div");
+  head.className = "pane-head";
+  const who = document.createElement("span");
+  who.className = "pane-head-who";
+  const name = document.createElement("strong");
+  name.className = "pane-head-name";
+  const model = document.createElement("span");
+  model.className = "pane-head-model";
+  const state = document.createElement("span");
+  state.className = "pane-head-state";
+  who.append(agentMarkNode("pane-head-mark", ""), name, model, state);
+  const pick = document.createElement("span");
+  pick.className = "pane-head-pick";
+  pick.hidden = true;
+  const view = document.createElement("span");
+  view.className = "pane-head-view";
+  // The part that travels to the conversation's head; held here wherever it stands.
+  const line = document.createElement("span");
+  line.className = "pane-head-line";
+  line.append(pick, view);
+  head.__line = line;
+  head.append(who, line);
+  return head;
+}
+
+function paintPaneHead(tab, term) {
+  let head = paneHeads.get(tab.id);
+  if (!head) {
+    head = paneHeadNode();
+    paneHeads.set(tab.id, head);
+    // Above the tree, which stays as it is — its slots hold the screens and
+    // the conversation. It stands aside until `placePaneHeadLine` says where
+    // the line goes, so the shells below measure the room it leaves once.
+    head.hidden = true;
+    paneHost(tab).prepend(head);
+  }
+  const agent = paneAgents.get(term) ?? "";
+  writeTextContent(head.querySelector(".pane-head-mark"), agentVoice(agent).glyph);
+  writeTextContent(head.querySelector(".pane-head-name"), agentPaneName(tab, term, agent) || tabLabel(tab));
+  const model = paneModelWords(term);
+  const pill = head.querySelector(".pane-head-model");
+  writeHidden(pill, model.text === "");
+  writeTextContent(pill, model.text);
+  writeAttribute(pill, "data-tip", model.tip);
+  const state = hookStates.get(term) ?? "idle";
+  const chip = head.querySelector(".pane-head-state");
+  writeAttribute(chip, "data-state", state);
+  writeTextContent(chip, bucketWord(state === "needs-attention" ? "attention" : state));
+  paintPaneHeadPick(head, term);
+  placePaneHeadLine(tab, term);
+  return head;
+}
+
+/* The tab head's line and switch stand in the conversation's own head while the
+ * pane in front wears its conversation, and the tab head steps aside; on the
+ * screen they come home. The shells below re-measure only when the head's room
+ * changes. A head rebuilt by its page (`paintPaneChat`) takes the line again. */
+function placePaneHeadLine(tab, term) {
+  const head = paneHeads.get(tab.id);
+  if (!head || activePaneOf(tab) !== term) return;
+  const page = paneChatOn(term) ? paneChats.get(term)?.host?.__helperPage : null;
+  const dock = page?.head.querySelector(".chat-head-pane") ?? head;
+  if (head.__line.parentElement !== dock) dock.append(head.__line);
+  const aside = dock !== head;
+  if (head.hidden === aside) return;
+  head.hidden = aside;
+  remeasurePanes(tab);
+}
+
+/* The one line that says which conversation this pane holds — the session its
+ * agent named, the one a 「계속」 resumes. t-68069 writes here why a resume
+ * picked it; until a hook names a session the line stands empty. */
+function paintPaneHeadPick(head, term) {
+  const pick = head.__line.querySelector(".pane-head-pick");
+  const session = paneSessions.get(term)?.session?.id ?? "";
+  writeHidden(pick, session === "");
+  writeTextContent(pick, session ? t("paneHead.pick", "대화 {{session}}", { session: shortSession(session) }) : "");
+  writeAttribute(pick, "data-tip", session);
+}
+
+/* The heads on screen say what the hooks last said — on the beat the tab strip
+ * repaints, so a busy agent costs one paint a frame, not one per event. */
+function paintShownPaneHeads() {
+  for (const [id, head] of paneHeads) {
+    if (head.parentElement?.hidden !== false) continue;
+    const tab = tabs.find((one) => one.id === id);
+    const term = tab ? activePaneOf(tab) : null;
+    if (term !== null && paneAgents.has(term)) paintPaneHead(tab, term);
+  }
+}
 
 /* Stand the pane's conversation in its slot, or take it down — called from the
  * stage's per-slot pass, so a page is shown exactly when its screen would have
@@ -13229,6 +13892,8 @@ function paintPaneChat(term) {
     workerClock.sync();
   }
   paintHelperPage(held.host, held.tab);
+  const owner = tabOfTerm(term);
+  if (owner) placePaneHeadLine(owner, term);
   // The composer's send is a stop while the turn is out and the send again
   // when it ends — the state it reads (`run.status`) moved here, so it is
   // repainted here; a hook's chip repaint ran before the state landed.
@@ -13399,8 +14064,17 @@ function activeHelperPage() {
   return null;
 }
 
+/* A pane's own transcript is followed while its agent is at work. Between turns
+ * nothing writes it but a turn, and every turn's start and end come as a hook
+ * that reads the page at once (`hook:agent`) — so a conversation that stands
+ * by default costs nothing at rest (2차 B; was a `pane_log` a second). A
+ * helper's file and a wire's log tell no hook, and are followed while shown. */
+function helperPageFollowed(tab) {
+  return tab !== null && (tab.worker.helper?.id !== PANE_LOG_ID || isMidTurn(hookStates.get(tab.worker.term)));
+}
+
 const helperClock = idlePoller({
-  wanted: () => activeHelperPage() !== null,
+  wanted: () => helperPageFollowed(activeHelperPage()),
   every: HELPER_POLL_MS,
   tick: () => void pollHelperPages(),
 });
@@ -15123,7 +15797,9 @@ function updateWorkerHead(head, run) {
 function chatHeadNode(run) {
   const head = document.createElement("header");
   head.className = "worker-head chat-head";
+  // The agent's mark is its picture; its name rides it for a screen reader.
   const mark = agentMarkNode("worker-mark", "");
+  mark.setAttribute("role", "img");
   const name = document.createElement("span");
   name.className = "worker-name";
   const meta = document.createElement("span");
@@ -15144,7 +15820,11 @@ function chatHeadNode(run) {
   const tally = document.createElement("span");
   tally.className = "chat-tally";
   tally.hidden = true;
-  meta.append(model, chip, tally, focusViewButtonNode());
+  meta.append(model, chip, tally);
+  // A pane's own conversation: where its tab head's line and switch stand while
+  // it is the pane in front, so the two heads read as one (`placePaneHeadLine`).
+  if (run.helper?.id === PANE_LOG_ID) meta.append(Object.assign(document.createElement("span"), { className: "chat-head-pane" }));
+  meta.append(focusViewButtonNode());
   head.append(mark, name, meta);
   updateChatHead(head, run);
   return head;
@@ -15154,7 +15834,9 @@ function chatHeadNode(run) {
  * costs no mutation. The clock says THIS turn's time while the agent works
  * (`workerElapsedWords`) and nothing between turns. */
 function updateChatHead(head, run) {
-  writeTextContent(head.querySelector(".worker-mark"), agentVoice(run.agent).glyph);
+  const mark = head.querySelector(".worker-mark");
+  writeTextContent(mark, agentVoice(run.agent).glyph);
+  writeAttribute(mark, "aria-label", agentName(run.agent));
   const focus = head.querySelector(".worker-focus");
   if (focus) writeAttribute(focus, "aria-pressed", focusViewOn() ? "true" : "false");
   writeTextContent(head.querySelector(".worker-name"), run.name);

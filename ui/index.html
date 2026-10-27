@@ -774,6 +774,11 @@
         <path d="m9 15 3-3 3 3" />
         <path d="M12 12v9" />
       </symbol>
+      <symbol id="i-layers" viewBox="0 0 24 24"><!-- lucide layers -->
+        <path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z" />
+        <path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12" />
+        <path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17" />
+      </symbol>
       <symbol id="i-panel" viewBox="0 0 24 24"><!-- lucide panel-left -->
         <rect width="18" height="18" x="3" y="3" rx="2" />
         <path d="M9 3v18" />
@@ -919,6 +924,16 @@
          which is what --traffic-light-inset is for. -->
     <header class="titlebar" data-drag-surface>
       <span class="wordmark" id="titlebar-app-name" data-drag-surface>ZO</span>
+      <!-- 2차 B: who needs the person now, as one number by the wordmark. It is
+           the attention column the dock badge reads (`applyBoardBadge`), and a
+           press drops the list of those turns (`openYourTurnList`). Grey with a
+           ring at nothing, the you-blue with a filled dot when something waits. -->
+      <button class="your-turn" id="your-turn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="your-turn-list" data-keyboard-owner="true">
+        <span class="your-turn-dot" aria-hidden="true"></span>
+        <span class="your-turn-label" data-i18n="yourTurn.label">당신 차례</span>
+        <span class="your-turn-count" id="your-turn-count">0</span>
+        <svg class="icon icon--twist your-turn-chevron" aria-hidden="true"><use href="#i-chevron"></use></svg>
+      </button>
       <span class="project" id="project" data-drag-surface></span>
       <span class="branch" id="branch" data-drag-surface hidden></span>
 
@@ -959,16 +974,18 @@
       <div class="tabstrip" id="tabstrip" role="tablist" data-drag-surface data-i18n-aria="tab.label" aria-label="탭"></div>
 
       <div class="titlebar-right" data-drag-surface>
-        <span class="attention" id="attention" hidden>
-          <span class="attention-dot"></span><span id="attention-count"></span>
-        </span>
         <!-- The active pane's view: its screen, or its conversation drawn from
              the agent's own transcript — one segment, hidden where the pane runs
-             no agent. `paintViewToggle` paints it; a click is `setPaneChat`. -->
+             no agent. `paintViewToggle` paints it; a click is `setPaneChat`.
+             2차 B: it stands in the head of the agent's tab, beside the pane it
+             speaks for (`paintPaneHead`); this is only its home, where a wire's
+             page — which has no panes — keeps it. -->
+        <span class="view-toggle-home" id="view-toggle-home">
         <div class="segment view-toggle" id="view-toggle" role="group" data-i18n-aria="view.toggleLabel" aria-label="보기" hidden>
-          <button class="segment-btn is-active" id="view-toggle-term" type="button" aria-pressed="true" data-i18n-title="view.terminalTip" data-tip="터미널 화면 보기"><span class="view-toggle-glyph" aria-hidden="true">&gt;_</span><span data-i18n="view.terminal">터미널</span></button>
           <button class="segment-btn" id="view-toggle-chat" type="button" aria-pressed="false" data-i18n-title="view.conversationTip" data-tip="대화로 보기"><span class="view-toggle-glyph" aria-hidden="true">◐</span><span data-i18n="view.conversation">대화</span></button>
+          <button class="segment-btn is-active" id="view-toggle-term" type="button" aria-pressed="true" data-i18n-title="view.terminalTip" data-tip="터미널 화면 보기"><span class="view-toggle-glyph" aria-hidden="true">&gt;_</span><span data-i18n="view.terminal">터미널</span></button>
         </div>
+        </span>
         <!-- Orca's `▷ 명령` sits here. Ours runs the thing this product
              already has a setting for — a terminal on the configured
              command, or your shell when you have not named one. The label
@@ -994,6 +1011,12 @@
         </button>
       </div>
     </header>
+
+    <!-- 2차 B: the turns, dropped from the chip. Empty while closed — every
+         row is built when it opens and dropped when it closes (`paintYourTurnList`).
+         It owns its keys (`data-keyboard-owner`): a number, ⌘↵, N and the arrows
+         answer a turn here instead of falling through to the terminal. -->
+    <div class="your-turn-list" id="your-turn-list" role="dialog" aria-labelledby="your-turn" tabindex="-1" data-keyboard-owner="true" hidden></div>
 
     <!-- Orca's Control+Tab switcher is a read-only preview while Control is
          held. The selected tab is committed only when Control is released. -->
@@ -1182,6 +1205,11 @@
             <span class="nav-search-keys" id="sidebar-search-keys" aria-hidden="true"></span>
           </button>
         </nav>
+
+        <!-- 2차 B: the agents a question or a permission is waiting on, above the
+             projects. Rows are built while something waits and gone at nothing
+             (`paintYourTurnGroup`). -->
+        <section class="your-turn-group" id="your-turn-group" data-i18n-aria="yourTurn.label" aria-label="당신 차례" data-keyboard-owner="true" hidden></section>
 
         <div class="panel-head">
           <!-- The heading is the grouping's name, stamped on a data attribute
@@ -2745,6 +2773,21 @@
              it can never have. -->
         <div class="activity-tabs">
           <div class="activity-tabset" role="tablist" data-i18n-aria="view.activityLabel" aria-label="사이드바 항목">
+          <!-- 2차 B: what is piling up in this project — the release lane, the
+               work not in main, the repository — before the source-control
+               list (`paintStackedWork`). The number is the commits not in main. -->
+          <button
+            class="activity-tab"
+            id="activity-pile-tab"
+            role="tab"
+            aria-selected="false"
+            data-i18n-title="pile.title" data-tip="쌓인 일"
+            data-i18n-aria="pile.title" aria-label="쌓인 일"
+          >
+            <svg class="icon" aria-hidden="true"><use href="#i-layers"></use></svg>
+            <span class="activity-pile-words" data-i18n="pile.title">쌓인 일</span>
+            <span class="activity-count" id="activity-pile-count" hidden></span>
+          </button>
           <button
             class="activity-tab is-active"
             id="activity-files-tab"
@@ -2838,6 +2881,9 @@
             </button>
           </div>
         </div>
+
+        <!-- 2차 B: 쌓인 일. Empty until its tab is up, emptied when it goes. -->
+        <section class="activity-item pile" id="activity-pile" data-i18n-aria="pile.title" aria-label="쌓인 일" hidden></section>
 
         <section class="activity-item" id="activity-files">
           <div id="file-search-filters" class="explorer-filters" hidden>

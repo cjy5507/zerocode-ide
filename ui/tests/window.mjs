@@ -113,6 +113,10 @@ import { testKeybindingText } from "./keybinding-text.mjs";
 import { testTerminalCloseResult } from "./terminal-close-result.mjs";
 import { testPermissionCard } from "./permission-card.mjs";
 import { testAnswerDoor } from "./answer-door.mjs";
+import { testYourTurn } from "./your-turn.mjs";
+import { testPassTwoBFit } from "./pass2-b-fit.mjs";
+import { testPaneHead } from "./pane-head.mjs";
+import { testStackedWork } from "./stacked-work.mjs";
 import { testSelfAct } from "./self-act.mjs";
 import { testComputerShare } from "./computer-share.mjs";
 import { testExplain } from "./explain.mjs";
@@ -294,6 +298,11 @@ suite("toast-clear-of-drawer", ({ browser, origin, ok }) => testToastClearOfDraw
 suite("skills-pickers", ({ browser, origin, ok }) => testSkillsPickers(browser, origin, ok));
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
 suite("answer-door", ({ browser, origin, ok }) => testAnswerDoor(browser, origin, ok));
+suite("your-turn", ({ browser, origin, ok }) => testYourTurn(browser, origin, ok));
+suite("pane-head", ({ browser, origin, ok }) => testPaneHead(browser, origin, ok));
+suite("stacked-work", ({ browser, origin, ok }) => testStackedWork(browser, origin, ok));
+/* IDE design pass 2 B at five widths, in dark and light. */
+suite("pass2-b-fit", ({ browser, origin, ok }) => testPassTwoBFit(browser, origin, ok));
 /* ZeroCode's own window as a Computer Use target: the page's half (t-73906). */
 suite("self-act", ({ browser, origin, ok }) => testSelfAct(browser, origin, ok));
 /* One window shared with an agent: the card and the band (t-73906). */
@@ -14617,9 +14626,10 @@ ok(
   "the bar counts this project's ports, and the rail grows no new icon",
   ports.onBar === "1" &&
     // The vault is the one rail member Orca itself has (activityItems:
-    // explorer, vault, …) — the guard is against PORTS growing an icon.
+    // explorer, vault, …), and 쌓인 일 leads the rail (2차 B) — the guard is
+    // against PORTS growing an icon.
     ports.railIcons.join(",") ===
-      "activity-files-tab,activity-vault-tab,activity-scm-tab,activity-search-tab,activity-checks-tab,activity-term-tab",
+      "activity-pile-tab,activity-files-tab,activity-vault-tab,activity-scm-tab,activity-search-tab,activity-checks-tab,activity-term-tab",
   JSON.stringify({ onBar: ports.onBar, railIcons: ports.railIcons }),
 );
 ok(
@@ -37362,7 +37372,8 @@ ok(
   "the pane's own conversation floats its composer in the extension's centered dock — inset from the pane's edges, no wider than the token, the composer as wide as the dock, and inside the pane and on screen when it narrows — the measure a helper's page stood before it got a footer",
   paneDock.stands && paneDock.paneWidth === 1200 &&
     paneDock.dockWidth === paneDock.wantDockWidth && paneDock.dockWidth > 0 &&
-    paneDock.dockWidth < paneDock.columnWidth &&
+    // No wider than the reading column it floats under (2차 B: the same 760 px axis).
+    paneDock.dockWidth <= paneDock.columnWidth &&
     paneDock.dockCentered && paneDock.composerOnAxis &&
     paneDock.narrowWidth === 420 && paneDock.composerInside && paneDock.composerOn,
   JSON.stringify(paneDock),
@@ -55803,12 +55814,15 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // At REST between turns: what a composer says and does while a turn is
       // out is the queue's business (`composer-queue`), and a box that says
       // 「대기열에 추가」 would hide the two words this suite is about.
-      const term = await openTermTab({ placement: "tab" });
-      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-chips", resumable: false, model: "claude-fable-5-1", permission_mode: "bypassPermissions" });
-      await window.__PAINTED__();
+      // On file before the agent's report: the pane stands in its conversation at that
+      // report and reads the transcript then — a pane at rest is not read again until a
+      // hook says something moved.
       window.__ANSWER__.pane_log = () => ({ found: true, next: 2, turns: [
         { role: "user", text: "hi" }, { role: "assistant", text: "hello" },
       ] });
+      const term = await openTermTab({ placement: "tab" });
+      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-chips", resumable: false, model: "claude-fable-5-1", permission_mode: "bypassPermissions" });
+      await window.__PAINTED__();
       el("view-toggle-chat").click();
       await settle(150);
       const chat = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat`);
@@ -55980,10 +55994,12 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // A page nobody has been answered on does not list `/copy` — a row
       // that would do nothing when it is pressed is not drawn at all. A pane's
       // conversation that holds only the person's words is such a page.
+      // On file before the agent's first report: the pane stands in its
+      // conversation at that report and reads the transcript then.
+      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
       const quietTerm = await openTermTab({ placement: "tab" });
       tell("hook:agent", { term: quietTerm, state: "idle", agent: "claude", session: "s-quiet", resumable: false, model: "claude-fable-5-1" });
       await window.__PAINTED__();
-      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
       el("view-toggle-chat").click();
       await settle(150);
       const quietBox = document.querySelector(`.pane-slot[data-term="${quietTerm}"] .pane-chat .worker-composer-box`);
@@ -56082,15 +56098,14 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       await window.__PAINTED__();
       const toggle = el("view-toggle");
       seen.hiddenBeforeAgent = toggle.hidden;
-      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false });
-      await window.__PAINTED__();
-      seen.shownForAgent = !toggle.hidden;
       // The pane's transcript, answered the way the backend reads it: the turns
       // after the page's cursor (the tail on the first read) and the cursor past
       // them. A read that finds nothing new brings nothing, so the page's quick
       // follow ends there as it does on a real file — an answer that repeated
       // the three turns on every read was news every 160 ms, and the follow
-      // never stopped (t-9741).
+      // never stopped (t-9741). On file before the agent's first report: the
+      // pane opens on its conversation at that report (2차 B), as a real
+      // transcript is there by then.
       const transcript = [
         { role: "user", text: "Wallet 결제 레시피 만들어줘" },
         { role: "tool", text: "Bash · zerocode-browser open http://admin.internal.example/login", tool: { name: "Bash", kind: "bash" } },
@@ -56101,6 +56116,9 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
         next: transcript.length,
         turns: transcript.slice(args.after ?? 0),
       });
+      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false });
+      await window.__PAINTED__();
+      seen.shownForAgent = !toggle.hidden;
       const view = termViews.get(term);
       const slot = document.querySelector(`.pane-slot[data-term="${term}"]`);
       const t0 = performance.now();
@@ -56281,7 +56299,11 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
         if (args.term !== long) return answerLog(args);
         if (reads === 0) firstAfter = args.after;
         reads += 1;
-        return chunks[Math.min(args.after ?? 0, 2)];
+        // Past the end the file has nothing new, as the backend answers it: a
+        // read the page owes after another (a hook's beside the opening one)
+        // must not be handed the last chunk twice.
+        if ((args.after ?? 0) >= chunks.length) return { found: true, next: chunks.length, more: false, skipped: false, turns: [] };
+        return chunks[args.after ?? 0];
       };
       const long = await openTermTab({ placement: "tab" });
       const bornAgo = 60 * 60 * 1000;

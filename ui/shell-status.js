@@ -3839,6 +3839,8 @@ function absorbReleaseStatus(answer) {
   if (laneSaid !== releaseLaneSaid) {
     releaseLaneSaid = laneSaid;
     scheduleDeskPaint();
+    // 쌓인 일 says the lane too, while its tab is up (shell-scm.js loads after this file).
+    if (typeof paintStackedWork === "function" && !el("activity-pile").hidden) paintStackedWork();
   }
   paintUpdateNotice();
   raiseUpdateToast();

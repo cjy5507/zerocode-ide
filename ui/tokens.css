@@ -316,6 +316,14 @@
    * its word beside it. Geist's blue-900 as words: 7.92:1. */
   --signal-you: var(--blue-900);
   --signal-you-ground: var(--blue-200);
+  /* The role a 「당신 차례」 mark reads (IDE design pass 2): the chip, the
+   * sidebar group, the list's kind marks. It points at the blue above — no new
+   * colour — so the one blue keeps one meaning wherever it is spent. */
+  --call: var(--signal-you);
+  --call-ground: var(--signal-you-ground);
+  /* The lit chip is the draft's filled pill: the solid you-blue under white words. */
+  --call-solid: var(--signal-you-solid);
+  --call-on-solid: var(--ink-on-solid);
   /* Words set in that blue on a ground tinted by it. On this floor the tint
    * barely lifts the ground (6.59:1 at 14%, 5.41:1 at 24%), so the ink is the
    * signal; the light block is where the two part. */
@@ -882,6 +890,15 @@
   --sftp-dialog-layer: 32;
   --sftp-confirm-layer: 34;
   --dialog-width: min(560px, calc(100% - var(--space-6)));
+  /* IDE design pass 2 (B): the list dropped from the 「당신 차례」 chip, and
+   * the one column the conversation view reads in — the passed draft's 760. */
+  --your-turn-list-width: min(560px, calc(100vw - 2 * var(--space-4)));
+  /* Over the stage and its scrims, with the chat preview, under the tab switcher (100). */
+  --your-turn-list-layer: 90;
+  --reading-column: 760px;
+  /* 쌓인 일's bar of the branches not in main: the draft's 6 px, 2 px apart. */
+  --pile-bar-height: 6px;
+  --pile-bar-gap: 2px;
 
   /* The finder is WIDER than a dialog, which reverses what this file used to
    * argue.
@@ -2653,15 +2670,14 @@
   --chat-shadow: 0 1px 2px rgb(0 0 0 / 10%);
   /* The permission mode's reach, one colour each (the extension's send by
    * `[data-permission-mode]`): edits taken without asking invert the send
-   * (ink on ground), a planning session wears the window's accent, a
-   * bypassed session the halt colour — the one destructive state this
-   * product colours. */
+   * (ink on ground), a planning session wears the window's accent. A session
+   * that asks nothing wears no colour — red is this window's word for a
+   * failure — and its composer chip says it by a triangle and the CLI's word
+   * instead (IDE design pass 2, item 11). */
   --chat-reach-edits: var(--ink-chalk);
   --chat-reach-edits-ink: var(--surface-deck);
   --chat-reach-plan: var(--ai-accent);
   --chat-reach-plan-ink: var(--surface-abyss);
-  --chat-reach-bypass: var(--signal-halt);
-  --chat-reach-bypass-ink: var(--chat-send-ink);
   /* How tall the plan on an approval card stands before it scrolls on its
    * own — a little over the composer's own cap (200px), so a plan of a dozen
    * steps is read in place while the two answers stay in reach. The
@@ -2689,8 +2705,11 @@
   --chat-bubble-pad-x: 6px;
   --chat-bubble-pad-y: 4px;
   --chat-bubble-gap: 4px;
-  --chat-radius-composer: 8px;
-  --chat-prose-size: var(--text-sm);
+  /* IDE design pass 2 (B, items 9 and 11): the composer floats as the round box
+   * of what floats, and the prose is read at Geist's copy-16 — 16 on a 24
+   * line (`--chat-prose-leading`). */
+  --chat-radius-composer: var(--radius-xl);
+  --chat-prose-size: var(--text-lg);
   --chat-prose-leading: 1.5;
   --chat-dot: 7px;
   --chat-dot-halo: 3px;
@@ -2751,7 +2770,7 @@
    * default face (WebKit: Times, and AppleMyungjo for Hangul — the serif
    * the person saw on 2026-09-23, t-6323 A0). */
   --chat-dock-inset: 16px;
-  --chat-dock-max: 680px;
+  --chat-dock-max: var(--reading-column);
   /* The dock's watched height, written on the page by `chatDockNode`; a page
    * without a dock keeps the extension's 40px alone. */
   --chat-dock-h: 0px;
@@ -3413,8 +3432,6 @@
   --chat-reach-edits-ink: var(--surface-deck);
   --chat-reach-plan: var(--ai-accent);
   --chat-reach-plan-ink: var(--surface-abyss);
-  --chat-reach-bypass: var(--signal-halt);
-  --chat-reach-bypass-ink: var(--chat-send-ink);
   --chat-dot-done: #3f9a5f;
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 3%, transparent);

@@ -31990,12 +31990,16 @@ mod tests {
              answer door, for a permission the pane still holds:\n{answering}"
         );
 
-        // The panel: both verbs through the command, dismissed on press.
+        // The panel: both verbs through the command, dismissed on press — in
+        // the one decision the panel and the turn list share.
         let panel = block_after(window, "function approvalPanelNode(");
+        let deciding = block_after(window, "function decideApproval(");
         assert!(
-            panel.contains(r#"invoke("answer_approval""#) && panel.contains("draft.open = false"),
+            panel.contains("decideApproval(card, draft, choice")
+                && deciding.contains(r#"invoke("answer_approval""#)
+                && deciding.contains("draft.open = false"),
             "the approval panel answers around the command, or lingers \
-             after the answer:\n{panel}"
+             after the answer:\n{panel}\n{deciding}"
         );
         // Question first, approval second — Orca's own order.
         assert!(
