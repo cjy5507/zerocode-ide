@@ -1410,11 +1410,12 @@ mod tests {
         std::fs::write(commands.join("fruit.md"), "Name the fruit $ARGUMENTS in one word.\n")
             .expect("the prompt command");
         let mut written = Vec::new();
+        let mode = core_types::PermissionMode::WorkspaceWrite;
         let (expanded, unknown) = {
             let mut renderer = super::Renderer::new(&mut written, super::RenderOptions::default());
             (
-                unlisted_command(&mut renderer, folder.path(), "fruit", "pineapple"),
-                unlisted_command(&mut renderer, folder.path(), "no-such-command-z12", ""),
+                unlisted_command(&mut renderer, folder.path(), mode, "fruit", "pineapple"),
+                unlisted_command(&mut renderer, folder.path(), mode, "no-such-command-z12", ""),
             )
         };
         assert!(
