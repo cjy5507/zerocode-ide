@@ -294,7 +294,7 @@ pre-handin suites='':
         step window env WINDOW_SUITES="$suites" node ui/tests/window.mjs
     else
         echo "pre-handin: ui changed ($(echo "$ui" | wc -l | tr -d ' ') files, first: $(echo "$ui" | head -1)) — name the window suites to run:" >&2
-        echo "  just pre-handin suites=<a,b>   (names or patterns; the suite list is in ui/tests/window.mjs)" >&2
+        echo "  just pre-handin suites=<a,b>   (names or patterns; the window harness registers the suite names)" >&2
         echo "  named like a changed ui/tests file: $(printf '%s\n' "$picked" | awk -F'\t' '$1 == "suite" { printf "%s%s", sep, $2; sep = "," }')" >&2
         note window 2
     fi
