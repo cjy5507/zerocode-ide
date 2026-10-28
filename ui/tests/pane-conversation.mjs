@@ -475,8 +475,8 @@ export async function testPaneConversation(browser, origin, ok) {
       nowLine.thinking.now === nowLine.wantThinking &&
       [nowLine.read, nowLine.bash, nowLine.waiting, nowLine.reconnecting, nowLine.thinking].every((one) => one.lead === nowLine.lead && !one.seeing.includes(nowLine.busy)),
       JSON.stringify(nowLine));
-    ok("a shell command behind a cd lead is said as 「셸 cargo test -p zo-ide · zo-ide」 — its command and its folder, no cd",
-      nowLine.shell.now === "셸 cargo test -p zo-ide · zo-ide",
+    ok("a shell command behind a cd lead is said as 「명령 cargo test -p zo-ide · zo-ide」 (t-81525 C7) — its command and its folder, no cd",
+      nowLine.shell.now === "명령 cargo test -p zo-ide · zo-ide",
       JSON.stringify(nowLine.shell));
     ok("a status that says quiet names nothing the page can name, and a status frame with no activity takes the line back to 「작업 중…」",
       nothingKnown(nowLine.quiet) && nothingKnown(nowLine.cleared),
