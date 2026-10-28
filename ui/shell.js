@@ -14416,7 +14416,15 @@ function helperTurnRowNode(run, turn, spoken, cold = false) {
     // Announced by who said it, as the extension announces every message
     // (2.1.272): the person's rows say 「나」 above, an answer says the
     // agent's own name — the catalog's, never a word invented here.
-    if (turn.role === "assistant") row.setAttribute("aria-label", agentName(run.agent));
+    if (turn.role === "assistant") {
+      row.setAttribute("aria-label", agentName(run.agent));
+      // The rail's jump hands an answer the focus, and the list's one copy
+      // follows it there — the keyboard's way to every answer's copy, not
+      // only the newest's (t-81525 r2). Its Tab walks into its own controls,
+      // not the window's key sink (`rearmKeySink`).
+      row.tabIndex = -1;
+      row.dataset.keyboardOwner = "true";
+    }
     // An answer born far from view waits for its prose (B1).
     if (cold && turn.role === "assistant") shelveBorn(row);
     else paintAnswerProse(said, turn, run);
@@ -14735,6 +14743,8 @@ function helperActionsNode() {
   copy.setAttribute("aria-label", copyWords);
   copy.dataset.tip = copyWords;
   copy.appendChild(iconNode("copy"));
+  // Enter and Space, while it has focus, are its own (`rearmKeySink`).
+  copy.dataset.keyboardOwner = "true";
   copyOnPress(copy, () => answerCopyText(actions.__row?.__turn?.text ?? ""));
   actions.appendChild(copy);
   return actions;

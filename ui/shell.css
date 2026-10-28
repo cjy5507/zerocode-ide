@@ -18170,8 +18170,11 @@ button.helper-sib:hover {
   outline-offset: 2px;
 }
 
-/* 스크롤 지역의 고리는 안쪽으로 — 바깥은 이미 잘려 나가는 상자다. */
-.helper-turns:focus-visible {
+/* 스크롤 지역의 고리는 안쪽으로 — 바깥은 이미 잘려 나가는 상자다. 레일이
+ * 초점을 건넨 답(t-81525 r2)도 목록 안에서 잘리지 않게 안쪽으로 두른다. */
+.helper-turns:focus-visible,
+.worker-view .helper-turn.is-assistant:focus-visible {
+  outline: 2px solid var(--ink-chalk);
   outline-offset: -2px;
 }
 

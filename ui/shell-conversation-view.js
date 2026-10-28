@@ -3042,12 +3042,19 @@ function turnRailNode(list) {
   rail.addEventListener("click", (event) => {
     const tick = event.target instanceof Element ? event.target.closest(".chat-rail-tick") : null;
     const row = (tick ?? nearestRailTick(rail, event.clientY))?.__row;
-    if (row?.isConnected) railJump(list, row);
+    if (row?.isConnected) railJump(list, row, { focus: true });
   });
   handle.addEventListener("keydown", (event) => {
     const rows = railRows(list);
     if (rows.length === 0) return;
     const at = railAt(list, rows);
+    // Enter goes into the row the handle stands on; the arrows keep the
+    // handle, so a second press still moves it.
+    if (event.key === "Enter") {
+      event.preventDefault();
+      railJump(list, rows[railAt(list, rows)], { focus: true });
+      return;
+    }
     const page = Math.max(1, railRoom(rail) - 1);
     const to = {
       ArrowUp: at - 1, ArrowDown: at + 1, PageUp: at - page, PageDown: at + page, Home: 0, End: rows.length - 1,
@@ -3234,8 +3241,9 @@ function nearestRailTick(rail, y) {
 
 /* Go to `row`: it stands at the list's top — under the person's words of its
  * turn, which stick there — and the list stops following its foot unless the
- * row is the last one. */
-function railJump(list, row) {
+ * row is the last one. With `focus`, an answer takes the focus too, and with
+ * it the list's copy (`watchAnswerActions`). */
+function railJump(list, row, { focus = false } = {}) {
   const view = list.getBoundingClientRect();
   let header = null;
   if (!row.classList.contains("is-user")) {
@@ -3254,6 +3262,7 @@ function railJump(list, row) {
   state.away = chatFootGap(list) >= CHAT_FOLLOW.slack;
   paintFootDoor(list);
   askTurnRail(list);
+  if (focus && row.tabIndex === -1) row.focus({ preventScroll: true });
 }
 
 /* ---- the conversation's state, over the composer (t-22100) --------------------
