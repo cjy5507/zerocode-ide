@@ -15000,12 +15000,17 @@ details.worker-command {
  * turn scrolls under it, padded above and below, its last stretch fading to
  * the ground; the box with the words is its child (`.helper-said`). */
 .helper-turn.is-user {
-  position: sticky;
-  top: 0;
-  z-index: 2;
   display: block;
   margin: var(--chat-bubble-gap) 0;
   padding: var(--chat-sticky-pad-top) 0 var(--chat-sticky-pad-bottom);
+}
+
+/* Only the newest words stick (t-81525 B4, `dressLastPerson`): one sticky
+ * row and one layer a page, not one for every time the person spoke. */
+.helper-turn.is-user.is-latest {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   background-image: linear-gradient(
     to bottom,
     var(--chat-ground) calc(100% - var(--chat-sticky-fade)),
@@ -15075,9 +15080,22 @@ details.worker-command {
   display: none;
 }
 
+/* An answer is bare prose in the reading column (t-81525 B3): no dot, no
+ * rail, the row's pad above and below. The newest answer reads in the full
+ * ink; the ones before it a step back (`--chat-said-earlier`), so the eye
+ * lands on what was said last. */
+.helper-turn.is-assistant {
+  position: relative;
+  padding: var(--chat-row-pad) 0;
+}
+
+.helper-turn.is-assistant:not(.is-latest, .is-streaming) > .helper-said {
+  color: var(--chat-said-earlier);
+}
+
 /* A line off the rail — a system word — is the extension's meta message
  * (`metaMessage`): italic, in the secondary ink, a little faded. */
-.helper-turn:not(.is-step):not(.is-user):not(.is-tool):not(.is-thinking) {
+.helper-turn:not(.is-step):not(.is-user):not(.is-assistant):not(.is-tool):not(.is-thinking) {
   margin: var(--chat-meta-gap) 0;
   padding: var(--chat-meta-pad);
   color: var(--chat-work-ink);
@@ -15412,9 +15430,12 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   box-sizing: border-box;
   width: fit-content;
   max-width: var(--chat-said-max);
+  /* On the right, under the hand that typed it (t-81525 B4), rounded as
+   * what floats. */
+  margin-left: auto;
   padding: var(--space-2) var(--space-3);
   border: 0;
-  border-radius: var(--chat-panel-radius);
+  border-radius: var(--radius-xl);
   background: var(--chat-bubble);
   color: var(--chat-bubble-ink);
   font-size: var(--chat-prose-size);
@@ -16183,6 +16204,11 @@ details[open] > .helper-step-line::after {
   padding-bottom: var(--chat-image-under);
   overflow-x: auto;
   scrollbar-width: thin;
+}
+
+/* The pictures the person sent stand over their words, on the same side. */
+.helper-turn.is-user > .helper-images {
+  justify-content: flex-end;
 }
 
 .helper-image {

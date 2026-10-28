@@ -14395,9 +14395,10 @@ function helperTurnRowNode(run, turn, spoken, cold = false) {
     if (turn.images) row.appendChild(imagePillsNode(run, turn.images));
     said.hidden = turn.text === "";
   } else {
-    // The agent's rows stand on the timeline rail (`is-step`); a system line
-    // stands off it, the way the extension's meta messages do.
-    row.className = turn.role === "assistant" ? "helper-turn is-assistant is-step" : `helper-turn is-${turn.role}`;
+    // An answer is bare prose in the reading column — no dot, no rail
+    // (t-81525 B3): the words are what is read. A system line is the
+    // extension's meta message.
+    row.className = `helper-turn is-${turn.role}`;
     // Announced by who said it, as the extension announces every message
     // (2.1.272): the person's rows say 「나」 above, an answer says the
     // agent's own name — the catalog's, never a word invented here.
@@ -14767,13 +14768,26 @@ function previewDoorNode(open, words, go) {
   return door;
 }
 
-/* 꼬리를 마지막 어시스턴트 턴으로 옮긴다 — 바뀌었을 때만 DOM을 만진다. */
+/* 꼬리를 마지막 어시스턴트 턴으로 옮긴다 — 바뀌었을 때만 DOM을 만진다. 마지막
+ * 답만 가장 진한 글로 선다(`is-latest`, t-81525 B3): 앞의 답들은 한 걸음 물러선다. */
 function dressLastAnswer(list, run, newest) {
   if (!newest || newest.row === list.__lastAnswer) return;
   list.__lastAnswer?.querySelector(":scope > .helper-tail")?.remove();
+  list.__lastAnswer?.classList.remove("is-latest");
   const tail = helperTailNode(run, newest.turn);
   if (tail.childElementCount) newest.row.appendChild(tail);
+  newest.row.classList.add("is-latest");
   list.__lastAnswer = newest.row;
+}
+
+/* Only the person's newest words stand stuck at the list's top (t-81525 B4):
+ * one sticky row a page, where every row of theirs was one — each a layer a
+ * long conversation paid for. Moved when newer words arrive. */
+function dressLastPerson(list, newest) {
+  if (!newest || newest === list.__lastPerson) return;
+  list.__lastPerson?.classList.remove("is-latest");
+  newest.classList.add("is-latest");
+  list.__lastPerson = newest;
 }
 
 /* The list's fixed tail — the helpers at work (t-6323 A6), then the status
@@ -15101,6 +15115,7 @@ function syncHelperTurns(list, run) {
     clearFocusGroups(list);
     for (const row of list.querySelectorAll(":scope > [data-turn]")) row.remove();
     list.__lastAnswer = null;
+    list.__lastPerson = null;
     syncHelperTasks(list, run);
     syncStreamingTurns(list, run);
     syncHelperReport(list, run);
@@ -15215,6 +15230,7 @@ function syncHelperTurns(list, run) {
   // them again a word at a time (09-16 → 09-20) only lagged behind it. The
   // wire's page streams the words themselves (`syncStreamingTurns`).
   dressLastAnswer(list, run, newest);
+  dressLastPerson(list, people.at(-1));
   standLatestTodo(list, focus);
   askShelfAgain(list);
   syncHelperTasks(list, run);
@@ -15355,7 +15371,7 @@ function streamingTurnNode(role) {
     return row;
   }
   const row = document.createElement("article");
-  row.className = "helper-turn is-assistant is-step is-streaming";
+  row.className = "helper-turn is-assistant is-streaming";
   row.dataset.role = role;
   const said = document.createElement("div");
   said.className = "helper-said";

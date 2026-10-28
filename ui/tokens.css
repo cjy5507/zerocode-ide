@@ -2651,6 +2651,9 @@
   --chat-ground: var(--surface-abyss);
   --chat-bubble: var(--surface-raised);
   --chat-bubble-ink: var(--ink-chalk);
+  /* An answer before the newest one (t-81525 B3): a step back from the
+   * newest, still the reading ink — 88% of it toward the secondary. */
+  --chat-said-earlier: color-mix(in srgb, var(--ink-chalk) 88%, var(--ink-mist));
   --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
   --chat-composer-bg: var(--surface-raised);
   --chat-composer-edge: var(--edge-glint);
@@ -3422,6 +3425,9 @@
   --chat-ground: var(--surface-abyss);
   --chat-bubble: var(--surface-raised);
   --chat-bubble-ink: var(--ink-chalk);
+  /* An answer before the newest one (t-81525 B3): a step back from the
+   * newest, still the reading ink — 88% of it toward the secondary. */
+  --chat-said-earlier: color-mix(in srgb, var(--ink-chalk) 88%, var(--ink-mist));
   --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 7%, transparent);
   --chat-composer-bg: var(--surface-deck);
   --chat-composer-edge: var(--edge-rule);

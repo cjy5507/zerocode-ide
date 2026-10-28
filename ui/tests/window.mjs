@@ -36297,7 +36297,7 @@ const thoughtRows = await page.evaluate(async () => {
 ok(
   "a thought is one closed line of the transcript — the window's label and its bold heading on the line, prose born on the first opening, never a paragraph and never the passport label — the call after it is its own row under its kind's word, and the composer's textarea wears no second ring when focused",
   JSON.stringify(thoughtRows.shape) === JSON.stringify([
-    "helper-turn is-user is-briefing", "helper-turn is-thinking", "helper-turn is-tool", "helper-turn is-assistant is-step",
+    "helper-turn is-user is-briefing", "helper-turn is-thinking", "helper-turn is-tool", "helper-turn is-assistant is-latest",
   ]) &&
     thoughtRows.thoughtFolded &&
     thoughtRows.who !== "" && thoughtRows.who === thoughtRows.whoExpected &&
@@ -57980,7 +57980,8 @@ suite("wire-live-stream", async ({ browser, origin, ok }) => {
       seen.everyBurstWithinAFrame = lags.every((frames) => frames <= 1);
       seen.shownWhole = flat(streaming()?.textContent ?? "") === flat(live);
       seen.noFade = face.querySelectorAll(".is-streaming .helper-word").length === 0;
-      seen.onRail = streaming()?.classList.contains("is-step") === true;
+      // An answer stands off the rail, bare prose (t-81525 B3) — the streaming one as the one it becomes.
+      seen.onRail = streaming()?.classList.contains("is-step") === false;
       // The closed block and the open one are both the answer's own markdown.
       live += "\n\n**bold** tail";
       await pollHelperPages();

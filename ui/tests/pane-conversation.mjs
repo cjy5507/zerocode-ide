@@ -76,10 +76,9 @@ export async function testPaneConversation(browser, origin, ok) {
         answerLeftGap: Math.round(answerBox.left - listBox.left),
       };
     });
-    ok("what the person said is the extension's sticky header — the row sticks at the list's top, the box spans the list between its gutters with the input's 1px edge — and what the agent said stands on the rail beside it",
+    ok("what the person said last is the one sticky row — it sticks at the list's top — and their words stand on the right, under the hand that typed them, while the answer reads from the column's left (t-81525 B4)",
       placed.sticky === "sticky" && placed.stickyTop === "0px" &&
-      placed.boxLeftGap === placed.gutter && placed.boxRightGap === placed.gutter &&
-      placed.boxEdge === "1px" &&
+      placed.boxRightGap === placed.gutter && placed.boxLeftGap >= placed.gutter &&
       placed.answerLeftGap <= placed.boxLeftGap,
       JSON.stringify(placed));
 
