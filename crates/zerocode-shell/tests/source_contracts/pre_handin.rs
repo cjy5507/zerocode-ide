@@ -46,10 +46,12 @@ fn steps(body: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Stage one is always: the formatter of both workspaces (the gate's own
+/// Stage one is always: the formatter of every Cargo workspace (the gate's own
 /// `fmt-check` recipes, so the stage and the gate cannot disagree), the
 /// private-value gate, the window's source contracts. In this order — cheapest
-/// first, so the first red comes in seconds.
+/// first, so the first red comes in seconds. The workspaces after the root are
+/// named by `changed_crates.py --workspaces`, one step run per name: the recipe
+/// spells none.
 #[test]
 fn stage_one_runs_the_four_checks_in_order() {
     let body = body();
@@ -63,7 +65,10 @@ fn stage_one_runs_the_four_checks_in_order() {
         first_four,
         [
             ("fmt", "just fmt-check"),
-            ("fmt-zo-ide", "bash -c 'cd zo-ide && just fmt-check'"),
+            (
+                "\"fmt-$workspace\"",
+                "bash -c 'cd \"$1\" && just fmt-check' _ \"$workspace\""
+            ),
             ("pii", "just pii-check"),
             (
                 "contracts",
@@ -72,14 +77,50 @@ fn stage_one_runs_the_four_checks_in_order() {
         ],
         "stage one's first four steps:\n{body}"
     );
+    assert!(
+        body.lines()
+            .any(|line| line.contains("changed_crates.py --workspaces")),
+        "the workspaces come from the script:\n{body}"
+    );
+    assert!(
+        !body.contains("zo-ide"),
+        "the second workspace's name lives in the script's WORKSPACES, not in the recipe:\n{body}"
+    );
 }
 
-/// The gate's fmt recipes are the ones the stage runs: they exist, in both
-/// workspaces.
+/// The workspaces the script names (its `WORKSPACES = (...)` line, the one
+/// place that knows them): the root and the others.
+fn script_workspaces() -> Vec<String> {
+    let path = repo_root().join("tools/release/changed_crates.py");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|why| panic!("{}: {why}", path.display()));
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("WORKSPACES = ("))
+        .expect("a `WORKSPACES = (...)` line in changed_crates.py");
+    line.split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The gate's fmt recipes are the ones the stage runs: they exist, in every
+/// workspace the script names.
 #[test]
 fn the_fmt_steps_run_recipes_that_exist() {
-    for justfile in ["justfile", "zo-ide/justfile"] {
-        let path = repo_root().join(justfile);
+    let workspaces = script_workspaces();
+    assert!(
+        workspaces.len() > 1 && workspaces[0] == ".",
+        "the root and at least one more workspace: {workspaces:?}"
+    );
+    for workspace in workspaces {
+        let justfile = if workspace == "." {
+            "justfile".to_string()
+        } else {
+            format!("{workspace}/justfile")
+        };
+        let path = repo_root().join(&justfile);
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|why| panic!("{}: {why}", path.display()));
         assert!(
@@ -87,6 +128,85 @@ fn the_fmt_steps_run_recipes_that_exist() {
             "{justfile} has the `fmt-check` recipe the gate and `pre-handin` both run"
         );
     }
+}
+
+/// A crate under test also gets its rustdoc built with the gate's own flags
+/// (a private intra-doc link was the red the lane hit on 2026-10-28), except
+/// the one crate the gate leaves out of `just doc`. Flags and that name are
+/// the `doc` recipe's variables, interpolated, so the step and the gate agree.
+#[test]
+fn a_crate_under_test_gets_its_docs_built_like_the_gate_builds_them() {
+    let body = body();
+    let steps = steps(&body);
+    assert!(
+        steps
+            .iter()
+            .any(|(name, command)| name == "\"doc:$package\""
+                && command
+                    == "env RUSTDOCFLAGS=\"$doc_flags\" cargo doc -p \"$package\" --no-deps"),
+        "a `doc:$package` step runs cargo doc with the flags the gate uses:\n{body}"
+    );
+    assert!(
+        body.lines()
+            .any(|line| line.trim() == "doc_flags={{quote(doc_flags)}}")
+            && body
+                .lines()
+                .any(|line| line.trim() == "doc_skip={{quote(doc_skip)}}"),
+        "the recipe takes the doc flags and the skipped crate from the justfile's variables:\n{body}"
+    );
+    let path = repo_root().join("justfile");
+    let justfile =
+        std::fs::read_to_string(&path).unwrap_or_else(|why| panic!("{}: {why}", path.display()));
+    assert!(
+        justfile.contains(
+            "RUSTDOCFLAGS=\"{{doc_flags}}\" cargo doc --workspace --exclude {{doc_skip}} --no-deps"
+        ),
+        "the gate's `doc` recipe runs on the same variables"
+    );
+}
+
+/// What the unit stage does not run is said on the last lines, not left for a
+/// worker to find out: the crates that depend on a changed crate, and the
+/// integration tests other than the contracts.
+#[test]
+fn the_recipe_says_what_the_unit_stage_does_not_run() {
+    let body = body();
+    assert!(
+        body.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("echo ")
+                && line.contains("not the crates that depend on them")
+                && line.contains("the gate")
+        }),
+        "a line says dependents and integration tests are the gate's:\n{body}"
+    );
+}
+
+/// A pick that failed is a window stage that stopped (`2`), with the message
+/// above it — not a `-` that reads as "nothing to do".
+#[test]
+fn a_failed_pick_stops_the_window_stage_instead_of_skipping_it() {
+    let body = body();
+    assert!(
+        body.lines()
+            .any(|line| line.trim() == "if [ \"$pick\" -ne 0 ]; then"),
+        "the window stage checks the pick first:\n{body}"
+    );
+}
+
+/// A hint of more than a quarter of the suites says so and carries its count.
+#[test]
+fn a_broad_suite_hint_is_said_to_be_broad() {
+    let body = body();
+    assert!(
+        body.lines()
+            .any(|line| line.trim().starts_with("broad_over=")),
+        "the share that makes a hint broad is one named value:\n{body}"
+    );
+    assert!(
+        body.contains("$hinted of $total"),
+        "the hint names how many of how many suites:\n{body}"
+    );
 }
 
 /// The crates to test are the ones the branch changed, chosen from Cargo's

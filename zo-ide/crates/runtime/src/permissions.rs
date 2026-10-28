@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use serde_json::Value;
+use zerocode_core::shell_rule::kill::KillVerdict;
 
 use crate::config::RuntimePermissionRuleConfig;
 
@@ -63,6 +64,10 @@ pub struct PermissionRequest {
     /// `None` = reuse `reason` (the ask-rule / hook cases, where one wording
     /// serves both).
     pub deny_reason: Option<String>,
+    /// Only a person may answer it, and only for this call (t-80732): the
+    /// prompt offers no lasting allow, and a front-end that decides in a
+    /// person's absence refuses it instead of approving it.
+    pub person_only: bool,
 }
 
 /// User-facing decision returned by a [`PermissionPrompter`].
@@ -381,8 +386,74 @@ impl PermissionPolicy {
         self.authorize_with_context(tool_name, input, &PermissionContext::default(), prompter)
     }
 
+    /// The decision for one call. A bash command that would send a signal is
+    /// judged by the kill guard first (t-80732): a signal to the window is
+    /// refused whatever the mode, the rules or a hook say, and nobody is
+    /// asked; one that needs a person's yes is put to the person, once and
+    /// for this call alone — no rule an earlier yes left behind answers it —
+    /// and refused when there is nobody to ask. The question also stands for
+    /// any escalation the mode would have asked about, so a person is asked
+    /// once; a call the mode or the rules refuse outright is refused unasked,
+    /// and so is every such question in a pane the ledger summoned as a
+    /// worker, which nobody watches.
     #[must_use]
     pub fn authorize_with_context(
+        &self,
+        tool_name: &str,
+        input: &str,
+        context: &PermissionContext,
+        prompter: Option<&mut dyn PermissionPrompter>,
+    ) -> PermissionOutcome {
+        let verdict = (tool_name == "bash")
+            .then(|| extract_bash_command(input))
+            .flatten()
+            .and_then(|command| crate::kill_guard::judge(&command));
+        match verdict {
+            Some(KillVerdict::Deny { reason }) => PermissionOutcome::Deny {
+                reason: crate::kill_guard::refusal(&reason),
+            },
+            // A pane the ledger summoned as a worker: nobody watches it, so
+            // nobody is asked.
+            Some(KillVerdict::Ask { reason }) if crate::kill_guard::in_a_summoned_worker_pane() => {
+                PermissionOutcome::Deny {
+                    reason: crate::kill_guard::unanswered(&reason),
+                }
+            }
+            Some(KillVerdict::Ask { reason }) => {
+                let mut would_ask = WouldAsk::default();
+                match self.authorize_by_mode_and_rules(
+                    tool_name,
+                    input,
+                    context,
+                    Some(&mut would_ask),
+                ) {
+                    PermissionOutcome::Deny { reason } if !would_ask.asked => {
+                        PermissionOutcome::Deny { reason }
+                    }
+                    _ => Self::prompt_or_deny(
+                        tool_name,
+                        input,
+                        ModeAudit {
+                            current_mode: self.active_mode(),
+                            required_mode: self.required_mode_for_input(tool_name, input),
+                            phase_clamp_base: self.phase_clamp_base,
+                        },
+                        Some(reason.clone()),
+                        Some(crate::kill_guard::unanswered(&reason)),
+                        true,
+                        prompter,
+                    ),
+                }
+            }
+            Some(KillVerdict::Allow) | None => {
+                self.authorize_by_mode_and_rules(tool_name, input, context, prompter)
+            }
+        }
+    }
+
+    /// [`Self::authorize_with_context`] as the mode, the rules and the hooks
+    /// decide it.
+    fn authorize_by_mode_and_rules(
         &self,
         tool_name: &str,
         input: &str,
@@ -434,6 +505,7 @@ impl PermissionPolicy {
                     mode_audit,
                     Some(reason),
                     None,
+                    false,
                     prompter,
                 );
             }
@@ -445,6 +517,7 @@ impl PermissionPolicy {
                         mode_audit,
                         Some(reason),
                         None,
+                        false,
                         prompter,
                     );
                 }
@@ -485,7 +558,7 @@ impl PermissionPolicy {
             ..
         } = mode_audit;
         if let Some(reason) = ask_reason {
-            return Self::prompt_or_deny(tool_name, input, mode_audit, Some(reason), None, prompter);
+            return Self::prompt_or_deny(tool_name, input, mode_audit, Some(reason), None, false, prompter);
         }
 
         if allow_matched
@@ -522,6 +595,7 @@ impl PermissionPolicy {
                 mode_audit,
                 prompt_reason,
                 deny_reason,
+                false,
                 prompter,
             );
         }
@@ -547,6 +621,7 @@ impl PermissionPolicy {
         mode_audit: ModeAudit,
         reason: Option<String>,
         deny_reason: Option<String>,
+        person_only: bool,
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
         let request = PermissionRequest {
@@ -556,6 +631,7 @@ impl PermissionPolicy {
             required_mode: mode_audit.required_mode,
             reason: reason.clone(),
             deny_reason: deny_reason.clone(),
+            person_only,
         };
 
         match prompter.as_mut() {
@@ -628,6 +704,22 @@ impl PermissionPolicy {
             ask: Self::find_matching_rule(&self.ask_rules, tool_name, input)
                 .map(|rule| ask_rule_reason(tool_name, &rule.raw)),
             allow: Self::find_matching_rule(&self.allow_rules, tool_name, input).is_some(),
+        }
+    }
+}
+
+/// Says no, and remembers whether it was asked: whether the mode, the rules
+/// and the hooks alone would put a call to a person.
+#[derive(Default)]
+struct WouldAsk {
+    asked: bool,
+}
+
+impl PermissionPrompter for WouldAsk {
+    fn decide(&mut self, _request: &PermissionRequest) -> PermissionPromptDecision {
+        self.asked = true;
+        PermissionPromptDecision::Deny {
+            reason: String::new(),
         }
     }
 }

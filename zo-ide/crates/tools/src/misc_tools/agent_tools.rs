@@ -662,6 +662,10 @@ pub(crate) struct AgentOutput {
 pub(crate) struct AgentLifecycle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) ledger: Option<ledger::Seat>,
+    /// A ledger worker's start while it runs in the background — the task
+    /// and the worker-start's request name — until `ledger` takes its place.
+    #[serde(rename = "ledgerStart", default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ledger_start: Option<ledger::Start>,
     /// `inline` (a thread of the spawning process) or `pane` (a zo of its
     /// own beside it). Absent on a manifest written before the stamp existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]

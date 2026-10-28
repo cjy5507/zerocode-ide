@@ -592,7 +592,7 @@ mod tests {
     /// cannot read (review, 2026-09-11).
     #[test]
     fn the_skill_names_every_stop_a_recipe_answers() {
-        let skill = include_str!("../../../../skills/computer-use/SKILL.md");
+        let skill = COMPUTER_USE_GUIDE;
         for kind in zerocode_core::computer_recipe::RecipeStop::ALL {
             assert!(
                 skill.contains(&format!("`{}`", kind.as_str())),
@@ -9775,7 +9775,7 @@ mod tests {
         );
         let team = block_after(shell, "fn answer_team_command(");
         assert!(
-            team.contains("is_worker_done(&request.argv)")
+            team.contains("is_worker_done(argv)")
                 && team.contains(
                     "crate::emulator::borrower_gone(term, crate::emulator::LoanEnd::WorkerDone)"
                 ),
@@ -9847,7 +9847,7 @@ mod tests {
         let shell = shipped_backend();
         let hooks = include_str!("../../src/hooks.rs");
         let window = window_source();
-        let skill = include_str!("../../../../skills/computer-use/SKILL.md");
+        let skill = COMPUTER_USE_GUIDE;
 
         assert!(
             hooks.contains("dir.join(zerocode_core::computer_use::COMPUTER_CLI)")
@@ -10249,7 +10249,7 @@ mod tests {
         }
         // And the installed skill teaches every verb the dispatcher answers —
         // VERBS = dispatcher arms = usage = SKILL, one checklist per verb.
-        let skill = include_str!("../../../../skills/computer-use/SKILL.md");
+        let skill = COMPUTER_USE_GUIDE;
         for verb in zerocode_core::agent_browser::VERBS {
             assert!(
                 skill.contains(&format!("zerocode-browser {verb}")),
@@ -33871,7 +33871,7 @@ mod tests {
             );
         }
 
-        let skill = include_str!("../../../../skills/orchestration/SKILL.md");
+        let skill = ORCHESTRATION_GUIDE;
         assert!(
             skill.contains("--on-quota-wall <agent[:model[:effort]]>")
                 && skill.contains("잔량으로 고르기")

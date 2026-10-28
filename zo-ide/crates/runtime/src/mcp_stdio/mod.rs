@@ -324,7 +324,9 @@ impl ManagedMcpProcess {
     }
 }
 
-/// Retry-once-with-reset skeleton shared by every manager request wrapper.
+/// Retry-once-with-reset skeleton shared by the manager's request wrappers —
+/// every one but `tools/call`, which is never sent twice (see
+/// [`McpServerManager::call_tool`]).
 ///
 /// Evaluates to `Result<T, McpServerManagerError>`: a first retryable
 /// failure (transport/timeout — see [`McpServerManager::is_retryable_error`])
@@ -752,17 +754,49 @@ impl McpServerManager {
             .ok_or_else(|| McpServerManagerError::UnknownTool {
                 qualified_name: qualified_tool_name.to_string(),
             })?;
-        let server_name = route.server_name.clone();
 
-        // Tool invocations can be non-idempotent, but transport/timeout errors
-        // already mean we did not receive a usable JSON-RPC response. Match the
-        // rest of the manager's bounded policy: reset and retry exactly once for
-        // retryable failures, never loop indefinitely.
-        with_reset_retry!(
-            self,
-            &server_name,
-            self.call_tool_once(&route, arguments.clone()).await
-        )
+        // A tool call need not be idempotent, so it is never sent twice. Once
+        // the request may have reached the server, a timeout or a dropped
+        // connection cannot say whether the tool ran: the server is reset as
+        // before, and the call comes back as an error that says it was not
+        // sent again. The `initialize` handshake ahead of it keeps its own
+        // reset-and-retry inside `ensure_server_ready`.
+        let error = match self.call_tool_once(&route, arguments).await {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+        let reset = if Self::should_reset_server(&error) {
+            self.reset_server_for_error(&route.server_name, &error)
+                .await
+        } else {
+            Ok(false)
+        };
+        Err(Self::tool_call_failure(error, reset))
+    }
+
+    /// What a failed `tools/call` comes back as, given how resetting its
+    /// server went: a failure after the request may have reached the server
+    /// says it was not sent again ([`McpServerManagerError::ToolCallNotResent`]),
+    /// a failed reset included — that fact outranks the reset's own error,
+    /// which rides along.
+    fn tool_call_failure(
+        error: McpServerManagerError,
+        reset: Result<bool, McpServerManagerError>,
+    ) -> McpServerManagerError {
+        let not_resent = matches!(
+            error,
+            McpServerManagerError::Transport { method: "tools/call", .. }
+                | McpServerManagerError::Timeout { method: "tools/call", .. }
+        );
+        match (not_resent, reset) {
+            (true, reset) => McpServerManagerError::ToolCallNotResent {
+                cause: Box::new(error),
+                server_reset: reset.as_ref().is_ok_and(|server_reset| *server_reset),
+                reset_error: reset.err().map(Box::new),
+            },
+            (false, Err(reset_error)) => reset_error,
+            (false, Ok(_)) => error,
+        }
     }
 
     async fn call_tool_once(
@@ -1465,12 +1499,12 @@ impl McpServerManager {
     /// response) — and a timeout against a child that has already exited — resets
     /// unconditionally, because those mean the connection is genuinely dead. The
     /// budget clears on the next successful `initialize` (see
-    /// [`Self::initialize_server_once`]).
+    /// [`Self::initialize_server_once`]). Returns whether the server was reset.
     async fn reset_server_for_error(
         &mut self,
         server_name: &str,
         error: &McpServerManagerError,
-    ) -> Result<(), McpServerManagerError> {
+    ) -> Result<bool, McpServerManagerError> {
         if matches!(error, McpServerManagerError::Timeout { .. })
             && self.server_process_alive(server_name)?
         {
@@ -1482,17 +1516,18 @@ impl McpServerManager {
             // browser windows, of which only the last could complete. Keep the
             // one live process (and its one tab) from the very first timeout.
             if self.is_interactive_oauth_bridge(server_name) {
-                return Ok(());
+                return Ok(false);
             }
             let server = self.server_mut(server_name)?;
             server.consecutive_timeout_resets += 1;
             if server.consecutive_timeout_resets > MAX_CONSECUTIVE_TIMEOUT_RESETS {
                 // Budget exhausted: keep the live process so a slow-but-alive
                 // handshake can complete instead of being relaunched forever.
-                return Ok(());
+                return Ok(false);
             }
         }
-        self.reset_server(server_name).await
+        self.reset_server(server_name).await?;
+        Ok(true)
     }
 
     /// Whether the server currently owns a child process that has *not* exited.

@@ -25820,6 +25820,174 @@ fn an_account_the_person_picked_is_kept_until_its_wall_even_after_a_restart() {
     crate::agent_teams::forget_term(stood.leader + 100);
 }
 
+/// t-78096 review P3-3 (t-80303): the pick is written before the select, so
+/// a window that dies between the two restarts on the account the person
+/// chose WITH its pick, not without it. What the select sees is the pick on
+/// disk already; a select that refuses leaves the pick as it was — the
+/// person's earlier one, or none.
+#[test]
+fn the_pick_is_on_disk_before_the_select_and_a_refused_select_leaves_the_earlier_pick() {
+    use crate::account_switch::{PersonPick, person_pick};
+    let stood = WalledClaude::near_limit(93_410, 1, 0);
+    let dir = stood.world.journal.path().to_path_buf();
+    let at = stood.began + 20_000;
+    stood.world.reads(10, 10, at);
+    // ① The select looks at the disk: the pick is already there.
+    let seen = std::sync::Arc::new(Mutex::new(None::<Option<PersonPick>>));
+    let seeing = std::sync::Arc::clone(&seen);
+    let looks_in = dir.clone();
+    *stood.world.after_select.lock().unwrap() = Some(Box::new(move |_| {
+        *seeing.lock().unwrap() = Some(person_pick(&looks_in));
+    }));
+    crate::account_switch::switch_by_person(&stood.host, &stood.world, Some("b-fixture"), at)
+        .expect("the person's pick");
+    let mine = PersonPick {
+        account: "b-fixture".to_string(),
+        at_ms: at,
+    };
+    assert_eq!(
+        seen.lock().unwrap().clone(),
+        Some(Some(mine.clone())),
+        "the select ran before the pick was written down"
+    );
+    assert_eq!(person_pick(&dir), Some(mine.clone()));
+    // ② A refused select: the earlier pick is back, not the refused one.
+    *stood.world.refuse.lock().unwrap() = Some("로그인을 확인하지 못했습니다".to_string());
+    let refused = crate::account_switch::switch_by_person(
+        &stood.host,
+        &stood.world,
+        Some("a-fixture"),
+        at + 1,
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(
+        person_pick(&dir),
+        Some(mine),
+        "a refused select left its own pick in the file"
+    );
+    // ③ And with no earlier pick, a refused select leaves none.
+    crate::account_switch::remember_pick(&dir, None).expect("take the pick away");
+    let refused = crate::account_switch::switch_by_person(
+        &stood.host,
+        &stood.world,
+        Some("a-fixture"),
+        at + 2,
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(person_pick(&dir), None, "a refused select left a pick");
+}
+
+/// t-78096 review P3-7 (t-80303), four scenes the first round did not hold.
+/// The person's 「시스템 기본값」 ends the pick; a pick file that is empty or
+/// holds other keys is no pick and blocks nothing; a file left naming an
+/// account that is no longer the default makes nobody picked.
+#[test]
+fn the_system_default_ends_the_pick_and_a_file_that_is_no_pick_blocks_nothing() {
+    use crate::account_switch::{PersonPick, person_pick};
+    use zerocode_core::account_autoswitch::{CLAUDE_ACCOUNT_AUTOSWITCH, Decision};
+    let stood = WalledClaude::near_limit(93_420, 1, 0);
+    let dir = stood.world.journal.path().to_path_buf();
+    let file = dir.join(crate::app_paths::artifact_file::CLAUDE_ACCOUNT_PICK);
+    let warned = CLAUDE_ACCOUNT_AUTOSWITCH.default_moves_at_percent + 2;
+    let at = stood.began + 20_000;
+    *stood.world.selected.lock().unwrap() = Some("a-fixture".to_string());
+    stood.world.reads(warned, 2, at);
+    // ① 「시스템 기본값」: the pick is gone, and the file with it.
+    crate::account_switch::remember_pick(
+        &dir,
+        Some(&PersonPick {
+            account: "a-fixture".to_string(),
+            at_ms: at,
+        }),
+    )
+    .expect("a pick");
+    assert!(file.exists());
+    crate::account_switch::switch_by_person(&stood.host, &stood.world, None, at + 1)
+        .expect("the person's own login");
+    assert!(!file.exists(), "the system default left the pick file");
+    assert_eq!(person_pick(&dir), None);
+    // ② A file that is no pick — empty, other keys, a half of one, no text
+    // at all — is read as none: the default is judged like any other, and
+    // past the warn line it moves. The pick above moved the default, so the
+    // cooldown's clock is cleared: what is asked here is the pick, not the rest.
+    *stood.world.selected.lock().unwrap() = Some("a-fixture".to_string());
+    *stood.world.last_switch.lock().unwrap() = None;
+    for (what, bytes) in [
+        ("empty", &b""[..]),
+        ("other keys", &br#"{"who":"a-fixture","when":1}"#[..]),
+        ("half a file", &br#"{"account":"a-fixture","at_"#[..]),
+        ("not text", &[0xff, 0xfe, 0x00][..]),
+    ] {
+        std::fs::write(&file, bytes).expect("a broken file");
+        assert_eq!(person_pick(&dir), None, "{what} was read as a pick");
+        let plan = stood.plan(at + 2);
+        assert_eq!(plan.picked_at_ms, None, "{what}: {plan:?}");
+        assert!(
+            matches!(plan.decision, Decision::Switch { ref to, .. } if to == "b-fixture"),
+            "{what} held the default past the warn line: {plan:?}"
+        );
+    }
+    // ③ A file naming an account that is not the default — the one the
+    // person picked was removed — picks nobody.
+    crate::account_switch::remember_pick(
+        &dir,
+        Some(&PersonPick {
+            account: "a-gone".to_string(),
+            at_ms: at,
+        }),
+    )
+    .expect("a stale pick");
+    let plan = stood.plan(at + 3);
+    assert_eq!(plan.picked_at_ms, None, "{plan:?}");
+    assert!(matches!(plan.decision, Decision::Switch { .. }), "{plan:?}");
+}
+
+/// The setting is the one switch (t-80303): with 「끔」 nothing moves the
+/// default by itself whatever the pick says — not at the wall, not past the
+/// warn line, and not when a beat asks to apply the plan it read. The
+/// person's own pick still works, and it is the person's.
+#[test]
+fn with_the_switch_off_a_pick_moves_nothing_by_itself_even_at_its_wall() {
+    use crate::account_switch::{PersonPick, person_pick};
+    use zerocode_core::account_autoswitch::{AutoSwitchMode, CLAUDE_ACCOUNT_AUTOSWITCH, Decision};
+    let stood = WalledClaude::near_limit(93_430, 1, 0);
+    let dir = stood.world.journal.path().to_path_buf();
+    *stood.world.mode.lock().unwrap() = AutoSwitchMode::Off;
+    let at = stood.began + 20_000;
+    *stood.world.selected.lock().unwrap() = Some("a-fixture".to_string());
+    let full = CLAUDE_ACCOUNT_AUTOSWITCH.picked_moves_at_percent;
+    stood.world.reads(full, 2, at);
+    crate::account_switch::remember_pick(
+        &dir,
+        Some(&PersonPick {
+            account: "a-fixture".to_string(),
+            at_ms: at,
+        }),
+    )
+    .expect("a pick");
+    for by in ["auto", "person"] {
+        let plan = stood.plan(at + 1);
+        assert_eq!(plan.decision, Decision::Stay { why: "off" }, "{plan:?}");
+        let refused =
+            crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, by, at + 1);
+        assert!(refused.is_err(), "{by}: {refused:?}");
+    }
+    assert_eq!(stood.world.selects(), Vec::<Option<String>>::new());
+    assert_eq!(
+        person_pick(&dir).map(|pick| pick.account),
+        Some("a-fixture".to_string()),
+        "a look under 「끔」 touched the pick"
+    );
+    // The person's own pick is theirs: it works with the switch off, writes
+    // its pick, and the plan afterwards still moves nothing.
+    crate::account_switch::switch_by_person(&stood.host, &stood.world, Some("b-fixture"), at + 2)
+        .expect("the person's pick");
+    assert_eq!(stood.world.selects(), vec![Some("b-fixture".to_string())]);
+    let plan = stood.plan(at + 3);
+    assert_eq!(plan.decision, Decision::Stay { why: "off" }, "{plan:?}");
+    assert_eq!(stood.world.selects().len(), 1);
+}
+
 /// t-46106, the acceptance case: 2026-10-11 11:15 replayed on the fixture.
 /// Seven Claude workers on `a-fixture` — five between turns, two at work —
 /// its session past the move line, nobody at a wall, and the beat's own
@@ -29828,4 +29996,73 @@ fn followup_successful_advice_clears_only_a_previously_notified_condition() {
             );
         }
     }
+}
+
+/// A verb's text that arrives as a file is read by the window before anything else reads the
+/// verb (t-80615): the ledger holds the file's letters, a request naming a file it cannot read is
+/// refused and writes nothing, and a text given both ways is refused.
+#[test]
+fn a_verb_text_in_a_file_is_read_by_the_window_before_the_verb_runs() {
+    let _window = the_window();
+    const LEADER_TERM: u32 = 98_100;
+    let team = format!("team-text-file-{LEADER_TERM}");
+    seat_a_team(&team, LEADER_TERM);
+    let seat = zerocode_core::agent_teams::LEADER_PANE;
+    let say = |argv: &[String]| {
+        run(
+            &Nowhere,
+            Vec::new(),
+            &team,
+            seat,
+            TEST_CAPABILITY,
+            argv,
+            clock(),
+        )
+    };
+    let opened = say(&words("run-create --name text-file"));
+    assert_eq!(opened.exit_code, 0, "{}", opened.stderr);
+
+    let dir = tempfile::tempdir().expect("scratch folder");
+    let path = dir.path().join("spec.md");
+    let spec = "never `pkill -f zerocode`, never $(touch /x), keep $HOME\n둘째 줄";
+    std::fs::write(&path, spec).expect("write the spec");
+    let path = path.display().to_string();
+    let argv =
+        |given: &[&str]| -> Vec<String> { given.iter().map(|word| (*word).to_string()).collect() };
+
+    let wrote = say(&argv(&[
+        "task-create",
+        "--spec-file",
+        &path,
+        "--retry-request",
+        "text-file-1",
+    ]));
+    assert_eq!(wrote.exit_code, 0, "{}", wrote.stderr);
+    let listed = say(&words("task-list"));
+    let listed: serde_json::Value = serde_json::from_str(&listed.stdout).expect("task-list JSON");
+    assert_eq!(listed["tasks"][0]["spec"], spec, "{listed}");
+
+    for (given, wanted) in [
+        (
+            argv(&["task-create", "--spec", "x", "--spec-file", &path]),
+            "--spec-file",
+        ),
+        (
+            argv(&["task-create", "--spec-file", "/nowhere/spec.md"]),
+            "--spec-file",
+        ),
+    ] {
+        let mut given = given;
+        given.extend(argv(&["--retry-request", "text-file-refused"]));
+        let refused = say(&given);
+        assert_ne!(refused.exit_code, 0, "{given:?}");
+        assert!(refused.stderr.contains(wanted), "{}", refused.stderr);
+    }
+    let listed = say(&words("task-list"));
+    let listed: serde_json::Value = serde_json::from_str(&listed.stdout).expect("task-list JSON");
+    assert_eq!(
+        listed["tasks"].as_array().expect("tasks").len(),
+        1,
+        "a refused request wrote a task: {listed}"
+    );
 }

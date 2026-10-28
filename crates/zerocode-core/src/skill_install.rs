@@ -7,7 +7,9 @@
 //! each detected agent actually reads, and only where no copy stands or the copy
 //! holds the text of an earlier release (`skill_releases.tsv`). A copy with any
 //! other text, a person's edit or somebody else's skill, is left as it is and
-//! reported.
+//! reported. A skill's reference files (`BundledSkill::files`) are written
+//! beside its `SKILL.md`; whether a copy is ours is still read from `SKILL.md`
+//! alone.
 //!
 //! Why the app carries its own copy: the manual road
 //! (`skill::skill_install_command`, `npx skills add <repository>`) fetches
@@ -28,10 +30,27 @@ use crate::skill::{
 pub struct BundledSkill {
     pub name: &'static str,
     pub content: &'static str,
+    /// The reference files `content` points to, as `(file name, text)`:
+    /// they are installed beside `SKILL.md`, under the same directory.
+    pub files: &'static [(&'static str, &'static str)],
 }
 
 // Every skill this build carries, generated from the source directory.
 include!(concat!(env!("OUT_DIR"), "/bundled_skills.rs"));
+
+#[cfg(test)]
+impl BundledSkill {
+    /// `SKILL.md` and its reference files in one text, as a test reads a guide
+    /// whose parts moved into files beside it.
+    pub(crate) fn whole_text(&self) -> String {
+        let mut text = self.content.to_string();
+        for (_, file) in self.files {
+            text.push('\n');
+            text.push_str(file);
+        }
+        text
+    }
+}
 
 /// Every text each bundled skill's `SKILL.md` has had on main, one
 /// `<name>\t<git blob id>` line per text, oldest first: `git log --follow
@@ -221,14 +240,22 @@ pub fn bundled_copies(
     let mut copies: Vec<SkillCopy> = Vec::new();
     for (agent, label) in detected {
         for root in skill_roots(agent, &sources, launched) {
-            let path = root.join(skill.name).join(SKILL_FILE);
+            let dir = root.join(skill.name);
+            let path = dir.join(SKILL_FILE);
             // Two agents that read one root (claude and openclaude, or the
             // shared `.agents` home) hold one copy there, not two.
             if copies.iter().any(|copy| copy.path == path) {
                 continue;
             }
             let state = match std::fs::read(&path) {
-                Ok(bytes) => copy_state(skill, &bytes),
+                Ok(bytes) => match copy_state(skill, &bytes) {
+                    // Our text with a reference file gone is an incomplete
+                    // install, and an install completes it.
+                    CopyState::Current if !missing_references(skill, &dir).is_empty() => {
+                        CopyState::Stale
+                    }
+                    state => state,
+                },
                 Err(error) if error.kind() == io::ErrorKind::NotFound => CopyState::Missing,
                 // A plain file where the skill's folder should stand, or a
                 // copy that cannot be read: not ours to touch either way.
@@ -300,8 +327,8 @@ fn install_one(skill: &BundledSkill, agent: &str, label: &str, root: &Path) -> S
     }
     match std::fs::read(&path) {
         Ok(existing) => match copy_state(skill, &existing) {
-            CopyState::Current => outcome(path, InstallState::Unchanged, String::new()),
-            CopyState::Stale => write_skill(&dir, &path, skill.content, outcome),
+            CopyState::Current => complete_references(skill, &dir, path, outcome),
+            CopyState::Stale => write_skill(&dir, &path, skill, outcome),
             CopyState::Edited | CopyState::Missing => outcome(
                 path,
                 InstallState::Kept,
@@ -309,10 +336,42 @@ fn install_one(skill: &BundledSkill, agent: &str, label: &str, root: &Path) -> S
             ),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            write_skill(&dir, &path, skill.content, outcome)
+            write_skill(&dir, &path, skill, outcome)
         }
         Err(error) => outcome(path, InstallState::Failed, error.to_string()),
     }
+}
+
+/// The reference files of `skill` that are not in `dir`.
+fn missing_references(
+    skill: &BundledSkill,
+    dir: &Path,
+) -> Vec<&'static (&'static str, &'static str)> {
+    skill
+        .files
+        .iter()
+        .filter(|(name, _)| !dir.join(name).exists())
+        .collect()
+}
+
+/// A copy whose `SKILL.md` is the one this build carries: write the reference
+/// files it lacks, and leave the ones that stand as they are.
+fn complete_references(
+    skill: &BundledSkill,
+    dir: &Path,
+    path: PathBuf,
+    outcome: impl Fn(PathBuf, InstallState, String) -> SkillInstallOutcome,
+) -> SkillInstallOutcome {
+    let missing = missing_references(skill, dir);
+    if missing.is_empty() {
+        return outcome(path, InstallState::Unchanged, String::new());
+    }
+    for (name, text) in missing {
+        if let Err(error) = std::fs::write(dir.join(name), text) {
+            return outcome(path, InstallState::Failed, error.to_string());
+        }
+    }
+    outcome(path, InstallState::Written, String::new())
 }
 
 /// What stands where the skill's directory should be, before we write into
@@ -351,7 +410,7 @@ fn standing_of(dir: &Path) -> Standing {
 fn write_skill(
     dir: &Path,
     path: &Path,
-    content: &str,
+    skill: &BundledSkill,
     outcome: impl Fn(PathBuf, InstallState, String) -> SkillInstallOutcome,
 ) -> SkillInstallOutcome {
     let mut detail = String::new();
@@ -371,7 +430,17 @@ fn write_skill(
             );
         }
     }
-    let written = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(path, content));
+    // The reference files first and `SKILL.md` last: a write that stops half
+    // way leaves the old `SKILL.md`, which an install reads as stale and
+    // writes again.
+    let written = std::fs::create_dir_all(dir)
+        .and_then(|()| {
+            skill
+                .files
+                .iter()
+                .try_for_each(|(name, text)| std::fs::write(dir.join(name), text))
+        })
+        .and_then(|()| std::fs::write(path, skill.content));
     match written {
         Ok(()) => outcome(path.to_path_buf(), InstallState::Written, detail),
         Err(error) => outcome(path.to_path_buf(), InstallState::Failed, error.to_string()),
@@ -667,6 +736,110 @@ mod tests {
             std::fs::read_to_string(ours_old.join(SKILL_FILE)).unwrap(),
             bundled_skill("second-brain").unwrap().content
         );
+    }
+
+    /// A skill's reference files are installed beside its `SKILL.md`, under
+    /// the same name, and the text of `SKILL.md` names each one (t-80606).
+    #[test]
+    fn a_skills_reference_files_install_beside_its_skill_file() {
+        let skill = bundled_skill("orchestration").unwrap();
+        assert!(
+            !skill.files.is_empty(),
+            "the orchestration skill has no reference files"
+        );
+        for (name, text) in skill.files {
+            assert!(
+                skill.content.contains(&format!("`{name}`")),
+                "SKILL.md does not tell when to read {name}"
+            );
+            assert!(!text.trim().is_empty(), "{name} is empty");
+        }
+        let home = tempfile::tempdir().unwrap();
+        let outcomes = install_bundled_skill(
+            "orchestration",
+            home.path(),
+            &[],
+            &detected(&[("claude", "Claude")]),
+        )
+        .unwrap();
+        assert_eq!(outcomes[0].state, InstallState::Written);
+        let dir = claude_skill_dir(home.path());
+        for (name, text) in skill.files {
+            assert_eq!(
+                &std::fs::read_to_string(dir.join(name)).unwrap(),
+                text,
+                "{name} was not installed as carried"
+            );
+        }
+        let again = install_bundled_skill(
+            "orchestration",
+            home.path(),
+            &[],
+            &detected(&[("claude", "Claude")]),
+        )
+        .unwrap();
+        assert_eq!(again[0].state, InstallState::Unchanged);
+    }
+
+    /// Our `SKILL.md` with a reference file gone is an incomplete install: it
+    /// reads stale, an install writes the missing file only, and a reference
+    /// file that stands is never rewritten.
+    #[test]
+    fn a_current_copy_missing_a_reference_file_is_completed_and_the_rest_left() {
+        let skill = bundled_skill("orchestration").unwrap();
+        let (gone, _) = skill.files[0];
+        let (kept, _) = skill.files[1];
+        let home = tempfile::tempdir().unwrap();
+        let agents = detected(&[("claude", "Claude")]);
+        install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+        let dir = claude_skill_dir(home.path());
+        std::fs::remove_file(dir.join(gone)).unwrap();
+        std::fs::write(dir.join(kept), "somebody's own notes\n").unwrap();
+
+        let copies = bundled_copies("orchestration", home.path(), &[], &agents).unwrap();
+        assert_eq!(copies[0].state, CopyState::Stale);
+        let outcomes = install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+        assert_eq!(outcomes[0].state, InstallState::Written);
+        assert!(
+            dir.join(gone).is_file(),
+            "the missing reference was not written"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(kept)).unwrap(),
+            "somebody's own notes\n",
+            "a reference file that stood was rewritten"
+        );
+        let copies = bundled_copies("orchestration", home.path(), &[], &agents).unwrap();
+        assert_eq!(copies[0].state, CopyState::Current);
+    }
+
+    /// Every bundled skill that carries reference files tells, in its
+    /// `SKILL.md`, when to read each one, and the one-folder rule holds: a
+    /// reference file is Markdown beside `SKILL.md`, so a skill that gains a
+    /// file is installed with it without a list of names in Rust (t-81132).
+    #[test]
+    fn every_bundled_reference_file_is_named_in_its_skill_file() {
+        let with_files: Vec<&str> = BUNDLED_SKILLS
+            .iter()
+            .filter(|skill| !skill.files.is_empty())
+            .map(|skill| skill.name)
+            .collect();
+        for needed in ["orchestration", "computer-use"] {
+            assert!(
+                with_files.contains(&needed),
+                "{needed} carries no reference files"
+            );
+        }
+        for skill in BUNDLED_SKILLS {
+            for (name, text) in skill.files {
+                assert!(
+                    skill.content.contains(&format!("`{name}`")),
+                    "{}: SKILL.md does not tell when to read {name}",
+                    skill.name
+                );
+                assert!(!text.trim().is_empty(), "{}: {name} is empty", skill.name);
+            }
+        }
     }
 
     /// A copy is told apart by its git blob id, the id `git hash-object`

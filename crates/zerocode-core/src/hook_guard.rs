@@ -635,6 +635,38 @@ fn command_in(tree: &Value) -> Option<String> {
     })
 }
 
+/// The shell command a hook event says is ABOUT to run, whole and as the
+/// shell will read it — for a guard that answers the hook itself (t-80602,
+/// [`crate::shell_rule::kill`]). Unlike [`Moment::CommandAbout`] it is neither
+/// scrubbed nor capped: a pattern past the viewer's cap still runs. An argv
+/// array is put back into shell words, each single-quoted, so `["bash",
+/// "-lc", "pkill …"]` reads as the shell string it hands on.
+#[must_use]
+pub fn command_about(event: &str, payload: &str) -> Option<String> {
+    let parsed = HookPayload::of(payload);
+    let activity = hook::activity_of_parsed(event, &parsed)?;
+    if activity.phase != Phase::Started || activity.verb != Tool::Bash {
+        return None;
+    }
+    let tree = parsed.tree_or_null();
+    let held = hook::INPUT_KEYS
+        .iter()
+        .find_map(|key| tree.get(*key))
+        .and_then(|input| input.get("command").or_else(|| input.get("cmd")))
+        .or_else(|| tree.get("command"))?;
+    let command = match held {
+        Value::String(text) => text.clone(),
+        Value::Array(argv) => argv
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|word| format!("'{}'", word.replace('\'', r"'\''")))
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => return None,
+    };
+    (!command.trim().is_empty()).then_some(command)
+}
+
 /// The words an edit or a write carries out.
 fn written_in(tree: &Value) -> Option<String> {
     let input = hook::INPUT_KEYS.iter().find_map(|key| tree.get(*key))?;

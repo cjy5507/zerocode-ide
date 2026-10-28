@@ -27,6 +27,7 @@ mod hooks;
 pub mod image_guard;
 pub mod jev_score;
 mod jsonl_log;
+pub mod kill_guard;
 pub mod lsp_client;
 pub mod live_output;
 mod mcp;

@@ -2,12 +2,17 @@
 """What `just pre-handin` should run for the paths a branch changed.
 
     changed_crates.py [--base REV]
+    changed_crates.py --workspaces
 
 prints one fact a line, tab-separated, for the recipe to read:
 
     crate <workspace dir> <package> <cargo test arguments>
     ui <changed path under ui/>
     suite <window suite that looks at a changed ui file: named like it, or run by a test module that spells its name>
+    suites <how many suites that is> <how many the window registers>
+
+`--workspaces` prints instead the directories of the Cargo workspaces after the
+root one, so that the recipe spells no workspace name.
 
 The paths are the working tree against the merge base with main (else
 origin/main), plus untracked files — what the branch would hand in. A crate is
@@ -17,13 +22,18 @@ changed path, in one of two ways, and no list of crates or folders is kept here:
   - the path is inside the package's directory (the longest manifest directory
     from `cargo metadata` that prefixes it);
   - the package reads the path from outside its directory: its sources name it
-    in `include_str!`/`include_bytes!`/`include!`, in
-    `concat!(env!("CARGO_MANIFEST_DIR"), "/…")` or in a build script's
-    `cargo:rerun-if-changed=`. Those are the files read at compile time, so a
-    test that lists a folder at run time is not seen.
+    in `include_str!`/`include_bytes!`/`include!` or in
+    `concat!(env!("CARGO_MANIFEST_DIR"), "/…")`. Those are the files read at
+    compile time, so a test that lists a folder at run time is not seen, nor
+    is a build script's `cargo:rerun-if-changed=`: every one here formats its
+    path from values known at run time, none is a quoted string.
 
 Its unit tests are `--lib` when it has a library and `--bins` when it has
-binaries, both when it has both.
+binaries, both when it has both. Which of them a path picks is the kind of
+source that holds or reads it: `src/main.rs` and `src/bin/` are the bins' own,
+`tests/`, `benches/` and `examples/` are targets of their own that this does
+not run (the shell's contracts are stage one of the recipe), and any other
+source — `src/lib.rs` and its modules, whose lib the bins link — picks all.
 """
 
 import argparse
@@ -43,7 +53,7 @@ IMPORT = re.compile(r'^import\s*(?:\{([^}]*)\}\s*from\s*)?"\./([^"]+)\.mjs"', re
 MANIFEST = r'env!\(\s*"CARGO_MANIFEST_DIR"\s*\)'
 FILE_READS = re.compile(r'\binclude(?:_str|_bytes)?!\s*\(\s*"([^"{}]+)"')          # beside the source file
 MANIFEST_READS = re.compile(r'concat!\(\s*' + MANIFEST + r'\s*,\s*"([^"{}]+)"')    # under the package dir
-RERUN_READS = re.compile(r'rerun-if-changed=([^"\\\s{}]+)')                          # a build script's inputs
+OTHER_TARGET_DIRS = ("tests", "benches", "examples")   # targets of their own, not the unit tests of a lib or a bin
 
 
 def git(*args):
@@ -89,11 +99,26 @@ def packages(workspace):
     return found
 
 
-def test_arguments(package):
-    """The `cargo test` arguments for a package's unit tests, or None when it has no tests to run."""
+def unit_flags(package):
+    """The `cargo test` flags of a package's unit tests: `--lib` for a library, `--bins` for binaries."""
     kinds = {kind for kinds, _ in package["targets"] for kind in kinds}
-    arguments = [flag for flag, kind in (("--lib", "lib"), ("--bins", "bin")) if kind in kinds]
-    return " ".join(arguments) or None
+    return {flag for flag, kind in (("--lib", "lib"), ("--bins", "bin")) if kind in kinds}
+
+
+def source_flags(package, path):
+    """The unit-test flags a source file of `package` is part of, as the kind of source it is.
+
+    `tests/`, `benches/` and `examples/` are targets of their own: none. The
+    bins' own files (`src/main.rs`, `src/bin/`) are `--bins`; every other file
+    is the library's, and the bins link the library, so all of them.
+    """
+    flags = unit_flags(package)
+    first, _, rest = path[len(package["dir"]):].lstrip("/").partition("/")
+    if first in OTHER_TARGET_DIRS:
+        return set()
+    if first == "src" and (rest == "main.rs" or rest.startswith("bin/")):
+        return flags & {"--bins"} or flags
+    return flags
 
 
 def inside(path, directory):
@@ -113,7 +138,7 @@ def own(path, packages_by_workspace):
 def reads_of(text, directory, package_dir):
     """The repo-relative paths one source file names: its `directory` for the file-relative macros, `package_dir` for the rest."""
     code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
-    for pattern, base in ((FILE_READS, directory), (MANIFEST_READS, package_dir), (RERUN_READS, package_dir)):
+    for pattern, base in ((FILE_READS, directory), (MANIFEST_READS, package_dir)):
         for name in pattern.findall(code):
             yield posixpath.normpath(posixpath.join(base, name.lstrip("/")))
 
@@ -124,7 +149,7 @@ def outside_reads(found, own_dir):
 
 
 def attach_reads(packages_by_workspace):
-    """Give each package its "reads": the paths outside its directory that its Rust sources name."""
+    """Give each package its "reads": {path outside its directory that its Rust sources name: the unit-test flags of the sources that name it}."""
     sources = [path for path in git("ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.rs")]
     found = {}
     for source in sources:
@@ -132,22 +157,31 @@ def attach_reads(packages_by_workspace):
         if hit is None or not (REPO / source).is_file():
             continue
         text = (REPO / source).read_text(encoding="utf-8", errors="replace")
-        found.setdefault((hit[0], hit[1]["name"]), set()).update(
-            reads_of(text, posixpath.dirname(source), hit[1]["dir"]))
+        by_flag = found.setdefault((hit[0], hit[1]["name"]), {})
+        for flag in source_flags(hit[1], source):
+            by_flag.setdefault(flag, set()).update(reads_of(text, posixpath.dirname(source), hit[1]["dir"]))
 
     for workspace, packages in packages_by_workspace.items():
         for package in packages:
-            package["reads"] = outside_reads(found.get((workspace, package["name"]), ()), package["dir"])
+            package["reads"] = {}
+            for flag, paths in found.get((workspace, package["name"]), {}).items():
+                for path in outside_reads(paths, package["dir"]):
+                    package["reads"].setdefault(path, set()).add(flag)
 
 
 def owners(path, packages_by_workspace):
-    """(workspace dir, package) pairs a change to `path` can break: its directory's package, and each package that reads it."""
+    """(workspace dir, package, unit-test flags) a change to `path` can break: its directory's package, and each package that reads it."""
+    found = []
     hit = own(path, packages_by_workspace)
-    found = [hit] if hit else []
+    if hit:
+        found.append((hit[0], hit[1], source_flags(hit[1], path)))
     for workspace, packages in packages_by_workspace.items():
         for package in packages:
-            if (workspace, package) not in found and any(inside(path, read) for read in package.get("reads", ())):
-                found.append((workspace, package))
+            if hit and (workspace, package) == hit:
+                continue
+            flags = set().union(*(flags for read, flags in package.get("reads", {}).items() if inside(path, read)))
+            if flags:
+                found.append((workspace, package, flags))
     return found
 
 
@@ -155,11 +189,10 @@ def crates(paths, packages_by_workspace):
     """The (workspace dir, package name, cargo test arguments) of every crate the paths touch, once."""
     chosen = {}
     for path in paths:
-        for workspace, package in owners(path, packages_by_workspace):
-            arguments = test_arguments(package)
-            if arguments is not None:
-                chosen[(workspace, package["name"])] = arguments
-    return [(workspace, name, arguments) for (workspace, name), arguments in sorted(chosen.items())]
+        for workspace, package, flags in owners(path, packages_by_workspace):
+            chosen.setdefault((workspace, package["name"]), set()).update(flags)
+    return [(workspace, name, " ".join(flag for flag in ("--lib", "--bins") if flag in flags))
+            for (workspace, name), flags in sorted(chosen.items()) if flags]
 
 
 def suites_for(paths, window_text, tests):
@@ -191,12 +224,23 @@ def ui_paths(paths):
     return [path for path in paths if path.startswith("ui/")]
 
 
+def cargo_workspaces():
+    """The Cargo workspaces that exist here, the root one first."""
+    return [workspace for workspace in WORKSPACES if (REPO / workspace / "Cargo.toml").is_file()]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--base", help="the revision to measure from (default: merge base with main, else origin/main)")
+    parser.add_argument("--workspaces", action="store_true", help="print the Cargo workspaces after the root one, and stop")
     args = parser.parse_args(argv)
+    if args.workspaces:
+        for workspace in cargo_workspaces():
+            if workspace != ".":
+                print(workspace)
+        return 0
     paths = changed_paths(merge_base(args.base))
-    by_workspace = {workspace: packages(workspace) for workspace in WORKSPACES if (REPO / workspace / "Cargo.toml").is_file()}
+    by_workspace = {workspace: packages(workspace) for workspace in cargo_workspaces()}
     attach_reads(by_workspace)
     for workspace, name, arguments in crates(paths, by_workspace):
         print("crate", workspace, name, arguments, sep="\t")
@@ -207,8 +251,11 @@ def main(argv=None):
     if ui and window.is_file():
         tests = {path.stem: path.read_text(encoding="utf-8", errors="replace")
                  for path in window.parent.glob("*.mjs") if path != window}
-        for name in suites_for(paths, window.read_text(encoding="utf-8"), tests):
+        window_text = window.read_text(encoding="utf-8")
+        hinted = suites_for(paths, window_text, tests)
+        for name in hinted:
             print("suite", name, sep="\t")
+        print("suites", len(hinted), len(SUITE.findall(window_text)), sep="\t")
 
 
 if __name__ == "__main__":
