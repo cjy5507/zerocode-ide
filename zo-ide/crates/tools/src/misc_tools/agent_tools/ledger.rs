@@ -303,8 +303,13 @@ fn spawn(client: &Client, launch: &Launch, model: Option<String>, job: AgentJob)
 }
 
 /// Put the start on its thread (`start` spawns it) for `manifest`'s agent.
+/// A thread that cannot be spawned fails the launch and takes the starting
+/// receipt back, as `start_failed` does for a start that ran and failed.
 fn start_in_background(manifest: &AgentOutput, start: impl FnOnce() -> std::io::Result<()>) -> Result<(), ToolError> {
-    start().map_err(|e| error(format!("could not start the ledger worker for {}: {e}", manifest.agent_id)))
+    start().map_err(|e| {
+        super::manifest::stamp_agent_lifecycle(manifest, |lifecycle| lifecycle.ledger_start = None);
+        error(format!("could not start the ledger worker for {}: {e}", manifest.agent_id))
+    })
 }
 
 /// The start the parent no longer waits for: the worker-start (asked again
