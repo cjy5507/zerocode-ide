@@ -36301,7 +36301,7 @@ const thoughtRows = await page.evaluate(async () => {
 ok(
   "a thought is one closed line of the transcript — the window's label and its bold heading on the line, prose born on the first opening, never a paragraph and never the passport label — the call after it is its own row under its kind's word, and the composer's textarea wears no second ring when focused",
   JSON.stringify(thoughtRows.shape) === JSON.stringify([
-    "helper-turn is-user is-briefing", "helper-turn is-thinking", "helper-turn is-tool", "helper-turn is-assistant is-latest",
+    "helper-turn is-user is-briefing is-latest", "helper-turn is-thinking", "helper-turn is-tool", "helper-turn is-assistant is-latest",
   ]) &&
     thoughtRows.thoughtFolded &&
     thoughtRows.who !== "" && thoughtRows.who === thoughtRows.whoExpected &&
@@ -36634,12 +36634,10 @@ const helperGrammar = await page.evaluate(async () => {
     span.remove();
     return value;
   };
-  // The answer's mark is the extension's bullet: a quiet dot the size of
-  // --chat-dot, no words of its own.
-  const bullet = turns[1] ? getComputedStyle(turns[1], "::before") : null;
-  seen.proseDot = bullet !== null && bullet.content !== "none" &&
-    bullet.width === getComputedStyle(document.documentElement).getPropertyValue("--chat-dot").trim() &&
-    bullet.borderRadius === "50%";
+  // An answer is bare prose (t-81525 B3): no dot, no rail — neither of the
+  // row's pseudo-elements draws.
+  seen.proseDot = turns[1] !== undefined && ["::before", "::after"]
+    .every((pseudo) => getComputedStyle(turns[1], pseudo).content === "none");
   // The prose is the grammar's: --chat-prose-size at --chat-prose-leading,
   // inline code a rounded chip — every value a token.
   const proseStyle = prose ? getComputedStyle(prose) : null;
@@ -36703,7 +36701,7 @@ const helperGrammar = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a helper page reads as one conversation: markdown prose behind a quiet dot, every tool step its own one-line row under its kind's word with the target in mono and the CLI's own name for a screen reader, and calls the answer closed wearing no accent",
+  "a helper page reads as one conversation: markdown prose bare, no dot (t-81525 B3), every tool step its own one-line row under its kind's word with the target in mono and the CLI's own name for a screen reader, and calls the answer closed wearing no accent",
   helperGrammar.count === 5 &&
     helperGrammar.codeRendered && helperGrammar.boldRendered && helperGrammar.listRendered &&
     helperGrammar.noAgentLabel && helperGrammar.proseFont && helperGrammar.proseDot &&
@@ -37573,9 +37571,12 @@ const flatTranscript = await page.evaluate(async () => {
   const brief = list.querySelector(".helper-turn.is-briefing");
   const briefStyle = getComputedStyle(brief);
   const briefBox = getComputedStyle(brief.querySelector(":scope > .helper-said"));
-  seen.briefingBubble = briefStyle.position === "sticky" &&
-    briefBox.backgroundColor !== "rgba(0, 0, 0, 0)" &&
-    brief.getBoundingClientRect().width <= list.clientWidth;
+  // A bubble on its soft fill; only the person's newest words stick (t-81525 B4).
+  const newestWords = list.querySelectorAll(".helper-turn.is-user.is-latest");
+  seen.briefingBubble = briefBox.backgroundColor !== "rgba(0, 0, 0, 0)" &&
+    brief.getBoundingClientRect().width <= list.clientWidth &&
+    newestWords.length === 1 && getComputedStyle(newestWords[0]).position === "sticky" &&
+    (brief === newestWords[0] || briefStyle.position !== "sticky");
   const person = list.querySelector(".helper-turn.is-user:not(.is-briefing)");
   const personStyle = getComputedStyle(person);
   const personBox = getComputedStyle(person.querySelector(":scope > .helper-said"));
@@ -37807,6 +37808,7 @@ const flatNarrow = await page.evaluate(async () => {
     // The pane's width as the window laid it out, for the day this goes red.
     faceWidth: Math.round(face.getBoundingClientRect().width),
     narrowPadding: parseFloat(getComputedStyle(list).paddingLeft),
+    narrowGutter: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--space-3")),
     light: document.documentElement.getAttribute("data-theme") === "light",
   };
 });
@@ -37824,7 +37826,7 @@ await page.evaluate(async (term) => {
 }, flatTranscript.term);
 console.log("HELPER_NODES", JSON.stringify({ turns: flatTranscript.count, listNodes: flatTranscript.listNodes }));
 ok(
-  "the helper page is a flat readable transcript: bare assistant prose behind a quiet dot, the person's bubbles on the left, every tool step one closed line under its kind's word with mono only for machine excerpts, the rest of a long input in the row's body one press away behind its door — and no more nodes at 400 turns than the measured ceiling",
+  "the helper page is a flat readable transcript: bare assistant prose with no dot, the person's bubbles on the right (t-81525 B3·B4), every tool step one closed line under its kind's word with mono only for machine excerpts, the rest of a long input in the row's body one press away behind its door — and no more nodes at 400 turns than the measured ceiling",
   flatTranscript.opened && flatTranscript.count === 400 &&
     flatTranscript.listNodes <= HELPER_LIST_NODES_CEILING &&
     flatTranscript.proseFlat && flatTranscript.inkFromToken &&
@@ -37880,7 +37882,9 @@ ok(
     flatLight.bg !== flatTranscript.darkBg &&
     flatReduced.cap === "0s" && flatReduced.door === "0s" &&
     flatNarrow.noSideScroll && flatNarrow.footOn && flatNarrow.frame &&
-    flatNarrow.light && flatNarrow.narrowPadding < flatTranscript.widePadding,
+    // The page measures itself (t-81525): a page under 720px narrows its sides
+    // to --space-3, whatever the window around it is.
+    flatNarrow.light && flatNarrow.narrowPadding === flatNarrow.narrowGutter && flatNarrow.narrowPadding <= flatTranscript.widePadding,
   JSON.stringify({ light: flatLight, reduced: flatReduced, narrow: flatNarrow }),
 );
 
