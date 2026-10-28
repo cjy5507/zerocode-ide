@@ -1469,6 +1469,32 @@ mod tests {
             "{printed}"
         );
         assert!(printed.contains("! echo hi → exit 0"), "{printed}");
+
+        // A program reading `--json` gets each line as one `system` event,
+        // and the answer `--last-message` keeps is the model's alone.
+        let mut json = Vec::new();
+        let last = {
+            let options = super::RenderOptions { json: true, ..super::RenderOptions::default() };
+            let mut renderer = super::Renderer::new(&mut json, options);
+            let _ = unlisted_command(&mut renderer, &folder, mode, true, "probe", "");
+            renderer.last_assistant_message().to_string()
+        };
+        let events: Vec<serde_json::Value> = String::from_utf8_lossy(&json)
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("one JSON event a line"))
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                serde_json::json!({
+                    "type": "system",
+                    "level": "info",
+                    "text": format!("/probe — {} (repository)", commands.join("probe.md").display()),
+                }),
+                serde_json::json!({"type": "system", "level": "info", "text": "  ! echo hi → exit 0"}),
+            ]
+        );
+        assert_eq!(last, "", "the shown lines reached the last answer");
     }
 
     /// 파이프의 `/help` 목록과 파이프가 실제로 드는 명령은 같은 사실을 읽는다.

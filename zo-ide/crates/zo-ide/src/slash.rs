@@ -249,7 +249,7 @@ pub struct PromptExpansion {
 /// Its `!` commands run only what the file's `allowed-tools` grants, none
 /// while `mode` is read-only, and none from a file in the working folder or
 /// above it until the person has given their word for the folder that holds
-/// it: trust in that folder ([`crate::workspace_trust::person_trusts_folder`])
+/// it: trust in that folder (`workspace_trust::person_trusts_folder`)
 /// or a mode they named (`origin.named`). A mode the default or a settings
 /// file gives — a repository can pin its own — is not that word, and a pipe
 /// (`origin.piped`) takes only a named mode: nobody there can answer for the
