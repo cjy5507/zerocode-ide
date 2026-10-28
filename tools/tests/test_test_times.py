@@ -132,9 +132,16 @@ class Tables(unittest.TestCase):
         after = result("after", {"x": 2.0, "y": 1.0}, run=4.0)
         text = times.compare(before, after, 5)
         self.assertIn("| run s | 10.0 → 4.0 (-60.0 %) |", text)
+        self.assertIn("| clippy s | — |", text)
         self.assertIn("| tests | 2 → 2 |", text)
         self.assertIn("| 8.00 | 10.00 | 2.00 | `x` |", text)
         self.assertNotIn("environments differ", text)
+
+    def test_a_cold_build_and_the_lint_are_said_with_their_exit(self):
+        cold = dict(result("c", {"x": 1.0}, run=1.0), cold=True, clippy={"seconds": 12.5, "exit": 0})
+        self.assertIn("build 100.0 s (cold) · run 1.0 s · clippy 12.5 s (exit 0) ·", times.table(cold, 5, 2))
+        warm = dict(cold, cold=False, clippy={"seconds": 3.0, "exit": 101})
+        self.assertIn("| clippy s | 12.5 → 3.0 (-76.0 %) |", times.compare(cold, warm, 5))
 
     def test_an_unfinished_test_still_counts(self):
         facts = times.summary(result("c", {"x": 1.0}, run=1.0, tests_extra=[{"name": "hung", "started": 0.5}]))
@@ -169,10 +176,42 @@ class RunsTheExecutable(unittest.TestCase):
         self.assertEqual(ran["suite"], {"groups": 2, "groups_failed": 0})
 
 
+class DebugSetting(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.checkout = Path(self.dir.name)
+        self.saved = {name: os.environ.pop(name) for name in ("CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG")
+                      if name in os.environ}
+
+    def tearDown(self):
+        os.environ.update(self.saved)
+        self.dir.cleanup()
+
+    def test_the_manifest_is_read_and_the_test_profile_inherits_dev(self):
+        (self.checkout / "Cargo.toml").write_text('[profile.dev]\ndebug = "line-tables-only"\n')
+        self.assertEqual(times.debug_setting(self.checkout),
+                         {"dev": "line-tables-only (Cargo.toml)", "test": "line-tables-only (Cargo.toml), from dev"})
+
+    def test_the_environment_wins_over_the_manifest(self):
+        (self.checkout / "Cargo.toml").write_text('[profile.dev]\ndebug = "line-tables-only"\n')
+        os.environ["CARGO_PROFILE_DEV_DEBUG"] = "0"
+        try:
+            self.assertEqual(times.debug_setting(self.checkout),
+                             {"dev": "0 (CARGO_PROFILE_DEV_DEBUG)", "test": "0 (CARGO_PROFILE_DEV_DEBUG), from dev"})
+        finally:
+            del os.environ["CARGO_PROFILE_DEV_DEBUG"]
+
+    def test_nothing_said_is_cargos_default(self):
+        (self.checkout / "Cargo.toml").write_text('[profile.release]\nlto = "fat"\n')
+        self.assertEqual(times.debug_setting(self.checkout),
+                         {"dev": "cargo's default", "test": "cargo's default, from dev"})
+
+
 class Arguments(unittest.TestCase):
     def test_a_filtered_or_single_thread_run_keeps_a_file_of_its_own(self):
         def path(**given):
-            args = times.argparse.Namespace(package="p", bin=None, test=None, threads=None, mode="json", filters=[])
+            args = times.argparse.Namespace(package="p", bin=None, test=None, threads=None, mode="json", filters=[],
+                                            checkout=times.REPO)
             vars(args).update(given)
             return times.result_path(args).name
         whole = path()

@@ -44,6 +44,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from collections import defaultdict
 from pathlib import Path
 
@@ -56,17 +57,17 @@ RESULTS = Path(tempfile.gettempdir()) / "zerocode-test-times"
 CONDITION_PREFIXES = ("CARGO_", "RUSTFLAGS", "RUSTC", "RUST_TEST_THREADS")
 
 
-def git(*args: str) -> str:
-    return subprocess.run(["git", "-C", str(REPO), *args], capture_output=True, text=True, check=True).stdout.strip()
+def git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True).stdout.strip()
 
 
-def commit_label() -> str:
+def commit_label(repo: Path) -> str:
     """The commit the tree is at, and `-dirty<hash of the diff>` when the tree holds changes the commit does not.
 
     The diff's hash, not `-dirty` alone: two different edits on one commit are two different trees to measure.
     """
-    head = git("rev-parse", "--short=12", "HEAD")
-    diff = subprocess.run(["git", "-C", str(REPO), "diff", "HEAD"], capture_output=True, check=True).stdout
+    head = git(repo, "rev-parse", "--short=12", "HEAD")
+    diff = subprocess.run(["git", "-C", str(repo), "diff", "HEAD"], capture_output=True, check=True).stdout
     return head + (f"-dirty{hashlib.sha256(diff).hexdigest()[:8]}" if diff else "")
 
 
@@ -76,12 +77,13 @@ def target_args(args: argparse.Namespace) -> list[str]:
     return ["--bin", args.bin or args.package]
 
 
-def result_path(args: argparse.Namespace) -> Path:
+def result_path(args: argparse.Namespace, commit: str | None = None) -> Path:
     """Named by what was measured: a filtered or single-thread run never stands in for the whole suite."""
     kind, name = target_args(args)
+    commit = commit or commit_label(args.checkout)
     variant = "".join([f"-threads{args.threads}" if args.threads else "", f"-{args.mode}" if args.mode != "json" else "",
                        *(f"-{re.sub(r'[^A-Za-z0-9_]+', '_', word)}" for word in args.filters)])
-    return RESULTS / f"{args.package}-{kind.lstrip('-')}-{name}{variant}-{commit_label()}.json"
+    return RESULTS / f"{args.package}-{kind.lstrip('-')}-{name}{variant}-{commit}.json"
 
 
 def load_average() -> list[float]:
@@ -89,6 +91,28 @@ def load_average() -> list[float]:
         return [round(value, 2) for value in os.getloadavg()]
     except OSError:
         return []
+
+
+def debug_setting(checkout: Path) -> dict:
+    """The debug info the dev and test builds carried: the environment's override, else the checkout's Cargo.toml.
+
+    A before and an after on two sides of a profile change differ in it, and a table that does not say so
+    reads the profile's effect as the code's.
+    """
+    try:
+        profiles = tomllib.loads((checkout / "Cargo.toml").read_text()).get("profile", {})
+    except (OSError, tomllib.TOMLDecodeError):
+        profiles = {}
+    def own(profile: str) -> str | None:
+        variable = f"CARGO_PROFILE_{profile.upper()}_DEBUG"
+        if variable in os.environ:
+            return f"{os.environ[variable]} ({variable})"
+        if "debug" in profiles.get(profile, {}):
+            return f"{profiles[profile]['debug']} (Cargo.toml)"
+        return None
+
+    dev = own("dev") or "cargo's default"
+    return {"dev": dev, "test": own("test") or f"{dev}, from dev"}   # the test profile inherits dev
 
 
 def power() -> dict:
@@ -102,17 +126,34 @@ def power() -> dict:
     return {"source": source[0].strip() if source else None, "powermode": mode}
 
 
+def cargo(args: argparse.Namespace, *words: str) -> list[str]:
+    return ["cargo", *words, *(["-j", str(args.jobs)] if args.jobs else [])]
+
+
+def clean(args: argparse.Namespace) -> None:
+    """A cold build: the checkout's whole target directory goes first (`cargo clean`, which honours CARGO_TARGET_DIR)."""
+    print("clean: cargo clean", file=sys.stderr)
+    subprocess.run(["cargo", "clean"], cwd=args.checkout, check=True)
+
+
+def clippy(args: argparse.Namespace) -> dict:
+    """The lint a worker runs, after the build, on the same target directory: its seconds and its exit code."""
+    command = cargo(args, "clippy", "-p", args.package, "--all-targets") + ["--", "-D", "warnings"]
+    print("clippy:", " ".join(command), file=sys.stderr)
+    started = time.monotonic()
+    done = subprocess.run(command, cwd=args.checkout)
+    return {"seconds": round(time.monotonic() - started, 1), "exit": done.returncode}
+
+
 def build(args: argparse.Namespace) -> tuple[Path, Path, float]:
     """Build the target's test executable; its path, the directory cargo runs it from, and the seconds."""
-    command = ["cargo", "test", "-p", args.package, *target_args(args), "--no-run",
-               "--message-format=json-render-diagnostics"]
-    if args.jobs:
-        command += ["-j", str(args.jobs)]
+    command = cargo(args, "test", "-p", args.package, *target_args(args), "--no-run",
+                    "--message-format=json-render-diagnostics")
     if args.timings:
         command.append("--timings")   # cargo writes target/cargo-timings/cargo-timing.html: the slowest crates
     print("build:", " ".join(command), file=sys.stderr)
     started = time.monotonic()
-    done = subprocess.run(command, cwd=REPO, stdout=subprocess.PIPE, text=True)
+    done = subprocess.run(command, cwd=args.checkout, stdout=subprocess.PIPE, text=True)
     seconds = time.monotonic() - started
     if done.returncode != 0:
         sys.exit(f"build failed (exit {done.returncode}) after {seconds:.0f} s")
@@ -232,24 +273,32 @@ def run_groups(executable: Path, cwd: Path, depth: int, filters: list[str]) -> d
 
 
 def measure(args: argparse.Namespace) -> Path:
-    out = result_path(args)
+    # Read once, before anything runs: a commit made while the suite runs is not the tree that was built.
+    commit = commit_label(args.checkout)
+    out = result_path(args, commit)
     if out.exists() and not args.again:
         print(f"kept: {out} (--again measures anew)", file=sys.stderr)
         return out
     load_before = load_average()
+    if args.cold:
+        clean(args)
     executable, cwd, build_seconds = build(args)
     started = time.monotonic()
     if args.mode == "json":
         ran = run_json(executable, cwd, args.threads, args.filters)
     else:
         ran = run_groups(executable, cwd, args.depth, args.filters)
+    run_seconds = time.monotonic() - started
     result = {
-        "package": args.package, "target": " ".join(target_args(args)), "commit": commit_label(),
+        "package": args.package, "target": " ".join(target_args(args)), "commit": commit,
+        "cold": args.cold,
         "mode": args.mode, "threads": args.threads or os.cpu_count(), "jobs": args.jobs,
         "filters": args.filters, "measured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "load_before": load_before, "load_after": load_average(), "power": power(),
+        "debug": debug_setting(args.checkout),
         "condition": {key: value for key, value in sorted(os.environ.items()) if key.startswith(CONDITION_PREFIXES)},
-        "build_seconds": round(build_seconds, 1), "run_seconds": round(time.monotonic() - started, 1),
+        "build_seconds": round(build_seconds, 1), "run_seconds": round(run_seconds, 1),
+        "clippy": clippy(args) if args.clippy else None,
         **ran,
     }
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -270,6 +319,7 @@ def summary(result: dict) -> dict:
         outcomes[row.get("outcome", "unfinished")] += 1
     return {"tests": len(result["tests"]), "timed": len(rows), "sum": total, "outcomes": dict(outcomes),
             "build": result.get("build_seconds"), "run": result.get("run_seconds"),
+            "clippy": (result.get("clippy") or {}).get("seconds"),
             "parallel": total / result["run_seconds"] if result.get("run_seconds") else None}
 
 
@@ -278,8 +328,11 @@ def table(result: dict, top: int, depth: int) -> str:
     total = facts["sum"] or 1.0
     lines = [
         f"{result['package']} {result['target']} at {result['commit']} ({result['mode']}, {result['threads']} threads,"
-        f" load {result['load_before']} → {result['load_after']}, power {result.get('power')})",
-        f"build {facts['build']} s · run {facts['run']} s · {facts['tests']} tests "
+        f" load {result['load_before']} → {result['load_after']}, power {result.get('power')},"
+        f" debug {result.get('debug')})",
+        f"build {facts['build']} s{' (cold)' if result.get('cold') else ''} · run {facts['run']} s"
+        + (f" · clippy {facts['clippy']} s (exit {result['clippy']['exit']})" if facts["clippy"] is not None else "")
+        + f" · {facts['tests']} tests "
         f"({', '.join(f'{k} {v}' for k, v in sorted(facts['outcomes'].items()))}) · sum of test seconds {facts['sum']:.1f} s"
         + (f" · {facts['parallel']:.1f} tests at once on average" if facts["parallel"] else ""),
         "",
@@ -320,9 +373,11 @@ def compare(before: dict, after: dict, top: int) -> str:
         f"| outcomes | {one['outcomes']} → {two['outcomes']} |",
         f"| build s | {change(one['build'], two['build'])} |",
         f"| run s | {change(one['run'], two['run'])} |",
+        f"| clippy s | {change(one['clippy'], two['clippy'])} |",
         f"| sum of test s | {change(one['sum'], two['sum'])} |",
         f"| threads · load before | {before['threads']} · {before['load_before']} → {after['threads']} · {after['load_before']} |",
         f"| power | {before.get('power')} → {after.get('power')} |",
+        f"| debug | {before.get('debug')} → {after.get('debug')} |",
     ]
     if before.get("condition") != after.get("condition"):
         lines.append(f"\nthe environments differ: {before.get('condition')} → {after.get('condition')}")
@@ -354,6 +409,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--depth", type=int, default=DEFAULT_DEPTH)
     parser.add_argument("--top", type=int, default=DEFAULT_TOP)
     parser.add_argument("--again", action="store_true", help="measure even when a result for this commit is kept")
+    parser.add_argument("--checkout", type=Path, default=REPO,
+                        help="measure this checkout (another commit, by this script) instead of the one it stands in")
+    parser.add_argument("--cold", action="store_true", help="cargo clean first, so the build seconds are a cold build's")
+    parser.add_argument("--clippy", action="store_true", help="time clippy --all-targets -D warnings after the run")
     parser.add_argument("--json", action="store_true", help="print the summary as JSON instead of the table")
     own, filters = split_filters(argv)
     args = parser.parse_args(own)
