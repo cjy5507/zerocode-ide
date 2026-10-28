@@ -268,10 +268,22 @@ mod tests {
     }
 
     /// Read-only mode runs no `!` line, even one the file's `allowed-tools`
-    /// grants; the same file in workspace-write runs it.
+    /// grants and in a folder the person trusts; the same file in
+    /// workspace-write runs it. The person's trust here is the settings that
+    /// trust every folder, in a zo home of the test's own.
     #[test]
     fn a_prompt_command_runs_no_bang_line_in_read_only_mode() {
+        use crate::support::EnvVarGuard;
         use core_types::PermissionMode;
+        let _lock = crate::test_env_lock();
+        let zo_home = tempfile::tempdir().expect("a zo home");
+        std::fs::write(
+            zo_home.path().join(crate::preferences::PREFERENCES_FILE_NAME),
+            r#"{"workspaceTrust":"always-full"}"#,
+        )
+        .expect("settings that trust every folder");
+        let _zo_home = EnvVarGuard::set("ZO_CONFIG_HOME", zo_home.path().to_str());
+        let _no_zo_home = EnvVarGuard::set("ZO_HOME", None);
         let folder = tempfile::tempdir().expect("a working folder");
         let commands = folder.path().join(".zo").join("commands");
         std::fs::create_dir_all(&commands).expect("the command folder");

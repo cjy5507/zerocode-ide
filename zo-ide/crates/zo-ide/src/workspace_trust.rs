@@ -880,4 +880,147 @@ mod tests {
         let _ = let_go.send(());
         pinner.join().expect("the pin's thread");
     }
+
+    /// One `!`-line trial: a person's home whose `.zo` is zo's home (trust
+    /// store, settings, personal commands), a project folder below that home,
+    /// and the file a `!touch` that ran leaves behind.
+    struct BangTrial {
+        root: std::path::PathBuf,
+        home: std::path::PathBuf,
+        zo_home: std::path::PathBuf,
+        project: std::path::PathBuf,
+        marker: std::path::PathBuf,
+    }
+
+    impl BangTrial {
+        fn new(label: &str) -> Self {
+            let root = crate::support::temp_dir(label);
+            let home = root.join("home");
+            let zo_home = home.join(".zo");
+            let project = home.join("project");
+            std::fs::create_dir_all(&zo_home).expect("zo home");
+            std::fs::create_dir_all(project.join(".zo")).expect("project .zo");
+            let marker = root.join("probe-ran");
+            Self { root, home, zo_home, project, marker }
+        }
+
+        fn touch(&self) -> String {
+            format!("touch {}", self.marker.display())
+        }
+
+        /// `probe.md` granting Bash to its `!touch` line, written into the
+        /// `commands` folder under `zo_dir`.
+        fn write_probe(&self, zo_dir: &Path) {
+            let commands = zo_dir.join("commands");
+            std::fs::create_dir_all(&commands).expect("commands dir");
+            std::fs::write(
+                commands.join("probe.md"),
+                format!("---\nallowed-tools: Bash\n---\n!{}\nDone.\n", self.touch()),
+            )
+            .expect("the prompt command");
+        }
+
+        /// A repository that pins `acceptEdits` in its own settings and
+        /// carries the probe command.
+        fn pin_accept_edits_with_probe(&self) {
+            std::fs::write(
+                self.project.join(".zo").join("settings.json"),
+                r#"{"permissionMode": "acceptEdits"}"#,
+            )
+            .expect("project settings");
+            self.write_probe(&self.project.join(".zo"));
+        }
+
+        /// `/probe` in the project, in the mode the project's settings pin,
+        /// with this trial's home as the only home.
+        fn run_probe(&self) -> String {
+            with_env_paths(
+                &[
+                    ("HOME", Some(self.home.as_path())),
+                    ("ZO_CONFIG_HOME", None),
+                    ("ZO_HOME", None),
+                ],
+                || crate::slash::prompt_command(&self.project, "probe", "", self.mode()),
+            )
+            .expect("/probe expands")
+        }
+
+        fn mode(&self) -> runtime::PermissionMode {
+            let pinned = runtime::ConfigLoader::default_for(&self.project)
+                .load()
+                .expect("config loads")
+                .permission_mode();
+            match pinned {
+                Some(runtime::ResolvedPermissionMode::WorkspaceWrite) | None => {
+                    runtime::PermissionMode::WorkspaceWrite
+                }
+                other => panic!("the trial pins acceptEdits or nothing, got {other:?}"),
+            }
+        }
+
+        fn record_trust(&self, mode: &str) {
+            let key = super::trust_key(&self.project);
+            write_store(&self.zo_home, &[(key.as_str(), mode)]);
+        }
+
+        fn untrusted_notice(&self) -> String {
+            format!(
+                "[!{}: not run — this folder is not trusted yet; trust it at zo's \"Trust this folder?\" prompt]\nDone.\n",
+                self.touch()
+            )
+        }
+    }
+
+    impl Drop for BangTrial {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// A repository's settings may pin `acceptEdits`, and then zo opens the
+    /// folder in workspace-write without asking whether the person trusts it.
+    /// That pin is the repository's word, not the person's, so a command file
+    /// in the same repository runs no `!` line until the trust store holds a
+    /// decision for the folder; one notice line stands in its place.
+    #[test]
+    fn a_repo_pinned_mode_is_not_trust_for_its_own_bang_lines() {
+        let _guard = crate::test_env_lock();
+        let trial = BangTrial::new("bang-pinned-untrusted");
+        trial.pin_accept_edits_with_probe();
+        let rendered = trial.run_probe();
+        assert!(!trial.marker.exists(), "a repo-pinned mode ran the repo's `!` line");
+        assert_eq!(rendered, trial.untrusted_notice());
+    }
+
+    /// The person's answer at the trust prompt is the decision: read-only
+    /// still runs nothing, workspace-write lets the granted line run.
+    #[test]
+    fn a_recorded_trust_decision_lets_the_repo_bang_lines_run() {
+        let _guard = crate::test_env_lock();
+        let trial = BangTrial::new("bang-pinned-trusted");
+        trial.pin_accept_edits_with_probe();
+
+        trial.record_trust("read-only");
+        let refused = trial.run_probe();
+        assert!(!trial.marker.exists(), "a read-only trust record ran the `!` line");
+        assert_eq!(refused, trial.untrusted_notice());
+
+        trial.record_trust("workspace-write");
+        let ran = trial.run_probe();
+        assert!(trial.marker.exists(), "a workspace-write trust record did not run the `!` line");
+        assert_eq!(ran, "\nDone.\n");
+    }
+
+    /// A command file in zo's home is the person's own: it runs what its
+    /// `allowed-tools` grants with no trust record, even though the walk up
+    /// from a project below the home passes the same `.zo/commands` folder.
+    #[test]
+    fn zo_home_commands_run_by_allowed_tools_without_a_trust_record() {
+        let _guard = crate::test_env_lock();
+        let trial = BangTrial::new("bang-zo-home");
+        trial.write_probe(&trial.zo_home);
+        let rendered = trial.run_probe();
+        assert!(trial.marker.exists(), "zo home's granted `!` line did not run");
+        assert_eq!(rendered, "\nDone.\n");
+    }
 }
