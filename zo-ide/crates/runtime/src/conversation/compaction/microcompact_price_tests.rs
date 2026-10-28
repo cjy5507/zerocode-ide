@@ -192,9 +192,9 @@ fn the_hard_ceiling_still_runs_a_trim_the_prices_decline() {
 }
 
 /// The clear pays until the conversation reaches the full-compaction tier at
-/// the pace it has been growing; a fall between two answered requests (a
-/// trim, a compaction) is not growth. With no pace on record the horizon is
-/// the token rule's bet.
+/// the pace it has been growing — past that tier, until the hard ceiling; a
+/// fall between two answered requests (a trim, a compaction) is not growth.
+/// With no pace on record the horizon is the token rule's bet.
 #[test]
 fn the_payback_horizon_is_the_requests_left_to_the_full_tier_at_the_recent_pace() {
     let mut runtime = runtime_on("claude-opus-5-5");
@@ -218,7 +218,10 @@ fn the_payback_horizon_is_the_requests_left_to_the_full_tier_at_the_recent_pace(
     let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
     let horizon = runtime.microcompact_payback_horizon(full - 100_000);
     assert!((horizon - 25.0).abs() < f64::EPSILON, "{horizon}");
-    assert!(runtime.microcompact_payback_horizon(full).abs() < f64::EPSILON);
+    let ceiling = runtime.hard_context_ceiling_tokens();
+    let past = runtime.microcompact_payback_horizon(full);
+    assert!((past - token_count(ceiling - full) / token_count(4_000)).abs() < f64::EPSILON, "{past}");
+    assert!(runtime.microcompact_payback_horizon(ceiling).abs() < f64::EPSILON);
 }
 
 /// What a firing leaves on the break row: the quote in the gate's unit, the

@@ -1134,8 +1134,13 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     }
 
     pub(super) fn request_reaches_hard_context_ceiling(&self, context_tokens: u64) -> bool {
-        let window = self.context_window_for_guards();
-        window > 0 && context_tokens > window.saturating_mul(95) / 100
+        self.context_window_for_guards() > 0 && context_tokens > self.hard_context_ceiling_tokens()
+    }
+
+    /// The most a request may carry before the hard ceiling: 95% of the real
+    /// context window.
+    pub(super) fn hard_context_ceiling_tokens(&self) -> u64 {
+        self.context_window_for_guards().saturating_mul(95) / 100
     }
 
     fn request_would_exceed_context_window(&self, context_tokens: u64) -> bool {
@@ -1605,10 +1610,19 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
 
     /// Requests a firing has to pay for itself in: until the conversation
     /// reaches the full-compaction tier at the pace it has been growing, past
-    /// which the summary rewrites everything anyway. With no pace on record
-    /// yet, the bet the token rule makes.
+    /// which the summary rewrites everything anyway. A conversation already
+    /// past that tier is one whose summary did not run (a failed summary
+    /// call), and what rewrites everything next is the last-resort trim at
+    /// the hard ceiling, so the room runs to the ceiling (t-78937). With no
+    /// pace on record yet, the bet the token rule makes.
     fn microcompact_payback_horizon(&self, context_tokens: u64) -> f64 {
-        let room = u64::from(self.auto_compaction_input_tokens_threshold).saturating_sub(context_tokens);
+        let full = u64::from(self.auto_compaction_input_tokens_threshold);
+        let rewrite_at = if context_tokens < full {
+            full
+        } else {
+            self.hard_context_ceiling_tokens()
+        };
+        let room = rewrite_at.saturating_sub(context_tokens);
         match recent_context_growth_per_request(&self.session.messages) {
             Some(growth) => token_count(room) / token_count(growth),
             None => token_count(MICROCOMPACT_PAYBACK_REQUESTS),
