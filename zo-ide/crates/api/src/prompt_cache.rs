@@ -2718,7 +2718,7 @@ pub struct RequestLedgerRow {
     /// for system block `i` or `m<i>` for message `i` of the body sent (after
     /// the client's own rewrites — thinking stripped, a served model id), and
     /// `bytes` the prefix's length with the markers themselves left out
-    /// ([`sent_prefixes`]). Lengths and hashes only; no text is kept.
+    /// (`sent_prefixes`). Lengths and hashes only; no text is kept.
     ///
     /// Every other column here is read off the `MessageRequest` the runtime
     /// built, and the client rewrites that before it goes out. So until this
