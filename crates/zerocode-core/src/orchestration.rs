@@ -46,6 +46,7 @@ pub mod land_batch;
 pub mod land_check;
 pub mod land_record;
 pub mod landing_watch;
+pub mod process_sweep;
 mod progress;
 pub mod project_scope;
 mod session_history;
@@ -7001,6 +7002,8 @@ fn changes_the_ledger(verb: &str, words: &Words) -> bool {
         // Reading the batches changes nothing; every press hands the window work whose
         // records come back as receipts.
         land_batch::LAND_BATCH_VERB => land_batch::presses(words),
+        // A list signals nothing; naming pids to end does.
+        process_sweep::VERB => words.value("--kill").is_some(),
         _ => true,
     };
     doing(verb).is_some_and(|what| what.changes(spending))
@@ -19521,6 +19524,18 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         Doing::Policy,
     ),
     (
+        process_sweep::VERB,
+        "--find <text> | --kill <pid@mark>[,<pid@mark>…] · the coordinator's one road to end a \
+         stray process: --find lists every process whose command line holds <text> as plain \
+         text (never a pattern) with its pid@mark, parent, start, place, the worker checkout it \
+         stands in and whether it is protected, and changes nothing; --kill ends only the pids \
+         a list showed, one at a time, each read again right before its TERM so a reused pid is \
+         left alone, refuses protected ones with the reason, and writes one line to the run. \
+         There is no pattern, parent or everything mode. 패턴으로 죽이는 명령은 쓰지 않는다 — \
+         인자가 패턴이 된다",
+        Doing::Policy,
+    ),
+    (
         gate_reuse::PIN,
         "--gate <gate-root|gate-zo> --body <policy-json> · pin exact policy and producer identities for the current authenticated coordinator",
         Doing::Mutation,
@@ -20055,6 +20070,7 @@ impl std::fmt::Debug for Decided {
             Effect::WorkerTranscript { .. } => "worker-transcript",
             Effect::LandCheck(..) => "land-check",
             Effect::LandBatch(..) => "land-batch",
+            Effect::ProcessSweep(..) => "process-sweep",
             Effect::WorkerTerminal { .. } => "worker-terminal",
             Effect::Focus { .. } => "focus",
             Effect::Close { .. } => "close",
@@ -24194,6 +24210,20 @@ fn plan_inner(
             let ask = land_check::ask(ledger, &run_id, &team.id, pane, &words)?;
             let mut planned = said(serde_json::Value::Null);
             planned.effect = Effect::LandCheck(ask);
+            planned
+        }
+
+        /* A stray process, listed or ended (t-78914). The ledger reads the mode, the needle and
+         * the pids, refuses a worker's pane the end road and names the worker checkouts it knows;
+         * the process table, the protection judgment and the signal are the window's, and so is
+         * the reply. */
+        process_sweep::VERB => {
+            let reading: &Ledger = ledger;
+            let ask = process_sweep::ask(reading, &words, &team.id, pane, || {
+                bound(reading, &words, &caller, &seat)
+            })?;
+            let mut planned = said(serde_json::Value::Null);
+            planned.effect = Effect::ProcessSweep(ask);
             planned
         }
 

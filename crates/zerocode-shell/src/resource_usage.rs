@@ -248,6 +248,20 @@ impl ProcessSample {
         self.rows.iter().any(|row| row.pid == pid)
     }
 
+    /// Every row whose start identity and command line were both read, as
+    /// `(pid, parent, started, command)` — the rows a pid can be named by and
+    /// read again later (t-78914 `process-sweep`).
+    pub(crate) fn identified(&self) -> impl Iterator<Item = (u32, u32, &str, &str)> + '_ {
+        self.rows.iter().filter_map(|row| {
+            Some((
+                row.pid,
+                row.ppid,
+                self.identities.get(&row.pid)?.as_str(),
+                self.commands.get(&row.pid)?.as_str(),
+            ))
+        })
+    }
+
     /// The commands an agent is running under the pane rooted at `root`
     /// (t-6428): what a restart would cut besides the agent's own turn.
     ///
@@ -828,6 +842,16 @@ pub(crate) fn process_has_args(pid: u32, required: &[&str]) -> Result<bool, Stri
     if pid == 0 {
         return Ok(false);
     }
+    let command = process_command(pid)?;
+    Ok(!command.is_empty() && command_has_args(&command, required))
+}
+
+/// One known pid's command line, in the same words and bounds the table read
+/// gives it — empty when no such process stands.
+pub(crate) fn process_command(pid: u32) -> Result<String, String> {
+    if pid == 0 {
+        return Ok(String::new());
+    }
     #[cfg(not(windows))]
     let command = {
         let mut command = crate::proc::quiet_command("ps");
@@ -849,8 +873,42 @@ pub(crate) fn process_has_args(pid: u32, required: &[&str]) -> Result<bool, Stri
         command
     };
     let output = run_sampler(command, PROCESS_IDENTITY_TIMEOUT)?;
-    let command = bounded_command(String::from_utf8_lossy(&output.stdout).split_ascii_whitespace());
-    Ok(!command.is_empty() && command_has_args(&command, required))
+    Ok(bounded_command(
+        String::from_utf8_lossy(&output.stdout).split_ascii_whitespace(),
+    ))
+}
+
+/// Ask exactly one pid to end, once (t-78914 `process-sweep`): TERM on Unix,
+/// and on Windows `taskkill` of that pid alone — never `/T`, so no tree goes
+/// with it. No wait and no escalation: the caller read the pid's identity
+/// immediately before and lists again to see what stands.
+pub(crate) fn end_one_process(pid: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let pid = libc::pid_t::try_from(pid)
+            .ok()
+            .filter(|pid| *pid > 1)
+            .ok_or_else(|| format!("{pid} is not a process id that may be signalled"))?;
+        // SAFETY: one positive pid above 1, never a group (a negative pid) or
+        // every process (-1); `kill` dereferences no pointer.
+        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "TERM was not delivered: {}",
+                io::Error::last_os_error()
+            ))
+        }
+    }
+    #[cfg(windows)]
+    {
+        if pid <= 1 {
+            return Err(format!("{pid} is not a process id that may be signalled"));
+        }
+        let mut command = crate::proc::quiet_command("taskkill.exe");
+        command.args(["/PID", &pid.to_string(), "/F"]);
+        run_sampler(command, PROCESS_IDENTITY_TIMEOUT).map(|_| ())
+    }
 }
 
 /// Stop a durable native child only while its pid still has the recorded

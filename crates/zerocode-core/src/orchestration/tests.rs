@@ -25570,6 +25570,9 @@ mod letter_answers;
 /// t-68069: one conversation is one worker's, whatever seat a report comes by
 /// (`tests/one_conversation.rs`).
 mod one_conversation;
+/// t-78914: `process-sweep` lists by plain text and ends only the pids a list
+/// showed, each read again before its signal (`tests/process_sweep.rs`).
+mod process_sweep;
 /// t-47538: one reading of where a task's work stands (`tests/progress.rs`).
 mod progress;
 /// t-65286: which project a run belongs to, and the run a verb answers in

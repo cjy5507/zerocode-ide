@@ -163,6 +163,7 @@ mod plain_read;
 mod preference_runtime;
 mod primary_selection;
 mod proc;
+mod process_sweep;
 mod project_runtime;
 mod project_search;
 mod prompt_transaction;

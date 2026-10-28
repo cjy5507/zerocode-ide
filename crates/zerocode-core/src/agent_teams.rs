@@ -381,6 +381,10 @@ pub enum Effect {
     /// cancel a batch. The ledger judged who pressed what; git, the repository's switch and the
     /// receipts are the window's. Boxed because it carries the batch as the ledger read it.
     LandBatch(Box<crate::orchestration::land_batch::LandBatchAsk>),
+    /// List or end stray processes (t-78914). The ledger chose the mode, the
+    /// needle or the pids and the run; the process table, the protection
+    /// judgment, the signal and the reply are the window's.
+    ProcessSweep(crate::orchestration::process_sweep::ProcessSweepAsk),
     /// Move the keyboard. The ONE road by which a teammate pane takes focus.
     Focus { term: u32 },
     /// End one pane.
