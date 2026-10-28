@@ -38,6 +38,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -226,34 +227,56 @@ impl TeamJudge {
             command.current_dir(cwd);
         }
         let mut child = command.spawn().map_err(|_| TRANSPORT.to_string())?;
-        if let Some(mut pipe) = child.stdin.take() {
-            let _ = pipe.write_all(stdin.as_bytes());
-        }
         let began = Instant::now();
-        let answered = loop {
+        // The write is inside the wall: a reader that stalls before it reads
+        // a prompt larger than its pipe holds would otherwise hold the walk
+        // past any deadline. Killing the reader ends the write in a broken
+        // pipe.
+        let writer = child.stdin.take().map(|mut pipe| {
+            let bytes = stdin.as_bytes().to_vec();
+            std::thread::spawn(move || {
+                let _ = pipe.write_all(&bytes);
+            })
+        });
+        let ended = loop {
             match child.try_wait() {
-                Ok(Some(status)) => break status.success(),
+                Ok(Some(status)) => break Ok(status.success()),
                 Ok(None) if began.elapsed() < deadline => std::thread::sleep(POLL),
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = std::fs::remove_file(&last_message);
-                    return Err(TIMEOUT.to_string());
-                }
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = std::fs::remove_file(&last_message);
-                    return Err(TRANSPORT.to_string());
-                }
+                Ok(None) => break Err(TIMEOUT),
+                Err(_) => break Err(TRANSPORT),
             }
         };
+        if ended.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        reap(writer);
         let text = std::fs::read_to_string(&last_message);
         let _ = std::fs::remove_file(&last_message);
-        match (answered, text) {
-            (true, Ok(text)) => Ok(text),
+        match (ended, text) {
+            (Err(token), _) => Err(token.to_string()),
+            (Ok(true), Ok(text)) => Ok(text),
             _ => Err(TRANSPORT.to_string()),
         }
+    }
+}
+
+/// How long a stdin writer is given to end once its reader is gone. A broken
+/// pipe ends it at once; a pipe that something the reader started still
+/// holds open is not waited out, and that thread ends when the pipe closes.
+const WRITER_GRACE: Duration = Duration::from_millis(500);
+
+/// Join the stdin writer once its reader has exited or been killed.
+fn reap(writer: Option<JoinHandle<()>>) {
+    let Some(writer) = writer else {
+        return;
+    };
+    let began = Instant::now();
+    while !writer.is_finished() && began.elapsed() < WRITER_GRACE {
+        std::thread::sleep(POLL);
+    }
+    if writer.is_finished() {
+        let _ = writer.join();
     }
 }
 
