@@ -47,11 +47,17 @@ MAIN = "zerocode-shell"
 HELPER = "ZeroCode Helper"
 # The vmmap -summary rows worth a column: the allocator's zones and the
 # graphics and web regions the task names. Each is summed over its rows.
-# Chromium's own allocator (PartitionAlloc) and V8 map their pages as plain
-# VM_ALLOCATE, so that row is the browser-process share apart from malloc;
-# WebKit names its regions (an artifact's WKWebView lives in this process).
+# Chromium tags the pages it maps itself: 253 is PartitionAlloc, 254 Chromium,
+# 255 V8 (`PageTag`, partition_alloc page_allocator_constants.h). The window's
+# browser process runs PartitionAlloc as malloc, so tag 253 holds every malloc
+# of the main process — the Rust side's history and ledger included — and the
+# MALLOC zones are nearly empty there (first reading, 2026-10-29: tag 253
+# 484 MiB dirty against 1.9 MiB of MALLOC). WebKit names its own regions (an
+# artifact's WKWebView lives in this process).
 REGION_GROUPS = {
     "malloc": re.compile(r"^MALLOC(?! ZONE)"),
+    "partition_alloc": re.compile(r"^Memory Tag 253(?! \(reserved\))"),
+    "chromium_v8": re.compile(r"^Memory Tag 25[45](?! \(reserved\))"),
     "vm_allocate": re.compile(r"^VM_ALLOCATE(?! \(reserved\))"),
     "coregraphics": re.compile(r"^CG\w*|^CoreGraphics|^CoreAnimation|^CoreUI"),
     "iokit": re.compile(r"^IOKit|^IOSurface|^IOAccelerator"),

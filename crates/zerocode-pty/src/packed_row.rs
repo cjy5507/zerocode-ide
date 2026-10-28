@@ -156,6 +156,12 @@ impl PackedRow {
         }
     }
 
+    /// Every style that is not plain, a run apiece — what the row's links
+    /// are read from without rebuilding a cell.
+    pub(crate) fn styles(&self) -> impl Iterator<Item = &CellStyle> {
+        self.runs.iter().map(|run| &run.style)
+    }
+
     /// The bytes this row's own allocations hold — what a row costs beyond
     /// the place it is kept in.
     #[cfg(test)]

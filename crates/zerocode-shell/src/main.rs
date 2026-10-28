@@ -130,6 +130,7 @@ mod google_login;
 mod hang_sample;
 mod hang_watchdog;
 mod harness_settings;
+mod history_budget;
 mod hooks;
 mod human_input;
 mod icon;

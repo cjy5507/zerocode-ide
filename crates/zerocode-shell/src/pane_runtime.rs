@@ -3268,6 +3268,10 @@ pub(super) fn pump_loop(app: &AppHandle) {
     let mut beat: Option<Instant> = None;
     // Where each pane's foreground process stands — a person's pace (pane_cwd_runtime).
     let mut cwd_looked: Option<Instant> = None;
+    // When each pane last printed, for the window's history budget
+    // (`history_budget`): the quietest pane gives up its oldest lines first.
+    // One entry per pane in the pool; `history_budget::hold` drops the rest.
+    let mut history_moved: HashMap<TermId, Instant> = HashMap::new();
     // The pool snapshot, and the two tables the round's questions are asked
     // of. Declared out here for their CAPACITY and nothing else: all three are
     // emptied again before the loop naps, so a shell that left the pool is
@@ -3439,6 +3443,9 @@ pub(super) fn pump_loop(app: &AppHandle) {
                     pumped.unanswered_since = again.unanswered_since;
                 }
                 pumped_any |= pumped.bytes > 0;
+                if pumped.bytes > 0 {
+                    history_moved.insert(*id, looked_at);
+                }
                 let look = chase_round.saw(pumped, looked_at);
                 // Read off the round just parsed, before the readers look: a
                 // frame is taken by a look here or by a window's pull on
@@ -3690,6 +3697,12 @@ pub(super) fn pump_loop(app: &AppHandle) {
                 pumped_any,
             )
         };
+        // The window's history budget, on the reaping beat and outside the
+        // walk: each pane is read and shed under its own lock alone, with no
+        // `deliveries` guard held.
+        if reaping {
+            history_budget::hold(state.terminals(), &mut history_moved, looked_at);
+        }
         // Counted before the notices go out, because telling a window to come
         // is work this round did — a round that had something to show is not
         // quiet.
