@@ -535,9 +535,17 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 
 /* A notice stands above the conversation's body, its words on the list's
  * left edge: the rail's column and the list's gutter, as the rows below. */
+/* A notice over the turns is a small pill centred over the list (t-81525 C5):
+ * the margins keep it off the turn rail's column, `align-self` stands it in
+ * the middle of what is left, and a long reason wraps inside it. */
 .pane-chat-notice {
-  margin: var(--space-3) var(--helper-gutter, var(--chat-list-pad-x)) 0
+  align-self: center;
+  max-width: min(var(--reading-column), calc(100% - var(--chat-turn-rail-w) - 2 * var(--helper-gutter, var(--chat-list-pad-x))));
+  margin: var(--space-2) var(--helper-gutter, var(--chat-list-pad-x)) 0
     calc(var(--chat-turn-rail-w) + var(--helper-gutter, var(--chat-list-pad-x)));
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
+  background: var(--chat-tool-bg);
   color: var(--ink-mist);
   font-size: var(--text-xs);
 }

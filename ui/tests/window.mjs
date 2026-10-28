@@ -56279,7 +56279,9 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
         if (!notice || !body || body.contains(notice)) return false;
         const line = notice.getBoundingClientRect();
         const list = body.querySelector(":scope > .helper-turns")?.getBoundingClientRect();
-        return Boolean(list) && line.bottom <= body.getBoundingClientRect().top + 0.5 && line.width >= list.width / 2;
+        // A pill centred over the list, off the rail's column (t-81525 C5).
+        return Boolean(list) && line.bottom <= body.getBoundingClientRect().top + 0.5 && line.left >= list.left - 0.5 &&
+          Math.abs((line.left + line.right) / 2 - (list.left + list.right) / 2) <= 1;
       };
       seen.noticeAbove = noticeAboveBody(quietChat, "worker.noPaneTranscript");
       // A long transcript is read to its end the moment the view opens — the
@@ -56316,15 +56318,16 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       seen.caughtUp = longChat?.querySelectorAll(".helper-turn").length === 3 && reads >= 3;
       // The first read asked for the tail (no cursor), and a folded answer
       // says so on the page in the catalog's words.
+      const foldedNotice = longChat?.querySelector('.pane-chat-notice[data-says="worker.historyFolded"]');
       seen.openedAtTail = firstAfter === null &&
-        longChat?.querySelector('.pane-chat-notice[data-says="worker.historyFolded"]')?.textContent ===
-          t("worker.historyFolded", "긴 기록의 끝부분만 보입니다 — 이전 턴은 판의 화면과 세션 기록에 있습니다.");
+        foldedNotice?.textContent === t("worker.historyFolded", "↑ 이전 기록 · 끝부분만 보는 중") &&
+        foldedNotice?.dataset.tip === t("worker.historyFoldedTip", "긴 기록의 끝부분만 보입니다 — 이전 턴은 판의 화면과 세션 기록에 있습니다.");
       seen.foldedAbove = noticeAboveBody(longChat, "worker.historyFolded");
       // Two notices at once, as in the person's photo (a hand-over waiting
       // beside the folded history): both stand above the body, one under the
       // other, each as wide as the list.
       noticeOnPaneChat(paneChats.get(long), "worker.handoverPending", true,
-        t("worker.handoverPending", "이 턴이 끝나면 대화가 실시간 세션(선)으로 이어집니다."));
+        t("worker.handoverPending", "이 턴이 끝나면 대화가 실시간으로 이어집니다 — 그때부터 답이 낱말 단위로 흐릅니다."));
       const pairBox = (key) => longChat?.querySelector(`.pane-chat-notice[data-says="${key}"]`)?.getBoundingClientRect();
       const folded = pairBox("worker.historyFolded");
       const pending = pairBox("worker.handoverPending");
@@ -57661,10 +57664,12 @@ suite("pane-hands-over-to-wire", async ({ browser, origin, ok }) => {
       await settle();
       seen.midTurnTranscript = paneChatOn(busy) && calls.filter((call) => call[0] === "start").length === startsBefore;
       seen.midTurnPending = paneChats.get(busy)?.pendingWire === true;
+      // Said by the head's running chip under the pointer, not as a line (t-81525 C5).
       seen.midTurnNotice = await until(
         () =>
-          document.querySelector(`.pane-chat[data-term="${busy}"] .pane-chat-notice[data-says="worker.handoverPending"]`)
-            ?.textContent === t("worker.handoverPending", "이 턴이 끝나면 대화가 실시간 세션(선)으로 이어집니다 — 그때부터 답이 낱말 단위로 흐릅니다."),
+          document.querySelector(`.pane-chat[data-term="${busy}"] .chat-head .chat-run`)
+            ?.dataset.tip === t("worker.handoverPending", "이 턴이 끝나면 대화가 실시간으로 이어집니다 — 그때부터 답이 낱말 단위로 흐릅니다.") &&
+          !document.querySelector(`.pane-chat[data-term="${busy}"] .pane-chat-notice[data-says="worker.handoverPending"]`),
       );
       tell("hook:agent", { term: busy, state: "done", agent: "claude", session: { key: "session_id", id: "s-busy" }, resumable: true });
       seen.handedAfterTurn = await until(() => calls.filter((call) => call[0] === "start").length === startsBefore + 1);

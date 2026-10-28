@@ -13908,14 +13908,19 @@ function paintPaneChat(term) {
     t("worker.noPaneTranscript", "이 판의 대화 기록을 아직 읽을 수 없습니다 — 에이전트가 전사의 자리를 알려 준 뒤에 보입니다."),
   );
   // A conversation asked for mid-turn is handed to the wire when the turn
-  // ends (`handPaneToWire`); until then the page says so, where a person
-  // would otherwise wonder why nothing streams yet.
-  noticeOnPaneChat(
-    held,
-    "worker.handoverPending",
-    held.pendingWire === true,
-    t("worker.handoverPending", "이 턴이 끝나면 대화가 실시간 세션(선)으로 이어집니다 — 그때부터 답이 낱말 단위로 흐릅니다."),
-  );
+  // ends (`handPaneToWire`), and the wire then takes it over behind this view
+  // while what is sent meanwhile waits for it (t-54304). Both are said by the
+  // head's running chip, under the pointer — not as lines over the turns
+  // (t-81525 C5): the person reads the conversation, and the chip is where
+  // they look to know what it is doing.
+  const handing = held.handing === true
+    ? t("worker.handingOver", "실시간 대화로 잇는 중입니다 — 그동안 보낸 글은 이어진 뒤에 갑니다.")
+    : held.pendingWire === true
+      ? t("worker.handoverPending", "이 턴이 끝나면 대화가 실시간으로 이어집니다 — 그때부터 답이 낱말 단위로 흐릅니다.")
+      : "";
+  const runChip = held.host.__helperPage?.head.querySelector(".chat-run") ?? null;
+  if (runChip && handing) writeAttribute(runChip, "data-tip", handing);
+  else runChip?.removeAttribute("data-tip");
   // A hand-over the backend refused (a worker's pane, a wire that failed to
   // stand, a screen that kept its conversation): the page says why, in the
   // backend's words, and stays the transcript view — 「대화」 again asks again.
@@ -13923,15 +13928,7 @@ function paintPaneChat(term) {
     held,
     "worker.wireRefused",
     typeof held.wireRefusal === "string" && held.wireRefusal !== "",
-    t("worker.wireRefused", "실시간 세션(선)으로 넘기지 못했습니다: {{reason}} — 전사 뷰로 봅니다(답은 턴이 닫힐 때 한 번에). 「대화」를 다시 누르면 다시 시도합니다.", { reason: held.wireRefusal ?? "" }),
-  );
-  // The wire takes the conversation over behind this view; what is sent
-  // meanwhile waits for it (t-54304).
-  noticeOnPaneChat(
-    held,
-    "worker.handingOver",
-    held.handing === true,
-    t("worker.handingOver", "실시간 세션(선)으로 잇는 중입니다 — 그동안 보낸 글은 이어진 뒤에 갑니다."),
+    t("worker.wireRefused", "실시간 대화로 넘기지 못했습니다: {{reason}} — 전사 뷰로 봅니다(답은 턴이 닫힐 때 한 번에). 「대화」를 다시 누르면 다시 시도합니다.", { reason: held.wireRefusal ?? "" }),
   );
   // The first read is out. Said only once it is late: the stylesheet holds the
   // line hidden for `--chat-late-ms`, so a read that comes sooner is never seen
@@ -13942,11 +13939,14 @@ function paintPaneChat(term) {
     run.helper.found === null,
     t("worker.readingTranscript", "대화를 읽는 중…"),
   ));
+  // The page holds the end of a long transcript: a small pill over the list
+  // says so, and its tooltip says where the rest is (t-81525 C5).
   noticeOnPaneChat(
     held,
     "worker.historyFolded",
     run.helper.folded === true,
-    t("worker.historyFolded", "긴 기록의 끝부분만 보입니다 — 이전 턴은 판의 화면과 세션 기록에 있습니다."),
+    t("worker.historyFolded", "↑ 이전 기록 · 끝부분만 보는 중"),
+    t("worker.historyFoldedTip", "긴 기록의 끝부분만 보입니다 — 이전 턴은 판의 화면과 세션 기록에 있습니다."),
   );
 }
 
@@ -13954,7 +13954,7 @@ function paintPaneChat(term) {
  * stands or goes on its own condition, so two of them never take each other
  * for the one already there. The words arrive translated (`t(key, …)` at the
  * call, where the catalog contract reads them); the key names the line. */
-function noticeOnPaneChat(held, key, wanted, words) {
+function noticeOnPaneChat(held, key, wanted, words, tip = "") {
   const shown = held.host.querySelector(`.pane-chat-notice[data-says="${key}"]`);
   if (!wanted) {
     shown?.remove();
@@ -13964,12 +13964,15 @@ function noticeOnPaneChat(held, key, wanted, words) {
     // The same line with new words (a refusal's reason): the words change,
     // the line stays.
     writeTextContent(shown, words);
+    if (tip) writeAttribute(shown, "data-tip", tip);
+    else shown.removeAttribute("data-tip");
     return shown;
   }
   const said = document.createElement("p");
   said.className = "pane-chat-notice";
   said.dataset.says = key;
   said.textContent = words;
+  if (tip) said.dataset.tip = tip;
   // Above the body, not inside it: the body is the rail | list grid
   // (t-22100), where a line of its own would become a grid cell and fall into
   // the rail's narrow column.
