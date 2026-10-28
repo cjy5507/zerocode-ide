@@ -294,9 +294,17 @@ fn spawn(client: &Client, launch: &Launch, model: Option<String>, job: AgentJob)
     let start = Start { run: client.run.clone().ok_or_else(|| error("ledger run missing"))?, task, retry_request: start_request(&id, 0) };
     super::manifest::stamp_agent_lifecycle(&job.manifest, |lifecycle| lifecycle.ledger_start = Some(start.clone()));
     let launch = launch.clone();
-    std::thread::Builder::new().name(format!("zo-ledger-{id}"))
-        .spawn(move || start_and_watch(&client, &launch, model, &prompt, start.task, job))
-        .map(|_| ()).map_err(|e| error(format!("could not start the ledger worker: {e}")))
+    let starting = job.manifest.clone();
+    start_in_background(&starting, move || {
+        std::thread::Builder::new().name(format!("zo-ledger-{id}"))
+            .spawn(move || start_and_watch(&client, &launch, model, &prompt, start.task, job))
+            .map(|_| ())
+    })
+}
+
+/// Put the start on its thread (`start` spawns it) for `manifest`'s agent.
+fn start_in_background(manifest: &AgentOutput, start: impl FnOnce() -> std::io::Result<()>) -> Result<(), ToolError> {
+    start().map_err(|e| error(format!("could not start the ledger worker for {}: {e}", manifest.agent_id)))
 }
 
 /// The start the parent no longer waits for: the worker-start (asked again
