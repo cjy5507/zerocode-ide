@@ -948,19 +948,24 @@ mod tests {
         /// `/probe` in the project, in the mode the project's settings pin,
         /// with this trial's home as the only home.
         fn run_probe(&self) -> String {
+            self.run_probe_in(&self.project)
+        }
+
+        /// [`Self::run_probe`] with `cwd` as the working folder.
+        fn run_probe_in(&self, cwd: &Path) -> String {
             with_env_paths(
                 &[
                     ("HOME", Some(self.home.as_path())),
                     ("ZO_CONFIG_HOME", None),
                     ("ZO_HOME", None),
                 ],
-                || crate::slash::prompt_command(&self.project, "probe", "", self.mode()),
+                || crate::slash::prompt_command(cwd, "probe", "", Self::mode(cwd)),
             )
             .expect("/probe expands")
         }
 
-        fn mode(&self) -> runtime::PermissionMode {
-            let pinned = runtime::ConfigLoader::default_for(&self.project)
+        fn mode(cwd: &Path) -> runtime::PermissionMode {
+            let pinned = runtime::ConfigLoader::default_for(cwd)
                 .load()
                 .expect("config loads")
                 .permission_mode();
@@ -973,7 +978,11 @@ mod tests {
         }
 
         fn record_trust(&self, mode: &str) {
-            let key = super::trust_key(&self.project);
+            self.record_trust_for(&self.project, mode);
+        }
+
+        fn record_trust_for(&self, folder: &Path, mode: &str) {
+            let key = super::trust_key(folder);
             write_store(&self.zo_home, &[(key.as_str(), mode)]);
         }
 
@@ -1022,6 +1031,28 @@ mod tests {
         trial.record_trust("workspace-write");
         let ran = trial.run_probe();
         assert!(trial.marker.exists(), "a workspace-write trust record did not run the `!` line");
+        assert_eq!(ran, "\nDone.\n");
+    }
+
+    /// Trust is the working folder's, by its exact path: a command file in a
+    /// folder above the working one runs under the working folder's trust,
+    /// and the person's trust in that upper folder alone does not run it.
+    #[test]
+    fn an_upper_folders_command_file_asks_the_working_folders_trust() {
+        let _guard = crate::test_env_lock();
+        let trial = BangTrial::new("bang-upper-folder");
+        trial.write_probe(&trial.project.join(".zo"));
+        let below = trial.project.join("below");
+        std::fs::create_dir_all(&below).expect("a folder below the project");
+
+        trial.record_trust_for(&trial.project, "workspace-write");
+        let refused = trial.run_probe_in(&below);
+        assert!(!trial.marker.exists(), "trust in the upper folder ran the `!` line below it");
+        assert_eq!(refused, trial.untrusted_notice());
+
+        trial.record_trust_for(&below, "workspace-write");
+        let ran = trial.run_probe_in(&below);
+        assert!(trial.marker.exists(), "trust in the working folder did not run the `!` line");
         assert_eq!(ran, "\nDone.\n");
     }
 
