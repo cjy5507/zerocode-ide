@@ -27,6 +27,25 @@ fn lineup() -> Lineup {
     .unwrap()
 }
 
+/// [`lineup`] with each model naming the efforts it accepts, as every model
+/// of `zo models --json` did on 2026-10-28: model-a all of claude's ladder,
+/// model-b nothing above `medium`, model-c nothing above `high`.
+fn lineup_with_efforts() -> Lineup {
+    let mut held = lineup();
+    for (model, efforts) in [
+        ("model-a", ladder_efforts("claude")),
+        ("model-b", vec!["low", "medium"]),
+        ("model-c", vec!["low", "medium", "high"]),
+    ] {
+        held.models
+            .iter_mut()
+            .find(|live| live.id == model)
+            .expect("a model of the lineup")
+            .efforts = Some(efforts.into_iter().map(str::to_string).collect());
+    }
+    held
+}
+
 /// Every model with a record, so no summons is a challenger's turn.
 fn recorded() -> BTreeMap<String, ModelRecord> {
     ["model-a", "model-b", "model-c"]
@@ -50,6 +69,7 @@ fn recorded() -> BTreeMap<String, ModelRecord> {
 /// the difficulty `low`, the model the pair `picked` names.
 struct Assigned {
     settings: serde_json::Value,
+    lineup: Lineup,
     records: BTreeMap<String, ModelRecord>,
     difficulty: serde_json::Value,
     model: serde_json::Value,
@@ -60,6 +80,7 @@ impl Assigned {
     fn answering(records: BTreeMap<String, ModelRecord>, picked: (&str, &str)) -> Self {
         Self {
             settings: serde_json::Value::Null,
+            lineup: lineup(),
             records,
             difficulty: serde_json::json!({
                 "outcome": "answered", "chosen": LADDER[0].0, "applied": true,
@@ -97,14 +118,14 @@ impl Launcher for Assigned {
             &self.settings,
             agent,
             difficulty,
-            Some(&lineup()),
+            Some(&self.lineup),
             Some(&Seen::default()),
             0,
         )
     }
     fn model_facts(&self, _: &str, _: [&str; 3]) -> Option<crate::summon_model::Facts> {
         Some(crate::summon_model::Facts {
-            lineup: lineup(),
+            lineup: self.lineup.clone(),
             seen: Seen::default(),
             records: self.records.clone(),
         })
@@ -122,13 +143,21 @@ impl Launcher for Assigned {
 /// One claude summons with every dial open under `launcher`: its reply and
 /// what it prepared.
 fn summon(launcher: &Assigned) -> (serde_json::Value, PreparedWorkerStart) {
+    summon_with(
+        launcher,
+        "worker-start --agent claude --prompt translate-labels",
+    )
+}
+
+/// [`summon`] of the `worker-start` line `line`.
+fn summon_with(launcher: &Assigned, line: &str) -> (serde_json::Value, PreparedWorkerStart) {
     let mut bench = Bench::new();
     bench.json("run-create --name assign");
     let planned = planned_on(
         &mut bench.ledger,
         &mut bench.team,
         launcher,
-        "worker-start --agent claude --prompt translate-labels",
+        line,
         bench.clock + 1,
     );
     assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
@@ -140,14 +169,9 @@ fn summon(launcher: &Assigned) -> (serde_json::Value, PreparedWorkerStart) {
     )
 }
 
-/// The efforts claude's ladder launches at, lowest first, once each.
+/// The efforts claude's ladder offers, lowest first, once each.
 fn claude_ladder() -> Vec<&'static str> {
-    let mut efforts: Vec<&str> = LADDER
-        .iter()
-        .filter_map(|(difficulty, _, _)| difficulty_effort("claude", difficulty))
-        .collect();
-    efforts.dedup();
-    efforts
+    ladder_efforts("claude")
 }
 
 /// A1, A3, A4: one call carries both questions; the model question offers a
@@ -484,5 +508,261 @@ fn every_agent_of_the_catalog_passes_the_same_moment() {
     assert!(
         pairs > 0 && models_only > 0 && neither > 0,
         "the catalog holds every kind: {pairs} {models_only} {neither}"
+    );
+}
+
+/// t-74181: a summons Jev did not judge — switched off, the service
+/// failing, or no answer in time — puts no effort of ours on the command
+/// line: the agent's CLI runs at its own default. Before, the unjudged row
+/// read `max` from a shipped table and a coded ladder. The reply says that
+/// nobody set the effort, why no seat judged, and that the pair has no
+/// measured record here.
+#[test]
+fn a_summons_jev_did_not_judge_runs_at_its_clis_default_effort() {
+    for outcome in [
+        crate::jev::door::Refused::Off.token(),
+        "http_500",
+        "timeout",
+    ] {
+        let unjudged = serde_json::json!({"outcome": outcome, "applied": false});
+        let launcher = Assigned {
+            difficulty: unjudged.clone(),
+            model: unjudged,
+            ..Assigned::answering(recorded(), ("model-b", "high"))
+        };
+        let (reply, _) = summon(&launcher);
+        assert_eq!(reply["model"], "model-a", "{outcome}: {reply}");
+        assert!(reply["effort"].is_null(), "{outcome}: {reply}");
+        let dials = &reply["dials"];
+        assert_eq!(dials["difficultyFrom"], "facts", "{outcome}: {reply}");
+        assert_eq!(dials["unjudged"]["why"], outcome, "{reply}");
+        assert_eq!(dials["modelUnjudged"]["why"], outcome, "{reply}");
+        assert_eq!(
+            dials["why"]["effortRule"], "cli-default",
+            "{outcome}: {reply}"
+        );
+        assert_eq!(dials["why"]["pairSamples"], 0, "{outcome}: {reply}");
+        assert_eq!(dials["why"]["evidence"], "unverified", "{outcome}: {reply}");
+    }
+}
+
+/// t-74181: the person's effort binds — with Jev silent it is what runs, and
+/// beside Jev's applied pair it still is: the seat may choose the model the
+/// person left open, never move the effort the person wrote. Written on
+/// every row, it is the one effort the question offers (review P2-2), so the
+/// seat's answer names it.
+#[test]
+fn the_persons_effort_binds_with_jev_silent_and_beside_its_pair() {
+    let written = serde_json::json!({
+        crate::jev::SMART_SETTINGS_KEY: {PROFILES_SETTING: {"claude": LADDER
+            .iter()
+            .map(|(difficulty, _)| ((*difficulty).to_string(), serde_json::json!({"effort": "medium"})))
+            .collect::<serde_json::Map<_, _>>()}},
+    });
+    let silent = Assigned {
+        settings: written.clone(),
+        ..Assigned::late()
+    };
+    let (reply, _) = summon(&silent);
+    assert_eq!(reply["effort"], "medium", "{reply}");
+    assert_eq!(reply["dials"]["why"]["effortRule"], "person", "{reply}");
+    let beside = Assigned {
+        settings: written,
+        ..Assigned::answering(recorded(), ("model-a", "medium"))
+    };
+    let (reply, _) = summon(&beside);
+    assert_eq!(reply["model"], "model-a", "the seat's model ran: {reply}");
+    assert_eq!(
+        reply["effort"], "medium",
+        "the person's effort stood: {reply}"
+    );
+    assert_eq!(reply["dials"]["why"]["effortRule"], "person", "{reply}");
+}
+
+/// t-74181: the pair is Jev's — when its answer runs, the effort is the one
+/// it chose, the top included, and the reply says Jev set it; the pair's own
+/// finished record decides whether that choice is measured or unverified.
+#[test]
+fn the_effort_jev_chose_runs_and_its_record_says_whether_it_is_measured() {
+    let launcher = Assigned::answering(recorded(), ("model-a", "max"));
+    let (reply, _) = summon(&launcher);
+    assert_eq!(reply["model"], "model-a", "{reply}");
+    assert_eq!(
+        reply["effort"], "max",
+        "the top, when Jev judges it: {reply}"
+    );
+    assert_eq!(reply["dials"]["why"]["effortRule"], "jev", "{reply}");
+    assert_eq!(reply["dials"]["why"]["evidence"], "unverified", "{reply}");
+    let mut records = recorded();
+    records.get_mut("model-a").unwrap().by_effort.insert(
+        "max".to_string(),
+        crate::summon_model::ModelPerformance {
+            ended: lineup::CHALLENGE_MIN_SAMPLES,
+            ..crate::summon_model::ModelPerformance::default()
+        },
+    );
+    let (reply, _) = summon(&Assigned::answering(records, ("model-a", "max")));
+    assert_eq!(
+        reply["dials"]["why"]["pairSamples"],
+        lineup::CHALLENGE_MIN_SAMPLES,
+        "{reply}"
+    );
+    assert_eq!(reply["dials"]["why"]["evidence"], "measured", "{reply}");
+}
+
+/// The person's effort written on `difficulties` of claude's rows, and no
+/// model: a half row the settings screen allows.
+fn effort_written_at(effort: &str, difficulties: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        crate::jev::SMART_SETTINGS_KEY: {PROFILES_SETTING: {"claude": difficulties
+            .iter()
+            .map(|difficulty| ((*difficulty).to_string(), serde_json::json!({"effort": effort})))
+            .collect::<serde_json::Map<_, _>>()}},
+    })
+}
+
+/// The difficulty seat's applied answer `difficulty`.
+fn difficulty_answered(difficulty: &str) -> serde_json::Value {
+    serde_json::json!({"outcome": "answered", "chosen": difficulty, "applied": true})
+}
+
+/// t-74181 (review P2-2): where the person wrote an effort alone on every
+/// row the summons can land on, that effort binds whatever model runs, so
+/// the pair question becomes a model question — each model offered once, at
+/// the effort it would run the person's at — and the answer that runs is
+/// the answer given. When the seat's model is not the row's, the person's
+/// effort is brought inside what that model accepts, and the reply says so.
+#[test]
+fn the_persons_effort_alone_makes_the_pair_question_a_model_question() {
+    let everywhere: Vec<&str> = LADDER.iter().map(|(difficulty, _)| *difficulty).collect();
+    let launcher = Assigned {
+        settings: effort_written_at("high", &everywhere),
+        lineup: lineup_with_efforts(),
+        difficulty: difficulty_answered(LADDER[2].0),
+        ..Assigned::answering(recorded(), ("model-b", "medium"))
+    };
+    let (reply, prepared) = summon(&launcher);
+    let asked = launcher.asked.borrow();
+    let offered = asked[0]
+        .model
+        .as_ref()
+        .expect("the pair question")
+        .offered();
+    assert_eq!(
+        offered,
+        [
+            ("model-a".to_string(), "high".to_string()),
+            ("model-b".to_string(), "medium".to_string()),
+            ("model-c".to_string(), "high".to_string()),
+        ],
+        "one option a model, at the effort the person's runs at on it"
+    );
+    assert_eq!(reply["model"], "model-b", "the seat's model ran: {reply}");
+    assert_eq!(
+        reply["effort"], "medium",
+        "the person's high, inside what model-b accepts: {reply}"
+    );
+    let dials = &reply["dials"];
+    assert_eq!(dials["modelFrom"], "jev", "{reply}");
+    assert_eq!(dials["why"]["effortRule"], "person", "{reply}");
+    assert_eq!(
+        dials["effortClamped"],
+        serde_json::json!({"from": "high", "to": "medium"}),
+        "{reply}"
+    );
+    let receipt = prepared
+        .model_shadow
+        .and_then(|shadow| shadow.receipt)
+        .expect("the pair answer's row");
+    assert_eq!(
+        receipt["applied"], true,
+        "the pair that ran is the answer: {receipt}"
+    );
+}
+
+/// t-74181 (review P2-2): where the person's effort binds only some rows,
+/// the pair question stays a pair question; an answer whose effort is not
+/// the one that binds at the difficulty that ran did not run — the row ran,
+/// and the answer is written down as recorded, never graded as applied. An
+/// answer at the binding effort runs.
+#[test]
+fn a_pair_whose_effort_the_person_bound_otherwise_did_not_run() {
+    let launcher = |picked| Assigned {
+        settings: effort_written_at("high", &[LADDER[2].0]),
+        lineup: lineup_with_efforts(),
+        difficulty: difficulty_answered(LADDER[2].0),
+        ..Assigned::answering(recorded(), picked)
+    };
+    let other = launcher(("model-c", "low"));
+    let (reply, prepared) = summon(&other);
+    assert!(
+        other.asked.borrow()[0]
+            .model
+            .as_ref()
+            .expect("the pair question")
+            .offered()
+            .contains(&("model-c".to_string(), "low".to_string())),
+        "a row the person left open keeps the pairs"
+    );
+    assert_eq!(reply["model"], "model-a", "the hard row ran: {reply}");
+    assert_eq!(reply["effort"], "high", "{reply}");
+    assert_eq!(reply["dials"]["modelFrom"], "lineup", "{reply}");
+    assert_eq!(reply["dials"]["why"]["effortRule"], "person", "{reply}");
+    let receipt = prepared
+        .model_shadow
+        .and_then(|shadow| shadow.receipt)
+        .expect("the pair answer's row");
+    assert_eq!(receipt["applied"], false, "{receipt}");
+    assert_eq!(receipt["ranFrom"], "lineup", "{receipt}");
+
+    let (reply, prepared) = summon(&launcher(("model-c", "high")));
+    assert_eq!(reply["model"], "model-c", "{reply}");
+    assert_eq!(reply["effort"], "high", "{reply}");
+    assert_eq!(reply["dials"]["modelFrom"], "jev", "{reply}");
+    let receipt = prepared
+        .model_shadow
+        .and_then(|shadow| shadow.receipt)
+        .expect("the pair answer's row");
+    assert_eq!(receipt["applied"], true, "{receipt}");
+}
+
+/// t-74181 (review P3-6): `baselineHigh` marks a summons the hard row ran as
+/// it stands — not any summons of that row's model. With no effort on the
+/// row, a request that named the model alone runs the same words, but no
+/// row ran it.
+#[test]
+fn baseline_high_is_the_hard_row_as_it_ran_not_any_summons_of_its_model() {
+    let (_, prepared) = summon(&Assigned::late());
+    assert!(
+        prepared
+            .difficulty_shadow
+            .expect("a difficulty row")
+            .baseline_high,
+        "unjudged, the hard row ran"
+    );
+    let hard = row_at(
+        &serde_json::Value::Null,
+        "claude",
+        LADDER[2].0,
+        Some(&lineup()),
+        None,
+        0,
+    )
+    .unwrap()
+    .expect("a hard row");
+    let (reply, prepared) = summon_with(
+        &Assigned::late(),
+        &format!(
+            "worker-start --agent claude --model {} --prompt translate-labels",
+            hard.model
+        ),
+    );
+    assert_eq!(reply["model"], hard.model.as_str(), "{reply}");
+    assert!(
+        !prepared
+            .difficulty_shadow
+            .expect("a difficulty row")
+            .baseline_high,
+        "a request that named the hard row's model ran no row: {reply}"
     );
 }

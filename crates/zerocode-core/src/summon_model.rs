@@ -33,7 +33,7 @@ pub const QUESTION: &str = "summon_model";
 /// The option that leaves the ladder's default in place.
 pub const ABSTAIN: &str = "abstain";
 /// The version of the words below; bump it when any of them changes.
-pub const RUBRIC_VERSION: u32 = 2;
+pub const RUBRIC_VERSION: u32 = 3;
 /// The fewest models that make a choice: one model beside `abstain` is a
 /// yes-or-no about a default, not a pick.
 pub const FEWEST_MODELS: usize = 2;
@@ -47,7 +47,7 @@ pub const CHALLENGE_KEY: &str = "challenge";
 const INSTRUCTIONS: &str = "A worker is about to be summoned to carry out the work in `title` and `spec` (the first 400 characters). Choose the model it runs on and the effort it runs at: each option names one model and one effort that model accepts, as `model|effort`. `models` holds every model this agent's command line accepts today, each under its `id`: where its provider's own classifier ranks it (`band`: `top` plans and verifies, `second` takes hard implementation, `rest` ordinary and easy work; `rungs` the implementation work it serves; both null when unranked), the `efforts` it accepts from lowest to highest, whether it arrived recently (`new`), how much of its provider's quota is spent (`quotaSpentPercent` of its `quotaWindow`, both null when unread), and this ledger's record of the summonses it carried here: how many (`summoned`), how many have `ended`, how many of those passed on the first attempt (`passedFirstTry`), and the median rework rounds, tokens and minutes of the ended ones (`medianReworkRounds`, `medianTokens`, `medianMinutes`). `byEffort` holds those same measurements separately for each effort that actually ran; null means that pair has no measured history. The model-wide record is only a prior for a pair with little evidence, not a measurement of every effort. A record built on a handful of summonses is weak evidence, and a model with none has not been shown either way. `attempt` counts earlier summonses of this task, `failures` its consecutive failures, and `retryOf` says whether this summons replaces an ended attempt. Choose the least costly pair that will carry this work well on the first attempt. Choose `abstain` when nothing here tells the models apart for this work.";
 const OPTION_MEANS: &str =
     "The worker runs on {model} at {effort} effort; the model's facts are its entry in `models`.";
-const ABSTAIN_MEANS: &str = "Nothing here tells the models apart for this work; the ladder's default for its difficulty runs.";
+const ABSTAIN_MEANS: &str = "Nothing here tells the models apart for this work; the ladder's model for its difficulty runs at the effort already set for it, else at its command line's default.";
 const STATE_KEYS: [&str; 6] = ["title", "spec", "attempt", "failures", "retryOf", "models"];
 const MODEL_KEYS: [&str; 14] = [
     "id",
@@ -229,6 +229,16 @@ pub fn options(
             }
         })
         .collect()
+}
+
+/// Offer each of `options` at the one effort `effort_on` says binds its
+/// model, for a summons whose effort the seat may not move — the request's,
+/// or the person's (t-74181): the pair question becomes a model question,
+/// so the answer that runs is the answer given and is graded as such.
+pub fn bind_effort(options: &mut [ModelOption], effort_on: impl Fn(&str) -> String) {
+    for option in options {
+        option.efforts = vec![effort_on(&option.id)];
+    }
 }
 
 /// What the window holds for one agent's model question — today's lineup,
@@ -574,7 +584,7 @@ mod tests {
             &lineup(),
             Some(&seen),
             &BTreeMap::new(),
-            &[LADDER[2].2],
+            &["max"],
             |model| (model == "model-b").then_some((40, "weekly")),
             NOW,
         );
@@ -656,7 +666,7 @@ mod tests {
             &lineup(),
             None,
             &BTreeMap::new(),
-            &[LADDER[1].2],
+            &["high"],
             |_| None,
             NOW,
         );
@@ -717,10 +727,10 @@ mod tests {
 
     #[test]
     fn the_version_is_pinned_to_the_words() {
-        assert_eq!(RUBRIC_VERSION, 2);
+        assert_eq!(RUBRIC_VERSION, 3);
         assert_eq!(
             crate::jev::rubric_fingerprint(rubric_words),
-            "fee41e1fe99e1749"
+            "5984c6ab0344bbcf"
         );
     }
 
@@ -729,27 +739,27 @@ mod tests {
         let row = |difficulty: &'static str| Row {
             difficulty,
             model: "model-a".into(),
-            effort: "medium".into(),
+            effort: None,
             from: Source::Lineup,
             band: None,
             tier_from: None,
             tier_confidence_permille: None,
-            effort_rule: lineup::EffortRule::Ladder,
+            effort_rule: lineup::EffortRule::CliDefault,
             effort_clamped: None,
             candidates: vec![
                 Candidate {
                     model: "model-b".into(),
-                    effort: "medium".into(),
+                    effort: None,
                     fresh: true,
                 },
                 Candidate {
                     model: "model-c".into(),
-                    effort: "medium".into(),
+                    effort: None,
                     fresh: true,
                 },
             ],
             auto_model: Some("model-a".into()),
-            auto_effort: Some("medium".into()),
+            auto_effort: None,
             written_model: None,
             written_effort: None,
             standing: None,

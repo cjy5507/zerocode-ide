@@ -10,15 +10,16 @@
 //! came from, and what else today's lineup offers there.
 //!
 //! - A difficulty's default is the lineup's model for its rung (`easy`,
-//!   `medium`, `hard`), at the shipped table's effort for that difficulty
-//!   brought inside what the model accepts — data a person can override,
-//!   never a rule in code (t-74181: a coded "easy and ordinary work at the
-//!   model's highest effort" put every default row at `max`). An agent the
-//!   table has no row for runs its ladder's effort. The table's model is
-//!   only the road back when no lineup was read or it has no model for the
-//!   rung, and a row says which road it took. Which pair a summons runs is
-//!   the model seat's to judge ([`crate::summon_model`]); these rows are what
-//!   runs when it abstains or does not act.
+//!   `medium`, `hard`), with no effort of ours: the agent's CLI runs it at
+//!   its own default unless the person wrote an effort (t-74181 — a coded
+//!   "easy and ordinary work at the model's highest effort", then a coded
+//!   ladder ending at `max` and a shipped table of efforts, put default rows
+//!   at `max`; the person, 2026-10-28: no table, in code or in data). The
+//!   table's model is only the road back when no lineup was read or it has
+//!   no model for the rung, and a row says which road it took. Which pair a
+//!   summons runs — the effort included — is the model seat's to judge
+//!   ([`crate::summon_model`]); these rows are what runs when it abstains or
+//!   does not act.
 //! - A row the person wrote is theirs and never moves; a saved row equal to
 //!   the shipped one is the shipped one.
 //! - A model without a band is offered only at the lowest difficulty: nothing
@@ -89,7 +90,7 @@ impl Rung {
     fn of(difficulty: &str) -> Option<Self> {
         LADDER
             .iter()
-            .position(|(key, _, _)| *key == difficulty)
+            .position(|(key, _)| *key == difficulty)
             .map(|at| RUNGS[at])
     }
 }
@@ -160,46 +161,10 @@ impl LiveModel {
         at
     }
 
-    /// The highest effort the model says it accepts; `None` when unknown.
-    #[must_use]
-    pub fn highest_effort(&self) -> Option<&str> {
-        self.efforts
-            .as_ref()?
-            .iter()
-            .filter_map(|effort| {
-                Some((
-                    EFFORT_ORDER.iter().position(|known| known == effort)?,
-                    effort,
-                ))
-            })
-            .max()
-            .map(|(_, effort)| effort.as_str())
-    }
-
-    /// The effort this model runs at when `wanted` is the default effort the
-    /// rule `rule` named for the difficulty (the shipped table's word, or the
-    /// agent's ladder), brought inside what the model accepts.
-    fn effort_at(&self, wanted: &str, rule: EffortRule) -> (String, EffortRule, Option<Clamp>) {
-        let clamped = self.clamp(wanted);
-        (
-            clamped.clone().unwrap_or_else(|| wanted.to_string()),
-            rule,
-            clamped.map(|to| Clamp {
-                from: wanted.to_string(),
-                to,
-            }),
-        )
-    }
-
-    /// `wanted` brought inside what the model accepts.
-    #[must_use]
-    pub fn effort_for(&self, wanted: &str) -> String {
-        self.clamp(wanted).unwrap_or_else(|| wanted.to_string())
-    }
-
     /// `wanted`, or the nearest effort below it the model accepts (the
     /// lowest it accepts when none is below); `None` when it stands as is.
-    fn clamp(&self, wanted: &str) -> Option<String> {
+    #[must_use]
+    pub fn clamp(&self, wanted: &str) -> Option<String> {
         let accepted = self.efforts.as_ref()?;
         if accepted.iter().any(|effort| effort == wanted) {
             return None;
@@ -428,7 +393,7 @@ impl Lineup {
 
 /// The efforts `model` may run at for `agent`, lowest first, and whether
 /// that is the model's own word: a model that names none (a connection's)
-/// is offered the agent's ladder, what a summons launches it at anyway.
+/// is offered every effort the agent's CLI takes.
 fn efforts_of(agent: &str, model: &LiveModel) -> (Vec<String>, bool) {
     model.efforts.clone().map_or_else(
         || {
@@ -569,18 +534,25 @@ pub enum Source {
     Table,
 }
 
-/// Why a row runs at its effort — the line a person reads beside it.
+/// Who set a row's effort — the line a person reads beside it. Never a rule
+/// of ours: the person's word, or none, and the agent's CLI decides
+/// (t-74181). The model seat's pair, when it runs, says `jev` in a summons'
+/// dials instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum EffortRule {
-    /// The agent's ladder effort for the difficulty, inside the model's
-    /// range: the table has no row for this agent.
-    Ladder,
     /// The person wrote it.
-    Written,
-    /// The shipped table's word for the difficulty, inside the model's range.
-    Table,
+    Person,
+    /// Nobody chose one: no effort goes on the command line, and the agent's
+    /// CLI runs at its own default.
+    CliDefault,
 }
+
+/// [`EffortRule::CliDefault`]'s word — also what a summons' seat rows say
+/// for the effort it ran at when none went on the command line (t-74181),
+/// so that branch's outcomes make a record of their own, apart from a row
+/// that does not say.
+pub const CLI_DEFAULT: &str = "cli-default";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Clamp {
@@ -592,7 +564,8 @@ pub struct Clamp {
 #[serde(rename_all = "camelCase")]
 pub struct Candidate {
     pub model: String,
-    pub effort: String,
+    /// `None`: it would run at its CLI's default.
+    pub effort: Option<String>,
     pub fresh: bool,
 }
 
@@ -603,7 +576,8 @@ pub struct Candidate {
 pub struct Row {
     pub difficulty: &'static str,
     pub model: String,
-    pub effort: String,
+    /// `None`: no effort goes on the command line ([`EffortRule::CliDefault`]).
+    pub effort: Option<String>,
     pub from: Source,
     /// Where the provider's classifier ranks the row's model, when the
     /// lineup lists it — half of why this model runs here.
@@ -614,8 +588,8 @@ pub struct Row {
     pub tier_confidence_permille: Option<u16>,
     /// And why it runs at this effort.
     pub effort_rule: EffortRule,
-    /// The ladder's effort, brought inside what the model accepts; for a
-    /// person's row the value stands and this only says it is outside.
+    /// For a person's effort outside what the model accepts: the value
+    /// stands, and this says where the model would bring it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort_clamped: Option<Clamp>,
     pub candidates: Vec<Candidate>,
@@ -638,7 +612,7 @@ pub struct Row {
 #[derive(Clone)]
 struct Picked {
     model: String,
-    effort: String,
+    effort: Option<String>,
     from: Source,
     effort_rule: EffortRule,
     effort_clamped: Option<Clamp>,
@@ -651,6 +625,39 @@ impl Row {
             model: self.model.clone(),
             effort: self.effort.clone(),
         }
+    }
+
+    /// The effort the person wrote on this row as it runs on `model`, and
+    /// where it was brought from when `model` does not accept it as written;
+    /// `None` when the person wrote no effort here (t-74181). On the row's
+    /// own model it is the row's; an effort written alone binds whatever
+    /// model runs in its place — the model seat's pair or a challenger's —
+    /// brought inside what that model accepts in `lineup`, as it is inside
+    /// the lineup's model.
+    #[must_use]
+    pub fn person_effort_on(
+        &self,
+        model: &str,
+        lineup: Option<&Lineup>,
+    ) -> Option<(String, Option<Clamp>)> {
+        if self.effort_rule != EffortRule::Person {
+            return None;
+        }
+        if model == self.model || self.written_model.is_some() {
+            return Some((self.effort.clone()?, self.effort_clamped.clone()));
+        }
+        let written = self.written_effort.clone()?;
+        Some(effort_on(lineup.and_then(|held| held.find(model)), written))
+    }
+}
+
+/// `wanted` as it runs on `model`: inside what the model accepts, and the
+/// [`Clamp`] that says so when it moved; as written for a model the lineup
+/// does not know or that names no efforts.
+fn effort_on(model: Option<&LiveModel>, wanted: String) -> (String, Option<Clamp>) {
+    match model.and_then(|held| held.clamp(&wanted)) {
+        Some(to) => (to.clone(), Some(Clamp { from: wanted, to })),
+        None => (wanted, None),
     }
 }
 
@@ -725,10 +732,11 @@ fn build(
         .get(SMART_SETTINGS_KEY)
         .and_then(|smart| smart.get(PROFILES_SETTING))
         .and_then(|table| table.get(agent));
-    let read = |table: Option<&Value>, difficulty: &str| -> Result<Option<Profile>, String> {
-        table
+    let read_shipped = |difficulty: &str| -> Result<Option<Written>, String> {
+        defaults
+            .get(agent)
             .and_then(|rows| rows.get(difficulty))
-            .map(|row| serde_json::from_value::<Profile>(row.clone()).map_err(|e| e.to_string()))
+            .map(|row| serde_json::from_value::<Written>(row.clone()).map_err(|e| e.to_string()))
             .transpose()
     };
     let read_written = |difficulty: &str| -> Result<Option<Written>, String> {
@@ -745,84 +753,70 @@ fn build(
         .and_then(|model| lineup?.find(model))
         .map(|model| model.provider.clone());
     let mut rows = Vec::new();
-    for (difficulty, _, _) in LADDER {
+    // An agent whose command line takes no effort is tuned at no difficulty
+    // (the measured launch table): it has no rows.
+    if !crate::orchestration::takes_effort(agent) {
+        return Ok(rows);
+    }
+    for (difficulty, _) in LADDER {
         if only.is_some_and(|only| only != difficulty) {
             continue;
         }
-        let shipped = read(defaults.get(agent), difficulty)?;
+        // The shipped row names a model only: no effort is ours to ship.
+        let shipped = read_shipped(difficulty)?.and_then(|row| {
+            Some(Profile {
+                model: row.model?,
+                effort: None,
+            })
+        });
         // A saved row equal to the shipped one is the shipped one.
         let person = read_written(difficulty)?
             .filter(|row| !row.is_empty() && (row.whole().is_none() || row.whole() != shipped));
-        // The default effort for the difficulty: the shipped table's word —
-        // data, overridden by a person's row — and the agent's own ladder
-        // (the measured launch table's word, ceiling included) only where the
-        // table has no row for this agent.
-        let ladder = crate::orchestration::difficulty_effort(agent, difficulty);
-        // An agent that takes no effort at all (no ladder) has none.
-        let default_effort = ladder.map(|ladder| {
-            shipped.as_ref().map_or_else(
-                || (ladder.to_string(), EffortRule::Ladder),
-                |row| (row.effort.clone(), EffortRule::Table),
-            )
-        });
         // What runs here when nobody wrote a row: the lineup's model for the
         // rung, else the table's while it is live.
-        let auto = if let Some((pick, (wanted, rule))) = lineup
-            .zip(default_effort.clone())
-            .and_then(|(held, wanted)| {
-                let rung = Rung::of(difficulty)?;
-                let by_rung = held
-                    .models
-                    .iter()
-                    .filter(|model| !model.folded() && model.rungs.contains(&rung))
-                    .min_by_key(|model| home.as_ref() != Some(&model.provider));
-                // No model for the rung: the table's model stands while it is
-                // live here; only a folded one gives way to what
-                // the lineup offers at this difficulty.
-                let table_stands = shipped.as_ref().is_some_and(|row| held.live(&row.model));
-                let pick = by_rung.or_else(|| {
-                    (!table_stands)
-                        .then(|| offered(held, difficulty).next())
-                        .flatten()
-                })?;
-                Some((pick, wanted))
-            }) {
-            let (effort, rule, clamped) = pick.effort_at(&wanted, rule);
+        let auto = if let Some(pick) = lineup.and_then(|held| {
+            let rung = Rung::of(difficulty)?;
+            let by_rung = held
+                .models
+                .iter()
+                .filter(|model| !model.folded() && model.rungs.contains(&rung))
+                .min_by_key(|model| home.as_ref() != Some(&model.provider));
+            // No model for the rung: the table's model stands while it is
+            // live here; only a folded one gives way to what the lineup
+            // offers at this difficulty.
+            let table_stands = shipped.as_ref().is_some_and(|row| held.live(&row.model));
+            by_rung.or_else(|| {
+                (!table_stands)
+                    .then(|| offered(held, difficulty).next())
+                    .flatten()
+            })
+        }) {
             Some(Picked {
                 model: pick.id.clone(),
-                effort,
+                effort: None,
                 from: Source::Lineup,
-                effort_rule: rule,
-                effort_clamped: clamped,
-            })
-        } else if let Some(table) = shipped
-            .clone()
-            .filter(|row| lineup.is_none_or(|held| held.live(&row.model)))
-        {
-            let clamped = lineup
-                .and_then(|held| held.find(&table.model))
-                .and_then(|held| held.clamp(&table.effort));
-            let effort = clamped.clone().unwrap_or_else(|| table.effort.clone());
-            Some(Picked {
-                model: table.model,
-                effort,
-                from: Source::Table,
-                effort_rule: EffortRule::Table,
-                effort_clamped: clamped.map(|to| Clamp {
-                    from: table.effort,
-                    to,
-                }),
+                effort_rule: EffortRule::CliDefault,
+                effort_clamped: None,
             })
         } else {
-            None
+            shipped
+                .clone()
+                .filter(|row| lineup.is_none_or(|held| held.live(&row.model)))
+                .map(|table| Picked {
+                    model: table.model,
+                    effort: None,
+                    from: Source::Table,
+                    effort_rule: EffortRule::CliDefault,
+                    effort_clamped: None,
+                })
         };
         let picked = match person.as_ref() {
             Some(person) => {
                 super::written_launchable(agent, person)?;
-                match written_pick(person, auto.as_ref(), default_effort.clone(), lineup) {
+                match written_pick(person, auto.as_ref(), lineup) {
                     Some(picked) => picked,
-                    // No pair to run: an effort written alone with no model
-                    // here to ride, or a model with no effort to run at.
+                    // No model to run: an effort written alone with no
+                    // model here to ride.
                     None => continue,
                 }
             }
@@ -838,17 +832,16 @@ fn build(
             effort_rule,
             effort_clamped,
         } = picked;
-        let candidates = match (lineup, default_effort.as_ref()) {
-            (Some(held), Some((wanted, rule))) => offered(held, difficulty)
+        let candidates = lineup.map_or_else(Vec::new, |held| {
+            offered(held, difficulty)
                 .filter(|candidate| candidate.id != held.canonical(&model))
                 .map(|candidate| Candidate {
                     model: candidate.id.clone(),
-                    effort: candidate.effort_at(wanted, *rule).0,
+                    effort: None,
                     fresh: seen.is_some_and(|seen| seen.fresh(agent, &candidate.id, now_ms)),
                 })
-                .collect(),
-            _ => Vec::new(),
-        };
+                .collect()
+        });
         let held = lineup.and_then(|held| held.find(&model));
         rows.push(Row {
             difficulty,
@@ -856,9 +849,10 @@ fn build(
             tier_from: held.and_then(|held| held.tier_from),
             tier_confidence_permille: held.and_then(|held| held.tier_confidence_permille),
             standing: lineup.map(|held| held.standing(&model)),
-            launch: crate::orchestration::launch_words(agent, &model, &effort).unwrap_or_default(),
+            launch: crate::orchestration::launch_words(agent, &model, effort.as_deref())
+                .unwrap_or_default(),
             auto_model: auto.as_ref().map(|auto| auto.model.clone()),
-            auto_effort: auto.map(|auto| auto.effort),
+            auto_effort: auto.and_then(|auto| auto.effort),
             written_model: person.as_ref().and_then(|person| person.model.clone()),
             written_effort: person.and_then(|person| person.effort),
             model,
@@ -872,67 +866,46 @@ fn build(
     Ok(rows)
 }
 
-/// The pair a person's row runs at: each field as written, the other the
-/// lineup's. `None` when there is no pair: an effort written alone where no
-/// model runs here, or a model written alone for an agent with no effort.
+/// The pair a person's row runs at: each field as written, the model the
+/// lineup's where none is written, and no effort where none is written — the
+/// agent's CLI runs its own default. `None` when there is no model: an
+/// effort written alone where no model runs here.
 fn written_pick(
     person: &Written,
     auto: Option<&Picked>,
-    default_effort: Option<(String, EffortRule)>,
     lineup: Option<&Lineup>,
 ) -> Option<Picked> {
-    match (&person.model, &person.effort) {
-        // Both written: the row stands as written, and only says when the
-        // effort is outside what the model accepts.
-        (Some(model), Some(effort)) => Some(Picked {
-            model: model.clone(),
-            effort: effort.clone(),
-            from: Source::Person,
-            effort_rule: EffortRule::Written,
-            effort_clamped: lineup
-                .and_then(|held| held.find(model))
-                .and_then(|held| held.clamp(effort))
-                .map(|to| Clamp {
-                    from: effort.clone(),
-                    to,
-                }),
-        }),
-        // A model alone runs at the difficulty's effort, inside its range.
-        (Some(model), None) => {
-            let (wanted, rule) = default_effort?;
-            let (effort, effort_rule, effort_clamped) =
-                match lineup.and_then(|held| held.find(model)) {
-                    Some(held) => held.effort_at(&wanted, rule),
-                    None => (wanted, rule, None),
-                };
-            Some(Picked {
-                model: model.clone(),
-                effort,
-                from: Source::Person,
-                effort_rule,
-                effort_clamped,
-            })
-        }
-        // An effort alone rides the lineup's model, inside that model's
-        // range: the model may move under it, a launch outside may not.
-        (None, Some(effort)) => {
+    let (model, from) = match &person.model {
+        Some(model) => (model.clone(), Source::Person),
+        None => {
             let auto = auto?;
-            let clamped = lineup
-                .and_then(|held| held.find(&auto.model))
-                .and_then(|held| held.clamp(effort));
-            Some(Picked {
-                model: auto.model.clone(),
-                effort: clamped.clone().unwrap_or_else(|| effort.clone()),
-                from: auto.from,
-                effort_rule: EffortRule::Written,
-                effort_clamped: clamped.map(|to| Clamp {
-                    from: effort.clone(),
-                    to,
-                }),
-            })
+            (auto.model.clone(), auto.from)
         }
-        (None, None) => auto.cloned(),
-    }
+    };
+    let Some(effort) = person.effort.clone() else {
+        return Some(Picked {
+            model,
+            effort: None,
+            from,
+            effort_rule: EffortRule::CliDefault,
+            effort_clamped: None,
+        });
+    };
+    let (inside, clamped) = effort_on(lineup.and_then(|held| held.find(&model)), effort.clone());
+    Some(Picked {
+        // A person's model and effort stand as written; an effort written
+        // alone rides the lineup's model, inside that model's range: the
+        // model may move under it, a launch outside may not.
+        effort: Some(if person.model.is_none() {
+            inside
+        } else {
+            effort
+        }),
+        model,
+        from,
+        effort_rule: EffortRule::Person,
+        effort_clamped: clamped,
+    })
 }
 
 /// Why a row a person is about to save is refused.
@@ -1118,9 +1091,9 @@ mod tests {
 
     fn shipped() -> Value {
         json!({"claude": {
-            LOW: {"model": "model-old", "effort": "medium"},
-            MID: {"model": "model-alias", "effort": "high"},
-            HIGH: {"model": "model-old", "effort": "max"},
+            LOW: {"model": "model-old"},
+            MID: {"model": "model-alias"},
+            HIGH: {"model": "model-old"},
         }})
     }
 
@@ -1209,7 +1182,7 @@ mod tests {
         );
         let across = Profile {
             model: "claude-model".into(),
-            effort: "high".into(),
+            effort: Some("high".into()),
         };
         assert!(super::super::launchable("zo", &across).is_ok());
     }
@@ -1257,13 +1230,16 @@ mod tests {
         );
     }
 
-    /// t-74181: a default row runs at the shipped table's effort for its
-    /// difficulty — data, inside the model's range — and no rule in code
-    /// raises it. Before, easy and ordinary work ran at the model's highest
-    /// effort, so every default row of every agent read `max`. An agent the
-    /// table has no row for runs its ladder's effort.
+    /// t-74181: a default row — nobody wrote one — carries no effort of
+    /// ours: no effort goes on the command line and the agent's CLI runs at
+    /// its own default, whatever the difficulty, the model's range or the
+    /// agent. Before, easy and ordinary work ran at the model's highest
+    /// effort, then at a shipped table's word and a coded ladder ending at
+    /// `max` (zo ran three workers at opus `max` on 2026-10-28); the person:
+    /// no table, in code or in data — the effort is the model seat's pair or
+    /// the person's word.
     #[test]
-    fn a_default_row_runs_at_the_shipped_tables_effort_and_never_at_a_coded_highest() {
+    fn a_default_row_carries_no_effort_and_its_cli_decides() {
         let mut easy = m("model-b", "rest", &["easy", "medium"]);
         easy.efforts = Some(&["low", "medium", "high", "xhigh", "max"]);
         let mut hard = m("model-a", "second", &["hard"]);
@@ -1271,69 +1247,62 @@ mod tests {
         let mut other = m("model-c", "rest", &[]);
         other.efforts = Some(&["high", "low"]);
         let today = lineup(&[easy, hard, other]);
-        let rows = read(&Value::Null, Some(&today), None);
-        for (difficulty, effort) in [(LOW, "medium"), (MID, "high")] {
-            let at = row(&rows, difficulty);
-            assert_eq!(
-                (at.model.as_str(), at.effort.as_str(), at.effort_rule),
-                ("model-b", effort, EffortRule::Table),
-                "{difficulty}"
-            );
-            assert_eq!(
-                at.band,
-                Some(Band::Rest),
-                "the row says where its model stands"
-            );
+        // Every agent whose command line takes an effort, over the table
+        // this build ships as well as this test's (review P3-2): a row of
+        // any of them that nobody wrote carries no effort, whichever file a
+        // table would have been written in.
+        let shipped_here: Value = serde_json::from_str(super::super::DEFAULT_PROFILES).unwrap();
+        let agents: Vec<&str> = crate::agent::AGENT_SPECS
+            .iter()
+            .map(|spec| spec.id)
+            .filter(|agent| crate::orchestration::takes_effort(agent))
+            .collect();
+        assert!(agents.len() > 1, "{agents:?}");
+        for agent in agents {
+            let bare = rows_with_defaults(&Value::Null, &json!({}), agent, Some(&today), None, NOW)
+                .unwrap();
+            let mut table = Vec::new();
+            for defaults in [shipped(), shipped_here.clone()] {
+                table.extend(
+                    rows_with_defaults(&Value::Null, &defaults, agent, Some(&today), None, NOW)
+                        .unwrap(),
+                );
+                table.extend(
+                    rows_with_defaults(&Value::Null, &defaults, agent, None, None, NOW).unwrap(),
+                );
+            }
+            for at in bare.iter().chain(&table) {
+                assert_eq!(
+                    (
+                        at.effort.as_deref(),
+                        at.effort_rule,
+                        at.auto_effort.as_deref()
+                    ),
+                    (None, EffortRule::CliDefault, None),
+                    "{agent} {at:?}"
+                );
+                assert!(
+                    !at.launch.iter().any(|word| word.contains("effort")),
+                    "{agent}: an effort nobody chose went on the command line: {at:?}"
+                );
+                assert!(at.candidates.iter().all(|c| c.effort.is_none()), "{at:?}");
+            }
+            assert_eq!(bare.len(), LADDER.len(), "{agent}: {bare:?}");
         }
+        let rows = read(&Value::Null, Some(&today), None);
         assert_eq!(
-            row(&rows, LOW)
-                .candidates
-                .iter()
-                .find(|c| c.model == "model-c")
-                .map(|c| c.effort.as_str()),
-            Some("low"),
-            "a candidate at the table's effort, brought inside what it takes"
+            row(&rows, HIGH).model,
+            "model-a",
+            "the difficulty still picks the model"
         );
-        let high = row(&rows, HIGH);
-        assert_eq!(
-            (high.model.as_str(), high.effort.as_str(), high.effort_rule),
-            ("model-a", "max", EffortRule::Table)
-        );
-        // Every default row would have read max under the coded rule; the
-        // table's three words stand instead.
-        let efforts: Vec<&str> = rows.iter().map(|row| row.effort.as_str()).collect();
-        assert_eq!(efforts, ["medium", "high", "max"]);
-        // An agent with no row in the table: its ladder.
-        let bare = rows_with_defaults(&Value::Null, &json!({}), "claude", Some(&today), None, NOW)
-            .unwrap();
-        assert!(
-            bare.iter().all(|row| row.effort_rule == EffortRule::Ladder),
-            "{bare:?}"
-        );
+        assert_eq!(row(&rows, LOW).model, "model-b");
     }
 
-    /// t-74181: no effort is decided by a rule written in code — the default
-    /// effort is the table's word or the agent's ladder, brought inside the
-    /// model's range, and nothing else in `effort_at` reads the difficulty.
     #[test]
-    fn no_rule_in_code_raises_a_default_rows_effort() {
-        let source = include_str!("lineup.rs");
-        let body = source
-            .split("fn effort_at(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    }\n").next())
-            .expect("effort_at");
-        for coded in ["CHALLENGED", "highest_effort", "difficulty", "\"max\""] {
-            assert!(!body.contains(coded), "effort_at reads `{coded}`:\n{body}");
-        }
-        let rules = source
-            .split("pub enum EffortRule {")
-            .nth(1)
-            .and_then(|rest| rest.split('}').next())
-            .expect("EffortRule");
-        assert!(
-            !rules.contains("Highest"),
-            "a coded highest rule is back:\n{rules}"
+    fn the_cli_default_rule_is_said_in_one_word() {
+        assert_eq!(
+            serde_json::to_value(EffortRule::CliDefault).unwrap(),
+            CLI_DEFAULT
         );
     }
 
@@ -1353,7 +1322,8 @@ mod tests {
             written.model, "model-gone",
             "kept though its model left the lineup"
         );
-        assert_eq!(written.effort, "high");
+        assert_eq!(written.effort.as_deref(), Some("high"));
+        assert_eq!(written.effort_rule, EffortRule::Person);
         // A saved row equal to the shipped one is the shipped one: it follows
         // the lineup like any default.
         assert_eq!(row(&rows, MID).from, Source::Lineup);
@@ -1446,31 +1416,37 @@ mod tests {
         assert_eq!(seen.observe("claude", &folded, NOW + 1).folded, ["model-e"]);
     }
 
+    /// A person's effort outside what the row's model takes: written with
+    /// the model it stands and the row says so; written alone, it rides the
+    /// lineup's model and comes down inside what that model takes.
     #[test]
     fn the_effort_comes_down_inside_what_the_model_accepts() {
         let mut capped = m("model-a", "second", &["hard"]);
         capped.efforts = Some(&["low", "medium", "high"]);
-        let rows = read(&Value::Null, Some(&lineup(&[capped])), None);
+        let root = settings(json!({"claude": {HIGH: {"effort": "max"}}}));
+        let rows = read(&root, Some(&lineup(&[capped])), None);
         let high = row(&rows, HIGH);
         assert_eq!(
-            high.effort, "high",
+            high.effort.as_deref(),
+            Some("high"),
             "max is not accepted; the nearest below is"
         );
         assert_eq!(
             high.effort_clamped,
             Some(Clamp {
-                from: LADDER[2].2.into(),
+                from: "max".into(),
                 to: "high".into()
             })
         );
-        // A person's effort stands; the row only says it is outside.
+        // A person's effort beside their model stands; the row only says it
+        // is outside.
         let mut person = shipped()["claude"].clone();
         person[HIGH] = json!({"model": "model-a", "effort": "max"});
         let mut capped = m("model-a", "second", &["hard"]);
         capped.efforts = Some(&["low", "medium", "high"]);
         let root = settings(json!({"claude": person}));
         let rows = read(&root, Some(&lineup(&[capped])), None);
-        assert_eq!(row(&rows, HIGH).effort, "max");
+        assert_eq!(row(&rows, HIGH).effort.as_deref(), Some("max"));
         assert!(row(&rows, HIGH).effort_clamped.is_some());
     }
 
@@ -1481,16 +1457,16 @@ mod tests {
     fn an_effort_below_low_is_ranked_like_every_other() {
         let mut two = m("model-a", "second", &["hard"]);
         two.efforts = Some(&["minimal", "low"]);
-        assert_eq!(two.into_live().effort_for("medium"), "low");
+        assert_eq!(two.into_live().clamp("medium").as_deref(), Some("low"));
         let mut one = m("model-b", "second", &["hard"]);
         one.efforts = Some(&["minimal"]);
         let one = one.into_live();
         assert_eq!(
-            one.effort_for("low"),
-            "minimal",
+            one.clamp("low").as_deref(),
+            Some("minimal"),
             "the one effort it accepts"
         );
-        assert_eq!(one.highest_effort(), Some("minimal"));
+        assert_eq!(one.clamp("minimal"), None, "accepted, it stands");
     }
 
     /// What a person picks from (the settings screen's lists): every live
@@ -1536,9 +1512,9 @@ mod tests {
     }
 
     /// A row may leave either field to the lineup (the settings screen's
-    /// 「자동」): a model written alone runs at the difficulty's effort inside
-    /// what it takes, an effort written alone rides the lineup's model inside
-    /// what that takes, and every row says what 「자동」 would run.
+    /// 「자동」): a model written alone runs with no effort of ours — its CLI's
+    /// default — an effort written alone rides the lineup's model inside what
+    /// that takes, and every row says what 「자동」 would run.
     #[test]
     fn a_row_written_by_half_takes_the_other_half_from_the_lineup() {
         let mut hard = m("model-a", "second", &["hard"]);
@@ -1556,28 +1532,24 @@ mod tests {
         );
         let high = row(&rows, HIGH);
         assert_eq!(
-            (high.model.as_str(), high.effort.as_str()),
-            ("model-a", "low")
+            (high.model.as_str(), high.effort.as_deref()),
+            ("model-a", Some("low"))
         );
         assert_eq!(high.from, Source::Lineup, "the model is still the lineup's");
-        assert_eq!(high.effort_rule, EffortRule::Written);
+        assert_eq!(high.effort_rule, EffortRule::Person);
         assert_eq!(high.written_effort.as_deref(), Some("low"));
         assert_eq!(high.written_model, None);
         assert_eq!(high.auto_model.as_deref(), Some("model-a"));
-        assert_eq!(
-            high.auto_effort.as_deref(),
-            Some("high"),
-            "the table's max, inside the model's range"
-        );
+        assert_eq!(high.auto_effort, None, "「자동」 is the CLI's own default");
         let low = row(&rows, LOW);
         assert_eq!(
-            (low.model.as_str(), low.effort.as_str()),
-            ("model-a", "medium"),
-            "the table's word for the difficulty"
+            (low.model.as_str(), low.effort.as_deref(), low.effort_rule),
+            ("model-a", None, EffortRule::CliDefault),
+            "no effort of ours beside the person's model"
         );
         assert_eq!(low.from, Source::Person);
         assert_eq!(low.auto_model.as_deref(), Some("model-b"));
-        assert_eq!(low.launch, ["--model", "model-a", "--effort", "medium"]);
+        assert_eq!(low.launch, ["--model", "model-a"]);
         assert_eq!(low.standing, Some(Standing::Listed));
         // An effort written alone is brought inside the model it rides.
         let rows = read(
@@ -1586,7 +1558,7 @@ mod tests {
             None,
         );
         let high = row(&rows, HIGH);
-        assert_eq!(high.effort, "high");
+        assert_eq!(high.effort.as_deref(), Some("high"));
         assert_eq!(
             high.effort_clamped,
             Some(Clamp {
@@ -1675,7 +1647,7 @@ mod tests {
         let catalog: Value =
             serde_json::from_str(&std::fs::read_to_string(path).expect("the catalog")).unwrap();
         for spec in crate::agent::AGENT_SPECS {
-            if crate::orchestration::difficulty_effort(spec.id, LOW).is_none() {
+            if !crate::orchestration::takes_effort(spec.id) {
                 continue;
             }
             let lineup = match crate::agent::agent_voice(spec.id).models_provider {

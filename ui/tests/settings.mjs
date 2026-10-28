@@ -54,11 +54,13 @@ const FIXTURE_LINEUP = {
   ],
 };
 /* The rows each agent runs when nobody wrote one: the shipped table, and for
- * zo — which the table has no row for — the lineup's model at its ladder. */
+ * zo — which the table has no row for — the lineup's model. Each names a
+ * model only: no effort is shipped, and an effort nobody wrote stays off the
+ * command line for the agent's CLI to default (t-74181). */
 const FIXTURE_SHIPPED = {
   ...SUMMON_PROFILES,
-  zo: Object.fromEntries(["low", "mid", "high"].map((difficulty, at) =>
-    [difficulty, { model: SUMMON_PROFILES.claude.low.model, effort: ["medium", "high", "max"][at] }])),
+  zo: Object.fromEntries(["low", "mid", "high"].map((difficulty) =>
+    [difficulty, { model: SUMMON_PROFILES.claude.low.model }])),
 };
 const TERMINAL_THEME_CATALOG = Object.freeze(JSON.parse(
   await readFile(
@@ -3700,25 +3702,28 @@ class StatefulBackend {
         : null,
       jevProvider,
       jev: { on: enabled && asks && (everywhere || folders > 0), everywhere, folders },
-      // The rows a person wrote, and what each difficulty runs (t-14437):
-      // each written field, the other the shipped table's, the effort
-      // brought inside what the row's model takes in this harness's lineup.
+      // The rows a person wrote, and what each difficulty runs (t-14437),
+      // as `summon_difficulty::lineup::rows` answers them (t-74181): each
+      // written field, the model the shipped table's where none is written,
+      // and no effort where none is written — the agent's CLI runs its own
+      // default, so the command line names the model alone.
       summonProfiles: clone(smart.summonProfiles ?? {}),
       summonRows: Object.fromEntries(Object.entries(FIXTURE_SHIPPED).map(([agent, levels]) => [
         agent,
         Object.entries(levels).map(([difficulty, auto]) => {
           const written = smart.summonProfiles?.[agent]?.[difficulty] ?? {};
           const model = written.model ?? auto.model;
-          const takes = FIXTURE_LINEUP[agent]?.find((pick) => pick.id === model)?.efforts ?? [auto.effort];
-          const effort = written.effort ?? (takes.includes(auto.effort) ? auto.effort : takes.at(-1));
+          const effort = written.effort ?? null;
+          const effortWords = !effort ? [] : agent === "codex"
+            ? ["-c", `model_reasoning_effort=${effort}`]
+            : ["--effort", effort];
           return {
             difficulty, model, effort, from: written.model ? "person" : "table", candidates: [],
-            autoModel: auto.model, autoEffort: auto.effort,
+            effortRule: effort ? "person" : "cli-default",
+            autoModel: auto.model, autoEffort: null,
             writtenModel: written.model ?? null, writtenEffort: written.effort ?? null,
             standing: { kind: FIXTURE_LINEUP[agent]?.some((pick) => pick.id === model) ? "listed" : "missing" },
-            launch: agent === "codex"
-              ? ["--model", model, "-c", `model_reasoning_effort=${effort}`]
-              : ["--model", model, "--effort", effort],
+            launch: ["--model", model, ...effortWords],
           };
         }),
       ])),
@@ -6702,21 +6707,23 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   assertEqual(await pageA.locator('#summon-profiles-table tr[data-agent="claude"] .worker-models-agent-state').textContent(),
     await said("settings.agents.loginNeeded", "로그인 필요"));
 
-  // A pick is saved at once — one cell, the effort left to the lineup — and
-  // the words the next summons runs are the backend's own.
+  // A pick is saved at once — one cell, the effort left open — and the words
+  // the next summons runs are the backend's own: the model alone, its CLI
+  // running its own default effort, which the screen calls 「자동」
+  // (t-74181).
   const pickAt = backend.calls.length;
   await lowModel.selectOption("gpt-fixture-new");
   const picked = await backend.waitForCall("A", "set_summon_profile", pickAt);
   assertEqual(picked.args, { agent: "codex", difficulty: "low", model: "gpt-fixture-new", effort: null });
   assertEqual(backend.zoSettings.smart.summonProfiles, { codex: { low: { model: "gpt-fixture-new" } } }, "more than the cell was written");
-  const ranAt = FIXTURE_LINEUP.codex.find((pick) => pick.id === "gpt-fixture-new").efforts.at(-1);
   await pageA.waitForFunction(
     (expected) => document.querySelector("#orch-models-status .settings-status-said")?.textContent === expected,
     await said("settings.workerModels.saved", "저장했습니다 — 다음 {{agent}} {{difficulty}} 소환부터 {{model}} · {{effort}}", {
-      agent: await pageA.evaluate(() => agentName("codex")), difficulty: await said("settings.workerModels.low", "쉬움"), model: "gpt-fixture-new", effort: ranAt,
+      agent: await pageA.evaluate(() => agentName("codex")), difficulty: await said("settings.workerModels.low", "쉬움"), model: "gpt-fixture-new",
+      effort: await said("settings.workerModels.autoPlain", "자동"),
     }), { timeout: UI_TIMEOUT },
   );
-  assertEqual(await pageA.locator("#worker-models-next-words").textContent(), `--model gpt-fixture-new -c model_reasoning_effort=${ranAt}`);
+  assertEqual(await pageA.locator("#worker-models-next-words").textContent(), "--model gpt-fixture-new");
   assertEqual(await lowModel.inputValue(), "gpt-fixture-new", "the cell did not repaint from the answer");
   assertEqual(await pageA.locator("#worker-models-auto").textContent(),
     await said("settings.workerModels.someWritten", "{{total}}칸 중 {{count}}칸 직접 정함", { total: 9, count: 1 }));

@@ -20,7 +20,7 @@ pub(super) fn head(look: &Look) -> Value {
         "attempt": look.attempt,
         "failures": look.failures,
         "retryOf": look.retry_of,
-        "options": difficulty::LADDER.iter().map(|(key, _, _)| *key).collect::<Vec<_>>(),
+        "options": difficulty::LADDER.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
         "applied": false,
     })
 }
@@ -249,7 +249,7 @@ pub(super) fn judgment() -> zerocode_core::orchestration::SummonJudgment {
 pub(super) fn rows(agent: &str) -> Option<Vec<difficulty::lineup::Row>> {
     // `agent-list` asks once per catalog agent; one that cannot launch a
     // difficulty at all has no rows, and costs no settings read.
-    zerocode_core::orchestration::difficulty_effort(agent, difficulty::LADDER[0].0)?;
+    zerocode_core::orchestration::takes_effort(agent).then_some(())?;
     rows_in(
         &Wire::of_this_machine().settings_root(),
         agent,

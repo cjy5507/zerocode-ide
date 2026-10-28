@@ -26509,7 +26509,7 @@ fn a_switch_leaves_one_receipt_and_no_credential_anywhere() {
 }
 
 #[test]
-fn summon_difficulty_preserves_pins_and_defaults_and_applies_only_the_omitted_effort() {
+fn summon_difficulty_preserves_pins_and_defaults_and_turns_no_difficulty_into_an_effort() {
     struct DifficultyLauncher {
         calls: std::cell::Cell<usize>,
         receipt: Option<serde_json::Value>,
@@ -26549,10 +26549,12 @@ fn summon_difficulty_preserves_pins_and_defaults_and_applies_only_the_omitted_ef
             None,
             1,
         ),
+        // t-74181: the difficulty seat's answer sets no effort — before, `low`
+        // ran this named model at a coded `medium` (and `high` at `max`).
         (
             Some(serde_json::json!({"chosen":"low", "applied":true})),
             "",
-            Some("medium"),
+            None,
             1,
         ),
         (
@@ -26596,13 +26598,20 @@ fn summon_difficulty_preserves_pins_and_defaults_and_applies_only_the_omitted_ef
             if calls == 0 { expected } else { None }
         );
     }
-    assert_eq!(difficulty_effort("antigravity", "high"), Some("high"));
-    assert_eq!(difficulty_effort("codex", "high"), Some("max"));
-    assert_eq!(difficulty_effort("cursor", "low"), None);
+    // What a model that names no efforts is offered at: what its CLI takes.
+    assert_eq!(ladder_efforts("antigravity"), ["low", "medium", "high"]);
+    assert_eq!(
+        ladder_efforts("claude"),
+        crate::capabilities::CLAUDE_EFFORT_LADDER
+    );
+    assert!(ladder_efforts("cursor").is_empty());
+    assert!(takes_effort("codex") && !takes_effort("cursor"));
 }
 
+/// t-74181: a named model with its effort left open runs at its CLI's own
+/// default — no difficulty turns into an effort — and the dials say so.
 #[test]
-fn a_named_model_says_the_ladder_set_its_effort() {
+fn a_named_model_with_its_effort_open_runs_at_its_clis_default_and_says_so() {
     struct LowLauncher;
     impl Launcher for LowLauncher {
         fn command_for(
@@ -26639,21 +26648,20 @@ fn a_named_model_says_the_ladder_set_its_effort() {
         serde_json::from_str::<serde_json::Value>(&planned.reply.stdout).unwrap()
     };
 
-    let laddered = launch("");
-    assert_eq!(laddered["effort"], "medium", "the launch is unchanged");
-    assert_eq!(laddered["dials"]["modelFrom"], "request");
+    let open = launch("");
+    assert!(open["effort"].is_null(), "no effort of ours: {open}");
+    assert_eq!(open["dials"]["modelFrom"], "request");
     assert_eq!(
-        laddered["dials"]["why"]["effortRule"], "ladder",
+        open["dials"]["why"]["effortRule"], "cli-default",
         "{}",
-        laddered["dials"]
+        open["dials"]
     );
 
     let written = launch("--effort max");
     assert_eq!(written["effort"], "max");
-    assert_ne!(
-        written["dials"]["why"]["effortRule"], "ladder",
-        "{}",
-        written["dials"]
+    assert!(
+        written["dials"].is_null(),
+        "no dial was left open: {written}"
     );
 }
 
@@ -26814,9 +26822,13 @@ fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin(
         .unwrap()
         .unwrap();
     for (flags, model, effort) in [
-        ("", default.model.as_str(), default.effort.as_str()),
-        ("--effort high", default.model.as_str(), "high"),
-        ("--model gpt-custom --effort xhigh", "gpt-custom", "xhigh"),
+        ("", default.model.as_str(), default.effort.as_deref()),
+        ("--effort high", default.model.as_str(), Some("high")),
+        (
+            "--model gpt-custom --effort xhigh",
+            "gpt-custom",
+            Some("xhigh"),
+        ),
     ] {
         let mut bench = Bench::new();
         bench.json("run-create --name profiles");
@@ -26830,15 +26842,15 @@ fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin(
         assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
         let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
         assert_eq!(reply["model"], model);
-        assert_eq!(reply["effort"], effort);
+        assert_eq!(reply["effort"].as_str(), effort);
     }
 }
 
 /// The settings screen writes one cell at a time and may leave either
 /// field to the lineup (2026-10-27). What it shows as the next summons'
 /// words is what a summons puts on the agent's command line: an effort
-/// written alone rides the default model, a model written alone runs at the
-/// difficulty's effort, both written run as written.
+/// written alone rides the default model, a model written alone runs at its
+/// CLI's own default effort (t-74181), both written run as written.
 #[test]
 fn a_row_the_settings_screen_wrote_is_what_the_summons_launches() {
     struct Screen {
@@ -26886,17 +26898,17 @@ fn a_row_the_settings_screen_wrote_is_what_the_summons_launches() {
         (
             serde_json::json!({"effort": "high"}),
             default.model.as_str(),
-            "high",
+            Some("high"),
         ),
         (
             serde_json::json!({"model": "gpt-custom"}),
             "gpt-custom",
-            default.effort.as_str(),
+            default.effort.as_deref(),
         ),
         (
             serde_json::json!({"model": "gpt-custom", "effort": "xhigh"}),
             "gpt-custom",
-            "xhigh",
+            Some("xhigh"),
         ),
     ] {
         let root = serde_json::json!({"smart": {"summonProfiles": {"codex": {low: cell}}}});
@@ -26904,7 +26916,7 @@ fn a_row_the_settings_screen_wrote_is_what_the_summons_launches() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            (shown.model.as_str(), shown.effort.as_str()),
+            (shown.model.as_str(), shown.effort.as_deref()),
             (model, effort),
             "{cell}"
         );
@@ -26925,7 +26937,7 @@ fn a_row_the_settings_screen_wrote_is_what_the_summons_launches() {
         let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
         assert_eq!(
             (reply["model"].as_str(), reply["effort"].as_str()),
-            (Some(model), Some(effort)),
+            (Some(model), effort),
             "{cell}"
         );
         let tuning = screen.tuning.lock().unwrap().clone();
