@@ -600,6 +600,7 @@ use super::{
     format_microcompact_notice, format_precompaction_warning, COMPACTION_RESUME_REMINDER,
     POST_COMPACTION_SYSTEM_REMINDER, STATE_DISTILL_REMINDER_PREFIX,
 };
+use crate::compact::{token_count, CachePrices};
 use crate::MicrocompactEvent;
 
 /// Most recent tool results never cleared by the tier-1 trim. Sized to cover a
@@ -637,19 +638,89 @@ pub(super) const MICROCOMPACT_THRASH_PROMOTION: usize = 3;
 /// relevance seat spends no question under it either, for the same reason
 /// (`crate::compact::relevance`).
 pub const MICROCOMPACT_MIN_OUTPUT_BYTES: usize = 240;
-/// How many more requests a trim is assumed to have left to pay itself back.
+/// How many more requests a trim is assumed to have left to pay itself back,
+/// where nothing better is known.
 ///
-/// A firing re-bills its invalidated suffix ONCE and saves `clearable` on every
-/// request after, so it is worth it when `clearable × requests_left ≥ rebilled`.
-/// Nobody knows `requests_left`, so it is a bet — and five is the bet this gate
-/// was already making implicitly (`clearable >= context / 5` with the whole
-/// context assumed re-billed). Kept at five so making the pricing accurate does
-/// not silently also change how eager the trim is; the live ledger's realized
-/// break-even was ~3.3 requests per firing, so five is on the safe side of it.
+/// Two places: the token rule for a model the price table does not price
+/// (`clearable × requests_left ≥ rebilled`, five being the bet this gate made
+/// implicitly as `clearable >= context / 5` with the whole context assumed
+/// re-billed), and a priced model's horizon before any request in the
+/// transcript has been answered, when there is no pace to measure the way to
+/// the full-compaction tier by (t-78937).
 const MICROCOMPACT_PAYBACK_REQUESTS: u64 = 5;
+
 use crate::message_stream::types::StreamPhase;
 use crate::message_stream::{BlockIdGen, RenderBlock, SystemLevel};
 use tokio::sync::mpsc;
+
+/// What the trim gate weighed one firing by — see
+/// [`ConversationRuntime::microcompact_pricing`].
+struct MicrocompactPricing {
+    /// `None` for a model the price table does not price.
+    prices: Option<CachePrices>,
+    ttl: api::CacheTtl,
+    horizon_requests: f64,
+    drops_orphaned_thinking: bool,
+}
+
+impl MicrocompactPricing {
+    /// The quote a firing leaves on the next break row of the session's
+    /// cache ledger.
+    // Both casts take a non-negative float already rounded to a whole number
+    // and kept under `u32::MAX`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn ledger_quote(
+        &self,
+        quote: &crate::MicrocompactQuote,
+        threshold_tokens: u64,
+        context_tokens: u64,
+        decision: &str,
+    ) -> api::ContextTrimQuote {
+        // Rates are price-table multiples of input, a few thousandths at the
+        // finest, so a thousandth is exact for every row.
+        let per_mille = |rate: f64| (rate * 1_000.0).round().clamp(0.0, f64::from(u32::MAX)) as u32;
+        let requests = |requests: f64| requests.ceil().clamp(0.0, f64::from(u32::MAX)) as u32;
+        api::ContextTrimQuote {
+            clearable_tokens: quote.clearable_tokens,
+            rebilled_tokens: quote.rebilled_tokens,
+            resent_tokens: quote.resent_tokens,
+            orphaned_thinking_tokens: quote.orphaned_thinking_tokens,
+            frontier: quote.frontier,
+            threshold_tokens,
+            context_tokens,
+            read_per_mille: self.prices.map(|prices| per_mille(prices.read)),
+            write_per_mille: self.prices.map(|prices| per_mille(prices.write)),
+            ttl: self.prices.map(|_| self.ttl.label().to_string()),
+            horizon_requests: requests(self.horizon_requests),
+            breakeven_requests: self
+                .prices
+                .and_then(|prices| quote.breakeven_requests(prices, self.drops_orphaned_thinking))
+                .map(requests),
+            drops_orphaned_thinking: self.drops_orphaned_thinking,
+            decision: decision.to_string(),
+        }
+    }
+}
+
+/// The median rise of the provider's context count from one answered request
+/// to the next among those still in the transcript — the requests since the
+/// last full compaction and the tail it kept. A fall (a trim, the compaction
+/// itself) is not growth and is left out. `None` until two answered requests
+/// rose.
+fn recent_context_growth_per_request(messages: &[ConversationMessage]) -> Option<u64> {
+    let counts: Vec<u64> = messages
+        .iter()
+        .filter_map(|message| message.usage)
+        .map(|usage| u64::from(usage.context_tokens()))
+        .collect();
+    let mut rises: Vec<u64> = counts
+        .windows(2)
+        .filter_map(|pair| pair[1].checked_sub(pair[0]))
+        .filter(|rise| *rise > 0)
+        .collect();
+    rises.sort_unstable();
+    rises.get(rises.len() / 2).copied()
+}
 
 /// How long a compaction waits for the model's summary, start to end, before
 /// it stops the request and folds the conversation with the local summary
@@ -1169,24 +1240,42 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             MICROCOMPACT_MIN_OUTPUT_BYTES,
         );
         let clearable = quote.clearable_tokens;
-        // Price the firing by WHERE it rewrites, not by how much it frees.
+        // Price the firing at the model's own cache rates (t-78937).
         //
-        // The old rule was `clearable >= context / 5`: a bet that five more
-        // requests follow, with the whole context assumed re-billed. That is
-        // right for a rewrite at the head of the history and badly wrong for
-        // one near the tail, which re-bills almost nothing — and it is the
-        // cheap tail trims that get declined, leaving the pressure to be
-        // resolved by full compaction instead (an LLM round-trip, not a
-        // rewrite). The appetite is deliberately UNCHANGED: at the head,
-        // `rebilled ≈ context`, so this reduces to the old comparison exactly.
-        // What changes is that a cheap firing is now recognized as cheap.
-        let worth_it =
-            quote.pays_back_within(MICROCOMPACT_PAYBACK_REQUESTS) && clearable >= 4_000;
-        if !worth_it && !self.microcompact_is_last_resort(context_tokens) {
+        // A firing writes the conversation back into the cache once, at the
+        // write rate of the lifetime the markers ask for, and saves only the
+        // read rate on every request after it. Counting both sides in tokens
+        // (`clearable × 5 ≥ rebilled`) priced a written token like a read one —
+        // on Opus 5.5 a twentieth of input against 1.25 or 2 times it — and
+        // took trims that never paid back: over 36 hours on this machine
+        // (2026-10-27/28) 69 firings re-wrote 13.35M tokens to clear 2.79M.
+        // The horizon is how long the clear keeps paying: until the
+        // conversation reaches the full-compaction tier at the pace it has
+        // been growing, where the summary rewrites everything anyway. A model
+        // the price table does not price keeps the token comparison.
+        let pricing = self.microcompact_pricing(context_tokens);
+        let pays_back = match pricing.prices {
+            Some(prices) => quote.pays_back_at(
+                prices,
+                pricing.horizon_requests,
+                pricing.drops_orphaned_thinking,
+            ),
+            None => quote.pays_back_within(MICROCOMPACT_PAYBACK_REQUESTS),
+        };
+        let worth_it = pays_back && clearable >= 4_000;
+        let last_resort = !worth_it && self.microcompact_is_last_resort(context_tokens);
+        if !worth_it && !last_resort {
             // In the trim zone but the batch is not worth the cache
             // invalidation: this is not a firing, so it must not count toward
             // the thrash-promotion streak (the streak only tracks rounds that
-            // actually trimmed and still didn't recover).
+            // actually trimmed and still didn't recover). It is counted on the
+            // session's cache stats, so a declined trim is visible too.
+            let reason = match (pays_back, pricing.prices.is_some()) {
+                (true, _) => "below_floor",
+                (false, true) => "price",
+                (false, false) => "token_rule",
+            };
+            api::note_context_trim_declined(&self.session.session_id, reason);
             return None;
         }
         let event = crate::microcompact_session(
@@ -1198,10 +1287,19 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             // Price this firing: deposit the cleared estimate for the ledger
             // (`api::prompt_cache`), which pairs it with the cache re-bill the
             // trim is about to cause on the next request — the third column
-            // that makes microcompact economics measurable per firing.
+            // that makes microcompact economics measurable per firing — and
+            // the quote it fired on.
+            let decision = if last_resort {
+                "last_resort"
+            } else if pricing.prices.is_some() {
+                "pays_back"
+            } else {
+                "token_rule"
+            };
             api::note_context_trim(
                 &self.session.session_id,
                 fired.estimated_tokens_saved,
+                Some(pricing.ledger_quote(&quote, micro_threshold, context_tokens, decision)),
             );
             // Recompute recall dedup for the same reason as full compaction:
             // reclaimed full bodies must be free to reseed, while any full
@@ -1311,6 +1409,39 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// arithmetic, so the argument above no longer leans on it.)
     fn microcompact_is_last_resort(&self, context_tokens: u64) -> bool {
         self.request_reaches_hard_context_ceiling(context_tokens)
+    }
+
+    /// What the trim gate weighs a firing by (t-78937): the session model's
+    /// cache rates from the price table, the write rate of the lifetime the
+    /// conversation markers ask for, how many requests the clear has to pay
+    /// back in, and whether the model drops thinking whose prefix changed.
+    fn microcompact_pricing(&self, context_tokens: u64) -> MicrocompactPricing {
+        let model = self.context_model.as_deref();
+        let ttl = crate::convert_messages::conversation_anchor_ttl();
+        let prices = model
+            .and_then(api::CacheRates::for_anthropic_model)
+            .map(|rates| CachePrices {
+                read: rates.read,
+                write: rates.write(ttl),
+            });
+        MicrocompactPricing {
+            prices,
+            ttl,
+            horizon_requests: self.microcompact_payback_horizon(context_tokens),
+            drops_orphaned_thinking: model.is_some_and(api::preserved_thinking_generation),
+        }
+    }
+
+    /// Requests a firing has to pay for itself in: until the conversation
+    /// reaches the full-compaction tier at the pace it has been growing, past
+    /// which the summary rewrites everything anyway. With no pace on record
+    /// yet, the bet the token rule makes.
+    fn microcompact_payback_horizon(&self, context_tokens: u64) -> f64 {
+        let room = u64::from(self.auto_compaction_input_tokens_threshold).saturating_sub(context_tokens);
+        match recent_context_growth_per_request(&self.session.messages) {
+            Some(growth) => token_count(room) / token_count(growth),
+            None => token_count(MICROCOMPACT_PAYBACK_REQUESTS),
+        }
     }
 
     /// True when the P6a Anthropic server-side trim executor owns tool-result
@@ -1670,7 +1801,8 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             // A relevance trim preserved the conversation, so it must not erase
             // repetition evidence or pretend that a new summary was generated.
             api::note_context_trim(&self.session.session_id,
-                u64::try_from(before.saturating_sub(estimate_session_tokens(&self.session))).unwrap_or(u64::MAX));
+                u64::try_from(before.saturating_sub(estimate_session_tokens(&self.session))).unwrap_or(u64::MAX),
+                None);
             self.consecutive_microcompacts = self.consecutive_microcompacts.saturating_add(1);
             self.precompaction_warned = false;
             self.clear_state_distill_compaction_state();
