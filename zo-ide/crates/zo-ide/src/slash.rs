@@ -370,6 +370,66 @@ mod tests {
         assert_eq!(writable, "\nDone.\n");
     }
 
+    /// What the screen shows once before an expanded command's turn: the
+    /// file it came from, a repository file of the same name it hides, and
+    /// every `!` line with what came of it — the exit code, or the line
+    /// that stood in for it.
+    #[test]
+    fn an_expansion_shows_its_file_what_it_hides_and_each_bang_line() {
+        use crate::support::EnvVarGuard;
+        use core_types::PermissionMode;
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().expect("a test root");
+        let home = root.path().join("home");
+        let zo_home = home.join(".zo");
+        let project = root.path().join("project");
+        let personal = zo_home.join("commands");
+        let repo = project.join(".zo").join("commands");
+        std::fs::create_dir_all(&personal).expect("personal commands");
+        std::fs::create_dir_all(&repo).expect("repo commands");
+        let _home = EnvVarGuard::set("HOME", home.to_str());
+        let _zo_home = EnvVarGuard::set("ZO_CONFIG_HOME", zo_home.to_str());
+        let _no_zo_home = EnvVarGuard::set("ZO_HOME", None);
+        std::fs::write(
+            personal.join("probe.md"),
+            "---\nallowed-tools: Bash\n---\n!echo hi\n!false\nDone.\n",
+        )
+        .expect("the person's command");
+        std::fs::write(repo.join("probe.md"), "---\nallowed-tools: Bash\n---\n!echo repo\nRepo.\n")
+            .expect("the repository's command");
+        let mode = PermissionMode::WorkspaceWrite;
+
+        let expansion = super::prompt_command(&project, "probe", "", mode, ModeOrigin::default())
+            .expect("/probe expands");
+        assert_eq!(expansion.text, "hi\n\nDone.\n");
+        assert_eq!(
+            expansion.shown,
+            vec![
+                format!("/probe — {} (your zo home)", personal.join("probe.md").display()),
+                format!(
+                    "  hides {} — that file's /probe does not run",
+                    repo.join("probe.md").display()
+                ),
+                "  ! echo hi → exit 0".to_string(),
+                "  ! false → exit 1".to_string(),
+            ]
+        );
+
+        std::fs::remove_file(personal.join("probe.md")).expect("the person's command goes");
+        let expansion = super::prompt_command(&project, "probe", "", mode, ModeOrigin::default())
+            .expect("/probe expands");
+        assert_eq!(
+            expansion.shown,
+            vec![
+                format!("/probe — {} (repository)", repo.join("probe.md").display()),
+                format!(
+                    "  ! echo repo → not run — {} is not trusted; a repository's command file runs its ! lines only in a folder you trust, or under a --permission-mode you name",
+                    project.display()
+                ),
+            ]
+        );
+    }
+
     #[test]
     fn zo_commands_prints_the_catalog_it_handles_in_popup_order() {
         let json: Vec<serde_json::Value> =

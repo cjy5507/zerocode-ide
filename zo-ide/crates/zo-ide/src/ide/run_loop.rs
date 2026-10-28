@@ -1431,6 +1431,38 @@ mod tests {
         );
     }
 
+    /// The pipe prints what an expanded command ran before its turn goes:
+    /// the file, and each `!` line with its exit code.
+    #[test]
+    fn a_prompt_command_in_the_pipe_prints_what_it_ran_before_its_turn() {
+        use crate::support::EnvVarGuard;
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().expect("a test root");
+        let zo_home = root.path().join("zo-home");
+        let folder = root.path().join("project");
+        let commands = folder.join(".zo").join("commands");
+        std::fs::create_dir_all(&zo_home).expect("zo home");
+        std::fs::create_dir_all(&commands).expect("the command folder");
+        let _home = EnvVarGuard::set("HOME", root.path().to_str());
+        let _zo_home = EnvVarGuard::set("ZO_CONFIG_HOME", zo_home.to_str());
+        let _no_zo_home = EnvVarGuard::set("ZO_HOME", None);
+        std::fs::write(commands.join("probe.md"), "---\nallowed-tools: Bash\n---\n!echo hi\nDone.\n")
+            .expect("the prompt command");
+        let mut written = Vec::new();
+        let mode = core_types::PermissionMode::WorkspaceWrite;
+        let outcome = {
+            let mut renderer = super::Renderer::new(&mut written, super::RenderOptions::default());
+            unlisted_command(&mut renderer, &folder, mode, true, "probe", "")
+        };
+        assert!(matches!(&outcome, SlashOutcome::Turn(text) if text == "hi\nDone.\n"));
+        let printed = String::from_utf8_lossy(&written);
+        assert!(
+            printed.contains(&format!("/probe — {} (repository)", commands.join("probe.md").display())),
+            "{printed}"
+        );
+        assert!(printed.contains("! echo hi → exit 0"), "{printed}");
+    }
+
     /// 파이프의 `/help` 목록과 파이프가 실제로 드는 명령은 같은 사실을 읽는다.
     /// 예전에는 둘이 손으로 적혀 있어, keep-list 에 명령을 더하면 도움말이
     /// 조용히 뒤처졌다(맨 터미널 단축키 카드가 `/resume` 를 빠뜨린 채 있었던

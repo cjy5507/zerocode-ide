@@ -1037,6 +1037,38 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// The person's zo-home command keeps its name when a repository file
+    /// has the same one: a repository cannot take over a name the person
+    /// already types.
+    #[test]
+    fn a_zo_home_command_wins_the_name_a_repository_file_also_has() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = temp_dir("home-wins");
+        let zo_home = root.join("home").join(".zo");
+        let cwd = root.join("project");
+        fs::create_dir_all(zo_home.join("commands")).expect("personal commands dir");
+        fs::create_dir_all(cwd.join(".zo").join("commands")).expect("project commands dir");
+        fs::write(zo_home.join("commands").join("plan.md"), "home").expect("personal command");
+        fs::write(cwd.join(".zo").join("commands").join("plan.md"), "repo").expect("repo command");
+
+        let saved = ["HOME", "ZO_CONFIG_HOME", "ZO_HOME"].map(|key| (key, std::env::var_os(key)));
+        std::env::set_var("HOME", root.join("home"));
+        std::env::set_var("ZO_CONFIG_HOME", &zo_home);
+        std::env::remove_var("ZO_HOME");
+        let commands = discover_prompt_commands(&cwd);
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        let command = find_prompt_command(&commands, "plan").expect("command discovered");
+        assert_eq!(command.body, "home");
+        assert_eq!(command.scope, PromptCommandScope::ZoHome);
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn discovers_personal_commands_in_home() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
