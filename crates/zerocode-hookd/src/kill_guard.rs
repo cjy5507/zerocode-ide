@@ -54,7 +54,7 @@ pub(crate) fn pending(agent: AgentKind, event: &str, payload: &str) -> Option<Pe
 }
 
 /// The reply for `pending`: judged on a blocking thread — the table is a
-/// process listing — within `wall`, and asked of a person when it is not.
+/// process listing — within `wall`, and refused when it is not.
 pub(crate) async fn reply(
     witness: Arc<dyn KillWitness>,
     pane_key: String,
@@ -88,25 +88,34 @@ pub(crate) async fn reply(
     answer(decision, &verdict)
 }
 
-/// The hook reply a verdict takes for this provider: nothing for a call
-/// that may run, so its reply stays what it was.
+/// What a pane can do instead of a kill it was refused for want of a person
+/// to ask: the pids it learns are its own to end by number, and a process it
+/// did not start is not its own to end.
+const WAY_OUT: &str = "nobody in a ZeroCode pane can answer a question, so it was refused. \
+To end what this pane started, name it so it can be checked before it runs: \
+its pid as a number (`echo $!` or `pgrep -f <name>`, then `kill 4242`), \
+`kill $(pgrep -f <name>)`, or its job (`kill %1`, `kill $!` in the same command). \
+A process this pane did not start is the person's or the coordinator's to end, \
+not this pane's";
+
+/// The hook reply a verdict takes: nothing for a call that may run, so its
+/// reply stays what it was, and a refusal otherwise. A pane is a host with
+/// nobody to ask ([`KillVerdict::Ask`]) — a worker's pane has no person at
+/// it, and one sitting on a question waits forever — so a question is a
+/// refusal that says what the pane can do instead.
 pub(crate) fn answer(
     decision: PreToolDecision,
     verdict: &KillVerdict,
 ) -> Option<serde_json::Value> {
-    let (word, reason) = match verdict {
+    let reason = match verdict {
         KillVerdict::Allow => return None,
-        KillVerdict::Ask { reason } if decision.asks => ("ask", reason.clone()),
-        KillVerdict::Ask { reason } => (
-            "deny",
-            format!("refused, since this agent's hook cannot put a question to a person: {reason}"),
-        ),
-        KillVerdict::Deny { reason } => ("deny", reason.clone()),
+        KillVerdict::Ask { reason } => format!("{reason}; {WAY_OUT}"),
+        KillVerdict::Deny { reason } => reason.clone(),
     };
     Some(serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": decision.event,
-            "permissionDecision": word,
+            "permissionDecision": "deny",
             "permissionDecisionReason": reason,
         }
     }))
