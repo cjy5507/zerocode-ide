@@ -2327,10 +2327,15 @@ fn given_oauth_bridge_initialize_times_out_then_child_is_never_respawned() {
 /// a tool call need not be idempotent, so it goes out once, comes back as an
 /// error that says it was not sent again, and the reset server answers the
 /// caller's next call.
+/// `call_timeout_ms` is the server's `tool_call_timeout_ms`: the hang needs
+/// a short one to end at all, and the disconnect keeps the default so that a
+/// slow exit on a loaded machine cannot turn its transport failure into a
+/// timeout.
 fn assert_failed_tool_call_is_not_sent_again(
     fail_once_mode: &str,
     failure_line: &str,
     expected_cause: &str,
+    call_timeout_ms: Option<u64>,
 ) {
     let runtime = Builder::new_current_thread()
         .enable_all()
@@ -2354,7 +2359,7 @@ fn assert_failed_tool_call_is_not_sent_again(
             ]),
         );
         if let McpServerConfig::Stdio(stdio) = &mut config.config {
-            stdio.tool_call_timeout_ms = Some(300);
+            stdio.tool_call_timeout_ms = call_timeout_ms;
         }
         let mut manager =
             McpServerManager::from_servers(&BTreeMap::from([("alpha".to_string(), config)]));
@@ -2412,6 +2417,7 @@ fn given_tool_call_disconnects_when_calling_tool_then_the_call_is_not_sent_again
         "tool_call_disconnect",
         "tools/call-disconnect",
         "transport failed during tools/call",
+        None,
     );
 }
 
@@ -2421,6 +2427,7 @@ fn given_tool_call_times_out_when_calling_tool_then_the_call_is_not_sent_again()
         "tool_call_hang",
         "tools/call-hang",
         "timed out after 300 ms while handling tools/call",
+        Some(300),
     );
 }
 
