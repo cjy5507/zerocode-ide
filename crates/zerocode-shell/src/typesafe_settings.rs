@@ -1127,7 +1127,7 @@ pub fn set_summon_profile(
     lineup: Option<&zerocode_core::summon_difficulty::lineup::Lineup>,
 ) -> Result<(), SummonRowRefusal> {
     use zerocode_core::summon_difficulty::{self as summon, lineup::Refusal};
-    if summon::effort(difficulty).is_none() {
+    if !summon::LADDER.iter().any(|(key, _)| *key == difficulty) {
         return Err(SummonRowRefusal::file(format!(
             "{agent}: unknown difficulty {difficulty}"
         )));
