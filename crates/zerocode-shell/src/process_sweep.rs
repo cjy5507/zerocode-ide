@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use zerocode_core::orchestration::process_sweep::{
-    self as sweep, Judge, Judgment, ProcessRow, ProcessSweepAsk, Signals,
+    self as sweep, Checkout, Judge, Judgment, ProcessRow, ProcessSweepAsk, Signals,
 };
 use zerocode_core::shell_rule::kill::{self, KillCall, KillTarget, KillVerdict, ProcessTable};
 use zerocode_hookd::KillRoots;
@@ -41,7 +41,12 @@ pub(crate) fn carry(
     now_ms: i64,
 ) -> Result<Carried, String> {
     let (rows, table) = table()?;
-    let judge = judge(roots, table);
+    let checkouts = match ask {
+        ProcessSweepAsk::Find { checkouts, .. } | ProcessSweepAsk::End { checkouts, .. } => {
+            checkouts.clone()
+        }
+    };
+    let judge = judge(roots, table, checkouts);
     carry_with(
         ask,
         rows,
@@ -55,12 +60,17 @@ pub(crate) fn carry(
 /// The protection judgment this window stands behind the verb — the ONE place
 /// it is chosen. A window that cannot say whose processes are whose ends
 /// nothing.
-fn judge(roots: Option<KillRoots>, table: ProcessTable) -> Box<dyn Judge> {
+fn judge(
+    roots: Option<KillRoots>,
+    table: ProcessTable,
+    checkouts: Vec<Checkout>,
+) -> Box<dyn Judge> {
     match roots {
         Some(roots) => Box::new(KillRule {
             table,
             caller: roots.caller,
             protected: roots.protected,
+            checkouts,
         }),
         None => Box::new(NoRoots),
     }
@@ -68,14 +78,21 @@ fn judge(roots: Option<KillRoots>, table: ProcessTable) -> Box<dyn Judge> {
 
 /// The kill guard's rule, asked of one pid at a time as a `kill <pid>` would
 /// be: a process in the asking pane's own tree may end; one in the window's
-/// or another pane's tree may not; anything else is a question for a person —
-/// and this verb puts no question to anybody mid-call, so a question is a
-/// refusal that says so.
+/// or another pane's tree may not, whatever else is said; anything else is a
+/// question for a person.
+///
+/// This verb asks nobody mid-call. The coordinator reading a list and naming
+/// the pid@mark it showed is its yes to that question (t-78914, agreed with
+/// t-80602's owner) — but only for a process standing in a worker checkout the
+/// ledger knows, which is where an orphaned build stands; a runner, a system
+/// agent or anything else no pane holds is refused as a question nobody can
+/// be asked. The guard's own rule is not changed: the exception lives here.
 struct KillRule {
     /// The same read the rows came from, in the guard's shape.
     table: ProcessTable,
     caller: Option<u32>,
     protected: Vec<kill::ProtectedRoot>,
+    checkouts: Vec<Checkout>,
 }
 
 impl Judge for KillRule {
@@ -89,13 +106,27 @@ impl Judge for KillRule {
         match kill::judge_kill(&[call], &self.table, self.caller, &self.protected) {
             KillVerdict::Allow => Judgment::Allow,
             KillVerdict::Deny { reason } => Judgment::Deny { why: reason },
-            KillVerdict::Ask { reason } => Judgment::Deny {
-                why: format!(
-                    "물을 수 없음 — {} asks nobody mid-call, so what a person would be asked \
-                     about is refused: {reason}",
-                    sweep::VERB
-                ),
-            },
+            // One pid in a table that read: the guard asks only for a
+            // process no pane and not the window holds.
+            KillVerdict::Ask { reason } => {
+                let in_checkout = row
+                    .cwd
+                    .as_deref()
+                    .and_then(|cwd| sweep::owner(cwd, &self.checkouts))
+                    .is_some();
+                if in_checkout {
+                    Judgment::Allow
+                } else {
+                    Judgment::Deny {
+                        why: format!(
+                            "물을 수 없음 — {} asks nobody mid-call, and a process no pane holds \
+                             is ended by its pid@mark only while it stands in a worker checkout \
+                             the ledger knows; this one does not: {reason}",
+                            sweep::VERB
+                        ),
+                    }
+                }
+            }
         }
     }
 }
@@ -128,7 +159,9 @@ fn carry_with(
                 filed: None,
             })
         }
-        ProcessSweepAsk::End { run, targets } => {
+        ProcessSweepAsk::End { run, targets, .. } => {
+            let cwds = read_cwds(&sweep::target_pids(targets));
+            sweep::with_cwds(&mut table, &cwds);
             let ended = sweep::end(&table, targets, judge, signals);
             Ok(Carried {
                 said: sweep::end_answer(run, &ended).to_string(),
@@ -260,6 +293,7 @@ mod tests {
         ProcessSweepAsk::End {
             run: "run-1".to_string(),
             targets,
+            checkouts: Vec::new(),
         }
     }
 
@@ -326,7 +360,7 @@ mod tests {
     fn without_the_panes_roots_nothing_is_ended() {
         let fixture = vec![row(4100, "cargo build")];
         let signals = Recorded::over(&fixture);
-        let judge = judge(None, ProcessTable::new(Vec::new()));
+        let judge = judge(None, ProcessTable::new(Vec::new()), Vec::new());
         let carried = carry_with(
             &end_call(vec![target(4100, "cargo build")]),
             fixture,
@@ -341,22 +375,40 @@ mod tests {
         assert_eq!(said["rows"][0]["outcome"], "refused");
     }
 
-    /// Through the kill guard's real rule over one fixture table (`ps -o
-    /// pid=,ppid=,pgid=,command=` text): the asking pane's own build ends;
-    /// another pane's build and the window are refused by name; an orphan
-    /// nobody's pane holds would be a question for a person, so it is refused
-    /// as one that cannot be asked. Nothing real is signalled.
-    #[test]
-    fn the_kill_guards_rule_decides_each_pid() {
-        let listing = "\
-            500 1 500 /Applications/ZeroCode.app/Contents/MacOS/zerocode-shell\n\
-            600 500 600 -zsh\n\
-            700 600 600 claude --model opus\n\
-            4100 700 4100 cargo build -p zerocode-shell\n\
-            610 500 610 -zsh\n\
-            4200 610 4200 cargo test -p zerocode-core\n\
-            4300 1 4300 cargo build -p orphaned\n";
-        let rows: Vec<ProcessRow> = listing
+    /// One machine as `ps -o pid=,ppid=,pgid=,command=` prints it: the window
+    /// (500), the asking pane (600) with its agent and build, another pane
+    /// (610) with a build in a worker checkout, an orphaned build in that
+    /// checkout and an orphaned build-line runner outside every checkout.
+    const LISTING: &str = "\
+        500 1 500 /Applications/ZeroCode.app/Contents/MacOS/zerocode-shell\n\
+        600 500 600 -zsh\n\
+        700 600 600 claude --model opus\n\
+        4100 700 4100 cargo build -p zerocode-shell\n\
+        610 500 610 -zsh\n\
+        4200 610 4200 cargo test -p zerocode-core\n\
+        4300 1 4300 rustc --crate-name zerocode_shell\n\
+        4400 1 4400 zsh build-queue/runner10.sh 1\n";
+
+    /// Where each stands: the other pane's build and the orphaned rustc in
+    /// worker w-9's checkout, the runner outside every checkout.
+    fn places(pids: &[u32]) -> HashMap<u32, String> {
+        let all = [
+            (4100, "/w/coordinator"),
+            (4200, "/w/t-9"),
+            (4300, "/w/t-9/crates/zerocode-shell"),
+            (4400, "/build-line"),
+        ];
+        all.into_iter()
+            .filter(|(pid, _)| pids.contains(pid))
+            .map(|(pid, cwd)| (pid, cwd.to_string()))
+            .collect()
+    }
+
+    /// Ends `pids` on [`LISTING`] through the kill guard's real rule, with
+    /// the window's roots as the guard reads them; nothing real is signalled.
+    /// Answers the pids signalled and the answer's rows.
+    fn guarded_end(pids: &[u32]) -> (Vec<u32>, Vec<serde_json::Value>) {
+        let rows: Vec<ProcessRow> = LISTING
             .lines()
             .map(|line| {
                 let mut fields = line.split_whitespace();
@@ -383,38 +435,79 @@ mod tests {
                 },
             ],
         };
-        let judge = judge(Some(roots), ProcessTable::from_listing(listing, None));
+        let checkouts = vec![Checkout {
+            path: "/w/t-9".to_string(),
+            run: "run-1".to_string(),
+            worker: "w-9".to_string(),
+            task: Some("t-9".to_string()),
+        }];
+        let judge = judge(
+            Some(roots),
+            ProcessTable::from_listing(LISTING, None),
+            checkouts.clone(),
+        );
         let signals = Recorded::over(&rows);
-        let targets: Vec<Target> = [500, 4100, 4200, 4300]
-            .into_iter()
+        let targets: Vec<Target> = pids
+            .iter()
             .map(|pid| {
-                let held = rows.iter().find(|row| row.pid == pid).expect("a row");
-                target(pid, &held.args)
+                let held = rows.iter().find(|row| row.pid == *pid).expect("a row");
+                target(*pid, &held.args)
             })
             .collect();
         let carried = carry_with(
-            &end_call(targets),
+            &ProcessSweepAsk::End {
+                run: "run-1".to_string(),
+                targets,
+                checkouts,
+            },
             rows,
-            &no_cwds,
+            &places,
             judge.as_ref(),
             &signals,
             7,
         )
         .expect("an end call");
-        assert_eq!(*signals.ended.borrow(), vec![4100], "only the own build");
         let said: serde_json::Value = serde_json::from_str(&carried.said).expect("JSON");
-        let why = |at: usize| {
-            said["rows"][at]["why"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string()
-        };
-        assert_eq!(said["rows"][0]["outcome"], "refused");
-        assert!(why(0).contains("the ZeroCode window"), "{said}");
-        assert_eq!(said["rows"][1]["outcome"], "ended");
-        assert_eq!(said["rows"][2]["outcome"], "refused");
-        assert!(why(2).contains("pane term-3"), "{said}");
-        assert_eq!(said["rows"][3]["outcome"], "refused");
-        assert!(why(3).starts_with("물을 수 없음"), "{said}");
+        let rows = said["rows"].as_array().expect("rows").clone();
+        let signalled = signals.ended.borrow().clone();
+        (signalled, rows)
+    }
+
+    fn why(row: &serde_json::Value) -> &str {
+        row["why"].as_str().unwrap_or_default()
+    }
+
+    /// The orphaned rustc of 03:23, named by the pid@mark a list showed and
+    /// standing in a worker checkout, is ended — the coordinator's pick is
+    /// the yes the guard would ask for. The asking pane's own build ends too.
+    #[test]
+    fn an_orphaned_build_named_by_its_mark_is_ended() {
+        let (signalled, rows) = guarded_end(&[4100, 4300]);
+        assert_eq!(signalled, vec![4100, 4300]);
+        assert_eq!(rows[0]["outcome"], "ended");
+        assert_eq!(rows[1]["outcome"], "ended");
+    }
+
+    /// Another pane's build is refused by name though its pid@mark is right
+    /// and it stands in a worker checkout; so is the window. No exception
+    /// reaches inside a pane or the window.
+    #[test]
+    fn a_protected_panes_build_is_refused_even_with_its_mark() {
+        let (signalled, rows) = guarded_end(&[4200, 500]);
+        assert!(signalled.is_empty(), "{signalled:?}");
+        assert_eq!(rows[0]["outcome"], "refused");
+        assert!(why(&rows[0]).contains("pane term-3"), "{rows:?}");
+        assert_eq!(rows[1]["outcome"], "refused");
+        assert!(why(&rows[1]).contains("the ZeroCode window"), "{rows:?}");
+    }
+
+    /// A process no pane holds that stands in no worker checkout — a
+    /// build-line runner — is a question nobody can be asked: refused.
+    #[test]
+    fn an_orphan_outside_every_checkout_is_refused_as_unaskable() {
+        let (signalled, rows) = guarded_end(&[4400]);
+        assert!(signalled.is_empty(), "{signalled:?}");
+        assert_eq!(rows[0]["outcome"], "refused");
+        assert!(why(&rows[0]).starts_with("물을 수 없음"), "{rows:?}");
     }
 }

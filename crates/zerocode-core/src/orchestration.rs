@@ -19531,6 +19531,9 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          stands in and whether it is protected, and changes nothing; --kill ends only the pids \
          a list showed, one at a time, each read again right before its TERM so a reused pid is \
          left alone, refuses protected ones with the reason, and writes one line to the run. \
+         A process no pane holds (an orphaned build, parent 1) is ended only by its pid@mark \
+         from a list (코디가 목록을 읽고 고른 pid = 물음에 대한 예, 판 안·창은 예외 없음), \
+         and only while it stands in a worker checkout the ledger knows. \
          There is no pattern, parent or everything mode. 패턴으로 죽이는 명령은 쓰지 않는다 — \
          인자가 패턴이 된다",
         Doing::Policy,

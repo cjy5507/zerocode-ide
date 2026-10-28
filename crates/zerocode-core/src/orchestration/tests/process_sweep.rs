@@ -292,6 +292,23 @@ fn a_pid_reused_since_the_list_is_left_alone() {
     assert!(fake.signalled.borrow().is_empty());
 }
 
+/// The same pid and the very same command line, started again after the
+/// list: the mark carries the start, so the new process is not the one shown
+/// and is left alone (an arguments-only check could not tell them apart).
+#[test]
+fn a_pid_restarted_with_the_same_command_line_is_left_alone() {
+    let table = table();
+    let restarted = ProcessRow {
+        started: LATER.to_string(),
+        ..table[3].clone()
+    };
+    assert_eq!(restarted.args, table[3].args);
+    let fake = Fake::standing(vec![restarted]);
+    let ended = end(&table, &[target(&table[3])], &Protects(Vec::new()), &fake);
+    assert_eq!(outcomes(&ended), vec![(4100, Outcome::Changed)]);
+    assert!(fake.signalled.borrow().is_empty());
+}
+
 /// A mark the table no longer agrees with (the arguments changed between the
 /// list and this call) is changed before anybody is asked.
 #[test]
@@ -397,6 +414,7 @@ fn an_end_call_names_its_run_and_targets() {
                     mark: "abcdef012345".to_string()
                 },
             ],
+            checkouts: Vec::new(),
         }
     );
 }
@@ -443,6 +461,22 @@ fn malformed_calls_are_refused_before_the_window_is_asked() {
     }
 }
 
+/// An orphan's pid without the mark a list showed for it is refused before the
+/// window is asked: the mark is what makes the coordinator's pick the yes.
+#[test]
+fn an_orphan_named_without_its_mark_is_refused() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name sweep");
+    let planned = bench.run(&format!("{VERB} --kill 4300"));
+    assert_ne!(planned.reply.exit_code, 0);
+    assert!(
+        planned.reply.stderr.contains("no mark"),
+        "{}",
+        planned.reply.stderr
+    );
+    assert!(matches!(planned.effect, Effect::None));
+}
+
 /// Ending is the coordinator's: a worker's pane is refused and told to ask.
 #[test]
 fn a_workers_pane_cannot_end_processes() {
@@ -483,4 +517,5 @@ fn the_help_says_never_to_kill_by_pattern() {
         .find(|(name, _, _)| *name == VERB)
         .expect("the verb is in the table");
     assert!(about.contains("패턴으로 죽이는 명령은 쓰지 않는다 — 인자가 패턴이 된다"));
+    assert!(about.contains("코디가 목록을 읽고 고른 pid = 물음에 대한 예, 판 안·창은 예외 없음"));
 }

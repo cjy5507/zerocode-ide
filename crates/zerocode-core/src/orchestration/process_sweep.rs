@@ -82,13 +82,22 @@ pub enum ProcessSweepAsk {
         needle: String,
         checkouts: Vec<Checkout>,
     },
-    /// End these pids, one at a time, and tell `run`'s coordinator what was done.
-    End { run: String, targets: Vec<Target> },
+    /// End these pids, one at a time, and tell `run`'s coordinator what was
+    /// done. `checkouts` says, as for a list, whose checkout each stands in.
+    End {
+        run: String,
+        targets: Vec<Target>,
+        checkouts: Vec<Checkout>,
+    },
 }
 
 /// Whether one row may be ended. The shape the blocking road's `judge_kill`
-/// answers, without its `Ask`: this verb has nobody to ask mid-call, so a
-/// judge that would ask answers [`Judgment::Deny`] with its question as `why`.
+/// answers, without its `Ask`: this verb has nobody to ask mid-call. What the
+/// guard would ask a person about is answered by the coordinator's own act —
+/// reading a list and naming the pid@mark it showed — only for a process no
+/// pane and not the window holds, standing in a worker checkout the ledger
+/// knows; every other question is [`Judgment::Deny`] with it as `why`. The
+/// window's judge makes that call, so the guard's rule stays as it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Judgment {
     Allow,
@@ -240,6 +249,7 @@ pub(super) fn ask(
             Ok(ProcessSweepAsk::End {
                 run: run_id,
                 targets: targets_of(&words.list("--kill"))?,
+                checkouts: checkouts(ledger),
             })
         }
     }
@@ -331,7 +341,8 @@ fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
 
 /// Whose checkout `cwd` stands in: the deepest one that holds it, and of two
 /// workers told the same path, the later.
-fn owner<'a>(cwd: &str, checkouts: &'a [Checkout]) -> Option<&'a Checkout> {
+#[must_use]
+pub fn owner<'a>(cwd: &str, checkouts: &'a [Checkout]) -> Option<&'a Checkout> {
     let standing = Path::new(cwd);
     let mut best: Option<&Checkout> = None;
     for checkout in checkouts {
@@ -349,6 +360,13 @@ fn owner<'a>(cwd: &str, checkouts: &'a [Checkout]) -> Option<&'a Checkout> {
 /// process-sweep --find cargo` contains `cargo`); they are not candidates.
 fn is_candidate(row: &ProcessRow, needle: &str) -> bool {
     row.args.contains(needle) && !row.args.contains(VERB)
+}
+
+/// The pids an end call names, so the window reads where those, and only
+/// those, stand.
+#[must_use]
+pub fn target_pids(targets: &[Target]) -> Vec<u32> {
+    targets.iter().map(|target| target.pid).collect()
 }
 
 /// The pids a list for `needle` will show, in pid order — so the window reads
