@@ -4631,6 +4631,44 @@ ok("P1 G2: where WebGL2 stands the window draws with GL on its own — nothing p
   () => !glPicked.thrown && glPicked.able && glPicked.pinned === null && glPicked.standing === "gl"
     && glPicked.canvases === 1 && glPicked.elements === 0,
   JSON.stringify(glPicked));
+/* 숨은 판은 GL 손의 그리기 버퍼를 돌려준다(t-80604). 판이 display:none이 되면 캔버스의 관찰자가 손을
+ * 쉬게 하고(캔버스 2×2 이하), 다시 보이는 판은 같은 손·같은 카메라·같은 고름으로 숨기 전의 크기에서
+ * 그린다. */
+const glParked = await glPage.evaluate(async () => {
+  try {
+    const frames = async (count) => {
+      for (let at = 0; at < count; at += 1) await new Promise((done) => requestAnimationFrame(done));
+    };
+    const view = document.querySelector(".knowledge-view:not([hidden])");
+    const layout = knowledgeLayouts.get(view);
+    const painter = knowledgePainters.get(view);
+    const canvas = view.querySelector(".knowledge-gl");
+    knowledgeSelectedKey = layout.model.keys[0];
+    await paintKnowledgeView();
+    await frames(2);
+    const look = () => ({ camera: JSON.stringify(knowledgeCamera(view, layout)), selected: knowledgeSelectedKey,
+      painter: knowledgePainters.get(view) === painter });
+    const was = look();
+    const shown = [canvas.width, canvas.height];
+    view.hidden = true;
+    await frames(3);
+    const hidden = [canvas.width, canvas.height];
+    view.hidden = false;
+    await frames(3);
+    const back = [canvas.width, canvas.height];
+    const now = look();
+    knowledgeSelectedKey = null;
+    await paintKnowledgeView();
+    return { was, now, shown, hidden, back };
+  } catch (error) {
+    return { thrown: String(error?.stack ?? error) };
+  }
+});
+ok("a hidden knowledge view gives its GL drawing buffer back and draws again at its size with the same camera and selection",
+  () => !glParked.thrown && glParked.shown[0] > 2 && glParked.hidden[0] <= 2 && glParked.hidden[1] <= 2
+    && glParked.back.join() === glParked.shown.join() && glParked.was.painter && glParked.now.painter
+    && JSON.stringify(glParked.now) === JSON.stringify(glParked.was),
+  JSON.stringify(glParked));
 await step(4343, () => measureKnowledgeSupplyParity(glPage, ok));
 await step(4344, () => measureKnowledgeSupplyScene(glPage, ok, { painter: "gl" }));
 

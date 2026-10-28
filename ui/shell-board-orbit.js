@@ -744,10 +744,14 @@ function agentOrbitResized(view) {
   agentOrbitWake();
 }
 
-/* 캔버스와 빛번짐 타깃의 크기(기기 픽셀). 빛번짐의 단은 반씩 줄어든다. */
+/* 캔버스와 빛번짐 타깃의 크기(기기 픽셀). 빛번짐의 단은 반씩 줄어든다. 자리가 없는 무대는
+ * 숨은 판이다(`agentOrbitPark`). */
 function agentOrbitSize(state) {
   const { renderer, bloom } = state.gl;
-  if (state.width <= 0 || state.height <= 0) return;
+  if (state.width <= 0 || state.height <= 0) {
+    agentOrbitPark(state);
+    return;
+  }
   renderer.setPixelRatio(state.dpr);
   renderer.setSize(state.width, state.height, false);
   if (!bloom) return;
@@ -763,6 +767,19 @@ function agentOrbitSize(state) {
     bloom.across[at].setSize(across, down);
     bloom.down[at].setSize(across, down);
   }
+}
+
+/* 숨은 판 — 보드가 탭·보기 전환으로 display:none이 되어 무대의 관찰자가 크기 0을 들고 왔다:
+ * 캔버스의 그리기 버퍼와 빛번짐의 타깃을 돌려준다. 장면 타깃 하나가 기기 픽셀마다 반정밀 넷의
+ * 표본 넷이라, 2,400×1,600 무대에서 타깃만 200 MiB를 넘게 쥐고 있었다(t-80604). 렌더러·
+ * 컨텍스트·셰이더와 장면, 카메라·선택은 그대로 둔다 — 다시 보이는 판은 크기만 다시 받고
+ * (`agentOrbitSize`), 타깃은 three가 다음 그림에서 그 크기로 다시 짓는다. 셰이더를 다시
+ * 엮지 않으므로 돌아온 첫 장이 멈추지 않는다. */
+function agentOrbitPark(state) {
+  const { renderer, bloom } = state.gl;
+  renderer.setSize(1, 1, false);
+  if (!bloom) return;
+  for (const target of [bloom.scene, bloom.high, ...bloom.across, ...bloom.down]) target.dispose();
 }
 
 /* ---- 서명과 적용 ------------------------------------------------------------- */
@@ -3172,6 +3189,7 @@ function agentOrbitHandles() {
     bloom: Boolean(state?.gl?.bloom),
     gpu: state?.gl ? { calls: state.gl.calls, sceneCalls: state.gl.sceneCalls, triangles: state.gl.triangles,
       geometries: memory.geometries,
-      textures: memory.textures, programs: state.gl.renderer.info.programs?.length ?? 0 } : null,
+      textures: memory.textures, programs: state.gl.renderer.info.programs?.length ?? 0,
+      drawing: [state.canvas.width, state.canvas.height] } : null,
   };
 }

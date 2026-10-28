@@ -1118,9 +1118,13 @@ pub struct TerminalGrid {
     /// lets [`Cell`] stay four bytes lighter than an `Option<u32>` would make
     /// it (`NonZeroU32` has no separate discriminant).
     ///
-    /// It is not pruned while the scrollback lives: a line scrolled out of
+    /// It is not pruned while any line names the link: a line scrolled out of
     /// sight still names its link, and a table that forgot would turn that
-    /// line's addresses into dangling numbers.
+    /// line's addresses into dangling numbers. Once history has turned over
+    /// and no line, pen or parked screen names a row, the row is emptied and
+    /// its number given to the next new address ([`Self::prune_tables`],
+    /// t-80604) — before that, a pane printing links for hours held every
+    /// address it ever saw until the ceiling refused new ones.
     links: Vec<Arc<str>>,
     /// The same addresses, keyed by address — `OSC 8` arrives once per printed
     /// name and a directory listing asks this question for every file, so the
@@ -1132,8 +1136,16 @@ pub struct TerminalGrid {
     /// it rides the next delta once — a table re-sent every frame would put a
     /// URI on the wire for every repaint of a line nobody touched.
     links_sent: usize,
+    /// The `links` rows [`Self::prune_tables`] emptied, 0-based, waiting for
+    /// the next new address.
+    free_links: Vec<usize>,
+    /// Rows below `links_sent` that took a new address: the consumer holds
+    /// the old one, so the next delta carries them again.
+    links_resent: Vec<usize>,
     fold_table: Vec<FoldMeta>,
     folds_sent: usize,
+    /// `scrollback_trimmed` when the link and fold tables were last swept.
+    tables_swept_at: usize,
     open_fold: Option<OpenFold>,
     title: Option<String>,
     bracketed_paste: bool,
@@ -1333,8 +1345,11 @@ impl TerminalGrid {
             links: Vec::new(),
             link_ids: HashMap::new(),
             links_sent: 0,
+            free_links: Vec::new(),
+            links_resent: Vec::new(),
             fold_table: Vec::new(),
             folds_sent: 0,
+            tables_swept_at: 0,
             open_fold: None,
             title: None,
             bracketed_paste: false,
@@ -2035,6 +2050,7 @@ impl TerminalGrid {
     fn advance_delta_baseline(&mut self, cursor: (usize, usize)) {
         self.bell = false;
         self.links_sent = self.links.len();
+        self.links_resent.clear();
         self.folds_sent = self.fold_table.len();
         self.taken_view = (self.view_offset, self.scrollback.len());
         self.taken_cursor_visible = self.cursor_visible;
@@ -2378,12 +2394,50 @@ impl TerminalGrid {
     pub fn set_scrollback_cap(&mut self, lines: usize) {
         let cap = lines.clamp(MIN_SCROLLBACK_LINES, MAX_SCROLLBACK_LINES);
         self.scrollback_cap = cap;
-        while self.scrollback.len() > cap {
+        self.drop_oldest_to(cap);
+    }
+
+    /// Give up the oldest history lines until at most `keep` remain, leaving
+    /// the cap the person chose as it is: the pane grows back toward it as it
+    /// prints. This is the window's answer when every pane's history together
+    /// is over its budget (`history_budget`, t-80604); the newest lines, the
+    /// ones nearest the screen, are the ones kept. Returns how many went.
+    pub fn shed_history(&mut self, keep: usize) -> usize {
+        let before = self.scrollback.len();
+        self.drop_oldest_to(keep);
+        let dropped = before - self.scrollback.len();
+        if dropped > 0 {
+            // The scrollbar and the trim origin the window holds moved.
+            self.dirty = true;
+        }
+        dropped
+    }
+
+    fn drop_oldest_to(&mut self, keep: usize) {
+        if self.scrollback.len() <= keep {
+            return;
+        }
+        while self.scrollback.len() > keep {
             drop(self.pop_scrollback());
-            // The view is anchored to CONTENT, so history falling off the back
-            // pulls it with it — otherwise the offset names a line that is no
-            // longer there and the screen jumps somewhere nobody asked for.
-            self.view_offset = self.view_offset.saturating_sub(1);
+        }
+        // The queues keep the room the deeper history needed — 50,000 rows'
+        // places in four queues is about 2 MiB a pane — unless told to give
+        // it back. Given back only when most of it is spare: a pane the
+        // budget trims a few lines a beat while it prints would otherwise
+        // move its queues every beat, to grow them again on the next line.
+        if self.scrollback.capacity() / 2 > self.scrollback.len() {
+            self.scrollback.shrink_to_fit();
+            self.scroll_wrap.shrink_to_fit();
+            self.scroll_folds.shrink_to_fit();
+            self.scroll_cols.shrink_to_fit();
+        }
+        // The view is anchored to CONTENT, counted up from the live screen:
+        // lines leaving the far end leave a reader on the line they were
+        // reading, unless that line itself went — then the oldest one kept,
+        // never an offset naming a line that is no longer there.
+        self.view_offset = self.view_offset.min(self.scrollback.len());
+        if self.tables_turned() {
+            self.prune_tables();
         }
     }
 
@@ -2905,7 +2959,92 @@ impl TerminalGrid {
         self.scroll_wrap.push_back(wrapped);
         self.scroll_folds.push_back(fold);
         self.scroll_cols.push_back(logical_cols);
+        // After the push, never before it: the line on its way into history
+        // names its links too.
+        if self.tables_turned() {
+            self.prune_tables();
+        }
         Some(line)
+    }
+
+    /// Whether a whole history's worth of lines has left since the tables
+    /// were last swept — so a sweep, which reads every kept line, costs a
+    /// read per trimmed line however long the pane lives. The worth is what
+    /// the pane holds, not its cap: a pane the window's budget cut to a tenth
+    /// of its cap sweeps right after the cut, not a cap's worth of lines
+    /// later. Never under the smallest cap a person can choose, so a pane
+    /// with next to no history does not sweep on every line.
+    fn tables_turned(&self) -> bool {
+        let worth = self
+            .scrollback_cap
+            .min(self.scrollback.len().max(MIN_SCROLLBACK_LINES))
+            .max(1);
+        self.scrollback_trimmed.saturating_sub(self.tables_swept_at) >= worth
+    }
+
+    /// Empty the link rows and drop the fold regions nothing left in this
+    /// grid names (t-80604). A link's number stays its row — a consumer and
+    /// every kept cell address it by that number — and the emptied row is
+    /// handed to the next new address. A fold is found by its id, so its
+    /// entry simply goes.
+    fn prune_tables(&mut self) {
+        self.tables_swept_at = self.scrollback_trimmed;
+        if self.links.is_empty() && self.fold_table.is_empty() {
+            return;
+        }
+        let mut linked = vec![false; self.links.len()];
+        let mut named = |style: &CellStyle| {
+            if let Some(id) = style.link
+                && let Some(slot) = linked.get_mut(id.get() as usize - 1)
+            {
+                *slot = true;
+            }
+        };
+        named(&self.pen);
+        self.cells
+            .iter()
+            .flatten()
+            .for_each(|cell| named(&cell.style));
+        self.scrollback
+            .iter()
+            .flat_map(PackedRow::styles)
+            .for_each(&mut named);
+        let mut folded: std::collections::HashSet<u32> = self
+            .folds
+            .iter()
+            .chain(&self.scroll_folds)
+            .flatten()
+            .map(|fold| fold.id)
+            .chain(self.open_fold.map(|open| open.id))
+            .collect();
+        if let Some(saved) = &self.saved_screen {
+            named(&saved.pen);
+            saved
+                .cells
+                .iter()
+                .flat_map(PackedRow::styles)
+                .for_each(&mut named);
+            folded.extend(saved.folds.iter().flatten().map(|fold| fold.id));
+        }
+        for (at, uri) in self.links.iter_mut().enumerate() {
+            if linked[at] || uri.is_empty() {
+                continue;
+            }
+            self.link_ids.remove(&**uri);
+            *uri = Arc::from("");
+            self.free_links.push(at);
+        }
+        let sent = self.folds_sent.min(self.fold_table.len());
+        let (mut at, mut kept_sent) = (0, 0);
+        self.fold_table.retain(|meta| {
+            let keep = folded.contains(&meta.id);
+            if keep && at < sent {
+                kept_sent += 1;
+            }
+            at += 1;
+            keep
+        });
+        self.folds_sent = kept_sent;
     }
 
     /// Retire one buffer coordinate along with its row and metadata. Both a
@@ -3308,6 +3447,25 @@ impl TerminalGrid {
             self.pen.link = Some(*id);
             return;
         }
+        // A row no line names any more takes the address first: the table
+        // stays the size of what the pane still shows (`prune_tables`).
+        if let Some((at, id)) = self.free_links.pop().and_then(|at| {
+            u32::try_from(at + 1)
+                .ok()
+                .and_then(NonZeroU32::new)
+                .map(|id| (at, id))
+        }) {
+            let uri: Arc<str> = Arc::from(uri);
+            self.links[at] = Arc::clone(&uri);
+            // Once, though the row may be emptied and taken again before
+            // the next delta: the consumer needs its newest address.
+            if at < self.links_sent && !self.links_resent.contains(&at) {
+                self.links_resent.push(at);
+            }
+            self.link_ids.insert(uri, id);
+            self.pen.link = Some(id);
+            return;
+        }
         // Past the ceiling the text still prints — it just prints as text. A
         // program that emits a fresh address per line would otherwise turn a
         // scrollback into a list of strings nobody can see.
@@ -3430,21 +3588,28 @@ impl TerminalGrid {
     /// gets the whole table (see [`Self::all_links`]).
     #[must_use]
     fn fresh_links(&self) -> Vec<(u32, Arc<str>)> {
+        let resent = self
+            .links_resent
+            .iter()
+            .filter_map(|at| self.links.get(*at).map(|uri| (*at, uri)));
         self.links
             .iter()
             .enumerate()
             .skip(self.links_sent)
+            .chain(resent)
+            .filter(|(_, uri)| !uri.is_empty())
             .map(|(at, uri)| (at as u32 + 1, Arc::clone(uri)))
             .collect()
     }
 
     /// The whole table, for the frame that replaces everything a consumer
-    /// holds.
+    /// holds — less the rows emptied for want of a line naming them.
     #[must_use]
     fn all_links(&self) -> Vec<(u32, Arc<str>)> {
         self.links
             .iter()
             .enumerate()
+            .filter(|(_, uri)| !uri.is_empty())
             .map(|(at, uri)| (at as u32 + 1, Arc::clone(uri)))
             .collect()
     }
@@ -3864,6 +4029,9 @@ impl TerminalGrid {
                     self.scroll_wrap.clear();
                     self.scroll_folds.clear();
                     self.scroll_cols.clear();
+                    // The whole history went at once: what it alone named goes
+                    // with it.
+                    self.prune_tables();
                 }
             }
             _ => {}
@@ -6639,5 +6807,154 @@ mod tests {
             "before\nhead\nbody1\nbody2\nafter",
             "an opened fold copies whole"
         );
+    }
+
+    /// The window's budget takes a quiet pane's oldest lines and nothing
+    /// else: the cap the person chose stands, the newest lines stay, a reader
+    /// scrolled back stays on the line they read, and the trim origin the
+    /// window shifts its selection by counts every line that went (t-80604).
+    #[test]
+    fn shedding_history_gives_up_the_oldest_lines_and_keeps_the_cap() {
+        let mut term = Terminal::new(4, 20);
+        for n in 0..40 {
+            term.feed(format!("line{n}\r\n").as_bytes());
+        }
+        let before = term.grid_mut().take_delta().expect("the first frame");
+        let grid = term.grid_mut();
+        let held = grid.scrollback_len();
+        let newest = grid.scrollback_line(held - 1);
+        grid.scroll_view(5);
+        let read = grid.scrollback_line(held - 5);
+
+        assert_eq!(grid.shed_history(12), held - 12);
+        assert_eq!(grid.scrollback_len(), 12);
+        assert_eq!(grid.scrollback_cap(), DEFAULT_SCROLLBACK_LINES);
+        assert_eq!(grid.scrollback_line(11), newest, "the newest line went");
+        assert_eq!(grid.view_offset(), 5);
+        assert_eq!(
+            grid.scrollback_line(12 - 5),
+            read,
+            "the reader was moved off the line they were reading"
+        );
+        assert_eq!(
+            grid.shed_history(40),
+            0,
+            "a pane under its share gave up lines"
+        );
+
+        let frame = grid.take_delta().expect("the shed is news to the window");
+        assert_eq!(frame.scrollback_len, 12);
+        assert_eq!(
+            wire_trimmed(&frame) - wire_trimmed(&before),
+            (held - 12) as u64
+        );
+
+        // Shedding below the reader leaves them on the oldest line kept.
+        grid.scroll_view(20);
+        grid.shed_history(3);
+        assert_eq!(grid.view_offset(), 3);
+    }
+
+    /// A link no line names any more stops holding its address once history
+    /// has turned over, and its number goes to the next new address — which
+    /// the consumer is sent again, since it held the old one. A link still on
+    /// screen keeps its row and its number (t-80604).
+    #[test]
+    fn a_link_nothing_names_gives_its_row_to_the_next_address() {
+        let mut term = Terminal::new(4, 30);
+        term.grid_mut().scrollback_cap = 4;
+        term.feed(b"\x1b]8;;https://gone\x1b\\old\x1b]8;;\x1b\\\r\n");
+        term.feed(b"\x1b]8;;https://kept\x1b\\");
+        let _ = term.grid_mut().take_delta();
+        // The pen still holds `kept`; `gone` scrolls through the whole history.
+        for n in 0..12 {
+            term.feed(format!("filler{n}\r\n").as_bytes());
+        }
+        let grid = term.grid_mut();
+        let gone = NonZeroU32::new(1).expect("one");
+        let kept = NonZeroU32::new(2).expect("two");
+        assert_eq!(
+            grid.link_uri(gone),
+            Some(""),
+            "an address nothing names was kept"
+        );
+        assert_eq!(grid.link_uri(kept), Some("https://kept"));
+        let all: Vec<u32> = grid.snapshot().links.iter().map(|(id, _)| *id).collect();
+        assert_eq!(all, vec![2], "a full frame named an emptied row");
+        let _ = grid.take_delta();
+
+        term.feed(b"\x1b]8;;https://fresh\x1b\\new\x1b]8;;\x1b\\");
+        let grid = term.grid_mut();
+        let reused = grid.row_cells(grid.cursor().0)[0]
+            .style
+            .link
+            .expect("the new address is a link");
+        assert_eq!(reused, gone, "the emptied row was not handed on");
+        assert_eq!(grid.link_uri(reused), Some("https://fresh"));
+        let frame = grid.take_delta().expect("a frame");
+        assert!(!frame.full);
+        assert_eq!(frame.links, vec![(1, Arc::from("https://fresh"))]);
+    }
+
+    /// A row emptied and taken again twice before the consumer's next delta
+    /// is sent once, with its newest address (t-80604).
+    #[test]
+    fn a_row_taken_twice_between_deltas_is_sent_once() {
+        let mut term = Terminal::new(4, 30);
+        term.grid_mut().scrollback_cap = 4;
+        term.feed(b"\x1b]8;;https://gone\x1b\\old\x1b]8;;\x1b\\\r\n");
+        let _ = term.grid_mut().take_delta();
+        for address in ["first", "second"] {
+            for n in 0..12 {
+                term.feed(format!("filler{n}\r\n").as_bytes());
+            }
+            term.feed(format!("\x1b]8;;https://{address}\x1b\\new\x1b]8;;\x1b\\\r\n").as_bytes());
+        }
+        let frame = term.grid_mut().take_delta().expect("a frame");
+        assert!(!frame.full);
+        assert_eq!(frame.links, vec![(1, Arc::from("https://second"))]);
+    }
+
+    /// A pane the window's budget cuts far under its cap sweeps its tables
+    /// at the cut, not a cap's worth of lines later (t-80604).
+    #[test]
+    fn a_pane_cut_under_its_cap_sweeps_its_tables_at_the_cut() {
+        let mut term = Terminal::new(4, 30);
+        term.grid_mut().scrollback_cap = 2 * MIN_SCROLLBACK_LINES;
+        term.feed(b"\x1b]8;;https://gone\x1b\\old\x1b]8;;\x1b\\\r\n");
+        let mut text = String::new();
+        for n in 0..MIN_SCROLLBACK_LINES + 500 {
+            text.push_str(&format!("filler{n}\r\n"));
+        }
+        term.feed(text.as_bytes());
+        let grid = term.grid_mut();
+        let gone = NonZeroU32::new(1).expect("one");
+        assert_eq!(grid.link_uri(gone), Some("https://gone"));
+        assert!(grid.shed_history(100) >= MIN_SCROLLBACK_LINES);
+        assert_eq!(
+            grid.link_uri(gone),
+            Some(""),
+            "a pane cut to a twentieth of its cap kept an address nothing names"
+        );
+    }
+
+    /// A fold region whose rows all left history leaves the table, so the
+    /// table's ceiling counts what the pane still holds; the open region and
+    /// the ones on screen stay (t-80604).
+    #[test]
+    fn a_fold_nothing_holds_leaves_the_table() {
+        let mut term = Terminal::new(4, 30);
+        term.grid_mut().scrollback_cap = 4;
+        term.feed(b"\x1b]7788;begin;1;expanded;\x1b\\head\r\nbody\r\n\x1b]7788;end;1\x1b\\");
+        for n in 0..12 {
+            term.feed(format!("filler{n}\r\n").as_bytes());
+        }
+        term.feed(b"\x1b]7788;begin;2;expanded;\x1b\\open\r\n");
+        let ids: Vec<u32> = term.grid().fold_table.iter().map(|meta| meta.id).collect();
+        assert_eq!(ids, vec![2]);
+        assert!(term.grid().folds_sent <= term.grid().fold_table.len());
+        term.feed(b"\x1b[3J");
+        let ids: Vec<u32> = term.grid().fold_table.iter().map(|meta| meta.id).collect();
+        assert_eq!(ids, vec![2], "the open region left with the history");
     }
 }

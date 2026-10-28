@@ -1986,6 +1986,20 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     return here;
   }
 
+  /* History was trimmed: every hit moves up with its text, the way the
+   * selection does, and a hit on a line that went goes with it. The current
+   * one stays current, or passes to the oldest hit left. The model only —
+   * the next paint indexes and draws them (`hitsMoved`). */
+  let hitsMoved = false;
+  function shiftHits(lines) {
+    if (!(lines > 0) || hits.length === 0) return;
+    const before = hits.slice(0, Math.max(hitAt, 0)).filter((hit) => hit.line < lines).length;
+    const current = hits[hitAt];
+    hits = hits.filter((hit) => hit.line >= lines).map((hit) => ({ ...hit, line: hit.line - lines }));
+    hitAt = hits.length === 0 ? -1 : current === undefined || current.line < lines ? 0 : hitAt - before;
+    hitsMoved = true;
+  }
+
   /* What the metrics in `cell` were taken under, so they are not taken again
    * under the same thing. Empty until a measurement has actually landed. */
   let measuredUnder = "";
@@ -2746,6 +2760,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     const trimmed = delta.scrollback_trimmed ?? scrollbackTrimmed;
     if (trimmed !== null && scrollbackTrimmed !== null) {
       selection.shift(trimmed - scrollbackTrimmed);
+      shiftHits(trimmed - scrollbackTrimmed);
     }
     scrollbackTrimmed = trimmed;
 
@@ -2845,6 +2860,10 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
    * few tabs open it is felt as typing lag. */
   function paint() {
     if (host.hidden || paintPaused) return;
+    if (hitsMoved) {
+      indexHits();
+      behindAll = true;
+    }
     repaint();
     applyFolds();
     if (caretWanted === null) return;
@@ -3346,6 +3365,16 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
    * Every road that changes what is found ends here rather than each doing its
    * own bookkeeping — a search, a step, a case toggle, a close. */
   function settleHits() {
+    indexHits();
+    // Every row's marks may have changed, and the run cache compares the
+    // classes a mark puts on a run — so a repaint from the model is what makes
+    // the highlight appear, and it repaints only the runs that differ.
+    behindAll = true;
+    repaint();
+  }
+
+  function indexHits() {
+    hitsMoved = false;
     hitsByLine = new Map();
     for (const [at, hit] of hits.entries()) {
       const here = hitsByLine.get(hit.line) ?? [];
@@ -3361,11 +3390,6 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
             at: hitAt + 1,
             count: hits.length >= TERM_SEARCH_MAX ? `${TERM_SEARCH_MAX}+` : hits.length,
           });
-    // Every row's marks may have changed, and the run cache compares the
-    // classes a mark puts on a run — so a repaint from the model is what makes
-    // the highlight appear, and it repaints only the runs that differ.
-    behindAll = true;
-    repaint();
   }
 
   async function runTermFind(step) {

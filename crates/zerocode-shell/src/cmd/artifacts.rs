@@ -53,6 +53,7 @@ pub(crate) fn artifacts_list(filter: artifact_runtime::Filter) -> Result<Artifac
             width: limits.thumb_width,
             height: limits.thumb_height,
             queue_max: limits.thumb_queue_max,
+            cache_bytes: limits.preview_cache_bytes,
         },
     })
 }
@@ -216,6 +217,10 @@ pub(crate) struct ThumbTable {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) queue_max: usize,
+    /// The preview cache's byte ceiling — the store's own LRU holds the same
+    /// one — so the window's copy is bounded by size and not by count alone
+    /// (t-80604).
+    pub(crate) cache_bytes: u64,
 }
 
 /// The snapshots kept for one page or document (t-3233 §5), oldest first —

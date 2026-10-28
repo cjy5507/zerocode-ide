@@ -1679,6 +1679,40 @@ export async function testArtifactWordFacedCards(page, ok) {
     seen.drawer && seen.drawerAsks === "shot-03", JSON.stringify(seen));
 }
 
+/* 미리보기 캐시는 개수(토큰 120장)만 세서, 스크린숏이 많은 카탈로그에서는 원본 data URL을
+ * 120장 몫(한 장 최대 4 MiB)까지 렌더러에 들고 있었다(t-80604). 목록이 본체 캐시의 바이트 상한
+ * (`thumb.cache_bytes`)을 실어 보내고, 창의 캐시는 그 크기 안에서 오래된 것부터 놓는다 — 상한보다
+ * 큰 한 장은 보여 주되 기억하지 않는다. */
+export async function testArtifactPreviewBytes(page, ok) {
+  await installHarnessWaits(page);
+  const seen = await page.evaluate(async () => {
+    const saved = { preview: window.__ANSWER__.artifact_preview, thumb: artifactListing.thumb };
+    const picture = (id, length) => ({ kind: "image", data_url: `data:image/png;base64,${id.padEnd(length, "A")}`,
+      bytes: length, truncated: false });
+    const sizes = { a: 400, b: 400, c: 400, huge: 5000 };
+    window.__ANSWER__.artifact_preview = (args) => picture(args.id, sizes[args.id]);
+    artifactPreviews.clear();
+    artifactListing.thumb = { queue_max: 4, cache_bytes: 1000 };
+    for (const id of ["a", "b", "c"]) await askArtifactPreview(id);
+    const kept = [...artifactPreviews.keys()].join(",");
+    const huge = await askArtifactPreview("huge");
+    const out = {
+      kept,
+      afterHuge: [...artifactPreviews.keys()].join(","),
+      hugeShown: typeof huge?.data_url === "string" && huge.data_url.length > 5000,
+      held: [...artifactPreviews.values()].reduce((sum, one) => sum + artifactPreviewSize(one), 0),
+    };
+    artifactPreviews.clear();
+    window.__ANSWER__.artifact_preview = saved.preview;
+    artifactListing.thumb = saved.thumb;
+    return out;
+  });
+  ok("the window's preview cache holds the store's byte ceiling, letting the oldest go first",
+    seen.kept === "b,c" && seen.held <= 1000, JSON.stringify(seen));
+  ok("…and a preview larger than the ceiling is shown but not kept",
+    seen.hugeShown && seen.afterHuge === "b,c", JSON.stringify(seen));
+}
+
 /* 다시 찾기(2026-09-28 항목 6): 프로젝트·에이전트·기간(오늘 · 이번 주 · 전체)으로
  * 좁히고, 카드는 날로 무리를 짓는다(오늘 · 이번 주 · 이전). 창이 카탈로그를 다
  * 들고 있으면 거르기는 창 안에서 하고 묻지 않는다. 표 상한이 답을 잘랐으면

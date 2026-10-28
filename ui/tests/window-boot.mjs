@@ -7,7 +7,11 @@ import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { standIpcCensus } from "./ipc-census.mjs";
 import { PLATFORM_OVERRIDE, PRIMARY_EVENT, reportedPlatformScript } from "./test-platform.mjs";
-const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// Another tree's `ui/` to serve in place of this one — a census comparing two
+// releases' pages under the same harness (memory-census.mjs, t-80604).
+const UI = process.env.ZEROCODE_WINDOW_UI
+  ? resolve(process.env.ZEROCODE_WINDOW_UI)
+  : resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /* The primary modifier as a synthetic-event spread — ⌘ on macOS, Ctrl
  * elsewhere (test-platform.mjs). `shell.js` reads the same platform; a test
  * that builds a ⌘/Ctrl event spreads `window.__TEST_PRIMARY_EVENT__` in. */
@@ -2465,11 +2469,13 @@ export async function waitBootSettled(page) {
  *            a fresh one otherwise.
  *   before — a hand on the page after the backend stands and before the
  *            window boots: the init script a fixture needs. */
-export async function openWindowTestPage(browser, origin, { faults = [], before = null } = {}) {
+export async function openWindowTestPage(browser, origin, { faults = [], before = null, context: shape = {} } = {}) {
   // A context of its own, not `browser.newPage()`: a context a page owns
   // refuses `context.newPage()`, and the axe check opens its blank page that
   // way ("Please use browser.newContext()"). The context leaves with the page.
-  const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, reducedMotion: WINDOW_MOTION_REST });
+  // `shape` adds to the context — a census draws at the person's device scale.
+  const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, reducedMotion: WINDOW_MOTION_REST,
+    ...shape });
   const page = await context.newPage();
   page.on("close", () => context.close().catch(() => {}));
   page.on("pageerror", (error) => faults.push(error?.stack ?? String(error)));

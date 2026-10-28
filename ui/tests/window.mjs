@@ -28,7 +28,7 @@ import { frameBudgetHolds, loadNote } from "./machine-load.mjs";
 
 import { testVaultSubagents } from "./vault-subagents.mjs";
 import { testKnowledgeLive } from "./knowledge-live.mjs";
-import { testArtifactBand, testArtifactBeside, testArtifactFollowed, testArtifactOtherProject, testArtifactCatalog, testArtifactChrome, testArtifactFirstScreen, testArtifactNewMenu, testArtifactPages, testArtifactProvenance, testArtifactRecall, testArtifactStudio, testArtifactStudioLayout, testArtifactStudioOwnership, testArtifactWordFacedCards } from "./artifact-gallery.mjs";
+import { testArtifactBand, testArtifactBeside, testArtifactFollowed, testArtifactOtherProject, testArtifactCatalog, testArtifactChrome, testArtifactFirstScreen, testArtifactNewMenu, testArtifactPages, testArtifactProvenance, testArtifactRecall, testArtifactStudio, testArtifactStudioLayout, testArtifactStudioOwnership, testArtifactWordFacedCards, testArtifactPreviewBytes } from "./artifact-gallery.mjs";
 
 import { testLedgerPoll } from "./ledger-poll.mjs";
 import { testUsageGoogleLogin, testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
@@ -226,6 +226,7 @@ const artifactGallery = async (page, ok) => {
   await testArtifactPages(page, ok);
   await testArtifactFirstScreen(page, ok);
   await testArtifactWordFacedCards(page, ok);
+  await testArtifactPreviewBytes(page, ok);
   await testArtifactRecall(page, ok);
   await testArtifactProvenance(page, ok);
   await testArtifactStudio(page, ok);
@@ -7433,6 +7434,18 @@ const termFind = await page.evaluate(async () => {
   await feed({ full: true, rows: [row(0, "abc def ghi")], scrollback_len: 100, view_offset: 30 });
   seen.painted = [...view.pre.querySelectorAll(".term-hit")].map((one) => one.textContent);
 
+  // History trimmed under an open bar (t-80604): 20 lines leave the top and
+  // the reader stays on the same text, so line 70 is now line 50 and the hit
+  // has to move with it. Then the hit's own line leaves, and the hit goes.
+  const marked = () => [...view.pre.querySelectorAll(".term-hit")].map((one) => one.textContent);
+  await feed({ full: true, rows: [row(0, "abc def ghi")], scrollback_len: 100, view_offset: 30, scrollback_trimmed: 0 });
+  await feed({ full: true, rows: [row(0, "abc def ghi")], scrollback_len: 100, view_offset: 50, scrollback_trimmed: 20 });
+  seen.paintedAfterTrim = marked();
+  seen.countAfterTrim = bar.querySelector(".file-find-count").textContent;
+  await feed({ full: true, rows: [row(0, "abc def ghi")], scrollback_len: 100, view_offset: 50, scrollback_trimmed: 80 });
+  seen.paintedAfterGone = marked();
+  seen.countAfterGone = bar.querySelector(".file-find-count").textContent;
+
   // Typing into the bar must not also type at the shell.
   const before = window.__COUNTS__.term_text ?? 0;
   field.dispatchEvent(new KeyboardEvent("keydown", { key: "e", bubbles: true }));
@@ -7457,6 +7470,15 @@ ok(
     termFind.landedOn === 40 &&
     termFind.afterNext === 12 &&
     termFind.countAfterNext === "1/2",
+  JSON.stringify(termFind),
+);
+ok(
+  "a hit moves up with its text when history is trimmed under the bar, and goes with its line",
+  JSON.stringify(termFind.paintedAfterTrim) === JSON.stringify(["def"]) &&
+    termFind.countAfterTrim === "1/1" &&
+    termFind.paintedAfterGone.length === 0 &&
+    termFind.countAfterGone !== "1/1" &&
+    termFind.countAfterGone !== "",
   JSON.stringify(termFind),
 );
 ok(

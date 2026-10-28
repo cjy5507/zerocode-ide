@@ -182,6 +182,52 @@ fn a_full_history_costs_its_text_not_a_screen_cell_per_column() {
     );
 }
 
+/// What the window's history budget gives back (t-80604): a pane at the
+/// deepest history a person may choose, shed to the grid's default the way
+/// `history_budget` sheds a quiet pane, returns all but the default's share,
+/// and what it still holds is the default's bill. The numbers ride the
+/// failure message and `--nocapture`, for the task's before/after table.
+#[test]
+fn a_deep_pane_shed_to_the_default_gives_back_all_but_the_defaults_share() {
+    let _turn = measuring();
+    let before = live_bytes();
+    let mut terminal = inline_pane(MAX_SCROLLBACK_LINES + ROWS, MAX_SCROLLBACK_LINES);
+    let deep = live_bytes().saturating_sub(before);
+    let dropped = terminal.grid_mut().shed_history(DEFAULT_SCROLLBACK_LINES);
+    let shed = live_bytes().saturating_sub(before);
+
+    let grid = terminal.grid();
+    assert_eq!(dropped, MAX_SCROLLBACK_LINES - DEFAULT_SCROLLBACK_LINES);
+    assert_eq!(grid.scrollback_len(), DEFAULT_SCROLLBACK_LINES);
+    assert_eq!(
+        grid.scrollback_cap(),
+        MAX_SCROLLBACK_LINES,
+        "the person's depth moved"
+    );
+    let shown: usize = (0..DEFAULT_SCROLLBACK_LINES)
+        .map(|index| grid.scrollback_line(index).chars().count())
+        .sum();
+    let screen = ROWS * COLS * size_of::<Cell>();
+    let bill = HISTORY_BYTES_PER_CHAR * shown + HISTORY_BYTES_PER_LINE * DEFAULT_SCROLLBACK_LINES;
+    let mib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
+    let said = format!(
+        "{MAX_SCROLLBACK_LINES} lines held {:.1} MiB; shed to {DEFAULT_SCROLLBACK_LINES} lines \
+         it holds {:.1} MiB (bill {:.1} MiB for the history plus screens of {:.1} MiB)",
+        mib(deep),
+        mib(shed),
+        mib(bill),
+        mib(screen * 3)
+    );
+    eprintln!("{said}");
+    // The history's bill, plus the screens a pane holds whatever its history:
+    // the live one, the sent copy and the queues' spare room.
+    assert!(shed <= bill + screen * 3, "{said}");
+    assert!(
+        shed * 4 <= deep,
+        "shedding gave back less than three quarters: {said}"
+    );
+}
+
 /// A pane draws on one screen of cells; the other screens it keeps cost what
 /// they show.
 ///
