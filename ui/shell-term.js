@@ -4560,14 +4560,13 @@ function raiseAsk(ask) {
     askQueue.pop();
     askQueue.unshift(ask, activeAsk);
     showNextAsk();
-  } else if (activeAsk) {
-    // Behind a question already on screen: the count says so and nothing else
-    // moves. A full repaint here would rebuild the buttons an answer in flight
-    // was pressed on, which is how one answer becomes two.
-    paintAskCount();
-  } else {
-    showNextAsk();
+    return true;
   }
+  // Behind a question already on screen: the count says so and nothing else
+  // moves. A full repaint here would rebuild the buttons an answer in flight
+  // was pressed on, which is how one answer becomes two.
+  if (activeAsk) paintAskCount();
+  else showNextAsk();
   return true;
 }
 
