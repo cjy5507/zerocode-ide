@@ -2581,3 +2581,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
 /// The tier-1 trim priced at the session model's cache rates (t-78937 Z1).
 #[cfg(test)]
 mod microcompact_price_tests;
+
+/// The gates' context figure in the provider's own count (t-78937 Z2).
+#[cfg(test)]
+mod context_anchor_tests;
