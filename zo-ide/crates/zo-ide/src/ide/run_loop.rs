@@ -100,8 +100,9 @@ pub async fn run(
 /// on: left parked it held the turn forever (a headless `zo --plain` under
 /// `workspace-write` sat on a `bash` approval for six minutes in a benchmark
 /// while Claude Code and codex finished; 2026-09-02). A permission is granted
-/// once when the mode allows writes at all and refused under read-only; a
-/// question has no answer to give and is dismissed. Either way the turn goes
+/// once when the mode allows writes at all and refused under read-only — a
+/// call only a person may allow is refused whatever the mode; a question has
+/// no answer to give and is dismissed. Either way the turn goes
 /// on, and the note says what was decided in the person's absence.
 fn decide_unattended<W: Write>(
     prompt: PendingPrompt,
@@ -109,6 +110,21 @@ fn decide_unattended<W: Write>(
     renderer: &mut Renderer<W>,
 ) -> Option<PendingPrompt> {
     match prompt {
+        // A tool call only a person may allow offers no lasting allow
+        // (t-80732: a kill the guard puts to a person). Nobody is here to
+        // allow it, so it is refused — never approved once in their absence.
+        PendingPrompt::Permission(inner)
+            if inner.question.is_none()
+                && !inner
+                    .choices
+                    .iter()
+                    .any(|choice| choice.decision == runtime::message_stream::PermissionDecision::AllowAlways) =>
+        {
+            let tool = inner.tool_name.clone();
+            PendingPrompt::Permission(inner).dismiss();
+            note(renderer, &format!("unattended: {tool} denied (only a person may allow it)"));
+            None
+        }
         PendingPrompt::Permission(inner) => {
             let tool = inner.tool_name.clone();
             let writes = !matches!(mode, core_types::PermissionMode::ReadOnly);

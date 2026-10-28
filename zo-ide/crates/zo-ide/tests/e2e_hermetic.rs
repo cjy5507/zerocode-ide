@@ -8898,6 +8898,103 @@ async fn e2e_headless_background_exit_reaches_the_model_at_a_tool_boundary() {
     assert!(requests[2].contains("headless-tail") && requests[2].contains("use TaskOutput"));
 }
 
+/// t-80732: the 10-28 shape — an example `pkill -f` in backticks inside a
+/// double-quoted line — aimed at a process the window started is refused by
+/// zo with its reason, in danger-full-access and with nobody to ask, and the
+/// process lives. The test plays the window: it names itself in
+/// `ZEROCODE_WINDOW_PID`, so the `sleep` it started is one of the window's
+/// processes and zo, its other child, is the pane.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_pkill_aimed_at_the_window_is_refused_and_its_target_lives() {
+    let layout = Layout::new();
+    // A duration no other process carries: the pattern can only match the bait.
+    let marker = format!("86400.{}7", std::process::id());
+    let mut bait = std::process::Command::new("sleep")
+        .arg(&marker)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the bait starts");
+    let window = std::process::id().to_string();
+    let service = ScriptedAnthropicService::tool_calls(&[
+        ("bash", serde_json::json!({ "command": format!("echo \"stop it with `pkill -f {marker}`\"") })),
+    ], "kill-refused").await.unwrap();
+    let output = run_pipe_with_env(&layout.cwd, &layout.home, &layout.sessions, &layout.state, service.base_url(),
+        &["--plain", "--permission-mode", "danger-full-access"], b"Stop the stray sleep.\n/exit\n",
+        &[("ZEROCODE_WINDOW_PID", window.as_str())]).unwrap();
+    let lived = bait.try_wait().expect("the bait can be asked").is_none();
+    let pid = bait.id();
+    let _ = bait.kill();
+    let _ = bait.wait();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(lived, "the bait lived through the session");
+    let requests = service.request_bodies().await;
+    assert!(
+        requests.iter().any(|body| body.contains("refused to run") && body.contains(&format!("pid {pid}"))),
+        "the model heard the refusal and what it would have hit: {requests:?}"
+    );
+}
+
+/// t-80732: a kill whose pid is known only when it runs is a question for a
+/// person, and a headless `--plain` run has nobody to answer it — so it is
+/// refused, never approved the way an unattended run approves an ordinary
+/// escalation once. The test plays the window as above; the bait's pid is
+/// read from a file by the command, so only the shell learns it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_an_unattended_run_refuses_a_kill_only_a_person_may_allow() {
+    let layout = Layout::new();
+    let marker = format!("86400.{}8", std::process::id());
+    let mut bait = std::process::Command::new("sleep")
+        .arg(&marker)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the bait starts");
+    let pid_file = layout.state.join("bait.pid");
+    std::fs::write(&pid_file, bait.id().to_string()).expect("write the bait's pid");
+    let window = std::process::id().to_string();
+    let service = ScriptedAnthropicService::tool_calls(&[
+        ("bash", serde_json::json!({ "command": format!("kill $(cat {})", pid_file.display()) })),
+    ], "kill-unanswered").await.unwrap();
+    let output = run_pipe_with_env(&layout.cwd, &layout.home, &layout.sessions, &layout.state, service.base_url(),
+        &["--plain", "--permission-mode", "danger-full-access"], b"Stop the stray sleep.\n/exit\n",
+        &[("ZEROCODE_WINDOW_PID", window.as_str())]).unwrap();
+    let lived = bait.try_wait().expect("the bait can be asked").is_none();
+    let _ = bait.kill();
+    let _ = bait.wait();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(lived, "nobody said yes, so the bait lived");
+    let requests = service.request_bodies().await;
+    assert!(
+        requests.iter().any(|body| body.contains("no person said yes")),
+        "the model heard why it was refused: {requests:?}"
+    );
+}
+
+/// t-80732: the refusal above is the kill question's alone — an unattended
+/// `--plain` run under workspace-write still approves an ordinary escalation
+/// once, as it did before.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_an_unattended_run_still_approves_an_ordinary_escalation_once() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::tool_calls(&[
+        ("bash", serde_json::json!({ "command": "touch approved-once.txt && printf approved-once-ran" })),
+    ], "ordinary-approved").await.unwrap();
+    let output = run_pipe(&layout.cwd, &layout.home, &layout.sessions, &layout.state, service.base_url(),
+        &["--plain", "--permission-mode", "workspace-write"], b"Touch the marker.\n/exit\n").unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let requests = service.request_bodies().await;
+    assert!(
+        requests.iter().any(|body| body.contains("approved-once-ran")),
+        "the ordinary call ran: {requests:?}"
+    );
+}
+
 /// t-68408: two zo sessions in one folder never hand each other their plans.
 /// The first writes a plan and leaves it in progress; the second, opened in the
 /// same folder, runs a tool and writes a plan of its own, and is handed none
