@@ -185,6 +185,13 @@ pub struct PromptCacheStats {
     pub context_trims_noted: u64,
     #[serde(default)]
     pub context_trim_tokens_noted: u64,
+    /// Trims the microcompact gate weighed and declined (t-78937), and the
+    /// same by reason (`price`, `token_rule`, `below_floor`). A declined trim
+    /// causes no break row, so this is the only place it shows.
+    #[serde(default)]
+    pub context_trims_declined: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub context_trim_declines: BTreeMap<String, u64>,
     pub completion_cache_hits: u64,
     pub completion_cache_misses: u64,
     pub completion_cache_writes: u64,
@@ -504,30 +511,147 @@ pub struct PromptCacheRecord {
 /// not be priced. Keyed by session id so concurrent sessions/subagents in
 /// one process can never claim each other's credit; a credit whose session
 /// never sends another request idles harmlessly for the process lifetime.
-fn pending_context_trims() -> &'static Mutex<std::collections::HashMap<String, u64>> {
-    static PENDING: std::sync::OnceLock<Mutex<std::collections::HashMap<String, u64>>> = std::sync::OnceLock::new();
+fn pending_context_trims() -> &'static Mutex<std::collections::HashMap<String, PendingContextTrim>> {
+    static PENDING: std::sync::OnceLock<Mutex<std::collections::HashMap<String, PendingContextTrim>>> =
+        std::sync::OnceLock::new();
     PENDING.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Deposit a microcompact's estimated cleared tokens for `session_id`.
-/// Accumulates: two firings before the next request price as one combined
-/// trim, which is what the single following break row actually reflects.
-pub fn note_context_trim(session_id: &str, estimated_tokens_cleared: u64) {
+/// What the compaction planner left for a session's next recorded request.
+#[derive(Debug, Default)]
+struct PendingContextTrim {
+    /// Estimated tokens the firings since the last request cleared, summed.
+    tokens: u64,
+    /// The quote the last of those firings fired on.
+    quote: Option<ContextTrimQuote>,
+    /// Trims the gate weighed and declined since the last request, by reason.
+    declined: BTreeMap<String, u64>,
+}
+
+/// What a microcompact firing was weighed by, as it rides the break row the
+/// firing causes (t-78937): both sides of the trade in the planner's own
+/// unit (`chars / 4`), the tier and context it fired at, the cache rates and
+/// horizon it was priced with, and the outcome.
+///
+/// Every field but the token counts is optional on the wire so a reader of
+/// an older row, or of a quote from a model the price table does not price,
+/// sees nothing rather than a zero that reads as a price.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextTrimQuote {
+    /// Tokens the firing removed from every later request.
+    pub clearable_tokens: u64,
+    /// The transcript from the earliest rewritten message to the end.
+    pub rebilled_tokens: u64,
+    /// What the next request writes back into the cache: the whole
+    /// conversation, counted before the clear.
+    pub resent_tokens: u64,
+    /// Thinking at or after the earliest rewritten message.
+    pub orphaned_thinking_tokens: u64,
+    /// Index of the earliest rewritten message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontier: Option<usize>,
+    /// The microcompact tier the gate compared `context_tokens` against.
+    pub threshold_tokens: u64,
+    /// The context figure the gate compared.
+    pub context_tokens: u64,
+    /// Reading a cached token back, in thousandths of the model's input price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_per_mille: Option<u32>,
+    /// Writing one, at the lifetime the markers asked for, in thousandths of
+    /// the model's input price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_per_mille: Option<u32>,
+    /// That lifetime (`5m`, `1h`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+    /// Requests the firing was given to pay for itself.
+    pub horizon_requests: u32,
+    /// Requests it needed at those rates, rounded up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakeven_requests: Option<u32>,
+    /// Whether the orphaned thinking counted as saved: the model drops thinking
+    /// whose prefix changed.
+    #[serde(default)]
+    pub drops_orphaned_thinking: bool,
+    /// `pays_back`, `token_rule` (an unpriced model, tokens on both sides) or
+    /// `last_resort` (the hard context ceiling, past any price).
+    pub decision: String,
+    /// The provider's count of the last answered request since the last
+    /// compaction, when there is one — the figure the gate stands on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_tokens: Option<u64>,
+    /// The local `chars / 4` estimate of the same request, for comparison.
+    #[serde(default)]
+    pub estimate_tokens: u64,
+    /// The model's context window.
+    #[serde(default)]
+    pub window_tokens: u64,
+    /// The window the compaction tiers are a share of: the model's, capped
+    /// at Claude Code's 650k unless `CLAUDE_CODE_AUTO_COMPACT_WINDOW` says
+    /// otherwise.
+    #[serde(default)]
+    pub compaction_window_tokens: u64,
+    /// Whether `CLAUDE_CODE_AUTO_COMPACT_WINDOW` was set.
+    #[serde(default)]
+    pub compaction_window_env: bool,
+    /// Whether `CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS` was set.
+    #[serde(default)]
+    pub threshold_env: bool,
+    /// The microcompact tier's share of the compaction window, in percent.
+    #[serde(default)]
+    pub microcompact_percent: u64,
+    /// The session model the tiers and prices were read for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// Consecutive firings before this one that did not bring the context
+    /// back under the tier.
+    #[serde(default)]
+    pub microcompact_streak: u64,
+}
+
+/// Deposit a microcompact's estimated cleared tokens for `session_id`, with
+/// the quote it fired on. Accumulates: two firings before the next request
+/// price as one combined trim, which is what the single following break row
+/// actually reflects, and the row keeps the later firing's quote.
+pub fn note_context_trim(
+    session_id: &str,
+    estimated_tokens_cleared: u64,
+    quote: Option<ContextTrimQuote>,
+) {
     if estimated_tokens_cleared == 0 {
         return;
     }
     let mut pending = pending_context_trims()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *pending.entry(session_id.to_string()).or_default() += estimated_tokens_cleared;
+    let entry = pending.entry(session_id.to_string()).or_default();
+    entry.tokens += estimated_tokens_cleared;
+    if quote.is_some() {
+        entry.quote = quote;
+    }
 }
 
-fn take_pending_context_trim(session_id: &str) -> u64 {
+/// Count a trim the gate weighed for `session_id` and declined, under
+/// `reason`. A declined trim causes no break row, so the count rides the
+/// session's next recorded request into its stats instead.
+pub fn note_context_trim_declined(session_id: &str, reason: &str) {
+    let mut pending = pending_context_trims()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *pending
+        .entry(session_id.to_string())
+        .or_default()
+        .declined
+        .entry(reason.to_string())
+        .or_default() += 1;
+}
+
+fn take_pending_context_trim(session_id: &str) -> PendingContextTrim {
     pending_context_trims()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(session_id)
-        .unwrap_or(0)
+        .unwrap_or_default()
 }
 
 /// The attempt each prompt-cache session is currently spending requests on,
@@ -805,7 +929,7 @@ impl PromptCache {
         let request_hash = request_hash_hex(request);
         let mut inner = self.lock();
         adopt_peer_stats(&mut inner);
-        let trimmed_tokens = withdraw_trim_credit(&mut inner);
+        let (trimmed_tokens, trim_quote) = withdraw_trim_credit(&mut inner);
         let previous = inner.previous.clone();
         let fingerprints = RequestFingerprints::from_request(request);
         let mut current = TrackedPromptState::from_fingerprints(&fingerprints, usage);
@@ -891,6 +1015,7 @@ impl PromptCache {
                     model: event.model.clone(),
                     provider: event.provider.clone(),
                     trimmed_tokens_estimate: (trimmed_tokens > 0).then_some(trimmed_tokens),
+                    trim_quote,
                     cache_breakpoints: current.cache_breakpoints.clone(),
                     marker_roles: current.marker_roles.clone(),
                     prev_cache_breakpoints: previous
@@ -2108,18 +2233,23 @@ fn adopt_peer_stats(inner: &mut PromptCacheInner) {
     }
 }
 
-/// Withdraw this session's pending trim credit and bank it in `stats`.
+/// Withdraw this session's pending trim credit and bank it in `stats`, with
+/// the trims the gate declined since the last request.
 ///
 /// Up front, before anything else this request does: the trim fired before
 /// THIS request regardless of whether a break row gets written below, and the
 /// stats pair must count such firings too.
-fn withdraw_trim_credit(inner: &mut PromptCacheInner) -> u64 {
-    let trimmed_tokens = take_pending_context_trim(&inner.config.session_id);
-    if trimmed_tokens > 0 {
+fn withdraw_trim_credit(inner: &mut PromptCacheInner) -> (u64, Option<ContextTrimQuote>) {
+    let pending = take_pending_context_trim(&inner.config.session_id);
+    if pending.tokens > 0 {
         inner.stats.context_trims_noted += 1;
-        inner.stats.context_trim_tokens_noted += trimmed_tokens;
+        inner.stats.context_trim_tokens_noted += pending.tokens;
     }
-    trimmed_tokens
+    for (reason, count) in pending.declined {
+        inner.stats.context_trims_declined += count;
+        *inner.stats.context_trim_declines.entry(reason).or_default() += count;
+    }
+    (pending.tokens, pending.quote)
 }
 
 fn apply_usage_to_stats(
@@ -2883,6 +3013,13 @@ pub struct CacheBreakLedgerRow {
     /// preceded by a trim, and on rows written by builds before this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trimmed_tokens_estimate: Option<u64>,
+    /// The quote the microcompact firing right before this request fired on
+    /// (t-78937) — what `trimmed_tokens_estimate` was weighed
+    /// against, at which rates and over how many requests. `None` on rows not
+    /// preceded by a trim, after a trim with no quote (a retained-original
+    /// compaction), and on rows written by builds before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_quote: Option<ContextTrimQuote>,
     /// Message indices this request marked with `cache_control`, ascending,
     /// and the same for the previous request.
     ///
@@ -5145,8 +5282,21 @@ mod tests {
             cache_creation: None,
         };
         let _ = cache.record_usage(&sample_request_with_messages(&["a", "b"]), &usage_with_read(50_000));
-        note_context_trim(&session, 12_345);
-        note_context_trim("someone-else", 999);
+        let earlier = super::ContextTrimQuote {
+            clearable_tokens: 2_000,
+            decision: "pays_back".to_string(),
+            ..super::ContextTrimQuote::default()
+        };
+        let later = super::ContextTrimQuote {
+            clearable_tokens: 10_345,
+            decision: "last_resort".to_string(),
+            ..super::ContextTrimQuote::default()
+        };
+        // Two firings before one request: the counts add up and the row
+        // keeps the later firing's quote.
+        note_context_trim(&session, 2_000, Some(earlier));
+        note_context_trim(&session, 10_345, Some(later.clone()));
+        note_context_trim("someone-else", 999, None);
         // The trim rewrote history mid-prefix → divergence → break row.
         let _ = cache.record_usage(
             &sample_request_with_messages(&["a", "REWRITTEN", "c"]),
@@ -5158,17 +5308,115 @@ mod tests {
         let rows = read_break_ledger(&PromptCachePaths::for_session(&session).breaks_path);
         let row = rows.last().expect("break row written");
         assert_eq!(row.trimmed_tokens_estimate, Some(12_345), "{row:?}");
+        assert_eq!(row.trim_quote.as_ref(), Some(&later), "{row:?}");
         // Consumed once: the next break carries nothing.
         let _ = cache.record_usage(
             &sample_request_with_messages(&["a", "DIFFERENT", "c"]),
             &usage_with_read(500),
         );
         let rows = read_break_ledger(&PromptCachePaths::for_session(&session).breaks_path);
-        assert_eq!(rows.last().expect("second row").trimmed_tokens_estimate, None);
+        let second = rows.last().expect("second row");
+        assert_eq!(second.trimmed_tokens_estimate, None);
+        assert_eq!(second.trim_quote, None);
         // The other session's deposit is still waiting for ITS next request.
-        assert_eq!(take_pending_context_trim("someone-else"), 999);
+        assert_eq!(take_pending_context_trim("someone-else").tokens, 999);
         std::env::remove_var("ZO_CONFIG_HOME");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A declined trim writes no break row, so the count rides the session's
+    /// next recorded request into its stats, by reason, and only its own
+    /// session's (t-78937).
+    #[test]
+    fn declined_trims_land_in_the_next_requests_stats_by_reason() {
+        use super::{note_context_trim_declined, take_pending_context_trim};
+        let _env = test_env_lock();
+        let home = std::env::temp_dir().join(format!("zo-trim-declined-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("ZO_CONFIG_HOME", &home);
+
+        let session = format!("trim-declined-{}", std::process::id());
+        let other = format!("trim-declined-other-{}", std::process::id());
+        let cache = PromptCache::new(session.clone());
+        let usage = Usage {
+            input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 40_000,
+            output_tokens: 0,
+            output_tokens_details: None,
+            cache_creation: None,
+        };
+        let _ = cache.record_usage(&sample_request_with_messages(&["a"]), &usage);
+        note_context_trim_declined(&session, "price");
+        note_context_trim_declined(&session, "price");
+        note_context_trim_declined(&session, "below_floor");
+        note_context_trim_declined(&other, "price");
+        let _ = cache.record_usage(&sample_request_with_messages(&["a", "b"]), &usage);
+
+        let stats = cache.stats();
+        assert_eq!(stats.context_trims_declined, 3);
+        assert_eq!(stats.context_trim_declines.get("price"), Some(&2));
+        assert_eq!(stats.context_trim_declines.get("below_floor"), Some(&1));
+        assert_eq!(stats.context_trims_noted, 0, "a declined trim is not a firing");
+        assert_eq!(take_pending_context_trim(&other).declined.get("price"), Some(&1));
+        std::env::remove_var("ZO_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Rows and stats written before the quote existed still load, and a row
+    /// without a quote spends no bytes on one; a quote survives the round
+    /// trip (t-78937).
+    #[test]
+    fn a_break_row_from_before_the_trim_quote_still_loads_and_a_quoted_row_round_trips() {
+        let old_row = r#"{"seq":4081,"ts_unix_secs":1793149918,"unexpected":false,"reason":"message payload changed","model_changed":false,"system_changed":false,"tools_changed":false,"messages_changed":true,"messages_truncated":false,"first_divergence_index":102,"prefix_stable_messages":102,"prev_message_count":195,"message_count":198,"prev_cache_read":298762,"cache_read":9691,"cache_creation":209261,"token_drop":289071,"elapsed_secs":142,"model":"claude-opus-5-5","provider":"anthropic","trimmed_tokens_estimate":24761,"cache_breakpoints":[194,196],"prev_cache_breakpoints":[191,194],"marker_roles":["user","user"]}"#;
+        let row: CacheBreakLedgerRow = serde_json::from_str(old_row).expect("an old row loads");
+        assert_eq!(row.trimmed_tokens_estimate, Some(24_761));
+        assert_eq!(row.trim_quote, None);
+        assert!(
+            !serde_json::to_string(&row).expect("serializes").contains("trim_quote"),
+            "a row without a quote spends no bytes on one"
+        );
+        let mut old_stats = serde_json::to_value(super::PromptCacheStats::default()).expect("stats serialize");
+        let fields = old_stats.as_object_mut().expect("stats are an object");
+        fields.remove("context_trims_declined");
+        fields.remove("context_trim_declines");
+        let old_stats: super::PromptCacheStats =
+            serde_json::from_value(old_stats).expect("stats from before the decline count load");
+        assert_eq!(old_stats.context_trims_declined, 0);
+        assert!(old_stats.context_trim_declines.is_empty());
+
+        let quoted = CacheBreakLedgerRow {
+            trimmed_tokens_estimate: Some(24_761),
+            trim_quote: Some(super::ContextTrimQuote {
+                clearable_tokens: 24_761,
+                rebilled_tokens: 98_000,
+                resent_tokens: 210_000,
+                orphaned_thinking_tokens: 31_000,
+                frontier: Some(102),
+                threshold_tokens: 416_000,
+                context_tokens: 420_000,
+                read_per_mille: Some(50),
+                write_per_mille: Some(1_250),
+                ttl: Some("5m".to_string()),
+                horizon_requests: 25,
+                breakeven_requests: Some(70),
+                drops_orphaned_thinking: true,
+                decision: "last_resort".to_string(),
+                provider_tokens: Some(298_762),
+                estimate_tokens: 490_564,
+                window_tokens: 1_000_000,
+                compaction_window_tokens: 650_000,
+                compaction_window_env: false,
+                threshold_env: false,
+                microcompact_percent: 64,
+                model: "claude-opus-5-5".to_string(),
+                microcompact_streak: 1,
+            }),
+            ..CacheBreakLedgerRow::default()
+        };
+        let line = serde_json::to_string(&quoted).expect("serializes");
+        let back: CacheBreakLedgerRow = serde_json::from_str(&line).expect("loads back");
+        assert_eq!(back, quoted);
     }
 
     /// A pure tail append cannot legitimately drop cache reads — the previous
@@ -6469,6 +6717,7 @@ mod tests {
             model: event.model.clone(),
             provider: event.provider.clone(),
             trimmed_tokens_estimate: None,
+            trim_quote: None,
             cache_breakpoints: Vec::new(),
             marker_roles: Vec::new(),
             prev_cache_breakpoints: Vec::new(),

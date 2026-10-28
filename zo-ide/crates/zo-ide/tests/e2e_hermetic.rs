@@ -4507,27 +4507,37 @@ fn command_cell(rows: &[String], head: &str) -> Option<Vec<String>> {
 /// The runtime's housekeeping — `Context trim · cleared N old tool
 /// result(s) …` — used to be a transcript cell (07:20 screenshot, t-3177).
 /// Codex leaves no such line in history. A turn long enough for a real
-/// microcompact to fire (a small compaction window, one sizeable `bash`
-/// result per request, every request after the first held a moment) must
-/// show the trim on the status row while the next request is out, and the
-/// settled transcript must not carry a `Context trim` row.
+/// microcompact to fire, and for the trim to pay for itself (a small
+/// compaction window, large `bash` results early and small ones after,
+/// every request after the first held a moment) must show the trim on the
+/// status row while the next request is out, and the settled transcript
+/// must not carry a `Context trim` row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript() {
     const TRIM: &str = "Context trim";
     const ROWS: u16 = 40;
-    // The microcompact tier is 64% of the compaction window; the trim keeps
-    // the 24 newest results (the model's own window is large) and needs at
-    // least 4k tokens of older ones to clear. Sixty results of ~4.8 KiB
-    // (~1.2k tokens) cross the tier near the fiftieth with some 25 older
-    // results to clear, and stay under the 80% full-compaction ceiling
-    // before and after.
+    // The microcompact tier is 64% of the compaction window and the full
+    // tier 80%; the trim keeps the 24 newest results (the model's own window
+    // is large). The script counts each request as a provider does, so the
+    // gate weighs the trim at the model's cache prices: on Opus 5 a re-write
+    // costs (1.25 − 0.1) ÷ 0.1 = 11.5 times what a cleared token saves per
+    // request, and the clear has until the full tier at the recent pace.
+    //
+    // Thirty results of 150 lines (~1,250 tokens a request) and then 60
+    // lines (~545) cross the tier after the 68th result, at 64,323 counted
+    // from a ~6k first request: the thirty large ones are past the 24 kept,
+    // and clearing them (53,040 of 72,744 by the gate's estimate) pays back
+    // in 4.3 requests against 28.7 left to the full tier (measured,
+    // 2026-10-28). Sixty equal results grew the conversation too fast for
+    // any trim to pay back before the full tier
+    // (`e2e_a_trim_that_cannot_pay_back_is_declined_for_its_price_and_never_drawn`).
     const WINDOW: &str = "100000";
-    const COMMAND: &str = "seq -f 'payload line %g of request {n}' 1 150";
+    const COMMAND: &str = "seq -f 'payload line %g of request {n}' 1 $(( {n} < 30 ? 150 : 60 ))";
     const HOLD: Duration = Duration::from_millis(250);
 
     let layout = Layout::new();
     let service = ScriptedAnthropicService::many_bash(
-        60,
+        72,
         COMMAND,
         HOLD,
         "### Done\n\n- the ladder ran\n",
@@ -4584,6 +4594,87 @@ async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript
         "the commands themselves are still in the transcript: {:#?}",
         screen.transcript()
     );
+}
+
+/// A trim that cannot pay back at the model's cache prices is declined, and
+/// the declined trim draws nothing (t-78937). Results of 240 lines (~1,970
+/// tokens a request) against a 100k compaction window cross the 64% tier
+/// after the 30th, at 64,815 counted, with 7.7 requests left to the 80% full
+/// tier at that pace, and only the 6 results past the 24 kept to clear
+/// (12,600 of 64,988 by the gate's estimate): on Opus 5 that pays back after
+/// 47.8 requests (measured, 2026-10-28). The turn ends after the 34th result
+/// at 72,789, under the full tier, with no `Context trim` in any frame, and
+/// the session's stats count the trims declined for their price.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_trim_that_cannot_pay_back_is_declined_for_its_price_and_never_drawn() {
+    const TRIM: &str = "Context trim";
+    const ROWS: u16 = 40;
+    const WINDOW: &str = "100000";
+    const COMMAND: &str = "seq -f 'payload line %g of request {n}' 1 240";
+    const HOLD: Duration = Duration::from_millis(250);
+
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::many_bash(
+        34,
+        COMMAND,
+        HOLD,
+        "### Done\n\n- the ladder ran\n",
+    )
+    .await
+    .expect("start many-bash script");
+    let args = interactive_args();
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &args,
+        &[("CLAUDE_CODE_AUTO_COMPACT_WINDOW", WINDOW)],
+    )
+    .expect("spawn zo in PTY");
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"Run the payload command many times\r").expect("send prompt");
+    run.wait_for_history_row("the ladder ran", Duration::from_secs(60));
+    wait_until_quiet(&run, Duration::from_millis(300), TEST_TIMEOUT);
+    let capture = run.finish();
+    dump_capture(&capture, "context-trim-declined");
+
+    let mut frame_screen = Screen::new(usize::from(ROWS));
+    for frame in frames(&capture) {
+        frame_screen.feed(frame);
+        assert!(
+            !frame_screen.visible().iter().any(|row| row.contains(TRIM)),
+            "a declined trim was drawn: {:#?}",
+            frame_screen.visible()
+        );
+    }
+    let screen = settled_screen(&capture, ROWS);
+    assert!(
+        !screen.transcript().iter().any(|row| row.contains(TRIM)),
+        "a declined trim reached the transcript: {:#?}",
+        screen.transcript()
+    );
+
+    let (declined, noted) = context_trim_stats(&layout);
+    assert!(declined > 0, "the gate declined no trim for its price");
+    assert_eq!(noted, 0, "a trim ran though none pays back");
+}
+
+/// Trims the gate declined for their price, and trims that ran, summed over
+/// every prompt-cache session the run wrote.
+fn context_trim_stats(layout: &Layout) -> (u64, u64) {
+    let root = layout.home.join("cache").join("prompt-cache");
+    let (mut declined, mut noted) = (0, 0);
+    for entry in fs::read_dir(&root).into_iter().flatten().flatten() {
+        let Ok(text) = fs::read_to_string(entry.path().join("stats.json")) else {
+            continue;
+        };
+        let stats: serde_json::Value = serde_json::from_str(&text).expect("stats.json is JSON");
+        declined += stats["context_trim_declines"]["price"].as_u64().unwrap_or(0);
+        noted += stats["context_trims_noted"].as_u64().unwrap_or(0);
+    }
+    (declined, noted)
 }
 
 /// The capture cut after each synchronised update's end: one slice per frame.
