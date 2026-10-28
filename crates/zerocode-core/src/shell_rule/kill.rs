@@ -4,7 +4,7 @@
 //! Twice on 10-28 an example command in backticks, inside a double-quoted
 //! instruction, ran as a command: `pkill -f` with every word after it taken
 //! as a pattern ended the window, its panes and a build runner. So the calls
-//! are read the way the shell will run them ([`super::script`]) — command
+//! are read the way the shell will run them (`shell_rule::script`) — command
 //! substitutions in double quotes, unquoted here-documents, `sh -c` and
 //! `eval` strings, `xargs` — and a single-quoted example is only letters.
 //!
@@ -23,10 +23,15 @@ use super::parse::WRAPPER_COMMANDS;
 use super::script::{self, Command, Script, Word};
 
 /// How many times an `sh -c` or `eval` string is read inside another before
-/// the rest is called unreadable.
+/// the rest is called unreadable. Chosen, not measured: the incident nested
+/// none, a hand-written script rarely goes past two (`ssh … "bash -c '…'"`),
+/// and each level is read again in full, so the bound keeps a hostile string
+/// from costing the hook its 800 ms.
 const MAX_STRING_DEPTH: usize = 8;
 
-/// The most of a call or a process's name a reason quotes.
+/// The most of a call or a process's name a reason quotes: two 80-column
+/// lines, so the agent's screen shows the reason without the command
+/// burying it. The incident's whole call, `pkill -f zo-step foo`, is 20.
 const QUOTED_CHARS: usize = 160;
 
 /// The variable a ZeroCode window puts in every pane's environment: its own
@@ -42,12 +47,6 @@ pub const TABLE_READ_WALL: Duration = Duration::from_millis(800);
 
 /// How a reason names the window itself.
 const WINDOW_LABEL: &str = "the ZeroCode window";
-
-/// The most a process listing may print before it is called unreadable.
-const LISTING_MAX_BYTES: u64 = 16 * 1024 * 1024;
-
-/// How often a running listing is asked whether it has finished.
-const LISTING_POLL: Duration = Duration::from_millis(5);
 
 /// Wrappers that run the command after them and are not in
 /// [`WRAPPER_COMMANDS`], which the intent classifier reads.
@@ -120,12 +119,14 @@ pub struct ProcessRow {
 }
 
 impl ProcessRow {
-    /// The program's name, as `pgrep` without `-f` matches it: the last part
-    /// of the first word of its command line.
+    /// The program's name, as `pgrep` without `-f` and `killall` match it:
+    /// the last part of the first word of its command line, without the `-`
+    /// a login shell's opens with (`-zsh` is named `zsh`).
     #[must_use]
     pub fn name(&self) -> &str {
         let program = self.command.split_whitespace().next().unwrap_or_default();
-        program.rsplit('/').next().unwrap_or(program)
+        let name = program.rsplit('/').next().unwrap_or(program);
+        name.strip_prefix('-').unwrap_or(name)
     }
 }
 
@@ -228,6 +229,16 @@ impl ProcessTable {
 fn listing(within: Duration) -> Result<(String, u32), String> {
     use std::io::Read as _;
     use std::process::{Command, Stdio};
+
+    /// The most a listing may print before it is called unreadable: about
+    /// 120 times this machine's, measured 10-28 at 140,746 bytes for 793
+    /// processes — room for a machine with ten times the processes and
+    /// command lines ten times as long, never a host's whole memory.
+    const LISTING_MAX_BYTES: u64 = 16 * 1024 * 1024;
+    /// How often a running listing is asked whether it has finished: a
+    /// quarter of the 20 ms the listing took here (five runs, 10-28), so the
+    /// wait past its end is at most 5 ms of the 800 ms wall.
+    const LISTING_POLL: Duration = Duration::from_millis(5);
 
     let mut child = Command::new("ps")
         .args(["-ww", "-eo", "pid=,ppid=,pgid=,command="])
@@ -560,18 +571,23 @@ fn run_text(text: &str, expands: bool, calls: &mut Vec<KillCall>, depth: usize) 
     calls_in(&script::read(text), calls, depth + 1);
 }
 
-/// The letters `echo` or `printf` hands a pipe, when that is all upstream.
+/// The letters `echo` or `printf` hands a pipe, or the here-document a `cat`
+/// without a file hands it (`cat <<'EOF' | bash`), when that is all upstream.
 fn printed_by(upstream: &[Command]) -> Option<(String, bool)> {
     let [source] = upstream else { return None };
     let (program, args) = source.words.split_first()?;
     let program = program_name(program.literal()?);
-    if program != "echo" && program != "printf" {
-        return None;
-    }
     let args: Vec<&Word> = args
         .iter()
         .skip_while(|word| word.literal().is_some_and(|text| text.starts_with('-')))
         .collect();
+    if program == "cat" {
+        // A file operand is what `cat` prints instead; `-` is its input.
+        return (args.is_empty() && !source.here.is_empty()).then(|| (source.here.concat(), false));
+    }
+    if program != "echo" && program != "printf" {
+        return None;
+    }
     let text = args
         .iter()
         .map(|word| word.text.as_str())

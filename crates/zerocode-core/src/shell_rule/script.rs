@@ -12,7 +12,9 @@
 //! rather than gluing two together.
 
 /// How deep substitutions may nest before the rest is no longer read; a
-/// command that deep is read as unreadable ([`Script::overflowed`]).
+/// command that deep is read as unreadable ([`Script::overflowed`]). Chosen,
+/// not measured: a hand-written command rarely nests past three, and the
+/// bound keeps the reader's recursion off the stack's edge for a hostile one.
 const MAX_DEPTH: usize = 32;
 
 /// Words that open or close a compound command in command position; the
