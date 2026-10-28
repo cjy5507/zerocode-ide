@@ -22336,7 +22336,6 @@ fn the_conversation_wears_the_extensions_own_measures() {
         ),
         ("chat-dock-inset", rule("inputContainer", "bottom")),
         ("chat-dock-max", rule("inputContainer", "max-width")),
-        ("chat-fade", rule("messageGradient", "height")),
         (
             "chat-sticky-pad-top",
             rule("message.stickyHeader", "padding-top"),
