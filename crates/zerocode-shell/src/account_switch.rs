@@ -159,7 +159,7 @@ pub(crate) fn person_pick(dir: &Path) -> Option<PersonPick> {
 
 /// Write the person's pick down — or take it away, for `None`: a pick of
 /// the machine's own login, or a default some other road moved.
-fn remember_pick(dir: &Path, pick: Option<&PersonPick>) -> Result<(), String> {
+pub(crate) fn remember_pick(dir: &Path, pick: Option<&PersonPick>) -> Result<(), String> {
     let Some(pick) = pick else {
         return match std::fs::remove_file(pick_file(dir)) {
             Err(why) if why.kind() != std::io::ErrorKind::NotFound => {

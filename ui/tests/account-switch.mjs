@@ -305,6 +305,44 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
       /고른|pick/i.test(picked.next) && picked.applies === 0,
     JSON.stringify(picked),
   );
+  // 쉬운 말(t-80303 ④): 「벽」은 코드베이스 말이라 화면 문구에서 뺀다 — 한도라고 쓴다.
+  ok(
+    "the picked-account words say 한도, never 벽 (t-80303)",
+    !/벽/.test(picked.said) && !/벽/.test(picked.next) && /한도/.test(picked.said) && /한도/.test(picked.next),
+    JSON.stringify(picked),
+  );
+  // 상태 바(t-80303 ⑤): 고른 계정이 머무는 동안 「다음 B 80%」는 곧 옮긴다는 뜻으로
+  // 읽히므로 서지 않는다 — 고른 조각 하나가 그 자리에 선다.
+  ok(
+    "while a picked account is kept the bar shows no 「다음 계정」 piece beside it (t-80303)",
+    !/다음|next/i.test(picked.next) && !/80%/.test(picked.next) && /고른|pick/i.test(picked.next),
+    JSON.stringify(picked),
+  );
+
+  // 고른 계정의 표시는 90% 아래에서도 보인다(t-80303 ⑥): 활성 계정 행이 「몇 시에 직접
+  // 골랐고 한도까지 유지된다」고 말한다. 자동 전환이 꺼져 있거나 고른 적이 없으면 말하지 않는다.
+  const pickedRow = await page.evaluate(async ({ asRoom, asOff, asNone }) => {
+    const read = async (report) => {
+      window.__ACCOUNT_USAGE__ = report;
+      showSettingsPane("provider-accounts");
+      await refreshClaudeAccountUsage(false);
+      const gauge = (id) => document.querySelector(`.account-gauge[data-account="${id}"]`)?.textContent ?? "";
+      return { active: gauge("a-fixture"), other: gauge("b-fixture") };
+    };
+    return { room: await read(asRoom), off: await read(asOff), none: await read(asNone) };
+  }, {
+    asRoom: plan("auto", { kind: "stay", why: "room" }, "tok-room", { pickedAtMs: Date.now() - 60_000 }),
+    asOff: plan("off", { kind: "stay", why: "off" }, "tok-off-pick", { pickedAtMs: Date.now() - 60_000 }),
+    asNone: plan("auto", { kind: "stay", why: "room" }, "tok-room-none"),
+  });
+  const pickedWords = /직접 고름|picked by you/i;
+  ok(
+    "a pick shows on the active row below the warn line, only there, only while the switch is on (t-80303)",
+    pickedWords.test(pickedRow.room.active) && /한도|limit/i.test(pickedRow.room.active) &&
+      !pickedWords.test(pickedRow.room.other) && !pickedWords.test(pickedRow.off.active) &&
+      !pickedWords.test(pickedRow.none.active),
+    JSON.stringify(pickedRow),
+  );
 
   // A refused apply (the situation changed) surfaces as an error and the
   // window re-reads the accounts rather than pretending.

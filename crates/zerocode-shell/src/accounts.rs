@@ -1696,7 +1696,7 @@ pub fn add_account(
 ) -> Result<AccountStore, String> {
     let id = new_id(now);
     let dir = account_dir(local_data_root, &id).ok_or("계정을 저장할 위치를 찾지 못했습니다")?;
-    let result = add_into(config_root, program, &id, &dir, now);
+    let result = add_into(config_root, local_data_root, program, &id, &dir, now);
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1705,6 +1705,7 @@ pub fn add_account(
 
 fn add_into(
     config_root: &Path,
+    local_data_root: &Path,
     program: &str,
     id: &str,
     dir: &Path,
@@ -1735,13 +1736,22 @@ fn add_into(
         config_dir: dir.to_string_lossy().into_owned(),
         added_at: now,
     });
-    // The first account added becomes the selected one; a later one does not
-    // steal the selection out from under a running window.
+    select_first_added(config_root, local_data_root, &mut store, id)?;
+    Ok(store)
+}
+
+/// The first account added becomes the selected one; a later one does not
+/// steal the selection out from under a running window.
+fn select_first_added(
+    config_root: &Path,
+    _local_data_root: &Path,
+    store: &mut AccountStore,
+    id: &str,
+) -> Result<(), String> {
     if store.selection.active.is_none() {
         store.selection.active = Some(id.to_string());
     }
-    write_store(config_root, &store)?;
-    Ok(store)
+    write_store(config_root, store)
 }
 
 /// Whether a directory's login still WORKS, asked of the CLI itself.
@@ -3513,6 +3523,115 @@ JSON
         .expect("write store");
         remove_account(config.path(), local_data.path(), "a-managed").expect("remove account");
         assert!(!managed.exists(), "the app-owned account home was retained");
+    }
+
+    /// The person's pick (t-78096) belongs to an account in the store. The
+    /// roads that end the account, or hand the first one the selection, end
+    /// the pick with them (t-80303): a stale file is ignored while the ids
+    /// differ, but it should not wait on disk for the day they match.
+    fn picked_store(config: &Path, local_data: &Path, ids: &[&str], active: Option<&str>) {
+        let account = |id: &str| ClaudeAccount {
+            id: id.to_string(),
+            email: format!("{id}@example.com"),
+            config_dir: account_dir(local_data, id)
+                .expect("safe id")
+                .to_string_lossy()
+                .into_owned(),
+            added_at: 1,
+            ..ClaudeAccount::default()
+        };
+        write_store(
+            config,
+            &AccountStore {
+                accounts: ids.iter().map(|id| account(id)).collect(),
+                selection: AccountSelection {
+                    active: active.map(str::to_string),
+                    system_default: false,
+                },
+            },
+        )
+        .expect("write store");
+    }
+
+    fn pick_of(account: &str) -> crate::account_switch::PersonPick {
+        crate::account_switch::PersonPick {
+            account: account.to_string(),
+            at_ms: 1_700_000_000_000,
+        }
+    }
+
+    #[test]
+    fn removing_the_picked_account_takes_the_pick_with_it_and_another_leaves_it() {
+        let config = tempfile::tempdir().expect("no config dir");
+        let local_data = tempfile::tempdir().expect("no local data dir");
+        picked_store(
+            config.path(),
+            local_data.path(),
+            &["a-one", "a-two"],
+            Some("a-one"),
+        );
+        crate::account_switch::remember_pick(local_data.path(), Some(&pick_of("a-one")))
+            .expect("write the pick");
+
+        remove_account(config.path(), local_data.path(), "a-two").expect("remove the other");
+        assert_eq!(
+            crate::account_switch::person_pick(local_data.path()),
+            Some(pick_of("a-one")),
+            "removing another account ended the pick"
+        );
+
+        remove_account(config.path(), local_data.path(), "a-one").expect("remove the picked");
+        assert_eq!(
+            crate::account_switch::person_pick(local_data.path()),
+            None,
+            "the pick of a removed account stayed on disk"
+        );
+        assert!(
+            !local_data
+                .path()
+                .join(crate::app_paths::artifact_file::CLAUDE_ACCOUNT_PICK)
+                .exists(),
+            "the pick file of a removed account stayed on disk"
+        );
+    }
+
+    #[test]
+    fn the_first_account_added_ends_a_stale_pick_and_a_later_one_keeps_the_live_pick() {
+        let config = tempfile::tempdir().expect("no config dir");
+        let local_data = tempfile::tempdir().expect("no local data dir");
+        // Nothing selected, a pick left behind by an account that is gone.
+        picked_store(config.path(), local_data.path(), &[], None);
+        crate::account_switch::remember_pick(local_data.path(), Some(&pick_of("a-gone")))
+            .expect("write the pick");
+        let mut store = read_store(config.path());
+        store.accounts.push(ClaudeAccount {
+            id: "a-first".into(),
+            ..ClaudeAccount::default()
+        });
+        select_first_added(config.path(), local_data.path(), &mut store, "a-first")
+            .expect("select the first");
+        assert_eq!(store.selection.active.as_deref(), Some("a-first"));
+        assert_eq!(
+            crate::account_switch::person_pick(local_data.path()),
+            None,
+            "the first account's selection left a stale pick on disk"
+        );
+
+        // The person picks it; a second account added later steals nothing.
+        crate::account_switch::remember_pick(local_data.path(), Some(&pick_of("a-first")))
+            .expect("write the pick");
+        store.accounts.push(ClaudeAccount {
+            id: "a-second".into(),
+            ..ClaudeAccount::default()
+        });
+        select_first_added(config.path(), local_data.path(), &mut store, "a-second")
+            .expect("add the second");
+        assert_eq!(store.selection.active.as_deref(), Some("a-first"));
+        assert_eq!(
+            crate::account_switch::person_pick(local_data.path()),
+            Some(pick_of("a-first")),
+            "a later account ended the person's pick"
+        );
     }
 
     #[test]
