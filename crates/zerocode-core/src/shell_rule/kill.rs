@@ -34,6 +34,12 @@ const QUOTED_CHARS: usize = 160;
 /// window's ([`ProtectedRoot::from_window_env`]).
 pub const WINDOW_PID_ENV: &str = "ZEROCODE_WINDOW_PID";
 
+/// How long a host waits for [`ProcessTable::read`] before it asks a person
+/// instead: 800 ms, the window's hook reply budget (1,500 ms) less its
+/// connect (500 ms) and reply margin (200 ms) — `zerocode_hookd`'s
+/// `TURN_BRIEF_WALL`, which a test there holds equal to this.
+pub const TABLE_READ_WALL: Duration = Duration::from_millis(800);
+
 /// How a reason names the window itself.
 const WINDOW_LABEL: &str = "the ZeroCode window";
 

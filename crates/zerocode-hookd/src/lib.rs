@@ -743,11 +743,12 @@ pub const TURN_BRIEF_WALL: std::time::Duration = HOOK_REPLY_BUDGET
     .saturating_sub(HOOK_CONNECT_BUDGET)
     .saturating_sub(HOOK_REPLY_MARGIN);
 
-/// How long the kill guard may take to judge a command (t-80602): the same
-/// wall as a turn's brief, for the same reason — a reply later than the
-/// script waits is thrown away, and a refusal thrown away is a command that
-/// runs. A judgment not in by then is a question put to a person.
-pub const KILL_GUARD_WALL: std::time::Duration = TURN_BRIEF_WALL;
+/// How long the kill guard may take to judge a command (t-80602): core's
+/// table wall, which is the same wall as a turn's brief for the same reason —
+/// a reply later than the script waits is thrown away, and a refusal thrown
+/// away is a command that runs. A judgment not in by then is a question put
+/// to a person.
+pub const KILL_GUARD_WALL: std::time::Duration = zerocode_core::shell_rule::kill::TABLE_READ_WALL;
 
 /// The most characters a turn's brief may carry: under the smallest context
 /// any measured provider takes from a hook — Codex's `additionalContextLimit`,
@@ -2663,6 +2664,13 @@ pub fn hook_script(agent: AgentKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Core names the kill guard's wall for zo, which has no bridge; it is
+    /// the brief's wall, and the two must not drift apart (t-80602).
+    #[test]
+    fn the_kill_guards_wall_is_the_briefs() {
+        assert_eq!(KILL_GUARD_WALL, TURN_BRIEF_WALL);
+    }
 
     #[tokio::test]
     async fn malformed_original_workspace_revisions_never_reach_the_browser_queue() {
