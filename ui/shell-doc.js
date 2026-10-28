@@ -6388,7 +6388,8 @@ let artifactCardCreations = 0;
 /* 판마다의 풀과 눈금. 판은 `docHost`가 리프마다 복제하므로 상태는 판에 붙는다. */
 const artifactCardPools = new WeakMap();
 const artifactTunings = new WeakMap();
-/* 미리보기 — id → 답. 서랍과 썸네일이 나눠 쓰고, 개수 상한은 토큰이 정한다. */
+/* 미리보기 — id → 답. 서랍과 썸네일이 나눠 쓰고, 개수 상한은 토큰이, 크기 상한은 본체
+ * 캐시와 같은 표의 `preview_cache_bytes`(목록의 `thumb.cache_bytes`)가 정한다. */
 const artifactPreviews = new Map();
 const artifactPreviewAsks = new Map();
 /* 렌더 썸네일(t-3233 §3) — id → data URL. 큐는 하나, 동시 1, 보이는 카드만,
@@ -8751,6 +8752,11 @@ async function askArtifactThumb(node, id) {
   thumb.hidden = false;
 }
 
+/* 미리보기 한 장이 캐시에서 차지하는 글자 수 — 그림의 data URL과 글. */
+function artifactPreviewSize(payload) {
+  return (payload?.data_url?.length ?? 0) + (payload?.text?.length ?? 0);
+}
+
 async function askArtifactPreview(id) {
   const held = artifactPreviews.get(id);
   if (held) return held;
@@ -8762,10 +8768,18 @@ async function askArtifactPreview(id) {
       // 「없음」은 기억하지 않는다 — 페이지의 썸네일은 뒤에 그려진다.
       if (payload?.kind === "none") return payload;
       const cap = artifactTuning(artifactsView() ?? document.documentElement).thumbCache;
-      while (artifactPreviews.size >= cap) {
-        const oldest = artifactPreviews.keys().next().value;
-        if (oldest === undefined) break;
+      // 개수만 세던 캐시는 스크린숏 120장(한 장 원본 최대 4 MiB의 data URL)을 들 수 있었다
+      // (t-80604) — 본체 캐시의 바이트 상한을 목록이 실어 보내고, 그보다 큰 한 장은 보여 주되
+      // 기억하지 않는다.
+      const budget = artifactListing.thumb?.cache_bytes ?? Infinity;
+      const size = artifactPreviewSize(payload);
+      if (size > budget) return payload;
+      let cached = 0;
+      for (const kept of artifactPreviews.values()) cached += artifactPreviewSize(kept);
+      while (artifactPreviews.size > 0 && (artifactPreviews.size >= cap || cached + size > budget)) {
+        const [oldest, kept] = artifactPreviews.entries().next().value;
         artifactPreviews.delete(oldest);
+        cached -= artifactPreviewSize(kept);
       }
       artifactPreviews.set(id, payload);
       return payload;
