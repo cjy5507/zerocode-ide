@@ -19551,7 +19551,7 @@ mod tests {
         );
         let usage = block_after(orchestration, "fn boot_with_usage(");
         assert!(
-            usage.contains("Self::boot_with(usage, None)"),
+            usage.contains("Self::boot_with(usage, None, None)"),
             "the private test runtime's usage boot no longer delegates:\n{usage}"
         );
         let private = block_after(orchestration, "fn boot_with(");

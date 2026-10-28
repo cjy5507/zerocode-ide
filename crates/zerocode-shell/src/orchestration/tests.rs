@@ -316,6 +316,17 @@ pub(crate) fn the_window() -> SharedWindow {
     }
 }
 
+/// How long a [`PrivateWindow::boot_lockable`] store waits out another
+/// writer's lock: a twentieth of the product's five seconds.
+///
+/// The tests that make the ledger unreadable take the store's write lock
+/// before a door's first look and let it go only after its last, so the
+/// lock outlasts the budget whatever the budget is — what the scene needs is
+/// that the actor's wait runs to its end and is refused, and each such look
+/// asserts that it took at least this long. At five seconds those looks
+/// were 44 s of the orchestration tests' one-at-a-time chain (t-80605).
+const UNREAD_LEDGER_BUSY_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// A window whose runtime is this test's own — its store is the test's
 /// to break — with the shared one restored when the guard drops.
 struct PrivateWindow {
@@ -335,7 +346,17 @@ impl PrivateWindow {
     fn boot_with_usage(
         usage: Vec<(&'static str, crate::usage::ProviderUsage)>,
     ) -> (Self, zerocode_orchestrator::workflow_store::WorkflowStore) {
-        Self::boot_with(usage, None)
+        Self::boot_with(usage, None, None)
+    }
+
+    /// The same private window, whose store waits out a held write lock for
+    /// [`UNREAD_LEDGER_BUSY_BUDGET`] — for a test that holds the lock to make
+    /// the ledger unreadable, and would otherwise sit out the product's
+    /// five seconds at every look.
+    fn boot_lockable(
+        usage: Vec<(&'static str, crate::usage::ProviderUsage)>,
+    ) -> (Self, zerocode_orchestrator::workflow_store::WorkflowStore) {
+        Self::boot_with(usage, None, Some(UNREAD_LEDGER_BUSY_BUDGET))
     }
 
     /// The same private window, standing on a ledger this test built — the
@@ -345,12 +366,13 @@ impl PrivateWindow {
         seeded: zerocode_core::orchestration::LedgerProjectionV1,
     ) -> (Self, zerocode_orchestrator::workflow_store::WorkflowStore) {
         let named = super::digest(b"zerocode.orchestration.test-seed.v1", &[b"seeded"]);
-        Self::boot_with(Vec::new(), Some(Box::new((seeded, named))))
+        Self::boot_with(Vec::new(), Some(Box::new((seeded, named))), None)
     }
 
     fn boot_with(
         usage: Vec<(&'static str, crate::usage::ProviderUsage)>,
         legacy: Option<Box<(zerocode_core::orchestration::LedgerProjectionV1, String)>>,
+        busy: Option<std::time::Duration>,
     ) -> (Self, zerocode_orchestrator::workflow_store::WorkflowStore) {
         let usage = super::UsageSource::fixed(usage);
         let turn = window_turns()
@@ -382,9 +404,15 @@ impl PrivateWindow {
             std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o700))
                 .expect("private authority permissions");
         }
-        let store = zerocode_orchestrator::workflow_store::WorkflowStore::open(
-            vault.join("authority.sqlite"),
-        )
+        let path = vault.join("authority.sqlite");
+        let store = match busy {
+            Some(busy) => {
+                zerocode_orchestrator::workflow_store::WorkflowStore::open_with_busy_timeout(
+                    path, busy,
+                )
+            }
+            None => zerocode_orchestrator::workflow_store::WorkflowStore::open(path),
+        }
         .expect("private authority store");
         let overrides: super::LiveOverrides =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -25189,12 +25217,34 @@ impl WalledClaude {
     }
 
     fn stand_full(leader_term: u32, working: usize, zo: bool, more_walled: usize) -> Self {
+        Self::stand_booted(leader_term, working, zo, more_walled, None)
+    }
+
+    /// [`Self::stand`], in a window whose ledger a test can lock without
+    /// sitting out the product's busy budget ([`PrivateWindow::boot_lockable`]).
+    fn stand_lockable(leader_term: u32, working: usize) -> Self {
+        Self::stand_booted(
+            leader_term,
+            working,
+            false,
+            0,
+            Some(UNREAD_LEDGER_BUSY_BUDGET),
+        )
+    }
+
+    fn stand_booted(
+        leader_term: u32,
+        working: usize,
+        zo: bool,
+        more_walled: usize,
+        busy: Option<std::time::Duration>,
+    ) -> Self {
         let began = clock();
         let dir = tempfile::tempdir().expect("a checkout");
         let checkout: &'static str =
             Box::leak(dir.path().to_string_lossy().into_owned().into_boxed_str());
         let gauges = |claude_used: u8| switch_fixture_gauges(began, claude_used);
-        let (window, store) = PrivateWindow::boot_with_usage(gauges(40));
+        let (window, store) = PrivateWindow::boot_with(gauges(40), None, busy);
         let beat = one_beat_at_a_time();
         let team = format!("team-switch-{leader_term}");
         seat_a_team(&team, leader_term);
@@ -27517,7 +27567,7 @@ fn a_worker_the_switch_rested_hears_the_switchs_words_once_after_a_restart_and_a
 /// reseat finds nothing to seat.
 #[test]
 fn a_program_nobody_saw_leave_holds_every_road_even_a_door_and_a_boot_without_its_journal() {
-    let stood = WalledClaude::stand(89_800, 0);
+    let stood = WalledClaude::stand_lockable(89_800, 0);
     let at = stood.began + 20_000;
     *stood.host.lingering.lock().unwrap() = true;
     // The journal takes nothing from the first receipt on — its directory is
@@ -27707,7 +27757,16 @@ fn held_doors_open_nothing_while_the_ledger_cannot_be_read(
     writer
         .execute_batch("BEGIN IMMEDIATE")
         .expect("the store's write lock, held");
+    let locked = std::time::Instant::now();
     asked("the runtime's image does not answer", unread);
+    // Every door's look waited the store's whole busy budget out: the lock
+    // outlasted it, and the refusal is the budget's end, not an early one.
+    let looks = u32::try_from(doors.len()).expect("a handful of doors");
+    assert!(
+        locked.elapsed() >= UNREAD_LEDGER_BUSY_BUDGET * looks,
+        "the runtime's image was refused before the store's busy budget ran out: {:?}",
+        locked.elapsed()
+    );
     writer
         .execute_batch("ROLLBACK")
         .expect("the store's write lock let go");
@@ -27743,7 +27802,7 @@ fn held_doors_open_nothing_while_the_ledger_cannot_be_read(
 /// asleep with its attempt open; only its hold is lifted.
 #[test]
 fn a_persons_door_elsewhere_opens_a_held_conversation_only_once_the_hold_is_read_gone() {
-    let stood = WalledClaude::stand(92_000, 0);
+    let stood = WalledClaude::stand_lockable(92_000, 0);
     let at = stood.began + 20_000;
     *stood.host.lingering.lock().unwrap() = true;
     let plan = stood.plan(at);

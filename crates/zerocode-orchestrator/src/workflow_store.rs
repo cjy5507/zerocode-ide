@@ -256,6 +256,8 @@ pub const MAX_WORKFLOW_REQUIRED_TESTS: usize = 256;
 #[derive(Clone)]
 pub struct WorkflowStore {
     path: PathBuf,
+    /// How long each connection waits out another writer's lock.
+    busy: Duration,
 }
 
 /// One idle connection kept open so this process stays attached to the
@@ -473,10 +475,20 @@ impl WorkflowStore {
 
     /// Open or create one workflow database.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, WorkflowStoreError> {
+        Self::open_with_busy_timeout(path, BUSY_TIMEOUT)
+    }
+
+    /// [`Self::open`], whose connections wait out another writer's lock for
+    /// `busy` instead of the product's five seconds — for a test that holds
+    /// the lock on purpose and would otherwise wait the whole budget out.
+    pub fn open_with_busy_timeout(
+        path: impl AsRef<Path>,
+        busy: Duration,
+    ) -> Result<Self, WorkflowStoreError> {
         prepare_store_path(path.as_ref())?;
         let path =
             fs::canonicalize(path.as_ref()).map_err(|_| WorkflowStoreError::UnsafeStorePath)?;
-        let store = Self { path };
+        let store = Self { path, busy };
         let mut connection = store.connection()?;
         /* Read the version BEFORE anything can write, because a file this
          * window will not touch has to leave here untouched.
@@ -500,7 +512,7 @@ impl WorkflowStore {
         // advanced it while this one was waiting, and branching on a version
         // read before the lock can migrate stale state or move the number back.
         // Tables and the version that names them then land in one transaction.
-        configure_wal(&connection).map_err(|_| WorkflowStoreError::Database)?;
+        configure_wal(&connection, store.busy).map_err(|_| WorkflowStoreError::Database)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| WorkflowStoreError::Database)?;
@@ -1288,7 +1300,7 @@ impl WorkflowStore {
         let connection = Connection::open_with_flags(&self.path, flags)
             .map_err(|_| WorkflowStoreError::Database)?;
         connection
-            .busy_timeout(BUSY_TIMEOUT)
+            .busy_timeout(self.busy)
             .map_err(|_| WorkflowStoreError::Database)?;
         connection
             .pragma_update(None, "foreign_keys", "ON")
@@ -1955,7 +1967,7 @@ fn immediate(connection: &mut Connection) -> Result<Transaction<'_>, WorkflowSto
 
 /// Only the idempotent connection setup is retried. Every attempt shares the
 /// existing busy budget, and migration/assignment transactions are unchanged.
-fn configure_wal(connection: &Connection) -> rusqlite::Result<()> {
+fn configure_wal(connection: &Connection, budget: Duration) -> rusqlite::Result<()> {
     let began = std::time::Instant::now();
     // SQLite's busy timeout counts its own sleep intervals, which can run
     // longer in wall time under load. This loop owns the setup deadline;
@@ -1967,18 +1979,18 @@ fn configure_wal(connection: &Connection) -> rusqlite::Result<()> {
     while matches!(&answer, Err(rusqlite::Error::SqliteFailure(error, _))
         if error.code == rusqlite::ErrorCode::DatabaseBusy)
     {
-        let remaining = BUSY_TIMEOUT.saturating_sub(began.elapsed());
+        let remaining = budget.saturating_sub(began.elapsed());
         if remaining.is_zero() {
             break;
         }
         std::thread::sleep(WAL_RETRY_DELAY.min(remaining));
-        let remaining = BUSY_TIMEOUT.saturating_sub(began.elapsed());
+        let remaining = budget.saturating_sub(began.elapsed());
         if remaining.is_zero() {
             break;
         }
         answer = configure();
     }
-    connection.busy_timeout(BUSY_TIMEOUT)?;
+    connection.busy_timeout(budget)?;
     answer
 }
 
@@ -2290,7 +2302,8 @@ mod tests {
             .expect("hold a read lock during WAL conversion");
         let (send, receive) = std::sync::mpsc::channel();
         let writer = std::thread::spawn(move || {
-            let result = configure_wal(&connection).map_err(|error| error.sqlite_error_code());
+            let result =
+                configure_wal(&connection, BUSY_TIMEOUT).map_err(|error| error.sqlite_error_code());
             let timeout: i64 = connection
                 .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
                 .unwrap();
@@ -2306,6 +2319,33 @@ mod tests {
         assert_eq!(outcome, Err(Some(rusqlite::ErrorCode::DatabaseBusy)));
         assert_eq!(NESTED_WAITS.load(std::sync::atomic::Ordering::Relaxed), 0);
         assert_eq!(timeout, i64::try_from(BUSY_TIMEOUT.as_millis()).unwrap());
+    }
+
+    /// A store opened with its own busy budget hands that budget to every
+    /// connection; `open` keeps the product's.
+    #[test]
+    fn a_store_opened_with_a_busy_budget_waits_that_long_and_open_keeps_five_seconds() {
+        let budget = |store: &WorkflowStore| -> i64 {
+            store
+                .connection()
+                .expect("a connection")
+                .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+                .expect("its busy timeout")
+        };
+        let root = a_private_root();
+        let product = WorkflowStore::open(root.path().join("product.sqlite")).expect("store");
+        assert_eq!(
+            budget(&product),
+            i64::try_from(BUSY_TIMEOUT.as_millis()).unwrap()
+        );
+        let short = Duration::from_millis(250);
+        let tested = WorkflowStore::open_with_busy_timeout(root.path().join("short.sqlite"), short)
+            .expect("store");
+        assert_eq!(budget(&tested), i64::try_from(short.as_millis()).unwrap());
+        assert_eq!(
+            budget(&tested.clone()),
+            i64::try_from(short.as_millis()).unwrap()
+        );
     }
 
     #[test]

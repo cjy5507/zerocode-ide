@@ -489,7 +489,7 @@ fn a_ledger_that_cannot_be_read_is_named_unread_and_the_decline_waits_for_it() {
     const LEADER: u32 = 577_200;
     const WORKER: u32 = 577_201;
     const DOOR: u32 = 577_208;
-    let (_window, store) = PrivateWindow::boot();
+    let (_window, store) = PrivateWindow::boot_lockable(Vec::new());
     let checkout = tempfile::tempdir().expect("the worker's checkout");
     let host = Restoring::new(checkout.path(), WORKER, (0, test_actor(LEADER)));
     let (team, _run) = a_run(&host, LEADER, "unread");
@@ -507,7 +507,9 @@ fn a_ledger_that_cannot_be_read_is_named_unread_and_the_decline_waits_for_it() {
     writer
         .execute_batch("BEGIN IMMEDIATE")
         .expect("the store's write lock, held");
+    let locked = std::time::Instant::now();
     let unread = door.wake(DOOR, "claude", session);
+    let waited = locked.elapsed();
     writer
         .execute_batch("ROLLBACK")
         .expect("the store's write lock let go");
@@ -515,6 +517,10 @@ fn a_ledger_that_cannot_be_read_is_named_unread_and_the_decline_waits_for_it() {
 
     let refused = unread.expect_err("a wake opened on a ledger that could not be read");
     assert!(refused.contains("원장을 읽지 못해"), "{refused}");
+    assert!(
+        waited >= super::UNREAD_LEDGER_BUSY_BUDGET,
+        "refused before the store's busy budget ran out: {waited:?}"
+    );
     assert!(door.started().is_empty(), "{:?}", door.started());
     let said = door.noted("road=visit ledger=unread");
     assert_eq!(said.len(), 1, "{:#?}", door.did.lock().unwrap());
