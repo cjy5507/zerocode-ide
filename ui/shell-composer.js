@@ -499,6 +499,10 @@ function composerMenuNode() {
   const menu = document.createElement("div");
   menu.className = "composer-menu";
   menu.setAttribute("role", "menu");
+  // The menu's rows take their own keys: without this the window's key sink
+  // took the focus back on the keydown, before Enter or Space could press
+  // the row it stood on (t-81532).
+  menu.dataset.keyboardOwner = "true";
   return menu;
 }
 
@@ -510,12 +514,16 @@ function composerMenuSection(menu, words) {
   return head;
 }
 
-function composerMenuItem(menu, words, sub, on, { current = false } = {}) {
+function composerMenuItem(menu, words, sub, on, { current = false, disabled = false } = {}) {
   const option = document.createElement("button");
   option.type = "button";
   option.className = "composer-menu-item";
   option.setAttribute("role", "menuitem");
   if (current) option.setAttribute("aria-current", "true");
+  // A row that cannot act now still reads, and keeps its focus for the
+  // keyboard: `aria-disabled`, never `disabled`, which would drop it from
+  // the tab order and leave the open menu with nothing to stand on.
+  if (disabled) option.setAttribute("aria-disabled", "true");
   const name = document.createElement("span");
   name.className = "composer-menu-name";
   name.textContent = words;
@@ -527,6 +535,7 @@ function composerMenuItem(menu, words, sub, on, { current = false } = {}) {
     option.appendChild(dim);
   }
   option.addEventListener("click", () => {
+    if (disabled) return;
     closeComposerMenu();
     on();
   });
@@ -561,7 +570,9 @@ function standOpenComposerMenu(chip, menu) {
   const watch = new ResizeObserver(stand);
   watch.observe(chip.closest(".worker-composer") ?? chip);
   openMenu = { node: menu, chip, away, keys, stand, watch };
-  menu.querySelector('[aria-current="true"], .composer-menu-item')?.focus();
+  // The ticked row first — a selector list answers in document order, which
+  // stood the focus on the first row whatever was ticked.
+  (menu.querySelector('[aria-current="true"]') ?? menu.querySelector(".composer-menu-item"))?.focus();
 }
 
 /* The chip's menu: the models this CLI drives, the current one ticked, then
@@ -822,6 +833,239 @@ function paintComposerModeChip(chip, run, spec) {
   writeAttribute(chip, "data-tip", tip);
   writeAttribute(chip, "aria-label", tip);
   chip.disabled = !road.canChangeMode();
+}
+
+/* ---- the effort chip (t-81532) -----------------------------------------
+ *
+ * `🧠 high ▾` beside the model: the effort the pane's session last ran a
+ * turn at, as its own record says (`pane_effort`; the summons' word before
+ * any turn, 「기본」 for the CLI's default), and the rungs a press can move it
+ * to. A press walks the road the step-effort seat drives — Claude Code's
+ * `/effort` picker, an arrow a rung and `s` for this session only — between
+ * turns only, and only after the person has read what it costs: on Anthropic
+ * a changed effort rewrites the conversation's cache. A CLI whose effort no
+ * typed key moves is shown, and its rungs say why they cannot be pressed.
+ *
+ * Asked at the turn's edges and on opening, never on a paint: a turn's dozens
+ * of tool events repaint the chip from what was last asked. */
+
+/* What the backend last said about each pane's effort, by terminal — cleared
+ * with the pane, as the context reading beside it is. */
+const paneEfforts = new Map();
+
+/* Ask the backend what `term`'s effort is now; repaint its chips when the
+ * answer moved. One question per pane at a time. */
+async function refreshPaneEffort(term) {
+  if (term === undefined || term === null) return null;
+  const held = paneEfforts.get(term);
+  if (held?.asking) return held.asking;
+  const asking = (async () => {
+    let said = null;
+    try {
+      said = await invoke("pane_effort", { term });
+    } catch {
+      said = null;
+    }
+    rememberPaneEffort(term, said);
+    return said;
+  })();
+  paneEfforts.set(term, { ...(held ?? {}), asking });
+  try {
+    return await asking;
+  } finally {
+    const now = paneEfforts.get(term);
+    if (now?.asking === asking) now.asking = null;
+  }
+}
+
+/* Keep an answer and repaint the chips that read it, only when it moved. */
+function rememberPaneEffort(term, said) {
+  const held = paneEfforts.get(term) ?? {};
+  const sign = JSON.stringify(said ?? null);
+  paneEfforts.set(term, { ...held, said, sign });
+  if (held.sign !== sign) paintComposerChipsFor(term);
+}
+
+/* Ask again for every pane whose composer wears the chip — the turn edge
+ * (`hook:agent`, once the state has crossed) is where its word can move. */
+function refreshComposerEffortFor(term) {
+  for (const form of document.querySelectorAll(".worker-composer")) {
+    if (form.__workerRun?.term === term && form.querySelector(".worker-composer-effort")) {
+      void refreshPaneEffort(term);
+      return;
+    }
+  }
+}
+
+/* The answer a chip paints from, with the moment the window sees itself: a
+ * turn under way in the pane says so before the backend is asked again. */
+function composerEffortOf(run) {
+  const said = paneEfforts.get(run.term)?.said ?? null;
+  if (!said) return null;
+  const working = composerWorking(run) && !said.stuck;
+  return working ? { ...said, stuck: "turn_running" } : said;
+}
+
+/* Whether the stuck word is the road's own — no wait changes it. */
+function effortRoadStuck(stuck) {
+  return stuck === "no_road" || stuck === "relaunch" || stuck === "on_screen";
+}
+
+/* The word on the chip: the rung a press put the session on, then the one its
+ * record says, then the CLI's default. The CLI's own spelling (`xhigh`) —
+ * these are its vocabulary, as the permission mode is. */
+function effortWords(said) {
+  return said?.pending ?? said?.current ?? t("composer.effort.default", "기본");
+}
+
+/* Where the word came from, in a sentence: the session's own record, the
+ * summons, or nobody. */
+function effortWitnessWords(said) {
+  if (said.pending) {
+    return t("composer.effort.pending", "다음 턴부터 {{effort}} — 이 세션만", { effort: said.pending });
+  }
+  if (said.witness === "turn") {
+    return t("composer.effort.fromTurn", "세션 기록: 마지막 턴이 {{effort}}로 돌았습니다", { effort: said.current });
+  }
+  if (said.witness === "summons") {
+    return t("composer.effort.fromSummons", "소환 요청: {{effort}} (아직 턴 기록 없음)", { effort: said.current });
+  }
+  return t("composer.effort.fromDefault", "CLI 기본값 — 세션이 아직 노력을 말하지 않았습니다");
+}
+
+/* Why the rungs cannot be pressed now, by the backend's code. */
+function effortStuckWords(said) {
+  const command = said.command ?? "";
+  switch (said.stuck) {
+    case "no_road": return t("composer.effort.stuck.noRoad", "이 CLI의 노력을 실행 중에 바꾸는 길을 아직 재지 않았습니다");
+    case "relaunch": return t("composer.effort.stuck.relaunch", "이 CLI는 실행 중에 노력을 바꾸지 못합니다 — 다음 실행에서 정합니다");
+    case "on_screen": return t("composer.effort.stuck.onScreen", "이 CLI는 제 화면의 피커에서 바꿉니다 ({{command}})", { command });
+    case "unknown": return t("composer.effort.stuck.unknown", "첫 턴이 끝나 세션이 노력을 말하면 바꿀 수 있습니다");
+    case "off_ladder": return t("composer.effort.stuck.offLadder", "세션이 이 목록에 없는 단계에 있습니다");
+    case "turn_running": return t("composer.effort.stuck.turnRunning", "턴이 도는 중입니다 — 턴 사이에 바꿀 수 있습니다");
+    case "never_heard": return t("composer.effort.stuck.neverHeard", "이 판의 턴 상태를 아직 듣지 못했습니다");
+    case "held_by_person": return t("composer.effort.stuck.heldByPerson", "지난 턴을 직접 멈춘 판입니다 — 다음 턴이 끝나면 바꿀 수 있습니다");
+    case "shell_in_front": return t("composer.effort.stuck.shellInFront", "에이전트 앞에 셸이 있습니다");
+    case "draft": return t("composer.effort.stuck.draft", "판의 입력줄에 쓰던 글이 있습니다");
+    case "seat_moving": return t("composer.effort.stuck.seatMoving", "자동 노력 조절이 이 판을 옮기는 중입니다");
+    default: return "";
+  }
+}
+
+/* What a press refused with, in words: a stuck code, or the door's own. */
+function effortRefusalWords(code) {
+  if (code === "withheld") return t("composer.effort.refused.withheld", "판이 피커 명령을 받지 않았습니다 — 노력은 그대로입니다");
+  if (code === "picker_missing") return t("composer.effort.refused.pickerMissing", "피커가 화면에 뜨지 않았습니다 — 노력은 그대로입니다");
+  return effortStuckWords({ stuck: code }) || String(code);
+}
+
+function composerEffortChip(run) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "worker-composer-pill worker-composer-effort";
+  chip.hidden = true;
+  chip.setAttribute("aria-haspopup", "menu");
+  chip.setAttribute("aria-expanded", "false");
+  chip.dataset.keyboardOwner = "true";
+  const chevron = document.createElement("span");
+  chevron.className = "worker-composer-chevron";
+  chevron.textContent = "▾";
+  chip.append(iconNode("brain"), pillWordsNode(""), chevron);
+  chip.addEventListener("click", () => {
+    if (chip.getAttribute("aria-expanded") === "true") closeComposerMenu(chip);
+    else void openComposerEffortMenu(chip, run);
+  });
+  paintComposerEffortChip(chip, run);
+  void refreshPaneEffort(run.term);
+  return chip;
+}
+
+/* Shown once the backend has answered for a pane; the tip says the word's
+ * witness and, when a press cannot move it, why. Every write is guarded. */
+function paintComposerEffortChip(chip, run) {
+  const said = composerEffortOf(run);
+  writeHidden(chip, !said);
+  if (!said) return;
+  writeTextContent(chip.querySelector(".worker-composer-pill-words"), effortWords(said));
+  writeClass(chip, "is-stuck", effortRoadStuck(said.stuck));
+  const why = said.stuck ? effortStuckWords(said) : t("composer.effort.tip", "노력 바꾸기 — 이 세션만");
+  const tip = t("composer.effort.chipTip", "노력 {{effort}} · {{why}}", { effort: effortWords(said), why });
+  writeAttribute(chip, "data-tip", tip);
+  writeAttribute(chip, "aria-label", tip);
+}
+
+/* A line of words inside the menu, in the empty line's type. */
+function composerMenuNote(menu, words, kind) {
+  const note = document.createElement("p");
+  note.className = `composer-menu-empty composer-effort-${kind}`;
+  note.textContent = words;
+  menu.appendChild(note);
+  return note;
+}
+
+/* The effort menu: where the word came from, the rungs (the one the session
+ * stands on ticked), why they cannot be pressed when they cannot, and — on a
+ * road where a move rewrites the cache — what a move costs. Asked afresh on
+ * opening, so the menu never offers a press on a stale answer. */
+async function openComposerEffortMenu(chip, run) {
+  closeComposerMenu();
+  await refreshPaneEffort(run.term);
+  const said = composerEffortOf(run);
+  if (!said) return;
+  const menu = composerMenuNode();
+  menu.classList.add("composer-effort-menu");
+  composerMenuSection(menu, t("composer.effort.menu", "노력"));
+  composerMenuNote(menu, effortWitnessWords(said), "witness");
+  const stands = said.pending ?? said.current;
+  for (const rung of said.ladder ?? []) {
+    composerMenuItem(
+      menu,
+      rung,
+      rung === stands ? t("composer.effort.now", "지금") : "",
+      () => void pressPaneEffort(chip, run, said, rung),
+      { current: rung === stands, disabled: Boolean(said.stuck) || rung === stands },
+    );
+  }
+  if (said.stuck) composerMenuNote(menu, effortStuckWords(said), "stuck");
+  else if (said.rewritesCache) composerMenuNote(menu, effortCacheWords(run), "cost");
+  standOpenComposerMenu(chip, menu);
+}
+
+/* What a move costs on a road that rewrites the cache, in one line — with the
+ * conversation's size when the pane has said it. */
+function effortCacheWords(run) {
+  const reading = composerRoad(run).usage?.() ?? null;
+  return reading?.tokens > 0
+    ? t("composer.effort.cacheTokens", "바꾸면 이 대화 {{tokens}} 토큰을 캐시에 다시 씁니다 — 다음 턴이 느려지고 그만큼 값이 듭니다", { tokens: reading.tokens.toLocaleString() })
+    : t("composer.effort.cache", "바꾸면 이 대화를 캐시에 다시 씁니다 — 다음 턴이 느려지고 그만큼 값이 듭니다");
+}
+
+/* A rung picked. On a road that rewrites the cache the menu asks once more
+ * with the cost in front of the person; the move goes only on that yes. */
+async function pressPaneEffort(chip, run, said, rung) {
+  if (said.rewritesCache) {
+    const menu = composerMenuNode();
+    menu.classList.add("composer-effort-menu");
+    composerMenuSection(menu, t("composer.effort.confirmHead", "{{from}} → {{to}}", { from: effortWords(said), to: rung }));
+    composerMenuNote(menu, effortCacheWords(run), "cost");
+    composerMenuItem(menu, t("composer.effort.confirm", "바꾸기 (이 세션만)"), "", () => void movePaneEffort(run, rung));
+    composerMenuItem(menu, t("composer.effort.cancel", "그대로 두기"), "", () => chip.focus());
+    standOpenComposerMenu(chip, menu);
+    return;
+  }
+  await movePaneEffort(run, rung);
+}
+
+/* The press itself: the backend drives the picker and answers the chip as it
+ * stands after; a refusal is said in the person's words and changes nothing. */
+async function movePaneEffort(run, rung) {
+  try {
+    const said = await invoke("pane_effort_press", { term: run.term, to: rung });
+    rememberPaneEffort(run.term, said);
+  } catch (error) {
+    showError(effortRefusalWords(String(error)));
+    void refreshPaneEffort(run.term);
+  }
 }
 
 /* ---- 컨텍스트 미터와 압축 문 --------------------------------------------

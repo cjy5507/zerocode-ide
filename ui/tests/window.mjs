@@ -128,6 +128,7 @@ import { testEditorSelection } from "./editor-selection.mjs";
 import { testEditorRecovery } from "./editor-recovery.mjs";
 import { testComposerAttach } from "./attach.mjs";
 import { testComposerMenuPosition } from "./composer-menu-position.mjs";
+import { testComposerEffort } from "./composer-effort.mjs";
 import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testImeKoreanRegression } from "./ime-korean-regression.mjs";
 import { testWorkers } from "./workers.mjs";
@@ -56102,6 +56103,12 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
     await page.close();
   }
 });
+
+/* The effort chip beside the model (t-81532): the pane's own word, a turn's
+ * edges asking again, every rung shut mid-turn and on a CLI no key moves, and
+ * a move on a road that rewrites the cache asked once more with its cost —
+ * by the keyboard, Enter and Space. */
+suite("composer-effort", ({ browser, origin, ok }) => testComposerEffort(browser, origin, ok));
 
 /* Where that menu stands: on the chip that opened it, inside the window,
  * flipped to the chip's other side when its own has no room, and still on the
