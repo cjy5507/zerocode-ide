@@ -51,6 +51,7 @@ pub mod project_scope;
 mod session_history;
 pub mod settle;
 pub mod task_cost;
+pub mod text_file;
 
 pub use progress::{NextStep, WorkProgress, WorkStage};
 pub use project_scope::{ProjectSource, Reach, RunProject, Scope};

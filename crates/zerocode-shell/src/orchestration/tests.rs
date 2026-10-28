@@ -29770,3 +29770,71 @@ fn followup_successful_advice_clears_only_a_previously_notified_condition() {
         }
     }
 }
+
+/// A verb's text that arrives as a file is read by the window before anything else reads the
+/// verb (t-80615): the ledger holds the file's letters, a request naming a file it cannot read is
+/// refused and writes nothing, and a text given both ways is refused.
+#[test]
+fn a_verb_text_in_a_file_is_read_by_the_window_before_the_verb_runs() {
+    let _window = the_window();
+    const LEADER_TERM: u32 = 98_100;
+    let team = format!("team-text-file-{LEADER_TERM}");
+    seat_a_team(&team, LEADER_TERM);
+    let seat = zerocode_core::agent_teams::LEADER_PANE;
+    let say = |argv: &[String]| {
+        run(
+            &Nowhere,
+            Vec::new(),
+            &team,
+            seat,
+            TEST_CAPABILITY,
+            argv,
+            clock(),
+        )
+    };
+    let opened = say(&words("run-create --name text-file"));
+    assert_eq!(opened.exit_code, 0, "{}", opened.stderr);
+
+    let dir = tempfile::tempdir().expect("scratch folder");
+    let path = dir.path().join("spec.md");
+    let spec = "never `pkill -f zerocode`, never $(touch /x), keep $HOME\n둘째 줄";
+    std::fs::write(&path, spec).expect("write the spec");
+    let path = path.display().to_string();
+    let argv = |words: &[&str]| -> Vec<String> { words.iter().map(|w| w.to_string()).collect() };
+
+    let wrote = say(&argv(&[
+        "task-create",
+        "--spec-file",
+        &path,
+        "--retry-request",
+        "text-file-1",
+    ]));
+    assert_eq!(wrote.exit_code, 0, "{}", wrote.stderr);
+    let listed = say(&words("task-list"));
+    let listed: serde_json::Value = serde_json::from_str(&listed.stdout).expect("task-list JSON");
+    assert_eq!(listed["tasks"][0]["spec"], spec, "{listed}");
+
+    for (given, wanted) in [
+        (
+            argv(&["task-create", "--spec", "x", "--spec-file", &path]),
+            "--spec-file",
+        ),
+        (
+            argv(&["task-create", "--spec-file", "/nowhere/spec.md"]),
+            "--spec-file",
+        ),
+    ] {
+        let mut given = given;
+        given.extend(argv(&["--retry-request", "text-file-refused"]));
+        let refused = say(&given);
+        assert_ne!(refused.exit_code, 0, "{given:?}");
+        assert!(refused.stderr.contains(wanted), "{}", refused.stderr);
+    }
+    let listed = say(&words("task-list"));
+    let listed: serde_json::Value = serde_json::from_str(&listed.stdout).expect("task-list JSON");
+    assert_eq!(
+        listed["tasks"].as_array().expect("tasks").len(),
+        1,
+        "a refused request wrote a task: {listed}"
+    );
+}

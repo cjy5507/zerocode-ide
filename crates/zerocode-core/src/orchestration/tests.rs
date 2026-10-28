@@ -28731,3 +28731,57 @@ fn a_workers_last_status_is_its_newest_line_since_the_moment_asked_about() {
     );
     assert_eq!(last_status(held, "w-elsewhere", i64::MIN), None);
 }
+
+/// A spec read from a file is written into the ledger letter for letter (t-80615): the backticks,
+/// the `$(…)` and the `$HOME` that a shell would have run or replaced are the characters the
+/// ledger holds, because the window reads the file and no shell sees it.
+#[test]
+fn a_spec_read_from_a_file_is_written_into_the_ledger_letter_for_letter() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name filed");
+    let dir = tempfile::tempdir().expect("scratch folder");
+    let path = dir.path().join("spec.md");
+    let spec = "do `pkill -f zerocode` never, nor $(touch /x), and keep $HOME\n둘째 줄 \"인용\"\n";
+    std::fs::write(&path, spec).expect("write the spec");
+    let argv: Vec<String> = [
+        "task-create",
+        "--spec-file",
+        &path.display().to_string(),
+        "--retry-request",
+        "filed-1",
+    ]
+    .map(String::from)
+    .to_vec();
+    let read = text_file::expand(&argv).expect("the file reads").into_owned();
+    let made = bench.at_argv(agent_teams::LEADER_PANE, read);
+    assert_eq!(made.reply.exit_code, 0, "{}", made.reply.stderr);
+
+    let listed = bench.json("task-list");
+    assert_eq!(listed["tasks"][0]["spec"], spec);
+}
+
+/// A file flag that reaches the plan without the window having read it is refused, not ignored
+/// (t-80615): ignored, the task would be written down with no spec and nobody would be told.
+#[test]
+fn a_file_flag_the_window_did_not_read_writes_nothing() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name unread");
+    let argv: Vec<String> = [
+        "task-create",
+        "--spec-file",
+        "/nowhere/spec.md",
+        "--retry-request",
+        "unread-1",
+    ]
+    .map(String::from)
+    .to_vec();
+    let refused = bench.at_argv(agent_teams::LEADER_PANE, argv);
+    assert_ne!(refused.reply.exit_code, 0);
+    assert!(
+        refused.reply.stderr.contains("--spec-file"),
+        "{}",
+        refused.reply.stderr
+    );
+    let listed = bench.json("task-list");
+    assert_eq!(listed["tasks"].as_array().expect("tasks").len(), 0);
+}

@@ -3112,6 +3112,85 @@ mod tests {
         }
     }
 
+    /// The orchestration shim says, on stderr and once, when a text it carries holds a backtick or
+    /// a `$(` (t-80615): the shell may already have run it. The answer on stdout is the window's,
+    /// unchanged, and the tmux shim — whose arguments are not briefings — never says it.
+    #[cfg(unix)]
+    #[test]
+    fn the_orchestration_shim_warns_of_an_inline_text_a_shell_may_have_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("scratch folder");
+        let fake = root.path().join("curl");
+        std::fs::write(
+            &fake,
+            "#!/usr/bin/env sh\ncat >/dev/null\nprintf '%s\\n%s' \"${FAKE_BODY}\" 200\n",
+        )
+        .expect("curl");
+        let mut shims = Vec::new();
+        for voice in ["orchestration", "tmux"] {
+            let shim = root.path().join(voice);
+            std::fs::write(&shim, shim_script("PORT_V", "TOKEN_V", voice)).expect("shim");
+            shims.push((voice, shim));
+        }
+        for path in std::iter::once(&fake).chain(shims.iter().map(|(_, shim)| shim)) {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let run = |voice: &str, argv: &[&str]| {
+            let shim = &shims.iter().find(|(held, _)| *held == voice).expect("shim").1;
+            std::process::Command::new("sh")
+                .arg(shim)
+                .args(argv)
+                .env("PATH", format!("{}:/usr/bin:/bin", root.path().display()))
+                .env("PORT_V", "1234")
+                .env("TOKEN_V", "tok")
+                .env(TEAM_ID_VAR, "team-1")
+                .env(TEAM_TOKEN_VAR, "pane-secret")
+                .env("TMUX_PANE", "%2")
+                .env("FAKE_BODY", "{\"ok\":true}")
+                .output()
+                .expect("sh")
+        };
+        let warning = crate::orchestration::text_file::inline_warning();
+        let risky = [
+            vec!["worker-start", "--prompt", "run `ls` now"],
+            vec!["worker-start", "--prompt=run $(ls) now"],
+            vec!["send", "--body", "a `b`"],
+            vec!["task-create", "--spec", "x $(y)"],
+            vec!["gate-create", "--question", "`q`"],
+            vec!["gate-resolve", "--resolution", "$(r)"],
+            vec!["worker-stop", "--reason", "`r`"],
+        ];
+        for argv in &risky {
+            let said = run("orchestration", argv);
+            assert!(said.status.success(), "{argv:?}");
+            assert_eq!(String::from_utf8_lossy(&said.stdout), "{\"ok\":true}", "{argv:?}");
+            let err = String::from_utf8_lossy(&said.stderr);
+            assert_eq!(err.matches(&warning).count(), 1, "{argv:?}: {err}");
+        }
+        for argv in [
+            vec!["worker-start", "--prompt", "plain text, $HOME and ${X}"],
+            vec!["worker-start", "--prompt-file", "/tmp/a`b.md"],
+            vec!["run-show", "--run", "r-`x`"],
+            vec!["send", "--body", "fine", "--title", "a `title`"],
+        ] {
+            let said = run("orchestration", &argv);
+            assert!(said.status.success(), "{argv:?}");
+            let err = String::from_utf8_lossy(&said.stderr);
+            assert!(!err.contains(&warning), "{argv:?}: {err}");
+        }
+        let tmux = run("tmux", &["send-keys", "--body", "a `b`"]);
+        assert!(
+            !String::from_utf8_lossy(&tmux.stderr).contains(&warning),
+            "the tmux shim warned about a briefing it does not carry"
+        );
+        // The PowerShell sibling carries the same words and the same two parts.
+        let powershell = shim_script_powershell("PORT_V", "TOKEN_V", "orchestration");
+        assert!(powershell.contains(&warning), "{powershell}");
+        for part in crate::orchestration::text_file::SHELL_RUNS {
+            assert!(powershell.contains(&format!("'{part}'")), "{part}");
+        }
+    }
+
     /// The PowerShell shim, run as what it is — on the one platform that has
     /// its interpreter. The content test above runs everywhere; this one is
     /// the Windows half of the same witness, against a real listener rather
