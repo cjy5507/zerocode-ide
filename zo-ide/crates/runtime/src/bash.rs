@@ -810,6 +810,18 @@ pub fn execute_bash_with_tasks(
             format!("refused to run a catastrophic command — {reason}"),
         ));
     }
+    // The kill guard (t-80732), at the same chokepoint for the same reason: a
+    // signal to the window or a process it started is refused in every mode
+    // and on every path. A question for a person is the permission layer's
+    // to ask (`PermissionPolicy`), so only a refusal is acted on here.
+    if let Some(zerocode_core::shell_rule::kill::KillVerdict::Deny { reason }) =
+        crate::kill_guard::judge(&input.command)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            crate::kill_guard::refusal(&reason),
+        ));
+    }
 
     // A per-agent tool context can pin the working directory (worktree
     // isolation); absent that, fall back to the live process cwd so the

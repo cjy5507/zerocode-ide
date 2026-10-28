@@ -7,9 +7,21 @@
 //! — are core's ([`zerocode_core::shell_rule::kill`], t-80602), the same ones
 //! the window's pre-tool hook reads. zo only names itself as the caller and,
 //! from the pane's environment, the window it runs in as kept
-//! ([`zerocode_core::shell_rule::kill::ProtectedRoot::from_window_env`]).
+//! ([`ProtectedRoot::from_window_env`]).
+//!
+//! Three places ask, and each does what it can with the answer:
+//! [`crate::PermissionPolicy`] puts a question to a person when one can be
+//! asked; [`crate::permission_enforcer::PermissionEnforcer::check_bash`] has
+//! nobody to ask, so a question is a refusal there; and the bash chokepoint
+//! ([`crate::execute_bash`]) refuses the window in every mode and on every
+//! path, a question having been the permission layer's to ask.
 
-use zerocode_core::shell_rule::kill::{self, KillVerdict, ProcessTable};
+use zerocode_core::shell_rule::kill::{self, KillCall, KillVerdict, ProcessTable, ProtectedRoot};
+
+/// Said after every refusal: the guard reads the processes, not the
+/// permission mode, so the mode advice a denial otherwise carries would send
+/// the model after an escalation that changes nothing.
+const NOT_THE_MODE: &str = "Permission audit: the kill guard decides this in every permission mode, so a wider mode changes nothing; do not retry the identical call.";
 
 /// The judgment for `command` run by this process; `None` when it makes no
 /// kill call, and then the process table is not read.
@@ -24,27 +36,38 @@ pub fn judge(command: &str) -> Option<KillVerdict> {
 }
 
 /// [`judge`] with what it reads from the machine handed in: the caller's
-/// pid, its environment and the process table, read only when a call needs
-/// it. Not read yet: the red half of t-80732.
+/// pid, its environment and the process table, read once and only when a
+/// call needs it.
 pub(crate) fn judge_with(
-    _command: &str,
-    _me: u32,
-    _env: impl Fn(&str) -> Option<String>,
-    _read_table: impl FnOnce() -> ProcessTable,
+    command: &str,
+    me: u32,
+    env: impl Fn(&str) -> Option<String>,
+    read_table: impl FnOnce() -> ProcessTable,
 ) -> Option<KillVerdict> {
-    None
+    let calls = kill::kill_calls(command);
+    if calls.is_empty() {
+        return None;
+    }
+    let table = if calls.iter().any(KillCall::needs_table) {
+        read_table()
+    } else {
+        ProcessTable::new(Vec::new())
+    };
+    let kept = ProtectedRoot::from_window_env(env, &table, me);
+    Some(kill::judge_kill(&calls, &table, Some(me), &kept))
 }
 
 /// The refusal a [`KillVerdict::Deny`] becomes, in every mode.
 #[must_use]
 pub fn refusal(reason: &str) -> String {
-    reason.to_string()
+    format!("refused to run: {reason}. {NOT_THE_MODE}")
 }
 
-/// The refusal a [`KillVerdict::Ask`] becomes when no person said yes.
+/// The refusal a [`KillVerdict::Ask`] becomes when no person said yes —
+/// nobody could be asked, or the person said no.
 #[must_use]
 pub fn unanswered(reason: &str) -> String {
-    reason.to_string()
+    format!("refused, since no person said yes to it: {reason}. {NOT_THE_MODE}")
 }
 
 #[cfg(test)]

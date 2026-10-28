@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use serde_json::Value;
+use zerocode_core::shell_rule::kill::KillVerdict;
 
 use crate::config::RuntimePermissionRuleConfig;
 
@@ -381,8 +382,64 @@ impl PermissionPolicy {
         self.authorize_with_context(tool_name, input, &PermissionContext::default(), prompter)
     }
 
+    /// The decision for one call. A bash command that would send a signal is
+    /// judged by the kill guard first (t-80732): a signal to the window is
+    /// refused whatever the mode, the rules or a hook say, and nobody is
+    /// asked; one that needs a person's yes is put to the person, once and
+    /// for this call alone — no rule an earlier yes left behind answers it —
+    /// and refused when there is nobody to ask. The question also stands for
+    /// any escalation the mode would have asked about, so a person is asked
+    /// once; a call the mode or the rules refuse outright is refused unasked.
     #[must_use]
     pub fn authorize_with_context(
+        &self,
+        tool_name: &str,
+        input: &str,
+        context: &PermissionContext,
+        prompter: Option<&mut dyn PermissionPrompter>,
+    ) -> PermissionOutcome {
+        let verdict = (tool_name == "bash")
+            .then(|| extract_bash_command(input))
+            .flatten()
+            .and_then(|command| crate::kill_guard::judge(&command));
+        match verdict {
+            Some(KillVerdict::Deny { reason }) => PermissionOutcome::Deny {
+                reason: crate::kill_guard::refusal(&reason),
+            },
+            Some(KillVerdict::Ask { reason }) => {
+                let mut would_ask = WouldAsk::default();
+                match self.authorize_by_mode_and_rules(
+                    tool_name,
+                    input,
+                    context,
+                    Some(&mut would_ask),
+                ) {
+                    PermissionOutcome::Deny { reason } if !would_ask.asked => {
+                        PermissionOutcome::Deny { reason }
+                    }
+                    _ => Self::prompt_or_deny(
+                        tool_name,
+                        input,
+                        ModeAudit {
+                            current_mode: self.active_mode(),
+                            required_mode: self.required_mode_for_input(tool_name, input),
+                            phase_clamp_base: self.phase_clamp_base,
+                        },
+                        Some(reason.clone()),
+                        Some(crate::kill_guard::unanswered(&reason)),
+                        prompter,
+                    ),
+                }
+            }
+            Some(KillVerdict::Allow) | None => {
+                self.authorize_by_mode_and_rules(tool_name, input, context, prompter)
+            }
+        }
+    }
+
+    /// [`Self::authorize_with_context`] as the mode, the rules and the hooks
+    /// decide it.
+    fn authorize_by_mode_and_rules(
         &self,
         tool_name: &str,
         input: &str,
@@ -628,6 +685,22 @@ impl PermissionPolicy {
             ask: Self::find_matching_rule(&self.ask_rules, tool_name, input)
                 .map(|rule| ask_rule_reason(tool_name, &rule.raw)),
             allow: Self::find_matching_rule(&self.allow_rules, tool_name, input).is_some(),
+        }
+    }
+}
+
+/// Says no, and remembers whether it was asked: whether the mode, the rules
+/// and the hooks alone would put a call to a person.
+#[derive(Default)]
+struct WouldAsk {
+    asked: bool,
+}
+
+impl PermissionPrompter for WouldAsk {
+    fn decide(&mut self, _request: &PermissionRequest) -> PermissionPromptDecision {
+        self.asked = true;
+        PermissionPromptDecision::Deny {
+            reason: String::new(),
         }
     }
 }
