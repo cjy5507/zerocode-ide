@@ -2670,3 +2670,7 @@ mod microcompact_price_tests;
 /// The gates' context figure in the provider's own count (t-78937 Z2).
 #[cfg(test)]
 mod context_anchor_tests;
+
+/// Budgets written in tokens met in the provider's tokens (t-78937 Z3).
+#[cfg(test)]
+mod estimate_ratio_tests;
