@@ -17,9 +17,11 @@
 //! is the first thing a person could see. The runtime's own clock, not the
 //! provider's, so the numbers match what the screen showed.
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,15 @@ use crate::message_stream::types::BlockId;
 
 const TIMINGS_DIR: &str = "request-timings";
 const TIMINGS_FILE: &str = "timings.jsonl";
+
+/// The rows a ledger keeps, newest last: as many as the per-turn trace keeps
+/// lines (`crate::turn_trace`) — the same retention for the same kind of
+/// per-project evidence file (t-80327).
+const RETAINED_ROWS: usize = crate::turn_trace::MAX_TURN_LOG_LINES;
+
+/// The rows this process appended to each ledger since it last cut the
+/// ledger back to its newest [`RETAINED_ROWS`].
+static APPENDED_SINCE_CUT: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
 
 /// The stamps one request collects while its stream is in flight. Monotonic
 /// instants; converted to millisecond waits only when the record is written.
@@ -403,7 +414,10 @@ pub fn record_request_timing(cwd: &Path, record: &RequestTimingRecord) -> io::Re
     record_request_timing_at_path(&request_timings_path(cwd), record)
 }
 
-/// Append one record at an explicit path — one serialized line, one write.
+/// Append one record at an explicit path — one serialized line, one write —
+/// and cut the ledger back to its newest [`RETAINED_ROWS`] when a cut is due
+/// ([`cut_is_due`]). The cut is best effort, as the per-turn trace's: the row
+/// is already written, and a ledger left long is no reason to fail.
 pub fn record_request_timing_at_path(path: &Path, record: &RequestTimingRecord) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -411,7 +425,26 @@ pub fn record_request_timing_at_path(path: &Path, record: &RequestTimingRecord) 
     let mut line = serde_json::to_string(record).map_err(io::Error::other)?;
     line.push('\n');
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(line.as_bytes())
+    file.write_all(line.as_bytes())?;
+    if cut_is_due(path) {
+        let _ = crate::jsonl_log::prune_jsonl_lines(path, RETAINED_ROWS);
+    }
+    Ok(())
+}
+
+/// Whether this process's append to `path` is the one that cuts the ledger
+/// back: its first, and then each one after it has appended as many rows
+/// again as the ledger keeps. A ledger stays within twice the rows it keeps,
+/// and is read whole once per that many appends rather than on every one.
+fn cut_is_due(path: &Path) -> bool {
+    let mut appended = APPENDED_SINCE_CUT.lock().unwrap_or_else(PoisonError::into_inner);
+    let since_cut = appended.entry(path.to_path_buf()).or_insert(RETAINED_ROWS);
+    *since_cut += 1;
+    let due = *since_cut > RETAINED_ROWS;
+    if due {
+        *since_cut = 0;
+    }
+    due
 }
 
 /// Read a project's ledger, dropping any line that does not parse.
@@ -419,7 +452,8 @@ pub fn read_request_timings(cwd: &Path) -> io::Result<Vec<RequestTimingRecord>> 
     read_request_timings_at_path(&request_timings_path(cwd))
 }
 
-/// Read a ledger at an explicit path; a missing file is an empty ledger.
+/// Read a ledger at an explicit path; a missing file is an empty ledger. A
+/// ledger written by this module holds at most twice [`RETAINED_ROWS`] rows.
 pub fn read_request_timings_at_path(path: &Path) -> io::Result<Vec<RequestTimingRecord>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
