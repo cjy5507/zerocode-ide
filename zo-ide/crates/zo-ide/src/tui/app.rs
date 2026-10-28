@@ -3902,7 +3902,12 @@ impl Ui {
             // A prompt command is a prompt: expanded, it waits in the queue
             // like a line typed now.
             None => match crate::slash::prompt_command(&self.session_cwd, name, arg, self.permission_mode, self.mode_origin()) {
-                Some(expansion) => self.pending_input.push_queued(Submission { text: expansion.text, image_paths: Vec::new() }),
+                Some(expansion) => {
+                    for line in &expansion.shown {
+                        self.note(SystemLevel::Info, line);
+                    }
+                    self.pending_input.push_queued(Submission { text: expansion.text, image_paths: Vec::new() });
+                }
                 None => self.note(SystemLevel::Info, &not_in_zo(name)),
             },
             // `/exit` 는 여기 오지 않는다 — 제출 자리에서 먼저 걸러 턴을 끝까지
@@ -5448,7 +5453,12 @@ impl App {
             // A prompt command runs as the turn its expanded body is; the
             // screen already shows the line as typed.
             None => match crate::slash::prompt_command(&self.session().cwd, name, arg, self.session().permission_mode, self.ui.mode_origin()) {
-                Some(expansion) => self.asked = Some(Work::Turn(Submission { text: expansion.text, image_paths: Vec::new() })),
+                Some(expansion) => {
+                    for line in &expansion.shown {
+                        self.ui.note(SystemLevel::Info, line);
+                    }
+                    self.asked = Some(Work::Turn(Submission { text: expansion.text, image_paths: Vec::new() }));
+                }
                 None => self.ui.note(SystemLevel::Info, &not_in_zo(name)),
             },
         }
@@ -9936,7 +9946,9 @@ mod footer_key_tests {
         ui.turn_slash("probe");
         let history: Vec<String> = ui.pending_history.iter().map(super::Line::plain).collect();
         let shown = history.join("\n");
-        assert!(shown.contains("/probe — "), "{shown}");
+        // The cell wraps at the test screen's width, so the path may run on
+        // to the next row; the name and the `!` line each fit on one.
+        assert!(shown.contains("• /probe —"), "{shown}");
         assert!(shown.contains("! echo hi → exit 0"), "{shown}");
     }
 

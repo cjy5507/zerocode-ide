@@ -658,7 +658,10 @@ fn handle_slash<W: Write>(
 }
 
 /// 목록에 없는 낱말 — 프롬프트 명령이면 그 펼친 본문이 턴이 되고, 아니면
-/// [`unknown_command`] 의 한 문구다.
+/// [`unknown_command`] 의 한 문구다. 턴이 나가기 전에 무엇이 돌았는지
+/// ([`crate::slash::PromptExpansion::shown`])를 렌더러에 한 줄씩 남긴다 —
+/// stderr 는 터미널이면 로그로 돌려지므로([`install_stderr_redirect`]) 사람이
+/// 보는 자리는 여기다.
 fn unlisted_command<W: Write>(
     renderer: &mut Renderer<W>,
     cwd: &std::path::Path,
@@ -669,7 +672,12 @@ fn unlisted_command<W: Write>(
 ) -> SlashOutcome {
     let origin = crate::slash::ModeOrigin { named: mode_named, piped: true };
     match crate::slash::prompt_command(cwd, name, arg, mode, origin) {
-        Some(expansion) => SlashOutcome::Turn(expansion.text),
+        Some(expansion) => {
+            for line in &expansion.shown {
+                note(renderer, line);
+            }
+            SlashOutcome::Turn(expansion.text)
+        }
         None => unknown_command(renderer, name),
     }
 }

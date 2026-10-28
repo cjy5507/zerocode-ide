@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -23,6 +23,18 @@ pub struct PromptCommandDef {
     /// The `commands` folder the file was found under (`<folder>/.zo/commands`
     /// for a workspace file).
     pub root: PathBuf,
+    /// Files further down the search order with the same name, which this one
+    /// keeps from running (`/name` always means this file).
+    pub shadows: Vec<PathBuf>,
+}
+
+/// A command body expanded, and one line per `!` command and `@path` it met
+/// saying what came of it (`! git status → exit 0`, `@notes.md → read`), for
+/// the screen to show before the turn goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedPrompt {
+    pub text: String,
+    pub trace: Vec<String>,
 }
 
 /// Where a command file was found.
@@ -118,6 +130,18 @@ impl PromptCommandDef {
     /// person has not trusted, whatever `allowed-tools` grants.
     #[must_use]
     pub fn render_prompt_as(&self, args: &str, base_dir: &Path, gate: InlineShellGate) -> String {
+        self.render_prompt_traced(args, base_dir, gate).text
+    }
+
+    /// [`Self::render_prompt_as`] with the line for each `!` command and
+    /// `@path` the body met ([`RenderedPrompt::trace`]).
+    #[must_use]
+    pub fn render_prompt_traced(
+        &self,
+        args: &str,
+        base_dir: &Path,
+        gate: InlineShellGate,
+    ) -> RenderedPrompt {
         let workspace = self.scope == PromptCommandScope::Workspace;
         let folder = self.workspace_folder().unwrap_or(base_dir);
         let shell = InlineShell {
@@ -128,7 +152,9 @@ impl PromptCommandDef {
             rules: gate.rules,
             confined: workspace,
         };
-        expand_command_template(&self.body, args, base_dir, &shell)
+        let mut trace = Vec::new();
+        let text = expand_command_template(&self.body, args, base_dir, &shell, &mut trace);
+        RenderedPrompt { text, trace }
     }
 }
 
@@ -143,18 +169,16 @@ pub fn find_prompt_command<'a>(
         .find(|command| command.name.eq_ignore_ascii_case(needle))
 }
 
+/// Every command file `cwd` can call. The person's own, in zo's home, come
+/// first and keep their names: a repository cannot take over a name the
+/// person already types. Then `.zo/commands` in `cwd` and each folder above
+/// it, nearest first. A file whose name is taken is not callable; the one
+/// that took it lists it in [`PromptCommandDef::shadows`].
 #[must_use]
 pub fn discover_prompt_commands(cwd: &Path) -> Vec<PromptCommandDef> {
-    let mut directories = Vec::new();
-    let mut cursor = Some(cwd);
-    while let Some(dir) = cursor {
-        directories.push(dir.to_path_buf());
-        cursor = dir.parent();
-    }
-
-    // The walk up from a project below the person's home passes zo's home
-    // too; a root that is one of zo's homes keeps the person's scope.
     let personal_roots = personal_command_roots();
+    // The walk up from a project below the person's home passes zo's home
+    // too; that folder was already read as the person's.
     let personal_canonical = personal_roots
         .iter()
         .filter_map(|root| root.canonicalize().ok())
@@ -165,28 +189,19 @@ pub fn discover_prompt_commands(cwd: &Path) -> Vec<PromptCommandDef> {
                 .canonicalize()
                 .is_ok_and(|canonical| personal_canonical.contains(&canonical))
     };
+    let workspace_roots = cwd
+        .ancestors()
+        .map(|dir| dir.join(".zo").join("commands"))
+        .filter(|root| !is_personal(root));
+    let roots = personal_roots
+        .iter()
+        .map(|root| (root.clone(), PromptCommandScope::ZoHome))
+        .chain(workspace_roots.map(|root| (root, PromptCommandScope::Workspace)));
 
-    let mut seen = BTreeSet::new();
+    let mut seen = BTreeMap::new();
     let mut commands = Vec::new();
-    for dir in directories {
-        let root = dir.join(".zo").join("commands");
-        let scope = if is_personal(&root) {
-            PromptCommandScope::ZoHome
-        } else {
-            PromptCommandScope::Workspace
-        };
+    for (root, scope) in roots {
         push_prompt_commands_from_root(&mut commands, &mut seen, &root, scope);
-        if commands.len() >= MAX_PROMPT_COMMANDS {
-            commands.truncate(MAX_PROMPT_COMMANDS);
-            return commands;
-        }
-    }
-
-    // Personal commands live under the user's home directory and are available
-    // in every project. Project commands are discovered first, so a project
-    // command with the same name keeps priority via the `seen` set.
-    for root in &personal_roots {
-        push_prompt_commands_from_root(&mut commands, &mut seen, root, PromptCommandScope::ZoHome);
         if commands.len() >= MAX_PROMPT_COMMANDS {
             commands.truncate(MAX_PROMPT_COMMANDS);
             return commands;
@@ -203,9 +218,11 @@ fn personal_command_roots() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Push the command files under `root`. `seen` maps each name taken so far
+/// (lowercase) to its command's index in `commands`.
 fn push_prompt_commands_from_root(
     commands: &mut Vec<PromptCommandDef>,
-    seen: &mut BTreeSet<String>,
+    seen: &mut BTreeMap<String, usize>,
     root: &Path,
     scope: PromptCommandScope,
 ) {
@@ -218,7 +235,8 @@ fn push_prompt_commands_from_root(
             continue;
         };
         let key = name.to_ascii_lowercase();
-        if seen.contains(&key) {
+        if let Some(&taken) = seen.get(&key) {
+            commands[taken].shadows.push(path);
             continue;
         }
         let Ok(content) = fs::read_to_string(&path) else {
@@ -229,7 +247,7 @@ fn push_prompt_commands_from_root(
         };
         command.scope = scope;
         command.root = root.to_path_buf();
-        seen.insert(key);
+        seen.insert(key, commands.len());
         commands.push(command);
     }
 }
@@ -290,6 +308,7 @@ fn parse_prompt_command_file(
         path,
         scope: PromptCommandScope::default(),
         root: PathBuf::new(),
+        shadows: Vec::new(),
     })
 }
 
@@ -433,6 +452,7 @@ fn expand_command_template(
     args: &str,
     base_dir: &Path,
     shell: &InlineShell<'_>,
+    trace: &mut Vec<String>,
 ) -> String {
     let mut output = String::with_capacity(body.len() + args.len());
     // Tracks line position for the `!cmd` line form and the `@path` word
@@ -451,13 +471,13 @@ fn expand_command_template(
             '!' if chars.peek() == Some(&'`') => {
                 let _ = chars.next();
                 let command = collect_until(&mut chars, '`');
-                output.push_str(&run_inline_command(&command, args, base_dir, shell));
+                output.push_str(&run_inline_command(&command, args, base_dir, shell, trace));
                 at_line_start = false;
                 prev_is_boundary = false;
             }
             '!' if at_line_start && peek_is_command_start(&mut chars) => {
                 let command = collect_line(&mut chars);
-                output.push_str(&run_inline_command(&command, args, base_dir, shell));
+                output.push_str(&run_inline_command(&command, args, base_dir, shell, trace));
                 // The line marker is fully consumed; the next char (if any) is a
                 // newline, so the output stays on its own line.
                 at_line_start = false;
@@ -465,7 +485,7 @@ fn expand_command_template(
             }
             '@' if prev_is_boundary && peek_is_path_start(&mut chars) => {
                 let token = collect_path_token(&mut chars);
-                output.push_str(&embed_file(&token, args, base_dir, shell.confined));
+                output.push_str(&embed_file(&token, args, base_dir, shell.confined, trace));
                 at_line_start = false;
                 prev_is_boundary = false;
             }
@@ -590,23 +610,25 @@ struct InlineShell<'a> {
 }
 
 impl InlineShell<'_> {
-    /// The notice that stands in for `command` when it may not run.
+    /// Why `command` may not run, when it may not: the words of the notice
+    /// that stands in for it (`[!<command>: <why>]`).
     fn refusal(&self, command: &str) -> Option<String> {
         if self.read_only {
-            return Some(format!("[!{command}: not run in read-only mode]"));
+            return Some("not run in read-only mode".to_string());
         }
         match self.workspace {
             WorkspaceTrust::Trusted => {}
             WorkspaceTrust::Untrusted => {
                 return Some(format!(
-                    "[!{command}: not run — {} is not trusted; a repository's command file runs its ! lines only in a folder you trust, or under a --permission-mode you name]",
+                    "not run — {} is not trusted; a repository's command file runs its ! lines only in a folder you trust, or under a --permission-mode you name",
                     self.folder.display()
                 ));
             }
             WorkspaceTrust::UnnamedPipe => {
-                return Some(format!(
-                    "[!{command}: not run — in a pipe nobody answers a trust prompt; give zo --permission-mode to let a repository's command file run its ! lines]"
-                ));
+                return Some(
+                    "not run — in a pipe nobody answers a trust prompt; give zo --permission-mode to let a repository's command file run its ! lines"
+                        .to_string(),
+                );
             }
         }
         if !self
@@ -614,22 +636,18 @@ impl InlineShell<'_> {
             .iter()
             .any(|spec| bash_rule_grants(spec, command))
         {
-            return Some(format!(
-                "[!{command}: not run — allowed-tools does not grant Bash for it]"
-            ));
+            return Some("not run — allowed-tools does not grant Bash for it".to_string());
         }
         self.rules_refusal(command)
     }
 
-    /// The notice for a command the person's permission rules stop: what
+    /// Why the person's permission rules stop `command`, when they do: what
     /// the model's Bash would meet, with no prompt to ask at.
     fn rules_refusal(&self, command: &str) -> Option<String> {
         let rules = match self.rules {
             Ok(rules) => rules,
             Err(why) => {
-                return Some(format!(
-                    "[!{command}: not run — your permission settings did not load: {why}]"
-                ));
+                return Some(format!("not run — your permission settings did not load: {why}"));
             }
         };
         // The mode is the session's to apply; this asks the rules alone, so
@@ -638,15 +656,14 @@ impl InlineShell<'_> {
             .with_permission_rules(rules);
         let input = serde_json::json!({ "command": command }).to_string();
         if policy.deny_reason(BASH_TOOL, &input).is_some() {
-            return Some(format!(
-                "[!{command}: not run — a deny rule in your permission settings forbids it]"
-            ));
+            return Some("not run — a deny rule in your permission settings forbids it".to_string());
         }
         match policy.authorize(BASH_TOOL, &input, None) {
             runtime::PermissionOutcome::Allow => None,
-            runtime::PermissionOutcome::Deny { .. } => Some(format!(
-                "[!{command}: not run — an ask rule in your permission settings wants your approval, and a command file cannot ask; run it yourself if you approve]"
-            )),
+            runtime::PermissionOutcome::Deny { .. } => Some(
+                "not run — an ask rule in your permission settings wants your approval, and a command file cannot ask; run it yourself if you approve"
+                    .to_string(),
+            ),
         }
     }
 }
@@ -690,20 +707,23 @@ fn bash_rule_grants(spec: &str, command: &str) -> bool {
 
 /// Run a `!` command and return its stdout (trailing newline trimmed). A
 /// command `shell` does not grant, or a failed or refused one, degrades to a
-/// one-line notice rather than panicking.
+/// one-line notice rather than panicking. Either way one line goes on
+/// `trace`: the exit code, or why it did not run.
 fn run_inline_command(
     template: &str,
     args: &str,
     base_dir: &Path,
     shell: &InlineShell<'_>,
+    trace: &mut Vec<String>,
 ) -> String {
     let command = expand_prompt_arguments(template, args);
     let command = command.trim();
     if command.is_empty() {
         return String::new();
     }
-    if let Some(notice) = shell.refusal(command) {
-        return notice;
+    if let Some(why) = shell.refusal(command) {
+        trace.push(format!("! {command} → {why}"));
+        return format!("[!{command}: {why}]");
     }
     let input = runtime::BashCommandInput {
         command: command.to_string(),
@@ -718,15 +738,41 @@ fn run_inline_command(
         cwd: Some(base_dir.to_path_buf()),
     };
     match runtime::execute_bash(input) {
-        Ok(output) => output.stdout.trim_end_matches('\n').to_string(),
-        Err(error) => format!("[!{command}: {error}]"),
+        Ok(output) => {
+            trace.push(format!("! {command} → {}", how_it_ended(&output)));
+            output.stdout.trim_end_matches('\n').to_string()
+        }
+        Err(error) => {
+            trace.push(format!("! {command} → {error}"));
+            format!("[!{command}: {error}]")
+        }
+    }
+}
+
+/// `exit 0`, `exit 2`, or the bash tool's own word for an end that has no
+/// code (`timeout`, `interrupted`).
+fn how_it_ended(output: &runtime::BashCommandOutput) -> String {
+    if output.interrupted {
+        return "interrupted".to_string();
+    }
+    match output.return_code_interpretation.as_deref() {
+        None => "exit 0".to_string(),
+        Some(word) => word
+            .strip_prefix("exit_code:")
+            .map_or_else(|| word.to_string(), |code| format!("exit {code}")),
     }
 }
 
 /// Embed `@path` file contents. Relative paths resolve against `base_dir`; a
 /// missing or unreadable file degrades to a one-line notice, and so does a
 /// path that lands outside `base_dir` when `confined`.
-fn embed_file(token: &str, args: &str, base_dir: &Path, confined: bool) -> String {
+fn embed_file(
+    token: &str,
+    args: &str,
+    base_dir: &Path,
+    confined: bool,
+    trace: &mut Vec<String>,
+) -> String {
     let raw = expand_prompt_arguments(token, args);
     let raw = raw.trim();
     if raw.is_empty() {
@@ -743,17 +789,26 @@ fn embed_file(token: &str, args: &str, base_dir: &Path, confined: bool) -> Strin
         // inside the working folder.
         let inside = match (resolved.canonicalize(), base_dir.canonicalize()) {
             (Ok(real), Ok(base)) => real.starts_with(base),
-            (Err(error), _) | (_, Err(error)) => return format!("[@{raw}: {error}]"),
+            (Err(error), _) | (_, Err(error)) => {
+                trace.push(format!("@{raw} → {error}"));
+                return format!("[@{raw}: {error}]");
+            }
         };
         if !inside {
-            return format!(
-                "[@{raw}: not read — a repository's command file reads only inside the working folder]"
-            );
+            let why = "not read — a repository's command file reads only inside the working folder";
+            trace.push(format!("@{raw} → {why}"));
+            return format!("[@{raw}: {why}]");
         }
     }
     match fs::read_to_string(&resolved) {
-        Ok(contents) => contents,
-        Err(error) => format!("[@{raw}: {error}]"),
+        Ok(contents) => {
+            trace.push(format!("@{raw} → read"));
+            contents
+        }
+        Err(error) => {
+            trace.push(format!("@{raw} → {error}"));
+            format!("[@{raw}: {error}]")
+        }
     }
 }
 
@@ -774,7 +829,7 @@ mod tests {
             rules: Ok(&no_rules),
             confined: true,
         };
-        expand_command_template(body, args, base_dir, &shell)
+        expand_command_template(body, args, base_dir, &shell, &mut Vec::new())
     }
 
     fn temp_dir(label: &str) -> PathBuf {

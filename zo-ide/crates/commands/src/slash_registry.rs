@@ -357,6 +357,7 @@ mod tests {
             path: PathBuf::from(format!(".zo/commands/{name}.md")),
             scope: crate::PromptCommandScope::Workspace,
             root: PathBuf::from(".zo/commands"),
+            shadows: Vec::new(),
         }
     }
 

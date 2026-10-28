@@ -241,9 +241,11 @@ pub struct PromptExpansion {
 /// The turn a `/word` the keep-list does not have runs as, when it names a
 /// prompt command: that command's body with `arg` filled in, expanded against
 /// `cwd`. Where commands are looked for and which wins a shared name is the
-/// commands crate's ([`commands::discover_prompt_commands`]): `.zo/commands/`
-/// in `cwd` and every folder above it, then `commands/` in zo's home. The
+/// commands crate's ([`commands::discover_prompt_commands`]): `commands/` in
+/// zo's home, then `.zo/commands/` in `cwd` and every folder above it. The
 /// keep-list is asked first, so a command file cannot shadow one of zo's own.
+/// [`PromptExpansion::shown`] names the file, any it hides, and each `!` line
+/// with what came of it, for the screen to show before the turn goes.
 /// Its `!` commands run only what the file's `allowed-tools` grants, none
 /// while `mode` is read-only, and none from a file in the working folder or
 /// above it until the person has given their word for the folder that holds
@@ -286,10 +288,17 @@ pub fn prompt_command(
             .map(runtime::RuntimeConfig::permission_rules)
             .map_err(|_| unreadable.as_str()),
     };
-    Some(PromptExpansion {
-        text: command.render_prompt_as(arg, cwd, gate),
-        shown: Vec::new(),
-    })
+    let rendered = command.render_prompt_traced(arg, cwd, gate);
+    let whose = match command.scope {
+        commands::PromptCommandScope::ZoHome => "your zo home",
+        commands::PromptCommandScope::Workspace => "repository",
+    };
+    let mut shown = vec![format!("/{} — {} ({whose})", command.name, command.path.display())];
+    shown.extend(command.shadows.iter().map(|hidden| {
+        format!("  hides {} — that file's /{} does not run", hidden.display(), command.name)
+    }));
+    shown.extend(rendered.trace.iter().map(|line| format!("  {line}")));
+    Some(PromptExpansion { text: rendered.text, shown })
 }
 
 #[cfg(test)]
