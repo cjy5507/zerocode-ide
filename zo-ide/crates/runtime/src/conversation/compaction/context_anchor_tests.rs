@@ -300,3 +300,83 @@ fn a_firing_stamps_where_its_figure_and_tiers_came_from() {
     assert_eq!(row.model, "claude-opus-5-5");
     assert_eq!(row.microcompact_streak, 0);
 }
+
+/// A long turn on a provider that reported no usage: every answer carries
+/// `Some` usage of zero, as an OpenAI-compatible adapter records it when the
+/// server sent none — xAI, Google-compatible and Ollama never ask for stream
+/// usage (`openai_compat::OpenAiCompatConfig::xai`), and `finish` closes the
+/// stream with an all-zero delta. Each round reads `result_chars` of output,
+/// until the local estimate reaches `tier`.
+fn turn_without_reported_usage(
+    runtime: &mut ConversationRuntime<NoopApiClient, StaticToolExecutor>,
+    result_chars: usize,
+    tier: u64,
+) {
+    runtime.session.push_user_text("read the tree").expect("task");
+    let mut step = 0;
+    while runtime.estimated_request_context_tokens() < tier {
+        let id = format!("read-{step}");
+        runtime
+            .session
+            .push_message(ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: "read_file".to_string(),
+                    input: format!("{{\"path\":\"src/{step}.rs\"}}"),
+                }],
+                Some(TokenUsage::default()),
+            ))
+            .expect("call");
+        runtime.usage_tracker.record(TokenUsage::default());
+        runtime
+            .session
+            .push_message(ConversationMessage::tool_result(id, "read_file", "x".repeat(result_chars), false))
+            .expect("result");
+        step += 1;
+    }
+}
+
+/// A request's input is never zero tokens, so an answer whose usage counts
+/// none is one the provider did not report: it anchors nothing, and the
+/// gates stand on the local estimate as they did before the anchor. Anchored
+/// on the zero, the trim tier was never reached however long the turn ran.
+#[test]
+fn an_answer_with_no_reported_usage_anchors_nothing_so_the_trim_stands() {
+    let _env = crate::test_env_lock();
+    let mut runtime = runtime_on("grok-4");
+    runtime.set_context_window(200_000);
+    let micro = runtime.microcompact_input_tokens_threshold();
+    let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
+    turn_without_reported_usage(&mut runtime, 16_000, micro);
+    let estimate = runtime.estimated_request_context_tokens();
+    assert!(estimate < full, "the turn stops in the trim tier: {estimate} against {full}");
+
+    assert_eq!(runtime.provider_anchored_context_tokens(), None);
+    assert_eq!(runtime.effective_context_tokens(), estimate);
+    assert!(
+        runtime.maybe_microcompact().is_some(),
+        "the transcript is {estimate} tokens by the estimate, past the {micro} tier, and no trim ran"
+    );
+}
+
+/// The same past the full tier: compaction runs on the turn's next request
+/// and on the next turn's first one.
+#[test]
+fn an_answer_with_no_reported_usage_anchors_nothing_so_full_compaction_stands() {
+    let _env = crate::test_env_lock();
+    let mut runtime = runtime_on("grok-4");
+    runtime.set_context_window(200_000);
+    let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
+    turn_without_reported_usage(&mut runtime, 16_000, full);
+    let estimate = runtime.estimated_request_context_tokens();
+
+    assert_eq!(runtime.preflight_context_tokens(), estimate);
+    assert!(
+        runtime.auto_compaction_config_if_ready().is_some(),
+        "the transcript is {estimate} tokens by the estimate, past the {full} tier, and no compaction ran"
+    );
+    assert!(
+        runtime.auto_compaction_config_if_preflight_ready().is_some(),
+        "the next turn's first request went out uncompacted at {estimate} of the {full} tier"
+    );
+}
