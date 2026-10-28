@@ -42,13 +42,14 @@ async function drawnFaces(cdp, selector) {
   return fonts.map((one) => one.familyName);
 }
 
-/* A0 — the face. The extension's panel wears VS Code's UI face
- * (`--vscode-font-family`, the platform's sans), and so must this page,
- * whatever the person chose: a chosen face that is not installed — the
- * default `Geist` is a name, never a shipped file — must fall through to the
- * platform's sans, not to the engine's default face (WebKit's Times, and for
- * Hangul AppleMyungjo: the serif the person saw, 2026-09-23). Which face is
- * the engine's default depends on the engine and the page's language, so the
+/* A0 — the face. The default `Geist` is the window's own shipped face (the
+ * passed Geist draft, t-78107): the conversation draws its Latin words in it,
+ * its Hangul in the platform's sans after it. Any other choice wears what
+ * VS Code's panel wears (`--vscode-font-family`, the platform's sans): a
+ * chosen face that is not installed must fall through to the platform's
+ * sans, not to the engine's default face (WebKit's Times, and for Hangul
+ * AppleMyungjo: the serif the person saw, 2026-09-23). Which face is the
+ * engine's default depends on the engine and the page's language, so the
  * page carries two controls beside the words: the same Latin word in a face
  * that does not exist (what the engine falls to) and in the platform's sans
  * (what the extension wears). Five ways a choice can arrive: the default,
@@ -87,6 +88,11 @@ export async function testConversationFont(browser, origin, ok) {
       // The engine answers for text it has laid out: a frame first.
       await window.__PAINTED__();
     });
+    // The shipped face is a loaded face of the page, not a name the machine happens to have.
+    const shipped = await page.evaluate(async () => {
+      await document.fonts.ready;
+      return [...document.fonts].some((face) => face.family.replaceAll("\"", "") === "Geist" && face.status === "loaded");
+    });
     const engine = await drawnFaces(cdp, "#conversation-font-engine");
     const system = await drawnFaces(cdp, "#conversation-font-system");
     const cases = {};
@@ -114,11 +120,13 @@ export async function testConversationFont(browser, origin, ok) {
         tool: await drawnFaces(cdp, "#worker-view .helper-step-kind"),
         user: await drawnFaces(cdp, "#worker-view .helper-turn.is-user .helper-said"),
       };
-      // The Latin words stand in the platform's sans: the unknown tool's name
-      // is all Latin, and the prose and the person's words carry Latin beside
-      // Hangul.
-      const latinInSans = drawn.tool?.join() === system?.join() &&
-        [drawn.prose, drawn.user].every((faces) => faces?.includes(system?.[0]) === true);
+      // The Latin words stand in the face they should: the unknown tool's
+      // name is all Latin, and the prose and the person's words carry Latin
+      // beside Hangul. The default draws them in the shipped Geist, every
+      // other choice in the platform's sans.
+      const latin = name === "default" ? ["Geist"] : system;
+      const latinInSans = drawn.tool?.join() === latin?.join() &&
+        [drawn.prose, drawn.user].every((faces) => faces?.includes(latin?.[0]) === true);
       // The Latin row says whether a face fell to the engine's default: the words may open with Hangul, which the
       // engine's default (Malgun Gothic under lang=ko on Windows) draws too, so the first face of prose proves nothing.
       const fellToEngine = engine?.[0] !== system?.[0] && drawn.tool?.[0] === engine?.[0];
@@ -128,15 +136,16 @@ export async function testConversationFont(browser, origin, ok) {
       cases[name] = { declared, drawn, latinInSans, fellToEngine, chained };
     }
     ok(
-      "A0: the conversation draws its Latin words in the platform's sans whatever face the person chose — the default Geist (a name, not a shipped file), none, a face this machine lacks, the same typed in quotes, and a typed list all fall through to the system sans, never to the engine's default face (WebKit: Times / AppleMyungjo); the declared list keeps the system chain after the choice, a quoted name is that name, and a typed list stays a list",
+      "A0: the conversation draws its Latin words in the shipped Geist by default, and in the platform's sans for any other choice — none, a face this machine lacks, the same typed in quotes, and a typed list all fall through to the system sans, never to the engine's default face (WebKit: Times / AppleMyungjo); the declared list keeps the system chain after the choice, a quoted name is that name, and a typed list stays a list",
       engine?.length > 0 && system?.length > 0 &&
         // The platform's sans is not the engine's default face (Times or AppleMyungjo on macOS and WebKit, Malgun
         // Gothic under lang=ko on Windows): a chain that collapsed to the engine default would pass the cases below.
         engine?.[0] !== system?.[0] &&
         Object.values(cases).every((one) => one.latinInSans && !one.fellToEngine && one.chained) &&
+        shipped &&
         cases.quoted.declared.choice === cases.missing.declared.choice &&
         cases.listed.declared.choice.split(",").length === 2,
-      JSON.stringify({ engine, system, cases }),
+      JSON.stringify({ shipped, engine, system, cases }),
     );
     ok("A0: the font cases raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
