@@ -7828,6 +7828,39 @@ fn a_refused_gauge_waits_until_somebody_asks() {
     );
 }
 
+/// A refusal on file was the answer to the build that asked. A new process
+/// starts without it and asks once, so an update that changes how the gauge
+/// asks is not held back by the old build's refusal; any other reading on
+/// file is what the gauge starts with.
+#[test]
+fn a_refusal_on_file_is_not_held_by_a_new_process() {
+    let on_file = |status: &str| {
+        serde_json::json!({
+            "provider": "antigravity",
+            "session": null,
+            "weekly": null,
+            "fable_weekly": null,
+            "updated_at": 1_793_083_884_908_i64,
+            "error": "Antigravity 사용량을 확인할 수 없습니다 — Google이 요청을 거절했습니다",
+            "status": status
+        })
+        .to_string()
+    };
+    assert_eq!(
+        seeded_antigravity_usage(&on_file("refused")),
+        None,
+        "the old build's refusal held the new process's gauge"
+    );
+    for status in ["ok", "no_project", "signed_out", "error"] {
+        assert_eq!(
+            seeded_antigravity_usage(&on_file(status)).map(|held| held.status),
+            Some(status.to_string()),
+            "a `{status}` reading on file was dropped at start"
+        );
+    }
+    assert_eq!(seeded_antigravity_usage("not json"), None);
+}
+
 /// The usage screen cuts what it already has, and says what it left out.
 ///
 /// Two claims hold this slice up and neither is visible in a screenshot.
