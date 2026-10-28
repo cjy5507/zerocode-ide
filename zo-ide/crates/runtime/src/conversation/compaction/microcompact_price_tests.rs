@@ -251,3 +251,172 @@ fn a_firing_leaves_its_quote_and_prices_for_the_ledger() {
     assert_eq!((row.read_per_mille, row.write_per_mille, row.ttl), (None, None, None));
     assert_eq!(row.breakeven_requests, None);
 }
+
+/// One read: the answer that asked for it — thinking first when
+/// `thinking_bytes` is not zero, and the provider's `usage` when given — and
+/// its result.
+fn read_round(
+    runtime: &mut ConversationRuntime<NoopApiClient, StaticToolExecutor>,
+    read: usize,
+    thinking_bytes: usize,
+    body_bytes: usize,
+    usage: Option<TokenUsage>,
+) {
+    let id = format!("read-{read}");
+    let mut blocks = Vec::new();
+    if thinking_bytes > 0 {
+        blocks.push(ContentBlock::Thinking {
+            thinking: "t".repeat(thinking_bytes),
+            signature: "s".to_string(),
+        });
+    }
+    blocks.push(ContentBlock::ToolUse {
+        id: id.clone(),
+        name: "read_file".to_string(),
+        input: format!("{{\"path\":\"src/file_{read}.rs\"}}"),
+    });
+    runtime
+        .session
+        .push_message(ConversationMessage::assistant_with_usage(blocks, usage))
+        .expect("call");
+    runtime
+        .session
+        .push_message(ConversationMessage::tool_result(id, "read_file", "x".repeat(body_bytes), false))
+        .expect("result");
+}
+
+/// A request the size of the whole window: past the hard ceiling, where the
+/// trim runs whatever its price.
+fn trim_past_the_ceiling(runtime: &mut ConversationRuntime<NoopApiClient, StaticToolExecutor>) {
+    let whole_window = runtime.context_window();
+    assert!(runtime.maybe_microcompact_for_tokens(whole_window).is_some(), "the last-resort trim runs");
+}
+
+/// The red case for the saving (t-78937 P2-2): Opus 5.5 dropped the thinking
+/// behind the first trim's frontier on the request after it, and drops it
+/// unbilled from then on. A second trim whose frontier falls inside that
+/// stretch orphans none of it again; what it gains is what it clears and the
+/// thinking of the answers that came after the first trim — here too little
+/// to pay for re-writing the rest within the gate's bet.
+#[test]
+fn a_second_trim_does_not_count_thinking_the_first_already_dropped_as_saved() {
+    let _env = crate::test_env_lock();
+    let mut runtime = runtime_on("claude-opus-5-5");
+    runtime
+        .session
+        .push_user_text("work through the repository")
+        .expect("task");
+    // The first trim clears the oldest six results; the answers from the
+    // eighth on think at length, and all of them sit behind its frontier.
+    let first = 6 + MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW;
+    for read in 0..first {
+        read_round(&mut runtime, read, if read > 6 { 40_000 } else { 0 }, 4_000, None);
+    }
+    trim_past_the_ceiling(&mut runtime);
+    // Twenty answers after it, each thinking briefly.
+    for read in first..first + 20 {
+        read_round(&mut runtime, read, 400, 400, None);
+    }
+
+    let quote = crate::microcompact_quote(
+        &runtime.session,
+        MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW,
+        MICROCOMPACT_MIN_OUTPUT_BYTES,
+    );
+    assert!(
+        quote.orphaned_thinking_tokens > 10 * quote.clearable_tokens,
+        "the second frontier falls inside the first trim's stretch: {quote:?}"
+    );
+    let threshold = runtime.microcompact_input_tokens_threshold();
+    let fired = runtime.maybe_microcompact_for_tokens(threshold);
+    assert!(
+        fired.is_none(),
+        "the second trim counted thinking the provider already dropped as saved: {quote:?}, fired {fired:?}"
+    );
+}
+
+/// The red case for the cost (t-78937 P2-2): the thinking the first trim
+/// orphaned is no longer billed, so re-writing the conversation after a
+/// second trim does not write it either. Here the dropped thinking all sits
+/// before the second frontier; without it the re-write is small and the
+/// second trim pays for itself.
+#[test]
+fn a_second_trim_does_not_pay_to_rewrite_thinking_the_first_already_dropped() {
+    let _env = crate::test_env_lock();
+    let mut runtime = runtime_on("claude-opus-5-5");
+    runtime
+        .session
+        .push_user_text("work through the repository")
+        .expect("task");
+    // The first trim clears the oldest six results; the answers that asked
+    // for results two to seven thought at length, behind its frontier and
+    // before the second one.
+    let first = 6 + MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW;
+    for read in 0..first {
+        read_round(&mut runtime, read, if (1..=6).contains(&read) { 40_000 } else { 0 }, 8_000, None);
+    }
+    trim_past_the_ceiling(&mut runtime);
+    // Enough small results after it that the second trim clears every result
+    // the first one kept.
+    for read in first..first + MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW {
+        read_round(&mut runtime, read, 0, 300, None);
+    }
+
+    let quote = crate::microcompact_quote(
+        &runtime.session,
+        MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW,
+        MICROCOMPACT_MIN_OUTPUT_BYTES,
+    );
+    assert_eq!(quote.orphaned_thinking_tokens, 0, "no thinking after the second frontier: {quote:?}");
+    let threshold = runtime.microcompact_input_tokens_threshold();
+    let fired = runtime.maybe_microcompact_for_tokens(threshold);
+    assert!(
+        fired.is_some(),
+        "the second trim priced re-writing thinking the provider no longer bills: {quote:?}"
+    );
+}
+
+/// The red case past the full tier (t-78937 P3-4): when the summary fails and
+/// the conversation stays over the full-compaction tier, the next thing that
+/// re-writes everything is the last-resort trim at the hard ceiling. A trim
+/// that pays for itself before the ceiling at the recent pace runs.
+#[test]
+fn past_the_full_tier_a_trim_that_pays_back_before_the_ceiling_runs() {
+    let _env = crate::test_env_lock();
+    let mut runtime = runtime_on("claude-opus-5-5");
+    runtime
+        .session
+        .push_user_text("work through the repository")
+        .expect("task");
+    let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
+    for read in 0..30 {
+        read_round(&mut runtime, read, 0, 40_000, None);
+    }
+    // The recent pace: 10k a request, the last answered request 70k over the
+    // tier.
+    let paced = MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW;
+    for step in 0..paced {
+        let usage = (step + 4 >= paced).then(|| {
+            let over = u64::try_from(paced - step).expect("fits") * 10_000;
+            let counted = u32::try_from(full + 80_000 - over).expect("fits");
+            TokenUsage {
+                input_tokens: 1,
+                cache_read_input_tokens: counted - 1,
+                ..TokenUsage::default()
+            }
+        });
+        read_round(&mut runtime, 30 + step, 0, 300, usage);
+    }
+    let context = full + 80_000;
+    assert!(!runtime.request_reaches_hard_context_ceiling(context));
+    let quote = crate::microcompact_quote(
+        &runtime.session,
+        MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW,
+        MICROCOMPACT_MIN_OUTPUT_BYTES,
+    );
+    let fired = runtime.maybe_microcompact_for_tokens(context);
+    assert!(
+        fired.is_some(),
+        "{context} tokens, over the {full} tier and under the ceiling: a trim that pays back before the ceiling was declined: {quote:?}"
+    );
+}

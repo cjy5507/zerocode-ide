@@ -117,17 +117,104 @@ fn the_gates_stand_on_the_providers_count_not_on_thinking_it_dropped() {
 }
 
 /// The figure is the provider's count of the last answered request and the
-/// local estimate of what came after the answer.
+/// local estimate of the answer itself and of what came after it: the
+/// provider counted what the request was sent, and the answer goes out on
+/// the next one.
 #[test]
 fn the_anchored_figure_adds_what_came_after_the_answer() {
     let mut runtime = runtime_on("claude-opus-5-5");
     let usage = turn_after_a_trim(&mut runtime, 3, 300_000);
-    let after = runtime.session.messages.len() - 1;
+    let after = runtime.session.messages.len() - 2;
     let since = crate::compact::estimate_messages_tokens(&runtime.session.messages[after..]);
     let expected = u64::from(usage.context_tokens()) + since;
     assert_eq!(runtime.provider_anchored_context_tokens(), Some(expected));
     assert_eq!(runtime.effective_context_tokens(), expected);
     assert_eq!(runtime.preflight_context_tokens(), expected);
+}
+
+/// The red case for the answer itself (t-78937 P2-1): on a 200k window the
+/// full tier and the 95% ceiling sit about 30k apart, and one answer's
+/// thinking can be larger than that. The provider counted the request the
+/// answer came back on just under the tier; the answer goes out on the next
+/// request, so the gate has to see it.
+#[test]
+fn the_anchored_figure_counts_the_answers_own_thinking() {
+    let _env = crate::test_env_lock();
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        NoopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+        vec!["system".to_string()],
+    );
+    runtime.set_context_window(200_000);
+    let window = runtime.context_window();
+    let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
+    runtime.session.push_user_text("read these").expect("task");
+    for step in 0..10 {
+        let id = format!("read-{step}");
+        runtime
+            .session
+            .push_message(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: id.clone(),
+                name: "read_file".to_string(),
+                input: format!("{{\"path\":\"src/{step}.rs\"}}"),
+            }]))
+            .expect("call");
+        runtime
+            .session
+            .push_message(ConversationMessage::tool_result(id, "read_file", "x".repeat(2_000), false))
+            .expect("result");
+    }
+    // Counted 5k under the tier; the answer thinks for the whole gap between
+    // the tier and the window.
+    let counted = u32::try_from(full - 5_000).expect("a 200k window fits");
+    let thinking_tokens = usize::try_from(window - full).expect("fits");
+    let usage = TokenUsage {
+        input_tokens: 1,
+        cache_read_input_tokens: counted - 1,
+        output_tokens: u32::try_from(thinking_tokens).expect("fits"),
+        ..TokenUsage::default()
+    };
+    runtime
+        .session
+        .push_message(ConversationMessage::assistant_with_usage(
+            vec![
+                ContentBlock::Thinking {
+                    thinking: "t".repeat(thinking_tokens * 4),
+                    signature: "s".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "last".to_string(),
+                    name: "read_file".to_string(),
+                    input: "{\"path\":\"src/last.rs\"}".to_string(),
+                },
+            ],
+            Some(usage),
+        ))
+        .expect("last answer");
+    runtime.usage_tracker.record(usage);
+    runtime
+        .session
+        .push_message(ConversationMessage::tool_result("last", "read_file", "ok", false))
+        .expect("last result");
+
+    let answer = runtime.session.messages.len() - 2;
+    let next_request =
+        u64::from(counted) + crate::compact::estimate_messages_tokens(&runtime.session.messages[answer..]);
+    assert!(
+        runtime.request_reaches_hard_context_ceiling(next_request),
+        "the next request carries the answer: {next_request} of a {window} window"
+    );
+    let gated = runtime.effective_context_tokens();
+    assert!(
+        gated >= full,
+        "the provider counted {counted} and the answer adds {thinking_tokens} of thinking, but the gate compared {gated} against the {full} tier"
+    );
+    assert!(
+        runtime.auto_compaction_config_if_ready().is_some(),
+        "a request past the ceiling ({next_request} of {window}) went out uncompacted"
+    );
 }
 
 /// Before any answer the local estimate stands alone, as it always did.
