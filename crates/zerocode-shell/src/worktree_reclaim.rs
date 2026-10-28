@@ -3472,6 +3472,26 @@ mod tests {
             .remove(&candidate.path);
     }
 
+    /// What is set aside lives in the checkout's own git directory, so the
+    /// checkout's removal takes it too (t-78886 r2): `git worktree remove`
+    /// deletes that directory whole, and nothing set aside outlives the
+    /// checkout it came from.
+    #[test]
+    fn a_build_tree_set_aside_goes_with_its_checkout() {
+        let bench = Bench::open();
+        let path = kept_with_a_build(&bench, "t-78886-r2-removed");
+        let own = linked_git_dir(&path).expect("a linked checkout");
+        let parked = own.join(format!("{SET_ASIDE}7-0"));
+        std::fs::create_dir_all(parked.join("debug")).expect("a tree set aside");
+        std::fs::write(parked.join("debug/big"), vec![0u8; 4096]).expect("build output");
+        git(
+            &bench.repo,
+            &["worktree", "remove", &path.to_string_lossy()],
+        );
+        assert!(!path.exists(), "the checkout stayed");
+        assert!(!parked.exists(), "a tree set aside outlived its checkout");
+    }
+
     /// A checkout a person locked keeps its build as it keeps everything
     /// else (t-78886): the lock is their word to leave it be.
     #[test]
