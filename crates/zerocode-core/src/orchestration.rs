@@ -1082,10 +1082,12 @@ const DEPLOYED_KEY: &str = "deployed";
 /// [`REVIEW_KEY_GROUPS`]' third group, and the one the ledger itself writes.
 const NOTHING_TO_LAND_KEY: &str = REVIEW_KEY_GROUPS[2][0];
 
-/// A coordinator's verification of a review hand-in with `nothingToLand` added (t-78890) — or
-/// `None` when the result verifies nothing, is not a JSON object, or already says something about
-/// landing (a merge key or a no-code key, either way): the coordinator's own word stands.
-fn nothing_to_land_added(result: &str) -> Option<String> {
+/// A coordinator's verification of a review hand-in with `nothingToLand` added (t-78890) — and,
+/// when the review handed in a commit, that commit as the one reviewed
+/// ([`landing_watch::REVIEWED_HEAD_KEY`]) unless the result names one — or `None` when the result
+/// verifies nothing, is not a JSON object, or already says something about landing (a merge key or
+/// a no-code key, either way): the coordinator's own word stands.
+fn nothing_to_land_added(result: &str, reviewed_head: Option<String>) -> Option<String> {
     let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(result)
     else {
         return None;
@@ -1100,6 +1102,10 @@ fn nothing_to_land_added(result: &str) -> Option<String> {
         return None;
     }
     map.insert(NOTHING_TO_LAND_KEY.to_string(), true.into());
+    if let Some(head) = reviewed_head {
+        map.entry(landing_watch::REVIEWED_HEAD_KEY)
+            .or_insert(head.into());
+    }
     Some(serde_json::Value::Object(map).to_string())
 }
 
@@ -22374,11 +22380,23 @@ fn plan_inner(
             let signed = author.kind();
             // A review hand-in has no code to land (t-78890): its verification says so, unless the
             // coordinator wrote a landing key of its own.
-            let review_hand_in = ledger
-                .run(&run_id)
-                .and_then(|run| run.task(task_id).and_then(|task| run.review_hand_in(task)));
+            let review_hand_in = ledger.run(&run_id).and_then(|run| {
+                let why = run
+                    .task(task_id)
+                    .and_then(|task| run.review_hand_in(task))?;
+                let reviewed_head = run
+                    .newest_attempt(task_id)
+                    .and_then(|attempt| attempt.source.as_deref())
+                    .and_then(commit_named);
+                Some((why, reviewed_head))
+            });
             let nothing_added = review_hand_in
-                .and_then(|why| Some((nothing_to_land_added(result.as_deref()?)?, why)))
+                .and_then(|(why, reviewed_head)| {
+                    Some((
+                        nothing_to_land_added(result.as_deref()?, reviewed_head)?,
+                        why,
+                    ))
+                })
                 .map(|(added, why)| {
                     result = Some(added);
                     why

@@ -99,6 +99,56 @@ fn a_stack_is_recorded_merged_on_every_member_in_one_call_bound_to_each_members_
     }
 }
 
+/// The hand-in to main time the landing stamps is the one `dispatch-show` says (t-78890 r2, review
+/// P2-1): `afterReport.mergedMs` is the moment `--members` first wrote `merged`, kept when the
+/// release is added, and a task nobody recorded as merged says none.
+#[test]
+fn dispatch_show_says_when_the_landing_was_recorded_and_nothing_for_a_task_not_recorded() {
+    let mut bench = Bench::new();
+    let (one, one_attempt) = handed(&mut bench, FIRST);
+    let (two, two_attempt) = handed(&mut bench, SECOND);
+    verified(&mut bench, &one, &one_attempt, FIRST);
+    verified(&mut bench, &two, &two_attempt, SECOND);
+    let merged_ms = |bench: &mut Bench, task: &str| {
+        bench.json(&format!("dispatch-show --task {task}"))["time"]["task"]["afterReport"]
+            ["mergedMs"]
+            .clone()
+    };
+    assert_eq!(merged_ms(&mut bench, &one), serde_json::Value::Null);
+
+    bench.json(&format!(
+        "task-update --members {one} --result {{\"merged\":true,\"mergeHead\":\"{MAIN}\"}}"
+    ));
+    let landed_at = bench.clock;
+    let stamped = {
+        let run = &bench.ledger.runs()[0];
+        run.completion_ms(run.task(&one).expect("the task"))
+    };
+    assert_eq!(stamped, Some(landed_at), "the write that said merged");
+    assert_eq!(merged_ms(&mut bench, &one), landed_at);
+    assert_eq!(
+        merged_ms(&mut bench, &two),
+        serde_json::Value::Null,
+        "verified and never recorded as merged"
+    );
+
+    bench.json(&format!(
+        "task-update --members {one} --result {{\"deployed\":true,\"release\":\"v1.1.101\"}}"
+    ));
+    assert!(bench.clock > landed_at);
+    assert_eq!(
+        merged_ms(&mut bench, &one),
+        landed_at,
+        "the release keeps the landing moment"
+    );
+    let shown = bench.json(&format!("dispatch-show --task {one}"));
+    assert_eq!(
+        shown["time"]["task"]["afterReport"]["deployedMs"],
+        serde_json::Value::Null,
+        "the ledger stamps no release moment"
+    );
+}
+
 /// One member that cannot take the record refuses the whole call, each reason on its own line,
 /// and nothing is written: a stack is recorded whole or not at all.
 #[test]

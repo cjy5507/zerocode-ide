@@ -424,9 +424,14 @@ The shape of a session is always the same:
    kept copy from the Artifacts view (or the row's door) rather than the
    worker's path, which is gone once the checkout is.
    A hand-in with `"reportKind":"review"` — or a report (no commit) on a task
-   titled 검수 / 읽기 전용 / review / read-only — has no code to land: your
+   whose title has the word 검수 / 읽기 전용 / review / read-only / audit (a
+   whole word: 「preview」 is not one) — has no code to land: your
    `verified` of it is written with `nothingToLand` added (the answer says
-   so), and `landing_stalled` never asks it to merge.
+   so) and, when it handed in a commit, that commit as `reviewedHead`, and
+   `landing_stalled` never asks it to merge.
+   **A review brief requires `"reportKind":"review"` in the worker's
+   `worker_done` payload**: a reviewer that hands in the head it reviewed is
+   told from code waiting to land by that word alone.
 5. `worker-read --worker <id>` — look at a worker's actual screen when you
    need to see what it is doing rather than what it said. A released worker
    answers from the screen its release archived, same tail rules. The window

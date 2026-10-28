@@ -10,11 +10,11 @@
 //! - the task, its attempts, the hand-in and the review are the ledger's, read
 //!   the way the desk reads them (the desk's one stage word,
 //!   [`worker_summary_in`], [`task_time`]);
-//! - landing and release are git's. The ledger stamps no moment for either
-//!   (`AfterReport::merged_ms` and `deployed_ms` are always `None`), so the
-//!   merge commit on the base branch's first-parent line and the release it
-//!   falls under say when — and the line says which of the two told it
-//!   ([`Told`]);
+//! - landing and release are git's. The ledger stamps no moment for a release
+//!   (`AfterReport::deployed_ms` is always `None`), and its `merged_ms` is when
+//!   the coordinator wrote `merged`, not when main took the work, so the merge
+//!   commit on the base branch's first-parent line and the release it falls
+//!   under say when — and the line says which of the two told it ([`Told`]);
 //! - the release notes at the base give a shipped task's sentence when neither
 //!   the hand-in nor the merge has one ([`Said`]).
 //!

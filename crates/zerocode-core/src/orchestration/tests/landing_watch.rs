@@ -7,7 +7,8 @@
 use super::*;
 use crate::orchestration::landing_watch::{
     CLEANABLE_AFTER_MS, ConflictCell, DRIFT_PER_DISPATCH_MAX, GitSays, HORIZON_MS, LandingWitness,
-    MERGE_OVERDUE_MS, MERGED_UNRECORDED_GRACE_MS, RENOTIFY_MS, VERIFY_OVERDUE_MS,
+    MERGE_OVERDUE_MS, MERGED_UNRECORDED_GRACE_MS, RENOTIFY_MS, REVIEW_BY_KIND, REVIEW_BY_TITLE,
+    REVIEWED_HEAD_KEY, VERIFY_OVERDUE_MS,
 };
 
 const CHECKOUT: &str = "/r/checkout";
@@ -1153,4 +1154,92 @@ fn a_review_hand_in_nobody_read_is_still_told_as_no_review() {
     );
     let told = news(&bench, MessageKind::LandingStalled);
     assert_eq!(body(&told[0])["reason"], "no_review");
+}
+
+/// A title says review by a word, never by a piece of one (t-78890 r2, review P2-2): 「preview」 and
+/// 「reviewer」 hold the letters of 「review」 and are not it, so a report handed in on such a task is
+/// work waiting to land and is told as before. A mark is a word wherever the title breaks it —
+/// 「읽기-전용」, 「read only」 — and a Korean mark takes the particle written after it.
+#[test]
+fn a_title_says_review_by_a_whole_word_and_never_by_a_piece_of_one() {
+    for title in [
+        "artifact-preview-구현",
+        "reviewer-picker",
+        "previewed-audits",
+        "재검수표-정리",
+    ] {
+        let mut bench = Bench::new();
+        let handed = review_handed_in(&mut bench, title, "", None);
+        let (said, verified_at) = verify_review(&mut bench, &handed);
+        assert!(said["nothingToLand"].is_null(), "{title}: {said}");
+        assert_eq!(
+            bench
+                .ledger
+                .landing_watch(&silent(), verified_at + MERGE_OVERDUE_MS),
+            1,
+            "{title}"
+        );
+        let told = news(&bench, MessageKind::LandingStalled);
+        assert_eq!(body(&told[0])["reason"], "no_merge", "{title}");
+    }
+    for title in [
+        "T-1-Review",
+        "audit:-the-stack",
+        "검수를-마친-보고",
+        "읽기_전용으로-본-것",
+        "a-READ-ONLY-pass",
+    ] {
+        let mut bench = Bench::new();
+        let handed = review_handed_in(&mut bench, title, "", None);
+        let (said, _) = verify_review(&mut bench, &handed);
+        assert_eq!(said["nothingToLand"], REVIEW_BY_TITLE, "{title}: {said}");
+    }
+}
+
+/// A review worker hands in the head it reviewed — someone else's commit (t-78392, t-78487,
+/// t-78512 and t-78521 on 10-28). With `reportKind: review` that hand-in is still a review, whatever
+/// the title: it is never told as unlanded, and its verification writes the commit as the one
+/// reviewed, beside `nothingToLand`, rather than as a head to land.
+#[test]
+fn a_review_that_hands_in_the_head_it_reviewed_is_a_review_and_names_that_head_as_reviewed() {
+    let mut bench = Bench::new();
+    let handed = review_handed_in(
+        &mut bench,
+        "stack-pass",
+        "{\"reportKind\":\"review\"}",
+        Some(HEAD),
+    );
+    let (said, verified_at) = verify_review(&mut bench, &handed);
+    assert_eq!(said["nothingToLand"], REVIEW_BY_KIND, "{said}");
+    let (facts, result) = {
+        let run = &bench.ledger.runs()[0];
+        let task = run.task(&handed.task).expect("the task");
+        (
+            run.review_of(task),
+            serde_json::from_str::<serde_json::Value>(task.result.as_str()).expect("a JSON result"),
+        )
+    };
+    assert!(
+        facts.verified && facts.nothing_to_land && !facts.merged && facts.merge_head.is_none(),
+        "{facts:?}"
+    );
+    assert_eq!(result[REVIEWED_HEAD_KEY], HEAD, "{result}");
+    assert_eq!(
+        bench.ledger.landing_watch(
+            &[witness(
+                CHECKOUT,
+                HEAD,
+                GitSays::Unlanded {
+                    behind: None,
+                    far_behind: false,
+                    conflict: None,
+                },
+                false,
+            )],
+            verified_at + 10 * MERGE_OVERDUE_MS,
+        ),
+        0,
+        "a reviewed head told as unlanded: {:?}",
+        news(&bench, MessageKind::LandingStalled)
+    );
 }

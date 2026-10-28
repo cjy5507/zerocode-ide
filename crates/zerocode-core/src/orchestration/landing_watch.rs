@@ -23,12 +23,15 @@ pub const DRIFT_PER_DISPATCH_MAX: usize = 10;
 /// 이보다 오래된 과업은 알리지 않는다 — 옛 기록이 한꺼번에 알림이 되지 않게.
 pub const HORIZON_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 /// 코디네이터가 읽기만 하는 일 — 검수 — 에 붙이는 제목의 표식 (t-78890). 커밋을 넘기지 않은
-/// 과업에만 읽는다: 제목만으로는 커밋을 숨기지 않는다. 영어 표식은 대소문자를 가리지 않는다.
-pub const REVIEW_TITLE_MARKS: &[&str] = &["검수", "읽기 전용", "read-only", "review"];
+/// 과업에만 읽는다: 제목만으로는 커밋을 숨기지 않는다. 낱말로 맞춘다(`title_says_review`):
+/// 영어 표식은 대소문자를 가리지 않고 「preview」·「reviewer」에 걸리지 않는다.
+pub const REVIEW_TITLE_MARKS: &[&str] = &["검수", "읽기 전용", "read-only", "review", "audit"];
 /// 넘김이 검수인 까닭 — 워커가 `reportKind: review`라고 말했다.
 pub const REVIEW_BY_KIND: &str = "reportKind review";
 /// 넘김이 검수인 까닭 — 커밋 없는 넘김에 제목이 검수라고 말한다.
 pub const REVIEW_BY_TITLE: &str = "read-only title";
+/// 커밋을 넘긴 검수의 검증 결과에 그 커밋을 적는 키 — 착지할 머리가 아니라 검수한 머리다.
+pub const REVIEWED_HEAD_KEY: &str = "reviewedHead";
 
 /// 창이 한 작업 폴더에 대해 본 git의 사실.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +104,9 @@ impl Run {
     /// 과업의 가장 새 시도가 넘긴 것이 검수 — 읽기만 하고 착지할 코드가 없는 일 — 인지, 그렇다면 어느
     /// 표식으로 아는지 (t-78890, VERDICT F1). 그 시도를 끝낸 `worker_done`이 payload에
     /// `reportKind: review`라고 말했거나, 커밋이 아닌 보고서를 넘겼는데 제목에
-    /// [`REVIEW_TITLE_MARKS`]가 있다.
+    /// [`REVIEW_TITLE_MARKS`]가 있다. `reportKind: review`는 커밋을 넘겼어도 검수다: 검수 워커가
+    /// `head`로 넘기는 것은 검수한 남의 커밋이고, 그 검증에는 그 커밋이 검수 대상
+    /// ([`REVIEWED_HEAD_KEY`])으로 적힌다.
     ///
     /// 늦은 착지 알림은 검수에게 착지를 묻지 않고, 코디네이터가 그 검수를 `verified`로 적을 때
     /// `nothingToLand`가 함께 적힌다. 둘 다 이 한 곳에서 읽는다.
@@ -130,11 +135,39 @@ impl Run {
         if said_review {
             return Some(REVIEW_BY_KIND);
         }
-        let title = task.title.to_lowercase();
-        (commit_named(source).is_none()
-            && REVIEW_TITLE_MARKS.iter().any(|mark| title.contains(mark)))
-        .then_some(REVIEW_BY_TITLE)
+        (commit_named(source).is_none() && title_says_review(&task.title))
+            .then_some(REVIEW_BY_TITLE)
     }
+}
+
+/// 제목에 [`REVIEW_TITLE_MARKS`]의 하나가 낱말로 있는가 (t-78890 r2). 제목과 표식을 글자·숫자가
+/// 아닌 것에서 끊어 낱말로 나누고, 표식의 낱말들이 제목에 잇달아 있어야 한다 — 「읽기 전용」은
+/// 「읽기-전용」에도, 「read-only」는 「read only」에도 맞는다. 마지막 낱말이 ASCII가 아니면
+/// 제목 낱말의 머리만 맞아도 된다: 한국어는 「검수를」·「전용으로」처럼 조사가 붙는다.
+fn title_says_review(title: &str) -> bool {
+    fn words(text: &str) -> Vec<String> {
+        text.split(|one: char| !one.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    }
+    let title = words(title);
+    REVIEW_TITLE_MARKS.iter().any(|mark| {
+        let mark = words(mark);
+        let Some((last, before)) = mark.split_last() else {
+            return false;
+        };
+        title.windows(mark.len()).any(|seen| {
+            seen.split_last().is_some_and(|(seen_last, seen_before)| {
+                seen_before == before
+                    && if last.is_ascii() {
+                        seen_last == last
+                    } else {
+                        seen_last.starts_with(last.as_str())
+                    }
+            })
+        })
+    })
 }
 
 impl Ledger {
