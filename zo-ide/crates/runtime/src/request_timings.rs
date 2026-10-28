@@ -70,6 +70,20 @@ impl StreamStamps {
         }
     }
 
+    /// A request of the turn `clock` keeps, whose assembly began at
+    /// `assemble_started` after the compaction `preflight`, when one ran in
+    /// front of it. The judgments' wait goes with the first request that
+    /// takes it off the clock: only the turn's first request waited for them.
+    #[must_use]
+    pub fn in_turn(assemble_started: Instant, clock: &mut TurnClock, preflight: Option<Range<Instant>>) -> Self {
+        Self {
+            turn_started: clock.started,
+            judge_wait: clock.judge_wait.take(),
+            preflight,
+            ..Self::begun(assemble_started)
+        }
+    }
+
     /// Observe a block on the probe channel, now.
     pub fn observe(&mut self, block: &RenderBlock) {
         self.observe_at(block, Instant::now());
@@ -117,6 +131,27 @@ impl StreamStamps {
     }
 }
 
+/// What a turn stamps before any of its requests is assembled: when it
+/// began, and how long its turn-start judgments held it — the waits in front
+/// of its first request that the request's own stamps begin too late to see
+/// (t-78938).
+#[derive(Debug, Clone, Default)]
+pub struct TurnClock {
+    /// When the runtime took the person's words.
+    pub started: Option<Instant>,
+    /// When the turn-start judgments began holding the turn's first
+    /// request, and when they let it go; `None` when none was asked.
+    pub judge_wait: Option<Range<Instant>>,
+}
+
+impl TurnClock {
+    /// A turn that began at `now`.
+    #[must_use]
+    pub fn began(now: Instant) -> Self {
+        Self { started: Some(now), judge_wait: None }
+    }
+}
+
 /// One line of the ledger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestTimingRecord {
@@ -150,6 +185,20 @@ pub struct RequestTimingRecord {
     /// written before this column and wherever no attempt was declared.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub attempt: String,
+    /// The turn began → last attempt left: the whole wait from the person's
+    /// words to this request, of which `judge_wait_ms`, `preflight_ms` and
+    /// `assemble_ms` are parts. Absent on every row written before this
+    /// column, and on a request no turn start was stamped for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_start_ms: Option<u64>,
+    /// How long the turn-start judgments held this request — the turn's
+    /// first request only, and only when one was asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge_wait_ms: Option<u64>,
+    /// How long the compaction preflight in front of this request took —
+    /// the turn's first request only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_ms: Option<u64>,
 }
 
 /// The turn context a record carries next to its waits.
@@ -170,6 +219,10 @@ fn millis_between(from: Option<Instant>, to: Option<Instant>) -> Option<u64> {
     Some(u64::try_from(to.saturating_duration_since(from).as_millis()).unwrap_or(u64::MAX))
 }
 
+fn span_millis(span: Option<&Range<Instant>>) -> Option<u64> {
+    span.and_then(|span| millis_between(Some(span.start), Some(span.end)))
+}
+
 /// Fold the stamps into a record.
 #[must_use]
 pub fn timing_record(context: &TimingContext<'_>, stamps: &StreamStamps) -> RequestTimingRecord {
@@ -186,6 +239,9 @@ pub fn timing_record(context: &TimingContext<'_>, stamps: &StreamStamps) -> Requ
         stream_ms: millis_between(stamps.sent, stamps.completed),
         outcome: context.outcome.to_string(),
         attempt: context.attempt.to_string(),
+        turn_start_ms: millis_between(stamps.turn_started, stamps.sent),
+        judge_wait_ms: span_millis(stamps.judge_wait.as_ref()),
+        preflight_ms: span_millis(stamps.preflight.as_ref()),
     }
 }
 
@@ -313,6 +369,41 @@ mod tests {
             !written.contains(r#""attempt":"#),
             "an empty attempt costs no bytes on a file kept forever: {written}"
         );
+    }
+
+    /// Every row written before the turn's columns parses, and a request no
+    /// turn start was stamped for spells none of them: a file kept forever
+    /// pays no bytes for a wait nobody measured.
+    #[test]
+    fn a_row_without_the_turn_columns_parses_and_spells_none_of_them() {
+        let old_line = r#"{"recorded_at":1789000000,"session_id":"s","model":null,"iteration":1,"request_messages":2,"attempts":1,"assemble_ms":1,"ttfb_ms":2,"ttfv_ms":3,"stream_ms":4,"outcome":"completed","attempt":"s@1"}"#;
+        let parsed: RequestTimingRecord = serde_json::from_str(old_line).expect("an older row must still parse");
+        assert_eq!((parsed.turn_start_ms, parsed.judge_wait_ms, parsed.preflight_ms), (None, None, None));
+
+        let t0 = Instant::now();
+        let mut stamps = StreamStamps::begun(t0);
+        stamps.observe_at(&sent(1), t0 + Duration::from_millis(5));
+        let written = serde_json::to_string(&timing_record(&context("completed"), &stamps)).expect("serialize");
+        for column in ["turn_start_ms", "judge_wait_ms", "preflight_ms"] {
+            assert!(!written.contains(column), "{column} was spelled for nothing: {written}");
+        }
+    }
+
+    /// The turn-start judgments held only the turn's first request: the
+    /// first request a turn's clock stamps takes their wait off it, and every
+    /// request after carries the turn's start alone.
+    #[test]
+    fn the_judgments_wait_rides_the_turns_first_request_only() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut clock = TurnClock::began(t0);
+        clock.judge_wait = Some(t0 + ms(1)..t0 + ms(9));
+        let first = StreamStamps::in_turn(t0 + ms(20), &mut clock, Some(t0 + ms(9)..t0 + ms(20)));
+        let second = StreamStamps::in_turn(t0 + ms(900), &mut clock, None);
+        assert_eq!(first.judge_wait, Some(t0 + ms(1)..t0 + ms(9)));
+        assert_eq!(second.judge_wait, None);
+        assert_eq!((first.turn_started, second.turn_started), (Some(t0), Some(t0)));
+        assert_eq!(second.preflight, None);
     }
 
     /// The three waits are read off the probe channel in order: the phase

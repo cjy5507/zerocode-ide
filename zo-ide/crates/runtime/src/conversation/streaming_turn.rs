@@ -1294,6 +1294,7 @@ where
             // fresh provider usage plus the local estimate. This prevents a
             // resumed or fast-growing session from jumping past the 85% trigger
             // before the runtime has a chance to shrink it.
+            let compaction_began = std::time::Instant::now();
             if iterations == 1 {
                 if let Some(event) = self
                     .maybe_microcompact_preflight_streaming(&render_tx, &id_gen)
@@ -1323,6 +1324,9 @@ where
                         .await;
                 }
             }
+            // The first request's checks are the turn's preflight, a wait in
+            // front of the turn's first send that its timing row names.
+            let preflight = (iterations == 1).then(|| compaction_began..std::time::Instant::now());
             // The seat has heard everything before this point, and a
             // compaction may have just rewritten it: what it hears next begins
             // here.
@@ -1338,7 +1342,8 @@ where
             // freeze). `assemble_request` is pure (Arc clones only), so it is
             // safe to run every iteration on the render thread.
             let __req_t = std::time::Instant::now();
-            let mut stream_stamps = crate::request_timings::StreamStamps::begun(__req_t);
+            let mut stream_stamps =
+                crate::request_timings::StreamStamps::in_turn(__req_t, &mut self.turn_clock, preflight);
             // Recall runs in `spawn_blocking` (FREEZE-1): the dense ONNX embedding
             // forward pass no longer executes on this `select!` task, so it cannot
             // starve render_tick. The recall inputs are cloned out of `&self`

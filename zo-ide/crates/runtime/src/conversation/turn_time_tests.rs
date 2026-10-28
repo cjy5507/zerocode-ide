@@ -381,3 +381,20 @@ fn only_a_turns_first_row_carries_the_judgments_wait_and_the_preflight() {
     assert!(second["judge_wait_ms"].is_null() && second["preflight_ms"].is_null(), "{second}");
     assert!(second["turn_start_ms"].as_u64() >= Some(entered), "{second}");
 }
+
+/// Z6: the turn's clock takes the turn-start judgments' wait when one was
+/// asked — a judgment that answers at once holds the turn a moment, far
+/// inside the wait — and none when nothing was asked.
+#[test]
+fn the_turns_clock_takes_the_judgments_wait_only_when_one_was_asked() {
+    let mut runtime =
+        runtime_with(Arc::new(Scripted::new(Vec::new())), Arc::new(Store::default()), Arc::new(CountingSeat::default()), SteeringQueue::default());
+    runtime.run_user_prompt_submit_for_streaming_user_entry("read a.rs").expect("the turn proceeds");
+    assert!(runtime.turn_clock.started.is_some(), "the turn's start is stamped");
+    assert_eq!(runtime.turn_clock.judge_wait, None, "nothing was asked, so nothing held the turn");
+
+    runtime.set_skill_suggestion_seat(Some(Arc::new(AnswersAtOnce)));
+    runtime.run_user_prompt_submit_for_streaming_user_entry("read a.rs").expect("the turn proceeds");
+    let held = runtime.turn_clock.judge_wait.clone().expect("a judgment was asked and waited for");
+    assert!(held.end - held.start < super::TURN_START_JUDGMENT_WAIT, "an answer at once is no wall: {held:?}");
+}

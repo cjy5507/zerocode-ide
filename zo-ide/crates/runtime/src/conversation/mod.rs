@@ -768,6 +768,9 @@ pub struct ConversationRuntime<C, T> {
     /// that is always late would otherwise cost every turn the whole wait
     /// and still miss its first request.
     slow_turn_notes: HashSet<&'static str>,
+    /// When this turn began and how long its turn-start judgments held it,
+    /// for its requests' timing rows (t-78938).
+    turn_clock: crate::request_timings::TurnClock,
     /// The start-of-turn reading awaiting its actual edited-file label.
     file_pick_pending_turn: Option<FilePickPendingTurn>,
     /// Seated beside the tools and handed each shell command before it runs
@@ -1843,6 +1846,7 @@ where
             skill_suggestion_turn_start: None,
             pending_turn_notes: Vec::new(),
             slow_turn_notes: HashSet::new(),
+            turn_clock: crate::request_timings::TurnClock::default(),
             file_pick_pending_turn: None,
             tool_guard_seat: None,
             max_iterations: default_max_iterations(),
@@ -2116,7 +2120,8 @@ where
         if self.pending_turn_notes.is_empty() {
             return;
         }
-        let until = std::time::Instant::now() + TURN_START_JUDGMENT_WAIT;
+        let waited_from = std::time::Instant::now();
+        let until = waited_from + TURN_START_JUDGMENT_WAIT;
         let slow = &self.slow_turn_notes;
         let pending = &mut self.pending_turn_notes;
         // The timers are made inside the async block: `timeout_at` binds its
@@ -2132,6 +2137,8 @@ where
             }
             landed
         });
+        // The wait the turn's first request carries on its timing row.
+        self.turn_clock.judge_wait = Some(waited_from..std::time::Instant::now());
         let mut landed = landed.into_iter();
         for note in std::mem::take(&mut self.pending_turn_notes) {
             if let Some(joined) = landed.next().flatten() {
@@ -2234,6 +2241,9 @@ where
         &mut self,
         user_input: &str,
     ) -> Result<(), StreamingTurnError> {
+        // The person's words reached the runtime: what every wait in front
+        // of this turn's requests is counted from.
+        self.turn_clock = crate::request_timings::TurnClock::began(std::time::Instant::now());
         let _ = self.run_lifecycle_hook(
             HookEvent::TurnStart,
             &json!({"session_id": self.session.session_id}),
