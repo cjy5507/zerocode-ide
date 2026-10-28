@@ -253,3 +253,102 @@ fn a_second_press_while_the_first_is_typing_is_refused_before_any_key() {
         assert_eq!(first.stuck, None, "the pane is free once the press is done");
     });
 }
+
+/// The step-effort seat under `shadow` judged a turn and typed nothing: its
+/// move waits for the next turn to label it, and a person's press between
+/// the two turns goes through.
+#[test]
+fn a_press_goes_through_while_a_recording_seat_waits_to_label_its_move() {
+    use zerocode_core::jev::{JevMode, STEP_EFFORT};
+    let stood = StoppedWorker::stand_with(
+        98_800,
+        "--agent claude --model claude-opus-5-5 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let term = stood.host.worker_term;
+    let raise =
+        crate::systemone::tests::Endpoint::serving("HTTP/1.1 200 OK", a_move_answer("raise"), 0);
+    let home = stood.asks_jev_for(&STEP_EFFORT, &raise, JevMode::Shadow, "/wt");
+    let began = stood.began + 10_000;
+    let stuck = a_stuck_turn("fix the build", "medium");
+    a_turn_runs_then_ends(&stood, &stuck, began, began + 1_000);
+    for beat in [2_000, 3_000, 4_000, 5_000] {
+        tick(&stood.host, &[], began + beat);
+    }
+    assert_eq!(
+        StoppedWorker::rows_of(&home, &STEP_EFFORT).len(),
+        1,
+        "the seat judged the turn"
+    );
+    assert!(
+        stood.sent_at_worker().is_empty(),
+        "a recording seat types nothing"
+    );
+    let tail = tail_of(&stood);
+    assert_eq!(pane_effort(&stood.host, term, tail.as_deref()).stuck, None);
+    picker_up(&stood);
+    let chip = press(&stood.host, term, tail.as_deref(), "high").expect("the press");
+    assert_eq!(chip.pending.as_deref(), Some("high"));
+    assert_eq!(
+        stood.sent_at_worker(),
+        [
+            CLAUDE_EFFORT_PICKER.open,
+            "\r",
+            CLAUDE_EFFORT_PICKER.raise,
+            CLAUDE_EFFORT_PICKER.session_only,
+        ]
+    );
+}
+
+/// The seat under `on` keyed its raise and waits for the next turn to label
+/// it: a person's press between the two turns goes through, and counts its
+/// arrows from the rung the seat's keys put the session on.
+#[test]
+fn a_press_after_the_seat_keyed_its_move_counts_from_the_rung_the_seat_put_the_session_on() {
+    use zerocode_core::jev::{JevMode, STEP_EFFORT};
+    let stood = StoppedWorker::stand_with(
+        98_900,
+        "--agent claude --model claude-opus-5-5 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let term = stood.host.worker_term;
+    let raise =
+        crate::systemone::tests::Endpoint::serving("HTTP/1.1 200 OK", a_move_answer("raise"), 0);
+    let _home = stood.asks_jev_for(&STEP_EFFORT, &raise, JevMode::On, "/wt");
+    let began = stood.began + 10_000;
+    let stuck = a_stuck_turn("fix the build", "medium");
+    a_turn_runs_then_ends(&stood, &stuck, began, began + 1_000);
+    tick(&stood.host, &[], began + 2_000);
+    tick(&stood.host, &[], began + 3_000);
+    picker_up(&stood);
+    tick(&stood.host, &[], began + 4_000);
+    tick(&stood.host, &[], began + 5_000);
+    assert_eq!(
+        stood.sent_at_worker(),
+        [
+            CLAUDE_EFFORT_PICKER.open,
+            "\r",
+            CLAUDE_EFFORT_PICKER.raise,
+            CLAUDE_EFFORT_PICKER.session_only,
+        ],
+        "the seat keyed medium → high"
+    );
+    let tail = tail_of(&stood);
+    let chip = pane_effort(&stood.host, term, tail.as_deref());
+    assert_eq!(chip.stuck, None, "a settled move holds the pane");
+    assert_eq!(chip.pending.as_deref(), Some("high"));
+    press(&stood.host, term, tail.as_deref(), "max").expect("the press");
+    assert_eq!(
+        &stood.sent_at_worker()[4..],
+        [
+            CLAUDE_EFFORT_PICKER.open,
+            "\r",
+            CLAUDE_EFFORT_PICKER.raise,
+            CLAUDE_EFFORT_PICKER.raise,
+            CLAUDE_EFFORT_PICKER.session_only,
+        ],
+        "two arrows up from the seat's high, not three from the recorded medium"
+    );
+}

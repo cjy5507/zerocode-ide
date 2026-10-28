@@ -754,12 +754,12 @@ pub(crate) fn pane_effort(host: &dyn Host, term: u32, tail: Option<&str>) -> Eff
     let turn = tail.and_then(effort_in);
     let summons = worker.and_then(|worker| worker.floor);
     let pending = held.as_ref().and_then(|held| {
-        held.moves
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .pressed
-            .get(&term)
-            .and_then(|pressed| pressed.pending.clone())
+        let mut book = held.moves.lock().unwrap_or_else(|held| held.into_inner());
+        let book = &mut *book;
+        match book.pressed.get_mut(&term) {
+            Some(pressed) => pressed.pending.clone(),
+            None => seat_keyed(&book.seats, term),
+        }
     });
     let chip = effort_chip::chip(
         moves.as_ref(),
@@ -785,10 +785,21 @@ pub(crate) fn pane_effort(host: &dyn Host, term: u32, tail: Option<&str>) -> Eff
     chip
 }
 
+/// The rung the seat's own keys put `term`'s session on, while its move
+/// waits for the next turn to end — the record still says the rung before.
+fn seat_keyed(seats: &HashMap<String, Seat>, term: u32) -> Option<String> {
+    seats.values().find_map(|seat| {
+        let open = seat.open.as_ref().filter(|open| open.term == term)?;
+        matches!(open.stage, Stage::Settled { applied: true, .. })
+            .then(|| open.to.clone())
+            .flatten()
+    })
+}
+
 /// Why a press may not type at `term` now, read the way every door that
 /// types unasked reads it ([`composer_at_rest`]), then the person's own
-/// words on the pane's line, then a move of the seat's own on its way there,
-/// then an earlier press still typing there.
+/// words on the pane's line, then a move of the seat's own still on its way
+/// to the pane's keys, then an earlier press still typing there.
 fn moment(host: &dyn Host, held: Option<&super::LiveRuntime>, term: u32) -> Result<(), Stuck> {
     let heard = super::pane_turns()
         .lock()
@@ -804,24 +815,40 @@ fn moment(host: &dyn Host, held: Option<&super::LiveRuntime>, term: u32) -> Resu
     if host.line_holds_a_draft(term) {
         return Err(Stuck::Draft);
     }
-    let (seat_moving, pressing) = held.map_or((false, false), |held| {
+    let (opened, deciding, pressing) = held.map_or((false, false, false), |held| {
         let book = held.moves.lock().unwrap_or_else(|held| held.into_inner());
+        let open = book
+            .seats
+            .values()
+            .find_map(|seat| seat.open.as_ref().filter(|open| open.term == term));
         (
-            book.seats
-                .values()
-                .any(|seat| seat.open.as_ref().is_some_and(|open| open.term == term)),
+            open.is_some_and(|open| matches!(open.stage, Stage::Opened { .. })),
+            open.is_some_and(|open| match open.stage {
+                Stage::Asking => true,
+                Stage::Decided { chosen, .. } => chosen != Move::Hold,
+                Stage::Opened { .. } | Stage::Settled { .. } => false,
+            }),
             book.pressed
                 .get(&term)
                 .is_some_and(|pressed| pressed.moving),
         )
     });
-    if seat_moving {
+    // A move that has settled waits only for its label, and a recording seat
+    // types nothing: neither holds the pane from the person.
+    if opened || (deciding && seat_types(host)) {
         return Err(Stuck::SeatMoving);
     }
     if pressing {
         return Err(Stuck::PressMoving);
     }
     Ok(())
+}
+
+/// Whether the seat carries out the moves it decides — `on`, or an `auto`
+/// its evidence raised — rather than only writing them down.
+fn seat_types(host: &dyn Host) -> bool {
+    host.jev_wire()
+        .is_some_and(|wire| crate::systemone::applies(&wire, &STEP_EFFORT))
 }
 
 /// The worker the ledger seated in `term`, when one is — its summons'
