@@ -621,6 +621,9 @@ where
             self.tool_executor.begin_user_turn();
             self.run_user_prompt_submit_for_streaming_user_entry(&user_input)?;
         }
+        // A public turn is its own first leg; an internal subturn is another
+        // leg inside the words its turn took (deep mode).
+        self.turn_clock.leg_began();
         // Before the user message is pushed — see `begin_attempt`.
         self.begin_attempt();
         self.record_turn_started(&user_input);

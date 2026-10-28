@@ -36,8 +36,12 @@ const TIMINGS_FILE: &str = "timings.jsonl";
 #[derive(Debug, Clone, Default)]
 pub struct StreamStamps {
     /// When the turn this request belongs to began: the runtime took the
-    /// person's words, before the turn-start hooks and judgments.
+    /// person's words, before the turn-start hooks and judgments. `None` on a
+    /// later leg's request — see [`Self::leg`].
     pub turn_started: Option<Instant>,
+    /// The leg of the turn this request belongs to, from the second on — a
+    /// deep-mode turn runs its legs inside one taking of the person's words.
+    pub leg: Option<u32>,
     /// When the turn-start judgments began holding this request, and when
     /// they let it go — the turn's first request only.
     pub judge_wait: Option<Range<Instant>>,
@@ -133,10 +137,14 @@ impl StreamStamps {
     /// `assemble_started` after the compaction `preflight`, when one ran in
     /// front of it. The judgments' wait goes with the first request that
     /// takes it off the clock: only the turn's first request waited for them.
+    /// A request of a later leg names its leg instead of the turn's start:
+    /// the legs before it ran in between (t-80327).
     #[must_use]
     pub fn in_turn(assemble_started: Instant, clock: &mut TurnClock, preflight: Option<Range<Instant>>) -> Self {
+        let later_leg = clock.legs > 1;
         Self {
-            turn_started: clock.started,
+            turn_started: if later_leg { None } else { clock.started },
+            leg: later_leg.then_some(clock.legs),
             judge_wait: clock.judge_wait.take(),
             preflight,
             ..Self::begun(assemble_started)
@@ -212,13 +220,22 @@ pub struct TurnClock {
     /// When the turn-start judgments began holding the turn's first
     /// request, and when they let it go; `None` when none was asked.
     pub judge_wait: Option<Range<Instant>>,
+    /// How many legs of the turn have begun: a plain turn is one leg, and a
+    /// deep-mode turn runs one leg after another — each starting its
+    /// iterations over — inside one taking of the person's words (t-80327).
+    pub legs: u32,
 }
 
 impl TurnClock {
-    /// A turn that began at `now`.
+    /// A turn that began at `now`, before its first leg.
     #[must_use]
     pub fn began(now: Instant) -> Self {
-        Self { started: Some(now), judge_wait: None }
+        Self { started: Some(now), judge_wait: None, legs: 0 }
+    }
+
+    /// Another leg of the turn began.
+    pub fn leg_began(&mut self) {
+        self.legs = self.legs.saturating_add(1);
     }
 }
 
@@ -258,9 +275,19 @@ pub struct RequestTimingRecord {
     /// The turn began → last attempt left: the whole wait from the person's
     /// words to this request, of which `judge_wait_ms`, `preflight_ms` and
     /// `assemble_ms` are parts. Absent on every row written before this
-    /// column, and on a request no turn start was stamped for.
+    /// column, on a request no turn start was stamped for, and on a later
+    /// leg's request (`leg`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_start_ms: Option<u64>,
+    /// The leg of the turn this request belongs to, from the second on. A
+    /// deep-mode turn takes the person's words once and runs its legs (PLAN,
+    /// EXEC, verify) one after another, each starting `iteration` over at 1;
+    /// a later leg's rows carry no `turn_start_ms`, which would hold every
+    /// leg before it, so "the words to the first send" is read off the rows
+    /// with `iteration` 1 and no `leg` (t-80327). Absent on a turn's first
+    /// leg and on every row written before this column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg: Option<u32>,
     /// How long the turn-start judgments held this request — the turn's
     /// first request only, and only when one was asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -324,6 +351,7 @@ pub fn timing_record(context: &TimingContext<'_>, stamps: &StreamStamps) -> Requ
         outcome: context.outcome.to_string(),
         attempt: context.attempt.to_string(),
         turn_start_ms: millis_between(stamps.turn_started, stamps.sent),
+        leg: stamps.leg,
         judge_wait_ms: span_millis(stamps.judge_wait.as_ref()),
         preflight_ms: span_millis(stamps.preflight.as_ref()),
         tool_closed_ms: stamps
@@ -555,14 +583,14 @@ mod tests {
     fn a_row_without_the_turn_columns_parses_and_spells_none_of_them() {
         let old_line = r#"{"recorded_at":1789000000,"session_id":"s","model":null,"iteration":1,"request_messages":2,"attempts":1,"assemble_ms":1,"ttfb_ms":2,"ttfv_ms":3,"stream_ms":4,"outcome":"completed","attempt":"s@1"}"#;
         let parsed: RequestTimingRecord = serde_json::from_str(old_line).expect("an older row must still parse");
-        assert_eq!((parsed.turn_start_ms, parsed.judge_wait_ms, parsed.preflight_ms), (None, None, None));
+        assert_eq!((parsed.turn_start_ms, parsed.leg, parsed.judge_wait_ms, parsed.preflight_ms), (None, None, None, None));
         assert!(parsed.tool_closed_ms.is_empty() && parsed.tool_ran_ms.is_empty());
 
         let t0 = Instant::now();
         let mut stamps = StreamStamps::begun(t0);
         stamps.observe_at(&sent(1), t0 + Duration::from_millis(5));
         let written = serde_json::to_string(&timing_record(&context("completed"), &stamps)).expect("serialize");
-        for column in ["turn_start_ms", "judge_wait_ms", "preflight_ms", "tool_closed_ms", "tool_ran_ms"] {
+        for column in ["turn_start_ms", "\"leg\"", "judge_wait_ms", "preflight_ms", "tool_closed_ms", "tool_ran_ms"] {
             assert!(!written.contains(column), "{column} was spelled for nothing: {written}");
         }
     }

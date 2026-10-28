@@ -576,6 +576,7 @@ mod tests {
             outcome: outcome.into(),
             attempt: String::new(),
             turn_start_ms: None,
+            leg: None,
             judge_wait_ms: None,
             preflight_ms: None,
             tool_closed_ms: Vec::new(),
