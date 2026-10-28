@@ -542,9 +542,9 @@ async function computerHandoff(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "it stands in the middle of the window, and the keyboard starts on the frame, not on either answer",
-      Math.abs(seen.rect.cx - seen.rect.vw / 2) <= 2 && Math.abs(seen.rect.cy - seen.rect.vh / 2) <= seen.rect.vh * 0.1
-        && seen.buttons.join() === "취소,다 했어요" && seen.focus === "(dialog)",
+      "it stands in the corner and takes no keyboard: both answers are there, neither holds the focus",
+      seen.rect.cx > seen.rect.vw / 2 && seen.rect.cy > seen.rect.vh / 2
+        && seen.buttons.join() === "취소,다 했어요" && seen.focus === null,
       JSON.stringify(seen),
     );
     // Enter says nothing: 「다 했어요」 is the person saying they did a thing on
@@ -552,9 +552,13 @@ async function computerHandoff(browser, origin, ok) {
     await page.keyboard.press("Enter");
     await page.waitForTimeout(120);
     const enterOnly = await page.evaluate(() => ({ answered: window.__ASK_T__.answered.slice(), shown: window.__ASK_T__.look().shown }));
-    await page.keyboard.press("Tab");
-    await page.keyboard.press("Tab");
-    const onDone = await page.evaluate(() => window.__ASK_T__.look().focus);
+    // The card takes no keyboard of its own, so the hand reaches 「다 했어요」 by
+    // the card's own buttons, and Enter there says done.
+    const onDone = await page.evaluate(() => {
+      const button = [...document.querySelectorAll("#ask-choices button")].find((one) => one.textContent.trim() === "다 했어요");
+      button.focus();
+      return window.__ASK_T__.look().focus;
+    });
     await page.keyboard.press("Enter");
     await page.waitForTimeout(90);
     // The window's own reason for a covered press comes as a key and its
@@ -565,14 +569,19 @@ async function computerHandoff(browser, origin, ok) {
       await T.settle(260);
       return T.look();
     });
+    // Escape is the person's for what they are doing; 「취소」 hands the desk back.
     await page.keyboard.press("Escape");
+    await page.waitForTimeout(90);
+    const escaped = await page.evaluate(() => ({ answered: window.__ASK_T__.answered.slice(), shown: window.__ASK_T__.look().shown }));
+    await page.evaluate(() => [...document.querySelectorAll("#ask-choices button")].find((one) => one.textContent.trim() === "취소").click());
     await page.waitForTimeout(90);
     const answered = await page.evaluate(() => window.__ASK_T__.answered.slice());
     ok(
-      "Enter alone answers nothing; Tab reaches 「다 했어요」 and Enter there says done; Escape hands the desk back unfinished",
+      "Enter alone answers nothing; Enter on 「다 했어요」 says done; Escape answers nothing and 「취소」 hands the desk back unfinished",
       enterOnly.answered.length === 0 && enterOnly.shown === true && onDone === "다 했어요"
+        && escaped.answered.length === 1 && escaped.shown === true
         && JSON.stringify(answered) === JSON.stringify([{ id: "handoff-1", allow: true }, { id: "handoff-2", allow: false }]),
-      JSON.stringify({ enterOnly, onDone, answered }),
+      JSON.stringify({ enterOnly, onDone, escaped, answered }),
     );
     ok(
       "a covered press is said in the window's words, with the app that covers it",
@@ -580,6 +589,172 @@ async function computerHandoff(browser, origin, ok) {
       JSON.stringify(covered),
     );
     ok("the hand-over scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  });
+}
+
+/* The person's turn asks for something done ELSEWHERE — a Settings row, a
+ * window on the desktop — so the plain card must not stand over it (t-79119,
+ * the card that sent the person to Settings and covered the whole window).
+ * Every other kind is a question the person must stop and answer, and keeps
+ * covering. Read the way a hand meets it: what is under a point, and what a
+ * real press at that point opens. */
+async function computerHandoffDocked(browser, origin, ok) {
+  await scenario(browser, origin, "docked hand-over", ok, async (page, faults) => {
+    const hands = () => {
+      const T = window.__ASK_T__;
+      const scrim = document.getElementById("ask-scrim");
+      const centerOf = (id) => {
+        const box = document.getElementById(id).getBoundingClientRect();
+        return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+      };
+      const under = (at) => document.elementFromPoint(at.x, at.y);
+      const covered = (id) => scrim.contains(under(centerOf(id)));
+      const card = document.querySelector("#ask-scrim .permission").getBoundingClientRect();
+      return {
+        settingsCovered: covered("foot-settings"),
+        middleCovered: scrim.contains(document.elementFromPoint(innerWidth / 2, innerHeight / 2)),
+        modal: document.querySelector("#ask-scrim .permission").getAttribute("aria-modal"),
+        docked: scrim.hasAttribute("data-docked"),
+        keyboardInCard: scrim.contains(document.activeElement),
+        corner: { right: Math.round(innerWidth - card.right), bottom: Math.round(innerHeight - card.bottom) },
+        look: T.look(),
+      };
+    };
+    const raised = await page.evaluate(async (read) => {
+      window.__ASK_T__.fire("computer:handoff", { id: "dock-1", reason: "설정의 브라우저에서 프로필 줄을 눌러 주세요", timeoutMs: 600000 });
+      await window.__ASK_T__.settle(260);
+      return new Function(`return (${read})()`)();
+    }, hands.toString());
+    ok(
+      "the person's turn stands in the corner as a card with its clock and both answers, over nothing",
+      raised.look.shown && raised.docked && raised.modal === "false" && raised.look.clock.includes("600")
+        && raised.look.buttons.join() === "취소,다 했어요" && raised.corner.right <= 24 && raised.corner.bottom <= 24,
+      JSON.stringify(raised),
+    );
+    ok(
+      "no part of the window is under the card's backdrop: not the middle, not the Settings button, and the keyboard stays where the person's hand was",
+      raised.middleCovered === false && raised.settingsCovered === false && raised.keyboardInCard === false,
+      JSON.stringify(raised),
+    );
+
+    // What the card asked for can be done while it stands: a real press opens
+    // Settings and a real press inside it picks the browser page.
+    const settings = await page.evaluate(() => {
+      const box = document.getElementById("foot-settings").getBoundingClientRect();
+      return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    });
+    await page.mouse.click(settings.x, settings.y);
+    await page.locator("#settings-view").waitFor({ state: "visible", timeout: 4000 }).catch(() => {});
+    const rail = await page.evaluate(() => {
+      const item = document.querySelector('.settings-rail-item[data-pane="browser"]');
+      if (!item) return null;
+      item.scrollIntoView({ block: "center" });
+      const box = item.getBoundingClientRect();
+      return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    });
+    if (rail) await page.mouse.click(rail.x, rail.y);
+    await page.waitForTimeout(150);
+    const inside = await page.evaluate(() => ({
+      settingsOpen: !document.getElementById("settings-view").hidden,
+      browserPage: document.querySelector('.settings-pane[data-pane="browser"]')?.hidden === false,
+      railCurrent: document.querySelector('.settings-rail-item[data-pane="browser"]')?.getAttribute("aria-current") ?? null,
+      card: window.__ASK_T__.look(),
+    }));
+    ok(
+      "Settings opens and an item inside it can be pressed while the card stands, and the card is still there with its clock",
+      inside.settingsOpen && inside.browserPage && inside.railCurrent === "page" && inside.card.shown && inside.card.clock !== null,
+      JSON.stringify(inside),
+    );
+
+    // Escape belongs to what the person is doing; only the card's buttons answer.
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(120);
+    const afterEscape = await page.evaluate(() => ({ answered: window.__ASK_T__.answered.slice(), shown: window.__ASK_T__.look().shown }));
+    ok(
+      "Escape answers nothing for a docked card — the card stays until a button answers it",
+      afterEscape.answered.length === 0 && afterEscape.shown === true,
+      JSON.stringify(afterEscape),
+    );
+    const done = await page.evaluate(() => {
+      const button = [...document.querySelectorAll("#ask-choices button")].find((one) => one.textContent.trim() === "다 했어요");
+      const box = button.getBoundingClientRect();
+      return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    });
+    await page.mouse.click(done.x, done.y);
+    await page.waitForTimeout(260);
+    const finished = await page.evaluate(() => ({ answered: window.__ASK_T__.answered.slice(), shown: window.__ASK_T__.look().shown }));
+    ok(
+      "pressing 「다 했어요」 on the card answers the hand-over and the card leaves",
+      JSON.stringify(finished.answered) === JSON.stringify([{ id: "dock-1", allow: true }]) && finished.shown === false,
+      JSON.stringify(finished),
+    );
+
+    // The kinds a person must stop for keep covering the window, and the line
+    // between the two is crossed in both directions without a stale backdrop.
+    const kinds = await page.evaluate(async (read) => {
+      const T = window.__ASK_T__;
+      const probe = new Function(`return (${read})()`);
+      const seen = {};
+      const stand = async (name, raise, close) => {
+        T.reset();
+        raise();
+        await T.settle(260);
+        seen[name] = probe();
+        close();
+        await T.settle(260);
+      };
+      await stand("tool",
+        () => T.frame("s-d", { type: "permission_prompt", prompt_id: 71, tool_name: "bash", reasoning: "", audit_hint: null }),
+        () => T.ended("s-d"));
+      await stand("confirm",
+        () => T.fire("computer:confirm", { id: "dock-c", kind: "payment", label: "Pay", timeoutMs: 120000 }),
+        () => T.fire("computer:confirm-closed", { id: "dock-c", decision: "refused" }));
+      await stand("share",
+        () => T.fire("computer:share", { id: "dock-s", app: "Safari", timeoutMs: 120000 }),
+        () => T.fire("computer:share-closed", { id: "dock-s", decision: "refused" }));
+      await stand("code",
+        () => T.fire("computer:handoff", { id: "dock-k", reason: "카카오톡 인증번호", timeoutMs: 180000, codeAsk: { min: 4, max: 10, typedMax: 20 } }),
+        () => T.fire("computer:handoff-closed", { id: "dock-k", decision: "refused" }));
+      // A permission waiting behind a docked card takes the window the moment it is up, then the card docks again.
+      T.reset();
+      T.fire("computer:handoff", { id: "dock-m", reason: "x", timeoutMs: 600000 });
+      T.frame("s-e", { type: "permission_prompt", prompt_id: 72, tool_name: "bash", reasoning: "", audit_hint: null });
+      await T.settle(260);
+      seen.dockedFirst = probe();
+      document.querySelector("#ask-choices button").click();
+      await T.settle(260);
+      seen.dockedSecond = probe();
+      T.ended("s-e");
+      await T.settle(260);
+      // And the other way: a permission in front, the card behind it docks when it comes up.
+      T.reset();
+      T.frame("s-f", { type: "permission_prompt", prompt_id: 73, tool_name: "bash", reasoning: "", audit_hint: null });
+      T.fire("computer:handoff", { id: "dock-n", reason: "x", timeoutMs: 600000 });
+      await T.settle(260);
+      seen.modalFirst = probe();
+      document.querySelector("#ask-choices button").click();
+      await T.settle(260);
+      seen.modalThenDocked = probe();
+      return seen;
+    }, hands.toString());
+    ok(
+      "a permission, the last-step confirm, a window share and the code card each stand over the whole window as modals",
+      ["tool", "confirm", "share", "code"].every((name) => {
+        const one = kinds[name];
+        return one.look.shown && one.docked === false && one.modal === "true" && one.settingsCovered === true && one.middleCovered === true;
+      }),
+      JSON.stringify(kinds),
+    );
+    ok(
+      "the line between the two is crossed both ways: a docked card in front keeps the window free until the ask behind it comes up, and a card behind a modal docks when its turn comes",
+      kinds.dockedFirst.look.kind === "computer-handoff" && kinds.dockedFirst.settingsCovered === false
+        && kinds.dockedSecond.look.kind === "tool" && kinds.dockedSecond.settingsCovered === true
+        && kinds.modalFirst.look.kind === "tool" && kinds.modalFirst.settingsCovered === true
+        && kinds.modalThenDocked.look.kind === "computer-handoff" && kinds.modalThenDocked.docked === true
+        && kinds.modalThenDocked.settingsCovered === false && kinds.modalThenDocked.modal === "false",
+      JSON.stringify({ first: kinds.dockedFirst, second: kinds.dockedSecond, modalFirst: kinds.modalFirst, then: kinds.modalThenDocked }),
+    );
+    ok("the docked hand-over scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
   });
 }
 
@@ -1384,6 +1559,8 @@ async function ink(browser, origin, ok) {
         await page.waitForTimeout(320);
         rows[`${theme}/${name}`] = await page.evaluate(measureInk);
         await page.keyboard.press("Escape");
+        // A docked card does not answer to Escape: the backend closes it.
+        await page.evaluate(() => window.__ASK_T__.fire("computer:handoff-closed", { id: "ink-h", decision: "refused" }));
         await page.waitForTimeout(260);
       }
     }
@@ -1798,8 +1975,8 @@ async function computerHandoffCode(browser, origin, ok) {
       return { ...T.look(), line: T.code() };
     });
     ok(
-      "a card the window says has no line is the plain turn: no field, Cancel and Done, the keyboard on the frame",
-      plain.shown && plain.line.shown === false && plain.buttons.join() === "취소,다 했어요" && plain.focus === "(dialog)"
+      "a card the window says has no line is the plain turn: no field, Cancel and Done, and it takes no keyboard",
+      plain.shown && plain.line.shown === false && plain.buttons.join() === "취소,다 했어요" && plain.focus === null
         && plain.title === ASK_TITLES.handoff.ko,
       JSON.stringify(plain),
     );
@@ -1963,6 +2140,7 @@ export async function testAskPopup(browser, origin, ok) {
   await computerConfirm(browser, origin, ok);
   await computerHandoff(browser, origin, ok);
   await computerHandoffCode(browser, origin, ok);
+  await computerHandoffDocked(browser, origin, ok);
   await confirm(browser, origin, ok);
   await queue(browser, origin, ok);
   await refused(browser, origin, ok);

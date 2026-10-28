@@ -10503,6 +10503,8 @@
          this frame, this queue and this keyboard; each kind writes its own
          title and body (`registerAskKind`, shell-term.js). Nothing here
          answers by itself — every answer goes back by the kind's own road.
+         A kind that asks for something done elsewhere (the person's turn) is
+         docked: the same frame in the corner, no backdrop, not a modal.
          Last in the body, so it stands above every other dialog. -->
     <div class="scrim" id="ask-scrim" hidden>
       <section class="permission ask" role="dialog" aria-modal="true" aria-labelledby="ask-title" aria-describedby="ask-why ask-fallback" data-kind="" tabindex="-1">

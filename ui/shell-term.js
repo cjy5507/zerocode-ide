@@ -4437,6 +4437,11 @@ const floatView = makeTermView(el("terminal"), el("term"), el("caret"), {
  *                element of the kind's own where the keyboard starts instead
  *                (a field the person types in); `safe` is Escape's
  *   clock(ask)   the words for a deadline the ask carries (Computer Use)
+ *   view().docked  the ask is for something the person does ELSEWHERE in the
+ *                window or on the desktop (the hand-over): it stands as a card
+ *                in the corner with no backdrop, is not a modal, and takes
+ *                neither the keyboard nor Escape — a card that asks for the
+ *                Settings page must not stand over the Settings page
  *   deliver(ask, choice, hand)  a promise that settles once the answer has
  *                reached whoever asked; a rejection keeps the ask on screen;
  *                `hand` is the hand that answered (shell-boot.js `handNow`),
@@ -4469,6 +4474,8 @@ let askFocus = null;
 let askSafe = null;
 let askClockTimer = null;
 let askLeavesAtOnce = false;
+/* Whether the popup holds the modal seat now: a docked ask does not. */
+let askIsModal = false;
 const ASK_CLOCK_TICK_MS = 1000;
 const askFrame = askScrim.querySelector(".permission");
 
@@ -4575,6 +4582,7 @@ function paintAsk() {
     askFocus = null;
     askSafe = null;
     askPainted = null;
+    askIsModal = false;
     // `closing` is a no-op on a surface that is already hidden, so the
     // repaint path a language change takes does not animate a popup nobody
     // opened.
@@ -4583,7 +4591,15 @@ function paintAsk() {
   }
   const kind = askKindOf(ask);
   const view = kind.view(ask);
+  const docked = view.docked === true;
   askFrame.dataset.kind = kind.tone;
+  askFrame.setAttribute("aria-modal", docked ? "false" : "true");
+  // Not a modal, so the terminal's key floor (`rearmKeySink`) would otherwise
+  // pull the focus off a button of the card on the next key and give Enter to
+  // the terminal; a button of the card owns the keys while it holds the focus.
+  if (docked) askFrame.dataset.keyboardOwner = "true";
+  else delete askFrame.dataset.keyboardOwner;
+  askScrim.toggleAttribute("data-docked", docked);
   paintAskPart("ask-agent", view.agent ?? null);
   el("ask-agent").className = `perm-agent ${view.agentClass ?? ""}`.trim();
   paintAskPart("ask-title", view.title);
@@ -4612,9 +4628,10 @@ function paintAsk() {
     // `initial: null` is a kind whose Enter must answer nothing (the hand-over):
     // the keyboard starts on the frame itself, and the person Tabs to the
     // answer they mean.
-    askFocus =
-      (view.focus ? el(view.focus) : null) ??
-      (view.initial === null ? askFrame : buttons[view.initial ?? 0] ?? buttons[0] ?? null);
+    askFocus = docked
+      ? null
+      : (view.focus ? el(view.focus) : null) ??
+        (view.initial === null ? askFrame : buttons[view.initial ?? 0] ?? buttons[0] ?? null);
     askSafe = choices[view.safe] ?? null;
   }
   kind.paint?.(ask, view);
@@ -4622,7 +4639,16 @@ function paintAsk() {
   if (kind.clock) askClockTimer = setInterval(paintAskClock, ASK_CLOCK_TICK_MS);
   const changed = ask !== askPainted;
   askPainted = ask;
-  showModal(askScrim, { animated: true });
+  if (docked) {
+    // Out of the modal stack first: a docked card has no focus trap and no
+    // Escape, and the focus goes back to where the person's hand was.
+    if (askIsModal) hideModal(askScrim, { animated: false });
+    askIsModal = false;
+    showing(askScrim);
+  } else {
+    askIsModal = true;
+    showModal(askScrim, { animated: true });
+  }
   // A new ask starts the keyboard on its own default. The same ask repainted
   // (a language change) keeps wherever the person's hand already is.
   if (changed) askFocus?.focus({ preventScroll: true });

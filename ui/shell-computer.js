@@ -685,7 +685,10 @@ registerAskKind("computer-confirm", {
 /* The person's turn (§7.4): the operator hands the desk over — a 2FA code, a
  * CAPTCHA, a press it may not make — and waits for 「다 했어요」. Same channel
  * as the question: the answer goes back by id. Enter says nothing; Tab reaches
- * 「다 했어요」, and Escape hands the desk back unfinished.
+ * 「다 했어요」. The plain card is docked (see `view().docked`): the person is
+ * doing something while it stands, so it takes no backdrop, no focus and no
+ * Escape — 「취소」 hands the desk back unfinished. The card with a field keeps
+ * the modal keyboard: Escape hands the desk back.
  *
  * A card the window says has a line (`codeAsk`, t-40807) is the same turn with
  * one field to type a one-time code in. The window decides which cards have
@@ -817,6 +820,11 @@ registerAskKind("computer-handoff", {
           ],
       initial: null,
       focus: line ? "ask-code-input" : null,
+      // The plain card asks for something done elsewhere — a Settings row, a
+      // window on the desktop — so it stands in the corner and covers nothing
+      // (t-79119). The card with a field is the one where the person types IN
+      // the card, and stays the modal it was.
+      docked: !line,
       safe: 0,
     };
   },
