@@ -1098,6 +1098,43 @@ mod tests {
         assert_eq!(ran, "\nDone.\n");
     }
 
+    /// A pipe has nobody at a trust prompt, so a repository's command file
+    /// runs no `!` line there unless the person named the mode — not even
+    /// with a trust record for the folder. One line says why and what to
+    /// do. The person's own zo-home command keeps its `allowed-tools` rule.
+    #[test]
+    fn a_pipe_runs_a_repository_bang_line_only_under_a_named_mode() {
+        use runtime::PermissionMode;
+        let _guard = crate::test_env_lock();
+        let trial = BangTrial::new("bang-pipe");
+        trial.pin_accept_edits_with_probe();
+        trial.record_trust("workspace-write");
+        let mode = PermissionMode::WorkspaceWrite;
+
+        let unnamed = crate::slash::ModeOrigin { named: false, piped: true };
+        let refused = trial.run_probe_as(&trial.project, mode, unnamed);
+        assert!(!trial.marker.exists(), "a pipe with no named mode ran a repository's `!` line");
+        assert_eq!(
+            refused,
+            format!(
+                "[!{}: not run — in a pipe nobody answers a trust prompt; give zo --permission-mode to let a repository's command file run its ! lines]\nDone.\n",
+                trial.touch()
+            )
+        );
+
+        let named = crate::slash::ModeOrigin { named: true, piped: true };
+        let ran = trial.run_probe_as(&trial.project, mode, named);
+        assert!(trial.marker.exists(), "a pipe with a named mode did not run the `!` line");
+        assert_eq!(ran, "\nDone.\n");
+
+        std::fs::remove_file(&trial.marker).expect("the marker clears");
+        std::fs::remove_dir_all(trial.project.join(".zo").join("commands")).expect("the repo's command goes");
+        trial.write_probe(&trial.zo_home);
+        let personal = trial.run_probe_as(&trial.project, mode, unnamed);
+        assert!(trial.marker.exists(), "a pipe stopped the person's own zo-home command");
+        assert_eq!(personal, "\nDone.\n");
+    }
+
     /// A command file in zo's home is the person's own: it runs what its
     /// `allowed-tools` grants with no trust record, even though the walk up
     /// from a project below the home passes the same `.zo/commands` folder.
