@@ -6707,21 +6707,23 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   assertEqual(await pageA.locator('#summon-profiles-table tr[data-agent="claude"] .worker-models-agent-state').textContent(),
     await said("settings.agents.loginNeeded", "로그인 필요"));
 
-  // A pick is saved at once — one cell, the effort left to the lineup — and
-  // the words the next summons runs are the backend's own.
+  // A pick is saved at once — one cell, the effort left open — and the words
+  // the next summons runs are the backend's own: the model alone, its CLI
+  // running its own default effort, which the screen calls 「자동」
+  // (t-74181).
   const pickAt = backend.calls.length;
   await lowModel.selectOption("gpt-fixture-new");
   const picked = await backend.waitForCall("A", "set_summon_profile", pickAt);
   assertEqual(picked.args, { agent: "codex", difficulty: "low", model: "gpt-fixture-new", effort: null });
   assertEqual(backend.zoSettings.smart.summonProfiles, { codex: { low: { model: "gpt-fixture-new" } } }, "more than the cell was written");
-  const ranAt = FIXTURE_LINEUP.codex.find((pick) => pick.id === "gpt-fixture-new").efforts.at(-1);
   await pageA.waitForFunction(
     (expected) => document.querySelector("#orch-models-status .settings-status-said")?.textContent === expected,
     await said("settings.workerModels.saved", "저장했습니다 — 다음 {{agent}} {{difficulty}} 소환부터 {{model}} · {{effort}}", {
-      agent: await pageA.evaluate(() => agentName("codex")), difficulty: await said("settings.workerModels.low", "쉬움"), model: "gpt-fixture-new", effort: ranAt,
+      agent: await pageA.evaluate(() => agentName("codex")), difficulty: await said("settings.workerModels.low", "쉬움"), model: "gpt-fixture-new",
+      effort: await said("settings.workerModels.autoPlain", "자동"),
     }), { timeout: UI_TIMEOUT },
   );
-  assertEqual(await pageA.locator("#worker-models-next-words").textContent(), `--model gpt-fixture-new -c model_reasoning_effort=${ranAt}`);
+  assertEqual(await pageA.locator("#worker-models-next-words").textContent(), "--model gpt-fixture-new");
   assertEqual(await lowModel.inputValue(), "gpt-fixture-new", "the cell did not repaint from the answer");
   assertEqual(await pageA.locator("#worker-models-auto").textContent(),
     await said("settings.workerModels.someWritten", "{{total}}칸 중 {{count}}칸 직접 정함", { total: 9, count: 1 }));

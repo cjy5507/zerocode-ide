@@ -548,7 +548,9 @@ fn a_summons_jev_did_not_judge_runs_at_its_clis_default_effort() {
 
 /// t-74181: the person's effort binds — with Jev silent it is what runs, and
 /// beside Jev's applied pair it still is: the seat may choose the model the
-/// person left open, never move the effort the person wrote.
+/// person left open, never move the effort the person wrote. Written on
+/// every row, it is the one effort the question offers (review P2-2), so the
+/// seat's answer names it.
 #[test]
 fn the_persons_effort_binds_with_jev_silent_and_beside_its_pair() {
     let written = serde_json::json!({
@@ -566,7 +568,7 @@ fn the_persons_effort_binds_with_jev_silent_and_beside_its_pair() {
     assert_eq!(reply["dials"]["why"]["effortRule"], "person", "{reply}");
     let beside = Assigned {
         settings: written,
-        ..Assigned::answering(recorded(), ("model-a", "max"))
+        ..Assigned::answering(recorded(), ("model-a", "medium"))
     };
     let (reply, _) = summon(&beside);
     assert_eq!(reply["model"], "model-a", "the seat's model ran: {reply}");

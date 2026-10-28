@@ -591,7 +591,7 @@ fn a_summons_at_its_clis_default_effort_says_so_on_its_rows() {
     for seat in [&SUMMON_DIFFICULTY, &SUMMON_MODEL] {
         let rows = crate::systemone::read_rows(&crate::systemone::ledger_of(&wire, seat).unwrap());
         assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0]["effort"], "cli-default", "{}", rows[0]);
+        assert_eq!(rows[0]["effort"], lineup::CLI_DEFAULT, "{}", rows[0]);
     }
 }
 

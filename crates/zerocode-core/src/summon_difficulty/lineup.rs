@@ -161,31 +161,10 @@ impl LiveModel {
         at
     }
 
-    /// The highest effort the model says it accepts; `None` when unknown.
-    #[must_use]
-    pub fn highest_effort(&self) -> Option<&str> {
-        self.efforts
-            .as_ref()?
-            .iter()
-            .filter_map(|effort| {
-                Some((
-                    EFFORT_ORDER.iter().position(|known| known == effort)?,
-                    effort,
-                ))
-            })
-            .max()
-            .map(|(_, effort)| effort.as_str())
-    }
-
-    /// `wanted` brought inside what the model accepts.
-    #[must_use]
-    pub fn effort_for(&self, wanted: &str) -> String {
-        self.clamp(wanted).unwrap_or_else(|| wanted.to_string())
-    }
-
     /// `wanted`, or the nearest effort below it the model accepts (the
     /// lowest it accepts when none is below); `None` when it stands as is.
-    fn clamp(&self, wanted: &str) -> Option<String> {
+    #[must_use]
+    pub fn clamp(&self, wanted: &str) -> Option<String> {
         let accepted = self.efforts.as_ref()?;
         if accepted.iter().any(|effort| effort == wanted) {
             return None;
@@ -569,6 +548,12 @@ pub enum EffortRule {
     CliDefault,
 }
 
+/// [`EffortRule::CliDefault`]'s word — also what a summons' seat rows say
+/// for the effort it ran at when none went on the command line (t-74181),
+/// so that branch's outcomes make a record of their own, apart from a row
+/// that does not say.
+pub const CLI_DEFAULT: &str = "cli-default";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Clamp {
     pub from: String,
@@ -640,6 +625,39 @@ impl Row {
             model: self.model.clone(),
             effort: self.effort.clone(),
         }
+    }
+
+    /// The effort the person wrote on this row as it runs on `model`, and
+    /// where it was brought from when `model` does not accept it as written;
+    /// `None` when the person wrote no effort here (t-74181). On the row's
+    /// own model it is the row's; an effort written alone binds whatever
+    /// model runs in its place — the model seat's pair or a challenger's —
+    /// brought inside what that model accepts in `lineup`, as it is inside
+    /// the lineup's model.
+    #[must_use]
+    pub fn person_effort_on(
+        &self,
+        model: &str,
+        lineup: Option<&Lineup>,
+    ) -> Option<(String, Option<Clamp>)> {
+        if self.effort_rule != EffortRule::Person {
+            return None;
+        }
+        if model == self.model || self.written_model.is_some() {
+            return Some((self.effort.clone()?, self.effort_clamped.clone()));
+        }
+        let written = self.written_effort.clone()?;
+        Some(effort_on(lineup.and_then(|held| held.find(model)), written))
+    }
+}
+
+/// `wanted` as it runs on `model`: inside what the model accepts, and the
+/// [`Clamp`] that says so when it moved; as written for a model the lineup
+/// does not know or that names no efforts.
+fn effort_on(model: Option<&LiveModel>, wanted: String) -> (String, Option<Clamp>) {
+    match model.and_then(|held| held.clamp(&wanted)) {
+        Some(to) => (to.clone(), Some(Clamp { from: wanted, to })),
+        None => (wanted, None),
     }
 }
 
@@ -873,21 +891,20 @@ fn written_pick(
             effort_clamped: None,
         });
     };
-    let clamped = lineup
-        .and_then(|held| held.find(&model))
-        .and_then(|held| held.clamp(&effort));
+    let (inside, clamped) = effort_on(lineup.and_then(|held| held.find(&model)), effort.clone());
     Some(Picked {
         // A person's model and effort stand as written; an effort written
         // alone rides the lineup's model, inside that model's range: the
         // model may move under it, a launch outside may not.
-        effort: Some(match (&clamped, &person.model) {
-            (Some(to), None) => to.clone(),
-            _ => effort.clone(),
+        effort: Some(if person.model.is_none() {
+            inside
+        } else {
+            effort
         }),
         model,
         from,
         effort_rule: EffortRule::Person,
-        effort_clamped: clamped.map(|to| Clamp { from: effort, to }),
+        effort_clamped: clamped,
     })
 }
 
@@ -1282,6 +1299,14 @@ mod tests {
     }
 
     #[test]
+    fn the_cli_default_rule_is_said_in_one_word() {
+        assert_eq!(
+            serde_json::to_value(EffortRule::CliDefault).unwrap(),
+            CLI_DEFAULT
+        );
+    }
+
+    #[test]
     fn a_row_the_person_wrote_never_moves() {
         let mut person = shipped()["claude"].clone();
         person[LOW] = json!({"model": "model-gone", "effort": "high"});
@@ -1432,16 +1457,16 @@ mod tests {
     fn an_effort_below_low_is_ranked_like_every_other() {
         let mut two = m("model-a", "second", &["hard"]);
         two.efforts = Some(&["minimal", "low"]);
-        assert_eq!(two.into_live().effort_for("medium"), "low");
+        assert_eq!(two.into_live().clamp("medium").as_deref(), Some("low"));
         let mut one = m("model-b", "second", &["hard"]);
         one.efforts = Some(&["minimal"]);
         let one = one.into_live();
         assert_eq!(
-            one.effort_for("low"),
-            "minimal",
+            one.clamp("low").as_deref(),
+            Some("minimal"),
             "the one effort it accepts"
         );
-        assert_eq!(one.highest_effort(), Some("minimal"));
+        assert_eq!(one.clamp("minimal"), None, "accepted, it stands");
     }
 
     /// What a person picks from (the settings screen's lists): every live

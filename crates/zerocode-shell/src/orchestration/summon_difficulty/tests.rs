@@ -600,7 +600,17 @@ fn a_switch_left_on_carries_out_the_difficulty_answer_for_an_open_dial() {
     );
     assert_eq!(row["requests"], 1, "{row}");
     assert_eq!(row["executionModel"], json!(low.model), "{row}");
-    assert_eq!(row["effort"], json!(low.effort), "{row}");
+    // No effort on the command line: the row says the CLI's default ran
+    // (t-74181).
+    assert_eq!(
+        row["effort"],
+        json!(
+            low.effort
+                .as_deref()
+                .unwrap_or(zerocode_core::summon_difficulty::lineup::CLI_DEFAULT)
+        ),
+        "{row}"
+    );
     assert!(
         row["pinnedEffort"].is_null(),
         "nobody pinned an effort: {row}"

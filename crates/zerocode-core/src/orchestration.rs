@@ -17966,15 +17966,16 @@ impl PairPlan {
 }
 
 /// `agent`'s [`PairPlan`] for a summons that leaves the model open
-/// (`model_open`). `scoped` names the question for the agent, as one of
-/// several that ride a request while the agent is still open
-/// ([`crate::summon_model::ask_for`]).
+/// (`model_open`) and names `request_effort`, when it does. `scoped` names
+/// the question for the agent, as one of several that ride a request while
+/// the agent is still open ([`crate::summon_model::ask_for`]).
 #[allow(clippy::too_many_arguments)] // Each argument is one fact of the summons the plan rests on.
 fn pair_plan(
     launcher: &dyn Launcher,
     ledger: &Ledger,
     agent: &str,
     model_open: bool,
+    request_effort: Option<&str>,
     scoped: bool,
     look: &crate::summon_difficulty::Look,
     origin: [&str; 3],
@@ -18014,8 +18015,29 @@ fn pair_plan(
         .flat_map(|run| run.workers.iter())
         .filter(|held| held.agent == agent)
         .count();
+    // An effort that binds whatever model runs — the request's, or the one
+    // the person wrote alone on every row the difficulty can land on — leaves
+    // the seat a model to choose, not a pair (t-74181): each model is offered
+    // once, at the effort it would run at, so the answer that runs is the
+    // answer given. A person's effort on some rows only binds at those; an
+    // answer at another effort there does not run (see the summons).
+    let person_bound = {
+        let written: Vec<Option<&str>> = rows_ahead
+            .iter()
+            .map(|row| {
+                (row.effort_rule == crate::summon_difficulty::lineup::EffortRule::Person)
+                    .then_some(row.written_effort.as_deref())
+                    .flatten()
+            })
+            .collect();
+        written
+            .first()
+            .copied()
+            .flatten()
+            .filter(|first| written.iter().all(|each| *each == Some(*first)))
+    };
     let asked = facts.as_ref().and_then(|facts| {
-        let options = crate::summon_model::options(
+        let mut options = crate::summon_model::options(
             agent,
             &facts.lineup,
             Some(&facts.seen),
@@ -18028,6 +18050,17 @@ fn pair_plan(
             },
             now_ms,
         );
+        if let Some(bound) = request_effort {
+            crate::summon_model::bind_effort(&mut options, |_| bound.to_string());
+        } else if let Some(bound) = person_bound {
+            crate::summon_model::bind_effort(&mut options, |model| {
+                facts
+                    .lineup
+                    .find(model)
+                    .and_then(|held| held.clamp(bound))
+                    .unwrap_or_else(|| bound.to_string())
+            });
+        }
         if scoped {
             crate::summon_model::ask_for(agent, look, &options)
         } else {
@@ -18607,7 +18640,7 @@ const TUNABLE: &[(&str, &str, Option<EffortRide>, &[&str])] = &[
         "zo",
         "--model",
         Some(EffortRide::Flag("--effort")),
-        &["low", "medium", "high", "xhigh", "max", "ultra"],
+        crate::capabilities::ZO_EFFORT_LEVELS,
     ),
     (
         "claude",
@@ -18625,7 +18658,7 @@ const TUNABLE: &[(&str, &str, Option<EffortRide>, &[&str])] = &[
         "antigravity",
         "--model",
         Some(EffortRide::Flag("--effort")),
-        &["low", "medium", "high"],
+        crate::capabilities::ANTIGRAVITY_EFFORT_LADDER,
     ),
     // Not installed on the machine this table was measured on, so its model
     // flag stands as inherited and it carries no effort ride: refusing a dial
@@ -18658,8 +18691,11 @@ fn dials_why(
         .or_else(|| row.map(|row| row.model.as_str()));
     let facts = turn.map(|(_, _, _, facts)| facts);
     let record = model.and_then(|model| facts?.records.get(model));
+    // A summons at its CLI's default is measured under that word, as its
+    // seat rows name it (t-74181).
+    let ran_at = effort.or((effort_from == DIALS_FROM_CLI_DEFAULT).then_some(effort_from));
     let pair_samples = record
-        .zip(effort)
+        .zip(ran_at)
         .and_then(|(record, effort)| record.by_effort.get(effort))
         .map_or(0, |pair| pair.ended);
     let held = model.and_then(|model| facts?.lineup.find(model));
@@ -18815,7 +18851,7 @@ const DIALS_FROM_CHALLENGE: &str = "challenge";
 /// `dials.modelFrom`: no row, no lineup and no answer named a model, so the
 /// agent's own CLI launched with its default; `dials.why.effortRule`: nobody
 /// chose an effort, so none went on the command line (t-74181).
-const DIALS_FROM_CLI_DEFAULT: &str = "cli-default";
+const DIALS_FROM_CLI_DEFAULT: &str = crate::summon_difficulty::lineup::CLI_DEFAULT;
 
 /// Whether `agent`'s command line takes an effort at all — the measured
 /// launch table carries an effort ride for it.
@@ -22709,6 +22745,7 @@ fn plan_inner(
                             ledger,
                             &option.id,
                             model.is_none() && open,
+                            effort.as_deref(),
                             true,
                             &difficulty_look,
                             summons_origin,
@@ -22796,6 +22833,7 @@ fn plan_inner(
                         ledger,
                         &agent,
                         model.is_none() && open,
+                        effort.as_deref(),
                         false,
                         &difficulty_look,
                         summons_origin,
@@ -22867,6 +22905,16 @@ fn plan_inner(
                         facts,
                     )
                 });
+            // The effort that binds a model in the row's place, when one
+            // does (t-74181): the request's as written, or the person's
+            // brought inside what that model accepts.
+            let held_lineup = model_turn.as_ref().map(|(_, _, _, facts)| &facts.lineup);
+            let bound_on = |runs: &str| {
+                effort
+                    .clone()
+                    .map(|own| (own, None))
+                    .or_else(|| profile.as_ref()?.person_effort_on(runs, held_lineup))
+            };
             let model_pick: Option<(String, Option<String>, &str)> = match &model_turn {
                 Some((_, _, Some(challenge), _)) => Some((
                     challenge.model.clone(),
@@ -22878,6 +22926,12 @@ fn plan_inner(
                         .as_str()
                         .zip(receipt[crate::summon_model::EFFORT_KEY].as_str())
                         .filter(|(chosen, _)| runs_model(&agent, chosen))
+                        // A pair whose effort is not the one that binds on
+                        // its model would run half of it: it does not run,
+                        // and its row says it was only recorded.
+                        .filter(|(chosen, effort)| {
+                            bound_on(chosen).is_none_or(|(bound, _)| bound == *effort)
+                        })
                         .map(|(chosen, effort)| {
                             (chosen.to_string(), Some(effort.to_string()), DIALS_FROM_JEV)
                         })
@@ -22904,12 +22958,19 @@ fn plan_inner(
             // both binding — the model seat's pair, or nobody: no difficulty
             // turns into an effort here, and an effort nobody chose stays off
             // the command line for the agent's CLI to default.
-            let person_effort = profile
+            // The person's effort as it runs on the model that runs — the
+            // row's, or the one the seat's pair or a challenger's turn put in
+            // its place — and where it was brought from when that model does
+            // not accept it.
+            let (person_effort, effort_clamped) = profile
                 .as_ref()
-                .filter(|row| {
-                    row.effort_rule == crate::summon_difficulty::lineup::EffortRule::Person
+                .and_then(|row| {
+                    let runs = model_pick
+                        .as_ref()
+                        .map_or(row.model.as_str(), |(picked, _, _)| picked.as_str());
+                    row.person_effort_on(runs, held_lineup)
                 })
-                .and_then(|row| row.effort.clone());
+                .map_or((None, None), |(bound, clamped)| (Some(bound), clamped));
             let jev_effort = model_pick
                 .as_ref()
                 .filter(|_| model.is_none())
@@ -22949,7 +23010,7 @@ fn plan_inner(
                         "model",
                         receipts.model.as_ref().and_then(|row| row["outcome"].as_str()),
                     )),
-                    "effortClamped": profile.as_ref().and_then(|row| row.effort_clamped.clone()),
+                    "effortClamped": effort_clamped.as_ref().filter(|_| effort_from == DIALS_FROM_PERSON),
                     "candidates": profile.as_ref().map_or_else(Vec::new, |row| row.candidates.clone()),
                     // Why this pair, in the facts a person asks for: where the
                     // model stands, what set its effort, how much finished
@@ -23244,6 +23305,11 @@ fn plan_inner(
             // work, and a judgment asked about nothing is a row that says
             // nothing: it gets no question at all.
             let said = Some(summon_brief(written.as_ref(), asked)).filter(|said| !said.is_empty());
+            // The hard row ran as it stands (t-74181): the summons ran its
+            // pair at the hard difficulty, the row's own model rather than a
+            // pick in its place, or the request named that pair whole. With
+            // no effort on the row, a summons that merely names its model
+            // ran no row.
             let baseline_high = launcher
                 .difficulty_profile(
                     &agent,
@@ -23252,8 +23318,15 @@ fn plan_inner(
                 )
                 .ok()
                 .flatten()
-                .is_some_and(|profile| {
-                    model.as_deref() == Some(profile.model.as_str()) && effort == profile.effort
+                .is_some_and(|hard| {
+                    let same_pair =
+                        model.as_deref() == Some(hard.model.as_str()) && effort == hard.effort;
+                    let row_ran = model_pick.is_none()
+                        && profile
+                            .as_ref()
+                            .is_some_and(|row| row.difficulty == hard.difficulty);
+                    let named_whole = model_was_pinned && hard.effort.is_some();
+                    same_pair && (row_ran || named_whole)
                 });
             prepared_worker_start.model_shadow = said.and(model_shadow);
             prepared_worker_start.difficulty_shadow =

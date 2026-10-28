@@ -255,6 +255,27 @@ pub const CLAUDE_EFFORT_LADDER: &[&str] = &["low", "medium", "high", "xhigh", "m
 pub const CODEX_EFFORT_LADDER: &[&str] =
     &["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
+/// zo's `--effort` help, in its own order (`off|low|medium|high|xhigh|max|
+/// ultra|smart`, measured 2026-08-28): the levels between two switches —
+/// `off` and `smart` are ways of running, not rungs ([`ZO_EFFORT_LEVELS`]).
+pub const ZO_EFFORT_LADDER: &[&str] = &[
+    "off", "low", "medium", "high", "xhigh", "max", "ultra", "smart",
+];
+
+/// The levels on [`ZO_EFFORT_LADDER`], lowest first: the ladder less the
+/// switch at either end.
+pub const ZO_EFFORT_LEVELS: &[&str] = match ZO_EFFORT_LADDER.split_first() {
+    Some((_, after_off)) => match after_off.split_last() {
+        Some((_, levels)) => levels,
+        None => &[],
+    },
+    None => &[],
+};
+
+/// Antigravity's (`agy`) `--effort` help, lowest first (`low|medium|high`,
+/// measured 2026-08-28 on this machine).
+pub const ANTIGRAVITY_EFFORT_LADDER: &[&str] = &["low", "medium", "high"];
+
 /// Every effort word an agent's picker offers, lowest first — the one order
 /// efforts are ranked in, wherever one is brought inside what a model accepts
 /// or the highest of several is taken. Codex's ladder is the widest and
@@ -772,9 +793,30 @@ mod tests {
     #[test]
     fn every_ladder_stands_in_the_one_effort_order() {
         let rank = |word: &str| EFFORT_ORDER.iter().position(|known| *known == word);
-        for ladder in [CLAUDE_EFFORT_LADDER, CODEX_EFFORT_LADDER] {
+        for ladder in [
+            CLAUDE_EFFORT_LADDER,
+            CODEX_EFFORT_LADDER,
+            ZO_EFFORT_LEVELS,
+            ANTIGRAVITY_EFFORT_LADDER,
+        ] {
             assert!(ladder.iter().all(|word| rank(word).is_some()), "{ladder:?}");
+            assert!(
+                ladder.iter().map(|word| rank(word)).is_sorted(),
+                "{ladder:?}"
+            );
         }
+        // zo's levels are its ladder less exactly the two words nothing
+        // ranks: its switches, one at either end.
+        let switches: Vec<&str> = ZO_EFFORT_LADDER
+            .iter()
+            .copied()
+            .filter(|word| rank(word).is_none())
+            .collect();
+        assert_eq!(
+            switches,
+            [ZO_EFFORT_LADDER[0], ZO_EFFORT_LADDER[ZO_EFFORT_LADDER.len() - 1]]
+        );
+        assert_eq!(ZO_EFFORT_LEVELS.len() + switches.len(), ZO_EFFORT_LADDER.len());
         for spec in &AGENT_SPECS {
             let ranks: Vec<usize> = spec
                 .harness

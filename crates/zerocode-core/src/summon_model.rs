@@ -231,6 +231,16 @@ pub fn options(
         .collect()
 }
 
+/// Offer each of `options` at the one effort `effort_on` says binds its
+/// model, for a summons whose effort the seat may not move — the request's,
+/// or the person's (t-74181): the pair question becomes a model question,
+/// so the answer that runs is the answer given and is graded as such.
+pub fn bind_effort(options: &mut [ModelOption], effort_on: impl Fn(&str) -> String) {
+    for option in options {
+        option.efforts = vec![effort_on(&option.id)];
+    }
+}
+
 /// What the window holds for one agent's model question — today's lineup,
 /// the book of models seen, and this ledger's records — peeked, never
 /// fetched.
