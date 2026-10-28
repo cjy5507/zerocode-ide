@@ -575,3 +575,44 @@ fn a_tool_stopped_while_it_runs_keeps_no_time_and_says_it_was_stopped() {
         );
     }
 }
+
+/// P2-2 (t-80327): a deep-mode turn takes the person's words once and runs
+/// its legs inside them. The first leg's first request is the turn's first
+/// send, so its row counts from the words; a later leg starts its
+/// iterations over at 1 after the legs before it ran, so its rows say which
+/// leg they are and carry no wait from the words — an "Enter to the first
+/// send" read off the first rows never takes in a whole leg.
+#[test]
+fn a_later_legs_rows_say_their_leg_and_carry_no_wait_from_the_turns_start() {
+    let api = Arc::new(Scripted::new(vec![Some("a.rs"), None, None]));
+    let mut runtime =
+        runtime_with(api, Arc::new(Store::default()), Arc::new(CountingSeat::default()), SteeringQueue::default());
+    take_recorded();
+
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    tokio_runtime.block_on(async {
+        runtime.run_user_prompt_submit_for_streaming_user_entry("plan, then do it").expect("the turn proceeds");
+        for leg in ["plan: read a.rs", "do it"] {
+            let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(64);
+            tokio::spawn(async move { while render_rx.recv().await.is_some() {} });
+            let prompter: Arc<dyn PermissionPrompter> = Arc::new(AllowAll);
+            runtime
+                .run_internal_subturn_streaming_with_images(leg, Vec::new(), render_tx, prompter)
+                .await
+                .expect("the leg ends");
+        }
+    });
+
+    let rows = recorded_rows();
+    assert_eq!(rows.len(), 3, "two requests in the first leg, one in the second: {rows:#?}");
+    for row in &rows[..2] {
+        assert!(row["turn_start_ms"].is_u64() && row["leg"].is_null(), "the first leg counts from the words: {row}");
+    }
+    let later = &rows[2];
+    assert!(later["turn_start_ms"].is_null(), "a later leg carries no wait from the words: {later}");
+    assert_eq!(later["leg"].as_u64(), Some(2), "a later leg says which it is: {later}");
+}
