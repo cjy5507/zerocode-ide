@@ -246,14 +246,43 @@ mod tests {
             "---\ndescription: name one fruit\n---\nName the fruit $ARGUMENTS in one word.\n",
         )
         .expect("the prompt command");
-        let expanded = prompt_command(folder.path(), "fruit", "pineapple").expect("/fruit expands");
+        let mode = core_types::PermissionMode::WorkspaceWrite;
+        let expanded =
+            prompt_command(folder.path(), "fruit", "pineapple", mode).expect("/fruit expands");
         assert_eq!(expanded.trim(), "Name the fruit pineapple in one word.");
         assert_eq!(
-            prompt_command(folder.path(), "FRUIT", "kiwi").map(|text| text.trim().to_string()),
+            prompt_command(folder.path(), "FRUIT", "kiwi", mode).map(|text| text.trim().to_string()),
             Some("Name the fruit kiwi in one word.".to_string()),
             "names match without case, as the commands crate finds them"
         );
-        assert_eq!(prompt_command(folder.path(), "no-such-command-z12", ""), None);
+        assert_eq!(prompt_command(folder.path(), "no-such-command-z12", "", mode), None);
+    }
+
+    /// Read-only mode runs no `!` line, even one the file's `allowed-tools`
+    /// grants; the same file in workspace-write runs it.
+    #[test]
+    fn a_prompt_command_runs_no_bang_line_in_read_only_mode() {
+        use core_types::PermissionMode;
+        let folder = tempfile::tempdir().expect("a working folder");
+        let commands = folder.path().join(".zo").join("commands");
+        std::fs::create_dir_all(&commands).expect("the command folder");
+        let marker = folder.path().join("probe-ran");
+        let touch = format!("touch {}", marker.display());
+        std::fs::write(
+            commands.join("probe.md"),
+            format!("---\nallowed-tools: Bash\n---\n!{touch}\nDone.\n"),
+        )
+        .expect("the prompt command");
+
+        let read_only = prompt_command(folder.path(), "probe", "", PermissionMode::ReadOnly)
+            .expect("/probe expands");
+        assert!(!marker.exists(), "read-only mode ran a `!` line");
+        assert_eq!(read_only, format!("[!{touch}: not run in read-only mode]\nDone.\n"));
+
+        let writable = prompt_command(folder.path(), "probe", "", PermissionMode::WorkspaceWrite)
+            .expect("/probe expands");
+        assert!(marker.exists(), "workspace-write did not run the granted `!` line");
+        assert_eq!(writable, "\nDone.\n");
     }
 
     #[test]

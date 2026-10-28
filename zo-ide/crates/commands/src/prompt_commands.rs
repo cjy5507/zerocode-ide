@@ -638,6 +638,85 @@ mod tests {
         );
     }
 
+    /// A command file that does not grant Bash in `allowed-tools` cannot run
+    /// its `!` lines: typing `/name` must not run a shell command the file
+    /// carries. Each one leaves a one-line notice in the prompt instead.
+    #[test]
+    fn bang_lines_without_allowed_tools_do_not_run() {
+        let root = temp_dir("bang-ungranted");
+        fs::create_dir_all(&root).expect("base dir");
+        let line_marker = root.join("line-ran");
+        let inline_marker = root.join("inline-ran");
+        let line = format!("touch {}", line_marker.display());
+        let inline = format!("touch {}", inline_marker.display());
+        let command = parse_prompt_command_file(
+            "ungranted".to_string(),
+            PathBuf::from("ungranted.md"),
+            &format!("---\ndescription: no tools\n---\nbefore\n!{line}\nmid !`{inline}` end\n"),
+        )
+        .expect("command parsed");
+
+        let rendered = command.render_prompt_in("", &root);
+
+        assert!(!line_marker.exists(), "the `!cmd` line ran without allowed-tools");
+        assert!(!inline_marker.exists(), "the inline `!`cmd`` ran without allowed-tools");
+        assert_eq!(
+            rendered,
+            format!(
+                "before\n[!{line}: not run — allowed-tools does not grant Bash for it]\n\
+                 mid [!{inline}: not run — allowed-tools does not grant Bash for it] end\n"
+            )
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// `Bash(echo:*)` grants `echo` and nothing else: `touch` stays unrun, and
+    /// so does an `echo` that chains a second command after it.
+    #[test]
+    fn bang_lines_run_only_what_allowed_tools_grants() {
+        let root = temp_dir("bang-granted");
+        fs::create_dir_all(&root).expect("base dir");
+        let touch_marker = root.join("touch-ran");
+        let chained_marker = root.join("chained-ran");
+        let touch = format!("touch {}", touch_marker.display());
+        let chained = format!("echo hi; touch {}", chained_marker.display());
+        let command = parse_prompt_command_file(
+            "granted".to_string(),
+            PathBuf::from("granted.md"),
+            &format!("---\nallowed-tools: Bash(echo:*)\n---\n!echo hi\n!{touch}\n!{chained}\n"),
+        )
+        .expect("command parsed");
+
+        let rendered = command.render_prompt_in("", &root);
+
+        assert!(!touch_marker.exists(), "Bash(echo:*) let `touch` run");
+        assert!(!chained_marker.exists(), "Bash(echo:*) let a chained `touch` run");
+        assert_eq!(
+            rendered,
+            format!(
+                "hi\n[!{touch}: not run — allowed-tools does not grant Bash for it]\n\
+                 [!{chained}: not run — allowed-tools does not grant Bash for it]\n"
+            )
+        );
+
+        // An argument cannot chain a command onto a granted prefix either.
+        let argued_marker = root.join("argued-ran");
+        let argued = parse_prompt_command_file(
+            "argued".to_string(),
+            PathBuf::from("argued.md"),
+            "---\nallowed-tools: Bash(echo:*)\n---\n!echo $ARGUMENTS\n",
+        )
+        .expect("command parsed");
+        let args = format!("hi; touch {}", argued_marker.display());
+        let rendered = argued.render_prompt_in(&args, &root);
+        assert!(!argued_marker.exists(), "an argument chained `touch` onto `echo`");
+        assert_eq!(
+            rendered,
+            format!("[!echo {args}: not run — allowed-tools does not grant Bash for it]\n")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn discovers_personal_commands_in_home() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
