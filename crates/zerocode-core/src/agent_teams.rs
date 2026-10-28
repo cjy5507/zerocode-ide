@@ -1294,6 +1294,96 @@ pub const SHIM_WAIT_GRACE_SECONDS: u32 = 8;
 /// to do, never refused in silence.
 pub const NO_SEAT_HINT: &str = " — the window grants a ledger seat once it sees the agent report in this pane; if it stays refused, start the agent from a ZeroCode agent tab";
 
+/// The voice of the shim an agent types ledger verbs through, which is the one that watches the
+/// texts it carries (t-80615): `tmux`'s arguments are not briefings.
+pub const ORCHESTRATION_VOICE: &str = "orchestration";
+
+/// What the POSIX shim adds to say a text may have been run by the shell before it arrived
+/// (t-80615): where to start looking, what to do with each argument, and what to say at the end.
+/// All three empty for a voice that carries no briefings.
+///
+/// The flags come from [`crate::orchestration::text_file::TEXT_FILE_FLAGS`] and the parts from
+/// [`crate::orchestration::text_file::SHELL_RUNS`], so the shim, the window and the tests read
+/// one list.
+pub fn text_watch_posix(voice: &str) -> (String, String, String) {
+    use crate::orchestration::text_file::{SHELL_RUNS, TEXT_FILE_FLAGS, inline_warning};
+    if voice != ORCHESTRATION_VOICE {
+        return Default::default();
+    }
+    let flags: Vec<&str> = TEXT_FILE_FLAGS.iter().map(|(_, text)| *text).collect();
+    let named = flags.join("|");
+    let joined = flags
+        .iter()
+        .map(|flag| format!("{flag}=*"))
+        .collect::<Vec<_>>()
+        .join("|");
+    let risky = SHELL_RUNS
+        .iter()
+        .map(|part| format!("*'{part}'*"))
+        .collect::<Vec<_>>()
+        .join("|");
+    let init = "risky=\"\"\ntext_next=\"\"".to_string();
+    let watch = format!(
+        r#"  if [ -n "$text_next" ]; then
+    case "$arg" in
+      {risky}) risky=1 ;;
+    esac
+    text_next=""
+  fi
+  case "$arg" in
+    {named}) text_next=1 ;;
+    {joined}) case "${{arg#*=}}" in {risky}) risky=1 ;; esac ;;
+  esac"#
+    );
+    let warn = format!(
+        "if [ -n \"$risky\" ]; then\n  echo '{voice}: {}' >&2\nfi",
+        inline_warning()
+    );
+    (init, watch, warn)
+}
+
+/// The PowerShell shim's half of [`text_watch_posix`], word for word the same watch.
+fn text_watch_powershell(voice: &str) -> (String, String, String) {
+    use crate::orchestration::text_file::{SHELL_RUNS, TEXT_FILE_FLAGS, inline_warning};
+    if voice != ORCHESTRATION_VOICE {
+        return Default::default();
+    }
+    let quoted = |words: Vec<&str>| {
+        words
+            .iter()
+            .map(|word| format!("'{word}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let flags = quoted(TEXT_FILE_FLAGS.iter().map(|(_, text)| *text).collect());
+    let runs = quoted(SHELL_RUNS.to_vec());
+    let init = format!(
+        "$risky = $false\n$textNext = $false\n$textFlags = @({flags})\n$shellRuns = @({runs})"
+    );
+    let watch = r#"  $held = $null
+  if ($textNext) {
+    $held = $word
+    $textNext = $false
+  } elseif ($textFlags -contains $word) {
+    $textNext = $true
+  } else {
+    foreach ($flag in $textFlags) {
+      if ($word.StartsWith($flag + '=')) { $held = $word.Substring($flag.Length + 1) }
+    }
+  }
+  if ($null -ne $held) {
+    foreach ($run in $shellRuns) {
+      if ($held.Contains($run)) { $risky = $true }
+    }
+  }"#
+    .to_string();
+    let warn = format!(
+        "if ($risky) {{\n  [Console]::Error.WriteLine('{voice}: {}')\n}}",
+        inline_warning()
+    );
+    (init, watch, warn)
+}
+
 /// The fake `tmux`, as a POSIX shell script.
 ///
 /// Orca's shim re-enters its own CLI (`orca agent-teams-tmux`, :173397-173404).
@@ -1350,6 +1440,7 @@ pub fn shim_script(port_var: &str, token_var: &str, voice: &str) -> String {
         crate::orchestration::READY_TIMEOUT_DEFAULT_MS / 1000 + SHIM_WAIT_GRACE_SECONDS;
     let delegate_headroom_s = crate::orchestration::delegate::WAIT_HEADROOM_MS / 1000;
     let ready_report_s = crate::orchestration::READY_REPORT_HEADROOM_MS / 1000;
+    let (text_init, text_watch, text_warn) = text_watch_posix(voice);
     // `jq` is not something we can count on, so the argv is sent as one
     // NUL-separated blob in the body and split on the far side: it is the one
     // encoding that cannot be confused by a quote, a newline or a space in a
@@ -1379,6 +1470,7 @@ delegating=""
 summoning=""
 waited=""
 joined=""
+{text_init}
 case "${{1:-}}" in
   ask) waiting=1; budget={ask_wait_s} ;;
   worker-start) waiting=1; summoning=1; budget={worker_wait_s} ;;
@@ -1409,8 +1501,10 @@ for arg in "$@"; do
       esac
       ;;
   esac
+{text_watch}
   body="$body$arg$sep"
 done
+{text_warn}
 if [ -n "$delegating" ] && [ -n "$waited" ]; then
   budget=$((budget + {delegate_headroom_s}))
 fi
@@ -1509,6 +1603,7 @@ pub fn shim_script_powershell(port_var: &str, token_var: &str, voice: &str) -> S
     let worker_wait_ms = crate::orchestration::READY_TIMEOUT_DEFAULT_MS + grace_ms;
     let delegate_headroom_ms = crate::orchestration::delegate::WAIT_HEADROOM_MS;
     let ready_report_ms = crate::orchestration::READY_REPORT_HEADROOM_MS;
+    let (text_init, text_watch, text_warn) = text_watch_powershell(voice);
     format!(
         r#"# Generated by ZeroCode. The POSIX sibling beside this file serves sh-hosted
 # agents (Git Bash and every unix; NOT WSL2, whose 127.0.0.1 is not the
@@ -1537,6 +1632,7 @@ $waiting = $false
 $wantMs = $false
 $delegating = $false
 $waitedFlag = $false
+{text_init}
 if ($args.Count -gt 0 -and ([string]$args[0]) -eq 'ask') {{
   $waiting = $true
   $deadlineMs = {ask_wait_ms}
@@ -1574,8 +1670,10 @@ foreach ($arg in $args) {{
   }}
   if ($word -eq '--wait') {{ $waiting = $true; $waitedFlag = $true }}
   if ($word -eq '--timeout-ms') {{ $wantMs = $true }}
+{text_watch}
   $body = $body + $word + $sep
 }}
+{text_warn}
 if ($delegating -and $waitedFlag) {{
   $deadlineMs = $deadlineMs + {delegate_headroom_ms}
 }}
@@ -3109,6 +3207,93 @@ mod tests {
                 Some(secs.to_string()),
                 "{argv:?} did not carry the patience of its --timeout-ms=X:\n{saw}"
             );
+        }
+    }
+
+    /// The orchestration shim says, on stderr and once, when a text it carries holds a backtick or
+    /// a `$(` (t-80615): the shell may already have run it. The answer on stdout is the window's,
+    /// unchanged, and the tmux shim — whose arguments are not briefings — never says it.
+    #[cfg(unix)]
+    #[test]
+    fn the_orchestration_shim_warns_of_an_inline_text_a_shell_may_have_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("scratch folder");
+        let fake = root.path().join("curl");
+        std::fs::write(
+            &fake,
+            "#!/usr/bin/env sh\ncat >/dev/null\nprintf '%s\\n%s' \"${FAKE_BODY}\" 200\n",
+        )
+        .expect("curl");
+        let mut shims = Vec::new();
+        for voice in ["orchestration", "tmux"] {
+            let shim = root.path().join(voice);
+            std::fs::write(&shim, shim_script("PORT_V", "TOKEN_V", voice)).expect("shim");
+            shims.push((voice, shim));
+        }
+        for path in std::iter::once(&fake).chain(shims.iter().map(|(_, shim)| shim)) {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let run = |voice: &str, argv: &[&str]| {
+            let shim = &shims
+                .iter()
+                .find(|(held, _)| *held == voice)
+                .expect("shim")
+                .1;
+            std::process::Command::new("sh")
+                .arg(shim)
+                .args(argv)
+                .env("PATH", format!("{}:/usr/bin:/bin", root.path().display()))
+                .env("PORT_V", "1234")
+                .env("TOKEN_V", "tok")
+                .env(TEAM_ID_VAR, "team-1")
+                .env(TEAM_TOKEN_VAR, "pane-secret")
+                .env("TMUX_PANE", "%2")
+                .env("FAKE_BODY", "{\"ok\":true}")
+                .output()
+                .expect("sh")
+        };
+        let warning = crate::orchestration::text_file::inline_warning();
+        let risky = [
+            vec!["worker-start", "--prompt", "run `ls` now"],
+            vec!["worker-start", "--prompt=run $(ls) now"],
+            vec!["send", "--body", "a `b`"],
+            vec!["task-create", "--spec", "x $(y)"],
+            vec!["gate-create", "--question", "`q`"],
+            vec!["gate-resolve", "--resolution", "$(r)"],
+            vec!["worker-stop", "--reason", "`r`"],
+        ];
+        for argv in &risky {
+            let said = run("orchestration", argv);
+            assert!(said.status.success(), "{argv:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&said.stdout),
+                "{\"ok\":true}",
+                "{argv:?}"
+            );
+            let err = String::from_utf8_lossy(&said.stderr);
+            assert_eq!(err.matches(&warning).count(), 1, "{argv:?}: {err}");
+        }
+        for argv in [
+            vec!["worker-start", "--prompt", "plain text, $HOME and ${X}"],
+            vec!["worker-start", "--prompt-file", "/tmp/a`b.md"],
+            vec!["run-show", "--run", "r-`x`"],
+            vec!["send", "--body", "fine", "--title", "a `title`"],
+        ] {
+            let said = run("orchestration", &argv);
+            assert!(said.status.success(), "{argv:?}");
+            let err = String::from_utf8_lossy(&said.stderr);
+            assert!(!err.contains(&warning), "{argv:?}: {err}");
+        }
+        let tmux = run("tmux", &["send-keys", "--body", "a `b`"]);
+        assert!(
+            !String::from_utf8_lossy(&tmux.stderr).contains(&warning),
+            "the tmux shim warned about a briefing it does not carry"
+        );
+        // The PowerShell sibling carries the same words and the same two parts.
+        let powershell = shim_script_powershell("PORT_V", "TOKEN_V", "orchestration");
+        assert!(powershell.contains(&warning), "{powershell}");
+        for part in crate::orchestration::text_file::SHELL_RUNS {
+            assert!(powershell.contains(&format!("'{part}'")), "{part}");
         }
     }
 

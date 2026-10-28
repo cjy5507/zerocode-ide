@@ -17,10 +17,27 @@ fn ui_file(name: &str) -> String {
     std::fs::read_to_string(ui.join(name)).unwrap_or_else(|why| panic!("{name}: {why}"))
 }
 
+/// A skill as an agent reads it: `SKILL.md` and the reference files beside it.
 fn skill(name: &str) -> String {
-    let skills = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
-    std::fs::read_to_string(skills.join(name).join("SKILL.md"))
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../skills")
+        .join(name);
+    let read = |file: &str| {
+        std::fs::read_to_string(dir.join(file)).unwrap_or_else(|why| panic!("skills/{name}: {why}"))
+    };
+    let mut references: Vec<String> = std::fs::read_dir(&dir)
         .unwrap_or_else(|why| panic!("skills/{name}: {why}"))
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|file| file != "SKILL.md" && file.ends_with(".md"))
+        .collect();
+    references.sort();
+    let mut text = read("SKILL.md");
+    for file in references {
+        text.push('\n');
+        text.push_str(&read(&file));
+    }
+    text
 }
 
 /// The pending table and the dispatch; a sibling module, read through its own

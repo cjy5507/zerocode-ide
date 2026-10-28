@@ -1367,6 +1367,53 @@ mod tests {
         );
     }
 
+    /// t-78096 review P3-7 (t-80303): the default is asked about with no
+    /// model, so a picked account whose Fable-only week is full moves while
+    /// its session reads 30% — Opus and Sonnet work would still run on it.
+    /// That is today's rule for every default (a window the launch might
+    /// meet is a window), pinned here as it stands; whether the person's
+    /// own pick should wait for a window every model meets is a question
+    /// for the person, not this test (a follow-up task, if they say yes).
+    #[test]
+    fn a_picked_accounts_full_fable_week_moves_the_default_while_its_session_has_room() {
+        let gauges = [
+            gauge(
+                "picked",
+                "claude_team",
+                &[
+                    ("session", 30, HOUR),
+                    ("weekly", 40, DAYS6),
+                    (
+                        "fable_weekly",
+                        CLAUDE_ACCOUNT_AUTOSWITCH.picked_moves_at_percent,
+                        DAYS6,
+                    ),
+                ],
+            ),
+            gauge(
+                "other",
+                "claude_max",
+                &[("session", 2, HOUR), ("weekly", 2, DAYS6)],
+            ),
+        ];
+        let mut question = ask("picked", &gauges);
+        question.picked = true;
+        assert_eq!(
+            decide(&question),
+            Decision::Switch {
+                from: "picked".into(),
+                to: "other".into(),
+                reason: SwitchReason::NearLimit {
+                    window: "fable_weekly".into(),
+                    used_percent: CLAUDE_ACCOUNT_AUTOSWITCH.picked_moves_at_percent
+                },
+            }
+        );
+        // A launch that names an Opus model is not limited by that week.
+        question.model = Some("claude-opus-5-5");
+        assert_eq!(decide(&question), Decision::Stay { why: "room" });
+    }
+
     #[test]
     fn the_table_reads_the_summons_tables_numbers_and_invents_none() {
         let policy = &CLAUDE_ACCOUNT_AUTOSWITCH;

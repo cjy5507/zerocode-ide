@@ -421,6 +421,10 @@ fn write_manager_mcp_server_script() -> PathBuf {
             "        if FAIL_ONCE_MODE == 'tool_call_disconnect' and should_fail_once():",
             "            log('tools/call-disconnect')",
             "            raise SystemExit(0)",
+            "        if FAIL_ONCE_MODE == 'tool_call_hang' and should_fail_once():",
+            "            log('tools/call-hang')",
+            "            while True:",
+            "                time.sleep(1)",
             "        args = request['params'].get('arguments') or {}",
             "        text = args.get('text', '')",
             "        send_message({",
@@ -1954,16 +1958,23 @@ fn manager_times_out_slow_tool_calls() {
             .expect_err("slow tool call should time out");
 
         match error {
-            McpServerManagerError::Timeout {
-                server_name,
-                method,
-                timeout_ms,
-            } => {
-                assert_eq!(server_name, "slow");
-                assert_eq!(method, "tools/call");
-                assert_eq!(timeout_ms, 25);
-            }
-            other => panic!("expected timeout error, got {other:?}"),
+            McpServerManagerError::ToolCallNotResent {
+                cause,
+                server_reset: true,
+                ..
+            } => match *cause {
+                McpServerManagerError::Timeout {
+                    server_name,
+                    method,
+                    timeout_ms,
+                } => {
+                    assert_eq!(server_name, "slow");
+                    assert_eq!(method, "tools/call");
+                    assert_eq!(timeout_ms, 25);
+                }
+                other => panic!("expected timeout cause, got {other:?}"),
+            },
+            other => panic!("expected a timeout that was not sent again, got {other:?}"),
         }
 
         manager.shutdown().await.expect("shutdown");
@@ -2073,11 +2084,21 @@ fn given_child_exits_after_discovery_when_calling_twice_then_second_call_succeed
             .await
         {
             Ok(response) => response,
-            Err(McpServerManagerError::Transport {
-                server_name,
-                method,
-                source,
+            // The child can still be exiting when the call goes out; the
+            // dropped call is then reset and handed back, never sent again.
+            Err(McpServerManagerError::ToolCallNotResent {
+                cause,
+                server_reset: true,
+                ..
             }) => {
+                let (server_name, method, source) = match *cause {
+                    McpServerManagerError::Transport {
+                        server_name,
+                        method,
+                        source,
+                    } => (server_name, method, source),
+                    other => panic!("expected a transport cause, got {other:?}"),
+                };
                 assert_eq!(server_name, "alpha");
                 assert_eq!(method, "tools/call");
                 assert!(matches!(
@@ -2302,8 +2323,22 @@ fn given_oauth_bridge_initialize_times_out_then_child_is_never_respawned() {
     });
 }
 
-#[test]
-fn given_tool_call_disconnects_once_when_calling_tool_then_manager_retries_and_call_succeeds() {
+/// Drive one `tools/call` that fails after it reached the server — on its first
+/// call the server drops the connection (`tool_call_disconnect`) or hangs past
+/// the call timeout (`tool_call_hang`) — and hold the manager to its contract:
+/// a tool call need not be idempotent, so it goes out once, comes back as an
+/// error that says it was not sent again, and the reset server answers the
+/// caller's next call.
+/// `call_timeout_ms` is the server's `tool_call_timeout_ms`: the hang needs
+/// a short one to end at all, and the disconnect keeps the default so that a
+/// slow exit on a loaded machine cannot turn its transport failure into a
+/// timeout.
+fn assert_failed_tool_call_is_not_sent_again(
+    fail_once_mode: &str,
+    failure_line: &str,
+    expected_cause: &str,
+    call_timeout_ms: Option<u64>,
+) {
     let runtime = Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2311,44 +2346,54 @@ fn given_tool_call_disconnects_once_when_calling_tool_then_manager_retries_and_c
     runtime.block_on(async {
         let script_path = write_manager_mcp_server_script();
         let root = script_path.parent().expect("script parent");
-        let log_path = root.join("tool-call-disconnect.log");
-        let marker_path = root.join("tool-call-disconnect.marker");
-        let servers = BTreeMap::from([(
-            "alpha".to_string(),
-            manager_server_config_with_env(
-                &script_path,
-                "alpha",
-                &log_path,
-                BTreeMap::from([
-                    (
-                        "MCP_FAIL_ONCE_MODE".to_string(),
-                        "tool_call_disconnect".to_string(),
-                    ),
-                    (
-                        "MCP_FAIL_ONCE_MARKER".to_string(),
-                        marker_path.to_string_lossy().into_owned(),
-                    ),
-                ]),
-            ),
-        )]);
-        let mut manager = McpServerManager::from_servers(&servers);
+        let log_path = root.join(format!("{fail_once_mode}.log"));
+        let marker_path = root.join(format!("{fail_once_mode}.marker"));
+        let mut config = manager_server_config_with_env(
+            &script_path,
+            "alpha",
+            &log_path,
+            BTreeMap::from([
+                ("MCP_FAIL_ONCE_MODE".to_string(), fail_once_mode.to_string()),
+                (
+                    "MCP_FAIL_ONCE_MARKER".to_string(),
+                    marker_path.to_string_lossy().into_owned(),
+                ),
+            ]),
+        );
+        if let McpServerConfig::Stdio(stdio) = &mut config.config {
+            stdio.tool_call_timeout_ms = call_timeout_ms;
+        }
+        let mut manager =
+            McpServerManager::from_servers(&BTreeMap::from([("alpha".to_string(), config)]));
+        let tool = mcp_tool_name("alpha", "echo");
 
         manager.discover_tools().await.expect("discover tools");
-        let response = manager
-            .call_tool(
-                &mcp_tool_name("alpha", "echo"),
-                Some(json!({"text": "retried"})),
-            )
-            .await
-            .expect("tool call should retry once after transport drop");
+        let outcome = manager.call_tool(&tool, Some(json!({"text": "once"}))).await;
 
+        let log = fs::read_to_string(&log_path).expect("read log");
+        let sent = log.lines().filter(|line| *line == "tools/call").count();
+        assert_eq!(
+            sent, 1,
+            "a tools/call that failed after reaching the server must not be sent again; server log:\n{log}"
+        );
+        let message = outcome
+            .expect_err("the failed call comes back as an error")
+            .to_string();
+        assert!(message.contains(expected_cause), "{message}");
+        assert!(message.contains("not sent again"), "{message}");
+        assert!(message.contains("reset"), "{message}");
+
+        let response = manager
+            .call_tool(&tool, Some(json!({"text": "next"})))
+            .await
+            .expect("the caller's next call reaches the reset server");
         assert_eq!(
             response
                 .result
                 .as_ref()
                 .and_then(|result| result.structured_content.as_ref())
                 .and_then(|value| value.get("echoed")),
-            Some(&json!("retried"))
+            Some(&json!("next"))
         );
         let log = fs::read_to_string(&log_path).expect("read log");
         assert_eq!(
@@ -2357,7 +2402,7 @@ fn given_tool_call_disconnects_once_when_calling_tool_then_manager_retries_and_c
                 "initialize",
                 "tools/list",
                 "tools/call",
-                "tools/call-disconnect",
+                failure_line,
                 "initialize",
                 "tools/call",
             ]
@@ -2366,6 +2411,54 @@ fn given_tool_call_disconnects_once_when_calling_tool_then_manager_retries_and_c
         manager.shutdown().await.expect("shutdown");
         cleanup_script(&script_path);
     });
+}
+
+#[test]
+fn given_tool_call_disconnects_when_calling_tool_then_the_call_is_not_sent_again() {
+    assert_failed_tool_call_is_not_sent_again(
+        "tool_call_disconnect",
+        "tools/call-disconnect",
+        "transport failed during tools/call",
+        None,
+    );
+}
+
+#[test]
+fn given_tool_call_times_out_when_calling_tool_then_the_call_is_not_sent_again() {
+    assert_failed_tool_call_is_not_sent_again(
+        "tool_call_hang",
+        "tools/call-hang",
+        "timed out after 300 ms while handling tools/call",
+        Some(300),
+    );
+}
+
+/// Review P3-3: a reset that fails after a `tools/call`
+/// may have reached the server must not hide that fact. The answer still
+/// says the call was not sent again, that the server was not reset, and why
+/// the reset failed.
+#[test]
+fn a_failed_reset_still_says_the_tool_call_was_not_sent_again() {
+    let cause = McpServerManagerError::Transport {
+        server_name: "alpha".to_string(),
+        method: "tools/call",
+        source: std::io::Error::new(ErrorKind::BrokenPipe, "pipe closed"),
+    };
+    let reset_error = McpServerManagerError::UnknownServer {
+        server_name: "alpha".to_string(),
+    };
+    let error = McpServerManager::tool_call_failure(cause, Err(reset_error));
+    let message = error.to_string();
+    assert!(
+        matches!(
+            &error,
+            McpServerManagerError::ToolCallNotResent { cause, server_reset: false, .. }
+                if matches!(**cause, McpServerManagerError::Transport { method: "tools/call", .. })
+        ),
+        "{message}"
+    );
+    assert!(message.contains("not sent again"), "{message}");
+    assert!(message.contains("unknown MCP server `alpha`"), "{message}");
 }
 
 #[test]

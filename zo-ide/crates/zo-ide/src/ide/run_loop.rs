@@ -45,6 +45,7 @@ const KEEP_LIST_HELP: &str = "\
 /goal [command]       지속 목표·bounded autonomous gate
 /loop [command]       횟수·간격·파일 변화 반복
 /status               사용량 카드 — 모델·권한·세션·컨텍스트·한도
+/context              컨텍스트 창을 무엇이 채우나·언제 압축하나
 /help                 이 목록
 /exit                 종료 (Ctrl-D 도 같다)
 그 외 슬래시는 zerocode IDE 에서 하세요.";
@@ -99,8 +100,9 @@ pub async fn run(
 /// on: left parked it held the turn forever (a headless `zo --plain` under
 /// `workspace-write` sat on a `bash` approval for six minutes in a benchmark
 /// while Claude Code and codex finished; 2026-09-02). A permission is granted
-/// once when the mode allows writes at all and refused under read-only; a
-/// question has no answer to give and is dismissed. Either way the turn goes
+/// once when the mode allows writes at all and refused under read-only — a
+/// call only a person may allow is refused whatever the mode; a question has
+/// no answer to give and is dismissed. Either way the turn goes
 /// on, and the note says what was decided in the person's absence.
 fn decide_unattended<W: Write>(
     prompt: PendingPrompt,
@@ -108,6 +110,21 @@ fn decide_unattended<W: Write>(
     renderer: &mut Renderer<W>,
 ) -> Option<PendingPrompt> {
     match prompt {
+        // A tool call only a person may allow offers no lasting allow
+        // (t-80732: a kill the guard puts to a person). Nobody is here to
+        // allow it, so it is refused — never approved once in their absence.
+        PendingPrompt::Permission(inner)
+            if inner.question.is_none()
+                && !inner
+                    .choices
+                    .iter()
+                    .any(|choice| choice.decision == runtime::message_stream::PermissionDecision::AllowAlways) =>
+        {
+            let tool = inner.tool_name.clone();
+            PendingPrompt::Permission(inner).dismiss();
+            note(renderer, &format!("unattended: {tool} denied (only a person may allow it)"));
+            None
+        }
         PendingPrompt::Permission(inner) => {
             let tool = inner.tool_name.clone();
             let writes = !matches!(mode, core_types::PermissionMode::ReadOnly);
@@ -556,6 +573,10 @@ fn handle_slash<W: Write>(
             notice(renderer, &crate::status_format::card_text(&rows));
             SlashOutcome::Continue
         }
+        Some(Slash::Context) => {
+            notice(renderer, &session.runtime.context_breakdown_report());
+            SlashOutcome::Continue
+        }
         Some(Slash::Model) => {
             if arg.is_empty() {
                 note(renderer, &format!(
@@ -647,10 +668,33 @@ fn handle_slash<W: Write>(
             | Slash::Warnings
             | Slash::Rewind
             | Slash::Clear,
-        )
-        | None => {
-            unknown_command(renderer, name)
+        ) => unknown_command(renderer, name),
+        None => unlisted_command(renderer, &session.cwd, session.permission_mode, session.named_permission_mode.is_some(), name, arg),
+    }
+}
+
+/// 목록에 없는 낱말 — 프롬프트 명령이면 그 펼친 본문이 턴이 되고, 아니면
+/// [`unknown_command`] 의 한 문구다. 턴이 나가기 전에 무엇이 돌았는지
+/// ([`crate::slash::PromptExpansion::shown`])를 렌더러에 한 줄씩 남긴다 —
+/// stderr 는 터미널이면 로그로 돌려지므로([`install_stderr_redirect`]) 사람이
+/// 보는 자리는 여기다.
+fn unlisted_command<W: Write>(
+    renderer: &mut Renderer<W>,
+    cwd: &std::path::Path,
+    mode: core_types::PermissionMode,
+    mode_named: bool,
+    name: &str,
+    arg: &str,
+) -> SlashOutcome {
+    let origin = crate::slash::ModeOrigin { named: mode_named, piped: true };
+    match crate::slash::prompt_command(cwd, name, arg, mode, origin) {
+        Some(expansion) => {
+            for line in &expansion.shown {
+                note(renderer, line);
+            }
+            SlashOutcome::Turn(expansion.text)
         }
+        None => unknown_command(renderer, name),
     }
 }
 
@@ -1225,7 +1269,8 @@ mod tests {
     use tokio::sync::{mpsc, watch};
 
     use super::{
-        forward_subagent_frames, start_subagent_frame_relay, SubagentFrameSink, KEEP_LIST_HELP,
+        forward_subagent_frames, start_subagent_frame_relay, unlisted_command, SlashOutcome,
+        SubagentFrameSink, KEEP_LIST_HELP,
     };
     use crate::ide::events::SubagentsFrame;
     use crate::session::subagent_progress::{RosterSnapshot, SubagentProgress, SubagentProgressWatcher};
@@ -1378,6 +1423,91 @@ mod tests {
             "session-a".to_string()
         )
         .is_none());
+    }
+
+    /// A word the keep-list does not have is a turn in the pipe when a command
+    /// file in the working folder names it — its body expanded with the
+    /// arguments — and the one line otherwise (adversarial review A, Z12).
+    #[test]
+    fn an_unlisted_word_that_names_a_prompt_command_is_a_turn() {
+        let _lock = crate::test_env_lock();
+        let _home = crate::support::IsolatedHome::new();
+        let folder = tempfile::tempdir().expect("a working folder");
+        let commands = folder.path().join(".zo").join("commands");
+        std::fs::create_dir_all(&commands).expect("the command folder");
+        std::fs::write(commands.join("fruit.md"), "Name the fruit $ARGUMENTS in one word.\n")
+            .expect("the prompt command");
+        let mut written = Vec::new();
+        let mode = core_types::PermissionMode::WorkspaceWrite;
+        let (expanded, unknown) = {
+            let mut renderer = super::Renderer::new(&mut written, super::RenderOptions::default());
+            (
+                unlisted_command(&mut renderer, folder.path(), mode, false, "fruit", "pineapple"),
+                unlisted_command(&mut renderer, folder.path(), mode, false, "no-such-command-z12", ""),
+            )
+        };
+        assert!(
+            matches!(&expanded, SlashOutcome::Turn(text) if text.trim() == "Name the fruit pineapple in one word."),
+            "/fruit did not become its expanded turn"
+        );
+        assert!(matches!(unknown, SlashOutcome::Continue));
+        assert!(
+            String::from_utf8_lossy(&written).contains("/no-such-command-z12"),
+            "the unknown word is answered with its one line"
+        );
+    }
+
+    /// The pipe prints what an expanded command ran before its turn goes:
+    /// the file, and each `!` line with its exit code.
+    #[test]
+    fn a_prompt_command_in_the_pipe_prints_what_it_ran_before_its_turn() {
+        let _lock = crate::test_env_lock();
+        let _home = crate::support::IsolatedHome::new();
+        let root = tempfile::tempdir().expect("a test root");
+        let folder = root.path().join("project");
+        let commands = folder.join(".zo").join("commands");
+        std::fs::create_dir_all(&commands).expect("the command folder");
+        std::fs::write(commands.join("probe.md"), "---\nallowed-tools: Bash\n---\n!echo hi\nDone.\n")
+            .expect("the prompt command");
+        let mut written = Vec::new();
+        let mode = core_types::PermissionMode::WorkspaceWrite;
+        let outcome = {
+            let mut renderer = super::Renderer::new(&mut written, super::RenderOptions::default());
+            unlisted_command(&mut renderer, &folder, mode, true, "probe", "")
+        };
+        assert!(matches!(&outcome, SlashOutcome::Turn(text) if text == "hi\nDone.\n"));
+        let printed = String::from_utf8_lossy(&written);
+        assert!(
+            printed.contains(&format!("/probe — {} (repository)", commands.join("probe.md").display())),
+            "{printed}"
+        );
+        assert!(printed.contains("! echo hi → exit 0"), "{printed}");
+
+        // A program reading `--json` gets each line as one `system` event,
+        // and the answer `--last-message` keeps is the model's alone.
+        let mut json = Vec::new();
+        let last = {
+            let options = super::RenderOptions { json: true, ..super::RenderOptions::default() };
+            let mut renderer = super::Renderer::new(&mut json, options);
+            let _ = unlisted_command(&mut renderer, &folder, mode, true, "probe", "");
+            renderer.last_assistant_message().to_string()
+        };
+        let events: Vec<serde_json::Value> = String::from_utf8_lossy(&json)
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("one JSON event a line"))
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                serde_json::json!({
+                    "type": "system",
+                    "level": "info",
+                    "text": format!("/probe — {} (repository)", commands.join("probe.md").display()),
+                }),
+                serde_json::json!({"type": "system", "level": "info", "text": "  ! echo hi → exit 0"}),
+            ]
+        );
+        assert_eq!(last, "", "the shown lines reached the last answer");
     }
 
     /// 파이프의 `/help` 목록과 파이프가 실제로 드는 명령은 같은 사실을 읽는다.

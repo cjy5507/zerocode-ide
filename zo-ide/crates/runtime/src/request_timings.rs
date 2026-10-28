@@ -17,9 +17,11 @@
 //! is the first thing a person could see. The runtime's own clock, not the
 //! provider's, so the numbers match what the screen showed.
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -31,13 +33,26 @@ use crate::message_stream::types::BlockId;
 const TIMINGS_DIR: &str = "request-timings";
 const TIMINGS_FILE: &str = "timings.jsonl";
 
+/// The rows a ledger keeps, newest last: as many as the per-turn trace keeps
+/// lines (`crate::turn_trace`) — the same retention for the same kind of
+/// per-project evidence file (t-80327).
+const RETAINED_ROWS: usize = crate::turn_trace::MAX_TURN_LOG_LINES;
+
+/// The rows this process appended to each ledger since it last cut the
+/// ledger back to its newest [`RETAINED_ROWS`].
+static APPENDED_SINCE_CUT: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
+
 /// The stamps one request collects while its stream is in flight. Monotonic
 /// instants; converted to millisecond waits only when the record is written.
 #[derive(Debug, Clone, Default)]
 pub struct StreamStamps {
     /// When the turn this request belongs to began: the runtime took the
-    /// person's words, before the turn-start hooks and judgments.
+    /// person's words, before the turn-start hooks and judgments. `None` on a
+    /// later leg's request — see [`Self::leg`].
     pub turn_started: Option<Instant>,
+    /// The leg of the turn this request belongs to, from the second on — a
+    /// deep-mode turn runs its legs inside one taking of the person's words.
+    pub leg: Option<u32>,
     /// When the turn-start judgments began holding this request, and when
     /// they let it go — the turn's first request only.
     pub judge_wait: Option<Range<Instant>>,
@@ -67,18 +82,24 @@ pub struct StreamStamps {
 }
 
 /// One tool on a row, by name only — never its input or its result — with a
-/// time in ms, absent for a tool that did not run (t-78938).
+/// time in ms, absent for a tool that did not run to its end (t-78938).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolMark {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ms: Option<u64>,
+    /// The person stopped the tool while it ran (Esc): it began but did not
+    /// finish, so it keeps no time — the wait up to the keypress is not how
+    /// long the tool takes (t-80327).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
 }
 
 /// The tools one answer asked for, in the order asked, each with how long it
 /// ran: what the request that carries their results back says of them
 /// (t-78938). A tool that did not run — refused, or answered by the
-/// repetition guard — keeps no time.
+/// repetition guard — keeps no time, and neither does one the person
+/// stopped while it ran, which is marked `cancelled` (t-80327).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolRuns {
     marks: Vec<ToolMark>,
@@ -89,7 +110,10 @@ impl ToolRuns {
     #[must_use]
     pub fn asked<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
-            marks: names.into_iter().map(|name| ToolMark { name: name.to_string(), ms: None }).collect(),
+            marks: names
+                .into_iter()
+                .map(|name| ToolMark { name: name.to_string(), ms: None, cancelled: false })
+                .collect(),
         }
     }
 
@@ -97,6 +121,15 @@ impl ToolRuns {
     pub fn ran(&mut self, index: usize, started: Instant, finished: Instant) {
         if let Some(mark) = self.marks.get_mut(index) {
             mark.ms = millis_between(Some(started), Some(finished));
+        }
+    }
+
+    /// The `index`th tool asked for began and the person stopped it before
+    /// it finished: it keeps no time.
+    pub fn stopped(&mut self, index: usize) {
+        if let Some(mark) = self.marks.get_mut(index) {
+            mark.ms = None;
+            mark.cancelled = true;
         }
     }
 }
@@ -115,10 +148,14 @@ impl StreamStamps {
     /// `assemble_started` after the compaction `preflight`, when one ran in
     /// front of it. The judgments' wait goes with the first request that
     /// takes it off the clock: only the turn's first request waited for them.
+    /// A request of a later leg names its leg instead of the turn's start:
+    /// the legs before it ran in between (t-80327).
     #[must_use]
     pub fn in_turn(assemble_started: Instant, clock: &mut TurnClock, preflight: Option<Range<Instant>>) -> Self {
+        let later_leg = clock.legs > 1;
         Self {
-            turn_started: clock.started,
+            turn_started: if later_leg { None } else { clock.started },
+            leg: later_leg.then_some(clock.legs),
             judge_wait: clock.judge_wait.take(),
             preflight,
             ..Self::begun(assemble_started)
@@ -194,13 +231,22 @@ pub struct TurnClock {
     /// When the turn-start judgments began holding the turn's first
     /// request, and when they let it go; `None` when none was asked.
     pub judge_wait: Option<Range<Instant>>,
+    /// How many legs of the turn have begun: a plain turn is one leg, and a
+    /// deep-mode turn runs one leg after another — each starting its
+    /// iterations over — inside one taking of the person's words (t-80327).
+    pub legs: u32,
 }
 
 impl TurnClock {
-    /// A turn that began at `now`.
+    /// A turn that began at `now`, before its first leg.
     #[must_use]
     pub fn began(now: Instant) -> Self {
-        Self { started: Some(now), judge_wait: None }
+        Self { started: Some(now), judge_wait: None, legs: 0 }
+    }
+
+    /// Another leg of the turn began.
+    pub fn leg_began(&mut self) {
+        self.legs = self.legs.saturating_add(1);
     }
 }
 
@@ -218,7 +264,11 @@ pub struct RequestTimingRecord {
     pub request_messages: usize,
     /// Times the request was sent.
     pub attempts: u32,
-    /// Assembly began → last attempt left.
+    /// Assembly began → last attempt left. Takes in the recall seat's wait
+    /// when the seat is waited for; a project whose last waited judgment
+    /// missed the wall takes the record-only road with no wait until a
+    /// recorded judgment answers inside it, a chance about once per turn
+    /// since t-78938 rather than once per request (t-80327).
     pub assemble_ms: Option<u64>,
     /// Last attempt left → first block.
     pub ttfb_ms: Option<u64>,
@@ -240,9 +290,19 @@ pub struct RequestTimingRecord {
     /// The turn began → last attempt left: the whole wait from the person's
     /// words to this request, of which `judge_wait_ms`, `preflight_ms` and
     /// `assemble_ms` are parts. Absent on every row written before this
-    /// column, and on a request no turn start was stamped for.
+    /// column, on a request no turn start was stamped for, and on a later
+    /// leg's request (`leg`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_start_ms: Option<u64>,
+    /// The leg of the turn this request belongs to, from the second on. A
+    /// deep-mode turn takes the person's words once and runs its legs (PLAN,
+    /// EXEC, verify) one after another, each starting `iteration` over at 1;
+    /// a later leg's rows carry no `turn_start_ms`, which would hold every
+    /// leg before it, so "the words to the first send" is read off the rows
+    /// with `iteration` 1 and no `leg` (t-80327). Absent on a turn's first
+    /// leg and on every row written before this column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg: Option<u32>,
     /// How long the turn-start judgments held this request — the turn's
     /// first request only, and only when one was asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -259,9 +319,14 @@ pub struct RequestTimingRecord {
     pub tool_closed_ms: Vec<ToolMark>,
     /// How long each tool whose result this request carries back ran, in the
     /// order the answer before it asked for them, by tool name only; a tool
-    /// that did not run has no `ms`. Read beside the row of the answer that
-    /// asked for them — the same `attempt`, the iteration before — so a row
-    /// with no attempt to be joined by never carries it.
+    /// that did not run has no `ms`, and one the person stopped while it ran
+    /// has none either and says `"cancelled": true`. Read beside the row of
+    /// the answer that asked for them — the same `attempt`, the iteration
+    /// before — so a row with no attempt to be joined by never carries it.
+    /// Only a request that is sent and completes carries them: when the turn
+    /// ends after its tools — a hard stop, the iteration limit, Esc, a next
+    /// request that fails — the last tools' times are on no row, so a week's
+    /// figures lean away from the tools that end turns (t-80327).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_ran_ms: Vec<ToolMark>,
 }
@@ -305,12 +370,17 @@ pub fn timing_record(context: &TimingContext<'_>, stamps: &StreamStamps) -> Requ
         outcome: context.outcome.to_string(),
         attempt: context.attempt.to_string(),
         turn_start_ms: millis_between(stamps.turn_started, stamps.sent),
+        leg: stamps.leg,
         judge_wait_ms: span_millis(stamps.judge_wait.as_ref()),
         preflight_ms: span_millis(stamps.preflight.as_ref()),
         tool_closed_ms: stamps
             .tool_closed
             .iter()
-            .map(|(_, name, closed)| ToolMark { name: name.clone(), ms: millis_between(stamps.sent, Some(*closed)) })
+            .map(|(_, name, closed)| ToolMark {
+                name: name.clone(),
+                ms: millis_between(stamps.sent, Some(*closed)),
+                cancelled: false,
+            })
             .collect(),
         tool_ran_ms: if context.attempt.is_empty() { Vec::new() } else { stamps.tools_ran.marks.clone() },
     }
@@ -352,7 +422,10 @@ pub fn record_request_timing(cwd: &Path, record: &RequestTimingRecord) -> io::Re
     record_request_timing_at_path(&request_timings_path(cwd), record)
 }
 
-/// Append one record at an explicit path — one serialized line, one write.
+/// Append one record at an explicit path — one serialized line, one write —
+/// and cut the ledger back to its newest `RETAINED_ROWS` when a cut is due
+/// (`cut_is_due`). The cut is best effort, as the per-turn trace's: the row
+/// is already written, and a ledger left long is no reason to fail.
 pub fn record_request_timing_at_path(path: &Path, record: &RequestTimingRecord) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -360,7 +433,26 @@ pub fn record_request_timing_at_path(path: &Path, record: &RequestTimingRecord) 
     let mut line = serde_json::to_string(record).map_err(io::Error::other)?;
     line.push('\n');
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(line.as_bytes())
+    file.write_all(line.as_bytes())?;
+    if cut_is_due(path) {
+        let _ = crate::jsonl_log::prune_jsonl_lines(path, RETAINED_ROWS);
+    }
+    Ok(())
+}
+
+/// Whether this process's append to `path` is the one that cuts the ledger
+/// back: its first, and then each one after it has appended as many rows
+/// again as the ledger keeps. A ledger stays within twice the rows it keeps,
+/// and is read whole once per that many appends rather than on every one.
+fn cut_is_due(path: &Path) -> bool {
+    let mut appended = APPENDED_SINCE_CUT.lock().unwrap_or_else(PoisonError::into_inner);
+    let since_cut = appended.entry(path.to_path_buf()).or_insert(RETAINED_ROWS);
+    *since_cut += 1;
+    let due = *since_cut > RETAINED_ROWS;
+    if due {
+        *since_cut = 0;
+    }
+    due
 }
 
 /// Read a project's ledger, dropping any line that does not parse.
@@ -368,7 +460,8 @@ pub fn read_request_timings(cwd: &Path) -> io::Result<Vec<RequestTimingRecord>> 
     read_request_timings_at_path(&request_timings_path(cwd))
 }
 
-/// Read a ledger at an explicit path; a missing file is an empty ledger.
+/// Read a ledger at an explicit path; a missing file is an empty ledger. A
+/// ledger written by this module holds at most twice `RETAINED_ROWS` rows.
 pub fn read_request_timings_at_path(path: &Path) -> io::Result<Vec<RequestTimingRecord>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -532,14 +625,14 @@ mod tests {
     fn a_row_without_the_turn_columns_parses_and_spells_none_of_them() {
         let old_line = r#"{"recorded_at":1789000000,"session_id":"s","model":null,"iteration":1,"request_messages":2,"attempts":1,"assemble_ms":1,"ttfb_ms":2,"ttfv_ms":3,"stream_ms":4,"outcome":"completed","attempt":"s@1"}"#;
         let parsed: RequestTimingRecord = serde_json::from_str(old_line).expect("an older row must still parse");
-        assert_eq!((parsed.turn_start_ms, parsed.judge_wait_ms, parsed.preflight_ms), (None, None, None));
+        assert_eq!((parsed.turn_start_ms, parsed.leg, parsed.judge_wait_ms, parsed.preflight_ms), (None, None, None, None));
         assert!(parsed.tool_closed_ms.is_empty() && parsed.tool_ran_ms.is_empty());
 
         let t0 = Instant::now();
         let mut stamps = StreamStamps::begun(t0);
         stamps.observe_at(&sent(1), t0 + Duration::from_millis(5));
         let written = serde_json::to_string(&timing_record(&context("completed"), &stamps)).expect("serialize");
-        for column in ["turn_start_ms", "judge_wait_ms", "preflight_ms", "tool_closed_ms", "tool_ran_ms"] {
+        for column in ["turn_start_ms", "\"leg\"", "judge_wait_ms", "preflight_ms", "tool_closed_ms", "tool_ran_ms"] {
             assert!(!written.contains(column), "{column} was spelled for nothing: {written}");
         }
     }
@@ -655,5 +748,31 @@ mod tests {
         assert!(read_request_timings_at_path(&dir.path().join("absent.jsonl"))
             .unwrap()
             .is_empty());
+    }
+
+    /// P3-2 (t-80327): the ledger keeps its newest rows — as many as the
+    /// per-turn trace keeps lines, at most twice that between two cuts — so
+    /// a project's file, which its readers take whole, stops growing.
+    #[test]
+    fn the_ledger_keeps_its_newest_rows_within_the_trace_line_cap() {
+        let cap = crate::turn_trace::MAX_TURN_LOG_LINES;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("request-timings").join("timings.jsonl");
+        let mut stamps = StreamStamps::begun(Instant::now());
+        stamps.observe(&sent(1));
+        stamps.complete();
+        let rows = 3 * cap;
+        for written in 0..rows {
+            let record = RequestTimingRecord {
+                recorded_at: u64::try_from(written).unwrap(),
+                ..timing_record(&context("completed"), &stamps)
+            };
+            record_request_timing_at_path(&path, &record).unwrap();
+        }
+        let kept: Vec<u64> = read_request_timings_at_path(&path).unwrap().iter().map(|row| row.recorded_at).collect();
+        assert!(kept.len() <= 2 * cap, "{} rows kept of {rows}, cap {cap}: {kept:?}", kept.len());
+        let newest = u64::try_from(rows).unwrap();
+        let expected: Vec<u64> = (newest - u64::try_from(kept.len()).unwrap()..newest).collect();
+        assert_eq!(kept, expected, "the newest rows, in the order written");
     }
 }

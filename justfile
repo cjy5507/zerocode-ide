@@ -238,10 +238,16 @@ package-windows:
     npm run check:package -- windows
     if [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]]; then pwsh -NoProfile -File scripts/native-package-smoke.windows.ps1; else echo "Windows install/launch smoke runs only on an ephemeral GitHub-hosted runner"; fi
 
+# The rustdoc flags, and the crate `doc` leaves out (its webview stack is a
+# build of minutes), are shared with `pre-handin`, which builds the docs of the
+# crates it tests.
+doc_flags := "-D warnings"
+doc_skip := "zerocode-shell"
+
 # rustdoc은 clippy가 못 보는 것을 잡는다 — 이름이 바뀐 타입을 가리키는 깨진
 # 링크는 문서를 조용히 거짓말하게 만든다. 경고를 에러로 올려 게이트에 넣는다.
 doc:
-    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude zerocode-shell --no-deps
+    RUSTDOCFLAGS="{{doc_flags}}" cargo doc --workspace --exclude {{doc_skip}} --no-deps
 
 fmt:
     cargo fmt --all
@@ -251,13 +257,18 @@ fmt:
 # caught beforehand by a check of 4 s to 23 min. Every stage runs even after one
 # fails (as `verify-every-recipe.sh` does), then one line says each stage's exit
 # code and what to do next for a red one, and the recipe exits 1 if any was not 0.
-#   Stage 1, always: the formatter of both Cargo workspaces and the private-value
+#   Stage 1, always: the formatter of every Cargo workspace and the private-value
 #   gate (the gate's own `fmt-check` recipes), the window's source contracts,
-#   and the unit tests of each crate the branch changed or reads a changed file
+#   and the unit tests and the rustdoc (the gate's `doc` flags; not the crate
+#   `doc` leaves out) of each crate the branch changed or reads a changed file
 #   of (`tools/release/changed_crates.py` picks them from Cargo's package list,
 #   the files the sources `include_str!`, and the diff against main — no list
-#   here). The contracts build the window once, so a first run in a fresh
-#   checkout takes minutes on every core, whichever crate the branch changed.
+#   here, and no workspace name either). A file only a `tests/` source reads
+#   picks nothing: the contracts above are that target. NOT run: the crates that
+#   depend on a changed crate, and integration tests other than the contracts —
+#   the gate runs those (the last lines say so). The contracts build the window
+#   once, so a first run in a fresh checkout takes minutes on every core,
+#   whichever crate the branch changed.
 #   Stage 2, only when ui/ changed: the window suites you name, with
 #   `just pre-handin a,b` (names or patterns, as WINDOW_SUITES takes them).
 #   The whole window gate is 23 min on a quiet machine, so a worker never runs
@@ -272,8 +283,11 @@ pre-handin suites='':
     #!/usr/bin/env bash
     set -u
     suites={{quote(suites)}}
+    doc_flags={{quote(doc_flags)}}
+    doc_skip={{quote(doc_skip)}}
+    broad_over=4    # a suite hint of more than 1/broad_over of the window's suites is not much of a hint
     names=(); codes=(); secs=(); hints=(); extras=()
-    hint=; extra=
+    hint=; extra=; units=0
     note() {  # note <name> <code> [seconds]: what the last line says of a stage
         names+=("$1"); codes+=("$2"); secs+=("${3:-0}"); hints+=("$hint"); extras+=("$extra"); hint=; extra=
     }
@@ -285,8 +299,11 @@ pre-handin suites='':
     }
     hint='cargo fmt --all'
     step fmt just fmt-check
-    hint='cd zo-ide && cargo fmt -p zo-ide'
-    step fmt-zo-ide bash -c 'cd zo-ide && just fmt-check'
+    workspaces=$(python3 tools/release/changed_crates.py --workspaces) || { hint='the message above says why'; note workspaces 1; workspaces=; }
+    for workspace in $workspaces; do
+        hint="the diff above names the files in $workspace/ — format those, not the whole workspace (rustfmt <file>)"
+        step "fmt-$workspace" bash -c 'cd "$1" && just fmt-check' _ "$workspace"
+    done
     hint='the lines above name the file and the rule; take the value out or mask it, then just pii-check'
     step pii just pii-check
     hint='fix the FAILED names above, then rerun one: cargo test -p zerocode-shell --test source_contracts <name>'
@@ -299,6 +316,11 @@ pre-handin suites='':
             [ "$kind" = crate ] || continue
             hint="fix the FAILED names above, then rerun one: (cd $workspace && cargo test -p $package $arguments <name>)"
             step "unit:$package" bash -c 'cd "$1" && cargo test -p "$2" $3' _ "$workspace" "$package" "$arguments"
+            units=1
+            if [ "$workspace" = . ] && [ "$package" != "$doc_skip" ]; then
+                hint="fix the rustdoc warnings above: RUSTDOCFLAGS='$doc_flags' cargo doc -p $package --no-deps"
+                step "doc:$package" env RUSTDOCFLAGS="$doc_flags" cargo doc -p "$package" --no-deps
+            fi
         done <<< "$picked"
         ui=$(printf '%s\n' "$picked" | awk -F'\t' '$1 == "ui" { print $2 }')
     else
@@ -306,7 +328,11 @@ pre-handin suites='':
     fi
     load=$(uptime | sed 's/.*load averages*: *//')
     cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)
-    if [ -z "$ui" ]; then
+    if [ "$pick" -ne 0 ]; then
+        echo "pre-handin: the window stage is undecided — the pick failed (message above), so which ui files changed is not known" >&2
+        hint='fix the pick first (the message above), then rerun'
+        note window 2
+    elif [ -z "$ui" ]; then
         note window -
     elif [ -n "$suites" ]; then
         hint='the FAILED lines above name the checks; rerun one suite: WINDOW_SUITES=<name> node ui/tests/window.mjs'
@@ -315,7 +341,12 @@ pre-handin suites='':
     else
         echo "pre-handin: ui changed ($(echo "$ui" | wc -l | tr -d ' ') files, first: $(echo "$ui" | head -1)) — name the window suites to run:" >&2
         echo "  just pre-handin <a,b>   (names or patterns; the window harness registers the suite names)" >&2
-        echo "  suites that look at the changed files: $(printf '%s\n' "$picked" | awk -F'\t' '$1 == "suite" { printf "%s%s", sep, $2; sep = "," }')" >&2
+        hinted=0; total=0
+        read -r hinted total < <(printf '%s\n' "$picked" | awk -F'\t' '$1 == "suites" { print $2, $3 }')
+        echo "  suites that look at the changed files ($hinted of $total): $(printf '%s\n' "$picked" | awk -F'\t' '$1 == "suite" { printf "%s%s", sep, $2; sep = "," }')" >&2
+        if [ $((hinted * broad_over)) -gt "$total" ]; then
+            echo "  that is more than 1/$broad_over of the window's suites: choose the few that draw what you changed, not all of them" >&2
+        fi
         hint='name the suites above (or others that draw what you changed): just pre-handin <a,b>'
         note window 2
     fi
@@ -328,6 +359,9 @@ pre-handin suites='':
             *) rc=1; next="$next"$'\n'"  ${names[$at]}: ${hints[$at]}" ;;
         esac
     done
+    if [ "$units" -ne 0 ]; then
+        echo "pre-handin: units and docs ran for the crates the branch changed or reads files of, not the crates that depend on them, nor integration tests other than the contracts — the gate runs those" >&2
+    fi
     echo "pre-handin:$line rc=$rc"
     [ -z "$next" ] || echo "next:$next"
     exit "$rc"

@@ -847,15 +847,17 @@ fn mark_breakpoints_with_ttl(
     // The tail marker rolls; slot one is an ANCHOR, not a second rolling
     // marker (see [`previous_request_tail`]). Without it both markers sit on
     // content this request invented, so neither can ever be an exact hit.
-    // Both are found on durable messages and then carried over the reminder
-    // messages persisted right behind them (see [`reminder_tail_end`]).
+    // All three are found on durable messages and then carried over the
+    // reminder messages persisted right behind them (see
+    // [`reminder_tail_end`]) — the VERIFY boundary too, so it stands where a
+    // request ending at that boundary rolled.
     let durable = messages
         .iter()
         .rposition(is_cache_marker_eligible);
     let rolling = durable.map(|index| reminder_tail_end(messages, index));
-    let anchor = verify_boundary.or_else(|| {
-        previous_request_tail(messages, durable?).map(|index| reminder_tail_end(messages, index))
-    });
+    let anchor = verify_boundary
+        .or_else(|| previous_request_tail(messages, durable?))
+        .map(|index| reminder_tail_end(messages, index));
     if let Some(index) = anchor {
         if mark_last_cacheable_block(&mut messages[index].content, anchor_ttl) {
             marked += 1;
@@ -902,11 +904,11 @@ fn mark_breakpoints_with_ttl(
 /// provider wrote itself one turn ago. The tail marker still rolls, writing the
 /// entry the NEXT request will anchor on.
 ///
-/// Found as the newest durable user-role message strictly behind `rolling`, the
+/// Found as the newest durable user-role message strictly behind `durable`, the
 /// newest durable message. Persisted `System` reminders also lower to wire
 /// `user`, but are transparent here: otherwise a changed reminder becomes the
 /// request tail and displaces the cache entry it was meant to follow. In the
-/// agentic shape `rolling` IS the newest user message and this is the one before
+/// agentic shape `durable` IS the newest user message and this is the one before
 /// it; behind an assistant tail it is the user message that assistant turn is
 /// answering — which is the predecessor's tail in both cases, where
 /// "second-to-last user message" would overshoot. The caller then carries it
@@ -915,8 +917,8 @@ fn mark_breakpoints_with_ttl(
 ///
 /// `None` on the first request of a session (one user message, no
 /// predecessor), which then keeps the plain two-from-the-tail placement.
-fn previous_request_tail(messages: &[InputMessage], rolling: usize) -> Option<usize> {
-    messages[..rolling]
+fn previous_request_tail(messages: &[InputMessage], durable: usize) -> Option<usize> {
+    messages[..durable]
         .iter()
         .rposition(|message| message.role == "user" && is_cache_marker_eligible(message))
 }
@@ -1296,6 +1298,55 @@ mod cache_marking_tests {
             2,
             "conversation history must stay within its two cache-control slots"
         );
+    }
+
+    /// The VERIFY boundary is an anchor like any other: it must stand where
+    /// a request ending at that boundary put its rolling marker, which rides
+    /// the reminder messages persisted behind the boundary
+    /// ([`super::reminder_tail_end`]). Two shapes: the reminder in front of
+    /// the boundary's assistant turn (adversarial review W3, P3-2, as
+    /// written), and the reminder between that turn and the VERIFY prompt,
+    /// the shape where a second rule shows.
+    #[test]
+    fn the_verify_anchor_rides_the_reminder_tail_like_the_rolling_marker() {
+        let reminder = || api::InputMessage::user_text(super::wrap_reminder("[zo:todo-progress] item A"));
+        let user = |text: &str| api::InputMessage::user_text(text);
+        let assistant = |text: &str| api::InputMessage {
+            role: "assistant".to_string(),
+            ..api::InputMessage::user_text(text)
+        };
+        let marked = |messages: &[api::InputMessage]| {
+            let mut messages = messages.to_vec();
+            super::mark_conversation_cache_breakpoints_short_lived(&mut messages);
+            messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| message.content.iter().any(|block| block_cache(block).is_some()))
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>()
+        };
+        let shapes = [
+            (
+                "reminder in front of the boundary",
+                vec![user("main task"), reminder(), assistant("implementation complete"), user("[deep:VERIFY] check")],
+            ),
+            (
+                "reminder behind the boundary",
+                vec![user("main task"), assistant("implementation complete"), reminder(), user("[deep:VERIFY] check")],
+            ),
+        ];
+        for (shape, messages) in shapes {
+            let verify = messages.len() - 1;
+            let before = marked(&messages[..verify]);
+            let now = marked(&messages);
+            assert_eq!(
+                now.first(),
+                before.last(),
+                "{shape}: the VERIFY anchor (markers {now:?}) must stand where the request \
+                 ending at the boundary rolled (markers {before:?})"
+            );
+            assert_eq!(now.last(), Some(&verify), "{shape}: the VERIFY prompt keeps the rolling marker");
+        }
     }
 
     /// The agentic-loop shape: the newest messages are a pure

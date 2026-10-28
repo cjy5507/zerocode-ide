@@ -139,6 +139,7 @@ mod jev_scope;
 mod jira_attachments;
 mod jira_store;
 mod keyboard_input_source;
+mod kill_witness;
 mod land_batch;
 mod land_check;
 mod landing_watch_sweep;
@@ -3441,6 +3442,7 @@ fn main() -> ExitCode {
         .setup(move |app| {
             computer_use::initialize(app.path().resource_dir().ok());
             run_evidence::install_window(app.handle().clone());
+            kill_witness::install_window(app.handle().clone());
             let resolved = app_paths::resolve(app).map_err(std::io::Error::other)?;
             let (paths, legacy_authority) =
                 match state_migration::migrate_if_needed(&resolved) {

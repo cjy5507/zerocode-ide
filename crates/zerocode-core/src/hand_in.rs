@@ -1159,7 +1159,9 @@ mod tests {
                 kind.word()
             );
         }
-        let guide = include_str!("../../../skills/orchestration/SKILL.md");
+        let guide = crate::skill_install::bundled_skill("orchestration")
+            .expect("the orchestration skill is bundled")
+            .whole_text();
         for key in [REPORT_KEY, EVIDENCE_KEY, REPORT_KIND_KEY, EXPECT_KEY] {
             assert!(guide.contains(key), "the guide does not teach `{key}`");
         }

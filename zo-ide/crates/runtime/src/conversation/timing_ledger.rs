@@ -14,8 +14,12 @@ where
     /// never a reason to fail a turn, so an I/O error is dropped; a request
     /// that never left the runtime (no probe blocks) writes nothing.
     /// A runtime no host armed (`relocate_traces_out_of_tree`) writes nothing
-    /// either: its rows would land in the person's real home.
+    /// either: its rows would land in the person's real home — a test reads
+    /// the stamps it would have written back with
+    /// `crate::request_timings::take_recorded` instead.
     pub(super) fn record_request_timing(&self, iteration: usize, stamps: &StreamStamps, outcome: &str) {
+        #[cfg(test)]
+        crate::request_timings::note_recorded(stamps);
         if !stamps.left_the_runtime() {
             return;
         }

@@ -150,9 +150,11 @@ impl Script {
             }
             Self::ManyBash { count, command, .. } if request_index < *count => {
                 let command = command.replace("{n}", &request_index.to_string());
-                bash_sse_for(&format!("toolu_many_bash_{request_index}"), &command)
+                bash_sse_counted(&format!("toolu_many_bash_{request_index}"), &command, provider_count(request))
             }
-            Self::ManyBash { final_text, .. } => text_sse("msg_many_bash_final", final_text),
+            Self::ManyBash { final_text, .. } => {
+                text_sse_counted("msg_many_bash_final", final_text, provider_count(request))
+            }
             Self::TextThenBash { first_text, .. } if request_index == 0 => {
                 text_sse("msg_text_then_bash_first", first_text)
             }
@@ -833,6 +835,11 @@ fn http_response(content_type: &str, body: &str) -> String {
 }
 
 fn text_sse(message_id: &str, text: &str) -> String {
+    text_sse_counted(message_id, text, 12)
+}
+
+/// [`text_sse`] reporting `input_tokens` of input on the answered request.
+fn text_sse_counted(message_id: &str, text: &str, input_tokens: u32) -> String {
     let mut body = String::new();
     append_sse(
         &mut body,
@@ -847,7 +854,7 @@ fn text_sse(message_id: &str, text: &str) -> String {
                 "model": "claude-sonnet-4-6",
                 "stop_reason": null,
                 "stop_sequence": null,
-                "usage": usage_json(12, 0)
+                "usage": usage_json(input_tokens, 0)
             }
         }),
     );
@@ -880,7 +887,7 @@ fn text_sse(message_id: &str, text: &str) -> String {
         &json!({
             "type": "message_delta",
             "delta": {"stop_reason": "end_turn", "stop_sequence": null},
-            "usage": usage_json(12, 8)
+            "usage": usage_json(input_tokens, 8)
         }),
     );
     append_sse(&mut body, "message_stop", &json!({"type": "message_stop"}));
@@ -1043,6 +1050,12 @@ fn dribbled_text_sse(message_id: &str, text: &str, pieces: usize) -> String {
 /// tool calls `tools` appends, the `message_delta` that ends the turn on tools,
 /// and `message_stop` — the envelope every tool script shares.
 fn tool_message_sse(message_id: &str, tools: impl FnOnce(&mut String)) -> String {
+    tool_message_sse_counted(message_id, 12, tools)
+}
+
+/// [`tool_message_sse`] reporting `input_tokens` of input on the answered
+/// request.
+fn tool_message_sse_counted(message_id: &str, input_tokens: u32, tools: impl FnOnce(&mut String)) -> String {
     let mut body = String::new();
     append_sse(
         &mut body,
@@ -1057,7 +1070,7 @@ fn tool_message_sse(message_id: &str, tools: impl FnOnce(&mut String)) -> String
                 "model": "claude-sonnet-4-6",
                 "stop_reason": null,
                 "stop_sequence": null,
-                "usage": usage_json(12, 0)
+                "usage": usage_json(input_tokens, 0)
             }
         }),
     );
@@ -1068,7 +1081,7 @@ fn tool_message_sse(message_id: &str, tools: impl FnOnce(&mut String)) -> String
         &json!({
             "type": "message_delta",
             "delta": {"stop_reason": "tool_use", "stop_sequence": null},
-            "usage": usage_json(12, 4)
+            "usage": usage_json(input_tokens, 4)
         }),
     );
     append_sse(&mut body, "message_stop", &json!({"type": "message_stop"}));
@@ -1226,8 +1239,13 @@ fn workflow_two_helpers_sse() -> String {
 }
 
 fn bash_sse_for(id: &str, command: &str) -> String {
+    bash_sse_counted(id, command, 12)
+}
+
+/// [`bash_sse_for`] reporting `input_tokens` of input on the answered request.
+fn bash_sse_counted(id: &str, command: &str, input_tokens: u32) -> String {
     let input = json!({"command": command, "timeout": 10_000}).to_string();
-    tool_message_sse(&format!("msg_{id}"), |body| {
+    tool_message_sse_counted(&format!("msg_{id}"), input_tokens, |body| {
         append_tool_use(body, 0, id, "bash", &input);
     })
 }
@@ -1328,6 +1346,15 @@ fn append_sse(buffer: &mut String, event: &str, payload: &Value) {
     writeln!(buffer, "event: {event}").expect("event write should succeed");
     writeln!(buffer, "data: {payload}").expect("payload write should succeed");
     buffer.push('\n');
+}
+
+/// What a provider counts for `request`: the whole body it was sent — the
+/// system prompt, the tool definitions and every message — at four bytes a
+/// token, the unit zo's own estimate counts in. A script whose turn grows its
+/// context reports this, so the count grows with the conversation as a real
+/// provider's does; a flat count says the request did not grow.
+fn provider_count(request: &str) -> u32 {
+    u32::try_from(request.len() / 4).unwrap_or(u32::MAX)
 }
 
 fn usage_json(input_tokens: u32, output_tokens: u32) -> Value {
