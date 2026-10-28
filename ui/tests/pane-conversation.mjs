@@ -303,10 +303,12 @@ export async function testPaneConversation(browser, origin, ok) {
       return {
         floats: style?.position === "absolute",
         inset: style ? [style.bottom, style.left, style.right].join(",") : "",
-        wantInset: [read("--chat-dock-inset"), read("--chat-dock-inset"), read("--chat-dock-inset")].join(","),
+        // Its left inset starts past the turn rail (t-22100).
+        wantInset: [read("--chat-dock-inset"), `${parseFloat(read("--chat-turn-rail-w")) + parseFloat(read("--chat-dock-inset"))}px`, read("--chat-dock-inset")].join(","),
         measure: style?.maxWidth ?? "",
         wantMeasure: read("--chat-dock-max"),
-        composerInDock: dock?.firstElementChild?.classList.contains("worker-composer") === true,
+        // The composer is the dock's last child: the state line stands joined over it (t-81525 C1).
+        composerInDock: dock?.lastElementChild?.classList.contains("worker-composer") === true,
         roomUnder: list && dock
           ? parseFloat(getComputedStyle(list).paddingBottom) >= dock.offsetHeight + parseFloat(read("--chat-list-pad-bottom"))
           : false,
