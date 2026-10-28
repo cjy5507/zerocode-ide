@@ -653,7 +653,7 @@ fn handle_slash<W: Write>(
             | Slash::Rewind
             | Slash::Clear,
         ) => unknown_command(renderer, name),
-        None => unlisted_command(renderer, &session.cwd, name, arg),
+        None => unlisted_command(renderer, &session.cwd, session.permission_mode, name, arg),
     }
 }
 
@@ -662,10 +662,11 @@ fn handle_slash<W: Write>(
 fn unlisted_command<W: Write>(
     renderer: &mut Renderer<W>,
     cwd: &std::path::Path,
+    mode: core_types::PermissionMode,
     name: &str,
     arg: &str,
 ) -> SlashOutcome {
-    match crate::slash::prompt_command(cwd, name, arg) {
+    match crate::slash::prompt_command(cwd, name, arg, mode) {
         Some(prompt) => SlashOutcome::Turn(prompt),
         None => unknown_command(renderer, name),
     }

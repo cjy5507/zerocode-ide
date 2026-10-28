@@ -223,10 +223,19 @@ impl Slash {
 /// commands crate's ([`commands::discover_prompt_commands`]): `.zo/commands/`
 /// in `cwd` and every folder above it, then `commands/` in zo's home. The
 /// keep-list is asked first, so a command file cannot shadow one of zo's own.
+/// Its `!` commands run only what the file's `allowed-tools` grants, and none
+/// while `mode` is read-only.
 #[must_use]
-pub fn prompt_command(cwd: &Path, name: &str, arg: &str) -> Option<String> {
+pub fn prompt_command(
+    cwd: &Path,
+    name: &str,
+    arg: &str,
+    mode: core_types::PermissionMode,
+) -> Option<String> {
     let found = commands::discover_prompt_commands(cwd);
-    commands::find_prompt_command(&found, name).map(|command| command.render_prompt_in(arg, cwd))
+    let read_only = mode == core_types::PermissionMode::ReadOnly;
+    commands::find_prompt_command(&found, name)
+        .map(|command| command.render_prompt_as(arg, cwd, read_only))
 }
 
 #[cfg(test)]

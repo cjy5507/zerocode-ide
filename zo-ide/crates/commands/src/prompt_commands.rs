@@ -34,7 +34,8 @@ impl PromptCommandDef {
     /// begins with `!`) inlines the command's stdout, and `@path` embeds the
     /// referenced file. Relative paths and the shell working directory resolve
     /// against the live process cwd; a failed command or missing file degrades
-    /// to an inline notice rather than aborting the render.
+    /// to an inline notice rather than aborting the render. A `!` command runs
+    /// only when the file's `allowed-tools` grants it Bash.
     #[must_use]
     pub fn render_prompt(&self, args: &str) -> String {
         let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -45,7 +46,19 @@ impl PromptCommandDef {
     /// the session's working folder, where `!cmd` runs and `@path` resolves.
     #[must_use]
     pub fn render_prompt_in(&self, args: &str, base_dir: &Path) -> String {
-        expand_command_template(&self.body, args, base_dir)
+        self.render_prompt_as(args, base_dir, false)
+    }
+
+    /// [`Self::render_prompt_in`] for a session whose permission mode is
+    /// read-only when `read_only` is set: then no `!` command runs, whatever
+    /// `allowed-tools` grants.
+    #[must_use]
+    pub fn render_prompt_as(&self, args: &str, base_dir: &Path, read_only: bool) -> String {
+        let shell = InlineShell {
+            allowed_tools: &self.allowed_tools,
+            read_only,
+        };
+        expand_command_template(&self.body, args, base_dir, &shell)
     }
 }
 
@@ -319,8 +332,14 @@ where
 /// arguments injected via `$ARGUMENTS`/`$N` are substituted into the captured
 /// command/path token but are never re-scanned, so a user argument cannot
 /// smuggle in a shell invocation. Failures (a non-zero command, an unreadable
-/// file) are inlined as short notices instead of aborting the render.
-fn expand_command_template(body: &str, args: &str, base_dir: &Path) -> String {
+/// file) and commands `shell` does not grant are inlined as short notices
+/// instead of aborting the render.
+fn expand_command_template(
+    body: &str,
+    args: &str,
+    base_dir: &Path,
+    shell: &InlineShell<'_>,
+) -> String {
     let mut output = String::with_capacity(body.len() + args.len());
     // Tracks line position for the `!cmd` line form and the `@path` word
     // boundary: `at_line_start` until non-whitespace appears on the line,
@@ -338,13 +357,13 @@ fn expand_command_template(body: &str, args: &str, base_dir: &Path) -> String {
             '!' if chars.peek() == Some(&'`') => {
                 let _ = chars.next();
                 let command = collect_until(&mut chars, '`');
-                output.push_str(&run_inline_command(&command, args, base_dir));
+                output.push_str(&run_inline_command(&command, args, base_dir, shell));
                 at_line_start = false;
                 prev_is_boundary = false;
             }
             '!' if at_line_start && peek_is_command_start(&mut chars) => {
                 let command = collect_line(&mut chars);
-                output.push_str(&run_inline_command(&command, args, base_dir));
+                output.push_str(&run_inline_command(&command, args, base_dir, shell));
                 // The line marker is fully consumed; the next char (if any) is a
                 // newline, so the output stays on its own line.
                 at_line_start = false;
@@ -462,13 +481,82 @@ where
     buffer.trim_end_matches([',', '.', ';', ':', ')']).to_string()
 }
 
-/// Run a `!` command and return its stdout (trailing newline trimmed). A failed
-/// or refused command degrades to a one-line notice rather than panicking.
-fn run_inline_command(template: &str, args: &str, base_dir: &Path) -> String {
+/// What a command file's `!` commands may run: what its `allowed-tools`
+/// grants Bash, and nothing while the session is read-only.
+struct InlineShell<'a> {
+    allowed_tools: &'a [String],
+    read_only: bool,
+}
+
+impl InlineShell<'_> {
+    /// The notice that stands in for `command` when it may not run.
+    fn refusal(&self, command: &str) -> Option<String> {
+        if self.read_only {
+            return Some(format!("[!{command}: not run in read-only mode]"));
+        }
+        if self
+            .allowed_tools
+            .iter()
+            .any(|spec| bash_rule_grants(spec, command))
+        {
+            return None;
+        }
+        Some(format!(
+            "[!{command}: not run — allowed-tools does not grant Bash for it]"
+        ))
+    }
+}
+
+/// Characters that let one shell line chain, substitute or redirect beyond its
+/// first command.
+const SHELL_CONTROL: &[char] = &[';', '&', '|', '<', '>', '`', '$', '(', ')', '\n', '\r'];
+
+/// Whether one `allowed-tools` spec grants `command`: bare `Bash` grants every
+/// command, `Bash(<prefix>:*)` a command that is `<prefix>` or `<prefix>`
+/// followed by whitespace, and `Bash(<command>)` that command exactly. A prefix
+/// rule never grants a command carrying [`SHELL_CONTROL`] — `echo hi; touch x`
+/// is not an `echo` — so neither the file nor an argument chains one on.
+fn bash_rule_grants(spec: &str, command: &str) -> bool {
+    let spec = spec.trim();
+    if spec == "Bash" {
+        return true;
+    }
+    let Some(rule) = spec
+        .strip_prefix("Bash(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let rule = rule.trim();
+    match rule.strip_suffix(":*") {
+        Some(prefix) => {
+            let prefix = prefix.trim_end();
+            !prefix.is_empty()
+                && !command.contains(SHELL_CONTROL)
+                && command
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        }
+        None => command == rule,
+    }
+}
+
+/// Run a `!` command and return its stdout (trailing newline trimmed). A
+/// command `shell` does not grant, or a failed or refused one, degrades to a
+/// one-line notice rather than panicking.
+fn run_inline_command(
+    template: &str,
+    args: &str,
+    base_dir: &Path,
+    shell: &InlineShell<'_>,
+) -> String {
     let command = expand_prompt_arguments(template, args);
     let command = command.trim();
     if command.is_empty() {
         return String::new();
+    }
+    if let Some(notice) = shell.refusal(command) {
+        return notice;
     }
     let input = runtime::BashCommandInput {
         command: command.to_string(),
@@ -512,6 +600,16 @@ fn embed_file(token: &str, args: &str, base_dir: &Path) -> String {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// [`expand_command_template`] for a file whose `allowed-tools` is `Bash`.
+    fn expand(body: &str, args: &str, base_dir: &Path) -> String {
+        let allowed_tools = ["Bash".to_string()];
+        let shell = InlineShell {
+            allowed_tools: &allowed_tools,
+            read_only: false,
+        };
+        expand_command_template(body, args, base_dir, &shell)
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -583,7 +681,7 @@ mod tests {
         let base = std::env::temp_dir();
         // Inline `!`cmd`` and the line `!cmd` form both inline stdout; the line
         // form receives a positional argument.
-        let rendered = expand_command_template(
+        let rendered = expand(
             "before !`echo inline` mid\n!echo $1\nafter",
             "lined",
             &base,
@@ -594,7 +692,7 @@ mod tests {
     #[test]
     fn bash_marker_is_not_re_scanned_from_arguments() {
         // A `!`…`` smuggled in through $ARGUMENTS must stay literal, never run.
-        let rendered = expand_command_template("$ARGUMENTS", "!`echo pwned`", &std::env::temp_dir());
+        let rendered = expand("$ARGUMENTS", "!`echo pwned`", &std::env::temp_dir());
         assert_eq!(rendered, "!`echo pwned`");
     }
 
@@ -604,11 +702,11 @@ mod tests {
         fs::create_dir_all(&root).expect("base dir");
         fs::write(root.join("notes.md"), "FILE BODY").expect("write file");
 
-        let rendered = expand_command_template("see @notes.md done", "", &root);
+        let rendered = expand("see @notes.md done", "", &root);
         assert_eq!(rendered, "see FILE BODY done");
 
         // A missing file degrades to an inline notice instead of panicking.
-        let missing = expand_command_template("@nope.md", "", &root);
+        let missing = expand("@nope.md", "", &root);
         assert!(missing.starts_with("[@nope.md:"), "got: {missing}");
 
         let _ = fs::remove_dir_all(root);
@@ -616,7 +714,7 @@ mod tests {
 
     #[test]
     fn at_mention_inside_word_stays_literal() {
-        let rendered = expand_command_template("ping user@host now", "", &std::env::temp_dir());
+        let rendered = expand("ping user@host now", "", &std::env::temp_dir());
         assert_eq!(rendered, "ping user@host now");
     }
 

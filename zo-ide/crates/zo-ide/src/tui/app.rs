@@ -3891,7 +3891,7 @@ impl Ui {
             }
             // A prompt command is a prompt: expanded, it waits in the queue
             // like a line typed now.
-            None => match crate::slash::prompt_command(&self.session_cwd, name, arg) {
+            None => match crate::slash::prompt_command(&self.session_cwd, name, arg, self.permission_mode) {
                 Some(text) => self.pending_input.push_queued(Submission { text, image_paths: Vec::new() }),
                 None => self.note(SystemLevel::Info, &not_in_zo(name)),
             },
@@ -5436,7 +5436,7 @@ impl App {
             }
             // A prompt command runs as the turn its expanded body is; the
             // screen already shows the line as typed.
-            None => match crate::slash::prompt_command(&self.session().cwd, name, arg) {
+            None => match crate::slash::prompt_command(&self.session().cwd, name, arg, self.session().permission_mode) {
                 Some(text) => self.asked = Some(Work::Turn(Submission { text, image_paths: Vec::new() })),
                 None => self.ui.note(SystemLevel::Info, &not_in_zo(name)),
             },
