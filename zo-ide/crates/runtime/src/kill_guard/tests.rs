@@ -370,6 +370,41 @@ mod real_run {
         }
     }
 
+    #[test]
+    fn kill_guard_execute_bash_refuses_a_question_in_a_summoned_worker_pane() {
+        let window = Bait::start(7);
+        let mut bait = Bait::start(8);
+        let pid_file = std::env::temp_dir().join(format!("{}.pid", bait.marker));
+        std::fs::write(&pid_file, bait.pid().to_string()).expect("the pid file is written");
+        // A pid read at run time is a question, and the paths that reach the
+        // chokepoint past the permission layer (a deep_gate check, a `!` line)
+        // never put it to anyone.
+        let command = format!("kill $(cat {})", pid_file.display());
+        {
+            let _worker = GuardEnv::set(window.pid(), Some("%3"), Some("%1"));
+            let refused = match run(&command) {
+                Ok(output) => panic!("`{command}` ran in a worker's pane: {output:?}"),
+                Err(refused) => refused,
+            };
+            assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied, "{refused}");
+            assert!(refused.to_string().contains("no person said yes"), "{refused}");
+            assert!(bait.alive(), "the refusal left the bait alive");
+        }
+        // A pane a person opened keeps the question the permission layer's.
+        let _person = GuardEnv::window(window.pid());
+        let output = run(&command).expect("a question a person could answer runs");
+        assert_eq!(output.return_code_interpretation, None, "{output:?}");
+        let ended = std::time::Instant::now();
+        while bait.alive() {
+            assert!(
+                ended.elapsed() < std::time::Duration::from_secs(10),
+                "the bait ended"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_file(&pid_file);
+    }
+
     /* ---- the permission layers -------------------------------------------------------- */
 
     fn bash(command: &str) -> String {
