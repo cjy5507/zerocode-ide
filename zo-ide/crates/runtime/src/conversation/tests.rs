@@ -14773,7 +14773,7 @@ fn the_recall_seat_hears_the_turn_before_the_compaction_after_it() {
         [(false, false), (true, false), (true, false), (true, false), (true, true)],
         "the turn's start, three answered reads, and the answered end — told once each"
     );
-    assert_eq!(seat.settled.load(Ordering::SeqCst), 4, "one recall per request");
+    assert_eq!(seat.settled.load(Ordering::SeqCst), 1, "one recall per turn");
 }
 
 /// A request the context budget refuses never left: the seat hears no answer

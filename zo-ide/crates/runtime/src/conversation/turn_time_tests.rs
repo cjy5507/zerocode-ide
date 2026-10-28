@@ -235,6 +235,45 @@ fn notes_written_during_the_turn_are_judged_once_more() {
     assert_eq!(notes, [vec!["parsers".to_string()], vec!["lexers".to_string()]], "each reading judged once");
 }
 
+/// Leaves the last note out the first time it is asked and nothing after —
+/// a seat whose answer moves between askings, as a judgment that lands in
+/// its memo after the wall moves the apply road's.
+#[derive(Default)]
+struct ChangesItsMind {
+    asked: AtomicUsize,
+}
+
+impl crate::RecallSeat for ChangesItsMind {
+    fn settle(&self, _attempt: &str, _query: &str, mut hits: Vec<MemoryHit>) -> Vec<MemoryHit> {
+        if self.asked.fetch_add(1, Ordering::SeqCst) == 0 {
+            hits.pop();
+        }
+        hits
+    }
+}
+
+/// Z5: the turn's seat asks the seat beside recall once per reading — the
+/// same attempt, query and notes — and hands every later asking the first
+/// answer; another attempt, another query or other notes is asked again.
+#[test]
+fn the_turns_seat_asks_once_per_reading_and_keeps_the_first_answer() {
+    use crate::RecallSeat as _;
+
+    let seat = Arc::new(ChangesItsMind::default());
+    let once = super::turn_support::SettledOnce::over(seat.clone(), Arc::default());
+    let two = vec![hit("parsers", "recall me about parser bugs"), hit("lexers", "and lexer bugs")];
+    for _ in 0..5 {
+        let read = once.settle("s@1", "parser bugs", two.clone());
+        assert_eq!(read, two[..1], "the first answer, every time");
+    }
+    assert_eq!(seat.asked.load(Ordering::SeqCst), 1, "five askings of one reading");
+
+    once.settle("s@1", "parser bugs", two[1..].to_vec());
+    once.settle("s@1", "lexer bugs", two[1..].to_vec());
+    once.settle("s@2", "lexer bugs", two[1..].to_vec());
+    assert_eq!(seat.asked.load(Ordering::SeqCst), 4, "other notes, another query, another attempt");
+}
+
 /// Z5: words the person types during the turn are a new query, and a new
 /// query is judged once more — then kept for the requests after it.
 #[test]

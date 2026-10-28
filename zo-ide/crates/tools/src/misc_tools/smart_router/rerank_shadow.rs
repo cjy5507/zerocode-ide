@@ -651,27 +651,28 @@ async fn run(shot: Shot, answer: Option<RowSender>) {
 /// could be a reading another session settled an hour ago. Slots belong to
 /// (project, attempt), and late results keep only their detached slot.
 ///
-/// A recall's section is staged here until the runtime says the request that
+/// A recall's section is staged here until the runtime says a request that
 /// carried it was answered (`heard`): a request that never left, or whose
 /// answer was taken back, showed the model nothing, and its notes are shown
-/// to nobody (t-6264).
+/// to nobody (t-6264) — unless the turn's next request, which carries the
+/// same section (t-78938), is answered.
 #[derive(Default)]
 struct Reading {
     /// The reading the label is named for when no judgment settled: the last
     /// answered recall's fingerprints, which its row is named by too.
     key: Option<(u64, u64)>,
     /// Each note an answered request's section named, once, in the order
-    /// first shown. A turn recalls once per request and reads the same
-    /// section each time, so this grows across the turn and one turn is one
-    /// showing of each note.
+    /// first shown. A turn settles each reading once and its requests carry
+    /// that reading's section each time (t-78938), so this grows only with a
+    /// new reading, and one turn is one showing of each note.
     shown: Vec<ShownPath>,
     /// Unix milliseconds of the first showing.
     shown_at: Option<u64>,
     /// The vault those pages belong to, at first showing
     /// (`vault_fingerprint`).
     vault: Option<u64>,
-    /// This slot's section, waiting to hear whether the request carrying it
-    /// was answered.
+    /// This slot's section, waiting to hear that a request carrying it was
+    /// answered.
     staged: Option<Staged>,
     /// Whether this slot's request was answered: a mark grades only a
     /// reading the model was shown.
@@ -810,10 +811,12 @@ fn heard(cwd: &Path, attempt: &str, progress: runtime::TurnProgress<'_>) {
     let Ok(mut reading) = slot.lock() else {
         return;
     };
-    let staged = reading.staged.take();
+    // A section the last request was not answered on stays staged: the
+    // turn's next request carries the same section without settling it
+    // again (t-78938), and that request's answer is the showing.
     if progress.answered {
         reading.answered = true;
-        if let Some(staged) = staged {
+        if let Some(staged) = reading.staged.take() {
             reading.show(staged);
         }
     }
@@ -3704,9 +3707,9 @@ mod tests {
         runtime::load_memory_retriever(cwd, None, Some(Arc::new(RerankShadow::at(cwd)))).expect("a vault to recall from")
     }
 
-    /// A turn recalls once per request and reads the same section each time:
-    /// its label counts each note once, at the place it first held, and a
-    /// note a later request's section adds is counted from that section.
+    /// However often a turn's requests settle a recall, its label counts
+    /// each note once, at the place it first held, and a note a later
+    /// request's section adds is counted from that section.
     #[test]
     fn a_turns_requests_show_one_section_and_each_note_is_counted_once() {
         let mock = Mock::serving(200, "{\"not\": \"a reply\"}".to_string());
@@ -3730,12 +3733,11 @@ mod tests {
         assert_eq!(named, [("wiki/a", 0, false), ("wiki/b", 1, false), ("wiki/c", 2, false), ("wiki/d", 2, true)]);
     }
 
-    /// A turn keeps the section its first request built for the requests
-    /// after it (`ConversationRuntime::turn_recall_section`, t-78938), so
-    /// only the first of them settles: a request that was not answered — an
-    /// empty reply asked again, a fallback that took it over — leaves its
+    /// A turn's requests that recall one reading settle it once (the
+    /// runtime's `SettledOnce`, t-78938): a request that was not answered —
+    /// an empty reply asked again, a fallback that took it over — leaves its
     /// section staged, and the next request, carrying the same section with
-    /// no second recall, shows it once it is answered.
+    /// no second settle, shows it once it is answered.
     #[test]
     fn a_section_kept_for_the_turn_is_shown_by_the_request_that_was_answered() {
         let mock = Mock::serving(200, "{\"not\": \"a reply\"}".to_string());

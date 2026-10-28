@@ -744,6 +744,9 @@ pub struct ConversationRuntime<C, T> {
     /// Seated beside the retriever and shown every recall after it settles;
     /// its answer is the order the turn reads. See [`crate::RecallSeat`].
     recall_seat: Option<Arc<dyn crate::RecallSeat>>,
+    /// The reading this turn's seat last settled, so a turn asks it once per
+    /// reading and not once per request ([`turn_support::SettledOnce`]).
+    turn_settled: Arc<Mutex<Option<turn_support::SettledReading>>>,
     /// Seated beside full compaction and asked, once per boundary, which
     /// tool results the summary still needs to read. See
     /// [`crate::CompactionSeat`].
@@ -1832,6 +1835,7 @@ where
             memory_retriever: None,
             user_preference_source: None,
             recall_seat: None,
+            turn_settled: Arc::default(),
             compaction_seat: None,
             patch_review_seat: None,
             file_pick_seat: None,

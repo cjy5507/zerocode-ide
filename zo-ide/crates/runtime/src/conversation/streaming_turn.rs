@@ -1344,12 +1344,13 @@ where
             // starve render_tick. The recall inputs are cloned out of `&self`
             // here, BEFORE the await, so the spawned turn future never holds a
             // `&self` borrow across it (the runtime is `Send` but not `Sync`).
-            // `assemble_request` itself is pure (Arc clones only).
+            // The seat is asked once per reading of the turn, not per request
+            // (`SettledOnce`). `assemble_request` itself is pure (Arc clones only).
             let recall_section = Self::recall_reminder_section(
                 self.memory_retriever.clone(),
                 self.recall_query_text().map(std::borrow::Cow::into_owned),
                 self.session_tracer.clone(),
-                self.recall_seat.clone(),
+                self.turn_recall_seat(),
                 self.attempt().to_string(),
                 self.user_preference_source.clone(),
             )
