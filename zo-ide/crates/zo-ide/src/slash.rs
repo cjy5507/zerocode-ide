@@ -2,11 +2,14 @@
 //!
 //! 여기 한 자리에만 적힌다 — 컴포저 팝업(`tui::slash`)도, 맨 터미널과 파이프
 //! 두 프런트엔드의 디스패치도 이 열거에서 이름을 읽으므로 목록과 처리가
-//! 갈라질 수 없다.
+//! 갈라질 수 없다. 목록에 없는 `/이름` 은 프롬프트 명령으로 한 번 더 찾는다
+//! ([`prompt_command`]).
+
+use std::path::Path;
 
 use crate::tui::fast;
 
-/// zo 가 실제로 처리하는 슬래시 열다섯.
+/// zo 가 실제로 처리하는 슬래시 열여섯.
 ///
 /// 순서는 팝업이 그리는 순서다. `/new` 는 codex `SlashCommand` 열거와 같이
 /// `/permissions` 와 `/resume` 사이에, `/clear` 는 종료 명령 뒤에 선다.
@@ -38,6 +41,10 @@ pub enum Slash {
     Goal,
     Loop,
     Status,
+    /// Claude Code's `/context`: what fills the context window and where each
+    /// compaction tier sits (`ConversationRuntime::context_breakdown_report`).
+    /// Read-only, so it stands beside `/status`.
+    Context,
     /// codex 0.157.1 `/warnings`: page through the warnings this conversation
     /// has shown (F2 opens the same viewer). Read-only, so it stands beside
     /// `/status`.
@@ -91,6 +98,7 @@ impl Slash {
         Self::Goal,
         Self::Loop,
         Self::Status,
+        Self::Context,
         Self::Warnings,
         Self::Help,
         Self::Exit,
@@ -112,6 +120,7 @@ impl Slash {
             Self::Goal => "/goal",
             Self::Loop => "/loop",
             Self::Status => "/status",
+            Self::Context => "/context",
             Self::Warnings => "/warnings",
             Self::Help => "/help",
             Self::Exit => "/exit",
@@ -144,6 +153,7 @@ impl Slash {
             Self::Goal => "persist a goal and run bounded autonomous checks",
             Self::Loop => "repeat a prompt on a bounded session schedule",
             Self::Status => "model, account, limits, session and context",
+            Self::Context => "what fills the context window and when it compacts",
             // codex `slash_command.rs:117`.
             Self::Warnings => "view retained warnings and diagnostic details",
             Self::Help => "show the shortcut card",
@@ -207,9 +217,222 @@ impl Slash {
     }
 }
 
+/// Who stands behind the session's permission mode, as a command file's `!`
+/// lines ask it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModeOrigin {
+    /// The person named the mode with `--permission-mode` on this run's
+    /// command line. The default and a mode a settings file pins are not
+    /// named.
+    pub named: bool,
+    /// The pipe front-end runs the command (`-p`, or no terminal): nobody
+    /// is there to answer a trust prompt.
+    pub piped: bool,
+}
+
+/// A `/word` expanded: the turn it runs as, and the lines the screen shows
+/// once before that turn goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptExpansion {
+    pub text: String,
+    pub shown: Vec<String>,
+}
+
+/// The turn a `/word` the keep-list does not have runs as, when it names a
+/// prompt command: that command's body with `arg` filled in, expanded against
+/// `cwd`. Where commands are looked for and which wins a shared name is the
+/// commands crate's ([`commands::discover_prompt_commands`]): `commands/` in
+/// zo's home, then `.zo/commands/` in `cwd` and every folder above it. The
+/// keep-list is asked first, so a command file cannot shadow one of zo's own.
+/// [`PromptExpansion::shown`] names the file, any it hides, and each `!` line
+/// with what came of it, for the screen to show before the turn goes.
+/// Its `!` commands run only what the file's `allowed-tools` grants, none
+/// while `mode` is read-only, and none from a file in the working folder or
+/// above it until the person has given their word for the folder that holds
+/// it: trust in that folder (`workspace_trust::person_trusts_folder`)
+/// or a mode they named (`origin.named`). A mode the default or a settings
+/// file gives — a repository can pin its own — is not that word, and a pipe
+/// (`origin.piped`) takes only a named mode: nobody there can answer for the
+/// folder, so an old trust record does not speak for this run. Every `!`
+/// command, a zo-home file's too, also answers to the person's permission
+/// rules: a deny or an ask rule that matches leaves it unrun.
+#[must_use]
+pub fn prompt_command(
+    cwd: &Path,
+    name: &str,
+    arg: &str,
+    mode: core_types::PermissionMode,
+    origin: ModeOrigin,
+) -> Option<PromptExpansion> {
+    let found = commands::discover_prompt_commands(cwd);
+    let command = commands::find_prompt_command(&found, name)?;
+    let workspace = match command.workspace_folder() {
+        None => commands::WorkspaceTrust::Trusted,
+        Some(_) if origin.named => commands::WorkspaceTrust::Trusted,
+        Some(_) if origin.piped => commands::WorkspaceTrust::UnnamedPipe,
+        Some(folder) if crate::workspace_trust::person_trusts_folder(folder) => {
+            commands::WorkspaceTrust::Trusted
+        }
+        Some(_) => commands::WorkspaceTrust::Untrusted,
+    };
+    // The rules the session's Bash was built with
+    // (`conversation_support::permission_policy`), read again here because
+    // a turn may be holding the session.
+    let config = runtime::ConfigLoader::default_for(cwd).load();
+    let unreadable = config.as_ref().err().map(ToString::to_string).unwrap_or_default();
+    let gate = commands::InlineShellGate {
+        read_only: mode == core_types::PermissionMode::ReadOnly,
+        workspace,
+        rules: config
+            .as_ref()
+            .map(runtime::RuntimeConfig::permission_rules)
+            .map_err(|_| unreadable.as_str()),
+    };
+    let rendered = command.render_prompt_traced(arg, cwd, gate);
+    let whose = match command.scope {
+        commands::PromptCommandScope::ZoHome => "your zo home",
+        commands::PromptCommandScope::Workspace => "repository",
+    };
+    let mut shown = vec![format!("/{} — {} ({whose})", command.name, command.path.display())];
+    shown.extend(command.shadows.iter().map(|hidden| {
+        format!("  hides {} — that file's /{} does not run", hidden.display(), command.name)
+    }));
+    shown.extend(rendered.trace.iter().map(|line| format!("  {line}")));
+    Some(PromptExpansion { text: rendered.text, shown })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{render_catalog, Slash};
+    use super::{render_catalog, ModeOrigin, Slash};
+
+    /// [`super::prompt_command`]'s turn, in a TUI run whose mode nobody named.
+    fn prompt_command(
+        cwd: &std::path::Path,
+        name: &str,
+        arg: &str,
+        mode: core_types::PermissionMode,
+    ) -> Option<String> {
+        super::prompt_command(cwd, name, arg, mode, ModeOrigin::default()).map(|expansion| expansion.text)
+    }
+
+    /// A command file in the working folder expands with its arguments; a
+    /// word no file names is not a prompt command. The folder is a fresh one,
+    /// so neither the person's home nor this checkout decides the answer.
+    #[test]
+    fn a_prompt_command_expands_by_its_name_from_the_working_folder() {
+        let _lock = crate::test_env_lock();
+        let _home = crate::support::IsolatedHome::new();
+        let folder = tempfile::tempdir().expect("a working folder");
+        let commands = folder.path().join(".zo").join("commands");
+        std::fs::create_dir_all(&commands).expect("the command folder");
+        std::fs::write(
+            commands.join("fruit.md"),
+            "---\ndescription: name one fruit\n---\nName the fruit $ARGUMENTS in one word.\n",
+        )
+        .expect("the prompt command");
+        let mode = core_types::PermissionMode::WorkspaceWrite;
+        let expanded =
+            prompt_command(folder.path(), "fruit", "pineapple", mode).expect("/fruit expands");
+        assert_eq!(expanded.trim(), "Name the fruit pineapple in one word.");
+        assert_eq!(
+            prompt_command(folder.path(), "FRUIT", "kiwi", mode).map(|text| text.trim().to_string()),
+            Some("Name the fruit kiwi in one word.".to_string()),
+            "names match without case, as the commands crate finds them"
+        );
+        assert_eq!(prompt_command(folder.path(), "no-such-command-z12", "", mode), None);
+    }
+
+    /// Read-only mode runs no `!` line, even one the file's `allowed-tools`
+    /// grants and in a folder the person trusts; the same file in
+    /// workspace-write runs it. The person's trust here is the settings that
+    /// trust every folder, in a zo home of the test's own.
+    #[test]
+    fn a_prompt_command_runs_no_bang_line_in_read_only_mode() {
+        use core_types::PermissionMode;
+        let _lock = crate::test_env_lock();
+        let home = crate::support::IsolatedHome::new();
+        std::fs::write(
+            home.zo_home.join(crate::preferences::PREFERENCES_FILE_NAME),
+            r#"{"workspaceTrust":"always-full"}"#,
+        )
+        .expect("settings that trust every folder");
+        let folder = tempfile::tempdir().expect("a working folder");
+        let commands = folder.path().join(".zo").join("commands");
+        std::fs::create_dir_all(&commands).expect("the command folder");
+        let marker = folder.path().join("probe-ran");
+        let touch = format!("touch {}", marker.display());
+        std::fs::write(
+            commands.join("probe.md"),
+            format!("---\nallowed-tools: Bash\n---\n!{touch}\nDone.\n"),
+        )
+        .expect("the prompt command");
+
+        let read_only = prompt_command(folder.path(), "probe", "", PermissionMode::ReadOnly)
+            .expect("/probe expands");
+        assert!(!marker.exists(), "read-only mode ran a `!` line");
+        assert_eq!(read_only, format!("[!{touch}: not run in read-only mode]\nDone.\n"));
+
+        let writable = prompt_command(folder.path(), "probe", "", PermissionMode::WorkspaceWrite)
+            .expect("/probe expands");
+        assert!(marker.exists(), "workspace-write did not run the granted `!` line");
+        assert_eq!(writable, "\nDone.\n");
+    }
+
+    /// What the screen shows once before an expanded command's turn: the
+    /// file it came from, a repository file of the same name it hides, and
+    /// every `!` line with what came of it — the exit code, or the line
+    /// that stood in for it.
+    #[test]
+    fn an_expansion_shows_its_file_what_it_hides_and_each_bang_line() {
+        use core_types::PermissionMode;
+        let _lock = crate::test_env_lock();
+        let home = crate::support::IsolatedHome::new();
+        let root = tempfile::tempdir().expect("a test root");
+        let project = root.path().join("project");
+        let personal = home.zo_home.join("commands");
+        let repo = project.join(".zo").join("commands");
+        std::fs::create_dir_all(&personal).expect("personal commands");
+        std::fs::create_dir_all(&repo).expect("repo commands");
+        std::fs::write(
+            personal.join("probe.md"),
+            "---\nallowed-tools: Bash\n---\n!echo hi\n!false\nDone.\n",
+        )
+        .expect("the person's command");
+        std::fs::write(repo.join("probe.md"), "---\nallowed-tools: Bash\n---\n!echo repo\nRepo.\n")
+            .expect("the repository's command");
+        let mode = PermissionMode::WorkspaceWrite;
+
+        let expansion = super::prompt_command(&project, "probe", "", mode, ModeOrigin::default())
+            .expect("/probe expands");
+        assert_eq!(expansion.text, "hi\n\nDone.\n");
+        assert_eq!(
+            expansion.shown,
+            vec![
+                format!("/probe — {} (your zo home)", personal.join("probe.md").display()),
+                format!(
+                    "  hides {} — that file's /probe does not run",
+                    repo.join("probe.md").display()
+                ),
+                "  ! echo hi → exit 0".to_string(),
+                "  ! false → exit 1".to_string(),
+            ]
+        );
+
+        std::fs::remove_file(personal.join("probe.md")).expect("the person's command goes");
+        let expansion = super::prompt_command(&project, "probe", "", mode, ModeOrigin::default())
+            .expect("/probe expands");
+        assert_eq!(
+            expansion.shown,
+            vec![
+                format!("/probe — {} (repository)", repo.join("probe.md").display()),
+                format!(
+                    "  ! echo repo → not run — {} is not trusted; a repository's command file runs its ! lines only in a folder you trust, or under a --permission-mode you name",
+                    project.display()
+                ),
+            ]
+        );
+    }
+
     #[test]
     fn zo_commands_prints_the_catalog_it_handles_in_popup_order() {
         let json: Vec<serde_json::Value> =
@@ -227,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn the_keep_list_is_the_fifteen_commands_zo_handles() {
+    fn the_keep_list_is_the_sixteen_commands_zo_handles() {
         let names: Vec<&str> = Slash::CATALOG.iter().map(|command| command.name()).collect();
         assert_eq!(
             names,
@@ -243,6 +466,7 @@ mod tests {
                 "/goal",
                 "/loop",
                 "/status",
+                "/context",
                 "/warnings",
                 "/help",
                 "/exit",

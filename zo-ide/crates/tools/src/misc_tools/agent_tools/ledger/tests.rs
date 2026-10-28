@@ -77,7 +77,7 @@ kind = config['kind']
 def message(event):
     body = {'ok':config['ok'],'summary':'ledger final answer','workerId':'w-2'}
     return {'messageId':'m-' + base.name + '-' + event, 'from':'worker:w-2' if event == 'worker_done' else 'ledger', 'dispatchId':'dp-3','type':event,'source':'agent' if event == 'worker_done' else 'ledger','body':json.dumps(body)}
-event = {'observed_death':'worker_died','observed_quota':'quota_walled','observed_done':'worker_done','ack_failure':'worker_done','cut_once':'worker_done'}.get(kind,kind)
+event = {'observed_death':'worker_died','observed_quota':'quota_walled','observed_done':'worker_done','ack_failure':'worker_done','cut_once':'worker_done','slow_start':'worker_done'}.get(kind,kind)
 events = [message(event)] if event in ('worker_done','worker_died','quota_walled') else []
 if kind == 'quota_then_done': events = [message('quota_walled'),message('worker_done')]
 if verb == 'run-current': out = {'runId':'run-1', 'seated':False}
@@ -93,6 +93,13 @@ elif verb == 'worker-start':
         (base/'cut').write_text('yes')
         print('orchestration: another pane is still being cut \u2014 ask again in a moment', file=sys.stderr)
         sys.exit(1)
+    if kind == 'start_fails':
+        print('fixture: the window could not open a pane for this agent', file=sys.stderr)
+        sys.exit(1)
+    if kind == 'slow_start':
+        import time
+        until = time.time() + 10
+        while not (base/'release').exists() and time.time() < until: time.sleep(0.02)
     (base/'started').write_text('yes')
     out = {'workerId':'w-2','dispatchId':'dp-3','agent':'codex','model':'exact-model','effort':'low','pane':'%2','worktree':True}
 elif verb == 'check':
@@ -219,9 +226,11 @@ fn a_different_model_in_the_launch_receipt_stops_that_worker_without_fallback() 
     input.launch.selected = true;
     input.registry = Some(super::super::AgentRegistry::at_root_for_tests("ledger-fixture", &root.path().join("store")));
     let launch = input.launch.clone();
-    let failure = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input,
-        move |job| spawn(&client, &launch, Some("requested-model".into()), job), None, None, None).unwrap_err();
-    assert!(failure.to_string().contains("differs from the requested"), "{failure}");
+    let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input,
+        move |job| spawn(&client, &launch, Some("requested-model".into()), job), None, None, None)
+        .unwrap_or_else(|failure| panic!("the launch hands back its starting receipt: {failure}"));
+    let failure = settled_failure(&manifest);
+    assert!(failure.contains("differs from the requested"), "{failure}");
     assert!(root.path().join("stopped").exists());
     let calls = std::fs::read_to_string(root.path().join("argv.jsonl")).unwrap();
     assert_eq!(calls.lines().filter(|line| line.contains("worker-start")).count(), 1);
@@ -313,9 +322,11 @@ fn a_pinned_effort_the_receipt_changed_stops_that_worker() {
     input.launch.selected = true;
     input.registry = Some(super::super::AgentRegistry::at_root_for_tests("ledger-fixture", &root.path().join("store")));
     let launch = input.launch.clone();
-    let failure = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input,
-        move |job| spawn(&client, &launch, Some("exact-model".into()), job), None, None, None).unwrap_err();
-    assert!(failure.to_string().contains("differs from the requested"), "{failure}");
+    let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input,
+        move |job| spawn(&client, &launch, Some("exact-model".into()), job), None, None, None)
+        .unwrap_or_else(|failure| panic!("the launch hands back its starting receipt: {failure}"));
+    let failure = settled_failure(&manifest);
+    assert!(failure.contains("differs from the requested"), "{failure}");
     assert!(root.path().join("stopped").exists());
 }
 
@@ -406,4 +417,151 @@ fn an_agent_call_that_opens_a_ledger_worker_leaves_a_running_manifest_with_its_c
     cancel.lock().unwrap().take().expect("the launch's cancel signal").abort();
     let results = super::super::wait_for_agent_completions(std::slice::from_ref(&manifest.agent_id), Duration::from_secs(10));
     assert_eq!(results.len(), 1, "{results:?}");
+}
+
+/// The one completion a launch settles with, which must be a failure: its error.
+fn settled_failure(manifest: &AgentOutput) -> String {
+    let results = super::super::wait_for_agent_completions(std::slice::from_ref(&manifest.agent_id), Duration::from_secs(10));
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0].status, "failed", "{results:?}");
+    results[0].error.clone().unwrap_or_default()
+}
+
+/// Adversarial review A (Z7): the window opening a worker's pane held the
+/// parent's turn for the whole worker-start (8.6–9.8 s on 2026-10-27). The
+/// start runs in the background now, so the `Agent` call hands back its
+/// starting receipt at once. The fixture answers worker-start after ten
+/// seconds unless the test lets it go, which it does once the call returned.
+#[cfg(unix)]
+#[test]
+fn an_agent_call_returns_before_a_slow_worker_start_answers() {
+    let _lock = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = tempfile::tempdir().unwrap();
+    let client = fake_door(root.path(), "slow_start", true);
+    let mut input: AgentInput = serde_json::from_value(json!({"description":"survey fixture","prompt":"report the fixture","agent":"codex","model":"exact-model","effort":"low","worktree":true})).unwrap();
+    input.launch.selected = true;
+    input.registry = Some(super::super::AgentRegistry::at_root_for_tests("ledger-slow-start", &root.path().join("store")));
+    let launch = input.launch.clone();
+    let began = Instant::now();
+    let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input,
+        move |job| spawn(&client, &launch, Some("exact-model".into()), job), None, None, None)
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let took = began.elapsed();
+    std::fs::write(root.path().join("release"), "go").unwrap();
+    assert!(took < Duration::from_secs(1), "the Agent call waited {took:?} for the worker-start");
+    // The number a hand-in quotes: `cargo test ... -- --nocapture` prints it.
+    println!("the Agent call returned in {} ms", took.as_millis());
+    assert_eq!(manifest.status, "running");
+    let start = Start { run: "run-1".into(), task: "t-4".into(), retry_request: format!("zo-start-{}", manifest.agent_id) };
+    assert_eq!(manifest.lifecycle.ledger_start.as_ref(), Some(&start), "the starting receipt");
+    assert!(manifest.lifecycle.ledger.is_none(), "no worker is bound yet");
+    let results = super::super::wait_for_agent_completions(std::slice::from_ref(&manifest.agent_id), Duration::from_secs(20));
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0].status, "completed", "{results:?}");
+    let stored = stored_manifest(&manifest);
+    assert!(stored.get("ledgerStart").is_none(), "the bound worker left its starting receipt behind: {stored}");
+    assert_eq!(stored["ledger"]["worker"], "w-2", "{stored}");
+    // The tool result names the start, and nothing else of the launch.
+    let receipt: Value = serde_json::from_str(&crate::misc_tools::running_background_agent_result(&manifest, None).unwrap()).unwrap();
+    super::super::clear_background_agent(&manifest.agent_id);
+    assert_eq!(receipt["ledgerStart"], json!({"run":"run-1","task":"t-4","retryRequest":start.retry_request}), "{receipt}");
+}
+
+/// A worker-start the window refuses reaches the parent through the
+/// completion channel every agent settles through: the `Agent` call has
+/// already returned its receipt by then.
+#[cfg(unix)]
+#[test]
+fn a_refused_worker_start_comes_back_through_the_completion_channel() {
+    let _lock = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = tempfile::tempdir().unwrap();
+    let client = fake_door(root.path(), "start_fails", true);
+    let mut input: AgentInput = serde_json::from_value(json!({"description":"survey fixture","prompt":"report the fixture","agent":"codex","model":"exact-model","effort":"low","worktree":true})).unwrap();
+    input.launch.selected = true;
+    input.registry = Some(super::super::AgentRegistry::at_root_for_tests("ledger-start-fails", &root.path().join("store")));
+    let launch = input.launch.clone();
+    let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input,
+        move |job| spawn(&client, &launch, Some("exact-model".into()), job), None, None, None)
+        .unwrap_or_else(|failure| panic!("a refused start still hands back the starting receipt: {failure}"));
+    let failure = settled_failure(&manifest);
+    assert!(failure.contains("could not open a pane for this agent"), "{failure}");
+    assert!(!root.path().join("started").exists());
+    assert!(!root.path().join("stopped").exists(), "no worker started, so none is stopped");
+    let stored = stored_manifest(&manifest);
+    assert_eq!(stored["status"], "failed", "{stored}");
+    assert!(stored.get("ledgerStart").is_none(), "a failed start left its starting receipt behind: {stored}");
+}
+
+/// A launch that has no ledger start in flight writes no key for one: the
+/// manifest and the background tool result are what they were before the
+/// start went to the background.
+#[test]
+fn without_a_ledger_start_neither_the_manifest_nor_the_tool_result_names_one() {
+    let _lock = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = tempfile::tempdir().unwrap();
+    let mut input: AgentInput = serde_json::from_value(json!({"description":"survey fixture","prompt":"report the fixture","subagent_type":"general-purpose"})).unwrap();
+    input.registry = Some(super::super::AgentRegistry::at_root_for_tests("session-no-start", &root.path().join("store")));
+    let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input, |_job| Ok(()), None, None, None)
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let stored = stored_manifest(&manifest);
+    assert!(stored.get("ledgerStart").is_none(), "{stored}");
+    let receipt: Value = serde_json::from_str(&crate::misc_tools::running_background_agent_result(&manifest, None).unwrap()).unwrap();
+    super::super::clear_background_agent(&manifest.agent_id);
+    let keys: std::collections::BTreeSet<&str> = receipt.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["agentId", "background", "name", "note", "outputFile", "status", "subagentType"].into_iter().collect(), "{receipt}");
+}
+
+/// A stop that wins while the worker is starting keeps its status. The start
+/// no longer runs under the launch's manifest lock, so it finishes, finds the
+/// agent stopped, stops the worker it brought up, and settles through the
+/// completion channel with no starting receipt and no binding left behind.
+#[cfg(unix)]
+#[test]
+fn a_stop_while_the_worker_starts_keeps_its_status_and_stops_that_worker() {
+    let _lock = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = tempfile::tempdir().unwrap();
+    let client = fake_door(root.path(), "slow_start", true);
+    let session = "session-stop-while-starting";
+    let registry = super::super::AgentRegistry::at_root_for_tests(session, &root.path().join("store"));
+    let mut input: AgentInput = serde_json::from_value(json!({"description":"survey fixture","prompt":"report the fixture","agent":"codex","model":"exact-model","effort":"low","worktree":true})).unwrap();
+    input.launch.selected = true;
+    input.parent_session_id = Some(session.into());
+    input.registry = Some(std::sync::Arc::clone(&registry));
+    let launch = input.launch.clone();
+    let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input,
+        move |job| spawn(&client, &launch, Some("exact-model".into()), job), None, None, None)
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let outcome = super::super::stop_agent_for_session(&registry, &manifest.agent_id, session, "the parent stopped it while it started");
+    assert!(matches!(outcome, super::super::AgentStopOutcome::Stopped { .. }), "{outcome:?}");
+    std::fs::write(root.path().join("release"), "go").unwrap();
+    let results = super::super::wait_for_agent_completions(std::slice::from_ref(&manifest.agent_id), Duration::from_secs(20));
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0].status, "stopped", "{results:?}");
+    // The stop's own fallback may publish first; the start settles a moment later.
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut stored = stored_manifest(&manifest);
+    while (stored.get("ledgerStart").is_some() || !root.path().join("stopped").exists()) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+        stored = stored_manifest(&manifest);
+    }
+    assert!(root.path().join("stopped").exists(), "the worker the start brought up was left running");
+    assert_eq!(stored["status"], "stopped", "{stored}");
+    assert!(stored.get("ledgerStart").is_none(), "{stored}");
+    assert!(stored.get("ledger").is_none(), "a stopped agent was bound to the worker it never used: {stored}");
+}
+
+/// Adversarial review A, P3-2: when the thread the start runs on cannot be
+/// spawned, the launch fails at once — and the starting receipt goes with
+/// it, so the failed manifest does not still say a start is under way.
+#[test]
+fn a_start_whose_thread_cannot_spawn_takes_its_starting_receipt_back() {
+    let isolated = crate::misc_tools::agent_tools::tests::IsolatedStore::new("ledger-no-thread");
+    let mut manifest = isolated.running_manifest("agent-no-thread");
+    manifest.lifecycle.ledger_start = Some(Start { run: "run-1".into(), task: "t-4".into(), retry_request: "zo-start-agent-no-thread".into() });
+    super::super::manifest::write_agent_manifest(&manifest).unwrap();
+    let failure = start_in_background(&manifest, || Err(std::io::Error::other("no thread to spare")))
+        .expect_err("a start with no thread fails the launch");
+    assert!(failure.to_string().contains("no thread to spare"), "{failure}");
+    let stored = isolated.read_manifest("agent-no-thread");
+    assert!(stored.lifecycle.ledger_start.is_none(), "the failed start left its starting receipt behind");
 }

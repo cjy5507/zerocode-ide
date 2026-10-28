@@ -682,6 +682,10 @@ struct Ui {
     osc_guard: Option<LateOscGuard>,
     ctx_tokens: u64,
     permission_mode: PermissionMode,
+    /// The mode named on the command line, if one was
+    /// ([`crate::slash::ModeOrigin::named`]); the same for every session
+    /// this run opens.
+    named_permission_mode: Option<PermissionMode>,
     /// Clone of the registry's shared permission cell, so Shift+Tab reaches a
     /// running turn. See [`PlainSession::permission_cell`] for what it does and
     /// does not switch.
@@ -3783,6 +3787,12 @@ impl Ui {
         }
     }
 
+    /// Who stands behind this TUI's permission mode, for a command file's
+    /// `!` lines: a person at the keyboard, and a mode named or not.
+    fn mode_origin(&self) -> crate::slash::ModeOrigin {
+        crate::slash::ModeOrigin { named: self.named_permission_mode.is_some(), piped: false }
+    }
+
     /// 턴이 도는 동안의 슬래시 한 줄.
     ///
     /// 가르는 기준은 codex `slash_command_blocked_by_active_task` 다 —
@@ -3844,6 +3854,12 @@ impl Ui {
                 let rows = crate::status_format::card_from_facts(&self.status_facts(), width);
                 self.history(&rows);
             }
+            // The breakdown is the session's to count, and the turn holds the
+            // session — so it is answered the moment the turn ends.
+            Some(Slash::Context) => {
+                self.deferred.push(Deferred::Slash(command.to_string()));
+                self.note(SystemLevel::Info, "↳ /context runs when this turn ends");
+            }
             Some(Slash::Goal) if arg.is_empty() || matches!(arg, "status" | "show") => {
                 self.note(
                     SystemLevel::Info,
@@ -3883,13 +3899,20 @@ impl Ui {
                 self.deferred.push(Deferred::Slash(command.to_string()));
                 self.note(SystemLevel::Info, "↳ /loop runs when this turn ends");
             }
+            // A prompt command is a prompt: expanded, it waits in the queue
+            // like a line typed now.
+            None => match crate::slash::prompt_command(&self.session_cwd, name, arg, self.permission_mode, self.mode_origin()) {
+                Some(expansion) => {
+                    for line in &expansion.shown {
+                        self.note(SystemLevel::Info, line);
+                    }
+                    self.pending_input.push_queued(Submission { text: expansion.text, image_paths: Vec::new() });
+                }
+                None => self.note(SystemLevel::Info, &not_in_zo(name)),
+            },
             // `/exit` 는 여기 오지 않는다 — 제출 자리에서 먼저 걸러 턴을 끝까지
             // 돌리고 나간다.
-            Some(Slash::Exit) | None => {
-                let text =
-                    format!("/{name} is not in zo — use zerocode IDE for it (? for shortcuts)");
-                self.note(SystemLevel::Info, &text);
-            }
+            Some(Slash::Exit) => self.note(SystemLevel::Info, &not_in_zo(name)),
         }
     }
 
@@ -4746,6 +4769,7 @@ impl App {
                 osc_guard: LateOscGuard::armed_if_needed(),
                 ctx_tokens: 0,
                 permission_mode: session.permission_mode,
+                named_permission_mode: session.named_permission_mode,
                 permission_cell: Some(session.permission_cell()),
                 cwd,
                 session_cwd,
@@ -5358,6 +5382,11 @@ impl App {
                 // 꼬리 빈 줄 **하나** 뒤에 곧장 상자를 세운다(부팅 카드와 같다).
                 self.ui.history(&rows);
             }
+            Some(Slash::Context) => {
+                let report = self.session().runtime.context_breakdown_report();
+                let rows: Vec<Line> = report.lines().map(Line::from_text).collect();
+                self.ui.history(&rows);
+            }
             Some(Slash::Model) => {
                 if arg.is_empty() {
                     self.ui.open_model_picker();
@@ -5421,11 +5450,17 @@ impl App {
             Some(Slash::Clear) => {
                 self.start_fresh_session((!arg.is_empty()).then_some(arg), true);
             }
-            None => {
-                let text =
-                    format!("/{name} is not in zo — use zerocode IDE for it (? for shortcuts)");
-                self.ui.note(SystemLevel::Info, &text);
-            }
+            // A prompt command runs as the turn its expanded body is; the
+            // screen already shows the line as typed.
+            None => match crate::slash::prompt_command(&self.session().cwd, name, arg, self.session().permission_mode, self.ui.mode_origin()) {
+                Some(expansion) => {
+                    for line in &expansion.shown {
+                        self.ui.note(SystemLevel::Info, line);
+                    }
+                    self.asked = Some(Work::Turn(Submission { text: expansion.text, image_paths: Vec::new() }));
+                }
+                None => self.ui.note(SystemLevel::Info, &not_in_zo(name)),
+            },
         }
     }
 
@@ -5653,6 +5688,7 @@ impl App {
             cwd: current.cwd.clone(),
             model: current.model.clone(),
             permission_mode: current.permission_mode,
+            named_permission_mode: launch.named_permission_mode,
             effort: current.effort(),
             resume: None,
             allowed_tools: launch.allowed_tools,
@@ -5756,6 +5792,7 @@ impl App {
             cwd: current.cwd.clone(),
             model: current.model.clone(),
             permission_mode: current.permission_mode,
+            named_permission_mode: launch.named_permission_mode,
             effort: current.effort(),
             resume: Some(id.to_string()),
             // 이 셋만 런치에서 온다 — 나머지는 지금 도는 세션이 진실이다.
@@ -6589,6 +6626,11 @@ impl TerminationSignals {
     }
 }
 
+/// What a `/word` that is neither zo's nor a prompt command answers.
+fn not_in_zo(name: &str) -> String {
+    format!("/{name} is not in zo — use zerocode IDE for it (? for shortcuts)")
+}
+
 #[cfg(test)]
 fn test_ui() -> Ui {
     let mut painter = Painter::new(std::io::stdout(), 80, 24, 1, false);
@@ -6661,6 +6703,7 @@ fn test_ui() -> Ui {
         osc_guard: None,
         ctx_tokens: 0,
         permission_mode: PermissionMode::WorkspaceWrite,
+        named_permission_mode: None,
         permission_cell: None,
         cwd: "/test".to_string(),
         session_cwd: std::path::PathBuf::from("/test"),
@@ -6677,6 +6720,10 @@ fn test_ui() -> Ui {
         exit: None,
     }
 }
+
+#[cfg(test)]
+#[path = "app_slash_tests.rs"]
+mod slash_tests;
 
 #[cfg(test)]
 mod tests {
@@ -9872,6 +9919,33 @@ mod footer_key_tests {
         assert!(!viewer_open(&ui));
         assert_eq!(ui.composer.text(), "keep me", "the draft waited under it");
         assert_eq!(ui.footer_hints().warnings, 2);
+    }
+
+    /// A prompt command typed mid-turn shows what its `!` lines did the
+    /// moment it expands, before its turn waits in the queue.
+    #[test]
+    fn a_prompt_command_typed_mid_turn_shows_its_bang_lines_before_it_queues() {
+        let _lock = crate::test_env_lock();
+        let home = crate::support::IsolatedHome::new();
+        let root = tempfile::tempdir().expect("a test root");
+        let project = root.path().join("project");
+        std::fs::create_dir_all(home.zo_home.join("commands")).expect("zo home");
+        std::fs::create_dir_all(&project).expect("project");
+        std::fs::write(
+            home.zo_home.join("commands").join("probe.md"),
+            "---\nallowed-tools: Bash\n---\n!echo hi\nDone.\n",
+        )
+        .expect("the person's command");
+        let mut ui = test_ui();
+        ui.session_cwd = project;
+
+        ui.turn_slash("probe");
+        let history: Vec<String> = ui.pending_history.iter().map(super::Line::plain).collect();
+        let shown = history.join("\n");
+        // The cell wraps at the test screen's width, so the path may run on
+        // to the next row; the name and the `!` line each fit on one.
+        assert!(shown.contains("• /probe —"), "{shown}");
+        assert!(shown.contains("! echo hi → exit 0"), "{shown}");
     }
 
     #[test]

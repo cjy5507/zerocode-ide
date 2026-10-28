@@ -46,6 +46,18 @@ pub(crate) struct Seat {
     pub task: String,
 }
 
+/// A ledger worker's start while it is in flight — [`spawn`] runs the
+/// worker-start in the background: the run and the task the work was written
+/// down as, and the worker-start's request name. The manifest holds it until
+/// the worker's [`Seat`] takes its place.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Start {
+    pub run: String,
+    pub task: String,
+    pub retry_request: String,
+}
+
 #[derive(Clone)]
 struct Client {
     program: PathBuf,
@@ -195,11 +207,17 @@ const PANE_CUT_REFUSAL: &str = "another pane is still being cut";
 const PANE_CUT_ASKS: u32 = 8;
 const PANE_CUT_PAUSE: Duration = Duration::from_millis(1500);
 
+/// The worker-start's request name for its `ask`th ask; the first is the one
+/// the starting receipt names.
+fn start_request(id: &str, ask: u32) -> String {
+    if ask == 0 { format!("zo-start-{id}") } else { format!("zo-start-{id}-{ask}") }
+}
+
 /// The worker-start, asked again while the window is cutting another pane.
 fn start_worker(client: &Client, launch: &Launch, model: Option<&str>, task: &str, prompt: &str, id: &str) -> Result<Value, ToolError> {
     let mut ask = 0;
     loop {
-        let retry = if ask == 0 { format!("zo-start-{id}") } else { format!("zo-start-{id}-{ask}") };
+        let retry = start_request(id, ask);
         match client.call(&start_args(launch, model, task, prompt, &retry)?) {
             Err(failure) if ask + 1 < PANE_CUT_ASKS && failure.to_string().contains(PANE_CUT_REFUSAL) => {
                 ask += 1;
@@ -242,7 +260,7 @@ pub(crate) fn execute(
     super::execute_agent_with_spawn_and_parent_model_and_hooks(input, move |job| spawn(&client, &launch, model, job), parent, lsp, hooks)
 }
 
-fn spawn(client: &Client, launch: &Launch, model: Option<String>, mut job: AgentJob) -> Result<(), ToolError> {
+fn spawn(client: &Client, launch: &Launch, model: Option<String>, job: AgentJob) -> Result<(), ToolError> {
     if job.permission_rules.is_some() || job.permission_mode.is_some_and(|mode| mode != runtime::PermissionMode::DangerFullAccess) {
         return Err(error("ledger worker launch cannot enforce a custom restricted harness"));
     }
@@ -268,14 +286,50 @@ fn spawn(client: &Client, launch: &Launch, model: Option<String>, mut job: Agent
     if !ready["dispatchId"].is_null() {
         return Err(error(format!("ledger task {task} was assigned before this exact launch")));
     }
-    let receipt = start_worker(&client, launch, model.as_deref(), &task, &prompt, &id)?;
-    let worker = required(&receipt, "workerId")?;
-    let seat = Seat { run: client.run.clone().ok_or_else(|| error("ledger run missing"))?, worker,
-        dispatch: required(&receipt, "dispatchId")?, task };
+    // The worker-start waits for the window to open a pane and the agent to
+    // come up (8.6-9.8 s on 2026-10-27). It runs in the background, so the
+    // parent's turn goes on with this starting receipt; the worker's binding,
+    // or why it did not start, reaches the parent through the completion
+    // channel every agent settles through.
+    let start = Start { run: client.run.clone().ok_or_else(|| error("ledger run missing"))?, task, retry_request: start_request(&id, 0) };
+    super::manifest::stamp_agent_lifecycle(&job.manifest, |lifecycle| lifecycle.ledger_start = Some(start.clone()));
+    let launch = launch.clone();
+    let starting = job.manifest.clone();
+    start_in_background(&starting, move || {
+        std::thread::Builder::new().name(format!("zo-ledger-{id}"))
+            .spawn(move || start_and_watch(&client, &launch, model, &prompt, start.task, job))
+            .map(|_| ())
+    })
+}
+
+/// Put the start on its thread (`start` spawns it) for `manifest`'s agent.
+/// A thread that cannot be spawned fails the launch and takes the starting
+/// receipt back, as `start_failed` does for a start that ran and failed.
+fn start_in_background(manifest: &AgentOutput, start: impl FnOnce() -> std::io::Result<()>) -> Result<(), ToolError> {
+    start().map_err(|e| {
+        super::manifest::stamp_agent_lifecycle(manifest, |lifecycle| lifecycle.ledger_start = None);
+        error(format!("could not start the ledger worker for {}: {e}", manifest.agent_id))
+    })
+}
+
+/// The start the parent no longer waits for: the worker-start (asked again
+/// while the window cuts another pane), its receipt held to what the launch
+/// pinned, the worker's binding written down, then the watch for its report.
+/// Every way it ends reaches the parent through the completion channel.
+fn start_and_watch(client: &Client, launch: &Launch, model: Option<String>, prompt: &str, task: String, mut job: AgentJob) {
+    let _registration = super::spawn::pane_worker_registration(&job);
+    let receipt = match start_worker(client, launch, model.as_deref(), &task, prompt, &job.manifest.agent_id) {
+        Ok(receipt) => receipt,
+        Err(failure) => return start_failed(&job, "failed", &failure.to_string()),
+    };
+    let seat = match seat_of(client, &receipt, task) {
+        Ok(seat) => seat,
+        Err(failure) => return start_failed(&job, "failed", &failure.to_string()),
+    };
     let expected = launch.agent.as_deref().unwrap_or("zo");
     if !receipt_honours(&receipt, expected, model.as_deref(), launch.effort.as_deref(), launch.worktree.unwrap_or(true)) {
-        let _ = stop(&client, &seat, "launch receipt did not honor the pinned choice");
-        return Err(error(format!("ledger launch receipt differs from the requested agent/model/effort: {receipt}")));
+        let _ = stop(client, &seat, "launch receipt did not honor the pinned choice");
+        return start_failed(&job, "failed", &format!("ledger launch receipt differs from the requested agent/model/effort: {receipt}"));
     }
     job.manifest.pane = receipt["pane"].as_str().map(str::to_owned);
     job.manifest.model.clone_from(&model);
@@ -283,17 +337,51 @@ fn spawn(client: &Client, launch: &Launch, model: Option<String>, mut job: Agent
     job.manifest.resolved_model = model.or_else(|| receipt["model"].as_str().map(str::to_owned));
     job.manifest.lifecycle.execution = Some("ledger".into());
     job.manifest.lifecycle.ledger = Some(seat.clone());
-    if let Err(failure) = super::manifest::write_agent_manifest(&job.manifest) {
-        let stopped = stop(&client, &seat, "could not persist the worker binding");
-        return Err(error(format!("{failure}; worker-stop: {stopped:?}")));
+    match record_binding(&job.manifest) {
+        Ok(true) => watch(client, &seat, &job),
+        // A stop won while the worker was starting: its status stands, and the
+        // worker it could not see is stopped.
+        Ok(false) => {
+            let stopped = stop(client, &seat, "the agent was stopped while its worker was starting");
+            start_failed(&job, "stopped", &format!("the agent was stopped while its ledger worker was starting; worker-stop: {stopped:?}"));
+        }
+        Err(failure) => {
+            let stopped = stop(client, &seat, "could not persist the worker binding");
+            start_failed(&job, "failed", &format!("{failure}; worker-stop: {stopped:?}"));
+        }
     }
-    let cleanup_client = client.clone();
-    let cleanup_seat = seat.clone();
-    std::thread::Builder::new().name(format!("zo-ledger-{id}")).spawn(move || watch(&client, &seat, &job))
-        .map(|_| ()).map_err(|e| {
-            let _ = stop(&cleanup_client, &cleanup_seat, "could not start the completion watcher");
-            error(e.to_string())
-        })
+}
+
+/// A start that ended without a bound worker: the starting receipt leaves the
+/// manifest, then the failure reaches the parent through the completion
+/// channel — no manifest is left saying a start is still under way.
+fn start_failed(job: &AgentJob, status: &'static str, failure: &str) {
+    super::manifest::stamp_agent_lifecycle(&job.manifest, |lifecycle| lifecycle.ledger_start = None);
+    fail(job, status, failure);
+}
+
+fn seat_of(client: &Client, receipt: &Value, task: String) -> Result<Seat, ToolError> {
+    let worker = required(receipt, "workerId")?;
+    Ok(Seat { run: client.run.clone().ok_or_else(|| error("ledger run missing"))?, worker,
+        dispatch: required(receipt, "dispatchId")?, task })
+}
+
+/// Write the worker's binding onto the stored manifest, in place of the
+/// starting receipt — only while it still says `running`, so a stop that won
+/// during the start keeps its status. Read fresh under the manifest lock: the
+/// parent may have stamped the manifest since the launch.
+fn record_binding(bound: &AgentOutput) -> Result<bool, String> {
+    super::manifest::run_if_agent_manifest_running(bound, || {
+        let mut stored = super::manifest::load_agent_manifest_from_scanned_path(Path::new(&bound.manifest_file))?;
+        stored.pane.clone_from(&bound.pane);
+        stored.model.clone_from(&bound.model);
+        stored.resolved_model.clone_from(&bound.resolved_model);
+        stored.lifecycle.execution.clone_from(&bound.lifecycle.execution);
+        stored.lifecycle.ledger.clone_from(&bound.lifecycle.ledger);
+        stored.lifecycle.ledger_start = None;
+        super::manifest::write_agent_manifest(&stored)
+    })
+    .map(|written| written.is_some())
 }
 
 fn lifecycle(observation: &Value) -> Result<&[Value], ToolError> {
@@ -446,7 +534,6 @@ fn collect_report(client: &Client, seat: &Seat, job: &AgentJob, acted: &mut Hash
 
 fn watch(client: &Client, seat: &Seat, job: &AgentJob) {
     static ACTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let _registration = super::spawn::pane_worker_registration(job);
     let began = Instant::now();
     let mut next_probe = began;
     loop {
