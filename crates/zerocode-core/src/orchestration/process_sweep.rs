@@ -432,9 +432,10 @@ fn targets_of(words: &[String]) -> Result<Vec<Target>, String> {
 
 /// Every checkout of a worker's own the ledger was told, across its runs —
 /// never the tree a worker opened in without one (no `--worktree`, `--bare`),
-/// which is its coordinator's, and never one that holds a run's project
-/// root (r2 P1-1: 191 of this machine's 1,499 worker rows reported the main
-/// checkout, where the build line's runner stands).
+/// which is its coordinator's, and never one that holds a run's git common
+/// directory (`RunProject.root` is `<main checkout>/.git`, so the main
+/// checkout holds it; r2 P1-1: 191 of this machine's 1,499 worker rows
+/// reported the main checkout, where the build line's runner stands).
 fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
     let mut found = Vec::new();
     let mut roots = Vec::new();
@@ -471,7 +472,8 @@ fn coordinator_seats(ledger: &Ledger) -> Vec<String> {
 }
 
 /// `checkouts` without each one that is, or holds, one of `trees` — a
-/// coordinator's tree or a project root is nobody's worker checkout, whatever
+/// coordinator's tree, or the checkout holding a run's git common directory,
+/// is nobody's worker checkout, whatever
 /// a row says, and a process standing in it is never an orphaned build.
 #[must_use]
 pub fn outside(checkouts: Vec<Checkout>, trees: &[String]) -> Vec<Checkout> {

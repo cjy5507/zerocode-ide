@@ -697,8 +697,10 @@ fn only_a_tree_of_the_workers_own_is_a_worker_checkout() {
     assert!(in_worktree(&own) && in_worktree(&own_heir) && in_worktree(&rooted));
     assert!(!in_worktree(&shared) && !in_worktree(&shared_heir));
     let run = bench.ledger.runs()[0].id.clone();
+    // The run's root as `git_dir::project_root` gives it: the git common
+    // directory inside the main checkout, not the checkout itself.
     bench.ledger.run_mut(&run).expect("the run").project = Some(RunProject {
-        root: "/main".to_string(),
+        root: "/main/.git".to_string(),
         source: ProjectSource::Created,
         at_ms: 1,
         seat: None,
@@ -736,6 +738,14 @@ fn a_checkout_holding_a_coordinators_tree_is_nobodys() {
     );
     let paths: Vec<&str> = held.iter().map(|one| one.path.as_str()).collect();
     assert_eq!(paths, vec!["/main/.worktrees/t-1", "/w/t-1", "/main-other"]);
+    // A run's root is its git common directory, `<main checkout>/.git`: the
+    // main checkout holds it and goes; a worktree beside it stays.
+    let held = outside(
+        vec![told("/main"), told("/w/t-1"), told("/main/.git")],
+        &["/main/.git".to_string()],
+    );
+    let paths: Vec<&str> = held.iter().map(|one| one.path.as_str()).collect();
+    assert_eq!(paths, vec!["/w/t-1"]);
 }
 
 /// The coordinator's end call names its run and the pids, marks and all.
