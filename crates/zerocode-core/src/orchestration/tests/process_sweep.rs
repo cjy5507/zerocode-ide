@@ -73,7 +73,8 @@ impl Judge for Protects {
 /// The system as a fake: rereads answer from `now` (what stands at signal
 /// time), and every signal is written down instead of sent. A signaled pid
 /// leaves `now`, as a process that ends on TERM does, unless it `ignores`
-/// TERM; every pause is written down instead of slept.
+/// TERM; every pause is written down instead of slept, and moves the fake's
+/// clock as far as a sleep would.
 struct Fake {
     now: RefCell<Vec<ProcessRow>>,
     signalled: RefCell<Vec<u32>>,
@@ -87,6 +88,9 @@ struct Fake {
     many_reads: RefCell<Vec<Vec<u32>>>,
     /// Every many-pid read fails, as a `ps` that timed out does.
     unreadable: bool,
+    /// How long each many-pid read takes on the fake's clock.
+    read_ms: u64,
+    clock: Cell<u64>,
 }
 
 impl Fake {
@@ -101,6 +105,8 @@ impl Fake {
             single_reads: Cell::new(0),
             many_reads: RefCell::new(Vec::new()),
             unreadable: false,
+            read_ms: 0,
+            clock: Cell::new(0),
         }
     }
 }
@@ -135,6 +141,7 @@ impl Signals for Fake {
 
     fn reread_many(&self, pids: &[u32]) -> Option<HashMap<u32, (String, String)>> {
         self.many_reads.borrow_mut().push(pids.to_vec());
+        self.clock.set(self.clock.get() + self.read_ms);
         if self.unreadable {
             return None;
         }
@@ -150,6 +157,11 @@ impl Signals for Fake {
 
     fn pause(&self, ms: u64) {
         self.paused.borrow_mut().push(ms);
+        self.clock.set(self.clock.get() + ms);
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.clock.get()
     }
 }
 
@@ -549,6 +561,39 @@ fn a_failed_settle_read_says_nobody_went() {
         outcomes(&ended),
         vec![(4100, Outcome::Signaled { gone: false })]
     );
+}
+
+/// The settle wait stops on the clock too (r3 P2-1): on a machine whose `ps`
+/// takes its whole 2 s every time, 21 reads would hold the answer 44 s past
+/// the window's 10 s. No read starts after 3 s, so the wait ends by 5 s; the
+/// pid that ignored TERM, or that nobody could read, is said still running,
+/// and it got one TERM and nothing more.
+#[test]
+fn a_settle_wait_whose_reads_are_slow_stops_on_time() {
+    for unreadable in [false, true] {
+        let table = table();
+        let mut fake = Fake::standing(table.clone());
+        fake.ignores = vec![4100];
+        fake.unreadable = unreadable;
+        fake.read_ms = 2_000;
+        let ended = end(&table, &[target(&table[3])], &Protects(Vec::new()), &fake);
+        assert_eq!(
+            outcomes(&ended),
+            vec![(4100, Outcome::Signaled { gone: false })],
+            "unreadable: {unreadable}"
+        );
+        assert_eq!(*fake.signalled.borrow(), vec![4100], "one TERM");
+        assert_eq!(
+            fake.many_reads.borrow().len(),
+            2,
+            "reads at 0 s and 2.1 s, none from 3 s on (unreadable: {unreadable})"
+        );
+        assert!(
+            fake.clock.get() <= 5_000,
+            "the wait took {} ms (unreadable: {unreadable})",
+            fake.clock.get()
+        );
+    }
 }
 
 /* ---- the verb ---------------------------------------------------------- */

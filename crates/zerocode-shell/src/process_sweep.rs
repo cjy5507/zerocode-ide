@@ -51,7 +51,7 @@ pub(crate) fn carry(
         rows,
         &crate::system_runtime::process_cwds,
         judge.as_ref(),
-        &System,
+        &System::new(),
     )
 }
 
@@ -310,7 +310,18 @@ fn table() -> Result<(Vec<ProcessRow>, ProcessTable), String> {
     Ok((rows, ProcessTable::new(guarded)))
 }
 
-struct System;
+/// The real system, for one call: its clock starts when the call does.
+struct System {
+    began: std::time::Instant,
+}
+
+impl System {
+    fn new() -> Self {
+        Self {
+            began: std::time::Instant::now(),
+        }
+    }
+}
 
 impl Signals for System {
     /// Every asked pid in one `ps` (r2 P2-1); Windows reads one at a time.
@@ -335,6 +346,10 @@ impl Signals for System {
 
     fn pause(&self, ms: u64) {
         std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.began.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 }
 
@@ -408,6 +423,10 @@ mod tests {
         }
 
         fn pause(&self, _ms: u64) {}
+
+        fn now_ms(&self) -> u64 {
+            0
+        }
     }
 
     fn end_call(targets: Vec<Target>) -> ProcessSweepAsk {

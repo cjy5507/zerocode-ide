@@ -178,6 +178,9 @@ pub trait Signals {
     fn terminate(&self, pid: u32) -> Result<(), String>;
     /// Wait `ms` before the signaled pids are read again.
     fn pause(&self, ms: u64);
+    /// Milliseconds on a clock that only moves forward, read by the settle
+    /// wait to stop on time however slow its reads are.
+    fn now_ms(&self) -> u64;
 }
 
 /// What became of one asked pid.
