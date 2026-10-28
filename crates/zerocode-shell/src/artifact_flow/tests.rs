@@ -715,9 +715,10 @@ fn work_nobody_is_coming_back_to_stands_in_its_piles_and_not_in_now() {
     assert_eq!(json["unreviewed"]["tasks"][0]["left"], "unreviewed");
 }
 
-/// The ledger stamps no moment for a landing or a release (`AfterReport`'s
-/// `merged_ms` and `deployed_ms` are always empty): git's merge commit and
-/// release say when, and the line says git told it.
+/// The ledger's landing moment is when the coordinator wrote `merged`
+/// (`AfterReport::merged_ms`), and it stamps none for a release
+/// (`deployed_ms` is always empty): git's merge commit and release say when,
+/// and the line says git told it.
 #[test]
 fn an_empty_landing_time_is_read_off_git() {
     let fixture = fixture();
@@ -739,8 +740,8 @@ fn an_empty_landing_time_is_read_off_git() {
     };
     assert_eq!(
         (after.merged_ms, after.deployed_ms),
-        (None, None),
-        "the ledger holds no landing moment"
+        (Some(at(75)), None),
+        "the ledger holds the moment its merged was written, and no release moment"
     );
     assert_eq!(
         shipped.land,

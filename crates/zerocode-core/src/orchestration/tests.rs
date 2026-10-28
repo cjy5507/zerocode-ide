@@ -1396,6 +1396,81 @@ fn an_inbox_audit_sweeps_all_runs_and_spends_nothing() {
     assert_eq!(batch["count"], 1, "an audit consumed a delivery");
 }
 
+/// A day's mail is more than one page (t-78890, O11): `--since` keeps the mail written at or after
+/// a moment, and `--cursor` — the last message id of the page before — walks the rest, page by
+/// page, until no `nextCursor` comes back. An unknown cursor is refused, not read as page one.
+#[test]
+fn an_inbox_audit_walks_a_day_by_since_and_cursor() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name day");
+    let early = bench.peer_status("before the day");
+    let mut day = Vec::new();
+    for at in 0..5 {
+        day.push(bench.peer_status(&format!("during the day {at}")));
+    }
+    let since = bench.ledger.runs()[0]
+        .messages()
+        .iter()
+        .find(|held| held.id == day[0])
+        .expect("the day's first letter")
+        .created_ms;
+
+    let all = bench.json(&format!("inbox --since {since} --limit 100"));
+    let ids: Vec<&str> = all["messages"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter_map(|row| row["messageId"].as_str())
+        .collect();
+    assert_eq!(ids.len(), day.len(), "{all}");
+    assert!(!ids.contains(&early.as_str()), "mail before --since: {all}");
+    assert!(
+        all["messages"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .all(|row| row["createdMs"].as_i64().is_some_and(|at| at >= since))
+    );
+    assert!(all["nextCursor"].is_null(), "one page held it all: {all}");
+
+    let mut walked: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..day.len() {
+        let line = match &cursor {
+            Some(after) => format!("inbox --since {since} --limit 2 --cursor {after}"),
+            None => format!("inbox --since {since} --limit 2"),
+        };
+        let page = bench.json(&line);
+        walked.extend(
+            page["messages"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .filter_map(|row| row["messageId"].as_str().map(str::to_string)),
+        );
+        cursor = page["nextCursor"].as_str().map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let mut newest_first = day.clone();
+    newest_first.reverse();
+    assert_eq!(
+        walked, newest_first,
+        "every letter of the day once, newest first"
+    );
+
+    let unknown = bench.run("inbox --cursor m-999999");
+    assert_ne!(unknown.reply.exit_code, 0);
+    assert!(
+        unknown.reply.stderr.contains("unknown cursor"),
+        "{}",
+        unknown.reply.stderr
+    );
+    let garbled = bench.run("inbox --since yesterday");
+    assert_ne!(garbled.reply.exit_code, 0);
+}
+
 /// A message carries its headline, its urgency and its freight whole; an
 /// answer headlines the thread it answers; a broadcast never answers its
 /// author; and a group with nobody in it is a refusal, not a "Sent".
@@ -25372,6 +25447,9 @@ mod land_batch;
 /// t-34501 stage 3 (t-42447): `land-check` names the task, head and repository for the window, and
 /// the window's evidence comes back as the ledger's own letter (`tests/land_check.rs`).
 mod land_check;
+/// t-78890 (O8): the landing of a stack written on every member in one `task-update --members`
+/// (`tests/land_record.rs`).
+mod land_record;
 /// t-34501: late landings told to the coordinator, a branch that ran away told to its worker
 /// (`tests/landing_watch.rs`).
 mod landing_watch;
