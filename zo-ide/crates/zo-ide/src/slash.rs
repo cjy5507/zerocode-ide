@@ -217,6 +217,27 @@ impl Slash {
     }
 }
 
+/// Who stands behind the session's permission mode, as a command file's `!`
+/// lines ask it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModeOrigin {
+    /// The person named the mode with `--permission-mode` on this run's
+    /// command line. The default and a mode a settings file pins are not
+    /// named.
+    pub named: bool,
+    /// The pipe front-end runs the command (`-p`, or no terminal): nobody
+    /// is there to answer a trust prompt.
+    pub piped: bool,
+}
+
+/// A `/word` expanded: the turn it runs as, and the lines the screen shows
+/// once before that turn goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptExpansion {
+    pub text: String,
+    pub shown: Vec<String>,
+}
+
 /// The turn a `/word` the keep-list does not have runs as, when it names a
 /// prompt command: that command's body with `arg` filled in, expanded against
 /// `cwd`. Where commands are looked for and which wins a shared name is the
@@ -234,7 +255,9 @@ pub fn prompt_command(
     name: &str,
     arg: &str,
     mode: core_types::PermissionMode,
-) -> Option<String> {
+    origin: ModeOrigin,
+) -> Option<PromptExpansion> {
+    let _ = origin;
     let found = commands::discover_prompt_commands(cwd);
     let command = commands::find_prompt_command(&found, name)?;
     let gate = commands::InlineShellGate {
@@ -242,12 +265,25 @@ pub fn prompt_command(
         workspace_trusted: command.scope == commands::PromptCommandScope::Workspace
             && crate::workspace_trust::person_trusts_cwd(cwd),
     };
-    Some(command.render_prompt_as(arg, cwd, gate))
+    Some(PromptExpansion {
+        text: command.render_prompt_as(arg, cwd, gate),
+        shown: Vec::new(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{prompt_command, render_catalog, Slash};
+    use super::{render_catalog, ModeOrigin, Slash};
+
+    /// [`super::prompt_command`]'s turn, in a TUI run whose mode nobody named.
+    fn prompt_command(
+        cwd: &std::path::Path,
+        name: &str,
+        arg: &str,
+        mode: core_types::PermissionMode,
+    ) -> Option<String> {
+        super::prompt_command(cwd, name, arg, mode, ModeOrigin::default()).map(|expansion| expansion.text)
+    }
 
     /// A command file in the working folder expands with its arguments; a
     /// word no file names is not a prompt command. The folder is a fresh one,

@@ -682,6 +682,10 @@ struct Ui {
     osc_guard: Option<LateOscGuard>,
     ctx_tokens: u64,
     permission_mode: PermissionMode,
+    /// The session's mode was named on the command line
+    /// ([`crate::slash::ModeOrigin::named`]); the same for every session
+    /// this run opens.
+    permission_mode_named: bool,
     /// Clone of the registry's shared permission cell, so Shift+Tab reaches a
     /// running turn. See [`PlainSession::permission_cell`] for what it does and
     /// does not switch.
@@ -3783,6 +3787,12 @@ impl Ui {
         }
     }
 
+    /// Who stands behind this TUI's permission mode, for a command file's
+    /// `!` lines: a person at the keyboard, and a mode named or not.
+    fn mode_origin(&self) -> crate::slash::ModeOrigin {
+        crate::slash::ModeOrigin { named: self.permission_mode_named, piped: false }
+    }
+
     /// 턴이 도는 동안의 슬래시 한 줄.
     ///
     /// 가르는 기준은 codex `slash_command_blocked_by_active_task` 다 —
@@ -3891,8 +3901,8 @@ impl Ui {
             }
             // A prompt command is a prompt: expanded, it waits in the queue
             // like a line typed now.
-            None => match crate::slash::prompt_command(&self.session_cwd, name, arg, self.permission_mode) {
-                Some(text) => self.pending_input.push_queued(Submission { text, image_paths: Vec::new() }),
+            None => match crate::slash::prompt_command(&self.session_cwd, name, arg, self.permission_mode, self.mode_origin()) {
+                Some(expansion) => self.pending_input.push_queued(Submission { text: expansion.text, image_paths: Vec::new() }),
                 None => self.note(SystemLevel::Info, &not_in_zo(name)),
             },
             // `/exit` 는 여기 오지 않는다 — 제출 자리에서 먼저 걸러 턴을 끝까지
@@ -4754,6 +4764,7 @@ impl App {
                 osc_guard: LateOscGuard::armed_if_needed(),
                 ctx_tokens: 0,
                 permission_mode: session.permission_mode,
+                permission_mode_named: session.permission_mode_named,
                 permission_cell: Some(session.permission_cell()),
                 cwd,
                 session_cwd,
@@ -5436,8 +5447,8 @@ impl App {
             }
             // A prompt command runs as the turn its expanded body is; the
             // screen already shows the line as typed.
-            None => match crate::slash::prompt_command(&self.session().cwd, name, arg, self.session().permission_mode) {
-                Some(text) => self.asked = Some(Work::Turn(Submission { text, image_paths: Vec::new() })),
+            None => match crate::slash::prompt_command(&self.session().cwd, name, arg, self.session().permission_mode, self.ui.mode_origin()) {
+                Some(expansion) => self.asked = Some(Work::Turn(Submission { text: expansion.text, image_paths: Vec::new() })),
                 None => self.ui.note(SystemLevel::Info, &not_in_zo(name)),
             },
         }
@@ -5667,6 +5678,7 @@ impl App {
             cwd: current.cwd.clone(),
             model: current.model.clone(),
             permission_mode: current.permission_mode,
+            permission_mode_named: launch.permission_mode_named,
             effort: current.effort(),
             resume: None,
             allowed_tools: launch.allowed_tools,
@@ -5770,6 +5782,7 @@ impl App {
             cwd: current.cwd.clone(),
             model: current.model.clone(),
             permission_mode: current.permission_mode,
+            permission_mode_named: launch.permission_mode_named,
             effort: current.effort(),
             resume: Some(id.to_string()),
             // 이 셋만 런치에서 온다 — 나머지는 지금 도는 세션이 진실이다.
@@ -6680,6 +6693,7 @@ fn test_ui() -> Ui {
         osc_guard: None,
         ctx_tokens: 0,
         permission_mode: PermissionMode::WorkspaceWrite,
+        permission_mode_named: false,
         permission_cell: None,
         cwd: "/test".to_string(),
         session_cwd: std::path::PathBuf::from("/test"),

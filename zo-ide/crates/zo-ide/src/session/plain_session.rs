@@ -62,6 +62,10 @@ pub struct OpenOptions {
     pub cwd: PathBuf,
     pub model: String,
     pub permission_mode: PermissionMode,
+    /// The person named `permission_mode` with `--permission-mode` on the
+    /// command line. A repository's command file reads it as the person's
+    /// word for the folder ([`crate::slash::ModeOrigin`]).
+    pub permission_mode_named: bool,
     pub allowed_tools: Option<AllowedToolSet>,
     /// `true` 면 [`SPAWN_FAMILY_TOOLS`] 를 `--disallowedTools` 로 설치한다.
     pub disable_spawn_family: bool,
@@ -157,6 +161,9 @@ pub struct PlainSession {
     pub cwd: PathBuf,
     pub model: String,
     pub permission_mode: PermissionMode,
+    /// [`OpenOptions::permission_mode_named`], kept for the sessions a TUI
+    /// opens from this one.
+    pub permission_mode_named: bool,
     allowed_tools: Option<AllowedToolSet>,
     system_prompt: Vec<String>,
     pub(crate) runtime: BuiltRuntime,
@@ -213,6 +220,7 @@ pub struct PlainSession {
 /// 교체할 때 argv 를 다시 파싱하지 않고 같은 조건으로 새 세션을 연다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchFlags {
+    pub permission_mode_named: bool,
     pub allowed_tools: Option<AllowedToolSet>,
     pub disable_spawn_family: bool,
     pub mcp_config: Option<PathBuf>,
@@ -730,6 +738,7 @@ impl PlainSession {
             cwd,
             model,
             permission_mode: options.permission_mode,
+            permission_mode_named: options.permission_mode_named,
             allowed_tools: options.allowed_tools,
             system_prompt,
             runtime,
@@ -2011,6 +2020,7 @@ impl PlainSession {
     /// 이 세션을 연 런치 플래그(`/resume` 세션 교체가 같은 조건으로 다시 연다).
     pub fn launch_flags(&self) -> LaunchFlags {
         LaunchFlags {
+            permission_mode_named: self.permission_mode_named,
             allowed_tools: self.allowed_tools.clone(),
             disable_spawn_family: self.disable_spawn_family,
             mcp_config: self.mcp_config.clone(),

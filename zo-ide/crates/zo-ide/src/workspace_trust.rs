@@ -959,9 +959,13 @@ mod tests {
                     ("ZO_CONFIG_HOME", None),
                     ("ZO_HOME", None),
                 ],
-                || crate::slash::prompt_command(cwd, "probe", "", Self::mode(cwd)),
+                || {
+                    let origin = crate::slash::ModeOrigin::default();
+                    crate::slash::prompt_command(cwd, "probe", "", Self::mode(cwd), origin)
+                },
             )
             .expect("/probe expands")
+            .text
         }
 
         fn mode(cwd: &Path) -> runtime::PermissionMode {

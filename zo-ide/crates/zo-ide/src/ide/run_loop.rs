@@ -653,7 +653,7 @@ fn handle_slash<W: Write>(
             | Slash::Rewind
             | Slash::Clear,
         ) => unknown_command(renderer, name),
-        None => unlisted_command(renderer, &session.cwd, session.permission_mode, name, arg),
+        None => unlisted_command(renderer, &session.cwd, session.permission_mode, session.permission_mode_named, name, arg),
     }
 }
 
@@ -663,11 +663,13 @@ fn unlisted_command<W: Write>(
     renderer: &mut Renderer<W>,
     cwd: &std::path::Path,
     mode: core_types::PermissionMode,
+    mode_named: bool,
     name: &str,
     arg: &str,
 ) -> SlashOutcome {
-    match crate::slash::prompt_command(cwd, name, arg, mode) {
-        Some(prompt) => SlashOutcome::Turn(prompt),
+    let origin = crate::slash::ModeOrigin { named: mode_named, piped: true };
+    match crate::slash::prompt_command(cwd, name, arg, mode, origin) {
+        Some(expansion) => SlashOutcome::Turn(expansion.text),
         None => unknown_command(renderer, name),
     }
 }
@@ -1414,8 +1416,8 @@ mod tests {
         let (expanded, unknown) = {
             let mut renderer = super::Renderer::new(&mut written, super::RenderOptions::default());
             (
-                unlisted_command(&mut renderer, folder.path(), mode, "fruit", "pineapple"),
-                unlisted_command(&mut renderer, folder.path(), mode, "no-such-command-z12", ""),
+                unlisted_command(&mut renderer, folder.path(), mode, false, "fruit", "pineapple"),
+                unlisted_command(&mut renderer, folder.path(), mode, false, "no-such-command-z12", ""),
             )
         };
         assert!(
