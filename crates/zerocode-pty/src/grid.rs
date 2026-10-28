@@ -2414,8 +2414,22 @@ impl TerminalGrid {
     }
 
     fn drop_oldest_to(&mut self, keep: usize) {
+        if self.scrollback.len() <= keep {
+            return;
+        }
         while self.scrollback.len() > keep {
             drop(self.pop_scrollback());
+        }
+        // The queues keep the room the deeper history needed — 50,000 rows'
+        // places in four queues is about 2 MiB a pane — unless told to give
+        // it back. Given back only when most of it is spare: a pane the
+        // budget trims a few lines a beat while it prints would otherwise
+        // move its queues every beat, to grow them again on the next line.
+        if self.scrollback.capacity() / 2 > self.scrollback.len() {
+            self.scrollback.shrink_to_fit();
+            self.scroll_wrap.shrink_to_fit();
+            self.scroll_folds.shrink_to_fit();
+            self.scroll_cols.shrink_to_fit();
         }
         // The view is anchored to CONTENT, counted up from the live screen:
         // lines leaving the far end leave a reader on the line they were
