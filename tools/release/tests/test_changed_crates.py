@@ -24,14 +24,14 @@ def load():
 
 
 def package(name, directory, *targets, reads=()):
-    return {"name": name, "dir": directory, "targets": [(kinds, target) for kinds, target in targets], "reads": list(reads)}
+    return {"name": name, "dir": directory, "targets": [(kinds, target) for kinds, target in targets], "reads": dict(reads)}
 
 
 WORKSPACES = {
     ".": [
         package("zerocode-core", "crates/zerocode-core", (["lib"], "zerocode_core")),
         package("zerocode-shell", "crates/zerocode-shell", (["bin"], "zerocode-shell"), (["bin"], "zerocode-pick"),
-                reads=["ui/shell.css", "crates/zerocode-core/src/account.rs"]),
+                reads={"ui/shell.css": {"--bins"}, "crates/zerocode-core/src/account.rs": {"--bins"}}),
         package("both", "crates/both", (["lib"], "both"), (["bin"], "both-cli")),
         package("zerocode-shell-state", "crates/zerocode-shell-state", (["lib"], "zerocode_shell_state")),
         package("tools-only", "tools/many", (["bin"], "first"), (["bin"], "second")),
@@ -80,6 +80,27 @@ class Pick(unittest.TestCase):
         picked = self.mod.crates(["crates/zerocode-core/src/account.rs"], WORKSPACES)
         self.assertEqual(picked, [(".", "zerocode-core", "--lib"), (".", "zerocode-shell", "--bins")])
 
+    def test_a_test_target_has_no_unit_tests_and_a_bin_source_has_only_the_bins(self):
+        # tests/ is an integration target (stage 1 runs the shell's), src/main.rs and src/bin/ are the bins',
+        # and src/lib.rs is what the bins link, so it picks both
+        self.assertEqual(self.mod.crates(["crates/both/tests/contract.rs", "crates/both/benches/b.rs"], WORKSPACES), [])
+        self.assertEqual(self.mod.crates(["crates/both/src/main.rs"], WORKSPACES), [(".", "both", "--bins")])
+        self.assertEqual(self.mod.crates(["crates/both/src/bin/other.rs"], WORKSPACES), [(".", "both", "--bins")])
+        self.assertEqual(self.mod.crates(["crates/both/src/lib.rs"], WORKSPACES), [(".", "both", "--lib --bins")])
+
+    def test_a_file_a_bin_reads_picks_the_bins_and_one_a_lib_reads_picks_the_lib_and_the_bins_that_link_it(self):
+        reading = {
+            "both": package("both", "crates/both", (["lib"], "both"), (["bin"], "both-cli"),
+                            reads={"data/bin.json": {"--bins"}, "data/lib.json": {"--lib", "--bins"}}),
+        }
+        found = {".": [reading["both"]]}
+        self.assertEqual(self.mod.crates(["data/bin.json"], found), [(".", "both", "--bins")])
+        self.assertEqual(self.mod.crates(["data/lib.json"], found), [(".", "both", "--lib --bins")])
+
+    def test_a_build_script_reads_what_the_package_formats_at_run_time_so_none_of_it_is_seen(self):
+        text = 'println!("cargo:rerun-if-changed=../../tools/y.json");\n'
+        self.assertEqual(list(self.mod.reads_of(text, "crates/shell", "crates/shell")), [])
+
     def test_the_reads_of_a_source_are_the_paths_its_macros_name_relative_to_the_right_base(self):
         text = (
             '// include_str!("../../../ui/commented.css")\n'
@@ -87,10 +108,9 @@ class Pick(unittest.TestCase):
             'const B: &[u8] = include_bytes!("fixtures/own.bin");\n'
             'const C: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../skills/x.md"));\n'
             'const D: &str = include_str!(concat!(env!("OUT_DIR"), "/generated.rs"));\n'
-            'println!("cargo:rerun-if-changed=../../tools/y.json");\n'
         )
         reads = set(self.mod.reads_of(text, "crates/shell/src/a", "crates/shell"))
-        self.assertEqual(reads, {"ui/shell.css", "crates/shell/src/a/fixtures/own.bin", "skills/x.md", "tools/y.json"})
+        self.assertEqual(reads, {"ui/shell.css", "crates/shell/src/a/fixtures/own.bin", "skills/x.md"})
 
     def test_reads_leave_out_what_is_inside_the_package_the_repository_or_nothing(self):
         found = {"crates/shell/src/a.rs", "ui/shell.css", "../outside", ".", "crates/shell"}
@@ -128,6 +148,12 @@ class WholeRun(unittest.TestCase):
         self.write("crates/lib-crate/src/lib.rs", "")
         self.write("crates/bin-crate/Cargo.toml", '[package]\nname = "bin-crate"\nversion = "0.1.0"\nedition = "2021"\n')
         self.write("crates/bin-crate/src/main.rs", 'const STYLE: &str = include_str!("../../../ui/style.css");\nfn main() {}\n')
+        self.write("crates/mixed/Cargo.toml", '[package]\nname = "mixed"\nversion = "0.1.0"\nedition = "2021"\n')
+        self.write("crates/mixed/src/lib.rs", 'const A: &str = include_str!("../../../data/lib.json");\n')
+        self.write("crates/mixed/src/main.rs", 'const B: &str = include_str!("../../../data/bin.json");\nfn main() {}\n')
+        self.write("crates/mixed/tests/contract.rs", 'const C: &str = include_str!("../../../AGENTS.md");\n')
+        for name in ("data/lib.json", "data/bin.json", "AGENTS.md"):
+            self.write(name, "")
         self.write("ui/style.css", "")
         self.write("ui/tests/window.mjs", 'suite("inbox", () => 1);\nsuite("workers", () => 1);\n')
         self.write("ui/tests/inbox.mjs", "")
@@ -165,6 +191,7 @@ class WholeRun(unittest.TestCase):
             "crate\t.\tlib-crate\t--lib",
             "ui\tui/tests/inbox.mjs",
             "suite\tinbox",
+            "suites\t1\t2",
         ])
 
     def test_an_unchanged_branch_picks_nothing(self):
@@ -174,11 +201,11 @@ class WholeRun(unittest.TestCase):
         self.write("ui/style.css", "a { color: red }\n")
         self.write("ui/unread.css", "")
         self.assertEqual(self.run_script(), [
-            "crate\t.\tbin-crate\t--bins", "ui\tui/style.css", "ui\tui/unread.css"])
+            "crate\t.\tbin-crate\t--bins", "ui\tui/style.css", "ui\tui/unread.css", "suites\t0\t2"])
 
     def test_a_path_with_korean_letters_is_read_as_spelled_not_as_git_quotes_it(self):
         self.write("ui/한글.css", "")
-        self.assertEqual(self.run_script(), ["ui\tui/한글.css"])
+        self.assertEqual(self.run_script(), ["ui\tui/한글.css", "suites\t0\t2"])
 
     def test_a_branch_cut_from_local_main_ahead_of_origin_main_does_not_count_the_landing(self):
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
@@ -195,6 +222,27 @@ class WholeRun(unittest.TestCase):
         self.write("crates/bin-crate/src/new.rs", "")
         self.assertEqual(self.run_script(), ["crate\t.\tbin-crate\t--bins", "crate\t.\tlib-crate\t--lib"])
         self.assertEqual(self.run_script("--base", "stack"), ["crate\t.\tbin-crate\t--bins"])
+
+    def test_a_file_only_a_test_target_reads_picks_no_unit_tests(self):
+        # tests/contract.rs reads AGENTS.md; the contracts are an integration target, not the bins' unit tests
+        self.write("AGENTS.md", "a line\n")
+        self.assertEqual(self.run_script(), [])
+
+    def test_the_kind_of_source_that_reads_a_file_picks_the_unit_tests_of_that_kind(self):
+        self.write("data/bin.json", "{}\n")
+        self.assertEqual(self.run_script(), ["crate\t.\tmixed\t--bins"])
+        self.write("data/bin.json", "")
+        self.write("data/lib.json", "{}\n")
+        self.assertEqual(self.run_script(), ["crate\t.\tmixed\t--lib --bins"])
+
+    def test_a_changed_integration_test_picks_no_unit_tests(self):
+        self.write("crates/mixed/tests/contract.rs", "// edited\n")
+        self.assertEqual(self.run_script(), [])
+
+    def test_the_other_cargo_workspaces_are_named_by_the_script_alone(self):
+        self.assertEqual(self.run_script("--workspaces"), [])
+        self.write("zo-ide/Cargo.toml", "[workspace]\n")
+        self.assertEqual(self.run_script("--workspaces"), ["zo-ide"])
 
 
 if __name__ == "__main__":
