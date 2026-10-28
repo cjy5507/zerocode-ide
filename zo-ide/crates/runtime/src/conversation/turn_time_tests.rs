@@ -1,19 +1,22 @@
 //! Where a turn's time goes before its requests leave (t-78938): how often a
-//! turn recalls and puts the recall to the seat's judgment.
+//! turn recalls and puts the recall to the seat's judgment, and what its
+//! timing rows say of the waits in front of each request.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::{
     ApiClient, ApiRequest, AssistantEvent, AsyncApiClient, ConcurrentDispatchFn,
     ConversationRuntime, RuntimeError, StaticToolExecutor, SteeringQueue,
 };
-use crate::message_stream::types::{BlockId, RenderBlock};
+use crate::message_stream::types::{BlockId, RenderBlock, StreamPhase};
 use crate::permission::{PermissionDecision, PermissionError, PermissionPrompter, PermissionRequest};
 use crate::permissions::{PermissionMode, PermissionPolicy};
-use crate::session::{ContentBlock, MessageRole, Session};
+use crate::request_timings::{take_recorded, timing_record, StreamStamps, TimingContext};
+use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 use crate::{MemoryEntry, MemoryHit, MemoryRetriever, TurnProgress};
 
 /// The sync client a runtime is built with; every request here goes out on
@@ -292,4 +295,89 @@ fn words_typed_during_the_turn_are_judged_once_more() {
     assert_eq!(queries.len(), 2, "two queries, each judged once: {queries:#?}");
     assert_eq!(queries[0], "parser bugs: read a.rs");
     assert!(queries[1].contains("now the lexer notes"), "the second query is the steer's: {:?}", queries[1]);
+}
+
+/// The context a row is written under, as the ledger names it.
+fn context() -> TimingContext<'static> {
+    TimingContext {
+        session_id: "session-1",
+        model: None,
+        iteration: 1,
+        request_messages: 2,
+        recorded_at: 1_789_000_000,
+        outcome: "completed",
+        attempt: "session-1@1",
+    }
+}
+
+/// The rows the turns run on this thread since the last look would have
+/// written, as the ledger writes them.
+fn recorded_rows() -> Vec<serde_json::Value> {
+    take_recorded()
+        .iter()
+        .map(|stamps| serde_json::to_value(timing_record(&context(), stamps)).expect("a row"))
+        .collect()
+}
+
+/// A skill judgment that answers as soon as it is asked, with nothing to say.
+struct AnswersAtOnce;
+
+impl crate::skill_rank::SkillSuggestionSeat for AnswersAtOnce {
+    fn suggest(&self, _request: String) -> futures_util::future::BoxFuture<'_, Option<String>> {
+        Box::pin(async { None })
+    }
+
+    fn finish(&self, _turn: &[ConversationMessage]) {}
+}
+
+/// Z6: a row says how long the turn-start judgments held its request, how
+/// long the compaction preflight took, and the whole wait from the turn's
+/// start until the request left — read off stamps given as instants, so
+/// nothing is waited out.
+#[test]
+fn a_row_says_how_long_the_turn_start_judgments_held_its_request() {
+    let ms = Duration::from_millis;
+    let held = super::TURN_START_JUDGMENT_WAIT;
+    let t0 = Instant::now();
+    let judged = t0 + ms(4) + held;
+    let assembling = judged + ms(30);
+    let mut stamps = StreamStamps::begun(assembling);
+    stamps.turn_started = Some(t0);
+    stamps.judge_wait = Some(t0 + ms(4)..judged);
+    stamps.preflight = Some(judged..assembling);
+    stamps.observe_at(&RenderBlock::StreamPhase(StreamPhase::RequestSent { attempt: 1 }), assembling + ms(2));
+    stamps.complete_at(assembling + ms(900));
+
+    let row = serde_json::to_value(timing_record(&context(), &stamps)).expect("a row");
+    let held_ms = u64::try_from(held.as_millis()).expect("a wait in ms");
+    assert_eq!(row["judge_wait_ms"].as_u64(), Some(held_ms), "the judgments' wait is on the row: {row}");
+    assert_eq!(row["preflight_ms"].as_u64(), Some(30), "{row}");
+    assert_eq!(row["assemble_ms"].as_u64(), Some(2), "assembly is measured as it was: {row}");
+    assert_eq!(row["turn_start_ms"].as_u64(), Some(4 + held_ms + 30 + 2), "the turn's start to the send: {row}");
+}
+
+/// Z6: a turn's first request carries the turn-start judgments' wait and
+/// the compaction preflight; the requests after it carry neither, and each
+/// says how long after the turn's start it left.
+#[test]
+fn only_a_turns_first_row_carries_the_judgments_wait_and_the_preflight() {
+    let api = Arc::new(Scripted::new(vec![Some("a.rs"), None]));
+    let mut runtime =
+        runtime_with(api, Arc::new(Store::default()), Arc::new(CountingSeat::default()), SteeringQueue::default());
+    runtime.set_skill_suggestion_seat(Some(Arc::new(AnswersAtOnce)));
+    take_recorded();
+
+    run_turn(&mut runtime, "read a.rs");
+
+    let rows = recorded_rows();
+    assert_eq!(rows.len(), 2, "two requests, two rows: {rows:#?}");
+    let first = &rows[0];
+    let waited = first["judge_wait_ms"].as_u64().expect("the first row says how long the judgments held it");
+    let preflight = first["preflight_ms"].as_u64().expect("the first row says how long the preflight took");
+    let assembled = first["assemble_ms"].as_u64().expect("the first row's assembly");
+    let entered = first["turn_start_ms"].as_u64().expect("the first row's wait from the turn's start");
+    assert!(waited + preflight + assembled <= entered, "the parts of a wait fit inside it: {first}");
+    let second = &rows[1];
+    assert!(second["judge_wait_ms"].is_null() && second["preflight_ms"].is_null(), "{second}");
+    assert!(second["turn_start_ms"].as_u64() >= Some(entered), "{second}");
 }

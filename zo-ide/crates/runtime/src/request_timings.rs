@@ -18,6 +18,7 @@
 //! provider's, so the numbers match what the screen showed.
 
 use std::io::{self, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -32,8 +33,17 @@ const TIMINGS_FILE: &str = "timings.jsonl";
 
 /// The stamps one request collects while its stream is in flight. Monotonic
 /// instants; converted to millisecond waits only when the record is written.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct StreamStamps {
+    /// When the turn this request belongs to began: the runtime took the
+    /// person's words, before the turn-start hooks and judgments.
+    pub turn_started: Option<Instant>,
+    /// When the turn-start judgments began holding this request, and when
+    /// they let it go — the turn's first request only.
+    pub judge_wait: Option<Range<Instant>>,
+    /// When the compaction preflight in front of this request began and
+    /// ended — the turn's first request only.
+    pub preflight: Option<Range<Instant>>,
     /// When the runtime began assembling this request (before recall,
     /// reminders and the wire build).
     pub assemble_started: Option<Instant>,
@@ -177,6 +187,29 @@ pub fn timing_record(context: &TimingContext<'_>, stamps: &StreamStamps) -> Requ
         outcome: context.outcome.to_string(),
         attempt: context.attempt.to_string(),
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The stamps of each request this thread's turns would have written a
+    /// row for. A test runtime arms no durable traces and writes no row, so a
+    /// test reads them back here ([`take_recorded`]).
+    static RECORDED: std::cell::RefCell<Vec<StreamStamps>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keep `stamps` for [`take_recorded`] when the ledger would write a row for
+/// them.
+#[cfg(test)]
+pub(crate) fn note_recorded(stamps: &StreamStamps) {
+    if stamps.left_the_runtime() {
+        RECORDED.with(|recorded| recorded.borrow_mut().push(stamps.clone()));
+    }
+}
+
+/// The stamps this thread's turns recorded since the last call, oldest first.
+#[cfg(test)]
+pub(crate) fn take_recorded() -> Vec<StreamStamps> {
+    RECORDED.with(std::cell::RefCell::take)
 }
 
 /// Where a project's ledger lives.
