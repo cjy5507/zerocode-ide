@@ -27814,19 +27814,18 @@ mod tests {
                 && !fetching.contains("zo login google"),
             "the signed-out sentence no longer names the card that fixes it"
         );
-        // The Code Assist calls present this client honestly: its own
-        // User-Agent, and no Antigravity or VS Code identity anywhere in the
-        // headers or the body the gauge sends.
+        // The Code Assist calls carry the identity zo sends for the same
+        // login (the person's choice in d8760d7ab, after Google answered
+        // ZeroCode's own headers with a 403 on 2026-10-27), and only that
+        // identity: usage_antigravity's
+        // the_gauge_asks_as_the_identity_zo_sends_for_the_same_login reads
+        // zo's gemini_code_assist.rs value for value and turns red when either
+        // side moves. Here the gauge keeps no identity of its own beside it.
         assert!(
-            fetching.contains("concat!(\"zerocode/\", env!(\"CARGO_PKG_VERSION\"))")
-                && !fetching.contains("ANTIGRAVITY_CLIENT_METADATA")
-                && !fetching.contains("ANTIGRAVITY_API_CLIENT")
-                && !fetching.contains("ANTIGRAVITY_VERSION")
-                && !fetching.contains("antigravity/")
-                && !fetching.contains("\"ANTIGRAVITY\"")
-                && !fetching.contains("DARWIN_ARM64")
-                && !fetching.contains("vscode_cloudshelleditor"),
-            "the Code Assist calls still present Antigravity's or VS Code's identity"
+            fetcher.contains("fn the_gauge_asks_as_the_identity_zo_sends_for_the_same_login()")
+                && fetcher.contains("zo-ide/crates/api/src/providers/gemini_code_assist.rs")
+                && !fetching.contains("concat!(\"zerocode/\", env!(\"CARGO_PKG_VERSION\"))"),
+            "the Code Assist calls stopped following zo's identity for the same login"
         );
         for spelled in [
             "command: \"antigravity_usage\",",
