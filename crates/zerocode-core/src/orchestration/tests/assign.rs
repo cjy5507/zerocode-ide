@@ -486,3 +486,35 @@ fn every_agent_of_the_catalog_passes_the_same_moment() {
         "the catalog holds every kind: {pairs} {models_only} {neither}"
     );
 }
+
+/// t-74181: a summons Jev did not judge — switched off, the service
+/// failing, or no answer in time — puts no effort of ours on the command
+/// line: the agent's CLI runs at its own default. Before, the unjudged row
+/// read `max` from a shipped table and a coded ladder. The reply says that
+/// nobody set the effort, why no seat judged, and that the pair has no
+/// measured record here.
+#[test]
+fn a_summons_jev_did_not_judge_runs_at_its_clis_default_effort() {
+    for outcome in [
+        crate::jev::door::Refused::Off.token(),
+        "http_500",
+        "timeout",
+    ] {
+        let unjudged = serde_json::json!({"outcome": outcome, "applied": false});
+        let launcher = Assigned {
+            difficulty: unjudged.clone(),
+            model: unjudged,
+            ..Assigned::answering(recorded(), ("model-b", "high"))
+        };
+        let (reply, _) = summon(&launcher);
+        assert_eq!(reply["model"], "model-a", "{outcome}: {reply}");
+        assert!(reply["effort"].is_null(), "{outcome}: {reply}");
+        let dials = &reply["dials"];
+        assert_eq!(dials["difficultyFrom"], "facts", "{outcome}: {reply}");
+        assert_eq!(dials["unjudged"]["why"], outcome, "{reply}");
+        assert_eq!(dials["modelUnjudged"]["why"], outcome, "{reply}");
+        assert_eq!(dials["why"]["effortRule"], "cli-default", "{outcome}: {reply}");
+        assert_eq!(dials["why"]["pairSamples"], 0, "{outcome}: {reply}");
+        assert_eq!(dials["why"]["evidence"], "unverified", "{outcome}: {reply}");
+    }
+}

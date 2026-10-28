@@ -26523,8 +26523,10 @@ fn summon_difficulty_preserves_pins_and_defaults_and_applies_only_the_omitted_ef
     assert_eq!(difficulty_effort("cursor", "low"), None);
 }
 
+/// t-74181: a named model with its effort left open runs at its CLI's own
+/// default — no difficulty turns into an effort — and the dials say so.
 #[test]
-fn a_named_model_says_the_ladder_set_its_effort() {
+fn a_named_model_with_its_effort_open_runs_at_its_clis_default_and_says_so() {
     struct LowLauncher;
     impl Launcher for LowLauncher {
         fn command_for(
@@ -26561,22 +26563,18 @@ fn a_named_model_says_the_ladder_set_its_effort() {
         serde_json::from_str::<serde_json::Value>(&planned.reply.stdout).unwrap()
     };
 
-    let laddered = launch("");
-    assert_eq!(laddered["effort"], "medium", "the launch is unchanged");
-    assert_eq!(laddered["dials"]["modelFrom"], "request");
+    let open = launch("");
+    assert!(open["effort"].is_null(), "no effort of ours: {open}");
+    assert_eq!(open["dials"]["modelFrom"], "request");
     assert_eq!(
-        laddered["dials"]["why"]["effortRule"], "ladder",
+        open["dials"]["why"]["effortRule"], "cli-default",
         "{}",
-        laddered["dials"]
+        open["dials"]
     );
 
     let written = launch("--effort max");
     assert_eq!(written["effort"], "max");
-    assert_ne!(
-        written["dials"]["why"]["effortRule"], "ladder",
-        "{}",
-        written["dials"]
-    );
+    assert!(written["dials"].is_null(), "no dial was left open: {written}");
 }
 
 #[test]

@@ -305,6 +305,48 @@ mod tests {
         changed["codex"][LADDER[0].0]["effort"] = json!("");
         assert!(validate_profiles(&changed).is_err());
     }
+    /// t-74181 (source contract): no difficulty-to-effort table, in code or
+    /// in data. The ladder carries an option and its meaning only, the
+    /// shipped table names models only, and the code that builds a default
+    /// row names no effort word — what a summons nobody chose an effort for
+    /// runs at is its CLI's own default.
+    #[test]
+    fn no_difficulty_to_effort_table_is_written_in_code_or_data() {
+        let quoted = |body: &str| -> Vec<&str> {
+            crate::capabilities::EFFORT_ORDER
+                .iter()
+                .copied()
+                .filter(|word| body.contains(&format!("\"{word}\"")))
+                .collect()
+        };
+        let own = include_str!("summon_difficulty.rs");
+        let code = own.split("#[cfg(test)]").next().expect("code");
+        let (before, ladder) = code.split_once("pub const LADDER").expect("LADDER");
+        let (ladder, after) = ladder.split_once("];").expect("LADDER ends");
+        assert!(
+            ladder.starts_with(": [(&str, &str); "),
+            "the ladder has a column beside option and meaning:{ladder}"
+        );
+        assert_eq!(quoted(&format!("{before}{after}")), Vec::<&str>::new());
+        let lineup = include_str!("summon_difficulty/lineup.rs");
+        let lineup = lineup.split("#[cfg(test)]").next().expect("code");
+        assert_eq!(quoted(lineup), Vec::<&str>::new(), "lineup.rs");
+        let shipped: Value = serde_json::from_str(DEFAULT_PROFILES).unwrap();
+        for (agent, rows) in shipped.as_object().unwrap() {
+            for (difficulty, row) in rows.as_object().unwrap() {
+                assert!(
+                    row.get("effort").is_none(),
+                    "summon-profiles.json {agent} {difficulty} ships an effort: {row}"
+                );
+            }
+        }
+        let orchestration = include_str!("orchestration.rs");
+        assert!(
+            !orchestration.contains("fn difficulty_effort("),
+            "a difficulty is turned into an effort in code"
+        );
+    }
+
     #[test]
     fn a_written_row_may_leave_a_field_to_the_lineup_but_not_both() {
         let mut table = json!({"codex": {
