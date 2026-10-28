@@ -765,21 +765,37 @@ impl McpServerManager {
             Ok(response) => return Ok(response),
             Err(error) => error,
         };
-        let server_reset = Self::should_reset_server(&error)
-            && self
-                .reset_server_for_error(&route.server_name, &error)
-                .await?;
+        let reset = if Self::should_reset_server(&error) {
+            self.reset_server_for_error(&route.server_name, &error)
+                .await
+        } else {
+            Ok(false)
+        };
+        Err(Self::tool_call_failure(error, reset))
+    }
+
+    /// What a failed `tools/call` comes back as, given how resetting its
+    /// server went: a failure after the request may have reached the server
+    /// says it was not sent again ([`McpServerManagerError::ToolCallNotResent`]).
+    fn tool_call_failure(
+        error: McpServerManagerError,
+        reset: Result<bool, McpServerManagerError>,
+    ) -> McpServerManagerError {
+        let server_reset = match reset {
+            Ok(server_reset) => server_reset,
+            Err(reset_error) => return reset_error,
+        };
         if matches!(
             error,
             McpServerManagerError::Transport { method: "tools/call", .. }
                 | McpServerManagerError::Timeout { method: "tools/call", .. }
         ) {
-            return Err(McpServerManagerError::ToolCallNotResent {
+            return McpServerManagerError::ToolCallNotResent {
                 cause: Box::new(error),
                 server_reset,
-            });
+            };
         }
-        Err(error)
+        error
     }
 
     async fn call_tool_once(
