@@ -59,7 +59,12 @@ Each line is the short form of a paragraph below or in a reference file.
 1. **A verb's text goes in as a file** (`--prompt-file`, `--body-file`,
    `--spec-file`, `--question-file`, `--resolution-file`, `--reason-file`),
    written with a quoted heredoc. No backtick, `$(…)` or `$VAR` inside an inline
-   double-quoted text: the shell runs it before the verb sees a word.
+   double-quoted text: the shell runs it before the verb sees a word. A file
+   argument works only on a v1.1.102 or newer window; an older window takes
+   `--prompt-file` and `--body-file` as unknown arguments and quietly makes an
+   empty worker or an empty letter. To check, look for `--prompt-file` in the
+   `everyVerb` line of `zerocode-orc help`. A retry (the same `--retry-request`)
+   reads the file again, so do not delete the file before the answer has come.
 2. **Every verb that changes anything needs `--retry-request <name>`**, the
    same name on a retry and a new one for a new request.
 3. **Ack a delivery, then wait.** `check --ack <deliveryId>` before the next
@@ -180,14 +185,15 @@ inside a briefing ran that way and took the window's panes down. Write the
 text with a quoted heredoc and name the file:
 
 ```sh
-cat > /tmp/slice-1.md <<'EOF'
+cat > <your scratchpad>/slice-<task-id>.md <<'EOF'
 Any characters at all: backticks, $(not run), $HOME, "quotes", 한글.
 EOF
-zerocode-orc worker-start --agent <name> --task <id> --prompt-file /tmp/slice-1.md --retry-request start-<id>
+zerocode-orc worker-start --agent <name> --task <id> --prompt-file <your scratchpad>/slice-<task-id>.md --retry-request start-<id>
 ```
 
 A text and its file form together are refused, and so is a file that is
-missing, empty, a link or not UTF-8. One plain word inline (`--resolution harvest`,
+missing, empty, a link or not UTF-8. When a verb refuses a text for an unexpanded
+`$(…)` or `$VAR`, use the file argument and send it again. One plain word inline (`--resolution harvest`,
 `--reason quota-wall`) is safe; an inline text with a backtick or `$(` still goes through, with
 a warning line on stderr. Every example below that takes text is written in the
 file form: `--spec-file <file>` stands for a file written like this one.
