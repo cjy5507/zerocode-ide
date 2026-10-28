@@ -44,6 +44,29 @@ publish = false
 lto = "fat"
 codegen-units = 1
 
+# Line tables only, in every dev and test build: a panic and a backtrace keep
+# their file and line, a debugger keeps its line breakpoints and loses local
+# variables. The full default wrote macOS's unpacked debug objects into each
+# target — 19 GiB of one 35.9 GiB gate target on 2026-10-28 — and the gates
+# already build this way (`CARGO_PROFILE_DEV_DEBUG=line-tables-only`). The test
+# profile inherits it. Release builds are their own profile and unchanged.
+[profile.dev]
+debug = "line-tables-only"
+
+# The two libraries a debug build spends its test time inside, built optimised
+# in every dev and test build. Sampled on 2026-10-29 (t-80605) during the
+# orchestration scenarios, which run one at a time and set the shell crate's
+# test wall: the runtime actor opens the authority store for every request and
+# each open re-parses its schema in the bundled SQLite, and every receipt is a
+# SHA-256 — at opt-level 0 the SQLite parser and `sha2::soft` were the hottest
+# frames on the CPU. Optimising them changes no code path, only their speed;
+# libsqlite3-sys built in 1.8 s unoptimised in the same run.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
 [workspace.dependencies]
 local-judgment = { path = "crates/local-judgment" }
 judgment-provider = { path = "crates/judgment-provider" }

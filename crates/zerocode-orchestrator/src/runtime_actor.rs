@@ -3770,7 +3770,7 @@ impl RuntimeState {
          * make a question that runs before EVERY request cost the size of the
          * ledger.
          */
-        let connection = self
+        let mut connection = self
             .store
             .connection()
             .map_err(|_| RuntimeError::StoreUnavailable)?;
@@ -3783,10 +3783,12 @@ impl RuntimeState {
         /* DESCRIBED, not granted. This runs before every request and only
          * ever compares fields; asking for permits here minted one per open
          * row per request and dropped them all — a capability spent on a
-         * question. */
+         * question. On the connection the head row was just read on: the
+         * journal is this store's, and one open per request is the rule,
+         * not two (t-80605). */
         let recoverable = self
             .journal
-            .open_operations(&self.lease)
+            .open_operations_on(&mut connection, &self.lease)
             .map_err(runtime_error)?;
         if recoverable.len() > 1 {
             return Err(RuntimeError::MultipleInFlightEffects);

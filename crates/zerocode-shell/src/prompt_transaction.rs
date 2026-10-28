@@ -2483,20 +2483,38 @@ done
     /// Before the receipt was the witness, a program still booting kept the
     /// words in its composer every time (0/3): the Enter was written and the
     /// delivery called it delivered.
+    ///
+    /// The five shapes run side by side, each on its own terminals, and each
+    /// shape's three restarts one after another: fifteen restarts in a row
+    /// were 62 s of a 413 s suite run, the last test standing (t-80605).
     #[cfg(unix)]
     #[test]
     fn a_restarts_words_are_sent_once_whatever_the_program_is_doing() {
         const RUNS: usize = 3;
         let words = "The window restarted and cut your last turn short.";
-        for (base, takes) in [
-            (8_400, Takes::AtRest),
-            (8_410, Takes::Booting),
-            (8_420, Takes::Late),
-            (8_430, Takes::Busy),
-        ] {
-            let runs: Vec<Restart> = (0..RUNS)
-                .map(|run| restart_at(base + run as TermId, takes, &[words]))
-                .collect();
+        let queued = ["the continuation", "You have 1 orchestration message."];
+        let shapes: [(TermId, Takes, &[&str]); 5] = [
+            (8_400, Takes::AtRest, &[words]),
+            (8_410, Takes::Booting, &[words]),
+            (8_420, Takes::Late, &[words]),
+            (8_430, Takes::Busy, &[words]),
+            (8_440, Takes::Booting, &queued),
+        ];
+        let [single @ .., two_queued] = std::thread::scope(|scope| {
+            let shapes = shapes.map(|(base, takes, sent)| {
+                scope.spawn(move || {
+                    (0..RUNS)
+                        .map(|run| restart_at(base + run as TermId, takes, sent))
+                        .collect::<Vec<Restart>>()
+                })
+            });
+            shapes.map(|shape| {
+                shape
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+        });
+        for ((_, takes, _), runs) in shapes.iter().zip(single) {
             let once = runs.iter().filter(|run| run.sent == [words]).count();
             assert_eq!(
                 once, RUNS,
@@ -2508,20 +2526,16 @@ done
                  {runs:?}"
             );
         }
-        let queued = ["the continuation", "You have 1 orchestration message."];
-        let runs: Vec<Restart> = (0..RUNS)
-            .map(|run| restart_at(8_440 + run as TermId, Takes::Booting, &queued))
-            .collect();
-        let both = runs.iter().filter(|run| run.sent == queued).count();
+        let both = two_queued.iter().filter(|run| run.sent == queued).count();
         assert_eq!(
             both, RUNS,
             "two deliveries on one booting pane went each once, in order, in {both}/{RUNS}: \
-             {runs:?}"
+             {two_queued:?}"
         );
         assert!(
-            runs.iter().all(|run| run.kept_its_word(queued.len())),
+            two_queued.iter().all(|run| run.kept_its_word(queued.len())),
             "a queued delivery was pressed more than once again, or not called delivered: \
-             {runs:?}"
+             {two_queued:?}"
         );
     }
 }

@@ -1148,15 +1148,34 @@ impl EffectJournal {
         &self,
         lease: &AuthorityLease,
     ) -> Result<Vec<OpenOperation>, EffectJournalError> {
+        self.open_operations_on(&mut self.connection()?, lease)
+    }
+
+    /// The same description, read on a connection the caller already opened
+    /// to this journal's store — `verify_authority` reads the head row on one
+    /// just before, and a second open was half of every request's cost
+    /// (t-80605: each open re-parses the schema).
+    pub fn open_operations_on(
+        &self,
+        connection: &mut Connection,
+        lease: &AuthorityLease,
+    ) -> Result<Vec<OpenOperation>, EffectJournalError> {
         Ok(self
-            .open_rows(lease)?
+            .open_rows_on(connection, lease)?
             .iter()
             .map(OpenOperation::from_row)
             .collect())
     }
 
     fn open_rows(&self, lease: &AuthorityLease) -> Result<Vec<OperationRow>, EffectJournalError> {
-        let mut connection = self.connection()?;
+        self.open_rows_on(&mut self.connection()?, lease)
+    }
+
+    fn open_rows_on(
+        &self,
+        connection: &mut Connection,
+        lease: &AuthorityLease,
+    ) -> Result<Vec<OperationRow>, EffectJournalError> {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| EffectJournalError::Database)?;

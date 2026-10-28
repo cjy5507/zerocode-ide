@@ -462,7 +462,13 @@ fn a_door_and_the_ledgers_reseat_bring_one_conversation_back_once_in_either_orde
             *host.during_split.lock().unwrap() = Some(Box::new(move || {
                 *answered.lock().unwrap() = Some(asking.wake(DOOR, "codex", session));
             }));
-            assert_eq!(coordinator_back(&*host, name, OLD_LEADER, NEW_LEADER), 1);
+            // The door asks on this thread, inside the reseat's own wake: its
+            // wait for that wake ends only at its patience.
+            crate::conversation_wake::WAKE_IN_FLIGHT_PATIENCE_HERE
+                .with(|here| here.set(Some(std::time::Duration::from_millis(50))));
+            let reseated = coordinator_back(&*host, name, OLD_LEADER, NEW_LEADER);
+            crate::conversation_wake::WAKE_IN_FLIGHT_PATIENCE_HERE.with(|here| here.set(None));
+            assert_eq!(reseated, 1);
             assert_eq!(
                 *asked.lock().unwrap(),
                 Some(Ok(ConversationWake::standing(0))),
