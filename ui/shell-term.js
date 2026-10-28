@@ -4546,22 +4546,28 @@ function askIsDocked(ask) {
 /* A docked card waits for the person to do something elsewhere, up to ten
  * minutes; a question that must stop the person (another pane's permission)
  * cannot queue behind that, because its agent is stopped for as long. So the
- * modal comes up first and the card goes back to the head of the queue — unless
- * the card's own answer is on its way, which a repaint would double. */
-function dockedGivesWayTo(ask) {
-  return activeAsk !== null && activeAsk.sending !== true && askIsDocked(activeAsk) && !askIsDocked(ask);
+ * queue gives the window to its first modal before anything docked: modals
+ * keep their order among themselves, and a card comes up only when no modal
+ * waits. */
+function modalWaitsBehindDocked() {
+  return activeAsk !== null && activeAsk.sending !== true && askIsDocked(activeAsk)
+    && askQueue.some((queued) => !askIsDocked(queued));
+}
+
+/* The card on screen goes back to the head of the queue, unless its own
+ * answer is on its way, which a repaint would double. */
+function giveWayToWaitingModal() {
+  if (!modalWaitsBehindDocked()) return false;
+  askQueue.unshift(activeAsk);
+  showNextAsk();
+  return true;
 }
 
 function raiseAsk(ask) {
   if (!askKinds.has(ask.kind) || askAlreadyRaised(ask)) return false;
   askQueue.push(ask);
   askKindOf(ask).raised?.(ask);
-  if (activeAsk && dockedGivesWayTo(ask)) {
-    askQueue.pop();
-    askQueue.unshift(ask, activeAsk);
-    showNextAsk();
-    return true;
-  }
+  if (giveWayToWaitingModal()) return true;
   // Behind a question already on screen: the count says so and nothing else
   // moves. A full repaint here would rebuild the buttons an answer in flight
   // was pressed on, which is how one answer becomes two.
@@ -4572,7 +4578,8 @@ function raiseAsk(ask) {
 
 function showNextAsk() {
   const leaving = activeAsk;
-  activeAsk = askQueue.shift() ?? null;
+  const first = askQueue.findIndex((queued) => !askIsDocked(queued));
+  activeAsk = askQueue.splice(Math.max(first, 0), 1)[0] ?? null;
   askLeavesAtOnce = leaving !== null && askKindOf(leaving).instant === true;
   paintAsk();
 }
@@ -4761,6 +4768,9 @@ async function answerAsk(choice) {
       return;
     }
     answered.failure = String(error);
+    // A modal that arrived while this card's answer was on its way has waited
+    // for exactly this; the card comes back, failure and all, after it.
+    if (giveWayToWaitingModal()) return;
     paintAskPart(
       "ask-why",
       t("perm.failed", "응답이 서버에 닿지 못했습니다 — 다시 시도하세요. ({{error}})", {

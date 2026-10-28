@@ -3257,8 +3257,7 @@ mod tests {
         // It also takes down the docked card's marks once the exit is over.
         let ask_painting = block_after(window, "function paintAsk() {");
         assert!(
-            ask_painting.contains("hideModal(askScrim, {")
-                && ask_painting.contains("animated: !askLeavesAtOnce,"),
+            ask_painting.contains("hideModal(askScrim, {\n      animated: !askLeavesAtOnce,"),
             "`askScrim` does not leave through the modal manager's shared exit"
         );
         let tab_picker_exit = block_after(window, "function closeTabCreate(");
