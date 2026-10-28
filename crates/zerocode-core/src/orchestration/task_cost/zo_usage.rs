@@ -18,14 +18,42 @@ pub struct ZoRequestUsage {
     pub ttl: String,
 }
 
+/// What a request journal's reader could not hand over whole (t-79891): a
+/// journal longer than the read limit is read from its end, and a line that
+/// is not a usage row is skipped rather than dropping every row beside it.
+/// Either way the rows read are a part, and the session says so.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadGaps {
+    /// The journal's oldest rows were left unread.
+    pub older_rows_dropped: bool,
+    /// Lines in the part read that were not a usage row.
+    pub skipped_lines: usize,
+}
+
+impl ReadGaps {
+    #[must_use]
+    pub fn is_whole(&self) -> bool {
+        !self.older_rows_dropped && self.skipped_lines == 0
+    }
+}
+
 impl SessionBook {
-    pub fn read_zo_usage(&mut self, session: &str, rows: &[ZoRequestUsage], scanned_at: i64) {
+    pub fn read_zo_usage(
+        &mut self,
+        session: &str,
+        rows: &[ZoRequestUsage],
+        gaps: ReadGaps,
+        scanned_at: i64,
+    ) {
         self.scanned_at.insert(UsageSource::Zo, scanned_at);
-        if rows.is_empty() {
+        if rows.is_empty() && gaps.is_whole() {
             return;
         }
         let mut unique = BTreeMap::new();
-        let mut spend = SessionSpend::default();
+        let mut spend = SessionSpend {
+            gaps,
+            ..SessionSpend::default()
+        };
         let mut total_usd = Some(0.0);
         let mut first = i64::MAX;
         let mut last = i64::MIN;
@@ -66,8 +94,10 @@ impl SessionBook {
         spend.usd = total_usd;
         self.sessions
             .insert((UsageSource::Zo, session.to_owned()), spend);
-        self.bounds
-            .insert((UsageSource::Zo, session.to_owned()), Some((first, last)));
+        self.bounds.insert(
+            (UsageSource::Zo, session.to_owned()),
+            (first <= last).then_some((first, last)),
+        );
     }
 }
 
@@ -109,13 +139,14 @@ mod tests {
             ttl: String::new(),
         };
         let mut book = SessionBook::default();
-        book.read_zo_usage("session", &[row.clone(), row.clone()], 20);
+        let rows = [row.clone(), row.clone()];
+        book.read_zo_usage("session", &rows, ReadGaps::default(), 20);
         let measured = book.spend(UsageSource::Zo, "session").unwrap();
         assert_eq!(measured.counters(), Some([200, 50, 100, 0]));
         assert_eq!(measured.usd, price(&row));
         let mut changed = row.clone();
         changed.output += 1;
-        book.read_zo_usage("session", &[row, changed], 30);
+        book.read_zo_usage("session", &[row, changed], ReadGaps::default(), 30);
         assert!(
             book.spend(UsageSource::Zo, "session")
                 .unwrap()
