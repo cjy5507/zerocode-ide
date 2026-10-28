@@ -35,7 +35,7 @@ const SHOTS = "output/playwright/board-now";
  * 표에 서지 않는다). 데스크 픽스처가 세운 답 위에 덮는다(그 픽스처가 응답 손·보드 열기를 맡는다).
  * `extra`는 과업 수를 늘려 성능을 잰다. `lane`이 "green"이면 레인은 07:31 무렵 초록으로 끝났고
  * 빌드 줄은 비어 있다. A page function: no closure. */
-export function draftBoardOverlay({ now = Date.now(), holds = false, extra = 0, ledger = true, lane = "running" } = {}) {
+export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = false, extra = 0, ledger = true, lane = "running" } = {}) {
   const minute = 60_000;
   const run = "run-desk";
   const goal = (parent, parentTitle) => ({ parent, parent_title: parentTitle });
@@ -84,6 +84,19 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, extra = 0, 
       ...board,
       gate: { id: "gate-702", kind: "asked", worker: null, checkout: null, examined: null,
         options: ["main 기준", "릴리스 기준"], question: "기준 커밋을 main으로 할까요, 지난 릴리스로 할까요?" },
+    }));
+  }
+  // A decision whose asker offered three whole sentences (t-79611): the question must keep its width.
+  if (longHold) {
+    tasks.push(task("t-66700", "예시 설정 기본값 정하기", "gate", {
+      ...board,
+      gate: { id: "gate-703", kind: "asked", worker: null, checkout: null, examined: null,
+        options: [
+          "예시 설정의 기본값은 지금 쓰는 쪽으로 두고, 바꾸는 일은 다음 묶음에서 한꺼번에 하기(되돌리기 쉬움)",
+          "기본값을 새 쪽으로 바로 바꾸되, 예전 값으로 돌아가는 길을 설정 화면에 한 줄로 남겨 두기",
+          "두 값을 모두 보여 주는 선택 칸을 먼저 만들고, 기본값은 사람이 한 번 고른 뒤에 정하기 — 시간이 더 든다",
+        ],
+        question: "예시 설정의 기본값을 어느 쪽으로 정할까요? 아래 세 가지 중에서 골라 주세요." },
     }));
   }
   for (let n = 0; n < extra; n += 1) {
@@ -575,6 +588,52 @@ export async function testBoardNow(browser, origin, ok) {
     ok("the two presses reach gate-resolve as the ledger's answer and the asker's option, nothing invented",
       JSON.stringify(resolved) === JSON.stringify([["gate-701", "harvest", null], ["gate-702", "answer", "릴리스 기준"]]),
       JSON.stringify(resolved));
+
+    /* ---- 긴 선택지 결정 행 (t-79611): 질문과 목표 줄은 읽히는 폭을 지키고, 선택지는 잘리지 않는다 ---- */
+    await draftScene(page, { holds: true, longHold: true });
+    await page.evaluate(() => { boardNowChoice.asksAll = true; paintCoordinatorDesk(document.querySelector("#board-view")); });
+    await mkdir(SHOTS, { recursive: true });
+    for (const width of [1440, 1000, 720]) {
+      await page.setViewportSize({ width, height: 900 });
+      await fullBoard(page);
+      const squeeze = await page.evaluate(() => {
+        const surface = document.querySelector("#board-view .task-board-surface");
+        const read = (key) => {
+          const row = document.querySelector(`#board-view [data-ask="hold:run-desk/${key}"]`);
+          const rect = row.getBoundingClientRect();
+          const title = row.querySelector(".board-ask-title");
+          const lineHeight = parseFloat(getComputedStyle(title).lineHeight);
+          const buttons = [...row.querySelectorAll(".board-ask-acts > button:not([hidden])")];
+          return {
+            row: Math.round(rect.width),
+            titleWidth: Math.round(title.getBoundingClientRect().width),
+            titleLines: Math.round(title.getBoundingClientRect().height / lineHeight),
+            metaWidth: Math.round(row.querySelector(".board-ask-meta").getBoundingClientRect().width),
+            sidewaysRow: row.scrollWidth > row.clientWidth + 1,
+            clipped: buttons.filter((one) => one.scrollWidth > one.clientWidth + 1).length,
+            outside: buttons.filter((one) => one.getBoundingClientRect().right > rect.right + 1).length,
+            tops: [...new Set(buttons.map((one) => Math.round(one.getBoundingClientRect().top)))].length,
+            words: buttons.map((one) => one.textContent),
+            asked: Math.round(row.querySelector(".board-ask-acts").getBoundingClientRect().width),
+          };
+        };
+        return { long: read("gate-703"), short: read("gate-702"), sideways: surface.scrollWidth > surface.clientWidth + 1 };
+      });
+      ok(`at ${width}px a decision with three long answers keeps its question and goal line readable (at most three lines, over a third of the row)`,
+        squeeze.long.titleLines <= 3 && squeeze.long.titleWidth * 3 >= squeeze.long.row
+          && squeeze.long.metaWidth * 3 >= squeeze.long.row, JSON.stringify(squeeze.long));
+      ok(`at ${width}px the long answers are read whole and nothing runs sideways`,
+        squeeze.long.clipped === 0 && squeeze.long.outside === 0 && !squeeze.long.sidewaysRow && !squeeze.sideways
+          && squeeze.long.words.length === 4 && squeeze.long.words[0].startsWith("예시 설정의 기본값은") && squeeze.long.words[3] === "직접 답하기",
+        JSON.stringify(squeeze));
+      ok(`at ${width}px the short answers stay on one line beside their question`,
+        squeeze.short.clipped === 0 && (width < 1000 || (squeeze.short.titleLines === 1 && squeeze.short.tops === 1)),
+        JSON.stringify(squeeze.short));
+      await page.locator('#board-view [data-ask="hold:run-desk/gate-703"]').screenshot({ path: `${SHOTS}/hold-long-${width}.png` });
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await draftScene(page, { holds: true });
+    await page.evaluate(() => { boardNowChoice.asksAll = true; paintCoordinatorDesk(document.querySelector("#board-view")); });
 
     /* ---- 탭: 워커는 워커 탭에만, 목록은 기록 탭에 ---- */
     await page.click('#board-view [data-board-tab-button="workers"]');
