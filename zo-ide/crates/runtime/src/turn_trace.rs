@@ -43,9 +43,9 @@ use crate::session::ContentBlock;
 const TURNS_DIR: &str = "turns";
 
 #[cfg(test)]
-const MAX_TURN_LOG_LINES: usize = 4;
+pub(crate) const MAX_TURN_LOG_LINES: usize = 4;
 #[cfg(not(test))]
-const MAX_TURN_LOG_LINES: usize = 20_000;
+pub(crate) const MAX_TURN_LOG_LINES: usize = 20_000;
 
 #[cfg(test)]
 const MAX_TURN_LOG_FILES: usize = 4;

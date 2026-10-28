@@ -707,4 +707,30 @@ mod tests {
             .unwrap()
             .is_empty());
     }
+
+    /// P3-2 (t-80327): the ledger keeps its newest rows — as many as the
+    /// per-turn trace keeps lines, at most twice that between two cuts — so
+    /// a project's file, which its readers take whole, stops growing.
+    #[test]
+    fn the_ledger_keeps_its_newest_rows_within_the_trace_line_cap() {
+        let cap = crate::turn_trace::MAX_TURN_LOG_LINES;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("request-timings").join("timings.jsonl");
+        let mut stamps = StreamStamps::begun(Instant::now());
+        stamps.observe(&sent(1));
+        stamps.complete();
+        let rows = 3 * cap;
+        for written in 0..rows {
+            let record = RequestTimingRecord {
+                recorded_at: u64::try_from(written).unwrap(),
+                ..timing_record(&context("completed"), &stamps)
+            };
+            record_request_timing_at_path(&path, &record).unwrap();
+        }
+        let kept: Vec<u64> = read_request_timings_at_path(&path).unwrap().iter().map(|row| row.recorded_at).collect();
+        assert!(kept.len() <= 2 * cap, "{} rows kept of {rows}, cap {cap}: {kept:?}", kept.len());
+        let newest = u64::try_from(rows).unwrap();
+        let expected: Vec<u64> = (newest - u64::try_from(kept.len()).unwrap()..newest).collect();
+        assert_eq!(kept, expected, "the newest rows, in the order written");
+    }
 }
