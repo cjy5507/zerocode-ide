@@ -423,8 +423,8 @@ pub fn record_request_timing(cwd: &Path, record: &RequestTimingRecord) -> io::Re
 }
 
 /// Append one record at an explicit path — one serialized line, one write —
-/// and cut the ledger back to its newest [`RETAINED_ROWS`] when a cut is due
-/// ([`cut_is_due`]). The cut is best effort, as the per-turn trace's: the row
+/// and cut the ledger back to its newest `RETAINED_ROWS` when a cut is due
+/// (`cut_is_due`). The cut is best effort, as the per-turn trace's: the row
 /// is already written, and a ledger left long is no reason to fail.
 pub fn record_request_timing_at_path(path: &Path, record: &RequestTimingRecord) -> io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -461,7 +461,7 @@ pub fn read_request_timings(cwd: &Path) -> io::Result<Vec<RequestTimingRecord>> 
 }
 
 /// Read a ledger at an explicit path; a missing file is an empty ledger. A
-/// ledger written by this module holds at most twice [`RETAINED_ROWS`] rows.
+/// ledger written by this module holds at most twice `RETAINED_ROWS` rows.
 pub fn read_request_timings_at_path(path: &Path) -> io::Result<Vec<RequestTimingRecord>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
