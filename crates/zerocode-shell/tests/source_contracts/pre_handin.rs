@@ -75,7 +75,7 @@ fn the_crates_under_test_are_picked_from_the_diff_by_the_script() {
 
 /// Stage two never runs the whole window gate: it is 23 minutes on a quiet
 /// machine, and every worker doing it would starve the build line. Every
-/// line that starts `ui/tests/window.mjs` names its suites.
+/// line that runs `ui/tests/window.mjs` names its suites.
 #[test]
 fn stage_two_never_runs_the_whole_window_gate() {
     let body = body();

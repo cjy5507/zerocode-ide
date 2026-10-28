@@ -61,6 +61,7 @@ tools-test:
     t tools/release/tests/test_coord_receipt.py; \
     t tools/release/tests/test_prebatch.py; \
     t tools/release/tests/test_workspace_units.py; \
+    t tools/release/tests/test_changed_crates.py; \
     macos "win-check cross-compiles from a Mac (cargo-xwin, Homebrew llvm)" tools/release/tests/test_win_check.py; \
     t tools/release/tests/test_bump.py; \
     t tools/release/tests/test_pii_scan.py; \
@@ -244,6 +245,67 @@ doc:
 
 fmt:
     cargo fmt --all
+
+# What a worker runs before `worker_done`, and writes the `rc=` line of into the
+# hand-in. On 2026-10-28 four gate reds cost the lane 1 h 43 m, and each was
+# caught beforehand by a check of 4 s to 23 min. Every stage runs even after one
+# fails (as `verify-every-recipe.sh` does), then one line says each stage's exit
+# code and the recipe exits 1 if any was not 0.
+#   Stage 1, always: the formatter of both Cargo workspaces, the private-value
+#   gate, the window's source contracts, and the unit tests of each crate the
+#   branch changed (`tools/release/changed_crates.py` picks them from Cargo's
+#   package list and the diff against origin/main — no list here).
+#   Stage 2, only when ui/ changed: the window suites you name, with
+#   `just pre-handin suites=a,b` (names or patterns, as WINDOW_SUITES takes
+#   them). The whole window gate is 23 min on a quiet machine, so a worker
+#   never runs it: without `suites` the stage stops, says which ui files
+#   changed, and the recipe exits 1.
+# A stage that stopped is `2`; one that did not apply is `-`.
+pre-handin suites='':
+    #!/usr/bin/env bash
+    set -u
+    suites={{quote(suites)}}
+    names=(); codes=(); secs=()
+    note() { names+=("$1"); codes+=("$2"); secs+=("${3:-0}"); }
+    step() {  # step <name> <command…>: run it and note its exit code and seconds
+        local name=$1 started=$SECONDS code; shift
+        echo "== pre-handin: $name" >&2
+        "$@"; code=$?
+        note "$name" "$code" "$((SECONDS - started))"
+    }
+    step fmt cargo fmt --all -- --check
+    step fmt-zo-ide bash -c 'cd zo-ide && cargo fmt --all -- --check'
+    step pii just pii-check
+    step contracts cargo test -p zerocode-shell --test source_contracts
+    picked=$(python3 tools/release/changed_crates.py); pick=$?
+    note pick "$pick"
+    if [ "$pick" -eq 0 ]; then
+        while IFS=$'\t' read -r kind workspace package arguments; do
+            [ "$kind" = crate ] || continue
+            step "unit:$package" bash -c 'cd "$1" && cargo test -p "$2" $3' _ "$workspace" "$package" "$arguments"
+        done <<< "$picked"
+        ui=$(printf '%s\n' "$picked" | awk -F'\t' '$1 == "ui" { print $2 }')
+    else
+        ui=
+    fi
+    if [ -z "$ui" ]; then
+        note window -
+    elif [ -n "$suites" ]; then
+        step window env WINDOW_SUITES="$suites" node ui/tests/window.mjs
+    else
+        echo "pre-handin: ui changed ($(echo "$ui" | wc -l | tr -d ' ') files, first: $(echo "$ui" | head -1)) — name the window suites to run:" >&2
+        echo "  just pre-handin suites=<a,b>   (names or patterns; the suite list is in ui/tests/window.mjs)" >&2
+        echo "  named like a changed ui/tests file: $(printf '%s\n' "$picked" | awk -F'\t' '$1 == "suite" { printf "%s%s", sep, $2; sep = "," }')" >&2
+        note window 2
+    fi
+    line=; rc=0
+    for at in "${!names[@]}"; do
+        line="$line ${names[$at]}=${codes[$at]}"
+        [ "${codes[$at]}" = - ] || line="$line(${secs[$at]}s)"
+        case ${codes[$at]} in 0|-) ;; *) rc=1 ;; esac
+    done
+    echo "pre-handin:$line rc=$rc"
+    exit "$rc"
 
 fmt-check:
     cargo fmt --all --check
