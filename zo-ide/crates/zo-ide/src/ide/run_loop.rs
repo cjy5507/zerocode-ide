@@ -1414,6 +1414,8 @@ mod tests {
     /// arguments — and the one line otherwise (adversarial review A, Z12).
     #[test]
     fn an_unlisted_word_that_names_a_prompt_command_is_a_turn() {
+        let _lock = crate::test_env_lock();
+        let _home = crate::support::IsolatedHome::new();
         let folder = tempfile::tempdir().expect("a working folder");
         let commands = folder.path().join(".zo").join("commands");
         std::fs::create_dir_all(&commands).expect("the command folder");
@@ -1443,17 +1445,12 @@ mod tests {
     /// the file, and each `!` line with its exit code.
     #[test]
     fn a_prompt_command_in_the_pipe_prints_what_it_ran_before_its_turn() {
-        use crate::support::EnvVarGuard;
         let _lock = crate::test_env_lock();
+        let _home = crate::support::IsolatedHome::new();
         let root = tempfile::tempdir().expect("a test root");
-        let zo_home = root.path().join("zo-home");
         let folder = root.path().join("project");
         let commands = folder.join(".zo").join("commands");
-        std::fs::create_dir_all(&zo_home).expect("zo home");
         std::fs::create_dir_all(&commands).expect("the command folder");
-        let _home = EnvVarGuard::set("HOME", root.path().to_str());
-        let _zo_home = EnvVarGuard::set("ZO_CONFIG_HOME", zo_home.to_str());
-        let _no_zo_home = EnvVarGuard::set("ZO_HOME", None);
         std::fs::write(commands.join("probe.md"), "---\nallowed-tools: Bash\n---\n!echo hi\nDone.\n")
             .expect("the prompt command");
         let mut written = Vec::new();

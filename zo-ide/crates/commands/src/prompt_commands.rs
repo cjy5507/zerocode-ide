@@ -852,7 +852,7 @@ mod tests {
         )
         .expect("write command");
 
-        let commands = discover_prompt_commands(&cwd);
+        let commands = discover_with_home(&cwd, &root.join("home"));
         let command = find_prompt_command(&commands, "git/review").expect("command discovered");
 
         assert_eq!(command.description.as_deref(), Some("Review changes"));
@@ -881,7 +881,7 @@ mod tests {
         )
         .expect("write nested command");
 
-        let commands = discover_prompt_commands(&cwd);
+        let commands = discover_with_home(&cwd, &root.join("home"));
         let command = find_prompt_command(&commands, "plan").expect("command discovered");
 
         assert_eq!(command.body, "nested");
@@ -1097,7 +1097,6 @@ mod tests {
     /// already types.
     #[test]
     fn a_zo_home_command_wins_the_name_a_repository_file_also_has() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = temp_dir("home-wins");
         let zo_home = root.join("home").join(".zo");
         let cwd = root.join("project");
@@ -1106,18 +1105,7 @@ mod tests {
         fs::write(zo_home.join("commands").join("plan.md"), "home").expect("personal command");
         fs::write(cwd.join(".zo").join("commands").join("plan.md"), "repo").expect("repo command");
 
-        let saved = ["HOME", "ZO_CONFIG_HOME", "ZO_HOME"].map(|key| (key, std::env::var_os(key)));
-        std::env::set_var("HOME", root.join("home"));
-        std::env::set_var("ZO_CONFIG_HOME", &zo_home);
-        std::env::remove_var("ZO_HOME");
-        let commands = discover_prompt_commands(&cwd);
-        for (key, value) in saved {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-
+        let commands = discover_with_home(&cwd, &root.join("home"));
         let command = find_prompt_command(&commands, "plan").expect("command discovered");
         assert_eq!(command.body, "home");
         assert_eq!(command.scope, PromptCommandScope::ZoHome);
@@ -1126,7 +1114,6 @@ mod tests {
 
     #[test]
     fn discovers_personal_commands_in_home() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = temp_dir("home");
         let personal = home.join(".zo").join("commands");
         fs::create_dir_all(&personal).expect("personal commands dir");
@@ -1136,14 +1123,7 @@ mod tests {
         let cwd = temp_dir("project");
         fs::create_dir_all(&cwd).expect("project dir");
 
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", &home);
-        let commands = discover_prompt_commands(&cwd);
-        match previous_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-
+        let commands = discover_with_home(&cwd, &home);
         let command = find_prompt_command(&commands, "greet").expect("personal command discovered");
         assert_eq!(command.body, "Hello from home.");
 
@@ -1165,7 +1145,7 @@ mod tests {
             .expect("write non-Zo command");
         }
 
-        let commands = discover_prompt_commands(&cwd);
+        let commands = discover_with_home(&cwd, &root.join("home"));
         assert!(find_prompt_command(&commands, "ignored-.other-tool").is_none());
         assert!(find_prompt_command(&commands, "ignored-.codex").is_none());
 
@@ -1174,4 +1154,24 @@ mod tests {
 
     /// Serializes the tests that mutate `HOME` (process-global state).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// [`discover_prompt_commands`] with `home` as the person's home and zo's
+    /// home in it (`<home>/.zo`): the person's own commands come first and
+    /// keep their names, so a test that let the real home in would answer
+    /// with whatever that home holds.
+    fn discover_with_home(cwd: &Path, home: &Path) -> Vec<PromptCommandDef> {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = ["HOME", "ZO_CONFIG_HOME", "ZO_HOME"].map(|key| (key, std::env::var_os(key)));
+        std::env::set_var("HOME", home);
+        std::env::set_var("ZO_CONFIG_HOME", home.join(".zo"));
+        std::env::remove_var("ZO_HOME");
+        let commands = discover_prompt_commands(cwd);
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        commands
+    }
 }

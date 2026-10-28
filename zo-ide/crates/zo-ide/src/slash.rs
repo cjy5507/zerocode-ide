@@ -320,6 +320,8 @@ mod tests {
     /// so neither the person's home nor this checkout decides the answer.
     #[test]
     fn a_prompt_command_expands_by_its_name_from_the_working_folder() {
+        let _lock = crate::test_env_lock();
+        let _home = crate::support::IsolatedHome::new();
         let folder = tempfile::tempdir().expect("a working folder");
         let commands = folder.path().join(".zo").join("commands");
         std::fs::create_dir_all(&commands).expect("the command folder");
@@ -346,17 +348,14 @@ mod tests {
     /// trust every folder, in a zo home of the test's own.
     #[test]
     fn a_prompt_command_runs_no_bang_line_in_read_only_mode() {
-        use crate::support::EnvVarGuard;
         use core_types::PermissionMode;
         let _lock = crate::test_env_lock();
-        let zo_home = tempfile::tempdir().expect("a zo home");
+        let home = crate::support::IsolatedHome::new();
         std::fs::write(
-            zo_home.path().join(crate::preferences::PREFERENCES_FILE_NAME),
+            home.zo_home.join(crate::preferences::PREFERENCES_FILE_NAME),
             r#"{"workspaceTrust":"always-full"}"#,
         )
         .expect("settings that trust every folder");
-        let _zo_home = EnvVarGuard::set("ZO_CONFIG_HOME", zo_home.path().to_str());
-        let _no_zo_home = EnvVarGuard::set("ZO_HOME", None);
         let folder = tempfile::tempdir().expect("a working folder");
         let commands = folder.path().join(".zo").join("commands");
         std::fs::create_dir_all(&commands).expect("the command folder");
@@ -385,20 +384,15 @@ mod tests {
     /// that stood in for it.
     #[test]
     fn an_expansion_shows_its_file_what_it_hides_and_each_bang_line() {
-        use crate::support::EnvVarGuard;
         use core_types::PermissionMode;
         let _lock = crate::test_env_lock();
+        let home = crate::support::IsolatedHome::new();
         let root = tempfile::tempdir().expect("a test root");
-        let home = root.path().join("home");
-        let zo_home = home.join(".zo");
         let project = root.path().join("project");
-        let personal = zo_home.join("commands");
+        let personal = home.zo_home.join("commands");
         let repo = project.join(".zo").join("commands");
         std::fs::create_dir_all(&personal).expect("personal commands");
         std::fs::create_dir_all(&repo).expect("repo commands");
-        let _home = EnvVarGuard::set("HOME", home.to_str());
-        let _zo_home = EnvVarGuard::set("ZO_CONFIG_HOME", zo_home.to_str());
-        let _no_zo_home = EnvVarGuard::set("ZO_HOME", None);
         std::fs::write(
             personal.join("probe.md"),
             "---\nallowed-tools: Bash\n---\n!echo hi\n!false\nDone.\n",

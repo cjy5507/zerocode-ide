@@ -9925,18 +9925,14 @@ mod footer_key_tests {
     /// moment it expands, before its turn waits in the queue.
     #[test]
     fn a_prompt_command_typed_mid_turn_shows_its_bang_lines_before_it_queues() {
-        use crate::support::EnvVarGuard;
         let _lock = crate::test_env_lock();
+        let home = crate::support::IsolatedHome::new();
         let root = tempfile::tempdir().expect("a test root");
-        let zo_home = root.path().join("zo-home");
         let project = root.path().join("project");
-        std::fs::create_dir_all(zo_home.join("commands")).expect("zo home");
+        std::fs::create_dir_all(home.zo_home.join("commands")).expect("zo home");
         std::fs::create_dir_all(&project).expect("project");
-        let _home = EnvVarGuard::set("HOME", root.path().to_str());
-        let _zo_home = EnvVarGuard::set("ZO_CONFIG_HOME", zo_home.to_str());
-        let _no_zo_home = EnvVarGuard::set("ZO_HOME", None);
         std::fs::write(
-            zo_home.join("commands").join("probe.md"),
+            home.zo_home.join("commands").join("probe.md"),
             "---\nallowed-tools: Bash\n---\n!echo hi\nDone.\n",
         )
         .expect("the person's command");
