@@ -1047,7 +1047,7 @@ async function pressPaneEffort(chip, run, said, rung) {
   if (said.rewritesCache) {
     const menu = composerMenuNode();
     menu.classList.add("composer-effort-menu");
-    composerMenuSection(menu, t("composer.effort.confirmHead", "{{from}} → {{to}}", { from: effortWords(said), to: rung }));
+    composerMenuSection(menu, t("composer.effort.confirmHead", "노력 {{from}} → {{to}}", { from: effortWords(said), to: rung }));
     composerMenuNote(menu, effortCacheWords(run), "cost");
     composerMenuItem(menu, t("composer.effort.confirm", "바꾸기 (이 세션만)"), "", () => void movePaneEffort(run, rung));
     composerMenuItem(menu, t("composer.effort.cancel", "그대로 두기"), "", () => chip.focus());
