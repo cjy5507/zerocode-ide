@@ -1958,16 +1958,22 @@ fn manager_times_out_slow_tool_calls() {
             .expect_err("slow tool call should time out");
 
         match error {
-            McpServerManagerError::Timeout {
-                server_name,
-                method,
-                timeout_ms,
-            } => {
-                assert_eq!(server_name, "slow");
-                assert_eq!(method, "tools/call");
-                assert_eq!(timeout_ms, 25);
-            }
-            other => panic!("expected timeout error, got {other:?}"),
+            McpServerManagerError::ToolCallNotResent {
+                cause,
+                server_reset: true,
+            } => match *cause {
+                McpServerManagerError::Timeout {
+                    server_name,
+                    method,
+                    timeout_ms,
+                } => {
+                    assert_eq!(server_name, "slow");
+                    assert_eq!(method, "tools/call");
+                    assert_eq!(timeout_ms, 25);
+                }
+                other => panic!("expected timeout cause, got {other:?}"),
+            },
+            other => panic!("expected a timeout that was not sent again, got {other:?}"),
         }
 
         manager.shutdown().await.expect("shutdown");
@@ -2077,11 +2083,20 @@ fn given_child_exits_after_discovery_when_calling_twice_then_second_call_succeed
             .await
         {
             Ok(response) => response,
-            Err(McpServerManagerError::Transport {
-                server_name,
-                method,
-                source,
+            // The child can still be exiting when the call goes out; the
+            // dropped call is then reset and handed back, never sent again.
+            Err(McpServerManagerError::ToolCallNotResent {
+                cause,
+                server_reset: true,
             }) => {
+                let (server_name, method, source) = match *cause {
+                    McpServerManagerError::Transport {
+                        server_name,
+                        method,
+                        source,
+                    } => (server_name, method, source),
+                    other => panic!("expected a transport cause, got {other:?}"),
+                };
                 assert_eq!(server_name, "alpha");
                 assert_eq!(method, "tools/call");
                 assert!(matches!(

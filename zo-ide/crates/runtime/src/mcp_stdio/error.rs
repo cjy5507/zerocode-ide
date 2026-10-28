@@ -38,6 +38,15 @@ pub enum McpServerManagerError {
         method: &'static str,
         timeout_ms: u64,
     },
+    /// A `tools/call` that failed after its request may have reached the
+    /// server (`cause` is the timeout or transport failure). A tool call need
+    /// not be idempotent, so the manager does not send it again;
+    /// `server_reset` says whether it reset the server so the next call
+    /// starts it fresh, or left a live one running.
+    ToolCallNotResent {
+        cause: Box<McpServerManagerError>,
+        server_reset: bool,
+    },
     DuplicateToolRoute {
         qualified_name: String,
         existing_server: String,
@@ -90,6 +99,20 @@ impl std::fmt::Display for McpServerManagerError {
                 f,
                 "MCP server `{server_name}` timed out after {timeout_ms} ms while handling {method}"
             ),
+            Self::ToolCallNotResent {
+                cause,
+                server_reset,
+            } => {
+                let server = if *server_reset {
+                    "the server was reset and starts again on the next call"
+                } else {
+                    "the server was left running"
+                };
+                write!(
+                    f,
+                    "{cause}; the call was not sent again because the tool may already have run; {server}"
+                )
+            }
             Self::DuplicateToolRoute {
                 qualified_name,
                 existing_server,
@@ -113,6 +136,7 @@ impl std::error::Error for McpServerManagerError {
         match self {
             Self::Io(error) => Some(error),
             Self::Transport { source, .. } => Some(source),
+            Self::ToolCallNotResent { cause, .. } => Some(cause.as_ref()),
             Self::JsonRpc { .. }
             | Self::InvalidResponse { .. }
             | Self::Timeout { .. }
@@ -137,6 +161,7 @@ impl McpServerManagerError {
             | Self::JsonRpc { method, .. }
             | Self::InvalidResponse { method, .. }
             | Self::Timeout { method, .. } => lifecycle_phase_for_method(method),
+            Self::ToolCallNotResent { cause, .. } => cause.lifecycle_phase(),
             Self::DuplicateToolRoute { .. } | Self::UnknownTool { .. } => {
                 McpLifecyclePhase::ToolDiscovery
             }
@@ -145,6 +170,9 @@ impl McpServerManagerError {
     }
 
     pub(super) fn recoverable(&self) -> bool {
+        if let Self::ToolCallNotResent { cause, .. } = self {
+            return cause.recoverable();
+        }
         !matches!(
             self.lifecycle_phase(),
             McpLifecyclePhase::InitializeHandshake
@@ -204,6 +232,15 @@ impl McpServerManagerError {
                 ("method".to_string(), (*method).to_string()),
                 ("timeout_ms".to_string(), timeout_ms.to_string()),
             ]),
+            Self::ToolCallNotResent {
+                cause,
+                server_reset,
+            } => {
+                let mut context = cause.error_context();
+                context.insert("resent".to_string(), "false".to_string());
+                context.insert("server_reset".to_string(), server_reset.to_string());
+                context
+            }
             Self::DuplicateToolRoute {
                 qualified_name,
                 existing_server,
