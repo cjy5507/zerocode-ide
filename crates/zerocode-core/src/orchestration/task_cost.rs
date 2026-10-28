@@ -133,7 +133,8 @@ impl SessionSpend {
         ];
         if self.invalid_usage
             || !self.gaps.is_whole()
-            || self.usd.is_some_and(|usd| !usd.is_finite() || usd < 0.0) {
+            || self.usd.is_some_and(|usd| !usd.is_finite() || usd < 0.0)
+        {
             return None;
         }
         token_sum(counters).map(|_| counters)

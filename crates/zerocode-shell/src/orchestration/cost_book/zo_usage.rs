@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 
 use zerocode_core::orchestration::Ledger;
 use zerocode_core::orchestration::task_cost::{
@@ -46,7 +46,8 @@ pub(super) fn read(ledger: &Ledger, sessions: &mut SessionBook, now_ms: i64) {
     }
 }
 
-/// The most bytes of one session's request journal read at once.
+/// The most bytes of one session's request journal read at once. A longer
+/// journal is read from its end, never in full, and says so ([`ReadGaps`]).
 const READ_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// The rows read from one session's request journal and what was left out.
@@ -59,26 +60,46 @@ fn read_rows(file: &std::path::Path) -> Option<Journal> {
     read_rows_within(file, READ_LIMIT)
 }
 
+/// The newest rows in the last `cap` bytes of the journal. A line that is not
+/// a usage row is skipped and counted, not a reason to drop the rows beside it.
 fn read_rows_within(file: &std::path::Path, cap: u64) -> Option<Journal> {
-    let file = crate::durable_file::open_plain_file(file).ok()?;
-    if file.metadata().ok()?.len() > cap {
-        return None;
+    let mut file = crate::durable_file::open_plain_file(file).ok()?;
+    let length = file.metadata().ok()?.len();
+    let older_rows_dropped = length > cap;
+    if older_rows_dropped {
+        file.seek(SeekFrom::Start(length - cap)).ok()?;
     }
-    let mut contents = String::new();
-    file.take(cap + 1).read_to_string(&mut contents).ok()?;
-    if contents.len() as u64 > cap {
-        return None;
+    let mut window = Vec::new();
+    file.take(cap).read_to_end(&mut window).ok()?;
+    let mut text = window.as_slice();
+    if older_rows_dropped {
+        // The window starts inside a row: its first piece is not one.
+        text = text
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(&[][..], |end| &text[end + 1..]);
     }
-    let rows = contents
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str)
-        .collect::<Result<_, _>>()
-        .ok()?;
-    Some(Journal {
-        rows,
-        gaps: ReadGaps::default(),
-    })
+    let mut journal = Journal {
+        rows: Vec::new(),
+        gaps: ReadGaps {
+            older_rows_dropped,
+            skipped_lines: 0,
+        },
+    };
+    let mut lines = text.split(|byte| *byte == b'\n').peekable();
+    while let Some(line) = lines.next() {
+        if line.trim_ascii().is_empty() {
+            continue;
+        }
+        match serde_json::from_slice(line) {
+            Ok(row) => journal.rows.push(row),
+            // The last line with no newline after it is a row still being
+            // written, not a line that is wrong.
+            Err(_) if lines.peek().is_none() => {}
+            Err(_) => journal.gaps.skipped_lines += 1,
+        }
+    }
+    Some(journal)
 }
 
 #[cfg(test)]
