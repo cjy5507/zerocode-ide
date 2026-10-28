@@ -48,6 +48,13 @@ const LINE_ARGS_MAX: usize = 80;
 /// are gone or the steps run out: 20 × 100 ms = 2 s for the whole call.
 const SETTLE_STEPS: u32 = 20;
 const SETTLE_STEP_MS: u64 = 100;
+/// No settle read starts once this much of the wait has passed (r3 P2-1).
+/// The window answers a coordinator within `zerocode_hookd::TEAM_DEADLINE`
+/// (10 s) and stops each settle `ps` at 2 s, so a machine whose `ps` takes
+/// all of it would spend 21 × 2 s here; with no read after 3 s the wait ends
+/// by 5 s. A pid still standing then is said still running — its TERM went
+/// once, and a retry under the same request name replays this answer.
+const SETTLE_WALL_MS: u64 = 3_000;
 
 /// One process-table row as this verb reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -627,15 +634,17 @@ pub fn end(
 /// the window's 10 s answer. One read pairs a start with a command line of
 /// the same row, and a pid handed to another process between the two can
 /// only fail its mark — which is gone, as it should be. A step whose read
-/// failed proves nothing and leaves every pid as it was.
+/// failed proves nothing and leaves every pid as it was, and no step reads
+/// once [`SETTLE_WALL_MS`] has passed, however slow the reads were.
 fn settle(ended: &mut [Ended], signals: &dyn Signals) {
+    let began = signals.now_ms();
     for step in 0..=SETTLE_STEPS {
         let waiting: Vec<u32> = ended
             .iter()
             .filter(|one| one.outcome == (Outcome::Signaled { gone: false }))
             .map(|one| one.target.pid)
             .collect();
-        if waiting.is_empty() {
+        if waiting.is_empty() || signals.now_ms().saturating_sub(began) >= SETTLE_WALL_MS {
             return;
         }
         if let Some(now) = signals.reread_many(&waiting) {
