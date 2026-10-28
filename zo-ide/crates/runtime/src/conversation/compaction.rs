@@ -939,9 +939,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     ///
     /// The provider's own count of the last answered request, plus the local
     /// estimate of that answer and of what the transcript gained after it
-    /// ([`Self::provider_anchored_context_tokens`]). Before any answer since the
-    /// last compaction, the larger of the provider's latest count and the
-    /// local estimate.
+    /// (`provider_anchored_context_tokens`). Before any answer since the last
+    /// compaction, or when the latest answer's usage counts no tokens, the
+    /// larger of the provider's latest count and the local estimate.
     ///
     /// Not the larger of the two once an answer is on record (t-78937). The
     /// local estimate counts every thinking block the transcript keeps, its
