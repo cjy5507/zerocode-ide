@@ -126,7 +126,8 @@ async function redesignHead(browser, origin, ok) {
         wantState: t("worker.live", "실행 중"),
         clock: words(head?.querySelector(".chat-run .worker-elapsed")),
         total: words(head?.querySelector(".chat-tally .chat-tally-total")),
-        kinds: [...(head?.querySelectorAll(".chat-tally .chat-tally-kind") ?? [])].map(words),
+        kinds: head?.querySelector(".chat-tally")?.dataset.tip ?? "",
+        parts: head?.querySelector(".chat-tally")?.childElementCount ?? 0,
         failed: words(head?.querySelector(".chat-tally .chat-tally-failed")),
         want: {
           total: t("worker.tallyTotal", "도구 {{n}}", { n: 9 }),
@@ -134,7 +135,7 @@ async function redesignHead(browser, origin, ok) {
             `${t("worker.familyWeb", "웹")} 2`,
             `${t("worker.familyShell", "셸")} 1`,
             `${t("worker.familyFile", "파일")} 6`,
-          ],
+          ].join(" · "),
           failed: t("worker.tallyFailed", "실패 {{n}}", { n: 0 }),
         },
         hairline: head ? getComputedStyle(head).borderBottomWidth : null,
@@ -152,8 +153,8 @@ async function redesignHead(browser, origin, ok) {
       JSON.stringify({ state: seen.state, clock: seen.clock }),
     );
     ok(
-      "R1: on the right the head counts what was done — 「도구 9」, then each family (웹 2 · 셸 1 · 파일 6) in the order it first came, then 「실패 0」",
-      seen.total === seen.want.total && JSON.stringify(seen.kinds) === JSON.stringify(seen.want.kinds) && seen.failed === seen.want.failed,
+      "R1: on the right the head says 「도구 9 · 실패 0」, each family (웹 2 · 셸 1 · 파일 6) in the order it first came in its tooltip (t-81525 C9)",
+      seen.total === seen.want.total && seen.parts === 2 && seen.kinds.startsWith(seen.want.kinds) && seen.failed === seen.want.failed,
       JSON.stringify({ total: seen.total, kinds: seen.kinds, failed: seen.failed }),
     );
     ok("R1: the head stands on one hairline", seen.hairline === "1px", JSON.stringify({ hairline: seen.hairline }));

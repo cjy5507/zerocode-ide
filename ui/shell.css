@@ -14769,11 +14769,12 @@ body.mod-held .term-link,
   background: var(--chat-dot-failed);
 }
 
-/* What it did, counted: the whole, each family, how many failed — at the
- * right, cut before it can push the chips. */
+/* What it did, counted: the whole and how many failed, 「도구 20 · 실패 0」 —
+ * at the right, cut before it can push the chips. Each family and the session
+ * are its tooltip (t-81525 C9). */
 .chat-tally {
   display: inline-flex;
-  gap: var(--space-2);
+  gap: var(--space-1);
   min-width: 0;
   margin-left: auto;
   overflow: hidden;
@@ -14793,6 +14794,11 @@ body.mod-held .term-link,
 
 .chat-tally-failed.is-failed {
   color: var(--signal-halt-ink);
+}
+
+.chat-tally-total + .chat-tally-failed::before {
+  content: "· ";
+  color: var(--ink-mist);
 }
 
 .is-chat-page .worker-where {
@@ -53744,14 +53750,16 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   gap: var(--space-2);
 }
 
+/* The session stands in the tally's tooltip there (t-81525 C9): the head says
+ * what was done, not the conversation's id. */
+.chat-head-pane .pane-head-pick {
+  display: none;
+}
+
 /* A narrow pane keeps the head on one line: the conversation's line gives way
  * first, the switch says itself by its glyphs (its words stay its name), then
  * the model's pill folds — the composer's chip still says it. */
 @container pane-chat (max-width: 560px) {
-  .chat-head-pane .pane-head-pick {
-    display: none;
-  }
-
   .chat-head-pane .view-toggle .segment-btn > :not(.view-toggle-glyph) {
     position: absolute;
     width: 1px;

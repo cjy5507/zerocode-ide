@@ -15851,13 +15851,15 @@ function updateChatHead(head, run) {
   paintChatTally(head.querySelector(".chat-tally"), run);
 }
 
-/* The head's count of what the conversation did (t-22100, the mockup's
- * 「도구 9 · 웹 2 · 셸 1 · 파일 6 · 실패 0」): every call the page holds, each
- * family of them in the order it first came, how many failed — counted by the
- * steps' own table (`helperTally`, `stepLook`), so the head and the rows say
- * one thing. Repainted only when the log moved. */
+/* The head's count of what the conversation did: 「도구 20 · 실패 0」 (t-81525
+ * C9). Every call the page holds and how many failed stand on the line; each
+ * family of them in the order it first came — counted by the steps' own table
+ * (`helperTally`, `stepLook`), so the head and the rows say one thing — and the
+ * session the pane holds are its tooltip, where the line had them as words.
+ * Repainted only when the log or the session moved. */
 function paintChatTally(strip, run) {
-  const said = `${run.helper.seq}|${locale}`;
+  const session = run.wire ? run.session ?? "" : paneSessions.get(run.term)?.session?.id ?? "";
+  const said = `${run.helper.seq}|${session}|${locale}`;
   if (strip.__said === said) return;
   strip.__said = said;
   const { total, failed, kinds, partial } = helperTally(run);
@@ -15874,13 +15876,10 @@ function paintChatTally(strip, run) {
   const whole = document.createElement("span");
   whole.className = "chat-tally-total";
   whole.textContent = tallyTotalWords(total, partial);
-  const parts = [...families].map(([family, count]) => {
-    const one = document.createElement("span");
-    one.className = "chat-tally-kind";
-    one.textContent = `${STEP_FAMILY_WORDS[family]()} ${count}`;
-    return one;
-  });
-  strip.replaceChildren(whole, ...parts, tallyFailedNode("chat-tally-failed", failed));
+  strip.replaceChildren(whole, tallyFailedNode("chat-tally-failed", failed));
+  const tip = [...families].map(([family, count]) => `${STEP_FAMILY_WORDS[family]()} ${count}`);
+  if (session) tip.push(t("paneHead.pick", "대화 {{session}}", { session }));
+  strip.dataset.tip = tip.join(" · ");
 }
 
 /* The two ends of a tally, the helper's strip's and the head's alike: the
