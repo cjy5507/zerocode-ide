@@ -55864,7 +55864,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // A conversation's own box says one sentence, working or resting (t-22100).
       seen.wantPlaceholder = t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다");
       seen.noDoorOnOwnPane = composer?.querySelector(".worker-composer-door") === null;
-      // The tool row, left to right: + · agent chip · mode chip … / · send.
+      // The tool row, left to right: + · agent chip · effort chip · mode chip … / · send.
       const tools = composer?.querySelector(".worker-composer-tools");
       seen.rowOrder = [...(tools?.children ?? [])].map((node) => node.className.split(" ").pop());
       // The agents pill stands in the row but says nothing while no helper
@@ -56049,9 +56049,9 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       return seen;
     });
     ok(
-      "the composer wears the extension's row — `+`, the agent chip (mark · name · model), the mode chip, then `/` and send — a pane's own conversation speaks to the pane without a door, and a helper's page has no composer at all: its footer speaks to the parent instead",
+      "the composer wears the extension's row — `+`, the agent chip (mark · name · model), the pane's effort beside it (t-81532), the mode chip, then `/` and send — a pane's own conversation speaks to the pane without a door, and a helper's page has no composer at all: its footer speaks to the parent instead",
       seen.placeholder === seen.wantPlaceholder && seen.noDoorOnOwnPane &&
-        JSON.stringify(seen.rowOrder) === JSON.stringify(["composer-attach-plus", "worker-composer-agent", "worker-composer-mode", "worker-composer-context", "worker-composer-agents", "worker-composer-right"]) &&
+        JSON.stringify(seen.rowOrder) === JSON.stringify(["composer-attach-plus", "worker-composer-agent", "worker-composer-effort", "worker-composer-mode", "worker-composer-context", "worker-composer-agents", "worker-composer-right"]) &&
         seen.agentsPillQuiet &&
         seen.chipMark === "✻" && seen.chipName === "Claude" && seen.chipModelRaw === " · claude-fable-5-1" &&
         seen.helperStandsWithoutComposer,

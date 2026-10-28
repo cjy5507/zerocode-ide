@@ -17370,7 +17370,7 @@ details[open] > .helper-cap::after {
   transition: background-color var(--motion-fast) var(--ease-standard);
 }
 
-.composer-menu-item:hover,
+.composer-menu-item:hover:not([aria-disabled="true"]),
 .composer-menu-item:focus-visible,
 .composer-slash-row:hover,
 .composer-slash-row.is-hot {
@@ -17386,10 +17386,6 @@ details[open] > .helper-cap::after {
 
 .composer-menu-item[aria-disabled="true"]:not([aria-current="true"]) {
   color: var(--ink-mist);
-}
-
-.composer-menu-item[aria-disabled="true"]:hover {
-  background: none;
 }
 
 .composer-menu-item[aria-current="true"] .composer-menu-name::before {
