@@ -361,8 +361,11 @@ fn late_landings(
         }
 
         // A review lands no code (t-78890): it is told while nobody has read it and for what its
-        // worker left beside it, never as unmerged, unrecorded or cleanable work.
-        if run.review_hand_in(task).is_some() {
+        // worker left beside it, never as unmerged, unrecorded or cleanable work — unless the
+        // coordinator's result says something of landing itself (`merged`, `nothingToLand: false`):
+        // its word stands over the worker's `reportKind`, as it does when the verification is
+        // written (`nothing_to_land_added`).
+        if run.review_hand_in(task).is_some() && !result_speaks_of_landing(&task.result) {
             reasons.retain(|(reason, _)| {
                 matches!(reason, StallReason::NoReview | StallReason::CheckoutsLeft)
             });

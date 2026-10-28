@@ -51,6 +51,22 @@ fn worker_briefings_ask_for_a_plain_report_by_the_skills_name() {
     }
 }
 
+/// A worker is told that a report citing a file it named writes the file's absolute path in its
+/// text (t-79642, review t-79586 P3-8): a log called only `red.log` was cited in a report and found
+/// nowhere, because the path rode in the hand-in's payload and not in the words a reader has.
+#[test]
+fn worker_briefings_ask_a_report_to_write_the_path_of_the_files_it_cites() {
+    let briefing = worker_briefing("t-1", "lint", "");
+    let (before, _) = briefing
+        .split_once(BRIEFING_HANDS_OVER)
+        .expect("the briefing hands over");
+    assert_eq!(
+        before.matches("absolute path in its own text").count(),
+        1,
+        "{before}"
+    );
+}
+
 /// A worker is told once, at launch, to keep one checkout per task and to take
 /// a checkout it cut beside its own away before it hands in (t-45336) — in the
 /// shared briefing and the federated one, before the task.
@@ -1469,6 +1485,100 @@ fn an_inbox_audit_walks_a_day_by_since_and_cursor() {
     );
     let garbled = bench.run("inbox --since yesterday");
     assert_ne!(garbled.reply.exit_code, 0);
+}
+
+/// Letters written in one millisecond keep one order across pages (they sort by id after the time),
+/// and the walk holds under `--address` (t-79642, review t-79586 P3-6): a cursor is a letter of the
+/// filtered list, and one that list leaves out is refused with the way to start again (P3-5).
+#[test]
+fn an_inbox_audit_walks_letters_of_one_millisecond_and_an_address_without_a_gap_or_a_repeat() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name tie");
+    let mut same = vec![bench.peer_status("first of the millisecond")];
+    for at in 1..4 {
+        // The fixture clock moves one millisecond for every letter: put it back to share one.
+        bench.clock -= 1;
+        same.push(bench.peer_status(&format!("{at} more of the millisecond")));
+    }
+    let stamps: Vec<i64> = bench.ledger.runs()[0]
+        .messages()
+        .iter()
+        .filter(|held| same.contains(&held.id))
+        .map(|held| held.created_ms)
+        .collect();
+    assert_eq!(stamps.len(), same.len());
+    assert!(stamps.iter().all(|at| *at == stamps[0]), "{stamps:?}");
+    let other = "pane:other/%9";
+    let elsewhere = bench.peer_message_to(
+        other,
+        MessageKind::Status,
+        "to someone else",
+        "",
+        Priority::Normal,
+        "",
+    );
+
+    let walk = |bench: &mut Bench, filter: &str| -> Vec<String> {
+        let mut walked = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let line = match &cursor {
+                Some(after) => format!("inbox {filter} --limit 2 --cursor {after}"),
+                None => format!("inbox {filter} --limit 2"),
+            };
+            let page = bench.json(&line);
+            walked.extend(
+                page["messages"]
+                    .as_array()
+                    .expect("rows")
+                    .iter()
+                    .filter_map(|row| row["messageId"].as_str().map(str::to_string)),
+            );
+            cursor = page["nextCursor"].as_str().map(str::to_string);
+            if cursor.is_none() {
+                return walked;
+            }
+        }
+    };
+    let whole = bench.json("inbox --limit 100");
+    let one_page: Vec<String> = whole["messages"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter_map(|row| row["messageId"].as_str().map(str::to_string))
+        .collect();
+    let mut tied: Vec<String> = one_page
+        .iter()
+        .filter(|id| same.contains(id))
+        .cloned()
+        .collect();
+    assert_eq!(tied.len(), same.len(), "{whole}");
+    tied.sort_unstable();
+    tied.reverse();
+    assert_eq!(
+        tied,
+        one_page
+            .iter()
+            .filter(|id| same.contains(id))
+            .cloned()
+            .collect::<Vec<_>>(),
+        "letters of one millisecond come by id, newest id first"
+    );
+    assert_eq!(
+        walk(&mut bench, ""),
+        one_page,
+        "pages of two meet the one page whole, ties and all"
+    );
+
+    let address = format!("--address {other}");
+    assert_eq!(walk(&mut bench, &address), vec![elsewhere]);
+    let left_out = bench.run(&format!("inbox {address} --cursor {}", same[0]));
+    assert_ne!(left_out.reply.exit_code, 0);
+    assert!(
+        left_out.reply.stderr.contains("without --cursor"),
+        "the way to start again: {}",
+        left_out.reply.stderr
+    );
 }
 
 /// A message carries its headline, its urgency and its freight whole; an

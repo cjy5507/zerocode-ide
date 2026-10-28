@@ -1082,23 +1082,41 @@ const DEPLOYED_KEY: &str = "deployed";
 /// [`REVIEW_KEY_GROUPS`]' third group, and the one the ledger itself writes.
 const NOTHING_TO_LAND_KEY: &str = REVIEW_KEY_GROUPS[2][0];
 
+/// The key `task-update` answers under when it added [`NOTHING_TO_LAND_KEY`] to a verification: the
+/// word for why (a string), where the result's own key is a bool (t-79642, review t-79586 P3-9).
+const NOTHING_TO_LAND_BECAUSE_KEY: &str = "nothingToLandBecause";
+
+/// Whether a result already says something about landing — a merge key or a no-code key, either
+/// way (`nothingToLand: false` is a word too): the coordinator's own word, which the ledger's
+/// defaults for a review hand-in (t-78890) give way to.
+fn speaks_of_landing(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let [_, merged_keys, nothing_keys] = REVIEW_KEY_GROUPS;
+    merged_keys
+        .iter()
+        .chain(nothing_keys)
+        .any(|key| map.contains_key(*key))
+}
+
+/// [`speaks_of_landing`] for a task's stored result; a result that is not a JSON object speaks of
+/// nothing.
+fn result_speaks_of_landing(result: &str) -> bool {
+    matches!(
+        serde_json::from_str::<serde_json::Value>(result),
+        Ok(serde_json::Value::Object(map)) if speaks_of_landing(&map)
+    )
+}
+
 /// A coordinator's verification of a review hand-in with `nothingToLand` added (t-78890) — and,
 /// when the review handed in a commit, that commit as the one reviewed
 /// ([`landing_watch::REVIEWED_HEAD_KEY`]) unless the result names one — or `None` when the result
-/// verifies nothing, is not a JSON object, or already says something about landing (a merge key or
-/// a no-code key, either way): the coordinator's own word stands.
+/// verifies nothing, is not a JSON object, or already says something about landing
+/// ([`speaks_of_landing`]): the coordinator's own word stands.
 fn nothing_to_land_added(result: &str, reviewed_head: Option<String>) -> Option<String> {
     let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(result)
     else {
         return None;
     };
-    let [_, merged_keys, nothing_keys] = REVIEW_KEY_GROUPS;
-    if !ReviewFacts::from_result(result).verified
-        || merged_keys
-            .iter()
-            .chain(nothing_keys)
-            .any(|key| map.contains_key(*key))
-    {
+    if !ReviewFacts::from_result(result).verified || speaks_of_landing(&map) {
         return None;
     }
     map.insert(NOTHING_TO_LAND_KEY.to_string(), true.into());
@@ -19282,7 +19300,8 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          result carrying a review (verified, merged, deployed…) names the attempt and the \
          source it reviewed — task-list shows both — and is refused when either is missing \
          or has moved; a verification of a review hand-in (reportKind review) carries \
-         nothingToLand | --members <t-1,t-2,…> --result <landing> · write a stack's landing \
+         nothingToLand, and the answer says why under nothingToLandBecause | --members \
+         <t-1,t-2,…> --result <landing> · write a stack's landing \
          ({\"merged\":true,\"mergeHead\":…}, later {\"deployed\":true,\"release\":…}) on every \
          member at once, each bound to the attempt and source its verified review names — one \
          member that cannot take it refuses the call, a line each",
@@ -20140,7 +20159,9 @@ payload as `\"{evidence}\":[\"/abs/file\",\"/abs/folder\"]`: the window keeps a 
 what you name before your checkout is cleaned (text and pictures only, private \
 values masked, {cap_mb} MB at most). An intended failure is evidence too — name it \
 `{{\"path\":\"/abs/red.log\",\"{expect}\":\"fail\"}}` so nobody guesses it from the file \
-name — and a report that is not a plain report says what it is: `\"{report_kind}\":\"review\"` \
+name. A report that cites a file you named writes that file's absolute path in its own text, \
+because a log called only `red.log` cannot be found afterwards. A report that is not a plain \
+report says what it is: `\"{report_kind}\":\"review\"` \
 (one of {kinds}). Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
 a new request. `zerocode-orc help` lists the rest. {find} {plain} {one_checkout} {purpose}\n\n{conditions}{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
@@ -22416,7 +22437,7 @@ fn plan_inner(
                 "author": signed,
             });
             if let Some(why) = nothing_added {
-                answer[NOTHING_TO_LAND_KEY] = why.into();
+                answer[NOTHING_TO_LAND_BECAUSE_KEY] = why.into();
             }
             said(answer)
         }
@@ -24478,7 +24499,9 @@ fn plan_inner(
                         .ok_or_else(|| {
                             format!(
                                 "unknown cursor: {after} — a cursor is the last message id of \
-                                 the page before, under the same --since and --address"
+                                 the page before, under the same --since and --address; a letter \
+                                 the retention sweep took, or one those two leave out, is none — \
+                                 read from the first page again, without --cursor"
                             )
                         })?
                         + 1
