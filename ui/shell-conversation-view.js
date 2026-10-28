@@ -2093,6 +2093,9 @@ const STEP_LOOKS = new Map(Object.entries({
  * catalog's own `todo_tool`). */
 const STEP_OWN_LOOKS = new Map(Object.entries({
   todo: { family: "todo", word: () => t("worker.todoHead", "할 일 갱신") },
+  // A result that arrived with no call the page holds — a command left
+  // running in the background answering later (t-81525 C4).
+  result: { family: "other", word: () => t("worker.stepResultOnly", "배경 실행") },
 }));
 
 /* The families the head's tally counts by (t-22100, the approved mockup's
@@ -2114,6 +2117,7 @@ const STEP_FAMILY_WORDS = Object.freeze({
  * has no word for, or a call written before turns carried a kind — is a kind of
  * its own, worded as the tool's own name (`tool:<name>`). */
 function stepKindOf(turn, run) {
+  if (turn.role === "tool_result" && !turn.tool?.name) return "result";
   const todo = agentVoice(run.agent).todo_tool;
   if (todo && turn.tool?.name === todo) return "todo";
   const kind = turn.tool?.kind;
@@ -2162,6 +2166,14 @@ function shellTargetWords(command) {
  * its target as the line says it. */
 function stepTitleWords(kind, arg, whole = arg) {
   return kind === "bash" ? shellTargetWords(whole) : stepTargetWords(arg);
+}
+
+/* What names a result that came with no call: the id the CLI gave the work
+ * it left in the background, or else its first words. */
+const STEP_RESULT_ID_RE = /\bID:?\s*([A-Za-z0-9_-]{4,})/;
+
+function resultOnlyTarget(text) {
+  return STEP_RESULT_ID_RE.exec(text)?.[1] ?? stepTargetWords(stepFirstLine(text));
 }
 
 function stepFirstLine(text) {
@@ -2338,9 +2350,12 @@ function dressFetchResult(node, facts) {
 function dressStepLine(row, turn, words, state) {
   const line = row.firstElementChild;
   writeTextContent(line.querySelector(".helper-step-kind"), state.todo ? t("worker.todoHead", "할 일 갱신") : stepLook(row.__kind).word());
-  writeTextContent(line.querySelector(".helper-step-target"), state.todo ? "" : stepTitleWords(row.__kind, words.arg, words.whole));
+  const orphan = row.__kind === "result";
+  writeTextContent(line.querySelector(".helper-step-target"), state.todo ? ""
+    : orphan ? resultOnlyTarget(turn.text) : stepTitleWords(row.__kind, words.arg, words.whole));
   let res = "";
   if (state.live) res = t("worker.stepLive", "진행 중");
+  else if (orphan && !state.failed) res = t("worker.stepResultArrived", "결과만 도착");
   else if (state.output !== undefined) res = stepResultWords(row.__kind, turn, state.output, state.failed, row);
   const resNode = line.querySelector(".helper-step-res");
   const facts = row.__kind === "web" && state.output !== undefined && !state.failed ? stepFetchFacts(turn) : null;

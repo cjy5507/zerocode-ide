@@ -14475,7 +14475,7 @@ function dressToolTurn(row, turn, run, spoken) {
   // A tool row is announced by the tool it ran (2.1.272) — the CLI's own
   // name for it, which the line words as a kind. Guarded like every other
   // write here: a quiet poll costs no mutation.
-  writeAttribute(row, "aria-label", t("worker.toolRow", "{{name}} 도구", { name: words.name }));
+  writeAttribute(row, "aria-label", t("worker.toolRow", "{{name}} 도구", { name: words.name || stepLook(row.__kind).word() }));
   const output = turn.role === "tool_result" ? turn.text : turn.output;
   const failed = turn.role === "tool_result" ? turn.tool?.is_error === true : turn.outputError === true;
   const live = output === undefined && run.status === "running" && turn.seq > spoken;
