@@ -15555,6 +15555,9 @@ function workerComposerNode(run, owner = null) {
     ? t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다")
     : t("worker.say", "부모 에이전트에게 보내기…");
   form.__composerOwn = ownPane;
+  // The sentence's first half, for a box too narrow for the whole of it on
+  // its one line (`fitComposerSay`).
+  if (ownPane) form.__composerSays = { whole: box.placeholder, short: t("composer.placeholderShort", "다음 지시를 쓰세요") };
   box.setAttribute("aria-label", box.placeholder);
   // 실행 중에는 상자가 「대기열에 추가」라고 말하고 턴 사이에는 제 본래의
   // 말로 돌아온다 — 그 본래의 말은 여기서 한 번 정해지므로, 갈아입히는
@@ -15693,6 +15696,29 @@ function workerComposerNode(run, owner = null) {
     }
   });
   return form;
+}
+
+/* The box's own sentence on one line (t-81525 r2). The box is one row that
+ * grows only with what is typed, so a sentence folded to a second line hid
+ * that line under the box's foot — at 390 px, 「들어갑니다」 half shown. A box
+ * too narrow for the whole sentence says its first half; measured in the
+ * box's own font, so every language and every width is asked the same
+ * question. Asked when the dock's box changes (`watchChatDock`), and only
+ * when the box's width did. */
+let composerPen = null;
+function fitComposerSay(form) {
+  const box = form?.querySelector(".worker-composer-box");
+  if (!form?.__composerSays || !box || box.clientWidth === form.__composerSayWidth) return;
+  form.__composerSayWidth = box.clientWidth;
+  const style = getComputedStyle(box);
+  composerPen ??= document.createElement("canvas").getContext("2d");
+  composerPen.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const room = box.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const { whole, short } = form.__composerSays;
+  const say = room <= 0 || composerPen.measureText(whole).width <= room ? whole : short;
+  if (say === form.__composerSay) return;
+  form.__composerSay = say;
+  paintWorkerComposerState(form, form.__workerRun);
 }
 
 function paintWorkerComposerState(form, run, delivered = null) {
@@ -16878,6 +16904,7 @@ function watchChatDock(host, dock) {
     chatDockSeen = height;
     for (const reader of readers()) reader.style.setProperty("--chat-dock-h", height);
     if (follow) carryToFoot(list);
+    fitComposerSay(dock.querySelector(":scope > .worker-composer"));
   });
   watch.observe(dock);
   return watch;

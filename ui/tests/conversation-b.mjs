@@ -76,6 +76,21 @@ function readPage() {
   const pills = [...list.querySelectorAll(":scope > .helper-group")];
   const codes = [...list.querySelectorAll(".helper-code")];
   const note = list.querySelector(":scope > .is-window-note .helper-window-note-words");
+  // The empty box's sentence, measured in the box's own font against the
+  // room inside its padding: one line, never a second one hidden under it.
+  const composer = page.querySelector(".worker-composer-box");
+  const say = (() => {
+    if (!composer) return null;
+    const style = getComputedStyle(composer);
+    const pen = document.createElement("canvas").getContext("2d");
+    pen.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    const room = composer.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    return {
+      words: composer.placeholder,
+      fits: pen.measureText(composer.placeholder).width <= room,
+      oneLine: getComputedStyle(composer, "::placeholder").whiteSpace === "nowrap",
+    };
+  })();
   return {
     pageWidth: Math.round(box(page).width),
     pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -90,6 +105,9 @@ function readPage() {
     personRight: person ? Math.round(column.right - box(person).right) : null,
     personInside: person ? inside(person) : false,
     answerDots: answers.filter((row) => getComputedStyle(row, "::after").content !== "none").length,
+    say,
+    sayWhole: t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다"),
+    sayShort: t("composer.placeholderShort", "다음 지시를 쓰세요"),
     rowsInView: list.querySelectorAll(":scope > [data-turn]").length,
     listElements: list.getElementsByTagName("*").length,
     stepRows: list.querySelectorAll(".helper-turn:is(.is-tool, .is-thinking)").length,
@@ -147,6 +165,10 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
           (want === "wide" ? one.proseLeading === 1.6 : one.proseLeading === 1.5);
       }) && new Set(B_WIDTHS.map((width) => step(dark(width)))).size >= 2,
       JSON.stringify(B_WIDTHS.map((width) => [width, dark(width).pageWidth, dark(width).proseSize, dark(width).proseLeading, dark(width).columnWidth])));
+    ok("B: the empty box's sentence stays on its one line at every width — the whole of it where it fits, its first half on a box too narrow for it, cut short rather than folded under the box",
+      all.every((one) => one.say?.fits && one.say.oneLine) &&
+        dark(390).say.words === dark(390).sayShort && dark(1440).say.words === dark(1440).sayWhole,
+      JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, one.say]))));
     ok("B: an answer wears no dot, the tool work stands as pills with no step built, and one row — the person's last words — sticks",
       all.every((one) => one.answerDots === 0 && one.stepRows === 0 && one.sticky === 1),
       JSON.stringify(dark(1440)));

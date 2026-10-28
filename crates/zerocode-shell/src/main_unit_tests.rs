@@ -21783,6 +21783,7 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "worker.stackOpen",
         "worker.stackClose",
         "composer.placeholder",
+        "composer.placeholderShort",
     ];
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -21876,7 +21877,7 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         ),
         (
             "function workerComposerNode(run, owner = null) {",
-            vec!["composer.placeholder"],
+            vec!["composer.placeholder", "composer.placeholderShort"],
         ),
         (
             "function updateHelperPageRole(badge, run) {",

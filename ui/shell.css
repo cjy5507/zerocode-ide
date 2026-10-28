@@ -17051,6 +17051,16 @@ details[open] > .helper-cap::after {
   max-height: var(--chat-composer-max-h);
 }
 
+/* The sentence in the empty box stays on the box's one line (t-81525 r2): a
+ * box too narrow says the sentence's first half (`fitComposerSay`), and a box
+ * narrower still cuts that with an ellipsis rather than fold it under its
+ * foot. */
+.worker-composer-box::placeholder {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* The box lights its own edge on `:focus-within` (above), so the measured
  * ring the global `:focus-visible` rule puts on every control would draw a
  * second, square rectangle around this textarea — one that pokes out past the
