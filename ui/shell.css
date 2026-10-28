@@ -36378,7 +36378,9 @@ details.task-board-section > summary {
 
 .board-asks > li {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) fit-content(var(--board-ask-acts-share));
+  /* The buttons span both lines: let the second take the extra height, so the goal line hangs under the question. */
+  grid-template-rows: auto 1fr;
   column-gap: var(--space-4);
   row-gap: var(--board-gap-small);
   align-items: start;
@@ -36426,6 +36428,7 @@ details.task-board-section > summary {
 
 .board-ask-title {
   min-width: 0;
+  overflow-wrap: anywhere; /* 띄어쓰기 없는 경로·URL은 칸 안에서 끊는다(창 기본은 keep-all) */
   padding-top: calc(var(--space-1) / 2); /* 배지 높이의 가운데에 14/20 글줄을 맞춘다 */
 }
 
@@ -36439,6 +36442,7 @@ details.task-board-section > summary {
 /* 한 줄의 이름 — 과업 id는 시안처럼 고정폭이다(`paintBoardMeta`). */
 .board-meta-id {
   font-family: var(--font-mono);
+  white-space: nowrap;
 }
 
 /* 질문 행은 답할 우편의 편지 그대로다(`paintDeskLetter`) — 마크업은 기록 탭의 소식과 같고,
@@ -36514,6 +36518,18 @@ details.task-board-section > summary {
   grid-column: 2;
   grid-row: 1 / span 2;
   justify-content: flex-end;
+  min-width: 0;
+}
+
+/* 선택지가 문장이면 단추가 그 몫 안에서 제 글을 줄바꿈한다 — 짧은 글은 그대로 한 줄 단추다.
+ * 띄어쓰기 없는 경로·URL은 `anywhere`로 끊어야 fit-content의 바닥(최소 폭)이 그 낱말 폭이 되지 않는다. */
+.board-ask-acts > .board-btn {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding-block: var(--space-1);
+  text-align: start;
+  white-space: normal;
 }
 
 .board-ask-note,

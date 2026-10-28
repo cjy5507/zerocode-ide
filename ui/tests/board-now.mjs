@@ -35,7 +35,7 @@ const SHOTS = "output/playwright/board-now";
  * 표에 서지 않는다). 데스크 픽스처가 세운 답 위에 덮는다(그 픽스처가 응답 손·보드 열기를 맡는다).
  * `extra`는 과업 수를 늘려 성능을 잰다. `lane`이 "green"이면 레인은 07:31 무렵 초록으로 끝났고
  * 빌드 줄은 비어 있다. A page function: no closure. */
-export function draftBoardOverlay({ now = Date.now(), holds = false, extra = 0, ledger = true, lane = "running" } = {}) {
+export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = false, extra = 0, ledger = true, lane = "running" } = {}) {
   const minute = 60_000;
   const run = "run-desk";
   const goal = (parent, parentTitle) => ({ parent, parent_title: parentTitle });
@@ -85,6 +85,29 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, extra = 0, 
       gate: { id: "gate-702", kind: "asked", worker: null, checkout: null, examined: null,
         options: ["main 기준", "릴리스 기준"], question: "기준 커밋을 main으로 할까요, 지난 릴리스로 할까요?" },
     }));
+  }
+  // Decisions whose askers offered long answers (t-79611): the question must keep its width.
+  if (longHold) {
+    const decision = (id, gateId, title, question, options) => task(id, title, "gate", {
+      ...board, gate: { id: gateId, kind: "asked", worker: null, checkout: null, examined: null, options, question },
+    });
+    // three whole sentences
+    tasks.push(decision("t-66700", "gate-703", "예시 설정 기본값 정하기",
+      "예시 설정의 기본값을 어느 쪽으로 정할까요? 아래 세 가지 중에서 골라 주세요.", [
+        "예시 설정의 기본값은 지금 쓰는 쪽으로 두고, 바꾸는 일은 다음 묶음에서 한꺼번에 하기(되돌리기 쉬움)",
+        "기본값을 새 쪽으로 바로 바꾸되, 예전 값으로 돌아가는 길을 설정 화면에 한 줄로 남겨 두기",
+        "두 값을 모두 보여 주는 선택 칸을 먼저 만들고, 기본값은 사람이 한 번 고른 뒤에 정하기 — 시간이 더 든다",
+      ]));
+    // an answer and a question that each hold one long word with no space and no hyphen or slash to break at (a branch name, a hash)
+    tasks.push(decision("t-66701", "gate-704", "예시 체크아웃 고르기",
+      "이 과업은 example_workspace_project_t12345_long_checkout_name_0123456789abcdef0123456789abcdef0123456789abcdef 에서 이어 쓸까요?", [
+        "example_workspace_project_t12345_long_checkout_name_0123456789abcdef0123456789abcdef0123456789abcdef",
+        "새 체크아웃",
+      ]));
+    // six sentences
+    tasks.push(decision("t-66702", "gate-705", "예시 순서 정하기",
+      "다음 여섯 가지 순서 중 어느 것으로 할까요?",
+      [1, 2, 3, 4, 5, 6].map((n) => `${n}번째 순서: 먼저 이 묶음을 닫고 나서, 남은 일을 같은 날 안에 차례로 이어서 하기`)));
   }
   for (let n = 0; n < extra; n += 1) {
     tasks.push(task(`t-${70000 + n}`, `더 도는 과업 ${n + 1}`, n % 3 === 0 ? "ready" : "dispatched",
@@ -590,6 +613,89 @@ export async function testBoardNow(browser, origin, ok) {
     ok("the two presses reach gate-resolve as the ledger's answer and the asker's option, nothing invented",
       JSON.stringify(resolved) === JSON.stringify([["gate-701", "harvest", null], ["gate-702", "answer", "릴리스 기준"]]),
       JSON.stringify(resolved));
+
+    /* ---- 긴 선택지 결정 행 (t-79611): 질문과 목표 줄은 읽히는 폭을 지키고, 선택지는 잘리지 않는다 ---- */
+    await draftScene(page, { holds: true, longHold: true });
+    await page.evaluate(() => { boardNowChoice.asksAll = true; paintCoordinatorDesk(document.querySelector("#board-view")); });
+    await mkdir(SHOTS, { recursive: true });
+    const longScenes = [
+      { key: "gate-703", label: "three long answers", count: 4, first: "예시 설정의 기본값은" },
+      { key: "gate-704", label: "one unbreakable word as an answer and in the question", count: 3, first: "example_workspace" },
+      { key: "gate-705", label: "six answers", count: 7, first: "1번째 순서" },
+    ];
+    for (const width of [2560, 1920, 1440, 1000, 720]) {
+      await page.setViewportSize({ width, height: 900 });
+      await fullBoard(page);
+      const squeeze = await page.evaluate((keys) => {
+        const surface = document.querySelector("#board-view .task-board-surface");
+        const share = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--board-ask-acts-share")) / 100;
+        const read = (key) => {
+          const row = document.querySelector(`#board-view [data-ask="hold:run-desk/${key}"]`);
+          const rect = row.getBoundingClientRect();
+          const style = getComputedStyle(row);
+          const line = row.querySelector(".board-ask-line").getBoundingClientRect();
+          const title = row.querySelector(".board-ask-title");
+          const lineHeight = parseFloat(getComputedStyle(title).lineHeight);
+          const buttons = [...row.querySelectorAll(".board-ask-acts > button:not([hidden])")];
+          const acts = row.querySelector(".board-ask-acts").getBoundingClientRect();
+          // How wide the question would stand on one line: the lines it needs follow from the width it keeps.
+          const probe = title.cloneNode(true);
+          probe.style.cssText = "position:absolute;visibility:hidden;width:max-content;white-space:nowrap;";
+          title.parentNode.appendChild(probe);
+          const oneLine = probe.getBoundingClientRect().width;
+          probe.remove();
+          const titleWidth = title.getBoundingClientRect().width;
+          const inner = rect.width - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+          return {
+            row: Math.round(rect.width),
+            // The question column keeps at least what the buttons' share leaves of the row's inner width.
+            keeps: Math.round(inner * (1 - share) - parseFloat(style.columnGap)),
+            lineWidth: Math.round(line.width),
+            titleWidth: Math.round(titleWidth),
+            titleLines: Math.round(title.getBoundingClientRect().height / lineHeight),
+            // A column that keeps its share wraps the question into the lines its length asks for, plus one of slack.
+            linesAllowed: Math.ceil(oneLine / titleWidth) + 1,
+            metaWidth: Math.round(row.querySelector(".board-ask-meta").getBoundingClientRect().width),
+            sidewaysRow: row.scrollWidth > row.clientWidth + 1,
+            clipped: buttons.filter((one) => one.scrollWidth > one.clientWidth + 1).length,
+            outside: buttons.filter((one) => one.getBoundingClientRect().right > rect.right + 1).length,
+            tops: [...new Set(buttons.map((one) => Math.round(one.getBoundingClientRect().top)))].length,
+            words: buttons.map((one) => one.textContent),
+            // Beside the question (not stacked under it), the buttons take no more than their share.
+            actsWidth: Math.round(acts.width),
+            actsCap: Math.round(inner * share) + 1,
+            stacked: acts.left <= line.left + 1,
+            // The goal line hangs right under the question line, however tall the answers beside them stand.
+            gapBelowQuestion: Math.round(row.querySelector(".board-ask-meta").getBoundingClientRect().top - line.bottom),
+            rowGap: parseFloat(style.rowGap),
+            idLines: Math.max(...[...row.querySelectorAll(".board-meta-id")].map((one) => one.getClientRects().length)),
+          };
+        };
+        const rows = Object.fromEntries([...keys, "gate-702"].map((key) => [key, read(key)]));
+        return { rows, sideways: surface.scrollWidth > surface.clientWidth + 1 };
+      }, longScenes.map((one) => one.key));
+      for (const scene of longScenes) {
+        const one = squeeze.rows[scene.key];
+        ok(`at ${width}px a decision with ${scene.label} keeps its question and goal line readable (the question keeps the share the buttons leave)`,
+          one.lineWidth >= one.keeps - 1 && one.titleLines <= one.linesAllowed && one.metaWidth >= one.keeps - 1
+            && (one.stacked || one.actsWidth <= one.actsCap), JSON.stringify(one));
+        ok(`at ${width}px with ${scene.label} the goal line hangs right under the question and the task number stays in one piece`,
+          one.gapBelowQuestion <= one.rowGap + 1 && one.idLines === 1, JSON.stringify(one));
+        ok(`at ${width}px with ${scene.label} the answers are read whole and nothing runs sideways`,
+          one.clipped === 0 && one.outside === 0 && !one.sidewaysRow && !squeeze.sideways
+            && one.words.length === scene.count && one.words[0].startsWith(scene.first) && one.words.at(-1) === "직접 답하기",
+          JSON.stringify(squeeze));
+      }
+      ok(`at ${width}px the short answers stay on one line beside their question`,
+        squeeze.rows["gate-702"].clipped === 0 && (width < 1000 || (squeeze.rows["gate-702"].titleLines === 1 && squeeze.rows["gate-702"].tops === 1)),
+        JSON.stringify(squeeze.rows["gate-702"]));
+      await page.locator('#board-view [data-ask="hold:run-desk/gate-703"]').screenshot({ path: `${SHOTS}/hold-long-${width}.png` });
+      await page.locator('#board-view [data-ask="hold:run-desk/gate-704"]').screenshot({ path: `${SHOTS}/hold-path-${width}.png` });
+      await page.locator('#board-view [data-ask="hold:run-desk/gate-705"]').screenshot({ path: `${SHOTS}/hold-six-${width}.png` });
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await draftScene(page, { holds: true });
+    await page.evaluate(() => { boardNowChoice.asksAll = true; paintCoordinatorDesk(document.querySelector("#board-view")); });
 
     /* ---- 탭: 워커는 워커 탭에만, 목록은 기록 탭에 ---- */
     await page.click('#board-view [data-board-tab-button="workers"]');

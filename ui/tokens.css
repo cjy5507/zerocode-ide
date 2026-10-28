@@ -600,6 +600,9 @@
    * neighbour. */
   --control-pad-inline: 10px;
   --board-ask-pad-block: 20px;
+  /* The most of a 「당신 차례」 row its buttons may take beside the question (t-79611): past it the buttons wrap
+   * their own words inside that share, so a long answer never squeezes the question into a column of one word. */
+  --board-ask-acts-share: 50%;
   --board-row-pad-block: 10px;
   --board-intro-after: 20px;
   --board-tab-height: 48px;
