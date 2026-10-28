@@ -455,6 +455,7 @@ pub(super) const KEYBINDING_ACTIONS: &[(&str, &[&str])] = &[
     ("activity.scm", &["mod+shift+g"]),
     ("project.open", &["mod+o"]),
     ("app.settings", &["mod+,"]),
+    ("ask.focusDocked", &["mod+shift+h"]),
     ("terminal.splitRight", &["mod+d"]),
     ("terminal.splitDown", &["mod+shift+d"]),
     ("terminal.focusNextPane", &["mod+]"]),
