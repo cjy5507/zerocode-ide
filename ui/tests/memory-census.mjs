@@ -18,6 +18,12 @@
  *   knowledge      합성 볼트 1,500쪽의 지식 그래프(평면 지도)
  *   sidebar        코디 셋·워커 다섯·체크아웃 열셋의 합성 원장이 선 사이드바(t-56141 `sidebar-team`의 장면) —
  *                  팀 보기가 있는 창은 팀을, 없는 창(기준 커밋)은 가지 목록을 그린다
+ *   layers         숨긴 것이 쥔 그래픽(t-80604 r2): 기기 픽셀 2배 창에 판 8개(일곱은 숨은 탭), 에이전트
+ *                  궤도 보드와 지식 그래프를 한 번 열었다가 마지막 판으로 돌아온 화면. `layers-no-orbit`·
+ *                  `layers-no-knowledge`·`layers-panes`는 그중 하나씩 뺀 같은 장면 — 차이가 그 후보의 몫이다.
+ *                  WebContent와 GPU 프로세스를 함께 읽고, 그래픽 표면(`(graphics)` 범주)을 따로 센다.
+ *
+ * 두 릴리즈의 `ui/`를 같은 하네스로 비교하려면 `ZEROCODE_WINDOW_UI=<다른 트리의 ui>`로 띄운다(window-boot.mjs).
  *
  * 저사양: 스크립트 전체를 `taskpolicy -b`(효율 코어·낮은 I/O 우선순위)로 돌리고 `--low-spec`로
  * 표시한다 — 띄운 브라우저도 그 정책을 물려받는다.
@@ -37,10 +43,16 @@ import { REAL_PANE, terminalFrameFixtureSource } from "./terminal-frames.mjs";
 import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
 import { seedUniverseVault } from "./knowledge-universe-fixture.mjs";
 import { standTeamScene } from "./sidebar-team.mjs";
+import { openOrbit } from "./board-orbit.mjs";
 
 export const SCENARIOS = Object.freeze([
   "empty", "panes-1", "panes-10", "panes-30", "scrollback", "conversation", "gallery", "knowledge", "sidebar",
+  "layers", "layers-no-orbit", "layers-no-knowledge", "layers-panes",
 ]);
+/* 숨긴 것 장면의 판 수 — 사람 창의 판(8~10)에 맞춘다. 일곱은 숨은 탭이다. */
+const LAYER_PANES = 8;
+/* 사람의 창(레티나)과 같은 기기 픽셀 — 그래픽 표면의 크기는 이 배율의 제곱으로 간다. */
+const LAYER_SCALE = 2;
 /* 스크롤백 장면이 흘리는 줄 수 — 창의 기본 스크롤백(`DEFAULT_SCROLLBACK_LINES`). */
 const SCROLLBACK_LINES = 5000;
 /* 한 프레임에 밀려 올라가는 줄 — 빌드 로그가 몰아칠 때의 한 당김. */
@@ -141,6 +153,18 @@ export function pageProcesses(engine, before) {
   return rows.filter((row) => browsers.has(row.ppid) && /--type=renderer/.test(row.command) && !before.has(row.pid));
 }
 
+/* 페이지의 그림을 받아 그리는 GPU 프로세스 — WebGL의 타깃과 텍스처는 여기에 산다. */
+function gpuProcess(engine, before) {
+  const rows = processTable();
+  if (engine === "webkit") {
+    return largest(rows.filter((row) => /ms-playwright\/webkit-\d+/.test(row.command) && /WebKit\.GPU/.test(row.command)
+      && !before.has(row.pid)));
+  }
+  const browsers = new Set(rows.filter((row) => row.ppid === process.pid).map((row) => row.pid));
+  return largest(rows.filter((row) => browsers.has(row.ppid) && /--type=gpu-process/.test(row.command)
+    && !before.has(row.pid)));
+}
+
 /* 페이지가 사는 프로세스 하나. */
 function pageProcess(engine, before) {
   return largest(pageProcesses(engine, before));
@@ -155,6 +179,10 @@ export function footprintOf(pid, folder) {
   const sum = (pick) => categories.reduce((total, [name, one]) => total + pick(name, one), 0);
   return {
     footprint: read.footprint,
+    peak: read.auxiliary?.phys_footprint_peak ?? null,
+    // Surfaces the process owns: layer backing stores and canvases in a
+    // page's process, render targets and textures in a GPU process.
+    graphics: sum((name, one) => (name.includes("(graphics)") ? one.dirty ?? 0 : 0)),
     dirty: sum((name, one) => one.dirty ?? 0),
     swapped: sum((name, one) => one.swapped ?? 0),
     malloc: sum((name, one) => (/malloc/i.test(name) ? (one.dirty ?? 0) + (one.swapped ?? 0) : 0)),
@@ -193,6 +221,7 @@ async function openPanes(page, count) {
       }));
       terms.push(term);
     }
+    window.__CENSUS_TERMS__ = terms;
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     return { panes: terms.length, rows: document.querySelectorAll(".term-row").length };
   }, { count, fixtureSource: terminalFrameFixtureSource, pane: REAL_PANE });
@@ -292,6 +321,25 @@ async function openGallery(page, pictures) {
   }, { pictures, catalog: GALLERY });
 }
 
+/* 숨긴 것 장면: 판 `LAYER_PANES`개를 탭으로 열고, 궤도 보드와 지식 그래프를 한 번씩 연 뒤 마지막
+ * 판으로 돌아온다 — 사람이 보드와 그래프를 들여다보고 일하던 판으로 돌아온 창. 보드와 그래프는
+ * 닫히지 않고 숨는다. 돌아온 뒤에 무엇이 보이는지 적는다: 숨김이 장면의 전제다. */
+async function standLayers(page, { orbit, knowledge }) {
+  const detail = await openPanes(page, LAYER_PANES);
+  if (orbit) {
+    await openOrbit(page);
+    detail.orbitViews = await page.evaluate(() => agentOrbitStates.size);
+  }
+  if (knowledge) Object.assign(detail, await openKnowledge(page));
+  return { ...detail, ...await page.evaluate(async () => {
+    setActiveTab(tabOfTerm(window.__CENSUS_TERMS__.at(-1)).id);
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    const shows = (selector) => document.querySelector(selector)?.checkVisibility() ?? null;
+    return { boardShown: shows("#board-view"), knowledgeShown: shows(".knowledge-view"),
+      termShown: shows(".term:not([hidden])") };
+  }) };
+}
+
 async function openKnowledge(page) {
   await page.evaluate((pages) => {
     secondBrainVault = "/universe";
@@ -316,8 +364,10 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
   try {
     let page;
     let faults = [];
-    if (name === "knowledge") {
-      const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const layers = name.startsWith("layers");
+    if (name === "knowledge" || layers) {
+      const context = await browser.newContext({ viewport: { width: 1440, height: 900 },
+        deviceScaleFactor: layers ? LAYER_SCALE : 1 });
       page = await context.newPage();
       page.on("pageerror", (error) => faults.push(String(error).slice(0, 200)));
       await seedKnowledgeWindow(page);
@@ -335,6 +385,10 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
       if (name === "gallery") return openGallery(page, pictures);
       if (name === "knowledge") return openKnowledge(page);
       if (name === "sidebar") return standTeamScene(page).then(() => page.evaluate(() => window.__ROWS__()));
+      if (layers) {
+        return standLayers(page, { orbit: !["layers-no-orbit", "layers-panes"].includes(name),
+          knowledge: !["layers-no-knowledge", "layers-panes"].includes(name) });
+      }
       if (name !== "empty") throw new Error(`no scenario named ${name}`);
       return {};
     };
@@ -355,6 +409,8 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
       row.process = footprintOf(pid, folder);
       if (engine === "webkit") row.heap = heapOf(pid);
     }
+    const gpu = gpuProcess(engine, before);
+    if (gpu !== null) row.gpu = footprintOf(gpu, folder);
     row.faults = faults.slice(0, 3);
     return row;
   } finally {
@@ -382,7 +438,8 @@ export async function census({ engine = "webkit", scenarios = SCENARIOS, lowSpec
       if (out) writeFileSync(out, `${JSON.stringify({ engine, lowSpec, rows }, null, 1)}\n`);
       const mib = (bytes) => (bytes === undefined || bytes === null ? "-" : (bytes / 1048576).toFixed(1));
       console.log(`${engine.padEnd(8)} ${lowSpec ? "low " : "    "}${name.padEnd(13)} footprint ${mib(row.process?.footprint)} MiB`
-        + ` dirty ${mib(row.process?.dirty)} malloc ${mib(row.process?.malloc)}`
+        + ` dirty ${mib(row.process?.dirty)} malloc ${mib(row.process?.malloc)} graphics ${mib(row.process?.graphics)}`
+        + (row.gpu ? ` gpu ${mib(row.gpu.footprint)} MiB graphics ${mib(row.gpu.graphics)}` : "")
         + (row.heap ? ` heap ${mib(row.heap.bytes)} MiB/${row.heap.nodes} nodes` : "")
         + (row.jsHeap !== undefined ? ` js ${mib(row.jsHeap)} MiB dom ${row.domNodes}` : "")
         + (row.previewBytesHeld !== undefined ? ` previews ${row.previewsHeld}/${row.previewAsks} asks ${mib(row.previewBytesHeld)} MiB held` : "")

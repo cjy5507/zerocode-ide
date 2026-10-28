@@ -7,7 +7,11 @@ import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { standIpcCensus } from "./ipc-census.mjs";
 import { PLATFORM_OVERRIDE, PRIMARY_EVENT, reportedPlatformScript } from "./test-platform.mjs";
-const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// Another tree's `ui/` to serve in place of this one — a census comparing two
+// releases' pages under the same harness (memory-census.mjs, t-80604).
+const UI = process.env.ZEROCODE_WINDOW_UI
+  ? resolve(process.env.ZEROCODE_WINDOW_UI)
+  : resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /* The primary modifier as a synthetic-event spread — ⌘ on macOS, Ctrl
  * elsewhere (test-platform.mjs). `shell.js` reads the same platform; a test
  * that builds a ⌘/Ctrl event spreads `window.__TEST_PRIMARY_EVENT__` in. */
