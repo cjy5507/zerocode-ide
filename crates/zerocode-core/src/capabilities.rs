@@ -563,6 +563,35 @@ pub enum AuthProbeKind {
     Keychain,
     /// `gh auth status`, for an agent that rides the GitHub CLI's login.
     GhAuthStatus,
+    /// The CLI's own log of how its last start signed in, for an agent that
+    /// keeps its login where this window does not read (its own keyring).
+    SignInLog(SignInLog),
+}
+
+impl AuthProbeKind {
+    /// The sign-in log this witness reads, when it is one.
+    #[must_use]
+    pub const fn sign_in_log(&self) -> Option<&SignInLog> {
+        match self {
+            Self::SignInLog(log) => Some(log),
+            _ => None,
+        }
+    }
+}
+
+/// Where a CLI writes how each start signed in, and the words it writes. The
+/// last of those lines in its newest log is how the next launch starts: a
+/// sign-in is a login to ride, a sign-out after it is none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SignInLog {
+    /// The newest log, relative to the home a launch reads.
+    pub path: &'static str,
+    /// How much of its start is read: a start signs in among its first lines.
+    pub head_bytes: usize,
+    /// A line carrying one of these says a sign-in finished.
+    pub signed_in: &'static [&'static str],
+    /// A line carrying one of these says the login was let go.
+    pub signed_out: &'static [&'static str],
 }
 
 /// Whether the window can read this agent's login before a launch: the
@@ -863,11 +892,22 @@ mod tests {
         // providers the window materialises (`providers_for`) and the witness
         // kinds the row allows — the identity file and the scoped keychain
         // item for the Anthropic homes, the identity file alone for Codex,
-        // and `gh auth status` for the one agent that rides gh's login.
+        // `gh auth status` for the one agent that rides gh's login, and the
+        // CLI's own sign-in log for agy, whose login is in its own keyring.
         assert_eq!(
             ids_where(|caps| caps.auth_probe.is_some()),
-            ["zo", "claude", "codex", "copilot"]
+            ["zo", "claude", "codex", "antigravity", "copilot"]
         );
+        // agy keeps its login in its own keyring; its log is the witness.
+        let agy = agent_capabilities("antigravity")
+            .expect("antigravity")
+            .auth_probe
+            .expect("a witness for agy");
+        assert!(agy.providers.is_empty());
+        assert!(matches!(
+            agy.probes,
+            [AuthProbeKind::SignInLog(SignInLog { path, .. })] if path.ends_with("cli.log")
+        ));
         assert_eq!(
             agent_capabilities("zo").expect("zo").auth_probe,
             Some(AuthProbe {

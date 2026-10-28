@@ -18,7 +18,9 @@
 //! checks the account modules already own: the identity file the CLI writes
 //! (`accounts::signed_in`, `codex_accounts::identity_in`), the scoped
 //! keychain item this window seeds (`accounts::keychain_says`, and only for
-//! the home this window owns), and `gh auth status` (`gh::integration_status`).
+//! the home this window owns), `gh auth status` (`gh::integration_status`),
+//! and the sign-in lines a CLI that keeps its login in its own keyring
+//! writes to its log (`SignInLog`).
 //! It never logs anybody in, never materializes a home, never runs the CLI's
 //! own status command — a look, on a timer, is what rewrote a person's
 //! credentials once already (`accounts::reading_env_for`'s history).
@@ -33,7 +35,7 @@ use std::sync::{Mutex, OnceLock};
 
 use zerocode_core::account::{OVERRIDING_AUTH_VARS, Provider};
 use zerocode_core::agent::{AgentPresence, resolve_on_path};
-use zerocode_core::capabilities::AuthProbeKind;
+use zerocode_core::capabilities::{AuthProbeKind, SignInLog};
 use zerocode_core::codex_account::{API_KEY_VAR, AuthKind};
 use zerocode_core::readiness::{
     AgentReadinessSnapshot, AuthState, BinaryState, Limits, OVERLAY_PREFIX, Purpose, ReadinessCache,
@@ -297,6 +299,9 @@ pub(crate) struct Witnesses<'a> {
     /// Whether this process's environment sets the named variable to
     /// something — the auth overrides a launch inherits.
     pub(crate) env_set: &'a dyn Fn(&str) -> bool,
+    /// The person's home, where a CLI this window gives no home of its own
+    /// keeps its log.
+    pub(crate) person_home: Option<PathBuf>,
 }
 
 /// One observation of `agent`, against the process's own machine. The
@@ -325,6 +330,7 @@ fn probe(agent: &str, presence: Option<&AgentPresence>, now_ms: i64) -> AgentRea
         codex_system_home: codex_accounts::system_home(),
         gh_connected: &gh_connected,
         env_set: &env_set,
+        person_home: dirs::home_dir(),
     };
     probe_in(
         &root,
@@ -368,6 +374,11 @@ pub(crate) fn probe_in(
         }
         if probe.probes.contains(&AuthProbeKind::GhAuthStatus) {
             let (state, words) = gh_witness((witnesses.gh_connected)());
+            verdicts.push(state);
+            said.push(words);
+        }
+        for log in probe.probes.iter().filter_map(AuthProbeKind::sign_in_log) {
+            let (state, words) = sign_in_log_witness(witnesses.person_home.as_deref(), log);
             verdicts.push(state);
             said.push(words);
         }
@@ -536,6 +547,52 @@ fn gh_witness(connected: Option<bool>) -> (AuthState, String) {
     }
 }
 
+/// How the CLI's last start signed in, by the last sign-in or sign-out line
+/// in the first bytes of its newest log. Only the CLI's own words are
+/// matched; nothing else in the log is read out, and the account it names
+/// is not carried.
+fn sign_in_log_witness(home: Option<&Path>, log: &SignInLog) -> (AuthState, String) {
+    use std::io::Read;
+    let Some(home) = home else {
+        return (AuthState::Unknown, "sign-in log: no home to read".into());
+    };
+    let mut head = Vec::new();
+    let read = std::fs::File::open(home.join(log.path)).and_then(|file| {
+        file.take(u64::try_from(log.head_bytes).unwrap_or(u64::MAX))
+            .read_to_end(&mut head)
+    });
+    if read.is_err() {
+        return (AuthState::Unknown, "sign-in log: none to read".into());
+    }
+    let says = |line: &str, words: &[&str]| words.iter().any(|word| line.contains(word));
+    let last = String::from_utf8_lossy(&head)
+        .lines()
+        .rev()
+        .find_map(|line| {
+            if says(line, log.signed_in) {
+                Some(true)
+            } else if says(line, log.signed_out) {
+                Some(false)
+            } else {
+                None
+            }
+        });
+    match last {
+        Some(true) => (
+            AuthState::Authorized,
+            "sign-in log: the last start signed in".into(),
+        ),
+        Some(false) => (
+            AuthState::Unauthorized,
+            "sign-in log: the login was let go after its last sign-in".into(),
+        ),
+        None => (
+            AuthState::Unknown,
+            "sign-in log: the last start wrote no sign-in".into(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
@@ -569,6 +626,7 @@ mod tests {
             codex_system_home,
             gh_connected: gh,
             env_set: env,
+            person_home: None,
         }
     }
 
@@ -774,6 +832,88 @@ mod tests {
 
         let nobody_here = observe(config.path(), "not-an-agent", Some(&path), &quiet);
         assert_eq!(nobody_here.evidence, "no agent by that name");
+    }
+
+    /// agy's login is in its own keyring, so its log is the witness: the last
+    /// sign-in or sign-out line of its newest start says how the next launch
+    /// starts. The account the log names is not carried, a log with neither
+    /// line or none at all accuses nobody, and a line past the read head is
+    /// not read.
+    #[test]
+    fn agys_log_says_how_its_last_start_signed_in() {
+        let config = tempfile::tempdir().expect("config root");
+        let home = tempfile::tempdir().expect("home");
+        let (_machine, path) = machine(&["agy"]);
+        let log = home.path().join(".gemini/antigravity-cli/cli.log");
+        std::fs::create_dir_all(log.parent().expect("log dir")).expect("log dir");
+        let look = || {
+            let witnesses = Witnesses {
+                person_home: Some(home.path().to_path_buf()),
+                ..quiet_witnesses(None, &nobody_answers, &nothing_set)
+            };
+            observe(config.path(), "antigravity", Some(&path), &witnesses)
+        };
+        let starting = "I1028 03:35:40.121351 23 server.go:1836] Starting language server\n";
+        let keyring = "I1028 03:35:40.893823 170 auth.go:157] ChainedAuth: authenticated via keyring (effective: keyring)\n";
+        let signed_in = "I1028 03:35:40.893900 170 server_oauth.go:229] OAuth: authenticated successfully as worker@example.test\n";
+        let let_go = "I1023 10:59:25.984297 2290 server_oauth.go:195] Logging out current user\n";
+
+        let none = look();
+        assert_eq!(none.auth, AuthState::Unknown, "{none:?}");
+        assert_eq!(none.evidence, "sign-in log: none to read");
+
+        std::fs::write(&log, [starting, keyring, signed_in].concat()).expect("log");
+        let ready = look();
+        assert_eq!(ready.auth, AuthState::Authorized, "{ready:?}");
+        assert!(matches!(ready.binary, BinaryState::Present { .. }));
+        assert!(
+            !ready.evidence.contains("example.test"),
+            "the evidence carries the account the log names: {}",
+            ready.evidence
+        );
+
+        std::fs::write(&log, [starting, signed_in, let_go].concat()).expect("log");
+        assert_eq!(
+            look().auth,
+            AuthState::Unauthorized,
+            "a sign-out after the sign-in"
+        );
+
+        std::fs::write(&log, [starting, signed_in, let_go, signed_in].concat()).expect("log");
+        assert_eq!(
+            look().auth,
+            AuthState::Authorized,
+            "a switch signs in again"
+        );
+
+        std::fs::write(&log, [starting, keyring].concat()).expect("log");
+        let unsaid = look();
+        assert_eq!(unsaid.auth, AuthState::Unknown, "{unsaid:?}");
+        assert_eq!(
+            unsaid.evidence,
+            "sign-in log: the last start wrote no sign-in"
+        );
+
+        let head_bytes = zerocode_core::agent_capabilities("antigravity")
+            .and_then(|caps| caps.auth_probe)
+            .and_then(|probe| probe.probes.iter().find_map(AuthProbeKind::sign_in_log))
+            .expect("agy's sign-in log")
+            .head_bytes;
+        let filler = starting.repeat(head_bytes / starting.len() + 1);
+        std::fs::write(&log, [filler.as_str(), signed_in].concat()).expect("log");
+        assert_eq!(
+            look().auth,
+            AuthState::Unknown,
+            "a line past the head was read"
+        );
+
+        let homeless = observe(
+            config.path(),
+            "antigravity",
+            Some(&path),
+            &quiet_witnesses(None, &nobody_answers, &nothing_set),
+        );
+        assert_eq!(homeless.evidence, "sign-in log: no home to read");
     }
 
     /// An agent on two providers starts on either: one login is enough,
