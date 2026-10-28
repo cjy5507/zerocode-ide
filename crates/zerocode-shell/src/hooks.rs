@@ -277,6 +277,10 @@ pub fn start(local_data_root: &Path) -> Option<HookBridgeReceivers> {
         .with_turn_brief(std::sync::Arc::new(crate::pane_guard::PaneBrief))
         .with_file_find(std::sync::Arc::new(crate::pane_guard::PaneFind));
     let state = state.with_pointer_mailbox(crate::orchestration_pointer_mailbox::mailbox());
+    // A pane's command that would signal the window or another pane is
+    // refused in its own pre-tool hook's reply (t-80602): the window says
+    // which process is whose, and reads the process table when asked.
+    let state = state.with_kill_witness(std::sync::Arc::new(crate::kill_witness::PaneProcesses));
     // A hook post that needed more than one try is written down in the
     // window's log (t-78634), so the posts a slow bridge lost can be counted.
     let notes_root = local_data_root.to_path_buf();
@@ -452,6 +456,12 @@ pub fn pty_env(
         (
             zerocode_hookd::env_var::PANE_KEY.into(),
             pane_key.to_string(),
+        ),
+        // The window's own pid: a host inside the pane (zo) keeps the
+        // window's tree from its own kills (t-80602).
+        (
+            zerocode_hookd::env_var::WINDOW_PID.into(),
+            std::process::id().to_string(),
         ),
         (
             zerocode_hookd::env_var::WORKTREE_ID.into(),
@@ -3334,6 +3344,22 @@ mod tests {
             "the vault variable outlived the setting"
         );
         assert_eq!(second_brain_vault(), None);
+    }
+
+    /// Every pane, agent or not, is told the window's own pid — what a host
+    /// inside it reads to keep the window's tree from its kills (t-80602).
+    #[test]
+    fn every_pane_is_told_the_windows_own_pid() {
+        bridge_for_tests();
+        for launch in [None, Some("launch-nonce")] {
+            let env = pty_env("term-7", launch, Path::new("/workspace"), None);
+            let told: Vec<&str> = env
+                .iter()
+                .filter(|(name, _)| name == zerocode_hookd::env_var::WINDOW_PID)
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert_eq!(told, [std::process::id().to_string()], "{launch:?}");
+        }
     }
 
     #[test]

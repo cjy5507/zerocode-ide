@@ -8,7 +8,7 @@
 /// Commands that wrap and then exec another command. Stripping them
 /// exposes the real command for classification: `timeout 5 rm -rf /`
 /// must classify as `rm` (Destructive), not as the unknown `timeout`.
-const WRAPPER_COMMANDS: &[&str] = &[
+pub(super) const WRAPPER_COMMANDS: &[&str] = &[
     "timeout", "time", "nice", "ionice", "nohup", "stdbuf", "setsid", "env", "xargs", "doas",
 ];
 
