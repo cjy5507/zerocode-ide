@@ -2728,15 +2728,21 @@ mod tests {
             }
         }
         // One script, two names — a second script would be a second thing to
-        // keep in step with the bridge.
+        // keep in step with the bridge. The one thing a voice adds is the
+        // watch over the texts it carries (t-80615), which is cut out by the
+        // very strings the script was given, so a drift anywhere else shows.
         let scripts: std::collections::HashSet<String> = dirs
             .iter()
             .zip(SHIMS)
-            .map(|(dir, (_, name, _))| {
-                std::fs::read_to_string(dir.join(name))
-                    .expect("read")
-                    .replace("tmux:", "")
-                    .replace("orchestration:", "")
+            .map(|(dir, (_, name, voice))| {
+                let (init, watch, warn) = zerocode_core::agent_teams::text_watch_posix(voice);
+                let mut script = std::fs::read_to_string(dir.join(name)).expect("read");
+                for added in [warn, watch, init] {
+                    if !added.is_empty() {
+                        script = script.replace(&added, "");
+                    }
+                }
+                script.replace("tmux:", "").replace("orchestration:", "")
             })
             .collect();
         assert_eq!(scripts.len(), 1, "the two shims drifted apart");

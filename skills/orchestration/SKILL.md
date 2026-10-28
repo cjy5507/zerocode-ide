@@ -20,91 +20,71 @@ You are one agent among several working on the same codebase, inside an IDE
 that already owns the things coordination needs. This skill is about using
 them, not about re-inventing them in prose.
 
-**What this product actually gives you.** Read this first — advice that names
-nothing in the product is advice for some other product.
+**What this product gives you.** The long form is in `workers.md`. Read this
+first — advice that names nothing in the product is advice for some other
+product.
 
-- **Worktrees are real, and a worker can be summoned into one.**
-  `zerocode-orchestrator` owns that lifetime — a workspace is a real
-  `git worktree`, made and removed by the window — and `worker-start
-  --worktree` cuts a fresh one from the leader's repository and starts the
-  worker THERE. Without the flag a worker lands in the tree you are already
-  in. A leader outside any repository is refused the flag rather than quietly
-  handed the shared tree.
-
-  What decides the flag is not "is this analysis or implementation" but WHAT
-  THE WORKER TOUCHES:
-
-  - **Changes git state — commits, branches, stash, reset — always
-    `--worktree`.** This is the one that bites. Exclusive file ranges do not
-    protect it: a worker given a slice of files still runs `git checkout -b`
-    in the tree it is standing in, and the shared checkout moves under
-    everyone. That is a real accident from 2026-08-28, and the file ranges
-    were exclusive when it happened.
-  - **Builds — `cargo`, `npm` — always `--worktree`.** Not for isolation but
-    for the lock and the disk: a build in the shared tree contends with your
-    own on cargo's lock, and its `target/` is tens of gigabytes over a day.
-    (Do NOT hand it a `CARGO_TARGET_DIR` of its own: cargo already puts
-    `target/` inside the worktree, and `git worktree remove` takes it along.
-    A target directory outside the worktree is an orphan nobody sweeps.)
-  - **Count the disk in worktrees, not in workers, and count before you
-    summon.** A worktree that runs this repo's gate measured about **10 GB**
-    on 2026-08-29 — mostly `target/debug` — so two parallel builders want
-    20 GB that nobody warned you about. Run `df` first and multiply — and
-    the ledger now does the first half of that for you: a `--worktree`
-    summons is refused, before anything is written, when the volume the
-    ledger lives on holds less than one budget, and its receipt carries a
-    `diskNotice` when the checkouts live workers hold could not all grow to
-    a budget at once. The refusal is the ledger's call; the notice is yours,
-    because a reader never builds. `null` there means the disk had nothing
-    to say and "not measured" means the window could not look. Getting
-    this wrong is not a failed build: filling the disk poisons the ledger
-    runtime itself, and every verb keeps refusing with "the authority store
-    is unavailable" long after you have freed the space. Only restarting the
-    window brings it back. If your workers are VERIFYING rather than
-    building, tell them so — the coordinator runs the gate, and a reader
-    that never builds costs a fraction of a builder.
-  - **Reads only — files, `grep`, docs, an analysis — no worktree.** Many
-    readers in one tree are safe, and a tree cut for one buys nothing: a
-    checkout, a `target/` that grows the moment anyone forgets the no-build
-    rule, and a reclaim later. Say so in the briefing, though: tell it not to
-    change git state and not to build, or it will do one of them for its own
-    reasons and the shared tree is where it lands — and several agents
-    building in one tree WOULD contend on cargo's lock, which is why the ban
-    and the shared tree travel together. Tell it to keep its notes outside
-    the repo (`/tmp`), so nothing it leaves behind is yours to clean.
+- **Worktrees are real.** `zerocode-orchestrator` owns them: a workspace is a
+  real `git worktree`, made and removed by the window, and `worker-start
+  --worktree` starts the worker in a fresh one. A worker that changes git
+  state or builds always gets `--worktree`; a reader that only reads gets none
+  and is told not to change git state and not to build. Count the disk before
+  you summon: one worktree that runs this repo's gate measured about 10 GB, and
+  a full disk stops the ledger itself until the window restarts.
 - **Panes are where agents live.** A worker runs in a terminal pane of this
-  window, and the sidebar draws the parent/child lineage — you can see which
-  agent started which, and click into one to watch it work.
-- **The window IS a channel.** There is a run, there are tasks, there are
-  dispatch ids, and there is a `worker_done` you can send. You do not need a
-  file to hand a result back, and you do not need a person to carry a message
-  between two agents.
+  window, and the sidebar draws the parent/child lineage.
+- **The window IS a channel.** There is a run, there are tasks, dispatch ids
+  and a `worker_done` you can send. You need no file to hand a result back.
 
-## zo delegation tools in this window
+## Reference files — open one when its row says so
 
-With a team grant and `zerocode-orc` on `PATH`, zo's `Agent`, members of
-`SpawnMultiAgent`, and `Workflow` phases use the same ledger door as a
-Claude Code or Codex coordinator. Set `agent` to an exact catalog id and
-carry any requested `model` and `effort` unchanged. The tools validate the
-catalog and the launch receipt; a refusal is returned without a provider
-substitution. Each ledger worker defaults to `worktree: true`. Set it false
-only for a reader that neither builds nor changes git state.
+They sit in this folder. Each holds text moved word for word from the former
+single-file guide; nothing was cut. They are not read at boot, only when the
+moment calls for them.
 
-The tool reuses the pane's current run, including when this pane is a
-worker, and creates a run on first summon only when none is bound. The
-ledger's `startedBy` edge routes each child's `worker_done` to its direct
-parent; all commands for that child keep the captured run id. Ledger reports return through zo's
-ordinary completion channel, including detached notifications. Cancellation
-and an explicit time budget stop the ledger worker; no implicit one-hour
-budget is added. A quota wall is an error, never an agent switch.
+| File | Read it when |
+| --- | --- |
+| `workers.md` | you are about to summon: worktree or shared tree, the disk count, zo's delegation tools, choosing agent, model and effort, headroom, `--agent auto` |
+| `verbs.md` | you write the first verbs of a run, read a `worker_done` payload, answer an `ask`, use `delegate`, a `send` group, `dispatch --inject` or a remote worker |
+| `recovery.md` | you are about to stop or reap a pane, a seat is held by somebody else, a worker died in its checkout, or the window restarted |
+| `news.md` | a notice arrives (`went_quiet`, `worker_died`, `quota_walled`, `resumed`, `classifier_declined`) or a pane was touched by the person |
+| `handover.md` | a worker is at a quota wall or was declined by a classifier and the work should go on elsewhere; `run-auto` |
+| `landing.md` | closing a task that is neither done nor failed, `task-take`, `hand-in`, `task-backfill`, landing records after a merge, decision gates |
+| `briefing.md` | you write a worker's briefing: the acceptance first, `zerocode-find`, the template to copy, how reports read |
 
-Native conversation forks, restricted permission harnesses, and native
-workflow isolation directories cannot be transferred to another CLI; those
-requests return a blocker. Use an explicit task brief and the ledger's
-`worktree` field. With `worktree: true`, each Workflow phase gets a fresh
-checkout: inspect the prior phase's reported commit and give dependent phases
-that source explicitly. The coordinator integrates the returned commits.
-Outside this window, zo retains its native helpers.
+## Rules at a glance
+
+Each line is the short form of a paragraph below or in a reference file.
+
+1. **A verb's text goes in as a file** (`--prompt-file`, `--body-file`,
+   `--spec-file`, `--question-file`, `--resolution-file`, `--reason-file`),
+   written with a quoted heredoc. No backtick, `$(…)` or `$VAR` inside an inline
+   double-quoted text: the shell runs it before the verb sees a word. A file
+   argument works only on a v1.1.102 or newer window; an older window takes
+   `--prompt-file` and `--body-file` as unknown arguments and quietly makes an
+   empty worker or an empty letter. To check, look for `--prompt-file` in the
+   `everyVerb` line of `zerocode-orc help`. A retry (the same `--retry-request`)
+   reads the file again, so do not delete the file before the answer has come.
+2. **Every verb that changes anything needs `--retry-request <name>`**, the
+   same name on a retry and a new one for a new request.
+3. **Ack a delivery, then wait.** `check --ack <deliveryId>` before the next
+   `check --wait`, or the same delivery comes back and real news stays hidden.
+4. **`worker_done` says `ok`, and carries the commit as a top-level `"head"`
+   key** (the 40-character hash) when the work is code. The coordinator
+   reviews the commit named there.
+5. **A review briefing requires `"reportKind":"review"`** in the worker's
+   `worker_done` payload; the word alone tells a reviewed head from code
+   waiting to land.
+6. **Builds take turns.** A worker starts no rustc, clippy or test run before
+   the coordinator's letter says cargo is free; after it, only the targeted
+   tests and the gate the briefing names. The full gate is the coordinator's.
+7. **A worker never pushes a branch and never opens a pull request.** Landing
+   and pushing belong to the coordinator.
+8. **Read your mail before `worker_done`.** Run `check --peek` first: a
+   letter that arrived while you worked can change the scope, and the
+   hand-in closes the attempt.
+9. **Ask your coordinator, not the person.** A prompt nobody watches blocks
+   the pane. Use `ask` and wait for its answer.
 
 ## Reaching it
 
@@ -125,215 +105,54 @@ settings before saying it started; if that exact launch is unsupported or
 unavailable, report the blocker and do not fall back. A name mentioned only
 for discussion or comparison is not a launch request.
 
-**When the person did not name a model or an effort, leave `--model` and
-`--effort` out — the ledger asks Jev.** An omitted dial is not the CLI's
-default: `worker-start` puts the work's title and the head of its spec to
-Jev's difficulty question (`low`, `mid`, `high`), waits up to two seconds, and
-launches on that difficulty's row of the person's table
-(`smart.summonProfiles`, the settings card's 난이도별 워커 모델·사고 깊이 — rows for
-Claude and Codex; another agent's omitted model is its own CLI default, and
-its effort follows the difficulty where its CLI takes one). With Jev switched
-on the question is carried out from the first summons; when it does not answer
-in time or refuses, or a person set it to `shadow` or `off`, an omitted model
-launches on the middle row. A dial you do pin always wins, and one pinned
-alone keeps the answer for the other (`--model` without `--effort` takes the
-answer's effort). Pin a dial only when the person named it, or when a quota
-handover names it (`--on-quota-wall <agent:model:effort>` carries exactly what
-it says).
-
-Pinning out of habit costs more than the dial: every answer is written down
-with whether it was carried out (`~/.zo/jev/summon-difficulty.jsonl`,
-`applied`), and what became of the work — whether its first attempt landed,
-what it cost in tokens and time — is the only evidence that keeps the
-question acting or takes it back. A pinned summons grades nothing. Read what
-a summons came to from the reply's `model` and `effort` and from
-`worker-show`; the settings card and the Jev tab say whether the question is
-acting or still recording.
-
-Still say the classification out loud, in one line each, where the person
-reads the round's plan — which agent, which slice, and how hard you judge it.
-What raises difficulty is not the size of the diff: it is how much of the
-work is JUDGEMENT. Surgery on a large well-tested file, a race whose order
-decides the answer, a design trade-off with a real cost on both sides are
-hard; an audit that is mostly `grep` and reading, a survey comparing two
-roads, a mechanical follow-through are not. An analysis is not automatically
-cheap and an implementation is not automatically dear; a read-only slice can
-be the hardest thing in a round. When the launch you read back disagrees
-with your line — a slice you called light launched on the high row, or the
-reverse — say so to the person rather than re-summoning with a pin: that is
-how a wrong answer is caught while it can still be weighed.
-
-**And spread the work across the agents that are actually installed.** A round
-that sends every slice to one vendor burns that quota alone while the others
-sit idle, and it also hands you one opinion where you could have had two — the
-value of a second agent is that it reads the same code differently. Two of
-this round's analyses each overturned a coordinator's hypothesis, which is the
-whole argument.
-
-Do it without being asked, and do it the same way every time:
-
-1. **Ask what is here before you plan the round**, not at the summons. A name
-   the catalog knows can be absent from this machine, and a summons for it
-   cuts a pane and only then fails. Availability is the one thing about an
-   agent a machine can honestly keep fresh — capability is not — and the
-   ledger now answers it: `zerocode-orc agent-list` says, per agent, whether
-   this machine has it (`installed: yes|no|unknown` — unknown means nobody
-   looked, never "no") and whether it takes `--model` and `--effort`. It
-   ranks nothing and recommends nothing, on purpose. Beside `installed`,
-   `readiness` is what the window last observed of the agent's binary and
-   login: `auth: authorized|unauthorized|unknown`, `binary`, `observedAtMs`,
-   `ageMs`, and `evidence` naming the local witness that said so (an
-   identity file, the keychain item, `gh auth status`). `unauthorized` is
-   a summons that would open on a login screen — `worker-start` refuses it
-   and names the same evidence; `unknown` is "nobody could look", never a
-   verdict.
-2. **Give the hardest slice to a different vendor than last round's hardest.**
-   Rotate rather than rank. You are not deciding who is better; you are
-   refusing to find out the hard way that you only ever asked one.
-3. **Never let one vendor take a whole round while another is installed and
-   idle.** A round of four with two vendors present is at worst three and one.
-4. **Say the assignment out loud** — which agent, which slice, why — for the
-   same reason you say the classification: so a bad split is visible while it
-   can still be changed, instead of being inferred later from a bill.
-
-A person naming an agent overrides all four, and their choice is binding.
-
-**`--agent auto` leaves the agent to Jev.** With Jev switched on, the
-summon question picks one of the agents this machine could start right now
-— the set the quota gate offers, each with its headroom and this ledger's
-record of it — for the summons' brief, waits up to ten seconds, and the
-summons lands on its pick: the reply's `agent` is the agent chosen, never
-the word `auto`, and the rest of the summons (the dials above, the quota
-gate) is read for that agent. When the question is not acting — Jev off, a
-person's `shadow` or `off` for it, or its judge took it back — or it does not
-answer, the summons is refused by name and nothing is written: name the agent
-then. An agent the person named is never replaced by `auto`.
-
-**잔량으로 고르기 — choose by headroom, and let the ledger refuse a wall.**
-`agent-list` answers `headroom` per installed agent — `usedPercent`,
-`resetsAtMs`, `ageMs` — read off the window's own usage cache (the status
-bar's numbers; nothing is fetched for the answer), and `null` where no gauge
-was read: `null` is "nobody knows", never 0%. Read it before you assign a
-round, the way you read `installed`: a slice sent to a provider at 95% is a
-slice you will re-summon. `worker-start` reads the same cache before it
-writes anything. At 90% it summons and says the number in the reply's
-`quotaNotice`; at 97% on a snapshot under thirty minutes old it REFUSES
-before the ledger moves — nothing reserved, the task still `ready` — and the
-refusal names the installed agents that still have room and, when the reset
-is under ten minutes away, says "ask again in N min". A snapshot older than
-that warns instead of refusing: an old number does not block a summons the
-provider may already have unblocked. Nothing is ever substituted unnamed. If
-you want the wall handled for you, say the alternative yourself with
-`--on-quota-wall <agent[:model[:effort]]>`: the summons lands on exactly
-that agent, and the reply's `quotaNotice.redirected` names both halves. A
-person's pinned agent is refused, never swapped.
-
-**Do not maintain a list of models — a ranking, or even a plain roster.** The ledger passes
-`--model` through unread, which is why it has never gone stale; a table of
-which model is best rots the moment a provider ships a new one. What a machine
-can honestly keep fresh is AVAILABILITY, not capability: whether a launch
-starts, retries, or dies is already in the ledger's own record, so let it
-answer "can this agent be summoned right now" and keep the judgement of who is
-good at what where a person can correct it.
-
-The test is not "is this a ranking" but "who updates it when a provider ships
-something new". If the answer is a person, it is already stale — that is as
-true of a bare list of ids as of a table saying which is best. Anything you
-keep has to be DERIVED at the moment it is used: presence from `PATH`, the
-launch flags from the agent's own configuration, the model from whatever the
-person set as that CLI's default. A model id read out of this machine's
-config does not rot, but it also cannot show you a model nobody here has run
-yet, so it buys less than it looks like.
-
-The ledger is that derived source, and it was there the whole time. Every
-summons writes its agent, its model and its effort down, so `agent-list`
-answers, per agent, what this ledger has launched it with (`launched`: each
-`(model, effort)` pair and how many times) — no table to keep, growing by
-itself every time anyone summons. A machine that had never heard of a provider's newest model
-learns it the moment someone uses it once. Ask that before you ask a config
-file: a CLI's config holds only its DEFAULT, which is why two models this
-coordinator had used repeatedly were invisible to a search that stopped at
-`~/.codex/config.toml`.
-
-Read it beside `PATH` rather than instead of it — they answer different
-questions, and the gap between them is information. An agent with launches
-recorded and no binary today was removed; an installed one with no launches
-has never been tried. Neither is "available" in the same sense, and flattening
-them into one list throws away the difference the caller needs.
+**When the person named no model or effort, leave `--model` and `--effort`
+out** — the ledger asks Jev, and a dial you pin always wins. How that works,
+and how to spread a round over the agents that are installed, is in
+`workers.md`. Still say the classification and the assignment out loud, one
+line each, where the person reads the round's plan.
 
 **Whoever implemented a slice does not verify it.** Give the check to a
 different agent, and give it the power to come back with "no". A verifier that
 reads the implementer's own report instead of the code confirms the mistake.
 
-**A pane you kill takes its children with it.** Before you stop or reap any
-pane, ask the ledger what that pane leads. A leader's exit dissolves its team,
-and a leader's exit is NOT a fact about any child's pane: every child that
-was carrying an open local dispatch becomes `orphaned` — alive as far as
-anybody knows, still addressable, its attempt intact. The dispatch stays open,
-the task stays `dispatched`, and its failure count does not move, whether or
-not the row knows its checkout and whether or not a person had typed in it.
-An orphan can still file `worker_done`, `ask` and `status` from its own pane,
-and every one of those lands with the run's CURRENT coordinator seat. Only a
-child carrying nothing is `abandoned`. `released` is written once the window
-has PROVEN the pane gone — never on the strength of the leader leaving. The
-ledger's notice tells the halves apart in separate fields rather than one
-list, because the difference is the whole question.
-
-What no longer follows is the panic. An orphan is waiting, not lost. When the
-next coordinator sits (`run-use`, `run-takeover`, or a restored tab mounting)
-every orphan whose pane is still standing is adopted where it is — `active`
-again, `adoptedBy` naming the seat's generation — and keeps working in the
-pane it always had. An orphan whose pane the window has CONFIRMED gone (the
-reconciler's five beats, written on the row as `pane_missing_since_ms`) is
-seated again in a fresh pane on the attempt it never lost, exactly as a
-sleeper is — or, when it has no checkout to be seated in, retired then and
-only then, its task handed back. An orphan still holding a pane is never
-re-seated, whatever anybody believes about it: cutting a second pane for an
-agent already running is how one session becomes two. If you must act before
-the window has looked, read the pane first (`worker-read` reads another
-leader's pane too), and only then decide.
-
-**A run has ONE coordinator seat, and it is a ledger fact.** `run-create`
-sits you. `run-use <run>` binds you and sits you only if the chair is empty
-or its holder's pane is gone; a chair somebody holds answers `"seated":
-false` with the holder and the one verb that replaces a holder:
-`run-takeover --run <id> --from <seat> --reason-file <file> --retry-request
-<name>`. `--from` names the holder as `run-use`/`run-current` spell it
-(`team/pane`, or its bare pane). A takeover raises the seat's generation,
-files a `handoff` receipt in the old seat's own pane inbox, and ends the old
-seat's `check --wait` with a refusal that names you. Only the seat signs and
-reads as `run:<id>` — a bound pane that is not the seat reads its own pane
-inbox — so two coordinators can no longer share one address and read each
-other's mail. `run-current` says whether you are `seated`. Do not take over a
-seat whose holder is merely quiet; read its pane first.
-
-**A worker that dies in a checkout of its own does not hand its task back.**
-Three times in one day a worker committed its slice, its terminal exited
-before `worker_done`, and the task went back to `ready` with the commits
-sitting on the branch where the ledger could not see them — the next summons
-would have done the slice again. Now the death leaves the task `blocked` by a
-gate the ledger opened itself; the `worker_died` notice names it
-(`heldByGate`) and the checkout. The window's reclaimer examines that
-checkout on its beat: nothing to harvest (clean and landed, or the
-coordinator's own tree) resolves the gate alone and the task is `ready`
-again; unlanded commits or uncommitted changes are written into the gate's
-question and sent to you once. Land the branch, then
-`gate-resolve --gate <id> --resolution harvest` — or `dispatch again` to start
-over. If the checkout is already gone the window cannot look; read the branch
-yourself (`git log main..wt/<task>`) and resolve the gate by hand.
-
-**After a window restart, two panes can hold the same session.** Both answer to
-the same run, and the second one is not idle — it summons, it acks your
-deliveries, it acts on results you are also acting on. Tell them apart by
-`ZEROCODE_PANE_KEY` and the team id in their environment, not by the session
-id, which is identical. And before reaping anything that looks stray, read its
-working directory (`lsof -a -p <pid> -d cwd`): a pane sitting in a different
-worktree may be a person's own session, not your leftover.
-
 **Ask the binary, not this file.** The verb table is deliberately not written
 here, so it can never drift from the program that will actually run your
 commands. If `zerocode-orc` is not on your `PATH`, this pane is not part of a
 run and you are not orchestrating — fall back to the handoff file below.
+
+The index below names the verbs this guide teaches, one line each. It is not
+the table: flags, arguments and every verb not named here are in `help`.
+
+- Runs and seats: `run-create` opens a run, binds you and sits you in its
+  coordinator seat. `run-use` binds you to another run. `run-takeover`
+  replaces a live seat. `run-current` says which run you are bound to and
+  whether you are seated. `run-show` counts one run out. `run-list` lists the
+  runs this window holds. `run-auto` keeps n workers fed from the ready tasks.
+  `handover-policy` declares what the run does at a quota wall, a transient
+  error or a classifier decline.
+- Tasks: `task-create` writes a slice down. `task-list` shows what is written
+  down. `task-update` corrects the record, from the coordinator seat.
+  `task-settle` lists old open work and closes it `outdated` with `--apply`.
+  `task-take` opens a coordinator attempt on work done by hand. `hand-in`
+  hands a commit in on that attempt. `task-backfill` writes the records of
+  work that landed without one.
+- Gates: `gate-create` holds a task on a decision. `gate-resolve` answers it.
+  `gate-list` shows what stands and what was decided.
+- Workers: `agent-list` says which agents this machine has and their
+  headroom. `worker-start` summons an agent into a pane. `delegate` writes the
+  task, summons the worker and leaves it a letter, in one step. `worker-list`
+  and `worker-show` read workers. `worker-read` reads a worker's screen and
+  `worker-transcript` its conversation. `worker-stop` ends an attempt.
+  `worker-abandon` stops tracking a pane. `worker-return` hands a pane the
+  person took back to the ledger. `worker-release` archives a screen and
+  retires the terminal. `dispatch` hands a written task to a pane you
+  summoned, and `dispatch-show` reads the latest attempt back.
+- Mail: `check` reads your inbox. `send` writes a letter to an address or a
+  group. `reply` answers in thread. `ask` is a question a blocked worker waits
+  on. `inbox` is an audit of the project's mail. `reset` is recovery only.
+  `help` is the verb table.
+- Federation, for a worker on another machine: `federation-invite`,
+  `federation-join`, `federation-servers` and `federation-forget`.
 
 **Every verb that CHANGES anything needs `--retry-request <name>`.** Reads do
 not (`run-list`, `task-list`, `worker-list`, a plain `check`); a `check --ack`
@@ -366,235 +185,28 @@ inside a briefing ran that way and took the window's panes down. Write the
 text with a quoted heredoc and name the file:
 
 ```sh
-cat > /tmp/slice-1.md <<'EOF'
+cat > <your scratchpad>/slice-<task-id>.md <<'EOF'
 Any characters at all: backticks, $(not run), $HOME, "quotes", 한글.
 EOF
-zerocode-orc worker-start --agent <name> --task <id> --prompt-file /tmp/slice-1.md --retry-request start-<id>
+zerocode-orc worker-start --agent <name> --task <id> --prompt-file <your scratchpad>/slice-<task-id>.md --retry-request start-<id>
 ```
 
 A text and its file form together are refused, and so is a file that is
-missing, empty, a link or not UTF-8. One plain word inline (`--resolution harvest`,
+missing, empty, a link or not UTF-8. When a verb refuses a text for an unexpanded
+`$(…)` or `$VAR`, use the file argument and send it again. One plain word inline (`--resolution harvest`,
 `--reason quota-wall`) is safe; an inline text with a backtick or `$(` still goes through, with
 a warning line on stderr. Every example below that takes text is written in the
 file form: `--spec-file <file>` stands for a file written like this one.
 
-The shape of a session is always the same:
+The shape of a session, one line each (the full text, with every trap, is in
+`verbs.md`):
 
-1. `run-create --name <run> --retry-request open-<run>` — open a run, bind
-   YOU to it, and sit in its coordinator seat. The run you are working in
-   follows your session, not the pane you happen to be sitting in: close the
-   window, come back, and `run-current` still answers the run you were in.
-   `run-use <run>` moves you; nothing else does, and a retry of an old request
-   never moves you back. Binding and sitting are two facts: `run-use` answers
-   `"seated": true` only when the chair was empty (see the seat rule above).
-2. `task-create --spec-file <file> --retry-request task-<run>-1` — write each
-   slice down BEFORE summoning anyone. A task carries its own spec, and
-   `--deps` holds a slice back until the slices it needs have finished.
-   Write `--title` in English: checkout and branch names are ASCII-only, so
-   Korean words fall away and a title led by `t-<id>` keeps only that id.
-3. `worker-start --agent <name> --task <id> --prompt-file <file> --retry-request
-   start-<id>` — this cuts a real pane and starts that agent in it, with your
-   prompt already on its command line. Any agent in the catalog: `claude`,
-   `codex`, and the rest.
-   **`--task` is not a prompt, and forgetting `--prompt` is silent.** The
-   task names where the work is WRITTEN; the prompt is what the worker is
-   actually TOLD. Name the first without the second and the pane opens with an
-   EMPTY composer — deliberately, because a briefing with no instruction
-   behind it would be a worker told how to report work it was never given.
-   From outside that agent looks exactly like one that is thinking, and the
-   only way to learn otherwise is `worker-read`.
-   It cannot be repaired in place either: the summons already minted the
-   dispatch carrying that task, so a later `dispatch --task <id> --to <pane>
-   --inject` is refused as *already carried on this very pane*. Abandon the
-   worker and summon again WITH `--prompt`.
-   So: say the slice in `--prompt` (or `--prompt-file`) every time, even when the spec already
-   reads like one. The deliberate road to a silent pane is `--bare` with no
-   `--task` at all, spoken to afterwards by `dispatch --inject`.
-4. `check --wait` — read your inbox. Workers report to you here. A plain look
-   needs no retry name; `check --ack <deliveryId> --retry-request ack-<deliveryId>`
-   does, because it spends the batch. `--wait` takes `--timeout-ms` when your
-   patience has a number; `--peek` looks without taking a batch, `--all` reads
-   history and never waits, and `--format` adds a human banner inside the same
-   JSON answer.
-   **Wait in the background, not in the foreground.** A foreground
-   `check --wait` blocks your whole turn for as long as the workers take —
-   the person cannot talk to you, and you cannot do anything else. Run it
-   with your shell tool's `run_in_background` (Claude Code, zo) and go on:
-   answer the person, review what has landed, prepare the next slice. The
-   completion arrives as a task notification mid-turn with the delivery in
-   it; nothing is lost by not standing at the door.
-   **Read a report's `payload` before you clean anything up.** The briefing
-   tells a worker to keep its summary short and to carry a longer answer as
-   `--payload '{"reportPath":"...","lifetime":"ephemeral"}'`. The lifetime
-   is explicit because a raw path is not an artifact: it usually lives in the
-   worker's worktree, which means `worker-release` and `git worktree remove`
-   destroy it. Read it, and copy anything worth keeping somewhere that
-   outlives the worker, BEFORE you retire the seat. A worker that packs a
-   whole analysis into one summary line has lost most of it; that happened
-   here on 2026-08-28 and the only recovery was scraping the pane.
-   The window now keeps a copy itself (t-32798): when a `worker_done` names a
-   `reportPath` (with `"reportKind"` — report, review, brief, handover or proposal —
-   when it is one of the last four), or files and folders under
-   `"evidencePaths":["/abs/file","/abs/dir"]` (an entry may be
-   `{"path":"/abs/red.log","expected":"fails at the assertion","expect":"fail"}`, so an
-   intended failure is said and not guessed from the file name; a report that
-   cites a file it named writes that file's absolute path in its text, not only
-   its name — a log called `red.log` cannot be found afterwards),
-   the ledger copies them into the artifact store — masked of home paths,
-   mailboxes, private addresses and credentials, text and pictures only, at most
-   24 MB a hand-in — and the task's row on the board says what was kept, what was
-   left out and why, with a door to open it. It keeps them again before any
-   cleanup or release takes the checkout, and a cleanup refuses while a keeping
-   has not finished or failed. The same road serves every agent CLI. Read the
-   kept copy from the Artifacts view (or the row's door) rather than the
-   worker's path, which is gone once the checkout is.
-   A hand-in with `"reportKind":"review"` — or a report (no commit) on a task
-   whose title has the word 검수 / 읽기 전용 / review / read-only / audit (a
-   whole word: 「preview」 is not one) — has no code to land: your
-   `verified` of it is written with `nothingToLand` added (the answer says
-   why under `nothingToLandBecause`) and, when it handed in a commit, that
-   commit as `reviewedHead`, and `landing_stalled` never asks it to merge —
-   unless your result says something of landing itself (`merged`,
-   `nothingToLand: false`): your word stands over the worker's.
-   **A review brief requires `"reportKind":"review"` in the worker's
-   `worker_done` payload**: a reviewer that hands in the head it reviewed is
-   told from code waiting to land by that word alone.
-5. `worker-read --worker <id>` — look at a worker's actual screen when you
-   need to see what it is doing rather than what it said. A released worker
-   answers from the screen its release archived, same tail rules. The window
-   is asked by the seat the LEDGER knows, so another leader's worker — an
-   orphan whose leader exited, a worker of the coordinator you took over from
-   — reads the same way; "unknown pane" is no longer what that answers.
-   `worker-transcript --worker <id> [--turns <n> | --since <ms>] [--json]`
-   is a separate read of the same worker's CONVERSATION — its newest steps
-   (default 5: what it said, the tools it then ran and what came back, and
-   when), which its screen does not show — out of the transcript its agent
-   reported, masked and cut at fixed caps; it is not a cheaper screen, it
-   never answers from the screen, and a worker whose agent reports no
-   transcript says `transcript unavailable` instead.
-
-When verification needs pixels, use the computer-use skill's
-`zerocode-browser screenshot` or `zerocode-emulator screenshot`; both commands
-are already on every launched worker pane's PATH and return a local PNG path.
-
-`worker-show`/`worker-list` carry a three-valued `agentWait`: an object
-means the pane is parked on a prompt only a person can answer (with the
-evidence and when it began), `null` means the window looked and found no
-wait, and an ABSENT field means it never looked — an agent that wires no
-hooks, a pane before its first report — which never means "not waiting".
-
-They also carry `seat`, the window's own word for the pane behind the row:
-`live` (the terminal is there), `gone` (the window looked and it is not),
-`unknown` (no table maps the seat to a terminal, so nobody has looked). Read
-it beside `state`: an `orphaned` row with `seat: live` is an agent at work
-under no leader, and `taskId` stays on the row for as long as its dispatch
-is open. `released` on a row that is not yours means the window proved its
-pane gone — another leader's pane that is merely not in YOUR table keeps its
-stored word. Each row names its `team` too, so two leaders' `%2` cannot be
-confused.
-
-Three more doors, when you need them. A worker that is BLOCKED asks —
-`ask --body-file <file> --retry-request <name>` — and the verb itself waits
-for the answer (ten minutes unless `--timeout-ms` says otherwise, half an
-hour at most). A timeout is not a failure: the answer names the question, and
-`ask --resume <questionId>` walks back to it without asking twice. One
-question takes ONE answer — a reply that repeats the standing answer lands AS
-it, a different one is refused with its name — and a question whose dispatch
-ended is closed. While you wait, the ledger tells you how the RECEIVER stands
-— one `status` line from `ledger` threaded on your question in your inbox,
-`reason: turn_ended | interrupted | awaiting_input | stalled | <stall cause> |
-quota_walled | taken_over | finished | seat_vacated | cancelled | exited` —
-and the timed-out answer carries the last of them under `receiver`. None of
-those is an answer, and `cancelled`/`exited` are final: the seat will never
-answer, the blocked `ask` wakes on them, and `cancelled` says in so many words
-not to ask again and not to summon a replacement — that is its coordinator's
-decision. On the answering side you are just reading mail:
-`check --types question`, then `reply --to-message <id> --body-file <file>`.
-A question from ANOTHER run's coordinator (`send --run <run> --to run:<run> --type question`) is answered the same way: one `reply --to-message <id>` closes it here and is delivered to the run that asked (`deliveredTo` in its answer) — do not answer with a `send --type status`, which leaves the question standing on the board.
-
-`delegate` is the three steps of a new piece of work in one: it writes the task,
-summons a worker on it (`worker-start`'s own gates: the quota wall, `--on-quota-wall`, the
-disk check for `--worktree`) and leaves the worker a letter that tells it its own worker,
-dispatch and task ids, which a worker cannot learn by itself. `zerocode-orc delegate --spec-file
-<file> --agent <a> [--title <t>] [--deps a,b] [--prompt-file <file>] [--model <id> [--effort
-<level>]] [--on-quota-wall …] [--worktree] --retry-request <name>`. The worker's first words
-are the spec unless you give `--prompt`. A refusal anywhere leaves no task, worker or letter
-behind; the same `--retry-request` answers with the first answer and makes nothing twice.
-With `--wait --timeout-ms <ms>` (up to ten minutes) the call holds its answer until that
-worker reports (`worker_done`), asks you something, or its attempt ends silently — the answer
-then carries a `waited` object with the outcome and, for a report, the worker's own summary.
-It never reads or acknowledges your inbox, so other workers' mail waits for your `check` as
-usual. A worker that is already on a task, a replacement for an ended attempt, a bare pane
-and a federated worker still go through `worker-start`.
-
-`worker-start` also takes launch tuning where the agent's own CLI does —
-`--model <id>` (an opaque provider id, passed through unread), `--effort`
-beside it where a ride exists — plus `--retry-of <dispatchId>` to link a
-replacement to the ENDED attempt it replaces, `--inherit-checkout` beside
-it to seat that replacement in the ended attempt's own checkout (the same
-tree, uncommitted work and all — refused when nobody reported that
-checkout or it is gone, and exclusive with `--worktree`; the reply's
-`inheritCheckout` names the path), `--timeout-ms` as a
-readiness window: a summons that stays silent past it is reported to you
-once, as news, settling nothing — and `--on-quota-wall
-<agent[:model[:effort]]>`, the one alternative the ledger may summon in
-your agent's place when that agent's provider is at its quota wall (the
-reply's `quotaNotice.redirected` says both; without the flag a walled
-summons is refused by name, and nothing is written). The same flag is the
-standing order for THAT worker's wall later on: it is written on the worker
-row (`worker-show.onQuotaWall`), and if the worker is witnessed at its
-wall the beat hands its task to exactly that alternative — see the
-handover paragraph below. For auditing there are `run-show`, `inbox`
-(this project's runs' mail, nothing moves; `--since <ms>` and `--cursor
-<nextCursor>` walk a whole day page by page) and `reset` (exactly one scope,
-refused if it would touch another project's runs; receipts survive it).
-
-The ledger is shared by the window, but a pane's commands and mail stay in
-its project. Worktrees sharing one repository are one project; its runs can
-write to each other. `--run` does not cross that boundary. Direct pane
-recipients and replies are checked against the recipient's current project
-as well. A refusal says which project does not match; ask from that project's
-pane rather than changing a scope switch. Legacy runs whose project is not
-known are visible only to their own seated participants.
-
-`send --to` takes one address or a whole set. `@all` is every live worker
-but you, `@idle` every live worker with no dispatch in flight, and
-`@<agent>` — `@codex`, `@claude` — every worker that IS that agent, the
-roster's own word rather than a guess from a pane title. Groups resolve when
-you SEND: a worker summoned afterwards was not among those asked and gets
-nothing, an empty group is a refusal rather than a quiet "sent", and the
-message stays ONE message — every reader answers to the same id, so replies
-meet in one thread by construction. Questions are the exception: `ask`
-refuses a group, because one question takes one answerer. And
-`@worktree:<path>` reaches every worker whose pane the window has placed in
-that checkout — the path `worker-show` prints as `checkout`, exact match. A
-row the window has not placed yet is in NO checkout group, and an empty
-checkout group's refusal says how many such unreported rows it is not
-counting — absence of the fact is never a fact of absence.
-
-A worker can live on ANOTHER machine: `worker-start --on <server> --task
-<id>` claims the task here and seats the pane over there — the far window
-runs the summons through its own rules, your dispatch settles here when its
-`worker_done` rides home, and `send --to remote:<dispatchId>` reaches that
-pane's inbox. One-time setup, by verb: on the worker machine
-`federation-invite` prints its address and token; on yours,
-`federation-join <name> --addr 127.0.0.1:<tunnelled port> --token <it>` —
-loopback only (reach a remote machine with `ssh -L`), a public address is
-refused where you can fix it. `federation-servers` lists the book with
-tokens shortened, `federation-forget <name>` drops one, and the far window
-names which team hosts borrowed panes in `federation/host-team` when it
-runs more than one. Placement words
-(`--worktree`, `--horizontal`, `--bare`) are refused with `--on` — where
-the borrowed pane sits is the server window's decision.
-
-A finished worker's pane is not spent. `dispatch --task <id> --to <pane>
---inject --retry-request re-<id>` hands the next written task to an idle
-worker you already have — the same briefing `worker-start` gives, with the
-task's own spec, typed into that pane as one paste. `--dry-run` previews the
-exact words without taking the task, and `dispatch-show --task <id>` reads
-the latest attempt back. The target must be one of THIS run's workers: a
-pane the run did not summon answers to somebody else's authority, and
-`dispatch` refuses it rather than typing at a stranger.
+1. `run-create` opens a run and sits you in its seat.
+2. `task-create` writes each slice down BEFORE you summon anyone.
+3. `worker-start` cuts a pane and starts the agent in it — and say the slice
+   in `--prompt-file` every time: `--task` alone opens an empty composer.
+4. `check --wait`, in the background, reads your inbox; ack what you act on.
+5. `worker-read` shows what a worker is doing rather than what it said.
 
 **What survives a window restart is your agent's own conversation.** Receipts
 — and your run binding — are filed under your session, not under the pane you
@@ -608,45 +220,6 @@ they will RUN. So after any restart you are not sure your conversation
 survived, look before you re-run a mutation: `run-list`, `task-list` and
 `worker-list` cost nothing and are the difference between resuming a run and
 starting a second copy of it.
-
-**Your workers survive a restart too — the window seats them again itself.**
-A window restart keeps the seat; a worker that never comes back dies with a
-dispatchId. A worker that was in a durable checkout comes back as `sleeping`:
-its dispatch is still open and its task still carried, and the window resumes
-its conversation into a restored pane and reseats it without you — the same
-worker id, the same dispatch, no handover. The window's own exit puts the
-seat to sleep BEFORE its panes go, so a pane exiting on the way out is not a
-death and raises no gate; and a pane the person had taken over comes back the
-same way, seated again by the window's own restored tab. The restored worker
-is told its seat stands and where its checkout is, and continues from its last
-tool result rather than re-running every gate. Only a sleeper nothing resumed
-within the grace (ten minutes from boot) ends: `worker_died` with the
-`dispatchId` a `--retry-of` needs. Do not summon a replacement for a
-`sleeping` worker; wait for `worker-list` to show it `active` again (or its
-`worker_died` if nothing brought it back). A restored
-worker that is alive and at work is seated as it is, briefing or no briefing —
-it picked its task straight back up, and the window does not tear it down for
-being busy. The one case you end yourself is a `sleeping` worker with nothing
-running behind it — you looked (`ps`, the roster) and found no process:
-`worker-stop --worker <id> --reason-file <file>` (what you saw) ends the attempt through
-the sleeping road, closes nothing (that pane id may be somebody else's in this
-window), and hands the task back `ready` — after which `worker-start --task …
---retry-of <dispatchId>` takes it (add `--inherit-checkout` to seat the
-replacement in the checkout the ended attempt sat in). `worker-abandon` does
-the same and says only that nobody is watching.
-
-Those `--retry-request` names are examples of the SHAPE, not magic strings:
-each one has to be unique to its request and identical if you run that request
-again. Deriving them from the ids you already have — the run, the task, the
-delivery — is the cheapest way to get both.
-
-Two answers you may see once and never again. **"this pane has no session
-identity yet"** means your agent has not reported to the window yet; wait for
-your first turn to finish and ask again — a change cannot be made retryable by
-somebody nobody can name. **"…was answered by an older window"** means that
-retry name belongs to a receipt this build cannot check; choose a different
-name. Both happen at most once, and neither is something you can work around by
-dropping `--retry-request`.
 
 ## Five rules that are not optional
 
@@ -684,120 +257,13 @@ These are the ones that cost you a run when you get them wrong.
   for the count to reach zero** — with three running, the first to finish
   moves nothing your loop is looking at, and its report sits unread behind
   any other queued notices.
-- **Silence is not failure.** An empty `check` (`{"count":0}`) and a `--wait`
-  that times out are both checkpoints. Real coding tasks run fifteen to sixty
-  minutes without a word. Do not restart a quiet worker; read its screen.
-  The ledger says the same about its own news: a `went_quiet` message — a
-  worker whose live pane stayed idle past the stall grace, or one that
-  `never_spoke` inside its readiness window — is information, not a verdict.
-  Turn boundaries remain audit rows and do not notify by themselves. Nothing
-  was settled; reading the screen is still the next move.
-- **A death is not a silence.** `worker_died` is the one piece of the
-  ledger's own news that IS a settlement: the seat carrying an open dispatch
-  is gone, the attempt is closed, and the task's status and remaining
-  attempts are already written. It arrives once, and it carries the
-  `dispatchId` that `worker-start --retry-of` takes. Deciding whether to
-  retry is yours — a death caused by a loop only dies again — but you no
-  longer have to go and look to learn that there was one.
-- **A wall is not a silence either.** `quota_walled` is the ledger's news
-  that a quiet worker stopped at its provider's quota wall — written only
-  on TWO witnesses, the agent's own words (a measured marker on its screen
-  or in its transcript: codex's `usage_limit_exceeded`, claude's "You've
-  hit your session limit", zo's "usage limit … resets in") AND the
-  provider's fresh number at the wall off the window's usage cache. A
-  screen line alone is a line; a number alone says nothing about that
-  pane. It arrives once per wall, carries the `dispatchId`, the
-  provider's number and reset, the `checkout` the work sits in and the
-  words that were seen, and settles NOTHING — the attempt is open and the
-  task carried until you (or the handover beat) say `worker-stop`. A pane
-  the person took over earns no such news. A wall stands until its reset
-  and three minutes after it (the stall grace — Claude Code waits out its
-  own reset and types its own continuation about a minute after it), or
-  six hours from the news when the reset is unknown or further off (a
-  weekly window). While it stands the worker's silence is the wall's;
-  after it, the silence is `went_quiet` news again, and a wall in the
-  next window is `quota_walled` news again.
-- **A dropped response is not a silence either — if you say so.** A worker
-  whose own transcript ends on a transient API error (claude's
-  `server_error` — "The response stopped arriving", "529 Overloaded",
-  "Connection lost mid-response"; codex's `server_overloaded` or "stream
-  disconnected before completion") sits at an empty composer until somebody
-  types. Declare `handover-policy --on-transient-error resume` (alone, or
-  beside `--on-quota-wall`; one `handover-policy` names the whole order,
-  `run-show.handover.onTransientError` reads it back, `--off` puts it down)
-  and the beat types one continuation into that worker's composer — only
-  when the error is the conversation's last word, only at a composer at rest
-  (never a pane the person took over, one holding its own question, or one a
-  person's hand interrupted), and never at a quota wall, whose road wins.
-  Each try leaves a `resumed` receipt in your inbox — `{workerId,
-  dispatchId, marker: {source, line, key}, attempt, attemptsMax, status}` —
-  `submitted` when the provider reported the prompt going in, `not_submitted`
-  with `typed` saying whether the words may be on the line, `interrupted` if
-  the window restarted mid-try. One error is typed at once unless the door
-  typed nothing; tries stand the stall grace apart; one attempt is resumed
-  at most three times, and the last says `ceilingReached` — after it the
-  silence is `went_quiet` news again and the resume is yours.
-- **A classifier's decline is not a silence either.** The provider's safety
-  classifier can decline a request (`stop_reason: "refusal"`, with a
-  category: `cyber`, `bio`, `frontier_llm`, `reasoning_extraction`, …) —
-  Claude Code says "<Model>'s safeguards flagged this message". Fable 5.x
-  and Opus 5/5.5 carry these classifiers; Opus 4.8 does not. A summoned
-  Claude worker launched with no model at all — no `--model`, and no row of
-  the summon profiles to fill one — is launched so its own CLI
-  continues the declined turn on the model the provider routes the category
-  to (`cyber` → Opus 4.8) instead of pausing — the flag rides that worker's
-  launch only; the person's settings, their panes and yours are untouched.
-  A worker summoned with `--model` is pinned, and so is one launched on its
-  profile row's model when you left the dial to Jev: its CLI is launched with
-  that switch OFF (zo: `--classifier-fallback off`), whatever the person's
-  file says, because the model it launched on is binding and the CLI's own route
-  is neither that model nor a rung you declared; where its task goes is
-  `handover-policy --on-classifier-decline`, exactly as declared, or your
-  own hand. A worker that still stops is `classifier_declined` news —
-  written only on TWO witnesses: the sentence on its screen AND its
-  transcript's last record saying the same, the category read off THAT
-  record's own request (never an earlier one's); or, for the pause dialog
-  (which writes no record until a key answers it), the dialog in the CLI's
-  own layout on screen AND the pane quiet ten minutes, longer than any
-  dialog a person answered here — and that one is DIAGNOSTIC news
-  (`screenOnly: true`, rung `notify`): a screen's words can be quoted by a
-  tool result, so a screen alone ends no worker and walks no handover,
-  whatever you declared; read the pane and hand it over yourself. The news
-  arrives once per record — a dialog once per attempt, and each decline
-  record the pane stands at after it once more, whether its hook came to
-  rest or still says `working` — with the `category`, whether the provider
-  routes it anywhere (`routed`), the `rung` it stands on and the
-  `dispatchId`, and settles nothing. Every switch of model a worker's CLI
-  made for a decline is a `model_deviated` row — the bound model, `from` →
-  `to`, the category, how long the switch lasts (Claude Code keeps it for
-  the rest of that conversation) — written once, for the attempt it was
-  made in and never for the next task the same pane is handed, and kept
-  until the ledger can hold it — because the model you summoned with is
-  binding and leaving it, however well, is yours to read.
-- **A silence the markers cannot name may be asked about, and only written
-  down.** With `smart.stallCause` at `shadow` or `auto` in zo's
-  `settings.json` and the worker's checkout consented under
-  `smart.jev.workspaces`, the beat puts each such silence to Jev once — the
-  pane's screen tail and its transcript tail, through the Jev door — and
-  appends a row to `jev/stall-cause.jsonl` in zo's config home: the cause it
-  chose (`transient_api_error`, `quota_wall`, `auth_failure`,
-  `classifier_decline`, `waiting_on_own_cli_question`,
-  `finished_without_report`, `long_running_tool`, `human_took_over`,
-  `unknown`) and, later, what you did next (`mail`, `resumed`,
-  `worker_done`, `worker_stop`, `worker_died`, or `none` within two hours).
-  Your inbox does not change and nothing is typed: `went_quiet` is still the
-  news, and reading the pane is still yours.
-- **Say when you cannot tell.** If you do not know whether a worker finished,
-  say you do not know. A report that guesses is worse than one that admits the
-  gap, because the coordinator acts on it.
-- **A pane the person touched is theirs.** Real keys in a worker's pane take
-  it over: from then on `worker-stop`, `worker-release` and `dispatch` refuse
-  — the refusal names the road left — and `worker-abandon`, which touches
-  nothing, is how you stop tracking it. Reports from that pane still land,
-  and hand nothing back — the person may still be sitting there. An Enter
-  that only sent words the window placed (a resume nudge, a mail pointer)
-  takes nothing over. `worker-return --worker <id>` hands a pane back by
-  name, and is refused while the person's own words sit unsent on its line.
+
+The rest of the list is in `news.md`, and it is about the ledger's own news:
+silence is not failure (`went_quiet` is information, read the screen), a death
+is a settlement (`worker_died` carries the `dispatchId` a retry takes), a wall
+is not a silence (`quota_walled`, written on two witnesses), a dropped
+response and a classifier's decline each have their own notice, say when you
+cannot tell, and a pane the person touched is theirs.
 
 ## When to orchestrate — and when not to
 
@@ -807,114 +273,9 @@ slices would touch the same files, they are one slice. A task that fits in
 one focused session should stay in one session — coordination has overhead,
 and a split that saves no wall-clock time only adds it.
 
-**You choose the placement.** By default nothing decides for you how many
-workers to start or where: a run is a namespace and an inbox, and it summons
-nobody until you say so. Start the number you can actually supervise.
-
-If you DO want it to keep itself fed, that is `run-auto --agent <name> --max
-<n>` — a standing order that summons at most one worker per beat, up to `n` at
-once, taking the oldest ready task. It stops when there is no ready work and
-stands down on a restart, and every worker it starts is the same
-`worker-start` you would have typed. `run-auto --off` ends it.
-
-**A quota wall is handed over only under a declared order.** By default a
-walled worker is `quota_walled` news and the hand recipe is yours: commit
-its WIP in its checkout, `worker-stop --worker <id> --reason quota-wall`,
-then `worker-start --agent <alt> --task <same> --retry-of <dispatchId>
---inherit-checkout`. If you want the beat to walk that road for you, say
-the alternative yourself — `--on-quota-wall <alt>` on the summons (that
-worker only), or `handover-policy --on-quota-wall <agent[:model[:effort]]>
-[--wip-commit]` on the run (every worker of the run; the summons' own word
-wins; `run-show.handover` reads it back; `handover-policy --off` puts it
-down). The order is refused whole, by name, when the alternative cannot be
-summoned. When armed and a `quota_walled` witness arrives, the beat walks
-ONE effect outside the ledger's locks, in this order because `--retry-of`
-follows an ENDED attempt only: ① a WIP commit in the worker's checkout —
-`wip(handover): <worker> stopped at <provider> wall, resets <hh:mm>` — made
-only under `--wip-commit` and only when the tree is dirty (a clean tree is
-"skipped", a commit git refuses ABORTS the handover with news and the
-worker keeps its pane); ② `worker-stop --reason quota-wall`; ③ `worker-start
---agent <alt…> --task <same> --retry-of <dispatchId> --inherit-checkout`,
-with a handover paragraph at the head of the replacement's briefing (who
-stopped, at which wall, where the tree is, the WIP sha, "continue — do not
-start over", and — read from the walled worker's transcript before ② closed
-its pane — its last words and latest tool calls, fenced as untrusted data
-and capped at 2 KiB, with the transcript's path); ④ a `handover` receipt in your inbox — `{from, to, steps:
-[{name, ok, detail}], status}` — delivered when the walk settles, `done`
-with the replacement's `workerId`/`dispatchId` or `failed` at the step that
-refused (an alternative that is itself at the wall fails step ③ by the
-gate's own sentence, with the attempt already ended and the task `ready`
-for you to place). Every step is the same argv a person would type, through
-the one door, from your coordinator seat. One task is handed over at most
-twice (`QUOTA_POLICY.handover_max`); past that a wall is news only. A pane
-the person took over is never handed over. If the window restarts mid-walk
-the receipt arrives `interrupted`, naming the last step that walked, and no
-later beat resumes it — read the steps and finish or undo by hand.
-
-**The same conversation comes before a different model.** `--on-quota-wall`
-also takes the closed word `wait` — alone, or beside the alternative as
-`wait,<agent[:model[:effort]]>` in either order (a word nobody measured is
-refused by name). The order is walked as a ladder, the wait first: while
-the wall's reset (named by a fresh gauge when the wall was witnessed) and
-the three minutes after it have not passed, nothing is handed over. Claude
-Code waits out its own reset and continues the same conversation about a
-minute after it — every wall on this machine did — and a handover walked at
-the wall would have ended that conversation for a new one. Once the wall
-stops standing, the handover walks as before, if the wall is witnessed
-again. A wall whose reset is unknown or more than six hours away (a weekly
-window) is not waited for: it is handed over at once. `wait` alone on a
-summons is that worker's whole order, so the run's alternative never
-reaches it — the way to keep a worker pinned to its model and effort.
-`run-show.handover.ladder` reads the rungs back in walking order; the
-`quota_walled` news carries `ladder` and `wait: {standsUntilMs}` (or
-`{skipped: <why>}`), and a `handover` receipt carries `rung: "handover"`.
-Under `wait` the beat also asks the window's usage gauge for a fresh
-reading from the reset on (never forced — the status bar's own floor and
-backoff hold), and if the worker is still stopped at its wall once the wall
-stops standing — its own words still at the wall, the provider's number
-read after the reset under it — you get ONE `went_quiet` notice with
-`reason: "quota_lifted"` and `rung: "wait"`, the `wallId`, and the `gauge`
-that says so: its own continuation did not come (a CLI that does not wait,
-or a countdown somebody cancelled), so wake it with a line of mail or hand
-it over. Nothing is typed for you. With no reading after the reset within
-five minutes, or without `wait`, the silence is ordinary `went_quiet` news.
-
-**A decline goes to the provider's route first, and to another worker only
-under a declared order.** The ladder is one table, walked in order: ① an
-UNPINNED worker's own CLI continues the declined turn on the category's
-route — no wait, nothing typed, and a `model_deviated` row says so (a
-worker you pinned with `--model` never takes this rung: its CLI is told
-not to switch, and a declaration does not turn that switch back on); ② for
-a routed category (`cyber`, `bio`, `frontier_llm`) that still stopped, the
-handover you declared with `handover-policy --on-classifier-decline
-<agent[:model[:effort]]> [--wip-commit]` (a part you leave out is the
-declined worker's own) — the same three steps as a wall's, with `worker-stop
---reason classifier-decline`, and a `handover` receipt that names the
-deviation; the walk ends the worker only on the decline it was planned
-for — the same transcript record, in the same routed category, re-read at
-every step and last inside the stop itself — and a decline that reads
-differently there (its category gone, another request's) settles nothing
-and is planned again from what the pane shows next; ③ the notice, for
-everything else — an unrouted category, no order declared, and every
-decline the screen alone witnessed. Not a retry on the same model first:
-here the request after a decline went through on the same model 6 times in
-15 and on the route 15 times in 15, and the provider's own guide says a
-refused request re-sent unchanged usually earns another refusal. A
-category the provider routes nowhere (`reasoning_extraction`, and a decline
-with no category) is news only: nobody is handed the declined request. Do
-not rewrite a brief to slip past the classifier, and do not grep briefs for
-"risky" words — neither predicted a decline here (a brief carrying such
-words was declined 2 times in 46, one without 1 in 106). Read a declined
-pane's words (`worker-read`); never paste a picture of the declined screen
-into a conversation — on this machine a refused message that carried a
-screenshot was declined again for as long as the picture stayed in the
-conversation. zo takes the same ladder in-process under
-`smart.classifierFallback` (`off`, `ask` — the default: it asks before a
-turn continues on the route, and a question nobody answers — the prompt
-ceiling passed, or nobody at the keyboard to ask — is NOT a yes: the turn
-stays on the chosen model and says so — or `auto`), announces every switch,
-and asks before it sends a declined request's images again; a summoned zo
-worker runs `auto` when you pinned no model, `off` when you did.
+You choose the placement. A run summons nobody until you say so; `run-auto`
+keeps it fed, and a quota wall or a classifier decline is handed over only
+under an order you declared. Both are in `handover.md`.
 
 If what you were asked for is "give this to another agent" and nobody asked
 you to watch it or collect a result, you do not need this skill. Make a
@@ -949,106 +310,15 @@ that opens a prompt nobody is watching blocks its own pane until somebody
 happens to look at it. Send the blocker as `escalation` and stop; a stopped
 child with a written reason is recoverable, a hung one is not.
 
-## Closing work that is neither done nor failed
+## Closing work, decision gates, and the coordinator's own hand-ins
 
-Work folded into another task, handed to the other run, or overtaken by events
-is not a completion and not a failure — it is `closed`, with the reason and the
-target that make it a fact. The coordinator writes it with `task-update`, and
-nothing else writes it:
-
-```
-task-update --task <id> --status closed --closed-as folded --into <task>
-task-update --task <id> --status closed --closed-as handed-over --to <run-id>
-task-update --task <id> --status closed --closed-as outdated --why '<one line>'
-```
-
-Each form is refused without its own flag, a fold into a task the run does not
-hold, into itself or in a circle is refused, and so is closing a task a worker
-is carrying (stop the attempt first) or one with a decision standing. A closed
-task leaves `task-list --open`, counts as neither completed nor failed
-(`run-show` counts `closed` on its own), and the board reads 닫힘 with the
-reason (접힘 → t-…, 넘김 → run-…, 낡음). A task that depends on a folded one
-waits for the task it was folded into; one that depends on a handed-over or
-outdated task lists it under `blockedBy`, because nothing in this run can
-produce it. `--status ready` (or any other status) puts a closed task back to
-work and drops its reason.
-
-`task-settle [--days <n>]` lists, and only lists, two piles of old work: the
-open tasks (pending, ready, blocked) whose every attempt ended handing nothing
-in and that nobody has touched for a week (the default is `SETTLE_QUIET_DAYS`),
-and — apart, as `unreviewableCompleted` — the completed tasks that can never
-take a review record. `task-settle --apply --retry-request settle-<run>` closes
-the first pile `outdated`, from the coordinator seat only; a completed task is
-never changed by it. Run it without `--apply` first and read both counts.
-
-The board does not wait on those completed tasks either. A completed task whose
-every attempt ended handing nothing in has no source a review could name —
-`task-update` refuses any review of it — so `task-list` carries
-`review.unreviewable: true` on its row, and the board, the worker rows and the
-sidebar read 완료 — 검토 기록 없음 instead of 검증 대기 from the moment it is so,
-without the quiet week `task-settle` waits. It is the ledger's reading of the
-attempts each time it is asked and is never written down: a new attempt that
-hands something in takes it back, and a task with a review written, a decision
-standing or an attempt still open is never read this way.
-
-### Work the coordinator took over or did by hand
-
-A review names an attempt and the source it handed in, so work a worker left
-without a hand-in — or work the coordinator did itself — needs an attempt of the
-coordinator's own before it can be reviewed. Three verbs, all from the live
-coordinator seat (a worker's pane is refused):
-
-- `task-take --task <id> [--from <attempt>] [--why '<line>'] --retry-request take-<id>`
-  opens an attempt carried by the seat (its `workerId` reads `coordinator@g<generation>`).
-  A worker still carrying the task is refused — `worker-stop` it first. An attempt an
-  earlier sitting of the seat took (a window restart, a `run-takeover`) is ended by the
-  take. A task with no attempt at all takes one too. A closed task is refused; use
-  `task-backfill` for closed work that landed.
-- `hand-in --task <id> --head <commit> --body-file <file> [--base main]
-  [--checkout <path>] --retry-request handin-<id>` hands one commit in on the seat's own
-  open attempt, once. The window asks git in `--checkout` (an absolute path; default: the
-  pane's project) that the commit exists — and, with `--base`, that the ref holds it —
-  before the ledger writes it; a commit git does not know, or one the base does not hold,
-  is refused and nothing is written. The attempt's source is the full hash git resolved; the letter it
-  leaves is a `worker_done` from the run's address, in the log and in no inbox.
-- Then review it exactly as any other: `task-update --task <id> --attempt <the take's
-  dispatchId> --source <the hand-in's source> --result '{"verified":true,…}'`.
-
-Once a stack is on main, write its landing on every member in the same turn:
-`task-update --members t-1,t-2 --result '{"merged":true,"mergeHead":"<sha>"}'
---retry-request landed-<sha>`, and after the release
-`--result '{"deployed":true,"release":"v1.2.3"}'`. Each member's record is bound
-to the attempt and source its verified review names; a member with no verified
-review, or whose attempt handed nothing in, refuses the whole call (a line each)
-and nothing is written.
-
-`task-backfill [--base main] [--tags 'v*'] [--checkout <path>]` lists the completed and
-closed tasks no review stands on whose result names a commit (`mergeHead`, `merged`,
-`landed.mergeHead`, `commits[]` …), with what git proves for each: `merged` when the base
-holds the commit, `deployed` when a release tag holds it (the tag is named), `verified`
-only when the result names a review task whose own review passed — otherwise
-`"verified":"unknown"`, never a pass nobody recorded — and, for every task it cannot
-write, why (no commit named, not in the base, git does not know it, an attempt handed
-something in). Read the list first; `--apply --retry-request backfill-<run>` writes the
-listed rows (attempt, hand-in, review) from the coordinator seat, one task's failure
-never stopping the others. The original result is kept: its keys stay, a review key it
-held moves under `backfill.replaced`, and `backfill.by` reads `task-backfill`.
-
-## Decision gates
-
-When a slice reaches a decision that is a person's or the coordinator's to
-make — an API shape, a destructive step, a tradeoff the spec left open — hold
-the work instead of guessing. `gate-create --task <id> --question-file <file> --options '["a","b"]' --retry-request gate-<task>` blocks the task:
-it leaves `task-list --ready`, `worker-start` refuses it, and it stays held
-until `gate-resolve --gate <id> --resolution-file <file> --retry-request
-answer-<gate>` frees it. `gate-list` shows what is standing and what was
-decided. A resolved gate is not re-resolved — the first answer stands, and a
-different second one is refused rather than written over it.
-
-Workers do not open gates. A worker that hits a decision sends it up —
-`send --type decision_gate --body-file <file>` — and stops; whether the
-question deserves to hold the DAG is the coordinator's call, made from the
-coordinator's own pane.
+Work folded into another task, handed to the other run or overtaken by events
+is `closed`, written by the coordinator with `task-update`. Work a worker left
+without a hand-in, or the coordinator did itself, needs `task-take` and
+`hand-in` before it can be reviewed. After a merge, write the landing on every
+member of the stack in the same turn. A decision that is a person's to make
+holds a task with `gate-create`; workers send a `decision_gate` letter and stop.
+All of it is in `landing.md`.
 
 ## Worker gates and briefing template
 
@@ -1057,83 +327,8 @@ For code changes in a Rust workspace, the worker gate must include
 test targets across the workspace. Report each gate exit code without hiding it
 behind a pipe. A package-only clippy run does not cover this gate.
 
-### Finish once — the briefing carries the acceptance, not the review
-
-A landing that needs a second pass is a briefing that was missing something,
-not a worker that was careless. On 2026-09-24 four of five landings came back
-from the closing partner's review for criteria that could have been written
-first: transient-state assertions instead of end-state ones, a pinned model's
-contract, whether a "run once" actually runs, one series per rubric version.
-So:
-
-- Write the definition of done into the briefing before summoning: the
-  red-first test names, the measurement table, and every contract, boundary
-  and negative case the reviewer will hold the work to.
-- Have the closing partner (the adversarial reviewer) read that briefing
-  first — ten minutes — and fold what it adds. A rejection after
-  implementation is the briefing's failure.
-- `worker_done` is accepted only with red (failing before the fix) and green
-  (passing after) receipts — command, sha, exit code, log path — and the
-  briefing's acceptance items ticked in the report. When the task's spec writes
-  pass conditions (lines that begin `통과 전`), an `ok:true` report also needs
-  one `evidence` entry per condition (build-line job, exit code, numbers); the
-  ledger refuses it without them and the same `--retry-request` sends it again.
-  A job named as a condition's evidence ends with a non-zero exit code when that
-  condition fails — its last command is the check itself, never a closing
-  `exit 0` after printing the stages: the receipt is the script's last exit code.
-- Close in the same task: review findings are fixed by the same worker in the
-  same checkout and merged once. "Accept with follow-ups" spawns no new task
-  unless the follow-up is a different unit by design.
-- The coordinator writes no claims of effect into comments or docs; it writes
-  what the code does and what was measured.
-
-### Find the files first — `zerocode-find`
-
-Every pane in this window has `zerocode-find` on its PATH. Before the first
-read of code you do not know yet, run it with what you are about to change or
-debug:
-
-```sh
-zerocode-find the parser crash on an empty line
-```
-
-It prints the files most likely involved, each with its first comment line —
-the window's search for the task's own words, ranked by the file pick
-judgment where that judgment acts for the pane. Start from those files
-instead of searching; they are suggestions, so verify them. In the last seven
-days before it existed, a Claude worker spent a median of 20 reads and
-searches before its first edit (t-14656).
-
-Copy into each implementation briefing:
-
-```text
-Work in a worktree. Run the affected tests and cargo fmt --all --check.
-Before the first read of unfamiliar code: zerocode-find <what you are changing>
-Required root gate: cargo clippy --all-targets -- -D warnings
-Report command exit codes without pipes, commits, and anything left before worker_done.
-```
-
-
-The main checkout is reserved for merges and the release lane. Do all edits,
-builds, tests, commits, and version bumps in a worktree; never do task work on
-main. Coordinators sharing the checkout merge and gate in a detached coordinator
-worktree, without stashing or committing another pane's changes.
-Exception: update the main checkout's release lane driver from the landed commit
-when the lane needs it; replace the file atomically (git checkout or temp + rename).
-
-### Reports are for a person: the plain-report skill
-
-A person reads a worker's summary, a report and a notice. The person asked
-for plain writing. Put the result first, write one fact in a sentence, give
-every number a unit and use no codebase metaphors. Where you explain a
-structure, add a diagram.
-
-The shared worker briefing says so once, at launch. The plain-report skill
-holds the rule and its word list. An agent reads it when it writes such a text,
-not every turn. When you report to the person yourself, follow it too.
-
-The window counts a worker's summary and a report against the rule and shows
-the counts beside them. It only counts. It never refuses a report.
+How to write a worker's briefing — the acceptance first, `zerocode-find`, the
+template to copy, and plain reports — is in `briefing.md`.
 
 ## Merging results
 

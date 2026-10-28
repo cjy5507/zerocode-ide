@@ -6867,7 +6867,9 @@ fn report_paths_are_rendered_with_an_explicit_ephemeral_lifetime() {
             "the rendered briefing lost its typed report lifetime: {briefing}"
         );
     }
-    let guide = include_str!("../../../../skills/orchestration/SKILL.md");
+    let guide = crate::skill_install::bundled_skill("orchestration")
+        .expect("the orchestration skill is bundled")
+        .whole_text();
     assert!(
         guide.contains(r#"--payload '{"reportPath":"...","lifetime":"ephemeral"}'"#),
         "the guide drifted from the rendered worker contract"
@@ -19213,7 +19215,10 @@ fn every_verb_the_planner_answers_is_in_the_table_it_prints() {
 /// it is a feature nobody uses.
 #[test]
 fn the_skill_describes_the_road_that_exists_and_names_no_verb_that_does_not() {
-    let skill = include_str!("../../../../skills/orchestration/SKILL.md");
+    let skill = crate::skill_install::bundled_skill("orchestration")
+        .expect("the orchestration skill is bundled")
+        .whole_text();
+    let skill = skill.as_str();
 
     // The guide is the binary's. A verb table written into prose is a verb
     // table that goes stale the first time somebody adds a verb.
