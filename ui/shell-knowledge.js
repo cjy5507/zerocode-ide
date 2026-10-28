@@ -8639,7 +8639,10 @@ function wireKnowledgeView(view) {
    * 그리는 것 말고 할 일이 없다 — 그리고 이 관찰자는 창에 하나뿐이다. */
   watchGraphResize(canvas, () => {
     const layout = knowledgeLayouts.get(view);
-    if (layout && !view.hidden) paintKnowledgeFrame(view, layout);
+    /* 숨은 판은 그리지 않고, 손이 쥔 그리기 버퍼를 돌려준다(t-80604) — 보이는 판이 되면 이
+     * 관찰자가 다시 와서 그 크기로 그린다. */
+    if (view.hidden) knowledgePainters.get(view)?.park?.();
+    else if (layout) paintKnowledgeFrame(view, layout);
   });
   /* 티어를 재는 상자는 캔버스가 아니라 판이다 — 캔버스의 폭은 인스펙터가 옆에 섰는지에
    * 따라 달라지므로, 그것으로 티어를 고르면 두 티어 사이를 오가는 고리가 된다. */

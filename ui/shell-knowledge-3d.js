@@ -1620,6 +1620,14 @@ function makeKnowledgeGlPainter() {
       return layout === undefined ? -1 : knowledgePickSeat(layout, px, py);
     },
 
+    /* 숨은 판(t-80604) — 탭이 다른 판으로 넘어가 판이 display:none이 되었다: 캔버스의 그리기
+     * 버퍼를 가장 작게 줄인다. 1,063×1,000 판·dpr 2에서 그 버퍼 한 벌이 약 17 MB이고, 판이
+     * 숨어 있는 동안 아무도 그것을 합성하지 않는다. 문맥·셰이더·자리 텍스처·카메라는 그대로다 —
+     * 다시 보이는 판의 첫 그림(`paintFrame`)이 판의 크기를 다시 맞춘다. */
+    park() {
+      this.renderer?.setSize(1, 1, false);
+    },
+
     /* 놓는다 — 기하(버퍼·VAO)·재질(프로그램)·텍스처·렌더러·문맥·리스너·오버레이 전부.
      * 하나라도 남으면 페인터를 갈아 끼울 때마다 GPU와 힙이 자란다(하네스가 열 번 갈아
      * 끼우고 그 자리를 재고, 렌더러의 장부 `info.memory`가 0으로 돌아오는지도 묻는다).
