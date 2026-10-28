@@ -143,7 +143,7 @@ pub(super) mod setting_key {
     pub const ARTIFACTS_RETENTION_DAYS: &str = "artifacts_retention_days";
     pub const ARTIFACTS_AUTO_OPEN_BESIDE: &str = "artifacts_auto_open_beside";
     pub const DIFF_SIDE_BY_SIDE: &str = "diff_side_by_side";
-    pub const CONVERSATION_FOCUS_VIEW: &str = "conversation_focus_view";
+    pub const CONVERSATION_TIMELINE_VIEW: &str = "conversation_timeline_view";
     pub const PANEL_WIDTHS: &str = "panel_widths";
     pub const WORKTREE_PREFS: &str = "worktree_prefs";
     pub const NOTIFICATIONS: &str = "notifications";
@@ -2453,12 +2453,15 @@ pub(super) struct SettingsDocument {
     pub(super) vault_session_limit: usize,
     #[serde(default = "enabled_by_default")]
     pub(super) diff_side_by_side: bool,
-    /// Whether a conversation folds each turn's tool work behind one summary
-    /// row (the extension's 「Focus view」, 2.1.221). OFF unless this person
-    /// has asked for it: the transcript's default is the whole story, and
-    /// the fold is the thing they reach for when a turn grows long.
+    /// Whether a conversation lays every step out on one timeline instead of
+    /// folding the tool work between two answers into one pill (t-81525 B1,
+    /// the conversation the person passed on 2026-10-29). OFF unless this
+    /// person asks for it: the folded page is everyone's default. It replaces
+    /// `conversation_focus_view`, whose OFF meant the opposite; a file that
+    /// still holds that key reads as before and the key is not written again
+    /// (no field reads it — the document refuses no unknown key).
     #[serde(default)]
-    pub(super) conversation_focus_view: bool,
+    pub(super) conversation_timeline_view: bool,
     #[serde(default)]
     pub(super) window_material: WindowMaterial,
     #[serde(default)]
@@ -2672,7 +2675,7 @@ impl Default for SettingsDocument {
             artifacts_auto_open_beside: true,
             vault_session_limit: default_vault_session_limit(),
             diff_side_by_side: true,
-            conversation_focus_view: false,
+            conversation_timeline_view: false,
             window_material: WindowMaterial::default(),
             default_agent: zerocode_core::DefaultAgentPreference::Auto,
             agent_teams_mode: TeamsMode::default(),

@@ -923,17 +923,17 @@ pub(crate) fn set_diff_side_by_side(
     )
 }
 
-/// Whether a conversation folds each turn's tool work behind one summary row
-/// — the extension's 「Focus view」 (2.1.221).
+/// Whether a conversation lays every step out on one timeline rather than
+/// folding the tool work between two answers into one pill (t-81525 B1).
 ///
 /// A view preference and not a page one, for `set_diff_side_by_side`'s reason:
-/// a person asks for the quieter transcript once, and every conversation they
+/// a person asks for the whole timeline once, and every conversation they
 /// open afterwards — a helper's page, a pane's view, a wire's session — is the
 /// one they asked for. The toggle stands on the conversation's own head rather
-/// than in the settings window, the way the extension keeps it in its command
-/// menu: it is reached while reading, not while configuring.
+/// than in the settings window: it is reached while reading, not while
+/// configuring.
 #[tauri::command(async)]
-pub(crate) fn set_conversation_focus_view(
+pub(crate) fn set_conversation_timeline_view(
     app: AppHandle,
     webview: tauri::Webview,
     state: State<'_, AppState>,
@@ -943,9 +943,9 @@ pub(crate) fn set_conversation_focus_view(
         &app,
         &webview,
         &state,
-        &[setting_key::CONVERSATION_FOCUS_VIEW],
+        &[setting_key::CONVERSATION_TIMELINE_VIEW],
         move |settings| {
-            settings.conversation_focus_view = on;
+            settings.conversation_timeline_view = on;
             Ok(())
         },
     )

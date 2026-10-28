@@ -18055,29 +18055,28 @@ fn deleting_canonical_documents_never_reimports_consumed_legacy_values() {
     );
 }
 
-/// Focus view is one remembered bit, and it is the conversation's alone.
-///
 /// The toggle stands on the conversation's own head rather than in the
-/// settings window — a person reaches for it while reading, the way the
-/// extension keeps it in its command menu (2.1.221) — so this is the gate
-/// that says the bit still travels the canonical road: the command patches
-/// the shared document, the document survives a restart, and the window
-/// applies the authoritative snapshot rather than a second copy of the value.
+/// settings window — a person reaches for it while reading — so this is the
+/// gate that says the bit still travels the canonical road: the command
+/// patches the shared document, the document survives a restart, and the
+/// window applies the authoritative snapshot rather than a second copy of the
+/// value. It is the bit that replaced `conversation_focus_view` (t-81525 B1):
+/// a file that still carries the old key reads, and the key is not written
+/// back.
 #[test]
-fn the_conversation_focus_view_is_one_remembered_bit() {
+fn the_conversation_timeline_view_is_one_remembered_bit() {
     let backend = shipped_backend();
     let (shipped, _) = backend.split_once("#[cfg(test)]").unwrap_or((backend, ""));
     assert!(
-        shipped.contains("            set_conversation_focus_view,"),
+        shipped.contains("            set_conversation_timeline_view,"),
         "the toggle is not on the command list, so saving it fails at runtime"
     );
-    // OFF unless this machine has said otherwise: a transcript's default is
-    // the whole story, and the fold is what a person reaches for when a turn
-    // grows long.
+    // OFF unless this machine has said otherwise: the folded conversation —
+    // the tool work between two answers as one pill — is everyone's page.
     assert!(
         block_after(shipped, "impl Default for SettingsDocument {")
-            .contains("conversation_focus_view: false,"),
-        "a machine that has never been asked now folds its conversations"
+            .contains("conversation_timeline_view: false,"),
+        "a machine that has never been asked now lays out every step"
     );
 
     let directory = tempfile::tempdir().expect("settings sandbox");
@@ -18089,13 +18088,13 @@ fn the_conversation_focus_view_is_one_remembered_bit() {
         !load_settings(&repository)
             .expect("fresh settings")
             .document
-            .conversation_focus_view
+            .conversation_timeline_view
     );
     mutate_settings(&repository, |settings| {
-        settings.conversation_focus_view = true;
+        settings.conversation_timeline_view = true;
         Ok(())
     })
-    .expect("save the focus view");
+    .expect("save the timeline view");
     drop(repository);
 
     let restarted = settings::SettingsRepository::new(directory.path());
@@ -18103,19 +18102,42 @@ fn the_conversation_focus_view_is_one_remembered_bit() {
         load_settings(&restarted)
             .expect("next boot settings")
             .document
-            .conversation_focus_view,
-        "the conversation's focus view did not survive a restart"
+            .conversation_timeline_view,
+        "the conversation's timeline view did not survive a restart"
+    );
+
+    // A document written before the key changed still reads — its old bit
+    // ignored, the new one at its default — and is not written back.
+    let older = tempfile::tempdir().expect("older settings sandbox");
+    let repository = settings::SettingsRepository::new(older.path());
+    let mut document = serde_json::to_value(SettingsDocument::default()).expect("settings as json");
+    let fields = document.as_object_mut().expect("settings are an object");
+    fields.remove("conversation_timeline_view");
+    fields.insert("conversation_focus_view".into(), serde_json::Value::Bool(true));
+    repository
+        .write_json(SETTINGS_DOCUMENT_FILE, &document)
+        .expect("older settings");
+    let read = load_settings(&repository).expect("older settings read");
+    assert!(
+        !read.document.conversation_timeline_view,
+        "the old focus bit was read as the new timeline bit"
+    );
+    assert!(
+        !serde_json::to_string(&read.document)
+            .expect("settings written")
+            .contains("conversation_focus_view"),
+        "the old key is written back"
     );
 
     assert_canonical_setting_round_trip(
         backend,
         window_source(),
-        "set_conversation_focus_view",
-        "setting_key::CONVERSATION_FOCUS_VIEW",
-        "settings.conversation_focus_view = on;",
-        "function setConversationFocusView(on) {",
-        "conversation_focus_view",
-        "conversationFocusView = snapshot.conversation_focus_view === true;",
+        "set_conversation_timeline_view",
+        "setting_key::CONVERSATION_TIMELINE_VIEW",
+        "settings.conversation_timeline_view = on;",
+        "function setConversationTimelineView(on) {",
+        "conversation_timeline_view",
+        "conversationTimelineView = snapshot.conversation_timeline_view === true;",
     );
 }
 
