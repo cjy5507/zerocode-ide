@@ -342,13 +342,7 @@ pub(crate) fn tunable_agents() -> impl Iterator<Item = &'static str> {
     zerocode_core::agent::AGENT_SPECS
         .iter()
         .map(|spec| spec.id)
-        .filter(|agent| {
-            zerocode_core::orchestration::difficulty_effort(
-                agent,
-                zerocode_core::summon_difficulty::LADDER[0].0,
-            )
-            .is_some()
-        })
+        .filter(|agent| zerocode_core::orchestration::takes_effort(agent))
 }
 
 /// Every release `lineups` hold as superseded, by agent, and the one that
@@ -458,12 +452,8 @@ mod tests {
         assert!(!read.is_empty());
         for agent in read.keys() {
             assert!(
-                zerocode_core::orchestration::difficulty_effort(
-                    agent,
-                    zerocode_core::summon_difficulty::LADDER[0].0
-                )
-                .is_some(),
-                "{agent} takes no effort at a difficulty"
+                zerocode_core::orchestration::takes_effort(agent),
+                "{agent} takes no effort"
             );
         }
         assert!(lineups_of(|_| None).is_empty(), "no catalog, no lineup");

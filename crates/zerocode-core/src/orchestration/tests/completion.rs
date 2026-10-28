@@ -87,6 +87,29 @@ fn later_deployment_keeps_completion_time_but_a_retracted_review_revokes_it() {
     );
 }
 
+/// A landing `task-backfill` wrote is stamped at the backfill's own moment — the hand-in and the
+/// review share it — so a time measured from it reads near zero and would pull the "hand-in to
+/// main" average down (review t-79586 P3-4). It is left out of the measure, not zeroed: the ledger
+/// still says when the record was written.
+#[test]
+fn a_backfilled_landing_is_left_out_of_the_completion_time() {
+    let (mut bench, task, dispatch) = reported();
+    bench.clock = 9_000;
+    bench.json(&format!(
+        "task-update --task {task} --result \
+         {{\"verified\":true,\"merged\":true,\"backfill\":{{\"by\":\"task-backfill\"}}}} \
+         --attempt {dispatch} --source abc1234"
+    ));
+    let wrote_at = bench.clock;
+    let run = &bench.ledger.runs()[0];
+    assert_eq!(
+        run.completion_ms(run.task(&task).expect("the task")),
+        Some(wrote_at),
+        "the ledger still says when the record was written"
+    );
+    assert_eq!(cost(&bench.ledger, &task).completion_wall_ms, None);
+}
+
 #[test]
 fn another_attempt_inherits_no_completion_and_its_waits_count_in_the_new_one() {
     let (mut bench, task, dispatch) = reported();

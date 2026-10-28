@@ -159,6 +159,12 @@ pub(super) fn process_cwds(_pids: &[u32]) -> HashMap<u32, String> {
 /// not a quiet machine), or a platform this does not read. A caller deciding
 /// whether a directory may be deleted keeps it on `None`.
 ///
+/// Read on macOS (`lsof`) and Linux (`/proc`); Windows answers `None`, so a
+/// kept checkout's build tree is not shed there (review t-79535 P3-7). What
+/// counts is where a process STANDS: a build that runs from outside the
+/// directory (`cargo --manifest-path`) is seen only through a child that
+/// stands inside it, which rustc is while it compiles.
+///
 /// The whole table in one call, a few hundred rows: asked only of a checkout
 /// that every other question has already let go, right before it would go.
 #[cfg(target_os = "macos")]
@@ -176,7 +182,34 @@ pub(super) fn processes_standing_in(dir: &Path) -> Option<usize> {
     )
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The same count from `/proc/<pid>/cwd`. A process this user cannot see
+/// into has no readable link and is not counted; when no link at all is
+/// readable the table is taken to be unread (`None`), as an empty `lsof` is.
+#[cfg(target_os = "linux")]
+pub(super) fn processes_standing_in(dir: &Path) -> Option<usize> {
+    let real = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let (mut read, mut inside) = (0_usize, 0_usize);
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let is_process = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()));
+        if !is_process {
+            continue;
+        }
+        // A process that exited since the listing has no link: not a row.
+        let Ok(cwd) = std::fs::read_link(entry.path().join("cwd")) else {
+            continue;
+        };
+        read += 1;
+        if cwd.starts_with(&real) || cwd.starts_with(dir) {
+            inside += 1;
+        }
+    }
+    (read > 0).then_some(inside)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub(super) fn processes_standing_in(_dir: &Path) -> Option<usize> {
     None
 }
@@ -455,6 +488,7 @@ pub(super) const KEYBINDING_ACTIONS: &[(&str, &[&str])] = &[
     ("activity.scm", &["mod+shift+g"]),
     ("project.open", &["mod+o"]),
     ("app.settings", &["mod+,"]),
+    ("ask.focusDocked", &["mod+shift+h"]),
     ("terminal.splitRight", &["mod+d"]),
     ("terminal.splitDown", &["mod+shift+d"]),
     ("terminal.focusNextPane", &["mod+]"]),

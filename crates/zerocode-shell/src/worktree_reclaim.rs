@@ -137,6 +137,10 @@
 //! cache would keep a JavaScript repository's `dist/`, `.next/` and
 //! `node_modules/` for good, which is the full disk this file exists to
 //! prevent; evidence a person still needs belongs outside the checkout.
+//!
+//! And a checkout that is kept still gives its build trees back (t-78886):
+//! what kept it is the work in it, and a directory a build tool tagged as its
+//! cache is no part of that work (`shed_build_trees`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -175,6 +179,17 @@ struct Judged {
     /// since, because a branch moving is how work lands. `None` for a
     /// refusal nobody stamped, which then waits out the clock like any other.
     base_mark: Option<BaseMark>,
+    /// The first look that found nobody standing in a kept checkout, and
+    /// whose hand-in it was ([`shed_build_trees`]). Carried across the
+    /// refusals written after it, and dropped once somebody stands in it.
+    quiet: Option<Quiet>,
+}
+
+/// A kept checkout first found with nobody in it.
+#[derive(Clone)]
+struct Quiet {
+    worker: String,
+    since_ms: i64,
 }
 
 /// The modification times of the files a branch move writes in the
@@ -192,6 +207,19 @@ fn due_again(held: Option<&Judged>, now_ms: i64, mark: impl FnOnce() -> BaseMark
         || held.base_mark.as_ref().is_some_and(|then| *then != mark())
 }
 
+/// The git directory a linked checkout's `.git` file names — where git keeps
+/// that checkout's own state, its `locked` mark among it. `None` for a
+/// repository's primary checkout, whose `.git` is a directory.
+fn linked_git_dir(checkout: &Path) -> Option<PathBuf> {
+    let said = std::fs::read_to_string(checkout.join(".git")).ok()?;
+    let linked = PathBuf::from(said.trim().strip_prefix("gitdir:")?.trim());
+    Some(if linked.is_absolute() {
+        linked
+    } else {
+        checkout.join(linked)
+    })
+}
+
 /// The shared git directory of a checkout: its own `.git` for a repository's
 /// primary checkout, and the `commondir` a linked one's git directory names.
 fn shared_git_dir(checkout: &Path) -> Option<PathBuf> {
@@ -199,13 +227,7 @@ fn shared_git_dir(checkout: &Path) -> Option<PathBuf> {
     if dot.is_dir() {
         return Some(dot);
     }
-    let said = std::fs::read_to_string(&dot).ok()?;
-    let linked = PathBuf::from(said.trim().strip_prefix("gitdir:")?.trim());
-    let linked = if linked.is_absolute() {
-        linked
-    } else {
-        checkout.join(linked)
-    };
+    let linked = linked_git_dir(checkout)?;
     let common = std::fs::read_to_string(linked.join("commondir")).ok()?;
     Some(linked.join(common.trim()))
 }
@@ -943,6 +965,10 @@ struct Where {
 /// not tell".
 type ProcessCount<'a> = &'a dyn Fn(&Path) -> Option<usize>;
 
+/// How many bytes the volume holding a folder still has free; `None` is
+/// "could not tell".
+type FreeBytes<'a> = &'a dyn Fn(&Path) -> Option<u64>;
+
 /// The two questions asked again once git has answered, because every git
 /// process is time for the world to move: a coordinator coming back seats its
 /// sleeper in the directory, a pane opens in it. Handed in rather than read
@@ -970,6 +996,9 @@ struct Recheck<'a> {
     /// being over, and a process standing in the directory says it is not.
     /// `None` keeps every such checkout.
     everyone: Option<ProcessCount<'a>>,
+    /// The disk's free bytes, asked before a kept checkout's build goes on
+    /// its first quiet look ([`DISK_FLOOR`]). `None` never reads as low.
+    free_bytes: Option<FreeBytes<'a>>,
 }
 
 /// Put the stamp read before a judgment on the refusal that judgment wrote
@@ -1035,6 +1064,7 @@ fn judge_and_act(
         keeping: &keeping,
         processes: matches!(road, Road::HandedIn(_)).then_some(&processes as ProcessCount<'_>),
         everyone: Some(&processes),
+        free_bytes: Some(&orchestration::free_bytes_at),
     };
     // Read before git is asked anything, so a branch that moves while the
     // judgment runs is seen as moved by the next beat.
@@ -1217,6 +1247,7 @@ fn settle(
             remember_as(
                 candidate, standing, &because, kind, waits, data_root, now_ms,
             );
+            shed_build_trees(candidate, &orchestrator, kind, recheck, data_root, now_ms);
             return Settled::Kept;
         }
         Verdict::Reclaim {
@@ -1341,6 +1372,256 @@ fn settle(
     }
 }
 
+/// What a build tool writes into a directory it keeps as a cache — the Cache
+/// Directory Tagging Specification, which cargo follows for every `target/`.
+const CACHE_DIRECTORY_TAG: &str = "CACHEDIR.TAG";
+
+/// The first bytes of that file, which make it the tag and not a file of the
+/// same name.
+const CACHE_DIRECTORY_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+
+/// Whether `tree` holds the cache tag a build tool writes: a regular file
+/// (not a link, and not a pipe — opening one waits for a writer that may never
+/// come) whose first bytes are the signature. Only that many bytes are read,
+/// so a tag file of any size answers at once (review t-79535 P3-8).
+fn carries_cache_tag(tree: &Path) -> bool {
+    use std::io::Read as _;
+    let tag = tree.join(CACHE_DIRECTORY_TAG);
+    if !std::fs::symlink_metadata(&tag).is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
+    let wanted = u64::try_from(CACHE_DIRECTORY_SIGNATURE.len()).unwrap_or(u64::MAX);
+    let mut head = Vec::new();
+    std::fs::File::open(&tag)
+        .and_then(|file| file.take(wanted).read_to_end(&mut head))
+        .is_ok()
+        && head == CACHE_DIRECTORY_SIGNATURE
+}
+
+/// What a build tree set aside to go is renamed to, in the checkout's own git
+/// directory — the name and the place a later look finds it by.
+const SET_ASIDE: &str = "zerocode-shed-";
+
+/// Free disk under which a kept checkout's build goes on its first quiet look
+/// rather than its second: one worktree's budget and half again, where the
+/// next summons is close to refused for room and a warm build waiting for a
+/// retry is the dearer thing to keep.
+const DISK_FLOOR: u64 = zerocode_core::orchestration::WORKTREE_BUDGET_BYTES / 2 * 3;
+
+/// The build trees of a finished worker's checkout that is kept (t-78886,
+/// adversarial review O9): the work in it stays for whoever comes to look,
+/// and the build goes.
+///
+/// A kept checkout used to keep everything in it, `target/` with the rest —
+/// on 2026-10-28 one of 14 GiB and one of 9 GiB stood in checkouts whose
+/// branches waited to land, and the disk fell under its floor four times in
+/// 25 minutes. A build tree is the one thing in a checkout nobody needs back:
+/// the next build makes it again from the commits that are kept.
+///
+/// So only what is provably a build tree goes: an ignored directory, a real
+/// one and not a link (a shared directory is the repository's own), holding
+/// the cache tag a build tool wrote. And only from a checkout this window
+/// cut, kept for what is in it rather than for who has it — a locked one is a
+/// person's word to leave it be, and one that is not ours is somebody's —
+/// while the ledger still counts it finished with and no terminal and no
+/// process on this machine stands in it. Every doubt keeps the build.
+///
+/// Not on the first look that finds it quiet (review r1 P2-3): a task sent
+/// back is seated again in the same checkout (`--retry-of
+/// --inherit-checkout`) within minutes, and a build gone then is a cold one.
+/// It goes on a look [`RE_JUDGE_AFTER`] later that still finds nobody, under
+/// the same hand-in — or on the first, once the disk is under
+/// [`DISK_FLOOR`].
+///
+/// And never deleted where it stands (review r1 P2-2): removing 14 GiB takes
+/// tens of seconds, and a build started in that time would write into a tree
+/// half gone. Each tree is first renamed into the checkout's own git
+/// directory — one rename on one volume, invisible to `git status` and to a
+/// `git add -A` in the checkout — then everyone is asked again, and only then
+/// is what was set aside deleted. A build that came meanwhile starts from an
+/// empty place, or finds its tree put back. What could not be deleted is
+/// written to the window log and deleted on a later look, by its name.
+fn shed_build_trees(
+    candidate: &orchestration::SettledCheckout,
+    orchestrator: &Orchestrator,
+    kind: ReclaimKind,
+    recheck: &Recheck<'_>,
+    data_root: &Path,
+    now_ms: i64,
+) {
+    if !matches!(
+        kind,
+        ReclaimKind::Kept | ReclaimKind::IgnoredFile | ReclaimKind::Unlanded
+    ) {
+        return;
+    }
+    let path = Path::new(&candidate.path);
+    let Some(own_git_dir) = linked_git_dir(path) else {
+        return;
+    };
+    if !nobody_stands_in(candidate, recheck, &own_git_dir) {
+        set_quiet(&candidate.path, |_| None);
+        return;
+    }
+    clear_set_aside(candidate, &own_git_dir, data_root);
+    let mut since_ms = now_ms;
+    set_quiet(&candidate.path, |held| {
+        since_ms = held
+            .filter(|quiet| quiet.worker == candidate.worker)
+            .map_or(now_ms, |quiet| quiet.since_ms);
+        Some(Quiet {
+            worker: candidate.worker.clone(),
+            since_ms,
+        })
+    });
+    let low = recheck
+        .free_bytes
+        .and_then(|free| free(path))
+        .is_some_and(|free| free < DISK_FLOOR);
+    if now_ms.saturating_sub(since_ms) < RE_JUDGE_AFTER && !low {
+        return;
+    }
+    let Ok(loss) = orchestrator.pending_loss(path) else {
+        return;
+    };
+    let mut aside: Vec<(String, PathBuf)> = Vec::new();
+    for (number, one) in loss.ignored.into_iter().enumerate() {
+        // Git names an ignored directory with its slash; the rename back
+        // names it without.
+        let one = one.trim_end_matches('/').to_string();
+        let tree = path.join(&one);
+        let tagged = std::fs::symlink_metadata(&tree).is_ok_and(|meta| meta.is_dir())
+            && carries_cache_tag(&tree);
+        if !tagged {
+            continue;
+        }
+        let parked = own_git_dir.join(format!("{SET_ASIDE}{now_ms}-{number}"));
+        match std::fs::rename(&tree, &parked) {
+            Ok(()) => aside.push((one, parked)),
+            Err(error) => crate::note_window_event(
+                data_root,
+                &format!(
+                    "orchestration: the build tree {one} in the checkout worker {} left at {} \
+                     stays: it could not be set aside ({error})",
+                    candidate.worker,
+                    path.display()
+                ),
+            ),
+        }
+    }
+    if aside.is_empty() {
+        return;
+    }
+    // Asked again: the git process and the renames were time for a build or
+    // a pane to come back, and what it needs is put back where it was.
+    if !nobody_stands_in(candidate, recheck, &own_git_dir) {
+        set_quiet(&candidate.path, |_| None);
+        let put_back: Vec<&str> = aside
+            .iter()
+            .filter(|(one, parked)| {
+                let tree = path.join(one);
+                !tree.exists() && std::fs::rename(parked, &tree).is_ok()
+            })
+            .map(|(one, _)| one.as_str())
+            .collect();
+        crate::note_window_event(
+            data_root,
+            &format!(
+                "orchestration: somebody came to stand in the checkout worker {} left at {} \
+                 while its build was set aside; put back: {}",
+                candidate.worker,
+                path.display(),
+                if put_back.is_empty() {
+                    "none".to_string()
+                } else {
+                    put_back.join(", ")
+                }
+            ),
+        );
+        return;
+    }
+    set_quiet(&candidate.path, |_| None);
+    let went = clear_set_aside(candidate, &own_git_dir, data_root);
+    let went: Vec<&str> = aside
+        .iter()
+        .filter(|(_, parked)| went.contains(parked))
+        .map(|(one, _)| one.as_str())
+        .collect();
+    if !went.is_empty() {
+        crate::note_window_event(
+            data_root,
+            &format!(
+                "orchestration: the checkout worker {} left at {} stays, and its build \
+                 tree(s) went: {}",
+                candidate.worker,
+                path.display(),
+                went.join(", ")
+            ),
+        );
+    }
+}
+
+/// The ledger still counts the checkout finished with, git does not report it
+/// locked, and no terminal and no process on this machine stands in it.
+fn nobody_stands_in(
+    candidate: &orchestration::SettledCheckout,
+    recheck: &Recheck<'_>,
+    own_git_dir: &Path,
+) -> bool {
+    let path = Path::new(&candidate.path);
+    (recheck.settled)(&candidate.path)
+        && !own_git_dir.join("locked").exists()
+        && (recheck.terminals)(path) == 0
+        && recheck.everyone.and_then(|count| count(path)) == Some(0)
+}
+
+/// Change the first quiet look remembered for a kept checkout.
+fn set_quiet(path: &str, change: impl FnOnce(Option<&Quiet>) -> Option<Quiet>) {
+    if let Some(held) = judged()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .get_mut(path)
+    {
+        held.quiet = change(held.quiet.as_ref());
+    }
+}
+
+/// Delete every build tree set aside in a checkout's git directory — this
+/// look's and any an earlier look could not finish — and say which could
+/// not go. The paths that went.
+fn clear_set_aside(
+    candidate: &orchestration::SettledCheckout,
+    own_git_dir: &Path,
+    data_root: &Path,
+) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(own_git_dir) else {
+        return Vec::new();
+    };
+    let mut went = Vec::new();
+    for entry in entries.flatten() {
+        let parked = entry.path();
+        let ours = entry.file_name().to_string_lossy().starts_with(SET_ASIDE)
+            && std::fs::symlink_metadata(&parked).is_ok_and(|meta| meta.is_dir());
+        if !ours {
+            continue;
+        }
+        match std::fs::remove_dir_all(&parked) {
+            Ok(()) => went.push(parked),
+            Err(error) => crate::note_window_event(
+                data_root,
+                &format!(
+                    "orchestration: a build tree set aside from the checkout worker {} left at \
+                     {} could not be deleted ({error}); a later look tries again: {}",
+                    candidate.worker,
+                    candidate.path,
+                    parked.display()
+                ),
+            ),
+        }
+    }
+    went
+}
+
 /// Write a refusal down — once per refusal, not once per beat.
 ///
 /// The window's own log is where the existing automatic cleanup already puts
@@ -1382,15 +1663,16 @@ fn remember_as(
     };
     let repeat = {
         let mut marks = judged().lock().unwrap_or_else(|held| held.into_inner());
-        let repeat = marks
-            .get(&candidate.path)
-            .is_some_and(|held| held.reason == reason);
+        let held = marks.get(&candidate.path);
+        let repeat = held.is_some_and(|held| held.reason == reason);
+        let quiet = held.and_then(|held| held.quiet.clone());
         marks.insert(
             candidate.path.clone(),
             Judged {
                 reason,
                 at_ms: now_ms,
                 base_mark: None,
+                quiet,
             },
         );
         repeat
@@ -2022,6 +2304,7 @@ mod tests {
             keeping: &kept,
             processes: None,
             everyone: None,
+            free_bytes: None,
         }
     }
 
@@ -2854,6 +3137,468 @@ mod tests {
             .remove(&candidate.path);
     }
 
+    /// A kept checkout keeps its work and loses its build (t-78886, review
+    /// O9). A finished worker's branch waiting to land kept the whole checkout
+    /// — on 2026-10-28 one `target/` of 14 GiB and one of 9 GiB, and the disk
+    /// fell under its floor four times in 25 minutes. The commit, the
+    /// uncommitted file and the evidence stay for whoever comes to look; every
+    /// build tree a build tool tagged goes, nested ones too — once no process
+    /// stands in the directory, never through a link, and never an ignored
+    /// folder nobody tagged.
+    #[test]
+    fn a_kept_checkout_keeps_its_work_and_its_build_trees_go_once_nobody_stands_in_it() {
+        let bench = Bench::open();
+        bench.ignore_on_main("output/\ntarget/\nshared/\n");
+        let path = bench.cut("t-78886-kept");
+        std::fs::create_dir_all(path.join("tools")).expect("tools");
+        std::fs::write(path.join("tools/work.rs"), "fn waiting_to_land() {}\n").expect("work");
+        git(&path, &["add", "tools/work.rs"]);
+        git(&path, &["commit", "-q", "-m", "the worker's own commit"]);
+        std::fs::write(path.join("draft.rs"), "fn not_committed() {}\n").expect("draft");
+        std::fs::create_dir_all(path.join("output/t-78886")).expect("evidence folder");
+        std::fs::write(path.join("output/t-78886/shot.png"), PNG).expect("screenshot");
+        Bench::build_tree(&path.join("target"));
+        Bench::build_tree(&path.join("tools/target"));
+        #[cfg(unix)]
+        let shared = {
+            let shared = bench.repo.with_file_name("shared-cache");
+            Bench::build_tree(&shared);
+            std::os::unix::fs::symlink(&shared, path.join("shared")).expect("shared link");
+            shared
+        };
+        let data_root = tempfile::tempdir().expect("data root");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let candidate = finished(&path, "w-78886");
+        let forget = || {
+            judged()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&candidate.path);
+        };
+
+        // A process standing in it — a build, a shell — keeps the build.
+        let standing = |_: &Path| Some(1);
+        assert!(matches!(
+            settle(
+                &candidate,
+                &Road::Report(bench.orchestrator()),
+                &here,
+                &nobody_left_and(&standing),
+                1_000
+            ),
+            Settled::Kept
+        ));
+        assert!(
+            path.join("target/debug/big").is_file(),
+            "a build in use went"
+        );
+        forget();
+
+        // Nobody, on the first look and the next one a whole wait later.
+        let nobody = |_: &Path| Some(0);
+        for at in [1_001, 1_001 + RE_JUDGE_AFTER] {
+            assert!(matches!(
+                settle(
+                    &candidate,
+                    &Road::Report(bench.orchestrator()),
+                    &here,
+                    &nobody_left_and(&nobody),
+                    at
+                ),
+                Settled::Kept
+            ));
+        }
+        for gone in ["target", "tools/target"] {
+            assert!(
+                !path.join(gone).exists(),
+                "{gone} stood on in a checkout nobody stands in"
+            );
+        }
+        assert!(
+            set_aside_in(&path).is_empty(),
+            "a build tree set aside stayed"
+        );
+        for survivor in ["tools/work.rs", "draft.rs", "output/t-78886/shot.png"] {
+            assert!(
+                path.join(survivor).is_file(),
+                "{survivor} went with the build"
+            );
+        }
+        #[cfg(unix)]
+        assert!(
+            path.join("shared").is_symlink() && shared.join("debug/big").is_file(),
+            "a shared directory was followed through its link"
+        );
+        let said = std::fs::read_to_string(data_root.path().join("window-errors.log"))
+            .expect("the window log");
+        assert!(
+            said.contains("stays, and its build tree(s) went:")
+                && said.contains("tools/target")
+                && !said.contains("worktree removed"),
+            "the log does not say what went:\n{said}"
+        );
+        forget();
+    }
+
+    /// The build trees set aside in a checkout's own git directory that are
+    /// still there.
+    fn set_aside_in(checkout: &Path) -> Vec<String> {
+        let own = linked_git_dir(checkout).expect("a linked checkout");
+        std::fs::read_dir(own)
+            .expect("its git directory")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(SET_ASIDE))
+            .collect()
+    }
+
+    /// A finished worker's checkout with a commit of its own still to land
+    /// and a cargo build in it — the shape a task sent back is seated in again.
+    fn kept_with_a_build(bench: &Bench, name: &str) -> PathBuf {
+        bench.ignore_on_main("target/\n");
+        let path = bench.cut(name);
+        std::fs::write(path.join("work.rs"), "fn waiting_to_land() {}\n").expect("work");
+        git(&path, &["add", "work.rs"]);
+        git(&path, &["commit", "-q", "-m", "the worker's own commit"]);
+        Bench::build_tree(&path.join("target"));
+        path
+    }
+
+    /// The first quiet look keeps the build (t-78886 r2, review r1 P2-3): a
+    /// task sent back is seated in the same checkout within minutes, and a
+    /// build gone by then made every retry a cold one. A look a whole wait
+    /// later that still finds nobody, under the same hand-in, takes it; a
+    /// retry's hand-in starts its own wait.
+    #[test]
+    fn a_kept_checkout_keeps_its_build_through_its_first_quiet_look_and_sheds_it_on_the_next() {
+        let bench = Bench::open();
+        let path = kept_with_a_build(&bench, "t-78886-r2-wait");
+        let data_root = tempfile::tempdir().expect("data root");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let nobody = |_: &Path| Some(0);
+        let look = |worker: &str, at: i64| {
+            assert!(matches!(
+                settle(
+                    &finished(&path, worker),
+                    &Road::Report(bench.orchestrator()),
+                    &here,
+                    &nobody_left_and(&nobody),
+                    at
+                ),
+                Settled::Kept
+            ));
+        };
+        let build = path.join("target/debug/big");
+        look("w-1", 1_000);
+        assert!(build.is_file(), "the first quiet look took the build");
+        // A branch moving brings the next look early: still within the wait.
+        look("w-1", 1_000 + RE_JUDGE_AFTER - 1);
+        assert!(build.is_file(), "a look within the wait took the build");
+        // The task was sent back, and its retry handed in from the same
+        // checkout: its own first quiet look.
+        look("w-2", 1_000 + RE_JUDGE_AFTER);
+        assert!(build.is_file(), "a retry's first quiet look took the build");
+        look("w-2", 1_000 + 2 * RE_JUDGE_AFTER);
+        assert!(
+            !path.join("target").exists(),
+            "the second quiet look kept the build"
+        );
+        assert!(
+            path.join("work.rs").is_file(),
+            "the work went with the build"
+        );
+        judged()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&path.to_string_lossy().into_owned());
+    }
+
+    /// Under the disk floor the build goes on the first quiet look (t-78886
+    /// r2): a warm build waiting for a retry is not worth the next summons
+    /// refused for room. At the floor itself it waits.
+    #[test]
+    fn a_kept_checkout_under_the_disk_floor_sheds_its_build_on_the_first_quiet_look() {
+        let bench = Bench::open();
+        let path = kept_with_a_build(&bench, "t-78886-r2-floor");
+        let data_root = tempfile::tempdir().expect("data root");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let candidate = finished(&path, "w-1");
+        let nobody = |_: &Path| Some(0);
+        for (free, stays) in [(DISK_FLOOR, true), (DISK_FLOOR - 1, false)] {
+            let free_bytes = move |_: &Path| Some(free);
+            assert!(matches!(
+                settle(
+                    &candidate,
+                    &Road::Report(bench.orchestrator()),
+                    &here,
+                    &Recheck {
+                        free_bytes: Some(&free_bytes),
+                        ..nobody_left_and(&nobody)
+                    },
+                    1_000
+                ),
+                Settled::Kept
+            ));
+            assert_eq!(
+                path.join("target/debug/big").is_file(),
+                stays,
+                "{free} bytes free"
+            );
+        }
+        judged()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&candidate.path);
+    }
+
+    /// A build tree is set aside before it is deleted, and everyone is asked
+    /// again in between (t-78886 r2, review r1 P2-2): a process that came to
+    /// stand in the checkout meanwhile finds its build put back where it was,
+    /// and nothing set aside is left behind.
+    #[test]
+    fn a_build_tree_set_aside_is_put_back_for_somebody_who_came_meanwhile() {
+        let bench = Bench::open();
+        let path = kept_with_a_build(&bench, "t-78886-r2-came");
+        let data_root = tempfile::tempdir().expect("data root");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let candidate = finished(&path, "w-1");
+        // Nobody when first asked; a build standing in it when asked again.
+        let asked = std::cell::Cell::new(0_usize);
+        let came = |_: &Path| {
+            asked.set(asked.get() + 1);
+            Some(usize::from(asked.get() > 1))
+        };
+        let low = |_: &Path| Some(0_u64);
+        assert!(matches!(
+            settle(
+                &candidate,
+                &Road::Report(bench.orchestrator()),
+                &here,
+                &Recheck {
+                    free_bytes: Some(&low),
+                    ..nobody_left_and(&came)
+                },
+                1_000
+            ),
+            Settled::Kept
+        ));
+        assert_eq!(asked.get(), 2, "everyone was not asked again");
+        assert!(
+            path.join("target/debug/big").is_file(),
+            "the build was not put back"
+        );
+        assert!(set_aside_in(&path).is_empty(), "a set-aside tree stayed");
+        let said = std::fs::read_to_string(data_root.path().join("window-errors.log"))
+            .expect("the window log");
+        assert!(
+            said.contains("while its build was set aside; put back: target")
+                && !said.contains("build tree(s) went"),
+            "the log does not say it was put back:\n{said}"
+        );
+        judged()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&candidate.path);
+    }
+
+    /// What a look could not delete is written down and deleted on a later
+    /// look (t-78886 r2, review r1 P2-2) — a tree half gone, its cache tag
+    /// with it, included: it is found by the name it was set aside under,
+    /// not by the tag.
+    #[cfg(unix)]
+    #[test]
+    fn a_build_tree_set_aside_that_would_not_go_is_written_down_and_goes_on_a_later_look() {
+        use std::os::unix::fs::PermissionsExt;
+        let bench = Bench::open();
+        let path = kept_with_a_build(&bench, "t-78886-r2-stuck");
+        let own = linked_git_dir(&path).expect("a linked checkout");
+        let half = own.join(format!("{SET_ASIDE}5-0"));
+        std::fs::create_dir_all(half.join("debug")).expect("half a tree");
+        std::fs::write(half.join("debug/big"), vec![0u8; 4096]).expect("build output");
+        let stuck = own.join(format!("{SET_ASIDE}6-0"));
+        std::fs::create_dir_all(stuck.join("debug")).expect("a stuck tree");
+        std::fs::write(stuck.join("debug/big"), vec![0u8; 4096]).expect("build output");
+        let mode = |bits| {
+            std::fs::set_permissions(stuck.join("debug"), std::fs::Permissions::from_mode(bits))
+                .expect("mode");
+        };
+        mode(0o500);
+        // A superuser deletes through the mode, and there is nothing stuck.
+        let modes_hold = std::fs::write(stuck.join("debug/probe"), "").is_err();
+        let data_root = tempfile::tempdir().expect("data root");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let candidate = finished(&path, "w-1");
+        let nobody = |_: &Path| Some(0);
+        let look = |at: i64| {
+            assert!(matches!(
+                settle(
+                    &candidate,
+                    &Road::Report(bench.orchestrator()),
+                    &here,
+                    &nobody_left_and(&nobody),
+                    at
+                ),
+                Settled::Kept
+            ));
+        };
+
+        look(1_000);
+        assert!(
+            !half.exists(),
+            "a half-gone tree set aside was not found again"
+        );
+        assert!(
+            path.join("target/debug/big").is_file(),
+            "the first quiet look took the live build"
+        );
+        if modes_hold {
+            assert!(stuck.is_dir(), "a tree that could not go went");
+            let said = std::fs::read_to_string(data_root.path().join("window-errors.log"))
+                .expect("the window log");
+            assert!(
+                said.contains("could not be deleted") && said.contains(&format!("{SET_ASIDE}6-0")),
+                "the failed delete was not written down:\n{said}"
+            );
+        }
+
+        mode(0o700);
+        look(1_000 + RE_JUDGE_AFTER);
+        assert!(set_aside_in(&path).is_empty(), "a set-aside tree stayed");
+        assert!(
+            !path.join("target").exists(),
+            "the second quiet look kept the build"
+        );
+        judged()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&candidate.path);
+    }
+
+    /// What is set aside lives in the checkout's own git directory, so the
+    /// checkout's removal takes it too (t-78886 r2): `git worktree remove`
+    /// deletes that directory whole, and nothing set aside outlives the
+    /// checkout it came from.
+    #[test]
+    fn a_build_tree_set_aside_goes_with_its_checkout() {
+        let bench = Bench::open();
+        let path = kept_with_a_build(&bench, "t-78886-r2-removed");
+        let own = linked_git_dir(&path).expect("a linked checkout");
+        let parked = own.join(format!("{SET_ASIDE}7-0"));
+        std::fs::create_dir_all(parked.join("debug")).expect("a tree set aside");
+        std::fs::write(parked.join("debug/big"), vec![0u8; 4096]).expect("build output");
+        git(
+            &bench.repo,
+            &["worktree", "remove", &path.to_string_lossy()],
+        );
+        assert!(!path.exists(), "the checkout stayed");
+        assert!(!parked.exists(), "a tree set aside outlived its checkout");
+    }
+
+    /// The tag is read for its signature and no more (review t-79535 P3-8):
+    /// a large file that starts with it is the tag, one that does not is not,
+    /// and a pipe or a link in its place is neither — read at once, never
+    /// waited on.
+    #[test]
+    fn a_cache_tag_is_read_for_its_signature_alone() {
+        let temp = tempfile::tempdir().expect("a build tree");
+        let tree = temp.path();
+        assert!(!carries_cache_tag(tree), "no tag at all");
+
+        let tag = tree.join(CACHE_DIRECTORY_TAG);
+        let mut big = CACHE_DIRECTORY_SIGNATURE.to_vec();
+        big.extend(std::iter::repeat_n(b'x', 8 * 1024 * 1024));
+        std::fs::write(&tag, &big).expect("a large tag");
+        assert!(carries_cache_tag(tree), "the signature leads a large file");
+
+        std::fs::write(&tag, &CACHE_DIRECTORY_SIGNATURE[1..]).expect("a short tag");
+        assert!(!carries_cache_tag(tree), "a file that is not the signature");
+        std::fs::write(&tag, b"a file of the same name").expect("another file");
+        assert!(!carries_cache_tag(tree));
+
+        std::fs::remove_file(&tag).expect("clear");
+        std::fs::create_dir(&tag).expect("a directory of the name");
+        assert!(!carries_cache_tag(tree), "a directory is no tag");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_or_a_link_in_the_tags_place_is_not_waited_on() {
+        let temp = tempfile::tempdir().expect("a build tree");
+        let tree = temp.path();
+        let tag = tree.join(CACHE_DIRECTORY_TAG);
+        let made = crate::proc::quiet_command("mkfifo")
+            .arg(&tag)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success(), "mkfifo");
+        let started = std::time::Instant::now();
+        assert!(!carries_cache_tag(tree), "a pipe is no tag");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a pipe held the look"
+        );
+
+        std::fs::remove_file(&tag).expect("clear");
+        let real = tree.join("elsewhere");
+        std::fs::write(&real, CACHE_DIRECTORY_SIGNATURE).expect("a real tag");
+        std::os::unix::fs::symlink(&real, &tag).expect("a link");
+        assert!(!carries_cache_tag(tree), "a link is no tag");
+    }
+
+    /// A checkout a person locked keeps its build as it keeps everything
+    /// else (t-78886): the lock is their word to leave it be.
+    #[test]
+    fn a_locked_checkout_keeps_its_build_tree() {
+        let bench = Bench::open();
+        bench.ignore_on_main("target/\n");
+        let path = bench.cut("t-78886-locked");
+        Bench::build_tree(&path.join("target"));
+        git(&bench.repo, &["worktree", "lock", &path.to_string_lossy()]);
+        let data_root = tempfile::tempdir().expect("data root");
+        let candidate = finished(&path, "w-78887");
+        let nobody = |_: &Path| Some(0);
+        assert!(matches!(
+            settle(
+                &candidate,
+                &Road::Report(bench.orchestrator()),
+                &Where {
+                    active: bench.repo.clone(),
+                    data_root: data_root.path().to_path_buf(),
+                },
+                &nobody_left_and(&nobody),
+                1_000
+            ),
+            Settled::Kept
+        ));
+        assert!(
+            path.join("target/debug/big").is_file(),
+            "a locked checkout lost its build"
+        );
+        git(
+            &bench.repo,
+            &["worktree", "unlock", &path.to_string_lossy()],
+        );
+        judged()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&candidate.path);
+    }
+
     /// And the reclaim goes on (t-12773). A checkout whose base has taken
     /// every commit, with nothing ignored in it but a cargo build tree, is
     /// still taken by both roads: the gigabytes are what the reclaim exists
@@ -3013,6 +3758,7 @@ mod tests {
                     keeping,
                     processes: None,
                     everyone: None,
+                    free_bytes: None,
                 };
                 assert!(
                     matches!(
@@ -3047,6 +3793,7 @@ mod tests {
                 keeping: &clear,
                 processes: None,
                 everyone: None,
+                free_bytes: None,
             };
             assert!(
                 matches!(
@@ -3164,6 +3911,7 @@ mod tests {
             keeping: &clear,
             processes: Some(&processes as ProcessCount<'_>),
             everyone: None,
+            free_bytes: None,
         };
         let mut found: Vec<PathBuf> = Vec::new();
         if let Besides::Found(road, beside) =
@@ -3798,6 +4546,7 @@ mod tests {
             },
             at_ms,
             base_mark: Some(base_mark(path)),
+            quiet: None,
         }
     }
 

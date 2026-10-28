@@ -1158,7 +1158,7 @@ let termContrastBar = null;
 
 function termMinContrast() {
   if (termContrastBar === null) {
-    const screen = readColor("var(--term-screen-bg)");
+    const screen = readColor(TERM_SCREEN_GROUND);
     termContrastBar =
       screen !== null && contrastRatio([0, 0, 0], screen) > contrastRatio([255, 255, 255], screen)
         ? 4.5
@@ -1177,7 +1177,7 @@ function termMinContrast() {
 let paletteGeneration = 0;
 const contrastLift = new Map();
 const indexedContrastLift = new Map();
-/* And the tokens themselves, read once each per palette.
+/* And the tokens themselves, read once per palette.
  *
  * The two maps above cache ANSWERS, which is not the same as caching the
  * reads that produce them: `nearestReadableIndex` walks all 256 palette
@@ -1190,8 +1190,27 @@ const indexedContrastLift = new Map();
  *
  * A token's value cannot change without `forgetPalette`, which is what makes
  * this safe to hold: every road that rebinds `--term-*` — a treatment flip, a
- * theme, an override — ends there (`applyTheme`, `applyTerminalPalette`). */
+ * theme, an override — ends there (`applyTheme`, `applyTerminalPalette`).
+ *
+ * And one style read fills the lot (t-78802): the first miss of a palette
+ * takes the token asked for, every indexed entry and the screen's ground from
+ * the same declaration. One per token was still 258 reads the first time a
+ * colour needed lifting — which on the design's darker ground comes in the
+ * middle of a stream, 2.1 style reads a frame over a dense scene. */
 const resolvedTokens = new Map();
+const TERM_PALETTE_SIZE = 256;
+const TERM_GROUND_TOKEN = "--term-screen-bg";
+const TERM_SCREEN_GROUND = `var(${TERM_GROUND_TOKEN})`;
+
+function resolveToken(name) {
+  const style = getComputedStyle(document.documentElement);
+  const read = (token) => resolvedTokens.set(token, style.getPropertyValue(token).trim());
+  if (resolvedTokens.size === 0) {
+    for (let index = 0; index < TERM_PALETTE_SIZE; index += 1) read(`--term-${index}`);
+    read(TERM_GROUND_TOKEN);
+  }
+  read(name);
+}
 
 function readColor(css) {
   if (typeof css !== "string") return null;
@@ -1201,13 +1220,8 @@ function readColor(css) {
   // palette here, which would be a copy to keep in step.
   const via = text.match(/^var\((--[a-z0-9-]+)\)$/i);
   if (via) {
-    const held = resolvedTokens.get(via[1]);
-    if (held === undefined) {
-      text = getComputedStyle(document.documentElement).getPropertyValue(via[1]).trim();
-      resolvedTokens.set(via[1], text);
-    } else {
-      text = held;
-    }
+    if (!resolvedTokens.has(via[1])) resolveToken(via[1]);
+    text = resolvedTokens.get(via[1]);
     if (text === "") return null;
   }
   const hex = text.match(/^#([0-9a-f]{6})$/i);
@@ -1265,7 +1279,7 @@ function computeReadable(fg, bg) {
   const ink = readColor(fg);
   // A run with no background of its own sits on the screen, so that is what it
   // has to be legible against.
-  const ground = readColor(bg ?? "var(--term-screen-bg)");
+  const ground = readColor(bg ?? TERM_SCREEN_GROUND);
   if (ink === null || ground === null) return fg;
   if (contrastRatio(ink, ground) >= termMinContrast()) return fg;
   const toward = luminance(ground) > 0.5 ? [0, 0, 0] : [255, 255, 255];
@@ -1300,12 +1314,12 @@ function nearestReadableIndex(readable, bg) {
   const held = indexedContrastLift.get(key);
   if (held !== undefined) return held;
   const target = readColor(readable);
-  const ground = readColor(bg ?? "var(--term-screen-bg)");
+  const ground = readColor(bg ?? TERM_SCREEN_GROUND);
   if (target === null || ground === null) return 15;
   let best = 15;
   let bestDistance = Number.POSITIVE_INFINITY;
   let foundReadable = false;
-  for (let index = 0; index < 256; index += 1) {
+  for (let index = 0; index < TERM_PALETTE_SIZE; index += 1) {
     const candidate = readColor(`var(--term-${index})`);
     if (candidate === null) continue;
     const reads = contrastRatio(candidate, ground) >= termMinContrast();
@@ -4437,6 +4451,11 @@ const floatView = makeTermView(el("terminal"), el("term"), el("caret"), {
  *                element of the kind's own where the keyboard starts instead
  *                (a field the person types in); `safe` is Escape's
  *   clock(ask)   the words for a deadline the ask carries (Computer Use)
+ *   view().docked  the ask is for something the person does ELSEWHERE in the
+ *                window or on the desktop (the hand-over): it stands as a card
+ *                in the corner with no backdrop, is not a modal, and takes
+ *                neither the keyboard nor Escape — a card that asks for the
+ *                Settings page must not stand over the Settings page
  *   deliver(ask, choice, hand)  a promise that settles once the answer has
  *                reached whoever asked; a rejection keeps the ask on screen;
  *                `hand` is the hand that answered (shell-boot.js `handNow`),
@@ -4469,8 +4488,40 @@ let askFocus = null;
 let askSafe = null;
 let askClockTimer = null;
 let askLeavesAtOnce = false;
+/* Whether the popup holds the modal seat now: a docked ask does not. */
+let askIsModal = false;
 const ASK_CLOCK_TICK_MS = 1000;
 const askFrame = askScrim.querySelector(".permission");
+/* What a screen reader hears when a docked card comes up: the card takes no
+ * focus, so nothing else would say it is there. */
+const askLive = el("ask-live");
+/* Where the hand was when a key sent it to the docked card, for Escape to give
+ * it back. */
+let askDockedReturn = null;
+
+/* The docked card on screen now — the one a key can send the hand to. */
+function dockedAskStands() {
+  return activeAsk !== null && !askScrim.hidden && askScrim.hasAttribute("data-docked");
+}
+
+function focusDockedAsk() {
+  if (!dockedAskStands()) return;
+  const from = document.activeElement;
+  if (!askFrame.contains(from)) askDockedReturn = from;
+  askFrame.focus({ preventScroll: true });
+}
+
+/* The card is no modal, so nothing traps the hand in it: Escape on the card
+ * gives the keyboard back to where it was (or the terminal), answering nothing. */
+askFrame.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !askScrim.hasAttribute("data-docked")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const back = askDockedReturn;
+  askDockedReturn = null;
+  if (back?.isConnected && !askFrame.contains(back)) back.focus({ preventScroll: true });
+  if (askFrame.contains(document.activeElement)) keySink.focus({ preventScroll: true });
+});
 
 /* One key, one answer. A key held down repeats, and a repeat that lands after
  * the first press has answered the ask on screen lands on the NEXT ask —
@@ -4502,10 +4553,35 @@ function askAlreadyRaised(ask) {
   return activeAsk?.key === ask.key || askQueue.some((queued) => queued.key === ask.key);
 }
 
+function askIsDocked(ask) {
+  return askKindOf(ask).view(ask).docked === true;
+}
+
+/* A docked card waits for the person to do something elsewhere, up to ten
+ * minutes; a question that must stop the person (another pane's permission)
+ * cannot queue behind that, because its agent is stopped for as long. So the
+ * queue gives the window to its first modal before anything docked: modals
+ * keep their order among themselves, and a card comes up only when no modal
+ * waits. */
+function modalWaitsBehindDocked() {
+  return activeAsk !== null && activeAsk.sending !== true && askIsDocked(activeAsk)
+    && askQueue.some((queued) => !askIsDocked(queued));
+}
+
+/* The card on screen goes back to the head of the queue, unless its own
+ * answer is on its way, which a repaint would double. */
+function giveWayToWaitingModal() {
+  if (!modalWaitsBehindDocked()) return false;
+  askQueue.unshift(activeAsk);
+  showNextAsk();
+  return true;
+}
+
 function raiseAsk(ask) {
   if (!askKinds.has(ask.kind) || askAlreadyRaised(ask)) return false;
   askQueue.push(ask);
   askKindOf(ask).raised?.(ask);
+  if (giveWayToWaitingModal()) return true;
   // Behind a question already on screen: the count says so and nothing else
   // moves. A full repaint here would rebuild the buttons an answer in flight
   // was pressed on, which is how one answer becomes two.
@@ -4516,7 +4592,8 @@ function raiseAsk(ask) {
 
 function showNextAsk() {
   const leaving = activeAsk;
-  activeAsk = askQueue.shift() ?? null;
+  const first = askQueue.findIndex((queued) => !askIsDocked(queued));
+  activeAsk = askQueue.splice(Math.max(first, 0), 1)[0] ?? null;
   askLeavesAtOnce = leaving !== null && askKindOf(leaving).instant === true;
   paintAsk();
 }
@@ -4575,15 +4652,34 @@ function paintAsk() {
     askFocus = null;
     askSafe = null;
     askPainted = null;
+    askIsModal = false;
+    askLive.textContent = "";
+    askDockedReturn = null;
     // `closing` is a no-op on a surface that is already hidden, so the
     // repaint path a language change takes does not animate a popup nobody
-    // opened.
-    hideModal(askScrim, { animated: !askLeavesAtOnce });
+    // opened. The docked marks stay through the exit (it fades the card's own
+    // look, not a backdrop) and go when the surface is hidden.
+    hideModal(askScrim, {
+      animated: !askLeavesAtOnce,
+      after: () => {
+        if (activeAsk !== null) return;
+        askScrim.removeAttribute("data-docked");
+        delete askFrame.dataset.keyboardOwner;
+      },
+    });
     return;
   }
   const kind = askKindOf(ask);
   const view = kind.view(ask);
+  const docked = view.docked === true;
   askFrame.dataset.kind = kind.tone;
+  askFrame.setAttribute("aria-modal", docked ? "false" : "true");
+  // Not a modal, so the terminal's key floor (`rearmKeySink`) would otherwise
+  // pull the focus off a button of the card on the next key and give Enter to
+  // the terminal; a button of the card owns the keys while it holds the focus.
+  if (docked) askFrame.dataset.keyboardOwner = "true";
+  else delete askFrame.dataset.keyboardOwner;
+  askScrim.toggleAttribute("data-docked", docked);
   paintAskPart("ask-agent", view.agent ?? null);
   el("ask-agent").className = `perm-agent ${view.agentClass ?? ""}`.trim();
   paintAskPart("ask-title", view.title);
@@ -4612,9 +4708,10 @@ function paintAsk() {
     // `initial: null` is a kind whose Enter must answer nothing (the hand-over):
     // the keyboard starts on the frame itself, and the person Tabs to the
     // answer they mean.
-    askFocus =
-      (view.focus ? el(view.focus) : null) ??
-      (view.initial === null ? askFrame : buttons[view.initial ?? 0] ?? buttons[0] ?? null);
+    askFocus = docked
+      ? null
+      : (view.focus ? el(view.focus) : null) ??
+        (view.initial === null ? askFrame : buttons[view.initial ?? 0] ?? buttons[0] ?? null);
     askSafe = choices[view.safe] ?? null;
   }
   kind.paint?.(ask, view);
@@ -4622,7 +4719,23 @@ function paintAsk() {
   if (kind.clock) askClockTimer = setInterval(paintAskClock, ASK_CLOCK_TICK_MS);
   const changed = ask !== askPainted;
   askPainted = ask;
-  showModal(askScrim, { animated: true });
+  if (docked) {
+    // Out of the modal stack first: a docked card has no focus trap and no
+    // Escape, and the focus goes back to where the person's hand was.
+    if (askIsModal) hideModal(askScrim, { animated: false });
+    askIsModal = false;
+    showing(askScrim);
+    if (changed) {
+      askLive.textContent = [view.title, view.why, kind.clock?.(ask)]
+        .filter((part) => typeof part === "string" && part !== "")
+        .join(". ");
+    }
+  } else {
+    askIsModal = true;
+    askLive.textContent = "";
+    askDockedReturn = null;
+    showModal(askScrim, { animated: true });
+  }
   // A new ask starts the keyboard on its own default. The same ask repainted
   // (a language change) keeps wherever the person's hand already is.
   if (changed) askFocus?.focus({ preventScroll: true });
@@ -4669,6 +4782,9 @@ async function answerAsk(choice) {
       return;
     }
     answered.failure = String(error);
+    // A modal that arrived while this card's answer was on its way has waited
+    // for exactly this; the card comes back, failure and all, after it.
+    if (giveWayToWaitingModal()) return;
     paintAskPart(
       "ask-why",
       t("perm.failed", "응답이 서버에 닿지 못했습니다 — 다시 시도하세요. ({{error}})", {
@@ -5018,16 +5134,6 @@ function refreshChrome() {
   // The lane's tab carries what a lane header used to: which agent, which
   // session, and whether it is waiting for someone.
   renderTabs();
-
-  const waiting = order.filter((id) => {
-    const held = lanes.get(id);
-    return held && ["awaiting_permission", "blocked"].includes(held.lane.state);
-  });
-  attention.hidden = waiting.length === 0;
-  if (waiting.length > 0) {
-    attention.className = `attention ${slotClass(waiting[0])}`;
-    attentionCount.textContent = t("session.waiting", "{{count}}개 대기", { count: waiting.length });
-  }
 }
 
 function upsertLane(lane) {
@@ -5549,6 +5655,8 @@ function collapseStageGroup(group) {
       held.emulatorView._emulatorResizeObserver = null;
       held.emulatorView._emulatorTab = null;
     }
+    // The strip watcher holds its strip the same way (t-78107).
+    tabStripWatch.unobserve(held.strip);
     held.el.remove();
     groups.delete(group);
   }
@@ -6453,6 +6561,9 @@ function prunePanes(node, keep) {
  * this host's slots and keep their scrollback — the same reason `updateStage`
  * moves a surface rather than drawing a second one. */
 const paneHosts = new Map();
+/* Each agent tab's head (2차 B, `paintPaneHead`), by tab: the first child of
+ * its host through every re-render of the tree below it. */
+const paneHeads = new Map();
 
 function paneHost(tab) {
   const held = paneHosts.get(tab.id);
@@ -6477,12 +6588,7 @@ function paneHost(tab) {
       if (paneModeOf(tab, host) !== host.dataset.paneMode) {
         renderPanes(tab);
       } else {
-        for (const term of paneLeaves(tab.layout)) {
-          const view = termViews.get(term);
-          if (!view || view.host.hidden) continue;
-          view.measure();
-          resizeTermTab(term);
-        }
+        remeasurePanes(tab);
       }
     }, SIDEBAR_REFLOW_DEBOUNCE_MS);
   }).observe(host);
@@ -6504,7 +6610,21 @@ function paneModeOf(tab, host) {
   return chain.length * PANE_MIN_GRID_WIDTH > width ? "grid" : "split";
 }
 
+/* Every shell of the tab that is on screen measures its room again and tells its program. */
+function remeasurePanes(tab) {
+  for (const term of paneLeaves(tab.layout)) {
+    const view = termViews.get(term);
+    if (!view || view.host.hidden) continue;
+    view.measure();
+    resizeTermTab(term);
+  }
+}
+
 function dropPaneHost(id) {
+  // The view switch may stand in this tab's head line — in the head, or in its
+  // pane's conversation head (`placePaneHeadLine`); it goes home before either does.
+  if (paneHeads.get(id)?.__line.contains(viewToggle)) el("view-toggle-home").appendChild(viewToggle);
+  paneHeads.delete(id);
   paneHosts.get(id)?.remove();
   paneHosts.delete(id);
 }
@@ -7004,7 +7124,9 @@ function renderPanes(tab) {
   // that still fits keeps the split renderer, its measured divider and its
   // drag; so does every hand-built shape (`paneModeOf`).
   const mode = paneModeOf(tab, host);
+  const head = paneHeads.get(tab.id);
   host.replaceChildren(
+    ...(head ? [head] : []),
     mode === "grid"
       ? paneGridEl(tab, uniformVerticalChainLeaves(tab.layout))
       : paneNodeEl(tab, tab.layout),
@@ -7016,12 +7138,7 @@ function renderPanes(tab) {
   // Every visible shell measures again: what changed is how much room each of
   // them has, and a grid sized for the old room paints for columns that are
   // not there.
-  for (const term of paneLeaves(tab.layout)) {
-    const view = termViews.get(term);
-    if (!view || view.host.hidden) continue;
-    view.measure();
-    resizeTermTab(term);
-  }
+  remeasurePanes(tab);
   // Every road that changes the shape ends here — split, prune, title,
   // expand, equalize — so this is the one place the file learns about all of
   // them. Orca persists a snapshot at each of those verbs individually
@@ -7359,7 +7476,7 @@ function tabSwitcherAvailable() {
   for (const id of ["settings-view", "task-view", "auto-view", "space-view", "qo-scrim"]) {
     if (!el(id).hidden) return false;
   }
-  return document.querySelector(".scrim:not([hidden])") === null;
+  return !modalScrimStands();
 }
 
 function openOrAdvanceTabSwitcher(direction) {
@@ -9455,35 +9572,10 @@ const TAB_GLYPH = {
   emulator: "phone",
 };
 
-/* What the strip writes on a tab (t-45938): its name, after the role its pane
- * plays — 「코디 · …」, 「워커 · …」, 「사람 · …」 — the word its sidebar row
- * wears, so the strip tells the coordinator's tab from a worker's without the
- * board. A tab holding the coordinator's pane is the coordinator's, whatever
- * else is split into it; any other tab speaks for its one pane. Only the strip
- * leads with the role: everything else that names a tab (a crumb, a sentence)
- * names the work.
- *
- * And it counts (t-67936): a tab holding two runs' coordinators reads
- * 「코디 2 · …」. The tab the 2026-10-21 13:24:35 close took held two
- * coordinators and read as one; its tip names them (`termTabTip`). */
-function tabStripWords(tab) {
-  const label = tabLabel(tab);
-  const role = tabRole(tab);
-  if (!role) return label;
-  const panes = paneLeaves(tab.layout).filter((term) => paneRole(term)?.kind === role.kind).length;
-  const word = panes > 1
-    ? t("agent.role.count", "{{role}} {{n}}", { role: paneRoleWord(role), n: panes })
-    : paneRoleWord(role);
-  return t("agent.role.tab", "{{role}} · {{label}}", { role: word, label });
-}
-
-function tabRole(tab) {
-  if (tab.kind !== "term" || tab.asleep) return null;
-  const leaves = paneLeaves(tab.layout);
-  const roles = leaves.map(paneRole).filter(Boolean);
-  return roles.find((role) => role.kind === "coordinator") ?? (leaves.length === 1 ? roles[0] ?? null : null);
-}
-
+/* A tab's role — the coordinator's, a worker's — is said on its tip and its
+ * sidebar row, not before its name (t-78107, 시안 「또렷한 Geist」 2: the strip
+ * says the work and its state; 「코디 · …」 had taken a third of every
+ * tab). `termTabTip` names the seats a tab holds (t-45938, t-67936). */
 function tabLabel(tab) {
   // 표와 노트북은 그 파일 자체이지 파생된 판이 아니다 — 이름만 단다(1-g39·1-g40).
   if (

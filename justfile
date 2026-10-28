@@ -61,6 +61,7 @@ tools-test:
     t tools/release/tests/test_coord_receipt.py; \
     t tools/release/tests/test_prebatch.py; \
     t tools/release/tests/test_workspace_units.py; \
+    t tools/release/tests/test_changed_crates.py; \
     macos "win-check cross-compiles from a Mac (cargo-xwin, Homebrew llvm)" tools/release/tests/test_win_check.py; \
     t tools/release/tests/test_bump.py; \
     t tools/release/tests/test_pii_scan.py; \
@@ -244,6 +245,92 @@ doc:
 
 fmt:
     cargo fmt --all
+
+# What a worker runs before `worker_done`, and writes the `rc=` line of into the
+# hand-in. On 2026-10-28 four gate reds cost the lane 1 h 43 m, and each was
+# caught beforehand by a check of 4 s to 23 min. Every stage runs even after one
+# fails (as `verify-every-recipe.sh` does), then one line says each stage's exit
+# code and what to do next for a red one, and the recipe exits 1 if any was not 0.
+#   Stage 1, always: the formatter of both Cargo workspaces and the private-value
+#   gate (the gate's own `fmt-check` recipes), the window's source contracts,
+#   and the unit tests of each crate the branch changed or reads a changed file
+#   of (`tools/release/changed_crates.py` picks them from Cargo's package list,
+#   the files the sources `include_str!`, and the diff against main — no list
+#   here). The contracts build the window once, so a first run in a fresh
+#   checkout takes minutes on every core, whichever crate the branch changed.
+#   Stage 2, only when ui/ changed: the window suites you name, with
+#   `just pre-handin a,b` (names or patterns, as WINDOW_SUITES takes them).
+#   The whole window gate is 23 min on a quiet machine, so a worker never runs
+#   it: without suites the stage stops, says which ui files changed and which
+#   suites look at them, and the recipe exits 1. The load before the run is in
+#   the last line: the window's frame budgets are judged only when the load is
+#   at most the core count, so a red on a busier machine is worth a rerun.
+# A branch cut from a stack tip, not from main, measures from that tip:
+# `PRE_HANDIN_BASE=<tip> just pre-handin`. A stage that stopped is `2`; one that
+# did not apply is `-`.
+pre-handin suites='':
+    #!/usr/bin/env bash
+    set -u
+    suites={{quote(suites)}}
+    names=(); codes=(); secs=(); hints=(); extras=()
+    hint=; extra=
+    note() {  # note <name> <code> [seconds]: what the last line says of a stage
+        names+=("$1"); codes+=("$2"); secs+=("${3:-0}"); hints+=("$hint"); extras+=("$extra"); hint=; extra=
+    }
+    step() {  # step <name> <command…>: run it and note its exit code and seconds
+        local name=$1 started=$SECONDS code; shift
+        echo "== pre-handin: $name" >&2
+        "$@"; code=$?
+        note "$name" "$code" "$((SECONDS - started))"
+    }
+    hint='cargo fmt --all'
+    step fmt just fmt-check
+    hint='cd zo-ide && cargo fmt -p zo-ide'
+    step fmt-zo-ide bash -c 'cd zo-ide && just fmt-check'
+    hint='the lines above name the file and the rule; take the value out or mask it, then just pii-check'
+    step pii just pii-check
+    hint='fix the FAILED names above, then rerun one: cargo test -p zerocode-shell --test source_contracts <name>'
+    step contracts cargo test -p zerocode-shell --test source_contracts
+    picked=$(python3 tools/release/changed_crates.py ${PRE_HANDIN_BASE:+--base "$PRE_HANDIN_BASE"}); pick=$?
+    hint='the message above says why; name the branch point with PRE_HANDIN_BASE=<commit>'
+    note pick "$pick"
+    if [ "$pick" -eq 0 ]; then
+        while IFS=$'\t' read -r kind workspace package arguments; do
+            [ "$kind" = crate ] || continue
+            hint="fix the FAILED names above, then rerun one: (cd $workspace && cargo test -p $package $arguments <name>)"
+            step "unit:$package" bash -c 'cd "$1" && cargo test -p "$2" $3' _ "$workspace" "$package" "$arguments"
+        done <<< "$picked"
+        ui=$(printf '%s\n' "$picked" | awk -F'\t' '$1 == "ui" { print $2 }')
+    else
+        ui=
+    fi
+    load=$(uptime | sed 's/.*load averages*: *//')
+    cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)
+    if [ -z "$ui" ]; then
+        note window -
+    elif [ -n "$suites" ]; then
+        hint='the FAILED lines above name the checks; rerun one suite: WINDOW_SUITES=<name> node ui/tests/window.mjs'
+        extra=" load $load, $cores cores"
+        step window env WINDOW_SUITES="$suites" node ui/tests/window.mjs
+    else
+        echo "pre-handin: ui changed ($(echo "$ui" | wc -l | tr -d ' ') files, first: $(echo "$ui" | head -1)) — name the window suites to run:" >&2
+        echo "  just pre-handin <a,b>   (names or patterns; the window harness registers the suite names)" >&2
+        echo "  suites that look at the changed files: $(printf '%s\n' "$picked" | awk -F'\t' '$1 == "suite" { printf "%s%s", sep, $2; sep = "," }')" >&2
+        hint='name the suites above (or others that draw what you changed): just pre-handin <a,b>'
+        note window 2
+    fi
+    line=; rc=0; next=
+    for at in "${!names[@]}"; do
+        line="$line ${names[$at]}=${codes[$at]}"
+        [ "${codes[$at]}" = - ] || line="$line(${secs[$at]}s${extras[$at]})"
+        case ${codes[$at]} in
+            0|-) ;;
+            *) rc=1; next="$next"$'\n'"  ${names[$at]}: ${hints[$at]}" ;;
+        esac
+    done
+    echo "pre-handin:$line rc=$rc"
+    [ -z "$next" ] || echo "next:$next"
+    exit "$rc"
 
 fmt-check:
     cargo fmt --all --check

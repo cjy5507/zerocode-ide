@@ -4910,6 +4910,11 @@ function paintAccountSwitchNote() {
     return;
   }
   const moves = accountSwitchMoves(plan);
+  // 사람이 직접 고른 계정은 벽까지 그대로 둔다(t-78096) — 왜 안 바꾸는지 한 줄로.
+  if (decision.why === "picked" && moves.length === 0) {
+    paint(true, false, t("settings.accounts.switchPicked", "직접 고른 계정이라 한도 벽에 닿을 때까지 자동으로 바꾸지 않습니다"));
+    return;
+  }
   if (plan.mode !== "ask" || (decision.kind !== "switch" && moves.length === 0)) {
     paint(false, false);
     return;
@@ -5017,6 +5022,7 @@ function paintClaudeNext() {
   } else {
     parts.push(t("usage.nextNone", "다음 계정 없음"));
   }
+  if (decision.why === "picked") parts.push(t("usage.nextPicked", "고른 계정 · 벽까지 유지"));
   if (decision.why === "cooldown" && plan.cooldown_until_ms) {
     parts.push(t("usage.nextCooldown", "전환 쉼 {{minutes}}분", {
       minutes: Math.max(1, Math.ceil((plan.cooldown_until_ms - Date.now()) / 60000)),
@@ -7024,12 +7030,12 @@ function workerCell(state, agent, row) {
   const effort = workerNode("select", "settings-input worker-models-effort");
   Object.assign(effort.dataset, { agent, difficulty: row.difficulty, field: "effort" });
   effort.setAttribute("aria-label", t("settings.workerModels.effortLabel", "{{agent}} {{difficulty}} 사고 깊이", { agent: who, difficulty }));
-  // 「자동」 for the effort is the difficulty's effort inside the model: what
-  // the row runs at now while no effort is written, else what clearing it
-  // brings back — known for the lineup's model, not for a written one.
+  // 「자동」 for the effort is what the row runs at while no effort is
+  // written: the model's own CLI default unless the model seat chooses one
+  // for the work (t-74181), so it names no word of ours.
   const autoEffort = !row.writtenEffort ? row.effort : row.writtenModel ? null : row.autoEffort;
   effort.append(workerOption("", auto(autoEffort), !row.writtenEffort));
-  const takes = [...(workerPick(state, agent, row.model)?.efforts ?? [row.effort])];
+  const takes = [...(workerPick(state, agent, row.model)?.efforts ?? [row.effort].filter(Boolean))];
   if (row.writtenEffort && !takes.includes(row.writtenEffort)) takes.push(row.writtenEffort);
   for (const word of takes) effort.append(workerOption(word, word, word === row.writtenEffort));
   effort.classList.toggle("is-auto", !row.writtenEffort);
@@ -7173,7 +7179,7 @@ function saveWorkerCell(agent, difficulty, model, effort, note = "") {
     paintWorkerNext(agent, row);
     const said = row
       ? t("settings.workerModels.saved", "저장했습니다 — 다음 {{agent}} {{difficulty}} 소환부터 {{model}} · {{effort}}", {
-        agent: agentName(agent), difficulty: workerDifficulty(difficulty).name, model: row.model, effort: row.effort,
+        agent: agentName(agent), difficulty: workerDifficulty(difficulty).name, model: row.model, effort: row.effort ?? t("settings.workerModels.autoPlain", "자동"),
       })
       : t("settings.workerModels.savedPlain", "저장했습니다.");
     return note ? `${said} ${note}` : said;
@@ -8123,6 +8129,8 @@ function setLocale(code) {
   // And the ask popup, if one is up. The agent behind it is blocked until it
   // is answered, so it is the last surface that can afford to be left behind.
   paintAsk();
+  // The chip's turns are drawn in words; shell.js, which owns them, loads last.
+  if (typeof paintYourTurn === "function") paintYourTurn();
   // 근거 화면도 제 말을 직접 짓는다 — 상태 딱지, 신선도, 그리고 「시험 결과가
   // 아니다」라는 유보 문장까지. 떠 있지 않으면 아무것도 하지 않는다.
   paintWorktreeEvidence();
@@ -8651,9 +8659,27 @@ function terminalThemePalette() {
     ? termPrefsSpec.theme_defaults.light
     : termPrefsSpec.theme_defaults.dark;
   const selected = light ? termPrefs.theme_light : termPrefs.theme_dark;
+  // The default, and the base a custom theme lays its own colours over.
+  const base = catalog[fallback] ? onWindowGround(catalog[fallback], light) : null;
   const custom = customTerminalTheme(selected);
-  if (custom) return { ...(catalog[fallback] ?? {}), ...(custom.terminal ?? {}) };
-  return catalog[selected] ?? catalog[fallback] ?? null;
+  if (custom) return { ...(base ?? {}), ...(custom.terminal ?? {}) };
+  return selected !== fallback && catalog[selected] ? catalog[selected] : base;
+}
+
+/* 시안 10 「바탕 한 장」 (t-78107): the treatment's default theme draws its
+ * screen on the conversation's ground, the window's floor, not on its own
+ * grey. Only where the theme's treatment is the window's — a dark theme kept
+ * under a light window keeps its ground. A theme the person picked and a
+ * background they set come over this; the cursor's glyph ink moves along. */
+function onWindowGround(palette, light) {
+  if (light !== (document.documentElement.dataset.theme === "light")) return palette;
+  const ground = normalizedHexColor(
+    getComputedStyle(document.documentElement).getPropertyValue("--chat-ground"),
+    null,
+  );
+  if (ground === null) return palette;
+  const cursorAccent = palette.cursorAccent === palette.background ? ground : palette.cursorAccent;
+  return { ...palette, background: ground, cursorAccent };
 }
 
 function terminalAnsiColorKeys() {
@@ -12540,6 +12566,33 @@ function browserProfileRow(profile) {
     })
     : t("settings.browser.profileNever", "아직 가져온 쿠키가 없습니다");
   identity.append(head, note);
+  // 마지막 주입의 결과. 거절이 있어도 받은 쿠키는 앉아 있고, 받지 않은
+  // 쿠키의 이름·도메인은 창 로그에 있다 — 「다시 가져오기」가 새로 받는 길이다.
+  const applied = profile.lastApply;
+  if (applied && Number.isInteger(applied.applied)) {
+    const outcome = document.createElement("p");
+    outcome.className = "browser-profile-note browser-profile-applied";
+    outcome.textContent = applied.refused > 0
+      ? t("settings.browser.profileAppliedRefused", "쿠키 {{applied}}개 적용 · {{refused}}개 거절", {
+        applied: applied.applied,
+        refused: applied.refused,
+      })
+      : t("settings.browser.profileApplied", "쿠키 {{applied}}개 적용", { applied: applied.applied });
+    // 만료 등으로 시도하기 전에 버린 수 — 전부 만료인 스테이징도 「0개 적용」만
+    // 말하지 않는다.
+    if (applied.dropped > 0) {
+      outcome.textContent += ` · ${t("settings.browser.profileDropped", "{{dropped}}개 만료 등으로 건너뜀", {
+        dropped: applied.dropped,
+      })}`;
+    }
+    if (applied.refused > 0) {
+      outcome.dataset.tip = t(
+        "settings.browser.profileRefusedHint",
+        "받지 않은 쿠키의 이름은 창 로그에 있습니다. 다시 가져오면 새로 받습니다",
+      );
+    }
+    identity.append(outcome);
+  }
 
   const acts = document.createElement("div");
   acts.className = "browser-profile-acts";

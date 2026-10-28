@@ -1989,6 +1989,7 @@ const TASK_COST_REASONS = Object.freeze({
   unlinked: { key: "board.desk.cost.reasonUnlinked", word: "잇지 못한 세션" },
   incomplete_session_history: { key: "board.desk.cost.reasonIncompleteHistory", word: "과거 세션 이력이 완전하지 않음" },
   invalid_usage: { key: "board.desk.cost.reasonInvalidUsage", word: "사용량 수치를 검증할 수 없음" },
+  partial_usage: { key: "board.desk.cost.reasonPartialUsage", word: "세션 사용량 기록의 일부만 읽을 수 있었음" },
   outside_attempt: { key: "board.desk.cost.reasonOutsideAttempt", word: "세션 사용량이 과업 시도 시간 안에만 속하는지 확인할 수 없음" },
   mixed_models: { key: "board.desk.cost.reasonMixed", word: "세션 중 모델이 바뀜" },
   unpriced_model: { key: "board.desk.cost.reasonUnpriced", word: "가격표에 없는 모델" },
@@ -2656,6 +2657,11 @@ const DESK_RELEASE_PHASES = Object.freeze({
   publish: { key: "board.now.phasePublish", word: "발행" },
   sweep: { key: "board.now.phaseSweep", word: "정리" },
 });
+
+/* A release lane's name: its version, or its commit when it has none yet. */
+function deskReleaseVersionWord(lane) {
+  return lane.version ? `v${lane.version}` : String(lane.sha).slice(0, SHORT_COMMIT_LENGTH);
+}
 
 function deskReleasePhaseWord(name) {
   const known = DESK_RELEASE_PHASES[name];

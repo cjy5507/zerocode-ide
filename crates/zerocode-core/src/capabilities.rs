@@ -255,6 +255,27 @@ pub const CLAUDE_EFFORT_LADDER: &[&str] = &["low", "medium", "high", "xhigh", "m
 pub const CODEX_EFFORT_LADDER: &[&str] =
     &["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
+/// zo's `--effort` help, in its own order (`off|low|medium|high|xhigh|max|
+/// ultra|smart`, measured 2026-08-28): the levels between two switches —
+/// `off` and `smart` are ways of running, not rungs ([`ZO_EFFORT_LEVELS`]).
+pub const ZO_EFFORT_LADDER: &[&str] = &[
+    "off", "low", "medium", "high", "xhigh", "max", "ultra", "smart",
+];
+
+/// The levels on [`ZO_EFFORT_LADDER`], lowest first: the ladder less the
+/// switch at either end.
+pub const ZO_EFFORT_LEVELS: &[&str] = match ZO_EFFORT_LADDER.split_first() {
+    Some((_, after_off)) => match after_off.split_last() {
+        Some((_, levels)) => levels,
+        None => &[],
+    },
+    None => &[],
+};
+
+/// Antigravity's (`agy`) `--effort` help, lowest first (`low|medium|high`,
+/// measured 2026-08-28 on this machine).
+pub const ANTIGRAVITY_EFFORT_LADDER: &[&str] = &["low", "medium", "high"];
+
 /// Every effort word an agent's picker offers, lowest first — the one order
 /// efforts are ranked in, wherever one is brought inside what a model accepts
 /// or the highest of several is taken. Codex's ladder is the widest and
@@ -563,6 +584,35 @@ pub enum AuthProbeKind {
     Keychain,
     /// `gh auth status`, for an agent that rides the GitHub CLI's login.
     GhAuthStatus,
+    /// The CLI's own log of how its last start signed in, for an agent that
+    /// keeps its login where this window does not read (its own keyring).
+    SignInLog(SignInLog),
+}
+
+impl AuthProbeKind {
+    /// The sign-in log this witness reads, when it is one.
+    #[must_use]
+    pub const fn sign_in_log(&self) -> Option<&SignInLog> {
+        match self {
+            Self::SignInLog(log) => Some(log),
+            _ => None,
+        }
+    }
+}
+
+/// Where a CLI writes how each start signed in, and the words it writes. The
+/// last of those lines in its newest log is how the next launch starts: a
+/// sign-in is a login to ride, a sign-out after it is none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SignInLog {
+    /// The newest log, relative to the home a launch reads.
+    pub path: &'static str,
+    /// How much of its start is read: a start signs in among its first lines.
+    pub head_bytes: usize,
+    /// A line carrying one of these says a sign-in finished.
+    pub signed_in: &'static [&'static str],
+    /// A line carrying one of these says the login was let go.
+    pub signed_out: &'static [&'static str],
 }
 
 /// Whether the window can read this agent's login before a launch: the
@@ -743,9 +793,36 @@ mod tests {
     #[test]
     fn every_ladder_stands_in_the_one_effort_order() {
         let rank = |word: &str| EFFORT_ORDER.iter().position(|known| *known == word);
-        for ladder in [CLAUDE_EFFORT_LADDER, CODEX_EFFORT_LADDER] {
+        for ladder in [
+            CLAUDE_EFFORT_LADDER,
+            CODEX_EFFORT_LADDER,
+            ZO_EFFORT_LEVELS,
+            ANTIGRAVITY_EFFORT_LADDER,
+        ] {
             assert!(ladder.iter().all(|word| rank(word).is_some()), "{ladder:?}");
+            assert!(
+                ladder.iter().map(|word| rank(word)).is_sorted(),
+                "{ladder:?}"
+            );
         }
+        // zo's levels are its ladder less exactly the two words nothing
+        // ranks: its switches, one at either end.
+        let switches: Vec<&str> = ZO_EFFORT_LADDER
+            .iter()
+            .copied()
+            .filter(|word| rank(word).is_none())
+            .collect();
+        assert_eq!(
+            switches,
+            [
+                ZO_EFFORT_LADDER[0],
+                ZO_EFFORT_LADDER[ZO_EFFORT_LADDER.len() - 1]
+            ]
+        );
+        assert_eq!(
+            ZO_EFFORT_LEVELS.len() + switches.len(),
+            ZO_EFFORT_LADDER.len()
+        );
         for spec in &AGENT_SPECS {
             let ranks: Vec<usize> = spec
                 .harness
@@ -863,11 +940,22 @@ mod tests {
         // providers the window materialises (`providers_for`) and the witness
         // kinds the row allows — the identity file and the scoped keychain
         // item for the Anthropic homes, the identity file alone for Codex,
-        // and `gh auth status` for the one agent that rides gh's login.
+        // `gh auth status` for the one agent that rides gh's login, and the
+        // CLI's own sign-in log for agy, whose login is in its own keyring.
         assert_eq!(
             ids_where(|caps| caps.auth_probe.is_some()),
-            ["zo", "claude", "codex", "copilot"]
+            ["zo", "claude", "codex", "antigravity", "copilot"]
         );
+        // agy keeps its login in its own keyring; its log is the witness.
+        let agy = agent_capabilities("antigravity")
+            .expect("antigravity")
+            .auth_probe
+            .expect("a witness for agy");
+        assert!(agy.providers.is_empty());
+        assert!(matches!(
+            agy.probes,
+            [AuthProbeKind::SignInLog(SignInLog { path, .. })] if path.ends_with("cli.log")
+        ));
         assert_eq!(
             agent_capabilities("zo").expect("zo").auth_probe,
             Some(AuthProbe {

@@ -154,7 +154,14 @@ impl Launched {
             task: prepared.task.clone(),
             agent: prepared.agent.clone(),
             execution_model: pinned.and_then(|pinned| pinned.model.clone()),
-            effort: pinned.and_then(|pinned| pinned.effort.clone()),
+            // No effort on the command line of an agent that takes one: its
+            // CLI ran its own default, and the row says so (t-74181).
+            effort: pinned.and_then(|pinned| {
+                pinned.effort.clone().or_else(|| {
+                    zerocode_core::orchestration::takes_effort(&pinned.agent)
+                        .then(|| zerocode_core::summon_difficulty::lineup::CLI_DEFAULT.to_string())
+                })
+            }),
         }
     }
 

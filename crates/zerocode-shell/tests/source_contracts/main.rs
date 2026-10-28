@@ -16,6 +16,7 @@ mod computer_progress;
 mod computer_use_mirrors;
 mod computer_use_tcc;
 mod continue_gate;
+mod cookie_import_card;
 mod coordinator_desk;
 mod crash_report;
 mod fixture_cases;
@@ -25,6 +26,7 @@ mod hand_in_keep;
 mod handoff_code;
 mod jev_pane_seats;
 mod land_batch;
+mod pre_handin;
 mod quiet_children;
 mod quota_wall;
 mod raw_feed;
@@ -2247,10 +2249,13 @@ mod tests {
         let cells = block_after_css(styles, ".term {");
         let markup = include_str!("../../../../ui/index.html");
 
-        // 값은 Orca의 기본 다크 테마(Ghostty Default Style Dark,
-        // store-BgJxB0hr.js:122) 실측 — 자체 남색조(#101418)는 앱의 중립
-        // 회색 체계와 색조가 어긋나 "터미널만 다른 앱"으로 읽혔다.
-        for role in ["--term-screen-bg: #282c34;", "--term-screen-fg: #ffffff;"] {
+        // 바탕은 대화 보기와 같은 창의 바닥(시안 10 「바탕 한 장」, t-78107) —
+        // 기본 테마의 회색(#282c34)은 가운데만 다른 재질로 띄웠다. 글자는
+        // Orca의 기본 다크 테마(Ghostty Default Style Dark) 실측 그대로.
+        for role in [
+            "--term-screen-bg: var(--chat-ground);",
+            "--term-screen-fg: #ffffff;",
+        ] {
             assert!(
                 root.contains(role),
                 "the terminal contrast pair is missing `{role}`"
@@ -2473,8 +2478,10 @@ mod tests {
     /// BlinkMacSystemFont, "Segoe UI", sans-serif` with a bundled
     /// Geist-Variable @font-face (:23531, :23510), and hands
     /// `--font-mono: "SF Mono", SFMono-Regular, ui-monospace…` beside it
-    /// (:23533). The face that renders is the one measured; the woff2 itself
-    /// is an asset and never ships.
+    /// (:23533). The face that renders is the one measured. Since 2026-10-28
+    /// the window ships Geist and Geist Mono itself (t-78107, the one asset the
+    /// person let in), so Geist Mono leads the window's mono words over the
+    /// measured stack, which the terminal and the editor keep reading.
     ///
     /// Pinned here because a near-miss on shape or type reads as an imitation
     /// exactly the way a near-miss on colour does, and neither says so.
@@ -2527,8 +2534,8 @@ mod tests {
         );
         assert!(
             root.contains(
-                "--font-mono: \"SF Mono\", SFMono-Regular, ui-monospace, \"Cascadia Code\""
-            ),
+                "--font-mono-system: \"SF Mono\", SFMono-Regular, ui-monospace, \"Cascadia Code\""
+            ) && root.contains("--font-mono: \"Geist Mono\", var(--font-mono-system);"),
             "the mono face stopped being the measured `--font-mono` stack"
         );
         // The Korean fallback is ours and stays: nothing in the measured
@@ -3254,8 +3261,10 @@ mod tests {
         );
         // The ask popup leaves animated too, except a kind that says it leaves
         // at once (the window's own confirm, whose caller must not wait on a fade).
+        // It also takes down the docked card's marks once the exit is over.
+        let ask_painting = block_after(window, "function paintAsk() {");
         assert!(
-            window.contains("hideModal(askScrim, { animated: !askLeavesAtOnce })"),
+            ask_painting.contains("hideModal(askScrim, {\n      animated: !askLeavesAtOnce,"),
             "`askScrim` does not leave through the modal manager's shared exit"
         );
         let tab_picker_exit = block_after(window, "function closeTabCreate(");
@@ -5929,9 +5938,10 @@ mod tests {
     /// `flex flex-col overflow-hidden` (components/sidebar/index.tsx:110)
     /// holding a fixed nav that ENDS in the palette's search button
     /// (SidebarNav.tsx:305) and STARTS with the setup entry (:109), a fixed
-    /// header whose title is the grouping's own name — bare `'Projects'` /
+    /// header whose title is the grouping's own name — `'Projects'` /
     /// `'Workspaces'`, stamped on `data-sidebar-section-title`
-    /// (SidebarHeader.tsx:21,28) — one scrolling list viewport
+    /// (SidebarHeader.tsx:21,28), said in the person's language since the
+    /// passed Geist draft (t-78107, 시안 7) — one scrolling list viewport
     /// (VirtualizedWorktreeViewport.tsx:352), and a fixed toolbar whose right
     /// pair is the crosshair and the board toggle wearing `aria-pressed`
     /// (SidebarToolbar.tsx:78-119). The board door used to be a nav row and
@@ -5994,7 +6004,8 @@ mod tests {
         let window = window_source();
         let heading = block_after(window, "function paintSidebarTitle() {");
         assert!(
-            heading.contains("\"Projects\" : \"Workspaces\"")
+            heading.contains("SIDEBAR_SECTION_WORDS[section]")
+                && heading.contains("t(key, word)")
                 && heading.contains("dataset.sidebarSectionTitle"),
             "the heading is not the grouping's own bare name:\n{heading}"
         );
@@ -7801,7 +7812,7 @@ mod tests {
     fn a_workspace_dot_repaints_without_rebuilding_the_list() {
         let window = window_source();
 
-        let shape = block_after(window, "function worktreeListShape(held) {");
+        let shape = block_after(window, "function worktreeListShape(held, resting) {");
         assert!(
             shape.contains("(held.get(worktree.path) ?? []).length"),
             "the shape guard cannot see a session appearing, so the row it \
@@ -16250,11 +16261,11 @@ mod tests {
             "a title change draws the strip on the frame path again:\n{naming}"
         );
         let leaves = block_after(window, "function writeTermTitleLeaves(term) {");
-        // The strip's words for a tab are its name after its pane's role (t-45938),
-        // written by the strip's own painter and by this guarded leaf alike.
+        // The strip's words for a tab are its name (t-78107: the role moved to
+        // the tip), written by the strip's own painter and this guarded leaf alike.
         assert!(
             leaves.contains("if (agentPaintDue.tabs || agentPaintDue.cards) return false;")
-                && leaves.contains("writeTextContent(label, tabStripWords(tab));")
+                && leaves.contains("writeTextContent(label, tabLabel(tab));")
                 && leaves.contains("writeTextContent(fit.name, fit.primary);")
                 && !leaves.contains("renderTabs()")
                 && !leaves.contains("paintWorktreeAgents()"),
@@ -16598,7 +16609,7 @@ mod tests {
                 && styles.contains("background: var(--term-cursor);")
                 && styles.contains("var(--term-cursor-accent)")
                 && styles
-                    .contains("font-family: var(--term-font-choice, \"SF Mono\"), var(--font-mono);")
+                    .contains("font-family: var(--term-font-choice, \"SF Mono\"), var(--font-mono-system);")
                 && styles.contains("font-feature-settings: \"liga\" 0, \"calt\" 0;")
                 && styles.contains(":root[data-term-ligatures=\"on\"] .term")
                 && styles.contains("font-feature-settings: \"liga\" 1, \"calt\" 1;")
@@ -16932,7 +16943,7 @@ mod tests {
             "installed font suggestions lost their single native owner"
         );
         assert!(
-            window.contains("var(--editor-font-family, var(--font-mono))")
+            window.contains("var(--editor-font-family, var(--font-mono-system))")
                 && window.contains("function applyEditorFontFamily() {")
                 && window.contains("held.editor.requestMeasure();")
                 && window.contains("held.merge.a.requestMeasure();")
@@ -17221,7 +17232,7 @@ mod tests {
         // and everything else has to be inside. (See
         // `a_workspace_dot_repaints_without_rebuilding_the_list` for the other
         // half: what left the shape has to have arrived on the paint road.)
-        let shape = block_after(window, "function worktreeListShape(held) {");
+        let shape = block_after(window, "function worktreeListShape(held, resting) {");
         assert!(
             shape.contains("closedProjects.has(project.path)")
                 && shape.contains("(held.get(worktree.path) ?? []).length")
@@ -20072,7 +20083,7 @@ mod tests {
         // window (t-74919) — and its outcome goes back to the watch.
         assert!(
             confirming.contains("let deadline = ready_timeout_for(agent);")
-                && confirming.contains("deadline + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE"),
+                && confirming.contains("deadline + RECEIPT_WAIT"),
             "the retype's outcome is no longer waited for on the agent's own deadline:\n{confirming}"
         );
         let retyping = block_after(backend, "fn retype(&mut self)");
@@ -27814,19 +27825,18 @@ mod tests {
                 && !fetching.contains("zo login google"),
             "the signed-out sentence no longer names the card that fixes it"
         );
-        // The Code Assist calls present this client honestly: its own
-        // User-Agent, and no Antigravity or VS Code identity anywhere in the
-        // headers or the body the gauge sends.
+        // The Code Assist calls carry the identity zo sends for the same
+        // login (the person's choice in d8760d7ab, after Google answered
+        // ZeroCode's own headers with a 403 on 2026-10-27), and only that
+        // identity: usage_antigravity's
+        // the_gauge_asks_as_the_identity_zo_sends_for_the_same_login reads
+        // zo's gemini_code_assist.rs value for value and turns red when either
+        // side moves. Here the gauge keeps no identity of its own beside it.
         assert!(
-            fetching.contains("concat!(\"zerocode/\", env!(\"CARGO_PKG_VERSION\"))")
-                && !fetching.contains("ANTIGRAVITY_CLIENT_METADATA")
-                && !fetching.contains("ANTIGRAVITY_API_CLIENT")
-                && !fetching.contains("ANTIGRAVITY_VERSION")
-                && !fetching.contains("antigravity/")
-                && !fetching.contains("\"ANTIGRAVITY\"")
-                && !fetching.contains("DARWIN_ARM64")
-                && !fetching.contains("vscode_cloudshelleditor"),
-            "the Code Assist calls still present Antigravity's or VS Code's identity"
+            fetcher.contains("fn the_gauge_asks_as_the_identity_zo_sends_for_the_same_login()")
+                && fetcher.contains("zo-ide/crates/api/src/providers/gemini_code_assist.rs")
+                && !fetching.contains("concat!(\"zerocode/\", env!(\"CARGO_PKG_VERSION\"))"),
+            "the Code Assist calls stopped following zo's identity for the same login"
         );
         for spelled in [
             "command: \"antigravity_usage\",",
@@ -32025,12 +32035,16 @@ mod tests {
              answer door, for a permission the pane still holds:\n{answering}"
         );
 
-        // The panel: both verbs through the command, dismissed on press.
+        // The panel: both verbs through the command, dismissed on press — in
+        // the one decision the panel and the turn list share.
         let panel = block_after(window, "function approvalPanelNode(");
+        let deciding = block_after(window, "function decideApproval(");
         assert!(
-            panel.contains(r#"invoke("answer_approval""#) && panel.contains("draft.open = false"),
+            panel.contains("decideApproval(card, draft, choice")
+                && deciding.contains(r#"invoke("answer_approval""#)
+                && deciding.contains("draft.open = false"),
             "the approval panel answers around the command, or lingers \
-             after the answer:\n{panel}"
+             after the answer:\n{panel}\n{deciding}"
         );
         // Question first, approval second — Orca's own order.
         assert!(

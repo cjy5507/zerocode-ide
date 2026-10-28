@@ -5,7 +5,10 @@
 //! model, effort and ledger seat intact.
 //!
 //! Three roads, one policy, one line. The person's picker
-//! ([`switch_by_person`]) moves the default. The beat's proposal (`ask`) is
+//! ([`switch_by_person`]) moves the default and writes the pick down
+//! ([`PersonPick`], t-78096): the beat leaves that account until its wall,
+//! across a restart, and the pick ends when any other road moves the
+//! default. The beat's proposal (`ask`) is
 //! a [`SwitchPlan`] the window shows and the person accepts BY TOKEN — an
 //! acceptance for a proposal that has since changed is refused, not
 //! re-aimed. The beat's own move (`auto`) applies the same plan without
@@ -127,7 +130,48 @@ pub(crate) struct Situation {
     /// ([`owed_followers`], t-46106) — what the plan's census says of a pane
     /// left on another account: moving, or left.
     pub(crate) owed: Vec<String>,
+    /// The account the person picked themselves, and when ([`person_pick`],
+    /// t-78096) — read off the disk at every look, so a restart keeps it.
+    pub(crate) picked: Option<PersonPick>,
     pub(crate) now_ms: i64,
+}
+
+/// The person's own pick of the default (t-78096): which account, and the
+/// moment. While the default is still this account, the beat leaves it
+/// until its wall; any other road that moves the default ends it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PersonPick {
+    pub(crate) account: String,
+    pub(crate) at_ms: i64,
+}
+
+fn pick_file(dir: &Path) -> PathBuf {
+    dir.join(app_paths::artifact_file::CLAUDE_ACCOUNT_PICK)
+}
+
+/// The pick written down in `dir`, when one is. A file that is missing or
+/// cannot be read is no pick: the beat judges the default as it would any
+/// account, and invents nothing.
+pub(crate) fn person_pick(dir: &Path) -> Option<PersonPick> {
+    let text = std::fs::read_to_string(pick_file(dir)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Write the person's pick down — or take it away, for `None`: a pick of
+/// the machine's own login, or a default some other road moved.
+fn remember_pick(dir: &Path, pick: Option<&PersonPick>) -> Result<(), String> {
+    let Some(pick) = pick else {
+        return match std::fs::remove_file(pick_file(dir)) {
+            Err(why) if why.kind() != std::io::ErrorKind::NotFound => {
+                Err(format!("고른 계정 기록을 지우지 못했습니다: {why}"))
+            }
+            _ => Ok(()),
+        };
+    };
+    let text = serde_json::to_string_pretty(pick).map_err(|why| why.to_string())?;
+    durable_file::replace_bytes(&pick_file(dir), text.as_bytes())
+        .map(|_| ())
+        .map_err(|why| format!("고른 계정을 적지 못했습니다: {why}"))
 }
 
 /// The doors a switch walks through: everything it does to the world
@@ -208,6 +252,7 @@ impl SwitchDoors for WindowDoors<'_> {
                 .map(|account| (account.id.clone(), claude_login_key(account)))
                 .collect(),
             owed: owed_followers(&self.journal_dir()),
+            picked: person_pick(&self.journal_dir()),
             now_ms,
         })
     }
@@ -472,6 +517,9 @@ pub(crate) struct SwitchPlan {
     /// Candidates left out because a switch to them failed inside the
     /// cooldown.
     pub(crate) failed_recently: Vec<String>,
+    /// When the person picked the default themselves, while it is still
+    /// that account (t-78096): the beat leaves it until its wall.
+    pub(crate) picked_at_ms: Option<i64>,
     /// Names this exact plan: mode, source, decision, every walled pane's
     /// seat, generation and verdict, and which login every account id names
     /// (astra R6). `apply` re-plans and compares.
@@ -543,8 +591,13 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
         failures,
         logins,
         owed,
+        picked,
         now_ms,
     } = situation;
+    // The person's pick holds while it is still the default (t-78096).
+    let picked_at_ms = picked
+        .filter(|pick| active.as_deref() == Some(pick.account.as_str()))
+        .map(|pick| pick.at_ms);
     let failed_recently: Vec<String> = failures
         .into_iter()
         .filter(|(_, at)| now_ms.saturating_sub(*at) < CLAUDE_ACCOUNT_AUTOSWITCH.cooldown_ms)
@@ -585,6 +638,7 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
             walled: walled
                 .iter()
                 .any(|row| row.account.as_deref() == Some(source.as_str())),
+            picked: picked_at_ms.is_some(),
             now_ms,
         }),
     };
@@ -628,6 +682,7 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
         last_switch_ms,
         cooldown_until_ms,
         failed_recently,
+        picked_at_ms,
         token,
         logins,
         now_ms,
@@ -1479,6 +1534,11 @@ pub(crate) fn apply_with(
             return Err(why);
         }
         doors.selected(to.as_deref(), now_ms);
+        // The default the person picked is no longer theirs (t-78096): the
+        // account it moved to is the table's.
+        if let Err(why) = remember_pick(&dir, None) {
+            doors.log(&format!("account-switch: {why}"));
+        }
         journal.landed = true;
         keep_in(&mut book, &journal);
         if let Err(why) = write_book(&dir, &book) {
@@ -2320,6 +2380,16 @@ pub(crate) fn switch_by_person(
         return Err(why);
     }
     doors.selected(to, now_ms);
+    // The pick and its moment, written down (t-78096): the beat leaves this
+    // account until its wall, and a restart still knows. A pick that could
+    // not be written is said in the log — the selection itself stands.
+    let pick = to.map(|account| PersonPick {
+        account: account.to_string(),
+        at_ms: now_ms,
+    });
+    if let Err(why) = remember_pick(&dir, pick.as_ref()) {
+        doors.log(&format!("account-switch: {why}"));
+    }
     journal.landed = true;
     keep_in(&mut book, &journal);
     if let Err(why) = write_book(&dir, &book) {
@@ -3130,6 +3200,7 @@ mod tests {
                 model: None,
                 last_switch_ms: None,
                 walled: false,
+                picked: false,
                 now_ms: now,
             });
             assert_eq!(

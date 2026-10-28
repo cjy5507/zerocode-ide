@@ -26,7 +26,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
     AppState, ShellStateExt,
-    browser_cookie_import::{self, StagedCookie},
+    browser_cookie_import::{self, CookieReply, Dropped, SetOutcome, StagedCookie, StagingSlot},
     browser_cookies::SameSite,
     browser_runtime::{BrowserDownload, BrowserNav, BrowserTitle, browsable_target},
 };
@@ -533,8 +533,7 @@ impl BrowserPane {
 
     pub(crate) fn navigate_after_cookies(
         &self,
-        profile_id: String,
-        config_root: PathBuf,
+        slot: StagingSlot,
         cookies: Vec<StagedCookie>,
         url: tauri::Url,
         number: u64,
@@ -544,30 +543,29 @@ impl BrowserPane {
                 .navigate_known(url, number, Default::default())
                 .map_err(String::from);
         }
-        // 저장소가 몇 번을 물어도 같은 답을 줄 쿠키는 시도하지 않는다.
-        // 시도하면 실패로 세어지고, 실패가 있으면 스테이징이 보관되어
-        // 판이 설 때마다 같은 알림이 돌아온다.
-        let staged = cookies.len();
+        // 저장소가 몇 번을 물어도 같은 답을 줄 쿠키는 시도하지 않는다 —
+        // 버린 수는 마지막 주입 결과에 함께 적힌다.
         let (cookies, dropped) =
             browser_cookie_import::keep_acceptable(cookies, browser_cookie_import::now_unix());
-        if !dropped.is_empty() {
-            eprintln!(
-                "zerocode-shell: Chromium profile {profile_id} cookie staging dropped {} of {staged} that can never be laid down ({dropped})",
-                dropped.total()
-            );
-        }
         if cookies.is_empty() {
             // 앉힐 것이 하나도 남지 않았다 — 붙들고 있어도 다음 판이 받을
             // 답은 같다.
-            browser_cookie_import::discard_staged_cookies(&config_root, &profile_id);
+            let settled = browser_cookie_import::settle_staging(
+                &slot,
+                &[],
+                &[],
+                dropped,
+                true,
+                browser_cookie_import::now_unix(),
+            );
+            crate::note_window_event(
+                self.app.state::<AppState>().local_data_root(),
+                &settled.log_line(slot.profile_id()),
+            );
             return self
                 .navigate_known(url, number, Default::default())
                 .map_err(String::from);
         }
-        let cookies = cookies
-            .into_iter()
-            .map(|cookie| cookie_url(&cookie).map(|url| (url, cookie)))
-            .collect::<Result<Vec<_>, _>>()?;
         let app = self.app.clone();
         let label = self.label.clone();
         on_ui(&self.app, &self.label, move |pane| {
@@ -577,25 +575,36 @@ impl BrowserPane {
                 .ok_or_else(|| "Chromium cookie manager is unavailable".to_string())?;
             let batch = Arc::new(CookieBatch {
                 remaining: AtomicUsize::new(cookies.len()),
-                failures: AtomicUsize::new(0),
+                outcomes: Mutex::new(vec![SetOutcome::Unsent; cookies.len()]),
+                flushed: AtomicBool::new(true),
+                cookies,
+                dropped,
                 app,
                 label,
                 url,
                 number,
-                config_root,
-                profile_id,
+                slot,
             });
-            for (cookie_url, staged) in cookies {
-                let cookie = cef_cookie(&staged);
-                let callback_state = batch.clone();
-                let mut callback = CookieSetCallback::new(callback_state.clone());
+            for (index, staged) in batch.cookies.iter().enumerate() {
+                // 콜백이 답 없이 놓여도 이 쿠키는 한 번 센다(`CookieReply`).
+                let owner = batch.clone();
+                let reply = Arc::new(CookieReply::new(move |outcome| {
+                    owner.finished(index, outcome);
+                }));
+                // 주소를 지을 수 없는 쿠키는 저장소에 물을 것도 없이 받지 않은 것이다.
+                let Ok(address) = cookie_url(staged) else {
+                    reply.give(SetOutcome::Refused);
+                    continue;
+                };
+                let cookie = cef_cookie(staged);
+                let mut callback = CookieSetCallback::new(reply.clone());
                 if manager.set_cookie(
-                    Some(&CefString::from(cookie_url.as_str())),
+                    Some(&CefString::from(address.as_str())),
                     Some(&cookie),
                     Some(&mut callback),
                 ) != 1
                 {
-                    callback_state.finished(false);
+                    reply.give(SetOutcome::Unsent);
                 }
             }
             Ok(())
@@ -780,19 +789,25 @@ fn zoom_level(factor: f64) -> Result<f64, String> {
 
 struct CookieBatch {
     remaining: AtomicUsize,
-    failures: AtomicUsize,
+    /// 쿠키마다 저장소가 준 답 — `cookies`와 같은 차례.
+    outcomes: Mutex<Vec<SetOutcome>>,
+    /// 저장소가 디스크에 쓰겠다고 답했는가.
+    flushed: AtomicBool,
+    cookies: Vec<StagedCookie>,
+    dropped: Dropped,
     app: AppHandle,
     label: String,
     url: tauri::Url,
     number: u64,
-    config_root: PathBuf,
-    profile_id: String,
+    slot: StagingSlot,
 }
 
 impl CookieBatch {
-    fn finished(self: &Arc<Self>, success: bool) {
-        if !success {
-            self.failures.fetch_add(1, Ordering::Relaxed);
+    fn finished(self: &Arc<Self>, index: usize, outcome: SetOutcome) {
+        if let Ok(mut outcomes) = self.outcomes.lock()
+            && let Some(slot) = outcomes.get_mut(index)
+        {
+            *slot = outcome;
         }
         if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
             return;
@@ -808,11 +823,16 @@ impl CookieBatch {
                     .and_then(|pane| pane.request_context.cookie_manager(None))
             });
             let Some(manager) = manager else {
+                // 주입이 도는 사이 판이 닫혔다. 받은 쿠키가 디스크에 쓰였는지
+                // 알 수 없으니 받지 않은 것과 같이 다시 시도하도록 남기고,
+                // 결과는 로그에 한 줄 적는다.
+                batch.flushed.store(false, Ordering::Release);
+                batch.finish_navigation();
                 return;
             };
             let mut callback = CookieFlushCallback::new(batch.clone());
             if manager.flush_store(Some(&mut callback)) != 1 {
-                batch.failures.fetch_add(1, Ordering::Relaxed);
+                batch.flushed.store(false, Ordering::Release);
                 batch.finish_navigation();
             }
         });
@@ -822,26 +842,47 @@ impl CookieBatch {
         let batch = self.clone();
         let app = self.app.clone();
         let _ = app.run_on_main_thread(move || {
-            let failures = batch.failures.load(Ordering::Acquire);
-            if failures == 0 {
-                crate::browser_cookie_import::discard_staged_cookies(
-                    &batch.config_root,
-                    &batch.profile_id,
-                );
-            } else {
-                eprintln!(
-                    "zerocode-shell: Chromium profile {} cookie import retained for retry after {failures} rejected cookies",
-                    batch.profile_id
-                );
-                let _ = batch.app.emit_to(
-                    "main",
-                    "browser:cookie-import-error",
-                    json!({
-                        "label": batch.label,
-                        "failedCookies": failures,
-                        "message": "일부 쿠키를 Chromium 프로필에 넣지 못했습니다. 가져온 쿠키는 다시 시도할 수 있도록 보관했습니다."
-                    }),
-                );
+            // 받은 것과 받지 않은 것은 스테이징에서 빠지고, 저장소에 닿지
+            // 못한 것만 다음 판을 기다린다(`settle_staging`).
+            let outcomes = batch
+                .outcomes
+                .lock()
+                .map(|outcomes| outcomes.clone())
+                .unwrap_or_default();
+            let settled = browser_cookie_import::settle_staging(
+                &batch.slot,
+                &batch.cookies,
+                &outcomes,
+                batch.dropped,
+                batch.flushed.load(Ordering::Acquire),
+                browser_cookie_import::now_unix(),
+            );
+            let state = batch.app.state::<AppState>();
+            crate::note_window_event(
+                state.local_data_root(),
+                &settled.log_line(batch.slot.profile_id()),
+            );
+            let apply = &settled.apply;
+            let counts = json!({
+                "label": batch.label,
+                "profile": batch.slot.profile_id(),
+                "applied": apply.applied,
+                "refused": apply.refused,
+                "retained": apply.retained,
+                "dropped": apply.dropped,
+            });
+            let _ = batch
+                .app
+                .emit_to("main", "browser:cookie-import-applied", counts.clone());
+            if apply.refused + apply.retained > 0 {
+                let mut said = counts;
+                said["message"] = json!(format!(
+                    "가져온 쿠키 {}개를 적용했습니다. {}개는 Chromium이 받지 않았고 {}개는 다음에 다시 시도합니다. 받지 않은 쿠키의 이름은 창 로그에 적었습니다.",
+                    apply.applied, apply.refused, apply.retained
+                ));
+                let _ = batch
+                    .app
+                    .emit_to("main", "browser:cookie-import-error", said);
             }
             let result: Result<(), String> = PANES.with(|panes| {
                 let mut panes = panes.borrow_mut();
@@ -871,11 +912,16 @@ wrap_completion_callback! {
 
 wrap_set_cookie_callback! {
     struct CookieSetCallback {
-        batch: Arc<CookieBatch>,
+        reply: Arc<CookieReply>,
     }
     impl SetCookieCallback {
         fn on_complete(&self, success: i32) {
-            self.batch.finished(success == 1);
+            let outcome = if success == 1 {
+                SetOutcome::Seated
+            } else {
+                SetOutcome::Refused
+            };
+            self.reply.give(outcome);
         }
     }
 }
@@ -901,7 +947,9 @@ fn cef_cookie(cookie: &StagedCookie) -> Cookie {
     Cookie {
         name: CefString::from(cookie.name.as_str()),
         value: CefString::from(cookie.value.as_str()),
-        domain: CefString::from(cookie.domain.as_str()),
+        // 호스트 전용 쿠키는 Domain 없이 — 서 있으면 CEF가 하위 도메인
+        // 쿠키로 넓히고, `__Host-` 쿠키는 거절한다.
+        domain: CefString::from(browser_cookie_import::domain_attribute(cookie)),
         path: CefString::from(if cookie.path.is_empty() {
             "/"
         } else {

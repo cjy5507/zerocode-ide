@@ -1592,6 +1592,13 @@ impl AnthropicClient {
             gateway.adapt_body(&mut request_body);
         }
         let payload = serde_json::to_vec(&request_body).map_err(ApiError::Json)?;
+        // The prefix each marker closes, hashed off these exact bytes for the
+        // request ledger: every rewrite above (thinking stripped, the served
+        // model id, a gateway's body) comes after the fingerprints the ledger
+        // otherwise judges a break by were taken from `request`.
+        if let Some(prompt_cache) = &self.prompt_cache {
+            prompt_cache.note_sent_payload(request, &payload);
+        }
         // Preflight the body against the endpoint's declared byte ceiling. This
         // is the only point where the EXACT wire size is known, and uploading a
         // body the endpoint will reject costs the whole transfer before the 413
@@ -2657,6 +2664,9 @@ impl MessageStream {
                     if let (Some(prompt_cache), Some(usage)) =
                         (&self.prompt_cache, self.latest_usage.as_ref())
                     {
+                        if let Some(seen) = self.parser.take_input_transformations() {
+                            prompt_cache.note_input_transformations(seen);
+                        }
                         let record = prompt_cache.record_usage(&self.request, usage);
                         *self
                             .last_prompt_cache_record

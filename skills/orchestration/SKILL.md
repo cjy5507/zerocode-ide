@@ -414,7 +414,9 @@ The shape of a session is always the same:
    when it is one of the last four), or files and folders under
    `"evidencePaths":["/abs/file","/abs/dir"]` (an entry may be
    `{"path":"/abs/red.log","expected":"fails at the assertion","expect":"fail"}`, so an
-   intended failure is said and not guessed from the file name),
+   intended failure is said and not guessed from the file name; a report that
+   cites a file it named writes that file's absolute path in its text, not only
+   its name — a log called `red.log` cannot be found afterwards),
    the ledger copies them into the artifact store — masked of home paths,
    mailboxes, private addresses and credentials, text and pictures only, at most
    24 MB a hand-in — and the task's row on the board says what was kept, what was
@@ -423,6 +425,17 @@ The shape of a session is always the same:
    has not finished or failed. The same road serves every agent CLI. Read the
    kept copy from the Artifacts view (or the row's door) rather than the
    worker's path, which is gone once the checkout is.
+   A hand-in with `"reportKind":"review"` — or a report (no commit) on a task
+   whose title has the word 검수 / 읽기 전용 / review / read-only / audit (a
+   whole word: 「preview」 is not one) — has no code to land: your
+   `verified` of it is written with `nothingToLand` added (the answer says
+   why under `nothingToLandBecause`) and, when it handed in a commit, that
+   commit as `reviewedHead`, and `landing_stalled` never asks it to merge —
+   unless your result says something of landing itself (`merged`,
+   `nothingToLand: false`): your word stands over the worker's.
+   **A review brief requires `"reportKind":"review"` in the worker's
+   `worker_done` payload**: a reviewer that hands in the head it reviewed is
+   told from code waiting to land by that word alone.
 5. `worker-read --worker <id>` — look at a worker's actual screen when you
    need to see what it is doing rather than what it said. A released worker
    answers from the screen its release archived, same tail rules. The window
@@ -509,7 +522,8 @@ standing order for THAT worker's wall later on: it is written on the worker
 row (`worker-show.onQuotaWall`), and if the worker is witnessed at its
 wall the beat hands its task to exactly that alternative — see the
 handover paragraph below. For auditing there are `run-show`, `inbox`
-(this project's runs' mail, nothing moves) and `reset` (exactly one scope,
+(this project's runs' mail, nothing moves; `--since <ms>` and `--cursor
+<nextCursor>` walk a whole day page by page) and `reset` (exactly one scope,
 refused if it would touch another project's runs; receipts survive it).
 
 The ledger is shared by the window, but a pane's commands and mail stay in
@@ -975,6 +989,14 @@ coordinator seat (a worker's pane is refused):
   leaves is a `worker_done` from the run's address, in the log and in no inbox.
 - Then review it exactly as any other: `task-update --task <id> --attempt <the take's
   dispatchId> --source <the hand-in's source> --result '{"verified":true,…}'`.
+
+Once a stack is on main, write its landing on every member in the same turn:
+`task-update --members t-1,t-2 --result '{"merged":true,"mergeHead":"<sha>"}'
+--retry-request landed-<sha>`, and after the release
+`--result '{"deployed":true,"release":"v1.2.3"}'`. Each member's record is bound
+to the attempt and source its verified review names; a member with no verified
+review, or whose attempt handed nothing in, refuses the whole call (a line each)
+and nothing is written.
 
 `task-backfill [--base main] [--tags 'v*'] [--checkout <path>]` lists the completed and
 closed tasks no review stands on whose result names a commit (`mergeHead`, `merged`,

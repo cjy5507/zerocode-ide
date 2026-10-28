@@ -44,6 +44,7 @@ pub mod evidence;
 pub mod gate_reuse;
 pub mod land_batch;
 pub mod land_check;
+pub mod land_record;
 pub mod landing_watch;
 mod progress;
 pub mod project_scope;
@@ -1076,6 +1077,55 @@ const REVIEW_KEY_GROUPS: [&[&str]; 3] = [
 
 /// The key that says the work shipped.
 const DEPLOYED_KEY: &str = "deployed";
+
+/// The key a coordinator marks work with no code to land under — the first of
+/// [`REVIEW_KEY_GROUPS`]' third group, and the one the ledger itself writes.
+const NOTHING_TO_LAND_KEY: &str = REVIEW_KEY_GROUPS[2][0];
+
+/// The key `task-update` answers under when it added [`NOTHING_TO_LAND_KEY`] to a verification: the
+/// word for why (a string), where the result's own key is a bool (t-79642, review t-79586 P3-9).
+const NOTHING_TO_LAND_BECAUSE_KEY: &str = "nothingToLandBecause";
+
+/// Whether a result already says something about landing — a merge key or a no-code key, either
+/// way (`nothingToLand: false` is a word too): the coordinator's own word, which the ledger's
+/// defaults for a review hand-in (t-78890) give way to.
+fn speaks_of_landing(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let [_, merged_keys, nothing_keys] = REVIEW_KEY_GROUPS;
+    merged_keys
+        .iter()
+        .chain(nothing_keys)
+        .any(|key| map.contains_key(*key))
+}
+
+/// [`speaks_of_landing`] for a task's stored result; a result that is not a JSON object speaks of
+/// nothing.
+fn result_speaks_of_landing(result: &str) -> bool {
+    matches!(
+        serde_json::from_str::<serde_json::Value>(result),
+        Ok(serde_json::Value::Object(map)) if speaks_of_landing(&map)
+    )
+}
+
+/// A coordinator's verification of a review hand-in with `nothingToLand` added (t-78890) — and,
+/// when the review handed in a commit, that commit as the one reviewed
+/// ([`landing_watch::REVIEWED_HEAD_KEY`]) unless the result names one — or `None` when the result
+/// verifies nothing, is not a JSON object, or already says something about landing
+/// ([`speaks_of_landing`]): the coordinator's own word stands.
+fn nothing_to_land_added(result: &str, reviewed_head: Option<String>) -> Option<String> {
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(result)
+    else {
+        return None;
+    };
+    if !ReviewFacts::from_result(result).verified || speaks_of_landing(&map) {
+        return None;
+    }
+    map.insert(NOTHING_TO_LAND_KEY.to_string(), true.into());
+    if let Some(head) = reviewed_head {
+        map.entry(landing_watch::REVIEWED_HEAD_KEY)
+            .or_insert(head.into());
+    }
+    Some(serde_json::Value::Object(map).to_string())
+}
 
 /// Every key whose presence in a result is a review written ([`ReviewFacts::written`]).
 fn review_keys() -> impl Iterator<Item = &'static str> {
@@ -17966,15 +18016,16 @@ impl PairPlan {
 }
 
 /// `agent`'s [`PairPlan`] for a summons that leaves the model open
-/// (`model_open`). `scoped` names the question for the agent, as one of
-/// several that ride a request while the agent is still open
-/// ([`crate::summon_model::ask_for`]).
+/// (`model_open`) and names `request_effort`, when it does. `scoped` names
+/// the question for the agent, as one of several that ride a request while
+/// the agent is still open ([`crate::summon_model::ask_for`]).
 #[allow(clippy::too_many_arguments)] // Each argument is one fact of the summons the plan rests on.
 fn pair_plan(
     launcher: &dyn Launcher,
     ledger: &Ledger,
     agent: &str,
     model_open: bool,
+    request_effort: Option<&str>,
     scoped: bool,
     look: &crate::summon_difficulty::Look,
     origin: [&str; 3],
@@ -17992,7 +18043,7 @@ fn pair_plan(
     {
         crate::summon_difficulty::LADDER
             .iter()
-            .filter_map(|(difficulty, _, _)| {
+            .filter_map(|(difficulty, _)| {
                 launcher
                     .difficulty_profile(agent, difficulty, origin)
                     .ok()
@@ -18014,8 +18065,29 @@ fn pair_plan(
         .flat_map(|run| run.workers.iter())
         .filter(|held| held.agent == agent)
         .count();
+    // An effort that binds whatever model runs — the request's, or the one
+    // the person wrote alone on every row the difficulty can land on — leaves
+    // the seat a model to choose, not a pair (t-74181): each model is offered
+    // once, at the effort it would run at, so the answer that runs is the
+    // answer given. A person's effort on some rows only binds at those; an
+    // answer at another effort there does not run (see the summons).
+    let person_bound = {
+        let written: Vec<Option<&str>> = rows_ahead
+            .iter()
+            .map(|row| {
+                (row.effort_rule == crate::summon_difficulty::lineup::EffortRule::Person)
+                    .then_some(row.written_effort.as_deref())
+                    .flatten()
+            })
+            .collect();
+        written
+            .first()
+            .copied()
+            .flatten()
+            .filter(|first| written.iter().all(|each| *each == Some(*first)))
+    };
     let asked = facts.as_ref().and_then(|facts| {
-        let options = crate::summon_model::options(
+        let mut options = crate::summon_model::options(
             agent,
             &facts.lineup,
             Some(&facts.seen),
@@ -18028,6 +18100,17 @@ fn pair_plan(
             },
             now_ms,
         );
+        if let Some(bound) = request_effort {
+            crate::summon_model::bind_effort(&mut options, |_| bound.to_string());
+        } else if let Some(bound) = person_bound {
+            crate::summon_model::bind_effort(&mut options, |model| {
+                facts
+                    .lineup
+                    .find(model)
+                    .and_then(|held| held.clamp(bound))
+                    .unwrap_or_else(|| bound.to_string())
+            });
+        }
         if scoped {
             crate::summon_model::ask_for(agent, look, &options)
         } else {
@@ -18593,38 +18676,44 @@ fn command_for_reserved_worker(
 /// and the table did not follow, so every claude worker was launched with the
 /// dial refused. Re-measure when a vendor ships; do not infer.
 ///
+/// The last column is that measured list, lowest first: what a model that
+/// names no efforts of its own is offered at in the model seat's pair
+/// question ([`ladder_efforts`]) — the efforts a CLI takes, never one a
+/// summons runs at by default (t-74181).
+///
 /// A test pins every id in this table to the agent catalog so the two
 /// registries cannot drift.
-const TUNABLE: &[(&str, &str, Option<EffortRide>, &str)] = &[
+const TUNABLE: &[(&str, &str, Option<EffortRide>, &[&str])] = &[
     // This project's own harness leads the table, as it does the catalog.
+    // `off` and `smart` are switches, not levels.
     (
         "zo",
         "--model",
         Some(EffortRide::Flag("--effort")),
-        crate::summon_difficulty::LADDER[2].2,
+        crate::capabilities::ZO_EFFORT_LEVELS,
     ),
     (
         "claude",
         "--model",
         Some(EffortRide::Flag("--effort")),
-        crate::summon_difficulty::LADDER[2].2,
+        crate::capabilities::CLAUDE_EFFORT_LADDER,
     ),
     (
         "codex",
         "--model",
         Some(EffortRide::ConfigKv("model_reasoning_effort")),
-        crate::summon_difficulty::LADDER[2].2,
+        crate::capabilities::CODEX_EFFORT_LADDER,
     ),
     (
         "antigravity",
         "--model",
         Some(EffortRide::Flag("--effort")),
-        crate::summon_difficulty::LADDER[1].2,
+        crate::capabilities::ANTIGRAVITY_EFFORT_LADDER,
     ),
     // Not installed on the machine this table was measured on, so its model
     // flag stands as inherited and it carries no effort ride: refusing a dial
     // nobody has measured beats guessing at its spelling.
-    ("cursor", "--model", None, ""),
+    ("cursor", "--model", None, &[]),
 ];
 
 /// One model turn's facts, as [`dials_why`] reads them.
@@ -18635,18 +18724,30 @@ type ModelTurn = (
     crate::summon_model::Facts,
 );
 
-/// `dials.why` (t-14437): the chosen model's band, what set its effort
-/// (`jev` when the seat's pair ran, else the row's rule), how many of its
-/// summonses here have ended, and the seat's confidence when its answer ran.
+/// `dials.why` (t-14437): the chosen model's band, who set the `effort` it
+/// runs at (`effort_from`: the request, the person, the seat's pair `jev`,
+/// or `cli-default` when none went on the command line), how many of its
+/// summonses here have ended, how many at this very effort, whether that is
+/// enough to call the pair measured (t-74181: too few is `unverified`, never
+/// a saving), and the seat's confidence when its answer ran.
 fn dials_why(
     turn: Option<&ModelTurn>,
-    pick: Option<&(String, String, &str)>,
+    pick: Option<&(String, Option<String>, &str)>,
     row: Option<&crate::summon_difficulty::lineup::Row>,
+    (effort, effort_from): (Option<&str>, &str),
 ) -> serde_json::Value {
     let model = pick
         .map(|(model, _, _)| model.as_str())
         .or_else(|| row.map(|row| row.model.as_str()));
     let facts = turn.map(|(_, _, _, facts)| facts);
+    let record = model.and_then(|model| facts?.records.get(model));
+    // A summons at its CLI's default is measured under that word, as its
+    // seat rows name it (t-74181).
+    let ran_at = effort.or((effort_from == DIALS_FROM_CLI_DEFAULT).then_some(effort_from));
+    let pair_samples = record
+        .zip(ran_at)
+        .and_then(|(record, effort)| record.by_effort.get(effort))
+        .map_or(0, |pair| pair.ended);
     let held = model.and_then(|model| facts?.lineup.find(model));
     let band = held
         .and_then(|held| held.band)
@@ -18665,14 +18766,14 @@ fn dials_why(
         "band": band,
         "tierFrom": tier_from,
         "tierConfidencePermille": tier_confidence,
-        "effortRule": if jev {
-            serde_json::json!(DIALS_FROM_JEV)
+        "effortRule": effort_from,
+        "samples": record.map_or(0, |record| record.overall.ended),
+        "pairSamples": pair_samples,
+        "evidence": if pair_samples < crate::summon_difficulty::lineup::CHALLENGE_MIN_SAMPLES {
+            DIALS_EVIDENCE_UNVERIFIED
         } else {
-            serde_json::json!(row.map(|row| row.effort_rule))
+            DIALS_EVIDENCE_MEASURED
         },
-        "samples": model
-            .and_then(|model| facts?.records.get(model))
-            .map_or(0, |record| record.overall.ended),
         "confidence": turn
             .and_then(|(_, receipt, _, _)| receipt.as_ref())
             .filter(|_| jev)
@@ -18680,10 +18781,17 @@ fn dials_why(
     })
 }
 
-/// `dials.difficultyFrom`: the difficulty seat's applied answer chose it.
+/// `dials.why.evidence`: fewer ended summonses of this model at this effort
+/// than make a record here ([`crate::summon_difficulty::lineup::CHALLENGE_MIN_SAMPLES`]).
+const DIALS_EVIDENCE_UNVERIFIED: &str = "unverified";
+/// `dials.why.evidence`: this model at this effort has a record here.
+const DIALS_EVIDENCE_MEASURED: &str = "measured";
+/// `dials.difficultyFrom`: the difficulty seat's applied answer chose it;
+/// `dials.why.effortRule`: the model seat's pair set the effort.
 const DIALS_FROM_JEV: &str = "jev";
 /// `dials.difficultyFrom`: no answer, and the person's own row for unjudged
-/// work ([`crate::summon_difficulty::UNJUDGED_DIFFICULTY`]) stood (t-45961).
+/// work ([`crate::summon_difficulty::UNJUDGED_DIFFICULTY`]) stood (t-45961);
+/// `dials.why.effortRule`: the person's row wrote the effort.
 const DIALS_FROM_PERSON: &str = "person";
 /// `dials.difficultyFrom`: no answer and no row of the person's: the
 /// lineup's hard rung — the provider's top implementation model as the
@@ -18791,34 +18899,29 @@ const DIALS_FROM_REQUEST: &str = "request";
 /// record here (`summon_model::challenger`).
 const DIALS_FROM_CHALLENGE: &str = "challenge";
 /// `dials.modelFrom`: no row, no lineup and no answer named a model, so the
-/// agent's own CLI launched with its default.
-const DIALS_FROM_CLI_DEFAULT: &str = "cli-default";
+/// agent's own CLI launched with its default; `dials.why.effortRule`: nobody
+/// chose an effort, so none went on the command line (t-74181).
+const DIALS_FROM_CLI_DEFAULT: &str = crate::summon_difficulty::lineup::CLI_DEFAULT;
 
-/// Translate the difficulty ladder through the measured launch table.
-/// Its last column is the highest effort this summons ladder may use.
+/// Whether `agent`'s command line takes an effort at all — the measured
+/// launch table carries an effort ride for it.
 #[must_use]
-pub fn difficulty_effort(agent: &str, difficulty: &str) -> Option<&'static str> {
-    let (_, _, ride, ceiling) = TUNABLE.iter().find(|(id, _, _, _)| *id == agent)?;
-    ride.as_ref()?;
-    let effort = crate::summon_difficulty::effort(difficulty)?;
-    Some(if effort == crate::summon_difficulty::LADDER[2].2 {
-        ceiling
-    } else {
-        effort
-    })
+pub fn takes_effort(agent: &str) -> bool {
+    TUNABLE
+        .iter()
+        .any(|(id, _, ride, _)| *id == agent && ride.is_some())
 }
 
-/// Every effort `agent`'s difficulty ladder launches at, lowest first, once
-/// each — what a model that names no efforts of its own is offered at, so
-/// the model question needs no difficulty's answer to be built (t-15554).
+/// Every effort `agent`'s CLI takes, lowest first, as the measured launch
+/// table has it — what a model that names no efforts of its own is offered
+/// at, so the model question needs no difficulty's answer to be built
+/// (t-15554). Empty for an agent that takes no effort.
 #[must_use]
 pub fn ladder_efforts(agent: &str) -> Vec<&'static str> {
-    let mut efforts: Vec<&'static str> = crate::summon_difficulty::LADDER
+    TUNABLE
         .iter()
-        .filter_map(|(difficulty, _, _)| difficulty_effort(agent, difficulty))
-        .collect();
-    efforts.dedup();
-    efforts
+        .find(|(id, _, ride, _)| *id == agent && ride.is_some())
+        .map_or_else(Vec::new, |(_, _, _, efforts)| efforts.to_vec())
 }
 
 /// Turn `--model`/`--effort` into the words the agent's own CLI takes.
@@ -18888,8 +18991,8 @@ pub fn model_words(agent: &str, model: &str) -> Result<Vec<String>, String> {
 ///
 /// # Errors
 /// As [`model_words`], and an agent with no measured effort ride.
-pub fn launch_words(agent: &str, model: &str, effort: &str) -> Result<Vec<String>, String> {
-    launch_tuning(agent, Some(model), Some(effort))
+pub fn launch_words(agent: &str, model: &str, effort: Option<&str>) -> Result<Vec<String>, String> {
+    launch_tuning(agent, Some(model), effort)
 }
 
 /// Say which launch choices this summons left to the agent CLI.
@@ -19249,7 +19352,12 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          <commit|report>] · correct the record, from the run's live coordinator seat; a \
          result carrying a review (verified, merged, deployed…) names the attempt and the \
          source it reviewed — task-list shows both — and is refused when either is missing \
-         or has moved",
+         or has moved; a verification of a review hand-in (reportKind review) carries \
+         nothingToLand, and the answer says why under nothingToLandBecause | --members \
+         <t-1,t-2,…> --result <landing> · write a stack's landing \
+         ({\"merged\":true,\"mergeHead\":…}, later {\"deployed\":true,\"release\":…}) on every \
+         member at once, each bound to the attempt and source its verified review names — one \
+         member that cannot take it refuses the call, a line each",
         Doing::Mutation,
     ),
     (
@@ -19447,7 +19555,10 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "inbox",
-        "[--limit <n>] [--address <a>] · this project's mail, newest first — an audit, never a delivery",
+        "[--limit <n>] [--address <a>] [--since <ms>] [--cursor <message-id>] · this project's \
+         mail, newest first — an audit, never a delivery; --since keeps what was written at or \
+         after that moment, and --cursor (the last id of the page before, given back as \
+         nextCursor) walks the rest",
         Doing::FreshRead,
     ),
     (
@@ -20101,7 +20212,9 @@ payload as `\"{evidence}\":[\"/abs/file\",\"/abs/folder\"]`: the window keeps a 
 what you name before your checkout is cleaned (text and pictures only, private \
 values masked, {cap_mb} MB at most). An intended failure is evidence too — name it \
 `{{\"path\":\"/abs/red.log\",\"{expect}\":\"fail\"}}` so nobody guesses it from the file \
-name — and a report that is not a plain report says what it is: `\"{report_kind}\":\"review\"` \
+name. A report that cites a file you named writes that file's absolute path in its own text, \
+because a log called only `red.log` cannot be found afterwards. A report that is not a plain \
+report says what it is: `\"{report_kind}\":\"review\"` \
 (one of {kinds}). Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
 a new request. `zerocode-orc help` lists the rest. {find} {plain} {one_checkout} {purpose}\n\n{conditions}{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
@@ -20229,16 +20342,18 @@ pub const READY_TIMEOUT_DEFAULT_MS: u32 = 60_000;
 /// summoned worker before it can say why the summons failed.
 ///
 /// The window's wait for a worker ends at the budget plus the receipt wait
-/// (`zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE`, 10 s); a briefing that
+/// (`zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE`, 10 s) and the hook's posts
+/// again that may bring the receipt late (`zerocode_hookd::HOOK_RETRY_SPAN`,
+/// 3.5 s, t-78634); a briefing that
 /// then has to be read back off the screen and typed once more waits up to two
-/// watch windows and the agent's own start-up deadline with the receipt wait on
-/// top (`BRIEFING_WINDOW` 6 s ×2, the longest `ready_timeout_ms` 20 s, 10 s);
-/// and the pane may have waited its turn to be cut (5 s) before any of that
-/// began. A bridge or a shim that gives up at the budget alone hands the
+/// watch windows and the agent's own start-up deadline with the same receipt
+/// wait on top (`BRIEFING_WINDOW` 6 s ×2, the longest `ready_timeout_ms` 20 s,
+/// 13.5 s, t-79561); and the pane may have waited its turn to be cut (5 s)
+/// before any of that began: 64 s in all. A bridge or a shim that gives up at the budget alone hands the
 /// caller "timed out waiting for the window" for a failure the window was
 /// still about to word, and the worker row that would have told them is
 /// already gone (t-76890). `zerocode-shell` holds this number above that sum.
-pub const READY_REPORT_HEADROOM_MS: u32 = 60_000;
+pub const READY_REPORT_HEADROOM_MS: u32 = 65_000;
 
 /// How long an `ask` holds on when its caller does not say: ten minutes.
 ///
@@ -22277,6 +22392,7 @@ fn plan_inner(
                 "--why",
                 "--run",
                 "--retry-request",
+                land_record::MEMBERS_FLAG,
             ];
             if let Some(flag) = words
                 .values
@@ -22296,13 +22412,16 @@ fn plan_inner(
                 return Err("task-update needs --status or --result; nothing was changed".into());
             }
             let run_id = bound(ledger, &words, &caller, &seat)?;
+            if words.value(land_record::MEMBERS_FLAG).is_some() {
+                return land_record::record(ledger, team, pane, &words, &run_id, now_ms);
+            }
             let task_id = words.value("--task").ok_or("task-update needs --task")?;
             let status = match words.value("--status") {
                 Some(named) => Some(named.parse::<TaskStatus>()?),
                 None => None,
             };
             let closure = closure_asked(&words, status)?;
-            let result = words.value("--result").map(str::to_string);
+            let mut result = words.value("--result").map(str::to_string);
             /* Whether this correction vouches for anything is read with the
              * same keys the board reads it with ([`ReviewFacts::from_result`]
              * `written`): one table, so a key the reader believes is a key
@@ -22335,6 +22454,29 @@ fn plan_inner(
                 observed,
             )?;
             let signed = author.kind();
+            // A review hand-in has no code to land (t-78890): its verification says so, unless the
+            // coordinator wrote a landing key of its own.
+            let review_hand_in = ledger.run(&run_id).and_then(|run| {
+                let why = run
+                    .task(task_id)
+                    .and_then(|task| run.review_hand_in(task))?;
+                let reviewed_head = run
+                    .newest_attempt(task_id)
+                    .and_then(|attempt| attempt.source.as_deref())
+                    .and_then(commit_named);
+                Some((why, reviewed_head))
+            });
+            let nothing_added = review_hand_in
+                .and_then(|(why, reviewed_head)| {
+                    Some((
+                        nothing_to_land_added(result.as_deref()?, reviewed_head)?,
+                        why,
+                    ))
+                })
+                .map(|(added, why)| {
+                    result = Some(added);
+                    why
+                });
             let now = match closure {
                 Some(closure) => {
                     if let Some(result) = result {
@@ -22344,11 +22486,15 @@ fn plan_inner(
                 }
                 None => ledger.update_task(&run_id, task_id, status, result, author, now_ms)?,
             };
-            said(serde_json::json!({
+            let mut answer = serde_json::json!({
                 "taskId": task_id,
                 "status": now.as_str(),
                 "author": signed,
-            }))
+            });
+            if let Some(why) = nothing_added {
+                answer[NOTHING_TO_LAND_BECAUSE_KEY] = why.into();
+            }
+            said(answer)
         }
 
         // The sixth noun's three verbs. Opening and answering a decision are
@@ -22663,9 +22809,7 @@ fn plan_inner(
             // Explicit choices survive; omitted dials may use the table.
             // The server window owns remote summonses.
             let open = words.value("--on").is_none() && !difficulty_look.spec.is_empty();
-            let takes_difficulty = |agent: &str| {
-                difficulty_effort(agent, crate::summon_difficulty::LADDER[0].0).is_some()
-            };
+            let takes_difficulty = |agent: &str| takes_effort(agent);
             // The pair question's plan for the agent the summons landed on,
             // when the agent question's request already planned it.
             let mut ridden: Option<(String, PairPlan, crate::summon_assign::Receipts)> = None;
@@ -22694,6 +22838,7 @@ fn plan_inner(
                             ledger,
                             &option.id,
                             model.is_none() && open,
+                            effort.as_deref(),
                             true,
                             &difficulty_look,
                             summons_origin,
@@ -22781,6 +22926,7 @@ fn plan_inner(
                         ledger,
                         &agent,
                         model.is_none() && open,
+                        effort.as_deref(),
                         false,
                         &difficulty_look,
                         summons_origin,
@@ -22852,7 +22998,17 @@ fn plan_inner(
                         facts,
                     )
                 });
-            let model_pick: Option<(String, String, &str)> = match &model_turn {
+            // The effort that binds a model in the row's place, when one
+            // does (t-74181): the request's as written, or the person's
+            // brought inside what that model accepts.
+            let held_lineup = model_turn.as_ref().map(|(_, _, _, facts)| &facts.lineup);
+            let bound_on = |runs: &str| {
+                effort
+                    .clone()
+                    .map(|own| (own, None))
+                    .or_else(|| profile.as_ref()?.person_effort_on(runs, held_lineup))
+            };
+            let model_pick: Option<(String, Option<String>, &str)> = match &model_turn {
                 Some((_, _, Some(challenge), _)) => Some((
                     challenge.model.clone(),
                     challenge.effort.clone(),
@@ -22863,8 +23019,14 @@ fn plan_inner(
                         .as_str()
                         .zip(receipt[crate::summon_model::EFFORT_KEY].as_str())
                         .filter(|(chosen, _)| runs_model(&agent, chosen))
+                        // A pair whose effort is not the one that binds on
+                        // its model would run half of it: it does not run,
+                        // and its row says it was only recorded.
+                        .filter(|(chosen, effort)| {
+                            bound_on(chosen).is_none_or(|(bound, _)| bound == *effort)
+                        })
                         .map(|(chosen, effort)| {
-                            (chosen.to_string(), effort.to_string(), DIALS_FROM_JEV)
+                            (chosen.to_string(), Some(effort.to_string()), DIALS_FROM_JEV)
                         })
                 }
                 _ => None,
@@ -22885,6 +23047,33 @@ fn plan_inner(
             let ran_jev = model_pick
                 .as_ref()
                 .is_some_and(|(_, _, from)| *from == DIALS_FROM_JEV);
+            // Who sets the effort (t-74181): the request, the person's row —
+            // both binding — the model seat's pair, or nobody: no difficulty
+            // turns into an effort here, and an effort nobody chose stays off
+            // the command line for the agent's CLI to default.
+            // The person's effort as it runs on the model that runs — the
+            // row's, or the one the seat's pair or a challenger's turn put in
+            // its place — and where it was brought from when that model does
+            // not accept it.
+            let (person_effort, effort_clamped) = profile
+                .as_ref()
+                .and_then(|row| {
+                    let runs = model_pick
+                        .as_ref()
+                        .map_or(row.model.as_str(), |(picked, _, _)| picked.as_str());
+                    row.person_effort_on(runs, held_lineup)
+                })
+                .map_or((None, None), |(bound, clamped)| (Some(bound), clamped));
+            let jev_effort = model_pick
+                .as_ref()
+                .filter(|_| model.is_none())
+                .and_then(|(_, effort, _)| effort.clone());
+            let (chosen_effort, effort_from) = match (&effort, &person_effort, &jev_effort) {
+                (Some(own), _, _) => (Some(own.clone()), DIALS_FROM_REQUEST),
+                (None, Some(person), _) => (Some(person.clone()), DIALS_FROM_PERSON),
+                (None, None, Some(jev)) => (Some(jev.clone()), DIALS_FROM_JEV),
+                (None, None, None) => (None, DIALS_FROM_CLI_DEFAULT),
+            };
             let dials = (model.is_none() || effort.is_none()).then(|| {
                 serde_json::json!({
                     // Always a word: the rung the answer chose, else the one
@@ -22914,13 +23103,18 @@ fn plan_inner(
                         "model",
                         receipts.model.as_ref().and_then(|row| row["outcome"].as_str()),
                     )),
-                    "effortClamped": profile.as_ref().and_then(|row| row.effort_clamped.clone()),
+                    "effortClamped": effort_clamped.as_ref().filter(|_| effort_from == DIALS_FROM_PERSON),
                     "candidates": profile.as_ref().map_or_else(Vec::new, |row| row.candidates.clone()),
                     // Why this pair, in the facts a person asks for: where the
                     // model stands, what set its effort, how much finished
                     // work here stands behind it, and the seat's confidence
                     // when its answer ran (t-14437).
-                    "why": dials_why(model_turn.as_ref(), model_pick.as_ref(), profile.as_ref()),
+                    "why": dials_why(
+                        model_turn.as_ref(),
+                        model_pick.as_ref(),
+                        profile.as_ref(),
+                        (chosen_effort.as_deref(), effort_from),
+                    ),
                 })
             });
             // The model question's row says its answer ran only when it did:
@@ -22942,31 +23136,9 @@ fn plan_inner(
                         .as_ref()
                         .is_some_and(|(_, _, challenge, _)| challenge.is_some()),
                 });
-            let effort = effort.or_else(|| {
-                model_pick
-                    .as_ref()
-                    .filter(|_| model.is_none())
-                    .map(|(_, effort, _)| effort.clone())
-            });
+            let effort = chosen_effort;
             let model = model.or_else(|| model_pick.as_ref().map(|(picked, _, _)| picked.clone()));
             let model = model.or_else(|| profile.as_ref().map(|p| p.model.clone()));
-            let effort = effort.or_else(|| profile.as_ref().map(|p| p.effort.clone()));
-            let laddered = chosen
-                // An inferred effort needs a selected model to apply to.
-                // With neither a model nor a profile, leave the CLI's dials
-                // open instead of manufacturing an invalid explicit request.
-                .filter(|_| effort.is_none() && model.is_some())
-                .and_then(|d| difficulty_effort(&agent, d));
-            let effort = effort.or_else(|| laddered.map(str::to_string));
-            // The dials say what set the effort even beside a model the
-            // request named, which no profile row speaks for (t-55423).
-            let dials = dials.map(|mut dials| {
-                if laddered.is_some() {
-                    dials["why"]["effortRule"] =
-                        serde_json::json!(crate::summon_difficulty::lineup::EffortRule::Ladder);
-                }
-                dials
-            });
             if effort.is_some() && model.is_none() {
                 return Err("--effort requires --model or a configured summon profile".to_string());
             }
@@ -23226,6 +23398,11 @@ fn plan_inner(
             // work, and a judgment asked about nothing is a row that says
             // nothing: it gets no question at all.
             let said = Some(summon_brief(written.as_ref(), asked)).filter(|said| !said.is_empty());
+            // The hard row ran as it stands (t-74181): the summons ran its
+            // pair at the hard difficulty, the row's own model rather than a
+            // pick in its place, or the request named that pair whole. With
+            // no effort on the row, a summons that merely names its model
+            // ran no row.
             let baseline_high = launcher
                 .difficulty_profile(
                     &agent,
@@ -23234,9 +23411,15 @@ fn plan_inner(
                 )
                 .ok()
                 .flatten()
-                .is_some_and(|profile| {
-                    model.as_deref() == Some(profile.model.as_str())
-                        && effort.as_deref() == Some(profile.effort.as_str())
+                .is_some_and(|hard| {
+                    let same_pair =
+                        model.as_deref() == Some(hard.model.as_str()) && effort == hard.effort;
+                    let row_ran = model_pick.is_none()
+                        && profile
+                            .as_ref()
+                            .is_some_and(|row| row.difficulty == hard.difficulty);
+                    let named_whole = model_was_pinned && hard.effort.is_some();
+                    same_pair && (row_ran || named_whole)
                 });
             prepared_worker_start.model_shadow = said.and(model_shadow);
             prepared_worker_start.difficulty_shadow =
@@ -24373,6 +24556,16 @@ fn plan_inner(
                 None => INBOX_LIMIT,
             };
             let address = words.value("--address");
+            // A day's mail is more than a page (t-78890, O11): `--since` keeps what was written at
+            // or after a moment, and `--cursor` — the last message id of the page before, as
+            // `run-list` takes its own — walks the rest. An unknown cursor is refused rather than
+            // read as page one, which would serve the same letters twice.
+            let since = match words.value("--since") {
+                Some(raw) => Some(raw.trim().parse::<i64>().map_err(|_| {
+                    format!("--since is epoch milliseconds, and {raw:?} is not a number")
+                })?),
+                None => None,
+            };
             let mut held: Vec<(&Run, &Message)> = Vec::new();
             for run in ledger
                 .runs()
@@ -24380,7 +24573,9 @@ fn plan_inner(
                 .filter(|run| project_scope::visible_to(run, project, &team.id, pane))
             {
                 for message in run.messages() {
-                    if address.is_some_and(|named| message.to != named && message.from != named) {
+                    if address.is_some_and(|named| message.to != named && message.from != named)
+                        || since.is_some_and(|floor| message.created_ms < floor)
+                    {
                         continue;
                     }
                     held.push((run, message));
@@ -24389,16 +24584,39 @@ fn plan_inner(
             held.sort_by(|(_, a), (_, b)| {
                 (b.created_ms, b.id.as_str()).cmp(&(a.created_ms, a.id.as_str()))
             });
-            let messages: Vec<serde_json::Value> = held
+            let from = match words.value("--cursor") {
+                Some(after) => {
+                    held.iter()
+                        .position(|(_, message)| message.id == after)
+                        .ok_or_else(|| {
+                            format!(
+                                "unknown cursor: {after} — a cursor is the last message id of \
+                                 the page before, under the same --since and --address; a letter \
+                                 the retention sweep took, or one those two leave out, is none — \
+                                 read from the first page again, without --cursor"
+                            )
+                        })?
+                        + 1
+                }
+                None => 0,
+            };
+            let page = &held[from..held.len().min(from.saturating_add(limit))];
+            let next = (from + page.len() < held.len())
+                .then(|| page.last().map(|(_, message)| message.id.clone()))
+                .flatten();
+            let messages: Vec<serde_json::Value> = page
                 .iter()
-                .take(limit)
                 .map(|(run, message)| {
                     let mut row = message_json(message);
                     row["runId"] = serde_json::Value::String(run.id.clone());
                     row
                 })
                 .collect();
-            said(serde_json::json!({ "messages": messages, "count": messages.len() }))
+            said(serde_json::json!({
+                "messages": messages,
+                "count": messages.len(),
+                "nextCursor": next,
+            }))
         }
 
         "reset" => {

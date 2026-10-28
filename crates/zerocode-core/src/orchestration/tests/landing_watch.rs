@@ -7,7 +7,8 @@
 use super::*;
 use crate::orchestration::landing_watch::{
     CLEANABLE_AFTER_MS, ConflictCell, DRIFT_PER_DISPATCH_MAX, GitSays, HORIZON_MS, LandingWitness,
-    MERGE_OVERDUE_MS, MERGED_UNRECORDED_GRACE_MS, RENOTIFY_MS, VERIFY_OVERDUE_MS,
+    MERGE_OVERDUE_MS, MERGED_UNRECORDED_GRACE_MS, RENOTIFY_MS, REVIEW_BY_KIND, REVIEW_BY_TITLE,
+    REVIEWED_HEAD_KEY, VERIFY_OVERDUE_MS,
 };
 
 const CHECKOUT: &str = "/r/checkout";
@@ -976,5 +977,334 @@ fn a_coordinators_row_from_before_the_verification_time_reads_and_writes_back_wi
     assert_eq!(
         serde_json::from_value::<ResultAuthor>(written).expect("read back"),
         read
+    );
+}
+
+/// A task handed in as a review: what it handed in, as the ledger named it (the report's message
+/// id), and the ids. `title` and `payload` are what the coordinator and the worker wrote.
+fn review_handed_in(bench: &mut Bench, title: &str, payload: &str, head: Option<&str>) -> Handed {
+    if bench.ledger.runs().is_empty() {
+        bench.json("run-create --name watch");
+    }
+    let task = bench.json(&format!("task-create --spec review-task --title {title}"))["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    assert!(bench.ledger.worker_seated(("team-1", &pane), CHECKOUT));
+    let dispatch = bench.ledger.runs()[0]
+        .dispatches
+        .last()
+        .expect("an attempt")
+        .id
+        .clone();
+    let said = match head {
+        Some(head) => format!("{{\"ok\":true,\"head\":\"{head}\"}}"),
+        None => "{\"ok\":true,\"summary\":\"two-findings\"}".to_string(),
+    };
+    let payload = match payload {
+        "" => String::new(),
+        given => format!(" --payload {given}"),
+    };
+    bench.json_at(
+        &pane,
+        &format!("send --type worker_done --body {said}{payload}"),
+    );
+    Handed {
+        task,
+        worker,
+        dispatch,
+        pane,
+        done_at: bench.clock,
+    }
+}
+
+/// What the attempt handed in, as the ledger named it.
+fn handed_source(bench: &Bench, handed: &Handed) -> String {
+    bench.ledger.runs()[0]
+        .dispatch(&handed.dispatch)
+        .and_then(|held| held.source.clone())
+        .expect("a hand-in")
+}
+
+/// The coordinator's `verified: true` of a review hand-in, against what it handed in. Answers the
+/// verb's answer and the time it was written.
+fn verify_review(bench: &mut Bench, handed: &Handed) -> (serde_json::Value, i64) {
+    let source = handed_source(bench, handed);
+    let said = bench.json(&format!(
+        "task-update --task {} --result {{\"verified\":true}} --attempt {} --source {source}",
+        handed.task, handed.dispatch
+    ));
+    (said, bench.clock)
+}
+
+/// O8 (t-78890, VERDICT F1): two of the six landing notices at 09:30 on 10-28 were review tasks —
+/// read-only work whose hand-in is a report, not a commit — told `no_merge` two hours after the
+/// coordinator verified them. A hand-in whose worker said `reportKind: review` has nothing to land:
+/// it is never told as unlanded, and the coordinator's verification of it carries `nothingToLand`
+/// without the coordinator having to remember the key.
+#[test]
+fn a_review_hand_in_is_never_told_as_unlanded_and_its_verification_says_nothing_to_land() {
+    let mut bench = Bench::new();
+    let handed = review_handed_in(
+        &mut bench,
+        "t-1-review",
+        "{\"reportKind\":\"review\"}",
+        None,
+    );
+    let (said, verified_at) = verify_review(&mut bench, &handed);
+    assert_eq!(said["nothingToLandBecause"], "reportKind review", "{said}");
+    let facts = {
+        let run = &bench.ledger.runs()[0];
+        run.review_of(run.task(&handed.task).expect("the task"))
+    };
+    assert!(
+        facts.verified && facts.nothing_to_land && !facts.merged,
+        "{facts:?}"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .landing_watch(&silent(), verified_at + 10 * MERGE_OVERDUE_MS),
+        0,
+        "a review hand-in told as unlanded: {:?}",
+        news(&bench, MessageKind::LandingStalled)
+    );
+}
+
+/// The watch reads the hand-in itself, not only the key the verification wrote: a review hand-in
+/// whose verification says nothing of landing — one an older window wrote, before the key was added
+/// — is still not told as unlanded.
+#[test]
+fn a_review_hand_in_verified_without_a_word_on_landing_is_not_told_as_unlanded_either() {
+    let mut bench = Bench::new();
+    let handed = review_handed_in(
+        &mut bench,
+        "t-1-review",
+        "{\"reportKind\":\"review\"}",
+        None,
+    );
+    let (_, verified_at) = verify_review(&mut bench, &handed);
+    let run_id = bench.ledger.runs()[0].id.clone();
+    let task = bench
+        .ledger
+        .run_mut(&run_id)
+        .expect("the run")
+        .tasks
+        .iter_mut()
+        .find(|held| held.id == handed.task)
+        .expect("the task");
+    task.result = Text("{\"verified\":true}".to_string());
+    assert_eq!(
+        bench
+            .ledger
+            .landing_watch(&silent(), verified_at + MERGE_OVERDUE_MS),
+        0
+    );
+}
+
+/// The coordinator's word on landing stands over the worker's `reportKind` (t-79642, review t-79586
+/// P3-1) — as it does when the verification is written, where `nothingToLand` is added only if the
+/// result says nothing of landing. A review verified with `nothingToLand: false` is code the
+/// coordinator means to land, and is told `no_merge`; one it wrote `merged` on that git does not
+/// hold is told `ledger_merged_git_not`, as any merged claim git denies is.
+#[test]
+fn a_coordinators_word_on_a_review_hand_ins_landing_stands_over_the_workers_report_kind() {
+    let mut said_false = Bench::new();
+    let handed = review_handed_in(
+        &mut said_false,
+        "t-1-review",
+        "{\"reportKind\":\"review\"}",
+        None,
+    );
+    let source = handed_source(&said_false, &handed);
+    said_false.json(&format!(
+        "task-update --task {} --result {{\"verified\":true,\"nothingToLand\":false}} --attempt {} \
+         --source {source}",
+        handed.task, handed.dispatch
+    ));
+    let verified_at = said_false.clock;
+    assert_eq!(
+        said_false
+            .ledger
+            .landing_watch(&silent(), verified_at + MERGE_OVERDUE_MS),
+        1
+    );
+    let told = news(&said_false, MessageKind::LandingStalled);
+    assert_eq!(body(&told[0])["reason"], "no_merge");
+
+    let mut said_merged = Bench::new();
+    let handed = review_handed_in(
+        &mut said_merged,
+        "stack-pass",
+        "{\"reportKind\":\"review\"}",
+        Some(HEAD),
+    );
+    said_merged.json(&format!(
+        "task-update --task {} --result {{\"verified\":true,\"mergeHead\":\"{HEAD}\"}} \
+         --attempt {} --source {HEAD}",
+        handed.task, handed.dispatch
+    ));
+    let merged_at = said_merged.clock;
+    let missing = vec![witness(
+        CHECKOUT,
+        HEAD,
+        GitSays::Unlanded {
+            behind: None,
+            far_behind: false,
+            conflict: None,
+        },
+        false,
+    )];
+    assert_eq!(said_merged.ledger.landing_watch(&missing, merged_at + 1), 1);
+    let told = news(&said_merged, MessageKind::LandingStalled);
+    assert_eq!(body(&told[0])["reason"], "ledger_merged_git_not");
+}
+
+/// The title the coordinator gave the task — 「검수」, 「읽기 전용」 — says the same thing of a hand-in
+/// that names no commit (both 09:30 notices handed in a report id, `m-78620`). A task so titled that
+/// handed in a commit is code waiting to land and is told as before: the title alone never hides
+/// a commit.
+#[test]
+fn a_read_only_title_marks_a_report_hand_in_as_a_review_but_never_a_commit() {
+    let mut report = Bench::new();
+    let handed = review_handed_in(
+        &mut report,
+        "t-78356-검수-(Fable-high,-읽기-전용)",
+        "",
+        None,
+    );
+    let (said, verified_at) = verify_review(&mut report, &handed);
+    assert_eq!(said["nothingToLandBecause"], "read-only title", "{said}");
+    assert_eq!(
+        report
+            .ledger
+            .landing_watch(&silent(), verified_at + MERGE_OVERDUE_MS),
+        0
+    );
+
+    let mut commit = Bench::new();
+    let handed = review_handed_in(&mut commit, "검수-P2-고침", "", Some(HEAD));
+    let (said, verified_at) = verify_review(&mut commit, &handed);
+    assert!(said["nothingToLandBecause"].is_null(), "{said}");
+    assert_eq!(
+        commit
+            .ledger
+            .landing_watch(&silent(), verified_at + MERGE_OVERDUE_MS),
+        1
+    );
+    let told = news(&commit, MessageKind::LandingStalled);
+    assert_eq!(body(&told[0])["reason"], "no_merge");
+}
+
+/// A review nobody has read is still told: `no_review` is about the coordinator's reading, not
+/// about landing, and a review waiting two hours for its reader is the stall F4 counted.
+#[test]
+fn a_review_hand_in_nobody_read_is_still_told_as_no_review() {
+    let mut bench = Bench::new();
+    let handed = review_handed_in(
+        &mut bench,
+        "t-1-review",
+        "{\"reportKind\":\"review\"}",
+        None,
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .landing_watch(&silent(), handed.done_at + VERIFY_OVERDUE_MS),
+        1
+    );
+    let told = news(&bench, MessageKind::LandingStalled);
+    assert_eq!(body(&told[0])["reason"], "no_review");
+}
+
+/// A title says review by a word, never by a piece of one (t-78890 r2, review P2-2): 「preview」 and
+/// 「reviewer」 hold the letters of 「review」 and are not it, so a report handed in on such a task is
+/// work waiting to land and is told as before. A mark is a word wherever the title breaks it —
+/// 「읽기-전용」, 「read only」 — and a Korean mark takes the particle written after it.
+#[test]
+fn a_title_says_review_by_a_whole_word_and_never_by_a_piece_of_one() {
+    for title in [
+        "artifact-preview-구현",
+        "reviewer-picker",
+        "previewed-audits",
+        "재검수표-정리",
+    ] {
+        let mut bench = Bench::new();
+        let handed = review_handed_in(&mut bench, title, "", None);
+        let (said, verified_at) = verify_review(&mut bench, &handed);
+        assert!(said["nothingToLandBecause"].is_null(), "{title}: {said}");
+        assert_eq!(
+            bench
+                .ledger
+                .landing_watch(&silent(), verified_at + MERGE_OVERDUE_MS),
+            1,
+            "{title}"
+        );
+        let told = news(&bench, MessageKind::LandingStalled);
+        assert_eq!(body(&told[0])["reason"], "no_merge", "{title}");
+    }
+    for title in [
+        "T-1-Review",
+        "audit:-the-stack",
+        "검수를-마친-보고",
+        "읽기_전용으로-본-것",
+        "a-READ-ONLY-pass",
+    ] {
+        let mut bench = Bench::new();
+        let handed = review_handed_in(&mut bench, title, "", None);
+        let (said, _) = verify_review(&mut bench, &handed);
+        assert_eq!(
+            said["nothingToLandBecause"], REVIEW_BY_TITLE,
+            "{title}: {said}"
+        );
+    }
+}
+
+/// A review worker hands in the head it reviewed — someone else's commit (t-78392, t-78487,
+/// t-78512 and t-78521 on 10-28). With `reportKind: review` that hand-in is still a review, whatever
+/// the title: it is never told as unlanded, and its verification writes the commit as the one
+/// reviewed, beside `nothingToLand`, rather than as a head to land.
+#[test]
+fn a_review_that_hands_in_the_head_it_reviewed_is_a_review_and_names_that_head_as_reviewed() {
+    let mut bench = Bench::new();
+    let handed = review_handed_in(
+        &mut bench,
+        "stack-pass",
+        "{\"reportKind\":\"review\"}",
+        Some(HEAD),
+    );
+    let (said, verified_at) = verify_review(&mut bench, &handed);
+    assert_eq!(said["nothingToLandBecause"], REVIEW_BY_KIND, "{said}");
+    let (facts, result) = {
+        let run = &bench.ledger.runs()[0];
+        let task = run.task(&handed.task).expect("the task");
+        (
+            run.review_of(task),
+            serde_json::from_str::<serde_json::Value>(task.result.as_str()).expect("a JSON result"),
+        )
+    };
+    assert!(
+        facts.verified && facts.nothing_to_land && !facts.merged && facts.merge_head.is_none(),
+        "{facts:?}"
+    );
+    assert_eq!(result[REVIEWED_HEAD_KEY], HEAD, "{result}");
+    assert_eq!(
+        bench.ledger.landing_watch(
+            &[witness(
+                CHECKOUT,
+                HEAD,
+                GitSays::Unlanded {
+                    behind: None,
+                    far_behind: false,
+                    conflict: None,
+                },
+                false,
+            )],
+            verified_at + 10 * MERGE_OVERDUE_MS,
+        ),
+        0,
+        "a reviewed head told as unlanded: {:?}",
+        news(&bench, MessageKind::LandingStalled)
     );
 }

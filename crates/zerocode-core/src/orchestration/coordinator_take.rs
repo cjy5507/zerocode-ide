@@ -127,6 +127,20 @@ const TASK_PREFIX: &str = "t-";
 /// The key a backfill writes what it did under, beside the original result.
 const BACKFILL_KEY: &str = "backfill";
 
+/// Whether the review standing on this task was written by [`BACKFILL_VERB`] and not by a
+/// coordinator who watched the work land: its `completed_ms` is the moment of the backfill, not of
+/// the landing, so a time measured from it says nothing (review t-79586 P3-4). A later review the
+/// coordinator writes replaces the whole result, the note with it.
+pub(super) fn backfilled(task: &Task) -> bool {
+    serde_json::from_str::<serde_json::Value>(&task.result).is_ok_and(|result| {
+        result
+            .get(BACKFILL_KEY)
+            .and_then(|note| note.get("by"))
+            .and_then(serde_json::Value::as_str)
+            == Some(BACKFILL_VERB)
+    })
+}
+
 /// What a backfill reads a review task's id under: any key that speaks of a review
 /// (`reviews`, `reviewTask`, `reviewedIn`…), in lower case.
 const REVIEW_WORD: &str = "review";

@@ -23,6 +23,13 @@
 //! reads the account the window's picker names, not whatever `~/.claude`
 //! holds.
 //!
+//! zo's plain front-end reads its stdin a line at a time: the first line
+//! opens the turn and every later one is a steer folded into it while it
+//! runs. So the prompt goes in as one bracketed paste ([`pasted`]), the one
+//! envelope zo joins back into a single submission, and every escape in it
+//! is made inert first — the state is words read off a screen, and an
+//! envelope's end among them would send the rest as steers again.
+//!
 //! The wall is one number ([`TEAM_DEADLINE`]) bounded by what the walk has
 //! left: a reader that has not answered by then is killed, and its silence is
 //! the wire's own word for it.
@@ -31,10 +38,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use zerocode_core::screen_action::ActionAsk;
+use zerocode_pty::{INERT_ESCAPE, PASTE_END, PASTE_START};
 
 use super::{ActionJudge, Judged};
 use crate::systemone::{SCHEMA, TIMEOUT, TRANSPORT};
@@ -202,10 +211,10 @@ impl TeamJudge {
         argv
     }
 
-    /// One question, bounded by `deadline`: the prompt on the reader's
-    /// stdin, the answer read from the file it was told to write, the reader
+    /// One question, bounded by `deadline`: `stdin` ([`pasted`]) on the
+    /// reader's stdin, the answer read from the file it was told to write, the reader
     /// killed if it outlives the wall.
-    fn run(&self, prompt: &str, deadline: Duration) -> Result<String, String> {
+    fn run(&self, stdin: &str, deadline: Duration) -> Result<String, String> {
         let last_message = answer_file();
         let _ = std::fs::remove_file(&last_message);
         let mut command = crate::proc::quiet_command_with_env(&self.program, &self.env);
@@ -218,35 +227,73 @@ impl TeamJudge {
             command.current_dir(cwd);
         }
         let mut child = command.spawn().map_err(|_| TRANSPORT.to_string())?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(prompt.as_bytes());
-        }
         let began = Instant::now();
-        let answered = loop {
+        // The write is inside the wall: a reader that stalls before it reads
+        // a prompt larger than its pipe holds would otherwise hold the walk
+        // past any deadline. Killing the reader ends the write in a broken
+        // pipe.
+        let writer = child.stdin.take().map(|mut pipe| {
+            let bytes = stdin.as_bytes().to_vec();
+            std::thread::spawn(move || {
+                let _ = pipe.write_all(&bytes);
+            })
+        });
+        let ended = loop {
             match child.try_wait() {
-                Ok(Some(status)) => break status.success(),
+                Ok(Some(status)) => break Ok(status.success()),
                 Ok(None) if began.elapsed() < deadline => std::thread::sleep(POLL),
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = std::fs::remove_file(&last_message);
-                    return Err(TIMEOUT.to_string());
-                }
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = std::fs::remove_file(&last_message);
-                    return Err(TRANSPORT.to_string());
-                }
+                Ok(None) => break Err(TIMEOUT),
+                Err(_) => break Err(TRANSPORT),
             }
         };
+        if ended.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        reap(writer);
         let text = std::fs::read_to_string(&last_message);
         let _ = std::fs::remove_file(&last_message);
-        match (answered, text) {
-            (true, Ok(text)) => Ok(text),
+        match (ended, text) {
+            (Err(token), _) => Err(token.to_string()),
+            (Ok(true), Ok(text)) => Ok(text),
             _ => Err(TRANSPORT.to_string()),
         }
     }
+}
+
+/// How long a stdin writer is given to end once its reader is gone. A broken
+/// pipe ends it at once; a pipe that something the reader started still
+/// holds open is not waited out, and that thread ends when the pipe closes.
+const WRITER_GRACE: Duration = Duration::from_millis(500);
+
+/// Join the stdin writer once its reader has exited or been killed.
+fn reap(writer: Option<JoinHandle<()>>) {
+    let Some(writer) = writer else {
+        return;
+    };
+    let began = Instant::now();
+    while !writer.is_finished() && began.elapsed() < WRITER_GRACE {
+        std::thread::sleep(POLL);
+    }
+    if writer.is_finished() {
+        let _ = writer.join();
+    }
+}
+
+/// The bytes the reader's stdin gets: `prompt` as one bracketed paste — the
+/// envelope zo (`zo-ide/crates/zo-ide/src/ide/input.rs`) joins into one
+/// submission — and the line that ends it. Every escape becomes
+/// [`INERT_ESCAPE`], the glyph the window's own paste puts in its place, so
+/// nothing inside can close the paste early. Line feeds stay line feeds — a
+/// pipe is not a terminal, and zo splits its stdin on them (the window's own
+/// paste, `zerocode_pty::sanitize_paste`, turns them into returns for a
+/// terminal's Enter).
+#[must_use]
+pub fn pasted(prompt: &str) -> String {
+    let words = prompt
+        .trim_end_matches('\n')
+        .replace('\u{1b}', INERT_ESCAPE.encode_utf8(&mut [0; 4]));
+    format!("{PASTE_START}{words}{PASTE_END}\n")
 }
 
 /// The model the person pinned for `modelRouter.roles.fast` in zo's settings,
@@ -305,12 +352,12 @@ impl ActionJudge for TeamJudge {
         if deadline.is_zero() {
             return Judged::Refused(TIMEOUT.to_string());
         }
-        let prompt = Self::prompt(ask);
+        let stdin = pasted(&Self::prompt(ask));
         let began = Instant::now();
-        let answered = self.run(&prompt, deadline);
+        let answered = self.run(&stdin, deadline);
         self.last = Some(Asked {
             elapsed_ms: u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
-            prompt_bytes: prompt.len(),
+            prompt_bytes: stdin.len(),
             answer_bytes: answered.as_ref().map_or(0, String::len),
             model: self.model.clone(),
         });

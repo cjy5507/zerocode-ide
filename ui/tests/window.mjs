@@ -66,6 +66,7 @@ import { testConnectedWorkbench } from "./connected-workbench.mjs";
 import { testWorkbenchResponsive } from "./workbench-responsive.mjs";
 import { testTabstripOverflow } from "./tabstrip-overflow.mjs";
 import { testNarrowWindow } from "./narrow-window.mjs";
+import { testChromeGeist } from "./chrome-geist.mjs";
 import { testPasteRoad } from "./paste-road.mjs";
 import { testTermMouseMotion } from "./term-mouse-motion.mjs";
 import { testFaultReportStorm } from "./fault-report-storm.mjs";
@@ -112,6 +113,10 @@ import { testKeybindingText } from "./keybinding-text.mjs";
 import { testTerminalCloseResult } from "./terminal-close-result.mjs";
 import { testPermissionCard } from "./permission-card.mjs";
 import { testAnswerDoor } from "./answer-door.mjs";
+import { testYourTurn } from "./your-turn.mjs";
+import { testPassTwoBFit } from "./pass2-b-fit.mjs";
+import { testPaneHead } from "./pane-head.mjs";
+import { testStackedWork } from "./stacked-work.mjs";
 import { testSelfAct } from "./self-act.mjs";
 import { testComputerShare } from "./computer-share.mjs";
 import { testExplain } from "./explain.mjs";
@@ -293,6 +298,11 @@ suite("toast-clear-of-drawer", ({ browser, origin, ok }) => testToastClearOfDraw
 suite("skills-pickers", ({ browser, origin, ok }) => testSkillsPickers(browser, origin, ok));
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
 suite("answer-door", ({ browser, origin, ok }) => testAnswerDoor(browser, origin, ok));
+suite("your-turn", ({ browser, origin, ok }) => testYourTurn(browser, origin, ok));
+suite("pane-head", ({ browser, origin, ok }) => testPaneHead(browser, origin, ok));
+suite("stacked-work", ({ browser, origin, ok }) => testStackedWork(browser, origin, ok));
+/* IDE design pass 2 B at five widths, in dark and light. */
+suite("pass2-b-fit", ({ browser, origin, ok }) => testPassTwoBFit(browser, origin, ok));
 /* ZeroCode's own window as a Computer Use target: the page's half (t-73906). */
 suite("self-act", ({ browser, origin, ok }) => testSelfAct(browser, origin, ok));
 /* One window shared with an agent: the card and the band (t-73906). */
@@ -343,6 +353,7 @@ suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsi
 // The title bar's tab strip under sixty tabs at four widths (t-17078).
 suite("tabstrip-overflow", ({ browser, origin, ok }) => testTabstripOverflow(browser, origin, ok));
 suite("narrow-window", async ({ browser, origin, ok }) => { await testNarrowWindow(browser, origin, ok); });
+suite("chrome-geist", async ({ browser, origin, ok }) => { await testChromeGeist(browser, origin, ok); });
 // A paste never stops the window's main thread (t-19409).
 suite("paste-road", ({ browser, origin, ok }) => testPasteRoad(browser, origin, ok));
 // A pointer over a program that asked for motion is reported once per cell (t-20972).
@@ -6173,7 +6184,7 @@ const rowBox = await page.evaluate(() => {
   const root = getComputedStyle(document.documentElement);
   const leading = Number.parseFloat(root.getPropertyValue("--term-leading"));
   const size = Number.parseFloat(root.getPropertyValue("--term-font-size"));
-  const stack = root.getPropertyValue("--font-mono").trim();
+  const stack = root.getPropertyValue("--font-mono-system").trim();
   const ctx = document.createElement("canvas").getContext("2d");
   ctx.font = `${size}px ${stack}`;
   const box = ctx.measureText("W");
@@ -14615,9 +14626,10 @@ ok(
   "the bar counts this project's ports, and the rail grows no new icon",
   ports.onBar === "1" &&
     // The vault is the one rail member Orca itself has (activityItems:
-    // explorer, vault, …) — the guard is against PORTS growing an icon.
+    // explorer, vault, …), and 쌓인 일 leads the rail (2차 B) — the guard is
+    // against PORTS growing an icon.
     ports.railIcons.join(",") ===
-      "activity-files-tab,activity-vault-tab,activity-scm-tab,activity-search-tab,activity-checks-tab,activity-term-tab",
+      "activity-pile-tab,activity-files-tab,activity-vault-tab,activity-scm-tab,activity-search-tab,activity-checks-tab,activity-term-tab",
   JSON.stringify({ onBar: ports.onBar, railIcons: ports.railIcons }),
 );
 ok(
@@ -16396,9 +16408,9 @@ ok(
   JSON.stringify(sidebarStateGroups),
 );
 
-/* 기둥의 제목은 그룹핑의 이름이다 — 원본이 'repo'면 Projects, 아니면
- * Workspaces를 번역 없이 맨글자로 쓰고, 선택을 data-sidebar-section-title에
- * 찍는 그대로(SidebarHeader.tsx:21·28). 메뉴의 groupBy가 지나는 한 기록자
+/* 기둥의 제목은 그룹핑의 이름이다 — 'repo'면 프로젝트, 아니면 워크스페이스를
+ * 사람의 언어로 쓰고(t-78107, 시안 7), 선택을 data-sidebar-section-title에
+ * 찍는 것은 원본 그대로(SidebarHeader.tsx:21·28). 메뉴의 groupBy가 지나는 한 기록자
  * (setSidebarView)가 글자와 도장 둘 다 옮긴다. */
 const sidebarHeading = await page.evaluate(async () => {
   const seen = {};
@@ -16412,16 +16424,20 @@ const sidebarHeading = await page.evaluate(async () => {
   seen.status = read();
   setSidebarView({ groupBy: "repo" });
   seen.back = read();
+  // The suite's language at this point, whichever it is.
+  seen.projects = `${t("sidebar.sectionProjects", "프로젝트")}/projects`;
+  seen.workspaces = `${t("sidebar.sectionWorkspaces", "워크스페이스")}/workspaces`;
   delete window.__ANSWER__.set_sidebar_view;
   await new Promise((done) => setTimeout(done, 80));
   return seen;
 });
 ok(
-  "the sidebar heading is the grouping's name, stamped and bare",
-  sidebarHeading.repo === "Projects/projects" &&
-    sidebarHeading.flat === "Workspaces/workspaces" &&
-    sidebarHeading.status === "Workspaces/workspaces" &&
-    sidebarHeading.back === "Projects/projects",
+  "the sidebar heading is the grouping's name, stamped and said in the person's language (t-78107)",
+  sidebarHeading.repo === sidebarHeading.projects &&
+    sidebarHeading.flat === sidebarHeading.workspaces &&
+    sidebarHeading.status === sidebarHeading.workspaces &&
+    sidebarHeading.back === sidebarHeading.projects &&
+    !sidebarHeading.projects.startsWith("sidebar."),
   JSON.stringify(sidebarHeading),
 );
 
@@ -23587,14 +23603,14 @@ const planFaces = await page.evaluate(async () => {
       updated_at: Date.now(), error: null, status: "ok",
     };
     await refreshClaudeUsage(false);
-    const fill = document.getElementById("sb-claude-fill");
+    const gauge = document.getElementById("sb-claude-bar");
     const pct = document.getElementById("sb-claude-pct");
     // Computed, not dataset: the first cut set the attribute perfectly and
-    // painted nothing — an inline fill ignores its width, and only the
-    // rendered colour and box can say the bar is really there.
-    return { width: fill.style.width, tone: fill.dataset.tone,
-      paint: getComputedStyle(fill).backgroundColor,
-      box: fill.offsetWidth,
+    // painted nothing — only the rendered sweep and box can say the gauge is
+    // really there.
+    return { width: gauge.style.getPropertyValue("--gauge-value"), tone: document.getElementById("sb-claude").dataset.tone,
+      paint: getComputedStyle(gauge).backgroundImage,
+      box: gauge.offsetWidth,
       figure: pct.textContent, figureTone: pct.dataset.tone,
       ink: getComputedStyle(pct).color };
   };
@@ -23607,18 +23623,20 @@ const planFaces = await page.evaluate(async () => {
     settled: document.getElementById("sb-claude-pct").textContent !== t("usage.loading", "확인 중…"),
   };
 });
+/* The rail stays grey until a window is nearly spent (t-78107, 시안 13): 65%
+ * is still grey; past the hot line the gauge and its figure take the wait ink. */
 ok(
-  "Detailed shows every window while the always-visible rail stays neutral",
-  planFaces.quiet.width === "26%" && planFaces.quiet.tone === undefined &&
+  "Detailed shows every window while the always-visible rail stays neutral until a window is nearly spent",
+  planFaces.quiet.width === "26" && planFaces.quiet.tone === undefined &&
     planFaces.quiet.figure === "26% used 4h 28m · 12% used wk" &&
     planFaces.warn.tone === undefined && planFaces.warn.figure === "65% used 4h 28m · 12% used wk" &&
-    planFaces.hot.width === "88%" && planFaces.hot.tone === undefined &&
+    planFaces.hot.width === "88" && planFaces.hot.tone === "warn" &&
     planFaces.hot.figure === "30% used 4h 28m · 88% used wk" &&
     planFaces.hot.figureTone === undefined && planFaces.settled &&
     planFaces.hot.box > 0 &&
-    planFaces.hot.paint === planFaces.quiet.paint &&
-    planFaces.warn.paint === planFaces.hot.paint &&
-    planFaces.hot.ink === planFaces.quiet.ink,
+    planFaces.hot.paint !== planFaces.quiet.paint &&
+    planFaces.warn.ink === planFaces.quiet.ink &&
+    planFaces.hot.ink !== planFaces.quiet.ink,
   JSON.stringify(planFaces),
 );
 
@@ -23833,12 +23851,12 @@ const usagePercentageFaces = await page.evaluate(async () => {
   setSettingsOpen(false);
   await new Promise((done) => setTimeout(done, 220));
 
-  const segmentFill = document.getElementById("sb-claude-fill");
+  const segmentFill = document.getElementById("sb-claude-bar");
   const segmentFigure = document.getElementById("sb-claude-pct");
   const segment = {
-    width: segmentFill.style.width,
+    width: `${segmentFill.style.getPropertyValue("--gauge-value")}%`,
     figure: segmentFigure.textContent,
-    tone: segmentFill.dataset.tone,
+    tone: document.getElementById("sb-claude").dataset.tone,
   };
   document.getElementById("sb-usage-roster").click();
   await new Promise((done) => setTimeout(done, 160));
@@ -23860,7 +23878,7 @@ const usagePercentageFaces = await page.evaluate(async () => {
   document.getElementById("usage-percentage-used").click();
   await new Promise((done) => setTimeout(done, 80));
   const restored = {
-    width: segmentFill.style.width,
+    width: `${segmentFill.style.getPropertyValue("--gauge-value")}%`,
     figure: segmentFigure.textContent,
   };
   setSettingsOpen(false);
@@ -23896,7 +23914,7 @@ ok(
   "Remaining flips every usage figure and fill while urgency follows actual usage",
   usagePercentageFaces.segment.width === "12%"
     && usagePercentageFaces.segment.figure === "70% left 4h 28m · 12% left wk"
-    && usagePercentageFaces.segment.tone === undefined
+    && usagePercentageFaces.segment.tone === "warn"
     && JSON.stringify(usagePercentageFaces.panelRows.map((row) => row.width))
       === JSON.stringify(["70%", "12%"])
     && JSON.stringify(usagePercentageFaces.panelRows.map((row) => row.figure))
@@ -37354,7 +37372,8 @@ ok(
   "the pane's own conversation floats its composer in the extension's centered dock — inset from the pane's edges, no wider than the token, the composer as wide as the dock, and inside the pane and on screen when it narrows — the measure a helper's page stood before it got a footer",
   paneDock.stands && paneDock.paneWidth === 1200 &&
     paneDock.dockWidth === paneDock.wantDockWidth && paneDock.dockWidth > 0 &&
-    paneDock.dockWidth < paneDock.columnWidth &&
+    // No wider than the reading column it floats under (2차 B: the same 760 px axis).
+    paneDock.dockWidth <= paneDock.columnWidth &&
     paneDock.dockCentered && paneDock.composerOnAxis &&
     paneDock.narrowWidth === 420 && paneDock.composerInside && paneDock.composerOn,
   JSON.stringify(paneDock),
@@ -48948,7 +48967,7 @@ ok(
     JSON.stringify(prLanes.progress) === JSON.stringify([
       "/tmp/pr-proj/main", "/tmp/pr-proj/wt-draft",
     ]) &&
-    prLanes.title === "Workspaces",
+    prLanes.title === "워크스페이스",
   JSON.stringify(prLanes),
 );
 ok(
@@ -55795,12 +55814,15 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // At REST between turns: what a composer says and does while a turn is
       // out is the queue's business (`composer-queue`), and a box that says
       // 「대기열에 추가」 would hide the two words this suite is about.
-      const term = await openTermTab({ placement: "tab" });
-      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-chips", resumable: false, model: "claude-fable-5-1", permission_mode: "bypassPermissions" });
-      await window.__PAINTED__();
+      // On file before the agent's report: the pane stands in its conversation at that
+      // report and reads the transcript then — a pane at rest is not read again until a
+      // hook says something moved.
       window.__ANSWER__.pane_log = () => ({ found: true, next: 2, turns: [
         { role: "user", text: "hi" }, { role: "assistant", text: "hello" },
       ] });
+      const term = await openTermTab({ placement: "tab" });
+      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-chips", resumable: false, model: "claude-fable-5-1", permission_mode: "bypassPermissions" });
+      await window.__PAINTED__();
       el("view-toggle-chat").click();
       await settle(150);
       const chat = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat`);
@@ -55972,10 +55994,12 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // A page nobody has been answered on does not list `/copy` — a row
       // that would do nothing when it is pressed is not drawn at all. A pane's
       // conversation that holds only the person's words is such a page.
+      // On file before the agent's first report: the pane stands in its
+      // conversation at that report and reads the transcript then.
+      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
       const quietTerm = await openTermTab({ placement: "tab" });
       tell("hook:agent", { term: quietTerm, state: "idle", agent: "claude", session: "s-quiet", resumable: false, model: "claude-fable-5-1" });
       await window.__PAINTED__();
-      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
       el("view-toggle-chat").click();
       await settle(150);
       const quietBox = document.querySelector(`.pane-slot[data-term="${quietTerm}"] .pane-chat .worker-composer-box`);
@@ -56074,15 +56098,14 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       await window.__PAINTED__();
       const toggle = el("view-toggle");
       seen.hiddenBeforeAgent = toggle.hidden;
-      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false });
-      await window.__PAINTED__();
-      seen.shownForAgent = !toggle.hidden;
       // The pane's transcript, answered the way the backend reads it: the turns
       // after the page's cursor (the tail on the first read) and the cursor past
       // them. A read that finds nothing new brings nothing, so the page's quick
       // follow ends there as it does on a real file — an answer that repeated
       // the three turns on every read was news every 160 ms, and the follow
-      // never stopped (t-9741).
+      // never stopped (t-9741). On file before the agent's first report: the
+      // pane opens on its conversation at that report (2차 B), as a real
+      // transcript is there by then.
       const transcript = [
         { role: "user", text: "Wallet 결제 레시피 만들어줘" },
         { role: "tool", text: "Bash · zerocode-browser open http://admin.internal.example/login", tool: { name: "Bash", kind: "bash" } },
@@ -56093,6 +56116,9 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
         next: transcript.length,
         turns: transcript.slice(args.after ?? 0),
       });
+      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false });
+      await window.__PAINTED__();
+      seen.shownForAgent = !toggle.hidden;
       const view = termViews.get(term);
       const slot = document.querySelector(`.pane-slot[data-term="${term}"]`);
       const t0 = performance.now();
@@ -56273,7 +56299,11 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
         if (args.term !== long) return answerLog(args);
         if (reads === 0) firstAfter = args.after;
         reads += 1;
-        return chunks[Math.min(args.after ?? 0, 2)];
+        // Past the end the file has nothing new, as the backend answers it: a
+        // read the page owes after another (a hook's beside the opening one)
+        // must not be handed the last chunk twice.
+        if ((args.after ?? 0) >= chunks.length) return { found: true, next: chunks.length, more: false, skipped: false, turns: [] };
+        return chunks[args.after ?? 0];
       };
       const long = await openTermTab({ placement: "tab" });
       const bornAgo = 60 * 60 * 1000;

@@ -891,3 +891,326 @@ fn the_shim_waits_longer_than_the_window_is_allowed_to_take() {
         "the ledger accepts an ask budget the bridge would refuse to hold"
     );
 }
+
+/* ---- a post the bridge held too long (t-78634) ----------------------------------- */
+
+/// One whole HTTP request off `stream`: the head, then as many body bytes
+/// as it announced.
+async fn read_request(stream: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt as _;
+    let mut seen = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        if let Some(end) = seen.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if seen.len() >= end + 4 + length {
+                break;
+            }
+        }
+        match stream.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => seen.extend_from_slice(&buffer[..read]),
+        }
+    }
+    String::from_utf8_lossy(&seen).into_owned()
+}
+
+/// One form field of a request the script posted.
+fn field<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    let body = request.split("\r\n\r\n").nth(1)?;
+    body.split('&')
+        .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+}
+
+const ACCEPTED: &[u8] = b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n";
+const REFUSED: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
+
+/// A bridge that holds the first `held` posts past the script's budget and
+/// answers the rest, telling `seen` every request it read.
+async fn holding_bridge(
+    held: usize,
+) -> (
+    u16,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
+    holding_bridge_answering(held, ACCEPTED).await
+}
+
+/// [`holding_bridge`], answering the posts it does not hold with `answer`.
+async fn holding_bridge_answering(
+    held: usize,
+    answer: &'static [u8],
+) -> (
+    u16,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
+    use tokio::io::AsyncWriteExt as _;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (seen, requests) = tokio::sync::mpsc::unbounded_channel();
+    let serving = tokio::spawn(async move {
+        for number in 0.. {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let _ = seen.send(read_request(&mut stream).await);
+                if number < held {
+                    tokio::time::sleep(
+                        zerocode_hookd::HOOK_REPLY_BUDGET + std::time::Duration::from_millis(500),
+                    )
+                    .await;
+                } else {
+                    let _ = stream.write_all(answer).await;
+                }
+            });
+        }
+    });
+    (port, requests, serving)
+}
+
+const PROMPT_SUBMIT: &str =
+    r#"{"hook_event_name":"UserPromptSubmit","session_id":"s-held","prompt":"the briefing"}"#;
+
+/// A bridge held up two seconds — the window under load — is asked again
+/// rather than taken for gone: one post was a briefing's whole submission
+/// receipt, and three worker launches were rolled back in a day on its
+/// loss. The post again carries the same delivery id, its try and the exit
+/// the one before gave up with, and the hook still ends inside its budget,
+/// leaving no mark of a broken bridge.
+#[cfg_attr(
+    not(unix),
+    ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead"
+)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_the_bridge_held_too_long_is_made_again_under_the_same_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    install_hook_scripts(dir.path()).expect("install");
+    let script = dir.path().join("claude-hook.sh");
+    let marker = dir.path().join("failures/window-1/term-7");
+    let (port, mut requests, serving) = holding_bridge(1).await;
+    let env = vec![
+        (env_var::PORT, port.to_string()),
+        (env_var::TOKEN, "secret".to_string()),
+        (env_var::PANE_KEY, "term-7".to_string()),
+        (env_var::LAUNCH_TOKEN, "launch-7".to_string()),
+        (env_var::EVENT, "UserPromptSubmit".to_string()),
+        (
+            env_var::DELIVERY_FAILURE_MARKER,
+            marker.to_string_lossy().into_owned(),
+        ),
+    ];
+    let started = std::time::Instant::now();
+    let output = tokio::task::spawn_blocking(move || run_script(&script, &env, PROMPT_SUBMIT))
+        .await
+        .expect("join");
+    let took = started.elapsed();
+
+    let first = requests.recv().await.expect("the first post");
+    let again = requests
+        .try_recv()
+        .expect("the post the bridge held was never made again: its receipt is gone");
+    let id = field(&first, "delivery_id").expect("the first post carries no delivery id");
+    assert!(!id.is_empty());
+    assert_eq!(field(&again, "delivery_id"), Some(id), "{again}");
+    assert_eq!(field(&first, "try"), Some("1"), "{first}");
+    assert_eq!(field(&again, "try"), Some("2"), "{again}");
+    assert_eq!(field(&again, "gave_up"), Some("28"), "{again}");
+    assert!(
+        took < zerocode_hookd::HOOK_DELIVERY_BUDGET + std::time::Duration::from_secs(1),
+        "the hook held its agent {took:?}"
+    );
+    assert!(output.status.success(), "hook must never fail its agent");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert!(!marker.exists(), "a held post was marked a broken bridge");
+    serving.abort();
+}
+
+/// A bridge that holds every post is tried exactly as `hook_tries` lays out,
+/// and the hook ends inside its budget whatever the bridge does — and inside
+/// the timeout the agent kills its hooks at.
+#[cfg_attr(
+    not(unix),
+    ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead"
+)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bridge_that_holds_every_post_costs_the_hook_its_budget_and_no_more() {
+    for agent in [AgentKind::Claude, AgentKind::Codex] {
+        let (posts, took) = post_to_a_bridge_that_holds_all(agent, "UserPromptSubmit").await;
+        let tries = zerocode_hookd::hook_tries(agent);
+        assert!(tries.len() > 1, "{agent:?} is never tried again");
+        assert_eq!(posts, tries.len(), "{agent:?}");
+        let laid_out = tries
+            .iter()
+            .map(|one| one.pause + one.budget)
+            .sum::<std::time::Duration>();
+        assert!(
+            laid_out <= zerocode_hookd::HOOK_DELIVERY_BUDGET,
+            "{tries:?}"
+        );
+        assert!(
+            laid_out + zerocode_hookd::HOOK_TIMEOUT_MARGIN
+                <= zerocode_hookd::install::hook_timeout(agent),
+            "{agent:?}: {tries:?}"
+        );
+        assert!(
+            took < laid_out + std::time::Duration::from_secs(1),
+            "{agent:?} held its agent {took:?}"
+        );
+    }
+    // Whatever an agent is posted again on, its posts leave its own hook
+    // timeout the margin for reading stdin and writing the reply — and a
+    // Copilot hook (5 s) is posted once (review t-79535 P3-1).
+    for agent in ALL_AGENTS {
+        let laid_out = zerocode_hookd::hook_tries(agent)
+            .iter()
+            .map(|one| one.pause + one.budget)
+            .sum::<std::time::Duration>();
+        assert!(
+            laid_out + zerocode_hookd::HOOK_TIMEOUT_MARGIN
+                <= zerocode_hookd::install::hook_timeout(agent),
+            "{agent:?}: {laid_out:?}"
+        );
+    }
+}
+
+/// Only the prompt event is posted again (review t-79535 P3-2): the receipt
+/// rides it, and a slow bridge must not hold an agent 5 s on every tool call
+/// and every turn end. A hook of an agent whose prompt hook carries no
+/// receipt is posted once on any event, and that agent's own hook timeout is
+/// then never the thing a post again runs into (P3-1: Copilot's, 5 s).
+#[cfg_attr(
+    not(unix),
+    ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead"
+)]
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_prompt_event_of_a_receipt_carrying_agent_is_posted_again() {
+    let once = zerocode_hookd::HOOK_REPLY_BUDGET + std::time::Duration::from_secs(1);
+    for (agent, event) in [
+        (AgentKind::Claude, "PreToolUse"),
+        (AgentKind::Claude, "Stop"),
+        (AgentKind::Codex, "PostToolUse"),
+        (AgentKind::Copilot, "UserPromptSubmit"),
+    ] {
+        let (posts, took) = post_to_a_bridge_that_holds_all(agent, event).await;
+        assert_eq!(posts, 1, "{agent:?} {event} was posted again");
+        assert!(took < once, "{agent:?} {event} held its agent {took:?}");
+    }
+    assert_eq!(zerocode_hookd::hook_tries(AgentKind::Copilot).len(), 1);
+}
+
+/// Posts a hook of `agent`'s on `event` to a bridge that holds every post:
+/// how many reached it, and how long the hook held its agent.
+async fn post_to_a_bridge_that_holds_all(
+    agent: AgentKind,
+    event: &'static str,
+) -> (usize, std::time::Duration) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    install_hook_scripts(dir.path()).expect("install");
+    let script = dir.path().join(format!("{}-hook.sh", agent.slug()));
+    let (port, mut requests, serving) = holding_bridge(usize::MAX).await;
+    let env = vec![
+        (env_var::PORT, port.to_string()),
+        (env_var::TOKEN, "secret".to_string()),
+        (env_var::PANE_KEY, "term-8".to_string()),
+        (env_var::EVENT, event.to_string()),
+        (env_var::COPILOT_EVENT, event.to_string()),
+    ];
+    let started = std::time::Instant::now();
+    let output = tokio::task::spawn_blocking(move || run_script(&script, &env, PROMPT_SUBMIT))
+        .await
+        .expect("join");
+    let took = started.elapsed();
+    assert!(output.status.success(), "hook must never fail its agent");
+    let mut posts = 0;
+    while requests.try_recv().is_ok() {
+        posts += 1;
+    }
+    serving.abort();
+    (posts, took)
+}
+
+/// A post again that the bridge itself refuses (its 503: the window is gone
+/// or took nothing) leaves the mark of a delivery that did not arrive, though
+/// the first try, which only stopped waiting, did not (review t-79535 P3-3).
+#[cfg_attr(
+    not(unix),
+    ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead"
+)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_again_the_bridge_refuses_is_marked_a_delivery_that_did_not_arrive() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    install_hook_scripts(dir.path()).expect("install");
+    let script = dir.path().join("claude-hook.sh");
+    let marker = dir.path().join("failures/window-1/term-9");
+    let (port, mut requests, serving) = holding_bridge_answering(1, REFUSED).await;
+    let env = vec![
+        (env_var::PORT, port.to_string()),
+        (env_var::TOKEN, "secret".to_string()),
+        (env_var::PANE_KEY, "term-9".to_string()),
+        (env_var::EVENT, "UserPromptSubmit".to_string()),
+        (
+            env_var::DELIVERY_FAILURE_MARKER,
+            marker.to_string_lossy().into_owned(),
+        ),
+    ];
+    let output = tokio::task::spawn_blocking(move || run_script(&script, &env, PROMPT_SUBMIT))
+        .await
+        .expect("join");
+    assert!(output.status.success(), "hook must never fail its agent");
+    let first = requests.recv().await.expect("the first post");
+    let again = requests.try_recv().expect("the post was never made again");
+    assert_eq!(field(&again, "gave_up"), Some("28"), "{again}");
+    assert!(
+        marker.exists(),
+        "a post again the bridge refused left no mark: {first}"
+    );
+    serving.abort();
+}
+
+/// Two hooks of one pane started in the same second under a process number
+/// that came round would be one delivery to the bridge; the id carries the
+/// second too (review t-79535 P3-4).
+#[cfg_attr(
+    not(unix),
+    ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead"
+)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delivery_id_names_the_process_and_the_second() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    install_hook_scripts(dir.path()).expect("install");
+    let script = dir.path().join("claude-hook.sh");
+    let (port, mut requests, serving) = holding_bridge(0).await;
+    let env = vec![
+        (env_var::PORT, port.to_string()),
+        (env_var::TOKEN, "secret".to_string()),
+        (env_var::PANE_KEY, "term-10".to_string()),
+        (env_var::EVENT, "UserPromptSubmit".to_string()),
+    ];
+    let output = tokio::task::spawn_blocking(move || run_script(&script, &env, PROMPT_SUBMIT))
+        .await
+        .expect("join");
+    assert!(output.status.success());
+    let post = requests.recv().await.expect("the post");
+    let id = field(&post, "delivery_id").expect("a delivery id");
+    let parts: Vec<&str> = id.split('-').collect();
+    assert!(
+        parts.len() == 3
+            && parts[0] == "p"
+            && parts[1..]
+                .iter()
+                .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())),
+        "{id}"
+    );
+    serving.abort();
+}

@@ -699,6 +699,130 @@ async fn e2e_headless_until_exits_two_when_its_run_limit_wins() {
     assert_eq!(service.request_bodies().await.len(), 1);
 }
 
+/// The many lines the computer-use errand's second reader asks zo: a head, a
+/// blank line, the state, a blank line, the answer's contract — the shape
+/// `pasted()` writes (`crates/zerocode-shell/src/computer_use/errand/team.rs`).
+const READER_PROMPT: &str =
+    "PARITY_SCENARIO:streaming_text second reader head\n\nstate:\n{\"a\":1}\n\nanswer with one line of JSON";
+
+/// The second reader's arguments: one session of its own, headless, nothing
+/// to spawn, read-only, the answer written to `last_message`.
+fn reader_args(last_message: &str) -> [&str; 6] {
+    ["-p", "--no-spawn", "--permission-mode", "read-only", "--last-message", last_message]
+}
+
+/// The text blocks of every user message in one request body, a message to a
+/// row.
+fn user_texts(body: &serde_json::Value) -> Vec<Vec<String>> {
+    body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|message| message["role"] == "user")
+        .map(|message| match &message["content"] {
+            serde_json::Value::String(text) => vec![text.clone()],
+            serde_json::Value::Array(blocks) => blocks
+                .iter()
+                .filter(|block| block["type"] == "text")
+                .filter_map(|block| block["text"].as_str().map(str::to_string))
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// Feed `stdin` to the second reader's `zo -p` on a pipe; its exit, stdout,
+/// and the user messages of every request the model was sent.
+async fn read_on_a_pipe(stdin: &[u8]) -> (std::process::Output, Vec<Vec<Vec<String>>>) {
+    let layout = Layout::new();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("spawn mock anthropic service");
+    let last_message = layout.root.path().join("last-message.txt");
+    let last_message = last_message.to_string_lossy();
+    let output = run_pipe(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        &service.base_url(),
+        &reader_args(&last_message),
+        stdin,
+    )
+    .expect("run zo -p on a pipe");
+    let requests = service
+        .captured_requests()
+        .await
+        .iter()
+        .map(|request| {
+            let body: serde_json::Value =
+                serde_json::from_str(&request.raw_body).expect("the request body is JSON");
+            user_texts(&body)
+        })
+        .collect();
+    (output, requests)
+}
+
+/// The second reader's prompt in one bracketed paste and the line that ends
+/// it reaches the model whole: the first request's one user message is
+/// exactly those lines, blank lines kept, and nothing is steered. This is the
+/// pipe road; the PTY road is pinned elsewhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_pasted_many_line_prompt_on_a_pipe_is_one_submission() {
+    let stdin = format!("\u{1b}[200~{READER_PROMPT}\u{1b}[201~\n");
+    let (output, requests) = read_on_a_pipe(stdin.as_bytes()).await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "zo -p exited with {:?}, stderr {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(requests.len(), 1, "one submission, one request: {requests:#?}");
+    assert_eq!(
+        requests[0],
+        vec![vec![READER_PROMPT.to_string()]],
+        "the first request's one user message is the whole paste"
+    );
+    assert!(!stdout.contains("steer queued"), "nothing was steered:\n{stdout}");
+}
+
+/// The same lines without the envelope: the first line alone opens the turn,
+/// and a later line reaches the model only inside a `[User steering …]`
+/// block — why the second reader pastes. Whether the steers ride the first
+/// request or a later one is a race with the request, so neither is pinned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_the_same_lines_without_the_paste_are_a_first_line_and_steers() {
+    let stdin = format!("{READER_PROMPT}\n");
+    let (output, requests) = read_on_a_pipe(stdin.as_bytes()).await;
+    let mut lines = READER_PROMPT.lines().filter(|line| !line.is_empty());
+    let first_line = lines.next().expect("a first line");
+    assert!(
+        !requests.is_empty(),
+        "the first line opens a turn; stderr {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let opened = &requests[0][0];
+    assert_eq!(opened[0], first_line, "the turn opens on the first line alone: {opened:#?}");
+    let blocks: Vec<&String> = requests.iter().flatten().flatten().collect();
+    assert!(
+        !blocks.iter().any(|block| block.as_str() == READER_PROMPT),
+        "the whole prompt never reaches the model as one message: {blocks:#?}"
+    );
+    for line in lines {
+        for block in blocks.iter().filter(|block| block.ends_with(&format!("\n{line}"))) {
+            assert!(
+                block.starts_with("[User steering"),
+                "{line:?} reaches the model only as a steer: {block:?}"
+            );
+        }
+    }
+    assert!(
+        blocks.iter().any(|block| block.starts_with("[User steering")),
+        "the later lines are steers: {blocks:#?}"
+    );
+}
+
 /// `auth.reload` is received while no turn owns the channel. The TUI paints
 /// the shared wording on its status row once; it is neither transcript replay
 /// nor a timer-driven notice that can repeat forever.

@@ -741,3 +741,165 @@ mod design_guidance_tests {
         assert!(!build_design_guidance_reminder(false).contains("frontend-design skill"));
     }
 }
+
+/// Z9 (adversarial review A, 2026-10-28): the reminder tail a request ends on
+/// must ride inside the cached prefix, not behind the last marker.
+///
+/// Built through the real request path: `build_request` persists the reminder
+/// as a trailing `System` message, and the lowering below is the one
+/// `zo-ide`'s `build_message_request` runs (lower, wire reminders, markers).
+/// The reminder is installed directly, never through recall, so a change to
+/// the recall judgment cannot move this test.
+#[cfg(test)]
+mod tail_cache_marker_tests {
+    use super::super::{ApiClient, ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError};
+    use crate::permissions::{PermissionMode, PermissionPolicy};
+    use crate::session::{ContentBlock, ConversationMessage, Session};
+    use crate::StaticToolExecutor;
+
+    struct Unused;
+
+    impl ApiClient for Unused {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Ok(vec![AssistantEvent::MessageStop])
+        }
+    }
+
+    const REMINDER: &str = "[zo:todo-progress] item A in progress";
+
+    fn lower(request: &ApiRequest) -> Vec<::api::InputMessage> {
+        let mut messages = crate::convert_messages_for(
+            request.messages.as_ref(),
+            crate::WireTarget::for_model("claude-opus-5-5"),
+        );
+        crate::append_wire_reminders(&mut messages, &request.wire_reminders);
+        crate::mark_conversation_cache_breakpoints(&mut messages);
+        messages
+    }
+
+    fn marked(messages: &[::api::InputMessage]) -> Vec<usize> {
+        ::api::conversation_markers(messages)
+            .iter()
+            .map(|marker| usize::try_from(marker.index).expect("message marker index"))
+            .collect()
+    }
+
+    fn reminder_index(messages: &[::api::InputMessage]) -> usize {
+        messages
+            .iter()
+            .position(|message| {
+                message.content.iter().any(|block| {
+                    matches!(block, ::api::InputContentBlock::Text { text, .. } if text.contains(REMINDER))
+                })
+            })
+            .expect("the reminder rides the request")
+    }
+
+    fn without_markers(messages: &[::api::InputMessage]) -> serde_json::Value {
+        fn strip(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    map.remove("cache_control");
+                    map.values_mut().for_each(strip);
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        let mut value = serde_json::to_value(messages).expect("wire messages");
+        strip(&mut value);
+        value
+    }
+
+    /// One turn, one reminder, one tool call: iteration 1 asks, the model
+    /// calls a tool, iteration 2 sends the result.
+    fn first_two_iterations() -> (Vec<::api::InputMessage>, Vec<::api::InputMessage>) {
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            Unused,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+            vec!["base prompt".to_string()],
+        );
+        runtime.session.push_user_text("earlier prompt").expect("earlier prompt");
+        runtime
+            .session
+            .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "earlier answer".to_string(),
+            }]))
+            .expect("earlier answer");
+        runtime.session.push_user_text("run the tests").expect("prompt");
+        runtime.set_transient_system_reminder(REMINDER, true);
+        let first = runtime.build_request(None).expect("iteration 1");
+
+        runtime
+            .session
+            .push_message(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+                input: "{}".to_string(),
+            }]))
+            .expect("tool call");
+        runtime
+            .session
+            .push_message(ConversationMessage::tool_result("t1", "bash", "ok", false))
+            .expect("tool result");
+        let second = runtime.build_request(None).expect("iteration 2");
+        (lower(&first), lower(&second))
+    }
+
+    #[test]
+    fn the_reminder_tail_rides_inside_the_cached_prefix() {
+        let (first, second) = first_two_iterations();
+        let (first_marks, second_marks) = (marked(&first), marked(&second));
+        let reminder = reminder_index(&first);
+        assert_eq!(reminder, first.len() - 1, "iteration 1 ends on the reminder");
+        assert_eq!(reminder_index(&second), reminder, "the reminder keeps its position");
+
+        // Iteration 1: bytes past the last marker are billed uncached.
+        assert!(
+            first_marks.last().is_some_and(|&last| last >= reminder),
+            "iteration 1 leaves the reminder at {reminder} behind its last marker \
+             (markers {first_marks:?}): it is billed uncached"
+        );
+        // Iteration 2 (the brief's literal check): not behind the last marker.
+        assert!(
+            second_marks.last().is_some_and(|&last| last >= reminder),
+            "iteration 2 leaves the reminder behind its last marker (markers {second_marks:?})"
+        );
+        // Iteration 2 reads it back: some marker of this request stands where
+        // iteration 1 wrote one, at or past the reminder, over identical bytes.
+        let read_back = second_marks.iter().copied().find(|&index| {
+            index >= reminder
+                && first_marks.contains(&index)
+                && without_markers(&first[..=index]) == without_markers(&second[..=index])
+        });
+        assert!(
+            read_back.is_some(),
+            "iteration 2 cannot read the reminder from cache: markers {second_marks:?} \
+             against iteration 1's {first_marks:?}, reminder at {reminder}"
+        );
+    }
+
+    /// The marker budget: two 1h system blocks plus the two conversation
+    /// markers make Anthropic's four. Moving the rolling marker onto the
+    /// reminder tail must not add a fifth.
+    #[test]
+    fn the_reminder_tail_takes_no_extra_marker() {
+        let (first, second) = first_two_iterations();
+        let blocks = |messages: &[::api::InputMessage]| {
+            messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .filter(|block| {
+                    serde_json::to_value(block)
+                        .ok()
+                        .and_then(|value| value.get("cache_control").cloned())
+                        .is_some()
+                })
+                .count()
+        };
+        assert!(blocks(&first) <= 2, "iteration 1 marks {} message blocks", blocks(&first));
+        assert!(blocks(&second) <= 2, "iteration 2 marks {} message blocks", blocks(&second));
+    }
+}

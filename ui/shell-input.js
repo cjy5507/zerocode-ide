@@ -254,6 +254,13 @@ function modalOpener(root, offered) {
   return remembered?.isConnected ? remembered : null;
 }
 
+/* Is a surface standing over the window that a shortcut must not reach
+ * through? The docked card (the person's turn) is a `.scrim` too, but it
+ * covers nothing and is no modal: Ctrl+Tab and the board's ⌘K work beside it. */
+function modalScrimStands() {
+  return document.querySelector(".scrim:not([hidden]):not([data-docked])") !== null;
+}
+
 function showModal(root, options = {}) {
   const spec = modalSpec(root);
   if (options.animated) showing(root);
@@ -1323,6 +1330,18 @@ const ACTIONS = [
     title: () => t("app.settings", "설정"),
     chord: "mod+,",
     run: () => setSettingsOpen(settingsView.hidden),
+  },
+  {
+    id: "ask.focusDocked", group: "global",
+    // Ours rather than measured, like `project.open`. A docked card (the
+    // person's turn) takes no focus, so with the hand in a terminal there is
+    // no key to it; this one puts the keyboard on the card, in the terminal
+    // too, and Escape from the card gives the hand back.
+    title: () => t("ask.focusDocked", "모서리 카드로 이동"),
+    chord: "mod+shift+h",
+    allowInTerminal: true,
+    when: () => dockedAskStands(),
+    run: () => focusDockedAsk(),
   },
   {
     id: "terminal.splitRight", group: "panes", scope: "terminal",

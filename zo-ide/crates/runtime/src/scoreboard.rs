@@ -575,6 +575,11 @@ mod tests {
             stream_ms: Some(10),
             outcome: outcome.into(),
             attempt: String::new(),
+            turn_start_ms: None,
+            judge_wait_ms: None,
+            preflight_ms: None,
+            tool_closed_ms: Vec::new(),
+            tool_ran_ms: Vec::new(),
         };
         let timings = vec![
             timing(900, "m", 100, "completed"),   // too old

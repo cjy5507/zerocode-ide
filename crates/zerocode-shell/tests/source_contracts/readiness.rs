@@ -42,7 +42,8 @@ fn the_probe_asks_the_table_for_its_witnesses_and_spells_no_agent_name() {
     );
     assert!(
         probing.contains("AuthProbeKind::Keychain")
-            && probing.contains("AuthProbeKind::GhAuthStatus"),
+            && probing.contains("AuthProbeKind::GhAuthStatus")
+            && probing.contains("AuthProbeKind::sign_in_log"),
         "the probe no longer reads which witness kinds the row allows:\n{probing}"
     );
     for spelled in agent_name_branches() {
@@ -54,7 +55,8 @@ fn the_probe_asks_the_table_for_its_witnesses_and_spells_no_agent_name() {
 }
 
 /// The witnesses are the ones the account modules already keep — the
-/// identity file, the scoped keychain item, `gh auth status` — and the probe
+/// identity file, the scoped keychain item, `gh auth status` — or the CLI's
+/// own sign-in log, read where its row says it lies; and the probe
 /// never runs a login, a materialization, or the CLI's own status command.
 #[test]
 fn the_probe_reuses_the_existing_login_checks_and_starts_no_login() {

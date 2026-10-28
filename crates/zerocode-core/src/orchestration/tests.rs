@@ -51,6 +51,22 @@ fn worker_briefings_ask_for_a_plain_report_by_the_skills_name() {
     }
 }
 
+/// A worker is told that a report citing a file it named writes the file's absolute path in its
+/// text (t-79642, review t-79586 P3-8): a log called only `red.log` was cited in a report and found
+/// nowhere, because the path rode in the hand-in's payload and not in the words a reader has.
+#[test]
+fn worker_briefings_ask_a_report_to_write_the_path_of_the_files_it_cites() {
+    let briefing = worker_briefing("t-1", "lint", "");
+    let (before, _) = briefing
+        .split_once(BRIEFING_HANDS_OVER)
+        .expect("the briefing hands over");
+    assert_eq!(
+        before.matches("absolute path in its own text").count(),
+        1,
+        "{before}"
+    );
+}
+
 /// A worker is told once, at launch, to keep one checkout per task and to take
 /// a checkout it cut beside its own away before it hands in (t-45336) — in the
 /// shared briefing and the federated one, before the task.
@@ -1394,6 +1410,176 @@ fn an_inbox_audit_sweeps_all_runs_and_spends_nothing() {
     // Nothing was spent: the bound run's check still hands its batch out.
     let batch = bench.json("check");
     assert_eq!(batch["count"], 1, "an audit consumed a delivery");
+}
+
+/// A day's mail is more than one page (t-78890, O11): `--since` keeps the mail written at or after
+/// a moment, and `--cursor` — the last message id of the page before — walks the rest, page by
+/// page, until no `nextCursor` comes back. An unknown cursor is refused, not read as page one.
+#[test]
+fn an_inbox_audit_walks_a_day_by_since_and_cursor() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name day");
+    let early = bench.peer_status("before the day");
+    let mut day = Vec::new();
+    for at in 0..5 {
+        day.push(bench.peer_status(&format!("during the day {at}")));
+    }
+    let since = bench.ledger.runs()[0]
+        .messages()
+        .iter()
+        .find(|held| held.id == day[0])
+        .expect("the day's first letter")
+        .created_ms;
+
+    let all = bench.json(&format!("inbox --since {since} --limit 100"));
+    let ids: Vec<&str> = all["messages"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter_map(|row| row["messageId"].as_str())
+        .collect();
+    assert_eq!(ids.len(), day.len(), "{all}");
+    assert!(!ids.contains(&early.as_str()), "mail before --since: {all}");
+    assert!(
+        all["messages"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .all(|row| row["createdMs"].as_i64().is_some_and(|at| at >= since))
+    );
+    assert!(all["nextCursor"].is_null(), "one page held it all: {all}");
+
+    let mut walked: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..day.len() {
+        let line = match &cursor {
+            Some(after) => format!("inbox --since {since} --limit 2 --cursor {after}"),
+            None => format!("inbox --since {since} --limit 2"),
+        };
+        let page = bench.json(&line);
+        walked.extend(
+            page["messages"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .filter_map(|row| row["messageId"].as_str().map(str::to_string)),
+        );
+        cursor = page["nextCursor"].as_str().map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let mut newest_first = day.clone();
+    newest_first.reverse();
+    assert_eq!(
+        walked, newest_first,
+        "every letter of the day once, newest first"
+    );
+
+    let unknown = bench.run("inbox --cursor m-999999");
+    assert_ne!(unknown.reply.exit_code, 0);
+    assert!(
+        unknown.reply.stderr.contains("unknown cursor"),
+        "{}",
+        unknown.reply.stderr
+    );
+    let garbled = bench.run("inbox --since yesterday");
+    assert_ne!(garbled.reply.exit_code, 0);
+}
+
+/// Letters written in one millisecond keep one order across pages (they sort by id after the time),
+/// and the walk holds under `--address` (t-79642, review t-79586 P3-6): a cursor is a letter of the
+/// filtered list, and one that list leaves out is refused with the way to start again (P3-5).
+#[test]
+fn an_inbox_audit_walks_letters_of_one_millisecond_and_an_address_without_a_gap_or_a_repeat() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name tie");
+    let mut same = vec![bench.peer_status("first of the millisecond")];
+    for at in 1..4 {
+        // The fixture clock moves one millisecond for every letter: put it back to share one.
+        bench.clock -= 1;
+        same.push(bench.peer_status(&format!("{at} more of the millisecond")));
+    }
+    let stamps: Vec<i64> = bench.ledger.runs()[0]
+        .messages()
+        .iter()
+        .filter(|held| same.contains(&held.id))
+        .map(|held| held.created_ms)
+        .collect();
+    assert_eq!(stamps.len(), same.len());
+    assert!(stamps.iter().all(|at| *at == stamps[0]), "{stamps:?}");
+    let (worker, _) = bench.seat("worker-start --agent codex");
+    let other = worker_address(&worker);
+    let elsewhere = bench.peer_message_to(
+        &other,
+        MessageKind::Status,
+        "to someone else",
+        "",
+        Priority::Normal,
+        "",
+    );
+
+    let walk = |bench: &mut Bench, filter: &str| -> Vec<String> {
+        let mut walked = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let line = match &cursor {
+                Some(after) => format!("inbox {filter} --limit 2 --cursor {after}"),
+                None => format!("inbox {filter} --limit 2"),
+            };
+            let page = bench.json(&line);
+            walked.extend(
+                page["messages"]
+                    .as_array()
+                    .expect("rows")
+                    .iter()
+                    .filter_map(|row| row["messageId"].as_str().map(str::to_string)),
+            );
+            cursor = page["nextCursor"].as_str().map(str::to_string);
+            if cursor.is_none() {
+                return walked;
+            }
+        }
+    };
+    let whole = bench.json("inbox --limit 100");
+    let one_page: Vec<String> = whole["messages"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter_map(|row| row["messageId"].as_str().map(str::to_string))
+        .collect();
+    let mut tied: Vec<String> = one_page
+        .iter()
+        .filter(|id| same.contains(id))
+        .cloned()
+        .collect();
+    assert_eq!(tied.len(), same.len(), "{whole}");
+    tied.sort_unstable();
+    tied.reverse();
+    assert_eq!(
+        tied,
+        one_page
+            .iter()
+            .filter(|id| same.contains(id))
+            .cloned()
+            .collect::<Vec<_>>(),
+        "letters of one millisecond come by id, newest id first"
+    );
+    assert_eq!(
+        walk(&mut bench, ""),
+        one_page,
+        "pages of two meet the one page whole, ties and all"
+    );
+
+    let address = format!("--address {other}");
+    assert_eq!(walk(&mut bench, &address), vec![elsewhere]);
+    let left_out = bench.run(&format!("inbox {address} --cursor {}", same[0]));
+    assert_ne!(left_out.reply.exit_code, 0);
+    assert!(
+        left_out.reply.stderr.contains("without --cursor"),
+        "the way to start again: {}",
+        left_out.reply.stderr
+    );
 }
 
 /// A message carries its headline, its urgency and its freight whole; an
@@ -25372,6 +25558,9 @@ mod land_batch;
 /// t-34501 stage 3 (t-42447): `land-check` names the task, head and repository for the window, and
 /// the window's evidence comes back as the ledger's own letter (`tests/land_check.rs`).
 mod land_check;
+/// t-78890 (O8): the landing of a stack written on every member in one `task-update --members`
+/// (`tests/land_record.rs`).
+mod land_record;
 /// t-34501: late landings told to the coordinator, a branch that ran away told to its worker
 /// (`tests/landing_watch.rs`).
 mod landing_watch;
@@ -26431,7 +26620,7 @@ fn a_switch_leaves_one_receipt_and_no_credential_anywhere() {
 }
 
 #[test]
-fn summon_difficulty_preserves_pins_and_defaults_and_applies_only_the_omitted_effort() {
+fn summon_difficulty_preserves_pins_and_defaults_and_turns_no_difficulty_into_an_effort() {
     struct DifficultyLauncher {
         calls: std::cell::Cell<usize>,
         receipt: Option<serde_json::Value>,
@@ -26471,10 +26660,12 @@ fn summon_difficulty_preserves_pins_and_defaults_and_applies_only_the_omitted_ef
             None,
             1,
         ),
+        // t-74181: the difficulty seat's answer sets no effort — before, `low`
+        // ran this named model at a coded `medium` (and `high` at `max`).
         (
             Some(serde_json::json!({"chosen":"low", "applied":true})),
             "",
-            Some("medium"),
+            None,
             1,
         ),
         (
@@ -26518,13 +26709,20 @@ fn summon_difficulty_preserves_pins_and_defaults_and_applies_only_the_omitted_ef
             if calls == 0 { expected } else { None }
         );
     }
-    assert_eq!(difficulty_effort("antigravity", "high"), Some("high"));
-    assert_eq!(difficulty_effort("codex", "high"), Some("max"));
-    assert_eq!(difficulty_effort("cursor", "low"), None);
+    // What a model that names no efforts is offered at: what its CLI takes.
+    assert_eq!(ladder_efforts("antigravity"), ["low", "medium", "high"]);
+    assert_eq!(
+        ladder_efforts("claude"),
+        crate::capabilities::CLAUDE_EFFORT_LADDER
+    );
+    assert!(ladder_efforts("cursor").is_empty());
+    assert!(takes_effort("codex") && !takes_effort("cursor"));
 }
 
+/// t-74181: a named model with its effort left open runs at its CLI's own
+/// default — no difficulty turns into an effort — and the dials say so.
 #[test]
-fn a_named_model_says_the_ladder_set_its_effort() {
+fn a_named_model_with_its_effort_open_runs_at_its_clis_default_and_says_so() {
     struct LowLauncher;
     impl Launcher for LowLauncher {
         fn command_for(
@@ -26561,21 +26759,20 @@ fn a_named_model_says_the_ladder_set_its_effort() {
         serde_json::from_str::<serde_json::Value>(&planned.reply.stdout).unwrap()
     };
 
-    let laddered = launch("");
-    assert_eq!(laddered["effort"], "medium", "the launch is unchanged");
-    assert_eq!(laddered["dials"]["modelFrom"], "request");
+    let open = launch("");
+    assert!(open["effort"].is_null(), "no effort of ours: {open}");
+    assert_eq!(open["dials"]["modelFrom"], "request");
     assert_eq!(
-        laddered["dials"]["why"]["effortRule"], "ladder",
+        open["dials"]["why"]["effortRule"], "cli-default",
         "{}",
-        laddered["dials"]
+        open["dials"]
     );
 
     let written = launch("--effort max");
     assert_eq!(written["effort"], "max");
-    assert_ne!(
-        written["dials"]["why"]["effortRule"], "ladder",
-        "{}",
-        written["dials"]
+    assert!(
+        written["dials"].is_null(),
+        "no dial was left open: {written}"
     );
 }
 
@@ -26736,9 +26933,13 @@ fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin(
         .unwrap()
         .unwrap();
     for (flags, model, effort) in [
-        ("", default.model.as_str(), default.effort.as_str()),
-        ("--effort high", default.model.as_str(), "high"),
-        ("--model gpt-custom --effort xhigh", "gpt-custom", "xhigh"),
+        ("", default.model.as_str(), default.effort.as_deref()),
+        ("--effort high", default.model.as_str(), Some("high")),
+        (
+            "--model gpt-custom --effort xhigh",
+            "gpt-custom",
+            Some("xhigh"),
+        ),
     ] {
         let mut bench = Bench::new();
         bench.json("run-create --name profiles");
@@ -26752,15 +26953,15 @@ fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin(
         assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
         let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
         assert_eq!(reply["model"], model);
-        assert_eq!(reply["effort"], effort);
+        assert_eq!(reply["effort"].as_str(), effort);
     }
 }
 
 /// The settings screen writes one cell at a time and may leave either
 /// field to the lineup (2026-10-27). What it shows as the next summons'
 /// words is what a summons puts on the agent's command line: an effort
-/// written alone rides the default model, a model written alone runs at the
-/// difficulty's effort, both written run as written.
+/// written alone rides the default model, a model written alone runs at its
+/// CLI's own default effort (t-74181), both written run as written.
 #[test]
 fn a_row_the_settings_screen_wrote_is_what_the_summons_launches() {
     struct Screen {
@@ -26808,17 +27009,17 @@ fn a_row_the_settings_screen_wrote_is_what_the_summons_launches() {
         (
             serde_json::json!({"effort": "high"}),
             default.model.as_str(),
-            "high",
+            Some("high"),
         ),
         (
             serde_json::json!({"model": "gpt-custom"}),
             "gpt-custom",
-            default.effort.as_str(),
+            default.effort.as_deref(),
         ),
         (
             serde_json::json!({"model": "gpt-custom", "effort": "xhigh"}),
             "gpt-custom",
-            "xhigh",
+            Some("xhigh"),
         ),
     ] {
         let root = serde_json::json!({"smart": {"summonProfiles": {"codex": {low: cell}}}});
@@ -26826,7 +27027,7 @@ fn a_row_the_settings_screen_wrote_is_what_the_summons_launches() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            (shown.model.as_str(), shown.effort.as_str()),
+            (shown.model.as_str(), shown.effort.as_deref()),
             (model, effort),
             "{cell}"
         );
@@ -26847,7 +27048,7 @@ fn a_row_the_settings_screen_wrote_is_what_the_summons_launches() {
         let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
         assert_eq!(
             (reply["model"].as_str(), reply["effort"].as_str()),
-            (Some(model), Some(effort)),
+            (Some(model), effort),
             "{cell}"
         );
         let tuning = screen.tuning.lock().unwrap().clone();

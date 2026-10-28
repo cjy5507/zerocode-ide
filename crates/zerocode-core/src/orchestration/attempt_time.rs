@@ -144,8 +144,10 @@ pub struct AfterReport {
     pub reported_ms: Option<i64>,
     pub verified_ms: Option<i64>,
     pub review_wait_ms: Option<i64>,
-    /// The ledger stamps no moment for a merge or a deploy; never estimated.
+    /// When the coordinator first wrote this review's `merged` ([`Run::completion_ms`]) — the
+    /// moment the hand-in reached main as the ledger knows it, not git's merge commit.
     pub merged_ms: Option<i64>,
+    /// The ledger stamps no moment for a deploy; never estimated.
     pub deployed_ms: Option<i64>,
 }
 
@@ -419,7 +421,7 @@ fn after_report(run: &Run, task: &Task) -> AfterReport {
             .zip(verified_ms)
             .and_then(|(reported, verified)| verified.checked_sub(reported))
             .filter(|wait| *wait >= 0),
-        merged_ms: None,
+        merged_ms: run.completion_ms(task),
         deployed_ms: None,
     }
 }

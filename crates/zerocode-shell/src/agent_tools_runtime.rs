@@ -2,6 +2,17 @@ use super::*;
 use zerocode_core::capabilities::{PointerRoute, SubmitAck};
 use zerocode_core::readiness::{AuthState, Purpose};
 
+/// How long past a delivery's own deadline a caller waits for the pane's
+/// receipt: the pane's patience ([`zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE`])
+/// and the posts again of the hook the receipt rides
+/// ([`zerocode_hookd::HOOK_RETRY_SPAN`], t-78634), which can bring it that
+/// much later. One number for every caller that waits on a delivery's
+/// outcome — a summons' briefing, the same typed again, a line sent to a
+/// pane, an ssh send, the explain door — so a receipt one of them has not
+/// waited for is not lost to it (review t-79535 P3-6).
+pub(crate) const RECEIPT_WAIT: Duration =
+    zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE.saturating_add(zerocode_hookd::HOOK_RETRY_SPAN);
+
 /// A screen change, as the webview receives it. `delta` obeys the shift
 /// contract documented on [`zerocode_pty::GridDelta`].
 #[derive(Serialize, Clone)]
@@ -944,9 +955,7 @@ impl TeamWindow {
         // answered are on its line, told to the person, and not the run's to
         // type again.
         waiting
-            .recv_timeout(
-                readiness.door_deadline(agent) + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
-            )
+            .recv_timeout(readiness.door_deadline(agent) + RECEIPT_WAIT)
             .ok()
     }
 }
@@ -997,7 +1006,7 @@ impl TeamWindow {
             &mut pane,
             &pending.briefing,
             BRIEFING_WINDOW,
-            deadline + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
+            deadline + RECEIPT_WAIT,
         ) {
             Verdict::Taken => return None,
             Verdict::Gone => {
@@ -1861,7 +1870,7 @@ impl agent_teams::Host for TeamWindow {
                 (
                     waiting,
                     submitted,
-                    started + timeout + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
+                    started + timeout + RECEIPT_WAIT,
                     restoring,
                     briefing,
                     composer,
@@ -5600,8 +5609,8 @@ pub(super) async fn ssh_agent_open(
 /// The delivery machine has its own readiness budget; this is the outer fence
 /// so a wedged pane cannot hold a caller's verb open forever. One second past
 /// the readiness timeout and the wait for the pane's receipt
-/// ([`zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE`]), which is the longest
-/// the two of them can honestly take.
+/// ([`RECEIPT_WAIT`]), which is the longest the two of them can honestly
+/// take.
 const SSH_SEND_PATIENCE: Duration = Duration::from_secs(1);
 
 /// What one `zerocode-ssh send` actually achieved.
@@ -5922,9 +5931,7 @@ fn ssh_register_delivery(
 async fn ssh_await_delivery(
     waiting: std::sync::mpsc::Receiver<DeliveryOutcome>,
 ) -> Result<DeliveryOutcome, String> {
-    let deadline = zerocode_pty::ready::TIMEOUT
-        + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE
-        + SSH_SEND_PATIENCE;
+    let deadline = zerocode_pty::ready::TIMEOUT + RECEIPT_WAIT + SSH_SEND_PATIENCE;
     tokio::task::spawn_blocking(move || {
         waiting
             .recv_timeout(deadline)

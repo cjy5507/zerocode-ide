@@ -379,8 +379,7 @@ fn type_into(app: &AppHandle, id: &str, term: Term, agent: &'static str, prompt:
     };
     // The door's own deadline and the pane's receipt after it — and no less,
     // or this gives up on a delivery that is still waiting for its program.
-    let patience =
-        readiness.door_deadline(Some(agent)) + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE;
+    let patience = readiness.door_deadline(Some(agent)) + crate::agent_tools_runtime::RECEIPT_WAIT;
     let app = app.clone();
     let id = id.to_string();
     std::thread::spawn(move || settle(&app, &id, term, waiting.recv_timeout(patience)));

@@ -672,6 +672,7 @@ impl PromptCache {
                 paths,
                 stats,
                 previous,
+                sent: None,
             })),
         }
     }
@@ -742,6 +743,32 @@ impl PromptCache {
         Some(entry.response)
     }
 
+    /// Deposit what the client is about to send for `request`: the length
+    /// and hash of the prefix every marker in `payload` closes
+    /// ([`sent_prefixes`]), and how long working that out took. The next
+    /// request recorded with the same model and message count withdraws it
+    /// onto its ledger row.
+    pub(crate) fn note_sent_payload(&self, request: &MessageRequest, payload: &[u8]) {
+        let started = std::time::Instant::now();
+        let prefixes = sent_prefixes(payload);
+        let hash_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.lock().sent = Some(SentRequest {
+            model: request.model.clone(),
+            message_count: request.messages.len(),
+            prefixes,
+            hash_micros,
+            transformations: None,
+        });
+    }
+
+    /// Deposit what the response's `message_start` said the server did to
+    /// the prompt, beside the payload [`Self::note_sent_payload`] left.
+    pub(crate) fn note_input_transformations(&self, seen: crate::sse::InputTransformations) {
+        if let Some(sent) = self.lock().sent.as_mut() {
+            sent.transformations = Some(seen);
+        }
+    }
+
     #[must_use]
     pub fn record_response(
         &self,
@@ -790,13 +817,14 @@ impl PromptCache {
         let prev_message_count = previous.as_ref().map_or(0, |state| state.message_hashes.len());
         let current_message_count = fingerprints.message_hashes.len();
 
-        let cache_break = detect_cache_break(
-            &inner.config,
+        // What the client sent is weighed in too ([`judge_cache_break`]).
+        let (cache_break, sent) = judge_cache_break(
+            &mut inner,
+            request,
             previous.as_ref(),
-            &current,
+            &mut current,
             first_divergence_index,
             current_message_count,
-            &request.model,
         );
 
         inner.stats.tracked_requests += 1;
@@ -885,7 +913,7 @@ impl PromptCache {
             cache_break.is_some(),
             // The same predecessor `detect_cache_break` compared against, so
             // `moved` and `read_drop` describe the transition `broke` does.
-            MarkerColumns::new(&fingerprints, previous.as_ref(), usage),
+            MarkerColumns::new(&fingerprints, previous.as_ref(), usage).with_sent(sent),
         );
         append_request_row(&inner.paths, &row);
 
@@ -906,6 +934,7 @@ impl PromptCache {
             previous.observed_at_unix_secs = now_unix_secs();
         }
         persist_state(&inner);
+        let sent = withdraw_sent_request(&mut inner, request).map(|sent| SentColumns::new(&sent, None));
         let mut row = request_ledger_row(
             inner.stats.tracked_requests,
             &inner.config.session_id,
@@ -913,7 +942,7 @@ impl PromptCache {
             usage,
             request.messages.len(),
             false,
-            MarkerColumns::default(),
+            MarkerColumns::default().with_sent(sent.unwrap_or_default()),
         );
         row.refresh = true;
         append_request_row(&inner.paths, &row);
@@ -932,6 +961,9 @@ struct PromptCacheInner {
     paths: PromptCachePaths,
     stats: PromptCacheStats,
     previous: Option<TrackedPromptState>,
+    /// The request the client last put on the wire, until a recorded request
+    /// withdraws it ([`SentRequest`]).
+    sent: Option<SentRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1010,6 +1042,11 @@ struct TrackedPromptState {
     /// loads with no label, which is the five-minute window.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     conversation_ttl: String,
+    /// [`RequestLedgerRow::prefix_hashes`] of this request, for the next
+    /// request's [`RequestLedgerRow::prefix_changed_at`]. `#[serde(default)]`
+    /// so an older state file loads with none, which compares nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sent_prefixes: Vec<String>,
 }
 
 /// What one wire model still has cached for this session, as of the last
@@ -1068,6 +1105,8 @@ impl TrackedPromptState {
             // fingerprint knows no other model's prefix.
             warm_prefixes: BTreeMap::new(),
             conversation_ttl: hashes.conversation_ttl.clone(),
+            // Filled by the recorder from what the client sent, when it said.
+            sent_prefixes: Vec::new(),
         }
     }
 
@@ -1729,6 +1768,12 @@ fn break_reasons(
     reasons
 }
 
+/// The reason a read drop on a pure append inside the entry's lifetime gets
+/// when nothing else explains it. [`judge_cache_break`] replaces it when what
+/// the client sent, or what the server said it did, does.
+const PURE_APPEND_MISS: &str =
+    "cache reads dropped on a pure append (prefix unchanged) — provider-side miss or eviction";
+
 /// `model` is the wire model id of the request being recorded — the one thing
 /// the tracked state cannot supply (it keeps only a hash of the model, so a
 /// break row could name the axis that moved but never the model it moved on).
@@ -1752,11 +1797,7 @@ fn pure_append_break_event(
             ),
         )
     } else {
-        (
-            true,
-            "cache reads dropped on a pure append (prefix unchanged) — provider-side miss or eviction"
-                .to_string(),
-        )
+        (true, PURE_APPEND_MISS.to_string())
     };
     CacheBreakEvent {
         unexpected,
@@ -2672,6 +2713,39 @@ pub struct RequestLedgerRow {
     /// other row.
     #[serde(default, skip_serializing_if = "is_false")]
     pub refresh: bool,
+    /// The prefix every `cache_control` marker closed, as the client SENT it:
+    /// `<at>:<bytes>:<hash>` in the provider's cache order, `at` being `s<i>`
+    /// for system block `i` or `m<i>` for message `i` of the body sent (after
+    /// the client's own rewrites — thinking stripped, a served model id), and
+    /// `bytes` the prefix's length with the markers themselves left out
+    /// (`sent_prefixes`). Lengths and hashes only; no text is kept.
+    ///
+    /// Every other column here is read off the `MessageRequest` the runtime
+    /// built, and the client rewrites that before it goes out. So until this
+    /// column a read drop with byte-identical fingerprints could only be
+    /// filed as the provider's miss (36 hours to 2026-10-28: 50 such breaks,
+    /// 2.90M re-billed tokens, 6.4% of all; adversarial review A, Z10). Empty
+    /// on a provider path that does not report its payload (only the
+    /// Anthropic client does).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefix_hashes: Vec<String>,
+    /// The first marker of this request whose prefix differs from the one the
+    /// previous request sent at the same marker (its `at`); empty when every
+    /// marker both carried agrees or there was nothing to compare.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prefix_changed_at: String,
+    /// Microseconds [`Self::prefix_hashes`] took on the request path, so
+    /// their cost is read off the same ledger that pays it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_hash_us: Option<u64>,
+    /// How many `input_transformations` the response's `message_start`
+    /// named — what the server changed in the prompt before the model saw it,
+    /// a replayed thinking block dropped — and their distinct kinds,
+    /// `type:reason`. Off the line when it named none.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub input_transformations: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_transformation_kinds: Vec<String>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -3003,6 +3077,8 @@ struct MarkerColumns {
     markers: Vec<MarkerRecord>,
     moved: &'static str,
     read_drop: u32,
+    /// The same request's markers as the client sent them.
+    sent: SentColumns,
 }
 
 impl MarkerColumns {
@@ -3027,7 +3103,12 @@ impl MarkerColumns {
                     .cache_read_input_tokens
                     .saturating_sub(usage.cache_read_input_tokens)
             }),
+            sent: SentColumns::default(),
         }
+    }
+
+    fn with_sent(self, sent: SentColumns) -> Self {
+        Self { sent, ..self }
     }
 }
 
@@ -3067,6 +3148,376 @@ fn request_ledger_row(
         attempt: attempt_for_session(session_id),
         effort: request_effort_label(request),
         refresh: false,
+        prefix_hashes: markers.sent.prefix_hashes,
+        prefix_changed_at: markers.sent.prefix_changed_at,
+        prefix_hash_us: markers.sent.prefix_hash_us,
+        input_transformations: markers.sent.input_transformations,
+        input_transformation_kinds: markers.sent.input_transformation_kinds,
+    }
+}
+
+/// What the Anthropic client put on the wire for one request, and what the
+/// server said it did to it — deposited by [`PromptCache::note_sent_payload`]
+/// and [`PromptCache::note_input_transformations`], withdrawn by the next
+/// recorded request ([`withdraw_sent_request`]).
+///
+/// A deposit, like the trim credit, because the bytes exist only in the
+/// client's send path and the ledger row is written when the response ends.
+/// Keyed by model and message count: a request recorded with another shape
+/// takes nothing rather than another request's facts.
+#[derive(Debug, Clone, Default)]
+struct SentRequest {
+    model: String,
+    message_count: usize,
+    prefixes: Vec<SentPrefix>,
+    hash_micros: u64,
+    transformations: Option<crate::sse::InputTransformations>,
+}
+
+/// One marker's prefix, as [`RequestLedgerRow::prefix_hashes`] spells it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SentPrefix {
+    at: String,
+    bytes: u64,
+    hash: u64,
+}
+
+impl SentPrefix {
+    fn label(&self) -> String {
+        format!("{}:{}:{:016x}", self.at, self.bytes, self.hash)
+    }
+}
+
+fn withdraw_sent_request(inner: &mut PromptCacheInner, request: &MessageRequest) -> Option<SentRequest> {
+    inner
+        .sent
+        .take()
+        .filter(|sent| sent.model == request.model && sent.message_count == request.messages.len())
+}
+
+/// [`detect_cache_break`], then what the client sent weighed in: this
+/// request's sent prefixes are carried into `current` for the next request,
+/// and a read drop the classifier could only call an unchanged prefix is
+/// corrected — the server's own report of a rewrite wins, then the first
+/// marker whose sent prefix differs from the previous request's. Returns the
+/// event and the ledger columns of what was sent (empty when the client said
+/// nothing).
+fn judge_cache_break(
+    inner: &mut PromptCacheInner,
+    request: &MessageRequest,
+    previous: Option<&TrackedPromptState>,
+    current: &mut TrackedPromptState,
+    first_divergence_index: Option<usize>,
+    current_message_count: usize,
+) -> (Option<CacheBreakEvent>, SentColumns) {
+    let mut cache_break = detect_cache_break(
+        &inner.config,
+        previous,
+        current,
+        first_divergence_index,
+        current_message_count,
+        &request.model,
+    );
+    let Some(sent) = withdraw_sent_request(inner, request) else {
+        return (cache_break, SentColumns::default());
+    };
+    current.sent_prefixes = sent.prefixes.iter().map(SentPrefix::label).collect();
+    let changed_at =
+        previous.and_then(|previous| first_changed_prefix(&previous.sent_prefixes, &current.sent_prefixes));
+    if let Some(event) = cache_break.as_mut().filter(|event| event.reason == PURE_APPEND_MISS) {
+        if let Some(seen) = sent.transformations.as_ref().filter(|seen| seen.count > 0) {
+            event.reason = format!(
+                "cache reads dropped on a pure append — the server rewrote the prompt first \
+                 ({} input_transformations: {})",
+                seen.count,
+                seen.kinds.join(", ")
+            );
+        } else if let Some(at) = &changed_at {
+            event.reason = format!(
+                "cache reads dropped on a pure append — the bytes sent changed before marker {at} \
+                 (its prefix hash differs from the previous request's)"
+            );
+        }
+    }
+    (cache_break, SentColumns::new(&sent, changed_at))
+}
+
+/// The `at` of the first entry of `current` whose prefix differs from the
+/// one `previous` carried at the same marker; a marker only one side carried
+/// compares nothing.
+fn first_changed_prefix(previous: &[String], current: &[String]) -> Option<String> {
+    current.iter().find_map(|label| {
+        let (at, prefix) = label.split_once(':')?;
+        let (_, before) = previous
+            .iter()
+            .find_map(|old| old.split_once(':').filter(|(old_at, _)| *old_at == at))?;
+        (before != prefix).then(|| at.to_string())
+    })
+}
+
+/// The [`RequestLedgerRow`] columns of what the client sent.
+#[derive(Debug, Default)]
+struct SentColumns {
+    prefix_hashes: Vec<String>,
+    prefix_changed_at: String,
+    prefix_hash_us: Option<u64>,
+    input_transformations: u32,
+    input_transformation_kinds: Vec<String>,
+}
+
+impl SentColumns {
+    fn new(sent: &SentRequest, changed_at: Option<String>) -> Self {
+        let seen = sent.transformations.clone().unwrap_or_default();
+        Self {
+            prefix_hashes: sent.prefixes.iter().map(SentPrefix::label).collect(),
+            prefix_changed_at: changed_at.unwrap_or_default(),
+            prefix_hash_us: Some(sent.hash_micros),
+            input_transformations: seen.count,
+            input_transformation_kinds: seen.kinds,
+        }
+    }
+}
+
+/// Every `cache_control` marker in a request body exactly as it was sent,
+/// with the length and a hash of the prefix it closes, in the provider's
+/// cache order: `tools`, then `system`, then `messages` — not the body's key
+/// order.
+///
+/// One structural pass finds the three arrays, their elements and the
+/// `cache_control` spans inside them ([`BodyLayout`]); a second hashes the
+/// bytes word at a time ([`PrefixHasher`]). The marker spans are left out of
+/// the hash: markers move every request by design and the prefix the provider
+/// keys on is the content, the reason `strip_message_cache_markers` exists. A
+/// marked message's prefix runs to the end of that message rather than of
+/// its marked block; only blocks that never take a marker (thinking, an empty
+/// text) can follow one.
+///
+/// Measured on a 520 KB body of 640 messages: see
+/// `sent_prefixes_cost_little_beside_the_send` for the number this test
+/// prints on the build at hand.
+fn sent_prefixes(payload: &[u8]) -> Vec<SentPrefix> {
+    let layout = BodyLayout::scan(payload);
+    let mut hasher = PrefixHasher::default();
+    if let Some((start, end)) = layout.tools {
+        hasher.write(&payload[start..end]);
+    }
+    let mut prefixes = Vec::new();
+    for (section, elements) in [("s", &layout.system), ("m", &layout.messages)] {
+        for (index, element) in elements.iter().enumerate() {
+            let mut from = element.start;
+            for &(skip_start, skip_end) in &element.markers {
+                hasher.write(&payload[from..skip_start]);
+                from = skip_end;
+            }
+            hasher.write(&payload[from..element.end]);
+            if !element.markers.is_empty() {
+                prefixes.push(SentPrefix {
+                    at: format!("{section}{index}"),
+                    bytes: hasher.bytes,
+                    hash: hasher.finish(),
+                });
+            }
+        }
+    }
+    prefixes
+}
+
+/// Where a compact JSON request body keeps what [`sent_prefixes`] hashes.
+#[derive(Debug, Default)]
+struct BodyLayout {
+    tools: Option<(usize, usize)>,
+    system: Vec<BodyElement>,
+    messages: Vec<BodyElement>,
+}
+
+/// One element of `system` or `messages`: its byte range and the
+/// `cache_control` key-and-value spans inside it, with their comma.
+#[derive(Debug, Default)]
+struct BodyElement {
+    start: usize,
+    end: usize,
+    markers: Vec<(usize, usize)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodySection {
+    Other,
+    Tools,
+    System,
+    Messages,
+}
+
+impl BodyLayout {
+    /// Depth 1 is the body object, 2 a top-level array, 3 one of its
+    /// elements. Strings are skipped with `memchr`, so the pass touches the
+    /// structural bytes one by one and the text in between hardly at all. A
+    /// string followed by `:` is a key; in compact JSON nothing else is.
+    fn scan(payload: &[u8]) -> Self {
+        let mut layout = Self::default();
+        let mut depth = 0_usize;
+        let mut section = BodySection::Other;
+        let mut tools_start = 0;
+        // The open `cache_control` span: where it starts, the depth of the
+        // object holding its key, and whether it took the comma before it.
+        let mut open: Option<(usize, usize, bool)> = None;
+        let mut at = 0;
+        while at < payload.len() {
+            match payload[at] {
+                b'"' => {
+                    let start = at;
+                    let end = string_end(payload, at + 1);
+                    at = end + 1;
+                    if payload.get(at) != Some(&b':') {
+                        continue;
+                    }
+                    let key = &payload[start + 1..end];
+                    if depth == 1 {
+                        section = match key {
+                            b"tools" => BodySection::Tools,
+                            b"system" => BodySection::System,
+                            b"messages" => BodySection::Messages,
+                            _ => BodySection::Other,
+                        };
+                    } else if depth >= 3
+                        && open.is_none()
+                        && key == b"cache_control"
+                        && payload.get(at + 1) == Some(&b'{')
+                        && matches!(section, BodySection::System | BodySection::Messages)
+                    {
+                        let comma = start > 0 && payload[start - 1] == b',';
+                        open = Some((if comma { start - 1 } else { start }, depth, comma));
+                    }
+                    continue;
+                }
+                byte @ (b'{' | b'[') => {
+                    depth += 1;
+                    match (depth, byte, section) {
+                        (2, b'[', BodySection::Tools) => tools_start = at,
+                        (3, b'{', BodySection::System | BodySection::Messages) => {
+                            layout.section_mut(section).push(BodyElement { start: at, ..BodyElement::default() });
+                        }
+                        _ => {}
+                    }
+                }
+                byte @ (b'}' | b']') => {
+                    if let Some((start, key_depth, comma)) = open {
+                        if depth == key_depth + 1 && byte == b'}' {
+                            let mut end = at + 1;
+                            if !comma && payload.get(end) == Some(&b',') {
+                                end += 1;
+                            }
+                            if let Some(element) = layout.section_mut(section).last_mut() {
+                                element.markers.push((start, end));
+                            }
+                            open = None;
+                        }
+                    }
+                    match (depth, byte, section) {
+                        (2, b']', BodySection::Tools) => layout.tools = Some((tools_start, at + 1)),
+                        (3, b'}', BodySection::System | BodySection::Messages) => {
+                            if let Some(element) = layout.section_mut(section).last_mut() {
+                                element.end = at + 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    depth = depth.saturating_sub(1);
+                }
+                _ => {}
+            }
+            at += 1;
+        }
+        layout
+    }
+
+    fn section_mut(&mut self, section: BodySection) -> &mut Vec<BodyElement> {
+        if section == BodySection::System {
+            &mut self.system
+        } else {
+            &mut self.messages
+        }
+    }
+}
+
+/// The index of the quote that closes the string whose first byte is at
+/// `from`, past escaped quotes; the last index when the body ends first.
+fn string_end(payload: &[u8], from: usize) -> usize {
+    let mut at = from;
+    while let Some(offset) = memchr::memchr2(b'"', b'\\', &payload[at.min(payload.len())..]) {
+        let found = at + offset;
+        if payload[found] == b'"' {
+            return found;
+        }
+        at = found + 2;
+    }
+    payload.len().saturating_sub(1)
+}
+
+/// Word-at-a-time multiply-rotate hashing (the `FxHash` step) with a
+/// `splitmix64` finish. Not cryptographic and not meant to be: it only has to
+/// tell two consecutive requests' prefixes apart, at memory speed, over the
+/// few hundred kilobytes a long session sends — FNV's byte-at-a-time loop
+/// ([`stable_hash_bytes`]) is several times slower over the same bytes.
+/// Fixed seed, so equal bytes hash equal across processes.
+#[derive(Debug, Clone)]
+struct PrefixHasher {
+    state: u64,
+    tail: [u8; 8],
+    tail_len: usize,
+    bytes: u64,
+}
+
+impl Default for PrefixHasher {
+    fn default() -> Self {
+        Self {
+            state: 0x9e37_79b9_7f4a_7c15,
+            tail: [0; 8],
+            tail_len: 0,
+            bytes: 0,
+        }
+    }
+}
+
+impl PrefixHasher {
+    const MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
+
+    fn mix(&mut self, word: u64) {
+        self.state = (self.state.rotate_left(5) ^ word).wrapping_mul(Self::MULTIPLIER);
+    }
+
+    fn write(&mut self, mut bytes: &[u8]) {
+        self.bytes += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if self.tail_len > 0 {
+            let take = (8 - self.tail_len).min(bytes.len());
+            self.tail[self.tail_len..self.tail_len + take].copy_from_slice(&bytes[..take]);
+            self.tail_len += take;
+            bytes = &bytes[take..];
+            if self.tail_len < 8 {
+                return;
+            }
+            self.mix(u64::from_le_bytes(self.tail));
+            self.tail_len = 0;
+        }
+        let mut words = bytes.chunks_exact(8);
+        for word in &mut words {
+            let mut buffer = [0_u8; 8];
+            buffer.copy_from_slice(word);
+            self.mix(u64::from_le_bytes(buffer));
+        }
+        let rest = words.remainder();
+        self.tail[..rest.len()].copy_from_slice(rest);
+        self.tail_len = rest.len();
+    }
+
+    /// The hash of everything written so far; writing may go on after.
+    fn finish(&self) -> u64 {
+        let mut last = [0_u8; 8];
+        last[..self.tail_len].copy_from_slice(&self.tail[..self.tail_len]);
+        let mut state =
+            (self.state.rotate_left(5) ^ u64::from_le_bytes(last)).wrapping_mul(Self::MULTIPLIER) ^ self.bytes;
+        state = (state ^ (state >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        state = (state ^ (state >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        state ^ (state >> 31)
     }
 }
 
@@ -4076,10 +4527,16 @@ mod tests {
     /// again on 2026-10-27, for `cache_creation_1h`: the worst case went from
     /// 420 to 447 bytes, about 11 MB a month at ~24,700 rows. The column is
     /// left off every row that wrote nothing at one hour, which is every row
-    /// under the five-minute default.
+    /// under the five-minute default. It moved again on 2026-10-28 for the
+    /// sent-prefix columns (Z10): four `at:bytes:hash` entries and the hash
+    /// time ride every Anthropic row, about 150 bytes, and the change and
+    /// transformation columns only the rare row that has one. At ~24,700 rows
+    /// a month that is about 3.7 MB a month more on the ordinary row. The
+    /// worst case below, every optional column at once, went from 447 to
+    /// about 780 bytes.
     #[test]
     fn a_request_ledger_row_stays_small_enough_to_keep_forever() {
-        const CEILING_BYTES: usize = 450;
+        const CEILING_BYTES: usize = 800;
 
         let marker = |index: i32, slot: &str, role: &str, ttl: &str| super::MarkerRecord {
             index,
@@ -4123,6 +4580,19 @@ mod tests {
             // A refresh row carries the flag but nothing a turn adds — no
             // output, no movement, no drop — so it stays far under this.
             refresh: false,
+            // The same four markers, prefixes up to 10 MB, with a change
+            // named and the server's two longest transformation kinds.
+            prefix_hashes: ["s0", "s1", "m633", "m634"]
+                .iter()
+                .map(|at| format!("{at}:9999999:0123456789abcdef"))
+                .collect(),
+            prefix_changed_at: "m633".to_string(),
+            prefix_hash_us: Some(99_999),
+            input_transformations: 99,
+            input_transformation_kinds: vec![
+                "thinking_dropped:model_binding_mismatch".to_string(),
+                "thinking_dropped:prefix_binding_mismatch".to_string(),
+            ],
         };
         let line = serde_json::to_string(&row).expect("row serializes") + "\n";
         println!("request ledger row: {} bytes — {line}", line.len());
@@ -5826,6 +6296,7 @@ mod tests {
             marker_roles: Vec::new(),
             warm_prefixes: std::collections::BTreeMap::new(),
             conversation_ttl: String::new(),
+            sent_prefixes: Vec::new(),
         };
         let row_for = |event: &super::CacheBreakEvent| CacheBreakLedgerRow {
             seq: 1,
@@ -6695,5 +7166,136 @@ mod tests {
             reasoning_replay: None,
             context_management: None,
         }
+    }
+}
+
+/// The sent-prefix hashes behind [`RequestLedgerRow::prefix_hashes`]: what
+/// they must agree on across requests, what they must not, and what they
+/// cost on the request path.
+#[cfg(test)]
+mod sent_prefix_tests {
+    use super::{first_changed_prefix, sent_prefixes, SentPrefix};
+    use crate::types::{CacheControl, InputContentBlock, InputMessage, MessageRequest, SystemBlock};
+
+    fn message(role: &str, text: &str, marked: bool) -> InputMessage {
+        InputMessage {
+            role: role.to_string(),
+            content: vec![InputContentBlock::Text {
+                text: text.to_string(),
+                cache_control: marked.then(CacheControl::ephemeral),
+            }],
+            ..InputMessage::user_text(String::new())
+        }
+    }
+
+    fn body(messages: Vec<InputMessage>) -> Vec<u8> {
+        let request = MessageRequest {
+            model: "claude-opus-5-5".to_string(),
+            max_tokens: 64,
+            messages,
+            system: Some(vec![
+                SystemBlock::Text { text: "static part".to_string(), cache_control: Some(CacheControl::ephemeral_1h()) },
+                SystemBlock::Text { text: "dynamic part".to_string(), cache_control: Some(CacheControl::ephemeral_1h()) },
+            ]),
+            tools: Some(vec![crate::types::ToolDefinition {
+                name: "bash".to_string(),
+                description: Some("run".to_string()),
+                input_schema: serde_json::json!({"type": "object"}),
+            }]),
+            tool_choice: None,
+            stream: true,
+            thinking: None,
+            output_config: None,
+            effort: None,
+            effort_band_ceiling: None,
+        };
+        // The client sends a `serde_json::Value` rendered this way, so the
+        // body's keys come in that map's order, not the struct's.
+        serde_json::to_vec(&serde_json::to_value(&request).expect("value")).expect("body")
+    }
+
+    fn at(prefixes: &[SentPrefix], label: &str) -> SentPrefix {
+        prefixes.iter().find(|prefix| prefix.at == label).cloned().unwrap_or_else(|| panic!("no {label} in {prefixes:?}"))
+    }
+
+    fn turn(edit: &str) -> Vec<InputMessage> {
+        vec![
+            message("user", "first prompt", true),
+            message("assistant", edit, false),
+            message("user", "second prompt", true),
+        ]
+    }
+
+    /// The rolling marker moving on is the ordinary request: the anchor's
+    /// prefix must hash the same as the marker that wrote it, and so must
+    /// both system blocks.
+    #[test]
+    fn a_marker_that_moved_on_leaves_the_shared_prefix_hash_alone() {
+        let first = sent_prefixes(&body(turn("answer")));
+        let mut longer = turn("answer");
+        if let Some(InputContentBlock::Text { cache_control, .. }) = longer[0].content.first_mut() {
+            *cache_control = None;
+        }
+        longer.push(message("assistant", "second answer", false));
+        longer.push(message("user", "third prompt", true));
+        let second = sent_prefixes(&body(longer));
+
+        let labels = |prefixes: &[SentPrefix]| prefixes.iter().map(|prefix| prefix.at.clone()).collect::<Vec<_>>();
+        assert_eq!(labels(&first), ["s0", "s1", "m0", "m2"]);
+        assert_eq!(labels(&second), ["s0", "s1", "m2", "m4"]);
+        for label in ["s0", "s1", "m2"] {
+            assert_eq!(at(&first, label), at(&second, label), "{label}");
+        }
+        assert!(first.windows(2).all(|pair| pair[0].bytes < pair[1].bytes), "{first:?}");
+        let labelled = |prefixes: &[SentPrefix]| prefixes.iter().map(SentPrefix::label).collect::<Vec<_>>();
+        assert_eq!(first_changed_prefix(&labelled(&first), &labelled(&second)), None);
+    }
+
+    /// An edit behind a marker changes that marker's prefix and nothing in
+    /// front of it, and the comparison names the first one.
+    #[test]
+    fn an_edit_changes_the_prefixes_behind_it_and_names_the_first() {
+        let first = sent_prefixes(&body(turn("answer")));
+        let second = sent_prefixes(&body(turn("answer, edited")));
+        assert_eq!(at(&first, "s1"), at(&second, "s1"));
+        assert_eq!(at(&first, "m0"), at(&second, "m0"));
+        assert_ne!(at(&first, "m2").hash, at(&second, "m2").hash);
+        let labelled = |prefixes: &[SentPrefix]| prefixes.iter().map(SentPrefix::label).collect::<Vec<_>>();
+        assert_eq!(first_changed_prefix(&labelled(&first), &labelled(&second)).as_deref(), Some("m2"));
+    }
+
+    /// Text that spells a marker, quotes and backslashes included, is text.
+    #[test]
+    fn a_marker_spelled_inside_text_is_not_a_marker() {
+        let tricky = r#"look: "cache_control":{"type":"ephemeral"} \" \\ ]}{["#;
+        let prefixes = sent_prefixes(&body(vec![message("user", tricky, false), message("user", "tail", true)]));
+        let labels: Vec<_> = prefixes.iter().map(|prefix| prefix.at.as_str()).collect();
+        assert_eq!(labels, ["s0", "s1", "m1"]);
+    }
+
+    /// What the hashing adds to the request path, on a body the size of a
+    /// long session's (640 messages, about 520 KB). Prints the number the
+    /// hand-over quotes; the bound only catches a pass gone quadratic.
+    #[test]
+    fn sent_prefixes_cost_little_beside_the_send() {
+        let filler = "lorem ipsum dolor sit amet, \"quoted\" and \\ escaped. ".repeat(14);
+        let messages: Vec<InputMessage> = (0..640)
+            .map(|index| {
+                let role = if index % 2 == 0 { "user" } else { "assistant" };
+                message(role, &format!("{index} {filler}"), index == 637 || index == 639)
+            })
+            .collect();
+        let payload = body(messages);
+        let runs = 20_u32;
+        let started = std::time::Instant::now();
+        let mut found = 0;
+        for _ in 0..runs {
+            found = std::hint::black_box(sent_prefixes(std::hint::black_box(&payload))).len();
+        }
+        let each = started.elapsed() / runs;
+        println!("sent_prefixes: {} bytes in {} µs ({found} markers)", payload.len(), each.as_micros());
+        assert_eq!(found, 4);
+        assert!(payload.len() > 500_000, "{} bytes", payload.len());
+        assert!(each < std::time::Duration::from_millis(50), "{each:?} for {} bytes", payload.len());
     }
 }

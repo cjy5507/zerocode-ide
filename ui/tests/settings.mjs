@@ -54,11 +54,13 @@ const FIXTURE_LINEUP = {
   ],
 };
 /* The rows each agent runs when nobody wrote one: the shipped table, and for
- * zo — which the table has no row for — the lineup's model at its ladder. */
+ * zo — which the table has no row for — the lineup's model. Each names a
+ * model only: no effort is shipped, and an effort nobody wrote stays off the
+ * command line for the agent's CLI to default (t-74181). */
 const FIXTURE_SHIPPED = {
   ...SUMMON_PROFILES,
-  zo: Object.fromEntries(["low", "mid", "high"].map((difficulty, at) =>
-    [difficulty, { model: SUMMON_PROFILES.claude.low.model, effort: ["medium", "high", "max"][at] }])),
+  zo: Object.fromEntries(["low", "mid", "high"].map((difficulty) =>
+    [difficulty, { model: SUMMON_PROFILES.claude.low.model }])),
 };
 const TERMINAL_THEME_CATALOG = Object.freeze(JSON.parse(
   await readFile(
@@ -3700,25 +3702,28 @@ class StatefulBackend {
         : null,
       jevProvider,
       jev: { on: enabled && asks && (everywhere || folders > 0), everywhere, folders },
-      // The rows a person wrote, and what each difficulty runs (t-14437):
-      // each written field, the other the shipped table's, the effort
-      // brought inside what the row's model takes in this harness's lineup.
+      // The rows a person wrote, and what each difficulty runs (t-14437),
+      // as `summon_difficulty::lineup::rows` answers them (t-74181): each
+      // written field, the model the shipped table's where none is written,
+      // and no effort where none is written — the agent's CLI runs its own
+      // default, so the command line names the model alone.
       summonProfiles: clone(smart.summonProfiles ?? {}),
       summonRows: Object.fromEntries(Object.entries(FIXTURE_SHIPPED).map(([agent, levels]) => [
         agent,
         Object.entries(levels).map(([difficulty, auto]) => {
           const written = smart.summonProfiles?.[agent]?.[difficulty] ?? {};
           const model = written.model ?? auto.model;
-          const takes = FIXTURE_LINEUP[agent]?.find((pick) => pick.id === model)?.efforts ?? [auto.effort];
-          const effort = written.effort ?? (takes.includes(auto.effort) ? auto.effort : takes.at(-1));
+          const effort = written.effort ?? null;
+          const effortWords = !effort ? [] : agent === "codex"
+            ? ["-c", `model_reasoning_effort=${effort}`]
+            : ["--effort", effort];
           return {
             difficulty, model, effort, from: written.model ? "person" : "table", candidates: [],
-            autoModel: auto.model, autoEffort: auto.effort,
+            effortRule: effort ? "person" : "cli-default",
+            autoModel: auto.model, autoEffort: null,
             writtenModel: written.model ?? null, writtenEffort: written.effort ?? null,
             standing: { kind: FIXTURE_LINEUP[agent]?.some((pick) => pick.id === model) ? "listed" : "missing" },
-            launch: agent === "codex"
-              ? ["--model", model, "-c", `model_reasoning_effort=${effort}`]
-              : ["--model", model, "--effort", effort],
+            launch: ["--model", model, ...effortWords],
           };
         }),
       ])),
@@ -6702,21 +6707,23 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   assertEqual(await pageA.locator('#summon-profiles-table tr[data-agent="claude"] .worker-models-agent-state').textContent(),
     await said("settings.agents.loginNeeded", "로그인 필요"));
 
-  // A pick is saved at once — one cell, the effort left to the lineup — and
-  // the words the next summons runs are the backend's own.
+  // A pick is saved at once — one cell, the effort left open — and the words
+  // the next summons runs are the backend's own: the model alone, its CLI
+  // running its own default effort, which the screen calls 「자동」
+  // (t-74181).
   const pickAt = backend.calls.length;
   await lowModel.selectOption("gpt-fixture-new");
   const picked = await backend.waitForCall("A", "set_summon_profile", pickAt);
   assertEqual(picked.args, { agent: "codex", difficulty: "low", model: "gpt-fixture-new", effort: null });
   assertEqual(backend.zoSettings.smart.summonProfiles, { codex: { low: { model: "gpt-fixture-new" } } }, "more than the cell was written");
-  const ranAt = FIXTURE_LINEUP.codex.find((pick) => pick.id === "gpt-fixture-new").efforts.at(-1);
   await pageA.waitForFunction(
     (expected) => document.querySelector("#orch-models-status .settings-status-said")?.textContent === expected,
     await said("settings.workerModels.saved", "저장했습니다 — 다음 {{agent}} {{difficulty}} 소환부터 {{model}} · {{effort}}", {
-      agent: await pageA.evaluate(() => agentName("codex")), difficulty: await said("settings.workerModels.low", "쉬움"), model: "gpt-fixture-new", effort: ranAt,
+      agent: await pageA.evaluate(() => agentName("codex")), difficulty: await said("settings.workerModels.low", "쉬움"), model: "gpt-fixture-new",
+      effort: await said("settings.workerModels.autoPlain", "자동"),
     }), { timeout: UI_TIMEOUT },
   );
-  assertEqual(await pageA.locator("#worker-models-next-words").textContent(), `--model gpt-fixture-new -c model_reasoning_effort=${ranAt}`);
+  assertEqual(await pageA.locator("#worker-models-next-words").textContent(), "--model gpt-fixture-new");
   assertEqual(await lowModel.inputValue(), "gpt-fixture-new", "the cell did not repaint from the answer");
   assertEqual(await pageA.locator("#worker-models-auto").textContent(),
     await said("settings.workerModels.someWritten", "{{total}}칸 중 {{count}}칸 직접 정함", { total: 9, count: 1 }));
@@ -14506,7 +14513,11 @@ await test("the browser page shows the cookie jars and where each one drank", as
 await test("a profile card picks the default, badges pending imports, and deletes on confirm", async () => {
   backend.defaultProfileId = null;
   backend.browserProfiles = [
-    { id: "1".repeat(32), name: "일하는 계정" },
+    {
+      id: "1".repeat(32),
+      name: "일하는 계정",
+      lastApply: { applied: 121, refused: 1, retained: 0, dropped: 24, atUnix: 1793150000 },
+    },
     {
       id: "2".repeat(32),
       name: "사는 계정",
@@ -14531,6 +14542,19 @@ await test("a profile card picks the default, badges pending imports, and delete
     await pageA.locator("#browser-profile-list > *").nth(0).locator(".browser-profile-chip").count(),
     0,
     "a profile with nothing staged still claimed pending",
+  );
+  // 주입이 끝난 프로필은 마지막 결과를 한 줄로 든다 — 거절이 있어도 받은 수가 먼저다.
+  // 문구는 그때 창의 언어로 선다 — 두 수와 거절 갈래(「·」)만 본다.
+  const outcome = await pageA.locator("#browser-profile-list > *").nth(0)
+    .locator(".browser-profile-applied").textContent();
+  assert(
+    /121\D[^·]*·\D*1\D[^·]*·\D*24\D/.test(`${outcome} `),
+    `the last injection's counts did not reach the card: ${JSON.stringify(outcome)}`,
+  );
+  assertEqual(
+    await pageA.locator("#browser-profile-list > *").nth(1).locator(".browser-profile-applied").count(),
+    0,
+    "a profile never injected claimed an outcome",
   );
 
   // 카드를 누르면 그 프로필이 새 탭의 기본이 된다 — 시스템 손에 적히고,
@@ -14581,6 +14605,77 @@ await test("a profile card picks the default, badges pending imports, and delete
   backend.browserProfiles = [];
   backend.defaultProfileId = null;
   return "default toggles, pending chip, delete on confirm";
+});
+
+/* 주입이 끝나면 창은 목록을 다시 읽어 「적용 대기」를 「N개 적용」으로 바꾸고,
+ * 다 받지 못했으면 세 수로 문장을 지어 알린다. 전부 만료인 스테이징은 「0개
+ * 적용」만이 아니라 건너뛴 수도 말한다. */
+await test("a finished injection repaints the cards and says what it skipped", async () => {
+  const id = "1".repeat(32);
+  backend.defaultProfileId = null;
+  backend.browserProfiles = [{ id, name: "일하는 계정", staged: true }];
+  await openSettings(pageA, "browser");
+  await pageA.waitForFunction(
+    () => document.querySelectorAll("#browser-profile-list .browser-profile-chip").length === 1,
+    undefined,
+    { timeout: UI_TIMEOUT },
+  );
+
+  // 판이 쿠키를 다 앉혔다: 칩이 사라지고 결과 줄이 선다. 목록은 이 이벤트로 다시 읽힌다.
+  const readAgain = backend.count("A", "browser_profiles");
+  backend.browserProfiles = [{
+    id,
+    name: "일하는 계정",
+    lastApply: { applied: 0, refused: 0, retained: 0, dropped: 2933, atUnix: 1793150000 },
+  }];
+  await pageA.evaluate((profile) => window.__SETTINGS_TEST_EMIT__("browser:cookie-import-applied", {
+    label: "browser-1", profile, applied: 0, refused: 0, retained: 0, dropped: 2933,
+  }), id);
+  await pageA.waitForFunction(
+    () => document.querySelectorAll("#browser-profile-list .browser-profile-applied").length === 1,
+    undefined,
+    { timeout: UI_TIMEOUT },
+  );
+  assert(
+    backend.count("A", "browser_profiles") > readAgain,
+    "the end of an injection did not re-read the profiles",
+  );
+  assertEqual(
+    await pageA.locator("#browser-profile-list .browser-profile-chip").count(),
+    0,
+    "the card kept saying pending after its injection ended",
+  );
+  const card = await pageA.locator("#browser-profile-list .browser-profile-applied").textContent();
+  assert(card.includes("2933"), `an all-expired staging did not say how many it skipped: ${JSON.stringify(card)}`);
+
+  // 다 받지 못한 주입의 알림은 세 수로 지은 문장이다. 수가 없는 옛 알림만 백엔드 문장을 그대로 쓴다.
+  await pageA.evaluate(() => {
+    window.__cookieNotices = [];
+    window.__realShowError = window.showError;
+    window.showError = (message) => window.__cookieNotices.push(String(message));
+  });
+  try {
+    await pageA.evaluate(() => {
+      window.__SETTINGS_TEST_EMIT__("browser:cookie-import-error", {
+        applied: 7, refused: 2, retained: 5, message: "backend sentence",
+      });
+      window.__SETTINGS_TEST_EMIT__("browser:cookie-import-error", { message: "older sentence" });
+    });
+    const notices = await pageA.evaluate(() => window.__cookieNotices);
+    assertEqual(notices.length, 2, "an incomplete injection did not reach the person");
+    assert(
+      notices[0] !== "backend sentence" && ["7", "2", "5"].every((count) => notices[0].includes(count)),
+      `the notice did not build its sentence from the three counts: ${JSON.stringify(notices[0])}`,
+    );
+    assertEqual(notices[1], "older sentence", "a notice without counts lost the backend's sentence");
+  } finally {
+    await pageA.evaluate(() => {
+      window.showError = window.__realShowError;
+    });
+  }
+
+  backend.browserProfiles = [];
+  return "pending chip becomes the outcome line; skipped count; notice from three counts";
 });
 
 /* 파일에서 가져오기(원본 "From File…"): 감지된 브라우저가 없어도 카드의

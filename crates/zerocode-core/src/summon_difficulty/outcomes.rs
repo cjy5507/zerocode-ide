@@ -246,7 +246,7 @@ mod tests {
         (0..MIN_EXECUTIONS).map(|i| json!({
             "run":"r", "task":format!("{applied}-{i}"), "dispatch":format!("d-{applied}-{i}"), "requestAt": i,
             "agent":"claude", "chosen":super::super::LADDER[0].0,
-            "pinnedEffort":super::super::LADDER[2].2, "baselineHigh":true, "applied":applied, "attempt":0, "retryOf":false,
+            "pinnedEffort":"max", "baselineHigh":true, "applied":applied, "attempt":0, "retryOf":false,
             KEY: Outcome { first_attempt_success:Some(success), done_with_receipts:true, landed:true,
                 rework_rounds:0, retry_count:0, wall_ms:Some(wall), tokens, tokens_reason:None, task_tokens:tokens, task_wall_ms:Some(wall) }
         })).collect()
@@ -344,7 +344,7 @@ mod integration_tests {
                     "rubricVersion":super::super::RUBRIC_VERSION, "model":"jev-test",
                     "outcome":"answered", "elapsedMs":1, "confidence":0.9,
                     "agent":"claude", "chosen":super::super::LADDER[0].0,
-                    "pinnedEffort":super::super::LADDER[2].2, "baselineHigh":true,
+                    "pinnedEffort":"max", "baselineHigh":true,
                     "applied":applied, "attempt":0, "retryOf":false});
                 rows.push(row.clone());
                 row.as_object_mut().unwrap().remove("outcome");
