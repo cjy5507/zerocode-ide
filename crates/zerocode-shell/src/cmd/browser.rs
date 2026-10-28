@@ -1565,6 +1565,13 @@ pub(crate) fn open_browser_pane(
         .snapshot(&label)?
         .map(|snapshot| snapshot.revision);
     let managed = creation_revision.is_some();
+    // The staging's generation is read BEFORE the staging itself: an import
+    // that lands in between then shows up as a changed generation when the
+    // injection settles, and the injection leaves the newer staging alone.
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    let generation = profile
+        .as_deref()
+        .and_then(|id| browser_cookie_import::staging_generation(state.config_root(), id));
     let staged = profile.as_deref().map_or_else(Vec::new, |id| {
         browser_cookie_import::peek_staged_cookies(state.config_root(), id)
     });
@@ -1583,6 +1590,7 @@ pub(crate) fn open_browser_pane(
         profile,
         label.clone(),
         staged,
+        generation,
         managed,
     );
     #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
@@ -2054,6 +2062,7 @@ fn open_chromium_browser_pane(
     profile: Option<String>,
     label: String,
     staged: Vec<browser_cookie_import::StagedCookie>,
+    generation: Option<String>,
     managed: bool,
 ) -> Result<String, String> {
     let reader = user_agent
@@ -2134,8 +2143,11 @@ fn open_chromium_browser_pane(
         None => Err("브라우저 판이 이미 닫혔습니다".to_string()),
         Some(number) => match profile {
             Some(profile_id) => pane.navigate_after_cookies(
-                profile_id,
-                state.config_root().to_path_buf(),
+                browser_cookie_import::StagingSlot::new(
+                    state.config_root(),
+                    &profile_id,
+                    generation,
+                ),
                 staged,
                 parsed,
                 number,

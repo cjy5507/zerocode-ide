@@ -1225,9 +1225,18 @@ fn deleting_a_profile_takes_its_staging_and_default_with_it() {
     .expect("the file");
     std::fs::write(browser_cookie_import::staging_file(dir.path(), &a), "[]").expect("staging");
     std::fs::write(browser_cookie_import::apply_file(dir.path(), &a), "{}").expect("apply");
+    std::fs::write(
+        browser_cookie_import::generation_file(dir.path(), &a),
+        "1-0",
+    )
+    .expect("generation");
     choose_default_browser_profile(dir.path(), Some(&a)).expect("default");
 
     remove_browser_profile(dir.path(), &a).expect("remove");
+    assert!(
+        !browser_cookie_import::generation_file(dir.path(), &a).exists(),
+        "the staging's generation outlived the profile"
+    );
     assert!(
         !browser_cookie_import::apply_file(dir.path(), &a).exists(),
         "the last injection's counts outlived the profile"

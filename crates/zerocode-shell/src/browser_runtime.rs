@@ -399,6 +399,7 @@ pub(super) fn remove_browser_profile(config_root: &Path, id: &str) -> Result<(),
     }
     save_browser_profiles(config_root, &held)?;
     let _ = std::fs::remove_file(browser_cookie_import::staging_file(config_root, id));
+    let _ = std::fs::remove_file(browser_cookie_import::generation_file(config_root, id));
     browser_cookie_import::discard_last_apply(config_root, id);
     if load_default_browser_profile(config_root).as_deref() == Some(id) {
         let _ = save_default_browser_profile(config_root, None);

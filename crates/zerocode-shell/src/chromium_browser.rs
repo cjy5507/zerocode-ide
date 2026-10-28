@@ -26,7 +26,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
     AppState, ShellStateExt,
-    browser_cookie_import::{self, Dropped, SetOutcome, StagedCookie},
+    browser_cookie_import::{self, CookieReply, Dropped, SetOutcome, StagedCookie, StagingSlot},
     browser_cookies::SameSite,
     browser_runtime::{BrowserDownload, BrowserNav, BrowserTitle, browsable_target},
 };
@@ -533,8 +533,7 @@ impl BrowserPane {
 
     pub(crate) fn navigate_after_cookies(
         &self,
-        profile_id: String,
-        config_root: PathBuf,
+        slot: StagingSlot,
         cookies: Vec<StagedCookie>,
         url: tauri::Url,
         number: u64,
@@ -552,8 +551,7 @@ impl BrowserPane {
             // 앉힐 것이 하나도 남지 않았다 — 붙들고 있어도 다음 판이 받을
             // 답은 같다.
             let settled = browser_cookie_import::settle_staging(
-                &config_root,
-                &profile_id,
+                &slot,
                 &[],
                 &[],
                 dropped,
@@ -562,7 +560,7 @@ impl BrowserPane {
             );
             crate::note_window_event(
                 self.app.state::<AppState>().local_data_root(),
-                &settled.log_line(&profile_id),
+                &settled.log_line(slot.profile_id()),
             );
             return self
                 .navigate_known(url, number, Default::default())
@@ -585,24 +583,28 @@ impl BrowserPane {
                 label,
                 url,
                 number,
-                config_root,
-                profile_id,
+                slot,
             });
             for (index, staged) in batch.cookies.iter().enumerate() {
+                // 콜백이 답 없이 놓여도 이 쿠키는 한 번 센다(`CookieReply`).
+                let owner = batch.clone();
+                let reply = Arc::new(CookieReply::new(move |outcome| {
+                    owner.finished(index, outcome);
+                }));
                 // 주소를 지을 수 없는 쿠키는 저장소에 물을 것도 없이 받지 않은 것이다.
                 let Ok(address) = cookie_url(staged) else {
-                    batch.finished(index, SetOutcome::Refused);
+                    reply.give(SetOutcome::Refused);
                     continue;
                 };
                 let cookie = cef_cookie(staged);
-                let mut callback = CookieSetCallback::new(batch.clone(), index);
+                let mut callback = CookieSetCallback::new(reply.clone());
                 if manager.set_cookie(
                     Some(&CefString::from(address.as_str())),
                     Some(&cookie),
                     Some(&mut callback),
                 ) != 1
                 {
-                    batch.finished(index, SetOutcome::Unsent);
+                    reply.give(SetOutcome::Unsent);
                 }
             }
             Ok(())
@@ -797,8 +799,7 @@ struct CookieBatch {
     label: String,
     url: tauri::Url,
     number: u64,
-    config_root: PathBuf,
-    profile_id: String,
+    slot: StagingSlot,
 }
 
 impl CookieBatch {
@@ -822,6 +823,11 @@ impl CookieBatch {
                     .and_then(|pane| pane.request_context.cookie_manager(None))
             });
             let Some(manager) = manager else {
+                // 주입이 도는 사이 판이 닫혔다. 받은 쿠키가 디스크에 쓰였는지
+                // 알 수 없으니 받지 않은 것과 같이 다시 시도하도록 남기고,
+                // 결과는 로그에 한 줄 적는다.
+                batch.flushed.store(false, Ordering::Release);
+                batch.finish_navigation();
                 return;
             };
             let mut callback = CookieFlushCallback::new(batch.clone());
@@ -844,8 +850,7 @@ impl CookieBatch {
                 .map(|outcomes| outcomes.clone())
                 .unwrap_or_default();
             let settled = browser_cookie_import::settle_staging(
-                &batch.config_root,
-                &batch.profile_id,
+                &batch.slot,
                 &batch.cookies,
                 &outcomes,
                 batch.dropped,
@@ -855,12 +860,12 @@ impl CookieBatch {
             let state = batch.app.state::<AppState>();
             crate::note_window_event(
                 state.local_data_root(),
-                &settled.log_line(&batch.profile_id),
+                &settled.log_line(batch.slot.profile_id()),
             );
             let apply = &settled.apply;
             let counts = json!({
                 "label": batch.label,
-                "profile": batch.profile_id,
+                "profile": batch.slot.profile_id(),
                 "applied": apply.applied,
                 "refused": apply.refused,
                 "retained": apply.retained,
@@ -907,8 +912,7 @@ wrap_completion_callback! {
 
 wrap_set_cookie_callback! {
     struct CookieSetCallback {
-        batch: Arc<CookieBatch>,
-        index: usize,
+        reply: Arc<CookieReply>,
     }
     impl SetCookieCallback {
         fn on_complete(&self, success: i32) {
@@ -917,7 +921,7 @@ wrap_set_cookie_callback! {
             } else {
                 SetOutcome::Refused
             };
-            self.batch.finished(self.index, outcome);
+            self.reply.give(outcome);
         }
     }
 }

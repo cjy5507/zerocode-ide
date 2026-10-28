@@ -14541,7 +14541,7 @@ await test("a profile card picks the default, badges pending imports, and delete
   const outcome = await pageA.locator("#browser-profile-list > *").nth(0)
     .locator(".browser-profile-applied").textContent();
   assert(
-    /121\D[^·]*·\D*1\D/.test(`${outcome} `),
+    /121\D[^·]*·\D*1\D[^·]*·\D*24\D/.test(`${outcome} `),
     `the last injection's counts did not reach the card: ${JSON.stringify(outcome)}`,
   );
   assertEqual(
@@ -14598,6 +14598,77 @@ await test("a profile card picks the default, badges pending imports, and delete
   backend.browserProfiles = [];
   backend.defaultProfileId = null;
   return "default toggles, pending chip, delete on confirm";
+});
+
+/* 주입이 끝나면 창은 목록을 다시 읽어 「적용 대기」를 「N개 적용」으로 바꾸고,
+ * 다 받지 못했으면 세 수로 문장을 지어 알린다. 전부 만료인 스테이징은 「0개
+ * 적용」만이 아니라 건너뛴 수도 말한다. */
+await test("a finished injection repaints the cards and says what it skipped", async () => {
+  const id = "1".repeat(32);
+  backend.defaultProfileId = null;
+  backend.browserProfiles = [{ id, name: "일하는 계정", staged: true }];
+  await openSettings(pageA, "browser");
+  await pageA.waitForFunction(
+    () => document.querySelectorAll("#browser-profile-list .browser-profile-chip").length === 1,
+    undefined,
+    { timeout: UI_TIMEOUT },
+  );
+
+  // 판이 쿠키를 다 앉혔다: 칩이 사라지고 결과 줄이 선다. 목록은 이 이벤트로 다시 읽힌다.
+  const readAgain = backend.count("A", "browser_profiles");
+  backend.browserProfiles = [{
+    id,
+    name: "일하는 계정",
+    lastApply: { applied: 0, refused: 0, retained: 0, dropped: 2933, atUnix: 1793150000 },
+  }];
+  await pageA.evaluate((profile) => window.__SETTINGS_TEST_EMIT__("browser:cookie-import-applied", {
+    label: "browser-1", profile, applied: 0, refused: 0, retained: 0, dropped: 2933,
+  }), id);
+  await pageA.waitForFunction(
+    () => document.querySelectorAll("#browser-profile-list .browser-profile-applied").length === 1,
+    undefined,
+    { timeout: UI_TIMEOUT },
+  );
+  assert(
+    backend.count("A", "browser_profiles") > readAgain,
+    "the end of an injection did not re-read the profiles",
+  );
+  assertEqual(
+    await pageA.locator("#browser-profile-list .browser-profile-chip").count(),
+    0,
+    "the card kept saying pending after its injection ended",
+  );
+  const card = await pageA.locator("#browser-profile-list .browser-profile-applied").textContent();
+  assert(card.includes("2933"), `an all-expired staging did not say how many it skipped: ${JSON.stringify(card)}`);
+
+  // 다 받지 못한 주입의 알림은 세 수로 지은 문장이다. 수가 없는 옛 알림만 백엔드 문장을 그대로 쓴다.
+  await pageA.evaluate(() => {
+    window.__cookieNotices = [];
+    window.__realShowError = window.showError;
+    window.showError = (message) => window.__cookieNotices.push(String(message));
+  });
+  try {
+    await pageA.evaluate(() => {
+      window.__SETTINGS_TEST_EMIT__("browser:cookie-import-error", {
+        applied: 7, refused: 2, retained: 5, message: "backend sentence",
+      });
+      window.__SETTINGS_TEST_EMIT__("browser:cookie-import-error", { message: "older sentence" });
+    });
+    const notices = await pageA.evaluate(() => window.__cookieNotices);
+    assertEqual(notices.length, 2, "an incomplete injection did not reach the person");
+    assert(
+      notices[0] !== "backend sentence" && ["7", "2", "5"].every((count) => notices[0].includes(count)),
+      `the notice did not build its sentence from the three counts: ${JSON.stringify(notices[0])}`,
+    );
+    assertEqual(notices[1], "older sentence", "a notice without counts lost the backend's sentence");
+  } finally {
+    await pageA.evaluate(() => {
+      window.showError = window.__realShowError;
+    });
+  }
+
+  backend.browserProfiles = [];
+  return "pending chip becomes the outcome line; skipped count; notice from three counts";
 });
 
 /* 파일에서 가져오기(원본 "From File…"): 감지된 브라우저가 없어도 카드의

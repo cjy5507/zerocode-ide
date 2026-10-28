@@ -12552,6 +12552,13 @@ function browserProfileRow(profile) {
         refused: applied.refused,
       })
       : t("settings.browser.profileApplied", "쿠키 {{applied}}개 적용", { applied: applied.applied });
+    // 만료 등으로 시도하기 전에 버린 수 — 전부 만료인 스테이징도 「0개 적용」만
+    // 말하지 않는다.
+    if (applied.dropped > 0) {
+      outcome.textContent += ` · ${t("settings.browser.profileDropped", "{{dropped}}개 만료 등으로 건너뜀", {
+        dropped: applied.dropped,
+      })}`;
+    }
     if (applied.refused > 0) {
       outcome.dataset.tip = t(
         "settings.browser.profileRefusedHint",
