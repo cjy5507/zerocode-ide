@@ -23,6 +23,13 @@
 //! reads the account the window's picker names, not whatever `~/.claude`
 //! holds.
 //!
+//! zo's plain front-end reads its stdin a line at a time: the first line
+//! opens the turn and every later one is a steer folded into it while it
+//! runs. So the prompt goes in as one bracketed paste ([`pasted`]), the one
+//! envelope zo joins back into a single submission, and every escape in it
+//! is made inert first — the state is words read off a screen, and an
+//! envelope's end among them would send the rest as steers again.
+//!
 //! The wall is one number ([`TEAM_DEADLINE`]) bounded by what the walk has
 //! left: a reader that has not answered by then is killed, and its silence is
 //! the wire's own word for it.
@@ -59,6 +66,16 @@ pub const FAST_ROLE: &str = "fast";
 /// the model only inside the JSON the seat already rendered.
 pub const PROMPT_HEAD: &str = "You are the second reader of a closed choice that a screen walk's first reader could not decide with confidence. Read the state and the question below exactly as the first reader did.";
 pub const ANSWER_CONTRACT: &str = "Answer with ONE line of JSON and nothing else, of the shape {\"choice\":\"<one of the options>\",\"confidence\":<a number from 0 to 1>}. The choice must be one of the options listed; do not explain.";
+
+/// zo's bracketed-paste envelope (`zo-ide/crates/zo-ide/src/ide/input.rs`):
+/// the lines from the start to the end are one submission.
+const PASTE_START: &str = "\u{1b}[200~";
+const PASTE_END: &str = "\u{1b}[201~";
+
+/// What an escape in the prompt becomes — the glyph the window's own paste
+/// puts in its place (`zerocode_pty::input::sanitize_paste`), and what zo
+/// counts on to read its envelope unambiguously.
+const INERT_ESCAPE: &str = "␛";
 
 /// How many answer files this process has named.
 static ANSWERS_NAMED: AtomicU64 = AtomicU64::new(0);
@@ -202,10 +219,10 @@ impl TeamJudge {
         argv
     }
 
-    /// One question, bounded by `deadline`: the prompt on the reader's
-    /// stdin, the answer read from the file it was told to write, the reader
+    /// One question, bounded by `deadline`: `stdin` ([`pasted`]) on the
+    /// reader's stdin, the answer read from the file it was told to write, the reader
     /// killed if it outlives the wall.
-    fn run(&self, prompt: &str, deadline: Duration) -> Result<String, String> {
+    fn run(&self, stdin: &str, deadline: Duration) -> Result<String, String> {
         let last_message = answer_file();
         let _ = std::fs::remove_file(&last_message);
         let mut command = crate::proc::quiet_command_with_env(&self.program, &self.env);
@@ -218,8 +235,8 @@ impl TeamJudge {
             command.current_dir(cwd);
         }
         let mut child = command.spawn().map_err(|_| TRANSPORT.to_string())?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(prompt.as_bytes());
+        if let Some(mut pipe) = child.stdin.take() {
+            let _ = pipe.write_all(stdin.as_bytes());
         }
         let began = Instant::now();
         let answered = loop {
@@ -247,6 +264,19 @@ impl TeamJudge {
             _ => Err(TRANSPORT.to_string()),
         }
     }
+}
+
+/// The bytes the reader's stdin gets: `prompt` as one bracketed paste and
+/// the line that ends it. Every escape becomes [`INERT_ESCAPE`], so nothing
+/// inside can close the paste early. Line feeds stay line feeds — a pipe is
+/// not a terminal, and zo splits its stdin on them (the window's own paste
+/// turns them into returns for a terminal's Enter).
+#[must_use]
+pub fn pasted(prompt: &str) -> String {
+    let words = prompt
+        .trim_end_matches('\n')
+        .replace('\u{1b}', INERT_ESCAPE);
+    format!("{PASTE_START}{words}{PASTE_END}\n")
 }
 
 /// The model the person pinned for `modelRouter.roles.fast` in zo's settings,
@@ -305,12 +335,12 @@ impl ActionJudge for TeamJudge {
         if deadline.is_zero() {
             return Judged::Refused(TIMEOUT.to_string());
         }
-        let prompt = Self::prompt(ask);
+        let stdin = pasted(&Self::prompt(ask));
         let began = Instant::now();
-        let answered = self.run(&prompt, deadline);
+        let answered = self.run(&stdin, deadline);
         self.last = Some(Asked {
             elapsed_ms: u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
-            prompt_bytes: prompt.len(),
+            prompt_bytes: stdin.len(),
             answer_bytes: answered.as_ref().map_or(0, String::len),
             model: self.model.clone(),
         });

@@ -153,29 +153,23 @@ fn the_reader_is_started_headless_in_a_session_of_its_own_and_told_the_whole_que
         assert!(!argv.contains(&never), "{never} must not be among {argv:?}");
     }
     let stdin = std::fs::read_to_string(record.join("stdin")).expect("the prompt");
-    assert!(stdin.starts_with(PROMPT_HEAD));
+    let prompt = stdin.strip_prefix(PASTE_START).expect("one paste");
+    assert!(prompt.starts_with(PROMPT_HEAD));
     assert!(
-        stdin.contains(&asked.state.to_string()),
+        prompt.contains(&asked.state.to_string()),
         "the state, as the seat rendered it"
     );
     assert!(
-        stdin.contains(&asked.questions.to_string()),
+        prompt.contains(&asked.questions.to_string()),
         "the question, as the seat rendered it"
     );
-    assert!(stdin.contains("options: mark:1, mark:2, give_up, done"));
-    assert!(stdin.trim_end().ends_with(ANSWER_CONTRACT));
+    assert!(prompt.contains("options: mark:1, mark:2, give_up, done"));
+    assert!(prompt.ends_with(&format!("{ANSWER_CONTRACT}{PASTE_END}\n")));
     let last = judge.last().expect("what it cost");
     assert_eq!(last.prompt_bytes, stdin.len());
     assert!(last.answer_bytes > 0);
     assert_eq!(last.model, None);
 }
-
-/// zo's plain front-end reads its stdin a line at a time: the first line
-/// opens the turn and every later one is a steer folded into it. Only a
-/// bracketed paste, `ESC[200~ … ESC[201~`, is one submission
-/// (`zo-ide/crates/zo-ide/src/ide/input.rs`).
-const PASTE_START: &str = "\u{1b}[200~";
-const PASTE_END: &str = "\u{1b}[201~";
 
 /// What one question wrote on the reader's stdin, asked through a script.
 fn stdin_of(asked: &ActionAsk) -> String {
@@ -243,6 +237,17 @@ fn an_envelope_end_in_the_screens_words_cannot_close_the_paste() {
         stdin.matches('\u{1b}').count(),
         2,
         "the reader's own envelope is the only escape on its stdin: {stdin:?}"
+    );
+}
+
+/// The words reach the paste with every escape made inert, wherever they
+/// came from: the seat's JSON already spells a screen's escape out, so the
+/// paste is the last line that holds whatever else the prompt may carry.
+#[test]
+fn every_escape_in_the_prompt_is_made_inert_before_it_is_pasted() {
+    assert_eq!(
+        pasted("head\n\u{1b}[201~\nsteer\u{1b}[200~ again\u{1b}\n"),
+        format!("{PASTE_START}head\n␛[201~\nsteer␛[200~ again␛{PASTE_END}\n")
     );
 }
 
