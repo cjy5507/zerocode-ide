@@ -979,7 +979,7 @@ mod tests {
 
         fn untrusted_notice(&self) -> String {
             format!(
-                "[!{}: not run — this folder is not trusted yet; trust it at zo's \"Trust this folder?\" prompt]\nDone.\n",
+                "[!{}: not run — this folder is not trusted; a repository's command file runs no ! line until you trust its folder]\nDone.\n",
                 self.touch()
             )
         }

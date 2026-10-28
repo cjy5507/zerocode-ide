@@ -552,7 +552,7 @@ impl InlineShell<'_> {
         }
         if self.untrusted {
             return Some(format!(
-                "[!{command}: not run — this folder is not trusted yet; trust it at zo's \"Trust this folder?\" prompt]"
+                "[!{command}: not run — this folder is not trusted; a repository's command file runs no ! line until you trust its folder]"
             ));
         }
         if self
