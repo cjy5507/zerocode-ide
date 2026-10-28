@@ -4594,6 +4594,87 @@ async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript
     );
 }
 
+/// A trim that cannot pay back at the model's cache prices is declined, and
+/// the declined trim draws nothing (t-78937). Results of 240 lines (~1,970
+/// tokens a request) against a 100k compaction window cross the 64% tier
+/// after the 30th, at 64,815 counted, with 7.7 requests left to the 80% full
+/// tier at that pace, and only the 6 results past the 24 kept to clear
+/// (12,600 of 64,988 by the gate's estimate): on Opus 5 that pays back after
+/// 47.8 requests (measured, 2026-10-28). The turn ends after the 34th result
+/// at 72,789, under the full tier, with no `Context trim` in any frame, and
+/// the session's stats count the trims declined for their price.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_trim_that_cannot_pay_back_is_declined_for_its_price_and_never_drawn() {
+    const TRIM: &str = "Context trim";
+    const ROWS: u16 = 40;
+    const WINDOW: &str = "100000";
+    const COMMAND: &str = "seq -f 'payload line %g of request {n}' 1 240";
+    const HOLD: Duration = Duration::from_millis(250);
+
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::many_bash(
+        34,
+        COMMAND,
+        HOLD,
+        "### Done\n\n- the ladder ran\n",
+    )
+    .await
+    .expect("start many-bash script");
+    let args = interactive_args();
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &args,
+        &[("CLAUDE_CODE_AUTO_COMPACT_WINDOW", WINDOW)],
+    )
+    .expect("spawn zo in PTY");
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"Run the payload command many times\r").expect("send prompt");
+    run.wait_for_history_row("the ladder ran", Duration::from_secs(60));
+    wait_until_quiet(&run, Duration::from_millis(300), TEST_TIMEOUT);
+    let capture = run.finish();
+    dump_capture(&capture, "context-trim-declined");
+
+    let mut frame_screen = Screen::new(usize::from(ROWS));
+    for frame in frames(&capture) {
+        frame_screen.feed(frame);
+        assert!(
+            !frame_screen.visible().iter().any(|row| row.contains(TRIM)),
+            "a declined trim was drawn: {:#?}",
+            frame_screen.visible()
+        );
+    }
+    let screen = settled_screen(&capture, ROWS);
+    assert!(
+        !screen.transcript().iter().any(|row| row.contains(TRIM)),
+        "a declined trim reached the transcript: {:#?}",
+        screen.transcript()
+    );
+
+    let (declined, noted) = context_trim_stats(&layout);
+    assert!(declined > 0, "the gate declined no trim for its price");
+    assert_eq!(noted, 0, "a trim ran though none pays back");
+}
+
+/// Trims the gate declined for their price, and trims that ran, summed over
+/// every prompt-cache session the run wrote.
+fn context_trim_stats(layout: &Layout) -> (u64, u64) {
+    let root = layout.home.join("cache").join("prompt-cache");
+    let (mut declined, mut noted) = (0, 0);
+    for entry in fs::read_dir(&root).into_iter().flatten().flatten() {
+        let Ok(text) = fs::read_to_string(entry.path().join("stats.json")) else {
+            continue;
+        };
+        let stats: serde_json::Value = serde_json::from_str(&text).expect("stats.json is JSON");
+        declined += stats["context_trim_declines"]["price"].as_u64().unwrap_or(0);
+        noted += stats["context_trims_noted"].as_u64().unwrap_or(0);
+    }
+    (declined, noted)
+}
+
 /// The capture cut after each synchronised update's end: one slice per frame.
 fn frames(capture: &[u8]) -> Vec<&[u8]> {
     let mut frames = Vec::new();
