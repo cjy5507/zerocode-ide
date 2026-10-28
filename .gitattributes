@@ -12,3 +12,7 @@ zo-ide/crates/zo-ide/tests/fixtures/codex-capture-*.txt -text
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
 *.bat text eol=crlf
+
+# The font licence is kept as published, its one line with a trailing space
+# included (SIL OFL 1.1 as shipped in geist-font v1.8.2).
+ui/fonts/OFL.txt whitespace=-blank-at-eol

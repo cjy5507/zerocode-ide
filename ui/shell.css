@@ -513,6 +513,8 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   flex: 1 1 0;
   min-width: 0;
   min-height: 0;
+  /* Its head keeps one line however narrow the pane (`.chat-head-pane`). */
+  container: pane-chat / inline-size;
 }
 
 .is-arriving {
@@ -564,24 +566,6 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-}
-
-.attention {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--text-2xs);
-  color: var(--ink-mist);
-}
-
-/* The waiting dot borrows the hue of the lane that needs the person — one of
- * the five sanctioned places lane colour may appear. */
-.attention-dot {
-  width: var(--dot-size);
-  height: var(--dot-size);
-  border-radius: 50%;
-  background: var(--lane, var(--ink-mist));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--lane, var(--ink-mist)) 18%, transparent);
 }
 
 /* The two panel toggles. Each is drawn as the panel it governs — a frame with
@@ -826,12 +810,21 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
  * reading size rather than three. */
 .nav-rows {
   display: flex;
-  flex-direction: column;
+  /* 2차 A (t-78107, 시안 「또렷한 Geist」 3): the seven destinations wrap in
+   * their own words onto two lines instead of standing seven rows tall — the
+   * column's top went from 245 px to about 106, and the agents at work start
+   * that much higher. The setup entry and the search keep a line each. */
+  flex-flow: row wrap;
   /* The layer's own inset, now that the column has none: `gap-0.5 px-2 pt-2
    * pb-1` (SidebarNav.tsx:106). The bottom is the shallow side because the
    * header below brings its own `mt-2`. */
   gap: 2px;
   padding: var(--space-2) var(--space-2) var(--space-1);
+}
+
+.nav-rows > .guide-entry,
+.nav-rows > .nav-search {
+  flex-basis: 100%;
 }
 
 /* In its original seat the setup entry is the nav's FIRST row
@@ -843,6 +836,7 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 
 .nav-row {
   display: flex;
+  flex: none;
   align-items: center;
   gap: var(--nav-gutter);
   /* 28px, the height a repository and a workspace row are drawn at. These are
@@ -1127,6 +1121,54 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   line-height: 1;
   outline: none;
   cursor: pointer;
+}
+
+/* 2차 A (t-78107, 시안 7): the projects that rest, as one quiet line under
+ * the ones at work — the count, then their names until the line runs out. */
+.proj-resting {
+  display: flex;
+  align-items: center;
+  gap: var(--nav-gutter);
+  width: 100%;
+  /* A grid item in the stack: without this the names' unwrapped width
+   * would widen the whole list. */
+  min-width: 0;
+  min-height: var(--control-height-sm);
+  margin-top: var(--space-2);
+  padding: 0 var(--space-2) 0 var(--nav-inset);
+  border: 0;
+  border-radius: var(--radius-edge);
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.proj-resting:hover,
+.proj-resting:focus-visible {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+.proj-resting-word {
+  flex: none;
+  white-space: nowrap;
+}
+
+.proj-resting-names {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .proj-row:hover,
@@ -1463,11 +1505,18 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
  * person's 10-21 pass of draft B) 2xs is 12px, a step over the 11px branch
  * line it sits in, and at its own line height it grew the row by 1.4px. */
 .wt-unseated {
-  flex: none;
+  /* Takes what the line has left after the folder's name before it, and
+   * elides there: a short line cuts the note, not the name to a letter
+   * (t-78107). From nothing, so the name is laid first; the line still
+   * measures the note whole when it sizes itself. */
+  flex: 1 1 0;
+  min-width: 0;
   margin-inline-start: var(--space-1);
+  overflow: hidden;
   color: var(--ink-mist);
   font-size: var(--text-2xs);
   line-height: 1;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -1572,8 +1621,9 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   opacity: 0.6;
 }
 
+/* Beside the heading it switches from (t-78107, 시안 7), not over the list. */
 .team-switch {
-  margin: var(--space-1) var(--space-1) var(--space-1) 0;
+  margin: var(--space-2) auto 0 var(--space-2);
 }
 
 .team-row {
@@ -2532,6 +2582,82 @@ svg.wt-agent-dot {
   min-width: 0;
 }
 
+/* 2차 A (t-78107, 시안 5): the name first, over the whole line — the chips
+ * (기본, the ledger's word, the landing count, the quota wall) join the
+ * branch line under it, at its right end. The name was cut to 「Trace
+ * judgment provi…」 by chips that said less than it did. `display: contents`
+ * lets the top line's parts take places in the box's grid without moving a
+ * node, so every reader of `.wt-title` and `.wt-landing` reads what it did. */
+.wt-titlebox {
+  display: grid;
+  /* The branch, the room left over, then one track for each chip that can
+   * stand (기본, the ledger's word, the landing count, the wall). A chip that
+   * is not there takes no width, so the gap rides the chip, not the grid.
+   *
+   * The branch and the chips are each sized to their words and share a short
+   * line evenly — the grid grows every such track by the same step until it
+   * holds its words — and the room left over stands between them, so the
+   * chips keep the right end. With the branch alone on the `1fr` track every
+   * chip took its whole width first: a 129 px 「미반영 6 · main보다 20 뒤」 left
+   * the branch's 91 px of words 52 at 1280 px, 「에이전트」, and 32 at 1000
+   * (review t-78487, P2-1). The chip's tail is what the ellipsis takes now,
+   * and its tooltip says it whole. */
+  --wt-branch-track: minmax(0, max-content);
+  --wt-spare-track: minmax(0, 1fr);
+  grid-template-columns: var(--wt-branch-track) var(--wt-spare-track) repeat(4, minmax(0, max-content));
+  align-items: center;
+}
+
+/* A clash and its count are the one news an even share could cut
+ * (sidebar-landing-state): on that row the chips are sized first, up to two
+ * thirds of the line, and the branch keeps the third. */
+.wt-titlebox:has(.wt-landing[data-landing="conflict"]) {
+  --wt-branch-track: minmax(calc(100% / 3), 1fr);
+  --wt-spare-track: 0;
+}
+
+.wt-titlebox > .wt-topline {
+  display: contents;
+}
+
+.wt-titlebox .wt-title {
+  grid-row: 1;
+  grid-column: 1 / -1;
+}
+
+.wt-titlebox > .wt-branch {
+  grid-row: 2;
+  grid-column: 1;
+  overflow: hidden;
+}
+
+.wt-titlebox .wt-default,
+.wt-titlebox .wt-phase,
+.wt-titlebox .wt-landing,
+.wt-titlebox .wt-wall {
+  grid-row: 2;
+  max-width: none;
+  margin-inline-start: var(--space-1);
+}
+
+/* Each chip in its own track past the room left over, in the order they
+ * stand in the row. */
+.wt-titlebox .wt-default {
+  grid-column: 3;
+}
+
+.wt-titlebox .wt-phase {
+  grid-column: 4;
+}
+
+.wt-titlebox .wt-landing {
+  grid-column: 5;
+}
+
+.wt-titlebox .wt-wall {
+  grid-column: 6;
+}
+
 .wt-title,
 .wt-branch-name {
   overflow: hidden;
@@ -2700,15 +2826,21 @@ svg.wt-agent-dot {
 }
 
 /* What git says about the work (t-22104), a second chip beside the ledger's
- * word and never in its colours alone: 반영됨 is ready ink, 미반영 N is the wait
- * ink, 확인 필요 is the halt ink, and a checkout with nothing of its own yet
- * stays the plane's quiet ink. 정리 가능 is the one chip that is a button. */
+ * word and never in its colours alone: 반영됨 is ready ink, 확인 필요 is the
+ * halt ink, and 미반영 N and a checkout with nothing of its own yet stay the
+ * plane's quiet ink (t-78107). 정리 가능 is the one chip that is a button. */
 .wt-landing[data-landing="landed"] {
   color: var(--signal-ready-ink);
 }
 
+/* 2차 A (t-78107, 시안 6): unlanded is a quiet number, not a lit badge. The
+ * amber stood on every branch with work in it — eight at once in the person's
+ * 10-27 photo — and a colour that is always on says nothing. The count keeps
+ * the plane's quiet ink (below) and loses its box. A clash keeps the halt
+ * ink: that one stops a landing. */
 .wt-landing[data-landing="ahead"] {
-  color: var(--signal-wait-ink);
+  border-color: transparent;
+  background: none;
 }
 
 .wt-landing[data-landing="check"] {
@@ -2716,12 +2848,13 @@ svg.wt-agent-dot {
 }
 
 /* A merge that would clash (t-34501): the halt ink 확인 필요 uses, and heavier, so it is the one
- * chip in the list that reads as a stop. Far behind without a clash keeps the wait ink above. */
+ * chip in the list that reads as a stop. Far behind without a clash stays the quiet unlanded number. */
 .wt-landing[data-landing="conflict"] {
   color: var(--signal-halt-ink);
   font-weight: 600;
 }
 
+.wt-landing[data-landing="ahead"],
 .wt-landing[data-landing="none"],
 .wt-landing[data-landing="pending"] {
   color: color-mix(in srgb, var(--nav-plane-ink) 70%, transparent);
@@ -6578,6 +6711,69 @@ body.is-dragging-pane {
   color: var(--ink-chalk);
 }
 
+/* 2차 A (t-78107, 시안 2): the tab says its agent's state by shape before
+ * its name — a filled dot while it works, a hollow blue ring while it waits
+ * on the person (blue is spent on what is yours to answer and nothing else) —
+ * and how long it has been at it after the name. The role word that led the
+ * name moved to the tip. */
+.tab.is-streaming .tab-dot {
+  visibility: visible;
+  background: var(--signal-ready);
+}
+
+.tab.is-waiting .tab-dot {
+  background: none;
+  box-shadow: inset 0 0 0 var(--status-dot-ring) var(--signal-you);
+}
+
+/* 2차 A (t-78107, 시안 17): under `--fold-sidebar-rail` the strip folds the
+ * tabs that are not on stage to their mark, state dot and age — the name
+ * stays the tab's spoken name (visually hidden, never removed) and its tip.
+ * The draft folds at the window's width, like the two folds below. The
+ * strip's own width cannot stand for it (t-78802): the 「당신 차례」 chip
+ * beside it always stands and is as wide as its word in each language and
+ * its count's digits, so a strip threshold lands on a different window in
+ * each. */
+@media (max-width: 1000px) {
+  .tab:not(.is-front) .tab-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .tab:not(.is-front) {
+    flex: none;
+    min-width: 0;
+  }
+
+  /* The tab on stage keeps room for its name — the folded ones gave it theirs. */
+  .tab.is-front {
+    flex: none;
+  }
+}
+
+/* The age rides right after the name, so the label sizes to its words and
+ * the close control takes the slack. `has-age` is the paint's word for it —
+ * a `:has()` here was asked again on every tab of the strip each repaint. */
+.tab.has-age .tab-label {
+  flex: 0 1 auto;
+}
+
+.tab-age {
+  flex: none;
+  margin-inline-end: auto;
+  color: var(--ink-mist);
+  font: var(--type-label-12-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.tab-age:empty {
+  display: none;
+}
+
 /* The close control is quiet until it can be used — but it KEEPS ITS PLACE.
  *
  * `opacity: 0` on a control that is `display`-sized by its own glyph still
@@ -6653,7 +6849,10 @@ body.is-dragging-pane {
 }
 
 .tab-detached:hover,
-.tab-detached:focus-visible {
+.tab-detached:focus-visible,
+.tab-menu:hover,
+.tab-menu:focus-visible,
+.tab-menu[aria-expanded="true"] {
   background: var(--row-hover);
   color: var(--ink-chalk);
 }
@@ -6690,6 +6889,72 @@ body.is-dragging-pane {
 .tab-new:focus-visible {
   background: var(--row-hover);
   color: var(--ink-chalk);
+}
+
+/* 2차 A (t-78107, 시안 17): 「탭 N ⌄」, the strip's one menu of its tabs. It
+ * wears the pill's quiet face and stands only in a window under
+ * `--fold-tab-menu`; its rows exist while its menu is up. */
+.tab-menu {
+  display: none;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--tabstrip-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  cursor: pointer;
+}
+
+.tab-menu .icon {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  transform: rotate(90deg);
+}
+
+/* 2차 A (t-78107, 시안 17): under `--fold-tab-menu` the strip is the tab on
+ * stage and its menu; under `--fold-tab-only` the + folds into that menu as
+ * its last row and the title bar gives the strip the room its other controls
+ * held. The tabs leave the strip, not the document — every one is a row of
+ * the menu. */
+@media (max-width: 760px) {
+  .tab:not(.is-front) {
+    display: none;
+  }
+
+  /* The tab on stage gives up its width before the menu does: its name
+   * ends in an ellipsis, the way to every tab stays whole. */
+  .tab.is-front {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .tab-menu {
+    display: flex;
+  }
+}
+
+@media (max-width: 480px) {
+  /* Back and forward keep their chords; the view switch and the run control
+   * keep their glyphs and say their words to a reader and on their tips. The
+   * tab's age gives its room to the name it follows. */
+  .tab-new,
+  .titlebar-nav,
+  .tab-age {
+    display: none;
+  }
+
+  .titlebar-right .segment-btn > :not(.view-toggle-glyph),
+  .chrome-run-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 
 /* The stage terminal: the lane's TUI, full-bleed — the tmux answer. Fills
@@ -11989,22 +12254,34 @@ body.is-dragging-pane {
   height: 12px;
 }
 
+/* 2차 A (t-78107, 시안 13): each provider wears Geist's Gauge — a ring, filled
+ * clockwise by the tightest window — where a 48×6 meter stood. One element:
+ * the fill is a conic sweep, the hole a radial mask, the value the
+ * `--gauge-value` the paint writes (0–100). Grey on grey until the window is
+ * nearly spent; then the ring and the figure take the wait ink, never the
+ * halt ink, which is for a failure. The hole's opaque stop is `--ink-chalk`:
+ * a mask reads only alpha, so it is not one more colour literal. */
 .sb-usage-bar {
-  width: 48px;
-  height: 6px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--meter-track);
+  width: var(--gauge-size);
+  height: var(--gauge-size);
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--gauge-ink, var(--ink-mist)) calc(var(--gauge-value, 0) * 1%),
+    var(--meter-track) 0
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - var(--gauge-stroke)),
+    var(--ink-chalk) calc(100% - var(--gauge-stroke))
+  );
 }
 
-.sb-usage-fill {
-  /* Block, or a span's width/height are suggestions: the track is a flex
-   * item and sizes, the fill inside it is not and vanished — a grey bar
-   * that never showed its colour. */
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  background: var(--meter-fill);
+.sb-claude[data-tone="warn"] {
+  --gauge-ink: var(--signal-wait);
+}
+
+.sb-claude[data-tone="warn"] .sb-figure {
+  color: var(--signal-wait-ink);
 }
 
 .sb-claude-warn {
@@ -13457,7 +13734,7 @@ body.is-dragging-pane {
   height: calc(100% - 2 * var(--term-inset-y, 0px));
   overflow: hidden;
   color: var(--term-screen-fg);
-  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono);
+  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono-system);
   font-variant-ligatures: none;
   font-feature-settings: "liga" 0, "calt" 0;
   /* Both from the cell token, never from the UI scale — see `--term-font-size`.
@@ -13530,7 +13807,7 @@ body.is-dragging-pane {
   justify-content: center;
   background: var(--term-screen-bg);
   color: var(--term-screen-fg);
-  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono);
+  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono-system);
   font-size: var(--term-font-size);
   line-height: 1;
   cursor: pointer;
@@ -14193,7 +14470,7 @@ body.mod-held .term-link,
   overflow: hidden;
   isolation: isolate;
   white-space: pre;
-  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono);
+  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono-system);
   font-size: var(--term-font-size);
   font-weight: var(--term-weight);
   line-height: var(--term-leading);
@@ -14848,7 +15125,9 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   height: var(--chat-code-copy-icon);
 }
 
-/* 인라인 코드는 둥근 칩 — 블록(`pre`) 안의 코드는 제 우물의 옷을 입는다. */
+/* 인라인 코드는 둥근 칩 — 블록(`pre`) 안의 코드는 제 우물의 옷을 입는다. 차례
+ * 목록의 명령도 같은 칩이다. */
+.your-turn-mono,
 .is-chat-page .helper-said :not(pre) > code {
   padding: 0 0.35em;
   border-radius: var(--radius-sm);
@@ -16484,7 +16763,9 @@ details[open] > .helper-cap::after {
 
 /* The permission mode's reach, worn as one colour by the send, the focus
  * ring and the spinner's mark (the extension's `[data-permission-mode]`).
- * A mode that asks wears no attribute, and the agent's own colour. */
+ * A mode that asks wears no attribute, and the agent's own colour; a mode
+ * that asks nothing wears its attribute and no colour (the chip's triangle
+ * says it, `paintComposerModeChip`). */
 .worker-composer[data-permission-reach="edits"],
 .helper-status[data-permission-reach="edits"] {
   --chat-reach: var(--chat-reach-edits);
@@ -16497,13 +16778,7 @@ details[open] > .helper-cap::after {
   --chat-reach-ink: var(--chat-reach-plan-ink);
 }
 
-.worker-composer[data-permission-reach="bypass"],
-.helper-status[data-permission-reach="bypass"] {
-  --chat-reach: var(--chat-reach-bypass);
-  --chat-reach-ink: var(--chat-reach-bypass-ink);
-}
-
-.worker-composer[data-permission-reach] .worker-composer-send:not(.is-stop) {
+.worker-composer:is([data-permission-reach="edits"], [data-permission-reach="plan"]) .worker-composer-send:not(.is-stop) {
   background: var(--chat-reach);
   color: var(--chat-reach-ink);
 }
@@ -17948,7 +18223,7 @@ button.helper-sib:hover {
    * moment it committed. The same stack `.term` and `.term-caret` name, for
    * the same reason they name it: the cell the renderer measured is a glyph
    * in THIS face. */
-  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono);
+  font-family: var(--term-font-choice, "SF Mono"), var(--font-mono-system);
   font-variant-ligatures: none;
   font-feature-settings: "liga" 0, "calt" 0;
   font-size: var(--term-font-size);
@@ -22457,12 +22732,6 @@ progress:indeterminate::-webkit-progress-bar {
 
   .sb-pct-short {
     display: inline;
-  }
-}
-
-@container statusbar (max-width: 900px) {
-  .sb-usage-bar {
-    width: 32px;
   }
 }
 
@@ -27221,6 +27490,7 @@ select {
 .tab,
 .tab-close,
 .tab-detached,
+.tab-menu,
 .tab-new,
 .task-chip,
 .task-close,
@@ -37181,6 +37451,46 @@ details.task-board-section > summary {
   flex: 1 1 auto;
   max-width: none;
   margin-left: 0;
+}
+
+/* 2차 A (t-78107, 시안 15): the task board's head is three layers, not five.
+ * The search, the only thing this toolbar holds on the task view, stands in
+ * the title row's right end (the head keeps that room free), and the
+ * schedule's range stands at the tab row's right end — the content starts a
+ * hundred pixels higher. The nav strip stays under the head (the selector
+ * contract). A narrow board keeps both in rows of their own. */
+@container board (min-width: 700px) {
+  .is-task-board > .agent-graph-head {
+    padding-inline-end: calc(var(--board-head-find-width) + var(--space-5) + var(--space-4));
+  }
+
+  .is-task-board > .agent-relations-toolbar {
+    grid-row: 1;
+    align-self: center;
+    justify-self: end;
+    width: var(--board-head-find-width);
+    margin-inline-end: var(--space-5);
+    padding: 0;
+    border-bottom: 0;
+    background: none;
+  }
+
+  /* The surface's padding box starts at the tab row (the tabs pull up over
+   * its gutter), so half a tab row down is the row's middle. */
+  .is-task-board .task-board-surface[data-board-tab="schedule"] {
+    position: relative;
+  }
+
+  .is-task-board .task-board-surface[data-board-tab="schedule"] .board-schedule-zoom {
+    position: absolute;
+    top: calc(var(--board-tab-height) / 2);
+    right: var(--board-gutter);
+    transform: translateY(-50%);
+  }
+
+  .is-task-board .board-schedule-head:has(> .board-schedule-note[hidden]) {
+    margin-bottom: 0;
+  }
 }
 
 /* 범위 선택은 폴더 아이콘을 단 상자이고 (시안의 scope-select), 상자 안의
@@ -52848,6 +53158,730 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .model-role-head .settings-jev-switch { margin: 0; padding: 0; border: 0; background: none; }
 .model-role-head .model-switch-about { display: none; }
 
+/* ==== 2차 B — 당신 차례 · 판 머리 · 읽는 글 · 떠 있는 입력 칸 · 쌓인 일 ========
+ *
+ * IDE design pass 2, part B (t-78111), from the passed draft p-6893560125c34552.
+ * The one blue (`--call`) is spent on what waits on the person and nowhere
+ * else; every kind says itself in a word and a shape beside the colour. */
+
+/* The chip by the wordmark: a ring and 0 in grey at nothing, a filled dot and
+ * the count in the you-blue when something waits. */
+.your-turn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  box-shadow: var(--shadow-border);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.your-turn:not(.is-live):hover {
+  color: var(--ink-chalk);
+}
+
+.your-turn:focus-visible,
+.your-turn-list:focus-visible,
+.pile-branch:focus-visible,
+.pile-scm:focus-visible,
+.pile-cleanup:focus-visible,
+.pile-more:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* One ring of a dot for every state mark here; a state fills it or reshapes it. */
+.your-turn-dot,
+.your-turn-kind::before,
+.pane-head-state::before {
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 var(--rule-width) currentColor;
+}
+
+.your-turn-count {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Lit, the draft's filled pill: white words, a white dot and a chevron down —
+ * up while the list hangs open. */
+.your-turn.is-live {
+  color: var(--call-on-solid);
+  background: var(--call-solid);
+  box-shadow: none;
+}
+
+.your-turn.is-live .your-turn-dot {
+  background: currentColor;
+  box-shadow: none;
+}
+
+.your-turn-chevron {
+  display: none;
+}
+
+.your-turn.is-live .your-turn-chevron {
+  display: block;
+  transform: rotate(90deg);
+}
+
+.your-turn.is-live[aria-expanded="true"] .your-turn-chevron {
+  transform: rotate(-90deg);
+}
+
+/* A narrow window keeps the dot and the number; the word stays the name a
+ * screen reader reads. */
+@media (max-width: 900px) {
+  .your-turn-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+/* The list dropped from the chip, hung from its edge and kept inside the window. */
+.your-turn-list {
+  position: fixed;
+  z-index: var(--your-turn-list-layer);
+  top: calc(var(--your-turn-top, 0px) + var(--space-1));
+  left: clamp(
+    var(--space-4),
+    var(--your-turn-left, 0px),
+    calc(100vw - var(--your-turn-list-width) - var(--space-4))
+  );
+  width: var(--your-turn-list-width);
+  max-height: calc(100vh - var(--your-turn-top, 0px) - var(--space-6));
+  overflow-y: auto;
+  border-radius: var(--radius-xl);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border), var(--shadow-drop);
+  color: var(--ink-chalk);
+  font: var(--type-copy-13);
+}
+
+.your-turn-list-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+}
+
+.your-turn-list-head strong {
+  font: var(--type-heading-14);
+  letter-spacing: var(--tracking-heading-14);
+}
+
+.your-turn-inbox {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.your-turn-inbox:hover {
+  color: var(--ink-chalk);
+}
+
+.your-turn-item {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+}
+
+.your-turn-item:focus-visible,
+.your-turn-row-name:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-offset));
+}
+
+.your-turn-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+/* The kind: a ring for a question, a filled square for a permission, a cross
+ * for a failure — the word beside it either way. */
+.your-turn-kind {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--call);
+  font-weight: 600;
+}
+
+.your-turn-kind::before {
+  content: "";
+}
+
+.your-turn-kind[data-kind="permission"]::before {
+  border-radius: var(--radius-xs);
+  background: currentColor;
+}
+
+.your-turn-kind[data-kind="failed"] {
+  color: var(--signal-halt);
+}
+
+.your-turn-kind[data-kind="failed"]::before {
+  content: "×";
+  width: auto;
+  height: auto;
+  box-shadow: none;
+}
+
+.your-turn-kind[data-kind="waiting"] {
+  color: var(--ink-mist);
+}
+
+.your-turn-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A row's name is its door to the conversation: a button that reads as the name. */
+.your-turn-row-name {
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: start;
+  cursor: pointer;
+}
+
+.your-turn-agent {
+  flex: none;
+}
+
+.your-turn-age {
+  flex: none;
+  margin-left: auto;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.your-turn-question {
+  margin: 0;
+  color: var(--ink-chalk);
+  font: var(--type-label-14);
+}
+
+.your-turn-acts,
+.your-turn-row-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.your-turn-list .btn,
+.your-turn-row .btn {
+  padding: var(--space-1) var(--space-2);
+  font: var(--type-label-12);
+  font-weight: 500;
+}
+
+.your-turn-chord {
+  font: var(--type-label-12-mono);
+  /* On the filled allow its keys are the button's own ink, not the page's grey. */
+  color: inherit;
+  border-color: currentColor;
+}
+
+.your-turn-words {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2);
+}
+
+.your-turn-words .your-turn-question {
+  grid-column: 1 / -1;
+}
+
+.your-turn-field {
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: var(--surface-abyss);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.your-turn-field:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 0;
+}
+
+/* Words that did not go in: caution, not failure — an amber edge and the
+ * sentence, never a red. */
+.your-turn-refusal {
+  margin: 0;
+  padding-left: var(--space-2);
+  border-left: var(--space-1) solid var(--signal-wait);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+}
+
+.your-turn-keys,
+.your-turn-empty {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+/* The sidebar's top group: who waits, one row each, answered in place. */
+.your-turn-group {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0 var(--space-2) var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--call-ground) 30%, transparent);
+  box-shadow: 0 0 0 var(--rule-width) color-mix(in srgb, var(--call) 35%, transparent);
+}
+
+.your-turn-group-top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.your-turn-group-head {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--call);
+  font: var(--type-label-12);
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.your-turn-group-head:hover {
+  color: var(--ink-chalk);
+}
+
+.your-turn-row {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.your-turn-row:hover {
+  background: var(--row-hover);
+}
+
+.your-turn-row-line {
+  overflow: hidden;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The switch's home in the title bar lays nothing out of its own. */
+.view-toggle-home {
+  display: contents;
+}
+
+/* An agent tab's head: above its panes, the tree under it taking the rest. */
+.panes:has(> .pane-head) {
+  flex-direction: column;
+}
+
+.pane-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  min-height: var(--control-height-sm);
+  padding: var(--space-1) var(--space-3);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: var(--surface-deck);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.pane-head-who {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.pane-head-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-head-model {
+  flex: none;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-border);
+  font: var(--type-label-12-mono);
+}
+
+.pane-head-state {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* What the agent is doing: a dot whose shape is the state's — filled while it
+ * works, a ring while it waits on the person — and the word beside it. */
+.pane-head-state::before {
+  content: "";
+  display: inline-block;
+  margin-right: var(--space-1);
+  vertical-align: middle;
+}
+
+.pane-head-state[data-state="working"]::before {
+  background: var(--signal-ready);
+  box-shadow: none;
+}
+
+.pane-head-state[data-state="needs-attention"] {
+  color: var(--call);
+}
+
+.pane-head-pick {
+  /* The one part that gives way when the pane is narrow: the line shortens,
+   * the switch keeps its place. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-head-view {
+  flex: none;
+  margin-left: auto;
+}
+
+/* The conversation line and the switch, one part wherever it stands. */
+.pane-head-line {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.pane-head[hidden] {
+  display: none;
+}
+
+/* In the conversation's own head (t-22100), at its right beside the tally. */
+.chat-head-pane {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.chat-head-pane:empty {
+  display: none;
+}
+
+.chat-tally:not([hidden]) + .chat-head-pane {
+  margin-left: 0;
+}
+
+.chat-head-pane > .pane-head-line {
+  gap: var(--space-2);
+}
+
+/* A narrow pane keeps the head on one line: the conversation's line gives way
+ * first, the switch says itself by its glyphs (its words stay its name), then
+ * the model's pill folds — the composer's chip still says it. */
+@container pane-chat (max-width: 560px) {
+  .chat-head-pane .pane-head-pick {
+    display: none;
+  }
+
+  .chat-head-pane .view-toggle .segment-btn > :not(.view-toggle-glyph) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+@container pane-chat (max-width: 400px) {
+  .chat-head > .worker-meta > .chat-model {
+    display: none;
+  }
+}
+
+/* The narrowest lets the state's clock and the wide gutter go. */
+@container pane-chat (max-width: 280px) {
+  .is-chat-page .worker-head.chat-head {
+    padding-inline: var(--space-2);
+  }
+
+  .chat-head .chat-run > .worker-elapsed {
+    display: none;
+  }
+
+  /* The state's chip gives way after the name; the mark and the switch stay. */
+  .chat-head .chat-run {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+  }
+}
+
+/* The answer read as prose — Geist's copy-16 through the prose tokens
+ * (`--chat-prose-size`, `--chat-prose-leading`) — in one column of
+ * `--reading-column`, centred in the list's room; the dock, measured by the
+ * same token, floats under it on the same axis. */
+.is-chat-page .helper-body > .helper-turns {
+  padding-inline: max(var(--helper-gutter, var(--chat-list-pad-x)), calc((100% - var(--reading-column)) / 2));
+}
+
+/* 쌓인 일: the right column's first tab, the one that says its name — 「쌓인 일
+ * 24」, the draft's word tab. Its number is the commits not in main, a quiet
+ * grey count, not a colour. */
+.activity-tabset #activity-pile-tab {
+  display: inline-flex;
+  flex: 0 1 auto;
+  gap: var(--space-1);
+  width: auto;
+  max-width: none;
+  padding-inline: var(--space-2);
+  font: var(--type-label-12);
+  font-weight: 500;
+  letter-spacing: normal;
+  white-space: nowrap;
+}
+
+.activity-pile-words {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-count {
+  color: var(--ink-mist);
+  font: var(--type-label-12-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.pile {
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  overflow-y: auto;
+  color: var(--ink-chalk);
+  font: var(--type-copy-13);
+}
+
+.pile-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.pile-title {
+  font: var(--type-heading-14);
+  letter-spacing: var(--tracking-heading-14);
+}
+
+.pile-project,
+.pile-section-count,
+.pile-release-state,
+.pile-repo-changed,
+.pile-checks,
+.pile-note,
+.pile-total-words {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.pile-section {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.pile-section-head {
+  display: flex;
+  justify-content: space-between;
+  margin: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-weight: 600;
+}
+
+.pile-release,
+.pile-gate,
+.pile-total,
+.pile-repo,
+.pile-repo-changed,
+.pile-checks,
+.pile-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.pile-release-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.pile-total-count {
+  font: var(--type-heading-24);
+  letter-spacing: var(--tracking-heading-24);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A branch not in main: its name in the repository's own face, how far behind
+ * main when it runs far, its commits — one row, a door to that checkout. */
+.pile-branch {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-1) 0;
+  border: 0;
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: none;
+  color: var(--ink-chalk);
+  font: var(--type-label-12-mono);
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.pile-branch:hover {
+  color: var(--ink-mist);
+}
+
+.pile-branch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pile-branch-behind {
+  flex: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.pile-branch-count {
+  flex: none;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.pile-repo {
+  font: var(--type-label-12-mono);
+}
+
+.pile-scm,
+.pile-more {
+  justify-self: start;
+  padding: var(--space-1) var(--space-2);
+  font: var(--type-label-12);
+}
+
+/* One bar per branch not in main, as long as its commits, in the meter's grey. */
+.pile-bar {
+  display: flex;
+  gap: var(--pile-bar-gap);
+  height: var(--pile-bar-height);
+}
+
+.pile-bar > i {
+  border-radius: var(--radius-xs);
+  background: var(--meter-fill);
+}
+
+.pile-cleanup {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.pile-cleanup:hover {
+  color: var(--ink-mist);
+  text-decoration: underline;
+}
+
+.pile-commits {
+  display: grid;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .your-turn,
+  .your-turn-inbox,
+  .your-turn-group-head,
+  .your-turn-row,
+  .pile-branch,
+  .pile-cleanup {
+    transition: none;
+  }
+}
+
 /* ---- 로딩 (t-67484) -----------------------------------------------------------
  * 로딩은 한 정의다: `aria-busy="true"`를 켜면 일곱 컴포넌트가 모두 같은 모습이 된다 — 이전에는
  * 화면마다 아이콘 회전을 따로 그렸다. 모습은 스켈레톤이 이미 쓰는 맥박(쓰는 곳: .usage-blank)을
@@ -53103,3 +54137,4 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
     border-right: 0;
   }
 }
+

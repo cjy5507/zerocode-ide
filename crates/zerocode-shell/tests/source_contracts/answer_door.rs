@@ -245,12 +245,18 @@ fn a_refusal_has_words_in_five_catalogs_and_a_signalled_wait_asks_the_board_agai
             "`{key}` is not in each of the en, ja, zh and es catalogs"
         );
     }
-    for road in ["function submitAsk(", "function approvalPanelNode("] {
+    // Both roads hand a refusal to the one place that words it, which the
+    // turn list (IDE design pass 2) reads beside the question as well.
+    for road in ["function submitAsk(", "function decideApproval("] {
         assert!(
-            block_after(window, road).contains("answerRefusalWords(error)"),
-            "{road} shows a refusal as the bare word"
+            block_after(window, road).contains("refuseAsk(draft, error)"),
+            "{road} answers a refusal around the one place that words it"
         );
     }
+    assert!(
+        block_after(window, "function refuseAsk(").contains("answerRefusalWords(error)"),
+        "a refused answer is shown as the bare word"
+    );
     // The board is asked again from the hook's handler, only for a wait the
     // hook described nothing of, and the asking is dropped when the pane moves
     // to anything else.

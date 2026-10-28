@@ -1335,18 +1335,20 @@ function paintProviderSegment(provider) {
     // 색조는 사용량의 것이다 — 여기엔 사용량이 없으므로 앞 스캔이 남긴 색을
     // 들고 있어서는 안 된다.
     delete figure.dataset.tone;
+    delete segment.dataset.tone;
     segment.dataset.tip = tip;
     return;
   }
   const tight = tightestUsage(usage);
   const usedPct = tight.window.used_percent;
   const displayedPct = displayedUsagePercentage(usedPct);
-  const fill = el(`${provider.prefix}-fill`);
-  fill.style.width = `${displayedPct}%`;
-  // Urgency belongs in the detailed panel. The always-visible status rail is
-  // deliberately neutral so a healthy quota does not turn the whole footer
-  // into an alert surface as it approaches a reset.
-  delete fill.dataset.tone;
+  el(`${provider.prefix}-bar`).style.setProperty("--gauge-value", String(displayedPct));
+  // The rail stays grey until a window is nearly spent (t-78107, 시안 13): only
+  // past the panel's own hot line does the segment turn amber — and never red,
+  // which this window keeps for a failure. Judged on what is SPENT, whichever
+  // way the person reads the figures.
+  if (usageTone(usedPct) === "hot") segment.dataset.tone = "warn";
+  else delete segment.dataset.tone;
   // 신판 실측(Image #81): verbose의 창 하나는 「N% 사용 <리셋 카운트다운>」이고
   // (Fable 창만 제 이름), 창들은 ·로 나란하다 — 창 라벨(wk·5h)이 아니라
   // 카운트다운이 꼬리인 것이 실측이 우리와 갈리던 자리다.
@@ -3837,6 +3839,8 @@ function absorbReleaseStatus(answer) {
   if (laneSaid !== releaseLaneSaid) {
     releaseLaneSaid = laneSaid;
     scheduleDeskPaint();
+    // 쌓인 일 says the lane too, while its tab is up (shell-scm.js loads after this file).
+    if (typeof paintStackedWork === "function" && !el("activity-pile").hidden) paintStackedWork();
   }
   paintUpdateNotice();
   raiseUpdateToast();
@@ -4172,6 +4176,7 @@ const tipNode = document.createElement("div");
 // (`<section class="permission tip">`), and taking that name would restyle a
 // dialog this has nothing to do with.
 tipNode.className = "tooltip";
+tipNode.id = "window-tooltip";
 tipNode.setAttribute("role", "tooltip");
 tipNode.hidden = true;
 document.body.append(tipNode);
@@ -4179,11 +4184,23 @@ document.body.append(tipNode);
 let tipTimer = null;
 let tipAnchor = null;
 
+/* The pill is the anchor's description while it shows (t-77830): a screen
+ * reader on a focused status-bar item heard its name and not the sentence
+ * the narrow bar folded into the tip. Added beside whatever the anchor
+ * already names, and taken back when the pill goes. */
+function describeByTip(anchor, on) {
+  const ids = (anchor.getAttribute("aria-describedby") ?? "").split(/\s+/).filter((id) => id && id !== tipNode.id);
+  if (on) ids.push(tipNode.id);
+  if (ids.length > 0) anchor.setAttribute("aria-describedby", ids.join(" "));
+  else anchor.removeAttribute("aria-describedby");
+}
+
 function hideTip() {
   if (tipTimer !== null) {
     clearTimeout(tipTimer);
     tipTimer = null;
   }
+  if (tipAnchor) describeByTip(tipAnchor, false);
   tipAnchor = null;
   tipNode.hidden = true;
 }
@@ -4234,8 +4251,10 @@ function showTip(anchor) {
   // an empty `title` used to. Drawing an empty pill would be worse than the
   // attribute being absent.
   if (!words || !anchor.isConnected) return hideTip();
+  if (tipAnchor && tipAnchor !== anchor) describeByTip(tipAnchor, false);
   tipAnchor = anchor;
   tipNode.textContent = words;
+  describeByTip(anchor, true);
   // Measured off-screen first: `hidden` is `display: none`, which has no box
   // to measure, and the entrance animation restarts from the same toggle.
   tipNode.style.left = "0";
@@ -4718,7 +4737,7 @@ function buildTabNode(tab, group) {
   // (rename-file-Bs2nv9pa.js:6325, :6397).
   node.innerHTML =
     '<span class="tab-dot"></span><span class="tab-kind"></span>' +
-    '<span class="tab-label"></span>' +
+    '<span class="tab-label"></span><span class="tab-age"></span>' +
     (tab.pinned
       ? '<span class="tab-pin" aria-hidden="true"></span>'
       : '<button class="tab-close">×</button>');
@@ -4793,12 +4812,26 @@ function buildTabNode(tab, group) {
  * one is this side's honest equivalent: the session ledger once a hook has
  * spoken, the launch ledger from the moment of the spawn. */
 function tabAgentSlug(tab) {
-  if (tab.kind !== "term") return null;
-  for (const term of paneLeaves(tab.layout)) {
-    const named = paneSessions.get(term)?.agent ?? paneAgents.get(term);
-    if (named) return named;
-  }
-  return null;
+  const term = tabAgentTerm(tab);
+  return term === null ? null : termAgentSlug(term);
+}
+
+function termAgentSlug(term) {
+  return paneSessions.get(term)?.agent ?? paneAgents.get(term) ?? null;
+}
+
+/* The pane a tab's agent speaks from — the first that names one. */
+function tabAgentTerm(tab) {
+  // A restored tab not woken yet has no panes to ask (t-20078).
+  if (tab.kind !== "term" || tab.asleep) return null;
+  return paneLeaves(tab.layout).find(termAgentSlug) ?? null;
+}
+
+/* How long the agent in `term` has been at it (t-78107, 시안 2), on the
+ * sidebar row's own clock (`agentRowAgo`) so the two never disagree.
+ * Repainted with the strip — no clock of its own. */
+function termAgeWords(term) {
+  return term === null ? "" : agentRowAgo({ term, state: hookStates.get(term) ?? "working" });
 }
 
 /* Everything about a tab that a render can have changed, onto a node that
@@ -4810,10 +4843,18 @@ function paintTabNode(node, tab) {
   // at the strip it IS the same sentence — one arrives over a socket and the
   // other through a hook.
   const said = hookStateOfTab(tab);
+  // A pane whose ring the notify seat took away is not marked as waiting
+  // either (t-6043): the mark is the ring's twin on the strip.
+  const waiting = said === "needs-attention" && !tabHushed(tab);
+  const lead = tabAgentTerm(tab);
+  const ago = termAgeWords(lead);
   const classes = [
     "tab",
     tab.kind === "lane" ? `is-lane ${slotClass(focusedId)}` : "",
     tab.id === activeTabId ? "is-active" : "",
+    // The tab its own leaf shows — in a split, a leaf without the window's
+    // active tab still shows one, and a folded strip keeps that one in sight.
+    groups.get(tab.pane)?.frontTabId === tab.id ? "is-front" : "",
     // Unsaved edits, on the tab rather than only in the header — the header
     // belongs to the file you are looking at, and the one you have to be
     // told about is the one you are not.
@@ -4829,11 +4870,10 @@ function paintTabNode(node, tab) {
     tab.kind === "term" && paneLeaves(tab.layout).some((term) => bellRang.has(term))
       ? "is-bell"
       : "",
-    // A pane whose ring the notify seat took away is not marked as waiting
-    // either (t-6043): the mark is the ring's twin on the strip.
-    said === "needs-attention" && !tabHushed(tab) ? "is-waiting" : "",
+    waiting ? "is-waiting" : "",
     said === "working" ? "is-streaming" : "",
     tab.color ? "has-color" : "",
+    ago ? "has-age" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -4863,8 +4903,10 @@ function paintTabNode(node, tab) {
   const turn = tab.asleep && tab.wakeOrder
     ? ` \u00b7 ${t("tab.wakingOrder", "깨우는 중 — {{n}}번째", { n: tab.wakeOrder })}`
     : "";
-  const wording = tabStripWords(tab) + turn;
+  const wording = tabLabel(tab) + turn;
   if (label.textContent !== wording) label.textContent = wording;
+  const age = node.querySelector(".tab-age");
+  if (age.textContent !== ago) age.textContent = ago;
   // 이 탭의 판이 발행하고 아직 아무도 열지 않은 페이지(t-11958).
   paintTabUnseen(node, tab);
   // A tab holding an agent leads with the agent's identity, not the shell
@@ -4877,7 +4919,7 @@ function paintTabNode(node, tab) {
   // never a rebuild. Swapped only when the answer changes, so a render is
   // not a refetch and the node under the pointer holds still.
   const wearing = node.querySelector(".tab-kind");
-  const slug = tabAgentSlug(tab);
+  const slug = lead === null ? null : termAgentSlug(lead);
   // Keyed by the agent AND the domain its mark comes from. A pane resumed at
   // boot is painted before the catalog has answered, so the first face is the
   // letter tile with no domain to fetch — and a key of the slug alone would
@@ -4907,7 +4949,9 @@ function paintTabNode(node, tab) {
     tab.kind === "lane"
       ? (lane?.session_id ?? "")
       : tab.kind === "term"
-        ? termTabTip(tab)
+        // The ring said in words too (시안 2: the shape and the word together),
+        // the word the sidebar's row wears for the same state.
+        ? [waiting ? bucketWord("attention") : "", termTabTip(tab)].filter(Boolean).join(" · ")
         : (tab.path ?? "");
   if (node.dataset.tip !== tip) node.dataset.tip = tip;
 }
@@ -5040,6 +5084,71 @@ function addTabButton(pane, group) {
   return add;
 }
 
+/* 2차 A (t-78107, 시안 17): 「탭 N ⌄」 — in a window under `--fold-tab-menu`
+ * the strip shows the tab on stage and this, whose menu names every tab of
+ * the strip and, last, the new-terminal door the + folds into under
+ * `--fold-tab-only`. The rows are built as the menu opens and dropped as it
+ * closes (`openSidebarMenu`); the control itself stands hidden by the
+ * stylesheet in a wider window. */
+function tabMenuButton(pane, group) {
+  if (pane.tabMenu) return pane.tabMenu;
+  const opener = document.createElement("button");
+  opener.type = "button";
+  opener.className = "tab-menu";
+  opener.setAttribute("aria-haspopup", "menu");
+  opener.setAttribute("aria-expanded", "false");
+  // Enter and Space on it open its menu; they are not the staged terminal's.
+  opener.dataset.keyboardOwner = "true";
+  opener.innerHTML = `<span class="tab-menu-count"></span>${icon("chevron")}`;
+  const open = () => {
+    focusedPane = group;
+    if (!sidebarMenu.hidden && menuOpener === opener) return closeSidebarMenu();
+    const box = opener.getBoundingClientRect();
+    openSidebarMenu(box.left, box.bottom + 4, tabMenuRows(pane, group, opener), opener);
+  };
+  // The title bar hands a press to macOS on mousedown, as the + found.
+  opener.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    open();
+  });
+  opener.addEventListener("click", (event) => {
+    if (event.detail > 0) return;
+    open();
+  });
+  pane.tabMenu = opener;
+  return opener;
+}
+
+function tabMenuRows(pane, group, opener) {
+  const rows = paneTabs(group).map((tab) => ({
+    choice: true,
+    checked: tab.id === pane.frontTabId,
+    label: tabLabel(tab),
+    run: () => setActiveTab(tab.id),
+  }));
+  rows.push({ separator: true }, {
+    label: t("terminal.new", "새 터미널"),
+    action: "terminal.newTab",
+    run: () => {
+      focusedPane = group;
+      openTabCreate(opener, "tab-menu");
+    },
+  });
+  return rows;
+}
+
+function paintTabMenuButton(pane, group, count) {
+  const opener = tabMenuButton(pane, group);
+  const words = t("terminal.tabMenu", "탭 {{n}}", { n: count });
+  const said = opener.firstElementChild;
+  if (said.textContent !== words) said.textContent = words;
+  const tip = t("terminal.tabMenuTip", "이 판의 탭 모두");
+  if (opener.dataset.tip !== tip) opener.dataset.tip = tip;
+  return opener;
+}
+
 /* The strip, reconciled rather than rebuilt.
  *
  * This threw every node away and made them again on each render — and a
@@ -5051,10 +5160,27 @@ function addTabButton(pane, group) {
  *
  * Nodes are kept by tab id and reordered in place. Only a tab whose SHAPE
  * changed — pinned, or a different kind — is built again. */
+/* A strip that changes width moves every tab — its tabs fold and unfold at
+ * a width (t-78107, 시안 17) — and the tab in front can land behind the fade
+ * with no change of tab to reveal it again. One observer for every strip. */
+const tabStripWatch = new ResizeObserver((entries) => {
+  for (const { target } of entries) {
+    const pane = [...groups.values()].find((one) => one.strip === target);
+    if (!pane) continue;
+    pane.revealedTab = null;
+    revealActiveTab(pane);
+  }
+});
+
 function renderPane(pane, group) {
   const strip = pane.strip;
+  if (!pane.stripWatched) {
+    tabStripWatch.observe(strip);
+    pane.stripWatched = true;
+  }
   const held = (pane.tabNodes ??= new Map());
   const wanted = paneTabs(group);
+  pane.frontTabId = activeTabIn(group)?.id ?? null;
   const seen = new Set();
   for (const [at, tab] of wanted.entries()) {
     seen.add(tab.id);
@@ -5088,6 +5214,7 @@ function renderPane(pane, group) {
     });
     pill.setAttribute("aria-label", pill.dataset.tip);
   }
+  const menu = paintTabMenuButton(pane, group, wanted.length);
   const add = addTabButton(pane, group);
   const addChord = optionalShortcutLabel("terminal.newTab");
   const addTip = addChord === null
@@ -5096,13 +5223,15 @@ function renderPane(pane, group) {
   if (add.dataset.tip !== addTip) add.dataset.tip = addTip;
   const addLabel = t("terminal.newTab", "새 터미널");
   if (add.getAttribute("aria-label") !== addLabel) add.setAttribute("aria-label", addLabel);
-  // Both tail pieces settle in one move, and only when either is out of
+  // The tail pieces settle in one move, and only when one is out of
   // place. Appending each on its own — "the pill last, then the add last" —
   // had them evict each other on every render: two nodes moved, four
   // childList mutations and a relayout of the strip on every agent-paint
   // beat, with nothing on the strip having changed (the freeze probe's
   // `#tabstrip childList×236` over sixty frames).
-  if (strip.lastElementChild !== add || add.previousElementSibling !== pill) strip.append(pill, add);
+  if (strip.lastElementChild !== add || add.previousElementSibling !== pill || pill.previousElementSibling !== menu) {
+    strip.append(menu, pill, add);
+  }
   revealActiveTab(pane);
   // Every strip in the tree stays visible: a group with no tabs has already
   // folded out of the tree (`collapseStageGroup`), so the only empty strip

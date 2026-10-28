@@ -21,6 +21,9 @@ const DIST = join(SOURCE, "dist");
 const FILES = Object.freeze([
   "favicon.ico",
   "favicon.png",
+  "fonts/Geist-Variable.woff2",
+  "fonts/GeistMono-Variable.woff2",
+  "fonts/OFL.txt",
   "index.html",
   "shell-boot.js",
   "shell-browser.js",
@@ -83,6 +86,17 @@ for (const [tag] of markup.matchAll(/<(?:script|link)\b[^>]*>/gi)) {
   if (!reference || /^(?:[a-z]+:|\/\/|#)/i.test(reference)) continue;
   const name = reference.replace(/^\.\//, "").split(/[?#]/)[0];
   if (!FILES.includes(name)) throw new Error(`index.html references an unshipped UI asset: ${name}`);
+}
+// The stylesheets are consumers too: a font named by `url()` and left off the
+// list would ship a window drawing the fallback face with no error anywhere.
+for (const sheet of FILES.filter((name) => name.endsWith(".css"))) {
+  const css = await readFile(join(SOURCE, sheet), "utf8");
+  for (const [, quoted, bare] of css.matchAll(/url\(\s*(?:["']([^"']+)["']|([^)\s]+))\s*\)/gi)) {
+    const reference = quoted ?? bare;
+    if (/^(?:[a-z]+:|\/\/|#)/i.test(reference)) continue;
+    const name = join(dirname(sheet), reference).split(sep).join("/").split(/[?#]/)[0];
+    if (!FILES.includes(name)) throw new Error(`${sheet} references an unshipped UI asset: ${name}`);
+  }
 }
 
 const portable = (path) => path.split(sep).join("/");

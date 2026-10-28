@@ -8914,7 +8914,7 @@ fn a_refusal_never_carries_the_credential_it_was_pushed_with() {
 /// private use area; our stack named none, so every powerline separator
 /// and every agent TUI's icon came out tofu — the first thing anyone sees.
 /// The file cannot come across (a woff2 is an asset, and assets do not
-/// ship), so what is pinned is the NAMES: anyone with a patched face
+/// ship — Geist is the one the person let in), so what is pinned is the NAMES: anyone with a patched face
 /// installed gets their prompt today.
 ///
 /// **The caret.** Block, blinking on a one-second step, hollow on the pane
@@ -8941,7 +8941,7 @@ fn the_terminal_wears_the_options_orca_ships() {
     // A patched face by name, before the generic and after the Latin
     // stack — a fallback for the codepoints above it do not carry, never
     // the face that draws ordinary text.
-    let mono = block_after(tokens, "--font-mono:");
+    let mono = block_after(tokens, "--font-mono-system:");
     for face in [
         "\"Symbols Nerd Font Mono\"",
         "\"MesloLGS NF\"",
@@ -10846,7 +10846,7 @@ fn the_pr_grouping_stands_orcas_lanes_and_the_headers_pin() {
          review no longer counts as a new shape:\n{refreshing}"
     );
     assert!(
-        block_after(window, "function worktreeListShape(held) {").contains("${reviewGeneration}"),
+        block_after(window, "function worktreeListShape(held, resting) {").contains("${reviewGeneration}"),
         "the shape guard is blind to review movement — a merged PR keeps \
          its old lane until something else rebuilds"
     );
@@ -21897,6 +21897,15 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         .find(":root[data-theme=\"light\"] {")
         .expect("the light treatment block is gone from ui/tokens.css");
     let (dark, light) = tokens.split_at(light_at);
+    // A session that asks no permission wears no colour — red is the window's
+    // word for a failure, and the composer's chip says it by a triangle — so
+    // the bypass reach has no token (IDE design pass 2, item 11).
+    for gone in ["reach-bypass", "reach-bypass-ink"] {
+        assert!(
+            !tokens.contains(&format!("\n  --chat-{gone}:")),
+            "--chat-{gone} came back; the bypass reach wears no colour"
+        );
+    }
     for name in [
         "ground",
         "bubble",
@@ -21917,8 +21926,6 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "reach-edits-ink",
         "reach-plan",
         "reach-plan-ink",
-        "reach-bypass",
-        "reach-bypass-ink",
         // The approved conversation (t-22100): a step's argument, the rail's tick.
         "arg-ink",
         "rail-tick",
@@ -22390,12 +22397,43 @@ fn the_conversation_wears_the_extensions_own_measures() {
         ("agent-send-claude", var("--app-claude-clay-button-orange")),
         ("chat-send-ink", var("--app-claude-ivory")),
     ];
+    // A token may name a scale step (`var(--radius-xl)`); it is read at the
+    // step's own value, one hop.
+    let resolved = |name: &str| -> String {
+        let raw = token(name);
+        match raw
+            .strip_prefix("var(--")
+            .and_then(|inner| inner.strip_suffix(')'))
+        {
+            Some(step) => token(step),
+            None => raw,
+        }
+    };
+    // Where the passed design (p-6893560125c34552, items 4 and 9) leaves the
+    // panel on purpose: the reading column is 760px, not the panel's 680px,
+    // and the composer's corners are 12px, not 8px. The panel's number stays
+    // pinned beside the approved one, so a panel that moves retires the entry.
+    let approved: [(&str, &str, &str); 2] = [
+        ("chat-dock-max", "760px", "680px"),
+        ("chat-radius-composer", "12px", "8px"),
+    ];
     let mut drifted = Vec::new();
     for (name, want) in &pairs {
-        let have = token(name);
-        if measure(&have) != measure(want) {
+        let have = resolved(name);
+        let wanted = match approved.iter().find(|(token_name, _, _)| token_name == name) {
+            Some((_, ours, panels)) => {
+                if measure(want) != measure(panels) {
+                    drifted.push(format!(
+                        "the panel's stylesheet now says `{want}` for --{name}, not `{panels}` — retire the approved `{ours}`"
+                    ));
+                }
+                (*ours).to_string()
+            }
+            None => want.clone(),
+        };
+        if measure(&have) != measure(&wanted) {
             drifted.push(format!(
-                "--{name} is `{have}`, the panel's stylesheet says `{want}`"
+                "--{name} is `{have}`, the panel's stylesheet says `{wanted}`"
             ));
         }
     }

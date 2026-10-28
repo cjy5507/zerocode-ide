@@ -1158,7 +1158,7 @@ let termContrastBar = null;
 
 function termMinContrast() {
   if (termContrastBar === null) {
-    const screen = readColor("var(--term-screen-bg)");
+    const screen = readColor(TERM_SCREEN_GROUND);
     termContrastBar =
       screen !== null && contrastRatio([0, 0, 0], screen) > contrastRatio([255, 255, 255], screen)
         ? 4.5
@@ -1177,7 +1177,7 @@ function termMinContrast() {
 let paletteGeneration = 0;
 const contrastLift = new Map();
 const indexedContrastLift = new Map();
-/* And the tokens themselves, read once each per palette.
+/* And the tokens themselves, read once per palette.
  *
  * The two maps above cache ANSWERS, which is not the same as caching the
  * reads that produce them: `nearestReadableIndex` walks all 256 palette
@@ -1190,8 +1190,27 @@ const indexedContrastLift = new Map();
  *
  * A token's value cannot change without `forgetPalette`, which is what makes
  * this safe to hold: every road that rebinds `--term-*` — a treatment flip, a
- * theme, an override — ends there (`applyTheme`, `applyTerminalPalette`). */
+ * theme, an override — ends there (`applyTheme`, `applyTerminalPalette`).
+ *
+ * And one style read fills the lot (t-78802): the first miss of a palette
+ * takes the token asked for, every indexed entry and the screen's ground from
+ * the same declaration. One per token was still 258 reads the first time a
+ * colour needed lifting — which on the design's darker ground comes in the
+ * middle of a stream, 2.1 style reads a frame over a dense scene. */
 const resolvedTokens = new Map();
+const TERM_PALETTE_SIZE = 256;
+const TERM_GROUND_TOKEN = "--term-screen-bg";
+const TERM_SCREEN_GROUND = `var(${TERM_GROUND_TOKEN})`;
+
+function resolveToken(name) {
+  const style = getComputedStyle(document.documentElement);
+  const read = (token) => resolvedTokens.set(token, style.getPropertyValue(token).trim());
+  if (resolvedTokens.size === 0) {
+    for (let index = 0; index < TERM_PALETTE_SIZE; index += 1) read(`--term-${index}`);
+    read(TERM_GROUND_TOKEN);
+  }
+  read(name);
+}
 
 function readColor(css) {
   if (typeof css !== "string") return null;
@@ -1201,13 +1220,8 @@ function readColor(css) {
   // palette here, which would be a copy to keep in step.
   const via = text.match(/^var\((--[a-z0-9-]+)\)$/i);
   if (via) {
-    const held = resolvedTokens.get(via[1]);
-    if (held === undefined) {
-      text = getComputedStyle(document.documentElement).getPropertyValue(via[1]).trim();
-      resolvedTokens.set(via[1], text);
-    } else {
-      text = held;
-    }
+    if (!resolvedTokens.has(via[1])) resolveToken(via[1]);
+    text = resolvedTokens.get(via[1]);
     if (text === "") return null;
   }
   const hex = text.match(/^#([0-9a-f]{6})$/i);
@@ -1265,7 +1279,7 @@ function computeReadable(fg, bg) {
   const ink = readColor(fg);
   // A run with no background of its own sits on the screen, so that is what it
   // has to be legible against.
-  const ground = readColor(bg ?? "var(--term-screen-bg)");
+  const ground = readColor(bg ?? TERM_SCREEN_GROUND);
   if (ink === null || ground === null) return fg;
   if (contrastRatio(ink, ground) >= termMinContrast()) return fg;
   const toward = luminance(ground) > 0.5 ? [0, 0, 0] : [255, 255, 255];
@@ -1300,12 +1314,12 @@ function nearestReadableIndex(readable, bg) {
   const held = indexedContrastLift.get(key);
   if (held !== undefined) return held;
   const target = readColor(readable);
-  const ground = readColor(bg ?? "var(--term-screen-bg)");
+  const ground = readColor(bg ?? TERM_SCREEN_GROUND);
   if (target === null || ground === null) return 15;
   let best = 15;
   let bestDistance = Number.POSITIVE_INFINITY;
   let foundReadable = false;
-  for (let index = 0; index < 256; index += 1) {
+  for (let index = 0; index < TERM_PALETTE_SIZE; index += 1) {
     const candidate = readColor(`var(--term-${index})`);
     if (candidate === null) continue;
     const reads = contrastRatio(candidate, ground) >= termMinContrast();
@@ -5120,16 +5134,6 @@ function refreshChrome() {
   // The lane's tab carries what a lane header used to: which agent, which
   // session, and whether it is waiting for someone.
   renderTabs();
-
-  const waiting = order.filter((id) => {
-    const held = lanes.get(id);
-    return held && ["awaiting_permission", "blocked"].includes(held.lane.state);
-  });
-  attention.hidden = waiting.length === 0;
-  if (waiting.length > 0) {
-    attention.className = `attention ${slotClass(waiting[0])}`;
-    attentionCount.textContent = t("session.waiting", "{{count}}개 대기", { count: waiting.length });
-  }
 }
 
 function upsertLane(lane) {
@@ -5651,6 +5655,8 @@ function collapseStageGroup(group) {
       held.emulatorView._emulatorResizeObserver = null;
       held.emulatorView._emulatorTab = null;
     }
+    // The strip watcher holds its strip the same way (t-78107).
+    tabStripWatch.unobserve(held.strip);
     held.el.remove();
     groups.delete(group);
   }
@@ -6555,6 +6561,9 @@ function prunePanes(node, keep) {
  * this host's slots and keep their scrollback — the same reason `updateStage`
  * moves a surface rather than drawing a second one. */
 const paneHosts = new Map();
+/* Each agent tab's head (2차 B, `paintPaneHead`), by tab: the first child of
+ * its host through every re-render of the tree below it. */
+const paneHeads = new Map();
 
 function paneHost(tab) {
   const held = paneHosts.get(tab.id);
@@ -6579,12 +6588,7 @@ function paneHost(tab) {
       if (paneModeOf(tab, host) !== host.dataset.paneMode) {
         renderPanes(tab);
       } else {
-        for (const term of paneLeaves(tab.layout)) {
-          const view = termViews.get(term);
-          if (!view || view.host.hidden) continue;
-          view.measure();
-          resizeTermTab(term);
-        }
+        remeasurePanes(tab);
       }
     }, SIDEBAR_REFLOW_DEBOUNCE_MS);
   }).observe(host);
@@ -6606,7 +6610,21 @@ function paneModeOf(tab, host) {
   return chain.length * PANE_MIN_GRID_WIDTH > width ? "grid" : "split";
 }
 
+/* Every shell of the tab that is on screen measures its room again and tells its program. */
+function remeasurePanes(tab) {
+  for (const term of paneLeaves(tab.layout)) {
+    const view = termViews.get(term);
+    if (!view || view.host.hidden) continue;
+    view.measure();
+    resizeTermTab(term);
+  }
+}
+
 function dropPaneHost(id) {
+  // The view switch may stand in this tab's head line — in the head, or in its
+  // pane's conversation head (`placePaneHeadLine`); it goes home before either does.
+  if (paneHeads.get(id)?.__line.contains(viewToggle)) el("view-toggle-home").appendChild(viewToggle);
+  paneHeads.delete(id);
   paneHosts.get(id)?.remove();
   paneHosts.delete(id);
 }
@@ -7106,7 +7124,9 @@ function renderPanes(tab) {
   // that still fits keeps the split renderer, its measured divider and its
   // drag; so does every hand-built shape (`paneModeOf`).
   const mode = paneModeOf(tab, host);
+  const head = paneHeads.get(tab.id);
   host.replaceChildren(
+    ...(head ? [head] : []),
     mode === "grid"
       ? paneGridEl(tab, uniformVerticalChainLeaves(tab.layout))
       : paneNodeEl(tab, tab.layout),
@@ -7118,12 +7138,7 @@ function renderPanes(tab) {
   // Every visible shell measures again: what changed is how much room each of
   // them has, and a grid sized for the old room paints for columns that are
   // not there.
-  for (const term of paneLeaves(tab.layout)) {
-    const view = termViews.get(term);
-    if (!view || view.host.hidden) continue;
-    view.measure();
-    resizeTermTab(term);
-  }
+  remeasurePanes(tab);
   // Every road that changes the shape ends here — split, prune, title,
   // expand, equalize — so this is the one place the file learns about all of
   // them. Orca persists a snapshot at each of those verbs individually
@@ -9557,35 +9572,10 @@ const TAB_GLYPH = {
   emulator: "phone",
 };
 
-/* What the strip writes on a tab (t-45938): its name, after the role its pane
- * plays — 「코디 · …」, 「워커 · …」, 「사람 · …」 — the word its sidebar row
- * wears, so the strip tells the coordinator's tab from a worker's without the
- * board. A tab holding the coordinator's pane is the coordinator's, whatever
- * else is split into it; any other tab speaks for its one pane. Only the strip
- * leads with the role: everything else that names a tab (a crumb, a sentence)
- * names the work.
- *
- * And it counts (t-67936): a tab holding two runs' coordinators reads
- * 「코디 2 · …」. The tab the 2026-10-21 13:24:35 close took held two
- * coordinators and read as one; its tip names them (`termTabTip`). */
-function tabStripWords(tab) {
-  const label = tabLabel(tab);
-  const role = tabRole(tab);
-  if (!role) return label;
-  const panes = paneLeaves(tab.layout).filter((term) => paneRole(term)?.kind === role.kind).length;
-  const word = panes > 1
-    ? t("agent.role.count", "{{role}} {{n}}", { role: paneRoleWord(role), n: panes })
-    : paneRoleWord(role);
-  return t("agent.role.tab", "{{role}} · {{label}}", { role: word, label });
-}
-
-function tabRole(tab) {
-  if (tab.kind !== "term" || tab.asleep) return null;
-  const leaves = paneLeaves(tab.layout);
-  const roles = leaves.map(paneRole).filter(Boolean);
-  return roles.find((role) => role.kind === "coordinator") ?? (leaves.length === 1 ? roles[0] ?? null : null);
-}
-
+/* A tab's role — the coordinator's, a worker's — is said on its tip and its
+ * sidebar row, not before its name (t-78107, 시안 「또렷한 Geist」 2: the strip
+ * says the work and its state; 「코디 · …」 had taken a third of every
+ * tab). `termTabTip` names the seats a tab holds (t-45938, t-67936). */
 function tabLabel(tab) {
   // 표와 노트북은 그 파일 자체이지 파생된 판이 아니다 — 이름만 단다(1-g39·1-g40).
   if (

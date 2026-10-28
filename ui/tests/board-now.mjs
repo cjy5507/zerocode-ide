@@ -201,7 +201,9 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, extra = 0, 
  * (창 높이 안)의 숫자 낱말, 카드, 글자 크기 단계, 원장의 영어 진단, 요소 수. 숫자는
  * 시각·분·개수만 센다 — 과업 id·sha·폴더 이름·모델 이름은 숫자가 아니라 이름이다(`code`,
  * 옮기지 않는 이름 `translate="no"`, 글자 뒤에 붙은 수). 시안의 셈도 시각과 개수(`data-fig`)만
- * 셌고, 그 첫 화면의 「Opus 5.5」·「Sonnet 5.5」는 세지 않았다. */
+ * 셌고, 그 첫 화면의 「Opus 5.5」·「Sonnet 5.5」는 세지 않았다. 사람·에이전트가 쓴 과업과
+ * 목표의 제목도 이름이다(t-78802): 판이 센 수가 아니라 이름의 일부라, 「상황판 디자인 시안
+ * 2차」의 2는 시안의 셈에 없다 — 제목은 홀로 서든 문장 속에 끼든 빼고 센다. */
 function boardFirstScreen() {
   const view = document.querySelector("#board-view");
   const surface = view.querySelector(".task-board-surface");
@@ -210,6 +212,8 @@ function boardFirstScreen() {
     && el.getBoundingClientRect().top < fold && el.getBoundingClientRect().bottom > 0;
   const all = [...surface.querySelectorAll("*")].filter(visible);
   const walker = document.createTreeWalker(surface, NodeFilter.SHOW_TEXT);
+  const names = [...new Set(deskLedger.tasks.flatMap((task) => [task.title, task.parent_title]).filter(Boolean))]
+    .sort((a, b) => b.length - a.length);
   let figures = 0;
   let raw = 0;
   const words = [];
@@ -217,7 +221,8 @@ function boardFirstScreen() {
     const host = node.parentElement;
     if (!host || !node.textContent.trim() || !visible(host) || host.closest('code, pre, details:not([open]), [translate="no"]')) continue;
     words.push(node.textContent);
-    figures += (node.textContent.match(/(?<![\p{L}\-.\d])\d+(?:[:.,]\d+)*/gu) ?? []).length;
+    const said = names.reduce((text, name) => text.replaceAll(name, " "), node.textContent);
+    figures += (said.match(/(?<![\p{L}\-.\d])\d+(?:[:.,]\d+)*/gu) ?? []).length;
     if (/exited in|nobody has looked|before reporting|dispatch again|resolve this/i.test(node.textContent)) raw += 1;
   }
   const sizes = new Set(all.filter((el) => [...el.childNodes].some((one) => one.nodeType === 3 && one.textContent.trim()))
@@ -228,8 +233,9 @@ function boardFirstScreen() {
 
 /* Every word on the Now tab against what it is drawn on — the draft's own contrast reckoning
  * (reports/t-67561/src/common.js): the text's colour over the grounds stacked under it, up to the
- * first opaque one. A disabled control is left out, as WCAG leaves it. A page function. */
-function nowContrast() {
+ * first opaque one. A disabled control is left out, as WCAG leaves it. A page function; another
+ * surface's scene hands it the selector of its own scope. */
+export function nowContrast(scopeSelector = "#board-view :is(.board-now-tabs, .task-board-intro, .task-board-desk)") {
   const parse = (value) => {
     let found = /^rgba?\(([^)]+)\)$/.exec(value);
     if (found) {
@@ -266,8 +272,7 @@ function nowContrast() {
     for (let at = layers.length - 1; at >= 0; at -= 1) ground = over(layers[at], ground);
     return ground;
   };
-  const view = document.querySelector("#board-view");
-  const scope = [...view.querySelectorAll(".board-now-tabs, .task-board-intro, .task-board-desk")];
+  const scope = [...document.querySelectorAll(scopeSelector)];
   let min = 99;
   let where = "";
   const below = [];
@@ -279,6 +284,12 @@ function nowContrast() {
       const ink = over(parse(getComputedStyle(node).color), ground);
       const [high, low] = [lum(ink), lum(ground)].sort((a, b) => b - a);
       const ratio = (high + 0.05) / (low + 0.05);
+      // A glyph that is itself a picture (an agent's mark, `role="img"`) is a graphic:
+      // WCAG 1.4.11 asks 3:1 of it, and it is still reported when below.
+      if (node.matches('[role="img"]')) {
+        if (ratio < 3) below.push(`${node.className || node.tagName}: ${node.textContent.trim().slice(0, 24)} ${ratio.toFixed(2)}`);
+        continue;
+      }
       if (ratio < min) { min = ratio; where = node.textContent.trim().slice(0, 24); }
       if (ratio < 4.5) below.push(`${node.className || node.tagName}: ${node.textContent.trim().slice(0, 24)} ${ratio.toFixed(2)}`);
     }
@@ -438,6 +449,10 @@ export async function testBoardNow(browser, origin, ok) {
 
     /* ---- 시안의 넷: 숫자 ≤ 8 · 묶음 3 · 글자 단계 4 · 영어 진단 0 ---- */
     const first = await page.evaluate(boardFirstScreen);
+    /* 2차 디자인(t-78802)의 수: 8/8, 여유 0 — 2개·시각·3분·12분·8분째·21분째·26분째·끝난 과업 3개.
+     * 여덟째인 끝난 과업 수는 시안 15(상황판 머리 253 → 136 px)가 돌려준 자리로 900 px 안에 올라왔다.
+     * 다음에 숫자가 하나 더 필요하면 예산을 올리지 말고, 목록이 선 자리(끝난 과업 줄을 900 px 아래로,
+     * 또는 접기)에서 자리를 낸다. */
     ok("the first screen at 1440×900 carries at most eight figures", first.figures <= 8, JSON.stringify(first));
     ok("the first screen is three groups: your turn, the build line, running now", first.cards === 3, JSON.stringify(first));
     ok("the first screen sets its words in at most four sizes", first.sizes.length <= 4, JSON.stringify(first.sizes));
