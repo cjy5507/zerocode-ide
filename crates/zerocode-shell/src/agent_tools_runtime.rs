@@ -1224,10 +1224,7 @@ impl agent_teams::Host for TeamWindow {
         let pane_key = caller
             .map(|term| format!("term-{term}"))
             .unwrap_or_default();
-        let witness = crate::kill_witness::PaneProcesses {
-            app: self.app.clone(),
-        };
-        Some(witness.roots(&pane_key))
+        Some(crate::kill_witness::PaneProcesses.roots(&pane_key))
     }
 
     /// The Codex lease a split of `command` will need, taken now — before its
