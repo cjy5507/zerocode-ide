@@ -46,7 +46,7 @@ pub(crate) fn carry(
             checkouts.clone()
         }
     };
-    let judge = judge(roots, table, checkouts);
+    let judge = judge(roots, table, checkouts, std::process::id());
     carry_with(
         ask,
         rows,
@@ -60,18 +60,38 @@ pub(crate) fn carry(
 /// The protection judgment this window stands behind the verb — the ONE place
 /// it is chosen. A window that cannot say whose processes are whose ends
 /// nothing.
+///
+/// The roots are the window's own reading of its panes ([`crate::kill_witness`]);
+/// the processes the window (`window`, its pid) started that no pane holds —
+/// its helpers — are added by the guard's own naming of them
+/// ([`kill::ProtectedRoot::from_window_env`]), so a refusal says which was hit.
 fn judge(
     roots: Option<KillRoots>,
     table: ProcessTable,
     checkouts: Vec<Checkout>,
+    window: u32,
 ) -> Box<dyn Judge> {
     match roots {
-        Some(roots) => Box::new(KillRule {
-            table,
-            caller: roots.caller,
-            protected: roots.protected,
-            checkouts,
-        }),
+        Some(roots) => {
+            let mut protected = roots.protected;
+            let told = window.to_string();
+            let named = kill::ProtectedRoot::from_window_env(
+                |name| (name == kill::WINDOW_PID_ENV).then(|| told.clone()),
+                &table,
+                roots.caller.unwrap_or_default(),
+            );
+            for root in named {
+                if !protected.iter().any(|held| held.pid == root.pid) {
+                    protected.push(root);
+                }
+            }
+            Box::new(KillRule {
+                table,
+                caller: roots.caller,
+                protected,
+                checkouts,
+            })
+        }
         None => Box::new(NoRoots),
     }
 }
@@ -106,15 +126,18 @@ impl Judge for KillRule {
         match kill::judge_kill(&[call], &self.table, self.caller, &self.protected) {
             KillVerdict::Allow => Judgment::Allow,
             KillVerdict::Deny { reason } => Judgment::Deny { why: reason },
-            // One pid in a table that read: the guard asks only for a
-            // process no pane and not the window holds.
+            // For one pid the guard asks for two things: a process no pane
+            // and not the window holds, or a table that did not read. Only
+            // the first is the coordinator's to answer; an unread table
+            // (`tree_of` is empty only then) stays a refusal.
             KillVerdict::Ask { reason } => {
+                let table_read = !self.table.tree_of(row.pid).is_empty();
                 let in_checkout = row
                     .cwd
                     .as_deref()
                     .and_then(|cwd| sweep::owner(cwd, &self.checkouts))
                     .is_some();
-                if in_checkout {
+                if table_read && in_checkout {
                     Judgment::Allow
                 } else {
                     Judgment::Deny {
@@ -360,7 +383,7 @@ mod tests {
     fn without_the_panes_roots_nothing_is_ended() {
         let fixture = vec![row(4100, "cargo build")];
         let signals = Recorded::over(&fixture);
-        let judge = judge(None, ProcessTable::new(Vec::new()), Vec::new());
+        let judge = judge(None, ProcessTable::new(Vec::new()), Vec::new(), 500);
         let carried = carry_with(
             &end_call(vec![target(4100, "cargo build")]),
             fixture,
@@ -408,7 +431,16 @@ mod tests {
     /// the window's roots as the guard reads them; nothing real is signalled.
     /// Answers the pids signalled and the answer's rows.
     fn guarded_end(pids: &[u32]) -> (Vec<u32>, Vec<serde_json::Value>) {
-        let rows: Vec<ProcessRow> = LISTING
+        guarded_end_over(LISTING, ProcessTable::from_listing(LISTING, None), pids)
+    }
+
+    /// The same over `listing`, with the guard's table given — read, or not.
+    fn guarded_end_over(
+        listing: &str,
+        guard_table: ProcessTable,
+        pids: &[u32],
+    ) -> (Vec<u32>, Vec<serde_json::Value>) {
+        let rows: Vec<ProcessRow> = listing
             .lines()
             .map(|line| {
                 let mut fields = line.split_whitespace();
@@ -441,11 +473,7 @@ mod tests {
             worker: "w-9".to_string(),
             task: Some("t-9".to_string()),
         }];
-        let judge = judge(
-            Some(roots),
-            ProcessTable::from_listing(LISTING, None),
-            checkouts.clone(),
-        );
+        let judge = judge(Some(roots), guard_table, checkouts.clone(), 500);
         let signals = Recorded::over(&rows);
         let targets: Vec<Target> = pids
             .iter()
@@ -509,5 +537,32 @@ mod tests {
         assert!(signalled.is_empty(), "{signalled:?}");
         assert_eq!(rows[0]["outcome"], "refused");
         assert!(why(&rows[0]).starts_with("물을 수 없음"), "{rows:?}");
+    }
+
+    /// When the guard's table did not read, the window alone is kept and the
+    /// guard asks about everything; that question is not the coordinator's to
+    /// answer, so even an orphaned build in a worker checkout is refused.
+    #[test]
+    fn an_unread_table_ends_nothing_even_in_a_checkout() {
+        let (signalled, rows) =
+            guarded_end_over(LISTING, ProcessTable::unreadable("ps timed out"), &[4300]);
+        assert!(signalled.is_empty(), "{signalled:?}");
+        assert_eq!(rows[0]["outcome"], "refused");
+        assert!(why(&rows[0]).starts_with("물을 수 없음"), "{rows:?}");
+    }
+
+    /// The window's helpers — processes it started that no pane holds — are
+    /// refused by the guard's own naming of them.
+    #[test]
+    fn a_window_helper_is_refused_by_name() {
+        let listing = format!("{LISTING}4500 500 4500 zerocode-cef-helper --type=gpu\n");
+        let (signalled, rows) = guarded_end_over(
+            &listing,
+            ProcessTable::from_listing(&listing, None),
+            &[4500],
+        );
+        assert!(signalled.is_empty(), "{signalled:?}");
+        assert_eq!(rows[0]["outcome"], "refused");
+        assert!(why(&rows[0]).contains("zerocode-cef-helper"), "{rows:?}");
     }
 }
