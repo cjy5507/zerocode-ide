@@ -5,11 +5,11 @@
 
 use std::cell::Cell;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
 
+use zerocode_core::agent_teams::{TEAM_LEADER_VAR, TEAM_PANE_VAR};
 use zerocode_core::shell_rule::kill::{KillVerdict, ProcessTable, WINDOW_PID_ENV};
 
-use super::{judge, judge_with};
+use super::{judge, judge_with, summoned_worker};
 use crate::permission_enforcer::{EnforcementResult, PermissionEnforcer};
 use crate::sandbox::FilesystemIsolationMode;
 use crate::{
@@ -205,9 +205,6 @@ fn kill_guard_reads_no_table_for_a_command_without_a_kill_call() {
 
 /* ---- a real run: a bait the test started stands for the window ------------------ */
 
-/// Serializes the tests that point [`WINDOW_PID_ENV`] at a bait.
-static WINDOW_LOCK: Mutex<()> = Mutex::new(());
-
 /// A `sleep` this test started, whose duration no other process carries, so
 /// a pattern naming it can only ever match it.
 struct Bait {
@@ -244,31 +241,53 @@ impl Drop for Bait {
     }
 }
 
-/// The window this process runs in is `pid` until the guard is dropped.
-struct WindowIs {
-    before: Option<String>,
+/// The environment the guard reads, held under the crate's env lock and put
+/// back when dropped: the window this process runs in is `window`, and it
+/// runs in the pane `pane` of a team led from `leader` — so a test's answer
+/// never depends on the pane the suite happens to run in.
+struct GuardEnv {
+    before: Vec<(&'static str, Option<String>)>,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
-impl WindowIs {
-    fn pid(pid: u32) -> Self {
-        let lock = WINDOW_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let before = std::env::var(WINDOW_PID_ENV).ok();
-        std::env::set_var(WINDOW_PID_ENV, pid.to_string());
+impl GuardEnv {
+    fn set(window: u32, pane: Option<&str>, leader: Option<&str>) -> Self {
+        let lock = crate::test_env_lock();
+        let window = window.to_string();
+        let wanted = [
+            (WINDOW_PID_ENV, Some(window.as_str())),
+            (TEAM_PANE_VAR, pane),
+            (TEAM_LEADER_VAR, leader),
+        ];
+        let before = wanted
+            .iter()
+            .map(|(name, _)| (*name, std::env::var(name).ok()))
+            .collect();
+        for (name, value) in wanted {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
         Self {
             before,
             _lock: lock,
         }
     }
+
+    /// The window is `pid`, in a pane a person opened.
+    fn window(pid: u32) -> Self {
+        Self::set(pid, None, None)
+    }
 }
 
-impl Drop for WindowIs {
+impl Drop for GuardEnv {
     fn drop(&mut self) {
-        match &self.before {
-            Some(value) => std::env::set_var(WINDOW_PID_ENV, value),
-            None => std::env::remove_var(WINDOW_PID_ENV),
+        for (name, value) in &self.before {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
         }
     }
 }
@@ -292,7 +311,7 @@ fn run(command: &str) -> std::io::Result<crate::BashCommandOutput> {
 #[test]
 fn kill_guard_execute_bash_refuses_a_signal_to_the_window_in_every_shape() {
     let mut bait = Bait::start(1);
-    let _window = WindowIs::pid(bait.pid());
+    let _window = GuardEnv::window(bait.pid());
     let marker = bait.marker.clone();
     let pid = bait.pid();
     for command in [
@@ -322,7 +341,7 @@ fn kill_guard_execute_bash_refuses_a_signal_to_the_window_in_every_shape() {
 fn kill_guard_execute_bash_lets_zo_end_what_it_started() {
     let window = Bait::start(2);
     let mut own = Bait::start(3);
-    let _window = WindowIs::pid(window.pid());
+    let _window = GuardEnv::window(window.pid());
     let output = run(&format!("pkill -f '[{}]{}'", &own.marker[..1], &own.marker[1..]))
         .expect("a signal to zo's own child runs");
     assert_eq!(output.return_code_interpretation, None, "{output:?}");
@@ -381,7 +400,7 @@ const EVERY_MODE: [PermissionMode; 5] = [
 #[test]
 fn kill_guard_check_bash_refuses_in_every_mode_and_cannot_ask() {
     let bait = Bait::start(4);
-    let _window = WindowIs::pid(bait.pid());
+    let _window = GuardEnv::window(bait.pid());
     let aimed = format!("pkill -f {}", bait.marker);
     for mode in EVERY_MODE {
         let enforcer = PermissionEnforcer::new(PermissionPolicy::new(mode));
@@ -408,7 +427,7 @@ fn kill_guard_check_bash_refuses_in_every_mode_and_cannot_ask() {
 #[test]
 fn kill_guard_authorize_refuses_the_window_without_asking_whatever_the_mode_or_rules() {
     let bait = Bait::start(5);
-    let _window = WindowIs::pid(bait.pid());
+    let _window = GuardEnv::window(bait.pid());
     let aimed = bash(&format!("echo \"`pkill -f {}`\"", bait.marker));
     for mode in EVERY_MODE {
         let policy = PermissionPolicy::new(mode).with_permission_rules(
@@ -433,7 +452,7 @@ fn kill_guard_authorize_refuses_the_window_without_asking_whatever_the_mode_or_r
 #[test]
 fn kill_guard_authorize_asks_a_person_once_and_refuses_when_nobody_can_answer() {
     let bait = Bait::start(6);
-    let _window = WindowIs::pid(bait.pid());
+    let _window = GuardEnv::window(bait.pid());
     let unknown = bash("kill \"$TARGET\"");
     for mode in [
         PermissionMode::WorkspaceWrite,
@@ -473,4 +492,30 @@ fn kill_guard_authorize_asks_a_person_once_and_refuses_when_nobody_can_answer() 
         PermissionOutcome::Deny { .. }
     ));
     assert!(person.asked.is_empty());
+}
+
+#[test]
+fn kill_guard_a_summoned_worker_pane_has_nobody_to_ask() {
+    // As the ledger sets them: a coordinator's pane leads its own team, a
+    // worker's pane is another, and a pane a person opened names neither.
+    assert!(summoned_worker(Some("%3"), Some("%1")), "a worker's pane");
+    assert!(!summoned_worker(Some("%1"), Some("%1")), "the coordinator's own pane");
+    assert!(!summoned_worker(None, None), "a pane a person opened");
+    assert!(!summoned_worker(None, Some("%1")));
+}
+
+#[cfg(unix)]
+#[test]
+fn kill_guard_authorize_refuses_a_question_in_a_summoned_worker_pane_unasked() {
+    let bait = Bait::start(9);
+    let _env = GuardEnv::set(bait.pid(), Some("%3"), Some("%1"));
+    let unknown = bash("kill \"$TARGET\"");
+    for mode in [PermissionMode::DangerFullAccess, PermissionMode::WorkspaceWrite, PermissionMode::Allow] {
+        let mut person = Person::saying(true);
+        match PermissionPolicy::new(mode).authorize("bash", &unknown, Some(&mut person)) {
+            PermissionOutcome::Deny { reason } => assert!(reason.contains("yes"), "{mode:?}: {reason}"),
+            PermissionOutcome::Allow => panic!("{mode:?}: a worker's pane allowed an unasked kill"),
+        }
+        assert!(person.asked.is_empty(), "{mode:?}: nobody watches a worker's pane, so nobody is asked");
+    }
 }

@@ -16,6 +16,7 @@
 //! ([`crate::execute_bash`]) refuses the window in every mode and on every
 //! path, a question having been the permission layer's to ask.
 
+use zerocode_core::agent_teams::{TEAM_LEADER_VAR, TEAM_PANE_VAR};
 use zerocode_core::shell_rule::kill::{self, KillCall, KillVerdict, ProcessTable, ProtectedRoot};
 
 /// Said after every refusal: the guard reads the processes, not the
@@ -55,6 +56,24 @@ pub(crate) fn judge_with(
     };
     let kept = ProtectedRoot::from_window_env(env, &table, me);
     Some(kill::judge_kill(&calls, &table, Some(me), &kept))
+}
+
+/// Whether this run's questions have nobody to answer them: zo runs in a
+/// pane the ledger summoned as a worker, which nobody watches. Its pane
+/// is named, and is not its team leader's (a coordinator's pane is its own
+/// leader; a pane a person opened names neither). Used only to refuse more.
+#[must_use]
+pub fn in_a_summoned_worker_pane() -> bool {
+    summoned_worker(
+        std::env::var(TEAM_PANE_VAR).ok().as_deref(),
+        std::env::var(TEAM_LEADER_VAR).ok().as_deref(),
+    )
+}
+
+/// [`in_a_summoned_worker_pane`] for the pane and leader handed in. Not
+/// read yet: the red half of t-80732's second part.
+pub(crate) fn summoned_worker(_pane: Option<&str>, _leader: Option<&str>) -> bool {
+    false
 }
 
 /// The refusal a [`KillVerdict::Deny`] becomes, in every mode.
