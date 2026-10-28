@@ -442,6 +442,8 @@ struct PrecomputedStreamingToolResult {
     tool_start: std::time::Instant,
     /// When its dispatch came back — not when the wave finished.
     finished: std::time::Instant,
+    /// The person stopped it before it came back on its own.
+    cancelled: bool,
 }
 
 struct StreamingToolRenderContext<'a> {
@@ -619,6 +621,9 @@ where
             self.tool_executor.begin_user_turn();
             self.run_user_prompt_submit_for_streaming_user_entry(&user_input)?;
         }
+        // A public turn is its own first leg; an internal subturn is another
+        // leg inside the words its turn took (deep mode).
+        self.turn_clock.leg_began();
         // Before the user message is pushed — see `begin_attempt`.
         self.begin_attempt();
         self.record_turn_started(&user_input);
@@ -2370,8 +2375,6 @@ where
             // its row leaves the tools' times to the request that re-carries
             // their results.
             stream_stamps.tools_ran = tools_ran.take().unwrap_or_default();
-            #[cfg(test)]
-            crate::request_timings::note_recorded(&stream_stamps);
             self.record_request_timing(iterations, &stream_stamps, "completed");
             prompt_cache_events.extend(turn_prompt_cache_events);
             let pending_tool_use_count = assistant_message
@@ -2762,7 +2765,11 @@ where
                     }
                 }
                 let result_message = if let Some(precomputed_result) = precomputed.remove(&idx) {
-                    tool_runs.ran(idx, precomputed_result.tool_start, precomputed_result.finished);
+                    if precomputed_result.cancelled {
+                        tool_runs.stopped(idx);
+                    } else {
+                        tool_runs.ran(idx, precomputed_result.tool_start, precomputed_result.finished);
+                    }
                     self.finalize_streaming_tool_result(
                         iterations,
                         p,
@@ -2903,7 +2910,11 @@ where
                                     )
                                 }
                             };
-                            tool_runs.ran(idx, tool_start, std::time::Instant::now());
+                            if tool_was_cancelled {
+                                tool_runs.stopped(idx);
+                            } else {
+                                tool_runs.ran(idx, tool_start, std::time::Instant::now());
+                            }
 
                             self.finalize_streaming_tool_result(
                                 iterations,
@@ -3229,6 +3240,7 @@ where
                         kind,
                         tool_start,
                         finished,
+                        cancelled,
                     },
                 );
             }
