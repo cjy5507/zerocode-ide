@@ -163,7 +163,7 @@ async function testChromeSidebarAndTabs(browser, origin, ok) {
           setLocale(code, { persist: false });
           await window.__PAINTED__();
           const spans = [...document.querySelectorAll(".nav-rows > .nav-row:not([hidden]) > span:not(.nav-badge)")];
-          cut[`${width || "default"}-${code}`] = spans.filter((name) => name.scrollWidth > name.clientWidth + 1).map((name) => name.textContent);
+          cut[`${width || "default"}-${code}`] = spans.filter((name) => name.scrollWidth > name.clientWidth + 1 || name.scrollHeight > name.clientHeight + 1).map((name) => name.textContent);
         }
       }
       root.style.setProperty("--sidebar-width", was);
@@ -171,7 +171,7 @@ async function testChromeSidebarAndTabs(browser, origin, ok) {
       await window.__PAINTED__();
       return cut;
     });
-    ok("every destination's name stands whole at 12px in all five languages, at the person's 378px column and the default width (t-81525 S1)",
+    ok("every destination's name stands whole at 12px in all five languages — a second line where the column is narrow —, at the person's 378px column and the default width (t-81525 S1)",
       Object.values(names).every((cut) => cut.length === 0), JSON.stringify(names));
     ok("a tab with an agent wears its state dot and how long it has run, right after its name (시안 2)",
       seen.dotShown && seen.dotInk === seen.ready && /^(now|\d+[mhd])$/.test(seen.tabAge ?? "") && seen.ageAfterName !== null && seen.ageAfterName < 12,

@@ -837,12 +837,17 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   grid-column: 1 / -1;
 }
 
-/* A name too long for its half ends in an ellipsis; the tooltip says it whole. */
+/* A name too long for its half takes a second line rather than lose its
+ * end — a long language in a narrow column (Spanish at the default 280px);
+ * past two it ends in an ellipsis and the tooltip says it whole. A name that
+ * fits stays one line, so the rows keep their height. */
 .nav-row > span:not(.nav-badge) {
+  display: -webkit-box;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: var(--leading-tight);
 }
 
 /* Under about 240 px the halves cannot hold a name: the menu becomes one line
