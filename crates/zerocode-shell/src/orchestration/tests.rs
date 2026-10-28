@@ -25043,6 +25043,7 @@ impl crate::account_switch::SwitchDoors for SwitchWorld {
             failures: self.failures.lock().unwrap().clone(),
             logins,
             owed: crate::account_switch::owed_followers(self.journal.path()),
+            picked: crate::account_switch::person_pick(self.journal.path()),
             now_ms,
         })
     }
@@ -25667,6 +25668,106 @@ fn a_manual_switch_cuts_no_turn_and_its_panes_follow_it() {
     for term in [stood.leader + 100, stood.leader + 101] {
         crate::agent_teams::forget_term(term);
     }
+}
+
+/// 2026-10-27, four times (t-78096): the person picked an account past the
+/// warn line, and once the cooldown ran out the beat moved the default back
+/// to one that read 2% — under `auto`, by itself. Replayed on the fixture:
+/// the beat had moved the default to `b-fixture`, the person picks
+/// `a-fixture` (its session past the move line, `b-fixture` near empty).
+/// The pick is written down with its moment and kept: no proposal and no
+/// move after the cooldown, and none after a window restart. Only the wall
+/// moves it — `a-fixture`'s window full — and that move is told in the
+/// ledger's voice like any other; the pick ends with it.
+#[test]
+fn an_account_the_person_picked_is_kept_until_its_wall_even_after_a_restart() {
+    use zerocode_core::account_autoswitch::{CLAUDE_ACCOUNT_AUTOSWITCH, Decision, SwitchReason};
+    let stood = WalledClaude::near_limit(93_400, 1, 0);
+    let dir = stood.world.journal.path().to_path_buf();
+    let warned = CLAUDE_ACCOUNT_AUTOSWITCH.default_moves_at_percent + 2;
+    *stood.world.selected.lock().unwrap() = Some("b-fixture".to_string());
+    let at = stood.began + 20_000;
+    stood.world.reads(warned, 2, at);
+    crate::account_switch::switch_by_person(&stood.host, &stood.world, Some("a-fixture"), at)
+        .expect("the person's pick");
+    assert_eq!(stood.world.selects(), vec![Some("a-fixture".to_string())]);
+    assert_eq!(
+        crate::account_switch::person_pick(&dir),
+        Some(crate::account_switch::PersonPick {
+            account: "a-fixture".to_string(),
+            at_ms: at,
+        }),
+        "the pick and its moment are written down"
+    );
+    // ① The cooldown over, the numbers the same: `b-fixture` has far more
+    // room, and the beat leaves the person's pick where it is.
+    let later = at + CLAUDE_ACCOUNT_AUTOSWITCH.cooldown_ms + 1;
+    stood.world.reads(warned, 2, later);
+    let kept = stood.plan(later);
+    assert_eq!(kept.decision, Decision::Stay { why: "picked" }, "{kept:?}");
+    assert_eq!(kept.picked_at_ms, Some(at));
+    let refused =
+        crate::account_switch::apply_with(&stood.host, &stood.world, &kept.token, "auto", later);
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(stood.world.selects(), vec![Some("a-fixture".to_string())]);
+    // ③ A window restart: nothing of this process survives — the cooldown's
+    // clock among it — and the pick still holds, read off the disk.
+    crate::account_switch::a_new_process(&dir);
+    *stood.world.last_switch.lock().unwrap() = None;
+    let restarted = later + 60_000;
+    stood.world.reads(warned, 2, restarted);
+    let after = stood.plan(restarted);
+    assert_eq!(
+        after.decision,
+        Decision::Stay { why: "picked" },
+        "{after:?}"
+    );
+    assert_eq!(after.picked_at_ms, Some(at));
+    // ② The wall: a window of the picked account is full. The beat moves
+    // the default, says so in a receipt, and the pick ends with the move.
+    let full = CLAUDE_ACCOUNT_AUTOSWITCH.picked_moves_at_percent;
+    let walled_at = restarted + 60_000;
+    stood.world.reads(full, 2, walled_at);
+    let wall = stood.plan(walled_at);
+    assert_eq!(
+        wall.decision,
+        Decision::Switch {
+            from: "a-fixture".into(),
+            to: "b-fixture".into(),
+            reason: SwitchReason::NearLimit {
+                window: "session".into(),
+                used_percent: full,
+            },
+        },
+        "{wall:?}"
+    );
+    stood.host.seating_onto(stood.leader + 100);
+    let applied = crate::account_switch::apply_with(
+        &stood.host,
+        &stood.world,
+        &wall.token,
+        "auto",
+        walled_at,
+    )
+    .expect("the wall's move");
+    assert!(applied.switched_default);
+    assert_eq!(
+        stood.world.selects(),
+        vec![Some("a-fixture".to_string()), Some("b-fixture".to_string())]
+    );
+    let told = stood.receipts(walled_at + 1_000);
+    let default = told
+        .iter()
+        .rev()
+        .find(|body| body["moved"] == "default" && body["by"] == "auto")
+        .expect("the wall's receipt");
+    assert_eq!(default["reason"], "near_limit");
+    assert_eq!(default["fromAccount"], "a-fixture");
+    assert_eq!(default["toAccount"], "b-fixture");
+    assert_eq!(default["observedPercent"], u64::from(full));
+    assert_eq!(crate::account_switch::person_pick(&dir), None);
+    assert_eq!(stood.plan(walled_at + 1).picked_at_ms, None);
+    crate::agent_teams::forget_term(stood.leader + 100);
 }
 
 /// t-46106, the acceptance case: 2026-10-11 11:15 replayed on the fixture.
@@ -28066,6 +28167,7 @@ fn a_selected_accounts_read_outside_the_range_is_unknown_to_the_table_and_the_wa
                 model: None,
                 last_switch_ms: None,
                 walled: true,
+                picked: false,
                 now_ms: now,
             }),
             Decision::Stay {

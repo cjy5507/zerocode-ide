@@ -105,6 +105,7 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
       last_switch_ms: extra.lastSwitchMs ?? null,
       cooldown_until_ms: extra.cooldownUntilMs ?? null,
       failed_recently: [],
+      picked_at_ms: extra.pickedAtMs ?? null,
       token,
       now_ms: Date.now(),
     },
@@ -276,6 +277,33 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
       words.cooling.shown && /4/.test(words.cooling.next) && words.cooling.applies === 0 &&
       words.unread.shown && /읽지 못함|unread/i.test(words.unread.next) && words.unread.applies === 0,
     JSON.stringify(words),
+  );
+
+  // An account the person picked themselves (t-78096): past the warn line
+  // the table leaves it until its wall — the bar and the accounts screen say
+  // why, there is no button, and `auto` applies nothing.
+  const picked = await page.evaluate(async ({ report }) => {
+    window.__ACCOUNT_USAGE__ = report;
+    window.__SWITCH_APPLIES__ = [];
+    showSettingsPane("provider-accounts");
+    await refreshClaudeAccountUsage(false);
+    return {
+      next: document.getElementById("sb-claude-next").textContent,
+      noteShown: !document.getElementById("account-switch-note").hidden,
+      buttonShown: !document.getElementById("account-switch-now").hidden,
+      said: document.getElementById("account-switch-said").textContent,
+      applies: window.__SWITCH_APPLIES__.length,
+    };
+  }, {
+    report: plan("auto", { kind: "stay", why: "picked" }, "tok-picked", {
+      pickedAtMs: Date.now() - 60_000,
+    }),
+  });
+  ok(
+    "an account the person picked is kept and said so: the bar and the accounts line say why, no button, nothing applied under auto (t-78096)",
+    picked.noteShown && !picked.buttonShown && /고른|picked/i.test(picked.said) &&
+      /고른|pick/i.test(picked.next) && picked.applies === 0,
+    JSON.stringify(picked),
   );
 
   // A refused apply (the situation changed) surfaces as an error and the
