@@ -2707,3 +2707,104 @@ fn a_claude_credential_is_configured_on_any_rung_and_never_refreshed_to_find_out
     crate::managed_account::clear();
     drop(isolation);
 }
+
+/// Smart mode sends a band, not a level: the floor rides on `effort` and the
+/// client picks the level per request (`normalize_thinking_for_wire`). The
+/// request ledger must say which level went out, beside the level the
+/// request asked for — otherwise a band that moved reads as one that held,
+/// and the cache rewrite every move costs (Z11: 45 of 45 effort changes)
+/// cannot be counted from the ledger.
+// Single-threaded test; the env lock across `.await` only serialises env access.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_band_raised_request_is_recorded_at_the_effort_it_sent() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let _guard = env_lock();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let session = format!("band-sent-effort-{}-{nonce}", std::process::id());
+    let home = std::env::temp_dir().join(format!("zo-{session}"));
+    let _home = EnvVarGuard::set("ZO_CONFIG_HOME", Some(home.to_str().expect("utf8 home")));
+    let _band = EnvVarGuard::set(super::super::ULTRA_BAND_ENV, None);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        let body_start = loop {
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "request ended inside its headers");
+            buffer.extend_from_slice(&chunk[..read]);
+            if let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break end + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&buffer[..body_start]).to_ascii_lowercase();
+        let length: usize = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .map_or(0, |value| value.trim().parse().expect("content length"));
+        while buffer.len() < body_start + length {
+            let read = socket.read(&mut chunk).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let body = concat!(
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":5}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        socket.write_all(head.as_bytes()).await.unwrap();
+        socket.write_all(body.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+        serde_json::from_slice::<serde_json::Value>(&buffer[body_start..]).expect("request body")
+    });
+
+    let client = AnthropicClient::new("test-key")
+        .with_base_url(format!("http://{addr}"))
+        .with_prompt_cache(crate::PromptCache::new(session.clone()));
+    // A heavy-intent ask on a Smart band: floor xhigh, ceiling max.
+    let request = MessageRequest {
+        model: "claude-opus-5-5".to_string(),
+        max_tokens: 64,
+        messages: vec![InputMessage::user_text("please refactor this module")],
+        system: None,
+        tools: None,
+        tool_choice: None,
+        stream: false,
+        thinking: None,
+        output_config: None,
+        effort: Some(crate::types::EffortLevel::Xhigh),
+        effort_band_ceiling: Some(crate::types::EffortLevel::Max),
+    };
+    let mut stream = client.stream_message(&request).await.expect("stream starts");
+    while stream.next_event().await.expect("event parses").is_some() {}
+    let sent = server.await.unwrap();
+
+    assert_eq!(
+        sent["output_config"]["effort"], "max",
+        "the band must have raised this request on the wire: {sent}"
+    );
+    let ledger = std::fs::read_to_string(crate::PromptCachePaths::for_session(&session).requests_path)
+        .expect("request ledger");
+    let rows: Vec<serde_json::Value> = ledger
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("ledger row"))
+        .collect();
+    let _ = std::fs::remove_dir_all(&home);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["effort"], "xhigh", "effort stays what the request asked for: {}", rows[0]);
+    assert_eq!(rows[0]["sent_effort"], "max", "the row must carry the effort that went out: {}", rows[0]);
+}
