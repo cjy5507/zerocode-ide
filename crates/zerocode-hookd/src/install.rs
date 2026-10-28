@@ -1343,30 +1343,12 @@ mod tests {
                 && judged < receipt,
             "{script}"
         );
-        // The batch dialect counts the same tries, without the pauses.
+        // The batch dialect posts once: cmd cannot hold stdin, so curl reads
+        // the payload from the pipe and a second post would carry nothing.
         let batch = crate::hook_script_cmd(AgentKind::Claude);
-        for words in [
-            ":brief_try",
-            ":plain_try",
-            "--max-time %hook_budget%",
-            "--data-urlencode \"delivery_id=%hook_id%\"",
-            "--data-urlencode \"try=%hook_try%\"",
-            "--data-urlencode \"gave_up=%hook_gave_up%\"",
-        ] {
-            assert!(batch.contains(words), "{words:?} is gone:\n{batch}");
-        }
-        for exit in crate::HOOK_RETRY_EXITS {
-            for road in ["brief", "plain"] {
-                let words = format!("if \"%curl_exit%\"==\"{exit}\" goto :{road}_try");
-                assert!(batch.contains(&words), "{words:?} is gone:\n{batch}");
-            }
-        }
-        let last = crate::hook_tries(AgentKind::Claude).len();
         assert!(
-            batch.contains(&format!(
-                "if \"%hook_try%\"==\"{last}\" goto :plain_gave_up"
-            )),
-            "{batch}"
+            !batch.contains("try="),
+            "the batch script posts again with an empty body:\n{batch}"
         );
     }
 

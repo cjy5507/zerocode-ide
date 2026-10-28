@@ -2152,7 +2152,8 @@ fn set_executable(path: &Path) -> io::Result<()> {
 /// 5. **Bounded curl, every failure swallowed.** Half a second to connect, a
 ///    second and a half a try, tried again on a give-up that may have left the
 ///    body with the bridge ([`hook_tries`], [`HOOK_RETRY_EXITS`]) under one
-///    delivery id, five seconds at most in all, `exit 0`. Providers that accept context receive
+///    delivery id, five seconds at most in all, `exit 0` — the POSIX script;
+///    the batch one posts once, since it cannot hold stdin for a second post. Providers that accept context receive
 ///    only the bridge's valid JSON body; every other response is discarded.
 ///    A POST that provably did not arrive creates the path the window handed
 ///    this pane, and a successful one removes it — a give-up that leaves the
@@ -2276,51 +2277,19 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
     lines.push(format!("if not defined {port} goto :unconfigured"));
     lines.push(format!("if not defined {token} goto :unconfigured"));
     lines.push(format!("if not defined {pane_key} goto :unconfigured"));
-    let post = format!(
-        "curl.exe -fsS -X POST \"http://127.0.0.1:%{port}%/hook/{slug}\" --connect-timeout {connect} --max-time %hook_budget% -H \"Content-Type: application/x-www-form-urlencoded\" -H \"{HOOK_TOKEN_HEADER}: %{token}%\" --data-urlencode \"pane_key=%{pane_key}%\" --data-urlencode \"tab_id=%{tab_id}%\" --data-urlencode \"launch_token=%{launch_token}%\" --data-urlencode \"worktree_id=%{worktree_id}%\" --data-urlencode \"selection_seeded=%{seeded}%\" --data-urlencode \"hook_event_name=%{event_var}%\" --data-urlencode \"env=%{agent_env}%\" --data-urlencode \"version={HOOK_CONTRACT_VERSION}\" --data-urlencode \"delivery_id=%hook_id%\" --data-urlencode \"try=%hook_try%\" --data-urlencode \"gave_up=%hook_gave_up%\" --data-urlencode \"payload@-\"",
-        connect = HOOK_CONNECT_BUDGET.as_secs_f64(),
-    );
-    // The tries of `hook_tries`, without their pauses: cmd has no sleep under
-    // a second without starting a program, and a try that timed out has
-    // already waited. Each road counts its own tries and sends the window
-    // the same delivery id every time (t-78634).
-    let tries = hook_tries(agent);
-    let try_lines = |road: &str, post: String| -> Vec<String> {
-        let mut lines = vec![
-            "set \"hook_try=0\"".to_string(),
-            "set \"hook_gave_up=\"".to_string(),
-            format!(":{road}_try"),
-            "set /a hook_try+=1 >nul 2>nul".to_string(),
-        ];
-        for (number, one) in tries.iter().enumerate() {
-            lines.push(format!(
-                "if \"%hook_try%\"==\"{}\" set \"hook_budget={}\"",
-                number + 1,
-                one.budget.as_secs_f64()
-            ));
-        }
-        lines.push(post);
-        lines.push("set \"curl_exit=%ERRORLEVEL%\"".to_string());
-        lines.push(format!("if \"%curl_exit%\"==\"0\" goto :{road}_sent"));
-        lines.push(
-            "if defined hook_gave_up (set \"hook_gave_up=%hook_gave_up%,%curl_exit%\") else (set \"hook_gave_up=%curl_exit%\")"
-                .to_string(),
-        );
-        lines.push(format!(
-            "if \"%hook_try%\"==\"{}\" goto :{road}_gave_up",
-            tries.len()
-        ));
-        for exit in HOOK_RETRY_EXITS {
-            lines.push(format!("if \"%curl_exit%\"==\"{exit}\" goto :{road}_try"));
-        }
-        lines.push(format!(":{road}_gave_up"));
-        // Judged by the first give-up, as the POSIX script is.
-        lines.push(
-            "for /f \"tokens=1 delims=,\" %%E in (\"%hook_gave_up%\") do call :gave_up %%E"
-                .to_string(),
-        );
-        lines
+    // One post, never a second (t-78634): cmd cannot hold stdin in a
+    // variable the way the POSIX script holds `$payload`, so curl reads it
+    // straight from the pipe and a post again would send an empty body.
+    let quiet = if spec.prints_context {
+        ""
+    } else {
+        " >nul 2>nul"
     };
+    let post = format!(
+        "curl.exe -fsS -X POST \"http://127.0.0.1:%{port}%/hook/{slug}\" --connect-timeout {connect} --max-time {budget} -H \"Content-Type: application/x-www-form-urlencoded\" -H \"{HOOK_TOKEN_HEADER}: %{token}%\" --data-urlencode \"pane_key=%{pane_key}%\" --data-urlencode \"tab_id=%{tab_id}%\" --data-urlencode \"launch_token=%{launch_token}%\" --data-urlencode \"worktree_id=%{worktree_id}%\" --data-urlencode \"selection_seeded=%{seeded}%\" --data-urlencode \"hook_event_name=%{event_var}%\" --data-urlencode \"env=%{agent_env}%\" --data-urlencode \"version={HOOK_CONTRACT_VERSION}\" --data-urlencode \"payload@-\"{quiet}",
+        connect = HOOK_CONNECT_BUDGET.as_secs_f64(),
+        budget = HOOK_REPLY_BUDGET.as_secs_f64(),
+    );
     if spec.prints_context {
         // Only cmd builtins and the existing curl are needed. Numeric status
         // comes from curl's formatter, never from untrusted response text.
@@ -2339,21 +2308,15 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
             "if %brief_attempt% LSS 3 goto :brief_nonce".into(),
             "goto :plain_post".into(),
             ":brief_post".into(),
-            "set \"hook_id=%brief_id%\"".into(),
-        ]);
-        lines.extend(try_lines(
-            "brief",
-            format!("{post} -o \"%brief_dir%\\reply\" -w \"%%{{http_code}}\" >\"%brief_dir%\\status\" 2>nul"),
-        ));
-        lines.extend([
-            "goto :brief_cleanup".into(),
-            ":brief_sent".into(),
+            format!("{post} --data-urlencode \"delivery_id=%brief_id%\" -o \"%brief_dir%\\reply\" -w \"%%{{http_code}}\" >\"%brief_dir%\\status\" 2>nul"),
+            "set \"curl_exit=%ERRORLEVEL%\"".into(),
+            "if not \"%curl_exit%\"==\"0\" (call :gave_up %curl_exit% & goto :brief_cleanup)".into(),
             "call :succeeded".into(),
             "type \"%brief_dir%\\reply\" 2>nul".into(),
             "if errorlevel 1 goto :brief_cleanup".into(),
             "set \"brief_status=\"".into(),
             "set /p brief_status=<\"%brief_dir%\\status\"".into(),
-            format!("if \"%brief_status%\"==\"200\" curl.exe -fsS -X POST \"http://127.0.0.1:%{port}%/hook-receipt/{slug}\" --connect-timeout 0.1 --max-time 0.25 -H \"{HOOK_TOKEN_HEADER}: %{token}%\" --data-urlencode \"pane_key=%{pane_key}%\" --data-urlencode \"launch_token=%{launch_token}%\" --data-urlencode \"delivery_id=%hook_id%\" >nul 2>nul"),
+            format!("if \"%brief_status%\"==\"200\" curl.exe -fsS -X POST \"http://127.0.0.1:%{port}%/hook-receipt/{slug}\" --connect-timeout 0.1 --max-time 0.25 -H \"{HOOK_TOKEN_HEADER}: %{token}%\" --data-urlencode \"pane_key=%{pane_key}%\" --data-urlencode \"launch_token=%{launch_token}%\" --data-urlencode \"delivery_id=%brief_id%\" >nul 2>nul"),
             ":brief_cleanup".into(),
             "del /q \"%brief_dir%\\reply\" \"%brief_dir%\\status\" >nul 2>nul".into(),
             "rmdir \"%brief_dir%\" >nul 2>nul".into(),
@@ -2361,20 +2324,11 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
             ":plain_post".into(),
         ]);
     }
-    let quiet = if spec.prints_context {
-        ""
-    } else {
-        " >nul 2>nul"
-    };
-    lines.push("set \"hook_clock=%TIME: =0%\"".into());
-    lines.push("set \"hook_clock=%hook_clock::=%\"".into());
-    lines.push("set \"hook_clock=%hook_clock:.=%\"".into());
-    lines.push("set \"hook_clock=%hook_clock:,=%\"".into());
-    lines.push("set \"hook_id=w-%hook_clock%-%RANDOM%-%RANDOM%-%RANDOM%\"".into());
-    lines.extend(try_lines("plain", format!("{post}{quiet}")));
-    lines.push("exit /b 0".into());
-    lines.push(":plain_sent".into());
-    lines.push("call :succeeded".into());
+    lines.push(post);
+    lines.push("set \"curl_exit=%ERRORLEVEL%\"".into());
+    lines.push(
+        "if \"%curl_exit%\"==\"0\" (call :succeeded) else (call :gave_up %curl_exit%)".into(),
+    );
     lines.push("exit /b 0".into());
     lines.push(":unconfigured".into());
     lines.push("call :failed".into());
