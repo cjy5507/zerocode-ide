@@ -35,7 +35,10 @@ pub use slash_registry::{
 
 // Re-export render_plugins_report as it was public in the original module.
 pub use plugins_agents::render_plugins_report;
-pub use prompt_commands::{discover_prompt_commands, find_prompt_command, PromptCommandDef};
+pub use prompt_commands::{
+    discover_prompt_commands, find_prompt_command, InlineShellGate, PromptCommandDef,
+    PromptCommandScope,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandManifestEntry {

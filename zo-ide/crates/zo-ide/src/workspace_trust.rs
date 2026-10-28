@@ -295,6 +295,20 @@ pub(crate) fn resolve_trust_for_cwd(
     default_for(cwd)
 }
 
+/// Whether the person has trusted `cwd` beyond read-only: the settings that
+/// trust every folder, or an answer at the trust prompt for `cwd` that is not
+/// read-only. A permission mode a settings file pins is not this decision —
+/// a repository can pin one for itself, and then the prompt never asks.
+pub(crate) fn person_trusts_cwd(cwd: &Path) -> bool {
+    if crate::preferences::load().grants_full_trust_everywhere() {
+        return true;
+    }
+    load_trust_store()
+        .get(&trust_key(cwd))
+        .and_then(|label| mode_from_label(label))
+        .is_some_and(|mode| mode != PermissionMode::ReadOnly)
+}
+
 fn is_interactive_tty() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()

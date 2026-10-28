@@ -223,8 +223,11 @@ impl Slash {
 /// commands crate's ([`commands::discover_prompt_commands`]): `.zo/commands/`
 /// in `cwd` and every folder above it, then `commands/` in zo's home. The
 /// keep-list is asked first, so a command file cannot shadow one of zo's own.
-/// Its `!` commands run only what the file's `allowed-tools` grants, and none
-/// while `mode` is read-only.
+/// Its `!` commands run only what the file's `allowed-tools` grants, none
+/// while `mode` is read-only, and none from a file in the working folder or
+/// above it until the person has trusted `cwd`
+/// ([`crate::workspace_trust::person_trusts_cwd`]) — a mode the repository's
+/// own settings pin is not that trust.
 #[must_use]
 pub fn prompt_command(
     cwd: &Path,
@@ -233,9 +236,13 @@ pub fn prompt_command(
     mode: core_types::PermissionMode,
 ) -> Option<String> {
     let found = commands::discover_prompt_commands(cwd);
-    let read_only = mode == core_types::PermissionMode::ReadOnly;
-    commands::find_prompt_command(&found, name)
-        .map(|command| command.render_prompt_as(arg, cwd, read_only))
+    let command = commands::find_prompt_command(&found, name)?;
+    let gate = commands::InlineShellGate {
+        read_only: mode == core_types::PermissionMode::ReadOnly,
+        workspace_trusted: command.scope == commands::PromptCommandScope::Workspace
+            && crate::workspace_trust::person_trusts_cwd(cwd),
+    };
+    Some(command.render_prompt_as(arg, cwd, gate))
 }
 
 #[cfg(test)]

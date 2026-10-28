@@ -355,6 +355,7 @@ mod tests {
             body: "Do $ARGUMENTS".to_string(),
             allowed_tools: Vec::new(),
             path: PathBuf::from(format!(".zo/commands/{name}.md")),
+            scope: crate::PromptCommandScope::Workspace,
         }
     }
 

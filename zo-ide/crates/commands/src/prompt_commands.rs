@@ -17,6 +17,31 @@ pub struct PromptCommandDef {
     pub allowed_tools: Vec<String>,
     pub body: String,
     pub path: PathBuf,
+    /// Where the file was found, which decides whether its `!` commands
+    /// also need the person's trust in the working folder.
+    pub scope: PromptCommandScope,
+}
+
+/// Where a command file was found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PromptCommandScope {
+    /// `.zo/commands` in the working folder or a folder above it: whoever
+    /// wrote the repository wrote the file.
+    #[default]
+    Workspace,
+    /// `commands` in zo's home: the person's own file.
+    ZoHome,
+}
+
+/// What the session lets a command file's `!` commands run, decided once by
+/// the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InlineShellGate {
+    /// The session is read-only: no `!` command runs.
+    pub read_only: bool,
+    /// The person has trusted the working folder. A workspace file's `!`
+    /// commands run only then; a file in zo's home does not ask.
+    pub workspace_trusted: bool,
 }
 
 impl PromptCommandDef {
@@ -44,19 +69,26 @@ impl PromptCommandDef {
 
     /// [`Self::render_prompt`] against `base_dir` rather than the process cwd:
     /// the session's working folder, where `!cmd` runs and `@path` resolves.
+    /// The caller vouches for the folder; a session renders through
+    /// [`Self::render_prompt_as`].
     #[must_use]
     pub fn render_prompt_in(&self, args: &str, base_dir: &Path) -> String {
-        self.render_prompt_as(args, base_dir, false)
+        let gate = InlineShellGate {
+            read_only: false,
+            workspace_trusted: true,
+        };
+        self.render_prompt_as(args, base_dir, gate)
     }
 
-    /// [`Self::render_prompt_in`] for a session whose permission mode is
-    /// read-only when `read_only` is set: then no `!` command runs, whatever
-    /// `allowed-tools` grants.
+    /// [`Self::render_prompt_in`] under what `gate` lets `!` commands run:
+    /// none while read-only, and none from a workspace file in a folder the
+    /// person has not trusted, whatever `allowed-tools` grants.
     #[must_use]
-    pub fn render_prompt_as(&self, args: &str, base_dir: &Path, read_only: bool) -> String {
+    pub fn render_prompt_as(&self, args: &str, base_dir: &Path, gate: InlineShellGate) -> String {
         let shell = InlineShell {
             allowed_tools: &self.allowed_tools,
-            read_only,
+            read_only: gate.read_only,
+            untrusted: self.scope == PromptCommandScope::Workspace && !gate.workspace_trusted,
         };
         expand_command_template(&self.body, args, base_dir, &shell)
     }
@@ -82,11 +114,30 @@ pub fn discover_prompt_commands(cwd: &Path) -> Vec<PromptCommandDef> {
         cursor = dir.parent();
     }
 
+    // The walk up from a project below the person's home passes zo's home
+    // too; a root that is one of zo's homes keeps the person's scope.
+    let personal_roots = personal_command_roots();
+    let personal_canonical = personal_roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .collect::<Vec<_>>();
+    let is_personal = |root: &Path| {
+        personal_roots.iter().any(|personal| personal == root)
+            || root
+                .canonicalize()
+                .is_ok_and(|canonical| personal_canonical.contains(&canonical))
+    };
+
     let mut seen = BTreeSet::new();
     let mut commands = Vec::new();
     for dir in directories {
         let root = dir.join(".zo").join("commands");
-        push_prompt_commands_from_root(&mut commands, &mut seen, &root);
+        let scope = if is_personal(&root) {
+            PromptCommandScope::ZoHome
+        } else {
+            PromptCommandScope::Workspace
+        };
+        push_prompt_commands_from_root(&mut commands, &mut seen, &root, scope);
         if commands.len() >= MAX_PROMPT_COMMANDS {
             commands.truncate(MAX_PROMPT_COMMANDS);
             return commands;
@@ -96,8 +147,8 @@ pub fn discover_prompt_commands(cwd: &Path) -> Vec<PromptCommandDef> {
     // Personal commands live under the user's home directory and are available
     // in every project. Project commands are discovered first, so a project
     // command with the same name keeps priority via the `seen` set.
-    for root in personal_command_roots() {
-        push_prompt_commands_from_root(&mut commands, &mut seen, &root);
+    for root in &personal_roots {
+        push_prompt_commands_from_root(&mut commands, &mut seen, root, PromptCommandScope::ZoHome);
         if commands.len() >= MAX_PROMPT_COMMANDS {
             commands.truncate(MAX_PROMPT_COMMANDS);
             return commands;
@@ -118,6 +169,7 @@ fn push_prompt_commands_from_root(
     commands: &mut Vec<PromptCommandDef>,
     seen: &mut BTreeSet<String>,
     root: &Path,
+    scope: PromptCommandScope,
 ) {
     let mut files = Vec::new();
     collect_markdown_files(root, &mut files);
@@ -134,9 +186,10 @@ fn push_prompt_commands_from_root(
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
-        let Some(command) = parse_prompt_command_file(name, path, &content) else {
+        let Some(mut command) = parse_prompt_command_file(name, path, &content) else {
             continue;
         };
+        command.scope = scope;
         seen.insert(key);
         commands.push(command);
     }
@@ -196,6 +249,7 @@ fn parse_prompt_command_file(
         allowed_tools,
         body,
         path,
+        scope: PromptCommandScope::default(),
     })
 }
 
@@ -482,10 +536,12 @@ where
 }
 
 /// What a command file's `!` commands may run: what its `allowed-tools`
-/// grants Bash, and nothing while the session is read-only.
+/// grants Bash, and nothing while the session is read-only or while the file
+/// is a workspace one in a folder the person has not trusted.
 struct InlineShell<'a> {
     allowed_tools: &'a [String],
     read_only: bool,
+    untrusted: bool,
 }
 
 impl InlineShell<'_> {
@@ -493,6 +549,11 @@ impl InlineShell<'_> {
     fn refusal(&self, command: &str) -> Option<String> {
         if self.read_only {
             return Some(format!("[!{command}: not run in read-only mode]"));
+        }
+        if self.untrusted {
+            return Some(format!(
+                "[!{command}: not run — this folder is not trusted yet; trust it at zo's \"Trust this folder?\" prompt]"
+            ));
         }
         if self
             .allowed_tools
@@ -607,6 +668,7 @@ mod tests {
         let shell = InlineShell {
             allowed_tools: &allowed_tools,
             read_only: false,
+            untrusted: false,
         };
         expand_command_template(body, args, base_dir, &shell)
     }
