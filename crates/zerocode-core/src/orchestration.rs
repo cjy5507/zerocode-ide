@@ -44,6 +44,7 @@ pub mod evidence;
 pub mod gate_reuse;
 pub mod land_batch;
 pub mod land_check;
+pub mod land_record;
 pub mod landing_watch;
 mod progress;
 pub mod project_scope;
@@ -1076,6 +1077,31 @@ const REVIEW_KEY_GROUPS: [&[&str]; 3] = [
 
 /// The key that says the work shipped.
 const DEPLOYED_KEY: &str = "deployed";
+
+/// The key a coordinator marks work with no code to land under — the first of
+/// [`REVIEW_KEY_GROUPS`]' third group, and the one the ledger itself writes.
+const NOTHING_TO_LAND_KEY: &str = REVIEW_KEY_GROUPS[2][0];
+
+/// A coordinator's verification of a review hand-in with `nothingToLand` added (t-78890) — or
+/// `None` when the result verifies nothing, is not a JSON object, or already says something about
+/// landing (a merge key or a no-code key, either way): the coordinator's own word stands.
+fn nothing_to_land_added(result: &str) -> Option<String> {
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(result)
+    else {
+        return None;
+    };
+    let [_, merged_keys, nothing_keys] = REVIEW_KEY_GROUPS;
+    if !ReviewFacts::from_result(result).verified
+        || merged_keys
+            .iter()
+            .chain(nothing_keys)
+            .any(|key| map.contains_key(*key))
+    {
+        return None;
+    }
+    map.insert(NOTHING_TO_LAND_KEY.to_string(), true.into());
+    Some(serde_json::Value::Object(map).to_string())
+}
 
 /// Every key whose presence in a result is a review written ([`ReviewFacts::written`]).
 fn review_keys() -> impl Iterator<Item = &'static str> {
@@ -19249,7 +19275,11 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          <commit|report>] · correct the record, from the run's live coordinator seat; a \
          result carrying a review (verified, merged, deployed…) names the attempt and the \
          source it reviewed — task-list shows both — and is refused when either is missing \
-         or has moved",
+         or has moved; a verification of a review hand-in (reportKind review) carries \
+         nothingToLand | --members <t-1,t-2,…> --result <landing> · write a stack's landing \
+         ({\"merged\":true,\"mergeHead\":…}, later {\"deployed\":true,\"release\":…}) on every \
+         member at once, each bound to the attempt and source its verified review names — one \
+         member that cannot take it refuses the call, a line each",
         Doing::Mutation,
     ),
     (
@@ -19447,7 +19477,10 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "inbox",
-        "[--limit <n>] [--address <a>] · this project's mail, newest first — an audit, never a delivery",
+        "[--limit <n>] [--address <a>] [--since <ms>] [--cursor <message-id>] · this project's \
+         mail, newest first — an audit, never a delivery; --since keeps what was written at or \
+         after that moment, and --cursor (the last id of the page before, given back as \
+         nextCursor) walks the rest",
         Doing::FreshRead,
     ),
     (
@@ -22277,6 +22310,7 @@ fn plan_inner(
                 "--why",
                 "--run",
                 "--retry-request",
+                land_record::MEMBERS_FLAG,
             ];
             if let Some(flag) = words
                 .values
@@ -22296,13 +22330,16 @@ fn plan_inner(
                 return Err("task-update needs --status or --result; nothing was changed".into());
             }
             let run_id = bound(ledger, &words, &caller, &seat)?;
+            if words.value(land_record::MEMBERS_FLAG).is_some() {
+                return land_record::record(ledger, team, pane, &words, &run_id, now_ms);
+            }
             let task_id = words.value("--task").ok_or("task-update needs --task")?;
             let status = match words.value("--status") {
                 Some(named) => Some(named.parse::<TaskStatus>()?),
                 None => None,
             };
             let closure = closure_asked(&words, status)?;
-            let result = words.value("--result").map(str::to_string);
+            let mut result = words.value("--result").map(str::to_string);
             /* Whether this correction vouches for anything is read with the
              * same keys the board reads it with ([`ReviewFacts::from_result`]
              * `written`): one table, so a key the reader believes is a key
@@ -22335,6 +22372,17 @@ fn plan_inner(
                 observed,
             )?;
             let signed = author.kind();
+            // A review hand-in has no code to land (t-78890): its verification says so, unless the
+            // coordinator wrote a landing key of its own.
+            let review_hand_in = ledger
+                .run(&run_id)
+                .and_then(|run| run.task(task_id).and_then(|task| run.review_hand_in(task)));
+            let nothing_added = review_hand_in
+                .and_then(|why| Some((nothing_to_land_added(result.as_deref()?)?, why)))
+                .map(|(added, why)| {
+                    result = Some(added);
+                    why
+                });
             let now = match closure {
                 Some(closure) => {
                     if let Some(result) = result {
@@ -22344,11 +22392,15 @@ fn plan_inner(
                 }
                 None => ledger.update_task(&run_id, task_id, status, result, author, now_ms)?,
             };
-            said(serde_json::json!({
+            let mut answer = serde_json::json!({
                 "taskId": task_id,
                 "status": now.as_str(),
                 "author": signed,
-            }))
+            });
+            if let Some(why) = nothing_added {
+                answer[NOTHING_TO_LAND_KEY] = why.into();
+            }
+            said(answer)
         }
 
         // The sixth noun's three verbs. Opening and answering a decision are
@@ -24373,6 +24425,16 @@ fn plan_inner(
                 None => INBOX_LIMIT,
             };
             let address = words.value("--address");
+            // A day's mail is more than a page (t-78890, O11): `--since` keeps what was written at
+            // or after a moment, and `--cursor` — the last message id of the page before, as
+            // `run-list` takes its own — walks the rest. An unknown cursor is refused rather than
+            // read as page one, which would serve the same letters twice.
+            let since = match words.value("--since") {
+                Some(raw) => Some(raw.trim().parse::<i64>().map_err(|_| {
+                    format!("--since is epoch milliseconds, and {raw:?} is not a number")
+                })?),
+                None => None,
+            };
             let mut held: Vec<(&Run, &Message)> = Vec::new();
             for run in ledger
                 .runs()
@@ -24380,7 +24442,9 @@ fn plan_inner(
                 .filter(|run| project_scope::visible_to(run, project, &team.id, pane))
             {
                 for message in run.messages() {
-                    if address.is_some_and(|named| message.to != named && message.from != named) {
+                    if address.is_some_and(|named| message.to != named && message.from != named)
+                        || since.is_some_and(|floor| message.created_ms < floor)
+                    {
                         continue;
                     }
                     held.push((run, message));
@@ -24389,16 +24453,37 @@ fn plan_inner(
             held.sort_by(|(_, a), (_, b)| {
                 (b.created_ms, b.id.as_str()).cmp(&(a.created_ms, a.id.as_str()))
             });
-            let messages: Vec<serde_json::Value> = held
+            let from = match words.value("--cursor") {
+                Some(after) => {
+                    held.iter()
+                        .position(|(_, message)| message.id == after)
+                        .ok_or_else(|| {
+                            format!(
+                                "unknown cursor: {after} — a cursor is the last message id of \
+                                 the page before, under the same --since and --address"
+                            )
+                        })?
+                        + 1
+                }
+                None => 0,
+            };
+            let page = &held[from..held.len().min(from.saturating_add(limit))];
+            let next = (from + page.len() < held.len())
+                .then(|| page.last().map(|(_, message)| message.id.clone()))
+                .flatten();
+            let messages: Vec<serde_json::Value> = page
                 .iter()
-                .take(limit)
                 .map(|(run, message)| {
                     let mut row = message_json(message);
                     row["runId"] = serde_json::Value::String(run.id.clone());
                     row
                 })
                 .collect();
-            said(serde_json::json!({ "messages": messages, "count": messages.len() }))
+            said(serde_json::json!({
+                "messages": messages,
+                "count": messages.len(),
+                "nextCursor": next,
+            }))
         }
 
         "reset" => {

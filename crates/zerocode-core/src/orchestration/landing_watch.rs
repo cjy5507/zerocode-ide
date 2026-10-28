@@ -22,6 +22,13 @@ pub const RENOTIFY_MS: i64 = 6 * 60 * 60 * 1000;
 pub const DRIFT_PER_DISPATCH_MAX: usize = 10;
 /// 이보다 오래된 과업은 알리지 않는다 — 옛 기록이 한꺼번에 알림이 되지 않게.
 pub const HORIZON_MS: i64 = 3 * 24 * 60 * 60 * 1000;
+/// 코디네이터가 읽기만 하는 일 — 검수 — 에 붙이는 제목의 표식 (t-78890). 커밋을 넘기지 않은
+/// 과업에만 읽는다: 제목만으로는 커밋을 숨기지 않는다. 영어 표식은 대소문자를 가리지 않는다.
+pub const REVIEW_TITLE_MARKS: &[&str] = &["검수", "읽기 전용", "read-only", "review"];
+/// 넘김이 검수인 까닭 — 워커가 `reportKind: review`라고 말했다.
+pub const REVIEW_BY_KIND: &str = "reportKind review";
+/// 넘김이 검수인 까닭 — 커밋 없는 넘김에 제목이 검수라고 말한다.
+pub const REVIEW_BY_TITLE: &str = "read-only title";
 
 /// 창이 한 작업 폴더에 대해 본 git의 사실.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +94,46 @@ impl StallReason {
             Self::LedgerMergedGitNot => "ledger_merged_git_not",
             Self::CheckoutsLeft => "checkouts_left",
         }
+    }
+}
+
+impl Run {
+    /// 과업의 가장 새 시도가 넘긴 것이 검수 — 읽기만 하고 착지할 코드가 없는 일 — 인지, 그렇다면 어느
+    /// 표식으로 아는지 (t-78890, VERDICT F1). 그 시도를 끝낸 `worker_done`이 payload에
+    /// `reportKind: review`라고 말했거나, 커밋이 아닌 보고서를 넘겼는데 제목에
+    /// [`REVIEW_TITLE_MARKS`]가 있다.
+    ///
+    /// 늦은 착지 알림은 검수에게 착지를 묻지 않고, 코디네이터가 그 검수를 `verified`로 적을 때
+    /// `nothingToLand`가 함께 적힌다. 둘 다 이 한 곳에서 읽는다.
+    #[must_use]
+    pub fn review_hand_in(&self, task: &Task) -> Option<&'static str> {
+        let attempt = self.newest_attempt(&task.id)?;
+        let source = attempt.source.as_deref()?;
+        let said_review = self
+            .messages()
+            .iter()
+            .filter(|held| {
+                held.kind == MessageKind::WorkerDone
+                    && held.dispatch.as_deref() == Some(attempt.id.as_str())
+            })
+            .any(|held| {
+                serde_json::from_str::<serde_json::Value>(held.payload.as_str())
+                    .ok()
+                    .and_then(|payload| {
+                        payload
+                            .get(crate::hand_in::REPORT_KIND_KEY)
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(crate::hand_in::ReportKind::parse)
+                    })
+                    == Some(crate::hand_in::ReportKind::Review)
+            });
+        if said_review {
+            return Some(REVIEW_BY_KIND);
+        }
+        let title = task.title.to_lowercase();
+        (commit_named(source).is_none()
+            && REVIEW_TITLE_MARKS.iter().any(|mark| title.contains(mark)))
+        .then_some(REVIEW_BY_TITLE)
     }
 }
 
@@ -280,6 +327,13 @@ fn late_landings(
             reasons.push((StallReason::NoReview, done_ms));
         }
 
+        // A review lands no code (t-78890): it is told while nobody has read it and for what its
+        // worker left beside it, never as unmerged, unrecorded or cleanable work.
+        if run.review_hand_in(task).is_some() {
+            reasons.retain(|(reason, _)| {
+                matches!(reason, StallReason::NoReview | StallReason::CheckoutsLeft)
+            });
+        }
         for (reason, since_ms) in reasons {
             // A checkout left beside a hand-in is a fact about that hand-in, told once; what is late
             // is told again while it stays late.
