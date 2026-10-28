@@ -931,7 +931,11 @@ fn field<'a>(request: &'a str, name: &str) -> Option<&'a str> {
 /// answers the rest, telling `seen` every request it read.
 async fn holding_bridge(
     held: usize,
-) -> (u16, tokio::sync::mpsc::UnboundedReceiver<String>, tokio::task::JoinHandle<()>) {
+) -> (
+    u16,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
     use tokio::io::AsyncWriteExt as _;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1038,10 +1042,9 @@ async fn a_bridge_that_holds_every_post_costs_the_hook_its_budget_and_no_more() 
             (env_var::PANE_KEY, "term-8".to_string()),
         ];
         let started = std::time::Instant::now();
-        let output =
-            tokio::task::spawn_blocking(move || run_script(&script, &env, PROMPT_SUBMIT))
-                .await
-                .expect("join");
+        let output = tokio::task::spawn_blocking(move || run_script(&script, &env, PROMPT_SUBMIT))
+            .await
+            .expect("join");
         let took = started.elapsed();
         let mut posts = 0;
         while requests.try_recv().is_ok() {
@@ -1054,7 +1057,10 @@ async fn a_bridge_that_holds_every_post_costs_the_hook_its_budget_and_no_more() 
             .iter()
             .map(|one| one.pause + one.budget)
             .sum::<std::time::Duration>();
-        assert!(laid_out <= zerocode_hookd::HOOK_DELIVERY_BUDGET, "{tries:?}");
+        assert!(
+            laid_out <= zerocode_hookd::HOOK_DELIVERY_BUDGET,
+            "{tries:?}"
+        );
         assert!(
             laid_out + zerocode_hookd::HOOK_TIMEOUT_MARGIN
                 <= zerocode_hookd::install::hook_timeout(agent),

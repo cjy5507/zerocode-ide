@@ -2102,7 +2102,10 @@ fn the_briefs_wall_leaves_the_scripts_budget_its_margin() {
         script.contains(&format!(
             "--connect-timeout {} --max-time \"$hook_budget\"",
             HOOK_CONNECT_BUDGET.as_secs_f64(),
-        )) && script.contains(&format!("for hook_plan in 0:{} ", HOOK_REPLY_BUDGET.as_secs_f64())),
+        )) && script.contains(&format!(
+            "for hook_plan in 0:{} ",
+            HOOK_REPLY_BUDGET.as_secs_f64()
+        )),
         "{script}"
     );
 }
@@ -2437,7 +2440,8 @@ async fn a_post_again_is_given_the_first_ones_answer_and_reaches_the_window_once
         .with_delivery_notes(Arc::new(move |line: String| {
             written.lock().unwrap().push(line);
         }));
-    let payload = r#"{"hook_event_name":"UserPromptSubmit","session_id":"s-again","prompt":"the briefing"}"#;
+    let payload =
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"s-again","prompt":"the briefing"}"#;
     let form = |attempt: &str, gave_up: &str| {
         script_form(&[
             ("pane_key", "term-9"),
@@ -2526,5 +2530,9 @@ async fn a_first_try_or_a_misshapen_one_writes_nothing_down() {
         assert!(events.recv().await.is_some());
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(notes.lock().unwrap().is_empty(), "{:?}", notes.lock().unwrap());
+    assert!(
+        notes.lock().unwrap().is_empty(),
+        "{:?}",
+        notes.lock().unwrap()
+    );
 }

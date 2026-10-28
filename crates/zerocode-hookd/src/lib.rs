@@ -661,8 +661,8 @@ pub struct HookTry {
 /// while what is left can still reach the bridge ([`HOOK_CONNECT_BUDGET`]).
 #[must_use]
 pub fn hook_tries(agent: AgentKind) -> Vec<HookTry> {
-    let budget = HOOK_DELIVERY_BUDGET
-        .min(install::hook_timeout(agent).saturating_sub(HOOK_TIMEOUT_MARGIN));
+    let budget =
+        HOOK_DELIVERY_BUDGET.min(install::hook_timeout(agent).saturating_sub(HOOK_TIMEOUT_MARGIN));
     let mut tries = vec![HookTry {
         pause: std::time::Duration::ZERO,
         budget: HOOK_REPLY_BUDGET.min(budget),
@@ -2603,8 +2603,7 @@ pub fn hook_script(agent: AgentKind) -> String {
         lines.push(r#"case "$reply" in"#.into());
         lines.push(r#"  \{*\}) trap '' PIPE"#.into());
         lines.push(
-            r#"  if printf '%s\n' "$reply" 2>/dev/null && [ "$brief_status" = 200 ]; then"#
-                .into(),
+            r#"  if printf '%s\n' "$reply" 2>/dev/null && [ "$brief_status" = 200 ]; then"#.into(),
         );
         lines.push(format!(r#"    curl -fsS -X POST "http://127.0.0.1:${{{port}}}/hook-receipt/{slug}" --connect-timeout 0.1 --max-time 0.25 -H "{HOOK_TOKEN_HEADER}: ${{{token}}}" --data-urlencode "pane_key=${{{pane_key}}}" --data-urlencode "launch_token=${{{launch_token}}}" --data-urlencode "delivery_id=$hook_id" >/dev/null 2>&1 || :"#));
         lines.push("  fi ;;".into());

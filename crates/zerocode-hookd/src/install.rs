@@ -1323,7 +1323,10 @@ mod tests {
         let carried = at(r#"--data-urlencode "delivery_id=$hook_id""#);
         let attempt = at(r#"--data-urlencode "try=$hook_try""#);
         let gave_up = at(r#"--data-urlencode "gave_up=$hook_gave_up""#);
-        let again = at(&format!("    {}) : ;;\n    *) break ;;", crate::posix_retry_exits()));
+        let again = at(&format!(
+            "    {}) : ;;\n    *) break ;;",
+            crate::posix_retry_exits()
+        ));
         let done = at("\ndone\n");
         let judged = at(r#"  delivery_gave_up "${hook_gave_up%%,*}""#);
         let receipt = at(r#"--data-urlencode "delivery_id=$hook_id" >/dev/null"#);
@@ -1360,7 +1363,9 @@ mod tests {
         }
         let last = crate::hook_tries(AgentKind::Claude).len();
         assert!(
-            batch.contains(&format!("if \"%hook_try%\"==\"{last}\" goto :plain_gave_up")),
+            batch.contains(&format!(
+                "if \"%hook_try%\"==\"{last}\" goto :plain_gave_up"
+            )),
             "{batch}"
         );
     }

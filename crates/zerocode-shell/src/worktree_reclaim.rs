@@ -2986,7 +2986,10 @@ mod tests {
             ),
             Settled::Kept
         ));
-        assert!(path.join("target/debug/big").is_file(), "a build in use went");
+        assert!(
+            path.join("target/debug/big").is_file(),
+            "a build in use went"
+        );
         forget();
 
         let nobody = |_: &Path| Some(0);
@@ -3007,7 +3010,10 @@ mod tests {
             );
         }
         for survivor in ["tools/work.rs", "draft.rs", "output/t-78886/shot.png"] {
-            assert!(path.join(survivor).is_file(), "{survivor} went with the build");
+            assert!(
+                path.join(survivor).is_file(),
+                "{survivor} went with the build"
+            );
         }
         #[cfg(unix)]
         assert!(
@@ -3050,8 +3056,14 @@ mod tests {
             ),
             Settled::Kept
         ));
-        assert!(path.join("target/debug/big").is_file(), "a locked checkout lost its build");
-        git(&bench.repo, &["worktree", "unlock", &path.to_string_lossy()]);
+        assert!(
+            path.join("target/debug/big").is_file(),
+            "a locked checkout lost its build"
+        );
+        git(
+            &bench.repo,
+            &["worktree", "unlock", &path.to_string_lossy()],
+        );
         judged()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
