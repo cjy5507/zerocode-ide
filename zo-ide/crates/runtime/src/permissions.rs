@@ -393,7 +393,9 @@ impl PermissionPolicy {
     /// for this call alone — no rule an earlier yes left behind answers it —
     /// and refused when there is nobody to ask. The question also stands for
     /// any escalation the mode would have asked about, so a person is asked
-    /// once; a call the mode or the rules refuse outright is refused unasked.
+    /// once; a call the mode or the rules refuse outright is refused unasked,
+    /// and so is every such question in a pane the ledger summoned as a
+    /// worker, which nobody watches.
     #[must_use]
     pub fn authorize_with_context(
         &self,
@@ -410,6 +412,13 @@ impl PermissionPolicy {
             Some(KillVerdict::Deny { reason }) => PermissionOutcome::Deny {
                 reason: crate::kill_guard::refusal(&reason),
             },
+            // A pane the ledger summoned as a worker: nobody watches it, so
+            // nobody is asked.
+            Some(KillVerdict::Ask { reason }) if crate::kill_guard::in_a_summoned_worker_pane() => {
+                PermissionOutcome::Deny {
+                    reason: crate::kill_guard::unanswered(&reason),
+                }
+            }
             Some(KillVerdict::Ask { reason }) => {
                 let mut would_ask = WouldAsk::default();
                 match self.authorize_by_mode_and_rules(

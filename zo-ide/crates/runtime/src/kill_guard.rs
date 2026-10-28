@@ -70,10 +70,9 @@ pub fn in_a_summoned_worker_pane() -> bool {
     )
 }
 
-/// [`in_a_summoned_worker_pane`] for the pane and leader handed in. Not
-/// read yet: the red half of t-80732's second part.
-pub(crate) fn summoned_worker(_pane: Option<&str>, _leader: Option<&str>) -> bool {
-    false
+/// [`in_a_summoned_worker_pane`] for the pane and leader handed in.
+pub(crate) fn summoned_worker(pane: Option<&str>, leader: Option<&str>) -> bool {
+    pane.is_some_and(|pane| !pane.is_empty() && leader != Some(pane))
 }
 
 /// The refusal a [`KillVerdict::Deny`] becomes, in every mode.
