@@ -665,7 +665,7 @@ pub fn is_persisted_reminder_text(text: &str) -> bool {
 /// durable conversation messages; the rolling marker (and, on the next request,
 /// the anchor) is then carried over the reminder-only messages persisted right
 /// behind them, so a request's reminder tail rides inside the cached prefix
-/// ([`reminder_tail_end`]). Harmless
+/// (`reminder_tail_end`). Harmless
 /// on non-Anthropic wires: the OpenAI and Gemini encoders build their own
 /// payloads from these blocks and never serialize `cache_control`.
 ///
