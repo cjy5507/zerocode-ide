@@ -1303,6 +1303,43 @@ async function testOrbitGates(browser, origin, ok) {
       await window.__BOARD_SETTLED__();
     });
 
+    /* 숨은 보드는 GPU를 돌려준다(t-80604): 무대의 관찰자가 크기 0을 들고 오면 캔버스의 그리기 버퍼가
+     * 기기 픽셀 2×2 이하로 줄고 빛번짐의 타깃이 텍스처 수에서 빠진다. 돌아온 보드는 같은 카메라, 같은
+     * 선택, 같은 몸체로 다시 그리고, 버퍼와 타깃은 숨기 전의 크기로 다시 선다. */
+    const parking = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const state = agentOrbitStates.get(view);
+      const key = [...state.bodies.values()].find((body) => body.kind === "agent")?.key ?? null;
+      selectAgentGraphEntity(view, key);
+      await window.__BOARD_SETTLED__();
+      state.camera.spin = false;
+      state.camera.yaw += 0.2;
+      await window.__ORBIT_FRAMES__(2);
+      const look = () => ({ yaw: state.camera.yaw, pitch: state.camera.pitch, selected: state.selected,
+        bodies: [...state.bodies.keys()].join(",") });
+      const was = look();
+      const before = window.__ORBIT__().gpu;
+      view.hidden = true;
+      await window.__ORBIT_WAIT__(200);
+      const hidden = window.__ORBIT__().gpu;
+      view.hidden = false;
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      await window.__ORBIT_FRAMES__(2);
+      const after = window.__ORBIT__().gpu;
+      state.camera.spin = true;
+      return { key, bloom: window.__ORBIT__().bloom, was, now: look(), before, hidden, after };
+    });
+    ok("a hidden board gives its drawing buffer and bloom targets back, and returns with the same camera and selection",
+      parking.key !== null && parking.was.selected === parking.key
+        && parking.hidden.drawing[0] <= 2 && parking.hidden.drawing[1] <= 2
+        && (!parking.bloom || parking.hidden.textures < parking.before.textures)
+        && parking.after.drawing.join() === parking.before.drawing.join()
+        && parking.after.textures === parking.before.textures
+        && parking.after.programs === parking.before.programs
+        && JSON.stringify(parking.now) === JSON.stringify(parking.was),
+      JSON.stringify(parking));
+
     await page.evaluate(() => {
       Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
       document.dispatchEvent(new Event("visibilitychange"));
