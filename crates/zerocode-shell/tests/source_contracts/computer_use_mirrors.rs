@@ -326,7 +326,7 @@ fn the_helper_counts_by_the_windows_guard_table() {
         "`status` must answer the core's pace table, not numbers of its own"
     );
     // The skill tells the model the pace the table holds, in its words.
-    let skill = include_str!("../../../../skills/computer-use/SKILL.md")
+    let skill = super::support::COMPUTER_USE_GUIDE
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
@@ -932,7 +932,7 @@ fn the_ios_exporter_counts_a_revisited_child_before_it_calls_a_subtree_truncated
 /// reads the null as nothing and stops looking.
 #[test]
 fn the_skill_says_a_look_that_cannot_be_compared_is_unknown_not_nothing() {
-    let skill = include_str!("../../../../skills/computer-use/SKILL.md")
+    let skill = super::support::COMPUTER_USE_GUIDE
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
@@ -958,7 +958,7 @@ fn the_skill_says_a_look_that_cannot_be_compared_is_unknown_not_nothing() {
 #[test]
 fn the_skill_names_every_no_look_reason_in_the_order_they_are_taken() {
     use zerocode_core::computer_use::walk_words;
-    let skill = include_str!("../../../../skills/computer-use/SKILL.md")
+    let skill = super::support::COMPUTER_USE_GUIDE
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
@@ -1003,7 +1003,7 @@ fn the_skill_names_every_no_look_reason_in_the_order_they_are_taken() {
 #[test]
 fn the_skill_says_a_walk_the_person_took_over_stops_and_is_no_defect() {
     use zerocode_core::computer_use::walk_words;
-    let skill = include_str!("../../../../skills/computer-use/SKILL.md")
+    let skill = super::support::COMPUTER_USE_GUIDE
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");

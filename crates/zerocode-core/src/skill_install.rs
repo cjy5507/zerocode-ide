@@ -813,6 +813,35 @@ mod tests {
         assert_eq!(copies[0].state, CopyState::Current);
     }
 
+    /// Every bundled skill that carries reference files tells, in its
+    /// `SKILL.md`, when to read each one, and the one-folder rule holds: a
+    /// reference file is Markdown beside `SKILL.md`, so a skill that gains a
+    /// file is installed with it without a list of names in Rust (t-81132).
+    #[test]
+    fn every_bundled_reference_file_is_named_in_its_skill_file() {
+        let with_files: Vec<&str> = BUNDLED_SKILLS
+            .iter()
+            .filter(|skill| !skill.files.is_empty())
+            .map(|skill| skill.name)
+            .collect();
+        for needed in ["orchestration", "computer-use"] {
+            assert!(
+                with_files.contains(&needed),
+                "{needed} carries no reference files"
+            );
+        }
+        for skill in BUNDLED_SKILLS {
+            for (name, text) in skill.files {
+                assert!(
+                    skill.content.contains(&format!("`{name}`")),
+                    "{}: SKILL.md does not tell when to read {name}",
+                    skill.name
+                );
+                assert!(!text.trim().is_empty(), "{}: {name} is empty", skill.name);
+            }
+        }
+    }
+
     /// A copy is told apart by its git blob id, the id `git hash-object`
     /// prints, so the release book is `git log` output and each of its lines
     /// can be checked against the history it came from. The bytes this build
