@@ -85,10 +85,12 @@ impl PromptCommandDef {
     /// person has not trusted, whatever `allowed-tools` grants.
     #[must_use]
     pub fn render_prompt_as(&self, args: &str, base_dir: &Path, gate: InlineShellGate) -> String {
+        let workspace = self.scope == PromptCommandScope::Workspace;
         let shell = InlineShell {
             allowed_tools: &self.allowed_tools,
             read_only: gate.read_only,
-            untrusted: self.scope == PromptCommandScope::Workspace && !gate.workspace_trusted,
+            untrusted: workspace && !gate.workspace_trusted,
+            confined: workspace,
         };
         expand_command_template(&self.body, args, base_dir, &shell)
     }
@@ -425,7 +427,7 @@ fn expand_command_template(
             }
             '@' if prev_is_boundary && peek_is_path_start(&mut chars) => {
                 let token = collect_path_token(&mut chars);
-                output.push_str(&embed_file(&token, args, base_dir));
+                output.push_str(&embed_file(&token, args, base_dir, shell.confined));
                 at_line_start = false;
                 prev_is_boundary = false;
             }
@@ -537,11 +539,13 @@ where
 
 /// What a command file's `!` commands may run: what its `allowed-tools`
 /// grants Bash, and nothing while the session is read-only or while the file
-/// is a workspace one in a folder the person has not trusted.
+/// is a workspace one in a folder the person has not trusted. A workspace
+/// file is also `confined`: its `@path` reads only inside the working folder.
 struct InlineShell<'a> {
     allowed_tools: &'a [String],
     read_only: bool,
     untrusted: bool,
+    confined: bool,
 }
 
 impl InlineShell<'_> {
@@ -638,8 +642,9 @@ fn run_inline_command(
 }
 
 /// Embed `@path` file contents. Relative paths resolve against `base_dir`; a
-/// missing or unreadable file degrades to a one-line notice.
-fn embed_file(token: &str, args: &str, base_dir: &Path) -> String {
+/// missing or unreadable file degrades to a one-line notice, and so does a
+/// path that lands outside `base_dir` when `confined`.
+fn embed_file(token: &str, args: &str, base_dir: &Path, confined: bool) -> String {
     let raw = expand_prompt_arguments(token, args);
     let raw = raw.trim();
     if raw.is_empty() {
@@ -651,6 +656,19 @@ fn embed_file(token: &str, args: &str, base_dir: &Path) -> String {
     } else {
         base_dir.join(path)
     };
+    if confined {
+        // Where the path really lands, links and `..` resolved, must be
+        // inside the working folder.
+        let inside = match (resolved.canonicalize(), base_dir.canonicalize()) {
+            (Ok(real), Ok(base)) => real.starts_with(base),
+            (Err(error), _) | (_, Err(error)) => return format!("[@{raw}: {error}]"),
+        };
+        if !inside {
+            return format!(
+                "[@{raw}: not read — a repository's command file reads only inside the working folder]"
+            );
+        }
+    }
     match fs::read_to_string(&resolved) {
         Ok(contents) => contents,
         Err(error) => format!("[@{raw}: {error}]"),
@@ -669,6 +687,7 @@ mod tests {
             allowed_tools: &allowed_tools,
             read_only: false,
             untrusted: false,
+            confined: true,
         };
         expand_command_template(body, args, base_dir, &shell)
     }
