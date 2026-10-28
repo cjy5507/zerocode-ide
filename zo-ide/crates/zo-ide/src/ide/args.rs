@@ -462,7 +462,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
             cwd,
             model,
             permission_mode: permission_mode.unwrap_or(PermissionMode::WorkspaceWrite),
-            permission_mode_named: permission_mode_explicit,
+            named_permission_mode: permission_mode,
             allowed_tools,
             disable_spawn_family: no_spawn,
             resume,

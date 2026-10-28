@@ -682,10 +682,10 @@ struct Ui {
     osc_guard: Option<LateOscGuard>,
     ctx_tokens: u64,
     permission_mode: PermissionMode,
-    /// The session's mode was named on the command line
+    /// The mode named on the command line, if one was
     /// ([`crate::slash::ModeOrigin::named`]); the same for every session
     /// this run opens.
-    permission_mode_named: bool,
+    named_permission_mode: Option<PermissionMode>,
     /// Clone of the registry's shared permission cell, so Shift+Tab reaches a
     /// running turn. See [`PlainSession::permission_cell`] for what it does and
     /// does not switch.
@@ -3790,7 +3790,7 @@ impl Ui {
     /// Who stands behind this TUI's permission mode, for a command file's
     /// `!` lines: a person at the keyboard, and a mode named or not.
     fn mode_origin(&self) -> crate::slash::ModeOrigin {
-        crate::slash::ModeOrigin { named: self.permission_mode_named, piped: false }
+        crate::slash::ModeOrigin { named: self.named_permission_mode.is_some(), piped: false }
     }
 
     /// 턴이 도는 동안의 슬래시 한 줄.
@@ -4769,7 +4769,7 @@ impl App {
                 osc_guard: LateOscGuard::armed_if_needed(),
                 ctx_tokens: 0,
                 permission_mode: session.permission_mode,
-                permission_mode_named: session.permission_mode_named,
+                named_permission_mode: session.named_permission_mode,
                 permission_cell: Some(session.permission_cell()),
                 cwd,
                 session_cwd,
@@ -5688,7 +5688,7 @@ impl App {
             cwd: current.cwd.clone(),
             model: current.model.clone(),
             permission_mode: current.permission_mode,
-            permission_mode_named: launch.permission_mode_named,
+            named_permission_mode: launch.named_permission_mode,
             effort: current.effort(),
             resume: None,
             allowed_tools: launch.allowed_tools,
@@ -5792,7 +5792,7 @@ impl App {
             cwd: current.cwd.clone(),
             model: current.model.clone(),
             permission_mode: current.permission_mode,
-            permission_mode_named: launch.permission_mode_named,
+            named_permission_mode: launch.named_permission_mode,
             effort: current.effort(),
             resume: Some(id.to_string()),
             // 이 셋만 런치에서 온다 — 나머지는 지금 도는 세션이 진실이다.
@@ -6703,7 +6703,7 @@ fn test_ui() -> Ui {
         osc_guard: None,
         ctx_tokens: 0,
         permission_mode: PermissionMode::WorkspaceWrite,
-        permission_mode_named: false,
+        named_permission_mode: None,
         permission_cell: None,
         cwd: "/test".to_string(),
         session_cwd: std::path::PathBuf::from("/test"),

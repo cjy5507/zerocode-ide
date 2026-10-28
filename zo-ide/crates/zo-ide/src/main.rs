@@ -778,7 +778,7 @@ fn run_teammate(
     // Whatever mode the brief carried, the parent chose it — a person named
     // none for this pane, so a repository's command file does not read it
     // as their word for the folder.
-    launch.open.permission_mode_named = false;
+    launch.open.named_permission_mode = None;
     // The harness (t-2513 contract 1). A v2 brief carries the one the parent
     // resolved — prompt, tools, mode, rules — and the child runs it as
     // written; re-deriving any of it here would be the drift the contract

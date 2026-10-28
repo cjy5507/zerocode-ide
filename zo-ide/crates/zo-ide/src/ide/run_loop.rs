@@ -653,7 +653,7 @@ fn handle_slash<W: Write>(
             | Slash::Rewind
             | Slash::Clear,
         ) => unknown_command(renderer, name),
-        None => unlisted_command(renderer, &session.cwd, session.permission_mode, session.permission_mode_named, name, arg),
+        None => unlisted_command(renderer, &session.cwd, session.permission_mode, session.named_permission_mode.is_some(), name, arg),
     }
 }
 
