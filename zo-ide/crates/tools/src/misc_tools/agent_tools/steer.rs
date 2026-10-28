@@ -65,8 +65,16 @@ pub(crate) fn steer_agent_with_receipt(manifest: &AgentOutput, text: String) -> 
         super::manifest::stamp_agent_receipt(manifest, SteerReceiptRecord::now(&outcome));
         return outcome;
     }
-    if manifest.lifecycle.execution.as_deref() == Some("ledger") {
-        let outcome = SteerOutcome::rejected("the ledger worker has not finished starting; retry after Agent returns its worker binding");
+    // Not bound yet: the worker-start still runs in the background
+    // (`ledgerStart` names it), or the binding is half written. Nothing reads
+    // the process queue for a ledger worker, so a push there would answer
+    // `queued` and lose the words.
+    let starting = manifest.lifecycle.ledger_start.as_ref();
+    if starting.is_some() || manifest.lifecycle.execution.as_deref() == Some("ledger") {
+        let task = starting.map_or_else(String::new, |start| format!(" for {}", start.task));
+        let outcome = SteerOutcome::rejected(format!(
+            "the ledger worker{task} is still starting, so nothing would read this message; send it again once the agent's status names its worker (a start that fails reaches you through the agent's completion notice)"
+        ));
         super::manifest::stamp_agent_receipt(manifest, SteerReceiptRecord::now(&outcome));
         return outcome;
     }
