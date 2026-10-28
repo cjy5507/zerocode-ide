@@ -1137,6 +1137,35 @@ fn the_settings_view_marks_staged_and_default_profiles() {
     assert!(!view_a.is_default);
     assert!(!view_b.staged);
     assert!(view_b.is_default, "b was chosen as the new-tab default");
+    // 주입된 적이 없는 프로필은 결과 칸을 싣지 않는다 — 앞의 칸들의 이름과
+    // 뜻은 그대로다(창의 handoff 카드가 그 칸들을 읽는다).
+    assert!(view_a.last_apply.is_none());
+    let wire = serde_json::to_value(view_b).expect("wire");
+    for kept in ["id", "name", "staged", "isDefault"] {
+        assert!(wire.get(kept).is_some(), "{kept} left the profile view");
+    }
+    assert!(wire.get("lastApply").is_none());
+
+    // 주입이 끝난 프로필은 그 결과를 「lastApply」로 싣는다.
+    let applied = browser_cookie_import::CookieApply {
+        applied: 121,
+        refused: 1,
+        retained: 0,
+        dropped: 24,
+        at_unix: 1_793_150_000,
+    };
+    std::fs::write(
+        browser_cookie_import::apply_file(dir.path(), &b),
+        serde_json::to_vec(&applied).expect("json"),
+    )
+    .expect("apply file");
+    let views = browser_profile_views(dir.path());
+    let view_b = views.iter().find(|view| view.id == b).expect("b is listed");
+    assert_eq!(view_b.last_apply.as_ref(), Some(&applied));
+    let wire = serde_json::to_value(view_b).expect("wire");
+    assert_eq!(wire["lastApply"]["applied"], 121);
+    assert_eq!(wire["lastApply"]["refused"], 1);
+    assert_eq!(wire["lastApply"]["atUnix"], 1_793_150_000);
 }
 
 /// 기본 프로필은 우리 mint가 지은, 실제로 있는 프로필만 될 수 있고,
@@ -1195,9 +1224,14 @@ fn deleting_a_profile_takes_its_staging_and_default_with_it() {
     )
     .expect("the file");
     std::fs::write(browser_cookie_import::staging_file(dir.path(), &a), "[]").expect("staging");
+    std::fs::write(browser_cookie_import::apply_file(dir.path(), &a), "{}").expect("apply");
     choose_default_browser_profile(dir.path(), Some(&a)).expect("default");
 
     remove_browser_profile(dir.path(), &a).expect("remove");
+    assert!(
+        !browser_cookie_import::apply_file(dir.path(), &a).exists(),
+        "the last injection's counts outlived the profile"
+    );
 
     let left = load_browser_profiles(dir.path());
     assert_eq!(left.len(), 1);

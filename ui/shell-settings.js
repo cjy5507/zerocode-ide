@@ -12540,6 +12540,26 @@ function browserProfileRow(profile) {
     })
     : t("settings.browser.profileNever", "아직 가져온 쿠키가 없습니다");
   identity.append(head, note);
+  // 마지막 주입의 결과. 거절이 있어도 받은 쿠키는 앉아 있고, 받지 않은
+  // 쿠키의 이름·도메인은 창 로그에 있다 — 「다시 가져오기」가 새로 받는 길이다.
+  const applied = profile.lastApply;
+  if (applied && Number.isInteger(applied.applied)) {
+    const outcome = document.createElement("p");
+    outcome.className = "browser-profile-note browser-profile-applied";
+    outcome.textContent = applied.refused > 0
+      ? t("settings.browser.profileAppliedRefused", "쿠키 {{applied}}개 적용 · {{refused}}개 거절", {
+        applied: applied.applied,
+        refused: applied.refused,
+      })
+      : t("settings.browser.profileApplied", "쿠키 {{applied}}개 적용", { applied: applied.applied });
+    if (applied.refused > 0) {
+      outcome.dataset.tip = t(
+        "settings.browser.profileRefusedHint",
+        "받지 않은 쿠키의 이름은 창 로그에 있습니다. 다시 가져오면 새로 받습니다",
+      );
+    }
+    identity.append(outcome);
+  }
 
   const acts = document.createElement("div");
   acts.className = "browser-profile-acts";
