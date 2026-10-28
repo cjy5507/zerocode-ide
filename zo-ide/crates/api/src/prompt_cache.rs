@@ -869,10 +869,16 @@ impl PromptCache {
 
     /// Deposit what the client is about to send for `request`: the length
     /// and hash of the prefix every marker in `payload` closes
-    /// ([`sent_prefixes`]), and how long working that out took. The request
-    /// recorded as this same request ([`sent_request_key`]) withdraws it onto
-    /// its ledger row.
-    pub(crate) fn note_sent_payload(&self, request: &MessageRequest, payload: &[u8]) {
+    /// ([`sent_prefixes`]), how long working that out took, and the effort
+    /// the payload carried (`output_config.effort` after the client resolved
+    /// it). The request recorded as this same request ([`sent_request_key`])
+    /// withdraws it onto its ledger row.
+    pub(crate) fn note_sent_payload(
+        &self,
+        request: &MessageRequest,
+        payload: &[u8],
+        effort: Option<&str>,
+    ) {
         let started = std::time::Instant::now();
         let Some(key) = sent_request_key(request) else {
             return;
@@ -890,6 +896,7 @@ impl PromptCache {
             key,
             prefixes,
             hash_micros,
+            effort: effort.unwrap_or_default().to_string(),
             transformations: None,
         });
     }
@@ -2849,6 +2856,25 @@ pub struct RequestLedgerRow {
     /// route record that only carries the router's RECOMMENDATION.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub effort: String,
+    /// The effort the client actually put on the wire, read off the body it
+    /// sent (`output_config.effort`; Anthropic spells its levels the way
+    /// [`EffortLevel::key`] does), after it resolved the request's own
+    /// setting for the model: a Smart band
+    /// (`MessageRequest::effort_band_ceiling`) picks its level per request
+    /// there, and a level the model does not accept is clamped there.
+    /// [`Self::effort`] keeps what the request asked for; the two differ
+    /// exactly when the client moved it.
+    ///
+    /// Without it a band that sent `max` read as the `xhigh` floor it asked
+    /// for, so a session's effort changes — each of which rewrote the
+    /// conversation cache on Anthropic, 45 of 45 in Z11 — could not be
+    /// counted from the ledger. Empty on a row recorded before the column
+    /// existed, on a request that sent no effort, and on a provider path that
+    /// does not report its payload (only the Anthropic client does).
+    ///
+    /// [`EffortLevel::key`]: crate::types::EffortLevel::key
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sent_effort: String,
     /// A refresh, not a turn: the conversation's last request re-sent with
     /// `max_tokens: 0` to keep its cache entry alive while the person is away
     /// (`cache_policy`). Billed like any request, so it has a row;
@@ -3297,6 +3323,7 @@ fn request_ledger_row(
         read_drop: markers.read_drop,
         attempt: attempt_for_session(session_id),
         effort: request_effort_label(request),
+        sent_effort: markers.sent.sent_effort,
         refresh: false,
         prefix_hashes: markers.sent.prefix_hashes,
         prefix_changed_at: markers.sent.prefix_changed_at,
@@ -3322,6 +3349,7 @@ struct SentRequest {
     key: u64,
     prefixes: Vec<SentPrefix>,
     hash_micros: u64,
+    effort: String,
     transformations: Option<crate::sse::InputTransformations>,
 }
 
@@ -3446,6 +3474,7 @@ struct SentColumns {
     prefix_hashes: Vec<String>,
     prefix_changed_at: String,
     prefix_hash_us: Option<u64>,
+    sent_effort: String,
     input_transformations: u32,
     input_transformation_kinds: Vec<String>,
 }
@@ -3457,6 +3486,7 @@ impl SentColumns {
             prefix_hashes: sent.prefixes.iter().map(SentPrefix::label).collect(),
             prefix_changed_at: changed_at.unwrap_or_default(),
             prefix_hash_us: Some(sent.hash_micros),
+            sent_effort: sent.effort.clone(),
             input_transformations: seen.count,
             input_transformation_kinds: seen.kinds,
         }
@@ -4694,6 +4724,20 @@ mod tests {
         );
     }
 
+    /// A row written before [`super::RequestLedgerRow::sent_effort`] existed
+    /// reads with the column empty and every other column as it was — the
+    /// ledger is kept forever, so its oldest rows meet every new reader.
+    #[test]
+    fn a_row_written_before_sent_effort_reads_it_empty() {
+        let line = r#"{"seq":3,"ts_unix_ms":10,"model":"claude-opus-5-5","provider":"anthropic","cache_creation":0,"cache_read":7,"input_uncached":1,"message_count":2,"broke":false,"effort":"xhigh"}"#;
+        let row: super::RequestLedgerRow = serde_json::from_str(line).expect("an old row parses");
+        assert_eq!(row.sent_effort, "");
+        assert_eq!(row.effort, "xhigh");
+        assert_eq!(row.cache_read, 7);
+        let rewritten = serde_json::to_string(&row).expect("row serializes");
+        assert!(!rewritten.contains("sent_effort"), "an empty column stays off the line: {rewritten}");
+    }
+
     #[test]
     fn request_ledger_row_count_equals_tracked_requests() {
         let _env = test_env_lock();
@@ -4815,10 +4859,14 @@ mod tests {
     /// about 780 bytes. The same day the request-parameter line `p` joined
     /// them (W3 review, P3-3): one more `p:bytes:hash` entry, 26 bytes with
     /// its quotes and comma, on every Anthropic row — about 0.6 MB a month —
-    /// taking the worst case to about 810 bytes.
+    /// taking the worst case to about 810 bytes. It moved again on 2026-10-29
+    /// for `sent_effort` (t-79471): measured on this row, the worst case went
+    /// from 808 to 831 bytes (`"medium"`, 23 bytes with its key, quotes and
+    /// comma), about 0.6 MB a month at ~24,700 rows. The ceiling kept the 22
+    /// bytes of room the `p` move left (830 - 808), so 831 + 22 = 853.
     #[test]
     fn a_request_ledger_row_stays_small_enough_to_keep_forever() {
-        const CEILING_BYTES: usize = 830;
+        const CEILING_BYTES: usize = 853;
 
         let marker = |index: i32, slot: &str, role: &str, ttl: &str| super::MarkerRecord {
             index,
@@ -4859,6 +4907,9 @@ mod tests {
             // A legacy thinking budget is the longer of the two spellings; a
             // level is at most `medium`.
             effort: "budget:32000".to_string(),
+            // What the client sent is a level, never a budget, and the
+            // longest level Anthropic accepts is `medium`.
+            sent_effort: "medium".to_string(),
             // A refresh row carries the flag but nothing a turn adds — no
             // output, no movement, no drop — so it stays far under this.
             refresh: false,
