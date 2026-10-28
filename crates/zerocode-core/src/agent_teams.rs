@@ -1305,7 +1305,7 @@ pub const ORCHESTRATION_VOICE: &str = "orchestration";
 /// The flags come from [`crate::orchestration::text_file::TEXT_FILE_FLAGS`] and the parts from
 /// [`crate::orchestration::text_file::SHELL_RUNS`], so the shim, the window and the tests read
 /// one list.
-fn text_watch_posix(voice: &str) -> (String, String, String) {
+pub fn text_watch_posix(voice: &str) -> (String, String, String) {
     use crate::orchestration::text_file::{SHELL_RUNS, TEXT_FILE_FLAGS, inline_warning};
     if voice != ORCHESTRATION_VOICE {
         return Default::default();
