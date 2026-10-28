@@ -364,21 +364,19 @@ function paintFootDoor(list) {
   list.__door?.classList.toggle("is-shown", chatOffFoot(list));
 }
 
-/* The way back to the foot (t-6824): a button over the list's lower right,
- * shown while the list is not following its words, that glides home and
- * follows again. Named by the words it shows; no tooltip. */
+/* The way back to the foot (t-6824): a round button centred on the reading
+ * column just over the composer (t-81525 C6), shown while the list is not
+ * following its words, that glides home and follows again. A mark alone, so
+ * it says its name twice — tooltip and name (`labelButton`). */
 function chatFootDoorNode(list) {
   const door = document.createElement("button");
   door.type = "button";
   door.className = "chat-foot-door";
-  const words = t("worker.toFoot", "맨 아래로");
-  door.setAttribute("aria-label", words);
+  labelButton(door, t("worker.toFoot", "맨 아래로"));
   // Enter and Space, while it has focus, are its own — the window's key
   // sink (`rearmKeySink`) would otherwise take them for the terminal.
   door.dataset.keyboardOwner = "true";
-  const said = document.createElement("span");
-  said.textContent = words;
-  door.append(iconNode("arrow-down"), said);
+  door.append(iconNode("arrow-down"));
   door.addEventListener("click", () => {
     returnToFoot(list);
     // Pressed from the keyboard, the button hides under the focus: the keys

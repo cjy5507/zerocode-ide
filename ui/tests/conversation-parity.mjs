@@ -911,6 +911,27 @@ export async function testConversationFoot(browser, origin, ok) {
       const rect = window.__FOOT__.door()?.getBoundingClientRect();
       return rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
     });
+    // Centred on the column over the composer, a round 28px mark that says
+    // its name twice (t-81525 C6).
+    seen.doorPlace = await page.evaluate(() => {
+      const door = window.__FOOT__.door();
+      const dock = door?.closest(".worker-view")?.querySelector(":scope > .chat-dock");
+      if (!door || !dock) return null;
+      const at = door.getBoundingClientRect();
+      const under = dock.getBoundingClientRect();
+      const probe = document.createElement("i");
+      probe.style.width = "var(--control-height-sm)";
+      document.body.append(probe);
+      const want = probe.getBoundingClientRect().width;
+      probe.remove();
+      return {
+        off: Math.round(Math.abs((at.left + at.width / 2) - (under.left + under.width / 2))),
+        above: Math.round(under.top - at.bottom),
+        size: [Math.round(at.width), Math.round(at.height)],
+        want,
+        tip: door.dataset.tip === door.getAttribute("aria-label"),
+      };
+    });
     if (doorAt) await page.mouse.click(doorAt.x, doorAt.y);
     seen.pressed = await still();
     seen.followsAgain = await grow();
@@ -928,6 +949,12 @@ export async function testConversationFoot(browser, origin, ok) {
         seen.pressed.gap <= 1 && seen.pressed.door === false && seen.followsAgain.gap <= 1 && seen.followsAgain.door === false &&
         seen.leftAgain.door === true && seen.entered.gap <= 1 && seen.entered.door === false,
       JSON.stringify(seen),
+    );
+    ok(
+      "the way back to the foot is a round 28px mark centred over the composer, named twice (t-81525 C6)",
+      seen.doorPlace !== null && seen.doorPlace.off <= 1 && seen.doorPlace.above >= 0 &&
+        seen.doorPlace.size[0] === seen.doorPlace.want && seen.doorPlace.size[1] === seen.doorPlace.want && seen.doorPlace.tip,
+      JSON.stringify(seen.doorPlace),
     );
 
     // --- reopening_the_same_conversation_keeps_the_readers_place ----------
