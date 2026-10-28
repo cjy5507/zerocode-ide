@@ -21875,7 +21875,7 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         // The copy stands under every answer now (the extension's
         // `assistantActions`), not only the last one's tail.
         (
-            "function helperActionsNode(turn) {",
+            "function helperActionsNode() {",
             vec!["worker.copyAnswer"],
         ),
         (

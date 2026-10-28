@@ -163,12 +163,13 @@ function explainSourceOfReport(entity, report, term) {
 }
 
 /* 답변 행의 단추: 행에 포인터나 초점이 처음 닿을 때 한 번 짓는다 — 긴 대화의 모든
- * 답마다 노드 셋씩을 미리 지으면 읽지도 않은 행이 값을 낸다. */
+ * 답마다 노드 셋씩을 미리 지으면 읽지도 않은 행이 값을 낸다. 손잡이 줄은 목록에 한
+ * 벌이라(t-81525 C8) 단추도 한 번 짓고, 누를 때 그 줄이 서 있는 답을 설명한다. */
 function ensureExplainTurnButton(event) {
   const row = event.target.closest?.(".helper-turn.is-assistant");
   const actions = row?.querySelector(":scope > .helper-actions");
   if (!actions || actions.querySelector(":scope > .explain-open")) return;
-  ensureExplainButton(actions, "turn", () => explainSourceOfTurn(row.__run, row.__turn));
+  ensureExplainButton(actions, "turn", () => explainSourceOfTurn(actions.__row?.__run, actions.__row?.__turn));
 }
 
 /* 대화 목록 하나가 설 때 한 번 건다(`helperTurnsNode`). 문서에는 제스처마다 위임 리스너가

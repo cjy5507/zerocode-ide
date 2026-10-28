@@ -1595,7 +1595,9 @@ export async function testConversationShelf(browser, origin, ok) {
       list.scrollTop = 0;
       await frames(4);
       await new Promise((done) => setTimeout(done, 50));
-      const focused = rows().find((row) => row.classList.contains("is-assistant") && reach()(row) && row.querySelector(":scope > .helper-actions .helper-copy"));
+      // The list's one copy comes to the answer the pointer reaches (t-81525 C8).
+      const focused = rows().find((row) => row.classList.contains("is-assistant") && reach()(row));
+      focused?.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
       const door = focused?.querySelector(":scope > .helper-actions .helper-copy") ?? null;
       door?.focus();
       list.scrollTop = list.scrollHeight;

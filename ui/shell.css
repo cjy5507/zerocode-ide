@@ -15368,9 +15368,20 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   background: var(--row-hover);
 }
 
-/* The extension's `assistantActions`: a short row under every answer, its
- * copy shown only while the pointer or the focus is on the answer. */
+/* The extension's `assistantActions`: a short row under an answer — the
+ * list's one, carried to the answer the pointer or the focus reaches
+ * (t-81525 C8). Every answer keeps its room under the words, so the row
+ * moving from one to the next moves no line of the page; it is drawn in that
+ * room, shown on the newest answer and while the pointer or the focus is on
+ * the one it stands in. */
+.helper-turn.is-assistant:not(.is-streaming) {
+  padding-bottom: var(--chat-actions-h);
+}
+
 .helper-actions {
+  position: absolute;
+  bottom: 0;
+  left: 0;
   display: flex;
   align-items: center;
   gap: var(--chat-actions-gap);
@@ -15379,15 +15390,8 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   transition: opacity var(--motion-fast) var(--ease-standard);
 }
 
-.helper-turn.is-assistant:hover .helper-actions,
-.helper-turn.is-assistant:focus-within .helper-actions {
+.helper-turn.is-assistant:is(.is-latest, :hover, :focus-within) > .helper-actions {
   opacity: 1;
-}
-
-/* An answer with its action row keeps no pad under it: the row is the pad
- * (`message:has([data-message-actions])`). */
-.helper-turn.is-assistant:has(> .helper-actions) {
-  padding-bottom: 0;
 }
 
 .helper-copy {

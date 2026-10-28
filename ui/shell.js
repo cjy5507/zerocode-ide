@@ -14408,9 +14408,8 @@ function helperTurnRowNode(run, turn, spoken, cold = false) {
     else paintAnswerProse(said, turn, run);
   }
   row.appendChild(said);
-  // Every answer carries the extension's action row (`assistantActions`):
-  // a copy, shown while the pointer or the focus is on the answer.
-  if (turn.role === "assistant") row.appendChild(helperActionsNode(turn));
+  // The answer's copy is the list's one action row, moved to the answer the
+  // pointer or the focus reaches (`standAnswerActions`, t-81525 C8).
   row.dataset.turn = String(turn.seq);
   row.__turn = turn;
   // 「그림·페이지로 설명」이 이 답의 대화를 찾는 길(t-32787): 단추는 처음 닿을 때 짓는다.
@@ -14676,9 +14675,12 @@ function helperTailNode(run, turn) {
   return tail;
 }
 
-/* The extension's `assistantActions` under an answer: one copy button, on
- * every answer, visible while the pointer or the focus is on the row. */
-function helperActionsNode(turn) {
+/* The extension's `assistantActions` under an answer: one copy button. One
+ * row of them a list (t-81525 C8) — a 400-turn page built four nodes for
+ * every answer, read or not — standing in the answer the pointer or the
+ * focus last reached, the newest answer until then. It copies the answer it
+ * stands in (`__row`). */
+function helperActionsNode() {
   const actions = document.createElement("div");
   actions.className = "helper-actions";
   const copy = document.createElement("button");
@@ -14688,9 +14690,28 @@ function helperActionsNode(turn) {
   copy.setAttribute("aria-label", copyWords);
   copy.dataset.tip = copyWords;
   copy.appendChild(iconNode("copy"));
-  copyOnPress(copy, () => answerCopyText(turn.text));
+  copyOnPress(copy, () => answerCopyText(actions.__row?.__turn?.text ?? ""));
   actions.appendChild(copy);
   return actions;
+}
+
+/* Stand the list's action row in `row` when it is a settled answer and the
+ * row is not already there. */
+function standAnswerActions(list, row) {
+  if (!row || row.__turn?.role !== "assistant" || !list.contains(row)) return;
+  const actions = list.__actions ??= helperActionsNode();
+  if (actions.parentElement === row) return;
+  actions.__row = row;
+  row.appendChild(actions);
+}
+
+/* The pointer and the focus carry the action row to the answer they reach —
+ * listened for on the list, once, before the explain button looks for it
+ * (`watchExplainTurns`). */
+function watchAnswerActions(list) {
+  const stand = (event) => standAnswerActions(list, event.target.closest?.(".helper-turn.is-assistant"));
+  list.addEventListener("pointerover", stand);
+  list.addEventListener("focusin", stand);
 }
 
 /* The last thing the agent SAID on this page, or "" — what the copy under an
@@ -14778,6 +14799,7 @@ function dressLastAnswer(list, run, newest) {
   if (tail.childElementCount) newest.row.appendChild(tail);
   newest.row.classList.add("is-latest");
   list.__lastAnswer = newest.row;
+  standAnswerActions(list, newest.row);
 }
 
 /* Only the person's newest words stand stuck at the list's top (t-81525 B4):
@@ -15389,7 +15411,9 @@ function helperTurnsNode(run) {
   list.setAttribute("aria-label", t("worker.transcript", "헬퍼 대화 기록"));
   list.tabIndex = 0;
   list.__run = run;
+  // The answer's copy follows the pointer and the focus (t-81525 C8), and
   // 「그림·페이지로 설명」 단추는 답변 행에 포인터나 초점이 처음 닿을 때 짓는다(t-32787).
+  watchAnswerActions(list);
   watchExplainTurns(list);
   // It keeps to its foot until the person leaves it (t-6323 A5).
   keepToFoot(list);

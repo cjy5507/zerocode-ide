@@ -37016,10 +37016,15 @@ const answerTail = await page.evaluate(async () => {
   seen.browsed = browsed;
   seen.defaults = defaults;
   seen.wantWhere = `${owner.worktree}/index.html`;
-  // 복사는 답마다 — 확장의 `assistantActions`처럼 행의 손잡이 줄에 서고,
-  // 그 턴의 원문 그대로를 창의 클립보드 문으로 보낸다.
-  seen.copyOnEveryAnswer = [turns[1], turns[2]].every((row) =>
-    row?.querySelector(":scope > .helper-actions > .helper-copy") !== null);
+  // 복사는 목록에 한 벌 — 새 답에 서 있다가 포인터가 닿은 답으로 옮겨 가고
+  // (t-81525 C8), 그 턴의 원문 그대로를 창의 클립보드 문으로 보낸다.
+  const copyIn = (row) => row?.querySelector(":scope > .helper-actions > .helper-copy") !== null;
+  const onePerList = () => list.querySelectorAll(".helper-copy").length === 1;
+  const atNewest = copyIn(turns[2]) && onePerList();
+  turns[1]?.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+  const moved = copyIn(turns[1]) && !copyIn(turns[2]) && onePerList();
+  turns[2]?.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+  seen.copyOnEveryAnswer = atNewest && moved && copyIn(turns[2]);
   const copy = turns[2]?.querySelector(":scope > .helper-actions > .helper-copy");
   seen.copyNamed = copy?.getAttribute("aria-label") === t("worker.copyAnswer", "답 복사") &&
     copy?.dataset.tip === t("worker.copyAnswer", "답 복사");
