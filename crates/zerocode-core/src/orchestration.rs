@@ -9091,15 +9091,19 @@ impl Ledger {
         // this ledger got wrong.
         let binding_revision = self.bind(&binding, run_id);
         let run = self.run_mut(run_id).ok_or_else(|| unknown_run(run_id))?;
-        // A tree of the worker's own: a fresh cut, or the tree of an attempt
-        // that was itself one. An inherited tree a worker without one
-        // reported is the coordinator's, and stays so under the replacement.
+        // A tree of the worker's own: a fresh cut, or the tree of the very
+        // attempt this one inherits (`--retry-of`) when that attempt's worker
+        // had one. An inherited tree a worker without one reported is the
+        // coordinator's, and stays so under the replacement — whatever other
+        // worker reported the same path.
         let in_worktree = worktree
-            || inherit_checkout.as_deref().is_some_and(|path| {
-                run.workers
-                    .iter()
-                    .any(|held| held.in_worktree && held.checkout.as_deref() == Some(path))
-            });
+            || (inherit_checkout.is_some()
+                && tuning
+                    .retry_of
+                    .as_deref()
+                    .and_then(|attempt| run.dispatch(attempt))
+                    .and_then(|attempt| run.worker(&attempt.worker))
+                    .is_some_and(|ended| ended.in_worktree));
         run.workers.push(Worker {
             id: worker_id.clone(),
             team: team.to_string(),

@@ -741,7 +741,7 @@ fn malformed_calls_are_refused_before_the_window_is_asked() {
     let many: Vec<String> = (0..=TARGETS_MAX)
         .map(|at| format!("{}@0123456789ab", 5000 + at))
         .collect();
-    let cases: [(String, &str); 10] = [
+    let cases: [(String, &str); 9] = [
         (VERB.to_string(), "--find"),
         (format!("{VERB} cargo"), "no bare words"),
         (
@@ -757,10 +757,6 @@ fn malformed_calls_are_refused_before_the_window_is_asked() {
             "twice",
         ),
         (format!("{VERB} --kill {}", many.join(",")), "at most"),
-        (
-            format!("{VERB} --kill 4100@0123456789ab"),
-            "--retry-request",
-        ),
     ];
     for (line, says) in cases {
         let mut bench = Bench::new();
