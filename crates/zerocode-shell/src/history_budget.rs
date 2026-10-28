@@ -57,7 +57,7 @@ pub(crate) fn shares(panes: &mut [PaneHistory]) -> Vec<(TermId, usize)> {
     // in the same round, and a tie fell to the pool's hash order. Among the
     // rest `None` orders first — a pane that has not moved since the window
     // began counting is the quietest there is.
-    panes.sort_by_key(|pane| pane.moved);
+    panes.sort_by_key(|pane| (pane.reading, pane.watched, pane.moved));
     let mut kept = Vec::new();
     for pane in panes.iter() {
         if total <= budget {

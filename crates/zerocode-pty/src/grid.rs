@@ -2975,7 +2975,10 @@ impl TerminalGrid {
     /// later. Never under the smallest cap a person can choose, so a pane
     /// with next to no history does not sweep on every line.
     fn tables_turned(&self) -> bool {
-        let worth = self.scrollback_cap.max(1);
+        let worth = self
+            .scrollback_cap
+            .min(self.scrollback.len().max(MIN_SCROLLBACK_LINES))
+            .max(1);
         self.scrollback_trimmed.saturating_sub(self.tables_swept_at) >= worth
     }
 
@@ -3456,7 +3459,7 @@ impl TerminalGrid {
             self.links[at] = Arc::clone(&uri);
             // Once, though the row may be emptied and taken again before
             // the next delta: the consumer needs its newest address.
-            if at < self.links_sent {
+            if at < self.links_sent && !self.links_resent.contains(&at) {
                 self.links_resent.push(at);
             }
             self.link_ids.insert(uri, id);

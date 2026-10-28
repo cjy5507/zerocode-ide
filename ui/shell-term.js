@@ -2760,6 +2760,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     const trimmed = delta.scrollback_trimmed ?? scrollbackTrimmed;
     if (trimmed !== null && scrollbackTrimmed !== null) {
       selection.shift(trimmed - scrollbackTrimmed);
+      shiftHits(trimmed - scrollbackTrimmed);
     }
     scrollbackTrimmed = trimmed;
 
