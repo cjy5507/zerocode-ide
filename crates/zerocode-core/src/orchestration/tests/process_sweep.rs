@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use super::*;
 use crate::orchestration::process_sweep::{
     Checkout, Ended, Judge, Judgment, Outcome, ProcessRow, ProcessSweepAsk, Signals, TARGETS_MAX,
-    Target, VERB, end, end_answer, find, ledger_line, mark, matching_pids,
+    Target, VERB, end, end_answer, find, ledger_line, mark, matching_pids, owner,
 };
 
 const STARTED: &str = "Wed Oct 28 21:00:00 2026";
@@ -70,19 +70,28 @@ impl Judge for Protects {
 }
 
 /// The system as a fake: rereads answer from `now` (what stands at signal
-/// time), and every signal is written down instead of sent.
+/// time), and every signal is written down instead of sent. A signaled pid
+/// leaves `now`, as a process that ends on TERM does, unless it `ignores`
+/// TERM; every pause is written down instead of slept.
 struct Fake {
-    now: Vec<ProcessRow>,
+    now: RefCell<Vec<ProcessRow>>,
     signalled: RefCell<Vec<u32>>,
     fails: Option<u32>,
+    ignores: Vec<u32>,
+    /// Pids handed to another process (a later start) the moment they go.
+    reborn: Vec<u32>,
+    paused: RefCell<Vec<u64>>,
 }
 
 impl Fake {
     fn standing(now: Vec<ProcessRow>) -> Self {
         Self {
-            now,
+            now: RefCell::new(now),
             signalled: RefCell::new(Vec::new()),
             fails: None,
+            ignores: Vec::new(),
+            reborn: Vec::new(),
+            paused: RefCell::new(Vec::new()),
         }
     }
 }
@@ -90,6 +99,7 @@ impl Fake {
 impl Signals for Fake {
     fn reread(&self, pid: u32) -> Option<(String, String)> {
         self.now
+            .borrow()
             .iter()
             .find(|row| row.pid == pid)
             .map(|row| (row.started.clone(), row.args.clone()))
@@ -99,10 +109,26 @@ impl Signals for Fake {
         self.signalled.borrow_mut().push(pid);
         match self.fails {
             Some(failing) if failing == pid => Err("Operation not permitted".to_string()),
-            _ => Ok(()),
+            _ => {
+                let mut now = self.now.borrow_mut();
+                if self.reborn.contains(&pid) {
+                    for row in now.iter_mut().filter(|row| row.pid == pid) {
+                        row.started = LATER.to_string();
+                    }
+                } else if !self.ignores.contains(&pid) {
+                    now.retain(|row| row.pid != pid);
+                }
+                Ok(())
+            }
         }
     }
+
+    fn pause(&self, ms: u64) {
+        self.paused.borrow_mut().push(ms);
+    }
 }
+
+const GONE: Outcome = Outcome::Signaled { gone: true };
 
 fn outcomes(ended: &[Ended]) -> Vec<(u32, Outcome)> {
     ended
@@ -202,8 +228,12 @@ fn an_allowed_pid_that_still_matches_is_ended_alone() {
     let table = table();
     let fake = Fake::standing(table.clone());
     let ended = end(&table, &[target(&table[3])], &Protects(Vec::new()), &fake);
-    assert_eq!(outcomes(&ended), vec![(4100, Outcome::Ended)]);
+    assert_eq!(outcomes(&ended), vec![(4100, GONE)]);
     assert_eq!(*fake.signalled.borrow(), vec![4100]);
+    assert!(
+        fake.paused.borrow().is_empty(),
+        "a pid gone at once is not waited for"
+    );
 }
 
 /// Refusal 1: the judge protects the pid — refused with the judge's reason,
@@ -228,7 +258,7 @@ fn a_protected_pid_is_refused_with_its_reason_and_the_rest_go_on() {
                     why: "a worker CLI the ledger knows".to_string()
                 }
             ),
-            (4100, Outcome::Ended),
+            (4100, GONE),
         ]
     );
     assert_eq!(
@@ -352,11 +382,74 @@ fn gone_and_failed_are_said_as_they_are() {
         ]
     );
     let answer = end_answer("run-1", &ended);
-    assert_eq!(answer["ended"], 0);
+    assert_eq!(answer["signaled"], 0);
     let line = ledger_line(&ended);
-    assert!(line.starts_with("process-sweep: ended 0 of 2"), "{line}");
+    assert!(
+        line.starts_with("process-sweep: TERM sent to 0 of 2, 0 gone"),
+        "{line}"
+    );
     assert!(line.contains("4100 gone"), "{line}");
     assert!(line.contains("4200 failed"), "{line}");
+}
+
+/// A sent TERM is not an ended process (r1 P2-1): the pid that left after
+/// it is said as signaled and gone, the pid that ignored it as signaled and
+/// still running — read again for the whole settle wait, 20 × 100 ms, and
+/// never sent anything stronger.
+#[test]
+fn a_sent_term_is_said_as_signaled_and_whether_it_went() {
+    let table = table();
+    let mut fake = Fake::standing(table.clone());
+    fake.ignores = vec![4200];
+    let ended = end(
+        &table,
+        &[target(&table[3]), target(&table[4])],
+        &Protects(Vec::new()),
+        &fake,
+    );
+    assert_eq!(
+        outcomes(&ended),
+        vec![(4100, GONE), (4200, Outcome::Signaled { gone: false })]
+    );
+    assert_eq!(*fake.signalled.borrow(), vec![4100, 4200], "one TERM each");
+    assert_eq!(
+        *fake.paused.borrow(),
+        vec![100; 20],
+        "2 s in all, then said"
+    );
+    let answer = end_answer("run-1", &ended);
+    assert_eq!(answer["signaled"], 2);
+    assert_eq!(answer["gone"], 1);
+    assert_eq!(answer["rows"][0]["outcome"], "signaled");
+    assert_eq!(answer["rows"][0]["after"], "gone");
+    assert_eq!(answer["rows"][1]["after"], "still_running");
+    assert!(
+        answer["rows"][1]["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("still runs")),
+        "{answer}"
+    );
+    assert!(answer.get("ended").is_none(), "{answer}");
+    let line = ledger_line(&ended);
+    assert!(
+        line.starts_with("process-sweep: TERM sent to 2 of 2, 1 gone"),
+        "{line}"
+    );
+    assert!(line.contains("4100 signaled, gone"), "{line}");
+    assert!(line.contains("4200 signaled, still running"), "{line}");
+    assert!(!line.contains("ended"), "{line}");
+}
+
+/// A pid that went on TERM and was handed to another process before the
+/// settle read is gone too: the mark, not the pid, is what was signaled.
+#[test]
+fn a_signaled_pid_reused_before_the_settle_read_is_gone() {
+    let table = table();
+    let mut fake = Fake::standing(table.clone());
+    fake.reborn = vec![4100];
+    let ended = end(&table, &[target(&table[3])], &Protects(Vec::new()), &fake);
+    assert_eq!(outcomes(&ended), vec![(4100, GONE)]);
+    assert!(fake.paused.borrow().is_empty());
 }
 
 /* ---- the verb ---------------------------------------------------------- */
@@ -500,6 +593,83 @@ fn a_workers_pane_cannot_end_processes() {
     // A worker may still look.
     let looked = bench.at(&pane, &format!("{VERB} --find cargo"));
     assert_eq!(looked.reply.exit_code, 0, "{}", looked.reply.stderr);
+}
+
+/// Ending is the live coordinator seat's, not merely "not this run's worker"
+/// (r1 P1-1): a worker naming another run, and a pane nobody seated naming a
+/// run, are both refused; the coordinator's own seat is not.
+#[test]
+fn only_the_runs_coordinator_seat_ends_processes() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name sweep");
+    let first = bench.ledger.runs()[0].id.clone();
+    let task = bench.json("task-create --spec build")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (_worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    bench.json("run-create --name other");
+    let other = bench
+        .ledger
+        .runs()
+        .iter()
+        .find(|run| run.id != first)
+        .expect("a second run")
+        .id
+        .clone();
+    let kill = "--kill 4100@0123456789ab";
+    for (at, line) in [
+        (pane.as_str(), format!("{VERB} {kill} --run {other}")),
+        (pane.as_str(), format!("{VERB} {kill} --run {first}")),
+        ("%9", format!("{VERB} {kill} --run {first}")),
+        ("%9", format!("{VERB} {kill} --run {other}")),
+    ] {
+        let planned = bench.at(at, &line);
+        assert_ne!(
+            planned.reply.exit_code, 0,
+            "`{line}` from {at} was not refused"
+        );
+        assert!(
+            planned.reply.stderr.contains("coordinator"),
+            "`{line}` from {at}: {}",
+            planned.reply.stderr
+        );
+        assert!(
+            matches!(planned.effect, Effect::None),
+            "`{line}` from {at} planned {:?}",
+            planned.effect
+        );
+    }
+    let seated = bench.run(&format!("{VERB} {kill} --run {other}"));
+    assert_eq!(seated.reply.exit_code, 0, "{}", seated.reply.stderr);
+    assert!(matches!(
+        seated.effect,
+        Effect::ProcessSweep(ProcessSweepAsk::End { .. })
+    ));
+}
+
+/// A checkout told as an empty, a relative or the root path holds no place
+/// (r1 P2-2): `starts_with` would read every cwd as inside it.
+#[test]
+fn an_empty_relative_or_root_checkout_holds_nothing() {
+    let told = |path: &str| Checkout {
+        path: path.to_string(),
+        run: "run-1".to_string(),
+        worker: "w-1".to_string(),
+        task: None,
+    };
+    for path in ["", "/", "w/t-1"] {
+        let checkouts = [told(path)];
+        assert!(
+            owner("/w/t-1/crates", &checkouts).is_none(),
+            "{path:?} held a place"
+        );
+    }
+    let checkouts = [told(""), told("/"), told("/w/t-1")];
+    assert_eq!(
+        owner("/w/t-1/crates", &checkouts).map(|held| held.path.as_str()),
+        Some("/w/t-1")
+    );
 }
 
 /// A list changes nothing and needs no retry name; an end call does.

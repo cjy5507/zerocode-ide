@@ -19528,12 +19528,16 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         "--find <text> | --kill <pid@mark>[,<pid@mark>…] · the coordinator's one road to end a \
          stray process: --find lists every process whose command line holds <text> as plain \
          text (never a pattern) with its pid@mark, parent, start, place, the worker checkout it \
-         stands in and whether it is protected, and changes nothing; --kill ends only the pids \
-         a list showed, one at a time, each read again right before its TERM so a reused pid is \
-         left alone, refuses protected ones with the reason, and writes one line to the run. \
-         A process no pane holds (an orphaned build, parent 1) is ended only by its pid@mark \
-         from a list (코디가 목록을 읽고 고른 pid = 물음에 대한 예, 판 안·창은 예외 없음), \
-         and only while it stands in a worker checkout the ledger knows. \
+         stands in and whether it is protected, and changes nothing; --kill (the run's live \
+         coordinator seat only) ends only pids a list could show, one at a time, each read \
+         again right before its TERM (taskkill /F on Windows) so a reused pid is left alone, \
+         refuses protected ones with the reason, waits up to 2 s and says of each whether it \
+         is gone or still running (nothing stronger is sent), and writes one line to the run. \
+         A process no pane holds (an orphaned build) is ended only by its pid@mark from a list \
+         (코디가 목록을 읽고 고른 pid = 물음에 대한 예, 판 안·창은 예외 없음), and only while \
+         it and every process above it up to pid 1 stand in one worker checkout the ledger \
+         knows — a runner's job or a person's terminal is refused; places are read on macOS \
+         only, so elsewhere only the caller's own tree ends. \
          There is no pattern, parent or everything mode. 패턴으로 죽이는 명령은 쓰지 않는다 — \
          인자가 패턴이 된다",
         Doing::Policy,
@@ -24217,7 +24221,8 @@ fn plan_inner(
         }
 
         /* A stray process, listed or ended (t-78914). The ledger reads the mode, the needle and
-         * the pids, refuses a worker's pane the end road and names the worker checkouts it knows;
+         * the pids, refuses the end road to every pane but the run's live coordinator seat and
+         * names the worker checkouts it knows;
          * the process table, the protection judgment and the signal are the window's, and so is
          * the reply. */
         process_sweep::VERB => {

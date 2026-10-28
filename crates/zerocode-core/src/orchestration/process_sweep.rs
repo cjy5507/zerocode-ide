@@ -44,6 +44,10 @@ const ROWS_SHOWN_MAX: usize = 200;
 const MARK_HEX: usize = 12;
 /// How much of a command line the ledger's line carries per pid.
 const LINE_ARGS_MAX: usize = 80;
+/// After the signals, the signaled pids are read again every step until all
+/// are gone or the steps run out: 20 × 100 ms = 2 s for the whole call.
+const SETTLE_STEPS: u32 = 20;
+const SETTLE_STEP_MS: u64 = 100;
 
 /// One process-table row as this verb reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,8 +99,9 @@ pub enum ProcessSweepAsk {
 /// answers, without its `Ask`: this verb has nobody to ask mid-call. What the
 /// guard would ask a person about is answered by the coordinator's own act —
 /// reading a list and naming the pid@mark it showed — only for a process no
-/// pane and not the window holds, standing in a worker checkout the ledger
-/// knows; every other question is [`Judgment::Deny`] with it as `why`. The
+/// pane and not the window holds that stands, with every process above it up
+/// to pid 1, in one worker checkout the ledger knows; every other question is
+/// [`Judgment::Deny`] with it as `why`. The
 /// window's judge makes that call, so the guard's rule stays as it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Judgment {
@@ -109,6 +114,13 @@ pub enum Judgment {
 /// whole table beside the row so ancestry can be read.
 pub trait Judge {
     fn judge(&self, row: &ProcessRow, table: &[ProcessRow]) -> Judgment;
+
+    /// The pids whose places this judge reads to judge `pids` — they and,
+    /// for a judge that reads ancestry, the pids above them. The window
+    /// reads where these stand, in one read, before any row is judged.
+    fn places_for(&self, pids: &[u32]) -> Vec<u32> {
+        pids.to_vec()
+    }
 }
 
 /// The two things the end road needs from the system, from outside, so a test
@@ -119,12 +131,19 @@ pub trait Signals {
     fn reread(&self, pid: u32) -> Option<(String, String)>;
     /// Ask exactly this one pid to end (TERM on Unix). Never a group or a tree.
     fn terminate(&self, pid: u32) -> Result<(), String>;
+    /// Wait `ms` before the signaled pids are read again.
+    fn pause(&self, ms: u64);
 }
 
 /// What became of one asked pid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    Ended,
+    /// TERM was sent. `gone` says whether the pid had left the table, or
+    /// carried another process, within the settle wait after it; nothing
+    /// stronger than TERM is ever sent.
+    Signaled {
+        gone: bool,
+    },
     /// No process stands under the pid any more.
     Gone,
     /// The pid stands, but not as the process the list showed: a different
@@ -141,7 +160,7 @@ pub enum Outcome {
 impl Outcome {
     const fn word(&self) -> &'static str {
         match self {
-            Self::Ended => "ended",
+            Self::Signaled { .. } => "signaled",
             Self::Gone => "gone",
             Self::Changed => "changed",
             Self::Refused { .. } => "refused",
@@ -156,8 +175,25 @@ impl Outcome {
                 "the pid now carries a different start or command line than the list showed — \
                  list again",
             ),
-            Self::Ended | Self::Gone => None,
+            Self::Signaled { gone: false } => Some(
+                "TERM was sent and it still runs after the settle wait — list again; nothing \
+                 stronger is sent",
+            ),
+            Self::Signaled { gone: true } | Self::Gone => None,
         }
+    }
+
+    /// What became of a signaled pid; `None` for one never signaled.
+    const fn after(&self) -> Option<&'static str> {
+        match self {
+            Self::Signaled { gone: true } => Some("gone"),
+            Self::Signaled { gone: false } => Some("still_running"),
+            _ => None,
+        }
+    }
+
+    const fn signaled(&self) -> bool {
+        matches!(self, Self::Signaled { .. })
     }
 }
 
@@ -244,6 +280,16 @@ pub(super) fn ask(
                     "{VERB} --kill is the coordinator's, and this pane is worker {} — say in your \
                      report which pids you want ended and let the coordinator end them",
                     worker.id
+                ));
+            }
+            // Not being this run's worker is not being its coordinator: a
+            // worker naming another run, a pane nobody seated and a run with
+            // no live seat all stop here.
+            if held.seat_is_coordinator(&format!("{team}/{pane}")) != Some(true) {
+                return Err(format!(
+                    "{VERB} --kill is the coordinator's, and this pane is not the live coordinator \
+                     seat of run {run_id} — say which pids you want ended to that run's \
+                     coordinator"
                 ));
             }
             Ok(ProcessSweepAsk::End {
@@ -340,13 +386,16 @@ fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
 }
 
 /// Whose checkout `cwd` stands in: the deepest one that holds it, and of two
-/// workers told the same path, the later.
+/// workers told the same path, the later. A checkout told as an empty, a
+/// relative or the root path holds nothing — `starts_with` would read every
+/// place as inside it.
 #[must_use]
 pub fn owner<'a>(cwd: &str, checkouts: &'a [Checkout]) -> Option<&'a Checkout> {
     let standing = Path::new(cwd);
     let mut best: Option<&Checkout> = None;
     for checkout in checkouts {
-        if !standing.starts_with(&checkout.path) {
+        let path = Path::new(&checkout.path);
+        if !path.is_absolute() || path.parent().is_none() || !standing.starts_with(path) {
             continue;
         }
         if best.is_none_or(|held| checkout.path.len() >= held.path.len()) {
@@ -453,14 +502,16 @@ pub fn find(
 /// Each one is found in `table` (read once for the whole call, so the judge
 /// can see ancestry), its mark compared, judged, then read AGAIN through
 /// `signals` immediately before its signal — the list may be minutes old, and
-/// the pid may have been handed to another process meanwhile.
+/// the pid may have been handed to another process meanwhile. A sent TERM is
+/// not an ended process: the signaled pids are read again until they are
+/// gone or the settle wait runs out, and each says which.
 pub fn end(
     table: &[ProcessRow],
     targets: &[Target],
     judge: &dyn Judge,
     signals: &dyn Signals,
 ) -> Vec<Ended> {
-    targets
+    let mut ended: Vec<Ended> = targets
         .iter()
         .map(|target| {
             let (args, outcome) = end_one(table, target, judge, signals);
@@ -470,7 +521,36 @@ pub fn end(
                 outcome,
             }
         })
-        .collect()
+        .collect();
+    settle(&mut ended, signals);
+    ended
+}
+
+/// Read the signaled pids again until each is gone — no process under the
+/// pid, or another process than the one marked — or the steps run out.
+fn settle(ended: &mut [Ended], signals: &dyn Signals) {
+    for step in 0..=SETTLE_STEPS {
+        let mut running = false;
+        for one in ended.iter_mut() {
+            if one.outcome != (Outcome::Signaled { gone: false }) {
+                continue;
+            }
+            let stands = signals
+                .reread(one.target.pid)
+                .is_some_and(|(started, args)| {
+                    mark(one.target.pid, &started, &args) == one.target.mark
+                });
+            if stands {
+                running = true;
+            } else {
+                one.outcome = Outcome::Signaled { gone: true };
+            }
+        }
+        if !running || step == SETTLE_STEPS {
+            return;
+        }
+        signals.pause(SETTLE_STEP_MS);
+    }
 }
 
 fn end_one(
@@ -496,7 +576,7 @@ fn end_one(
         return (said_args(&now), Outcome::Changed);
     }
     match signals.terminate(target.pid) {
-        Ok(()) => (args, Outcome::Ended),
+        Ok(()) => (args, Outcome::Signaled { gone: false }),
         Err(why) => (args, Outcome::Failed { why }),
     }
 }
@@ -513,6 +593,9 @@ pub fn end_answer(run: &str, ended: &[Ended]) -> serde_json::Value {
                 "outcome": one.outcome.word(),
                 "args": one.args,
             });
+            if let Some(after) = one.outcome.after() {
+                said["after"] = after.into();
+            }
             if let Some(why) = one.outcome.why() {
                 said["why"] = why.into();
             }
@@ -522,24 +605,34 @@ pub fn end_answer(run: &str, ended: &[Ended]) -> serde_json::Value {
     serde_json::json!({
         "run": run,
         "asked": ended.len(),
-        "ended": ended.iter().filter(|one| one.outcome == Outcome::Ended).count(),
+        "signaled": ended.iter().filter(|one| one.outcome.signaled()).count(),
+        "gone": gone_count(ended),
         "rows": rows,
+        "next": format!("zerocode-orc {VERB} --find <text> — to see what still stands"),
         "never": NEVER_BY_PATTERN,
     })
 }
 
-/// The one line the ledger keeps of an end call: how many ended, and each pid
-/// with its outcome and the start of its command line.
+fn gone_count(ended: &[Ended]) -> usize {
+    ended
+        .iter()
+        .filter(|one| one.outcome == Outcome::Signaled { gone: true })
+        .count()
+}
+
+/// The one line the ledger keeps of an end call: how many were signaled and
+/// how many of those are gone, and each pid with its outcome and the start of
+/// its command line.
 #[must_use]
 pub fn ledger_line(ended: &[Ended]) -> String {
-    let count = ended
-        .iter()
-        .filter(|one| one.outcome == Outcome::Ended)
-        .count();
+    let count = ended.iter().filter(|one| one.outcome.signaled()).count();
     let each: Vec<String> = ended
         .iter()
         .map(|one| {
             let mut piece = format!("{} {}", one.target.pid, one.outcome.word());
+            if let Some(after) = one.outcome.after() {
+                piece.push_str(&format!(", {}", after.replace('_', " ")));
+            }
             if !one.args.is_empty() {
                 let args: String = one.args.chars().take(LINE_ARGS_MAX).collect();
                 let cut = if one.args.chars().count() > LINE_ARGS_MAX {
@@ -556,8 +649,9 @@ pub fn ledger_line(ended: &[Ended]) -> String {
         })
         .collect();
     format!(
-        "{VERB}: ended {count} of {} — {}",
+        "{VERB}: TERM sent to {count} of {}, {} gone — {}",
         ended.len(),
+        gone_count(ended),
         each.join("; ")
     )
 }
