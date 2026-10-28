@@ -2431,6 +2431,34 @@ fn given_tool_call_times_out_when_calling_tool_then_the_call_is_not_sent_again()
     );
 }
 
+/// Review P3-3: a reset that fails after a `tools/call`
+/// may have reached the server must not hide that fact. The answer still
+/// says the call was not sent again, that the server was not reset, and why
+/// the reset failed.
+#[test]
+fn a_failed_reset_still_says_the_tool_call_was_not_sent_again() {
+    let cause = McpServerManagerError::Transport {
+        server_name: "alpha".to_string(),
+        method: "tools/call",
+        source: std::io::Error::new(ErrorKind::BrokenPipe, "pipe closed"),
+    };
+    let reset_error = McpServerManagerError::UnknownServer {
+        server_name: "alpha".to_string(),
+    };
+    let error = McpServerManager::tool_call_failure(cause, Err(reset_error));
+    let message = error.to_string();
+    assert!(
+        matches!(
+            &error,
+            McpServerManagerError::ToolCallNotResent { cause, server_reset: false, .. }
+                if matches!(**cause, McpServerManagerError::Transport { method: "tools/call", .. })
+        ),
+        "{message}"
+    );
+    assert!(message.contains("not sent again"), "{message}");
+    assert!(message.contains("unknown MCP server `alpha`"), "{message}");
+}
+
 #[test]
 fn manager_rejects_duplicate_qualified_tool_routes() {
     let runtime = Builder::new_current_thread()
