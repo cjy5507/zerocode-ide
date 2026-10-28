@@ -81,12 +81,18 @@ impl KillWitness for FakeWindow {
 }
 
 fn pre_tool_use(agent: AgentKind, command: &str) -> Request<Body> {
+    pre_tool_call(agent, "Bash", serde_json::json!(command))
+}
+
+/// A pre-tool knock carrying `command` the way `agent`'s `tool` holds it: a
+/// string for Claude's `Bash`, an argv for Codex's `shell`.
+fn pre_tool_call(agent: AgentKind, tool: &str, command: serde_json::Value) -> Request<Body> {
     let body = serde_json::json!({
         "pane_key": "term-1",
         "payload": {
             "hook_event_name": "PreToolUse",
             "session_id": "session-1",
-            "tool_name": "Bash",
+            "tool_name": tool,
             "tool_use_id": "call-1",
             "tool_input": { "command": command },
         }
@@ -106,15 +112,16 @@ async fn answer(
     agent: AgentKind,
     command: &str,
 ) -> (StatusCode, Vec<u8>) {
+    answer_to(window, pre_tool_use(agent, command)).await
+}
+
+async fn answer_to(window: Option<Arc<FakeWindow>>, knock: Request<Body>) -> (StatusCode, Vec<u8>) {
     let (state, mut events, _teams, _browser) = BridgeState::new(TOKEN, "browser");
     let state = match window {
         Some(window) => state.with_kill_witness(window),
         None => state,
     };
-    let response = router(state)
-        .oneshot(pre_tool_use(agent, command))
-        .await
-        .expect("service");
+    let response = router(state).oneshot(knock).await.expect("service");
     assert!(
         events.recv().await.is_some(),
         "the window was handed the event"
@@ -182,17 +189,26 @@ async fn a_command_without_kill_reads_no_table_and_keeps_its_reply() {
     }
 }
 
+/// Nobody in a pane can answer a question — a worker's pane has no person at
+/// it, and a pane sitting on a prompt waits forever — so what core would ask
+/// of a person is refused, with the ways this pane can still end what it
+/// started.
 #[tokio::test]
-async fn the_callers_own_child_is_allowed_and_a_pid_known_only_at_run_time_is_asked() {
+async fn the_callers_own_child_is_allowed_and_a_pid_known_only_at_run_time_is_refused() {
     let window = FakeWindow::new(true);
     let (_, body) = answer(Some(Arc::clone(&window)), AgentKind::Claude, "kill 210").await;
     assert!(body.is_empty(), "{}", String::from_utf8_lossy(&body));
     let (_, body) = answer(Some(window), AgentKind::Claude, "kill $SERVER_PID").await;
-    assert_eq!(decision(&body).0, "ask");
+    let (word, reason) = decision(&body);
+    assert_eq!(word, "deny");
+    assert!(reason.contains("SERVER_PID"), "{reason}");
+    for way_out in ["kill 4242", "kill %1", "pgrep"] {
+        assert!(reason.contains(way_out), "{way_out:?} in {reason}");
+    }
 }
 
 #[tokio::test]
-async fn a_table_that_did_not_read_is_asked() {
+async fn a_table_that_did_not_read_is_refused() {
     let window = FakeWindow::new(false);
     let (_, body) = answer(
         Some(Arc::clone(&window)),
@@ -201,7 +217,7 @@ async fn a_table_that_did_not_read_is_asked() {
     )
     .await;
     let (word, reason) = decision(&body);
-    assert_eq!(word, "ask");
+    assert_eq!(word, "deny");
     assert!(reason.contains("ps did not answer"), "{reason}");
     assert_eq!(window.tables_read(), 1);
 }
@@ -226,6 +242,27 @@ async fn codex_is_refused_what_claude_would_be_asked() {
     )
     .await;
     assert_eq!(decision(&body).0, "deny");
+}
+
+/// Codex's own shell tool hands its command as an argv, `bash -lc` and the
+/// script: the script inside is read and refused all the same.
+#[tokio::test]
+async fn codexs_argv_shell_call_is_read_and_refused() {
+    let window = FakeWindow::new(true);
+    let knock = pre_tool_call(
+        AgentKind::Codex,
+        "shell",
+        serde_json::json!(["bash", "-lc", "pkill -f zo-step"]),
+    );
+    let (status, body) = answer_to(Some(Arc::clone(&window)), knock).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (word, reason) = decision(&body);
+    assert_eq!(word, "deny");
+    assert!(
+        reason.contains("pid 310") && reason.contains("pane term-2"),
+        "{reason}"
+    );
+    assert_eq!(window.tables_read(), 1);
 }
 
 /// A provider whose pre-tool reply was never measured is not handed one.
