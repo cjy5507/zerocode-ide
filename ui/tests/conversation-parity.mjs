@@ -1134,11 +1134,8 @@ export async function testConversationTodos(browser, origin, ok) {
     }, null, 2);
     const call = (id, states) => ({ role: "tool", text: "TodoWrite", tool: { call_id: id, name: "TodoWrite", kind: "TodoWrite", input: todos(states), is_error: false } });
     const result = (id) => ({ role: "tool_result", text: "Todos have been modified successfully.", tool: { call_id: id, name: "TodoWrite", kind: "TodoWrite", input: "", is_error: false } });
-    // The rows themselves are read on the whole timeline (t-81525 B1); the
-    // folded page is read at the end.
-    await page.evaluate(() => {
-      conversationTimelineView = true;
-    });
+    // The rows themselves are read on the whole timeline, the harness's
+    // (t-81525 B1); the folded page is read at the end.
     await openConversation(page, [
       { role: "user", text: "시작" },
       call("t1", ["in_progress", "pending", "pending"]),
