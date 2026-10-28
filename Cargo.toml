@@ -44,6 +44,15 @@ publish = false
 lto = "fat"
 codegen-units = 1
 
+# Line tables only, in every dev and test build: a panic and a backtrace keep
+# their file and line, a debugger keeps its line breakpoints and loses local
+# variables. The full default wrote macOS's unpacked debug objects into each
+# target — 19 GiB of one 35.9 GiB gate target on 2026-10-28 — and the gates
+# already build this way (`CARGO_PROFILE_DEV_DEBUG=line-tables-only`). The test
+# profile inherits it. Release builds are their own profile and unchanged.
+[profile.dev]
+debug = "line-tables-only"
+
 # The two libraries a debug build spends its test time inside, built optimised
 # in every dev and test build. Sampled on 2026-10-29 (t-80605) during the
 # orchestration scenarios, which run one at a time and set the shell crate's
