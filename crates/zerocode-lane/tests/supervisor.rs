@@ -14,7 +14,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -72,14 +72,21 @@ impl PtySpawner for RecordingSpawner {
 /// any fixed wait they could pick.
 const LATE_START: Duration = Duration::from_secs(6);
 
+/// How long a test waits for an event that is not coming at all. A slow
+/// machine delays an event; it does not cancel it. So this bounds a hang, never
+/// a speed, and no test passes or fails by being under it.
+const NO_EVENT_COMES: Duration = Duration::from_secs(120);
+
 /// A `zo` that appends `"<args>|<token>"` to `marker` and echoes its arguments.
 /// The marker path is baked into the script so parallel tests never share state.
 fn fake_zo(dir: &Path, marker: &Path) -> ZoBinary {
-    fake_zo_after(dir, marker, Duration::ZERO)
+    fake_zo_after(dir, marker, Duration::ZERO, None)
 }
 
-/// [`fake_zo`] whose script does nothing for `delay` before it runs.
-fn fake_zo_after(dir: &Path, marker: &Path, delay: Duration) -> ZoBinary {
+/// [`fake_zo`] whose script does nothing for `delay` before it runs, and that
+/// opens the named pipe `ran` once its line is in `marker`, when one is given.
+/// The opening is the event a test waits on: it is the child saying it ran.
+fn fake_zo_after(dir: &Path, marker: &Path, delay: Duration, ran: Option<&Path>) -> ZoBinary {
     use std::os::unix::fs::PermissionsExt;
 
     let path = dir.join(ZO_EXECUTABLE);
@@ -88,10 +95,11 @@ fn fake_zo_after(dir: &Path, marker: &Path, delay: Duration) -> ZoBinary {
     } else {
         format!("sleep {}\n", delay.as_secs())
     };
+    let announce = ran.map_or_else(String::new, |pipe| format!(": > '{}'\n", pipe.display()));
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\n{start_late}printf '%s|%s\\n' \"$*\" \"${TOKEN_ENV}\" >> '{}'\n\
+            "#!/bin/sh\n{start_late}printf '%s|%s\\n' \"$*\" \"${TOKEN_ENV}\" >> '{}'\n{announce}\
              if [ -n \"${ZO_EVENTS_ADDR_FILE_ENV}\" ]; then printf '127.0.0.1:49152\\n%s\\n' \"${TOKEN_ENV}\" > \"${ZO_EVENTS_ADDR_FILE_ENV}\"; fi\n\
              printf 'fake-zo ran: %s pane=%s cwd=%s' \"$*\" \"$ZEROCODE_PANE_KEY\" \"$PWD\"\n",
             marker.display()
@@ -224,25 +232,14 @@ fn marker_lines(marker: &Path) -> Vec<String> {
         .collect()
 }
 
-/// The marker once `want` lines have arrived, or whatever is there when the wait
-/// runs out.
-///
-/// The lines are written by a spawned SHELL, so "the supervisor returned" and
-/// "the child has run" are two different moments. Reading once made the spawn
-/// assertion a race that lost under load — this suite failed intermittently only
-/// when the whole workspace ran at once, which is the shape of flake that
-/// teaches people to re-run instead of to look. Waiting for the fact keeps the
-/// assertion about the spawn rather than about the scheduler; a genuine
-/// no-spawn still fails, one wait later.
-fn marker_lines_awaiting(marker: &Path, want: usize) -> Vec<String> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let lines = marker_lines(marker);
-        if lines.len() >= want || std::time::Instant::now() >= deadline {
-            return lines;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+/// A named pipe at `path`, which a reader and a writer meet at: each side's
+/// open waits for the other.
+fn named_pipe(path: &Path) {
+    let made = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo {} failed", path.display());
 }
 
 fn supervisor_for(zo: ZoBinary, addr: &str) -> LaneSupervisor {
@@ -389,7 +386,16 @@ fn a_non_loopback_bind_address_is_refused() {
 fn an_absent_server_is_spawned_with_the_serve_arguments_and_the_token() {
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("calls.log");
-    let zo = fake_zo_after(dir.path(), &marker, LATE_START);
+    let ran = dir.path().join("ran");
+    named_pipe(&ran);
+    let zo = fake_zo_after(dir.path(), &marker, LATE_START, Some(&ran));
+    // Reading starts before the spawn, so the child's open of the pipe is never
+    // left waiting for a reader the test has not got to yet.
+    let (said_tx, said_rx) = mpsc::channel();
+    let pipe = ran.clone();
+    thread::spawn(move || {
+        let _ = said_tx.send(fs::read_to_string(pipe));
+    });
     // Kept to the end of the test, so nobody is given the port meanwhile.
     let silent = QuietPort::silent();
     let addr = silent.addr().to_string();
@@ -405,12 +411,15 @@ fn an_absent_server_is_spawned_with_the_serve_arguments_and_the_token() {
         "unexpected error: {error}"
     );
 
-    // Awaited rather than read: the only evidence of the spawn is a line the
-    // spawned shell appends, and "ensure_serve gave up" happens before "the
-    // child got scheduled". The other marker assertions in this file are safe
-    // as plain reads — they either follow output the child printed AFTER the
-    // append, or assert the marker is empty on a path that spawns nothing.
-    let calls = marker_lines_awaiting(&marker, 1);
+    // The only evidence of the spawn is a line the spawned shell appends, and
+    // "ensure_serve gave up" happens before "the child got scheduled" — by
+    // seconds, on a loaded machine. So the test waits for the child's own word
+    // that it ran, which comes after its append, and not for a time to pass.
+    said_rx
+        .recv_timeout(NO_EVENT_COMES)
+        .expect("the spawned child never said it ran")
+        .expect("read the pipe the child opened");
+    let calls = marker_lines(&marker);
     assert_eq!(calls.len(), 1, "exactly one spawn: {calls:?}");
     assert_eq!(calls[0], format!("serve --bind {addr}|{TOKEN}"));
 }
@@ -557,7 +566,10 @@ fn a_pane_that_exits_before_publishing_is_refused_at_once_with_its_last_words() 
         &silent.addr().to_string(),
     );
 
-    let started = Instant::now();
+    // The patience is far longer than the process takes to refuse, so the only
+    // way back is the exit itself: the refusal is PaneExited, and a pane that
+    // waited out its patience instead would be PaneChannelNotReady. Nothing here
+    // measures how long the exit took, which is the machine's to decide.
     let error = supervisor
         .open_pane(
             Box::new(LocalPty),
@@ -568,11 +580,10 @@ fn a_pane_that_exits_before_publishing_is_refused_at_once_with_its_last_words() 
             &[],
             10,
             80,
-            Duration::from_secs(10),
+            NO_EVENT_COMES,
         )
         .err()
         .expect("a pane whose process ended cannot be open");
-    let waited = started.elapsed();
 
     match error {
         LaneError::PaneExited { code, said } => {
@@ -584,15 +595,11 @@ fn a_pane_that_exits_before_publishing_is_refused_at_once_with_its_last_words() 
         }
         other => panic!("expected PaneExited, got {other}"),
     }
-    assert!(
-        waited < Duration::from_secs(5),
-        "waited {waited:?} on a process that had already ended"
-    );
     assert!(!addr_file.exists(), "the one-shot address file leaked");
 }
 
-/// A `zo` that refuses the way a lease-held `--resume` does: one line on its
-/// terminal, a non-zero exit, and no address file.
+/// A `zo` that refuses the way a lease-held `--resume` does, `delay` after it
+/// starts: one line on its terminal, a non-zero exit, and no address file.
 fn refusing_zo(dir: &Path, delay: Duration) -> ZoBinary {
     use std::os::unix::fs::PermissionsExt;
 

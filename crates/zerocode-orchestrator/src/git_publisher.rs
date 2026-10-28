@@ -64,6 +64,12 @@ pub struct LocalGitRefPublisher {
     publisher_scope: String,
     timeout: Duration,
     output_limit: usize,
+    /// Runs in `commit` after the transaction is built and before Git is asked
+    /// to apply it — the moment a ref can move "inside the commit window".
+    /// A test moves it here rather than through a Git wrapper script, whose
+    /// launch would count against the call deadline.
+    #[cfg(test)]
+    before_transaction: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl std::fmt::Debug for LocalGitRefPublisher {
@@ -149,6 +155,8 @@ impl LocalGitRefPublisher {
                 publisher_scope,
                 timeout: PUBLISH_GIT_TIMEOUT,
                 output_limit: PUBLISH_GIT_OUTPUT_LIMIT,
+                #[cfg(test)]
+                before_transaction: None,
             })
         }
     }
@@ -448,6 +456,12 @@ impl Publisher for LocalGitRefPublisher {
             expected.target.oid,
             expected.source.oid
         );
+        #[cfg(test)]
+        {
+            if let Some(before_transaction) = &self.before_transaction {
+                before_transaction();
+            }
+        }
         if self
             .update_refs(&transaction)
             .map_err(GitCallError::publisher)?
@@ -879,8 +893,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn source_ref_movement_inside_the_commit_window_fails_the_transaction() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let repository = repository();
         let expected = expectation(&repository, TEST_TARGET, &repository.base_oid);
         let tree = git(
@@ -898,24 +910,15 @@ mod tests {
                 "source-moved",
             ],
         );
-        let wrapper = repository
-            .root
-            .path()
-            .join("move-source-before-transaction");
-        fs::write(
-            &wrapper,
-            format!(
-                "#!/bin/sh\ncase \" $* \" in\n  *\" update-ref --no-deref --stdin \"*)\n    sleep {}\n    git -C '{}' update-ref refs/heads/feature {} {} || exit 91\n    ;;\nesac\nexec git \"$@\"\n",
-                (PUBLISH_GIT_TIMEOUT + Duration::from_secs(1)).as_secs(),
-                repository.root.path().display(),
-                later,
-                repository.source_oid
-            ),
-        )
-        .expect("git wrapper");
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("executable");
+        let root = repository.root.path().to_path_buf();
+        let (moved_to, moved_from) = (later.clone(), repository.source_oid.clone());
         let mut publisher = repository.publisher.clone();
-        publisher.git = wrapper.into_os_string();
+        publisher.before_transaction = Some(std::sync::Arc::new(move || {
+            git(
+                &root,
+                &["update-ref", "refs/heads/feature", &moved_to, &moved_from],
+            );
+        }));
         let operation = operation(10);
         assert_eq!(
             publisher.commit(&PublishAttempt::new(&expected, &operation)),
