@@ -44,6 +44,20 @@ publish = false
 lto = "fat"
 codegen-units = 1
 
+# The two libraries a debug build spends its test time inside, built optimised
+# in every dev and test build. Sampled on 2026-10-29 (t-80605) during the
+# orchestration scenarios, which run one at a time and set the shell crate's
+# test wall: the runtime actor opens the authority store for every request and
+# each open re-parses its schema in the bundled SQLite, and every receipt is a
+# SHA-256 — at opt-level 0 the SQLite parser and `sha2::soft` were the hottest
+# frames on the CPU. Optimising them changes no code path, only their speed;
+# libsqlite3-sys built in 1.8 s unoptimised in the same run.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
 [workspace.dependencies]
 local-judgment = { path = "crates/local-judgment" }
 judgment-provider = { path = "crates/judgment-provider" }
