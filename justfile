@@ -256,10 +256,10 @@ fmt:
 #   branch changed (`tools/release/changed_crates.py` picks them from Cargo's
 #   package list and the diff against origin/main — no list here).
 #   Stage 2, only when ui/ changed: the window suites you name, with
-#   `just pre-handin suites=a,b` (names or patterns, as WINDOW_SUITES takes
-#   them). The whole window gate is 23 min on a quiet machine, so a worker
-#   never runs it: without `suites` the stage stops, says which ui files
-#   changed, and the recipe exits 1.
+#   `just pre-handin a,b` (names or patterns, as WINDOW_SUITES takes them).
+#   The whole window gate is 23 min on a quiet machine, so a worker never runs
+#   it: without suites the stage stops, says which ui files changed, and the
+#   recipe exits 1.
 # A stage that stopped is `2`; one that did not apply is `-`.
 pre-handin suites='':
     #!/usr/bin/env bash
@@ -294,7 +294,7 @@ pre-handin suites='':
         step window env WINDOW_SUITES="$suites" node ui/tests/window.mjs
     else
         echo "pre-handin: ui changed ($(echo "$ui" | wc -l | tr -d ' ') files, first: $(echo "$ui" | head -1)) — name the window suites to run:" >&2
-        echo "  just pre-handin suites=<a,b>   (names or patterns; the window harness registers the suite names)" >&2
+        echo "  just pre-handin <a,b>   (names or patterns; the window harness registers the suite names)" >&2
         echo "  named like a changed ui/tests file: $(printf '%s\n' "$picked" | awk -F'\t' '$1 == "suite" { printf "%s%s", sep, $2; sep = "," }')" >&2
         note window 2
     fi
