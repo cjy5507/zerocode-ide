@@ -8844,6 +8844,44 @@ async fn e2e_a_pkill_aimed_at_the_window_is_refused_and_its_target_lives() {
     );
 }
 
+/// t-80732: a kill whose pid is known only when it runs is a question for a
+/// person, and a headless `--plain` run has nobody to answer it — so it is
+/// refused, never approved the way an unattended run approves an ordinary
+/// escalation once. The test plays the window as above; the bait's pid is
+/// read from a file by the command, so only the shell learns it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_an_unattended_run_refuses_a_kill_only_a_person_may_allow() {
+    let layout = Layout::new();
+    let marker = format!("86400.{}8", std::process::id());
+    let mut bait = std::process::Command::new("sleep")
+        .arg(&marker)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the bait starts");
+    let pid_file = layout.state.join("bait.pid");
+    std::fs::write(&pid_file, bait.id().to_string()).expect("write the bait's pid");
+    let window = std::process::id().to_string();
+    let service = ScriptedAnthropicService::tool_calls(&[
+        ("bash", serde_json::json!({ "command": format!("kill $(cat {})", pid_file.display()) })),
+    ], "kill-unanswered").await.unwrap();
+    let output = run_pipe_with_env(&layout.cwd, &layout.home, &layout.sessions, &layout.state, service.base_url(),
+        &["--plain", "--permission-mode", "danger-full-access"], b"Stop the stray sleep.\n/exit\n",
+        &[("ZEROCODE_WINDOW_PID", window.as_str())]).unwrap();
+    let lived = bait.try_wait().expect("the bait can be asked").is_none();
+    let _ = bait.kill();
+    let _ = bait.wait();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(lived, "nobody said yes, so the bait lived");
+    let requests = service.request_bodies().await;
+    assert!(
+        requests.iter().any(|body| body.contains("no person said yes")),
+        "the model heard why it was refused: {requests:?}"
+    );
+}
+
 /// t-68408: two zo sessions in one folder never hand each other their plans.
 /// The first writes a plan and leaves it in progress; the second, opened in the
 /// same folder, runs a tool and writes a plan of its own, and is handed none
