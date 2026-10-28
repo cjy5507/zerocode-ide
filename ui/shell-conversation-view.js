@@ -2082,7 +2082,7 @@ const STEP_LOOKS = new Map(Object.entries({
   read: { family: "file", word: () => t("worker.stepRead", "파일 읽기") },
   edit: { family: "file", word: () => t("worker.stepEdit", "파일 수정") },
   write: { family: "file", word: () => t("worker.stepWrite", "파일 쓰기") },
-  bash: { family: "shell", word: () => t("worker.stepShell", "셸") },
+  bash: { family: "shell", word: () => t("worker.stepShell", "명령") },
   grep: { family: "search", word: () => t("worker.stepSearch", "검색") },
   web: { family: "web", word: () => t("worker.stepWeb", "웹 읽기") },
   websearch: { family: "web", word: () => t("worker.stepWebSearch", "웹 검색") },
@@ -2101,7 +2101,7 @@ const STEP_OWN_LOOKS = new Map(Object.entries({
  * core has no word for is counted with the others. */
 const STEP_FAMILY_WORDS = Object.freeze({
   web: () => t("worker.familyWeb", "웹"),
-  shell: () => t("worker.familyShell", "셸"),
+  shell: () => t("worker.familyShell", "명령"),
   file: () => t("worker.familyFile", "파일"),
   search: () => t("worker.familySearch", "검색"),
   helper: () => t("worker.familyHelper", "헬퍼"),
@@ -2509,13 +2509,18 @@ function runRowNode(run, turns) {
   return row;
 }
 
+/* The row says what was done and the first one done — 「명령 6개 실행 ls -la」
+ * — and how many more stand behind it in the quiet result slot, not as more
+ * words of the first one's (t-81525 C7). */
 function dressRunLine(row) {
   const line = row.firstElementChild;
   const turns = row.__members;
-  writeTextContent(line.querySelector(".helper-step-kind"), t("worker.stepRun", "{{kind}} {{n}}개", { kind: stepLook(row.__kind).word(), n: turns.length }));
+  writeTextContent(line.querySelector(".helper-step-kind"), row.__kind === "bash"
+    ? t("worker.stepShellRun", "명령 {{n}}개 실행", { n: turns.length })
+    : t("worker.stepRun", "{{kind}} {{n}}개", { kind: stepLook(row.__kind).word(), n: turns.length }));
   const first = toolWords(turns[0]);
-  writeTextContent(line.querySelector(".helper-step-target"),
-    `${stepTitleWords(row.__kind, first.arg, first.whole)} ${t("worker.stepMore", "외 {{n}}개", { n: turns.length - 1 })}`);
+  writeTextContent(line.querySelector(".helper-step-target"), stepTitleWords(row.__kind, first.arg, first.whole));
+  writeTextContent(line.querySelector(".helper-step-res"), t("worker.stepMore", "외 {{n}}개", { n: turns.length - 1 }));
   writeTextContent(line.querySelector(".helper-step-meta"), stepTook(turns[0], turns.at(-1)));
 }
 

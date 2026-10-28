@@ -2493,7 +2493,7 @@ async function stepsByKind(browser, origin, ok) {
         looks: {
           read: t("worker.stepRead", "파일 읽기"),
           grep: t("worker.stepSearch", "검색"),
-          bash: t("worker.stepShell", "셸"),
+          bash: t("worker.stepShell", "명령"),
           web: t("worker.stepWeb", "웹 읽기"),
           websearch: t("worker.stepWebSearch", "웹 검색"),
           task: t("worker.stepTask", "헬퍼 호출"),
@@ -3141,7 +3141,10 @@ async function stepsShellTitle(browser, origin, ok) {
       seen.search = targetOf(rowOf("q1"));
       const run = steps().find((row) => row.classList.contains("is-run") && row.__kind === "bash");
       seen.run = targetOf(run);
+      seen.runRes = lineOf(run)?.querySelector(".helper-step-res")?.textContent ?? null;
+      seen.runKind = lineOf(run)?.querySelector(".helper-step-kind")?.textContent ?? null;
       seen.runMore = t("worker.stepMore", "외 {{n}}개", { n: 1 });
+      seen.wantRunKind = t("worker.stepShellRun", "명령 {{n}}개 실행", { n: 2 });
       // The opened row keeps the whole command.
       lineOf(rowOf("s1")).click();
       await settle();
@@ -3172,7 +3175,7 @@ async function stepsShellTitle(browser, origin, ok) {
     ok(
       "D1: only a shell step is read as a command — a search of the web whose query begins `cd /tmp &&` keeps its words — and a row of shell steps is titled like one step, then how many more stand behind it",
       seen.search === "cd /tmp && ls" && seen.run.includes("git status") && seen.run.includes(" · shop-app") &&
-        !/(^|\s)cd\s/.test(seen.run) && seen.run.endsWith(seen.runMore),
+        !/(^|\s)cd\s/.test(seen.run) && !seen.run.endsWith(seen.runMore) && seen.runRes === seen.runMore && seen.runKind === seen.wantRunKind,
       JSON.stringify({ search: seen.search, run: seen.run }),
     );
     ok(
@@ -3839,8 +3842,8 @@ async function stepsWebResults(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "D7: a shell step's kind is worded 「셸」 — the mockup's word — not 「셸 실행」",
-      seen.shell === "셸",
+      "D7: a shell step's kind is worded 「명령」 — the passed conversation's word (t-81525 C7) — not 「셸」",
+      seen.shell === t("worker.stepShell", "명령"),
       JSON.stringify(seen),
     );
     ok("D7: the web results raised no page errors", faults.length === 0, faults.join("\n"));
@@ -4266,7 +4269,7 @@ async function stepsWebKinds(browser, origin, ok) {
       kinds: strip ? [...strip.querySelectorAll(".helper-tally-kind")].map((one) => one.textContent) : null,
       web: t("worker.stepWeb", "웹 읽기"),
       search: t("worker.stepWebSearch", "웹 검색"),
-      shell: t("worker.stepShell", "셸"),
+      shell: t("worker.stepShell", "명령"),
       reads: t("worker.stepRead", "파일 읽기"),
     };
   });

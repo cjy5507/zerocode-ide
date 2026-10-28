@@ -133,7 +133,7 @@ async function redesignHead(browser, origin, ok) {
           total: t("worker.tallyTotal", "도구 {{n}}", { n: 9 }),
           kinds: [
             `${t("worker.familyWeb", "웹")} 2`,
-            `${t("worker.familyShell", "셸")} 1`,
+            `${t("worker.familyShell", "명령")} 1`,
             `${t("worker.familyFile", "파일")} 6`,
           ].join(" · "),
           failed: t("worker.tallyFailed", "실패 {{n}}", { n: 0 }),
@@ -276,7 +276,7 @@ async function redesignRows(browser, origin, ok) {
         wantKinds: [
           t("worker.stepWeb", "웹 읽기"),
           t("worker.stepWebSearch", "웹 검색"),
-          t("worker.stepShell", "셸"),
+          t("worker.stepShell", "명령"),
           t("worker.stepRun", "{{kind}} {{n}}개", { kind: t("worker.stepRead", "파일 읽기"), n: 6 }),
         ],
         results: rows.map(res),
@@ -502,7 +502,7 @@ async function redesignNow(browser, origin, ok) {
       await pollHelperPages();
       await settle();
       seen.calling = read();
-      seen.wantCalling = `${t("worker.stepShell", "셸")} cargo test -p shop`;
+      seen.wantCalling = `${t("worker.stepShell", "명령")} cargo test -p shop`;
       return seen;
     });
     ok(
