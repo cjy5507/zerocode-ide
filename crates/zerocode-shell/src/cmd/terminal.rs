@@ -348,6 +348,7 @@ pub(crate) async fn pane_effort_press(
     term: TermId,
     to: String,
 ) -> Result<zerocode_core::effort_chip::EffortChip, String> {
+    let _crumb = crate::crumbs::Command::enter("pane_effort_press");
     crate::only_the_main_webview(&webview, "노력은 메인 창의 입력칸에서만 바꿉니다")?;
     tauri::async_runtime::spawn_blocking(move || {
         let tail = pane_tail(&app.state::<AppState>(), term);
