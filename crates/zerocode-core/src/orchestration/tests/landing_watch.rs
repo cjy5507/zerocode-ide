@@ -1094,7 +1094,7 @@ fn a_review_hand_in_verified_without_a_word_on_landing_is_not_told_as_unlanded_e
         .iter_mut()
         .find(|held| held.id == handed.task)
         .expect("the task");
-    task.result = "{\"verified\":true}".to_string();
+    task.result = Text("{\"verified\":true}".to_string());
     assert_eq!(
         bench
             .ledger

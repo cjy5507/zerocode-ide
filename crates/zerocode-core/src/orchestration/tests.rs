@@ -1508,9 +1508,10 @@ fn an_inbox_audit_walks_letters_of_one_millisecond_and_an_address_without_a_gap_
         .collect();
     assert_eq!(stamps.len(), same.len());
     assert!(stamps.iter().all(|at| *at == stamps[0]), "{stamps:?}");
-    let other = "pane:other/%9";
+    let (worker, _) = bench.seat("worker-start --agent codex");
+    let other = worker_address(&worker);
     let elsewhere = bench.peer_message_to(
-        other,
+        &other,
         MessageKind::Status,
         "to someone else",
         "",
