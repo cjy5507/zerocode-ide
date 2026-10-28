@@ -549,3 +549,19 @@ fn a_stop_while_the_worker_starts_keeps_its_status_and_stops_that_worker() {
     assert!(stored.get("ledgerStart").is_none(), "{stored}");
     assert!(stored.get("ledger").is_none(), "a stopped agent was bound to the worker it never used: {stored}");
 }
+
+/// Adversarial review A, P3-2: when the thread the start runs on cannot be
+/// spawned, the launch fails at once — and the starting receipt goes with
+/// it, so the failed manifest does not still say a start is under way.
+#[test]
+fn a_start_whose_thread_cannot_spawn_takes_its_starting_receipt_back() {
+    let isolated = crate::misc_tools::agent_tools::tests::IsolatedStore::new("ledger-no-thread");
+    let mut manifest = isolated.running_manifest("agent-no-thread");
+    manifest.lifecycle.ledger_start = Some(Start { run: "run-1".into(), task: "t-4".into(), retry_request: "zo-start-agent-no-thread".into() });
+    super::super::manifest::write_agent_manifest(&manifest).unwrap();
+    let failure = start_in_background(&manifest, || Err(std::io::Error::other("no thread to spare")))
+        .expect_err("a start with no thread fails the launch");
+    assert!(failure.to_string().contains("no thread to spare"), "{failure}");
+    let stored = isolated.read_manifest("agent-no-thread");
+    assert!(stored.lifecycle.ledger_start.is_none(), "the failed start left its starting receipt behind");
+}
