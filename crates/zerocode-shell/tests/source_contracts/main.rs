@@ -16,6 +16,7 @@ mod computer_progress;
 mod computer_use_mirrors;
 mod computer_use_tcc;
 mod continue_gate;
+mod cookie_import_card;
 mod coordinator_desk;
 mod crash_report;
 mod fixture_cases;
