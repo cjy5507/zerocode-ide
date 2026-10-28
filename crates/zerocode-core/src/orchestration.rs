@@ -19556,13 +19556,15 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          stands in and whether it is protected, and changes nothing; --kill (the run's live \
          coordinator seat only) ends only pids a list could show, one at a time, each read \
          again right before its TERM (taskkill /F on Windows) so a reused pid is left alone, \
-         refuses protected ones with the reason, waits up to 2 s and says of each whether it \
+         refuses protected ones with the reason, waits up to 2 s (no read after 3 s) and says of each whether it \
          is gone or still running (nothing stronger is sent), and writes one line to the run. \
          A process no pane holds (an orphaned build) is ended only by its pid@mark from a list \
          (코디가 목록을 읽고 고른 pid = 물음에 대한 예, 판 안·창은 예외 없음), and only while \
          it and every process above it up to pid 1 stand in one worker's own tree the ledger \
          knows (a --worktree checkout, never a coordinator's tree or the project root) — a \
-         runner's job or a person's terminal is refused; --kill needs --retry-request, and the \
+         runner's job or a person's terminal is refused, and so is the orphan of a worker \
+         seated before the ledger wrote down whether its tree was its own (worker-list says \
+         inWorktree: false), which this verb cannot end; --kill needs --retry-request, and the \
          line is filed once under it; places are read on macOS \
          only, so elsewhere only the caller's own tree ends. \
          There is no pattern, parent or everything mode. 패턴으로 죽이는 명령은 쓰지 않는다 — \

@@ -436,6 +436,10 @@ fn targets_of(words: &[String]) -> Result<Vec<Target>, String> {
 /// directory (`RunProject.root` is `<main checkout>/.git`, so the main
 /// checkout holds it; r2 P1-1: 191 of this machine's 1,499 worker rows
 /// reported the main checkout, where the build line's runner stands).
+///
+/// A row written before `in_worktree` was is read as not its own, so the
+/// orphans of workers seated before this build cannot be ended by this verb
+/// — the safe refusal, until those workers are gone or seated again.
 fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
     let mut found = Vec::new();
     let mut roots = Vec::new();
