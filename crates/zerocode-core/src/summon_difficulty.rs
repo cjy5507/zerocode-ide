@@ -9,6 +9,10 @@ pub const RUBRIC_VERSION: u32 = 2;
 pub mod lineup;
 pub mod outcomes;
 pub const PROFILES_SETTING: &str = "summonProfiles";
+/// The shipped launch table: the model each agent's difficulty falls back to
+/// when no lineup names one. Its rows name models only — no effort is ours
+/// to ship (t-74181): the model seat chooses one with the model, the person
+/// may write one, and otherwise the agent's CLI runs at its own default.
 pub const DEFAULT_PROFILES: &str = include_str!("summon-profiles.json");
 /// The difficulty a summons nobody judged runs at (t-45961): the ladder's
 /// top, whose row is the person's own where they wrote one and otherwise the
@@ -22,7 +26,10 @@ pub const UNJUDGED_DIFFICULTY: &str = LADDER[2].0;
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     pub model: String,
-    pub effort: String,
+    /// `None`: no effort goes on the command line, and the agent's CLI runs
+    /// at its own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// One difficulty's row as a person wrote it. Either field may be left to
@@ -45,12 +52,12 @@ impl Written {
         self.model.is_none() && self.effort.is_none()
     }
 
-    /// The row as the launch profile it names, when both fields are written.
+    /// The row as the launch profile it names, when it writes a model.
     #[must_use]
     pub fn whole(&self) -> Option<Profile> {
         Some(Profile {
             model: self.model.clone()?,
-            effort: self.effort.clone()?,
+            effort: self.effort.clone(),
         })
     }
 }
@@ -88,7 +95,7 @@ pub fn validate_profiles(table: &Value) -> Result<(), String> {
             .as_object()
             .ok_or_else(|| format!("{agent}: expected an object of difficulties"))?;
         for (difficulty, row) in rows {
-            if effort(difficulty).is_none() {
+            if !LADDER.iter().any(|(key, _)| key == difficulty) {
                 return Err(format!("{agent}: unknown difficulty {difficulty}"));
             }
             let written: Written =
@@ -106,7 +113,7 @@ pub fn launchable(agent: &str, profile: &Profile) -> Result<(), String> {
         agent,
         &Written {
             model: Some(profile.model.clone()),
-            effort: Some(profile.effort.clone()),
+            effort: profile.effort.clone(),
         },
     )
 }
@@ -156,22 +163,17 @@ pub const TITLE_CHAR_CAP: usize = crate::summon_choice::SUMMON_RECENT_BRIEF_CHAR
 pub const APPLY_DEADLINE_MS: u64 = 2_000;
 pub const QUESTION: &str = "summon_difficulty";
 
-/// One ladder: option, meaning, and launch effort outside the question.
-pub const LADDER: [(&str, &str, &str); 3] = [
+/// One ladder: option and meaning. A difficulty picks a model from the
+/// lineup; it sets no effort (t-74181).
+pub const LADDER: [(&str, &str); 3] = [
     (
         "low",
         "Documentation, translation, tests only, or a small fix.",
-        "medium",
     ),
-    (
-        "mid",
-        "A UI feature, tooling, benchmarking, or a TUI port.",
-        "high",
-    ),
+    ("mid", "A UI feature, tooling, benchmarking, or a TUI port."),
     (
         "high",
         "Core rules, protocols, concurrency, or ledger contracts.",
-        "max",
     ),
 ];
 const INSTRUCTIONS: &str = "Choose the difficulty of the work in `title` and `spec` (the first 400 characters). Judge its scope and reasoning requirements using the option meanings. `attempt` counts earlier summonses of this task, `failures` counts consecutive failures, and `retryOf` says whether this summons replaces an ended attempt. These are context, not automatic reasons to choose the highest level. Choose the lowest level adequate for the work.";
@@ -216,37 +218,14 @@ pub fn questions() -> Value {
         INSTRUCTIONS,
         LADDER
             .iter()
-            .map(|(key, means, _)| ((*key).to_string(), json!(means)))
+            .map(|(key, means)| ((*key).to_string(), json!(means)))
             .collect(),
     )
 }
 
 pub fn read(answers: &Value) -> Result<choice::Choice, choice::ChoiceRefusal> {
-    let offered: BTreeSet<String> = LADDER
-        .iter()
-        .map(|(key, _, _)| (*key).to_string())
-        .collect();
+    let offered: BTreeSet<String> = LADDER.iter().map(|(key, _)| (*key).to_string()).collect();
     choice::read(answers, QUESTION, &offered)
-}
-
-/// Legacy effort-to-difficulty context for old replay files; never a label.
-#[must_use]
-pub fn teacher(effort: &str) -> Option<&'static str> {
-    let effort = if effort == "xhigh" {
-        LADDER[2].2
-    } else {
-        effort
-    };
-    LADDER
-        .iter()
-        .find_map(|(key, _, rung)| (*rung == effort).then_some(*key))
-}
-
-#[must_use]
-pub fn effort(difficulty: &str) -> Option<&'static str> {
-    LADDER
-        .iter()
-        .find_map(|(key, _, effort)| (*key == difficulty).then_some(*effort))
 }
 
 /// Keep the old pin as context, never as a success label.
@@ -263,7 +242,7 @@ pub fn compare(row: &mut Value, teacher_effort: Option<&str>) {
 pub fn rubric_words() -> String {
     std::iter::once(INSTRUCTIONS)
         .chain(STATE_KEYS)
-        .chain(LADDER.iter().flat_map(|(key, means, _)| [*key, *means]))
+        .chain(LADDER.iter().flat_map(|(key, means)| [*key, *means]))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -272,11 +251,7 @@ pub fn rubric_words() -> String {
 #[must_use]
 pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
     use crate::jev::builtin::QuestionDefinition as D;
-    vec![D::choice(
-        QUESTION,
-        INSTRUCTIONS,
-        &LADDER.map(|(key, words, _)| (key, words)),
-    )]
+    vec![D::choice(QUESTION, INSTRUCTIONS, &LADDER)]
 }
 
 #[cfg(test)]
@@ -303,6 +278,7 @@ mod tests {
             "gpt-test-profile"
         );
         changed["codex"][LADDER[0].0]["effort"] = json!("");
+        changed["codex"][LADDER[0].0]["model"] = json!("gpt-test-profile");
         assert!(validate_profiles(&changed).is_err());
     }
     /// t-74181 (source contract): no difficulty-to-effort table, in code or
@@ -362,7 +338,7 @@ mod tests {
     #[test]
     fn a_pin_is_context_and_cannot_award_success() {
         let mut row = json!({"chosen": LADDER[2].0});
-        compare(&mut row, Some(LADDER[2].2));
+        compare(&mut row, Some("max"));
         assert!(row.get("agreed").is_none());
         assert!(row.get("baselineAgreed").is_none());
     }

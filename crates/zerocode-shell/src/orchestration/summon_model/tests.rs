@@ -31,7 +31,7 @@ fn asked() -> ModelAsk {
         &lineup(),
         None,
         &Default::default(),
-        &[LADDER[0].2],
+        &["medium"],
         |_| None,
         0,
     );
@@ -51,7 +51,7 @@ fn wire(home: &tempfile::TempDir, endpoint: &Endpoint, mode: &str) -> Wire {
 /// The pair `model` at the ladder's easy effort — an effort every question
 /// here offers a model that names none at.
 fn pair(model: &str) -> String {
-    model::option_word(model, LADDER[0].2)
+    model::option_word(model, "medium")
 }
 
 fn answer(word: &str) -> String {
@@ -109,7 +109,7 @@ fn only_a_seat_that_applies_asks_on_the_launchs_path_and_abstain_never_acts() {
             assert_eq!(
                 row[model::EFFORT_KEY],
                 if applied {
-                    json!(LADDER[0].2)
+                    json!("medium")
                 } else {
                     Value::Null
                 }
@@ -175,7 +175,7 @@ impl zerocode_core::orchestration::Launcher for Lined {
             self.asked_on_the_path
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             json!({
-                "outcome": "answered", "chosen": "model-b", model::EFFORT_KEY: LADDER[0].2,
+                "outcome": "answered", "chosen": "model-b", model::EFFORT_KEY: "medium",
                 "confidence": 0.85, "applied": true,
             })
         });

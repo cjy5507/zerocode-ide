@@ -112,12 +112,6 @@ fn replay_recorded_summonses() {
                     ] {
                         row[name] = seed[name].clone();
                     }
-                    row["wouldEffort"] = json!(row["chosen"].as_str().and_then(|chosen| {
-                        zerocode_core::orchestration::difficulty_effort(
-                            seed["agent"].as_str().unwrap(),
-                            chosen,
-                        )
-                    }));
                     results.lock().unwrap().push(row);
                 }
             });
@@ -256,7 +250,7 @@ fn recording_is_deferred_and_an_acting_receipt_is_not_asked_twice() {
         assert_eq!(row["worker"], prepared.worker);
         assert_eq!(row["dispatch"], prepared.worker);
         assert_eq!(row["requestAt"], 3);
-        assert_eq!(row["pinnedEffort"], difficulty::LADDER[2].2);
+        assert_eq!(row["pinnedEffort"], "max");
         assert!(row.get("agreed").is_none());
         assert!(row.get("baselineAgreed").is_none());
         assert_eq!(row["applied"], carried);
@@ -341,7 +335,7 @@ fn replay_execution_outcomes() {
             difficulty::profile(&Value::Null, &worker.agent, difficulty::LADDER[2].0).unwrap();
         row["baselineHigh"] = json!(
             high.is_some_and(|p| worker.model.as_deref() == Some(p.model.as_str())
-                && row["effort"].as_str() == Some(p.effort.as_str()))
+                && row["effort"].as_str() == p.effort.as_deref())
         );
         row["attempt"] = json!(
             run.dispatches
@@ -992,7 +986,7 @@ fn live_the_switch_carries_out_real_answers() {
         assert_eq!(reply["model"], json!(profile.model), "{reply}");
         assert_eq!(reply["effort"], json!(profile.effort), "{reply}");
         println!(
-            "difficulty: the launch is the {level} row ({} / {})",
+            "difficulty: the launch is the {level} row ({} / {:?})",
             profile.model, profile.effort
         );
     } else {

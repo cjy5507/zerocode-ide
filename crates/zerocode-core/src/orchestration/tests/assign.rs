@@ -140,14 +140,9 @@ fn summon(launcher: &Assigned) -> (serde_json::Value, PreparedWorkerStart) {
     )
 }
 
-/// The efforts claude's ladder launches at, lowest first, once each.
+/// The efforts claude's ladder offers, lowest first, once each.
 fn claude_ladder() -> Vec<&'static str> {
-    let mut efforts: Vec<&str> = LADDER
-        .iter()
-        .filter_map(|(difficulty, _, _)| difficulty_effort("claude", difficulty))
-        .collect();
-    efforts.dedup();
-    efforts
+    ladder_efforts("claude")
 }
 
 /// A1, A3, A4: one call carries both questions; the model question offers a
@@ -513,8 +508,73 @@ fn a_summons_jev_did_not_judge_runs_at_its_clis_default_effort() {
         assert_eq!(dials["difficultyFrom"], "facts", "{outcome}: {reply}");
         assert_eq!(dials["unjudged"]["why"], outcome, "{reply}");
         assert_eq!(dials["modelUnjudged"]["why"], outcome, "{reply}");
-        assert_eq!(dials["why"]["effortRule"], "cli-default", "{outcome}: {reply}");
+        assert_eq!(
+            dials["why"]["effortRule"], "cli-default",
+            "{outcome}: {reply}"
+        );
         assert_eq!(dials["why"]["pairSamples"], 0, "{outcome}: {reply}");
         assert_eq!(dials["why"]["evidence"], "unverified", "{outcome}: {reply}");
     }
+}
+
+/// t-74181: the person's effort binds — with Jev silent it is what runs, and
+/// beside Jev's applied pair it still is: the seat may choose the model the
+/// person left open, never move the effort the person wrote.
+#[test]
+fn the_persons_effort_binds_with_jev_silent_and_beside_its_pair() {
+    let written = serde_json::json!({
+        crate::jev::SMART_SETTINGS_KEY: {PROFILES_SETTING: {"claude": LADDER
+            .iter()
+            .map(|(difficulty, _)| ((*difficulty).to_string(), serde_json::json!({"effort": "medium"})))
+            .collect::<serde_json::Map<_, _>>()}},
+    });
+    let silent = Assigned {
+        settings: written.clone(),
+        ..Assigned::late()
+    };
+    let (reply, _) = summon(&silent);
+    assert_eq!(reply["effort"], "medium", "{reply}");
+    assert_eq!(reply["dials"]["why"]["effortRule"], "person", "{reply}");
+    let beside = Assigned {
+        settings: written,
+        ..Assigned::answering(recorded(), ("model-a", "max"))
+    };
+    let (reply, _) = summon(&beside);
+    assert_eq!(reply["model"], "model-a", "the seat's model ran: {reply}");
+    assert_eq!(
+        reply["effort"], "medium",
+        "the person's effort stood: {reply}"
+    );
+    assert_eq!(reply["dials"]["why"]["effortRule"], "person", "{reply}");
+}
+
+/// t-74181: the pair is Jev's — when its answer runs, the effort is the one
+/// it chose, the top included, and the reply says Jev set it; the pair's own
+/// finished record decides whether that choice is measured or unverified.
+#[test]
+fn the_effort_jev_chose_runs_and_its_record_says_whether_it_is_measured() {
+    let launcher = Assigned::answering(recorded(), ("model-a", "max"));
+    let (reply, _) = summon(&launcher);
+    assert_eq!(reply["model"], "model-a", "{reply}");
+    assert_eq!(
+        reply["effort"], "max",
+        "the top, when Jev judges it: {reply}"
+    );
+    assert_eq!(reply["dials"]["why"]["effortRule"], "jev", "{reply}");
+    assert_eq!(reply["dials"]["why"]["evidence"], "unverified", "{reply}");
+    let mut records = recorded();
+    records.get_mut("model-a").unwrap().by_effort.insert(
+        "max".to_string(),
+        crate::summon_model::ModelPerformance {
+            ended: lineup::CHALLENGE_MIN_SAMPLES,
+            ..crate::summon_model::ModelPerformance::default()
+        },
+    );
+    let (reply, _) = summon(&Assigned::answering(records, ("model-a", "max")));
+    assert_eq!(
+        reply["dials"]["why"]["pairSamples"],
+        lineup::CHALLENGE_MIN_SAMPLES,
+        "{reply}"
+    );
+    assert_eq!(reply["dials"]["why"]["evidence"], "measured", "{reply}");
 }

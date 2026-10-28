@@ -7024,12 +7024,12 @@ function workerCell(state, agent, row) {
   const effort = workerNode("select", "settings-input worker-models-effort");
   Object.assign(effort.dataset, { agent, difficulty: row.difficulty, field: "effort" });
   effort.setAttribute("aria-label", t("settings.workerModels.effortLabel", "{{agent}} {{difficulty}} 사고 깊이", { agent: who, difficulty }));
-  // 「자동」 for the effort is the difficulty's effort inside the model: what
-  // the row runs at now while no effort is written, else what clearing it
-  // brings back — known for the lineup's model, not for a written one.
+  // 「자동」 for the effort is what the row runs at while no effort is
+  // written: the model's own CLI default unless the model seat chooses one
+  // for the work (t-74181), so it names no word of ours.
   const autoEffort = !row.writtenEffort ? row.effort : row.writtenModel ? null : row.autoEffort;
   effort.append(workerOption("", auto(autoEffort), !row.writtenEffort));
-  const takes = [...(workerPick(state, agent, row.model)?.efforts ?? [row.effort])];
+  const takes = [...(workerPick(state, agent, row.model)?.efforts ?? [row.effort].filter(Boolean))];
   if (row.writtenEffort && !takes.includes(row.writtenEffort)) takes.push(row.writtenEffort);
   for (const word of takes) effort.append(workerOption(word, word, word === row.writtenEffort));
   effort.classList.toggle("is-auto", !row.writtenEffort);
@@ -7173,7 +7173,7 @@ function saveWorkerCell(agent, difficulty, model, effort, note = "") {
     paintWorkerNext(agent, row);
     const said = row
       ? t("settings.workerModels.saved", "저장했습니다 — 다음 {{agent}} {{difficulty}} 소환부터 {{model}} · {{effort}}", {
-        agent: agentName(agent), difficulty: workerDifficulty(difficulty).name, model: row.model, effort: row.effort,
+        agent: agentName(agent), difficulty: workerDifficulty(difficulty).name, model: row.model, effort: row.effort ?? t("settings.workerModels.autoPlain", "자동"),
       })
       : t("settings.workerModels.savedPlain", "저장했습니다.");
     return note ? `${said} ${note}` : said;

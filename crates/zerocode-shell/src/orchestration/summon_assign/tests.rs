@@ -59,7 +59,7 @@ fn model_ask() -> ModelAsk {
         &lineup(),
         None,
         &records(),
-        &[LADDER[0].2],
+        &["medium"],
         |_| None,
         0,
     );
@@ -973,7 +973,7 @@ fn live_difficulty_answers_alone_and_joint() {
             )
         })
         .collect();
-    let ladder: Vec<&str> = LADDER.iter().map(|(_, _, effort)| *effort).collect();
+    let ladder = zerocode_core::orchestration::ladder_efforts("claude");
     let options = model::options("claude", &lineup, None, &records, &ladder, |_| None, 0);
     let said = |row: Option<Value>| {
         let row = row.unwrap_or_default();
