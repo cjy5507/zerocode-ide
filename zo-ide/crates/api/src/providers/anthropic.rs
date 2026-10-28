@@ -118,6 +118,14 @@ fn normalize_thinking_for_wire(request: &MessageRequest) -> std::borrow::Cow<'_,
     Cow::Owned(rewritten)
 }
 
+/// The effort a rendered request body carries (`output_config.effort`), as
+/// the request ledger records it (`RequestLedgerRow::sent_effort`).
+fn sent_effort(body: &Value) -> Option<&str> {
+    body.get("output_config")
+        .and_then(|config| config.get("effort"))
+        .and_then(Value::as_str)
+}
+
 /// Strip replayed reasoning blocks from the wire when this request has thinking
 /// DISABLED.
 ///
@@ -1599,11 +1607,7 @@ impl AnthropicClient {
         // goes with them for the same reason: a Smart band picks its level in
         // `normalize_thinking_for_wire`, after `request` was built.
         if let Some(prompt_cache) = &self.prompt_cache {
-            let effort = request_body
-                .get("output_config")
-                .and_then(|config| config.get("effort"))
-                .and_then(Value::as_str);
-            prompt_cache.note_sent_payload(request, &payload, effort);
+            prompt_cache.note_sent_payload(request, &payload, sent_effort(&request_body));
         }
         // Preflight the body against the endpoint's declared byte ceiling. This
         // is the only point where the EXACT wire size is known, and uploading a
