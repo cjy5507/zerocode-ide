@@ -427,8 +427,10 @@ fn targets_of(words: &[String]) -> Result<Vec<Target>, String> {
 /// checkout, where the build line's runner stands).
 fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
     let mut found = Vec::new();
+    let mut roots = Vec::new();
     for run in ledger.runs() {
-        for worker in &run.workers {
+        roots.extend(run.project.as_ref().map(|project| project.root.clone()));
+        for worker in run.workers.iter().filter(|worker| worker.in_worktree) {
             let Some(path) = worker.checkout.clone() else {
                 continue;
             };
@@ -445,7 +447,7 @@ fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
             });
         }
     }
-    found
+    outside(found, &roots)
 }
 
 /// The live coordinator seat (`team/pane`) of every run, for the window to
@@ -625,22 +627,30 @@ pub fn end(
 /// failed proves nothing and leaves every pid as it was.
 fn settle(ended: &mut [Ended], signals: &dyn Signals) {
     for step in 0..=SETTLE_STEPS {
-        let mut running = false;
-        for one in ended.iter_mut() {
-            if one.outcome != (Outcome::Signaled { gone: false }) {
-                continue;
-            }
-            let stands = signals
-                .reread(one.target.pid)
-                .is_some_and(|(started, args)| {
-                    mark(one.target.pid, &started, &args) == one.target.mark
+        let waiting: Vec<u32> = ended
+            .iter()
+            .filter(|one| one.outcome == (Outcome::Signaled { gone: false }))
+            .map(|one| one.target.pid)
+            .collect();
+        if waiting.is_empty() {
+            return;
+        }
+        if let Some(now) = signals.reread_many(&waiting) {
+            for one in ended
+                .iter_mut()
+                .filter(|one| waiting.contains(&one.target.pid))
+            {
+                let stands = now.get(&one.target.pid).is_some_and(|(started, args)| {
+                    mark(one.target.pid, started, args) == one.target.mark
                 });
-            if stands {
-                running = true;
-            } else {
-                one.outcome = Outcome::Signaled { gone: true };
+                if !stands {
+                    one.outcome = Outcome::Signaled { gone: true };
+                }
             }
         }
+        let running = ended
+            .iter()
+            .any(|one| one.outcome == (Outcome::Signaled { gone: false }));
         if !running || step == SETTLE_STEPS {
             return;
         }

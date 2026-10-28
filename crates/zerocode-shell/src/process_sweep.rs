@@ -57,8 +57,8 @@ pub(crate) fn carry(
 
 /// The worker checkouts this call reads: the ask's, less each that is or
 /// holds a coordinator's tree.
-fn held_checkouts(ask: &ProcessSweepAsk, _coordinator_trees: &[String]) -> Vec<Checkout> {
-    ask.checkouts().to_vec()
+fn held_checkouts(ask: &ProcessSweepAsk, coordinator_trees: &[String]) -> Vec<Checkout> {
+    sweep::outside(ask.checkouts().to_vec(), coordinator_trees)
 }
 
 /// The tree each live coordinator seat (`team/pane`) stands in, as the window
