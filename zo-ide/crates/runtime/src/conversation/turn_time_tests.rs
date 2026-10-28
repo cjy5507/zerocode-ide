@@ -5,7 +5,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{
@@ -479,4 +479,99 @@ fn a_two_tool_answer_says_when_its_blocks_closed_and_the_next_request_how_long_e
     );
     let written: String = rows.iter().map(ToString::to_string).collect();
     assert!(!written.contains("a.rs") && !written.contains("fn b()"), "no tool input reaches a row: {written}");
+}
+
+/// Holds every tool it runs until it is let go — tools still running when
+/// the person stops them.
+#[derive(Default)]
+struct Held {
+    released: Mutex<bool>,
+    let_go: Condvar,
+}
+
+impl Held {
+    fn hold(&self) {
+        let released = self.released.lock().expect("released");
+        drop(self.let_go.wait_while(released, |released| !*released).expect("released"));
+    }
+}
+
+/// Lets every held tool go when dropped, so a tokio runtime dropped after
+/// it — at the end of a test or while one unwinds — never waits on a tool
+/// still held on its blocking pool.
+struct LetGo(Arc<Held>);
+
+impl Drop for LetGo {
+    fn drop(&mut self) {
+        if let Ok(mut released) = self.0.released.lock() {
+            *released = true;
+        }
+        self.0.let_go.notify_all();
+    }
+}
+
+/// P2-1 (t-80327): a tool the person stops with Esc while it runs did not
+/// run to its end, so the request that carries its result back says it was
+/// stopped and keeps no time for it — a time up to the keypress is not how
+/// long the tool takes. Both roads: two reads side by side in a wave, then
+/// a write run by itself.
+#[test]
+fn a_tool_stopped_while_it_runs_keeps_no_time_and_says_it_was_stopped() {
+    let scripted = Scripted::calling(vec![
+        vec![("read_file", r#"{"path":"a.rs"}"#.to_string()), ("read_file", r#"{"path":"b.rs"}"#.to_string())],
+        vec![("write_file", r#"{"path":"c.rs","content":"fn c() {}"}"#.to_string())],
+        Vec::new(),
+    ]);
+    let mut runtime = runtime_with(
+        Arc::new(scripted),
+        Arc::new(Store::default()),
+        Arc::new(CountingSeat::default()),
+        SteeringQueue::default(),
+    );
+    let held = Arc::new(Held::default());
+    let holding = Arc::clone(&held);
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let dispatch: ConcurrentDispatchFn = Arc::new(move |name, input| {
+        let _ = started_tx.send(name.to_string());
+        holding.hold();
+        Ok(format!("ran:{input}"))
+    });
+    runtime.set_concurrent_dispatch(dispatch);
+    let esc = runtime.tool_cancel_signal();
+    take_recorded();
+
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let _let_go = LetGo(held);
+    tokio_runtime.block_on(async {
+        let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move { while render_rx.recv().await.is_some() {} });
+        let prompter: Arc<dyn PermissionPrompter> = Arc::new(AllowAll);
+        let person = async move {
+            for stopped in ["read_file", "write_file"] {
+                while started_rx.recv().await.is_some_and(|name| name != stopped) {}
+                esc.cancel_running_tools();
+            }
+        };
+        let (turn, ()) = tokio::join!(
+            runtime.run_turn_streaming_with_images("read a.rs and b.rs, then write c.rs", Vec::new(), render_tx, prompter),
+            person
+        );
+        turn.expect("stopping a tool does not end the turn");
+    });
+
+    let rows = recorded_rows();
+    assert_eq!(rows.len(), 3, "three requests, three rows: {rows:#?}");
+    for (row, names) in [(&rows[1], vec!["read_file", "read_file"]), (&rows[2], vec!["write_file"])] {
+        assert_eq!(tool_names(&row["tool_ran_ms"]), names, "{row}");
+        assert!(
+            row["tool_ran_ms"]
+                .as_array()
+                .is_some_and(|marks| marks.iter().all(|mark| mark["ms"].is_null() && mark["cancelled"] == true)),
+            "a stopped tool keeps no time and says it was stopped: {row}"
+        );
+    }
 }
