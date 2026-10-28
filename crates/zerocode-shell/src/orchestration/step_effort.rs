@@ -882,43 +882,42 @@ pub(crate) fn press(
     let Some(keys) = effort_chip::press(&moves, from, to).map_err(PressRefused::Stuck)? else {
         return Ok(chip);
     };
-    let book = |write: &dyn Fn(&mut HashMap<u32, Option<String>>)| {
-        if let Some(held) = held.as_ref() {
-            write(
-                &mut held
-                    .moves
-                    .lock()
-                    .unwrap_or_else(|held| held.into_inner())
-                    .pressed,
-            );
-        }
-    };
     // The seat is told first, so a beat between here and the keys does not
     // judge the pane the person is moving; a press the door refused gives
     // back a pane no earlier press had made the person's.
-    let first = held.as_ref().is_some_and(|held| {
-        !held
-            .moves
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .pressed
-            .contains_key(&term)
-    });
-    book(&|pressed| {
+    let first = with_pressed(held.as_ref(), |pressed| {
+        let first = !pressed.contains_key(&term);
         pressed.entry(term).or_default();
-    });
+        first
+    })
+    .unwrap_or(false);
     if let Err(refused) = carry(host, term, &keys) {
         if first {
-            book(&|pressed| {
-                pressed.remove(&term);
-            });
+            with_pressed(held.as_ref(), |pressed| pressed.remove(&term));
         }
         return Err(refused);
     }
-    book(&|pressed| {
-        pressed.insert(term, Some(to.to_string()));
+    with_pressed(held.as_ref(), |pressed| {
+        pressed.insert(term, Some(to.to_string()))
     });
     Ok(pane_effort(host, term, tail))
+}
+
+/// Write the panes a person moved, under the book's lock — `None` in a
+/// window whose runtime never started, where no seat moves anything.
+fn with_pressed<R>(
+    held: Option<&super::LiveRuntime>,
+    write: impl FnOnce(&mut HashMap<u32, Option<String>>) -> R,
+) -> Option<R> {
+    held.map(|held| {
+        write(
+            &mut held
+                .moves
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .pressed,
+        )
+    })
 }
 
 /// Type a press's keys at `term`: the line, or the picker's command and,
