@@ -56,6 +56,9 @@ pub enum WorkspaceTrust {
     Trusted,
     /// Nothing the person said covers the folder: no `!` command runs.
     Untrusted,
+    /// A pipe whose mode the person did not name: nobody is there to answer
+    /// for the folder, so no `!` command runs, whatever the trust store says.
+    UnnamedPipe,
 }
 
 impl PromptCommandDef {
@@ -110,11 +113,12 @@ impl PromptCommandDef {
     #[must_use]
     pub fn render_prompt_as(&self, args: &str, base_dir: &Path, gate: InlineShellGate) -> String {
         let workspace = self.scope == PromptCommandScope::Workspace;
-        let untrusted = workspace && gate.workspace == WorkspaceTrust::Untrusted;
+        let folder = self.workspace_folder().unwrap_or(base_dir);
         let shell = InlineShell {
             allowed_tools: &self.allowed_tools,
             read_only: gate.read_only,
-            untrusted: untrusted.then(|| self.workspace_folder().unwrap_or(base_dir)),
+            workspace: if workspace { gate.workspace } else { WorkspaceTrust::Trusted },
+            folder,
             confined: workspace,
         };
         expand_command_template(&self.body, args, base_dir, &shell)
@@ -566,13 +570,14 @@ where
 
 /// What a command file's `!` commands may run: what its `allowed-tools`
 /// grants Bash, and nothing while the session is read-only or while the file
-/// is a workspace one in a folder the person has not trusted (`untrusted`
-/// names that folder). A workspace file is also `confined`: its `@path`
-/// reads only inside the working folder.
+/// is a workspace one the person has not given their word for (`workspace`,
+/// about `folder`). A workspace file is also `confined`: its `@path` reads
+/// only inside the working folder.
 struct InlineShell<'a> {
     allowed_tools: &'a [String],
     read_only: bool,
-    untrusted: Option<&'a Path>,
+    workspace: WorkspaceTrust,
+    folder: &'a Path,
     confined: bool,
 }
 
@@ -582,11 +587,19 @@ impl InlineShell<'_> {
         if self.read_only {
             return Some(format!("[!{command}: not run in read-only mode]"));
         }
-        if let Some(folder) = self.untrusted {
-            return Some(format!(
-                "[!{command}: not run — {} is not trusted; a repository's command file runs its ! lines only in a folder you trust, or under a --permission-mode you name]",
-                folder.display()
-            ));
+        match self.workspace {
+            WorkspaceTrust::Trusted => {}
+            WorkspaceTrust::Untrusted => {
+                return Some(format!(
+                    "[!{command}: not run — {} is not trusted; a repository's command file runs its ! lines only in a folder you trust, or under a --permission-mode you name]",
+                    self.folder.display()
+                ));
+            }
+            WorkspaceTrust::UnnamedPipe => {
+                return Some(format!(
+                    "[!{command}: not run — in a pipe nobody answers a trust prompt; give zo --permission-mode to let a repository's command file run its ! lines]"
+                ));
+            }
         }
         if self
             .allowed_tools
@@ -715,7 +728,8 @@ mod tests {
         let shell = InlineShell {
             allowed_tools: &allowed_tools,
             read_only: false,
-            untrusted: None,
+            workspace: WorkspaceTrust::Trusted,
+            folder: base_dir,
             confined: true,
         };
         expand_command_template(body, args, base_dir, &shell)

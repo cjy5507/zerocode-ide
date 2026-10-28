@@ -249,7 +249,9 @@ pub struct PromptExpansion {
 /// above it until the person has given their word for the folder that holds
 /// it: trust in that folder ([`crate::workspace_trust::person_trusts_folder`])
 /// or a mode they named (`origin.named`). A mode the default or a settings
-/// file gives — a repository can pin its own — is not that word.
+/// file gives — a repository can pin its own — is not that word, and a pipe
+/// (`origin.piped`) takes only a named mode: nobody there can answer for the
+/// folder, so an old trust record does not speak for this run.
 #[must_use]
 pub fn prompt_command(
     cwd: &Path,
@@ -261,12 +263,13 @@ pub fn prompt_command(
     let found = commands::discover_prompt_commands(cwd);
     let command = commands::find_prompt_command(&found, name)?;
     let workspace = match command.workspace_folder() {
-        Some(folder)
-            if !origin.named && !crate::workspace_trust::person_trusts_folder(folder) =>
-        {
-            commands::WorkspaceTrust::Untrusted
+        None => commands::WorkspaceTrust::Trusted,
+        Some(_) if origin.named => commands::WorkspaceTrust::Trusted,
+        Some(_) if origin.piped => commands::WorkspaceTrust::UnnamedPipe,
+        Some(folder) if crate::workspace_trust::person_trusts_folder(folder) => {
+            commands::WorkspaceTrust::Trusted
         }
-        _ => commands::WorkspaceTrust::Trusted,
+        Some(_) => commands::WorkspaceTrust::Untrusted,
     };
     let gate = commands::InlineShellGate {
         read_only: mode == core_types::PermissionMode::ReadOnly,
