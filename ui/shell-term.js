@@ -1158,7 +1158,7 @@ let termContrastBar = null;
 
 function termMinContrast() {
   if (termContrastBar === null) {
-    const screen = readColor("var(--term-screen-bg)");
+    const screen = readColor(TERM_SCREEN_GROUND);
     termContrastBar =
       screen !== null && contrastRatio([0, 0, 0], screen) > contrastRatio([255, 255, 255], screen)
         ? 4.5
@@ -1177,7 +1177,7 @@ function termMinContrast() {
 let paletteGeneration = 0;
 const contrastLift = new Map();
 const indexedContrastLift = new Map();
-/* And the tokens themselves, read once each per palette.
+/* And the tokens themselves, read once per palette.
  *
  * The two maps above cache ANSWERS, which is not the same as caching the
  * reads that produce them: `nearestReadableIndex` walks all 256 palette
@@ -1190,8 +1190,27 @@ const indexedContrastLift = new Map();
  *
  * A token's value cannot change without `forgetPalette`, which is what makes
  * this safe to hold: every road that rebinds `--term-*` — a treatment flip, a
- * theme, an override — ends there (`applyTheme`, `applyTerminalPalette`). */
+ * theme, an override — ends there (`applyTheme`, `applyTerminalPalette`).
+ *
+ * And one style read fills the lot (t-78802): the first miss of a palette
+ * takes the token asked for, every indexed entry and the screen's ground from
+ * the same declaration. One per token was still 258 reads the first time a
+ * colour needed lifting — which on the design's darker ground comes in the
+ * middle of a stream, 2.1 style reads a frame over a dense scene. */
 const resolvedTokens = new Map();
+const TERM_PALETTE_SIZE = 256;
+const TERM_GROUND_TOKEN = "--term-screen-bg";
+const TERM_SCREEN_GROUND = `var(${TERM_GROUND_TOKEN})`;
+
+function resolveToken(name) {
+  const style = getComputedStyle(document.documentElement);
+  const read = (token) => resolvedTokens.set(token, style.getPropertyValue(token).trim());
+  if (resolvedTokens.size === 0) {
+    for (let index = 0; index < TERM_PALETTE_SIZE; index += 1) read(`--term-${index}`);
+    read(TERM_GROUND_TOKEN);
+  }
+  read(name);
+}
 
 function readColor(css) {
   if (typeof css !== "string") return null;
@@ -1201,13 +1220,8 @@ function readColor(css) {
   // palette here, which would be a copy to keep in step.
   const via = text.match(/^var\((--[a-z0-9-]+)\)$/i);
   if (via) {
-    const held = resolvedTokens.get(via[1]);
-    if (held === undefined) {
-      text = getComputedStyle(document.documentElement).getPropertyValue(via[1]).trim();
-      resolvedTokens.set(via[1], text);
-    } else {
-      text = held;
-    }
+    if (!resolvedTokens.has(via[1])) resolveToken(via[1]);
+    text = resolvedTokens.get(via[1]);
     if (text === "") return null;
   }
   const hex = text.match(/^#([0-9a-f]{6})$/i);
@@ -1265,7 +1279,7 @@ function computeReadable(fg, bg) {
   const ink = readColor(fg);
   // A run with no background of its own sits on the screen, so that is what it
   // has to be legible against.
-  const ground = readColor(bg ?? "var(--term-screen-bg)");
+  const ground = readColor(bg ?? TERM_SCREEN_GROUND);
   if (ink === null || ground === null) return fg;
   if (contrastRatio(ink, ground) >= termMinContrast()) return fg;
   const toward = luminance(ground) > 0.5 ? [0, 0, 0] : [255, 255, 255];
@@ -1300,12 +1314,12 @@ function nearestReadableIndex(readable, bg) {
   const held = indexedContrastLift.get(key);
   if (held !== undefined) return held;
   const target = readColor(readable);
-  const ground = readColor(bg ?? "var(--term-screen-bg)");
+  const ground = readColor(bg ?? TERM_SCREEN_GROUND);
   if (target === null || ground === null) return 15;
   let best = 15;
   let bestDistance = Number.POSITIVE_INFINITY;
   let foundReadable = false;
-  for (let index = 0; index < 256; index += 1) {
+  for (let index = 0; index < TERM_PALETTE_SIZE; index += 1) {
     const candidate = readColor(`var(--term-${index})`);
     if (candidate === null) continue;
     const reads = contrastRatio(candidate, ground) >= termMinContrast();
