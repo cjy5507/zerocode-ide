@@ -3730,6 +3730,29 @@ mod tests {
         assert_eq!(named, [("wiki/a", 0, false), ("wiki/b", 1, false), ("wiki/c", 2, false), ("wiki/d", 2, true)]);
     }
 
+    /// A turn keeps the section its first request built for the requests
+    /// after it (`ConversationRuntime::turn_recall_section`, t-78938), so
+    /// only the first of them settles: a request that was not answered — an
+    /// empty reply asked again, a fallback that took it over — leaves its
+    /// section staged, and the next request, carrying the same section with
+    /// no second recall, shows it once it is answered.
+    #[test]
+    fn a_section_kept_for_the_turn_is_shown_by_the_request_that_was_answered() {
+        let mock = Mock::serving(200, "{\"not\": \"a reply\"}".to_string());
+        let rows = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (kept for the turn)", three().to_vec());
+            heard(cwd, TEST_ATTEMPT, told(&[], false, false));
+            assert!(
+                note_recall_read(cwd, &turn(vec![read_of(&read[1].entry.path)])),
+                "the answered request showed the turn nothing"
+            );
+            labels(cwd)
+        });
+        assert_eq!(rows.len(), 1, "one turn, one row: {rows:?}");
+        let named: Vec<(&str, bool)> = rows[0].shown.iter().map(|note| (note.slug.as_str(), note.read)).collect();
+        assert_eq!(named, [("wiki/a", false), ("wiki/b", true), ("wiki/c", false)]);
+    }
+
     /// The section names the first `MAX_RECALLED_ENTRIES` notes and no more,
     /// and the apply road's bottom level is out of it: a note shown to nobody
     /// is on no label.
