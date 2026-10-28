@@ -782,6 +782,45 @@ async function computerHandoffDocked(browser, origin, ok) {
       document.querySelector("#ask-choices button").click();
       await T.settle(260);
       seen.modalThenDocked = probe();
+      // Modals keep their order among themselves, and the card never holds one back — however many came first.
+      // Card, then pane A's permission (in front), then pane B's: B comes up when A is answered, not after the card.
+      T.reset();
+      T.fire("computer:handoff", { id: "dock-q", reason: "x", timeoutMs: 600000 });
+      await T.settle(260);
+      T.frame("s-qa", { type: "permission_prompt", prompt_id: 91, tool_name: "bash", reasoning: "", audit_hint: null });
+      T.frame("s-qb", { type: "permission_prompt", prompt_id: 92, tool_name: "edit_file", reasoning: "", audit_hint: null });
+      await T.settle(260);
+      seen.queuedFirst = probe();
+      document.querySelector("#ask-choices button").click();
+      await T.settle(260);
+      seen.queuedSecond = probe();
+      document.querySelector("#ask-choices button").click();
+      await T.settle(260);
+      seen.queuedCard = probe();
+      [...document.querySelectorAll("#ask-choices button")].find((one) => one.textContent.trim() === "다 했어요")?.click();
+      await T.settle(260);
+      // The card's answer fails on the wire while a permission waits behind it: the permission takes the window
+      // when the failure lands, without waiting for another ask to arrive, and the card returns with its failure.
+      T.reset();
+      let fail = null;
+      const sendWire = window.__ANSWER__.computer_confirm_answer;
+      window.__ANSWER__.computer_confirm_answer = () => new Promise((_, refuse) => { fail = () => refuse(new Error("offline")); });
+      T.fire("computer:handoff", { id: "dock-f", reason: "x", timeoutMs: 600000 });
+      await T.settle(260);
+      [...document.querySelectorAll("#ask-choices button")].find((one) => one.textContent.trim() === "다 했어요")?.click();
+      await T.settle();
+      T.frame("s-fa", { type: "permission_prompt", prompt_id: 93, tool_name: "bash", reasoning: "", audit_hint: null });
+      await T.settle(260);
+      seen.failWaiting = probe();
+      fail?.();
+      await T.settle(260);
+      seen.failModal = probe();
+      document.querySelector("#ask-choices button").click();
+      await T.settle(260);
+      seen.failCard = probe();
+      window.__ANSWER__.computer_confirm_answer = sendWire;
+      [...document.querySelectorAll("#ask-choices button")].find((one) => one.textContent.trim() === "취소")?.click();
+      await T.settle(260);
       return seen;
     }, hands.toString());
     ok(
@@ -809,6 +848,22 @@ async function computerHandoffDocked(browser, origin, ok) {
       kinds.sending.look.kind === "computer-handoff" && kinds.sending.docked === true && kinds.sending.look.more === "1개 더 대기 중"
         && kinds.afterSending.look.kind === "tool" && kinds.afterSending.docked === false && kinds.afterSending.settingsCovered === true,
       JSON.stringify({ sending: kinds.sending, after: kinds.afterSending }),
+    );
+    ok(
+      "a second permission waits behind the first only: the card never holds a permission back, however many came before it",
+      kinds.queuedFirst.look.mono === "bash" && kinds.queuedFirst.docked === false && kinds.queuedFirst.look.more === "2개 더 대기 중"
+        && kinds.queuedSecond.look.kind === "tool" && kinds.queuedSecond.look.mono === "edit_file"
+        && kinds.queuedSecond.docked === false && kinds.queuedSecond.settingsCovered === true && kinds.queuedSecond.look.more === "1개 더 대기 중"
+        && kinds.queuedCard.look.kind === "computer-handoff" && kinds.queuedCard.docked === true && kinds.queuedCard.look.more === null,
+      JSON.stringify({ first: kinds.queuedFirst, second: kinds.queuedSecond, card: kinds.queuedCard }),
+    );
+    ok(
+      "a permission that waited for the card's answer takes the window when that answer fails, and the card comes back with its failure",
+      kinds.failWaiting.look.kind === "computer-handoff" && kinds.failWaiting.look.more === "1개 더 대기 중"
+        && kinds.failModal.look.kind === "tool" && kinds.failModal.docked === false && kinds.failModal.settingsCovered === true
+        && kinds.failCard.look.kind === "computer-handoff" && kinds.failCard.docked === true
+        && String(kinds.failCard.look.why).includes("닿지 못했습니다"),
+      JSON.stringify({ waiting: kinds.failWaiting, modal: kinds.failModal, card: kinds.failCard }),
     );
     ok("the docked hand-over scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
   });
