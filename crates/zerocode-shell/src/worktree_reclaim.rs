@@ -2854,6 +2854,132 @@ mod tests {
             .remove(&candidate.path);
     }
 
+    /// A kept checkout keeps its work and loses its build (t-78886, review
+    /// O9). A finished worker's branch waiting to land kept the whole checkout
+    /// — on 2026-10-28 one `target/` of 14 GiB and one of 9 GiB, and the disk
+    /// fell under its floor four times in 25 minutes. The commit, the
+    /// uncommitted file and the evidence stay for whoever comes to look; every
+    /// build tree a build tool tagged goes, nested ones too — once no process
+    /// stands in the directory, never through a link, and never an ignored
+    /// folder nobody tagged.
+    #[test]
+    fn a_kept_checkout_keeps_its_work_and_its_build_trees_go_once_nobody_stands_in_it() {
+        let bench = Bench::open();
+        bench.ignore_on_main("output/\ntarget/\nshared/\n");
+        let path = bench.cut("t-78886-kept");
+        std::fs::create_dir_all(path.join("tools")).expect("tools");
+        std::fs::write(path.join("tools/work.rs"), "fn waiting_to_land() {}\n").expect("work");
+        git(&path, &["add", "tools/work.rs"]);
+        git(&path, &["commit", "-q", "-m", "the worker's own commit"]);
+        std::fs::write(path.join("draft.rs"), "fn not_committed() {}\n").expect("draft");
+        std::fs::create_dir_all(path.join("output/t-78886")).expect("evidence folder");
+        std::fs::write(path.join("output/t-78886/shot.png"), PNG).expect("screenshot");
+        Bench::build_tree(&path.join("target"));
+        Bench::build_tree(&path.join("tools/target"));
+        #[cfg(unix)]
+        let shared = {
+            let shared = bench.repo.with_file_name("shared-cache");
+            Bench::build_tree(&shared);
+            std::os::unix::fs::symlink(&shared, path.join("shared")).expect("shared link");
+            shared
+        };
+        let data_root = tempfile::tempdir().expect("data root");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let candidate = finished(&path, "w-78886");
+        let forget = || {
+            judged()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&candidate.path);
+        };
+
+        // A process standing in it — a build, a shell — keeps the build.
+        let standing = |_: &Path| Some(1);
+        assert!(matches!(
+            settle(
+                &candidate,
+                &Road::Report(bench.orchestrator()),
+                &here,
+                &nobody_left_and(&standing),
+                1_000
+            ),
+            Settled::Kept
+        ));
+        assert!(path.join("target/debug/big").is_file(), "a build in use went");
+        forget();
+
+        let nobody = |_: &Path| Some(0);
+        assert!(matches!(
+            settle(
+                &candidate,
+                &Road::Report(bench.orchestrator()),
+                &here,
+                &nobody_left_and(&nobody),
+                1_001
+            ),
+            Settled::Kept
+        ));
+        for gone in ["target", "tools/target"] {
+            assert!(
+                !path.join(gone).exists(),
+                "{gone} stood on in a checkout nobody stands in"
+            );
+        }
+        for survivor in ["tools/work.rs", "draft.rs", "output/t-78886/shot.png"] {
+            assert!(path.join(survivor).is_file(), "{survivor} went with the build");
+        }
+        #[cfg(unix)]
+        assert!(
+            path.join("shared").is_symlink() && shared.join("debug/big").is_file(),
+            "a shared directory was followed through its link"
+        );
+        let said = std::fs::read_to_string(data_root.path().join("window-errors.log"))
+            .expect("the window log");
+        assert!(
+            said.contains("stays, and its build tree(s) went:")
+                && said.contains("tools/target")
+                && !said.contains("worktree removed"),
+            "the log does not say what went:\n{said}"
+        );
+        forget();
+    }
+
+    /// A checkout a person locked keeps its build as it keeps everything
+    /// else (t-78886): the lock is their word to leave it be.
+    #[test]
+    fn a_locked_checkout_keeps_its_build_tree() {
+        let bench = Bench::open();
+        bench.ignore_on_main("target/\n");
+        let path = bench.cut("t-78886-locked");
+        Bench::build_tree(&path.join("target"));
+        git(&bench.repo, &["worktree", "lock", &path.to_string_lossy()]);
+        let data_root = tempfile::tempdir().expect("data root");
+        let candidate = finished(&path, "w-78887");
+        let nobody = |_: &Path| Some(0);
+        assert!(matches!(
+            settle(
+                &candidate,
+                &Road::Report(bench.orchestrator()),
+                &Where {
+                    active: bench.repo.clone(),
+                    data_root: data_root.path().to_path_buf(),
+                },
+                &nobody_left_and(&nobody),
+                1_000
+            ),
+            Settled::Kept
+        ));
+        assert!(path.join("target/debug/big").is_file(), "a locked checkout lost its build");
+        git(&bench.repo, &["worktree", "unlock", &path.to_string_lossy()]);
+        judged()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&candidate.path);
+    }
+
     /// And the reclaim goes on (t-12773). A checkout whose base has taken
     /// every commit, with nothing ignored in it but a cargo build tree, is
     /// still taken by both roads: the gigabytes are what the reclaim exists

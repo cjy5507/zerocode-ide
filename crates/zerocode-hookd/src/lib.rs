@@ -584,6 +584,9 @@ pub struct BridgeState {
     /// [`pointer_mailbox::PointerMailbox`]. `None` until the window installs
     /// one, and `None` is a bridge that simply never answers with a pointer.
     pointers: Option<Arc<dyn pointer_mailbox::PointerMailbox>>,
+    /// Where a hook delivery that needed more than one try is written down
+    /// for the window — see [`BridgeState::with_delivery_notes`].
+    delivery_notes: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 /// The second brain's answer to a prompt, for the providers whose prompt hook
@@ -612,6 +615,87 @@ pub const HOOK_CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_m
 
 /// What a reply keeps back for writing itself once every part is in.
 pub const HOOK_REPLY_MARGIN: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The pause a hook script takes before each post again (t-78634), when the
+/// one before was given up on with its body possibly with the bridge — curl
+/// 28, 52 or 56. A briefing's whole submission receipt rode one post, and a
+/// bridge held up past [`HOOK_REPLY_BUDGET`] (the window under load, a reply
+/// composed slowly) lost it: three worker launches were rolled back on one
+/// day for a receipt that never came.
+pub const HOOK_RETRY_PAUSES: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(500),
+    std::time::Duration::from_millis(1_000),
+    std::time::Duration::from_millis(2_000),
+];
+
+/// The most a hook script spends posting, every try and pause counted. A
+/// try that would not fit in what is left is not made ([`hook_tries`]).
+pub const HOOK_DELIVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What an agent's own hook timeout keeps back beyond the posts — reading
+/// stdin, sourcing the endpoint file, printing the reply — so a script that
+/// tries again is never the hook its agent kills.
+pub const HOOK_TIMEOUT_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How much later than one try a hook's delivery can reach the window once
+/// it is tried again: the budget past the first try. A wait for a receipt
+/// that rides a hook adds this to its own.
+pub const HOOK_RETRY_SPAN: std::time::Duration =
+    HOOK_DELIVERY_BUDGET.saturating_sub(HOOK_REPLY_BUDGET);
+
+/// One post of a hook script: the pause before it and its own `--max-time`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HookTry {
+    pub pause: std::time::Duration,
+    pub budget: std::time::Duration,
+}
+
+/// The posts one agent's hook script may make, laid out so that the worst
+/// case — every try timing out — ends within [`HOOK_DELIVERY_BUDGET`] and
+/// within the agent's own hook timeout less [`HOOK_TIMEOUT_MARGIN`]. The
+/// first try is the whole [`HOOK_REPLY_BUDGET`]; each later one waits its
+/// pause and takes what is left, up to the same budget, and is made only
+/// while what is left can still reach the bridge ([`HOOK_CONNECT_BUDGET`]).
+#[must_use]
+pub fn hook_tries(agent: AgentKind) -> Vec<HookTry> {
+    let budget = HOOK_DELIVERY_BUDGET
+        .min(install::hook_timeout(agent).saturating_sub(HOOK_TIMEOUT_MARGIN));
+    let mut tries = vec![HookTry {
+        pause: std::time::Duration::ZERO,
+        budget: HOOK_REPLY_BUDGET.min(budget),
+    }];
+    let mut spent = HOOK_REPLY_BUDGET.min(budget);
+    for pause in HOOK_RETRY_PAUSES {
+        let left = budget.saturating_sub(spent + pause);
+        if left < HOOK_CONNECT_BUDGET {
+            break;
+        }
+        let try_budget = HOOK_REPLY_BUDGET.min(left);
+        tries.push(HookTry {
+            pause,
+            budget: try_budget,
+        });
+        spent += pause + try_budget;
+    }
+    tries
+}
+
+/// The curl exits after which a hook script posts again: it stopped waiting
+/// (28), or the answer was lost (52, 56) — each with the body possibly with
+/// the bridge, which is why a post again carries the same delivery id and
+/// the bridge answers it once. A bridge that is not there (7) or refused the
+/// payload (22) is not asked again: an agent outside a live window would
+/// pay the pauses on every hook.
+pub const HOOK_RETRY_EXITS: [u8; 3] = [28, 52, 56];
+
+/// [`HOOK_RETRY_EXITS`] as a POSIX `case` pattern.
+fn posix_retry_exits() -> String {
+    HOOK_RETRY_EXITS
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join("|")
+}
 
 /// How long a turn's brief may take (t-14869): the reply's budget less the
 /// connect's and the reply's own margin, so a late brief is only a brief
@@ -766,6 +850,16 @@ impl BridgeState {
         self
     }
 
+    /// Install where a hook delivery that needed more than one try is
+    /// written down (t-78634): one line per post again, with the try and the
+    /// curl exits before it, so the posts a slow bridge lost can be counted.
+    /// Called off the async runtime.
+    #[must_use]
+    pub fn with_delivery_notes(mut self, note: Arc<dyn Fn(String) + Send + Sync>) -> Self {
+        self.delivery_notes = Some(note);
+        self
+    }
+
     /// The window's own UI submits through the same consumer as authenticated
     /// CLI requests. This in-process handle exposes no capability token and
     /// does not skip the consumer's sequence, permission or action guards.
@@ -808,6 +902,7 @@ impl BridgeState {
                 finder: None,
                 artifacts: None,
                 pointers: None,
+                delivery_notes: None,
                 selection_context: Arc::new(std::sync::Mutex::new(
                     orchestration_contract::SelectionContextTracker::default(),
                 )),
