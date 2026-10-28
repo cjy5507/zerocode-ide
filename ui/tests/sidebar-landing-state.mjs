@@ -303,7 +303,7 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
           cut,
           chip: box.width,
           slack: inner - span(0, text.data.length).width,
-          line: row.querySelector(".wt-topline").clientWidth,
+          chipUnderName: box.top >= title.getBoundingClientRect().bottom - 1,
           nameCut: title.scrollWidth > title.clientWidth,
         };
       };
@@ -336,8 +336,8 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       JSON.stringify({ sidebar: room.sidebar, b: room.b, worded, every: room.every }),
     );
     ok(
-      "a chip is never wider than its words — D's 커밋 없음 has no empty room inside it — and a name too long for its line still holds the chip to half the line, so the word is cut and not the name to nothing",
-      Math.abs(room.d.slack) <= 1 && room.unread.nameCut && room.unread.chip <= room.unread.line / 2 + 0.5,
+      "a chip is never wider than its words — D's 커밋 없음 has no empty room inside it — and a long name keeps its whole line, the chip standing on the line under it (t-78107, 시안 5: the name first)",
+      Math.abs(room.d.slack) <= 1 && !room.unread.nameCut && room.unread.chipUnderName,
       JSON.stringify({ d: room.d, unread: room.unread }),
     );
 

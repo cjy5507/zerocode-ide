@@ -585,8 +585,8 @@ fn where_work_stands_is_read_once_in_core_and_no_surface_reads_a_word_back_as_a_
 /// the role words come off one table (`PANE_ROLES`), the sidebar's row wears
 /// its role as a chip between the state dot and the face (a ring on the
 /// coordinator's face when the row is folded), the workspace line and the
-/// desk's worker heads name the worker after its role, and the strip leads a
-/// tab with it. The seats are read with the ledger's workers, on the same beat.
+/// desk's worker heads name the worker after its role, and a tab's tip names
+/// the seats it holds. The seats are read with the ledger's workers, on the same beat.
 #[test]
 fn the_role_words_come_off_one_table_on_every_surface() {
     let window = window_source();
@@ -611,7 +611,9 @@ fn the_role_words_come_off_one_table_on_every_surface() {
     assert!(
         block_after(window, "function worktreeWorkerWords(path) {")
             .contains("worktreeRoleWords(path)")
-            && block_after(window, "function tabStripWords(tab) {").contains("paneRoleWord(role)")
+            // The strip says the work; the tab's seats are on its tip
+            // (t-78107, 시안 「또렷한 Geist」 2).
+            && block_after(window, "function termTabTip(tab) {").contains("holdingWords(held)")
             && block_after(window, "function paintDeskWorkers(")
                 .contains("workerRoleWords(ledgerWorkerRole("),
         "a surface names the role in words of its own"

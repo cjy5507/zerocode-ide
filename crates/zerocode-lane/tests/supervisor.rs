@@ -14,7 +14,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -23,7 +24,7 @@ use zerocode_lane::{
     LaneError, LaneSupervisor, LocalPty, PtyHandle, PtySpawner, PtyTransport, PtyTransportError,
     ServeProbe, ServeState, TOKEN_ENV, discover_pane_channel, pane_channel_file,
 };
-use zerocode_pty::{ZO_EVENTS_ADDR_FILE_ENV, ZO_EXECUTABLE, ZoBinary};
+use zerocode_pty::{Pumped, Terminal, ZO_EVENTS_ADDR_FILE_ENV, ZO_EXECUTABLE, ZoBinary};
 
 const TOKEN: &str = "supervisor-test-secret";
 
@@ -66,16 +67,40 @@ impl PtySpawner for RecordingSpawner {
 
 // ------------------------------------------------------------------- doubles
 
+/// How late a child's first line may arrive after the call that started it has
+/// returned. A shell script launched on a loaded machine has been seen to run
+/// seconds later, so the test that waits for one is held to a start later than
+/// any fixed wait it could pick.
+const LATE_START: Duration = Duration::from_secs(6);
+
+/// How long a test waits for an event that is not coming at all. A slow
+/// machine delays an event; it does not cancel it. So this bounds a hang, never
+/// a speed, and no test passes or fails by being under it.
+const NO_EVENT_COMES: Duration = Duration::from_secs(120);
+
 /// A `zo` that appends `"<args>|<token>"` to `marker` and echoes its arguments.
 /// The marker path is baked into the script so parallel tests never share state.
 fn fake_zo(dir: &Path, marker: &Path) -> ZoBinary {
+    fake_zo_after(dir, marker, Duration::ZERO, None)
+}
+
+/// [`fake_zo`] whose script does nothing for `delay` before it runs, and that
+/// opens the named pipe `ran` once its line is in `marker`, when one is given.
+/// The opening is the event a test waits on: it is the child saying it ran.
+fn fake_zo_after(dir: &Path, marker: &Path, delay: Duration, ran: Option<&Path>) -> ZoBinary {
     use std::os::unix::fs::PermissionsExt;
 
     let path = dir.join(ZO_EXECUTABLE);
+    let start_late = if delay.is_zero() {
+        String::new()
+    } else {
+        format!("sleep {}\n", delay.as_secs())
+    };
+    let announce = ran.map_or_else(String::new, |pipe| format!(": > '{}'\n", pipe.display()));
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\nprintf '%s|%s\\n' \"$*\" \"${TOKEN_ENV}\" >> '{}'\n\
+            "#!/bin/sh\n{start_late}printf '%s|%s\\n' \"$*\" \"${TOKEN_ENV}\" >> '{}'\n{announce}\
              if [ -n \"${ZO_EVENTS_ADDR_FILE_ENV}\" ]; then printf '127.0.0.1:49152\\n%s\\n' \"${TOKEN_ENV}\" > \"${ZO_EVENTS_ADDR_FILE_ENV}\"; fi\n\
              printf 'fake-zo ran: %s pane=%s cwd=%s' \"$*\" \"$ZEROCODE_PANE_KEY\" \"$PWD\"\n",
             marker.display()
@@ -208,25 +233,14 @@ fn marker_lines(marker: &Path) -> Vec<String> {
         .collect()
 }
 
-/// The marker once `want` lines have arrived, or whatever is there when the wait
-/// runs out.
-///
-/// The lines are written by a spawned SHELL, so "the supervisor returned" and
-/// "the child has run" are two different moments. Reading once made the spawn
-/// assertion a race that lost under load — this suite failed intermittently only
-/// when the whole workspace ran at once, which is the shape of flake that
-/// teaches people to re-run instead of to look. Waiting for the fact keeps the
-/// assertion about the spawn rather than about the scheduler; a genuine
-/// no-spawn still fails, one wait later.
-fn marker_lines_awaiting(marker: &Path, want: usize) -> Vec<String> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let lines = marker_lines(marker);
-        if lines.len() >= want || std::time::Instant::now() >= deadline {
-            return lines;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+/// A named pipe at `path`, which a reader and a writer meet at: each side's
+/// open waits for the other.
+fn named_pipe(path: &Path) {
+    let made = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo {} failed", path.display());
 }
 
 fn supervisor_for(zo: ZoBinary, addr: &str) -> LaneSupervisor {
@@ -373,7 +387,16 @@ fn a_non_loopback_bind_address_is_refused() {
 fn an_absent_server_is_spawned_with_the_serve_arguments_and_the_token() {
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("calls.log");
-    let zo = fake_zo(dir.path(), &marker);
+    let ran = dir.path().join("ran");
+    named_pipe(&ran);
+    let zo = fake_zo_after(dir.path(), &marker, LATE_START, Some(&ran));
+    // Reading starts before the spawn, so the child's open of the pipe is never
+    // left waiting for a reader the test has not got to yet.
+    let (said_tx, said_rx) = mpsc::channel();
+    let pipe = ran.clone();
+    thread::spawn(move || {
+        let _ = said_tx.send(fs::read_to_string(pipe));
+    });
     // Kept to the end of the test, so nobody is given the port meanwhile.
     let silent = QuietPort::silent();
     let addr = silent.addr().to_string();
@@ -389,12 +412,23 @@ fn an_absent_server_is_spawned_with_the_serve_arguments_and_the_token() {
         "unexpected error: {error}"
     );
 
-    // Awaited rather than read: the only evidence of the spawn is a line the
-    // spawned shell appends, and "ensure_serve gave up" happens before "the
-    // child got scheduled". The other marker assertions in this file are safe
-    // as plain reads — they either follow output the child printed AFTER the
-    // append, or assert the marker is empty on a path that spawns nothing.
-    let calls = marker_lines_awaiting(&marker, 1);
+    // The only evidence of the spawn is a line the spawned shell appends, and
+    // "ensure_serve gave up" happens before "the child got scheduled" — by
+    // seconds, on a loaded machine. So the test waits for the child's own word
+    // that it ran, which comes after its append, and not for a time to pass.
+    // Nothing tells "no child was started" from "a child not yet scheduled", so
+    // an absent spawn is a wait to NO_EVENT_COMES; the marker is in the failure
+    // so that wait ends in a reason rather than a bare hang.
+    said_rx
+        .recv_timeout(NO_EVENT_COMES)
+        .unwrap_or_else(|_| {
+            panic!(
+                "the spawned child never said it ran; marker holds {:?}",
+                marker_lines(&marker)
+            )
+        })
+        .expect("read the pipe the child opened");
+    let calls = marker_lines(&marker);
     assert_eq!(calls.len(), 1, "exactly one spawn: {calls:?}");
     assert_eq!(calls[0], format!("serve --bind {addr}|{TOKEN}"));
 }
@@ -529,6 +563,12 @@ fn opening_a_pane_uses_its_private_events_channel() {
 /// with no reason in it. 2026-09-13: a `zo --resume` refused by the session's
 /// writer lease exited within a second, the window waited 20 s, and the
 /// refusal it logged said only that no channel had appeared.
+///
+/// "Now" is proved by counting, not by timing: the pane answers "still running"
+/// until its `EXITS_ON_POLL`th question, and the supervisor must come back on
+/// that very question. One that looked at its process only once the patience
+/// was spent would ask once, be told "running", and give up with the other
+/// refusal.
 #[test]
 fn a_pane_that_exits_before_publishing_is_refused_at_once_with_its_last_words() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -536,9 +576,64 @@ fn a_pane_that_exits_before_publishing_is_refused_at_once_with_its_last_words() 
     let worktree = dir.path().join("wt-refused");
     fs::create_dir_all(&worktree).expect("worktree");
     let silent = QuietPort::silent();
+    let supervisor = supervisor_for(
+        ZoBinary {
+            path: dir.path().join(ZO_EXECUTABLE),
+        },
+        &silent.addr().to_string(),
+    );
+    let polls = Arc::new(AtomicU32::new(0));
+
+    let error = supervisor
+        .open_pane(
+            Box::new(EndingPaneSpawner {
+                polls: Arc::clone(&polls),
+            }),
+            &worktree,
+            Some("session-held"),
+            &addr_file,
+            &[],
+            &[],
+            10,
+            80,
+            // The ceiling for the polls below, which take a few sleeps of the
+            // supervisor's own. The refusal is reached long before it; a
+            // supervisor that waits for it has failed the count.
+            Duration::from_secs(10),
+        )
+        .err()
+        .expect("a pane whose process ended cannot be open");
+
+    match error {
+        LaneError::PaneExited { code, said } => {
+            assert_eq!(code, EXIT_CODE);
+            assert!(
+                said.contains(LAST_WORDS),
+                "the refusal must carry the process's last line: {said:?}"
+            );
+        }
+        other => panic!("expected PaneExited, got {other}"),
+    }
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        EXITS_ON_POLL,
+        "the supervisor must come back on the question that learned of the exit"
+    );
+    assert!(!addr_file.exists(), "the one-shot address file leaked");
+}
+
+/// The same refusal from a real child on a real pty: the exit code and the
+/// last line come off the terminal the shell wrote them to. The child's start
+/// is the machine's to decide, so this claims what is reported, not how soon.
+#[test]
+fn a_real_pane_process_that_refuses_is_reported_with_its_code_and_last_words() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let addr_file = dir.path().join("pane.addr");
+    let worktree = dir.path().join("wt-refused");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let silent = QuietPort::silent();
     let supervisor = supervisor_for(refusing_zo(dir.path()), &silent.addr().to_string());
 
-    let started = Instant::now();
     let error = supervisor
         .open_pane(
             Box::new(LocalPty),
@@ -549,28 +644,32 @@ fn a_pane_that_exits_before_publishing_is_refused_at_once_with_its_last_words() 
             &[],
             10,
             80,
-            Duration::from_secs(10),
+            NO_EVENT_COMES,
         )
         .err()
         .expect("a pane whose process ended cannot be open");
-    let waited = started.elapsed();
 
     match error {
         LaneError::PaneExited { code, said } => {
-            assert_eq!(code, 3);
+            assert_eq!(code, EXIT_CODE);
             assert!(
-                said.contains("resume failed: fixture lease held by zo pid 1"),
+                said.contains(LAST_WORDS),
                 "the refusal must carry the process's last line: {said:?}"
             );
         }
         other => panic!("expected PaneExited, got {other}"),
     }
-    assert!(
-        waited < Duration::from_secs(5),
-        "waited {waited:?} on a process that had already ended"
-    );
     assert!(!addr_file.exists(), "the one-shot address file leaked");
 }
+
+/// What a lease-held `--resume` leaves behind: this line on the terminal and
+/// this exit code, with no address file.
+const LAST_WORDS: &str = "resume failed: fixture lease held by zo pid 1";
+const EXIT_CODE: u32 = 3;
+
+/// The question to a pane's process, counted from 1, that is answered with its
+/// exit.
+const EXITS_ON_POLL: u32 = 4;
 
 /// A `zo` that refuses the way a lease-held `--resume` does: one line on its
 /// terminal, a non-zero exit, and no address file.
@@ -580,13 +679,76 @@ fn refusing_zo(dir: &Path) -> ZoBinary {
     let path = dir.join(ZO_EXECUTABLE);
     fs::write(
         &path,
-        "#!/bin/sh\nprintf 'resume failed: fixture lease held by zo pid 1\\n' >&2\nexit 3\n",
+        format!("#!/bin/sh\nprintf '{LAST_WORDS}\\n' >&2\nexit {EXIT_CODE}\n"),
     )
     .expect("write refusing zo");
     let mut perms = fs::metadata(&path).expect("metadata").permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&path, perms).expect("chmod");
     ZoBinary { path }
+}
+
+/// Hands the supervisor a pane whose process ends on its [`EXITS_ON_POLL`]th
+/// `try_wait`, counted into `polls`.
+struct EndingPaneSpawner {
+    polls: Arc<AtomicU32>,
+}
+
+impl PtySpawner for EndingPaneSpawner {
+    fn spawn(self: Box<Self>, _spec: &PtySpec) -> Result<PtyHandle, PtyTransportError> {
+        Ok(PtyHandle::new(EndingPane {
+            terminal: Terminal::new(10, 80),
+            last_words: Some(format!("{LAST_WORDS}\r\n").into_bytes()),
+            polls: self.polls,
+        }))
+    }
+}
+
+/// A pane that says "still running" until its [`EXITS_ON_POLL`]th question,
+/// then exits with [`EXIT_CODE`]; its last words reach the terminal on the next
+/// pump, as a child's output does.
+struct EndingPane {
+    terminal: Terminal,
+    last_words: Option<Vec<u8>>,
+    polls: Arc<AtomicU32>,
+}
+
+impl PtyTransport for EndingPane {
+    fn pump(&mut self) -> Pumped {
+        let output = self.last_words.take().unwrap_or_default();
+        self.terminal.feed(&output);
+        Pumped {
+            bytes: output.len(),
+            ended: false,
+            answered: false,
+            unanswered_since: None,
+        }
+    }
+
+    fn terminal(&self) -> &Terminal {
+        &self.terminal
+    }
+
+    fn terminal_mut(&mut self) -> &mut Terminal {
+        &mut self.terminal
+    }
+
+    fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyTransportError> {
+        Ok(())
+    }
+
+    fn resize(&mut self, _rows: u16, _cols: u16) -> Result<(), PtyTransportError> {
+        Ok(())
+    }
+
+    fn try_wait(&mut self) -> Result<Option<u32>, PtyTransportError> {
+        let asked = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok((asked >= EXITS_ON_POLL).then_some(EXIT_CODE))
+    }
+
+    fn kill(&mut self) -> Result<(), PtyTransportError> {
+        Ok(())
+    }
 }
 
 /// The supervisor builds the attach request, but the injected backend is the

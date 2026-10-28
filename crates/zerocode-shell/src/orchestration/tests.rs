@@ -19792,6 +19792,7 @@ fn the_bridge_holds_a_summons_past_the_longest_the_window_takes_to_word_a_failur
         .fold(zerocode_pty::ready::TIMEOUT, std::time::Duration::max);
     let window_after_its_budget = EFFECT_LINE_CEILING
         + SUBMIT_RECEIPT_PATIENCE
+        + zerocode_hookd::HOOK_RETRY_SPAN
         + BRIEFING_WINDOW * 2
         + longest_start_up
         + SUBMIT_RECEIPT_PATIENCE;

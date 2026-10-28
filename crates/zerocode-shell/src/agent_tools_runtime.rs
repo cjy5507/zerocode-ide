@@ -1861,7 +1861,12 @@ impl agent_teams::Host for TeamWindow {
                 (
                     waiting,
                     submitted,
-                    started + timeout + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
+                    // The receipt rides a hook post the script may try
+                    // again (t-78634), which can bring it this much later.
+                    started
+                        + timeout
+                        + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE
+                        + zerocode_hookd::HOOK_RETRY_SPAN,
                     restoring,
                     briefing,
                     composer,

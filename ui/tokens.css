@@ -5,6 +5,36 @@
  * "what state". Everything else belongs to the titanium material ramp or a
  * 1px rule. */
 
+/* Geist ships with the window (2026-10-28, the person: 「글꼴 넣고…」 — the
+ * first exception to "assets never ship"). Before this the stack below named
+ * Geist and every machine without it installed drew the system face, so the
+ * passed design (p-6893560125c34552) was never what anyone saw. One variable
+ * file per family covers every weight the type styles ask for; `swap` keeps
+ * the first frame on the system face instead of holding text invisible.
+ * vercel/geist-font v1.8.2, OFL 1.1 (fonts/OFL.txt). Relative URLs, so the
+ * test harness's file:// and http:// pages load the same files the window
+ * does. The range leaves Hangul and CJK out: Geist carries none, and asked
+ * first for every one of those letters it cost the week schedule's moved
+ * paint 2.85 -> 3.2 ms (p50, board-schedule-perf); named, the letters go
+ * straight to their own face and the paint is back at 2.85 ms. */
+@font-face {
+  font-family: "Geist";
+  src: url("fonts/Geist-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-10FF, U+1200-2FFF;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("fonts/GeistMono-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-10FF, U+1200-2FFF;
+}
+
 :root {
   --computer-permission-granted-mark: "✓";
   --computer-permission-denied-mark: "○";
@@ -286,6 +316,14 @@
    * its word beside it. Geist's blue-900 as words: 7.92:1. */
   --signal-you: var(--blue-900);
   --signal-you-ground: var(--blue-200);
+  /* The role a 「당신 차례」 mark reads (IDE design pass 2): the chip, the
+   * sidebar group, the list's kind marks. It points at the blue above — no new
+   * colour — so the one blue keeps one meaning wherever it is spent. */
+  --call: var(--signal-you);
+  --call-ground: var(--signal-you-ground);
+  /* The lit chip is the draft's filled pill: the solid you-blue under white words. */
+  --call-solid: var(--signal-you-solid);
+  --call-on-solid: var(--ink-on-solid);
   /* Words set in that blue on a ground tinted by it. On this floor the tint
    * barely lifts the ground (6.59:1 at 14%, 5.41:1 at 24%), so the ink is the
    * signal; the light block is where the two part. */
@@ -455,11 +493,11 @@
    * fallback (I18nProvider-DPbv01TU.css:103); the app overrides it further
    * down: `--app-font-family: "Geist", -apple-system, BlinkMacSystemFont,
    * "Segoe UI", sans-serif` (:23531), backed by a bundled Geist-Variable
-   * @font-face (:23510). So Geist leads here too. The FILE does not come
-   * across — a woff2 is an asset and assets never ship (repo rule); the name
-   * resolves where Geist is installed and falls to the same system faces
-   * Orca names where it is not. The Korean fallback is ours, appended
-   * because nothing in the measured stack carries Hangul. */
+   * @font-face (:23510). So Geist leads here too, and since 2026-10-28 the
+   * file ships beside it (the @font-face at the top of this file); the
+   * system faces after it draw the first frame and any glyph Geist lacks.
+   * The Korean fallback is ours, appended because nothing in the measured
+   * stack carries Hangul. */
   --font-ui: var(--font-ui-choice, "Geist"), -apple-system, BlinkMacSystemFont, "Segoe UI",
     "Apple SD Gothic Neo", sans-serif;
   --font-display: var(--font-ui);
@@ -473,10 +511,10 @@
    *
    * Orca closes this by BUNDLING `SymbolsNerdFontMono-Regular.woff2` (1.18MB)
    * and pinning it to the PUA with `unicode-range`
-   * (I18nProvider-0D3bXbhN.css:23900-23907). The file cannot come across — a
-   * woff2 is an asset and assets never ship (the same repo rule that keeps
-   * Geist to a name above); whether to make this rule's first exception is a
-   * decision left open in the ledger (1-em), not one taken here.
+   * (I18nProvider-0D3bXbhN.css:23900-23907). That file does not come across:
+   * the one exception to "assets never ship" the person made (2026-10-28) is
+   * Geist and Geist Mono — the Nerd Font tail is a decision still open in the
+   * ledger (1-em).
    *
    * The names still buy most of it back: anyone who has installed a patched
    * face gets their prompt rendered today, and anyone who has not is exactly
@@ -485,9 +523,15 @@
    * above do not cover, never the face that draws ordinary text. The symbols-
    * only face leads the tail because it is the one that carries nothing but
    * those codepoints and so can never capture a letter. */
-  --font-mono: "SF Mono", SFMono-Regular, ui-monospace, "Cascadia Code",
+  --font-mono-system: "SF Mono", SFMono-Regular, ui-monospace, "Cascadia Code",
     Menlo, Consolas, "Liberation Mono", "Symbols Nerd Font Mono",
     "MesloLGS NF", "JetBrainsMono Nerd Font", "Hack Nerd Font", monospace;
+  /* The window's own mono words lead with the shipped Geist Mono (t-78107).
+   * The terminal and the editor read the system stack above, under the face
+   * the person chose: their rows are sized to that face's box (`--term-leading`),
+   * and a webfont reached as a fallback would change both without anyone
+   * having chosen it. */
+  --font-mono: "Geist Mono", var(--font-mono-system);
 
   /* Type scale */
   /* The scale had no step below 11px, so every dense surface was assigned one
@@ -542,6 +586,10 @@
   --badge-height: 24px;
   --tab-underline-width: 2px;
   --status-dot-size: 10px;
+  /* A provider's gauge on the status bar (t-78107, 시안 13): Geist's Gauge as a
+   * 14px ring with a 2px stroke, in place of the 48×6 meter. */
+  --gauge-size: 14px;
+  --gauge-stroke: 2px;
   --focus-ring: 2px solid var(--ink-chalk);
   --focus-ring-offset: 2px;
   /* The rest of the draft's own measures (t-70028, the person on 10-22: 「시안대로
@@ -552,9 +600,16 @@
    * neighbour. */
   --control-pad-inline: 10px;
   --board-ask-pad-block: 20px;
+  /* The most of a 「당신 차례」 row its buttons may take beside the question (t-79611): past it the buttons wrap
+   * their own words inside that share, so a long answer never squeezes the question into a column of one word. */
+  --board-ask-acts-share: 50%;
   --board-row-pad-block: 10px;
   --board-intro-after: 20px;
   --board-tab-height: 48px;
+  /* The board's search in its title row (t-78107, 시안 15): the passed draft's
+   * 460px field, never more than 42% of the row the title and the mode
+   * segment share. */
+  --board-head-find-width: min(460px, 42%);
   --board-gap-small: 6px;
   /* The schedule tab's vertical timetable (t-77628): the height of one hour. At the 「지금」 zoom the four
    * hours around now stand 480px, one screen of the test holder; at the 「하루」 zoom twenty-four hours
@@ -770,6 +825,18 @@
   --statusbar-height: 24px;
   --panel-folded-height: 26vh;
 
+  /* 2차 A (t-78107, 시안 17): the window widths the passed draft folds at —
+   * the right panel to a counted rail, the sidebar to a rail of marks, the
+   * tabs to one menu, and at the last only the tab on stage and that menu.
+   * A media or container query cannot read a custom property, so the rules
+   * that fold write these numbers out and a scene (chrome-geist.mjs) holds
+   * them to these names. The two rails are a later task's; the tab strip
+   * folds to marks at the second and to one menu at the last two. */
+  --fold-panel-rail: 1360px;
+  --fold-sidebar-rail: 1000px;
+  --fold-tab-menu: 760px;
+  --fold-tab-only: 480px;
+
   /* A status dot — the smallest mark that still reads as deliberate. */
   --dot-size: 5px;
   /* 상태를 나르는 점의 치수. `--dot-size`와 다른 이름인 이유는 다른 것을
@@ -826,6 +893,15 @@
   --sftp-dialog-layer: 32;
   --sftp-confirm-layer: 34;
   --dialog-width: min(560px, calc(100% - var(--space-6)));
+  /* IDE design pass 2 (B): the list dropped from the 「당신 차례」 chip, and
+   * the one column the conversation view reads in — the passed draft's 760. */
+  --your-turn-list-width: min(560px, calc(100vw - 2 * var(--space-4)));
+  /* Over the stage and its scrims, with the chat preview, under the tab switcher (100). */
+  --your-turn-list-layer: 90;
+  --reading-column: 760px;
+  /* 쌓인 일's bar of the branches not in main: the draft's 6 px, 2 px apart. */
+  --pile-bar-height: 6px;
+  --pile-bar-gap: 2px;
 
   /* The finder is WIDER than a dialog, which reverses what this file used to
    * argue.
@@ -1178,14 +1254,16 @@
   --traffic-light-inset: 78px;
 
   /* Terminal screen — content, not chrome. The programs inside paint for a
-   * dark terminal, so this surface does NOT flip with the app theme; these
-   * two literals deliberately restate the dark abyss/chalk pair. Terminal
-   * theme import (Warp/Ghostty, docs/reverse/orca-ui-inventory.md 4절) will
-   * replace this block wholesale. */
-  --term-screen-bg: #282c34;
+   * dark terminal, so this surface does NOT flip with the app theme. Its
+   * ground is the conversation's, the window's floor (시안 10 「바탕 한
+   * 장」, t-78107): the default theme's own grey made the centre the one
+   * plane of another material. The terminal theme (`applyTerminalPalette`)
+   * binds this block once its prefs arrive, onto the same floor unless the
+   * person picked another theme. */
+  --term-screen-bg: var(--chat-ground);
   --term-screen-fg: #ffffff;
   --term-cursor: #ffffff;
-  --term-cursor-accent: #282c34;
+  --term-cursor-accent: var(--term-screen-bg);
   --term-selection-bg: #5a7898;
   --term-selection-fg: #ffffff;
 
@@ -2568,7 +2646,9 @@
    * 이 묶음에서 온다. 값은 이미 있는 역할에서 섞으므로 라이트 블록이 같은
    * 이름을 제 값으로 다시 맨다. 기하(반경·단 폭·크기·줄간)는 색이 아니라
    * 여기 한 번만 선다. */
-  --chat-ground: var(--surface-deck);
+  /* 2차 A (시안 10): the floor, so the centre stands one step under the
+   * panels around it as Geist's material order has it, not as a lighter slab. */
+  --chat-ground: var(--surface-abyss);
   --chat-bubble: var(--surface-raised);
   --chat-bubble-ink: var(--ink-chalk);
   --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
@@ -2593,15 +2673,14 @@
   --chat-shadow: 0 1px 2px rgb(0 0 0 / 10%);
   /* The permission mode's reach, one colour each (the extension's send by
    * `[data-permission-mode]`): edits taken without asking invert the send
-   * (ink on ground), a planning session wears the window's accent, a
-   * bypassed session the halt colour — the one destructive state this
-   * product colours. */
+   * (ink on ground), a planning session wears the window's accent. A session
+   * that asks nothing wears no colour — red is this window's word for a
+   * failure — and its composer chip says it by a triangle and the CLI's word
+   * instead (IDE design pass 2, item 11). */
   --chat-reach-edits: var(--ink-chalk);
   --chat-reach-edits-ink: var(--surface-deck);
   --chat-reach-plan: var(--ai-accent);
   --chat-reach-plan-ink: var(--surface-abyss);
-  --chat-reach-bypass: var(--signal-halt);
-  --chat-reach-bypass-ink: var(--chat-send-ink);
   /* How tall the plan on an approval card stands before it scrolls on its
    * own — a little over the composer's own cap (200px), so a plan of a dozen
    * steps is read in place while the two answers stay in reach. The
@@ -2629,8 +2708,11 @@
   --chat-bubble-pad-x: 6px;
   --chat-bubble-pad-y: 4px;
   --chat-bubble-gap: 4px;
-  --chat-radius-composer: 8px;
-  --chat-prose-size: var(--text-sm);
+  /* IDE design pass 2 (B, items 9 and 11): the composer floats as the round box
+   * of what floats, and the prose is read at Geist's copy-16 — 16 on a 24
+   * line (`--chat-prose-leading`). */
+  --chat-radius-composer: var(--radius-xl);
+  --chat-prose-size: var(--text-lg);
   --chat-prose-leading: 1.5;
   --chat-dot: 7px;
   --chat-dot-halo: 3px;
@@ -2691,7 +2773,7 @@
    * default face (WebKit: Times, and AppleMyungjo for Hangul — the serif
    * the person saw on 2026-09-23, t-6323 A0). */
   --chat-dock-inset: 16px;
-  --chat-dock-max: 680px;
+  --chat-dock-max: var(--reading-column);
   /* The dock's watched height, written on the page by `chatDockNode`; a page
    * without a dock keeps the extension's 40px alone. */
   --chat-dock-h: 0px;
@@ -3159,10 +3241,10 @@
    * "bright white" slots have to render DARK or a program that asks for white
    * writes invisibly — which is what every light terminal theme does, and the
    * reason this block is not the dark one with two values swapped. */
-  --term-screen-bg: #ffffff;
+  --term-screen-bg: var(--chat-ground);
   --term-screen-fg: #2e3434;
   --term-cursor: #2e3434;
-  --term-cursor-accent: #ffffff;
+  --term-cursor-accent: var(--term-screen-bg);
   --term-selection-bg: #accef7;
   --term-selection-fg: #2e3434;
   --term-0: #2e3436;
@@ -3332,7 +3414,7 @@
   /* 채팅 페이지의 색, 종이 위에서(t-2973). 상자는 흰 바닥에 괘선 한 줄, 칩과
    * 알약은 더 옅게, 보내기는 검은 원에 흰 화살 — 기하는 다크 블록의 것을
    * 그대로 물려받는다. */
-  --chat-ground: var(--surface-deck);
+  --chat-ground: var(--surface-abyss);
   --chat-bubble: var(--surface-raised);
   --chat-bubble-ink: var(--ink-chalk);
   --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 7%, transparent);
@@ -3353,8 +3435,6 @@
   --chat-reach-edits-ink: var(--surface-deck);
   --chat-reach-plan: var(--ai-accent);
   --chat-reach-plan-ink: var(--surface-abyss);
-  --chat-reach-bypass: var(--signal-halt);
-  --chat-reach-bypass-ink: var(--chat-send-ink);
   --chat-dot-done: #3f9a5f;
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 3%, transparent);

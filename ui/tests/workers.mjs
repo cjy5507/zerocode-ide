@@ -2420,7 +2420,10 @@ async function testHelperPage(page, ok) {
     seen.stopWords = /멈추|중지|중단|stop|halt|kill|cancel|停止|中止|detener/i
       .test([p.head, p.sibs, p.card, p.foot].map((node) => words(node)).join(" "));
 
-    // 부모가 터미널일 때: 누르면 부모의 탭이 서고 터미널의 입력에 초점이 간다.
+    // 부모가 터미널일 때: 누르면 부모의 탭이 서고 터미널의 입력에 초점이 간다. 에이전트의
+    // 판은 대화로 서므로(2차 B) 사람이 화면을 고른 판이다.
+    paneChatOf(at.term).chosen = true;
+    await setPaneChat(at.term, false);
     p.foot?.querySelector(".helper-foot-speak")?.click();
     await settle(250);
     seen.terminalDoor = { tab: activeTabId === at.owner.id, focus: document.activeElement === keySink };
