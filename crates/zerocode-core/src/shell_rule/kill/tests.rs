@@ -58,10 +58,7 @@ fn table() -> ProcessTable {
 
 fn protected() -> Vec<ProtectedRoot> {
     vec![
-        ProtectedRoot {
-            pid: WINDOW,
-            label: "the ZeroCode window".to_string(),
-        },
+        ProtectedRoot::window(WINDOW),
         ProtectedRoot {
             pid: OTHER_PANE,
             label: "pane term-2".to_string(),
@@ -327,4 +324,36 @@ not a row
     assert_eq!(read.tree_of(100).len(), 5);
     let unread = ProcessTable::unreadable("no ps");
     assert!(unread.ancestors(220).is_empty() && unread.tree_of(200).is_empty());
+}
+
+/// A host inside a pane (zo) is told the window's pid by its environment and
+/// keeps the window and every process the window started but its own pane.
+#[test]
+fn a_host_inside_a_pane_keeps_the_window_and_the_other_panes() {
+    let env = |name: &str| (name == WINDOW_PID_ENV).then(|| "100".to_string());
+    let kept = ProtectedRoot::from_window_env(env, &table(), 210);
+    assert_eq!(
+        kept.iter().map(|root| root.pid).collect::<Vec<_>>(),
+        vec![WINDOW, OTHER_PANE],
+        "{kept:?}"
+    );
+    assert_eq!(kept[0], ProtectedRoot::window(WINDOW));
+    let calls = kill_calls("pkill -f zo-step");
+    assert!(matches!(
+        judge_kill(&calls, &table(), Some(210), &kept),
+        KillVerdict::Deny { .. }
+    ));
+    assert_eq!(
+        judge_kill(&kill_calls("kill 220"), &table(), Some(210), &kept),
+        KillVerdict::Allow
+    );
+    // Outside a window, or with a value that is not a pid, nothing is kept.
+    assert!(ProtectedRoot::from_window_env(|_| None, &table(), 210).is_empty());
+    let garbled = |_: &str| Some("not-a-pid".to_string());
+    assert!(ProtectedRoot::from_window_env(garbled, &table(), 210).is_empty());
+    // A table that did not read still keeps the window itself.
+    assert_eq!(
+        ProtectedRoot::from_window_env(env, &ProcessTable::unreadable("no ps"), 210),
+        vec![ProtectedRoot::window(WINDOW)]
+    );
 }

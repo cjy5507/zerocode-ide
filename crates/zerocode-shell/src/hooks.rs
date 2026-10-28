@@ -459,6 +459,12 @@ pub fn pty_env(
             zerocode_hookd::env_var::PANE_KEY.into(),
             pane_key.to_string(),
         ),
+        // The window's own pid: a host inside the pane (zo) keeps the
+        // window's tree from its own kills (t-80602).
+        (
+            zerocode_hookd::env_var::WINDOW_PID.into(),
+            std::process::id().to_string(),
+        ),
         (
             zerocode_hookd::env_var::WORKTREE_ID.into(),
             worktree.to_string_lossy().into_owned(),
@@ -3340,6 +3346,22 @@ mod tests {
             "the vault variable outlived the setting"
         );
         assert_eq!(second_brain_vault(), None);
+    }
+
+    /// Every pane, agent or not, is told the window's own pid — what a host
+    /// inside it reads to keep the window's tree from its kills (t-80602).
+    #[test]
+    fn every_pane_is_told_the_windows_own_pid() {
+        bridge_for_tests();
+        for launch in [None, Some("launch-nonce")] {
+            let env = pty_env("term-7", launch, Path::new("/workspace"), None);
+            let told: Vec<&str> = env
+                .iter()
+                .filter(|(name, _)| name == zerocode_hookd::env_var::WINDOW_PID)
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert_eq!(told, [std::process::id().to_string()], "{launch:?}");
+        }
     }
 
     #[test]

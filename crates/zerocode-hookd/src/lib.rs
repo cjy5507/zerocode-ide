@@ -167,6 +167,9 @@ pub mod env_var {
     /// quote it, and three spellings would be three variables.
     pub const SECOND_BRAIN: &str = zerocode_core::second_brain::VAULT_ENV;
     pub const PANE_KEY: &str = zerocode_core::hook::PANE_KEY_ENV;
+    /// The window's own pid, so a host inside a pane knows which process
+    /// tree is the window's (t-80602).
+    pub const WINDOW_PID: &str = zerocode_core::shell_rule::kill::WINDOW_PID_ENV;
     /// A directory whose presence means this pane's most recent hook POST did
     /// not reach the window. The generated script creates it without writing
     /// payload bytes and removes it only after a successful delivery.
