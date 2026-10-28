@@ -306,8 +306,29 @@ impl ProtectedRoot {
         table: &ProcessTable,
         caller: u32,
     ) -> Vec<Self> {
-        let _ = (env, table, caller);
-        Vec::new()
+        let Some(window) = env(WINDOW_PID_ENV)
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|pid| *pid != 0)
+        else {
+            return Vec::new();
+        };
+        let mut kept = vec![Self::window(window)];
+        if let Ok(rows) = &table.rows {
+            let callers_line = lineage(&by_pid(rows), caller);
+            kept.extend(
+                rows.iter()
+                    .filter(|row| row.ppid == window && !callers_line.contains(&row.pid))
+                    .map(|row| Self {
+                        pid: row.pid,
+                        label: format!(
+                            "{} (pid {}), which {WINDOW_LABEL} started",
+                            quoted(row.name()),
+                            row.pid
+                        ),
+                    }),
+            );
+        }
+        kept
     }
 }
 

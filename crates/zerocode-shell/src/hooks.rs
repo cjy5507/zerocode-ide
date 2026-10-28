@@ -459,6 +459,12 @@ pub fn pty_env(
             zerocode_hookd::env_var::PANE_KEY.into(),
             pane_key.to_string(),
         ),
+        // The window's own pid: a host inside the pane (zo) keeps the
+        // window's tree from its own kills (t-80602).
+        (
+            zerocode_hookd::env_var::WINDOW_PID.into(),
+            std::process::id().to_string(),
+        ),
         (
             zerocode_hookd::env_var::WORKTREE_ID.into(),
             worktree.to_string_lossy().into_owned(),
