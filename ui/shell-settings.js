@@ -4910,6 +4910,11 @@ function paintAccountSwitchNote() {
     return;
   }
   const moves = accountSwitchMoves(plan);
+  // 사람이 직접 고른 계정은 벽까지 그대로 둔다(t-78096) — 왜 안 바꾸는지 한 줄로.
+  if (decision.why === "picked" && moves.length === 0) {
+    paint(true, false, t("settings.accounts.switchPicked", "직접 고른 계정이라 한도 벽에 닿을 때까지 자동으로 바꾸지 않습니다"));
+    return;
+  }
   if (plan.mode !== "ask" || (decision.kind !== "switch" && moves.length === 0)) {
     paint(false, false);
     return;
@@ -5017,6 +5022,7 @@ function paintClaudeNext() {
   } else {
     parts.push(t("usage.nextNone", "다음 계정 없음"));
   }
+  if (decision.why === "picked") parts.push(t("usage.nextPicked", "고른 계정 · 벽까지 유지"));
   if (decision.why === "cooldown" && plan.cooldown_until_ms) {
     parts.push(t("usage.nextCooldown", "전환 쉼 {{minutes}}분", {
       minutes: Math.max(1, Math.ceil((plan.cooldown_until_ms - Date.now()) / 60000)),
