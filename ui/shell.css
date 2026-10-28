@@ -26597,12 +26597,14 @@ select {
 /* A docked ask (the person's turn, t-79119) asks for something done elsewhere
  * in the window or on the desktop, so it must not stand over it: no backdrop,
  * the corner instead of the middle, and only the card itself takes the pointer.
- * The toasts already step to the other corner while any scrim stands. */
+ * It rests on the toast lift, not on the window's edge, so the status bar's
+ * right end (usage gauges, model) stays readable. The toasts already step to
+ * the other corner while any scrim stands. */
 #ask-scrim[data-docked] {
   background: transparent;
   pointer-events: none;
   place-items: end end;
-  padding: var(--space-4);
+  padding: var(--space-4) var(--space-4) var(--toast-lift);
 }
 
 #ask-scrim[data-docked] > .permission {

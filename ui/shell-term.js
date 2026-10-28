@@ -4478,6 +4478,36 @@ let askLeavesAtOnce = false;
 let askIsModal = false;
 const ASK_CLOCK_TICK_MS = 1000;
 const askFrame = askScrim.querySelector(".permission");
+/* What a screen reader hears when a docked card comes up: the card takes no
+ * focus, so nothing else would say it is there. */
+const askLive = el("ask-live");
+/* Where the hand was when a key sent it to the docked card, for Escape to give
+ * it back. */
+let askDockedReturn = null;
+
+/* The docked card on screen now — the one a key can send the hand to. */
+function dockedAskStands() {
+  return activeAsk !== null && !askScrim.hidden && askScrim.hasAttribute("data-docked");
+}
+
+function focusDockedAsk() {
+  if (!dockedAskStands()) return;
+  const from = document.activeElement;
+  if (!askFrame.contains(from)) askDockedReturn = from;
+  askFrame.focus({ preventScroll: true });
+}
+
+/* The card is no modal, so nothing traps the hand in it: Escape on the card
+ * gives the keyboard back to where it was (or the terminal), answering nothing. */
+askFrame.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !askScrim.hasAttribute("data-docked")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const back = askDockedReturn;
+  askDockedReturn = null;
+  if (back?.isConnected && !askFrame.contains(back)) back.focus({ preventScroll: true });
+  if (askFrame.contains(document.activeElement)) keySink.focus({ preventScroll: true });
+});
 
 /* One key, one answer. A key held down repeats, and a repeat that lands after
  * the first press has answered the ask on screen lands on the NEXT ask —
@@ -4509,15 +4539,35 @@ function askAlreadyRaised(ask) {
   return activeAsk?.key === ask.key || askQueue.some((queued) => queued.key === ask.key);
 }
 
+function askIsDocked(ask) {
+  return askKindOf(ask).view(ask).docked === true;
+}
+
+/* A docked card waits for the person to do something elsewhere, up to ten
+ * minutes; a question that must stop the person (another pane's permission)
+ * cannot queue behind that, because its agent is stopped for as long. So the
+ * modal comes up first and the card goes back to the head of the queue — unless
+ * the card's own answer is on its way, which a repaint would double. */
+function dockedGivesWayTo(ask) {
+  return activeAsk !== null && activeAsk.sending !== true && askIsDocked(activeAsk) && !askIsDocked(ask);
+}
+
 function raiseAsk(ask) {
   if (!askKinds.has(ask.kind) || askAlreadyRaised(ask)) return false;
   askQueue.push(ask);
   askKindOf(ask).raised?.(ask);
-  // Behind a question already on screen: the count says so and nothing else
-  // moves. A full repaint here would rebuild the buttons an answer in flight
-  // was pressed on, which is how one answer becomes two.
-  if (activeAsk) paintAskCount();
-  else showNextAsk();
+  if (activeAsk && dockedGivesWayTo(ask)) {
+    askQueue.pop();
+    askQueue.unshift(ask, activeAsk);
+    showNextAsk();
+  } else if (activeAsk) {
+    // Behind a question already on screen: the count says so and nothing else
+    // moves. A full repaint here would rebuild the buttons an answer in flight
+    // was pressed on, which is how one answer becomes two.
+    paintAskCount();
+  } else {
+    showNextAsk();
+  }
   return true;
 }
 
@@ -4583,10 +4633,20 @@ function paintAsk() {
     askSafe = null;
     askPainted = null;
     askIsModal = false;
+    askLive.textContent = "";
+    askDockedReturn = null;
     // `closing` is a no-op on a surface that is already hidden, so the
     // repaint path a language change takes does not animate a popup nobody
-    // opened.
-    hideModal(askScrim, { animated: !askLeavesAtOnce });
+    // opened. The docked marks stay through the exit (it fades the card's own
+    // look, not a backdrop) and go when the surface is hidden.
+    hideModal(askScrim, {
+      animated: !askLeavesAtOnce,
+      after: () => {
+        if (activeAsk !== null) return;
+        askScrim.removeAttribute("data-docked");
+        delete askFrame.dataset.keyboardOwner;
+      },
+    });
     return;
   }
   const kind = askKindOf(ask);
@@ -4645,8 +4705,15 @@ function paintAsk() {
     if (askIsModal) hideModal(askScrim, { animated: false });
     askIsModal = false;
     showing(askScrim);
+    if (changed) {
+      askLive.textContent = [view.title, view.why, kind.clock?.(ask)]
+        .filter((part) => typeof part === "string" && part !== "")
+        .join(". ");
+    }
   } else {
     askIsModal = true;
+    askLive.textContent = "";
+    askDockedReturn = null;
     showModal(askScrim, { animated: true });
   }
   // A new ask starts the keyboard on its own default. The same ask repainted
@@ -7385,7 +7452,7 @@ function tabSwitcherAvailable() {
   for (const id of ["settings-view", "task-view", "auto-view", "space-view", "qo-scrim"]) {
     if (!el(id).hidden) return false;
   }
-  return document.querySelector(".scrim:not([hidden])") === null;
+  return !modalScrimStands();
 }
 
 function openOrAdvanceTabSwitcher(direction) {

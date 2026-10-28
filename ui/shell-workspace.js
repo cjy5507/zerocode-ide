@@ -8402,7 +8402,7 @@ function workspaceBoardSearchShortcut(event) {
     const editable = (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable)
       && target.id !== "key-sink";
     if (editable) return;
-    if (document.querySelector(".scrim:not([hidden])")) return;
+    if (modalScrimStands()) return;
     event.preventDefault();
     event.stopPropagation();
     const query = el("workspace-board-query");
