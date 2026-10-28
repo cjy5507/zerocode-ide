@@ -149,6 +149,7 @@ import { testLandBatch } from "./land-batch.mjs";
 import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
+import { testConversationB } from "./conversation-b.mjs";
 import { testConversationSwitch } from "./conversation-switch.mjs";
 import { testConversationDiagrams } from "./conversation-diagrams.mjs";
 import { createRequire } from "node:module";
@@ -484,6 +485,9 @@ suite("conversation-typing-work", ({ browser, origin, ok }) => testConversationT
 /* 사람이 승인한 대화창 (2026-10-02 23:4x, t-22100) — 머리줄·사람의 말·생각·걸음·셸의 첫 줄·울타리·지금
  * 줄·턴 레일·입력창 위 상태 묶음·입력창, 평평하게, 두 테마와 줄인 움직임에서. */
 suite("conversation-redesign", ({ browser, origin, ok }) => testConversationRedesign(browser, origin, ok));
+/* 사람이 고른 대화 시안 B (2026-10-29, t-81525) — 접힌 페이지를 네 폭과 두 테마에서: 옆으로
+ * 밀림 0, 폭을 따르는 읽기, 알약·말풍선·코드 띠, 대비 4.5:1. */
+suite("conversation-b", ({ browser, origin, ok }) => testConversationB(browser, origin, ok));
 /* 대화를 바꿨다가 돌아오면 그 화면 그대로, 판의 「대화」는 전사부터(인계 중 보낸 글은 한 번만),
  * 늦은 첫 읽기는 늦게 한 줄 (t-54304 — Claude·Codex·Dots 역분석에서 가져온 1단계). */
 suite("conversation-switch", ({ browser, origin, ok }) => testConversationSwitch(browser, origin, ok));
