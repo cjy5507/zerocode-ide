@@ -189,6 +189,11 @@ pub const fn encode_focus(focused: bool) -> &'static [u8] {
     if focused { b"\x1b[I" } else { b"\x1b[O" }
 }
 
+/// The bracketed-paste envelope: everything between the start and the end is
+/// one paste.
+pub const PASTE_START: &str = "\x1b[200~";
+pub const PASTE_END: &str = "\x1b[201~";
+
 /// Encode pasted text, honouring bracketed paste when the program asked for
 /// it.
 ///
@@ -203,15 +208,15 @@ pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
         return text.into_bytes();
     }
     let mut bytes = Vec::with_capacity(text.len() + 12);
-    bytes.extend_from_slice(b"\x1b[200~");
+    bytes.extend_from_slice(PASTE_START.as_bytes());
     bytes.extend_from_slice(text.as_bytes());
-    bytes.extend_from_slice(b"\x1b[201~");
+    bytes.extend_from_slice(PASTE_END.as_bytes());
     bytes
 }
 
 /// What an escape becomes on its way into a paste: the printable glyph that
 /// names it (U+241B SYMBOL FOR ESCAPE), which is what Orca substitutes.
-const INERT_ESCAPE: char = '␛';
+pub const INERT_ESCAPE: char = '␛';
 
 /// Make text safe to hand a terminal as a paste.
 ///

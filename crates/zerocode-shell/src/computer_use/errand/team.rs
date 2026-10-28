@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use zerocode_core::screen_action::ActionAsk;
+use zerocode_pty::{INERT_ESCAPE, PASTE_END, PASTE_START};
 
 use super::{ActionJudge, Judged};
 use crate::systemone::{SCHEMA, TIMEOUT, TRANSPORT};
@@ -66,16 +67,6 @@ pub const FAST_ROLE: &str = "fast";
 /// the model only inside the JSON the seat already rendered.
 pub const PROMPT_HEAD: &str = "You are the second reader of a closed choice that a screen walk's first reader could not decide with confidence. Read the state and the question below exactly as the first reader did.";
 pub const ANSWER_CONTRACT: &str = "Answer with ONE line of JSON and nothing else, of the shape {\"choice\":\"<one of the options>\",\"confidence\":<a number from 0 to 1>}. The choice must be one of the options listed; do not explain.";
-
-/// zo's bracketed-paste envelope (`zo-ide/crates/zo-ide/src/ide/input.rs`):
-/// the lines from the start to the end are one submission.
-const PASTE_START: &str = "\u{1b}[200~";
-const PASTE_END: &str = "\u{1b}[201~";
-
-/// What an escape in the prompt becomes — the glyph the window's own paste
-/// puts in its place (`zerocode_pty::input::sanitize_paste`), and what zo
-/// counts on to read its envelope unambiguously.
-const INERT_ESCAPE: &str = "␛";
 
 /// How many answer files this process has named.
 static ANSWERS_NAMED: AtomicU64 = AtomicU64::new(0);
@@ -266,16 +257,19 @@ impl TeamJudge {
     }
 }
 
-/// The bytes the reader's stdin gets: `prompt` as one bracketed paste and
-/// the line that ends it. Every escape becomes [`INERT_ESCAPE`], so nothing
-/// inside can close the paste early. Line feeds stay line feeds — a pipe is
-/// not a terminal, and zo splits its stdin on them (the window's own paste
-/// turns them into returns for a terminal's Enter).
+/// The bytes the reader's stdin gets: `prompt` as one bracketed paste — the
+/// envelope zo (`zo-ide/crates/zo-ide/src/ide/input.rs`) joins into one
+/// submission — and the line that ends it. Every escape becomes
+/// [`INERT_ESCAPE`], the glyph the window's own paste puts in its place, so
+/// nothing inside can close the paste early. Line feeds stay line feeds — a
+/// pipe is not a terminal, and zo splits its stdin on them (the window's own
+/// paste, `zerocode_pty::input::sanitize_paste`, turns them into returns for a
+/// terminal's Enter).
 #[must_use]
 pub fn pasted(prompt: &str) -> String {
     let words = prompt
         .trim_end_matches('\n')
-        .replace('\u{1b}', INERT_ESCAPE);
+        .replace('\u{1b}', INERT_ESCAPE.encode_utf8(&mut [0; 4]));
     format!("{PASTE_START}{words}{PASTE_END}\n")
 }
 
