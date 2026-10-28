@@ -36091,6 +36091,8 @@ details.task-board-section > summary {
 .board-asks > li {
   display: grid;
   grid-template-columns: minmax(0, 1fr) fit-content(var(--board-ask-acts-share));
+  /* The buttons span both lines: let the second take the extra height, so the goal line hangs under the question. */
+  grid-template-rows: auto 1fr;
   column-gap: var(--space-4);
   row-gap: var(--board-gap-small);
   align-items: start;
@@ -36151,6 +36153,7 @@ details.task-board-section > summary {
 /* 한 줄의 이름 — 과업 id는 시안처럼 고정폭이다(`paintBoardMeta`). */
 .board-meta-id {
   font-family: var(--font-mono);
+  white-space: nowrap;
 }
 
 /* 질문 행은 답할 우편의 편지 그대로다(`paintDeskLetter`) — 마크업은 기록 탭의 소식과 같고,
