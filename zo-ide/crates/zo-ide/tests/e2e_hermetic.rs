@@ -4505,27 +4505,37 @@ fn command_cell(rows: &[String], head: &str) -> Option<Vec<String>> {
 /// The runtime's housekeeping — `Context trim · cleared N old tool
 /// result(s) …` — used to be a transcript cell (07:20 screenshot, t-3177).
 /// Codex leaves no such line in history. A turn long enough for a real
-/// microcompact to fire (a small compaction window, one sizeable `bash`
-/// result per request, every request after the first held a moment) must
-/// show the trim on the status row while the next request is out, and the
-/// settled transcript must not carry a `Context trim` row.
+/// microcompact to fire, and for the trim to pay for itself (a small
+/// compaction window, large `bash` results early and small ones after,
+/// every request after the first held a moment) must show the trim on the
+/// status row while the next request is out, and the settled transcript
+/// must not carry a `Context trim` row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript() {
     const TRIM: &str = "Context trim";
     const ROWS: u16 = 40;
-    // The microcompact tier is 64% of the compaction window; the trim keeps
-    // the 24 newest results (the model's own window is large) and needs at
-    // least 4k tokens of older ones to clear. Sixty results of ~4.8 KiB
-    // (~1.2k tokens) cross the tier near the fiftieth with some 25 older
-    // results to clear, and stay under the 80% full-compaction ceiling
-    // before and after.
+    // The microcompact tier is 64% of the compaction window and the full
+    // tier 80%; the trim keeps the 24 newest results (the model's own window
+    // is large). The script counts each request as a provider does, so the
+    // gate weighs the trim at the model's cache prices: on Opus 5 a re-write
+    // costs (1.25 − 0.1) ÷ 0.1 = 11.5 times what a cleared token saves per
+    // request, and the clear has until the full tier at the recent pace.
+    //
+    // Thirty results of 150 lines (~1,250 tokens a request) and then 60
+    // lines (~545) cross the tier after the 68th result, at 64,323 counted
+    // from a ~6k first request: the thirty large ones are past the 24 kept,
+    // and clearing them (53,040 of 72,744 by the gate's estimate) pays back
+    // in 4.3 requests against 28.7 left to the full tier (measured,
+    // 2026-10-28). Sixty equal results grew the conversation too fast for
+    // any trim to pay back before the full tier
+    // (`e2e_a_trim_that_cannot_pay_back_is_declined_for_its_price_and_never_drawn`).
     const WINDOW: &str = "100000";
-    const COMMAND: &str = "seq -f 'payload line %g of request {n}' 1 150";
+    const COMMAND: &str = "seq -f 'payload line %g of request {n}' 1 $(( {n} < 30 ? 150 : 60 ))";
     const HOLD: Duration = Duration::from_millis(250);
 
     let layout = Layout::new();
     let service = ScriptedAnthropicService::many_bash(
-        60,
+        72,
         COMMAND,
         HOLD,
         "### Done\n\n- the ladder ran\n",
