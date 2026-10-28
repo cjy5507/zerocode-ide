@@ -115,3 +115,67 @@ fn the_kept_tail_holds_its_budget_in_the_providers_tokens() {
         "a {budget}-token tail budget, with the provider billing twice the estimate"
     );
 }
+
+/// The price rule weighs both sides in the estimate's own unit, so the ratio
+/// cannot move it: the same loop on Opus 5.5 is declined whether the provider
+/// bills the estimate or 2.1 times it, and the token rule takes a batch far
+/// over the floor either way.
+#[test]
+fn the_ratio_moves_the_floor_and_never_the_price_decision() {
+    let _env = crate::test_env_lock();
+    for times in [1.0, 2.1] {
+        let mut priced = runtime();
+        priced.set_context_model("claude-opus-5-5");
+        priced.session.push_user_text("read these").expect("task");
+        push_results(&mut priced, 54, 4_000);
+        answer_counted_at(&mut priced, times);
+        let threshold = priced.microcompact_input_tokens_threshold();
+        assert!(priced.maybe_microcompact_for_tokens(threshold).is_none(), "priced, ratio {times}");
+        let measured = priced.context_estimate_ratio.expect("measured");
+        assert!((measured - times).abs() < 0.001, "measured {measured} for {times}");
+
+        let mut unpriced = runtime();
+        unpriced.session.push_user_text("read these").expect("task");
+        push_results(&mut unpriced, 20, 12_000);
+        answer_counted_at(&mut unpriced, times);
+        let threshold = unpriced.microcompact_input_tokens_threshold();
+        assert!(unpriced.maybe_microcompact_for_tokens(threshold).is_some(), "unpriced, ratio {times}");
+    }
+}
+
+/// What the ratio was measured against stops holding on a model switch and
+/// after a full compaction; until the next fresh measurement it reads as one.
+#[test]
+fn a_model_switch_or_a_full_compaction_forgets_the_ratio() {
+    let _env = crate::test_env_lock();
+    let mut runtime = runtime();
+    runtime.session.push_user_text("read these").expect("task");
+    push_results(&mut runtime, 30, 8_000);
+    answer_counted_at(&mut runtime, 2.0);
+    assert!(runtime.maybe_microcompact_for_tokens(0).is_none());
+    assert!(runtime.context_estimate_ratio.is_some());
+    runtime.set_context_model("claude-sonnet-5-5");
+    assert_eq!(runtime.context_estimate_ratio, None);
+
+    assert!(runtime.maybe_microcompact_for_tokens(0).is_none());
+    assert!(runtime.context_estimate_ratio.is_some());
+    let config = runtime.compaction_config_if_possible().expect("compactable");
+    let result = crate::compact::compact_session(&runtime.session, config);
+    assert!(runtime.finish_auto_compaction(result).is_some(), "a full compaction folded the transcript");
+    assert_eq!(runtime.context_estimate_ratio, None);
+    assert_eq!(runtime.provider_tokens_for_estimate(4_000), 4_000);
+}
+
+/// A calibrated figure never leaves the range the gates already work in:
+/// not below zero, not above the window the compaction tiers are a share of.
+#[test]
+fn a_calibrated_figure_stays_inside_the_compaction_window() {
+    let mut runtime = runtime();
+    let window = super::auto_compaction_window(runtime.context_window_for_guards());
+    runtime.context_estimate_ratio = Some(1e9);
+    assert_eq!(runtime.provider_tokens_for_estimate(4_000), window);
+    assert_eq!(runtime.estimate_tokens_for_provider(40_000), 0);
+    runtime.context_estimate_ratio = Some(1e-9);
+    assert_eq!(runtime.provider_tokens_for_estimate(4_000), 0);
+    assert_eq!(runtime.estimate_tokens_for_provider(40_000), window);
+}

@@ -898,6 +898,13 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// count to that count; this estimate stands alone only where the
     /// transcript holds no answer since its last compaction.
     pub(super) fn estimated_request_context_tokens(&self) -> u64 {
+        self.request_estimate_over(&self.session.messages)
+    }
+
+    /// [`Self::estimated_request_context_tokens`] for a request carrying
+    /// `messages` — the whole transcript, or the prefix an answered request
+    /// was sent.
+    fn request_estimate_over(&self, messages: &[ConversationMessage]) -> u64 {
         // Estimate WITHOUT running recall — do NOT call
         // `request_wire_reminders` here. On the streaming path this runs in the
         // drive-loop preflight (micro + auto compaction), and for the dense
@@ -905,7 +912,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         // re-introducing the very freeze the off-thread seam removes (and twice,
         // once per preflight). Transient reminders are cheap locals, so they
         // are counted directly.
-        let base = estimate_session_tokens(&self.session) as u64
+        let base = crate::compact::estimate_messages_tokens(messages)
             + estimate_system_prompt_tokens(&self.system_prompt)
             + estimate_system_prompt_tokens(&self.transient_reminders);
         // The streaming turn injects a recalled-memory section into the wire
@@ -1094,9 +1101,11 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// re-work right after each compact). `ZO_COMPACT_TAIL_TOKENS`
     /// overrides the budget; `0` restores the legacy 4-message tail.
     fn auto_compaction_preserved_tail_len(&self) -> usize {
+        // The budget is the provider's tokens; the tail is counted by the
+        // local estimate, so the budget goes over in the estimate's unit.
         crate::compact::preserved_tail_len_for_budget(
             &self.session.messages,
-            auto_compaction_tail_budget(self.context_window_for_guards()),
+            self.estimate_tokens_for_provider(auto_compaction_tail_budget(self.context_window_for_guards())),
         )
     }
 
@@ -1272,6 +1281,12 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         &mut self,
         context_tokens: u64,
     ) -> Option<MicrocompactEvent> {
+        // Measure the estimate against the provider while the prefix the last
+        // answer was counted on is still the one it was sent: nothing rewrote
+        // it between that request and this gate, and a trim below may.
+        if let Some(ratio) = self.measured_estimate_ratio() {
+            self.context_estimate_ratio = Some(ratio);
+        }
         if !self.auto_compaction_enabled {
             return None;
         }
@@ -1327,7 +1342,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             ),
             None => quote.pays_back_within(MICROCOMPACT_PAYBACK_REQUESTS),
         };
-        let worth_it = pays_back && clearable >= 4_000;
+        let worth_it = pays_back && self.provider_tokens_for_estimate(clearable) >= 4_000;
         let last_resort = !worth_it && self.microcompact_is_last_resort(context_tokens);
         if !worth_it && !last_resort {
             // In the trim zone but the batch is not worth the cache
@@ -1515,6 +1530,38 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         row.microcompact_percent = self.context_policy.microcompact;
         row.model = self.context_model.clone().unwrap_or_default();
         row.microcompact_streak = u64::try_from(self.consecutive_microcompacts).unwrap_or(u64::MAX);
+    }
+
+    /// The provider's count of the latest answered request over the local
+    /// estimate of what that request was sent — the same messages, system
+    /// prompt and reminders — when the transcript holds an answer since its
+    /// last compaction (t-78937). Fresh only while nothing has rewritten that
+    /// prefix, which is why the microcompact gate takes it first.
+    fn measured_estimate_ratio(&self) -> Option<f64> {
+        let (index, usage) = self.latest_answer_since_compaction()?;
+        let counted = u64::from(usage.context_tokens());
+        let estimate = self.request_estimate_over(&self.session.messages[..index]);
+        (counted > 0 && estimate > 0).then(|| token_count(counted) / token_count(estimate))
+    }
+
+    /// `tokens` of the local estimate in the provider's count: scaled by the
+    /// last fresh ratio (none yet reads as one), never below zero nor above
+    /// the window the compaction tiers are a share of.
+    fn provider_tokens_for_estimate(&self, tokens: u64) -> u64 {
+        self.within_compaction_window(token_count(tokens) * self.context_estimate_ratio.unwrap_or(1.0))
+    }
+
+    /// `tokens` of the provider's count in the local estimate's unit, bounded
+    /// the same way.
+    fn estimate_tokens_for_provider(&self, tokens: u64) -> u64 {
+        self.within_compaction_window(token_count(tokens) / self.context_estimate_ratio.unwrap_or(1.0))
+    }
+
+    // The value is clamped to `0..=window` first, so the cast keeps it whole.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn within_compaction_window(&self, tokens: f64) -> u64 {
+        let window = auto_compaction_window(self.context_window_for_guards());
+        tokens.clamp(0.0, token_count(window)) as u64
     }
 
     /// Requests a firing has to pay for itself in: until the conversation
@@ -1894,8 +1941,10 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             return true;
         }
         // Full compaction summarized the transcript, breaking any microcompact
-        // thrash cycle: reset the streak so the escape re-arms cleanly.
+        // thrash cycle: reset the streak so the escape re-arms cleanly. The
+        // estimate's ratio was measured on the history the summary replaced.
         self.consecutive_microcompacts = 0;
+        self.context_estimate_ratio = None;
         self.full_compactions_this_turn = self.full_compactions_this_turn.saturating_add(1);
         // A real compaction just shrank the transcript back below the ceiling:
         // re-arm the pre-compaction early-warning latch so the next climb toward

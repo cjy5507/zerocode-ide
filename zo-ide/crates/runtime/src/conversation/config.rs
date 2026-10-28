@@ -998,6 +998,9 @@ where
         self.refusal_switch_consented_for_session = false;
         self.context_policy = ContextPolicy::for_model(Some(model))
             .with_full_compaction_override(self.full_compaction_override_percent);
+        // Another model counts the same text differently: what the estimate
+        // was measured against no longer holds.
+        self.context_estimate_ratio = None;
         self.set_context_window(::api::context_window_for_model(model));
         self.retarget_system_prompt_model(model);
     }

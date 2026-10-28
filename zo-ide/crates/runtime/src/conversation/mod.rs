@@ -987,6 +987,14 @@ pub struct ConversationRuntime<C, T> {
     /// compaction so tool-result trimming can no longer starve the
     /// LLM-summarize path that ends the loop.
     consecutive_microcompacts: usize,
+    /// The provider's count of the latest answered request over the local
+    /// `chars / 4` estimate of the same prefix, measured where nothing had
+    /// rewritten that prefix yet — the microcompact gate's first step. It
+    /// turns a budget written in tokens (the trim's floor, the kept tail)
+    /// into the estimate's unit. `None` before a fresh measurement and again
+    /// after a model switch or a full compaction; kept in memory only
+    /// (t-78937).
+    context_estimate_ratio: Option<f64>,
     /// Full compactions completed within the current turn. Ordinary turns see
     /// 0–1 (occasionally 2 on a giant context); a repetition loop that keeps
     /// inflating the transcript can trigger one per cycle — and every
@@ -1899,6 +1907,7 @@ where
             serial_reads_nudged: false,
             attendance: Attendance::Unattended,
             consecutive_microcompacts: 0,
+            context_estimate_ratio: None,
             full_compactions_this_turn: 0,
             cross_turn_tool_fingerprints: HashMap::new(),
             cross_turn_tool_repetition_pending_hard_stop_fps: HashSet::new(),
