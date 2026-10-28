@@ -157,7 +157,7 @@ fn thinking_the_edit_orphans_counts_as_saved_only_where_the_model_drops_it() {
     let with = sample_quote(Some(3)).breakeven_requests(prices, true).expect("saves");
     let without = sample_quote(Some(3)).breakeven_requests(prices, false).expect("saves");
     assert!(with < without, "with the dropped thinking {with}, without {without}");
-    let between = (with + without) / 2.0;
+    let between = f64::midpoint(with, without);
     assert!(sample_quote(Some(3)).pays_back_at(prices, between, true));
     assert!(!sample_quote(Some(3)).pays_back_at(prices, between, false));
 }
