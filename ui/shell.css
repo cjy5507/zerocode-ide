@@ -36090,7 +36090,7 @@ details.task-board-section > summary {
 
 .board-asks > li {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) fit-content(var(--board-ask-acts-share));
   column-gap: var(--space-4);
   row-gap: var(--board-gap-small);
   align-items: start;
@@ -36226,6 +36226,14 @@ details.task-board-section > summary {
   grid-column: 2;
   grid-row: 1 / span 2;
   justify-content: flex-end;
+}
+
+/* 선택지가 문장이면 단추가 그 몫 안에서 제 글을 줄바꿈한다 — 짧은 글은 그대로 한 줄 단추다. */
+.board-ask-acts > .board-btn {
+  max-width: 100%;
+  padding-block: var(--space-1);
+  text-align: start;
+  white-space: normal;
 }
 
 .board-ask-note,
