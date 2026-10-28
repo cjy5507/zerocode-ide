@@ -14565,6 +14565,15 @@ body.mod-held .term-link,
   clip-path: inset(50%);
 }
 
+/* Clipped to nothing is not stopped: the ring and the live dots of a page set
+ * aside kept turning under the clip (t-81525 C11). They hold still while the
+ * page stands behind — only the animated parts are named, the same ones
+ * reduced motion names, so a press restyles those and not every row. */
+:is(.pane > .worker-view, .pane-slot > .pane-chat).is-behind :is(.helper-step-dot, .helper-state-dot, .helper-agent-dot, .helper-status, .helper-status-ring, .chat-run-dot),
+:is(.pane > .worker-view, .pane-slot > .pane-chat).is-behind .helper-group::before {
+  animation-play-state: paused;
+}
+
 .worker-head {
   display: flex;
   flex-wrap: wrap;
