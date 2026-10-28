@@ -105,19 +105,34 @@ fn recalled_blocks(request: &ApiRequest) -> Vec<String> {
         .collect()
 }
 
-/// Answers `script` a request at a time — `Some(path)` reads that file,
-/// `None` answers in words — and keeps what each request carried of the
-/// recall. `steer_on` names a request during which the person types `steer`.
+/// Answers `script` a request at a time — the tools an answer calls, by
+/// name and input, or none for an answer in words — and keeps what each
+/// request carried of the recall. With `announces`, each tool block is also
+/// announced on the probe channel as closed, as the Anthropic parser
+/// announces one whose input is complete (`ToolCallStatus::Running`).
+/// `steer_on` names a request during which the person types `steer`.
 struct Scripted {
-    script: Vec<Option<&'static str>>,
+    script: Vec<Vec<(&'static str, String)>>,
+    announces: bool,
     sent: AtomicUsize,
     carried: Mutex<Vec<Vec<String>>>,
     steer_on: Option<(usize, &'static str, SteeringQueue)>,
 }
 
 impl Scripted {
+    /// Each `Some(path)` an answer that reads that file, each `None` one in
+    /// words.
     fn new(script: Vec<Option<&'static str>>) -> Self {
-        Self { script, sent: AtomicUsize::new(0), carried: Mutex::new(Vec::new()), steer_on: None }
+        Self::calling(
+            script
+                .into_iter()
+                .map(|read| read.map_or_else(Vec::new, |path| vec![("read_file", format!(r#"{{"path":"{path}"}}"#))]))
+                .collect(),
+        )
+    }
+
+    fn calling(script: Vec<Vec<(&'static str, String)>>) -> Self {
+        Self { script, announces: false, sent: AtomicUsize::new(0), carried: Mutex::new(Vec::new()), steer_on: None }
     }
 
     fn carried(&self) -> Vec<Vec<String>> {
@@ -129,9 +144,11 @@ impl AsyncApiClient for Scripted {
     fn stream_async<'a>(
         &'a self,
         request: ApiRequest,
-        _render_tx: tokio::sync::mpsc::Sender<RenderBlock>,
+        render_tx: tokio::sync::mpsc::Sender<RenderBlock>,
         _text_block_id: BlockId,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
+        use crate::message_stream::types::{ToolCallId, ToolCallStatus, ToolPreview};
+
         let sent = self.sent.fetch_add(1, Ordering::SeqCst);
         self.carried.lock().expect("carried").push(recalled_blocks(&request));
         if let Some((during, steer, queue)) = &self.steer_on {
@@ -139,18 +156,34 @@ impl AsyncApiClient for Scripted {
                 queue.lock().expect("steering").push((*steer).to_string());
             }
         }
-        let events = match self.script.get(sent).copied().flatten() {
-            Some(path) => vec![
-                AssistantEvent::ToolUse {
-                    id: format!("tool-{sent}"),
-                    name: "read_file".to_string(),
-                    input: format!(r#"{{"path":"{path}"}}"#),
-                },
-                AssistantEvent::MessageStop,
-            ],
-            None => vec![AssistantEvent::TextDelta(format!("answer {sent}")), AssistantEvent::MessageStop],
-        };
-        Box::pin(async move { Ok(events) })
+        let calls = self.script.get(sent).cloned().unwrap_or_default();
+        let mut announced = Vec::new();
+        let mut events = Vec::new();
+        for (index, (name, input)) in calls.iter().enumerate() {
+            let id = format!("tool-{sent}-{index}");
+            if self.announces {
+                announced.push(RenderBlock::ToolCall {
+                    id: BlockId(u64::try_from(index).expect("a block id")),
+                    tool_call_id: ToolCallId(id.clone()),
+                    name: (*name).to_string(),
+                    summary: String::new(),
+                    preview: ToolPreview::Generic { name: (*name).to_string(), input_summary: String::new() },
+                    input_print: Some(input.clone()),
+                    status: ToolCallStatus::Running,
+                });
+            }
+            events.push(AssistantEvent::ToolUse { id, name: (*name).to_string(), input: input.clone() });
+        }
+        if calls.is_empty() {
+            events.push(AssistantEvent::TextDelta(format!("answer {sent}")));
+        }
+        events.push(AssistantEvent::MessageStop);
+        Box::pin(async move {
+            for block in announced {
+                let _ = render_tx.send(block).await;
+            }
+            Ok(events)
+        })
     }
 }
 
@@ -397,4 +430,53 @@ fn the_turns_clock_takes_the_judgments_wait_only_when_one_was_asked() {
     runtime.run_user_prompt_submit_for_streaming_user_entry("read a.rs").expect("the turn proceeds");
     let held = runtime.turn_clock.judge_wait.clone().expect("a judgment was asked and waited for");
     assert!(held.end - held.start < super::TURN_START_JUDGMENT_WAIT, "an answer at once is no wall: {held:?}");
+}
+
+/// The names on a row's tool marks, in order.
+fn tool_names(marks: &serde_json::Value) -> Vec<String> {
+    marks.as_array().map_or_else(Vec::new, |marks| {
+        marks.iter().map(|mark| mark["name"].as_str().unwrap_or_default().to_string()).collect()
+    })
+}
+
+/// Z13: an answer that calls two tools says on its own row when each tool's
+/// block closed, and the request that carries their results back says on
+/// its row how long each ran — the two rows joined by their attempt and
+/// iteration, and by each tool's name, never its input or its result.
+#[test]
+fn a_two_tool_answer_says_when_its_blocks_closed_and_the_next_request_how_long_each_ran() {
+    let mut scripted = Scripted::calling(vec![
+        vec![
+            ("read_file", r#"{"path":"a.rs"}"#.to_string()),
+            ("write_file", r#"{"path":"b.rs","content":"fn b() {}"}"#.to_string()),
+        ],
+        Vec::new(),
+    ]);
+    scripted.announces = true;
+    let mut runtime = runtime_with(
+        Arc::new(scripted),
+        Arc::new(Store::default()),
+        Arc::new(CountingSeat::default()),
+        SteeringQueue::default(),
+    );
+    take_recorded();
+
+    run_turn(&mut runtime, "read a.rs, then write b.rs");
+
+    let rows = recorded_rows();
+    assert_eq!(rows.len(), 2, "two requests, two rows: {rows:#?}");
+    let (answer, after) = (&rows[0], &rows[1]);
+    assert_eq!(tool_names(&answer["tool_closed_ms"]), ["read_file", "write_file"], "the answer's row: {answer}");
+    assert!(
+        answer["tool_closed_ms"].as_array().is_some_and(|marks| marks.iter().all(|mark| mark["ms"].is_u64())),
+        "each block's close is a time: {answer}"
+    );
+    assert!(after["tool_closed_ms"].is_null(), "an answer in words closed no tool block: {after}");
+    assert_eq!(tool_names(&after["tool_ran_ms"]), ["read_file", "write_file"], "the next request's row: {after}");
+    assert!(
+        after["tool_ran_ms"].as_array().is_some_and(|marks| marks.iter().all(|mark| mark["ms"].is_u64())),
+        "both tools ran: {after}"
+    );
+    let written: String = rows.iter().map(ToString::to_string).collect();
+    assert!(!written.contains("a.rs") && !written.contains("fn b()"), "no tool input reaches a row: {written}");
 }

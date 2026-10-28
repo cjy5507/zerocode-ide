@@ -371,6 +371,44 @@ mod tests {
         );
     }
 
+    fn tool_call(id: &str, name: &str, status: crate::message_stream::types::ToolCallStatus) -> RenderBlock {
+        use crate::message_stream::types::{ToolCallId, ToolCallStatus, ToolPreview};
+        RenderBlock::ToolCall {
+            id: BlockId(2),
+            tool_call_id: ToolCallId(id.to_string()),
+            name: name.to_string(),
+            summary: String::new(),
+            preview: ToolPreview::Generic { name: name.to_string(), input_summary: String::new() },
+            input_print: (status == ToolCallStatus::Running).then(String::new),
+            status,
+        }
+    }
+
+    /// Z13: each tool block of an answer closes at its own time — its input
+    /// complete, the moment its tool could have started — and the row says
+    /// when, counted from the send, by the tool's name alone. A block
+    /// announced while its input still streams has not closed.
+    #[test]
+    fn a_row_says_when_each_tool_block_of_the_answer_closed() {
+        use crate::message_stream::types::ToolCallStatus::{Pending, Running};
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut stamps = StreamStamps::begun(t0);
+        stamps.observe_at(&sent(1), t0 + ms(5));
+        stamps.observe_at(&tool_call("toolu_a", "read_file", Pending), t0 + ms(40));
+        stamps.observe_at(&tool_call("toolu_a", "read_file", Running), t0 + ms(100));
+        stamps.observe_at(&tool_call("toolu_b", "Bash", Pending), t0 + ms(120));
+        stamps.observe_at(&tool_call("toolu_b", "Bash", Running), t0 + ms(305));
+        stamps.complete_at(t0 + ms(400));
+
+        let row = serde_json::to_value(timing_record(&context("completed"), &stamps)).expect("a row");
+        assert_eq!(
+            row["tool_closed_ms"],
+            serde_json::json!([{"name": "read_file", "ms": 95}, {"name": "Bash", "ms": 300}]),
+            "the first block's close and the second's: {row}"
+        );
+    }
+
     /// Every row written before the turn's columns parses, and a request no
     /// turn start was stamped for spells none of them: a file kept forever
     /// pays no bytes for a wait nobody measured.
