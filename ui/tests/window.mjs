@@ -56406,14 +56406,11 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
   }
 });
 
-/* Focus view(확장 2.1.221; 발주서 `docs/plans/conversation-panel-wave2-20260921.md`
- * 레인 A): 한 턴의 도구 일이 요약 한 줄 뒤로 접힌다.
- *
- * 묶음은 연속한 활동 행 — 도구 호출과 생각 — 의 최대 구간이라 답이 오면
- * 닫히고, 구성원은 목록의 직계 자식으로 남은 채 숨는다(옮기면 `data-turn`
- * 회계가 무너진다). 계수는 폴마다 다시 세지 않고 상태가 움직인 행 하나만
- * 옮기므로, 같은 묶음 노드가 제 수를 갈아입고 조용한 폴은 아무것도 쓰지
- * 않는다. 기본은 꺼짐이고, 머리의 토글이 전역 설정을 쓴다. */
+/* 알약(t-81525 B1·B2, 사람이 고른 대화 시안 B): 두 답 사이의 도구 일이 알약 한
+ * 줄로 접히는 것이 모두의 기본이다. 알약은 제 턴들을 들고 마지막 구성원의
+ * 열쇠(`data-turn`)를 쓰며, 구성원의 행은 펼칠 때 짓고 접을 때 버린다. 머리의
+ * 토글 「걸음 모두 펼치기」가 전역 설정 `conversation_timeline_view`를 쓰고,
+ * 켜면 걸음이 모두 펼쳐진 타임라인이 그 자리에서 선다. */
 suite("focus-view", async ({ browser, origin, ok }) => {
   const { page } = await openWindowTestPage(browser, origin);
   try {
@@ -56424,7 +56421,7 @@ suite("focus-view", async ({ browser, origin, ok }) => {
         for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
       };
       const saved = [];
-      window.__ANSWER__.set_conversation_focus_view = (args) => {
+      window.__ANSWER__.set_conversation_timeline_view = (args) => {
         saved.push(args);
         return null;
       };
@@ -56434,7 +56431,7 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       tell("hook:subagent", { term, rows: [{ id: "focus", name: "@focus", state: "running" }] });
       await window.__PAINTED__();
       // `[user, tool(Read), tool(Grep 실패), thinking, assistant, tool(Edit 살아 있음)]`
-      // — 결과는 제 호출 행에 합류하므로 행은 여섯이다.
+      // — 결과는 제 호출에 합류한다.
       window.__ANSWER__.subagent_log = () => ({
         found: true,
         next: 8,
@@ -56457,55 +56454,14 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       const face = document.querySelector("#worker-view");
       const list = face.querySelector(".helper-turns");
       const tab = tabs.find((one) => one.id === `helper:${term}:focus`);
-      const groups = () => [...list.querySelectorAll(":scope > .helper-group")];
-      const keys = () => [...list.querySelectorAll(":scope > [data-turn]")]
-        .map((row) => row.dataset.turn).join(",");
-      const hiddenRows = () => list.querySelectorAll(":scope > .helper-turn[hidden]").length;
+      const pills = () => [...list.querySelectorAll(":scope > .helper-group")];
+      const stepRows = () => list.querySelectorAll(".helper-turn:is(.is-tool, .is-thinking)").length;
       const capOf = (group) => group.querySelector(":scope > .helper-group-cap");
       const wordsOf = (group) => capOf(group).querySelector(".helper-group-words").textContent;
       const liveOf = (group) => {
         const live = capOf(group).querySelector(".helper-group-live");
-        return live.hidden ? "" : `${live.querySelector(".helper-tool-name").textContent} ${live.querySelector(".helper-tool-arg").textContent}`;
+        return live.hidden ? "" : live.textContent;
       };
-
-      // (a) 기본은 꺼짐: 묶음도 없고 숨은 행도 없다.
-      seen.offGroups = groups().length;
-      seen.offHidden = hiddenRows();
-      seen.keysBefore = keys();
-      const button = face.querySelector(".worker-head .worker-focus");
-      seen.buttonNamed = button?.dataset.tip === t("worker.focusView", "집중 보기") &&
-        button?.getAttribute("aria-label") === t("worker.focusView", "집중 보기");
-      seen.offPressed = button?.getAttribute("aria-pressed");
-
-      // (b) 머리 단추 하나가 전역 설정을 쓰고, 그 자리에서 묶음이 선다.
-      button.click();
-      await new Promise((done) => setTimeout(done, 80));
-      seen.saved = JSON.stringify(saved);
-      seen.onPressed = button.getAttribute("aria-pressed");
-      const standing = groups();
-      seen.onGroups = standing.length;
-      seen.firstWords = standing[0] ? wordsOf(standing[0]) : "";
-      seen.wantFirstWords = t("worker.focusCalls", "도구 호출 {{n}}회", { n: 2 }) +
-        t("worker.focusFailed", " · 실패 {{n}}", { n: 1 });
-      seen.firstFailed = standing[0]?.classList.contains("is-failed") === true &&
-        !standing[0]?.classList.contains("is-live");
-      seen.secondWords = standing[1] ? wordsOf(standing[1]) : "";
-      seen.wantSecondWords = t("worker.focusCalls", "도구 호출 {{n}}회", { n: 1 });
-      seen.secondLive = standing[1]?.classList.contains("is-live") === true;
-      seen.secondLiveWords = standing[1] ? liveOf(standing[1]) : "";
-      seen.wantSecondLiveWords = `${t("worker.stepEdit", "파일 수정")} /repo/b.rs`;
-      // 구성원은 전부 숨고, 목록의 열쇠와 정체성은 그대로다. 숨은 행은
-      // 자리도 갖지 않는다 — `[hidden]`이 행의 display를 이겨야 한다.
-      seen.onHidden = hiddenRows();
-      seen.hiddenTakeNoRoom = [...list.querySelectorAll(":scope > .helper-turn[hidden]")]
-        .every((row) => getComputedStyle(row).display === "none");
-      seen.capsStand = standing.every((group) => getComputedStyle(group).display !== "none");
-      seen.keysAfter = keys();
-      seen.capExpanded = standing[0] ? capOf(standing[0]).getAttribute("aria-expanded") : "";
-      seen.capNamed = standing[0]
-        ? capOf(standing[0]).getAttribute("aria-label") === t("worker.focusExpand", "도구 호출 펼치기")
-        : false;
-      // 점은 묶음의 상태다 — 도구 행과 같은 규칙에서 온다.
       const probe = (name) => {
         const span = document.createElement("span");
         span.style.backgroundColor = `var(${name})`;
@@ -56514,41 +56470,56 @@ suite("focus-view", async ({ browser, origin, ok }) => {
         span.remove();
         return value;
       };
-      seen.firstDot = standing[0]
-        ? getComputedStyle(standing[0], "::before").backgroundColor === probe("--chat-dot-failed")
-        : false;
-      seen.secondDot = standing[1]
-        ? getComputedStyle(standing[1], "::before").backgroundColor === probe("--agent-accent-claude")
-        : false;
+      const failed = (n) => t("worker.tallyFailed", "실패 {{n}}", { n });
 
-      // (c) 캡을 누르면 그 묶음의 구성원만 보인다.
+      // (a) 기본은 알약: 한 턴의 도구 일이 한 줄이고, 걸음의 행은 하나도 없다.
+      const button = face.querySelector(".worker-head .worker-focus");
+      seen.buttonNamed = button?.dataset.tip === t("worker.timelineView", "걸음 모두 펼치기") &&
+        button?.getAttribute("aria-label") === t("worker.timelineView", "걸음 모두 펼치기");
+      seen.pressed = button?.getAttribute("aria-pressed");
+      const standing = pills();
+      seen.pills = standing.length;
+      seen.rowsFolded = stepRows();
+      seen.firstWords = standing[0] ? wordsOf(standing[0]) : "";
+      seen.wantFirstWords = `${t("worker.focusCalls", "도구 {{n}}개", { n: 2 })} · ${failed(1)}`;
+      seen.firstFailed = standing[0]?.classList.contains("is-failed") === true;
+      seen.firstDot = standing[0] ? getComputedStyle(capOf(standing[0]), "::before").backgroundColor === probe("--chat-dot-failed") : false;
+      seen.secondWords = standing[1] ? wordsOf(standing[1]) : "";
+      seen.wantSecondWords = t("worker.stepRun", "{{kind}} {{n}}개", { kind: t("worker.stepEdit", "파일 수정"), n: 1 });
+      seen.secondLive = standing[1]?.classList.contains("is-live") === true;
+      seen.secondLiveWords = standing[1] ? liveOf(standing[1]) : "";
+      seen.wantSecondLiveWords = `${t("worker.stepEdit", "파일 수정")} /repo/b.rs`;
+      seen.secondDot = standing[1] ? getComputedStyle(capOf(standing[1]), "::before").backgroundColor === probe("--agent-accent-claude") : false;
+      seen.keys = standing.map((group) => group.dataset.turn).join(",");
+      seen.wantKeys = [3, 5].join(",");
+
+      // (b) 누르면 그 알약의 걸음이 그때 지어지고, 다시 누르면 버려진다 — 키보드로도.
+      capOf(standing[0]).focus();
       capOf(standing[0]).click();
       seen.openedExpanded = capOf(standing[0]).getAttribute("aria-expanded");
-      seen.openedNamed = capOf(standing[0]).getAttribute("aria-label") ===
-        t("worker.focusCollapse", "도구 호출 접기");
-      seen.openedHidden = hiddenRows();
+      seen.openedRows = standing[0].querySelectorAll(":scope > .helper-group-body > .helper-turn").length;
       capOf(standing[0]).click();
-      seen.closedHidden = hiddenRows();
+      seen.closedExpanded = capOf(standing[0]).getAttribute("aria-expanded");
+      seen.closedRows = stepRows();
+      seen.capIsButton = capOf(standing[0]).tagName === "BUTTON";
 
-      // (d) 폴로 도구 턴이 더 오면 **같은 노드**가 제 수를 갈아입는다.
+      // (c) 폴로 도구 턴이 더 오면 같은 노드가 제 말을 갈아입고, 조용한 폴은 아무것도 쓰지 않는다.
       const secondNode = standing[1];
       holdHelperTurns(tab.worker.helper, [
         { role: "tool", text: "Bash · cargo test", tool: { call_id: "d", name: "Bash", kind: "bash", is_error: false } },
         { role: "tool", text: "Read · /repo/c.rs", tool: { call_id: "e", name: "Read", kind: "read", is_error: false } },
       ]);
       paintWorkerView(tab);
-      seen.grewSameNode = groups()[1] === secondNode;
+      seen.grewSameNode = pills()[1] === secondNode;
       seen.grewWords = wordsOf(secondNode);
-      seen.wantGrewWords = t("worker.focusCalls", "도구 호출 {{n}}회", { n: 3 });
-      seen.grewHidden = hiddenRows();
-      // 조용한 폴은 아무것도 쓰지 않는다.
+      seen.wantGrewWords = t("worker.focusCalls", "도구 {{n}}개", { n: 3 });
       const watch = new MutationObserver(() => {});
       watch.observe(list, { childList: true, subtree: true, characterData: true, attributes: true });
       paintWorkerView(tab);
       seen.quietMutations = watch.takeRecords().length;
       watch.disconnect();
-
-      // 결과가 합류하면 그 묶음의 계수가 살아 있는 쪽에서 끝난 쪽으로 옮겨 간다.
+      // 열어 둔 알약에는 나중 걸음이 그 자리에서 이어진다.
+      capOf(secondNode).click();
       holdHelperTurns(tab.worker.helper, [
         { role: "tool_result", text: "done", tool: { call_id: "c", is_error: false } },
         { role: "tool_result", text: "ok", tool: { call_id: "d", is_error: false } },
@@ -56556,21 +56527,23 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       ]);
       paintWorkerView(tab);
       seen.settledWords = wordsOf(secondNode);
-      seen.wantSettledWords = t("worker.focusCalls", "도구 호출 {{n}}회", { n: 3 }) +
-        t("worker.focusFailed", " · 실패 {{n}}", { n: 1 });
+      seen.wantSettledWords = `${t("worker.focusCalls", "도구 {{n}}개", { n: 3 })} · ${failed(1)}`;
       seen.settledLive = secondNode.classList.contains("is-live");
+      seen.openRowsSettled = [...secondNode.querySelectorAll(":scope > .helper-group-body > .is-tool")]
+        .map((row) => (row.classList.contains("is-live") ? "live" : row.classList.contains("is-failed") ? "failed" : "done")).join(",");
+      capOf(secondNode).click();
 
-      // (e) 답이 오면 묶음이 닫히고, 다음 도구 턴은 새 묶음이다.
+      // (d) 답이 오면 알약이 닫히고, 다음 도구 턴은 새 알약이다.
       holdHelperTurns(tab.worker.helper, [
         { role: "assistant", text: "끝났습니다." },
         { role: "tool", text: "Read · /repo/d.rs", tool: { call_id: "f", name: "Read", kind: "read", is_error: false } },
       ]);
       paintWorkerView(tab);
-      seen.afterAnswerGroups = groups().length;
-      seen.thirdWords = wordsOf(groups()[2]);
-      seen.wantThirdWords = t("worker.focusCalls", "도구 호출 {{n}}회", { n: 1 });
+      seen.afterAnswerPills = pills().length;
+      seen.thirdWords = wordsOf(pills()[2]);
+      seen.wantThirdWords = t("worker.stepRun", "{{kind}} {{n}}개", { kind: t("worker.stepRead", "파일 읽기"), n: 1 });
 
-      // (f) 상한을 넘겨 앞이 잘려도 계수가 맞고 빈 묶음이 남지 않는다.
+      // (e) 상한을 넘겨 앞이 잘려도 빈 알약이 남지 않고, 알약의 말은 남은 구성원의 수다.
       const flood = [];
       for (let at = 0; at < 420; at += 1) {
         flood.push({ role: "tool", text: `Read · /repo/${at}.rs`,
@@ -56579,47 +56552,28 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       }
       holdHelperTurns(tab.worker.helper, flood);
       paintWorkerView(tab);
-      const capped = groups();
-      seen.cappedRows = list.querySelectorAll(":scope > [data-turn]").length;
-      seen.cappedTurns = tab.worker.helper.turns.length;
-      // 남은 묶음은 저마다 구성원을 갖고, 계수는 그 구성원 수와 같다.
-      seen.cappedHonest = capped.length > 0 && capped.every((group) => {
-        let members = 0;
-        let calls = 0;
-        let failed = 0;
-        let live = 0;
-        let row = group.nextElementSibling;
-        while (row && row.__group === group) {
-          members += 1;
-          if (row.classList.contains("is-tool")) {
-            calls += 1;
-            if (row.classList.contains("is-failed")) failed += 1;
-            if (row.classList.contains("is-live")) live += 1;
-          }
-          row = row.nextElementSibling;
-        }
-        return members > 0 && group.__calls === calls &&
-          group.__failed === failed && group.__live === live;
-      });
+      const held = tab.worker.helper.turns;
+      const capped = pills();
+      seen.cappedTurns = held.length;
+      seen.cappedHonest = capped.length > 0 && capped.every((group) => group.__members.length > 0 &&
+        group.__members.every((turn) => turn.seq >= held[0].seq) &&
+        group.dataset.turn === String(group.__members.at(-1).seq));
       seen.cappedWords = wordsOf(capped.at(-1));
-      seen.wantCappedWords = t("worker.focusCalls", "도구 호출 {{n}}회", { n: capped.at(-1).__calls });
-      seen.cappedAllHidden = hiddenRows() === list.querySelectorAll(":scope > .helper-turn.is-grouped").length;
+      seen.wantCappedWords = t("worker.stepRun", "{{kind}} {{n}}개", { kind: t("worker.stepRead", "파일 읽기"), n: capped.at(-1).__members.length });
+      seen.cappedRows = stepRows();
 
-      // (g) 끄면 묶음도 숨은 행도 없다 — 목록의 열쇠는 있던 턴의 것이고, 같은
-      // 종류로 끝난 걸음들은 다시 한 줄로 접힌다(집중 보기가 켜진 동안은 접히지
-      // 않는다).
-      const keysWhileOn = keys().split(",");
+      // (f) 토글을 켜면 걸음을 모두 펼친 타임라인이 그 자리에서 서고 — 끝난 같은 종류는
+      // 한 줄로 접힌다 — 끄면 알약으로 돌아온다.
       button.click();
       await new Promise((done) => setTimeout(done, 80));
-      seen.savedBack = JSON.stringify(saved);
-      seen.backGroups = groups().length;
-      seen.backHidden = hiddenRows();
-      const keysBack = keys().split(",");
-      seen.backKeys = keysBack.at(-1) === keysWhileOn.at(-1) &&
-        keysBack.every((key, at) => keysWhileOn.includes(key) && (at === 0 || Number(keysBack[at - 1]) < Number(key)));
-      seen.backFolded = keysBack.length < keysWhileOn.length &&
-        list.querySelectorAll(":scope > .helper-turn.is-run").length >= 1;
-      seen.backPressed = button.getAttribute("aria-pressed");
+      seen.timelinePressed = button.getAttribute("aria-pressed");
+      seen.timelinePills = pills().length;
+      seen.timelineRuns = list.querySelectorAll(":scope > .helper-turn.is-run").length;
+      button.click();
+      await new Promise((done) => setTimeout(done, 80));
+      seen.saved = JSON.stringify(saved);
+      seen.backPills = pills().length;
+      seen.backRows = stepRows();
 
       tell("hook:subagent", { term, rows: [] });
       tell("term:exited", { term });
@@ -56630,28 +56584,30 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       return seen;
     });
     ok(
-      "focus view is off until the head's toggle writes the one global setting; on, a turn's tool work stands behind one summary — `n tool calls · m failed` with the group's own dot, the live call named beside it — its members hidden in place with every `data-turn` and its identity untouched, the cap opens and closes that group alone, a poll that brings more calls grows the SAME node and a quiet poll writes nothing, an answer closes the group and the next call opens a new one, the 400 cap leaves no empty group behind, and turning it off returns the whole transcript — the settled steps of one kind folded into one line again",
-      seen.offGroups === 0 && seen.offHidden === 0 && seen.offPressed === "false" &&
-        seen.buttonNamed &&
-        seen.saved === JSON.stringify([{ on: true }]) && seen.onPressed === "true" &&
-        seen.onGroups === 2 &&
+      "the tool work between two answers is one pill by default — 「도구 2개 · 실패 1」 with its state's dot, the call out named beside it — and no step has a row until its pill opens (t-81525 B1·B2)",
+      seen.buttonNamed && seen.pressed === "false" && seen.pills === 2 && seen.rowsFolded === 0 &&
         seen.firstWords === seen.wantFirstWords && seen.firstFailed && seen.firstDot &&
         seen.secondWords === seen.wantSecondWords && seen.secondLive && seen.secondDot &&
-        seen.secondLiveWords === seen.wantSecondLiveWords &&
-        seen.onHidden === 4 && seen.hiddenTakeNoRoom && seen.capsStand &&
-        seen.keysAfter === seen.keysBefore &&
-        seen.capExpanded === "false" && seen.capNamed &&
-        seen.openedExpanded === "true" && seen.openedNamed &&
-        seen.openedHidden === 1 && seen.closedHidden === 4 &&
-        seen.grewSameNode && seen.grewWords === seen.wantGrewWords && seen.grewHidden === 6 &&
-        seen.quietMutations === 0 &&
-        seen.settledWords === seen.wantSettledWords && !seen.settledLive &&
-        seen.afterAnswerGroups === 3 && seen.thirdWords === seen.wantThirdWords &&
-        seen.cappedTurns === 400 && seen.cappedRows === 400 && seen.cappedHonest &&
-        seen.cappedWords === seen.wantCappedWords && seen.cappedAllHidden &&
-        seen.savedBack === JSON.stringify([{ on: true }, { on: false }]) &&
-        seen.backGroups === 0 && seen.backHidden === 0 && seen.backKeys && seen.backFolded &&
-        seen.backPressed === "false",
+        seen.secondLiveWords === seen.wantSecondLiveWords && seen.keys === seen.wantKeys,
+      JSON.stringify(seen),
+    );
+    ok(
+      "a pill is a button that opens to its steps, built then, and closing it lets them go; a pill that grows is the same node, a quiet poll writes nothing, and an open pill's steps follow their results",
+      seen.capIsButton && seen.openedExpanded === "true" && seen.openedRows === 3 && seen.closedExpanded === "false" &&
+        seen.closedRows === 0 && seen.grewSameNode && seen.grewWords === seen.wantGrewWords && seen.quietMutations === 0 &&
+        seen.settledWords === seen.wantSettledWords && !seen.settledLive && seen.openRowsSettled === "done,done,failed",
+      JSON.stringify(seen),
+    );
+    ok(
+      "an answer closes the pill and the next call opens a new one; the 400 cap leaves no empty pill and each says the members it still holds",
+      seen.afterAnswerPills === 3 && seen.thirdWords === seen.wantThirdWords &&
+        seen.cappedTurns === 400 && seen.cappedHonest && seen.cappedWords === seen.wantCappedWords && seen.cappedRows === 0,
+      JSON.stringify(seen),
+    );
+    ok(
+      "the head's 「걸음 모두 펼치기」 writes the one global setting: on, every step stands on the timeline (settled steps of one kind folded into one line); off, the pills are back",
+      seen.timelinePressed === "true" && seen.timelinePills === 0 && seen.timelineRuns >= 1 &&
+        seen.saved === JSON.stringify([{ on: true }, { on: false }]) && seen.backPills >= 1 && seen.backRows === 0,
       JSON.stringify(seen),
     );
   } finally {

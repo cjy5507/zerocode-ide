@@ -138,7 +138,7 @@ const BOOT = {
     },
   },
   diff_side_by_side: true,
-  conversation_focus_view: false,
+  conversation_timeline_view: false,
   terminal_prefs: {
     font_size: 14,
     font_family: "",

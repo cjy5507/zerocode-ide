@@ -1009,10 +1009,9 @@ function syncHelperTasks(list, run, now = Date.now()) {
  * no count, no numbering, never the `activeForm`, and no result line (the
  * list says what the result would). Every call is its own row with the whole
  * list as that call left it; nothing is updated in place — the session's
- * newest list (`todos`) is kept by the extension but drawn nowhere else. In
- * the Focus view the newest list stands out of its fold (`ew0`): the newest
- * call that has not failed — out or back — and none when that call emptied
- * the list. Which tool is the todo tool is the catalog's fact (`todo_tool`):
+ * newest list (`todos`) is kept by the extension but drawn nowhere else; on
+ * the folded page it is the state line over the composer that says it
+ * (`paintChatStack`). Which tool is the todo tool is the catalog's fact (`todo_tool`):
  * a CLI that names none keeps its generic row, and so does a call whose
  * input is not a list, as the extension's falls back to its generic body. */
 function todosOf(turn, agent) {
@@ -1060,35 +1059,6 @@ function dressTodoRow(row, turn, run) {
   if (row.__todos === null) return false;
   row.classList.add("is-todo");
   return true;
-}
-
-/* In the Focus view the newest todo list stands out of its fold, its row
- * open; the one before it goes back in (and closes, if it was this that
- * opened it). Asked once per paint, and it touches the page only when the one
- * that stands changes. */
-function standLatestTodo(list, focus) {
-  const newest = focus ? [...list.querySelectorAll(":scope > .helper-turn.is-todo:not(.is-failed)")].at(-1) : null;
-  const latest = newest?.__todos?.length > 0 ? newest : null;
-  const before = list.__standingTodo ?? null;
-  if (before === latest) return;
-  if (before) {
-    before.__standing = false;
-    before.classList.remove("is-standing");
-    if (before.__group) writeHidden(before, !before.__group.__open);
-    if (before.__openedByFocus) {
-      before.__openedByFocus = false;
-      before.open = false;
-    }
-  }
-  list.__standingTodo = latest;
-  if (!latest) return;
-  latest.__standing = true;
-  latest.classList.add("is-standing");
-  writeHidden(latest, false);
-  if (!latest.open) {
-    latest.__openedByFocus = true;
-    latest.open = true;
-  }
 }
 
 /* ---- images (t-6323 A8) ------------------------------------------------------
@@ -2070,8 +2040,8 @@ function askShelfAgain(list) {
  * steps holds a line each and not a body each. Steps of one kind in a row
  * (nothing said between them) fold into one row that opens to its members; a
  * step that failed is never folded, and one still out waits for its answer
- * before it may join. The Focus view folds by turn instead and keeps its rows
- * single (`applyFocusView`). */
+ * before it may join. The folded page (t-81525 B1) holds a turn's steps in
+ * one pill instead and builds them when it opens (`holdActivityTurn`). */
 
 /* A kind's words and the family the head counts it in (t-22100), keyed by the
  * words the core reduces a tool's name to (`hook::Tool::as_str`): a turn
@@ -2617,48 +2587,10 @@ function foldSettledStep(row, run) {
   }
 }
 
-/* The Focus view folds by turn and keeps its rows single: turned on, every
- * row of steps gives its members back as rows; turned off, they fold again.
- * What a reader had of a row of steps is kept: a member that was open comes
- * back open, and the row that stands for where the keyboard was — the member
- * it was on or in, else the first — is returned, for `landFocus` once the
- * Focus view has laid its folds. */
-function dissolveSteps(list, run) {
-  const held = document.activeElement;
-  let lands = null;
-  for (const row of list.querySelectorAll(":scope > .is-run")) {
-    const members = [...(row.querySelector(":scope > .helper-run-body")?.children ?? [])];
-    const rows = row.__members.map((turn) => stepRowNode(run, turn, -1));
-    row.replaceWith(...rows);
-    members.forEach((member, at) => {
-      if (!member.open) return;
-      rows[at].open = true;
-      paintStepBody(rows[at], run);
-    });
-    if (row.contains(held)) lands = rows[Math.max(0, members.findIndex((member) => member.contains(held)))];
-  }
-  return lands;
-}
-
 /* The keyboard, put back on what stands for `row` now that the row was
- * rebuilt: its line — or, when the Focus view has folded the row away under a
- * head, that head, the one thing on screen that stands for it. */
+ * rebuilt: its line. */
 function landFocus(row) {
-  const line = row.hidden ? row.__group?.firstElementChild : row.firstElementChild;
-  line?.focus({ preventScroll: true });
-}
-
-function regroupSteps(list, run) {
-  let before = null;
-  for (const row of [...list.querySelectorAll(":scope > .helper-turn")]) {
-    const kind = row.__kind;
-    if (before && kind !== undefined && stepFolds(row, kind) && stepReceives(before, kind)) {
-      before = absorbStep(run, before, row.__turn);
-      dropStep(row);
-      continue;
-    }
-    before = row.classList.contains("is-tool") ? row : null;
-  }
+  row.firstElementChild?.focus({ preventScroll: true });
 }
 
 /* ---- a thought is one line (t-15682) -----------------------------------------
@@ -3280,7 +3212,8 @@ function paintTurnRail(rail) {
  * what a step or a thought was (not a shell step's lines), an answer's first
  * words. */
 function railRowWords(row) {
-  const words = row.querySelector(":scope > .helper-step-line > .helper-step-what") ?? row.querySelector(":scope > .helper-said");
+  const words = row.querySelector(":scope > .helper-step-line > .helper-step-what") ?? row.querySelector(":scope > .helper-said") ??
+    row.querySelector(":scope > .helper-group-cap > .helper-group-words");
   return stepFirstLine(words?.textContent ?? row.getAttribute("aria-label") ?? "");
 }
 

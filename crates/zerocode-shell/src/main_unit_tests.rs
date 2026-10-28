@@ -21734,13 +21734,11 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "worker.thinking",
         // Every row announces what it is (2.1.272): a tool row by its tool.
         "worker.toolRow",
-        // Focus view (2.1.221): the summary's words, and the toggle's name.
-        "worker.focusView",
+        // The folded page's pill (t-81525 B1): its words, and the toggle's
+        // name for the whole timeline.
+        "worker.timelineView",
         "worker.focusCalls",
-        "worker.focusFailed",
         "worker.focusThinking",
-        "worker.focusExpand",
-        "worker.focusCollapse",
         // What a row folds (t-6323): the door's two words.
         "worker.showMore",
         "worker.showLess",
@@ -21909,19 +21907,21 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
                 "worker.openInApp",
             ],
         ),
-        // The summary a folded turn wears, and the cap's two names — all of
-        // them written from the group's own counters, in one place.
+        // The words a pill wears, counted from its members' turns in one
+        // place (t-81525 B1).
         (
-            "function paintFocusGroup(group) {",
+            "function paintActivityPill(group, run, spoken) {",
             vec![
                 "worker.focusCalls",
-                "worker.focusFailed",
                 "worker.focusThinking",
-                "worker.focusExpand",
-                "worker.focusCollapse",
+                "worker.stepRun",
+                "worker.tallyFailed",
             ],
         ),
-        ("function focusViewButtonNode() {", vec!["worker.focusView"]),
+        (
+            "function timelineViewButtonNode() {",
+            vec!["worker.timelineView"],
+        ),
     ];
     for (opens, wanted) in reads {
         let drawing = block_after(window, opens);
