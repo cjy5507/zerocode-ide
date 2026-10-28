@@ -8,7 +8,12 @@
 //! at all: its reply is the bytes it always was, and the process table is not
 //! read for it.
 
-use zerocode_core::shell_rule::kill::{ProcessTable, ProtectedRoot};
+use std::sync::Arc;
+use std::time::Duration;
+
+use zerocode_core::AgentKind;
+use zerocode_core::hook_continuation::{self, PreToolDecision};
+use zerocode_core::shell_rule::kill::{self, KillCall, KillVerdict, ProcessTable, ProtectedRoot};
 
 /// What the window knows of its panes' processes, asked only for a command
 /// that would signal something.
@@ -26,4 +31,83 @@ pub struct KillRoots {
     /// The pane's own process, `None` when the window does not know it.
     pub caller: Option<u32>,
     pub protected: Vec<ProtectedRoot>,
+}
+
+/// A knock the guard has something to say about.
+pub(crate) struct Pending {
+    decision: PreToolDecision,
+    calls: Vec<KillCall>,
+}
+
+/// The kill calls a knock carries, when it is `agent`'s pre-tool event, its
+/// hook can refuse, and its command would signal something.
+pub(crate) fn pending(agent: AgentKind, event: &str, payload: &str) -> Option<Pending> {
+    let decision = hook_continuation::pre_tool_decision(agent)?;
+    if super::normalized_hook_event(event) != super::normalized_hook_event(decision.event)
+        || !kill::might_signal(payload)
+    {
+        return None;
+    }
+    let command = zerocode_core::hook_guard::command_about(event, payload)?;
+    let calls = kill::kill_calls(&command);
+    (!calls.is_empty()).then_some(Pending { decision, calls })
+}
+
+/// The reply for `pending`: judged on a blocking thread — the table is a
+/// process listing — within `wall`, and asked of a person when it is not.
+pub(crate) async fn reply(
+    witness: Arc<dyn KillWitness>,
+    pane_key: String,
+    pending: Pending,
+    wall: Duration,
+) -> Option<serde_json::Value> {
+    let Pending { decision, calls } = pending;
+    let written = calls
+        .iter()
+        .map(|call| call.written.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let judging = tokio::task::spawn_blocking(move || {
+        let roots = witness.roots(&pane_key);
+        let table = if calls.iter().any(KillCall::needs_table) {
+            witness.table()
+        } else {
+            ProcessTable::new(Vec::new())
+        };
+        kill::judge_kill(&calls, &table, roots.caller, &roots.protected)
+    });
+    let verdict = match tokio::time::timeout(wall, judging).await {
+        Ok(Ok(verdict)) => verdict,
+        _ => KillVerdict::Ask {
+            reason: format!(
+                "`{written}` could not be checked within {} ms; a person should say yes first",
+                wall.as_millis()
+            ),
+        },
+    };
+    answer(decision, &verdict)
+}
+
+/// The hook reply a verdict takes for this provider: nothing for a call
+/// that may run, so its reply stays what it was.
+pub(crate) fn answer(
+    decision: PreToolDecision,
+    verdict: &KillVerdict,
+) -> Option<serde_json::Value> {
+    let (word, reason) = match verdict {
+        KillVerdict::Allow => return None,
+        KillVerdict::Ask { reason } if decision.asks => ("ask", reason.clone()),
+        KillVerdict::Ask { reason } => (
+            "deny",
+            format!("refused, since this agent's hook cannot put a question to a person: {reason}"),
+        ),
+        KillVerdict::Deny { reason } => ("deny", reason.clone()),
+    };
+    Some(serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": decision.event,
+            "permissionDecision": word,
+            "permissionDecisionReason": reason,
+        }
+    }))
 }

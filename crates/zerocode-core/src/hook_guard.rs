@@ -643,8 +643,28 @@ fn command_in(tree: &Value) -> Option<String> {
 /// "-lc", "pkill …"]` reads as the shell string it hands on.
 #[must_use]
 pub fn command_about(event: &str, payload: &str) -> Option<String> {
-    let _ = (event, payload);
-    None
+    let parsed = HookPayload::of(payload);
+    let activity = hook::activity_of_parsed(event, &parsed)?;
+    if activity.phase != Phase::Started || activity.verb != Tool::Bash {
+        return None;
+    }
+    let tree = parsed.tree_or_null();
+    let held = hook::INPUT_KEYS
+        .iter()
+        .find_map(|key| tree.get(*key))
+        .and_then(|input| input.get("command").or_else(|| input.get("cmd")))
+        .or_else(|| tree.get("command"))?;
+    let command = match held {
+        Value::String(text) => text.clone(),
+        Value::Array(argv) => argv
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|word| format!("'{}'", word.replace('\'', r"'\''")))
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => return None,
+    };
+    (!command.trim().is_empty()).then_some(command)
 }
 
 /// The words an edit or a write carries out.

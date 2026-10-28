@@ -117,8 +117,17 @@ pub struct PreToolDecision {
 /// how. `None` for every provider whose behaviour has not been measured.
 #[must_use]
 pub const fn pre_tool_decision(agent: AgentKind) -> Option<PreToolDecision> {
-    let _ = agent;
-    None
+    match agent {
+        AgentKind::Claude => Some(PreToolDecision {
+            event: "PreToolUse",
+            asks: true,
+        }),
+        AgentKind::Codex => Some(PreToolDecision {
+            event: "PreToolUse",
+            asks: false,
+        }),
+        _ => None,
+    }
 }
 
 /// Whether this `Stop` payload says the turn is already a hook's continuation.

@@ -138,6 +138,7 @@ mod jev_scope;
 mod jira_attachments;
 mod jira_store;
 mod keyboard_input_source;
+mod kill_witness;
 mod land_batch;
 mod land_check;
 mod landing_watch_sweep;
@@ -3633,7 +3634,7 @@ fn main() -> ExitCode {
             boot_timeline::mark(boot_timeline::Phase::LedgerReady);
             crumbs::record("boot", format_args!("hooks"));
             if let Some((events, teams, browser, computer, federation)) =
-                hooks::start(&local_data_root)
+                hooks::start(&local_data_root, handle.clone())
             {
                 let listener = handle.clone();
                 tauri::async_runtime::spawn(async move { hook_loop(listener, events).await });
