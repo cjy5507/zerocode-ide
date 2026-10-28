@@ -2940,7 +2940,19 @@ pub(super) fn answer_team_command(
     // would receive an effect authorized against the incarnation it replaced.
     let window = TeamWindow { app: app.clone() };
     if speaks_orchestration {
-        let verb = request.argv.first().map(String::as_str);
+        // A text that came as a file is read once, here, so the readers below that look at the
+        // verb's own words (a worker's `--body` verdict) read what the verb read (t-80615).
+        let argv = match orchestration::with_text_files(&request.argv) {
+            Ok(expanded) => expanded,
+            Err(answer) => {
+                return TeamCommandResult {
+                    answer,
+                    cleanup: None,
+                };
+            }
+        };
+        let argv: &[String] = &argv;
+        let verb = argv.first().map(String::as_str);
         let term = {
             let teams = agent_teams::teams();
             teams
@@ -2956,7 +2968,7 @@ pub(super) fn answer_team_command(
         let bound_run = matches!(verb, Some("worker-start" | "delegate" | "dispatch"))
             .then(|| orchestration::bound_run(&request.team_id, &request.pane, actor.as_deref()))
             .flatten();
-        let completed = is_worker_done(&request.argv)
+        let completed = is_worker_done(argv)
             .then(|| orchestration::seat_assignment(&request.team_id, &request.pane))
             .flatten();
         let isolated = term.and_then(|term| state.isolated_worker_terms().get(&term).cloned());
@@ -2977,14 +2989,14 @@ pub(super) fn answer_team_command(
             &request.team_id,
             &request.pane,
             &request.pane_token,
-            &request.argv,
+            argv,
             now_epoch_ms(),
         );
         // A worker that reported done has no more use for what it borrowed
         // (t-6336): the devices the emulator door booted for its pane go
         // down now, not when somebody notices the memory they hold.
         if answer.exit_code == 0
-            && is_worker_done(&request.argv)
+            && is_worker_done(argv)
             && let Some(term) = term
         {
             crate::emulator::borrower_gone(term, crate::emulator::LoanEnd::WorkerDone);
@@ -3003,7 +3015,7 @@ pub(super) fn answer_team_command(
             observe_linked_orchestration(
                 app,
                 verb,
-                &request.argv,
+                argv,
                 &answer,
                 caller_identity.as_ref(),
                 bound_run.as_deref(),
@@ -3012,7 +3024,7 @@ pub(super) fn answer_team_command(
         }
         let cleanup = if answer.exit_code == 0
             && completed.as_ref().is_some_and(|seat| seat.auto_release)
-            && orchestration_arg(&request.argv, "--body")
+            && orchestration_arg(argv, "--body")
                 .and_then(|body| zerocode_core::orchestration::worker_done_succeeded(body).ok())
                 == Some(true)
         {

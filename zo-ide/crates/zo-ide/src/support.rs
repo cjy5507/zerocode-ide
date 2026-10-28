@@ -286,6 +286,34 @@ impl Drop for EnvVarGuard {
     }
 }
 
+/// A home of the test's own for everything zo reads from one: `HOME`, and
+/// zo's home in it (`ZO_CONFIG_HOME`, created; `ZO_HOME` unset), which holds
+/// the settings, the permission rules, the trust store and the person's own
+/// commands. The person's files cannot change the test's answer while it
+/// lives — hold `crate::test_env_lock()` as long. Both go when it drops.
+#[cfg(test)]
+pub(crate) struct IsolatedHome {
+    pub(crate) zo_home: std::path::PathBuf,
+    _root: tempfile::TempDir,
+    _env: [EnvVarGuard; 3],
+}
+
+#[cfg(test)]
+impl IsolatedHome {
+    pub(crate) fn new() -> Self {
+        let root = tempfile::tempdir().expect("a test home's root");
+        let home = root.path().join("home");
+        let zo_home = home.join(".zo");
+        std::fs::create_dir_all(&zo_home).expect("zo's home");
+        let env = [
+            EnvVarGuard::set("HOME", home.to_str()),
+            EnvVarGuard::set("ZO_CONFIG_HOME", zo_home.to_str()),
+            EnvVarGuard::set("ZO_HOME", None),
+        ];
+        Self { zo_home, _root: root, _env: env }
+    }
+}
+
 /// 테스트용 임시 디렉터리 — 만들어 준 채로 돌려준다.
 ///
 /// 일곱 벌이 있었고 규약이 갈렸다: 만들어 주는 판과 안 만들어 주는 판, 유일성을

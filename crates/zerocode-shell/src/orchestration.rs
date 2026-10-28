@@ -11184,6 +11184,17 @@ fn run_seated(
     }) {
         return refused("coordinator handover requires a human declaration through the window");
     }
+    /* A text that came as a file is read here, before anything reads the verb.
+     *
+     * The briefing a shell would have run (t-80615) never reaches this far as
+     * words: it is a path, and the window opens the file. Every reader below —
+     * the project gate, the commits, the difficulty origin, the plan, the
+     * receipt's fingerprint — sees `--prompt <text>` as if it had been typed. */
+    let argv = match with_text_files(argv) {
+        Ok(expanded) => expanded,
+        Err(answer) => return answer,
+    };
+    let argv: &[String] = &argv;
     if let Some(verb) = argv.first().filter(|_| speaks_here(argv)) {
         crate::crumbs::record("ledger", format_args!("{verb}"));
     }
@@ -14223,6 +14234,15 @@ pub(crate) fn spawn_federation_relay() {
             }
         })
         .ok();
+}
+
+/// A verb's text that came as a file, read here (t-80615), or the refusal in the window's own
+/// words. The one road to [`zerocode_core::orchestration::text_file::expand`] from the window, for
+/// the door that answers a verb and for the readers beside it that look at the verb's own words.
+pub(super) fn with_text_files(
+    argv: &[String],
+) -> Result<std::borrow::Cow<'_, [String]>, zerocode_hookd::TeamAnswer> {
+    zerocode_core::orchestration::text_file::expand(argv).map_err(refused)
 }
 
 /// A refusal in this road's own name, said the way the shim expects.

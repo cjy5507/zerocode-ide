@@ -19,7 +19,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,7 +28,11 @@ import { Watch } from "./watch.mjs";
 import { madeOfSecrets, secretFacts } from "./scene-kit.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SKILL = await readFile(join(HERE, "../../../skills/computer-use/SKILL.md"), "utf8");
+// The guide as an agent reads it: SKILL.md and the reference files beside it.
+const SKILL_DIR = join(HERE, "../../../skills/computer-use");
+const SKILL = (await Promise.all(
+  (await readdir(SKILL_DIR)).filter((file) => file.endsWith(".md")).sort().map((file) => readFile(join(SKILL_DIR, file), "utf8")),
+)).join("\n");
 
 const results = [];
 async function test(name, run) {

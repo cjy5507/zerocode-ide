@@ -1,5 +1,47 @@
 use std::sync::OnceLock;
 
+/// The orchestration guide as an agent reads it: `SKILL.md` and the reference
+/// files beside it, which hold the text it points to word for word.
+pub(crate) const ORCHESTRATION_GUIDE: &str = concat!(
+    include_str!("../../../../skills/orchestration/SKILL.md"),
+    "\n",
+    include_str!("../../../../skills/orchestration/briefing.md"),
+    "\n",
+    include_str!("../../../../skills/orchestration/handover.md"),
+    "\n",
+    include_str!("../../../../skills/orchestration/landing.md"),
+    "\n",
+    include_str!("../../../../skills/orchestration/news.md"),
+    "\n",
+    include_str!("../../../../skills/orchestration/recovery.md"),
+    "\n",
+    include_str!("../../../../skills/orchestration/verbs.md"),
+    "\n",
+    include_str!("../../../../skills/orchestration/workers.md"),
+);
+
+/// The computer-use guide as an agent reads it: `SKILL.md` and the reference
+/// files beside it, which hold the text it points to word for word.
+pub(crate) const COMPUTER_USE_GUIDE: &str = concat!(
+    include_str!("../../../../skills/computer-use/SKILL.md"),
+    "\n",
+    include_str!("../../../../skills/computer-use/app-and-desktop.md"),
+    "\n",
+    include_str!("../../../../skills/computer-use/batch-hearing-qa.md"),
+    "\n",
+    include_str!("../../../../skills/computer-use/browser-tabs.md"),
+    "\n",
+    include_str!("../../../../skills/computer-use/handoff-recipes.md"),
+    "\n",
+    include_str!("../../../../skills/computer-use/observation.md"),
+    "\n",
+    include_str!("../../../../skills/computer-use/permissions-windows.md"),
+    "\n",
+    include_str!("../../../../skills/computer-use/terminals.md"),
+    "\n",
+    include_str!("../../../../skills/computer-use/web-forms.md"),
+);
+
 /// All of the backend shipped by this window, even after it is split into files.
 pub(crate) const BACKEND_PARTS: &[(&str, &str)] = &[
     (

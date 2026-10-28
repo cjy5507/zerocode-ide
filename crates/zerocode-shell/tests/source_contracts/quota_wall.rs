@@ -408,7 +408,7 @@ fn the_handover_walk_is_three_argv_steps_through_the_one_door_in_order() {
 /// `help`.
 #[test]
 fn the_orchestration_guide_teaches_the_handover_order_and_its_flags() {
-    let skill = include_str!("../../../../skills/orchestration/SKILL.md");
+    let skill = super::support::ORCHESTRATION_GUIDE;
     for needed in [
         "--inherit-checkout",
         "handover-policy --on-quota-wall <agent[:model[:effort]]>",
@@ -586,7 +586,7 @@ fn the_transient_error_continuation_rides_the_stall_sweep_through_the_pointers_d
 /// uses, beside the wall's.
 #[test]
 fn the_orchestration_guide_teaches_the_transient_error_order() {
-    let skill = include_str!("../../../../skills/orchestration/SKILL.md");
+    let skill = super::support::ORCHESTRATION_GUIDE;
     for needed in [
         "handover-policy --on-transient-error resume",
         "`resumed` receipt",
@@ -609,7 +609,7 @@ fn the_orchestration_guide_teaches_the_transient_error_order() {
 /// declares, the stop's own reason, and what never to do about a decline.
 #[test]
 fn the_orchestration_guide_teaches_the_classifier_decline_order() {
-    let skill = include_str!("../../../../skills/orchestration/SKILL.md");
+    let skill = super::support::ORCHESTRATION_GUIDE;
     for needed in [
         "`classifier_declined`",
         "`model_deviated`",

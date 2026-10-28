@@ -994,7 +994,7 @@ fn running_background_agent_result(
             "{BACKGROUND_AGENT_NOTE} The turn that was waiting for it stopped, but the agent keeps running."
         ),
     };
-    to_pretty_json(json!({
+    let mut result = json!({
         "agentId": manifest.agent_id,
         "name": manifest.name,
         "subagentType": manifest.subagent_type,
@@ -1002,7 +1002,13 @@ fn running_background_agent_result(
         "background": true,
         "outputFile": manifest.output_file,
         "note": note,
-    }))
+    });
+    // A ledger worker still starting: the receipt names its task and the
+    // worker-start's request; the binding or the failure arrives as its completion.
+    if let Some(start) = &manifest.lifecycle.ledger_start {
+        result["ledgerStart"] = json!(start);
+    }
+    to_pretty_json(result)
 }
 
 fn finish_blocking_agent_call(

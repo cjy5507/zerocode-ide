@@ -170,6 +170,15 @@ pub fn estimate_session_tokens(session: &Session) -> usize {
     session.messages.iter().map(estimate_message_tokens).sum()
 }
 
+/// The same estimate over a run of messages — what a transcript gained after
+/// a request the provider has already counted.
+pub(crate) fn estimate_messages_tokens(messages: &[ConversationMessage]) -> u64 {
+    messages
+        .iter()
+        .map(|message| u64::try_from(estimate_message_tokens(message)).unwrap_or(u64::MAX))
+        .sum()
+}
+
 /// At least this many messages must remain summarizable after the preserved
 /// tail is carved off, or a token-budgeted tail could swallow the whole
 /// transcript and turn the round into a no-op that immediately re-triggers.
@@ -610,6 +619,8 @@ fn retained_cache_quote(plan: &CompactionPlan, after: usize) -> MicrocompactQuot
         clearable_tokens: u64::try_from(before.saturating_sub(after)).unwrap_or(u64::MAX),
         rebilled_tokens: frontier.map_or(0, |index| original[index..].iter().map(estimated_message_tokens).sum()),
         frontier,
+        resent_tokens: resent_tokens(original, frontier, &[]),
+        orphaned_thinking_tokens: orphaned_thinking_tokens(original, frontier, &[]),
     }
 }
 
@@ -2348,6 +2359,29 @@ pub fn microcompact_clearable_estimate(
 /// expensive one — and declines cheap tail trims that would have relieved the
 /// pressure for almost nothing, leaving the session to reach the far more
 /// expensive full compaction instead.
+///
+/// WHAT THE PROVIDER RE-WRITES (t-78937). `rebilled_tokens` is the suffix that
+/// CHANGED, and the paragraphs above price a firing by it; what the next
+/// request writes back into the cache is more, and does not depend on where
+/// the frontier sits. A cache entry exists only where an earlier request put a
+/// marker, and the conversation markers stand on the previous request's tail
+/// and on this request's tail (`mark_breakpoints_with_ttl`); the provider looks
+/// back about twenty blocks from a marker for an older entry and no further.
+/// The trim keeps the most recent results, so its frontier always sits further
+/// back than that — even a "tail" trim — and the request reads back only the
+/// system prompt and re-writes the whole conversation: 66 of 69 firings over
+/// 36 hours on this machine (2026-10-27/28, Opus 5.5) read 20k tokens or less
+/// back from the cache, the ones at message 2 and the ones mid-transcript
+/// alike. That is `resent_tokens`, and the priced rule weighs it.
+///
+/// A model that binds each thinking block to the prefix it was produced under
+/// (`thinking.block_binding`, Opus 5.5 and the 5.1 generation) loses every
+/// thinking block after the frontier as well: the provider drops them, unbilled,
+/// on this request and every later one. The same 69 firings shrank the billed
+/// context by 2.6 times what they cleared (median). That is
+/// `orphaned_thinking_tokens`, counted from the thinking text this transcript
+/// keeps — on the one firing checked, 0.6 of what the provider stopped billing,
+/// so it prices the drop low rather than high.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MicrocompactQuote {
     /// Tokens this firing would remove from every subsequent request.
@@ -2358,12 +2392,34 @@ pub struct MicrocompactQuote {
     pub rebilled_tokens: u64,
     /// Index of the earliest message the firing would rewrite.
     pub frontier: Option<usize>,
+    /// Tokens the next request writes back into the cache because of this
+    /// firing, counted before the clear: the whole conversation, less the
+    /// thinking an earlier firing already had the provider drop. Zero when
+    /// there is nothing to rewrite.
+    pub resent_tokens: u64,
+    /// Thinking at or after the frontier that the provider still reads, and
+    /// that a provider binding thinking to its prefix stops reading once this
+    /// firing changes that prefix.
+    pub orphaned_thinking_tokens: u64,
+}
+
+/// What reading and writing a cached prefix costs, each a multiple of the
+/// model's input price: the price table's read rate, and its write rate for
+/// the lifetime the conversation's markers actually ask for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CachePrices {
+    pub read: f64,
+    pub write: f64,
 }
 
 impl MicrocompactQuote {
     /// Whether the firing pays for itself within `payback_requests` more
     /// requests. A trim that rewrites nothing (`frontier` is `None`) costs no
     /// invalidation, so it is always worth running.
+    ///
+    /// Counts both sides in tokens, as if writing and reading a cached token
+    /// cost the same: the rule for a model the price table does not price,
+    /// and for the retained-original compaction.
     #[must_use]
     pub fn pays_back_within(self, payback_requests: u64) -> bool {
         self.clearable_tokens
@@ -2371,6 +2427,56 @@ impl MicrocompactQuote {
             .max(u64::from(self.frontier.is_none()) * u64::MAX)
             >= self.rebilled_tokens
     }
+
+    /// Tokens the firing takes off every request after it: what it clears,
+    /// and the orphaned thinking when the model drops thinking whose prefix
+    /// changed.
+    #[must_use]
+    pub fn gained_tokens(self, drops_orphaned_thinking: bool) -> u64 {
+        self.clearable_tokens
+            .saturating_add(u64::from(drops_orphaned_thinking) * self.orphaned_thinking_tokens)
+    }
+
+    /// How many requests after the firing it takes to pay for itself at
+    /// `prices`: `Some(0.0)` when it re-writes nothing, `None` when it saves
+    /// nothing on a request.
+    ///
+    /// Without the firing the next request reads the conversation back,
+    /// `resent × read`; with it the next request writes back what is left,
+    /// `(resent − gained) × write`, and every request reads `gained` fewer
+    /// tokens. Over `n` requests the firing saves `n × gained × read` and pays
+    /// `(resent − gained) × (write − read)` once.
+    #[must_use]
+    pub fn breakeven_requests(self, prices: CachePrices, drops_orphaned_thinking: bool) -> Option<f64> {
+        if self.frontier.is_none() {
+            return Some(0.0);
+        }
+        let gained = self.gained_tokens(drops_orphaned_thinking);
+        let premium = prices.write - prices.read;
+        let rewritten = self.resent_tokens.saturating_sub(gained);
+        if rewritten == 0 || premium <= 0.0 {
+            return Some(0.0);
+        }
+        if gained == 0 || prices.read <= 0.0 {
+            return None;
+        }
+        Some(token_count(rewritten) * premium / (token_count(gained) * prices.read))
+    }
+
+    /// Whether the firing pays for itself within `horizon_requests` at
+    /// `prices`.
+    #[must_use]
+    pub fn pays_back_at(self, prices: CachePrices, horizon_requests: f64, drops_orphaned_thinking: bool) -> bool {
+        self.breakeven_requests(prices, drops_orphaned_thinking)
+            .is_some_and(|requests| requests <= horizon_requests)
+    }
+}
+
+/// A token count as a float. Counts stay far below 2^52, where a float holds
+/// every integer exactly, so nothing is lost.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn token_count(tokens: u64) -> f64 {
+    tokens as f64
 }
 
 /// Price a microcompact firing on `session` without mutating anything.
@@ -2379,6 +2485,22 @@ pub fn microcompact_quote(
     session: &Session,
     keep_recent: usize,
     min_output_bytes: usize,
+) -> MicrocompactQuote {
+    microcompact_quote_after_drops(session, keep_recent, min_output_bytes, &[])
+}
+
+/// [`microcompact_quote`] on a transcript whose thinking in the stretches
+/// `dropped_thinking` the provider has already dropped (t-78937). An earlier
+/// firing changed the prefix every block there was produced under, and a
+/// model that binds thinking to its prefix drops such a block, unbilled, on
+/// every request after: this firing neither saves that thinking again nor
+/// writes it back into the cache.
+#[must_use]
+pub(crate) fn microcompact_quote_after_drops(
+    session: &Session,
+    keep_recent: usize,
+    min_output_bytes: usize,
+    dropped_thinking: &[std::ops::Range<usize>],
 ) -> MicrocompactQuote {
     let plan = plan_microcompact_clears(session, keep_recent, min_output_bytes);
     let frontier = mutation_frontier(&plan.tool_results, &plan.images).or_else(|| {
@@ -2397,27 +2519,80 @@ pub fn microcompact_quote(
         clearable_tokens: plan_estimated_tokens(session, &plan),
         rebilled_tokens: rebilled,
         frontier,
+        resent_tokens: resent_tokens(&session.messages, frontier, dropped_thinking),
+        orphaned_thinking_tokens: orphaned_thinking_tokens(&session.messages, frontier, dropped_thinking),
     }
+}
+
+/// The conversation the next request writes back into the cache when a
+/// firing rewrites anything at all — see [`MicrocompactQuote`] for why that is
+/// all of it — less the thinking the provider has already dropped.
+fn resent_tokens(
+    messages: &[ConversationMessage],
+    frontier: Option<usize>,
+    dropped_thinking: &[std::ops::Range<usize>],
+) -> u64 {
+    frontier.map_or(0, |_| {
+        messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| {
+                let dropped = dropped_thinking.iter().any(|stretch| stretch.contains(&index));
+                estimated_message_tokens(message)
+                    .saturating_sub(u64::from(dropped) * thinking_tokens(message))
+            })
+            .sum()
+    })
+}
+
+/// Thinking at or after `frontier` that the provider still reads, in the
+/// same unit as the rest of the quote.
+fn orphaned_thinking_tokens(
+    messages: &[ConversationMessage],
+    frontier: Option<usize>,
+    dropped_thinking: &[std::ops::Range<usize>],
+) -> u64 {
+    frontier.map_or(0, |frontier| {
+        messages
+            .iter()
+            .enumerate()
+            .skip(frontier)
+            .filter(|(index, _)| !dropped_thinking.iter().any(|stretch| stretch.contains(index)))
+            .map(|(_, message)| thinking_tokens(message))
+            .sum()
+    })
+}
+
+/// The thinking one stored message carries, in [`estimated_message_tokens`]'s
+/// unit.
+fn thinking_tokens(message: &ConversationMessage) -> u64 {
+    message
+        .blocks
+        .iter()
+        .filter(|block| matches!(block, ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }))
+        .map(estimated_block_tokens)
+        .sum()
 }
 
 /// Rough token size of one stored message, in the repo's `chars / 4` unit.
 fn estimated_message_tokens(message: &ConversationMessage) -> u64 {
-    message
-        .blocks
-        .iter()
-        .map(|block| match block {
-            ContentBlock::Text { text } => text.len() as u64 / 4,
-            ContentBlock::Thinking { thinking, .. } => thinking.len() as u64 / 4,
-            ContentBlock::RedactedThinking { data } => data.len() as u64 / 4,
-            ContentBlock::ToolUse { input, .. } => input.len() as u64 / 4,
-            ContentBlock::ToolResult { output, images, .. } => {
-                output.len() as u64 / 4 + images.len() as u64 * 1_600
-            }
-            // Same 1,600-token figure `plan_estimated_tokens` prices an image
-            // at, so the gain and the cost are quoted in one unit.
-            ContentBlock::Image { .. } => 1_600,
-        })
-        .sum()
+    message.blocks.iter().map(estimated_block_tokens).sum()
+}
+
+/// [`estimated_message_tokens`] of one block.
+fn estimated_block_tokens(block: &ContentBlock) -> u64 {
+    match block {
+        ContentBlock::Text { text } => text.len() as u64 / 4,
+        ContentBlock::Thinking { thinking, .. } => thinking.len() as u64 / 4,
+        ContentBlock::RedactedThinking { data } => data.len() as u64 / 4,
+        ContentBlock::ToolUse { input, .. } => input.len() as u64 / 4,
+        ContentBlock::ToolResult { output, images, .. } => {
+            output.len() as u64 / 4 + images.len() as u64 * 1_600
+        }
+        // Same 1,600-token figure `plan_estimated_tokens` prices an image
+        // at, so the gain and the cost are quoted in one unit.
+        ContentBlock::Image { .. } => 1_600,
+    }
 }
 
 /// Tier-1 context trim (Claude Code "microcompact" parity): replace the

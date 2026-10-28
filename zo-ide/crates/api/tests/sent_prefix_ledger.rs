@@ -205,7 +205,9 @@ async fn a_drop_the_server_rewrote_is_not_filed_as_an_unchanged_prefix() {
 /// The second request turns thinking off, so the client strips the replayed
 /// thinking block from the history it sends (`strip_thinking_blocks_when_disabled`)
 /// — after the fingerprints were taken, which therefore still see a pure
-/// append. The prefix hash at the marker both requests carry tells the truth.
+/// append. The prefix hash at the marker both requests carry tells the truth,
+/// and the request-parameter line in front of it (thinking itself changed)
+/// is the first change named (adversarial review W3, P3-3).
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn a_drop_after_the_client_rewrote_the_sent_bytes_names_the_first_changed_marker() {
@@ -255,6 +257,64 @@ async fn a_drop_after_the_client_rewrote_the_sent_bytes_names_the_first_changed_
         "bytes the client changed were filed as an unchanged prefix: {}",
         ledger.reason
     );
-    assert!(ledger.reason.contains("m2"), "the first changed marker is the shared one: {}", ledger.reason);
-    assert_eq!(ledger.rows[1]["prefix_changed_at"], "m2", "{}", ledger.rows[1]);
+    assert!(ledger.reason.contains("parameters"), "thinking changed first: {}", ledger.reason);
+    assert_eq!(ledger.rows[1]["prefix_changed_at"], "p", "{}", ledger.rows[1]);
+    assert_ne!(
+        prefix_at(&ledger.rows[0], "m2"),
+        prefix_at(&ledger.rows[1], "m2"),
+        "the stripped thinking block changes the prefix at the shared marker too"
+    );
+}
+
+/// The `at:bytes:hash` entry a ledger row carries for marker `at`.
+fn prefix_at(row: &serde_json::Value, at: &str) -> String {
+    row["prefix_hashes"]
+        .as_array()
+        .and_then(|all| all.iter().filter_map(|entry| entry.as_str()).find(|entry| entry.starts_with(&format!("{at}:"))))
+        .unwrap_or_else(|| panic!("no {at} in {row}"))
+        .split_once(':')
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default()
+}
+
+/// Only the thinking budget changes between two requests whose history is a
+/// pure append: the provider keys the messages' cache entry on it, so the
+/// read drop is the parameters', not an unchanged prefix (adversarial review
+/// W3, P3-3; the shape effort A/B runs, Z11).
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_drop_after_only_the_thinking_budget_changed_names_the_request_parameters() {
+    let _guard = env_lock();
+    let first = request(vec![text("user", "first prompt", true)], Some(api::ThinkingConfig::enabled(1_024)));
+    let second = request(
+        vec![
+            text("user", "first prompt", true),
+            text("assistant", "first answer", false),
+            text("user", "second prompt", true),
+        ],
+        Some(api::ThinkingConfig::enabled(2_048)),
+    );
+    let Some(ledger) = record(
+        "sent-prefix-parameters",
+        vec![sse_reply(9_000, ""), sse_reply(1_000, "")],
+        first,
+        second,
+    )
+    .await
+    else {
+        return;
+    };
+
+    assert!(!ledger.reason.is_empty(), "the read drop is a break");
+    assert!(
+        !ledger.reason.contains("prefix unchanged"),
+        "a changed thinking budget was filed as an unchanged prefix: {}",
+        ledger.reason
+    );
+    assert_eq!(ledger.rows[1]["prefix_changed_at"], "p", "{}", ledger.rows[1]);
+    assert_eq!(
+        prefix_at(&ledger.rows[0], "m0"),
+        prefix_at(&ledger.rows[1], "m0"),
+        "the message bytes in front of the shared marker did not change"
+    );
 }

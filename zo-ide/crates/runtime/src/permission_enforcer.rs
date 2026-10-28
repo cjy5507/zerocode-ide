@@ -3,6 +3,7 @@
 
 use crate::permissions::{PermissionMode, PermissionOutcome, PermissionPolicy};
 use serde::{Deserialize, Serialize};
+use zerocode_core::shell_rule::kill::KillVerdict;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome")]
@@ -147,9 +148,26 @@ impl PermissionEnforcer {
     /// `Warn` and `Allow` both permit execution. Destructive *warnings*
     /// are non-blocking and surfaced on the command result rather than
     /// hard-denied at this layer, matching upstream behaviour.
+    ///
+    /// The kill guard (t-80732) goes first, in every mode: a signal to the
+    /// window is refused, and a signal that needs a person's yes is refused
+    /// too, since this layer has nobody to ask.
     #[must_use]
     pub fn check_bash(&self, command: &str) -> EnforcementResult {
         let mode = self.policy.active_mode();
+        let refused = match crate::kill_guard::judge(command) {
+            Some(KillVerdict::Deny { reason }) => Some(crate::kill_guard::refusal(&reason)),
+            Some(KillVerdict::Ask { reason }) => Some(crate::kill_guard::unanswered(&reason)),
+            Some(KillVerdict::Allow) | None => None,
+        };
+        if let Some(reason) = refused {
+            return EnforcementResult::Denied {
+                tool: "bash".to_owned(),
+                active_mode: mode.as_str().to_owned(),
+                required_mode: mode.as_str().to_owned(),
+                reason,
+            };
+        }
         let workspace = std::env::current_dir().unwrap_or_default();
 
         match crate::bash_validation::validate_command(command, mode, &workspace) {

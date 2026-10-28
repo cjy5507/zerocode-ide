@@ -5,8 +5,9 @@
 //! Anthropic offers a marker two lifetimes, five minutes and an hour, and
 //! bills writing at 1.25× and 2× input (the price table's
 //! `cache_write_5m_rate` / `cache_write_1h_rate`). A read refreshes the entry
-//! at the read price — 0.1× input, a twentieth on Opus 5.5 and Sonnet 5.5, a
-//! fortieth on Fable 5.1 — and the lifetime runs from the start of the
+//! at the read price, the row's own multiple of input — 0.05× on Opus 5.5 and
+//! Sonnet 5.5, 0.025× on Fable 5.1, the table's 0.1× on a row that names no
+//! multiple of its own — and the lifetime runs from the start of the
 //! request that last wrote or read it (platform.claude.com prompt-caching and
 //! pricing pages, read 2026-10-28). So there are three ways to carry a
 //! conversation across a person's pause, and which is cheapest depends on two
