@@ -100,6 +100,13 @@ function readPage() {
     proseLeading: style ? Math.round((parseFloat(style.lineHeight) / parseFloat(style.fontSize)) * 100) / 100 : null,
     pillsInside: pills.length > 0 && pills.every((pill) => inside(pill.firstElementChild)),
     codesInside: codes.length >= 2 && codes.every(inside),
+    // What a block's code runs past its own box — the block's inside scroll,
+    // which neither the page's nor the list's width counts.
+    codeOverflow: Math.max(...codes.map((code) => {
+      const pre = code.querySelector(":scope > pre");
+      return pre ? pre.scrollWidth - pre.clientWidth : 0;
+    })),
+    codeWrap: codes[0] ? getComputedStyle(codes[0].querySelector(":scope > pre")).whiteSpace : null,
     codeLanguages: codes.slice(-2).map((code) => code.querySelector(".helper-code-lang")?.textContent ?? ""),
     codeWord: t("mdview.code", "코드"),
     personRight: person ? Math.round(column.right - box(person).right) : null,
@@ -149,6 +156,10 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
     ok("B: at 390, 720, 1000 and 1440 px, in both treatments, nothing pushes the page or the column sideways",
       all.every((one) => one.pageOverflow === 0 && one.listOverflow === 0),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pageOverflow, one.listOverflow]]))));
+    ok("B: on a page under 560 px a line of code folds inside its block — nothing to scroll sideways inside it — and a wider page keeps the line whole, to scroll",
+      all.every((one) => (one.pageWidth < 560 ? one.codeOverflow === 0 && one.codeWrap === "pre-wrap" : one.codeWrap === "pre")) &&
+        all.some((one) => one.pageWidth < 560),
+      JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pageWidth, one.codeOverflow, one.codeWrap]]))));
     ok("B: the pills, the code blocks and the person's bubble stay inside the column at every width — the bubble on its right edge",
       all.every((one) => one.pillsInside && one.codesInside && one.personInside && one.personRight <= 1),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pillsInside, one.codesInside, one.personInside, one.personRight]]))));

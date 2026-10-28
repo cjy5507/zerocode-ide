@@ -18254,6 +18254,15 @@ button.helper-sib:hover {
   .worker-view.is-chat-page > * {
     --chat-prose-size: var(--chat-read-size-narrow);
   }
+
+  /* A line of code longer than a narrow page folds inside its block (t-81525
+   * r2): scrolled sideways inside the block, its end read as cut off — the
+   * overlay scroll bar shows only once it scrolls. Only the code folds; the
+   * prose keeps its own breaking. A wider page keeps the scroll. */
+  .is-chat-page .helper-said .helper-code > pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
 }
 
 /* The agent's real face on its sidebar row — the favicon chain at dot size,
