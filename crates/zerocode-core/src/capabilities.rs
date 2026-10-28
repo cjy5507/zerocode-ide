@@ -814,9 +814,15 @@ mod tests {
             .collect();
         assert_eq!(
             switches,
-            [ZO_EFFORT_LADDER[0], ZO_EFFORT_LADDER[ZO_EFFORT_LADDER.len() - 1]]
+            [
+                ZO_EFFORT_LADDER[0],
+                ZO_EFFORT_LADDER[ZO_EFFORT_LADDER.len() - 1]
+            ]
         );
-        assert_eq!(ZO_EFFORT_LEVELS.len() + switches.len(), ZO_EFFORT_LADDER.len());
+        assert_eq!(
+            ZO_EFFORT_LEVELS.len() + switches.len(),
+            ZO_EFFORT_LADDER.len()
+        );
         for spec in &AGENT_SPECS {
             let ranks: Vec<usize> = spec
                 .harness

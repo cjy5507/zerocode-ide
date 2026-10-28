@@ -643,7 +643,11 @@ fn the_persons_effort_alone_makes_the_pair_question_a_model_question() {
     };
     let (reply, prepared) = summon(&launcher);
     let asked = launcher.asked.borrow();
-    let offered = asked[0].model.as_ref().expect("the pair question").offered();
+    let offered = asked[0]
+        .model
+        .as_ref()
+        .expect("the pair question")
+        .offered();
     assert_eq!(
         offered,
         [
@@ -670,7 +674,10 @@ fn the_persons_effort_alone_makes_the_pair_question_a_model_question() {
         .model_shadow
         .and_then(|shadow| shadow.receipt)
         .expect("the pair answer's row");
-    assert_eq!(receipt["applied"], true, "the pair that ran is the answer: {receipt}");
+    assert_eq!(
+        receipt["applied"], true,
+        "the pair that ran is the answer: {receipt}"
+    );
 }
 
 /// t-74181 (review P2-2): where the person's effort binds only some rows,
@@ -727,7 +734,10 @@ fn a_pair_whose_effort_the_person_bound_otherwise_did_not_run() {
 fn baseline_high_is_the_hard_row_as_it_ran_not_any_summons_of_its_model() {
     let (_, prepared) = summon(&Assigned::late());
     assert!(
-        prepared.difficulty_shadow.expect("a difficulty row").baseline_high,
+        prepared
+            .difficulty_shadow
+            .expect("a difficulty row")
+            .baseline_high,
         "unjudged, the hard row ran"
     );
     let hard = row_at(
@@ -749,7 +759,10 @@ fn baseline_high_is_the_hard_row_as_it_ran_not_any_summons_of_its_model() {
     );
     assert_eq!(reply["model"], hard.model.as_str(), "{reply}");
     assert!(
-        !prepared.difficulty_shadow.expect("a difficulty row").baseline_high,
+        !prepared
+            .difficulty_shadow
+            .expect("a difficulty row")
+            .baseline_high,
         "a request that named the hard row's model ran no row: {reply}"
     );
 }

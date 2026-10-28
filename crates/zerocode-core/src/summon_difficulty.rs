@@ -348,7 +348,10 @@ mod tests {
             // Its tests live in files of their own.
             ("orchestration.rs", include_str!("orchestration.rs")),
         ] {
-            let code = source.split("#[cfg(test)]\nmod tests").next().expect("code");
+            let code = source
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .expect("code");
             let side_by_side: Vec<(usize, &str)> = code
                 .lines()
                 .enumerate()
