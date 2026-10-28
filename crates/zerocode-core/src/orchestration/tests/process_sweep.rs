@@ -184,7 +184,9 @@ fn a_list_says_each_rows_target_place_owner_and_verdict() {
 /// A command line's private value is masked in what the list says.
 #[test]
 fn a_listed_command_line_is_masked() {
-    let token = format!("ghp_{}", "FAKE".repeat(9));
+    // Built at run time, and of letters the table's allow list does not
+    // excuse (`fake`, `test`, `example`… are left unmasked on purpose).
+    let token = format!("ghp_{}", "Q7mZ".repeat(9));
     let table = [row(4100, 1, &format!("cargo run -- {token}"))];
     let said = find(&table, "cargo", &[], &Protects(Vec::new()));
     let args = said["rows"][0]["args"].as_str().expect("args");
