@@ -904,11 +904,11 @@ fn mark_breakpoints_with_ttl(
 /// provider wrote itself one turn ago. The tail marker still rolls, writing the
 /// entry the NEXT request will anchor on.
 ///
-/// Found as the newest durable user-role message strictly behind `rolling`, the
+/// Found as the newest durable user-role message strictly behind `durable`, the
 /// newest durable message. Persisted `System` reminders also lower to wire
 /// `user`, but are transparent here: otherwise a changed reminder becomes the
 /// request tail and displaces the cache entry it was meant to follow. In the
-/// agentic shape `rolling` IS the newest user message and this is the one before
+/// agentic shape `durable` IS the newest user message and this is the one before
 /// it; behind an assistant tail it is the user message that assistant turn is
 /// answering — which is the predecessor's tail in both cases, where
 /// "second-to-last user message" would overshoot. The caller then carries it
@@ -917,8 +917,8 @@ fn mark_breakpoints_with_ttl(
 ///
 /// `None` on the first request of a session (one user message, no
 /// predecessor), which then keeps the plain two-from-the-tail placement.
-fn previous_request_tail(messages: &[InputMessage], rolling: usize) -> Option<usize> {
-    messages[..rolling]
+fn previous_request_tail(messages: &[InputMessage], durable: usize) -> Option<usize> {
+    messages[..durable]
         .iter()
         .rposition(|message| message.role == "user" && is_cache_marker_eligible(message))
 }

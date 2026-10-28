@@ -4662,9 +4662,10 @@ mod tests {
     ///
     /// The ceiling is what makes that argument keep holding: a column added
     /// later has to fit, or has to move this number and re-do the arithmetic
-    /// in `docs/analysis/cache-remeasure-r22.md`. It moved on 2026-09-15,
-    /// when the attempt/effort join columns took the worst case from 360 to
-    /// 404 bytes; the arithmetic is re-done in that document's §5. It moved
+    /// in this comment, each move with its bytes a row and megabytes a month
+    /// (the first working, cache-remeasure-r22, is not kept in the tree). It
+    /// moved on 2026-09-15, when the attempt/effort join columns took the
+    /// worst case from 360 to 404 bytes. It moved
     /// again on 2026-10-27, for `cache_creation_1h`: the worst case went from
     /// 420 to 447 bytes, about 11 MB a month at ~24,700 rows. The column is
     /// left off every row that wrote nothing at one hour, which is every row
@@ -4742,8 +4743,9 @@ mod tests {
         println!("request ledger row: {} bytes — {line}", line.len());
         assert!(
             line.len() <= CEILING_BYTES,
-            "a row grew to {} bytes (ceiling {CEILING_BYTES}); \
-             re-do the retention arithmetic in cache-remeasure-r22.md before raising it",
+            "a row grew to {} bytes (ceiling {CEILING_BYTES}); re-do the retention arithmetic \
+             in this test's doc comment (prompt_cache.rs, above \
+             a_request_ledger_row_stays_small_enough_to_keep_forever) before raising it",
             line.len()
         );
     }
@@ -7318,7 +7320,7 @@ mod tests {
 /// cost on the request path.
 #[cfg(test)]
 mod sent_prefix_tests {
-    use super::{first_changed_prefix, sent_prefixes, SentPrefix};
+    use super::{first_changed_prefix, sent_prefixes, sent_request_key, SentPrefix};
     use crate::types::{
         CacheControl, EffortLevel, InputContentBlock, InputMessage, MessageRequest, OutputConfig, SystemBlock,
         ThinkingConfig,
@@ -7453,8 +7455,11 @@ mod sent_prefix_tests {
     }
 
     /// What the hashing adds to the request path, on a body the size of a
-    /// long session's (640 messages, about 520 KB). Prints the number the
-    /// hand-over quotes; the bound only catches a pass gone quadratic.
+    /// long session's (640 messages, about 520 KB). Prints the numbers the
+    /// hand-over quotes — the prefixes and the deposit key — and asserts no
+    /// time: a loaded build machine stalls a thread longer than any bound
+    /// worth setting (W3 review, P3-4). What it asserts instead is counted:
+    /// the hasher took each byte of the body at most once.
     #[test]
     fn sent_prefixes_cost_little_beside_the_send() {
         let filler = "lorem ipsum dolor sit amet, \"quoted\" and \\ escaped. ".repeat(14);
@@ -7464,17 +7469,36 @@ mod sent_prefix_tests {
                 message(role, &format!("{index} {filler}"), index == 637 || index == 639)
             })
             .collect();
-        let payload = body(messages);
+        let request = request_of(messages);
+        let payload = encode(&request);
         let runs = 20_u32;
         let started = std::time::Instant::now();
-        let mut found = 0;
+        let mut prefixes = Vec::new();
         for _ in 0..runs {
-            found = std::hint::black_box(sent_prefixes(std::hint::black_box(&payload))).len();
+            prefixes = std::hint::black_box(sent_prefixes(std::hint::black_box(&payload)));
         }
         let each = started.elapsed() / runs;
-        println!("sent_prefixes: {} bytes in {} µs ({found} markers)", payload.len(), each.as_micros());
-        assert_eq!(found, 5, "the request-parameter line and four markers");
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            std::hint::black_box(sent_request_key(std::hint::black_box(&request)));
+        }
+        let key_each = started.elapsed() / runs;
+        println!(
+            "sent_prefixes: {} bytes in {} µs ({} entries); sent_request_key in {} µs",
+            payload.len(),
+            each.as_micros(),
+            prefixes.len(),
+            key_each.as_micros()
+        );
+        assert_eq!(prefixes.len(), 5, "the request-parameter line and four markers");
         assert!(payload.len() > 500_000, "{} bytes", payload.len());
-        assert!(each < std::time::Duration::from_millis(50), "{each:?} for {} bytes", payload.len());
+        // The content prefixes share one running hash and the parameter line
+        // has its own; together they cover each byte of the body at most once.
+        let hashed = prefixes[0].bytes + prefixes.last().map_or(0, |last| last.bytes);
+        assert!(
+            hashed <= u64::try_from(payload.len()).unwrap_or(u64::MAX),
+            "{hashed} bytes hashed for a {}-byte body: a byte went through the hasher twice",
+            payload.len()
+        );
     }
 }
