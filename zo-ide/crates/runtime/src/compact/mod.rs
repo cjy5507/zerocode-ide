@@ -619,8 +619,8 @@ fn retained_cache_quote(plan: &CompactionPlan, after: usize) -> MicrocompactQuot
         clearable_tokens: u64::try_from(before.saturating_sub(after)).unwrap_or(u64::MAX),
         rebilled_tokens: frontier.map_or(0, |index| original[index..].iter().map(estimated_message_tokens).sum()),
         frontier,
-        resent_tokens: resent_tokens(original, frontier),
-        orphaned_thinking_tokens: orphaned_thinking_tokens(original, frontier),
+        resent_tokens: resent_tokens(original, frontier, &[]),
+        orphaned_thinking_tokens: orphaned_thinking_tokens(original, frontier, &[]),
     }
 }
 
@@ -2393,11 +2393,13 @@ pub struct MicrocompactQuote {
     /// Index of the earliest message the firing would rewrite.
     pub frontier: Option<usize>,
     /// Tokens the next request writes back into the cache because of this
-    /// firing, counted before the clear: the whole conversation. Zero when
+    /// firing, counted before the clear: the whole conversation, less the
+    /// thinking an earlier firing already had the provider drop. Zero when
     /// there is nothing to rewrite.
     pub resent_tokens: u64,
-    /// Thinking at or after the frontier, which a provider that binds thinking
-    /// to its prefix stops reading once this firing changes that prefix.
+    /// Thinking at or after the frontier that the provider still reads, and
+    /// that a provider binding thinking to its prefix stops reading once this
+    /// firing changes that prefix.
     pub orphaned_thinking_tokens: u64,
 }
 
@@ -2484,6 +2486,22 @@ pub fn microcompact_quote(
     keep_recent: usize,
     min_output_bytes: usize,
 ) -> MicrocompactQuote {
+    microcompact_quote_after_drops(session, keep_recent, min_output_bytes, &[])
+}
+
+/// [`microcompact_quote`] on a transcript whose thinking in the stretches
+/// `dropped_thinking` the provider has already dropped (t-78937). An earlier
+/// firing changed the prefix every block there was produced under, and a
+/// model that binds thinking to its prefix drops such a block, unbilled, on
+/// every request after: this firing neither saves that thinking again nor
+/// writes it back into the cache.
+#[must_use]
+pub(crate) fn microcompact_quote_after_drops(
+    session: &Session,
+    keep_recent: usize,
+    min_output_bytes: usize,
+    dropped_thinking: &[std::ops::Range<usize>],
+) -> MicrocompactQuote {
     let plan = plan_microcompact_clears(session, keep_recent, min_output_bytes);
     let frontier = mutation_frontier(&plan.tool_results, &plan.images).or_else(|| {
         plan.superseded_reminders
@@ -2501,31 +2519,61 @@ pub fn microcompact_quote(
         clearable_tokens: plan_estimated_tokens(session, &plan),
         rebilled_tokens: rebilled,
         frontier,
-        resent_tokens: resent_tokens(&session.messages, frontier),
-        orphaned_thinking_tokens: orphaned_thinking_tokens(&session.messages, frontier),
+        resent_tokens: resent_tokens(&session.messages, frontier, dropped_thinking),
+        orphaned_thinking_tokens: orphaned_thinking_tokens(&session.messages, frontier, dropped_thinking),
     }
 }
 
 /// The conversation the next request writes back into the cache when a
 /// firing rewrites anything at all — see [`MicrocompactQuote`] for why that is
-/// all of it.
-fn resent_tokens(messages: &[ConversationMessage], frontier: Option<usize>) -> u64 {
-    frontier.map_or(0, |_| messages.iter().map(estimated_message_tokens).sum())
-}
-
-/// Thinking at or after `frontier`, in the same unit as the rest of the quote.
-fn orphaned_thinking_tokens(messages: &[ConversationMessage], frontier: Option<usize>) -> u64 {
-    frontier.map_or(0, |frontier| {
-        messages[frontier..]
+/// all of it — less the thinking the provider has already dropped.
+fn resent_tokens(
+    messages: &[ConversationMessage],
+    frontier: Option<usize>,
+    dropped_thinking: &[std::ops::Range<usize>],
+) -> u64 {
+    frontier.map_or(0, |_| {
+        messages
             .iter()
-            .flat_map(|message| &message.blocks)
-            .map(|block| match block {
-                ContentBlock::Thinking { thinking, .. } => thinking.len() as u64 / 4,
-                ContentBlock::RedactedThinking { data } => data.len() as u64 / 4,
-                _ => 0,
+            .enumerate()
+            .map(|(index, message)| {
+                let dropped = dropped_thinking.iter().any(|stretch| stretch.contains(&index));
+                estimated_message_tokens(message)
+                    .saturating_sub(u64::from(dropped) * thinking_tokens(message))
             })
             .sum()
     })
+}
+
+/// Thinking at or after `frontier` that the provider still reads, in the
+/// same unit as the rest of the quote.
+fn orphaned_thinking_tokens(
+    messages: &[ConversationMessage],
+    frontier: Option<usize>,
+    dropped_thinking: &[std::ops::Range<usize>],
+) -> u64 {
+    frontier.map_or(0, |frontier| {
+        messages
+            .iter()
+            .enumerate()
+            .skip(frontier)
+            .filter(|(index, _)| !dropped_thinking.iter().any(|stretch| stretch.contains(index)))
+            .map(|(_, message)| thinking_tokens(message))
+            .sum()
+    })
+}
+
+/// The thinking one stored message carries.
+fn thinking_tokens(message: &ConversationMessage) -> u64 {
+    message
+        .blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Thinking { thinking, .. } => thinking.len() as u64 / 4,
+            ContentBlock::RedactedThinking { data } => data.len() as u64 / 4,
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Rough token size of one stored message, in the repo's `chars / 4` unit.

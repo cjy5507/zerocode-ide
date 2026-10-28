@@ -1290,6 +1290,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         if let Some(ratio) = self.measured_estimate_ratio() {
             self.context_estimate_ratio = Some(ratio);
         }
+        self.forget_dropped_thinking_past_the_end();
         if !self.auto_compaction_enabled {
             return None;
         }
@@ -1317,10 +1318,11 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         } else {
             MICROCOMPACT_KEEP_RECENT_RESULTS
         };
-        let quote = crate::microcompact_quote(
+        let quote = crate::compact::microcompact_quote_after_drops(
             &self.session,
             keep_recent,
             MICROCOMPACT_MIN_OUTPUT_BYTES,
+            &self.dropped_thinking_spans,
         );
         let clearable = quote.clearable_tokens;
         // Price the firing at the model's own cache rates (t-78937).
@@ -1389,6 +1391,11 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             // reclaimed full bodies must be free to reseed, while any full
             // entries that survived this trim must remain deduplicated.
             self.recalled_memory_slugs = super::recalled_slugs_from_session(&self.session);
+            if pricing.drops_orphaned_thinking {
+                if let Some(frontier) = quote.frontier {
+                    self.note_dropped_thinking(frontier..self.session.messages.len());
+                }
+            }
             // Trimmed again while still over the floor: the thrash signature
             // (read → clear → re-read). Count it; the compaction gate promotes
             // to full compaction once the streak reaches the threshold.
@@ -1402,6 +1409,35 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             );
         }
         event
+    }
+
+    /// Record that the provider drops the thinking in `stretch` from the next
+    /// request on, merged into the stretches already on record.
+    fn note_dropped_thinking(&mut self, stretch: std::ops::Range<usize>) {
+        let spans = &mut self.dropped_thinking_spans;
+        spans.push(stretch);
+        spans.sort_by_key(|span| span.start);
+        let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(spans.len());
+        for span in spans.drain(..) {
+            match merged.last_mut() {
+                Some(last) if span.start <= last.end => last.end = last.end.max(span.end),
+                _ => merged.push(span),
+            }
+        }
+        *spans = merged;
+    }
+
+    /// Cut the stretches of dropped thinking back to the transcript as it
+    /// stands: a cancelled turn or a rewind takes back messages from the end,
+    /// and an answer later written at the same index was produced under the
+    /// trimmed prefix, so its thinking is read. Run on every pass through the
+    /// trim gate, before any request can append such an answer.
+    fn forget_dropped_thinking_past_the_end(&mut self) {
+        let length = self.session.messages.len();
+        self.dropped_thinking_spans.retain_mut(|span| {
+            span.end = span.end.min(length);
+            span.start < span.end
+        });
     }
 
     /// Whether a batch that FAILED the break-even test must still be cleared
@@ -1927,6 +1963,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         let before = estimate_session_tokens(&self.session);
         self.resolved_tool_use_fingerprints.get_mut().clear();
         self.session = result.compacted_session;
+        // The stretches of dropped thinking name messages of the transcript
+        // this round rewrote.
+        self.dropped_thinking_spans.clear();
         // Recompute recall dedup against the compacted transcript. The summary
         // erased the bodies it evicted, so those entries must be free to reseed
         // in full — but compaction keeps a preserved tail, and a body still

@@ -420,3 +420,74 @@ fn past_the_full_tier_a_trim_that_pays_back_before_the_ceiling_runs() {
         "{context} tokens, over the {full} tier and under the ceiling: a trim that pays back before the ceiling was declined: {quote:?}"
     );
 }
+
+/// What the gate keeps of each firing on a model that binds thinking to its
+/// prefix (t-78937 P2-2): the stretch whose thinking the provider drops from
+/// then on, merged with the stretches before it, cut back when the transcript
+/// loses its end, and gone with the transcript. The next quote counts that
+/// thinking neither as saved nor as re-written.
+#[test]
+fn each_firing_records_the_thinking_the_provider_drops_after_it() {
+    let _env = crate::test_env_lock();
+    let keep = MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW;
+    let mut runtime = runtime_on("claude-opus-5-5");
+    runtime
+        .session
+        .push_user_text("work through the repository")
+        .expect("task");
+    let first = 6 + keep;
+    for read in 0..first {
+        read_round(&mut runtime, read, 4_000, 4_000, None);
+    }
+    let frontier = crate::microcompact_quote(&runtime.session, keep, MICROCOMPACT_MIN_OUTPUT_BYTES)
+        .frontier
+        .expect("the trim rewrites the oldest results");
+    trim_past_the_ceiling(&mut runtime);
+    let length = runtime.session.messages.len();
+    assert_eq!(runtime.dropped_thinking_spans, vec![frontier..length]);
+
+    // Twenty answers after the trim, a hundred tokens of thinking each.
+    for read in first..first + 20 {
+        read_round(&mut runtime, read, 400, 400, None);
+    }
+    let quote = crate::compact::microcompact_quote_after_drops(
+        &runtime.session,
+        keep,
+        MICROCOMPACT_MIN_OUTPUT_BYTES,
+        &runtime.dropped_thinking_spans,
+    );
+    assert_eq!(quote.orphaned_thinking_tokens, 20 * 100, "{quote:?}");
+    // Every answer but the first sits behind the first frontier, a thousand
+    // tokens of thinking each.
+    let unaware = crate::microcompact_quote(&runtime.session, keep, MICROCOMPACT_MIN_OUTPUT_BYTES);
+    let dropped = u64::try_from(first - 1).expect("fits") * 1_000;
+    assert_eq!(unaware.resent_tokens - quote.resent_tokens, dropped, "{quote:?} against {unaware:?}");
+
+    trim_past_the_ceiling(&mut runtime);
+    assert_eq!(runtime.dropped_thinking_spans, vec![frontier..runtime.session.messages.len()]);
+
+    // A cancelled turn takes messages back from the end.
+    std::sync::Arc::make_mut(&mut runtime.session.messages).truncate(length - 10);
+    assert!(runtime.maybe_microcompact_for_tokens(0).is_none());
+    assert_eq!(runtime.dropped_thinking_spans, vec![frontier..length - 10]);
+
+    runtime.replace_session(Session::new());
+    assert!(runtime.dropped_thinking_spans.is_empty());
+}
+
+/// A model that does not bind thinking to its prefix keeps its thinking
+/// through a trim, so a firing on it records nothing.
+#[test]
+fn a_firing_on_a_model_that_keeps_its_thinking_records_nothing() {
+    let _env = crate::test_env_lock();
+    let mut runtime = runtime_on("gpt-5.5");
+    runtime
+        .session
+        .push_user_text("work through the repository")
+        .expect("task");
+    for read in 0..6 + MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW {
+        read_round(&mut runtime, read, 4_000, 4_000, None);
+    }
+    trim_past_the_ceiling(&mut runtime);
+    assert!(runtime.dropped_thinking_spans.is_empty());
+}

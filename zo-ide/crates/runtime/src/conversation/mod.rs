@@ -987,6 +987,16 @@ pub struct ConversationRuntime<C, T> {
     /// compaction so tool-result trimming can no longer starve the
     /// LLM-summarize path that ends the loop.
     consecutive_microcompacts: usize,
+    /// Stretches of the transcript, each `[frontier, length then)` of one
+    /// microcompact on a model that binds thinking to its prefix, whose
+    /// thinking the provider has dropped: the firing changed the prefix every
+    /// block there was produced under, and `drop_block`
+    /// (`api::providers::anthropic::bind_thinking_for_wire`) has the provider
+    /// drop such a block, unbilled, on every request after. The trim's next
+    /// quote counts that thinking neither as saved nor as re-written. Sorted
+    /// and disjoint; kept in memory only, so empty again after a full
+    /// compaction, `replace_session` or a restart (t-78937).
+    dropped_thinking_spans: Vec<std::ops::Range<usize>>,
     /// The provider's count of the latest answered request over the local
     /// `chars / 4` estimate of the same prefix, measured where nothing had
     /// rewritten that prefix yet — the microcompact gate's first step. It
@@ -1907,6 +1917,7 @@ where
             serial_reads_nudged: false,
             attendance: Attendance::Unattended,
             consecutive_microcompacts: 0,
+            dropped_thinking_spans: Vec::new(),
             context_estimate_ratio: None,
             full_compactions_this_turn: 0,
             cross_turn_tool_fingerprints: HashMap::new(),
