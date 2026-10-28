@@ -1742,16 +1742,26 @@ fn add_into(
 
 /// The first account added becomes the selected one; a later one does not
 /// steal the selection out from under a running window.
+///
+/// A default nobody held cannot have been picked by the person: a pick left
+/// on disk by an account that is gone goes with this selection (t-80303).
+/// The file is the window's own, so a refusal to delete it is no reason to
+/// refuse the account — nothing reads it while the ids differ.
 fn select_first_added(
     config_root: &Path,
-    _local_data_root: &Path,
+    local_data_root: &Path,
     store: &mut AccountStore,
     id: &str,
 ) -> Result<(), String> {
-    if store.selection.active.is_none() {
+    let first = store.selection.active.is_none();
+    if first {
         store.selection.active = Some(id.to_string());
     }
-    write_store(config_root, store)
+    write_store(config_root, store)?;
+    if first {
+        let _ = crate::account_switch::remember_pick(local_data_root, None);
+    }
+    Ok(())
 }
 
 /// Whether a directory's login still WORKS, asked of the CLI itself.
@@ -2374,6 +2384,9 @@ pub fn remove_account(
         store.selection.active = None;
     }
     write_store(config_root, &store)?;
+    // The pick of the account that is gone (t-80303); another account's pick
+    // stays. Not read while the ids differ, so a failure here changes nothing.
+    let _ = crate::account_switch::forget_pick_of(local_data_root, id);
     Ok(store)
 }
 

@@ -4868,8 +4868,31 @@ function accountGaugeWords(id) {
   else if (typeof fit?.room_percent === "number") {
     parts.push(t("settings.accounts.gaugeRoom", "남은 몫 {{room}}%", { room: fit.room_percent }));
   }
+  const picked = accountPickedWords(id);
+  if (picked) parts.push(picked);
   if (held?.fetching) parts.push("…");
   return parts.join(" · ");
+}
+
+/* 사람이 직접 고른 계정 행의 한 마디(t-80303): 몇 시에 골랐고 한도까지 그대로 둔다는 것.
+ * 고른 계정은 90%를 넘어야 상태 바와 안내 줄이 말하므로, 그 아래에서는 이 줄만이 고름이
+ * 기억되고 있음을 보인다. 자동 전환이 꺼져 있으면 아무것도 옮기지 않으니 말하지 않는다. */
+function accountPickedWords(id) {
+  const plan = accountUsageReport?.plan ?? null;
+  if (!plan || plan.mode === "off" || plan.active !== id || !plan.picked_at_ms) return "";
+  return t("settings.accounts.pickedAt", "{{when}}에 직접 고름 · 한도까지 유지", {
+    when: pickedMomentWords(plan.picked_at_ms),
+  });
+}
+
+/* 오늘이면 시각만, 아니면 날짜와 시각. */
+function pickedMomentWords(ms) {
+  const moment = new Date(ms);
+  const tongue = document.documentElement.lang || undefined;
+  const clock = { hour: "2-digit", minute: "2-digit", hourCycle: "h23" };
+  return moment.toDateString() === new Date().toDateString()
+    ? moment.toLocaleTimeString(tongue, clock)
+    : moment.toLocaleString(tongue, { month: "numeric", day: "numeric", ...clock });
 }
 
 /* 계획이 옮길 벽 판. */
@@ -4910,9 +4933,9 @@ function paintAccountSwitchNote() {
     return;
   }
   const moves = accountSwitchMoves(plan);
-  // 사람이 직접 고른 계정은 벽까지 그대로 둔다(t-78096) — 왜 안 바꾸는지 한 줄로.
+  // 사람이 직접 고른 계정은 한도까지 그대로 둔다(t-78096) — 왜 안 바꾸는지 한 줄로.
   if (decision.why === "picked" && moves.length === 0) {
-    paint(true, false, t("settings.accounts.switchPicked", "직접 고른 계정이라 한도 벽에 닿을 때까지 자동으로 바꾸지 않습니다"));
+    paint(true, false, t("settings.accounts.switchPicked", "직접 고른 계정이라 한도에 닿을 때까지 자동으로 바꾸지 않습니다"));
     return;
   }
   if (plan.mode !== "ask" || (decision.kind !== "switch" && moves.length === 0)) {
@@ -5014,6 +5037,10 @@ function paintClaudeNext() {
     }));
   } else if (decision.why === "unread") {
     parts.push(t("usage.nextUnread", "사용량 읽지 못함"));
+  } else if (decision.why === "picked") {
+    // 고른 계정이 머무는 동안 「다음 B 98%」를 나란히 두면 곧 옮긴다는 뜻으로 읽힌다
+    // (t-80303). 이 조각 하나가 그 자리에 선다.
+    parts.push(t("usage.nextPicked", "직접 고른 계정 · 한도까지 유지"));
   } else if (plan.next) {
     parts.push(t("usage.nextAccount", "다음 {{account}} {{room}}%", {
       account: accountBadge(plan.next.id),
@@ -5022,7 +5049,6 @@ function paintClaudeNext() {
   } else {
     parts.push(t("usage.nextNone", "다음 계정 없음"));
   }
-  if (decision.why === "picked") parts.push(t("usage.nextPicked", "고른 계정 · 벽까지 유지"));
   if (decision.why === "cooldown" && plan.cooldown_until_ms) {
     parts.push(t("usage.nextCooldown", "전환 쉼 {{minutes}}분", {
       minutes: Math.max(1, Math.ceil((plan.cooldown_until_ms - Date.now()) / 60000)),

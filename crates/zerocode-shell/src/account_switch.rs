@@ -161,17 +161,34 @@ pub(crate) fn person_pick(dir: &Path) -> Option<PersonPick> {
 /// the machine's own login, or a default some other road moved.
 pub(crate) fn remember_pick(dir: &Path, pick: Option<&PersonPick>) -> Result<(), String> {
     let Some(pick) = pick else {
-        return match std::fs::remove_file(pick_file(dir)) {
-            Err(why) if why.kind() != std::io::ErrorKind::NotFound => {
-                Err(format!("고른 계정 기록을 지우지 못했습니다: {why}"))
-            }
-            _ => Ok(()),
-        };
+        return remove_if_present(&pick_file(dir), "고른 계정 기록을");
     };
     let text = serde_json::to_string_pretty(pick).map_err(|why| why.to_string())?;
     durable_file::replace_bytes(&pick_file(dir), text.as_bytes())
         .map(|_| ())
         .map_err(|why| format!("고른 계정을 적지 못했습니다: {why}"))
+}
+
+/// End the pick when it names `account`, an account that has left the store
+/// (t-80303); a pick of another account stays. The file is ignored once the
+/// default is not its account, but it should not wait on disk for the day an
+/// id and the default meet again.
+pub(crate) fn forget_pick_of(dir: &Path, account: &str) -> Result<(), String> {
+    match person_pick(dir) {
+        Some(pick) if pick.account == account => remember_pick(dir, None),
+        _ => Ok(()),
+    }
+}
+
+/// A file taken away, one that is not there being as good: `what` (with its
+/// particle) names it in the refusal when the disk will not let it go.
+fn remove_if_present(path: &Path, what: &str) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Err(why) if why.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("{what} 지우지 못했습니다: {why}"))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The doors a switch walks through: everything it does to the world
@@ -1034,12 +1051,7 @@ fn write_before_the_first_effect(dir: &Path, book: &JournalBook) -> Result<(), S
 
 fn replace_book(dir: &Path, book: &JournalBook) -> Result<(), String> {
     if book.switches.is_empty() {
-        return match std::fs::remove_file(journal_file(dir)) {
-            Err(why) if why.kind() != std::io::ErrorKind::NotFound => {
-                Err(format!("전환 일지를 지우지 못했습니다: {why}"))
-            }
-            _ => Ok(()),
-        };
+        return remove_if_present(&journal_file(dir), "전환 일지를");
     }
     let text = serde_json::to_string_pretty(book).map_err(|why| why.to_string())?;
     durable_file::replace_bytes(&journal_file(dir), text.as_bytes())
@@ -2372,17 +2384,14 @@ pub(crate) fn switch_by_person(
     let mut book = open_book(doors)?;
     keep_in(&mut book, &journal);
     write_before_the_first_effect(&dir, &book)?;
-    if let Err(why) = doors.select(to) {
-        book.switches.retain(|held| held.key != journal.key);
-        if let Err(unwritten) = write_book(&dir, &book) {
-            doors.log(&format!("account-switch: {unwritten}"));
-        }
-        return Err(why);
-    }
-    doors.selected(to, now_ms);
-    // The pick and its moment, written down (t-78096): the beat leaves this
-    // account until its wall, and a restart still knows. A pick that could
-    // not be written is said in the log — the selection itself stands.
+    // The pick and its moment, written down BEFORE the select (t-78096,
+    // t-80303): a window that dies between the two restarts on the account
+    // the person chose with its pick, not without it. A pick that could not
+    // be written is said in the log — the selection goes on. A select that
+    // refuses puts the earlier pick back: the file names an account the
+    // default never became, so nothing reads it, and the earlier one is
+    // still the person's.
+    let earlier = person_pick(&dir);
     let pick = to.map(|account| PersonPick {
         account: account.to_string(),
         at_ms: now_ms,
@@ -2390,6 +2399,17 @@ pub(crate) fn switch_by_person(
     if let Err(why) = remember_pick(&dir, pick.as_ref()) {
         doors.log(&format!("account-switch: {why}"));
     }
+    if let Err(why) = doors.select(to) {
+        if let Err(unwritten) = remember_pick(&dir, earlier.as_ref()) {
+            doors.log(&format!("account-switch: {unwritten}"));
+        }
+        book.switches.retain(|held| held.key != journal.key);
+        if let Err(unwritten) = write_book(&dir, &book) {
+            doors.log(&format!("account-switch: {unwritten}"));
+        }
+        return Err(why);
+    }
+    doors.selected(to, now_ms);
     journal.landed = true;
     keep_in(&mut book, &journal);
     if let Err(why) = write_book(&dir, &book) {
