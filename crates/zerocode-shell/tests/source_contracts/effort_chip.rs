@@ -22,7 +22,7 @@ fn a_press_proves_the_main_window_and_runs_off_its_threads_and_the_beat_never_re
     let terminal = shell_source("cmd/terminal.rs");
     let body = super::support::block_after(&terminal, "pub(crate) async fn pane_effort_press(");
     let main_only = body
-        .find("crate::from_the_main_webview(&webview)?")
+        .find("crate::only_the_main_webview(&webview, ")
         .unwrap_or_else(|| panic!("the press is open beyond the main window:\n{body}"));
     let pressed = body.find("step_effort::press(").expect("the press");
     assert!(
