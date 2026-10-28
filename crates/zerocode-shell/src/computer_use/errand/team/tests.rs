@@ -365,6 +365,39 @@ fn a_reader_that_outlives_the_wall_is_killed_and_its_silence_is_a_timeout() {
     );
 }
 
+/// More than a pipe holds (64 KiB on macOS), so a reader that never reads
+/// its stdin leaves the write waiting.
+const PROMPT_PAST_THE_PIPE: usize = 256 * 1024;
+
+/// A reader that stalls before it reads its stdin, asked a prompt larger
+/// than the pipe holds: the write cannot finish, and the wall still holds —
+/// the reader is killed at the deadline and its silence is a timeout. Asked
+/// on a thread of its own so a write past the wall fails this test instead
+/// of hanging it.
+#[test]
+fn a_reader_that_never_reads_its_stdin_is_still_bounded_by_the_wall() {
+    let root = tempfile::tempdir().expect("a root");
+    let program = crate::test_host::fake_program(root.path(), "zo", "exec sleep 10");
+    let mut judge = TeamJudge::at(program, Vec::new(), None, None);
+    let mut asked = asked();
+    asked.state = json!({ "screen": "가".repeat(PROMPT_PAST_THE_PIPE) });
+    let wall = Duration::from_millis(300);
+    let (sent, answered) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let began = std::time::Instant::now();
+        let judged = judge.choose_within(&asked, wall);
+        let _ = sent.send((judged, began.elapsed()));
+    });
+    let (judged, took) = answered
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the reader's stdin was written outside the wall and held the walk past it");
+    assert_eq!(judged, Judged::Refused(TIMEOUT.to_string()));
+    assert!(
+        took < Duration::from_secs(3),
+        "killed at the wall, not waited out: {took:?}"
+    );
+}
+
 #[test]
 fn a_reader_that_cannot_be_started_is_transport() {
     let mut judge = TeamJudge::at(PathBuf::from("/nonexistent/zo"), Vec::new(), None, None);
