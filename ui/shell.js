@@ -14995,9 +14995,13 @@ function paintActivityPill(group, run, spoken) {
   let first = null;
   let last = null;
   const kinds = new Set();
+  // A call whose result has not come yet: the pill is counted again on each
+  // paint until it has, whether the run still works or not.
+  group.__waiting = false;
   for (const turn of group.__members) {
     const state = activityState(turn, run, spoken);
     if (state === "thought") continue;
+    if (turn.role === "tool" && turn.output === undefined) group.__waiting = true;
     calls += 1;
     kinds.add(stepKindOf(turn, run));
     first ??= turn;
@@ -15227,7 +15231,7 @@ function syncHelperTurns(list, run) {
     watchShelf(list, row);
     if (!folded) foldSettledStep(row, run);
   }
-  for (const group of list.querySelectorAll(":scope > .helper-group.is-live")) pills.add(group);
+  for (const group of list.querySelectorAll(":scope > .helper-group")) if (group.__waiting) pills.add(group);
   for (const group of pills) paintActivityPill(group, run, spoken);
   // A turn that arrived stands whole, the moment it arrived — the terminal
   // already showed these words as they were said, and a page that released
