@@ -2445,3 +2445,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         Ok(text)
     }
 }
+
+/// The tier-1 trim priced at the session model's cache rates (t-78937 Z1).
+#[cfg(test)]
+mod microcompact_price_tests;
