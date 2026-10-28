@@ -24612,6 +24612,10 @@ mod restore_wake;
 /// (`tests/seat_follows.rs`).
 mod seat_follows;
 
+/// t-81532: the composer's effort chip — what it shows for a pane, and a
+/// person's press on the seat's own road (`tests/effort_chip.rs`).
+mod effort_chip;
+
 /* ---- account switch: the same seat, another login (t-7538) --------------- */
 
 /// The conversation a switch test's walled pane is in.

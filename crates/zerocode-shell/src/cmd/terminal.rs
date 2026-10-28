@@ -317,6 +317,48 @@ pub(crate) fn pane_log(
     Ok(log)
 }
 
+/// The tail of a pane's own transcript, as lines joined for the readers
+/// that scan a chunk (`zerocode_core::transcript::effort_in`), or `None`
+/// where no file can be named or read.
+fn pane_tail(state: &AppState, term: TermId) -> Option<String> {
+    let path = crate::pane_transcript::pane_transcript(state, term).ok()?;
+    zerocode_core::transcript::tail_lines(&path).map(|lines| lines.join("\n"))
+}
+
+/// The composer's effort chip for a pane (t-81532): the effort the session's
+/// own record says it ran its last turn at — the summons' word before any
+/// turn, nothing for the CLI's default — the rungs a press can pick, and why
+/// a press cannot move it now when it cannot.
+#[tauri::command(async)]
+pub(crate) fn pane_effort(app: AppHandle, term: TermId) -> zerocode_core::effort_chip::EffortChip {
+    let tail = pane_tail(&app.state::<AppState>(), term);
+    let host = crate::agent_tools_runtime::TeamWindow { app };
+    crate::orchestration::step_effort::pane_effort(&host, term, tail.as_deref())
+}
+
+/// A press on the composer's effort chip (t-81532): move the pane's effort
+/// to `to` for this session only, on the road the step-effort seat drives
+/// (Claude Code's `/effort` picker, an arrow a rung and `s`), between turns
+/// only. The main window only, after the renderer's own confirm of what the
+/// move costs. Refused by a code the chip says in the person's language.
+#[tauri::command]
+pub(crate) async fn pane_effort_press(
+    app: AppHandle,
+    webview: tauri::Webview,
+    term: TermId,
+    to: String,
+) -> Result<zerocode_core::effort_chip::EffortChip, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let tail = pane_tail(&app.state::<AppState>(), term);
+        let host = crate::agent_tools_runtime::TeamWindow { app };
+        crate::orchestration::step_effort::press(&host, term, tail.as_deref(), &to)
+            .map_err(crate::orchestration::step_effort::PressRefused::code)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// The longest line a transcript read takes whole: past a message with a
 /// handful of screenshots in it, short of reading a runaway file into memory.
 /// A longer one is skipped, as every long line was before.
