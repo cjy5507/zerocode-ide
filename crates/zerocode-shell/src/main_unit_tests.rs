@@ -22007,7 +22007,6 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "list-pad-x",
         "list-pad-top",
         "list-pad-bottom",
-        "fade",
         "sticky-pad-top",
         "sticky-pad-bottom",
         "sticky-fade",
