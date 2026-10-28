@@ -2314,6 +2314,11 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
             lines.push(format!("if \"%curl_exit%\"==\"{exit}\" goto :{road}_try"));
         }
         lines.push(format!(":{road}_gave_up"));
+        // Judged by the first give-up, as the POSIX script is.
+        lines.push(
+            "for /f \"tokens=1 delims=,\" %%E in (\"%hook_gave_up%\") do call :gave_up %%E"
+                .to_string(),
+        );
         lines
     };
     if spec.prints_context {
@@ -2341,7 +2346,6 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
             format!("{post} -o \"%brief_dir%\\reply\" -w \"%%{{http_code}}\" >\"%brief_dir%\\status\" 2>nul"),
         ));
         lines.extend([
-            "call :gave_up %curl_exit%".into(),
             "goto :brief_cleanup".into(),
             ":brief_sent".into(),
             "call :succeeded".into(),
@@ -2368,7 +2372,6 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
     lines.push("set \"hook_clock=%hook_clock:,=%\"".into());
     lines.push("set \"hook_id=w-%hook_clock%-%RANDOM%-%RANDOM%-%RANDOM%\"".into());
     lines.extend(try_lines("plain", format!("{post}{quiet}")));
-    lines.push("call :gave_up %curl_exit%".into());
     lines.push("exit /b 0".into());
     lines.push(":plain_sent".into());
     lines.push("call :succeeded".into());
@@ -2586,10 +2589,13 @@ pub fn hook_script(agent: AgentKind) -> String {
     lines.push("    *) break ;;".into());
     lines.push("  esac".into());
     lines.push("done".into());
+    // Judged by the FIRST give-up: the loop only goes on after one that may
+    // have left the body with the bridge, so a refused connection on a later
+    // try (a bridge gone meanwhile) does not prove the window never got it.
     lines.push(r#"if [ "$hook_exit" = 0 ]; then"#.into());
     lines.push("  delivery_succeeded".into());
     lines.push("else".into());
-    lines.push(r#"  delivery_gave_up "$hook_exit""#.into());
+    lines.push(r#"  delivery_gave_up "${hook_gave_up%%,*}""#.into());
     lines.push("fi".into());
     if context_hook.is_some() {
         lines.push(r#"brief_status=${reply##*"$brief_nl"}"#.into());

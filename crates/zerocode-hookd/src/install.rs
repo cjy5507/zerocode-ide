@@ -1325,7 +1325,7 @@ mod tests {
         let gave_up = at(r#"--data-urlencode "gave_up=$hook_gave_up""#);
         let again = at(&format!("    {}) : ;;\n    *) break ;;", crate::posix_retry_exits()));
         let done = at("\ndone\n");
-        let judged = at(r#"  delivery_gave_up "$hook_exit""#);
+        let judged = at(r#"  delivery_gave_up "${hook_gave_up%%,*}""#);
         let receipt = at(r#"--data-urlencode "delivery_id=$hook_id" >/dev/null"#);
         assert!(
             id < tries
