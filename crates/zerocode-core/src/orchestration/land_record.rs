@@ -9,7 +9,7 @@
 //!
 //! The ledger writes only what it heard. Each member's record is bound to the attempt and the
 //! source its standing verified review already named — the review written one task at a time —
-//! and goes through the same seat check every review does ([`correction_author`]). So this writes
+//! and goes through the same seat check every review does (`correction_author`). So this writes
 //! a landing on reviewed work and nothing else: no verification, no status, no attempt named by
 //! hand. One member that cannot take it refuses the call, one line each, and nothing is written.
 
@@ -19,7 +19,7 @@ use super::*;
 /// (`--tasks` is `reset`'s standalone switch, so a list after it would be read as a stray word.)
 pub const MEMBERS_FLAG: &str = "--members";
 
-/// The key a release tag is written under beside [`DEPLOYED_KEY`]: `v1.1.101`.
+/// The key a release tag is written under beside `deployed`: `v1.1.101`.
 pub const RELEASE_KEY: &str = "release";
 
 /// The `task-update` flags that speak of one task, refused beside [`MEMBERS_FLAG`].
