@@ -391,7 +391,7 @@ mod permission_metadata_tests {
         assert_eq!(bash.input_summary, "cargo test -p runtime");
     }
 
-    /// t-80732: a kill_guard question offers this once or not at all, so an
+    /// t-80732: a `kill_guard` question offers this once or not at all, so an
     /// unattended front-end finds no lasting allow to approve it with.
     #[test]
     fn kill_guard_question_offers_no_lasting_allow() {
