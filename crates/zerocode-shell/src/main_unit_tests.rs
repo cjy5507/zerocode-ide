@@ -8553,6 +8553,18 @@ fn the_port_scan_reads_lsofs_field_output() {
     );
 }
 
+/// The process table is read where it can be (review t-79535 P3-7): this
+/// process stands in its own directory, so a directory that holds it counts
+/// one at least, and one nobody stands in counts none.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_process_table_counts_this_process_in_its_own_directory() {
+    let here = std::env::current_dir().expect("a working directory");
+    assert!(processes_standing_in(&here).is_some_and(|count| count >= 1));
+    let empty = tempfile::tempdir().expect("an empty directory");
+    assert_eq!(processes_standing_in(empty.path()), Some(0));
+}
+
 /// An address is split from the right, and a wildcard is made openable.
 ///
 /// From the right because an IPv6 address is full of colons and only the

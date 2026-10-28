@@ -20233,10 +20233,10 @@ pub const READY_TIMEOUT_DEFAULT_MS: u32 = 60_000;
 /// again that may bring the receipt late (`zerocode_hookd::HOOK_RETRY_SPAN`,
 /// 3.5 s, t-78634); a briefing that
 /// then has to be read back off the screen and typed once more waits up to two
-/// watch windows and the agent's own start-up deadline with the receipt wait on
-/// top (`BRIEFING_WINDOW` 6 s ×2, the longest `ready_timeout_ms` 20 s, 10 s);
-/// and the pane may have waited its turn to be cut (5 s) before any of that
-/// began. A bridge or a shim that gives up at the budget alone hands the
+/// watch windows and the agent's own start-up deadline with the same receipt
+/// wait on top (`BRIEFING_WINDOW` 6 s ×2, the longest `ready_timeout_ms` 20 s,
+/// 13.5 s, t-79561); and the pane may have waited its turn to be cut (5 s)
+/// before any of that began: 64 s in all. A bridge or a shim that gives up at the budget alone hands the
 /// caller "timed out waiting for the window" for a failure the window was
 /// still about to word, and the worker row that would have told them is
 /// already gone (t-76890). `zerocode-shell` holds this number above that sum.

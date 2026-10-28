@@ -1380,6 +1380,24 @@ const CACHE_DIRECTORY_TAG: &str = "CACHEDIR.TAG";
 /// same name.
 const CACHE_DIRECTORY_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
 
+/// Whether `tree` holds the cache tag a build tool writes: a regular file
+/// (not a link, and not a pipe — opening one waits for a writer that may never
+/// come) whose first bytes are the signature. Only that many bytes are read,
+/// so a tag file of any size answers at once (review t-79535 P3-8).
+fn carries_cache_tag(tree: &Path) -> bool {
+    use std::io::Read as _;
+    let tag = tree.join(CACHE_DIRECTORY_TAG);
+    if !std::fs::symlink_metadata(&tag).is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
+    let wanted = u64::try_from(CACHE_DIRECTORY_SIGNATURE.len()).unwrap_or(u64::MAX);
+    let mut head = Vec::new();
+    std::fs::File::open(&tag)
+        .and_then(|file| file.take(wanted).read_to_end(&mut head))
+        .is_ok()
+        && head == CACHE_DIRECTORY_SIGNATURE
+}
+
 /// What a build tree set aside to go is renamed to, in the checkout's own git
 /// directory — the name and the place a later look finds it by.
 const SET_ASIDE: &str = "zerocode-shed-";
@@ -1473,8 +1491,7 @@ fn shed_build_trees(
         let one = one.trim_end_matches('/').to_string();
         let tree = path.join(&one);
         let tagged = std::fs::symlink_metadata(&tree).is_ok_and(|meta| meta.is_dir())
-            && std::fs::read(tree.join(CACHE_DIRECTORY_TAG))
-                .is_ok_and(|tag| tag.starts_with(CACHE_DIRECTORY_SIGNATURE));
+            && carries_cache_tag(&tree);
         if !tagged {
             continue;
         }
@@ -3490,6 +3507,57 @@ mod tests {
         );
         assert!(!path.exists(), "the checkout stayed");
         assert!(!parked.exists(), "a tree set aside outlived its checkout");
+    }
+
+    /// The tag is read for its signature and no more (review t-79535 P3-8):
+    /// a large file that starts with it is the tag, one that does not is not,
+    /// and a pipe or a link in its place is neither — read at once, never
+    /// waited on.
+    #[test]
+    fn a_cache_tag_is_read_for_its_signature_alone() {
+        let temp = tempfile::tempdir().expect("a build tree");
+        let tree = temp.path();
+        assert!(!carries_cache_tag(tree), "no tag at all");
+
+        let tag = tree.join(CACHE_DIRECTORY_TAG);
+        let mut big = CACHE_DIRECTORY_SIGNATURE.to_vec();
+        big.extend(std::iter::repeat_n(b'x', 8 * 1024 * 1024));
+        std::fs::write(&tag, &big).expect("a large tag");
+        assert!(carries_cache_tag(tree), "the signature leads a large file");
+
+        std::fs::write(&tag, &CACHE_DIRECTORY_SIGNATURE[1..]).expect("a short tag");
+        assert!(!carries_cache_tag(tree), "a file that is not the signature");
+        std::fs::write(&tag, b"a file of the same name").expect("another file");
+        assert!(!carries_cache_tag(tree));
+
+        std::fs::remove_file(&tag).expect("clear");
+        std::fs::create_dir(&tag).expect("a directory of the name");
+        assert!(!carries_cache_tag(tree), "a directory is no tag");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_or_a_link_in_the_tags_place_is_not_waited_on() {
+        let temp = tempfile::tempdir().expect("a build tree");
+        let tree = temp.path();
+        let tag = tree.join(CACHE_DIRECTORY_TAG);
+        let made = crate::proc::quiet_command("mkfifo")
+            .arg(&tag)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success(), "mkfifo");
+        let started = std::time::Instant::now();
+        assert!(!carries_cache_tag(tree), "a pipe is no tag");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a pipe held the look"
+        );
+
+        std::fs::remove_file(&tag).expect("clear");
+        let real = tree.join("elsewhere");
+        std::fs::write(&real, CACHE_DIRECTORY_SIGNATURE).expect("a real tag");
+        std::os::unix::fs::symlink(&real, &tag).expect("a link");
+        assert!(!carries_cache_tag(tree), "a link is no tag");
     }
 
     /// A checkout a person locked keeps its build as it keeps everything

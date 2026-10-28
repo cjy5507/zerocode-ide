@@ -1316,7 +1316,8 @@ mod tests {
                 .find(words)
                 .unwrap_or_else(|| panic!("{words:?} is gone:\n{script}"))
         };
-        let id = at("hook_id=p-$$");
+        let id = at("hook_id=p-$$-$(command -p date +%s 2>/dev/null || :)");
+        let gate = at("  UserPromptSubmit) hook_again=1 ;;");
         let tries = at(&format!("for hook_plan in {plan}; do"));
         let pause = at(r#"command -p sleep "$hook_pause" 2>/dev/null || :"#);
         let budget = at(r#"--max-time "$hook_budget""#);
@@ -1324,14 +1325,19 @@ mod tests {
         let attempt = at(r#"--data-urlencode "try=$hook_try""#);
         let gave_up = at(r#"--data-urlencode "gave_up=$hook_gave_up""#);
         let again = at(&format!(
-            "    {}) : ;;\n    *) break ;;",
+            "    {}) [ -n \"$hook_again\" ] || break ;;\n    *) break ;;",
             crate::posix_retry_exits()
         ));
         let done = at("\ndone\n");
+        let refused = at(&format!(
+            r#"elif [ "$hook_exit" = {} ]; then"#,
+            crate::HOOK_REFUSED_EXIT
+        ));
         let judged = at(r#"  delivery_gave_up "${hook_gave_up%%,*}""#);
         let receipt = at(r#"--data-urlencode "delivery_id=$hook_id" >/dev/null"#);
         assert!(
-            id < tries
+            id < gate
+                && gate < tries
                 && tries < pause
                 && pause < budget
                 && budget < carried
@@ -1339,10 +1345,21 @@ mod tests {
                 && attempt < gave_up
                 && gave_up < again
                 && again < done
-                && done < judged
+                && done < refused
+                && refused < judged
                 && judged < receipt,
             "{script}"
         );
+        // The prompt event only (review t-79535 P3-2): an agent whose prompt
+        // hook carries no receipt has one try, and no gate to open more.
+        for agent in [AgentKind::Copilot, AgentKind::Cursor] {
+            assert_eq!(crate::hook_tries(agent).len(), 1, "{agent:?}");
+            assert!(crate::hook_retries_on(agent).is_none(), "{agent:?}");
+            assert!(
+                !crate::hook_script(agent).contains("hook_again=1"),
+                "{agent:?} opens a post again"
+            );
+        }
         // The batch dialect posts once: cmd cannot hold stdin, so curl reads
         // the payload from the pipe and a second post would carry nothing.
         let batch = crate::hook_script_cmd(AgentKind::Claude);

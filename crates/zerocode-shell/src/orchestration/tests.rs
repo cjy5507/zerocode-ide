@@ -19783,19 +19783,15 @@ fn a_spawn_that_failed_once_may_be_asked_again_by_the_same_name() {
 /// gone. Raise any of them and this says the headroom must follow.
 #[test]
 fn the_bridge_holds_a_summons_past_the_longest_the_window_takes_to_word_a_failure() {
+    use crate::agent_tools_runtime::RECEIPT_WAIT;
     use zerocode_pty::briefing::BRIEFING_WINDOW;
-    use zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE;
     let longest_start_up = zerocode_core::agent::AGENT_SPECS
         .iter()
         .filter_map(|spec| spec.ready_timeout_ms)
         .map(|ms| std::time::Duration::from_millis(u64::from(ms)))
         .fold(zerocode_pty::ready::TIMEOUT, std::time::Duration::max);
-    let window_after_its_budget = EFFECT_LINE_CEILING
-        + SUBMIT_RECEIPT_PATIENCE
-        + zerocode_hookd::HOOK_RETRY_SPAN
-        + BRIEFING_WINDOW * 2
-        + longest_start_up
-        + SUBMIT_RECEIPT_PATIENCE;
+    let window_after_its_budget =
+        EFFECT_LINE_CEILING + RECEIPT_WAIT + BRIEFING_WINDOW * 2 + longest_start_up + RECEIPT_WAIT;
     let headroom = std::time::Duration::from_millis(u64::from(
         zerocode_core::orchestration::READY_REPORT_HEADROOM_MS,
     ));

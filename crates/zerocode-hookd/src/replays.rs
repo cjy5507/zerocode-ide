@@ -15,8 +15,14 @@ use tokio::sync::watch;
 
 use crate::brief_receipts::Key;
 
-/// More deliveries than every pane of a window starts while an id is
-/// remembered.
+/// More deliveries than every pane of a window starts while a post can still
+/// be tried again: a post again follows its first within
+/// [`crate::HOOK_DELIVERY_BUDGET`] (5 s) and the time a busy machine adds to
+/// it, about 10 s, so 256 is some 25 posts a second from one window, which no
+/// set of panes comes near. An id pushed out by more than that costs only its
+/// own replay — the post again is then a new event, as it was before ids were
+/// remembered — and the memory is capped whatever the posts do (review
+/// t-79535 P3-5; `the_oldest_goes_past_the_limit` pins the cap).
 const LIMIT: usize = 256;
 
 /// How long an id is remembered — well past [`crate::HOOK_DELIVERY_BUDGET`]
