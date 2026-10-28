@@ -782,6 +782,9 @@ async function computerHandoffDocked(browser, origin, ok) {
       document.querySelector("#ask-choices button").click();
       await T.settle(260);
       seen.modalThenDocked = probe();
+      // The card this scene left standing is answered, so it does not count among the asks of the next one.
+      [...document.querySelectorAll("#ask-choices button")].find((one) => one.textContent.trim() === "다 했어요")?.click();
+      await T.settle(260);
       // Modals keep their order among themselves, and the card never holds one back — however many came first.
       // Card, then pane A's permission (in front), then pane B's: B comes up when A is answered, not after the card.
       T.reset();
