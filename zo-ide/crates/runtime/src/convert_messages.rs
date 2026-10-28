@@ -661,9 +661,11 @@ pub fn is_persisted_reminder_text(text: &str) -> bool {
 /// system blocks ever cached and each iteration re-billed the full transcript
 /// as uncached input.
 ///
-/// Run this after [`append_wire_reminders`]. Persisted reminder-only messages
-/// stay behind the newest breakpoint: their per-request text remains visible,
-/// while marker placement is owned by durable conversation messages. Harmless
+/// Run this after [`append_wire_reminders`]. Marker placement is owned by
+/// durable conversation messages; the rolling marker (and, on the next request,
+/// the anchor) is then carried over the reminder-only messages persisted right
+/// behind them, so a request's reminder tail rides inside the cached prefix
+/// ([`reminder_tail_end`]). Harmless
 /// on non-Anthropic wires: the OpenAI and Gemini encoders build their own
 /// payloads from these blocks and never serialize `cache_control`.
 ///
@@ -845,12 +847,22 @@ fn mark_breakpoints_with_ttl(
     // The tail marker rolls; slot one is an ANCHOR, not a second rolling
     // marker (see [`previous_request_tail`]). Without it both markers sit on
     // content this request invented, so neither can ever be an exact hit.
-    let rolling = messages
+    // Both are found on durable messages and then carried over the reminder
+    // messages persisted right behind them (see [`reminder_tail_end`]).
+    let durable = messages
         .iter()
         .rposition(is_cache_marker_eligible);
-    let anchor = verify_boundary.or_else(|| previous_request_tail(messages, rolling?));
+    let rolling = durable.map(|index| reminder_tail_end(messages, index));
+    let anchor = verify_boundary.or_else(|| {
+        previous_request_tail(messages, durable?).map(|index| reminder_tail_end(messages, index))
+    });
     if let Some(index) = anchor {
         if mark_last_cacheable_block(&mut messages[index].content, anchor_ttl) {
+            marked += 1;
+        }
+    }
+    if let Some(index) = rolling.filter(|&index| Some(index) != anchor) {
+        if mark_last_cacheable_block(&mut messages[index].content, rolling_ttl) {
             marked += 1;
         }
     }
@@ -859,7 +871,7 @@ fn mark_breakpoints_with_ttl(
         if marked == MAX_MESSAGE_CACHE_BREAKPOINTS {
             break;
         }
-        if Some(index) == anchor {
+        if Some(index) == anchor || Some(index) == rolling {
             continue;
         }
         if !is_cache_marker_eligible(message) {
@@ -891,13 +903,15 @@ fn mark_breakpoints_with_ttl(
 /// entry the NEXT request will anchor on.
 ///
 /// Found as the newest durable user-role message strictly behind `rolling`, the
-/// slot the tail marker takes. Persisted `System` reminders also lower to wire
+/// newest durable message. Persisted `System` reminders also lower to wire
 /// `user`, but are transparent here: otherwise a changed reminder becomes the
 /// request tail and displaces the cache entry it was meant to follow. In the
 /// agentic shape `rolling` IS the newest user message and this is the one before
 /// it; behind an assistant tail it is the user message that assistant turn is
 /// answering — which is the predecessor's tail in both cases, where
-/// "second-to-last user message" would overshoot.
+/// "second-to-last user message" would overshoot. The caller then carries it
+/// over the reminders persisted right behind it ([`reminder_tail_end`]): that
+/// is where the predecessor's rolling marker stood.
 ///
 /// `None` on the first request of a session (one user message, no
 /// predecessor), which then keeps the plain two-from-the-tail placement.
@@ -905,6 +919,45 @@ fn previous_request_tail(messages: &[InputMessage], rolling: usize) -> Option<us
     messages[..rolling]
         .iter()
         .rposition(|message| message.role == "user" && is_cache_marker_eligible(message))
+}
+
+/// The last of the reminder-only messages persisted directly behind the
+/// durable message at `index`, or `index` when none follow it.
+///
+/// A request's reminders are persisted as a trailing `System` message just
+/// before it is sent (`absorb_wire_reminders_into_session`), so a request that
+/// carries new reminders ENDS on them. With the rolling marker on the durable
+/// message before them, those blocks were billed uncached on that request and
+/// written again on the next (the next anchor stands in front of them too):
+/// 2.25× the input price for text that, once persisted, never changes bytes.
+/// Measured over 36 hours of this machine's ledger before the change: 635
+/// uncached input tokens a request on average, p90 2,314, 1.71M in all
+/// (adversarial review A, Z9). Marking the reminder tail instead writes them
+/// once at 1.25× and lets the next request read them at the read price.
+///
+/// No marker is added for it — the system prompt's two 1h blocks and these two
+/// make Anthropic's four — the rolling marker moves onto the tail, and the next
+/// request's anchor is carried the same way, so it lands exactly where this
+/// marker stood. A reminder set that changes is persisted as a NEW message
+/// behind the old one; the old one keeps its bytes and its place, so there is
+/// no changing reminder to keep in front of the marker: every persisted
+/// reminder is append-only text. The cost is the last request before a pause
+/// longer than the entry lives, whose reminder tail is written (1.25×) and
+/// never read: 0.25× on those tokens instead of a 0.9× saving everywhere else.
+///
+/// Only messages made wholly of reminder blocks qualify — the shape
+/// [`is_cache_marker_eligible`] refuses — and only while one still has a block
+/// that can take a marker; a legacy mixed message is itself durable.
+fn reminder_tail_end(messages: &[InputMessage], index: usize) -> usize {
+    let run = messages[index + 1..]
+        .iter()
+        .take_while(|message| {
+            message.role == "user"
+                && has_cacheable_block(&message.content)
+                && !is_cache_marker_eligible(message)
+        })
+        .count();
+    index + run
 }
 
 fn is_deep_verify_prompt(message: &InputMessage) -> bool {
@@ -937,7 +990,8 @@ fn has_cacheable_block(blocks: &[InputContentBlock]) -> bool {
 /// explicit, however, and an absorber-created reminder message contains only
 /// such blocks. A legacy mixed user message (ordinary content plus appended
 /// reminder blocks) remains eligible under that legacy path's existing marker
-/// semantics.
+/// semantics. A reminder-only message is never a position of its own; it takes
+/// the marker of the durable message it trails ([`reminder_tail_end`]).
 fn is_cache_marker_eligible(message: &InputMessage) -> bool {
     has_cacheable_block(&message.content)
         && !message.content.iter().all(|block| {

@@ -33,6 +33,18 @@ pub(crate) fn guard_sse_buffer_push(retained: usize, incoming: usize) -> Result<
 pub struct SseParser {
     buffer: Vec<u8>,
     cursor: usize,
+    /// What this stream's `message_start` said the server did to the prompt,
+    /// kept for the request ledger until [`Self::take_input_transformations`].
+    input_transformations: Option<InputTransformations>,
+}
+
+/// The `input_transformations` a `message_start` named: how many entries, and
+/// their distinct kinds — `type`, or `type:reason` when one is given — sorted.
+/// Only counts and kinds; a path or a block body never leaves this parser.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InputTransformations {
+    pub count: u32,
+    pub kinds: Vec<String>,
 }
 
 impl SseParser {
@@ -62,8 +74,8 @@ impl SseParser {
 
         self.buffer.extend_from_slice(chunk);
 
-        while let Some(frame) = self.next_frame() {
-            if let Some(event) = parse_frame(frame)? {
+        while let Some(frame) = next_frame(&self.buffer, &mut self.cursor) {
+            if let Some(event) = parse_frame_noting(frame, &mut self.input_transformations)? {
                 out.push(event);
             }
         }
@@ -84,12 +96,13 @@ impl SseParser {
 
         let remaining = &self.buffer[self.cursor..];
         // Fast path: valid UTF-8 -- borrow directly, no allocation
+        let seen = &mut self.input_transformations;
         let result = if let Ok(s) = std::str::from_utf8(remaining) {
-            parse_frame(s)
+            parse_frame_noting(s, seen)
         } else {
             // Fallback: lossy decode requires an owned String
             let owned = String::from_utf8_lossy(remaining).into_owned();
-            parse_frame(&owned)
+            parse_frame_noting(&owned, seen)
         };
         self.buffer.clear();
         self.cursor = 0;
@@ -99,29 +112,49 @@ impl SseParser {
         }
     }
 
-    /// Find the next complete frame using SIMD-accelerated `memmem::find`.
-    /// Returns a `&str` borrowed from the internal buffer -- zero copy.
-    /// Always advances the cursor past frame separators, skipping any
-    /// non-UTF-8 frames so the parser never gets stuck.
+    /// The `input_transformations` this stream's `message_start` named, once.
+    pub fn take_input_transformations(&mut self) -> Option<InputTransformations> {
+        self.input_transformations.take()
+    }
+
+    #[cfg(test)]
     fn next_frame(&mut self) -> Option<&str> {
-        loop {
-            let start = self.cursor;
-            let remaining = &self.buffer[start..];
+        next_frame(&self.buffer, &mut self.cursor)
+    }
+}
 
-            let (position, separator_len) = memmem::find(remaining, b"\n\n")
-                .map(|p| (p, 2))
-                .or_else(|| memmem::find(remaining, b"\r\n\r\n").map(|p| (p, 4)))?;
+/// Find the next complete frame using SIMD-accelerated `memmem::find`.
+/// Returns a `&str` borrowed from `buffer` -- zero copy. Always advances
+/// `cursor` past frame separators, skipping any non-UTF-8 frames so the
+/// parser never gets stuck. Free of `SseParser` so the frame's borrow of the
+/// buffer leaves the parser's other fields writable.
+fn next_frame<'b>(buffer: &'b [u8], cursor: &mut usize) -> Option<&'b str> {
+    loop {
+        let start = *cursor;
+        let remaining = &buffer[start..];
 
-            self.cursor = start + position + separator_len;
-            let frame_bytes = &self.buffer[start..start + position];
-            if let Ok(frame) = std::str::from_utf8(frame_bytes) {
-                return Some(frame);
-            }
+        let (position, separator_len) = memmem::find(remaining, b"\n\n")
+            .map(|p| (p, 2))
+            .or_else(|| memmem::find(remaining, b"\r\n\r\n").map(|p| (p, 4)))?;
+
+        *cursor = start + position + separator_len;
+        let frame_bytes = &buffer[start..start + position];
+        if let Ok(frame) = std::str::from_utf8(frame_bytes) {
+            return Some(frame);
         }
     }
 }
 
 pub fn parse_frame(frame: &str) -> Result<Option<StreamEvent>, ApiError> {
+    parse_frame_noting(frame, &mut None)
+}
+
+/// [`parse_frame`], keeping what a `message_start` said about
+/// `input_transformations` in `seen`.
+fn parse_frame_noting(
+    frame: &str,
+    seen: &mut Option<InputTransformations>,
+) -> Result<Option<StreamEvent>, ApiError> {
     let trimmed = frame.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -169,7 +202,7 @@ pub fn parse_frame(frame: &str) -> Result<Option<StreamEvent>, ApiError> {
             return Err(error);
         }
         return serde_json::from_str::<StreamEvent>(first)
-            .map(|event| Some(note_input_transformations(first, event)))
+            .map(|event| Some(note_input_transformations(first, event, seen)))
             .map_err(ApiError::from);
     }
 
@@ -186,7 +219,7 @@ pub fn parse_frame(frame: &str) -> Result<Option<StreamEvent>, ApiError> {
     }
 
     serde_json::from_str::<StreamEvent>(&payload)
-        .map(|event| Some(note_input_transformations(&payload, event)))
+        .map(|event| Some(note_input_transformations(&payload, event, seen)))
         .map_err(ApiError::from)
 }
 
@@ -201,11 +234,21 @@ static THINKING_DROP_SAID: AtomicBool = AtomicBool::new(false);
 /// tool-result trimming), `model_binding_mismatch` after a model switch. The
 /// request went through; what was lost is the reasoning those blocks carried,
 /// so the model re-plans. Said once per process, like the context-editing
-/// latch, so a long session hears it without a line per turn. The event is
-/// handed back untouched.
-fn note_input_transformations(payload: &str, event: StreamEvent) -> StreamEvent {
+/// latch, so a long session hears it without a line per turn. Every kind of
+/// transformation is also kept in `seen` for the request ledger, where the
+/// cache-break classifier reads it (a rewritten prompt is not an unchanged
+/// prefix). The event is handed back untouched.
+fn note_input_transformations(
+    payload: &str,
+    event: StreamEvent,
+    seen: &mut Option<InputTransformations>,
+) -> StreamEvent {
     if matches!(event, StreamEvent::MessageStart(_)) {
-        if let Some(said) = dropped_thinking_summary(payload) {
+        let entries = peek_input_transformations(payload);
+        if !entries.is_empty() {
+            *seen = Some(transformations_of(&entries));
+        }
+        if let Some(said) = dropped_thinking_summary_of(&entries) {
             if !THINKING_DROP_SAID.swap(true, Ordering::Relaxed) {
                 eprintln!("[zo] {said}");
             }
@@ -214,9 +257,10 @@ fn note_input_transformations(payload: &str, event: StreamEvent) -> StreamEvent 
     event
 }
 
-/// One sentence on the thinking blocks a `message_start` payload says were
-/// dropped, or `None` when it names none.
-fn dropped_thinking_summary(payload: &str) -> Option<String> {
+/// The `input_transformations` entries of a `message_start` payload; empty
+/// when it names none. One substring search first, so the ordinary
+/// `message_start` costs no second parse.
+fn peek_input_transformations(payload: &str) -> Vec<Value> {
     #[derive(Deserialize)]
     struct Peek {
         message: PeekMessage,
@@ -226,11 +270,42 @@ fn dropped_thinking_summary(payload: &str) -> Option<String> {
         #[serde(default)]
         input_transformations: Vec<Value>,
     }
-    memmem::find(payload.as_bytes(), b"input_transformations")?;
-    let peek = serde_json::from_str::<Peek>(payload).ok()?;
-    let dropped: Vec<&Value> = peek
-        .message
-        .input_transformations
+    if memmem::find(payload.as_bytes(), b"input_transformations").is_none() {
+        return Vec::new();
+    }
+    serde_json::from_str::<Peek>(payload)
+        .map(|peek| peek.message.input_transformations)
+        .unwrap_or_default()
+}
+
+fn transformations_of(entries: &[Value]) -> InputTransformations {
+    let mut kinds: Vec<String> = entries
+        .iter()
+        .map(|entry| {
+            let kind = entry.get("type").and_then(Value::as_str).unwrap_or("unknown");
+            match entry.get("reason").and_then(Value::as_str) {
+                Some(reason) => format!("{kind}:{reason}"),
+                None => kind.to_string(),
+            }
+        })
+        .collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    InputTransformations {
+        count: u32::try_from(entries.len()).unwrap_or(u32::MAX),
+        kinds,
+    }
+}
+
+/// One sentence on the thinking blocks a `message_start` payload says were
+/// dropped, or `None` when it names none.
+#[cfg(test)]
+fn dropped_thinking_summary(payload: &str) -> Option<String> {
+    dropped_thinking_summary_of(&peek_input_transformations(payload))
+}
+
+fn dropped_thinking_summary_of(entries: &[Value]) -> Option<String> {
+    let dropped: Vec<&Value> = entries
         .iter()
         .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("thinking_dropped"))
         .collect();
@@ -630,5 +705,35 @@ mod tests {
         )
         .is_none());
         assert!(dropped_thinking_summary(r#"{"type":"content_block_delta"}"#).is_none());
+    }
+
+    /// The parser keeps the count and kinds of every transformation — not
+    /// only dropped thinking — for the request ledger, once per stream.
+    #[test]
+    fn the_parser_keeps_a_message_starts_transformations_for_the_ledger() {
+        let mut parser = SseParser::new();
+        let frame = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-fable-5-1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0},\"input_transformations\":[{\"type\":\"thinking_dropped\",\"path\":\"messages.1.content.0\",\"reason\":\"prefix_binding_mismatch\"},{\"type\":\"thinking_dropped\",\"path\":\"messages.3.content.0\",\"reason\":\"model_binding_mismatch\"},{\"type\":\"thinking_dropped\",\"path\":\"messages.5.content.0\",\"reason\":\"prefix_binding_mismatch\"}]}}\n\n"
+        );
+        let events = parser.push(frame.as_bytes()).expect("frame parses");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            parser.take_input_transformations(),
+            Some(super::InputTransformations {
+                count: 3,
+                kinds: vec![
+                    "thinking_dropped:model_binding_mismatch".to_string(),
+                    "thinking_dropped:prefix_binding_mismatch".to_string(),
+                ],
+            })
+        );
+        assert_eq!(parser.take_input_transformations(), None, "taken once");
+
+        let mut quiet = SseParser::new();
+        quiet
+            .push(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"m\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n")
+            .expect("frame parses");
+        assert_eq!(quiet.take_input_transformations(), None);
     }
 }
