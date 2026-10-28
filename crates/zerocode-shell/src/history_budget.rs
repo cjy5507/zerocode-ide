@@ -118,11 +118,26 @@ mod tests {
     fn a_window_at_the_default_depth_is_never_touched() {
         let now = Instant::now();
         let mut panes: Vec<PaneHistory> = (0..10)
-            .map(|term| pane(term, DEFAULT_SCROLLBACK_LINES, DEFAULT_SCROLLBACK_LINES, None))
+            .map(|term| {
+                pane(
+                    term,
+                    DEFAULT_SCROLLBACK_LINES,
+                    DEFAULT_SCROLLBACK_LINES,
+                    None,
+                )
+            })
             .collect();
         assert!(shares(&mut panes).is_empty());
-        let mut alone = [pane(1, MAX_SCROLLBACK_LINES, MAX_SCROLLBACK_LINES, Some(now))];
-        assert!(shares(&mut alone).is_empty(), "one pane keeps the whole depth chosen");
+        let mut alone = [pane(
+            1,
+            MAX_SCROLLBACK_LINES,
+            MAX_SCROLLBACK_LINES,
+            Some(now),
+        )];
+        assert!(
+            shares(&mut alone).is_empty(),
+            "one pane keeps the whole depth chosen"
+        );
     }
 
     #[test]
@@ -162,7 +177,12 @@ mod tests {
         let deep = MAX_SCROLLBACK_LINES;
         let mut panes = vec![
             pane(1, deep, deep, Some(now)),
-            pane(2, DEFAULT_SCROLLBACK_LINES + 300, deep, now.checked_sub(Duration::from_secs(60))),
+            pane(
+                2,
+                DEFAULT_SCROLLBACK_LINES + 300,
+                deep,
+                now.checked_sub(Duration::from_secs(60)),
+            ),
         ];
         assert_eq!(shares(&mut panes), vec![(2, DEFAULT_SCROLLBACK_LINES)]);
     }

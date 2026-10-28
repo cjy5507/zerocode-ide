@@ -2993,7 +2993,10 @@ impl TerminalGrid {
             }
         };
         named(&self.pen);
-        self.cells.iter().flatten().for_each(|cell| named(&cell.style));
+        self.cells
+            .iter()
+            .flatten()
+            .for_each(|cell| named(&cell.style));
         self.scrollback
             .iter()
             .flat_map(PackedRow::styles)
@@ -6823,11 +6826,18 @@ mod tests {
             read,
             "the reader was moved off the line they were reading"
         );
-        assert_eq!(grid.shed_history(40), 0, "a pane under its share gave up lines");
+        assert_eq!(
+            grid.shed_history(40),
+            0,
+            "a pane under its share gave up lines"
+        );
 
         let frame = grid.take_delta().expect("the shed is news to the window");
         assert_eq!(frame.scrollback_len, 12);
-        assert_eq!(wire_trimmed(&frame) - wire_trimmed(&before), (held - 12) as u64);
+        assert_eq!(
+            wire_trimmed(&frame) - wire_trimmed(&before),
+            (held - 12) as u64
+        );
 
         // Shedding below the reader leaves them on the oldest line kept.
         grid.scroll_view(20);
@@ -6853,7 +6863,11 @@ mod tests {
         let grid = term.grid_mut();
         let gone = NonZeroU32::new(1).expect("one");
         let kept = NonZeroU32::new(2).expect("two");
-        assert_eq!(grid.link_uri(gone), Some(""), "an address nothing names was kept");
+        assert_eq!(
+            grid.link_uri(gone),
+            Some(""),
+            "an address nothing names was kept"
+        );
         assert_eq!(grid.link_uri(kept), Some("https://kept"));
         let all: Vec<u32> = grid.snapshot().links.iter().map(|(id, _)| *id).collect();
         assert_eq!(all, vec![2], "a full frame named an emptied row");

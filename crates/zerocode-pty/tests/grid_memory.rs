@@ -199,7 +199,11 @@ fn a_deep_pane_shed_to_the_default_gives_back_all_but_the_defaults_share() {
     let grid = terminal.grid();
     assert_eq!(dropped, MAX_SCROLLBACK_LINES - DEFAULT_SCROLLBACK_LINES);
     assert_eq!(grid.scrollback_len(), DEFAULT_SCROLLBACK_LINES);
-    assert_eq!(grid.scrollback_cap(), MAX_SCROLLBACK_LINES, "the person's depth moved");
+    assert_eq!(
+        grid.scrollback_cap(),
+        MAX_SCROLLBACK_LINES,
+        "the person's depth moved"
+    );
     let shown: usize = (0..DEFAULT_SCROLLBACK_LINES)
         .map(|index| grid.scrollback_line(index).chars().count())
         .sum();
@@ -218,7 +222,10 @@ fn a_deep_pane_shed_to_the_default_gives_back_all_but_the_defaults_share() {
     // The history's bill, plus the screens a pane holds whatever its history:
     // the live one, the sent copy and the queues' spare room.
     assert!(shed <= bill + screen * 3, "{said}");
-    assert!(shed * 4 <= deep, "shedding gave back less than three quarters: {said}");
+    assert!(
+        shed * 4 <= deep,
+        "shedding gave back less than three quarters: {said}"
+    );
 }
 
 /// A pane draws on one screen of cells; the other screens it keeps cost what
