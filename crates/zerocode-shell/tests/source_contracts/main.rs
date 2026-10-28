@@ -33871,7 +33871,7 @@ mod tests {
             );
         }
 
-        let skill = include_str!("../../../../skills/orchestration/SKILL.md");
+        let skill = support::ORCHESTRATION_GUIDE;
         assert!(
             skill.contains("--on-quota-wall <agent[:model[:effort]]>")
                 && skill.contains("잔량으로 고르기")

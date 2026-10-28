@@ -18,7 +18,8 @@ Summon it through the ledger instead:
 Each worker opens as a real CLI in its own terminal pane — a Codex window for
 Codex, a Claude window for Claude — and the ledger carries its briefing, its
 mail, and its completion report. `zerocode-orc help` lists every verb;
-`skills/orchestration/SKILL.md` is the full guide.
+`skills/orchestration/SKILL.md` is the guide, and the reference files beside it
+hold its long form.
 
 An agent identity, model, or effort chosen by the user is a binding constraint,
 not a preference. Resolve the identity through the ZeroCode catalog and pass
