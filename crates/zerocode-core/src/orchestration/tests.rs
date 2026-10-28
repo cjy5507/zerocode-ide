@@ -28743,16 +28743,19 @@ fn a_spec_read_from_a_file_is_written_into_the_ledger_letter_for_letter() {
     let path = dir.path().join("spec.md");
     let spec = "do `pkill -f zerocode` never, nor $(touch /x), and keep $HOME\n둘째 줄 \"인용\"\n";
     std::fs::write(&path, spec).expect("write the spec");
+    let path = path.display().to_string();
     let argv: Vec<String> = [
         "task-create",
         "--spec-file",
-        &path.display().to_string(),
+        path.as_str(),
         "--retry-request",
         "filed-1",
     ]
     .map(String::from)
     .to_vec();
-    let read = text_file::expand(&argv).expect("the file reads").into_owned();
+    let read = text_file::expand(&argv)
+        .expect("the file reads")
+        .into_owned();
     let made = bench.at_argv(agent_teams::LEADER_PANE, read);
     assert_eq!(made.reply.exit_code, 0, "{}", made.reply.stderr);
 

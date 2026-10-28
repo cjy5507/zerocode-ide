@@ -29800,7 +29800,8 @@ fn a_verb_text_in_a_file_is_read_by_the_window_before_the_verb_runs() {
     let spec = "never `pkill -f zerocode`, never $(touch /x), keep $HOME\n둘째 줄";
     std::fs::write(&path, spec).expect("write the spec");
     let path = path.display().to_string();
-    let argv = |words: &[&str]| -> Vec<String> { words.iter().map(|w| w.to_string()).collect() };
+    let argv =
+        |given: &[&str]| -> Vec<String> { given.iter().map(|word| (*word).to_string()).collect() };
 
     let wrote = say(&argv(&[
         "task-create",

@@ -12,34 +12,176 @@
 //! file ([`refuse_unexpanded`] stops a request that reached it with one).
 
 use std::borrow::Cow;
+use std::path::Path;
 
-use super::Words;
+use super::{BOOL_FLAGS, MAX_PROSE, Words};
 
-/// Each file flag and the text flag it stands for.
-pub const TEXT_FILE_FLAGS: &[(&str, &str)] = &[];
+/// Each file flag and the text flag it stands for: every flag a verb reads prose from, except
+/// `--result`, which is JSON, and `--title`, which is one line.
+pub const TEXT_FILE_FLAGS: &[(&str, &str)] = &[
+    ("--prompt-file", "--prompt"),
+    ("--body-file", "--body"),
+    ("--spec-file", "--spec"),
+    ("--question-file", "--question"),
+    ("--resolution-file", "--resolution"),
+    ("--reason-file", "--reason"),
+];
 
-/// What inline text holding one of these may have been through before the
-/// window saw it.
+/// What inline text holding one of these may have been through before the window saw it: a shell
+/// runs a backtick pair and a `$(` inside double quotes, and hands the verb what they printed.
 pub const SHELL_RUNS: &[&str] = &["`", "$("];
 
-/// The line printed once for an inline text holding [`SHELL_RUNS`].
+/// The sentence the shim says once for an inline text holding [`SHELL_RUNS`]. It carries no
+/// apostrophe, so both shims can quote it in single quotes and no shell reads it as a command.
 pub fn inline_warning() -> String {
-    String::new()
+    let files: Vec<&str> = TEXT_FILE_FLAGS.iter().map(|(file, _)| *file).collect();
+    format!(
+        "warning: a text holds a backtick or $( - the shell may already have run it \
+         before this verb saw it; give the text as a file with {} instead",
+        files.join(", ")
+    )
+}
+
+/// What `help` says once about the file forms, beside what every verb shares.
+pub fn help_line() -> String {
+    let files: Vec<&str> = TEXT_FILE_FLAGS.iter().map(|(file, _)| *file).collect();
+    format!(
+        "a text flag also comes as a file ({}): an absolute path to a UTF-8 file, \
+         read as it lies with no shell in between — give any text holding a backtick \
+         or $( that way",
+        files.join(", ")
+    )
 }
 
 /// Whether inline text holds something a shell runs as a command.
-pub fn may_have_been_expanded(_text: &str) -> bool {
-    false
+pub fn may_have_been_expanded(text: &str) -> bool {
+    SHELL_RUNS.iter().any(|part| text.contains(part))
 }
 
-/// Replace every file flag in `argv` with the text flag it stands for.
+/// Replace every file flag in `argv` with the text flag it stands for, holding the file's text.
+///
+/// The one place a file is opened for a verb. `argv` comes back as it was, without a copy, when
+/// it names no file flag — which is every verb but the ones an agent hands a briefing.
+///
+/// A text comes by one road: a file flag beside the inline flag it stands for, or beside itself,
+/// is refused, not resolved by which came last. The words are walked as
+/// [`super::split_words`] walks them, so the value of another flag, or anything past `--`, that
+/// happens to spell a file flag is left alone.
 pub fn expand(argv: &[String]) -> Result<Cow<'_, [String]>, String> {
-    Ok(Cow::Borrowed(argv))
+    let names_a_file = |arg: &String| {
+        let name = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
+        TEXT_FILE_FLAGS.iter().any(|(file, _)| *file == name)
+    };
+    let Some((verb, rest)) = argv.split_first().filter(|_| argv.iter().any(names_a_file)) else {
+        return Ok(Cow::Borrowed(argv));
+    };
+    let mut expanded = vec![verb.clone()];
+    // Each text flag a source was seen for, and whether that source was a file.
+    let mut sources: Vec<(&str, bool)> = Vec::new();
+    let mut note = |(file, text): (&'static str, &'static str), from_file: bool| {
+        if sources
+            .iter()
+            .any(|(held, was_file)| *held == text && (*was_file || from_file))
+        {
+            return Err(format!(
+                "{text} and {file} were both given, or one of them twice — a text comes one \
+                 way, so give one of them"
+            ));
+        }
+        sources.push((text, from_file));
+        Ok(())
+    };
+    let mut index = 0;
+    let mut past_terminator = false;
+    while index < rest.len() {
+        let arg = rest[index].as_str();
+        if past_terminator || !arg.starts_with("--") || arg == "--" {
+            past_terminator |= arg == "--";
+            expanded.push(arg.to_string());
+            index += 1;
+            continue;
+        }
+        let (name, joined) = arg
+            .split_once('=')
+            .map_or((arg, None), |(name, value)| (name, Some(value)));
+        let width = if joined.is_some() || BOOL_FLAGS.contains(&arg) {
+            1
+        } else {
+            2
+        };
+        let value = joined
+            .map(str::to_string)
+            .or_else(|| (width == 2).then(|| rest.get(index + 1).cloned().unwrap_or_default()));
+        if let Some(&pair) = TEXT_FILE_FLAGS.iter().find(|(file, _)| *file == name) {
+            note(pair, true)?;
+            expanded.push(pair.1.to_string());
+            expanded.push(read_text_file(pair.0, &value.unwrap_or_default())?);
+        } else {
+            if let Some(&pair) = TEXT_FILE_FLAGS.iter().find(|(_, text)| *text == name) {
+                note(pair, false)?;
+            }
+            expanded.extend(rest[index..(index + width).min(rest.len())].iter().cloned());
+        }
+        index += width;
+    }
+    Ok(Cow::Owned(expanded))
+}
+
+/// A file's text, whole, as it lies: a plain file by its absolute path, UTF-8, not past the prose
+/// bound, with something in it.
+///
+/// Absolute because the window reads it from its own folder, not the caller's. A link is not
+/// followed — the window opens what the caller names, and a link is a way to name something
+/// else — the rule a worker's receipt file is read by. A file past the bound is refused whole,
+/// because a cut briefing is one nobody wrote.
+fn read_text_file(flag: &str, path: &str) -> Result<String, String> {
+    if path.is_empty() {
+        return Err(format!("{flag} needs a path"));
+    }
+    if !Path::new(path).is_absolute() {
+        return Err(format!(
+            "{flag} names a file by its absolute path, and {path:?} is not one — the window \
+             reads it from its own folder, not yours; write \"$PWD/name\""
+        ));
+    }
+    let unreadable = |why: &dyn std::fmt::Display| format!("{flag} {path:?} cannot be read: {why}");
+    let held = std::fs::symlink_metadata(path).map_err(|why| unreadable(&why))?;
+    if !held.is_file() {
+        return Err(format!(
+            "{flag} {path:?} is not a plain file — a link or a folder is not followed"
+        ));
+    }
+    if held.len() > MAX_PROSE as u64 {
+        return Err(format!(
+            "{flag} {path:?} is {} bytes and a text holds {MAX_PROSE} — nothing was written, \
+             so give a shorter file",
+            held.len()
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|why| unreadable(&why))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("{flag} {path:?} is not UTF-8 text — nothing was written"))?;
+    if text.trim().is_empty() {
+        return Err(format!("{flag} {path:?} is empty — nothing was written"));
+    }
+    Ok(text)
 }
 
 /// Refuse a request that reached the plan with a file flag still in it.
-pub fn refuse_unexpanded(_words: &Words) -> Result<(), String> {
-    Ok(())
+///
+/// The window reads the files before the plan, so a file flag here means a road to the plan that
+/// skipped the window. Ignored, the verb would write a task with no spec and say it worked.
+pub fn refuse_unexpanded(words: &Words) -> Result<(), String> {
+    match TEXT_FILE_FLAGS
+        .iter()
+        .find(|(file, _)| words.value(file).is_some())
+    {
+        Some((file, text)) => Err(format!(
+            "{file} reached the ledger unread — the window reads a file before a verb is planned, \
+             so this request came by a road that does not; send {text} with the text itself"
+        )),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -82,7 +224,7 @@ mod tests {
     #[test]
     fn a_file_arrives_letter_for_letter_whatever_a_shell_would_have_made_of_it() {
         let (_dir, path) = written(DANGEROUS.as_bytes());
-        for (file, text) in TEXT_FILE_FLAGS {
+        for &(file, text) in TEXT_FILE_FLAGS {
             let given = argv(&["worker-start", "--task", "t-1", file, &path, "--worktree"]);
             let read = expand(&given).expect("a plain file reads");
             assert_eq!(
@@ -198,11 +340,17 @@ mod tests {
     }
 
     #[test]
+    fn help_names_every_file_flag_once() {
+        let line = help_line();
+        for &(file, _) in TEXT_FILE_FLAGS {
+            assert_eq!(line.matches(file).count(), 1, "{file}: {line}");
+        }
+    }
+
+    #[test]
     fn a_file_flag_that_reaches_the_plan_is_refused_not_dropped() {
-        let words = super::super::split_words(
-            &argv(&["--prompt-file", "/tmp/x.md", "--task", "t-1"]),
-            &[],
-        );
+        let words =
+            super::super::split_words(&argv(&["--prompt-file", "/tmp/x.md", "--task", "t-1"]), &[]);
         let why = refuse_unexpanded(&words).expect_err("it would silently lose the text");
         assert!(why.contains("--prompt-file"), "{why}");
         let words = super::super::split_words(&argv(&["--prompt", "x"]), &[]);
