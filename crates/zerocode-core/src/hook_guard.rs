@@ -635,6 +635,18 @@ fn command_in(tree: &Value) -> Option<String> {
     })
 }
 
+/// The shell command a hook event says is ABOUT to run, whole and as the
+/// shell will read it — for a guard that answers the hook itself (t-80602,
+/// [`crate::shell_rule::kill`]). Unlike [`Moment::CommandAbout`] it is neither
+/// scrubbed nor capped: a pattern past the viewer's cap still runs. An argv
+/// array is put back into shell words, each single-quoted, so `["bash",
+/// "-lc", "pkill …"]` reads as the shell string it hands on.
+#[must_use]
+pub fn command_about(event: &str, payload: &str) -> Option<String> {
+    let _ = (event, payload);
+    None
+}
+
 /// The words an edit or a write carries out.
 fn written_in(tree: &Value) -> Option<String> {
     let input = hook::INPUT_KEYS.iter().find_map(|key| tree.get(*key))?;

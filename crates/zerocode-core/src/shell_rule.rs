@@ -19,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 
 pub mod check;
 mod classify;
+pub mod kill;
 pub mod parse;
 pub mod scope;
 

@@ -44,6 +44,8 @@ use tokio::sync::mpsc;
 use zerocode_core::computer_use::COMPUTER_CLI;
 use zerocode_core::{ALL_AGENTS, AgentKind, HookEnvelope};
 
+pub use kill_guard::{KillRoots, KillWitness};
+
 /// Header carrying the per-run shared secret.
 pub const HOOK_TOKEN_HEADER: &str = "x-zerocode-hook-token";
 
@@ -205,6 +207,7 @@ pub mod codex_runtime_auth;
 pub mod codex_trust;
 pub mod endpoint;
 pub mod install;
+mod kill_guard;
 mod orchestration_contract;
 pub mod plugin;
 pub mod pointer_mailbox;
@@ -590,6 +593,9 @@ pub struct BridgeState {
     /// Where a hook delivery that needed more than one try is written down
     /// for the window — see [`BridgeState::with_delivery_notes`].
     delivery_notes: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    /// What the window knows of its panes' processes, for the kill guard
+    /// ([`kill_guard`]). `None` is a bridge that refuses nothing.
+    kill_witness: Option<Arc<dyn KillWitness>>,
 }
 
 /// The second brain's answer to a prompt, for the providers whose prompt hook
@@ -849,6 +855,15 @@ impl BridgeState {
         self
     }
 
+    /// Install what the window knows of its panes' processes: a pane's
+    /// command that would signal the window or another pane is then refused
+    /// in its own pre-tool hook's reply ([`kill_guard`], t-80602).
+    #[must_use]
+    pub fn with_kill_witness(mut self, witness: Arc<dyn KillWitness>) -> Self {
+        self.kill_witness = Some(witness);
+        self
+    }
+
     /// Install the window's turn brief as a further answer to prompt hooks.
     #[must_use]
     pub fn with_turn_brief(mut self, source: Arc<dyn TurnBrief>) -> Self {
@@ -933,6 +948,7 @@ impl BridgeState {
                 pointers: None,
                 replays: Arc::new(std::sync::Mutex::new(replays::Replays::default())),
                 delivery_notes: None,
+                kill_witness: None,
                 selection_context: Arc::new(std::sync::Mutex::new(
                     orchestration_contract::SelectionContextTracker::default(),
                 )),
