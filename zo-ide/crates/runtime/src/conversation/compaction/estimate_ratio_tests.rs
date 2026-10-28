@@ -7,10 +7,11 @@
 //! estimate ran at 0.75 to 1.67 times the provider's count; scaled by the
 //! ratio measured on the previous answered request, 277 of 295 requests came
 //! within 20% of what the provider billed. A budget written in tokens — the
-//! trim's 4k floor, the kept tail — means the provider's tokens.
+//! trim's floor ([`MICROCOMPACT_MIN_CLEARED_TOKENS`]), the kept tail — means
+//! the provider's tokens.
 
 use super::super::{ApiClient, ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError, StaticToolExecutor};
-use super::auto_compaction_tail_budget;
+use super::{auto_compaction_tail_budget, MICROCOMPACT_MIN_CLEARED_TOKENS};
 use crate::permissions::{PermissionMode, PermissionPolicy};
 use crate::session::{ContentBlock, ConversationMessage, Session};
 use crate::usage::TokenUsage;
@@ -74,14 +75,17 @@ fn answer_counted_at(runtime: &mut ConversationRuntime<NoopApiClient, StaticTool
         .expect("answer");
 }
 
-/// Two old bodies worth 3k estimated tokens, under the 4k floor — 6k by the
-/// count of a provider that bills twice the estimate.
+/// Two old bodies worth three quarters of [`MICROCOMPACT_MIN_CLEARED_TOKENS`]
+/// by the estimate, under the floor — one and a half times it by the count
+/// of a provider that bills twice the estimate.
 #[test]
 fn the_trim_floor_is_counted_in_the_providers_tokens() {
     let _env = crate::test_env_lock();
     let mut runtime = runtime();
     runtime.session.push_user_text("read these").expect("task");
-    push_results(&mut runtime, 2, 6_000);
+    // Four bytes a token: each body is three eighths of the floor.
+    let body_bytes = usize::try_from(MICROCOMPACT_MIN_CLEARED_TOKENS * 3 / 2).expect("fits");
+    push_results(&mut runtime, 2, body_bytes);
     push_results(&mut runtime, 10, 300);
     answer_counted_at(&mut runtime, 2.0);
 
@@ -89,7 +93,7 @@ fn the_trim_floor_is_counted_in_the_providers_tokens() {
     let fired = runtime.maybe_microcompact_for_tokens(threshold);
     assert!(
         fired.is_some(),
-        "3k estimated tokens are 6k by the provider's count, over the 4k floor"
+        "three quarters of the floor by the estimate are one and a half times it by the provider's count"
     );
 }
 
@@ -163,7 +167,10 @@ fn a_model_switch_or_a_full_compaction_forgets_the_ratio() {
     let result = crate::compact::compact_session(&runtime.session, config);
     assert!(runtime.finish_auto_compaction(result).is_some(), "a full compaction folded the transcript");
     assert_eq!(runtime.context_estimate_ratio, None);
-    assert_eq!(runtime.provider_tokens_for_estimate(4_000), 4_000);
+    assert_eq!(
+        runtime.provider_tokens_for_estimate(MICROCOMPACT_MIN_CLEARED_TOKENS),
+        MICROCOMPACT_MIN_CLEARED_TOKENS
+    );
 }
 
 /// A calibrated figure never leaves the range the gates already work in:

@@ -2563,37 +2563,36 @@ fn orphaned_thinking_tokens(
     })
 }
 
-/// The thinking one stored message carries.
+/// The thinking one stored message carries, in [`estimated_message_tokens`]'s
+/// unit.
 fn thinking_tokens(message: &ConversationMessage) -> u64 {
     message
         .blocks
         .iter()
-        .map(|block| match block {
-            ContentBlock::Thinking { thinking, .. } => thinking.len() as u64 / 4,
-            ContentBlock::RedactedThinking { data } => data.len() as u64 / 4,
-            _ => 0,
-        })
+        .filter(|block| matches!(block, ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }))
+        .map(estimated_block_tokens)
         .sum()
 }
 
 /// Rough token size of one stored message, in the repo's `chars / 4` unit.
 fn estimated_message_tokens(message: &ConversationMessage) -> u64 {
-    message
-        .blocks
-        .iter()
-        .map(|block| match block {
-            ContentBlock::Text { text } => text.len() as u64 / 4,
-            ContentBlock::Thinking { thinking, .. } => thinking.len() as u64 / 4,
-            ContentBlock::RedactedThinking { data } => data.len() as u64 / 4,
-            ContentBlock::ToolUse { input, .. } => input.len() as u64 / 4,
-            ContentBlock::ToolResult { output, images, .. } => {
-                output.len() as u64 / 4 + images.len() as u64 * 1_600
-            }
-            // Same 1,600-token figure `plan_estimated_tokens` prices an image
-            // at, so the gain and the cost are quoted in one unit.
-            ContentBlock::Image { .. } => 1_600,
-        })
-        .sum()
+    message.blocks.iter().map(estimated_block_tokens).sum()
+}
+
+/// [`estimated_message_tokens`] of one block.
+fn estimated_block_tokens(block: &ContentBlock) -> u64 {
+    match block {
+        ContentBlock::Text { text } => text.len() as u64 / 4,
+        ContentBlock::Thinking { thinking, .. } => thinking.len() as u64 / 4,
+        ContentBlock::RedactedThinking { data } => data.len() as u64 / 4,
+        ContentBlock::ToolUse { input, .. } => input.len() as u64 / 4,
+        ContentBlock::ToolResult { output, images, .. } => {
+            output.len() as u64 / 4 + images.len() as u64 * 1_600
+        }
+        // Same 1,600-token figure `plan_estimated_tokens` prices an image
+        // at, so the gain and the cost are quoted in one unit.
+        ContentBlock::Image { .. } => 1_600,
+    }
 }
 
 /// Tier-1 context trim (Claude Code "microcompact" parity): replace the

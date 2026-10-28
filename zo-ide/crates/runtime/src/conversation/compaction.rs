@@ -648,6 +648,10 @@ pub const MICROCOMPACT_MIN_OUTPUT_BYTES: usize = 240;
 /// transcript has been answered, when there is no pace to measure the way to
 /// the full-compaction tier by (t-78937).
 const MICROCOMPACT_PAYBACK_REQUESTS: u64 = 5;
+/// The least a trim must clear to be worth the cache it invalidates, in the
+/// provider's tokens: the gate scales the estimate's `chars / 4` by the ratio
+/// measured on the last answered request before comparing (t-78937).
+const MICROCOMPACT_MIN_CLEARED_TOKENS: u64 = 4_000;
 
 use crate::message_stream::types::StreamPhase;
 use crate::message_stream::{BlockIdGen, RenderBlock, SystemLevel};
@@ -1352,7 +1356,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             ),
             None => quote.pays_back_within(MICROCOMPACT_PAYBACK_REQUESTS),
         };
-        let worth_it = pays_back && self.provider_tokens_for_estimate(clearable) >= 4_000;
+        let worth_it = pays_back && self.provider_tokens_for_estimate(clearable) >= MICROCOMPACT_MIN_CLEARED_TOKENS;
         let last_resort = !worth_it && self.microcompact_is_last_resort(context_tokens);
         if !worth_it && !last_resort {
             // In the trim zone but the batch is not worth the cache

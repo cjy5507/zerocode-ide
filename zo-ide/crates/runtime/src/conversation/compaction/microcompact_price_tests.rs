@@ -186,7 +186,7 @@ fn the_hard_ceiling_still_runs_a_trim_the_prices_decline() {
     assert!(runtime
         .maybe_microcompact_for_tokens(runtime.microcompact_input_tokens_threshold())
         .is_none());
-    let ceiling = runtime.context_window() * 95 / 100 + 1;
+    let ceiling = runtime.hard_context_ceiling_tokens() + 1;
     let fired = runtime.maybe_microcompact_for_tokens(ceiling);
     assert!(fired.is_some(), "the last-resort trim runs at the hard ceiling");
 }
