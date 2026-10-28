@@ -456,6 +456,7 @@ fn kill_guard_authorize_asks_a_person_once_and_refuses_when_nobody_can_answer() 
         assert_eq!(yes.asked.len(), 1, "{mode:?}: one question");
         let question = yes.asked[0].reason.clone().unwrap_or_default();
         assert!(question.contains("$TARGET"), "{mode:?}: the question names the call: {question}");
+        assert!(yes.asked[0].person_only, "{mode:?}: only a person may answer it");
         let mut no = Person::saying(false);
         assert!(
             matches!(

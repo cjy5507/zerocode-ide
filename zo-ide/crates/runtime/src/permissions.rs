@@ -64,6 +64,10 @@ pub struct PermissionRequest {
     /// `None` = reuse `reason` (the ask-rule / hook cases, where one wording
     /// serves both).
     pub deny_reason: Option<String>,
+    /// Only a person may answer it, and only for this call (t-80732): the
+    /// prompt offers no lasting allow, and a front-end that decides in a
+    /// person's absence refuses it instead of approving it.
+    pub person_only: bool,
 }
 
 /// User-facing decision returned by a [`PermissionPrompter`].
@@ -427,6 +431,7 @@ impl PermissionPolicy {
                         },
                         Some(reason.clone()),
                         Some(crate::kill_guard::unanswered(&reason)),
+                        true,
                         prompter,
                     ),
                 }
@@ -491,6 +496,7 @@ impl PermissionPolicy {
                     mode_audit,
                     Some(reason),
                     None,
+                    false,
                     prompter,
                 );
             }
@@ -502,6 +508,7 @@ impl PermissionPolicy {
                         mode_audit,
                         Some(reason),
                         None,
+                        false,
                         prompter,
                     );
                 }
@@ -542,7 +549,7 @@ impl PermissionPolicy {
             ..
         } = mode_audit;
         if let Some(reason) = ask_reason {
-            return Self::prompt_or_deny(tool_name, input, mode_audit, Some(reason), None, prompter);
+            return Self::prompt_or_deny(tool_name, input, mode_audit, Some(reason), None, false, prompter);
         }
 
         if allow_matched
@@ -579,6 +586,7 @@ impl PermissionPolicy {
                 mode_audit,
                 prompt_reason,
                 deny_reason,
+                false,
                 prompter,
             );
         }
@@ -604,6 +612,7 @@ impl PermissionPolicy {
         mode_audit: ModeAudit,
         reason: Option<String>,
         deny_reason: Option<String>,
+        person_only: bool,
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
         let request = PermissionRequest {
@@ -613,6 +622,7 @@ impl PermissionPolicy {
             required_mode: mode_audit.required_mode,
             reason: reason.clone(),
             deny_reason: deny_reason.clone(),
+            person_only,
         };
 
         match prompter.as_mut() {

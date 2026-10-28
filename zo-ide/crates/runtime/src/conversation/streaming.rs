@@ -82,6 +82,18 @@ pub(crate) fn default_permission_choices() -> Vec<AsyncPermissionChoice> {
     ]
 }
 
+/// The answers to a call only a person may allow (t-80732): this once, or
+/// not at all. No lasting allow is offered — the next such call is asked
+/// again — and so a front-end that decides in a person's absence, which
+/// approves only where a lasting allow is offered, has nothing to approve it
+/// with.
+pub(crate) fn person_only_choices() -> Vec<AsyncPermissionChoice> {
+    default_permission_choices()
+        .into_iter()
+        .filter(|choice| choice.decision != AsyncPermissionDecision::Allow)
+        .collect()
+}
+
 /// One question the refusal ladder asks the person (t-6747). It goes through
 /// the prompt every permission question uses, but it is not a tool: it names
 /// none and carries no risk, and `question` — the ladder's own
@@ -336,7 +348,11 @@ pub(crate) fn build_async_permission_request(
                 sync_request.current_mode.as_str()
             )
         }),
-        choices: default_permission_choices(),
+        choices: if sync_request.person_only {
+            person_only_choices()
+        } else {
+            default_permission_choices()
+        },
         risk_level: risk_from_tool_name(&sync_request.tool_name),
         question: None,
     }
@@ -357,6 +373,7 @@ mod permission_metadata_tests {
             required_mode: PermissionMode::Allow,
             reason: None,
             deny_reason: None,
+            person_only: false,
         });
         assert_eq!(request.input_summary, "Input details hidden");
         assert_eq!(request.input_hash.len(), 64);
@@ -369,8 +386,38 @@ mod permission_metadata_tests {
             required_mode: PermissionMode::Allow,
             reason: None,
             deny_reason: None,
+            person_only: false,
         });
         assert_eq!(bash.input_summary, "cargo test -p runtime");
+    }
+
+    /// t-80732: a kill_guard question offers this once or not at all, so an
+    /// unattended front-end finds no lasting allow to approve it with.
+    #[test]
+    fn kill_guard_question_offers_no_lasting_allow() {
+        let request = |person_only| PermissionRequest {
+            tool_name: "bash".to_string(),
+            input: r#"{"command":"kill \"$TARGET\""}"#.to_string(),
+            current_mode: PermissionMode::DangerFullAccess,
+            required_mode: PermissionMode::DangerFullAccess,
+            reason: Some("a person should say yes first".to_string()),
+            deny_reason: None,
+            person_only,
+        };
+        let lasting = |person_only| {
+            build_async_permission_request(&request(person_only))
+                .choices
+                .iter()
+                .any(|choice| choice.decision == crate::permission::PermissionDecision::Allow)
+        };
+        assert!(!lasting(true));
+        assert!(lasting(false), "an ordinary question keeps its lasting allow");
+        let offered = build_async_permission_request(&request(true)).choices;
+        assert!(
+            offered.iter().any(|choice| choice.decision == crate::permission::PermissionDecision::AllowOnce)
+                && offered.iter().any(|choice| choice.decision == crate::permission::PermissionDecision::Deny),
+            "{offered:?}"
+        );
     }
 }
 
