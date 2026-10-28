@@ -958,6 +958,38 @@ fn only_the_end_call_changes_anything() {
     assert!(changes_the_ledger(VERB, &kill_words));
 }
 
+/// An end call without a retry name is refused twice over (r3 P3-3): the
+/// road says it needs one before planning, and the verb itself refuses it
+/// from the live coordinator seat — so a retry is always told what the first
+/// call did rather than signalling again.
+#[test]
+fn an_end_call_without_a_retry_name_is_refused() {
+    let kill = format!("{VERB} --kill 4100@0123456789ab");
+    assert!(needs_a_retry_name(&words(&kill)));
+    assert!(!needs_a_retry_name(&words(&format!(
+        "{kill} --retry-request sweep-1"
+    ))));
+    assert!(!needs_a_retry_name(&words(&format!("{VERB} --find cargo"))));
+    let mut bench = Bench::new();
+    bench.json("run-create --name sweep");
+    let run = bench.ledger.runs()[0].id.clone();
+    let asked = |line: &str| {
+        crate::orchestration::process_sweep::ask(
+            &bench.ledger,
+            &split_words(&words(line), BOOL_FLAGS),
+            &bench.team.id,
+            agent_teams::LEADER_PANE,
+            || Ok(run.clone()),
+        )
+    };
+    let refused = asked("--kill 4100@0123456789ab").expect_err("an unnamed end call");
+    assert!(refused.contains(RETRY_REQUEST), "{refused}");
+    assert!(matches!(
+        asked("--kill 4100@0123456789ab --retry-request sweep-1"),
+        Ok(ProcessSweepAsk::End { .. })
+    ));
+}
+
 /// The help says the rule the verb exists for.
 #[test]
 fn the_help_says_never_to_kill_by_pattern() {
