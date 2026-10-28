@@ -14506,7 +14506,11 @@ await test("the browser page shows the cookie jars and where each one drank", as
 await test("a profile card picks the default, badges pending imports, and deletes on confirm", async () => {
   backend.defaultProfileId = null;
   backend.browserProfiles = [
-    { id: "1".repeat(32), name: "일하는 계정" },
+    {
+      id: "1".repeat(32),
+      name: "일하는 계정",
+      lastApply: { applied: 121, refused: 1, retained: 0, dropped: 24, atUnix: 1793150000 },
+    },
     {
       id: "2".repeat(32),
       name: "사는 계정",
@@ -14531,6 +14535,19 @@ await test("a profile card picks the default, badges pending imports, and delete
     await pageA.locator("#browser-profile-list > *").nth(0).locator(".browser-profile-chip").count(),
     0,
     "a profile with nothing staged still claimed pending",
+  );
+  // 주입이 끝난 프로필은 마지막 결과를 한 줄로 든다 — 거절이 있어도 받은 수가 먼저다.
+  // 문구는 그때 창의 언어로 선다 — 두 수와 거절 갈래(「·」)만 본다.
+  const outcome = await pageA.locator("#browser-profile-list > *").nth(0)
+    .locator(".browser-profile-applied").textContent();
+  assert(
+    /121\D[^·]*·\D*1\D/.test(`${outcome} `),
+    `the last injection's counts did not reach the card: ${JSON.stringify(outcome)}`,
+  );
+  assertEqual(
+    await pageA.locator("#browser-profile-list > *").nth(1).locator(".browser-profile-applied").count(),
+    0,
+    "a profile never injected claimed an outcome",
   );
 
   // 카드를 누르면 그 프로필이 새 탭의 기본이 된다 — 시스템 손에 적히고,

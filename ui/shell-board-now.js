@@ -1308,7 +1308,7 @@ function boardNextWords(rows, now) {
   }
   if (running) {
     return t("board.now.nextLane", "빌드 줄에서 {{version}} 발행이 {{phase}} 단계를 돌고 있습니다.",
-      { version: lane.version ? `v${lane.version}` : String(lane.sha).slice(0, SHORT_COMMIT_LENGTH),
+      { version: deskReleaseVersionWord(lane),
         phase: deskReleasePhaseWord(String(lane.phase || "")) });
   }
   const live = rows.filter((row) => row.state === "run").length;
