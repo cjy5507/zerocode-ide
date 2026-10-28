@@ -25685,9 +25685,7 @@ fn a_manual_switch_cuts_no_turn_and_its_panes_follow_it() {
 /// ledger's voice like any other; the pick ends with it.
 #[test]
 fn an_account_the_person_picked_is_kept_until_its_wall_even_after_a_restart() {
-    use zerocode_core::account_autoswitch::{
-        CLAUDE_ACCOUNT_AUTOSWITCH, Decision, SwitchReason,
-    };
+    use zerocode_core::account_autoswitch::{CLAUDE_ACCOUNT_AUTOSWITCH, Decision, SwitchReason};
     let stood = WalledClaude::near_limit(93_400, 1, 0);
     let dir = stood.world.journal.path().to_path_buf();
     let warned = CLAUDE_ACCOUNT_AUTOSWITCH.default_moves_at_percent + 2;
@@ -25723,7 +25721,11 @@ fn an_account_the_person_picked_is_kept_until_its_wall_even_after_a_restart() {
     let restarted = later + 60_000;
     stood.world.reads(warned, 2, restarted);
     let after = stood.plan(restarted);
-    assert_eq!(after.decision, Decision::Stay { why: "picked" }, "{after:?}");
+    assert_eq!(
+        after.decision,
+        Decision::Stay { why: "picked" },
+        "{after:?}"
+    );
     assert_eq!(after.picked_at_ms, Some(at));
     // ② The wall: a window of the picked account is full. The beat moves
     // the default, says so in a receipt, and the pick ends with the move.
@@ -25744,9 +25746,14 @@ fn an_account_the_person_picked_is_kept_until_its_wall_even_after_a_restart() {
         "{wall:?}"
     );
     stood.host.seating_onto(stood.leader + 100);
-    let applied =
-        crate::account_switch::apply_with(&stood.host, &stood.world, &wall.token, "auto", walled_at)
-            .expect("the wall's move");
+    let applied = crate::account_switch::apply_with(
+        &stood.host,
+        &stood.world,
+        &wall.token,
+        "auto",
+        walled_at,
+    )
+    .expect("the wall's move");
     assert!(applied.switched_default);
     assert_eq!(
         stood.world.selects(),
