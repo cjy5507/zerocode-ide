@@ -440,6 +440,8 @@ struct PrecomputedStreamingToolResult {
     output: ToolExecutionResult,
     kind: ToolTextKind,
     tool_start: std::time::Instant,
+    /// When its dispatch came back — not when the wave finished.
+    finished: std::time::Instant,
 }
 
 struct StreamingToolRenderContext<'a> {
@@ -1044,6 +1046,9 @@ where
         // when the turn ends (`Self::tell_recall_seat`).
         let mut recall_heard_from = message_count_before;
         let mut recall_answered = false;
+        // How long the last answer's tools ran: the request that carries
+        // their results back says so on its timing row (t-78938).
+        let mut tools_ran: Option<crate::request_timings::ToolRuns> = None;
 
         'outer: loop {
             if self.tool_loop_break_requested {
@@ -2361,6 +2366,10 @@ where
                 }
             }
             self.record_prompt_cache_breaks(iterations, &turn_prompt_cache_events);
+            // Taken here, where the row is written: a request abandoned before
+            // its row leaves the tools' times to the request that re-carries
+            // their results.
+            stream_stamps.tools_ran = tools_ran.take().unwrap_or_default();
             #[cfg(test)]
             crate::request_timings::note_recorded(&stream_stamps);
             self.record_request_timing(iterations, &stream_stamps, "completed");
@@ -2688,6 +2697,9 @@ where
             // Where the tools begin to run — every permission is settled, so
             // what follows is the tools' own time (t-12076).
             let tools_began = std::time::Instant::now();
+            // Each tool's own run, for the next request's timing row.
+            let mut tool_runs =
+                crate::request_timings::ToolRuns::asked(prepared.iter().map(|p| p.tool_name.as_str()));
 
             // ── Pass 2: the waves ──
             // Consecutive tools that may run side by side — reads, and the
@@ -2750,6 +2762,7 @@ where
                     }
                 }
                 let result_message = if let Some(precomputed_result) = precomputed.remove(&idx) {
+                    tool_runs.ran(idx, precomputed_result.tool_start, precomputed_result.finished);
                     self.finalize_streaming_tool_result(
                         iterations,
                         p,
@@ -2890,6 +2903,7 @@ where
                                     )
                                 }
                             };
+                            tool_runs.ran(idx, tool_start, std::time::Instant::now());
 
                             self.finalize_streaming_tool_result(
                                 iterations,
@@ -2983,6 +2997,7 @@ where
                 self.note_progress_tool_result(&result_message);
                 tool_results.push(result_message);
             }
+            tools_ran = Some(tool_runs);
 
             // A tool call that is running is progress: on a quiet deadline the
             // clock does not run while a call does, so a build longer than the
@@ -3174,10 +3189,10 @@ where
                 handles.push(async move {
                     let outcome =
                         await_cancellable_tool_dispatch(handle, &mut watch, &owner_session).await;
-                    (idx, tool_start, outcome)
+                    (idx, tool_start, std::time::Instant::now(), outcome)
                 });
             }
-            while let Some((idx, tool_start, outcome)) = handles.next().await {
+            while let Some((idx, tool_start, finished, outcome)) = handles.next().await {
                 let (output, kind, cancelled) = outcome;
                 if cancelled {
                     self.mark_streaming_tool_cancelled(
@@ -3213,6 +3228,7 @@ where
                         output,
                         kind,
                         tool_start,
+                        finished,
                     },
                 );
             }
