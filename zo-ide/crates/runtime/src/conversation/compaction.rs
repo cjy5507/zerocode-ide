@@ -972,7 +972,8 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// 7k output tokens at p90 and 66k at most, against about 30k between the
     /// full tier and the hard ceiling on a 200k window (t-78937).
     ///
-    /// `None` when the latest answer carries no usage, or is older than the
+    /// `None` when the latest answer carries no usage or usage that counts no
+    /// tokens (the provider did not report it), or is older than the
     /// last compaction's continuation: the tail a compaction keeps holds
     /// answers counted against the history it folded away.
     pub(super) fn provider_anchored_context_tokens(&self) -> Option<u64> {
@@ -995,7 +996,10 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             .enumerate()
             .rev()
             .find(|(_, message)| message.role == MessageRole::Assistant)?;
-        let usage = answer.usage?;
+        // A request's input is never zero tokens: usage that counts none is
+        // usage the provider did not report, which an OpenAI-compatible
+        // adapter still closes the stream with as an all-zero delta.
+        let usage = answer.usage.filter(|usage| usage.context_tokens() > 0)?;
         if self.session.compaction.is_some() {
             let compacted_at = messages.first().and_then(|message| message.updated_at_ms)?;
             // Strictly older: the kept tail was written well before the
