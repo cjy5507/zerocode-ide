@@ -92,8 +92,8 @@ fn stage_one_runs_the_four_checks_in_order() {
 /// place that knows them): the root and the others.
 fn script_workspaces() -> Vec<String> {
     let path = repo_root().join("tools/release/changed_crates.py");
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|why| panic!("{}: {why}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|why| panic!("{}: {why}", path.display()));
     let line = text
         .lines()
         .find(|line| line.starts_with("WORKSPACES = ("))
@@ -139,9 +139,11 @@ fn a_crate_under_test_gets_its_docs_built_like_the_gate_builds_them() {
     let body = body();
     let steps = steps(&body);
     assert!(
-        steps.iter().any(|(name, command)| name == "\"doc:$package\""
-            && command
-                == "env RUSTDOCFLAGS=\"$doc_flags\" cargo doc -p \"$package\" --no-deps"),
+        steps
+            .iter()
+            .any(|(name, command)| name == "\"doc:$package\""
+                && command
+                    == "env RUSTDOCFLAGS=\"$doc_flags\" cargo doc -p \"$package\" --no-deps"),
         "a `doc:$package` step runs cargo doc with the flags the gate uses:\n{body}"
     );
     assert!(
