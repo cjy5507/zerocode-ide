@@ -331,15 +331,22 @@ async function standLayers(page, { orbit, knowledge, chat }) {
   if (chat) await openFixtureConversation(page, conversationFixture());
   if (orbit) {
     await openOrbit(page);
-    detail.orbitViews = await page.evaluate(() => agentOrbitStates.size);
+    Object.assign(detail, await page.evaluate(() => ({ orbitViews: agentOrbitViews.size, orbitBroken: agentOrbitBroken,
+      orbitBloom: window.__ORBIT__?.()?.bloom ?? null })));
   }
-  if (knowledge) Object.assign(detail, await openKnowledge(page));
+  if (knowledge) {
+    Object.assign(detail, await openKnowledge(page));
+    detail.knowledgePainter = await page.evaluate(() => {
+      const view = document.querySelector(".knowledge-view:not([hidden])");
+      return view === null ? null : knowledgePainters.get(view)?.id ?? (knowledgeUniverses.has(view) ? "universe" : null);
+    });
+  }
   return { ...detail, ...await page.evaluate(async () => {
     setActiveTab(tabOfTerm(window.__CENSUS_TERMS__.at(-1)).id);
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     const shows = (selector) => document.querySelector(selector)?.checkVisibility() ?? null;
     return { boardShown: shows("#board-view"), knowledgeShown: shows(".knowledge-view"),
-      termShown: shows(".term:not([hidden])"), chatsBehind: document.querySelectorAll(".is-behind").length,
+      termShown: termView(window.__CENSUS_TERMS__.at(-1)).host.checkVisibility(), chatsBehind: document.querySelectorAll(".is-behind").length,
       // Animations still running inside a page set behind: each one is a frame drawn for nobody.
       behindAnimations: document.getAnimations().filter((one) => one.playState === "running"
         && one.effect?.target?.closest?.(".is-behind")).length };
@@ -371,9 +378,14 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
     let page;
     let faults = [];
     const layers = name.startsWith("layers");
-    if (name === "knowledge" || layers) {
-      const context = await browser.newContext({ viewport: { width: 1440, height: 900 },
-        deviceScaleFactor: layers ? LAYER_SCALE : 1 });
+    if (layers) {
+      // The window's own fixtures (terminals, board, conversation) with the vault the knowledge view reads.
+      ({ page, faults } = await openWindowTestPage(browser, origin, { before: seedUniverseVault,
+        context: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: LAYER_SCALE,
+          // The person's window moves: an animation is part of what a layer costs.
+          reducedMotion: "no-preference" } }));
+    } else if (name === "knowledge") {
+      const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
       page = await context.newPage();
       page.on("pageerror", (error) => faults.push(String(error).slice(0, 200)));
       await seedKnowledgeWindow(page);

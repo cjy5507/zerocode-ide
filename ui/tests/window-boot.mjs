@@ -2469,11 +2469,13 @@ export async function waitBootSettled(page) {
  *            a fresh one otherwise.
  *   before — a hand on the page after the backend stands and before the
  *            window boots: the init script a fixture needs. */
-export async function openWindowTestPage(browser, origin, { faults = [], before = null } = {}) {
+export async function openWindowTestPage(browser, origin, { faults = [], before = null, context: shape = {} } = {}) {
   // A context of its own, not `browser.newPage()`: a context a page owns
   // refuses `context.newPage()`, and the axe check opens its blank page that
   // way ("Please use browser.newContext()"). The context leaves with the page.
-  const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, reducedMotion: WINDOW_MOTION_REST });
+  // `shape` adds to the context — a census draws at the person's device scale.
+  const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, reducedMotion: WINDOW_MOTION_REST,
+    ...shape });
   const page = await context.newPage();
   page.on("close", () => context.close().catch(() => {}));
   page.on("pageerror", (error) => faults.push(error?.stack ?? String(error)));
