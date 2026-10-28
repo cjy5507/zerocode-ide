@@ -109,6 +109,9 @@ function readPage() {
     codeWrap: codes[0] ? getComputedStyle(codes[0].querySelector(":scope > pre")).whiteSpace : null,
     codeLanguages: codes.slice(-2).map((code) => code.querySelector(".helper-code-lang")?.textContent ?? ""),
     codeWord: t("mdview.code", "코드"),
+    // The rail's handle names the window's note by its line.
+    noteRail: railRowWords(list.querySelector(":scope > .is-window-note")),
+    noteWords: t("worker.windowNote", "창 알림 · 창이 다시 시작되어 이어 가라고 알렸습니다"),
     personRight: person ? Math.round(column.right - box(person).right) : null,
     personInside: person ? inside(person) : false,
     answerDots: answers.filter((row) => getComputedStyle(row, "::after").content !== "none").length,
@@ -198,6 +201,8 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
     ok("B: an answer wears no dot, the tool work stands as pills with no step built, and one row — the person's last words — sticks",
       all.every((one) => one.answerDots === 0 && one.stepRows === 0 && one.sticky === 1),
       JSON.stringify(dark(1440)));
+    ok("B: the rail's handle, standing on the window's note, says the note's line — not nothing, not its door",
+      dark(1440).noteRail === dark(1440).noteWords, JSON.stringify([dark(1440).noteRail, dark(1440).noteWords]));
     ok("B: a code block opens with the language its fence names — 「코드」 when it names none",
       dark(1440).codeLanguages[0] === "typescript" && dark(1440).codeLanguages[1] === dark(1440).codeWord,
       JSON.stringify(dark(1440).codeLanguages));

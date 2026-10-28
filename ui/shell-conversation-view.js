@@ -3217,10 +3217,11 @@ function paintTurnRail(rail) {
 
 /* What a row is, in a few words, for the handle's value: the person's words,
  * what a step or a thought was (not a shell step's lines), an answer's first
- * words. */
+ * words, a window note's line without its 「원문」 door (t-81525 r2). */
 function railRowWords(row) {
   const words = row.querySelector(":scope > .helper-step-line > .helper-step-what") ?? row.querySelector(":scope > .helper-said") ??
-    row.querySelector(":scope > .helper-group-cap > .helper-group-words");
+    row.querySelector(":scope > .helper-group-cap > .helper-group-words") ??
+    row.querySelector(":scope > .helper-window-note-line > .helper-window-note-words")?.firstChild;
   return stepFirstLine(words?.textContent ?? row.getAttribute("aria-label") ?? "");
 }
 
