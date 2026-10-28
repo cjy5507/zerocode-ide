@@ -834,7 +834,7 @@ fn build(
             launch: crate::orchestration::launch_words(agent, &model, effort.as_deref())
                 .unwrap_or_default(),
             auto_model: auto.as_ref().map(|auto| auto.model.clone()),
-            auto_effort: auto.map(|auto| auto.effort),
+            auto_effort: auto.and_then(|auto| auto.effort),
             written_model: person.as_ref().and_then(|person| person.model.clone()),
             written_effort: person.and_then(|person| person.effort),
             model,
