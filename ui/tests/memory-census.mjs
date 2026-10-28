@@ -21,6 +21,8 @@
  *   layers         숨긴 것이 쥔 그래픽(t-80604 r2): 기기 픽셀 2배 창에 판 8개(일곱은 숨은 탭), 에이전트
  *                  궤도 보드와 지식 그래프를 한 번 열었다가 마지막 판으로 돌아온 화면. `layers-no-orbit`·
  *                  `layers-no-knowledge`·`layers-panes`는 그중 하나씩 뺀 같은 장면 — 차이가 그 후보의 몫이다.
+ *                  `layers-chat`은 `layers-panes`에 400턴 대화 하나를 열었다가 판으로 돌아와 그 페이지를 뒤에
+ *                  세운 장면(`.is-behind`, 창은 많아야 두 장을 세워 둔다 — `CHAT_PARK`).
  *                  WebContent와 GPU 프로세스를 함께 읽고, 그래픽 표면(`(graphics)` 범주)을 따로 센다.
  *
  * 두 릴리즈의 `ui/`를 같은 하네스로 비교하려면 `ZEROCODE_WINDOW_UI=<다른 트리의 ui>`로 띄운다(window-boot.mjs).
@@ -47,7 +49,7 @@ import { openOrbit } from "./board-orbit.mjs";
 
 export const SCENARIOS = Object.freeze([
   "empty", "panes-1", "panes-10", "panes-30", "scrollback", "conversation", "gallery", "knowledge", "sidebar",
-  "layers", "layers-no-orbit", "layers-no-knowledge", "layers-panes",
+  "layers", "layers-no-orbit", "layers-no-knowledge", "layers-panes", "layers-chat",
 ]);
 /* 숨긴 것 장면의 판 수 — 사람 창의 판(8~10)에 맞춘다. 일곱은 숨은 탭이다. */
 const LAYER_PANES = 8;
@@ -324,8 +326,9 @@ async function openGallery(page, pictures) {
 /* 숨긴 것 장면: 판 `LAYER_PANES`개를 탭으로 열고, 궤도 보드와 지식 그래프를 한 번씩 연 뒤 마지막
  * 판으로 돌아온다 — 사람이 보드와 그래프를 들여다보고 일하던 판으로 돌아온 창. 보드와 그래프는
  * 닫히지 않고 숨는다. 돌아온 뒤에 무엇이 보이는지 적는다: 숨김이 장면의 전제다. */
-async function standLayers(page, { orbit, knowledge }) {
+async function standLayers(page, { orbit, knowledge, chat }) {
   const detail = await openPanes(page, LAYER_PANES);
+  if (chat) await openFixtureConversation(page, conversationFixture());
   if (orbit) {
     await openOrbit(page);
     detail.orbitViews = await page.evaluate(() => agentOrbitStates.size);
@@ -336,7 +339,10 @@ async function standLayers(page, { orbit, knowledge }) {
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     const shows = (selector) => document.querySelector(selector)?.checkVisibility() ?? null;
     return { boardShown: shows("#board-view"), knowledgeShown: shows(".knowledge-view"),
-      termShown: shows(".term:not([hidden])") };
+      termShown: shows(".term:not([hidden])"), chatsBehind: document.querySelectorAll(".is-behind").length,
+      // Animations still running inside a page set behind: each one is a frame drawn for nobody.
+      behindAnimations: document.getAnimations().filter((one) => one.playState === "running"
+        && one.effect?.target?.closest?.(".is-behind")).length };
   }) };
 }
 
@@ -386,8 +392,9 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
       if (name === "knowledge") return openKnowledge(page);
       if (name === "sidebar") return standTeamScene(page).then(() => page.evaluate(() => window.__ROWS__()));
       if (layers) {
-        return standLayers(page, { orbit: !["layers-no-orbit", "layers-panes"].includes(name),
-          knowledge: !["layers-no-knowledge", "layers-panes"].includes(name) });
+        return standLayers(page, { orbit: !["layers-no-orbit", "layers-panes", "layers-chat"].includes(name),
+          knowledge: !["layers-no-knowledge", "layers-panes", "layers-chat"].includes(name),
+          chat: name === "layers-chat" });
       }
       if (name !== "empty") throw new Error(`no scenario named ${name}`);
       return {};
