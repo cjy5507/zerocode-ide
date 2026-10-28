@@ -13691,8 +13691,17 @@ function paneHeadNode() {
   head.className = "pane-head";
   const who = document.createElement("span");
   who.className = "pane-head-who";
-  const name = document.createElement("strong");
+  // The pane's name is the head's, and renaming it starts here (t-81525 C14):
+  // the name bar under the head no longer says it a second time.
+  const name = document.createElement("button");
+  name.type = "button";
   name.className = "pane-head-name";
+  name.dataset.tip = t("tree.menu.rename", "이름 바꾸기");
+  name.addEventListener("click", () => {
+    const tab = [...paneHeads].find(([, one]) => one === head)?.[0];
+    const owner = tabs.find((one) => one.id === tab);
+    if (owner) startPaneRename(owner, activePaneOf(owner));
+  });
   const model = document.createElement("span");
   model.className = "pane-head-model";
   const state = document.createElement("span");
@@ -13723,6 +13732,10 @@ function paintPaneHead(tab, term) {
     head.hidden = true;
     paneHost(tab).prepend(head);
   }
+  // A tab of one pane: the head names it, so its name bar keeps only its
+  // actions (t-81525 C14, shell.css `.is-named-above`).
+  const slot = paneHost(tab).querySelector(`.pane-slot[data-term="${term}"]`);
+  if (slot) writeClass(slot, "is-named-above", paneLeaves(tab.layout).length === 1);
   const agent = paneAgents.get(term) ?? "";
   writeTextContent(head.querySelector(".pane-head-mark"), agentVoice(agent).glyph);
   writeTextContent(head.querySelector(".pane-head-name"), agentPaneName(tab, term, agent) || tabLabel(tab));

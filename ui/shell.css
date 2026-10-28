@@ -6142,8 +6142,16 @@ svg.wt-agent-dot {
 
 /* Untitled, the bar is chromeless — Orca's `data-chromeless`: no strip, no
  * rule, no layout room, only the actions floating in the pane's top-right
- * corner. The bar itself lets the pointer through; the buttons take it back. */
-.pane-title-bar[data-chromeless] {
+ * corner. The bar itself lets the pointer through; the buttons take it back.
+ * A pane whose head already says its name (`.is-named-above`, a tab of one
+ * pane, t-81525 C14) wears its bar the same way — the name once, in the head
+ * — except while the name is being typed there. */
+.pane-slot.is-named-above > .pane-title-bar:not(:has(> .pane-title-input)) > .pane-title-text {
+  display: none;
+}
+
+.pane-title-bar[data-chromeless],
+.pane-slot.is-named-above > .pane-title-bar:not(:has(> .pane-title-input)) {
   position: absolute;
   top: 2px;
   right: 2px;
@@ -6155,7 +6163,8 @@ svg.wt-agent-dot {
   pointer-events: none;
 }
 
-.pane-title-bar[data-chromeless] .pane-title-act {
+.pane-title-bar[data-chromeless] .pane-title-act,
+.pane-slot.is-named-above > .pane-title-bar .pane-title-act {
   pointer-events: auto;
 }
 
@@ -53700,6 +53709,10 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .pane-head-name {
   min-width: 0;
   overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
   color: var(--ink-chalk);
   font: var(--type-label-13);
   font-weight: 600;
