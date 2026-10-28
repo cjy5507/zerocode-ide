@@ -15028,11 +15028,23 @@ details.worker-command {
   position: sticky;
   top: 0;
   z-index: 2;
-  background-image: linear-gradient(
-    to bottom,
-    var(--chat-ground) calc(100% - var(--chat-sticky-fade)),
-    transparent 100%
-  );
+  background-color: var(--chat-ground);
+}
+
+/* The extension's fade hangs under the row, past its pad (t-81525 r2): drawn
+ * inside the pad, its 12px lay exactly over the pad under the bubble, and
+ * with the bubble standing narrow on the right, the answer scrolling under it
+ * showed through on the left. The row is the ground to its foot; the rows
+ * scrolling under it fade in below. */
+.helper-turn.is-user.is-latest::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  right: 0;
+  left: 0;
+  height: var(--chat-sticky-fade);
+  background-image: linear-gradient(to bottom, var(--chat-ground), transparent);
+  pointer-events: none;
 }
 
 .helper-turn.is-user:first-child {
