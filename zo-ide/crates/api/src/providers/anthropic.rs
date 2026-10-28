@@ -2665,7 +2665,7 @@ impl MessageStream {
                         (&self.prompt_cache, self.latest_usage.as_ref())
                     {
                         if let Some(seen) = self.parser.take_input_transformations() {
-                            prompt_cache.note_input_transformations(seen);
+                            prompt_cache.note_input_transformations(&self.request, seen);
                         }
                         let record = prompt_cache.record_usage(&self.request, usage);
                         *self
