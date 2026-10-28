@@ -88,7 +88,7 @@ pub(super) fn preserve(
         }
     } else if matches!(
         spend.usd_reason,
-        Some(UsdReason::Unlinked | UsdReason::Unscanned)
+        Some(UsdReason::Unlinked | UsdReason::Unscanned | UsdReason::PartialUsage)
     ) {
         if let Some(receipt) = previous.filter(|receipt| !receipt.revoked) {
             *spend = receipt.spend;

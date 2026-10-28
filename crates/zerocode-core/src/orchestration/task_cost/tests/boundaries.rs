@@ -225,3 +225,55 @@ fn invalid_reported_currency_and_reasoning_overflow_stay_unknown() {
         Some(UsdReason::InvalidUsage)
     );
 }
+
+/// A zo journal read in part — its oldest rows left unread, or a line in it
+/// skipped — is a floor: its tokens and dollars stay unknown with their
+/// reason, a journal with nothing readable in it included (t-79891).
+#[test]
+fn a_zo_journal_read_in_part_is_never_a_bill() {
+    let held = run(
+        json!([attempt("dp-1", "t-1", "w-1", 0, Some(MINUTE))]),
+        json!([worker("w-1", "zo", Some("conv-zo"))]),
+        json!([]),
+    );
+    let row = ZoRequestUsage {
+        seq: 1,
+        ts_unix_ms: 1_000,
+        model: SOL.into(),
+        input_uncached: 200,
+        cache_read: 100,
+        cache_creation: 0,
+        output: 50,
+        ttl: String::new(),
+    };
+    let read = |rows: &[ZoRequestUsage], gaps: ReadGaps| {
+        let mut book = SessionBook::default();
+        book.read_zo_usage("conv-zo", rows, gaps, READ_AT);
+        task_cost(&held, "t-1", &book, JevTally::default()).generation
+    };
+    let whole = read(std::slice::from_ref(&row), ReadGaps::default());
+    assert_eq!(whole.measured_tokens(), Some(350));
+    for gaps in [
+        ReadGaps {
+            older_rows_dropped: true,
+            skipped_lines: 0,
+        },
+        ReadGaps {
+            older_rows_dropped: false,
+            skipped_lines: 1,
+        },
+    ] {
+        let part = read(std::slice::from_ref(&row), gaps);
+        assert_eq!(part.usd_reason, Some(UsdReason::PartialUsage));
+        assert_eq!((part.usd, part.measured_tokens()), (None, None));
+    }
+    let nothing = read(
+        &[],
+        ReadGaps {
+            older_rows_dropped: false,
+            skipped_lines: 3,
+        },
+    );
+    assert_eq!(nothing.usd_reason, Some(UsdReason::PartialUsage));
+    assert_eq!(nothing.measured_tokens(), None);
+}

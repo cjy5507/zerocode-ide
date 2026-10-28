@@ -59,7 +59,7 @@ use crate::{usage_ledger, usage_stats, usage_stats_codex};
 mod session_attribution;
 pub use session_attribution::SessionAttribution;
 mod zo_usage;
-pub use zo_usage::ZoRequestUsage;
+pub use zo_usage::{ReadGaps, ZoRequestUsage};
 
 /// The key a stamping seat writes the ledger's task id under.
 pub const TASK_STAMP: &str = "task";
@@ -117,6 +117,9 @@ pub struct SessionSpend {
     pub usd: Option<f64>,
     /// Whether the vendor's own ledger saw more than one model in it.
     pub mixed_models: bool,
+    /// What the journal could not hand over whole: counters summed over a
+    /// part of it are a floor, never the conversation's bill (t-79891).
+    pub gaps: ReadGaps,
     invalid_usage: bool,
 }
 
@@ -128,7 +131,10 @@ impl SessionSpend {
             self.cache_read_tokens,
             self.cache_write_tokens,
         ];
-        if self.invalid_usage || self.usd.is_some_and(|usd| !usd.is_finite() || usd < 0.0) {
+        if self.invalid_usage
+            || !self.gaps.is_whole()
+            || self.usd.is_some_and(|usd| !usd.is_finite() || usd < 0.0)
+        {
             return None;
         }
         token_sum(counters).map(|_| counters)
@@ -185,6 +191,7 @@ impl SessionBook {
                         session.total_cache_write_tokens,
                     ),
                     mixed_models: false,
+                    gaps: ReadGaps::default(),
                     invalid_usage: false,
                 },
             );
@@ -223,6 +230,7 @@ impl SessionBook {
                         session.output_tokens,
                     ),
                     mixed_models: session.model_breakdown.len() > 1,
+                    gaps: ReadGaps::default(),
                     invalid_usage: fresh.is_none()
                         || session.input_tokens < 0
                         || session.cached_input_tokens < 0
@@ -259,6 +267,7 @@ impl SessionBook {
                     cache_write_tokens: 0,
                     usd: session.estimated_cost_usd,
                     mixed_models: false,
+                    gaps: ReadGaps::default(),
                     invalid_usage: output.is_none()
                         || session.output_tokens < 0
                         || session.reasoning_output_tokens < 0,
@@ -405,6 +414,10 @@ pub enum UsdReason {
     Unlinked,
     IncompleteSessionHistory,
     InvalidUsage,
+    /// The conversation's journal was read in part — its oldest rows were
+    /// beyond the read limit or a line in it was not a usage row — so what
+    /// was read is a floor, not the bill (t-79891).
+    PartialUsage,
     OutsideAttempt,
     /// A conversation switched models mid-way — a switch the ledger wrote
     /// against the attempt, or more than one model in the vendor's own
@@ -448,6 +461,7 @@ impl GenerationCost {
                         | UsdReason::Unlinked
                         | UsdReason::IncompleteSessionHistory
                         | UsdReason::InvalidUsage
+                        | UsdReason::PartialUsage
                         | UsdReason::OutsideAttempt
                 )
             )
@@ -764,6 +778,10 @@ fn generation(
                 worse(UsdReason::Unlinked);
                 continue;
             };
+            if !spend.gaps.is_whole() {
+                worse(UsdReason::PartialUsage);
+                continue;
+            }
             if !session_attribution::covers(
                 carried,
                 sessions
