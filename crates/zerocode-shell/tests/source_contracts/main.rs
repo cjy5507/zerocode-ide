@@ -20087,6 +20087,45 @@ mod tests {
         );
     }
 
+    /// A fresh worker whose submission receipt never came is asked what its
+    /// provider said before it is torn down (t-78356).
+    ///
+    /// w-78348 took its briefing at 04:07:30 and read files for 58 s; the
+    /// receipt never reached the window and the launch was rolled back over
+    /// a worker at work. The pure half — the receipt heard since, a reported
+    /// turn, the briefing in the provider's transcript, and never the screen —
+    /// is `zerocode_pty::briefing::taken_without_receipt`, held by its unit
+    /// tests; this pins that the launch road asks it, for fresh launches only,
+    /// after the receipt's own success road and before the teardown.
+    #[test]
+    fn a_fresh_worker_without_its_receipt_is_asked_before_it_is_torn_down() {
+        let backend = shipped_backend();
+        let waiting = backend
+            .split_once("fn await_worker_ready(&self, term: TermId)")
+            .map_or("", |(_, rest)| rest);
+        let waiting = &waiting[..waiting.find("\n    fn send(").unwrap_or(waiting.len())];
+        let receipted = waiting.find("if accepted && undelivered.is_none()");
+        let asked = waiting.find("self.taken_without_receipt(term, &pending)");
+        let torn = waiting.find("let removed = state.terminals().remove(&term);");
+        assert!(
+            matches!((receipted, asked, torn), (Some(seat), Some(ask), Some(tear)) if seat < ask && ask < tear),
+            "a fresh worker without its receipt is torn down unasked:\n{waiting}"
+        );
+        let gate = waiting[..asked.unwrap_or(0)]
+            .rsplit_once("if entered")
+            .map_or("", |(_, gate)| gate);
+        assert!(
+            gate.contains("!accepted") && gate.contains("!pending.restoring"),
+            "the receiptless question is no longer only a fresh launch's:\n{gate}"
+        );
+        let asking = block_after(backend, "fn taken_without_receipt(");
+        assert!(
+            asking.contains("zerocode_pty::briefing::taken_without_receipt(&mut pane)")
+                && !asking.contains("confirm("),
+            "the receiptless question reads the screen or types again:\n{asking}"
+        );
+    }
+
     /// Every door that deletes a worktree asks this window's own terminals
     /// first, through ONE function.
     ///

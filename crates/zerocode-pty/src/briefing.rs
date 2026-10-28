@@ -94,6 +94,14 @@ impl BriefingWatch {
     }
 }
 
+/// `text` without what a pane's drawing adds to words: whitespace, control
+/// characters, and the bars a composer wraps its text in.
+fn bare(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control() && !"│┃|".contains(*c))
+        .collect()
+}
+
 /// How many of the briefing's own characters are looked for on the screen.
 const PROBE_CHARS: usize = 24;
 
@@ -107,11 +115,6 @@ const PROBE_CHARS: usize = 24;
 /// pane wrapped across rows is still found. A briefing with no visible
 /// characters is nothing to look for, and shows.
 pub fn briefing_shows(screen: &str, briefing: &str) -> bool {
-    let bare = |text: &str| -> String {
-        text.chars()
-            .filter(|c| !c.is_whitespace() && !c.is_control() && !"│┃|".contains(*c))
-            .collect()
-    };
     let words = bare(briefing);
     let probe: String = words.chars().take(PROBE_CHARS).collect();
     if probe.is_empty() {
@@ -128,6 +131,17 @@ pub fn briefing_shows(screen: &str, briefing: &str) -> bool {
         || seen.to_lowercase().contains("[pasted")
 }
 
+/// Whether `prompt` — a prompt the provider recorded taking, whole — is
+/// `briefing` itself (t-78356).
+///
+/// A screen shows a briefing's head or tail ([`briefing_shows`]); a
+/// recorded prompt holds all of its words, and only all of them tell this
+/// briefing from another launch's, whose window preamble is the same text.
+/// Whitespace is ignored on both sides, as on a screen.
+pub fn prompt_is_briefing(prompt: &str, briefing: &str) -> bool {
+    bare(prompt).contains(&bare(briefing))
+}
+
 /// How often the screen is read while the watch waits.
 const LOOK_EVERY: Duration = Duration::from_millis(100);
 
@@ -141,6 +155,12 @@ pub trait BriefingPane {
     /// The launched agent has started its turn. A working agent must not
     /// receive another copy of its launch briefing.
     fn working(&mut self) -> bool {
+        false
+    }
+    /// The provider's own record of the conversation holds this briefing as
+    /// a prompt it took — its transcript, written whether or not the hook
+    /// that carries the receipt ever reached the window (t-78356).
+    fn recorded(&mut self) -> bool {
         false
     }
     /// The pane's scrollback and visible text; `None` once the pane is gone.
@@ -226,6 +246,39 @@ pub fn confirm(
                 return Verdict::Undelivered(Unheard::NeverShown);
             }
         }
+    }
+}
+
+/// Which of the provider's own words said a launch took its briefing when
+/// its submission receipt did not come by the deadline (t-78356).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Witness {
+    /// The receipt, heard after its deadline.
+    LateReceipt,
+    /// A turn the pane's hooks reported.
+    ReportedTurn,
+    /// The briefing in the provider's own transcript.
+    Transcript,
+}
+
+/// Whether a briefing whose submission receipt never arrived by its deadline
+/// was taken all the same, and which word said so (t-78356).
+///
+/// Asked before a launch is torn down as unacknowledged: a receipt rides one
+/// hook post, and a post lost or late under load is a worker at work killed
+/// for the window's deafness. Only the provider's own words count here — the
+/// receipt heard after all, a turn its hooks reported, the prompt its own
+/// transcript recorded. The screen does not: a briefing left unsent in its
+/// composer shows on it exactly as one that was taken does.
+pub fn taken_without_receipt(pane: &mut impl BriefingPane) -> Option<Witness> {
+    if pane.submitted() {
+        Some(Witness::LateReceipt)
+    } else if pane.working() {
+        Some(Witness::ReportedTurn)
+    } else if pane.recorded() {
+        Some(Witness::Transcript)
+    } else {
+        None
     }
 }
 
@@ -414,6 +467,98 @@ mod tests {
             WatchStep::Waiting
         );
         assert_eq!(watch.poll(true, submitted), WatchStep::Taken);
+    }
+
+    /// A pane whose receipt never came, as the launch road finds it at the
+    /// deadline: what its provider said of itself, and a screen that must not
+    /// be asked.
+    struct Unreceipted {
+        heard: bool,
+        working: bool,
+        recorded: bool,
+    }
+
+    impl BriefingPane for Unreceipted {
+        fn submitted(&mut self) -> bool {
+            self.heard
+        }
+
+        fn working(&mut self) -> bool {
+            self.working
+        }
+
+        fn recorded(&mut self) -> bool {
+            self.recorded
+        }
+
+        fn screen(&mut self) -> Option<String> {
+            panic!("a briefing standing unsent shows like one that was taken")
+        }
+
+        fn retype(&mut self) -> Receiver<Outcome> {
+            panic!("a launch at its deadline is not typed at again")
+        }
+
+        fn withdraw(&mut self) {
+            panic!("a launch at its deadline has no retype to withdraw")
+        }
+    }
+
+    /// w-78348 (10-28 04:07): the briefing went in at 04:07:30, the worker
+    /// read files for 58 s, and the receipt never reached the window — each
+    /// of the provider's own words is enough to keep that worker.
+    #[test]
+    fn a_worker_at_work_whose_receipt_never_came_was_taken() {
+        for (heard, working, recorded, witness) in [
+            (true, false, false, Witness::LateReceipt),
+            (false, true, false, Witness::ReportedTurn),
+            (false, false, true, Witness::Transcript),
+            (true, true, true, Witness::LateReceipt),
+            (false, true, true, Witness::ReportedTurn),
+        ] {
+            let mut pane = Unreceipted {
+                heard,
+                working,
+                recorded,
+            };
+            assert_eq!(
+                taken_without_receipt(&mut pane),
+                Some(witness),
+                "heard {heard}, working {working}, recorded {recorded}"
+            );
+        }
+    }
+
+    /// w-78343 (10-28 04:06): the briefing stood in the composer, unsent, and
+    /// nothing the provider said was a prompt taken — still a failed launch.
+    #[test]
+    fn a_briefing_nothing_took_is_still_not_taken() {
+        let mut pane = Unreceipted {
+            heard: false,
+            working: false,
+            recorded: false,
+        };
+        assert_eq!(taken_without_receipt(&mut pane), None);
+    }
+
+    /// Two launch briefings share the window's preamble and part at their
+    /// task: a recorded prompt is this briefing only when it holds all of
+    /// this briefing's words (t-78356).
+    #[test]
+    fn a_recorded_prompt_is_this_briefing_only_whole() {
+        let briefing = |task: &str| {
+            format!(
+                "You are a worker in this window's orchestration, carrying task {task}.\n\
+                 When your work is done, run: zerocode-orc send --type worker_done.\n\
+                 Now do this: read the auto-format test."
+            )
+        };
+        let mine = briefing("t-2");
+        let rewrapped = mine.replace('\n', "\n\n  ");
+        assert!(prompt_is_briefing(&mine, &mine));
+        assert!(prompt_is_briefing(&rewrapped, &mine));
+        assert!(!prompt_is_briefing(&briefing("t-1"), &mine));
+        assert!(!prompt_is_briefing("summarise the diff for me", &mine));
     }
 
     #[test]
