@@ -356,6 +356,10 @@ pub(super) struct BrowserProfileView {
     pub(super) source: Option<BrowserProfileSource>,
     pub(super) staged: bool,
     pub(super) is_default: bool,
+    /// 마지막 주입의 결과(「N개 적용 · M개 거절」). 주입된 적이 없거나 새로
+    /// 가져온 뒤면 없다 — 앞의 칸들은 그대로 두고 더하기만 한 칸이다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) last_apply: Option<browser_cookie_import::CookieApply>,
 }
 
 /// 저장된 프로필들에 파생 상태(스테이징·기본)를 입혀 창에 건넨다.
@@ -366,7 +370,9 @@ pub(super) fn browser_profile_views(config_root: &Path) -> Vec<BrowserProfileVie
         .map(|held| {
             let staged = browser_cookie_import::staging_file(config_root, &held.id).exists();
             let is_default = default_id.as_deref() == Some(held.id.as_str());
+            let last_apply = browser_cookie_import::last_apply(config_root, &held.id);
             BrowserProfileView {
+                last_apply,
                 id: held.id,
                 name: held.name,
                 source: held.source,
@@ -393,6 +399,7 @@ pub(super) fn remove_browser_profile(config_root: &Path, id: &str) -> Result<(),
     }
     save_browser_profiles(config_root, &held)?;
     let _ = std::fs::remove_file(browser_cookie_import::staging_file(config_root, id));
+    browser_cookie_import::discard_last_apply(config_root, id);
     if load_default_browser_profile(config_root).as_deref() == Some(id) {
         let _ = save_default_browser_profile(config_root, None);
     }

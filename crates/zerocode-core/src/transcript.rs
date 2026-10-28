@@ -525,12 +525,21 @@ pub const NAMING_PROMPT_SEARCH_BYTES: u64 = 4 * 1024 * 1024;
 /// the hook's prompt gets ([`prompt_words_in_parsed`]).
 #[must_use]
 pub fn last_naming_prompt(path: &Path) -> Option<String> {
+    last_naming_prompt_words(path).map(|prompt| clamp(&prompt))
+}
+
+/// [`last_naming_prompt`]'s prompt whole, not clamped for a card — what a
+/// caller that must tell one long prompt from another reads (t-78356): two
+/// launch briefings share their first lines and differ past where a card
+/// cuts them.
+#[must_use]
+pub fn last_naming_prompt_words(path: &Path) -> Option<String> {
     let tail = Tail::read_within(path, NAMING_PROMPT_SEARCH_BYTES)?;
     tail.lines().rev().find_map(|line| {
         let typed = typed_prompt(line.trim())?;
         let unframed = without_pasted_frames(&typed);
         let prompt = past_the_envelopes(&unframed).trim();
-        names_the_turn(prompt).then(|| clamp(prompt))
+        names_the_turn(prompt).then(|| prompt.to_string())
     })
 }
 
@@ -2927,6 +2936,31 @@ mod tests {
         let bare = write("bare.jsonl", &[user("계속".into()), user("r".into())]);
         assert_eq!(last_naming_prompt(&bare), None);
         assert_eq!(last_naming_prompt(&dir.path().join("absent.jsonl")), None);
+    }
+
+    /// The prompt whole, for a caller that tells one long prompt from
+    /// another: two launch briefings agree on their first lines and part
+    /// past the card's cut, and only the whole prompt keeps that part
+    /// (t-78356). The card's reading of the same record stays clamped.
+    #[test]
+    fn a_naming_prompt_is_also_read_whole() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("briefing.jsonl");
+        let briefing = format!(
+            "{} carrying task t-2",
+            "the same window preamble ".repeat(20)
+        );
+        let record = serde_json::json!({ "type": "user", "message": { "role": "user", "content": briefing } });
+        std::fs::write(&path, format!("{record}\n")).expect("write");
+        assert_eq!(
+            last_naming_prompt_words(&path).as_deref(),
+            Some(briefing.trim())
+        );
+        assert_eq!(last_naming_prompt(&path), Some(clamp(&briefing)));
+        assert_eq!(
+            last_naming_prompt_words(&dir.path().join("absent.jsonl")),
+            None
+        );
     }
 
     /// Further back than a card's tail window, still inside the search's:

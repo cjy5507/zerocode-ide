@@ -448,8 +448,6 @@ function idlePoller({ wanted, every, tick, onResume }) {
 const tabstrip = el("tabstrip");
 const stage = el("stage");
 const placeholder = el("placeholder");
-const attention = el("attention");
-const attentionCount = el("attention-count");
 const termFloat = el("term-float");
 const keySink = el("key-sink");
 const fileTree = el("file-tree");
