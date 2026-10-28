@@ -990,6 +990,16 @@ mod tests {
             }
         }
 
+        /// The person's own settings (`<zo home>/settings.json`) holding
+        /// `permissions` — the rules the session's Bash answers to.
+        fn person_permissions(&self, permissions: &str) {
+            std::fs::write(
+                self.zo_home.join(crate::preferences::PREFERENCES_FILE_NAME),
+                format!(r#"{{"permissions": {permissions}}}"#),
+            )
+            .expect("the person's settings");
+        }
+
         fn record_trust(&self, mode: &str) {
             self.record_trust_for(&self.project, mode);
         }
@@ -1133,6 +1143,44 @@ mod tests {
         let personal = trial.run_probe_as(&trial.project, mode, unnamed);
         assert!(trial.marker.exists(), "a pipe stopped the person's own zo-home command");
         assert_eq!(personal, "\nDone.\n");
+    }
+
+    /// Every `!` line answers to the person's permission rules, as the
+    /// model's Bash does: a deny rule stops it, and so does an ask rule,
+    /// because nobody can be asked where the command expands. Both scopes:
+    /// the person's zo-home command and a repository's, trusted, command.
+    #[test]
+    fn the_persons_deny_and_ask_rules_stop_a_bang_line() {
+        let _guard = crate::test_env_lock();
+        let trial = BangTrial::new("bang-rules");
+        let denied = format!(
+            "[!{}: not run — a deny rule in your permission settings forbids it]\nDone.\n",
+            trial.touch()
+        );
+        let asked = format!(
+            "[!{}: not run — an ask rule in your permission settings wants your approval, and a command file cannot ask; run it yourself if you approve]\nDone.\n",
+            trial.touch()
+        );
+
+        trial.write_probe(&trial.zo_home);
+        trial.person_permissions(r#"{"deny": ["bash(touch:*)"]}"#);
+        assert_eq!(trial.run_probe(), denied);
+        assert!(!trial.marker.exists(), "a deny rule let a zo-home `!` line run");
+        trial.person_permissions(r#"{"ask": ["bash(touch:*)"]}"#);
+        assert_eq!(trial.run_probe(), asked);
+        assert!(!trial.marker.exists(), "an ask rule let a zo-home `!` line run unasked");
+
+        std::fs::remove_dir_all(trial.zo_home.join("commands")).expect("the zo-home command goes");
+        trial.write_probe(&trial.project.join(".zo"));
+        trial.record_trust("workspace-write");
+        assert_eq!(trial.run_probe(), asked);
+        trial.person_permissions(r#"{"deny": ["bash(touch:*)"]}"#);
+        assert_eq!(trial.run_probe(), denied);
+        assert!(!trial.marker.exists(), "a rule let a trusted repository's `!` line run");
+
+        trial.person_permissions(r#"{"deny": ["bash(rm:*)"]}"#);
+        assert_eq!(trial.run_probe(), "\nDone.\n", "a rule for another command stopped this one");
+        assert!(trial.marker.exists());
     }
 
     /// A command file in zo's home is the person's own: it runs what its
