@@ -4437,6 +4437,11 @@ const floatView = makeTermView(el("terminal"), el("term"), el("caret"), {
  *                element of the kind's own where the keyboard starts instead
  *                (a field the person types in); `safe` is Escape's
  *   clock(ask)   the words for a deadline the ask carries (Computer Use)
+ *   view().docked  the ask is for something the person does ELSEWHERE in the
+ *                window or on the desktop (the hand-over): it stands as a card
+ *                in the corner with no backdrop, is not a modal, and takes
+ *                neither the keyboard nor Escape — a card that asks for the
+ *                Settings page must not stand over the Settings page
  *   deliver(ask, choice, hand)  a promise that settles once the answer has
  *                reached whoever asked; a rejection keeps the ask on screen;
  *                `hand` is the hand that answered (shell-boot.js `handNow`),
@@ -4469,8 +4474,40 @@ let askFocus = null;
 let askSafe = null;
 let askClockTimer = null;
 let askLeavesAtOnce = false;
+/* Whether the popup holds the modal seat now: a docked ask does not. */
+let askIsModal = false;
 const ASK_CLOCK_TICK_MS = 1000;
 const askFrame = askScrim.querySelector(".permission");
+/* What a screen reader hears when a docked card comes up: the card takes no
+ * focus, so nothing else would say it is there. */
+const askLive = el("ask-live");
+/* Where the hand was when a key sent it to the docked card, for Escape to give
+ * it back. */
+let askDockedReturn = null;
+
+/* The docked card on screen now — the one a key can send the hand to. */
+function dockedAskStands() {
+  return activeAsk !== null && !askScrim.hidden && askScrim.hasAttribute("data-docked");
+}
+
+function focusDockedAsk() {
+  if (!dockedAskStands()) return;
+  const from = document.activeElement;
+  if (!askFrame.contains(from)) askDockedReturn = from;
+  askFrame.focus({ preventScroll: true });
+}
+
+/* The card is no modal, so nothing traps the hand in it: Escape on the card
+ * gives the keyboard back to where it was (or the terminal), answering nothing. */
+askFrame.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !askScrim.hasAttribute("data-docked")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const back = askDockedReturn;
+  askDockedReturn = null;
+  if (back?.isConnected && !askFrame.contains(back)) back.focus({ preventScroll: true });
+  if (askFrame.contains(document.activeElement)) keySink.focus({ preventScroll: true });
+});
 
 /* One key, one answer. A key held down repeats, and a repeat that lands after
  * the first press has answered the ask on screen lands on the NEXT ask —
@@ -4502,10 +4539,35 @@ function askAlreadyRaised(ask) {
   return activeAsk?.key === ask.key || askQueue.some((queued) => queued.key === ask.key);
 }
 
+function askIsDocked(ask) {
+  return askKindOf(ask).view(ask).docked === true;
+}
+
+/* A docked card waits for the person to do something elsewhere, up to ten
+ * minutes; a question that must stop the person (another pane's permission)
+ * cannot queue behind that, because its agent is stopped for as long. So the
+ * queue gives the window to its first modal before anything docked: modals
+ * keep their order among themselves, and a card comes up only when no modal
+ * waits. */
+function modalWaitsBehindDocked() {
+  return activeAsk !== null && activeAsk.sending !== true && askIsDocked(activeAsk)
+    && askQueue.some((queued) => !askIsDocked(queued));
+}
+
+/* The card on screen goes back to the head of the queue, unless its own
+ * answer is on its way, which a repaint would double. */
+function giveWayToWaitingModal() {
+  if (!modalWaitsBehindDocked()) return false;
+  askQueue.unshift(activeAsk);
+  showNextAsk();
+  return true;
+}
+
 function raiseAsk(ask) {
   if (!askKinds.has(ask.kind) || askAlreadyRaised(ask)) return false;
   askQueue.push(ask);
   askKindOf(ask).raised?.(ask);
+  if (giveWayToWaitingModal()) return true;
   // Behind a question already on screen: the count says so and nothing else
   // moves. A full repaint here would rebuild the buttons an answer in flight
   // was pressed on, which is how one answer becomes two.
@@ -4516,7 +4578,8 @@ function raiseAsk(ask) {
 
 function showNextAsk() {
   const leaving = activeAsk;
-  activeAsk = askQueue.shift() ?? null;
+  const first = askQueue.findIndex((queued) => !askIsDocked(queued));
+  activeAsk = askQueue.splice(Math.max(first, 0), 1)[0] ?? null;
   askLeavesAtOnce = leaving !== null && askKindOf(leaving).instant === true;
   paintAsk();
 }
@@ -4575,15 +4638,34 @@ function paintAsk() {
     askFocus = null;
     askSafe = null;
     askPainted = null;
+    askIsModal = false;
+    askLive.textContent = "";
+    askDockedReturn = null;
     // `closing` is a no-op on a surface that is already hidden, so the
     // repaint path a language change takes does not animate a popup nobody
-    // opened.
-    hideModal(askScrim, { animated: !askLeavesAtOnce });
+    // opened. The docked marks stay through the exit (it fades the card's own
+    // look, not a backdrop) and go when the surface is hidden.
+    hideModal(askScrim, {
+      animated: !askLeavesAtOnce,
+      after: () => {
+        if (activeAsk !== null) return;
+        askScrim.removeAttribute("data-docked");
+        delete askFrame.dataset.keyboardOwner;
+      },
+    });
     return;
   }
   const kind = askKindOf(ask);
   const view = kind.view(ask);
+  const docked = view.docked === true;
   askFrame.dataset.kind = kind.tone;
+  askFrame.setAttribute("aria-modal", docked ? "false" : "true");
+  // Not a modal, so the terminal's key floor (`rearmKeySink`) would otherwise
+  // pull the focus off a button of the card on the next key and give Enter to
+  // the terminal; a button of the card owns the keys while it holds the focus.
+  if (docked) askFrame.dataset.keyboardOwner = "true";
+  else delete askFrame.dataset.keyboardOwner;
+  askScrim.toggleAttribute("data-docked", docked);
   paintAskPart("ask-agent", view.agent ?? null);
   el("ask-agent").className = `perm-agent ${view.agentClass ?? ""}`.trim();
   paintAskPart("ask-title", view.title);
@@ -4612,9 +4694,10 @@ function paintAsk() {
     // `initial: null` is a kind whose Enter must answer nothing (the hand-over):
     // the keyboard starts on the frame itself, and the person Tabs to the
     // answer they mean.
-    askFocus =
-      (view.focus ? el(view.focus) : null) ??
-      (view.initial === null ? askFrame : buttons[view.initial ?? 0] ?? buttons[0] ?? null);
+    askFocus = docked
+      ? null
+      : (view.focus ? el(view.focus) : null) ??
+        (view.initial === null ? askFrame : buttons[view.initial ?? 0] ?? buttons[0] ?? null);
     askSafe = choices[view.safe] ?? null;
   }
   kind.paint?.(ask, view);
@@ -4622,7 +4705,23 @@ function paintAsk() {
   if (kind.clock) askClockTimer = setInterval(paintAskClock, ASK_CLOCK_TICK_MS);
   const changed = ask !== askPainted;
   askPainted = ask;
-  showModal(askScrim, { animated: true });
+  if (docked) {
+    // Out of the modal stack first: a docked card has no focus trap and no
+    // Escape, and the focus goes back to where the person's hand was.
+    if (askIsModal) hideModal(askScrim, { animated: false });
+    askIsModal = false;
+    showing(askScrim);
+    if (changed) {
+      askLive.textContent = [view.title, view.why, kind.clock?.(ask)]
+        .filter((part) => typeof part === "string" && part !== "")
+        .join(". ");
+    }
+  } else {
+    askIsModal = true;
+    askLive.textContent = "";
+    askDockedReturn = null;
+    showModal(askScrim, { animated: true });
+  }
   // A new ask starts the keyboard on its own default. The same ask repainted
   // (a language change) keeps wherever the person's hand already is.
   if (changed) askFocus?.focus({ preventScroll: true });
@@ -4669,6 +4768,9 @@ async function answerAsk(choice) {
       return;
     }
     answered.failure = String(error);
+    // A modal that arrived while this card's answer was on its way has waited
+    // for exactly this; the card comes back, failure and all, after it.
+    if (giveWayToWaitingModal()) return;
     paintAskPart(
       "ask-why",
       t("perm.failed", "응답이 서버에 닿지 못했습니다 — 다시 시도하세요. ({{error}})", {
@@ -7359,7 +7461,7 @@ function tabSwitcherAvailable() {
   for (const id of ["settings-view", "task-view", "auto-view", "space-view", "qo-scrim"]) {
     if (!el(id).hidden) return false;
   }
-  return document.querySelector(".scrim:not([hidden])") === null;
+  return !modalScrimStands();
 }
 
 function openOrAdvanceTabSwitcher(direction) {

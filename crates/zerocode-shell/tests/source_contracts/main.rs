@@ -3254,8 +3254,10 @@ mod tests {
         );
         // The ask popup leaves animated too, except a kind that says it leaves
         // at once (the window's own confirm, whose caller must not wait on a fade).
+        // It also takes down the docked card's marks once the exit is over.
+        let ask_painting = block_after(window, "function paintAsk() {");
         assert!(
-            window.contains("hideModal(askScrim, { animated: !askLeavesAtOnce })"),
+            ask_painting.contains("hideModal(askScrim, {\n      animated: !askLeavesAtOnce,"),
             "`askScrim` does not leave through the modal manager's shared exit"
         );
         let tab_picker_exit = block_after(window, "function closeTabCreate(");
