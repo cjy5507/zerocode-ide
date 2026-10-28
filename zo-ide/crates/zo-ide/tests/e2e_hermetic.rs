@@ -8882,6 +8882,26 @@ async fn e2e_an_unattended_run_refuses_a_kill_only_a_person_may_allow() {
     );
 }
 
+/// t-80732: the refusal above is the kill question's alone — an unattended
+/// `--plain` run under workspace-write still approves an ordinary escalation
+/// once, as it did before.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_an_unattended_run_still_approves_an_ordinary_escalation_once() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::tool_calls(&[
+        ("bash", serde_json::json!({ "command": "touch approved-once.txt && printf approved-once-ran" })),
+    ], "ordinary-approved").await.unwrap();
+    let output = run_pipe(&layout.cwd, &layout.home, &layout.sessions, &layout.state, service.base_url(),
+        &["--plain", "--permission-mode", "workspace-write"], b"Touch the marker.\n/exit\n").unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let requests = service.request_bodies().await;
+    assert!(
+        requests.iter().any(|body| body.contains("approved-once-ran")),
+        "the ordinary call ran: {requests:?}"
+    );
+}
+
 /// t-68408: two zo sessions in one folder never hand each other their plans.
 /// The first writes a plan and leaves it in progress; the second, opened in the
 /// same folder, runs a tool and writes a plan of its own, and is handed none
