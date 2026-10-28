@@ -574,6 +574,27 @@ fn two_recording_seats_share_one_request_after_the_pane_opens() {
     assert_shared_rows(&wire, false);
 }
 
+/// t-74181 (review P3-3): a summons nobody chose an effort for ran at its
+/// CLI's own default, and its rows say so in so many words — never a blank,
+/// which an older row or an unread one also is — so that branch's outcomes
+/// make a record of their own beside each named effort's.
+#[test]
+fn a_summons_at_its_clis_default_effort_says_so_on_its_rows() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::answering_each("HTTP/1.1 200 OK", answer_every, 0);
+    let wire = wire(&home, &endpoint, "shadow", "shadow");
+    let (reply, prepared) = summoned(&wire, home.path(), "cli-default-effort");
+    assert!(reply["effort"].is_null(), "{reply}");
+    let host = super::super::summon_difficulty::tests::Deferred::on(&wire);
+    record(&host, &prepared, home.path().to_str(), 3);
+    host.drain();
+    for seat in [&SUMMON_DIFFICULTY, &SUMMON_MODEL] {
+        let rows = crate::systemone::read_rows(&crate::systemone::ledger_of(&wire, seat).unwrap());
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["effort"], "cli-default", "{}", rows[0]);
+    }
+}
+
 /// Each seat's ledger holds one row of its own rubric, `applied` as said,
 /// and both name one shared request.
 fn assert_shared_rows(wire: &Wire, applied: bool) {

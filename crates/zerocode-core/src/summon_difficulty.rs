@@ -323,6 +323,42 @@ mod tests {
         );
     }
 
+    /// t-74181 (review P3-2): a table of efforts — by difficulty, by agent,
+    /// in a match or in a list — sets effort words side by side. No line of
+    /// the code that builds, asks about or launches a summons' row holds two:
+    /// the efforts a CLI takes are named once where they were measured
+    /// (`capabilities`) and read from there, so a table moved into another of
+    /// these files, or behind another function's name, is still caught.
+    #[test]
+    fn no_line_of_the_summons_code_sets_efforts_side_by_side() {
+        let efforts_on = |line: &str| {
+            crate::capabilities::EFFORT_ORDER
+                .iter()
+                .filter(|word| line.contains(&format!("\"{word}\"")))
+                .count()
+        };
+        for (file, source) in [
+            ("summon_difficulty.rs", include_str!("summon_difficulty.rs")),
+            (
+                "summon_difficulty/lineup.rs",
+                include_str!("summon_difficulty/lineup.rs"),
+            ),
+            ("summon_model.rs", include_str!("summon_model.rs")),
+            ("summon_assign.rs", include_str!("summon_assign.rs")),
+            // Its tests live in files of their own.
+            ("orchestration.rs", include_str!("orchestration.rs")),
+        ] {
+            let code = source.split("#[cfg(test)]\nmod tests").next().expect("code");
+            let side_by_side: Vec<(usize, &str)> = code
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| efforts_on(line) > 1)
+                .map(|(at, line)| (at + 1, line.trim()))
+                .collect();
+            assert_eq!(side_by_side, Vec::<(usize, &str)>::new(), "{file}");
+        }
+    }
+
     #[test]
     fn a_written_row_may_leave_a_field_to_the_lineup_but_not_both() {
         let mut table = json!({"codex": {

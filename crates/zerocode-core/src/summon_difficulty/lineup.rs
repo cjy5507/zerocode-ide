@@ -1230,15 +1230,31 @@ mod tests {
         let mut other = m("model-c", "rest", &[]);
         other.efforts = Some(&["high", "low"]);
         let today = lineup(&[easy, hard, other]);
-        for agent in ["claude", "zo"] {
+        // Every agent whose command line takes an effort, over the table
+        // this build ships as well as this test's (review P3-2): a row of
+        // any of them that nobody wrote carries no effort, whichever file a
+        // table would have been written in.
+        let shipped_here: Value = serde_json::from_str(super::super::DEFAULT_PROFILES).unwrap();
+        let agents: Vec<&str> = crate::agent::AGENT_SPECS
+            .iter()
+            .map(|spec| spec.id)
+            .filter(|agent| crate::orchestration::takes_effort(agent))
+            .collect();
+        assert!(agents.len() > 1, "{agents:?}");
+        for agent in agents {
             let bare = rows_with_defaults(&Value::Null, &json!({}), agent, Some(&today), None, NOW)
                 .unwrap();
-            let table =
-                rows_with_defaults(&Value::Null, &shipped(), agent, Some(&today), None, NOW)
-                    .unwrap();
-            let none =
-                rows_with_defaults(&Value::Null, &shipped(), agent, None, None, NOW).unwrap();
-            for at in bare.iter().chain(&table).chain(&none) {
+            let mut table = Vec::new();
+            for defaults in [shipped(), shipped_here.clone()] {
+                table.extend(
+                    rows_with_defaults(&Value::Null, &defaults, agent, Some(&today), None, NOW)
+                        .unwrap(),
+                );
+                table.extend(
+                    rows_with_defaults(&Value::Null, &defaults, agent, None, None, NOW).unwrap(),
+                );
+            }
+            for at in bare.iter().chain(&table) {
                 assert_eq!(
                     (
                         at.effort.as_deref(),

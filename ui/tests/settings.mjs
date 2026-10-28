@@ -54,11 +54,13 @@ const FIXTURE_LINEUP = {
   ],
 };
 /* The rows each agent runs when nobody wrote one: the shipped table, and for
- * zo — which the table has no row for — the lineup's model at its ladder. */
+ * zo — which the table has no row for — the lineup's model. Each names a
+ * model only: no effort is shipped, and an effort nobody wrote stays off the
+ * command line for the agent's CLI to default (t-74181). */
 const FIXTURE_SHIPPED = {
   ...SUMMON_PROFILES,
-  zo: Object.fromEntries(["low", "mid", "high"].map((difficulty, at) =>
-    [difficulty, { model: SUMMON_PROFILES.claude.low.model, effort: ["medium", "high", "max"][at] }])),
+  zo: Object.fromEntries(["low", "mid", "high"].map((difficulty) =>
+    [difficulty, { model: SUMMON_PROFILES.claude.low.model }])),
 };
 const TERMINAL_THEME_CATALOG = Object.freeze(JSON.parse(
   await readFile(
@@ -3700,25 +3702,28 @@ class StatefulBackend {
         : null,
       jevProvider,
       jev: { on: enabled && asks && (everywhere || folders > 0), everywhere, folders },
-      // The rows a person wrote, and what each difficulty runs (t-14437):
-      // each written field, the other the shipped table's, the effort
-      // brought inside what the row's model takes in this harness's lineup.
+      // The rows a person wrote, and what each difficulty runs (t-14437),
+      // as `summon_difficulty::lineup::rows` answers them (t-74181): each
+      // written field, the model the shipped table's where none is written,
+      // and no effort where none is written — the agent's CLI runs its own
+      // default, so the command line names the model alone.
       summonProfiles: clone(smart.summonProfiles ?? {}),
       summonRows: Object.fromEntries(Object.entries(FIXTURE_SHIPPED).map(([agent, levels]) => [
         agent,
         Object.entries(levels).map(([difficulty, auto]) => {
           const written = smart.summonProfiles?.[agent]?.[difficulty] ?? {};
           const model = written.model ?? auto.model;
-          const takes = FIXTURE_LINEUP[agent]?.find((pick) => pick.id === model)?.efforts ?? [auto.effort];
-          const effort = written.effort ?? (takes.includes(auto.effort) ? auto.effort : takes.at(-1));
+          const effort = written.effort ?? null;
+          const effortWords = !effort ? [] : agent === "codex"
+            ? ["-c", `model_reasoning_effort=${effort}`]
+            : ["--effort", effort];
           return {
             difficulty, model, effort, from: written.model ? "person" : "table", candidates: [],
-            autoModel: auto.model, autoEffort: auto.effort,
+            effortRule: effort ? "person" : "cli-default",
+            autoModel: auto.model, autoEffort: null,
             writtenModel: written.model ?? null, writtenEffort: written.effort ?? null,
             standing: { kind: FIXTURE_LINEUP[agent]?.some((pick) => pick.id === model) ? "listed" : "missing" },
-            launch: agent === "codex"
-              ? ["--model", model, "-c", `model_reasoning_effort=${effort}`]
-              : ["--model", model, "--effort", effort],
+            launch: ["--model", model, ...effortWords],
           };
         }),
       ])),
