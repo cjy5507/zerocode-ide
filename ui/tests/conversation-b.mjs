@@ -114,7 +114,7 @@ function readPage() {
     noteWords: t("worker.windowNote", "창 알림 · 창이 다시 시작되어 이어 가라고 알렸습니다"),
     personRight: person ? Math.round(column.right - box(person).right) : null,
     personInside: person ? inside(person) : false,
-    answerDots: answers.filter((row) => getComputedStyle(row, "::after").content !== "none").length,
+    answerDots: answers.filter((row) => ["::before", "::after"].some((part) => getComputedStyle(row, part).content !== "none")).length,
     say,
     sayWhole: t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다"),
     sayShort: t("composer.placeholderShort", "다음 지시를 쓰세요"),
