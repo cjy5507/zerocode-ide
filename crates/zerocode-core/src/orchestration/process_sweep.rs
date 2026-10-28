@@ -21,7 +21,7 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use super::{Ledger, Words};
+use super::{Ledger, RETRY_REQUEST, Words};
 
 /// The verb's one spelling: the table, the plan arm and the window's carrying
 /// of it all say it.
@@ -62,7 +62,9 @@ pub struct ProcessRow {
     pub cwd: Option<String>,
 }
 
-/// A worker checkout the ledger knows, for saying whose a process is.
+/// A worker checkout the ledger knows, for saying whose a process is: a
+/// tree of the worker's own ([`super::Worker::in_worktree`]), never one
+/// that holds a coordinator's tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkout {
     pub path: String,
@@ -82,17 +84,49 @@ pub struct Target {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessSweepAsk {
     /// List the rows whose command line holds `needle`, and change nothing.
+    /// `coordinator_seats` are the live seats (`team/pane`) of every run:
+    /// the window drops each checkout that holds one of their trees, which
+    /// only it can read.
     Find {
         needle: String,
         checkouts: Vec<Checkout>,
+        coordinator_seats: Vec<String>,
     },
-    /// End these pids, one at a time, and tell `run`'s coordinator what was
-    /// done. `checkouts` says, as for a list, whose checkout each stands in.
+    /// End these pids, one at a time, and tell `run`'s coordinator — the
+    /// seat of `generation`, which asked — what was done, filed once under
+    /// the call's own retry name `request`. `checkouts` and
+    /// `coordinator_seats` say, as for a list, whose checkout each stands in.
     End {
         run: String,
+        generation: u32,
+        request: String,
         targets: Vec<Target>,
         checkouts: Vec<Checkout>,
+        coordinator_seats: Vec<String>,
     },
+}
+
+impl ProcessSweepAsk {
+    /// The worker checkouts the ledger knows, as either mode carries them.
+    #[must_use]
+    pub fn checkouts(&self) -> &[Checkout] {
+        match self {
+            Self::Find { checkouts, .. } | Self::End { checkouts, .. } => checkouts,
+        }
+    }
+
+    /// The live coordinator seats, as either mode carries them.
+    #[must_use]
+    pub fn coordinator_seats(&self) -> &[String] {
+        match self {
+            Self::Find {
+                coordinator_seats, ..
+            }
+            | Self::End {
+                coordinator_seats, ..
+            } => coordinator_seats,
+        }
+    }
 }
 
 /// Whether one row may be ended. The shape the blocking road's `judge_kill`
@@ -129,6 +163,17 @@ pub trait Signals {
     /// `(started, args)` for `pid` as the system reads it NOW, or `None` when
     /// no such process stands.
     fn reread(&self, pid: u32) -> Option<(String, String)>;
+    /// The same for several pids in one read — each pid that stands now,
+    /// with its `(started, args)` — or `None` when the read itself failed,
+    /// which says nothing about any of them. The default reads one pid at a
+    /// time; a system that can answer for many in one read says so here.
+    fn reread_many(&self, pids: &[u32]) -> Option<HashMap<u32, (String, String)>> {
+        Some(
+            pids.iter()
+                .filter_map(|pid| self.reread(*pid).map(|now| (*pid, now)))
+                .collect(),
+        )
+    }
     /// Ask exactly this one pid to end (TERM on Unix). Never a group or a tree.
     fn terminate(&self, pid: u32) -> Result<(), String>;
     /// Wait `ms` before the signaled pids are read again.
@@ -269,6 +314,7 @@ pub(super) fn ask(
         (Some(needle), None) => Ok(ProcessSweepAsk::Find {
             needle: needle_of(needle)?,
             checkouts: checkouts(ledger),
+            coordinator_seats: coordinator_seats(ledger),
         }),
         (None, Some(_)) => {
             let run_id = run()?;
@@ -285,17 +331,30 @@ pub(super) fn ask(
             // Not being this run's worker is not being its coordinator: a
             // worker naming another run, a pane nobody seated and a run with
             // no live seat all stop here.
-            if held.seat_is_coordinator(&format!("{team}/{pane}")) != Some(true) {
+            let Some(seat) = held
+                .coordinator_live()
+                .filter(|seat| seat.seat == format!("{team}/{pane}"))
+            else {
                 return Err(format!(
                     "{VERB} --kill is the coordinator's, and this pane is not the live coordinator \
                      seat of run {run_id} — say which pids you want ended to that run's \
                      coordinator"
                 ));
-            }
+            };
+            let targets = targets_of(&words.list("--kill"))?;
+            let request = words.value(RETRY_REQUEST).ok_or_else(|| {
+                format!(
+                    "{VERB} --kill signals processes — name the call with {RETRY_REQUEST} <name>, \
+                     so a retry is told what the first call did instead of signalling again"
+                )
+            })?;
             Ok(ProcessSweepAsk::End {
                 run: run_id,
-                targets: targets_of(&words.list("--kill"))?,
+                generation: seat.generation,
+                request: request.to_string(),
+                targets,
                 checkouts: checkouts(ledger),
+                coordinator_seats: coordinator_seats(ledger),
             })
         }
     }
@@ -361,7 +420,11 @@ fn targets_of(words: &[String]) -> Result<Vec<Target>, String> {
     Ok(targets)
 }
 
-/// Every worker checkout the ledger was told, across its runs.
+/// Every checkout of a worker's own the ledger was told, across its runs —
+/// never the tree a worker opened in without one (no `--worktree`, `--bare`),
+/// which is its coordinator's, and never one that holds a run's project
+/// root (r2 P1-1: 191 of this machine's 1,499 worker rows reported the main
+/// checkout, where the build line's runner stands).
 fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
     let mut found = Vec::new();
     for run in ledger.runs() {
@@ -383,6 +446,31 @@ fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
         }
     }
     found
+}
+
+/// The live coordinator seat (`team/pane`) of every run, for the window to
+/// read their trees by.
+fn coordinator_seats(ledger: &Ledger) -> Vec<String> {
+    ledger
+        .runs()
+        .iter()
+        .filter_map(|run| run.coordinator_live().map(|seat| seat.seat.clone()))
+        .collect()
+}
+
+/// `checkouts` without each one that is, or holds, one of `trees` — a
+/// coordinator's tree or a project root is nobody's worker checkout, whatever
+/// a row says, and a process standing in it is never an orphaned build.
+#[must_use]
+pub fn outside(checkouts: Vec<Checkout>, trees: &[String]) -> Vec<Checkout> {
+    checkouts
+        .into_iter()
+        .filter(|checkout| {
+            !trees
+                .iter()
+                .any(|tree| Path::new(tree).starts_with(Path::new(&checkout.path)))
+        })
+        .collect()
 }
 
 /// Whose checkout `cwd` stands in: the deepest one that holds it, and of two
@@ -528,6 +616,13 @@ pub fn end(
 
 /// Read the signaled pids again until each is gone — no process under the
 /// pid, or another process than the one marked — or the steps run out.
+///
+/// Every step is ONE read of all the pids still standing (r2 P2-1): 32 pids
+/// that ignore TERM read one at a time cost 32 × 3 `ps` a step, about 8 s of
+/// the window's 10 s answer. One read pairs a start with a command line of
+/// the same row, and a pid handed to another process between the two can
+/// only fail its mark — which is gone, as it should be. A step whose read
+/// failed proves nothing and leaves every pid as it was.
 fn settle(ended: &mut [Ended], signals: &dyn Signals) {
     for step in 0..=SETTLE_STEPS {
         let mut running = false;
@@ -621,10 +716,10 @@ fn gone_count(ended: &[Ended]) -> usize {
 }
 
 /// The one line the ledger keeps of an end call: how many were signaled and
-/// how many of those are gone, and each pid with its outcome and the start of
-/// its command line.
+/// how many of those are gone, which coordinator seat asked (its generation),
+/// and each pid with its outcome and the start of its command line.
 #[must_use]
-pub fn ledger_line(ended: &[Ended]) -> String {
+pub fn ledger_line(generation: u32, ended: &[Ended]) -> String {
     let count = ended.iter().filter(|one| one.outcome.signaled()).count();
     let each: Vec<String> = ended
         .iter()
@@ -649,22 +744,25 @@ pub fn ledger_line(ended: &[Ended]) -> String {
         })
         .collect();
     format!(
-        "{VERB}: TERM sent to {count} of {}, {} gone — {}",
+        "{VERB}: TERM sent to {count} of {}, {} gone, asked by coordinator generation \
+         {generation} — {}",
         ended.len(),
         gone_count(ended),
         each.join("; ")
     )
 }
 
-/// Every pid the end call asked about, in a receipt-sized word, so one call's
-/// ledger line is filed once however often the window is asked to file it.
+/// The call's own retry name and every pid it asked about, in a
+/// receipt-sized word, so one call's ledger line is filed once however often
+/// the window is asked to carry it — a clock in the word would file a
+/// second line for a second carrying of the same call.
 #[must_use]
-pub fn receipt_of(run: &str, targets: &[Target], now_ms: i64) -> String {
+pub fn receipt_of(run: &str, request: &str, targets: &[Target]) -> String {
     let words: Vec<String> = targets
         .iter()
         .map(|target| target_word(target.pid, &target.mark))
         .collect();
-    format!("{VERB}:{run}:{now_ms}:{}", words.join(","))
+    format!("{VERB}:{run}:{request}:{}", words.join(","))
 }
 
 /// Where each listed process stands (`cwds`, by pid), folded into its row.

@@ -3,12 +3,13 @@
 //! is a fixture and every signal is written down by a fake: no test reaches a
 //! real process.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 use super::*;
 use crate::orchestration::process_sweep::{
     Checkout, Ended, Judge, Judgment, Outcome, ProcessRow, ProcessSweepAsk, Signals, TARGETS_MAX,
-    Target, VERB, end, end_answer, find, ledger_line, mark, matching_pids, owner,
+    Target, VERB, end, end_answer, find, ledger_line, mark, matching_pids, outside, owner,
 };
 
 const STARTED: &str = "Wed Oct 28 21:00:00 2026";
@@ -81,6 +82,11 @@ struct Fake {
     /// Pids handed to another process (a later start) the moment they go.
     reborn: Vec<u32>,
     paused: RefCell<Vec<u64>>,
+    /// One-pid reads, and the pids each many-pid read was asked for.
+    single_reads: Cell<usize>,
+    many_reads: RefCell<Vec<Vec<u32>>>,
+    /// Every many-pid read fails, as a `ps` that timed out does.
+    unreadable: bool,
 }
 
 impl Fake {
@@ -92,12 +98,16 @@ impl Fake {
             ignores: Vec::new(),
             reborn: Vec::new(),
             paused: RefCell::new(Vec::new()),
+            single_reads: Cell::new(0),
+            many_reads: RefCell::new(Vec::new()),
+            unreadable: false,
         }
     }
 }
 
 impl Signals for Fake {
     fn reread(&self, pid: u32) -> Option<(String, String)> {
+        self.single_reads.set(self.single_reads.get() + 1);
         self.now
             .borrow()
             .iter()
@@ -121,6 +131,21 @@ impl Signals for Fake {
                 Ok(())
             }
         }
+    }
+
+    fn reread_many(&self, pids: &[u32]) -> Option<HashMap<u32, (String, String)>> {
+        self.many_reads.borrow_mut().push(pids.to_vec());
+        if self.unreadable {
+            return None;
+        }
+        Some(
+            self.now
+                .borrow()
+                .iter()
+                .filter(|row| pids.contains(&row.pid))
+                .map(|row| (row.pid, (row.started.clone(), row.args.clone())))
+                .collect(),
+        )
     }
 
     fn pause(&self, ms: u64) {
@@ -383,7 +408,7 @@ fn gone_and_failed_are_said_as_they_are() {
     );
     let answer = end_answer("run-1", &ended);
     assert_eq!(answer["signaled"], 0);
-    let line = ledger_line(&ended);
+    let line = ledger_line(1, &ended);
     assert!(
         line.starts_with("process-sweep: TERM sent to 0 of 2, 0 gone"),
         "{line}"
@@ -430,9 +455,11 @@ fn a_sent_term_is_said_as_signaled_and_whether_it_went() {
         "{answer}"
     );
     assert!(answer.get("ended").is_none(), "{answer}");
-    let line = ledger_line(&ended);
+    let line = ledger_line(4, &ended);
     assert!(
-        line.starts_with("process-sweep: TERM sent to 2 of 2, 1 gone"),
+        line.starts_with(
+            "process-sweep: TERM sent to 2 of 2, 1 gone, asked by coordinator generation 4"
+        ),
         "{line}"
     );
     assert!(line.contains("4100 signaled, gone"), "{line}");
@@ -450,6 +477,78 @@ fn a_signaled_pid_reused_before_the_settle_read_is_gone() {
     let ended = end(&table, &[target(&table[3])], &Protects(Vec::new()), &fake);
     assert_eq!(outcomes(&ended), vec![(4100, GONE)]);
     assert!(fake.paused.borrow().is_empty());
+}
+
+/// The settle wait reads every pid still standing in ONE read a step (r2
+/// P2-1): 32 pids that ignore TERM are read one at a time once each, right
+/// before their signals, and then 21 times all together — not 32 × 21.
+#[test]
+fn the_settle_wait_reads_all_standing_pids_in_one_read_a_step() {
+    let table: Vec<ProcessRow> = (6000..)
+        .take(TARGETS_MAX)
+        .map(|pid| row(pid, 1, "cargo build -p zerocode-shell"))
+        .collect();
+    let mut fake = Fake::standing(table.clone());
+    fake.ignores = table.iter().map(|row| row.pid).collect();
+    let targets: Vec<Target> = table.iter().map(target).collect();
+    let ended = end(&table, &targets, &Protects(Vec::new()), &fake);
+    assert!(
+        ended
+            .iter()
+            .all(|one| one.outcome == Outcome::Signaled { gone: false }),
+        "{ended:?}"
+    );
+    assert_eq!(
+        fake.single_reads.get(),
+        TARGETS_MAX,
+        "one read before each signal"
+    );
+    let many = fake.many_reads.borrow();
+    assert_eq!(
+        many.len(),
+        21,
+        "one read a step, 20 steps and the last look"
+    );
+    let all: Vec<u32> = table.iter().map(|row| row.pid).collect();
+    assert!(many.iter().all(|asked| *asked == all), "{many:?}");
+}
+
+/// A step asks only for the pids still standing, and stops once none does.
+#[test]
+fn a_settle_step_asks_only_for_the_pids_still_standing() {
+    let table = table();
+    let mut fake = Fake::standing(table.clone());
+    fake.ignores = vec![4200];
+    let ended = end(
+        &table,
+        &[target(&table[3]), target(&table[4])],
+        &Protects(Vec::new()),
+        &fake,
+    );
+    assert_eq!(
+        outcomes(&ended),
+        vec![(4100, GONE), (4200, Outcome::Signaled { gone: false })]
+    );
+    let many = fake.many_reads.borrow();
+    assert_eq!(many[0], vec![4100, 4200]);
+    assert!(
+        many[1..].iter().all(|asked| *asked == vec![4200]),
+        "{many:?}"
+    );
+}
+
+/// A settle read that failed proves nothing: the pid is not said gone.
+#[test]
+fn a_failed_settle_read_says_nobody_went() {
+    let table = table();
+    let mut fake = Fake::standing(table.clone());
+    fake.unreadable = true;
+    let ended = end(&table, &[target(&table[3])], &Protects(Vec::new()), &fake);
+    assert_eq!(*fake.signalled.borrow(), vec![4100]);
+    assert_eq!(
+        outcomes(&ended),
+        vec![(4100, Outcome::Signaled { gone: false })]
+    );
 }
 
 /* ---- the verb ---------------------------------------------------------- */
@@ -471,11 +570,18 @@ fn a_list_carries_the_needle_and_the_ledgers_checkouts() {
         .as_str()
         .expect("a task id")
         .to_string();
-    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let (worker, pane) = bench.seat(&format!(
+        "worker-start --agent claude --task {task} --worktree"
+    ));
     assert!(bench.ledger.worker_seated(("team-1", &pane), "/w/t-1"));
     let planned = bench.run(&format!("{VERB} --find cargo"));
     assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
-    let ProcessSweepAsk::Find { needle, checkouts } = asked(&planned) else {
+    let ProcessSweepAsk::Find {
+        needle,
+        checkouts,
+        coordinator_seats,
+    } = asked(&planned)
+    else {
         panic!("a list was asked for")
     };
     assert_eq!(needle, "cargo");
@@ -483,6 +589,108 @@ fn a_list_carries_the_needle_and_the_ledgers_checkouts() {
     assert_eq!(checkouts[0].path, "/w/t-1");
     assert_eq!(checkouts[0].worker, worker);
     assert_eq!(checkouts[0].task.as_deref(), Some(task.as_str()));
+    let live = bench.ledger.runs()[0]
+        .coordinator_live()
+        .map(|seat| seat.seat.clone());
+    assert_eq!(coordinator_seats, live.into_iter().collect::<Vec<_>>());
+}
+
+/// r2 P1-1: a worker opened without a tree of its own (no `--worktree`, or
+/// a replacement inheriting such a worker's tree) reports its coordinator's
+/// tree — on this machine 191 of 1,499 worker rows named the main checkout,
+/// where the build line's runner stands. Only a tree of the worker's own is
+/// a worker checkout, and never one holding the run's project root.
+#[test]
+fn only_a_tree_of_the_workers_own_is_a_worker_checkout() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name sweep");
+    let mut task = || {
+        bench.json("task-create --spec build")["taskId"]
+            .as_str()
+            .expect("a task id")
+            .to_string()
+    };
+    let (own_task, shared_task, rooted_task) = (task(), task(), task());
+    let mut seat = |line: String, checkout: &str| {
+        let (worker, pane) = bench.seat(&line);
+        assert!(bench.ledger.worker_seated(("team-1", &pane), checkout));
+        worker
+    };
+    let own = seat(
+        format!("worker-start --agent claude --task {own_task} --worktree"),
+        "/w/t-1",
+    );
+    let shared = seat(
+        format!("worker-start --agent claude --task {shared_task}"),
+        "/main",
+    );
+    let rooted = seat(
+        format!("worker-start --agent claude --task {rooted_task} --worktree"),
+        "/main",
+    );
+    // Each replaced by a worker inheriting its tree.
+    let mut inherit = |ended: &str, task: &str, checkout: &str| {
+        let dispatch = bench.ledger.runs()[0]
+            .worker(ended)
+            .and_then(|held| held.dispatch.clone())
+            .expect("the attempt");
+        bench.json(&format!("worker-stop --worker {ended} --reason quota-wall"));
+        let (worker, pane) = bench.seat(&format!(
+            "worker-start --agent claude --task {task} --retry-of {dispatch} --inherit-checkout"
+        ));
+        assert!(bench.ledger.worker_seated(("team-1", &pane), checkout));
+        worker
+    };
+    let own_heir = inherit(&own, &own_task, "/w/t-1");
+    let shared_heir = inherit(&shared, &shared_task, "/main");
+    let in_worktree = |worker: &str| {
+        bench.ledger.runs()[0]
+            .worker(worker)
+            .expect("the worker")
+            .in_worktree
+    };
+    assert!(in_worktree(&own) && in_worktree(&own_heir) && in_worktree(&rooted));
+    assert!(!in_worktree(&shared) && !in_worktree(&shared_heir));
+    let run = bench.ledger.runs()[0].id.clone();
+    bench.ledger.run_mut(&run).expect("the run").project = Some(RunProject {
+        root: "/main".to_string(),
+        source: ProjectSource::Created,
+        at_ms: 1,
+        seat: None,
+    });
+    let planned = bench.run(&format!("{VERB} --find cargo"));
+    let ProcessSweepAsk::Find { checkouts, .. } = asked(&planned) else {
+        panic!("a list was asked for")
+    };
+    let workers: Vec<&str> = checkouts.iter().map(|one| one.worker.as_str()).collect();
+    assert_eq!(workers, vec![own.as_str(), own_heir.as_str()]);
+    assert!(owner("/main", &checkouts).is_none());
+    assert!(owner("/main/build-queue", &checkouts).is_none());
+}
+
+/// A coordinator's tree, or a project root, held by a checkout — the
+/// checkout itself or a folder above it — takes the checkout out; one
+/// inside it, or beside it, does not.
+#[test]
+fn a_checkout_holding_a_coordinators_tree_is_nobodys() {
+    let told = |path: &str| Checkout {
+        path: path.to_string(),
+        run: "run-1".to_string(),
+        worker: "w-1".to_string(),
+        task: None,
+    };
+    let held = outside(
+        vec![
+            told("/main"),
+            told("/"),
+            told("/main/.worktrees/t-1"),
+            told("/w/t-1"),
+            told("/main-other"),
+        ],
+        &["/main/".to_string()],
+    );
+    let paths: Vec<&str> = held.iter().map(|one| one.path.as_str()).collect();
+    assert_eq!(paths, vec!["/main/.worktrees/t-1", "/w/t-1", "/main-other"]);
 }
 
 /// The coordinator's end call names its run and the pids, marks and all.
@@ -491,14 +699,25 @@ fn an_end_call_names_its_run_and_targets() {
     let mut bench = Bench::new();
     bench.json("run-create --name sweep");
     let run = bench.ledger.runs()[0].id.clone();
+    let generation = bench.ledger.runs()[0]
+        .coordinator_live()
+        .map(|seat| seat.generation)
+        .expect("the bench's coordinator sits");
+    let seats = bench.ledger.runs()[0]
+        .coordinator_live()
+        .map(|seat| seat.seat.clone())
+        .into_iter()
+        .collect();
     let planned = bench.run(&format!(
-        "{VERB} --kill 4100@0123456789ab,4200@abcdef012345"
+        "{VERB} --kill 4100@0123456789ab,4200@abcdef012345 --retry-request sweep-1"
     ));
     assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
     assert_eq!(
         asked(&planned),
         ProcessSweepAsk::End {
             run,
+            generation,
+            request: "sweep-1".to_string(),
             targets: vec![
                 Target {
                     pid: 4100,
@@ -510,6 +729,7 @@ fn an_end_call_names_its_run_and_targets() {
                 },
             ],
             checkouts: Vec::new(),
+            coordinator_seats: seats,
         }
     );
 }
@@ -521,7 +741,7 @@ fn malformed_calls_are_refused_before_the_window_is_asked() {
     let many: Vec<String> = (0..=TARGETS_MAX)
         .map(|at| format!("{}@0123456789ab", 5000 + at))
         .collect();
-    let cases: [(String, &str); 9] = [
+    let cases: [(String, &str); 10] = [
         (VERB.to_string(), "--find"),
         (format!("{VERB} cargo"), "no bare words"),
         (
@@ -537,6 +757,10 @@ fn malformed_calls_are_refused_before_the_window_is_asked() {
             "twice",
         ),
         (format!("{VERB} --kill {}", many.join(",")), "at most"),
+        (
+            format!("{VERB} --kill 4100@0123456789ab"),
+            "--retry-request",
+        ),
     ];
     for (line, says) in cases {
         let mut bench = Bench::new();
@@ -640,7 +864,9 @@ fn only_the_runs_coordinator_seat_ends_processes() {
             planned.effect
         );
     }
-    let seated = bench.run(&format!("{VERB} {kill} --run {other}"));
+    let seated = bench.run(&format!(
+        "{VERB} {kill} --run {other} --retry-request sweep-1"
+    ));
     assert_eq!(seated.reply.exit_code, 0, "{}", seated.reply.stderr);
     assert!(matches!(
         seated.effect,

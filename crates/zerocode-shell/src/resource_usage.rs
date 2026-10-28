@@ -671,11 +671,8 @@ fn parse_ps_output(output: &str) -> ParsedProcesses {
         });
         uids.insert(pid, uid);
         process_groups.insert(pid, process_group);
-        // `lstart` is five whitespace-delimited fields under LC_ALL=C.
-        let started = (0..5).filter_map(|_| fields.next()).collect::<Vec<_>>();
-        if started.len() == 5 {
-            identities.insert(pid, started.join(" "));
-            let command = bounded_command(fields);
+        if let Some((started, command)) = start_and_command(fields) {
+            identities.insert(pid, started);
             if !command.is_empty() {
                 commands.insert(pid, command);
             }
@@ -689,6 +686,61 @@ fn parse_ps_output(output: &str) -> ParsedProcesses {
         uids,
         process_groups,
     }
+}
+
+/// The start identity and the command line after it, as one `ps` row prints
+/// them — `lstart` is five whitespace-delimited fields under LC_ALL=C — in the
+/// words and bounds every reader of the table keys a process by. `None` for a
+/// row with fewer than five start fields.
+#[cfg(any(not(windows), test))]
+fn start_and_command<'a>(mut fields: impl Iterator<Item = &'a str>) -> Option<(String, String)> {
+    let started = fields.by_ref().take(5).collect::<Vec<_>>();
+    (started.len() == 5).then(|| (started.join(" "), bounded_command(fields)))
+}
+
+/// Several known pids' start identities and command lines in ONE `ps`
+/// (t-78914 `process-sweep`'s settle wait), in the words and bounds the table
+/// read gives each, so a mark made from the table matches. A pid missing from
+/// the answer does not stand. The read asks for this process too — always
+/// standing — so `ps` answers even when none of `pids` does, and an `Err` is
+/// only ever a read that failed, never "all gone".
+#[cfg(not(windows))]
+pub(crate) fn process_identities(pids: &[u32]) -> Result<HashMap<u32, (String, String)>, String> {
+    let own = std::process::id();
+    let asked: Vec<String> = pids
+        .iter()
+        .chain(std::iter::once(&own))
+        .map(u32::to_string)
+        .collect();
+    let mut command = crate::proc::quiet_command("ps");
+    command
+        .args(["-ww", "-p", &asked.join(","), "-o", "pid=,lstart=,command="])
+        .env("LC_ALL", "C")
+        .env("LANG", "C");
+    let output = run_sampler(command, PROCESS_IDENTITY_TIMEOUT)?;
+    Ok(parse_identities(
+        &String::from_utf8_lossy(&output.stdout),
+        pids,
+    ))
+}
+
+/// The rows of `ps -o pid=,lstart=,command=` for `pids` — a row for any
+/// other pid, this process's own among them, is not an answer.
+#[cfg(any(not(windows), test))]
+fn parse_identities(output: &str, pids: &[u32]) -> HashMap<u32, (String, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_ascii_whitespace();
+            let pid = fields
+                .next()?
+                .parse::<u32>()
+                .ok()
+                .filter(|pid| pids.contains(pid))?;
+            let (started, command) = start_and_command(fields)?;
+            (!command.is_empty()).then_some((pid, (started, command)))
+        })
+        .collect()
 }
 
 fn bounded_command<'a>(words: impl Iterator<Item = &'a str>) -> String {
@@ -1315,6 +1367,28 @@ mod tests {
         assert_eq!(parsed.commands[&10], "/sdk/emulator -avd Pixel");
         assert_eq!(parsed.uids[&10], 501);
         assert_eq!(parsed.process_groups[&10], 7);
+    }
+
+    /// One settle read for several pids (t-78914 r2 P2-1) keys each asked
+    /// pid exactly as the table read keys it — so a mark made from the table
+    /// matches — and answers nothing for a pid it was not asked about (the
+    /// reader's own row) or one that is missing.
+    #[test]
+    fn one_read_for_several_pids_keys_them_as_the_table_does() {
+        let table = parse_ps_output(
+            " 501 10 1 7 12.5 2048 Thu Aug 27 13:14:15 2026 /sdk/emulator -avd Pixel\n",
+        );
+        let read = parse_identities(
+            "   10 Thu Aug 27 13:14:15 2026 /sdk/emulator -avd Pixel\n\
+             \x2077 Thu Aug 27 09:00:00 2026 zerocode-shell\n\
+             \x20 12 Thu Aug 27 13:14:16 2026\n",
+            &[10, 11, 12],
+        );
+        assert_eq!(
+            read.get(&10),
+            Some(&(table.identities[&10].clone(), table.commands[&10].clone()))
+        );
+        assert_eq!(read.len(), 1, "{read:?}");
     }
 
     /// The three pane shapes measured on this machine (t-6428, 2026-09-24),

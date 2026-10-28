@@ -223,6 +223,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         on_quota_wall TEXT,
         quota_wait INTEGER NOT NULL DEFAULT 0 CHECK (quota_wait IN (0, 1)),
         exit_unconfirmed TEXT,
+        in_worktree INTEGER NOT NULL DEFAULT 0 CHECK (in_worktree IN (0, 1)),
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, run, id),
         FOREIGN KEY (ledger_id) REFERENCES orchestration_ledger_heads(ledger_id)
@@ -507,6 +508,14 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
          * and written together — and NULL for every run written before
          * projects were recorded, which the window infers one for. */
         ("ledger_runs", "project", "TEXT"),
+        /* Whether a worker's checkout is its own tree (t-78914): a flag like
+         * `taken_over`, and false for every row written before it — a
+         * checkout nobody said was the worker's own is not counted as one. */
+        (
+            "ledger_workers",
+            "in_worktree",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (in_worktree IN (0, 1))",
+        ),
     ];
     /* Unversioned digest rows were written by format generation one. Derive
      * the migration default from the format's single named constant so the
@@ -1743,8 +1752,8 @@ fn write_rows(
                         started_ms, dispatch, model, effort, session, ready_by_ms,
                         hook_unreachable_since_ms, pane_missing_since_ms,
                         taken_over, checkout, quiet_at, archive, started_by, adopted_by,
-                        on_quota_wall, quota_wait, exit_unconfirmed
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                        on_quota_wall, quota_wait, exit_unconfirmed, in_worktree
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
                     params![
                         ledger_id,
                         ordinal(at)?,
@@ -1783,6 +1792,7 @@ fn write_rows(
                             .map(serde_json::to_string)
                             .transpose()
                             .map_err(|_| EffectJournalError::Corrupt)?,
+                        row.in_worktree,
                     ],
                 )
                 .map_err(|_| EffectJournalError::Database)?;
@@ -2551,7 +2561,8 @@ fn read_repairable_from_head(
         "SELECT run, id, team, agent, pane, state, started_ms, dispatch, model, effort,
                 session, ready_by_ms, hook_unreachable_since_ms,
                 pane_missing_since_ms, taken_over, checkout, quiet_at, archive,
-                started_by, adopted_by, on_quota_wall, quota_wait, exit_unconfirmed
+                started_by, adopted_by, on_quota_wall, quota_wait, exit_unconfirmed,
+                in_worktree
            FROM ledger_workers WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -2582,6 +2593,7 @@ fn read_repairable_from_head(
                     row.get::<_, Option<String>>(20)?,
                     row.get::<_, bool>(21)?,
                     row.get::<_, Option<String>>(22)?,
+                    row.get::<_, bool>(23)?,
                 ),
             ));
             Ok(())
@@ -2613,7 +2625,14 @@ fn read_repairable_from_head(
                 ),
                 state,
             )| {
-                let (started_by, adopted_by, on_quota_wall, quota_wait, exit_unconfirmed) = lineage;
+                let (
+                    started_by,
+                    adopted_by,
+                    on_quota_wall,
+                    quota_wait,
+                    exit_unconfirmed,
+                    in_worktree,
+                ) = lineage;
                 /* A generation is a small positive count; a value SQLite hands
                  * back that a `u32` cannot hold was not written by this store. */
                 let adopted_by = adopted_by
@@ -2654,6 +2673,7 @@ fn read_repairable_from_head(
                     pane_missing_since_ms,
                     taken_over,
                     checkout,
+                    in_worktree,
                     quiet_at,
                     archive: archive.map(Text::from),
                     started_by,
@@ -3100,6 +3120,9 @@ mod tests {
                 pane_missing_since_ms: None,
                 taken_over: true,
                 checkout: Some("/wt/grown".to_string()),
+                // Left false for the digest pin's reason below; the set flag
+                // rides the round trip on its own.
+                in_worktree: false,
                 quiet_at: None,
                 archive: None,
                 // Left empty ON PURPOSE. This fixture is what the table-digest
@@ -3571,6 +3594,8 @@ mod tests {
         });
         // And its own `wait` beside it (t-6427).
         projection.workers[0].quota_wait = true;
+        // And whether its checkout is its own tree (t-78914).
+        projection.workers[0].in_worktree = true;
         // And a switch's close nobody saw end (t-7538), the same way.
         projection.workers[0].exit_unconfirmed = Some(zerocode_core::orchestration::ExitWitness {
             group: 4_242,
@@ -3988,6 +4013,7 @@ mod tests {
                  ALTER TABLE ledger_workers DROP COLUMN quota_wait;
                  ALTER TABLE ledger_workers DROP COLUMN exit_unconfirmed;
                  ALTER TABLE ledger_runs DROP COLUMN project;
+                 ALTER TABLE ledger_workers DROP COLUMN in_worktree;
                  UPDATE orchestration_ledger_heads SET bytes_held = {};",
                 bytes_held(&expected)
             ))

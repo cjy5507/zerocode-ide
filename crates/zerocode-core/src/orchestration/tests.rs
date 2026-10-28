@@ -6719,6 +6719,7 @@ fn an_agents_words_never_reach_a_debug_rendering() {
             pane_missing_since_ms: None,
             taken_over: false,
             checkout: None,
+            in_worktree: false,
             quiet_at: None,
             archive: Some(secret.to_string()),
             adopted_by: None,

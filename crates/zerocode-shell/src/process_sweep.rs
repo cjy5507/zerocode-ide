@@ -34,27 +34,59 @@ pub(crate) struct Filed {
 }
 
 /// Carry one decided call against this machine. `roots` is the asking pane's
-/// own process and the trees it may not signal, as the window reads them.
+/// own process and the trees it may not signal, as the window reads them;
+/// `coordinator_trees` are where the ledger's live coordinator seats stand
+/// ([`coordinator_trees`]).
 pub(crate) fn carry(
     ask: &ProcessSweepAsk,
     roots: Option<KillRoots>,
-    now_ms: i64,
+    coordinator_trees: &[String],
 ) -> Result<Carried, String> {
     let (rows, table) = table()?;
-    let checkouts = match ask {
-        ProcessSweepAsk::Find { checkouts, .. } | ProcessSweepAsk::End { checkouts, .. } => {
-            checkouts.clone()
-        }
-    };
-    let judge = judge(roots, table, checkouts, std::process::id());
+    let checkouts = held_checkouts(ask, coordinator_trees);
+    let judge = judge(roots, table, checkouts.clone(), std::process::id());
     carry_with(
         ask,
+        &checkouts,
         rows,
         &crate::system_runtime::process_cwds,
         judge.as_ref(),
         &System,
-        now_ms,
     )
+}
+
+/// The worker checkouts this call reads: the ask's, less each that is or
+/// holds a coordinator's tree.
+fn held_checkouts(ask: &ProcessSweepAsk, _coordinator_trees: &[String]) -> Vec<Checkout> {
+    ask.checkouts().to_vec()
+}
+
+/// The tree each live coordinator seat (`team/pane`) stands in, as the window
+/// recorded it when it placed that pane. A coordinator's tree is nobody's
+/// worker checkout, whatever a worker row reported (r2 P1-1): a worker opened
+/// without a tree of its own reports the coordinator's. A seat this window
+/// holds no pane or no tree for adds nothing — the ledger has already left
+/// out every row that was not a tree of the worker's own.
+pub(crate) fn coordinator_trees(
+    seats: &[String],
+    host: &dyn crate::agent_teams::Host,
+) -> Vec<String> {
+    // The terms first, the table let go before the host is asked.
+    let terms: Vec<u32> = {
+        let teams = crate::agent_teams::teams();
+        seats
+            .iter()
+            .filter_map(|seat| {
+                let (team, pane) = seat.split_once('/')?;
+                teams.get(team)?.term_of(pane)
+            })
+            .collect()
+    };
+    terms
+        .into_iter()
+        .filter_map(|term| host.worktree_of(term))
+        .map(|tree| tree.to_string_lossy().into_owned())
+        .collect()
 }
 
 /// The protection judgment this window stands behind the verb — the ONE place
@@ -208,16 +240,18 @@ impl Judge for NoRoots {
     }
 }
 
+/// `checkouts` are the ask's, less every coordinator's tree — the same list
+/// the judge holds, so a row's owner and its verdict read one list.
 fn carry_with(
     ask: &ProcessSweepAsk,
+    checkouts: &[Checkout],
     mut table: Vec<ProcessRow>,
     read_cwds: &dyn Fn(&[u32]) -> HashMap<u32, String>,
     judge: &dyn Judge,
     signals: &dyn Signals,
-    now_ms: i64,
 ) -> Result<Carried, String> {
     match ask {
-        ProcessSweepAsk::Find { needle, checkouts } => {
+        ProcessSweepAsk::Find { needle, .. } => {
             let cwds = read_cwds(&judge.places_for(&sweep::matching_pids(&table, needle)));
             sweep::with_cwds(&mut table, &cwds);
             Ok(Carried {
@@ -225,7 +259,13 @@ fn carry_with(
                 filed: None,
             })
         }
-        ProcessSweepAsk::End { run, targets, .. } => {
+        ProcessSweepAsk::End {
+            run,
+            generation,
+            request,
+            targets,
+            ..
+        } => {
             let cwds = read_cwds(&judge.places_for(&sweep::target_pids(targets)));
             sweep::with_cwds(&mut table, &cwds);
             let ended = sweep::end(&table, targets, judge, signals);
@@ -233,8 +273,8 @@ fn carry_with(
                 said: sweep::end_answer(run, &ended).to_string(),
                 filed: Some(Filed {
                     run: run.clone(),
-                    line: sweep::ledger_line(&ended),
-                    receipt: sweep::receipt_of(run, targets, now_ms),
+                    line: sweep::ledger_line(*generation, &ended),
+                    receipt: sweep::receipt_of(run, request, targets),
                 }),
             })
         }
@@ -273,6 +313,12 @@ fn table() -> Result<(Vec<ProcessRow>, ProcessTable), String> {
 struct System;
 
 impl Signals for System {
+    /// Every asked pid in one `ps` (r2 P2-1); Windows reads one at a time.
+    #[cfg(not(windows))]
+    fn reread_many(&self, pids: &[u32]) -> Option<HashMap<u32, (String, String)>> {
+        crate::resource_usage::process_identities(pids).ok()
+    }
+
     fn reread(&self, pid: u32) -> Option<(String, String)> {
         let started = crate::resource_usage::process_start_identity(pid).ok()?;
         let args = crate::resource_usage::process_command(pid).ok()?;
@@ -365,10 +411,17 @@ mod tests {
     }
 
     fn end_call(targets: Vec<Target>) -> ProcessSweepAsk {
+        end_call_over(targets, Vec::new())
+    }
+
+    fn end_call_over(targets: Vec<Target>, checkouts: Vec<Checkout>) -> ProcessSweepAsk {
         ProcessSweepAsk::End {
             run: "run-1".to_string(),
+            generation: 3,
+            request: "sweep-1".to_string(),
             targets,
-            checkouts: Vec::new(),
+            checkouts,
+            coordinator_seats: Vec::new(),
         }
     }
 
@@ -389,12 +442,13 @@ mod tests {
             &ProcessSweepAsk::Find {
                 needle: "cargo".to_string(),
                 checkouts: Vec::new(),
+                coordinator_seats: Vec::new(),
             },
+            &[],
             fixture,
             &read_cwds,
             &Allow,
             &signals,
-            1,
         )
         .expect("a list");
         assert_eq!(*asked.borrow(), vec![4100]);
@@ -412,24 +466,30 @@ mod tests {
         let signals = Recorded::over(&fixture);
         let carried = carry_with(
             &end_call(vec![target(4100, args)]),
+            &[],
             fixture,
             &no_cwds,
             &Allow,
             &signals,
-            7,
         )
         .expect("an end call");
         assert_eq!(*signals.ended.borrow(), vec![4100]);
         let filed = carried.filed.expect("a line for the ledger");
         assert_eq!(filed.run, "run-1");
         assert!(
-            filed
-                .line
-                .starts_with("process-sweep: TERM sent to 1 of 1, 1 gone"),
+            filed.line.starts_with(
+                "process-sweep: TERM sent to 1 of 1, 1 gone, asked by coordinator generation 3"
+            ),
             "{}",
             filed.line
         );
-        assert!(filed.receipt.contains("run-1"), "{}", filed.receipt);
+        // Filed under the call's own retry name, never a clock: carried
+        // twice, one call files one line (r2 P3).
+        assert_eq!(
+            filed.receipt,
+            sweep::receipt_of("run-1", "sweep-1", &[target(4100, args)])
+        );
+        assert!(filed.receipt.contains("sweep-1"), "{}", filed.receipt);
     }
 
     /// A window that cannot say whose processes are whose ends nothing.
@@ -440,11 +500,11 @@ mod tests {
         let judge = judge(None, ProcessTable::new(Vec::new()), Vec::new(), 500);
         let carried = carry_with(
             &end_call(vec![target(4100, "cargo build")]),
+            &[],
             fixture,
             &no_cwds,
             judge.as_ref(),
             &signals,
-            7,
         )
         .expect("an end call");
         assert!(signals.ended.borrow().is_empty());
@@ -522,6 +582,19 @@ mod tests {
         guard_table: ProcessTable,
         pids: &[u32],
     ) -> (Vec<u32>, Vec<serde_json::Value>) {
+        guarded_end_told(listing, guard_table, guarded_checkouts(), &[], pids)
+    }
+
+    /// The same with the worker checkouts the ledger `told` and the trees
+    /// the window read for the live coordinator seats, as [`carry`] holds
+    /// them ([`held_checkouts`]).
+    fn guarded_end_told(
+        listing: &str,
+        guard_table: ProcessTable,
+        told: Vec<Checkout>,
+        coordinator_trees: &[String],
+        pids: &[u32],
+    ) -> (Vec<u32>, Vec<serde_json::Value>) {
         let rows: Vec<ProcessRow> = listing
             .lines()
             .map(|line| {
@@ -536,10 +609,6 @@ mod tests {
                 }
             })
             .collect();
-        let roots = guarded_roots();
-        let checkouts = guarded_checkouts();
-        let judge = judge(Some(roots), guard_table, checkouts.clone(), 500);
-        let signals = Recorded::over(&rows);
         let targets: Vec<Target> = pids
             .iter()
             .map(|pid| {
@@ -547,19 +616,12 @@ mod tests {
                 target(*pid, &held.args)
             })
             .collect();
-        let carried = carry_with(
-            &ProcessSweepAsk::End {
-                run: "run-1".to_string(),
-                targets,
-                checkouts,
-            },
-            rows,
-            &places,
-            judge.as_ref(),
-            &signals,
-            7,
-        )
-        .expect("an end call");
+        let ask = end_call_over(targets, told);
+        let checkouts = held_checkouts(&ask, coordinator_trees);
+        let judge = judge(Some(guarded_roots()), guard_table, checkouts.clone(), 500);
+        let signals = Recorded::over(&rows);
+        let carried = carry_with(&ask, &checkouts, rows, &places, judge.as_ref(), &signals)
+            .expect("an end call");
         let said: serde_json::Value = serde_json::from_str(&carried.said).expect("JSON");
         let rows = said["rows"].as_array().expect("rows").clone();
         let signalled = signals.ended.borrow().clone();
@@ -585,15 +647,18 @@ mod tests {
     }
 
     fn guarded_checkouts() -> Vec<Checkout> {
-        ["9", "8"]
-            .into_iter()
-            .map(|at| Checkout {
-                path: format!("/w/t-{at}"),
-                run: "run-1".to_string(),
-                worker: format!("w-{at}"),
-                task: Some(format!("t-{at}")),
-            })
-            .collect()
+        ["/w/t-9", "/w/t-8"].into_iter().map(told).collect()
+    }
+
+    /// A worker checkout at `path`, as the ledger tells it.
+    fn told(path: &str) -> Checkout {
+        let at = path.rsplit('-').next().unwrap_or_default();
+        Checkout {
+            path: path.to_string(),
+            run: "run-1".to_string(),
+            worker: format!("w-{at}"),
+            task: Some(format!("t-{at}")),
+        }
     }
 
     fn why(row: &serde_json::Value) -> &str {
@@ -698,5 +763,96 @@ mod tests {
         assert!(signalled.is_empty(), "{signalled:?}");
         assert_eq!(rows[0]["outcome"], "refused");
         assert!(why(&rows[0]).contains("zerocode-cef-helper"), "{rows:?}");
+    }
+    /// r2 P1-1: a worker opened without a tree of its own reports its
+    /// coordinator's tree as its checkout — on this machine 191 of 1,499
+    /// worker rows named the main checkout, where the build line's runner
+    /// (ppid 1) stands. Whatever the ledger told, a checkout that is or
+    /// holds a live coordinator seat's tree is nobody's, so the runner there
+    /// is refused as a question nobody can be asked. An orphaned build in a
+    /// worker's own tree is still ended.
+    #[test]
+    fn a_runner_in_a_coordinators_tree_is_refused_whatever_a_row_says() {
+        let mut told_rows = guarded_checkouts();
+        told_rows.push(told("/build-line"));
+        for tree in ["/build-line", "/build-line/crates/zerocode-shell"] {
+            let (signalled, rows) = guarded_end_told(
+                LISTING,
+                ProcessTable::from_listing(LISTING, None),
+                told_rows.clone(),
+                &[tree.to_string()],
+                &[4400, 5510, 5500],
+            );
+            assert_eq!(signalled, vec![5510, 5500], "{tree}: {rows:?}");
+            assert_eq!(rows[0]["outcome"], "refused", "{tree}: {rows:?}");
+            assert!(why(&rows[0]).starts_with("물을 수 없음"), "{rows:?}");
+        }
+    }
+
+    /// The control for the case above: the same row told as a worker's own
+    /// tree, with no coordinator standing in it, is an orphan's checkout —
+    /// so it is the coordinator's tree, and only that, that refuses.
+    #[test]
+    fn a_checkout_no_coordinator_stands_in_still_holds_its_orphan() {
+        let mut told_rows = guarded_checkouts();
+        told_rows.push(told("/build-line"));
+        let ask = end_call_over(Vec::new(), told_rows);
+        let held = held_checkouts(&ask, &["/w/coordinator".to_string()]);
+        assert!(held.iter().any(|one| one.path == "/build-line"), "{held:?}");
+        let held = held_checkouts(&ask, &["/build-line".to_string()]);
+        let paths: Vec<&str> = held.iter().map(|one| one.path.as_str()).collect();
+        assert_eq!(paths, vec!["/w/t-9", "/w/t-8"]);
+    }
+
+    /// The window reads a live coordinator seat's tree from the pane it
+    /// placed there; a seat with no team, no pane or no tree here adds
+    /// nothing.
+    #[test]
+    fn a_coordinator_seats_tree_is_the_one_the_window_placed_it_in() {
+        struct Placed;
+        impl crate::agent_teams::Host for Placed {
+            fn split(
+                &self,
+                _team: &str,
+                _leader_term: u32,
+                _from_term: u32,
+                _pane: &str,
+                _direction: zerocode_core::agent_teams::Direction,
+                _command: &str,
+                _token: &str,
+            ) -> Option<u32> {
+                None
+            }
+            fn send(&self, _term: u32, _text: &str) -> bool {
+                false
+            }
+            fn capture(&self, _term: u32) -> Option<String> {
+                None
+            }
+            fn focus(&self, _term: u32) -> bool {
+                false
+            }
+            fn close(&self, _term: u32) {}
+            fn worktree_of(&self, term: u32) -> Option<std::path::PathBuf> {
+                (term == 78_914).then(|| std::path::PathBuf::from("/main-checkout"))
+            }
+        }
+        let team = "team-t78914-sweep";
+        crate::agent_teams::teams().insert(
+            team.to_string(),
+            zerocode_core::agent_teams::Team::new(team, "unused", 78_914),
+        );
+        let leader = zerocode_core::agent_teams::LEADER_PANE;
+        let trees = coordinator_trees(
+            &[
+                format!("{team}/{leader}"),
+                format!("{team}/%99"),
+                format!("team-nobody/{leader}"),
+                "no-slash".to_string(),
+            ],
+            &Placed,
+        );
+        crate::agent_teams::teams().remove(team);
+        assert_eq!(trees, vec!["/main-checkout".to_string()]);
     }
 }

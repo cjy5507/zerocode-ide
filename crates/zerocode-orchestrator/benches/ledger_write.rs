@@ -102,6 +102,7 @@ fn a_projection() -> LedgerProjectionV1 {
                 exit_unconfirmed: None,
                 taken_over: false,
                 checkout: None,
+                in_worktree: false,
                 quiet_at: Some(at as i64 + 1),
                 archive: Some(Text::from("worker output")),
                 // Populated so the row this benchmark writes is the size a

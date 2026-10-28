@@ -12599,7 +12599,8 @@ fn carried(
                 .get(team_id)
                 .and_then(|team| team.term_of(pane));
             let roots = host.kill_roots(caller);
-            match crate::process_sweep::carry(&ask, roots, now_ms) {
+            let trees = crate::process_sweep::coordinator_trees(ask.coordinator_seats(), host);
+            match crate::process_sweep::carry(&ask, roots, &trees) {
                 Ok(carried) => {
                     if let Some(filed) = carried.filed {
                         match actor.observation_once(

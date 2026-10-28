@@ -1553,6 +1553,15 @@ pub struct Worker {
     /// absence of the fact, never a fact of absence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout: Option<String>,
+    /// Whether this summons asked for a checkout of the worker's own — a
+    /// `--worktree` cut, or the inherited tree of an attempt that had one —
+    /// written at the reservation from the summons' own words (t-78914).
+    /// `false` is a pane opened in the coordinator's tree (no `--worktree`,
+    /// `--bare`) and every row written before this field existed: the
+    /// checkout it reports is then somebody else's tree, never the worker's,
+    /// and `process-sweep` reads only these rows as worker checkouts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_worktree: bool,
     /// The last quiet turn this worker's hook reported.
     ///
     /// This is the duplicate-event watermark, not the coordinator-notification
@@ -1646,6 +1655,7 @@ impl std::fmt::Debug for Worker {
             .field("pane_missing_since_ms", &self.pane_missing_since_ms)
             .field("taken_over", &self.taken_over)
             .field("checkout_bytes", &self.checkout.as_ref().map(String::len))
+            .field("in_worktree", &self.in_worktree)
             .field("quiet_at", &self.quiet_at)
             .field("archive_bytes", &self.archive.as_ref().map(String::len))
             .field("adopted_by", &self.adopted_by)
@@ -9080,6 +9090,15 @@ impl Ledger {
         // this ledger got wrong.
         let binding_revision = self.bind(&binding, run_id);
         let run = self.run_mut(run_id).ok_or_else(|| unknown_run(run_id))?;
+        // A tree of the worker's own: a fresh cut, or the tree of an attempt
+        // that was itself one. An inherited tree a worker without one
+        // reported is the coordinator's, and stays so under the replacement.
+        let in_worktree = worktree
+            || inherit_checkout.as_deref().is_some_and(|path| {
+                run.workers
+                    .iter()
+                    .any(|held| held.in_worktree && held.checkout.as_deref() == Some(path))
+            });
         run.workers.push(Worker {
             id: worker_id.clone(),
             team: team.to_string(),
@@ -9097,6 +9116,7 @@ impl Ledger {
             pane_missing_since_ms: None,
             taken_over: false,
             checkout: None,
+            in_worktree,
             quiet_at: None,
             archive: None,
             adopted_by: None,
@@ -19535,8 +19555,10 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          is gone or still running (nothing stronger is sent), and writes one line to the run. \
          A process no pane holds (an orphaned build) is ended only by its pid@mark from a list \
          (코디가 목록을 읽고 고른 pid = 물음에 대한 예, 판 안·창은 예외 없음), and only while \
-         it and every process above it up to pid 1 stand in one worker checkout the ledger \
-         knows — a runner's job or a person's terminal is refused; places are read on macOS \
+         it and every process above it up to pid 1 stand in one worker's own tree the ledger \
+         knows (a --worktree checkout, never a coordinator's tree or the project root) — a \
+         runner's job or a person's terminal is refused; --kill needs --retry-request, and the \
+         line is filed once under it; places are read on macOS \
          only, so elsewhere only the caller's own tree ends. \
          There is no pattern, parent or everything mode. 패턴으로 죽이는 명령은 쓰지 않는다 — \
          인자가 패턴이 된다",
@@ -25372,6 +25394,9 @@ fn worker_json(run: &Run, worker: &Worker, team: &Team) -> serde_json::Value {
         // The window's placement fact, as reported — `null` for a seat the
         // window has not placed, which is an unknown, not a location.
         "checkout": worker.checkout,
+        // Whether that checkout is the worker's own tree (t-78914) — `false`
+        // for a pane opened in its coordinator's tree.
+        "inWorktree": worker.in_worktree,
         // The reconciler's proof of absence, when it has one — what the
         // window reads `seat: gone` from for a row no table maps.
         "paneMissingSinceMs": worker.pane_missing_since_ms,
@@ -25958,6 +25983,9 @@ pub struct WorkerRow {
     pub taken_over: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout: Option<String>,
+    /// Whether that checkout is the worker's own (t-78914), same posture.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_worktree: bool,
     pub quiet_at: Option<i64>,
     pub archive: Option<Text>,
     /// The adopting seat's generation, on the same posture as the seat
@@ -26308,6 +26336,7 @@ impl Ledger {
                     pane_missing_since_ms: worker.pane_missing_since_ms,
                     taken_over: worker.taken_over,
                     checkout: worker.checkout.clone(),
+                    in_worktree: worker.in_worktree,
                     quiet_at: worker.quiet_at,
                     archive: worker.archive.clone().map(Text),
                     adopted_by: worker.adopted_by,
@@ -26557,6 +26586,7 @@ impl Ledger {
                     pane_missing_since_ms: row.pane_missing_since_ms,
                     taken_over: row.taken_over,
                     checkout: row.checkout,
+                    in_worktree: row.in_worktree,
                     quiet_at: row.quiet_at,
                     archive: row.archive.map(Text::into_string),
                     adopted_by: row.adopted_by,
