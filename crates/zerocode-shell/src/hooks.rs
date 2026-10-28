@@ -3342,6 +3342,22 @@ mod tests {
         assert_eq!(second_brain_vault(), None);
     }
 
+    /// Every pane, agent or not, is told the window's own pid — what a host
+    /// inside it reads to keep the window's tree from its kills (t-80602).
+    #[test]
+    fn every_pane_is_told_the_windows_own_pid() {
+        bridge_for_tests();
+        for launch in [None, Some("launch-nonce")] {
+            let env = pty_env("term-7", launch, Path::new("/workspace"), None);
+            let told: Vec<&str> = env
+                .iter()
+                .filter(|(name, _)| name == zerocode_hookd::env_var::WINDOW_PID)
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert_eq!(told, [std::process::id().to_string()], "{launch:?}");
+        }
+    }
+
     #[test]
     fn a_plain_shell_clears_the_inherited_hook_secret_when_endpoint_exists() {
         bridge_for_tests();

@@ -19,9 +19,6 @@ use crate::{AppState, ShellStateExt as _};
 /// which is kept as a whole.
 const PANE_PATIENCE: Duration = Duration::from_millis(50);
 
-/// How a reason names the window itself.
-const WINDOW_LABEL: &str = "the ZeroCode window";
-
 pub(crate) struct PaneProcesses {
     pub(crate) app: tauri::AppHandle,
 }
@@ -31,10 +28,7 @@ impl zerocode_hookd::KillWitness for PaneProcesses {
         let caller_term = crate::hooks::term_of_pane_key(pane_key);
         let mut roots = KillRoots {
             caller: None,
-            protected: vec![ProtectedRoot {
-                pid: std::process::id(),
-                label: WINDOW_LABEL.to_string(),
-            }],
+            protected: vec![ProtectedRoot::window(std::process::id())],
         };
         let state = self.app.state::<AppState>();
         for (term, held) in state.terminals().entries() {

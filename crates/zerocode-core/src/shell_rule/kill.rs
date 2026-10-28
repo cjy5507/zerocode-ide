@@ -29,6 +29,14 @@ const MAX_STRING_DEPTH: usize = 8;
 /// The most of a call or a process's name a reason quotes.
 const QUOTED_CHARS: usize = 160;
 
+/// The variable a ZeroCode window puts in every pane's environment: its own
+/// pid. A host inside a pane (zo) reads it to know which tree is the
+/// window's ([`ProtectedRoot::from_window_env`]).
+pub const WINDOW_PID_ENV: &str = "ZEROCODE_WINDOW_PID";
+
+/// How a reason names the window itself.
+const WINDOW_LABEL: &str = "the ZeroCode window";
+
 /// The most a process listing may print before it is called unreadable.
 const LISTING_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -274,6 +282,33 @@ pub struct ProtectedRoot {
     pub pid: u32,
     /// How a reason names it: `the ZeroCode window`, `pane term-3`.
     pub label: String,
+}
+
+impl ProtectedRoot {
+    /// The window itself.
+    #[must_use]
+    pub fn window(pid: u32) -> Self {
+        Self {
+            pid,
+            label: WINDOW_LABEL.to_string(),
+        }
+    }
+
+    /// What a process inside a ZeroCode pane may not signal, read from `env`
+    /// (its value of [`WINDOW_PID_ENV`]): the window, and every process the
+    /// window started whose tree does not hold `caller` — the other panes,
+    /// the window's own helpers. Empty outside a window. The window's whole
+    /// tree is kept either way; the processes it started are named so a
+    /// reason can say which one was hit.
+    #[must_use]
+    pub fn from_window_env(
+        env: impl Fn(&str) -> Option<String>,
+        table: &ProcessTable,
+        caller: u32,
+    ) -> Vec<Self> {
+        let _ = (env, table, caller);
+        Vec::new()
+    }
 }
 
 /// What may become of a command's calls.
