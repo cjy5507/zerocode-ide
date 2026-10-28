@@ -12144,7 +12144,10 @@ fn a_launch_deadline_is_the_agents_own_on_every_launch_road() {
     // the two `new` that remain are the send road and the queue
     // promotion, which are sends by definition. A reused automation run
     // was counted a launch until t-4530 — it sends to a composer that is
-    // already up, and takes the send road's door and timing.
+    // already up, and takes the send road's door and timing. A fresh
+    // launch whose submit receipt never came (t-78356) asks its provider
+    // through the same briefing pane the retype uses, so it names the
+    // agent's own deadline too — it types nothing, and builds no delivery.
     assert_eq!(
         shipped.matches("PromptDelivery::with_deadlines(").count(),
         5,
@@ -12157,8 +12160,8 @@ fn a_launch_deadline_is_the_agents_own_on_every_launch_road() {
     );
     assert_eq!(
         shipped.matches("ready_timeout_for(").count(),
-        5,
-        "the deadline resolver or one of its four catalog-timed launch sites drifted"
+        6,
+        "the deadline resolver, its four catalog-timed launch sites or the receipt-less ask drifted"
     );
     assert_eq!(
         shipped.matches("PromptDelivery::new(").count(),

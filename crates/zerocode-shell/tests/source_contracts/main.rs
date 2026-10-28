@@ -20087,6 +20087,45 @@ mod tests {
         );
     }
 
+    /// A fresh worker whose submission receipt never came is asked what its
+    /// provider said before it is torn down (t-78356).
+    ///
+    /// w-78348 took its briefing at 04:07:30 and read files for 58 s; the
+    /// receipt never reached the window and the launch was rolled back over
+    /// a worker at work. The pure half — the receipt heard since, a reported
+    /// turn, the briefing in the provider's transcript, and never the screen —
+    /// is `zerocode_pty::briefing::taken_without_receipt`, held by its unit
+    /// tests; this pins that the launch road asks it, for fresh launches only,
+    /// after the receipt's own success road and before the teardown.
+    #[test]
+    fn a_fresh_worker_without_its_receipt_is_asked_before_it_is_torn_down() {
+        let backend = shipped_backend();
+        let waiting = backend
+            .split_once("fn await_worker_ready(&self, term: TermId)")
+            .map_or("", |(_, rest)| rest);
+        let waiting = &waiting[..waiting.find("\n    fn send(").unwrap_or(waiting.len())];
+        let receipted = waiting.find("if accepted && undelivered.is_none()");
+        let asked = waiting.find("self.taken_without_receipt(term, &pending)");
+        let torn = waiting.find("let removed = state.terminals().remove(&term);");
+        assert!(
+            matches!((receipted, asked, torn), (Some(seat), Some(ask), Some(tear)) if seat < ask && ask < tear),
+            "a fresh worker without its receipt is torn down unasked:\n{waiting}"
+        );
+        let gate = waiting[..asked.unwrap_or(0)]
+            .rsplit_once("if entered")
+            .map_or("", |(_, gate)| gate);
+        assert!(
+            gate.contains("!accepted") && gate.contains("!pending.restoring"),
+            "the receiptless question is no longer only a fresh launch's:\n{gate}"
+        );
+        let asking = block_after(backend, "fn taken_without_receipt(");
+        assert!(
+            asking.contains("zerocode_pty::briefing::taken_without_receipt(&mut pane)")
+                && !asking.contains("confirm("),
+            "the receiptless question reads the screen or types again:\n{asking}"
+        );
+    }
+
     /// Every door that deletes a worktree asks this window's own terminals
     /// first, through ONE function.
     ///
@@ -27775,19 +27814,18 @@ mod tests {
                 && !fetching.contains("zo login google"),
             "the signed-out sentence no longer names the card that fixes it"
         );
-        // The Code Assist calls present this client honestly: its own
-        // User-Agent, and no Antigravity or VS Code identity anywhere in the
-        // headers or the body the gauge sends.
+        // The Code Assist calls carry the identity zo sends for the same
+        // login (the person's choice in d8760d7ab, after Google answered
+        // ZeroCode's own headers with a 403 on 2026-10-27), and only that
+        // identity: usage_antigravity's
+        // the_gauge_asks_as_the_identity_zo_sends_for_the_same_login reads
+        // zo's gemini_code_assist.rs value for value and turns red when either
+        // side moves. Here the gauge keeps no identity of its own beside it.
         assert!(
-            fetching.contains("concat!(\"zerocode/\", env!(\"CARGO_PKG_VERSION\"))")
-                && !fetching.contains("ANTIGRAVITY_CLIENT_METADATA")
-                && !fetching.contains("ANTIGRAVITY_API_CLIENT")
-                && !fetching.contains("ANTIGRAVITY_VERSION")
-                && !fetching.contains("antigravity/")
-                && !fetching.contains("\"ANTIGRAVITY\"")
-                && !fetching.contains("DARWIN_ARM64")
-                && !fetching.contains("vscode_cloudshelleditor"),
-            "the Code Assist calls still present Antigravity's or VS Code's identity"
+            fetcher.contains("fn the_gauge_asks_as_the_identity_zo_sends_for_the_same_login()")
+                && fetcher.contains("zo-ide/crates/api/src/providers/gemini_code_assist.rs")
+                && !fetching.contains("concat!(\"zerocode/\", env!(\"CARGO_PKG_VERSION\"))"),
+            "the Code Assist calls stopped following zo's identity for the same login"
         );
         for spelled in [
             "command: \"antigravity_usage\",",
