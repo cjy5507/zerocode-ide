@@ -819,10 +819,10 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
  * Two even columns (t-81525 S1, the menu the person passed on 2026-10-29):
  * seven destinations and the search in four lines of two, the height the
  * wrapped rows took (about 130 px), with every line ending on the same edge
- * and no destination left alone on a line of its own. The menu measures its
- * own width — a container — so a narrow column folds it, not the window. */
+ * and no destination left alone on a line of its own. The menu reads its
+ * column's width (`@container threads`), so a narrow column folds it, not the
+ * window. */
 .nav-rows {
-  container: nav-rows / inline-size;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   /* The layer's own inset, now that the column has none: `gap-0.5 px-2 pt-2
@@ -860,10 +860,6 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 @container threads (max-width: 240px) {
   .nav-rows {
     grid-template-columns: repeat(auto-fill, minmax(var(--control-height-sm), 1fr));
-  }
-
-  .nav-rows > .guide-entry {
-    grid-column: 1 / -1;
   }
 
   .nav-row {
