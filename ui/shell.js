@@ -15886,7 +15886,10 @@ function updateChatHead(head, run) {
  * session the pane holds are its tooltip, where the line had them as words.
  * Repainted only when the log or the session moved. */
 function paintChatTally(strip, run) {
-  const session = run.wire ? run.session ?? "" : paneSessions.get(run.term)?.session?.id ?? "";
+  // The session is a wire's own or a pane's own conversation's; a helper's
+  // page stands in its parent's pane and names no session of the parent's.
+  const session = run.wire ? run.session ?? ""
+    : run.helper?.id === PANE_LOG_ID ? paneSessions.get(run.term)?.session?.id ?? "" : "";
   const said = `${run.helper.seq}|${session}|${locale}`;
   if (strip.__said === said) return;
   strip.__said = said;

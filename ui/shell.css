@@ -15042,7 +15042,8 @@ details.worker-command {
  * lands on what was said last. */
 .helper-turn.is-assistant {
   position: relative;
-  padding: var(--chat-row-pad) 0;
+  /* The room under the words is the action row's (`.helper-actions`, C8). */
+  padding: var(--chat-row-pad) 0 var(--chat-actions-h);
 }
 
 .helper-turn.is-assistant:not(.is-latest, .is-streaming) > .helper-said {
@@ -15391,14 +15392,11 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 
 /* The extension's `assistantActions`: a short row under an answer — the
  * list's one, carried to the answer the pointer or the focus reaches
- * (t-81525 C8). Every answer keeps its room under the words, so the row
+ * (t-81525 C8). Every answer keeps its room under the words — the one still
+ * streaming too, so the turn that replaces it stands no taller — and the row
  * moving from one to the next moves no line of the page; it is drawn in that
  * room, shown on the newest answer and while the pointer or the focus is on
  * the one it stands in. */
-.helper-turn.is-assistant:not(.is-streaming) {
-  padding-bottom: var(--chat-actions-h);
-}
-
 .helper-actions {
   position: absolute;
   bottom: 0;
