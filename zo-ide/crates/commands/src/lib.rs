@@ -37,7 +37,7 @@ pub use slash_registry::{
 pub use plugins_agents::render_plugins_report;
 pub use prompt_commands::{
     discover_prompt_commands, find_prompt_command, InlineShellGate, PromptCommandDef,
-    PromptCommandScope,
+    PromptCommandScope, WorkspaceTrust,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

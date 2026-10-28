@@ -246,9 +246,10 @@ pub struct PromptExpansion {
 /// keep-list is asked first, so a command file cannot shadow one of zo's own.
 /// Its `!` commands run only what the file's `allowed-tools` grants, none
 /// while `mode` is read-only, and none from a file in the working folder or
-/// above it until the person has trusted `cwd`
-/// ([`crate::workspace_trust::person_trusts_cwd`]) — a mode the repository's
-/// own settings pin is not that trust.
+/// above it until the person has given their word for the folder that holds
+/// it: trust in that folder ([`crate::workspace_trust::person_trusts_folder`])
+/// or a mode they named (`origin.named`). A mode the default or a settings
+/// file gives — a repository can pin its own — is not that word.
 #[must_use]
 pub fn prompt_command(
     cwd: &Path,
@@ -257,13 +258,19 @@ pub fn prompt_command(
     mode: core_types::PermissionMode,
     origin: ModeOrigin,
 ) -> Option<PromptExpansion> {
-    let _ = origin;
     let found = commands::discover_prompt_commands(cwd);
     let command = commands::find_prompt_command(&found, name)?;
+    let workspace = match command.workspace_folder() {
+        Some(folder)
+            if !origin.named && !crate::workspace_trust::person_trusts_folder(folder) =>
+        {
+            commands::WorkspaceTrust::Untrusted
+        }
+        _ => commands::WorkspaceTrust::Trusted,
+    };
     let gate = commands::InlineShellGate {
         read_only: mode == core_types::PermissionMode::ReadOnly,
-        workspace_trusted: command.scope == commands::PromptCommandScope::Workspace
-            && crate::workspace_trust::person_trusts_cwd(cwd),
+        workspace,
     };
     Some(PromptExpansion {
         text: command.render_prompt_as(arg, cwd, gate),

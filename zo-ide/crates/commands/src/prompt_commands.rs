@@ -18,8 +18,11 @@ pub struct PromptCommandDef {
     pub body: String,
     pub path: PathBuf,
     /// Where the file was found, which decides whether its `!` commands
-    /// also need the person's trust in the working folder.
+    /// also need the person's word for the folder that holds it.
     pub scope: PromptCommandScope,
+    /// The `commands` folder the file was found under (`<folder>/.zo/commands`
+    /// for a workspace file).
+    pub root: PathBuf,
 }
 
 /// Where a command file was found.
@@ -39,12 +42,33 @@ pub enum PromptCommandScope {
 pub struct InlineShellGate {
     /// The session is read-only: no `!` command runs.
     pub read_only: bool,
-    /// The person has trusted the working folder. A workspace file's `!`
-    /// commands run only then; a file in zo's home does not ask.
-    pub workspace_trusted: bool,
+    /// What the person has said for the folder a workspace file is in
+    /// ([`PromptCommandDef::workspace_folder`]). A file in zo's home does
+    /// not ask.
+    pub workspace: WorkspaceTrust,
+}
+
+/// The person's word for the folder that holds a workspace command file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceTrust {
+    /// The person trusted the folder, or named the session's mode: its `!`
+    /// commands run what `allowed-tools` grants.
+    Trusted,
+    /// Nothing the person said covers the folder: no `!` command runs.
+    Untrusted,
 }
 
 impl PromptCommandDef {
+    /// The folder whose `.zo/commands` holds a workspace file — the one the
+    /// person's trust is asked for. `None` for a file in zo's home.
+    #[must_use]
+    pub fn workspace_folder(&self) -> Option<&Path> {
+        match self.scope {
+            PromptCommandScope::Workspace => self.root.parent()?.parent(),
+            PromptCommandScope::ZoHome => None,
+        }
+    }
+
     #[must_use]
     pub fn summary(&self) -> String {
         self.description
@@ -75,7 +99,7 @@ impl PromptCommandDef {
     pub fn render_prompt_in(&self, args: &str, base_dir: &Path) -> String {
         let gate = InlineShellGate {
             read_only: false,
-            workspace_trusted: true,
+            workspace: WorkspaceTrust::Trusted,
         };
         self.render_prompt_as(args, base_dir, gate)
     }
@@ -86,10 +110,11 @@ impl PromptCommandDef {
     #[must_use]
     pub fn render_prompt_as(&self, args: &str, base_dir: &Path, gate: InlineShellGate) -> String {
         let workspace = self.scope == PromptCommandScope::Workspace;
+        let untrusted = workspace && gate.workspace == WorkspaceTrust::Untrusted;
         let shell = InlineShell {
             allowed_tools: &self.allowed_tools,
             read_only: gate.read_only,
-            untrusted: workspace && !gate.workspace_trusted,
+            untrusted: untrusted.then(|| self.workspace_folder().unwrap_or(base_dir)),
             confined: workspace,
         };
         expand_command_template(&self.body, args, base_dir, &shell)
@@ -192,6 +217,7 @@ fn push_prompt_commands_from_root(
             continue;
         };
         command.scope = scope;
+        command.root = root.to_path_buf();
         seen.insert(key);
         commands.push(command);
     }
@@ -252,6 +278,7 @@ fn parse_prompt_command_file(
         body,
         path,
         scope: PromptCommandScope::default(),
+        root: PathBuf::new(),
     })
 }
 
@@ -539,12 +566,13 @@ where
 
 /// What a command file's `!` commands may run: what its `allowed-tools`
 /// grants Bash, and nothing while the session is read-only or while the file
-/// is a workspace one in a folder the person has not trusted. A workspace
-/// file is also `confined`: its `@path` reads only inside the working folder.
+/// is a workspace one in a folder the person has not trusted (`untrusted`
+/// names that folder). A workspace file is also `confined`: its `@path`
+/// reads only inside the working folder.
 struct InlineShell<'a> {
     allowed_tools: &'a [String],
     read_only: bool,
-    untrusted: bool,
+    untrusted: Option<&'a Path>,
     confined: bool,
 }
 
@@ -554,9 +582,10 @@ impl InlineShell<'_> {
         if self.read_only {
             return Some(format!("[!{command}: not run in read-only mode]"));
         }
-        if self.untrusted {
+        if let Some(folder) = self.untrusted {
             return Some(format!(
-                "[!{command}: not run — this folder is not trusted; a repository's command file runs no ! line until you trust its folder]"
+                "[!{command}: not run — {} is not trusted; a repository's command file runs its ! lines only in a folder you trust, or under a --permission-mode you name]",
+                folder.display()
             ));
         }
         if self
@@ -686,7 +715,7 @@ mod tests {
         let shell = InlineShell {
             allowed_tools: &allowed_tools,
             read_only: false,
-            untrusted: false,
+            untrusted: None,
             confined: true,
         };
         expand_command_template(body, args, base_dir, &shell)
@@ -916,7 +945,7 @@ mod tests {
         );
         let trusted = InlineShellGate {
             read_only: false,
-            workspace_trusted: true,
+            workspace: WorkspaceTrust::Trusted,
         };
         let refused = |raw: &str| {
             format!("[@{raw}: not read — a repository's command file reads only inside the working folder]")
