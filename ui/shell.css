@@ -6524,9 +6524,6 @@ body.is-dragging-pane {
  * (docs/reverse/orca-ui-inventory.md 1-e). Overflow is a scroll and nothing
  * else — Orca has no tab menu, and neither does this. */
 .tabstrip {
-  /* Its own width decides when its tabs fold (t-78107, 시안 17) — a split
-   * pane's strip is narrower than the window it sits in. */
-  container: tabstrip / inline-size;
   display: flex;
   align-items: stretch;
   min-height: var(--tabstrip-height);
@@ -6729,12 +6726,15 @@ body.is-dragging-pane {
   box-shadow: inset 0 0 0 var(--status-dot-ring) var(--signal-you);
 }
 
-/* 2차 A (t-78107, 시안 17): a narrow strip folds the tabs that are not on
- * stage to their mark, state dot and age — the name stays the tab's spoken
- * name (visually hidden, never removed) and its tip. 560 px is the title
- * bar's strip in a 1000 px window with both side panels open, the width the
- * passed draft folds at. */
-@container tabstrip (max-width: 560px) {
+/* 2차 A (t-78107, 시안 17): under `--fold-sidebar-rail` the strip folds the
+ * tabs that are not on stage to their mark, state dot and age — the name
+ * stays the tab's spoken name (visually hidden, never removed) and its tip.
+ * The draft folds at the window's width, like the two folds below. The
+ * strip's own width cannot stand for it (t-78802): the 「당신 차례」 chip
+ * beside it always stands and is as wide as its word in each language and
+ * its count's digits, so a strip threshold lands on a different window in
+ * each. */
+@media (max-width: 1000px) {
   .tab:not(.is-front) .tab-label {
     position: absolute;
     width: 1px;

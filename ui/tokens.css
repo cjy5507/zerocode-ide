@@ -828,7 +828,7 @@
    * A media or container query cannot read a custom property, so the rules
    * that fold write these numbers out and a scene (chrome-geist.mjs) holds
    * them to these names. The two rails are a later task's; the tab strip
-   * folds at the last two. */
+   * folds to marks at the second and to one menu at the last two. */
   --fold-panel-rail: 1360px;
   --fold-sidebar-rail: 1000px;
   --fold-tab-menu: 760px;

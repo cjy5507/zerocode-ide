@@ -422,7 +422,9 @@ async function testBoardHead(browser, origin, ok) {
 }
 
 /* 17 — a narrow window folds the tabs not on stage to their mark: the name
- * leaves the eye and stays the tab's spoken name. */
+ * leaves the eye and stays the tab's spoken name. The draft folds at the
+ * window's width (`--fold-sidebar-rail`), so the scene holds both sides of
+ * it: folded at 1000 px, every name back at 1001 px. */
 async function testNarrowFolds(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -438,15 +440,19 @@ async function testNarrowFolds(browser, origin, ok) {
       };
     }));
     const wide = await read();
+    await page.setViewportSize({ width: 1001, height: 900 });
+    await frames(page);
+    const above = await read();
     await page.setViewportSize({ width: 1000, height: 900 });
     await frames(page);
     const narrow = await read();
-    const strip = await page.evaluate(() => Math.round(el("tabstrip").getBoundingClientRect().width));
     ok("a wide window shows every tab's name (시안 17)", wide.every((tab) => tab.shown), JSON.stringify(wide));
+    ok("a 1001 px window still shows every tab's name — the fold is the window's 1000 px, whatever the title bar's chip says (시안 17)",
+      above.every((tab) => tab.shown), JSON.stringify(above));
     ok("in a 1000 px window the title bar's strip folds the tabs not on stage to their mark, keeping their spoken name; the one on stage keeps its name (시안 17)",
-      strip <= 560 && narrow.filter((tab) => !tab.active).every((tab) => !tab.shown && tab.spoken) &&
+      narrow.some((tab) => !tab.active) && narrow.filter((tab) => !tab.active).every((tab) => !tab.shown && tab.spoken) &&
         narrow.filter((tab) => tab.active).every((tab) => tab.shown),
-      JSON.stringify({ strip, narrow }));
+      JSON.stringify({ narrow }));
     ok("the fold scene raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
@@ -580,7 +586,7 @@ async function testTabMenuFold(browser, origin, ok) {
       const folds = new Set();
       const visit = (rules) => {
         for (const rule of rules) {
-          if (rule instanceof CSSMediaRule && /\.tab-menu|\.tab-new/.test(rule.cssText)) folds.add(rule.conditionText);
+          if (rule instanceof CSSMediaRule && /\.tab-menu|\.tab-new|\.tab:not\(\.is-front\) \.tab-label/.test(rule.cssText)) folds.add(rule.conditionText);
           else if (rule.cssRules) visit(rule.cssRules);
         }
       };
@@ -592,9 +598,9 @@ async function testTabMenuFold(browser, origin, ok) {
         folds: [...folds],
       };
     });
-    ok("the fold widths are named tokens — 1360, 1000, 760 and 480 px — and the tab menu folds at the last two",
+    ok("the fold widths are named tokens — 1360, 1000, 760 and 480 px — the tabs fold to marks at the second and to the tab menu at the last two",
       widths.tokens.join() === "1360px,1000px,760px,480px" &&
-        widths.folds.length === 2 && widths.folds.every((when) => [widths.tokens[2], widths.tokens[3]].some((width) => when.includes(width))),
+        widths.folds.length === 3 && widths.folds.every((when) => widths.tokens.slice(1).some((width) => when.includes(width))),
       JSON.stringify(widths));
     ok("the tab menu scene raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
