@@ -227,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn the_keep_list_is_the_fifteen_commands_zo_handles() {
+    fn the_keep_list_is_the_sixteen_commands_zo_handles() {
         let names: Vec<&str> = Slash::CATALOG.iter().map(|command| command.name()).collect();
         assert_eq!(
             names,
@@ -243,6 +243,7 @@ mod tests {
                 "/goal",
                 "/loop",
                 "/status",
+                "/context",
                 "/warnings",
                 "/help",
                 "/exit",

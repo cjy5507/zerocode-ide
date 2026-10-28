@@ -6679,6 +6679,10 @@ fn test_ui() -> Ui {
 }
 
 #[cfg(test)]
+#[path = "app_slash_tests.rs"]
+mod slash_tests;
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 
