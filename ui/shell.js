@@ -14389,6 +14389,7 @@ function cleanseAssistantText(text) {
  * (person or agent): a call after it with no result yet is still out. */
 function helperTurnRowNode(run, turn, spoken, cold = false) {
   if (turn.role === "thinking") return thoughtTurnNode(run, turn);
+  if (turn.role === "window") return windowNoteNode(turn);
   if (turn.role === "tool" || turn.role === "tool_result") return stepRowNode(run, turn, spoken, cold);
   const briefing = turn.role === "user" && turn.seq === 0;
   const row = document.createElement("article");
@@ -14427,6 +14428,37 @@ function helperTurnRowNode(run, turn, spoken, cold = false) {
   row.__turn = turn;
   // 「그림·페이지로 설명」이 이 답의 대화를 찾는 길(t-32787): 단추는 처음 닿을 때 짓는다.
   row.__run = run;
+  return row;
+}
+
+/* What the window itself typed into the pane — its resume nudge, which the
+ * transcript holds as the person's prompt (`pane_log` marks it `window`) — is
+ * a thin line across the column, 「창 알림 · …」, not the person's bubble
+ * (t-81525 C3). The words it typed are the agent's language, not the
+ * person's, and stand behind 「원문」: built the first time the line opens. */
+function windowNoteNode(turn) {
+  const row = document.createElement("details");
+  row.className = "helper-turn is-window-note";
+  row.dataset.turn = String(turn.seq);
+  row.__turn = turn;
+  const line = document.createElement("summary");
+  line.className = "helper-window-note-line";
+  const words = document.createElement("span");
+  words.className = "helper-window-note-words";
+  const door = document.createElement("span");
+  door.className = "helper-window-note-door";
+  door.textContent = t("worker.windowNoteOpen", "원문");
+  words.append(t("worker.windowNote", "창 알림 · 창이 다시 시작되어 이어 가라고 알렸습니다"), " · ", door);
+  line.appendChild(words);
+  row.appendChild(line);
+  row.addEventListener("toggle", () => {
+    if (!row.open || row.querySelector(":scope > .helper-window-note-said")) return;
+    const said = document.createElement("p");
+    said.className = "helper-window-note-said";
+    said.lang = "en";
+    said.textContent = turn.text;
+    row.appendChild(said);
+  });
   return row;
 }
 

@@ -15102,9 +15102,54 @@ details.worker-command {
   color: var(--chat-said-earlier);
 }
 
+/* The window's own note to the agent (t-81525 C3): a thin line across the
+ * column with its words in the middle, the words it typed behind 「원문」. */
+.helper-turn.is-window-note {
+  margin: var(--space-2) 0;
+  color: var(--ink-mist);
+  font-size: var(--text-xs);
+}
+
+.helper-window-note-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  list-style: none;
+  cursor: pointer;
+}
+
+.helper-window-note-line::-webkit-details-marker {
+  display: none;
+}
+
+.helper-window-note-line::before,
+.helper-window-note-line::after {
+  content: "";
+  flex: 1 1 0;
+  min-width: var(--space-4);
+  height: var(--rule-width);
+  background: var(--edge-rule);
+}
+
+.helper-window-note-words {
+  min-width: 0;
+  text-align: center;
+}
+
+.helper-window-note-door {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.helper-window-note-said {
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+}
+
 /* A line off the rail — a system word — is the extension's meta message
  * (`metaMessage`): italic, in the secondary ink, a little faded. */
-.helper-turn:not(.is-step):not(.is-user):not(.is-assistant):not(.is-tool):not(.is-thinking) {
+.helper-turn:not(.is-step):not(.is-user):not(.is-assistant):not(.is-tool):not(.is-thinking):not(.is-window-note) {
   margin: var(--chat-meta-gap) 0;
   padding: var(--chat-meta-pad);
   color: var(--chat-work-ink);

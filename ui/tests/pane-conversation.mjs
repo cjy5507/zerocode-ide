@@ -485,6 +485,30 @@ export async function testPaneConversation(browser, origin, ok) {
       nothingKnown(nowLine.ended) && nothingKnown(nowLine.restarted) && nothingKnown(nowLine.elsewhere),
       JSON.stringify({ ended: nowLine.ended, restarted: nowLine.restarted, elsewhere: nowLine.elsewhere }));
 
+    // ------------------------------------------------------- the window's own note (t-81525 C3)
+    const note = await page.evaluate(async () => {
+      const typed = "Commands still running under you when the window restarted were cut: `cargo test` — run again whichever you still need.";
+      window.__LOG__ = { next: 90, turns: [{ role: "window", text: typed }] };
+      await pollHelperPages();
+      window.__LOG__ = { next: 90, turns: [] };
+      await new Promise((r) => requestAnimationFrame(r));
+      const row = [...document.querySelectorAll(".helper-turns > [data-turn]")].at(-1);
+      const seen = {
+        note: row?.classList.contains("is-window-note") === true,
+        notPerson: !row?.classList.contains("is-user"),
+        words: row?.querySelector(".helper-window-note-words")?.textContent ?? "",
+        want: `${t("worker.windowNote", "창 알림 · 창이 다시 시작되어 이어 가라고 알렸습니다")} · ${t("worker.windowNoteOpen", "원문")}`,
+        bornClosed: !row?.querySelector(".helper-window-note-said"),
+      };
+      row?.querySelector("summary")?.click();
+      await new Promise((r) => requestAnimationFrame(r));
+      seen.opened = row?.querySelector(".helper-window-note-said")?.textContent === typed;
+      return seen;
+    });
+    ok("a nudge the window typed into the pane stands as its own thin 「창 알림」 line, not the person's bubble, its words behind 「원문」 (t-81525 C3)",
+      note.note && note.notPerson && note.words === note.want && note.bornClosed && note.opened,
+      JSON.stringify(note));
+
     await page.screenshot({ path: "output/playwright/pane-conversation/chat.png" });
     ok("the conversation raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
