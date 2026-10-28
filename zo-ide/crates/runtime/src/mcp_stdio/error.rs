@@ -42,10 +42,12 @@ pub enum McpServerManagerError {
     /// server (`cause` is the timeout or transport failure). A tool call need
     /// not be idempotent, so the manager does not send it again;
     /// `server_reset` says whether it reset the server so the next call
-    /// starts it fresh, or left a live one running.
+    /// starts it fresh, or left a live one running; `reset_error` is why a
+    /// reset that was tried failed.
     ToolCallNotResent {
         cause: Box<McpServerManagerError>,
         server_reset: bool,
+        reset_error: Option<Box<McpServerManagerError>>,
     },
     DuplicateToolRoute {
         qualified_name: String,
@@ -102,16 +104,21 @@ impl std::fmt::Display for McpServerManagerError {
             Self::ToolCallNotResent {
                 cause,
                 server_reset,
+                reset_error,
             } => {
-                let server = if *server_reset {
-                    "the server was reset and starts again on the next call"
-                } else {
-                    "the server was left running"
-                };
                 write!(
                     f,
-                    "{cause}; the call was not sent again because the tool may already have run; {server}"
-                )
+                    "{cause}; the call was not sent again because the tool may already have run; "
+                )?;
+                match (server_reset, reset_error) {
+                    (_, Some(reset_error)) => {
+                        write!(f, "resetting the server failed: {reset_error}")
+                    }
+                    (true, None) => {
+                        write!(f, "the server was reset and starts again on the next call")
+                    }
+                    (false, None) => write!(f, "the server was left running"),
+                }
             }
             Self::DuplicateToolRoute {
                 qualified_name,
@@ -235,10 +242,14 @@ impl McpServerManagerError {
             Self::ToolCallNotResent {
                 cause,
                 server_reset,
+                reset_error,
             } => {
                 let mut context = cause.error_context();
                 context.insert("resent".to_string(), "false".to_string());
                 context.insert("server_reset".to_string(), server_reset.to_string());
+                if let Some(reset_error) = reset_error {
+                    context.insert("reset_error".to_string(), reset_error.to_string());
+                }
                 context
             }
             Self::DuplicateToolRoute {

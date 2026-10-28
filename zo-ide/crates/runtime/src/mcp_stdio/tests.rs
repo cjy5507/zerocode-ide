@@ -1961,6 +1961,7 @@ fn manager_times_out_slow_tool_calls() {
             McpServerManagerError::ToolCallNotResent {
                 cause,
                 server_reset: true,
+                ..
             } => match *cause {
                 McpServerManagerError::Timeout {
                     server_name,
@@ -2088,6 +2089,7 @@ fn given_child_exits_after_discovery_when_calling_twice_then_second_call_succeed
             Err(McpServerManagerError::ToolCallNotResent {
                 cause,
                 server_reset: true,
+                ..
             }) => {
                 let (server_name, method, source) = match *cause {
                     McpServerManagerError::Transport {
