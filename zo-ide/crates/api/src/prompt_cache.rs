@@ -4071,6 +4071,42 @@ mod tests {
         assert!(!event.reason.contains("TTL"), "{}", event.reason);
     }
 
+    /// A refresh still on the wire when the person sends the next request:
+    /// the request's deposit replaces the refresh's, and the refresh's answer
+    /// must not take it away on its way to finding nothing of its own
+    /// (adversarial review W3, P3-1). The next request's row keeps what it
+    /// sent.
+    #[test]
+    fn a_refresh_answer_leaves_the_next_request_its_sent_prefixes() {
+        let _env = test_env_lock();
+        let home = CacheHome::new("refresh-leaves-deposit");
+        let cache = PromptCache::new(home.session.clone());
+        let turn = sample_request_with_messages(&["a", "b"]);
+        let _ = cache.record_usage(&turn, &plain_usage(0, 50_000, 2));
+        let refresh = MessageRequest { max_tokens: 0, ..turn.clone() };
+        let next = sample_request_with_messages(&["a", "b", "c"]);
+        let payload = |last: &str| {
+            format!(
+                r#"{{"messages":[{{"role":"user","content":[{{"type":"text","text":"{last}","cache_control":{{"type":"ephemeral"}}}}]}}]}}"#
+            )
+            .into_bytes()
+        };
+
+        cache.note_sent_payload(&refresh, &payload("b"));
+        cache.note_sent_payload(&next, &payload("c"));
+        cache.record_refresh(&refresh, &plain_usage(0, 50_000, 2));
+        let _ = cache.record_usage(&next, &plain_usage(0, 50_000, 2));
+
+        let rows = home.requests();
+        assert_eq!(rows.iter().map(|row| row.refresh).collect::<Vec<_>>(), vec![false, true, false], "{rows:?}");
+        let sent: Vec<String> = super::sent_prefixes(&payload("c")).iter().map(super::SentPrefix::label).collect();
+        assert_eq!(
+            rows[2].prefix_hashes, sent,
+            "the refresh's answer threw away the next request's deposit: {:?}",
+            rows[2]
+        );
+    }
+
     /// The one-hour part of a write is on the row, so a request under the 1h
     /// anchor is priced at the multiplier it was billed at. A row whose
     /// write was all five-minute leaves the column off and reads the same.
@@ -7175,7 +7211,10 @@ mod tests {
 #[cfg(test)]
 mod sent_prefix_tests {
     use super::{first_changed_prefix, sent_prefixes, SentPrefix};
-    use crate::types::{CacheControl, InputContentBlock, InputMessage, MessageRequest, SystemBlock};
+    use crate::types::{
+        CacheControl, EffortLevel, InputContentBlock, InputMessage, MessageRequest, OutputConfig, SystemBlock,
+        ThinkingConfig,
+    };
 
     fn message(role: &str, text: &str, marked: bool) -> InputMessage {
         InputMessage {
@@ -7189,7 +7228,11 @@ mod sent_prefix_tests {
     }
 
     fn body(messages: Vec<InputMessage>) -> Vec<u8> {
-        let request = MessageRequest {
+        encode(&request_of(messages))
+    }
+
+    fn request_of(messages: Vec<InputMessage>) -> MessageRequest {
+        MessageRequest {
             model: "claude-opus-5-5".to_string(),
             max_tokens: 64,
             messages,
@@ -7208,10 +7251,13 @@ mod sent_prefix_tests {
             output_config: None,
             effort: None,
             effort_band_ceiling: None,
-        };
+        }
+    }
+
+    fn encode(request: &MessageRequest) -> Vec<u8> {
         // The client sends a `serde_json::Value` rendered this way, so the
         // body's keys come in that map's order, not the struct's.
-        serde_json::to_vec(&serde_json::to_value(&request).expect("value")).expect("body")
+        serde_json::to_vec(&serde_json::to_value(request).expect("value")).expect("body")
     }
 
     fn at(prefixes: &[SentPrefix], label: &str) -> SentPrefix {
@@ -7262,6 +7308,30 @@ mod sent_prefix_tests {
         assert_ne!(at(&first, "m2").hash, at(&second, "m2").hash);
         let labelled = |prefixes: &[SentPrefix]| prefixes.iter().map(SentPrefix::label).collect::<Vec<_>>();
         assert_eq!(first_changed_prefix(&labelled(&first), &labelled(&second)).as_deref(), Some("m2"));
+    }
+
+    /// Effort, thinking, tool choice and the model are part of what the
+    /// provider keys a cache entry on, but they sit outside tools, system and
+    /// messages. A request that changes only them must not compare as an
+    /// unchanged prefix: the list leads with a request-parameter line, `p`,
+    /// and the comparison names it first (adversarial review W3, P3-3).
+    #[test]
+    fn a_changed_effort_or_thinking_leads_the_prefix_list() {
+        let with = |effort: Option<EffortLevel>, thinking: Option<ThinkingConfig>| {
+            let mut request = request_of(turn("answer"));
+            request.output_config = effort.map(OutputConfig::new);
+            request.thinking = thinking;
+            sent_prefixes(&encode(&request)).iter().map(SentPrefix::label).collect::<Vec<_>>()
+        };
+        let high = with(Some(EffortLevel::High), Some(ThinkingConfig::adaptive()));
+        let low = with(Some(EffortLevel::Low), Some(ThinkingConfig::adaptive()));
+        let budget = with(Some(EffortLevel::High), Some(ThinkingConfig::enabled(1_024)));
+
+        assert!(high.first().is_some_and(|label| label.starts_with("p:")), "{high:?}");
+        assert_eq!(first_changed_prefix(&high, &high.clone()), None);
+        assert_eq!(first_changed_prefix(&high, &low).as_deref(), Some("p"), "effort only: {high:?} → {low:?}");
+        assert_eq!(first_changed_prefix(&high, &budget).as_deref(), Some("p"), "thinking only: {high:?} → {budget:?}");
+        assert_eq!(high[1..], low[1..], "the content prefixes do not move with the parameters");
     }
 
     /// Text that spells a marker, quotes and backslashes included, is text.

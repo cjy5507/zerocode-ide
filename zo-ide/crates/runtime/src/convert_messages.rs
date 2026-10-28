@@ -1298,6 +1298,55 @@ mod cache_marking_tests {
         );
     }
 
+    /// The VERIFY boundary is an anchor like any other: it must stand where
+    /// a request ending at that boundary put its rolling marker, which rides
+    /// the reminder messages persisted behind the boundary
+    /// ([`super::reminder_tail_end`]). Two shapes: the reminder in front of
+    /// the boundary's assistant turn (adversarial review W3, P3-2, as
+    /// written), and the reminder between that turn and the VERIFY prompt,
+    /// the shape where a second rule shows.
+    #[test]
+    fn the_verify_anchor_rides_the_reminder_tail_like_the_rolling_marker() {
+        let reminder = || api::InputMessage::user_text(super::wrap_reminder("[zo:todo-progress] item A"));
+        let user = |text: &str| api::InputMessage::user_text(text);
+        let assistant = |text: &str| api::InputMessage {
+            role: "assistant".to_string(),
+            ..api::InputMessage::user_text(text)
+        };
+        let marked = |messages: &[api::InputMessage]| {
+            let mut messages = messages.to_vec();
+            super::mark_conversation_cache_breakpoints_short_lived(&mut messages);
+            messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| message.content.iter().any(|block| block_cache(block).is_some()))
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>()
+        };
+        let shapes = [
+            (
+                "reminder in front of the boundary",
+                vec![user("main task"), reminder(), assistant("implementation complete"), user("[deep:VERIFY] check")],
+            ),
+            (
+                "reminder behind the boundary",
+                vec![user("main task"), assistant("implementation complete"), reminder(), user("[deep:VERIFY] check")],
+            ),
+        ];
+        for (shape, messages) in shapes {
+            let verify = messages.len() - 1;
+            let before = marked(&messages[..verify]);
+            let now = marked(&messages);
+            assert_eq!(
+                now.first(),
+                before.last(),
+                "{shape}: the VERIFY anchor (markers {now:?}) must stand where the request \
+                 ending at the boundary rolled (markers {before:?})"
+            );
+            assert_eq!(now.last(), Some(&verify), "{shape}: the VERIFY prompt keeps the rolling marker");
+        }
+    }
+
     /// The agentic-loop shape: the newest messages are a pure
     /// `tool_use`/`tool_result` exchange with no text anywhere near the tail.
     /// The markers must live in that tail — the rolling one on the newest
