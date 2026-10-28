@@ -3441,6 +3441,7 @@ fn main() -> ExitCode {
         .setup(move |app| {
             computer_use::initialize(app.path().resource_dir().ok());
             run_evidence::install_window(app.handle().clone());
+            kill_witness::install_window(app.handle().clone());
             let resolved = app_paths::resolve(app).map_err(std::io::Error::other)?;
             let (paths, legacy_authority) =
                 match state_migration::migrate_if_needed(&resolved) {
@@ -3634,7 +3635,7 @@ fn main() -> ExitCode {
             boot_timeline::mark(boot_timeline::Phase::LedgerReady);
             crumbs::record("boot", format_args!("hooks"));
             if let Some((events, teams, browser, computer, federation)) =
-                hooks::start(&local_data_root, handle.clone())
+                hooks::start(&local_data_root)
             {
                 let listener = handle.clone();
                 tauri::async_runtime::spawn(async move { hook_loop(listener, events).await });
