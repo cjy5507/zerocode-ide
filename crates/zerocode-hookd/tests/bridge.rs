@@ -2093,11 +2093,17 @@ fn the_briefs_wall_leaves_the_scripts_budget_its_margin() {
         TURN_BRIEF_WALL + HOOK_CONNECT_BUDGET + HOOK_REPLY_MARGIN,
         HOOK_REPLY_BUDGET
     );
+    // The first try is the whole reply budget; a later one is a post again
+    // the bridge answers with the first one's answer (t-78634).
+    let first = zerocode_hookd::hook_tries(AgentKind::Claude)[0];
+    assert_eq!(first.budget, HOOK_REPLY_BUDGET);
     let script = zerocode_hookd::hook_script(AgentKind::Claude);
     assert!(
         script.contains(&format!(
-            "--connect-timeout {} --max-time {}",
+            "--connect-timeout {} --max-time \"$hook_budget\"",
             HOOK_CONNECT_BUDGET.as_secs_f64(),
+        )) && script.contains(&format!(
+            "for hook_plan in 0:{} ",
             HOOK_REPLY_BUDGET.as_secs_f64()
         )),
         "{script}"
@@ -2382,4 +2388,151 @@ async fn a_refusal_at_a_full_queue_names_the_full_queue_and_claims_no_holder_age
     for task in pending {
         assert_eq!(task.await.expect("queued handler").status(), StatusCode::OK);
     }
+}
+
+/* ---- a hook post tried again (t-78634) ------------------------------------------- */
+
+/// A vault whose answer takes longer than a script waits, and counts asks.
+struct SlowVault(AtomicUsize);
+
+impl zerocode_hookd::PromptKnowledge for SlowVault {
+    fn related_block(&self, _session_key: &str, _pane_key: &str, _prompt: &str) -> Option<String> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(zerocode_hookd::HOOK_REPLY_BUDGET + Duration::from_millis(500));
+        Some("the vault's pages".to_string())
+    }
+}
+
+/// The form a shell script posts, every byte but the plain ones escaped.
+fn script_form(fields: &[(&str, &str)]) -> String {
+    let escape = |text: &str| {
+        text.bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() || b"-_.".contains(&byte) {
+                    char::from(byte).to_string()
+                } else {
+                    format!("%{byte:02X}")
+                }
+            })
+            .collect::<String>()
+    };
+    fields
+        .iter()
+        .map(|(key, value)| format!("{key}={}", escape(value)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// A post again under the same delivery id is the same delivery: the first
+/// post's work runs to its end though its client stopped waiting, the post
+/// again is given that answer — the vault's block with it — and the window
+/// is handed the event once and writes down the try that needed it. One
+/// post was a briefing's whole submission receipt; a bridge held past the
+/// script's budget lost it, and three launches were rolled back in a day.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_again_is_given_the_first_ones_answer_and_reaches_the_window_once() {
+    let vault = Arc::new(SlowVault(AtomicUsize::new(0)));
+    let notes = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let (state, mut events, _teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let written = Arc::clone(&notes);
+    let state = state
+        .with_prompt_knowledge(vault.clone())
+        .with_delivery_notes(Arc::new(move |line: String| {
+            written.lock().unwrap().push(line);
+        }));
+    let payload =
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"s-again","prompt":"the briefing"}"#;
+    let form = |attempt: &str, gave_up: &str| {
+        script_form(&[
+            ("pane_key", "term-9"),
+            ("launch_token", "launch-9"),
+            ("delivery_id", "p-4242"),
+            ("try", attempt),
+            ("gave_up", gave_up),
+            ("payload", payload),
+        ])
+    };
+    // The first try: its client stops waiting at the script's budget.
+    let first = timeout(
+        zerocode_hookd::HOOK_REPLY_BUDGET,
+        router(state.clone()).oneshot(post("/hook/claude", Some(TOKEN), &form("1", ""))),
+    )
+    .await;
+    assert!(first.is_err(), "the slow vault answered inside the budget");
+    // The second, under the same id after the first gave up with 28.
+    let again = timeout(
+        zerocode_hookd::HOOK_DELIVERY_BUDGET,
+        router(state.clone()).oneshot(post("/hook/claude", Some(TOKEN), &form("2", "28"))),
+    )
+    .await
+    .expect("the post again was never answered")
+    .expect("response");
+    let reply = reply_of(again).await;
+    assert!(
+        reply["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .is_some_and(|context| context.contains("the vault's pages")),
+        "the post again lost the first one's answer: {reply}"
+    );
+    assert_eq!(
+        vault.0.load(Ordering::SeqCst),
+        1,
+        "the post again was worked a second time"
+    );
+    assert_eq!(events.recv().await.expect("envelope").pane_key, "term-9");
+    assert!(
+        events.try_recv().is_err(),
+        "the window was handed one delivery twice"
+    );
+    let line = async {
+        loop {
+            if let Some(line) = notes.lock().unwrap().first().cloned() {
+                return line;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let line = timeout(Duration::from_secs(2), line)
+        .await
+        .expect("the try that needed it was not written down");
+    assert!(
+        line.contains("term-9")
+            && line.contains("try 2")
+            && line.contains("28")
+            && line.contains("answered once"),
+        "{line}"
+    );
+}
+
+/// What a script says of its tries is held to its shape: a first try, or a
+/// try whose exits are not numbers, writes nothing down.
+#[tokio::test]
+async fn a_first_try_or_a_misshapen_one_writes_nothing_down() {
+    let notes = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let (state, mut events, _teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let written = Arc::clone(&notes);
+    let state = state.with_delivery_notes(Arc::new(move |line: String| {
+        written.lock().unwrap().push(line);
+    }));
+    for (id, attempt, gave_up) in [("p-1", "1", ""), ("p-2", "2", "28\nforged line")] {
+        let body = script_form(&[
+            ("pane_key", "term-9"),
+            ("delivery_id", id),
+            ("try", attempt),
+            ("gave_up", gave_up),
+            ("payload", r#"{"event":"stop"}"#),
+        ]);
+        let response = router(state.clone())
+            .oneshot(post("/hook/claude", Some(TOKEN), &body))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert!(events.recv().await.is_some());
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        notes.lock().unwrap().is_empty(),
+        "{:?}",
+        notes.lock().unwrap()
+    );
 }
