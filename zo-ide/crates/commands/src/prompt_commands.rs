@@ -877,6 +877,60 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// A repository's command file reads `@path` only inside the working
+    /// folder: an absolute path, a `..` that climbs out, and a link inside
+    /// that points out each leave one notice line. The same file in zo's
+    /// home reads where it points.
+    #[test]
+    fn workspace_at_paths_stay_inside_the_working_folder() {
+        let root = temp_dir("at-confined");
+        let work = root.join("work");
+        let outside = root.join("outside");
+        fs::create_dir_all(&work).expect("working folder");
+        fs::create_dir_all(&outside).expect("outside folder");
+        fs::write(work.join("inside.md"), "INSIDE").expect("inside file");
+        fs::write(outside.join("secret.md"), "SECRET").expect("outside file");
+        let absolute_outside = outside.join("secret.md").display().to_string();
+        let absolute_inside = work.join("inside.md").display().to_string();
+        let body = format!(
+            "@inside.md\n@../outside/secret.md\n@{absolute_outside}\n@{absolute_inside}\n"
+        );
+        let trusted = InlineShellGate {
+            read_only: false,
+            workspace_trusted: true,
+        };
+        let refused = |raw: &str| {
+            format!("[@{raw}: not read — a repository's command file reads only inside the working folder]")
+        };
+
+        let mut command = parse_prompt_command_file("at".to_string(), PathBuf::from("at.md"), &body)
+            .expect("command parsed");
+        assert_eq!(
+            command.render_prompt_as("", &work, trusted),
+            format!(
+                "INSIDE\n{}\n{}\nINSIDE\n",
+                refused("../outside/secret.md"),
+                refused(&absolute_outside)
+            )
+        );
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.join("secret.md"), work.join("link.md"))
+                .expect("a link that points out");
+            let linked = parse_prompt_command_file("link".to_string(), PathBuf::from("link.md"), "@link.md\n")
+                .expect("command parsed");
+            assert_eq!(linked.render_prompt_as("", &work, trusted), format!("{}\n", refused("link.md")));
+        }
+
+        command.scope = PromptCommandScope::ZoHome;
+        assert_eq!(
+            command.render_prompt_as("", &work, trusted),
+            "INSIDE\nSECRET\nSECRET\nINSIDE\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn discovers_personal_commands_in_home() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
