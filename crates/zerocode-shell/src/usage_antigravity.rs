@@ -10,6 +10,13 @@
 //! names none, for the one zo resolved for the same login and keeps on file
 //! (t-72144). The gauge never makes a project: a login with none to read gets
 //! a sentence saying why and what makes one, never 「read failed — retry」.
+//!
+//! Both calls go out as the Antigravity IDE, exactly as zo's calls for the
+//! same login do ([`AntigravityHeaders`]). Asked as this client instead,
+//! Google named no project for hours and then refused the quota of the
+//! project zo had recorded with a 403 (2026-10-27), while zo — same login,
+//! same project — was served. The person chose zo's identity for these two
+//! read-only calls once that refusal came back (2026-10-28).
 
 use std::path::Path;
 
@@ -27,23 +34,130 @@ const LOAD_CODE_ASSIST: &str = "loadCodeAssist";
 const RETRIEVE_USER_QUOTA: &str = "retrieveUserQuota";
 const BUCKET_WINDOW_MINUTES: u32 = 60;
 
-/// The headers of every Code Assist call. They name this client and nothing
-/// else: its own User-Agent, and no Antigravity, VS Code or Cloud Shell identity.
+/// The IDE version zo presents: this floor, raised by an installed IDE and
+/// overridden by zo's own variable — zo's `ANTIGRAVITY_VERSION` and
+/// `ANTIGRAVITY_VERSION_ENV`, which say why the floor moves.
+const ANTIGRAVITY_VERSION: &str = "2.9.1";
+const ANTIGRAVITY_VERSION_ENV: &str = "ZO_ANTIGRAVITY_VERSION";
+/// zo's `ANTIGRAVITY_API_CLIENT`.
+const ANTIGRAVITY_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
+
+/// The headers of every Code Assist call: the Antigravity IDE identity zo's
+/// `antigravity_headers` puts on every call it sends for this login. A test
+/// holds each value to zo's source, so the two never drift apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AntigravityHeaders {
     user_agent: String,
+    client_metadata: String,
 }
 
 impl AntigravityHeaders {
     fn new() -> Self {
         Self {
-            user_agent: concat!("zerocode/", env!("CARGO_PKG_VERSION")).to_string(),
+            user_agent: format!(
+                "antigravity/{} darwin/arm64",
+                antigravity_version(
+                    std::env::var(ANTIGRAVITY_VERSION_ENV).ok(),
+                    installed_antigravity_version()
+                )
+            ),
+            client_metadata: client_metadata(None).to_string(),
         }
     }
 
-    fn pairs(&self) -> [(&str, &str); 1] {
-        [("User-Agent", &self.user_agent)]
+    fn pairs(&self) -> [(&str, &str); 3] {
+        [
+            ("User-Agent", &self.user_agent),
+            ("X-Goog-Api-Client", ANTIGRAVITY_API_CLIENT),
+            ("Client-Metadata", &self.client_metadata),
+        ]
     }
+}
+
+/// zo's `client_metadata`: the IDE, this host's platform and the plugin, and
+/// the configured project when there is one.
+fn client_metadata(configured: Option<&str>) -> serde_json::Value {
+    let mut metadata = serde_json::json!({
+        "ideType": "ANTIGRAVITY",
+        "platform": client_platform(),
+        "pluginType": "GEMINI",
+    });
+    if let Some(project) = configured.filter(|project| !project.is_empty()) {
+        metadata["duetProject"] = serde_json::Value::String(project.to_string());
+    }
+    metadata
+}
+
+/// zo's `client_platform`: the backend takes only its `{OS}_{ARCH}` enum
+/// values, and the unspecified one where none fits.
+fn client_platform() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "DARWIN_ARM64",
+        ("macos", "x86_64") => "DARWIN_AMD64",
+        ("linux", "aarch64") => "LINUX_ARM64",
+        ("linux", "x86_64") => "LINUX_AMD64",
+        ("windows", _) => "WINDOWS_AMD64",
+        _ => "PLATFORM_UNSPECIFIED",
+    }
+}
+
+/// The version zo's `antigravity_user_agent` presents: its variable when set
+/// to something, else the newer of the installed IDE and the floor.
+fn antigravity_version(overridden: Option<String>, installed: Option<String>) -> String {
+    overridden
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| newest_version(installed, ANTIGRAVITY_VERSION))
+}
+
+/// zo's `newest_version`: compared numerically per dotted part, so `2.10.0`
+/// is newer than `2.9.1`, and an older IDE does not lower the floor.
+fn newest_version(installed: Option<String>, floor: &str) -> String {
+    let parts = |version: &str| -> Vec<u64> {
+        version
+            .split('.')
+            .map(|part| part.trim().parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    match installed {
+        Some(found) if parts(&found) > parts(floor) => found,
+        _ => floor.to_string(),
+    }
+}
+
+/// zo's `installed_antigravity_version`: the IDE bundle's short version,
+/// from `/Applications` or the home's `Applications`.
+fn installed_antigravity_version() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut roots = vec![std::path::PathBuf::from("/Applications")];
+        if let Some(home) = dirs::home_dir() {
+            roots.push(home.join("Applications"));
+        }
+        roots.into_iter().find_map(|root| {
+            let plist = root.join("Antigravity.app/Contents/Info.plist");
+            bundle_short_version(&std::fs::read_to_string(plist).ok()?)
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// The `CFBundleShortVersionString` of an XML property list, when it reads
+/// as a dotted version.
+#[cfg(any(target_os = "macos", test))]
+fn bundle_short_version(plist: &str) -> Option<String> {
+    let (_, after_key) = plist.split_once("<key>CFBundleShortVersionString</key>")?;
+    let (_, after_open) = after_key.split_once("<string>")?;
+    let (version, _) = after_open.split_once("</string>")?;
+    let version = version.trim();
+    let plausible = !version.is_empty()
+        && version
+            .chars()
+            .all(|glyph| glyph.is_ascii_digit() || glyph == '.');
+    plausible.then(|| version.to_string())
 }
 
 /// The seam the tests replace: everything this reader says to a server.
@@ -128,15 +242,14 @@ fn refused_answer(now: i64) -> ProviderUsage {
     )
 }
 
-/// What Google says about this login's Code Assist project. The client metadata
-/// names no IDE and no platform: every field is optional in Google's public
-/// schema, and the unspecified values are the ones its own CLI sends outside an
-/// IDE. `pluginType` is left out, because it names the Gemini plugin and this
-/// client is not that plugin.
+/// What Google says about this login's Code Assist project, asked the way
+/// zo's `setup_user_for` asks it: about the configured project, with zo's
+/// client metadata.
 fn load_code_assist(
     wire: &mut impl Wire,
     access_token: &str,
     headers: &AntigravityHeaders,
+    configured: Option<&str>,
     now: i64,
 ) -> Result<serde_json::Value, Stop> {
     wire.post_json(
@@ -144,10 +257,8 @@ fn load_code_assist(
         access_token,
         headers,
         &serde_json::json!({
-            "metadata": {
-                "ideType": "IDE_UNSPECIFIED",
-                "platform": "PLATFORM_UNSPECIFIED"
-            }
+            "cloudaicompanionProject": configured,
+            "metadata": client_metadata(configured),
         }),
         now,
     )
@@ -568,7 +679,7 @@ fn scan_with(
         );
     };
     let headers = AntigravityHeaders::new();
-    let load = match load_code_assist(wire, &access_token, &headers, now) {
+    let load = match load_code_assist(wire, &access_token, &headers, configured, now) {
         Ok(load) => load,
         Err(stop) => return stop.into_read(now),
     };
@@ -998,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn an_expiring_token_refreshes_with_zerocode_headers_without_writing_zo() {
+    fn an_expiring_token_refreshes_and_asks_as_antigravity_without_writing_zo() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("credentials.json");
         let original = r#"{
@@ -1022,32 +1133,169 @@ mod tests {
                 .iter()
                 .all(|request| request.access_token == "fresh-access")
         );
-        // Honest identity: this client's own User-Agent and nothing else, no
-        // Antigravity or VS Code headers.
-        let expected_headers = vec![(
-            "User-Agent".to_string(),
-            format!("zerocode/{}", env!("CARGO_PKG_VERSION")),
-        )];
-        assert!(
-            wire.posts
-                .iter()
-                .all(|request| request.headers == expected_headers)
-        );
+        // zo's identity on both calls: the IDE's User-Agent, its API client and
+        // its client metadata, and nothing that names this window.
+        for request in &wire.posts {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .iter()
+                    .find(|(held, _)| held == name)
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_else(|| panic!("{} went out without {name}", request.url))
+            };
+            let agent = header("User-Agent");
+            assert!(
+                agent.starts_with("antigravity/") && agent.ends_with(" darwin/arm64"),
+                "{} went out as {agent}",
+                request.url
+            );
+            assert_eq!(header("X-Goog-Api-Client"), ANTIGRAVITY_API_CLIENT);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&header("Client-Metadata"))
+                    .expect("the client metadata is JSON"),
+                serde_json::json!({
+                    "ideType": "ANTIGRAVITY",
+                    "platform": client_platform(),
+                    "pluginType": "GEMINI"
+                })
+            );
+            assert_eq!(request.headers.len(), 3, "{:?}", request.headers);
+        }
         assert_eq!(wire.posts[0].url, LOAD_CODE_ASSIST_URL);
         assert_eq!(wire.posts[1].url, RETRIEVE_QUOTA_URL);
         assert_eq!(
             wire.posts[0].body,
-            serde_json::json!({ "metadata": {
-                "ideType": "IDE_UNSPECIFIED",
-                "platform": "PLATFORM_UNSPECIFIED"
-            } }),
-            "the loadCodeAssist body names an IDE and a platform that are not this client's"
+            serde_json::json!({
+                "cloudaicompanionProject": null,
+                "metadata": {
+                    "ideType": "ANTIGRAVITY",
+                    "platform": client_platform(),
+                    "pluginType": "GEMINI"
+                }
+            }),
+            "the loadCodeAssist body is not the one zo sends"
         );
         assert_eq!(
             std::fs::read_to_string(path).expect("credentials after scan"),
             original,
             "the window wrote its refreshed access token into zo's store"
         );
+    }
+
+    /// A configured project rides the loadCodeAssist body the way zo's
+    /// `setup_user_for` sends it: named in the request and in the metadata.
+    #[test]
+    fn a_configured_project_is_asked_about_the_way_zo_asks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = login_on_file(dir.path(), None);
+        let mut wire = fake_wire();
+
+        scan_with(Some(&path), Some("acme-project"), NOW, &mut wire);
+
+        let load = &wire.posts[0];
+        assert_eq!(load.url, LOAD_CODE_ASSIST_URL);
+        assert_eq!(load.body["cloudaicompanionProject"], "acme-project");
+        assert_eq!(load.body["metadata"]["duetProject"], "acme-project");
+        assert_eq!(
+            load.headers
+                .iter()
+                .find(|(name, _)| name == "Client-Metadata")
+                .map(|(_, value)| value.contains("duetProject")),
+            Some(false),
+            "the header's metadata names a project; zo's never does"
+        );
+    }
+
+    /// The gauge's identity is zo's, value for value: the version floor and its
+    /// variable, the API client, the User-Agent's shape, the three headers, the
+    /// metadata and the platform table all stand in zo's own source. A zo that
+    /// moves any of them turns this red until the gauge moves with it.
+    #[test]
+    fn the_gauge_asks_as_the_identity_zo_sends_for_the_same_login() {
+        let zo = include_str!("../../../zo-ide/crates/api/src/providers/gemini_code_assist.rs");
+        // Both calls go to the host zo calls.
+        let host_of = |url: &'static str| url.rsplit_once('/').map(|(host, _)| host);
+        let host = host_of(LOAD_CODE_ASSIST_URL).expect("the load URL's host");
+        assert_eq!(host_of(RETRIEVE_QUOTA_URL), Some(host));
+        let platform_rows = [
+            r#"("macos", "aarch64") => "DARWIN_ARM64","#,
+            r#"("macos", "x86_64") => "DARWIN_AMD64","#,
+            r#"("linux", "aarch64") => "LINUX_ARM64","#,
+            r#"("linux", "x86_64") => "LINUX_AMD64","#,
+            r#"("windows", _) => "WINDOWS_AMD64","#,
+            r#"_ => "PLATFORM_UNSPECIFIED","#,
+        ];
+        let pinned = [
+            format!(r#"const ANTIGRAVITY_VERSION: &str = "{ANTIGRAVITY_VERSION}";"#),
+            format!(r#"const ANTIGRAVITY_VERSION_ENV: &str = "{ANTIGRAVITY_VERSION_ENV}";"#),
+            format!(r#"const ANTIGRAVITY_API_CLIENT: &str = "{ANTIGRAVITY_API_CLIENT}";"#),
+            format!(r#"const DEFAULT_CODE_ASSIST_ENDPOINT: &str = "{host}";"#),
+            r#"format!("antigravity/{version} darwin/arm64")"#.to_string(),
+            r#".header("User-Agent", antigravity_user_agent())"#.to_string(),
+            r#".header("X-Goog-Api-Client", ANTIGRAVITY_API_CLIENT)"#.to_string(),
+            r#".header("Client-Metadata", client_metadata(None).to_string())"#.to_string(),
+            r#""ideType": "ANTIGRAVITY","#.to_string(),
+            r#""platform": client_platform(),"#.to_string(),
+            r#""pluginType": "GEMINI","#.to_string(),
+            r#"metadata["duetProject"] = Value::String(project.to_string());"#.to_string(),
+            r#""cloudaicompanionProject": project_id,"#.to_string(),
+            r#"let plist = root.join("Antigravity.app/Contents/Info.plist");"#.to_string(),
+            r#"<key>CFBundleShortVersionString</key>"#.to_string(),
+        ]
+        .into_iter()
+        .chain(platform_rows.iter().map(|row| (*row).to_string()));
+        for line in pinned {
+            assert!(
+                zo.contains(&line),
+                "zo no longer sends `{line}` — move the gauge's identity with it"
+            );
+        }
+        for (os, arch) in [
+            ("macos", "aarch64"),
+            ("macos", "x86_64"),
+            ("linux", "aarch64"),
+            ("linux", "x86_64"),
+        ] {
+            assert!(
+                platform_rows
+                    .iter()
+                    .any(|row| row.starts_with(&format!(r#"("{os}", "{arch}")"#))),
+                "the pinned table lost {os}/{arch}"
+            );
+        }
+    }
+
+    /// The version zo presents: its variable when set to something, else the
+    /// newer of the installed IDE and the floor, numerically per part.
+    #[test]
+    fn the_version_is_zos_variable_else_the_newer_of_the_ide_and_the_floor() {
+        let some = |text: &str| Some(text.to_string());
+        for (overridden, installed, presented) in [
+            (some(" 3.0.0 "), some("2.10.0"), "3.0.0"),
+            (some("   "), some("2.10.0"), "2.10.0"),
+            (None, some("2.10.0"), "2.10.0"),
+            (None, some("2.1.4"), ANTIGRAVITY_VERSION),
+            (None, None, ANTIGRAVITY_VERSION),
+        ] {
+            assert_eq!(
+                antigravity_version(overridden.clone(), installed.clone()),
+                presented,
+                "{overridden:?} over {installed:?}"
+            );
+        }
+        let plist = |version: &str| {
+            format!(
+                "<dict>\n\t<key>CFBundleShortVersionString</key>\n\t<string> {version} </string>\n</dict>"
+            )
+        };
+        assert_eq!(
+            bundle_short_version(&plist("2.10.3")).as_deref(),
+            Some("2.10.3")
+        );
+        assert_eq!(bundle_short_version(&plist("2.10-beta")), None);
+        assert_eq!(bundle_short_version(&plist("")), None);
+        assert_eq!(bundle_short_version("<dict></dict>"), None);
     }
 
     /// A refusal from Google is an answer, not a reason to ask again. The gauge
