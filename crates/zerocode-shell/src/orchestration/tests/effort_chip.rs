@@ -118,7 +118,7 @@ fn a_press_moves_a_claude_pane_for_this_session_only_and_the_word_waits_for_the_
 }
 
 #[test]
-fn a_press_mid_turn_or_with_no_legend_types_no_key_after_the_command() {
+fn a_press_mid_turn_or_with_no_legend_types_no_arrow_after_the_command_and_closes_what_it_opened() {
     let stood = StoppedWorker::stand_with(
         98_300,
         "--agent claude --model claude-opus-5-5 --effort medium",
@@ -138,12 +138,16 @@ fn a_press_mid_turn_or_with_no_legend_types_no_key_after_the_command() {
 
     let owned: Vec<&str> = ran.iter().map(String::as_str).collect();
     stood.stops_on(&owned, stood.began + 6_000);
-    // No legend ever shows: the command went in, no arrow follows it.
+    // No legend ever shows: the command went in, no arrow follows it, and
+    // one Esc closes whatever it opened.
     assert_eq!(
         press(&stood.host, term, tail.as_deref(), "high"),
         Err(PressRefused::Door("picker_missing"))
     );
-    assert_eq!(stood.sent_at_worker(), [CLAUDE_EFFORT_PICKER.open, "\r"]);
+    assert_eq!(
+        stood.sent_at_worker(),
+        [CLAUDE_EFFORT_PICKER.open, "\r", CLAUDE_EFFORT_PICKER.cancel]
+    );
     let chip = pane_effort(&stood.host, term, tail.as_deref());
     assert_eq!(chip.pending, None, "a refused press moved nothing");
 }

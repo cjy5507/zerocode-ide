@@ -1028,6 +1028,17 @@ fn carry(host: &dyn Host, term: u32, keys: &PressKeys) -> Result<(), PressRefuse
         .is_some_and(|screen| screen.contains(keys.legend))
     {
         if since.elapsed() > wait {
+            // Whatever the command opened without its legend is closed, so
+            // no picker stands open that nobody drives — at a pane still
+            // between turns only: an Esc into a turn stops it.
+            let heard = super::pane_turns()
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .get(&term)
+                .copied();
+            if composer_at_rest(host, term, heard).is_ok() {
+                host.send(term, keys.cancel);
+            }
             return Err(PressRefused::Door(door_outcome::PICKER_MISSING));
         }
         std::thread::sleep(PRESS_LEGEND_LOOK);

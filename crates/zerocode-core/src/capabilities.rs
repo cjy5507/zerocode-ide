@@ -108,6 +108,8 @@ pub struct PickerKeys {
     pub raise: &'static str,
     /// Confirms for this session only.
     pub session_only: &'static str,
+    /// Closes the picker with nothing changed (`Esc to cancel` on its line).
+    pub cancel: &'static str,
     /// Words the picker prints while it is up. The keys are sent only after
     /// the screen shows them; a screen without them gets no key.
     pub legend: &'static str,
@@ -249,6 +251,7 @@ pub const CLAUDE_EFFORT_PICKER: PickerKeys = PickerKeys {
     lower: "\x1b[D",
     raise: "\x1b[C",
     session_only: "s",
+    cancel: "\x1b",
     legend: "s for this session only",
 };
 
