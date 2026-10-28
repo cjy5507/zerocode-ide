@@ -13691,8 +13691,17 @@ function paneHeadNode() {
   head.className = "pane-head";
   const who = document.createElement("span");
   who.className = "pane-head-who";
-  const name = document.createElement("strong");
+  // The pane's name is the head's, and renaming it starts here (t-81525 C14):
+  // the name bar under the head no longer says it a second time.
+  const name = document.createElement("button");
+  name.type = "button";
   name.className = "pane-head-name";
+  name.dataset.tip = t("tree.menu.rename", "이름 바꾸기");
+  name.addEventListener("click", () => {
+    const tab = [...paneHeads].find(([, one]) => one === head)?.[0];
+    const owner = tabs.find((one) => one.id === tab);
+    if (owner) startPaneRename(owner, activePaneOf(owner));
+  });
   const model = document.createElement("span");
   model.className = "pane-head-model";
   const state = document.createElement("span");
@@ -13723,6 +13732,10 @@ function paintPaneHead(tab, term) {
     head.hidden = true;
     paneHost(tab).prepend(head);
   }
+  // A tab of one pane: the head names it, so its name bar keeps only its
+  // actions (t-81525 C14, shell.css `.is-named-above`).
+  const slot = paneHost(tab).querySelector(`.pane-slot[data-term="${term}"]`);
+  if (slot) writeClass(slot, "is-named-above", paneLeaves(tab.layout).length === 1);
   const agent = paneAgents.get(term) ?? "";
   writeTextContent(head.querySelector(".pane-head-mark"), agentVoice(agent).glyph);
   writeTextContent(head.querySelector(".pane-head-name"), agentPaneName(tab, term, agent) || tabLabel(tab));
@@ -13908,14 +13921,19 @@ function paintPaneChat(term) {
     t("worker.noPaneTranscript", "이 판의 대화 기록을 아직 읽을 수 없습니다 — 에이전트가 전사의 자리를 알려 준 뒤에 보입니다."),
   );
   // A conversation asked for mid-turn is handed to the wire when the turn
-  // ends (`handPaneToWire`); until then the page says so, where a person
-  // would otherwise wonder why nothing streams yet.
-  noticeOnPaneChat(
-    held,
-    "worker.handoverPending",
-    held.pendingWire === true,
-    t("worker.handoverPending", "이 턴이 끝나면 대화가 실시간 세션(선)으로 이어집니다 — 그때부터 답이 낱말 단위로 흐릅니다."),
-  );
+  // ends (`handPaneToWire`), and the wire then takes it over behind this view
+  // while what is sent meanwhile waits for it (t-54304). Both are said by the
+  // head's running chip, under the pointer — not as lines over the turns
+  // (t-81525 C5): the person reads the conversation, and the chip is where
+  // they look to know what it is doing.
+  const handing = held.handing === true
+    ? t("worker.handingOver", "실시간 대화로 잇는 중입니다 — 그동안 보낸 글은 이어진 뒤에 갑니다.")
+    : held.pendingWire === true
+      ? t("worker.handoverPending", "이 턴이 끝나면 대화가 실시간으로 이어집니다 — 그때부터 답이 낱말 단위로 흐릅니다.")
+      : "";
+  const runChip = held.host.__helperPage?.head.querySelector(".chat-run") ?? null;
+  if (runChip && handing) writeAttribute(runChip, "data-tip", handing);
+  else runChip?.removeAttribute("data-tip");
   // A hand-over the backend refused (a worker's pane, a wire that failed to
   // stand, a screen that kept its conversation): the page says why, in the
   // backend's words, and stays the transcript view — 「대화」 again asks again.
@@ -13923,15 +13941,7 @@ function paintPaneChat(term) {
     held,
     "worker.wireRefused",
     typeof held.wireRefusal === "string" && held.wireRefusal !== "",
-    t("worker.wireRefused", "실시간 세션(선)으로 넘기지 못했습니다: {{reason}} — 전사 뷰로 봅니다(답은 턴이 닫힐 때 한 번에). 「대화」를 다시 누르면 다시 시도합니다.", { reason: held.wireRefusal ?? "" }),
-  );
-  // The wire takes the conversation over behind this view; what is sent
-  // meanwhile waits for it (t-54304).
-  noticeOnPaneChat(
-    held,
-    "worker.handingOver",
-    held.handing === true,
-    t("worker.handingOver", "실시간 세션(선)으로 잇는 중입니다 — 그동안 보낸 글은 이어진 뒤에 갑니다."),
+    t("worker.wireRefused", "실시간 대화로 넘기지 못했습니다: {{reason}} — 전사 뷰로 봅니다(답은 턴이 닫힐 때 한 번에). 「대화」를 다시 누르면 다시 시도합니다.", { reason: held.wireRefusal ?? "" }),
   );
   // The first read is out. Said only once it is late: the stylesheet holds the
   // line hidden for `--chat-late-ms`, so a read that comes sooner is never seen
@@ -13942,11 +13952,14 @@ function paintPaneChat(term) {
     run.helper.found === null,
     t("worker.readingTranscript", "대화를 읽는 중…"),
   ));
+  // The page holds the end of a long transcript: a small pill over the list
+  // says so, and its tooltip says where the rest is (t-81525 C5).
   noticeOnPaneChat(
     held,
     "worker.historyFolded",
     run.helper.folded === true,
-    t("worker.historyFolded", "긴 기록의 끝부분만 보입니다 — 이전 턴은 판의 화면과 세션 기록에 있습니다."),
+    t("worker.historyFolded", "↑ 이전 기록 · 끝부분만 보는 중"),
+    t("worker.historyFoldedTip", "긴 기록의 끝부분만 보입니다 — 이전 턴은 판의 화면과 세션 기록에 있습니다."),
   );
 }
 
@@ -13954,7 +13967,7 @@ function paintPaneChat(term) {
  * stands or goes on its own condition, so two of them never take each other
  * for the one already there. The words arrive translated (`t(key, …)` at the
  * call, where the catalog contract reads them); the key names the line. */
-function noticeOnPaneChat(held, key, wanted, words) {
+function noticeOnPaneChat(held, key, wanted, words, tip = "") {
   const shown = held.host.querySelector(`.pane-chat-notice[data-says="${key}"]`);
   if (!wanted) {
     shown?.remove();
@@ -13964,12 +13977,15 @@ function noticeOnPaneChat(held, key, wanted, words) {
     // The same line with new words (a refusal's reason): the words change,
     // the line stays.
     writeTextContent(shown, words);
+    if (tip) writeAttribute(shown, "data-tip", tip);
+    else shown.removeAttribute("data-tip");
     return shown;
   }
   const said = document.createElement("p");
   said.className = "pane-chat-notice";
   said.dataset.says = key;
   said.textContent = words;
+  if (tip) said.dataset.tip = tip;
   // Above the body, not inside it: the body is the rail | list grid
   // (t-22100), where a line of its own would become a grid cell and fall into
   // the rail's narrow column.
@@ -14373,6 +14389,7 @@ function cleanseAssistantText(text) {
  * (person or agent): a call after it with no result yet is still out. */
 function helperTurnRowNode(run, turn, spoken, cold = false) {
   if (turn.role === "thinking") return thoughtTurnNode(run, turn);
+  if (turn.role === "window") return windowNoteNode(turn);
   if (turn.role === "tool" || turn.role === "tool_result") return stepRowNode(run, turn, spoken, cold);
   const briefing = turn.role === "user" && turn.seq === 0;
   const row = document.createElement("article");
@@ -14392,25 +14409,64 @@ function helperTurnRowNode(run, turn, spoken, cold = false) {
     if (turn.images) row.appendChild(imagePillsNode(run, turn.images));
     said.hidden = turn.text === "";
   } else {
-    // The agent's rows stand on the timeline rail (`is-step`); a system line
-    // stands off it, the way the extension's meta messages do.
-    row.className = turn.role === "assistant" ? "helper-turn is-assistant is-step" : `helper-turn is-${turn.role}`;
+    // An answer is bare prose in the reading column — no dot, no rail
+    // (t-81525 B3): the words are what is read. A system line is the
+    // extension's meta message.
+    row.className = `helper-turn is-${turn.role}`;
     // Announced by who said it, as the extension announces every message
     // (2.1.272): the person's rows say 「나」 above, an answer says the
     // agent's own name — the catalog's, never a word invented here.
-    if (turn.role === "assistant") row.setAttribute("aria-label", agentName(run.agent));
+    if (turn.role === "assistant") {
+      row.setAttribute("aria-label", agentName(run.agent));
+      // The rail's jump hands an answer the focus, and the list's one copy
+      // follows it there — the keyboard's way to every answer's copy, not
+      // only the newest's (t-81525 r2). Its Tab walks into its own controls,
+      // not the window's key sink (`rearmKeySink`).
+      row.tabIndex = -1;
+      row.dataset.keyboardOwner = "true";
+    }
     // An answer born far from view waits for its prose (B1).
     if (cold && turn.role === "assistant") shelveBorn(row);
     else paintAnswerProse(said, turn, run);
   }
   row.appendChild(said);
-  // Every answer carries the extension's action row (`assistantActions`):
-  // a copy, shown while the pointer or the focus is on the answer.
-  if (turn.role === "assistant") row.appendChild(helperActionsNode(turn));
+  // The answer's copy is the list's one action row, moved to the answer the
+  // pointer or the focus reaches (`standAnswerActions`, t-81525 C8).
   row.dataset.turn = String(turn.seq);
   row.__turn = turn;
   // 「그림·페이지로 설명」이 이 답의 대화를 찾는 길(t-32787): 단추는 처음 닿을 때 짓는다.
   row.__run = run;
+  return row;
+}
+
+/* What the window itself typed into the pane — its resume nudge, which the
+ * transcript holds as the person's prompt (`pane_log` marks it `window`) — is
+ * a thin line across the column, 「창 알림 · …」, not the person's bubble
+ * (t-81525 C3). The words it typed are the agent's language, not the
+ * person's, and stand behind 「원문」: built the first time the line opens. */
+function windowNoteNode(turn) {
+  const row = document.createElement("details");
+  row.className = "helper-turn is-window-note";
+  row.dataset.turn = String(turn.seq);
+  row.__turn = turn;
+  const line = document.createElement("summary");
+  line.className = "helper-window-note-line";
+  const words = document.createElement("span");
+  words.className = "helper-window-note-words";
+  const door = document.createElement("span");
+  door.className = "helper-window-note-door";
+  door.textContent = t("worker.windowNoteOpen", "원문");
+  words.append(t("worker.windowNote", "창 알림 · 창이 다시 시작되어 이어 가라고 알렸습니다"), " · ", door);
+  line.appendChild(words);
+  row.appendChild(line);
+  row.addEventListener("toggle", () => {
+    if (!row.open || row.querySelector(":scope > .helper-window-note-said")) return;
+    const said = document.createElement("p");
+    said.className = "helper-window-note-said";
+    said.lang = "en";
+    said.textContent = turn.text;
+    row.appendChild(said);
+  });
   return row;
 }
 
@@ -14472,7 +14528,7 @@ function dressToolTurn(row, turn, run, spoken) {
   // A tool row is announced by the tool it ran (2.1.272) — the CLI's own
   // name for it, which the line words as a kind. Guarded like every other
   // write here: a quiet poll costs no mutation.
-  writeAttribute(row, "aria-label", t("worker.toolRow", "{{name}} 도구", { name: words.name }));
+  writeAttribute(row, "aria-label", t("worker.toolRow", "{{name}} 도구", { name: words.name || stepLook(row.__kind).word() }));
   const output = turn.role === "tool_result" ? turn.text : turn.output;
   const failed = turn.role === "tool_result" ? turn.tool?.is_error === true : turn.outputError === true;
   const live = output === undefined && run.status === "running" && turn.seq > spoken;
@@ -14672,9 +14728,12 @@ function helperTailNode(run, turn) {
   return tail;
 }
 
-/* The extension's `assistantActions` under an answer: one copy button, on
- * every answer, visible while the pointer or the focus is on the row. */
-function helperActionsNode(turn) {
+/* The extension's `assistantActions` under an answer: one copy button. One
+ * row of them a list (t-81525 C8) — a 400-turn page built four nodes for
+ * every answer, read or not — standing in the answer the pointer or the
+ * focus last reached, the newest answer until then. It copies the answer it
+ * stands in (`__row`). */
+function helperActionsNode() {
   const actions = document.createElement("div");
   actions.className = "helper-actions";
   const copy = document.createElement("button");
@@ -14684,9 +14743,30 @@ function helperActionsNode(turn) {
   copy.setAttribute("aria-label", copyWords);
   copy.dataset.tip = copyWords;
   copy.appendChild(iconNode("copy"));
-  copyOnPress(copy, () => answerCopyText(turn.text));
+  // Enter and Space, while it has focus, are its own (`rearmKeySink`).
+  copy.dataset.keyboardOwner = "true";
+  copyOnPress(copy, () => answerCopyText(actions.__row?.__turn?.text ?? ""));
   actions.appendChild(copy);
   return actions;
+}
+
+/* Stand the list's action row in `row` when it is a settled answer and the
+ * row is not already there. */
+function standAnswerActions(list, row) {
+  if (!row || row.__turn?.role !== "assistant" || !list.contains(row)) return;
+  const actions = list.__actions ??= helperActionsNode();
+  if (actions.parentElement === row) return;
+  actions.__row = row;
+  row.appendChild(actions);
+}
+
+/* The pointer and the focus carry the action row to the answer they reach —
+ * listened for on the list, once, before the explain button looks for it
+ * (`watchExplainTurns`). */
+function watchAnswerActions(list) {
+  const stand = (event) => standAnswerActions(list, event.target.closest?.(".helper-turn.is-assistant"));
+  list.addEventListener("pointerover", stand);
+  list.addEventListener("focusin", stand);
 }
 
 /* The last thing the agent SAID on this page, or "" — what the copy under an
@@ -14764,13 +14844,27 @@ function previewDoorNode(open, words, go) {
   return door;
 }
 
-/* 꼬리를 마지막 어시스턴트 턴으로 옮긴다 — 바뀌었을 때만 DOM을 만진다. */
+/* 꼬리를 마지막 어시스턴트 턴으로 옮긴다 — 바뀌었을 때만 DOM을 만진다. 마지막
+ * 답만 가장 진한 글로 선다(`is-latest`, t-81525 B3): 앞의 답들은 한 걸음 물러선다. */
 function dressLastAnswer(list, run, newest) {
   if (!newest || newest.row === list.__lastAnswer) return;
   list.__lastAnswer?.querySelector(":scope > .helper-tail")?.remove();
+  list.__lastAnswer?.classList.remove("is-latest");
   const tail = helperTailNode(run, newest.turn);
   if (tail.childElementCount) newest.row.appendChild(tail);
+  newest.row.classList.add("is-latest");
   list.__lastAnswer = newest.row;
+  standAnswerActions(list, newest.row);
+}
+
+/* Only the person's newest words stand stuck at the list's top (t-81525 B4):
+ * one sticky row a page, where every row of theirs was one — each a layer a
+ * long conversation paid for. Moved when newer words arrive. */
+function dressLastPerson(list, newest) {
+  if (!newest || newest === list.__lastPerson) return;
+  list.__lastPerson?.classList.remove("is-latest");
+  newest.classList.add("is-latest");
+  list.__lastPerson = newest;
 }
 
 /* The list's fixed tail — the helpers at work (t-6323 A6), then the status
@@ -14803,278 +14897,220 @@ function scrollHelperToBottom(list) {
   });
 }
 
-/* ---- Focus view: 한 턴의 도구 일을 요약 한 줄 뒤로 ----
+/* ---- 알약: 두 답 사이의 도구 일을 한 줄로 (t-81525 B1·B2) ----
  *
- * 확장 2.1.221의 「Focus view hides tool activity behind per-turn summaries
- * with a live running-tool indicator」. 연속한 활동 행 — 도구 호출과 생각 —
- * 이 한 묶음이 되고, 묶음의 머리가 「도구 호출 n회 · 실패 m」과 지금 나가
- * 있는 호출 하나를 말한다. 사람의 말·답·시스템 줄은 활동이 아니므로 묶음을
- * 닫는다: 그래서 한 묶음은 「한 턴이 한 일」과 같은 구간이다.
+ * 사람이 고른 대화(2026-10-29, 시안 B): 답은 읽는 단의 맨글이고, 두 답 사이의
+ * 활동 — 도구 호출과 생각 — 은 알약 한 줄 「명령 5개 · 68.0초」로 접힌다.
+ * 누르면(포인터·Enter·Space) 그 안에 걸음의 타임라인이 펼쳐진다. 사람의 말·
+ * 답·창 알림은 활동이 아니므로 알약을 닫는다: 한 알약은 「한 턴이 한 일」이다.
  *
- * 구성원은 목록의 직계 자식으로 **남는다**. 옮기지 않는 것이 요점이다 —
- * 행의 열쇠(`data-turn`)로 잇고 지우는 `syncHelperTurns`의 회계도, t-110의
- * 정체성 핀들도 모두 그 자리를 전제로 서 있다. 묶음 노드는 `data-turn`이
- * 없어 그 회계에 보이지 않고, 접힘은 구성원의 `hidden` 한 비트다.
- *
- * 계수는 묶음이 들고 다닌다(`__calls`·`__failed`·`__live`). 폴마다 구성원을
- * 다시 세는 대신 상태가 움직인 행 하나만 계상하므로(`accountFocusMember`),
- * 한 폴이 치르는 값은 그 폴에 온 행과 아직 나가 있는 호출의 수에 비례한다. */
+ * 알약은 목록의 행이다. 제 턴들을 `__members`로 들고, 열쇠(`data-turn`)는 마지막
+ * 구성원의 것이다 — `syncHelperTurns`의 회계(뒤에 잇기, 앞에서 지우기)가 다른
+ * 행과 똑같이 닿는다. 구성원의 행은 펼칠 때 만들고 접을 때 버린다(B2): 400턴
+ * 페이지가 읽지도 않은 걸음마다 노드 여덟 개를 들고 있던 것이 이 페이지의
+ * 무게였다. 머리의 말은 구성원의 턴에서 센다 — 폴마다가 아니라 새 구성원이
+ * 왔을 때와 나가 있는 호출이 있을 때만. */
 
-/* 이 창의 모든 대화가 입는 한 값 — 전역 설정 `conversation_focus_view`.
+/* 이 창의 모든 대화가 입는 한 값 — 전역 설정 `conversation_timeline_view`.
+ * 꺼져 있으면(기본) 알약, 켜져 있으면 걸음을 모두 펼친 타임라인이다.
  * 스냅샷이 옮기고(`applyAgentSettingsSnapshot`), 머리의 단추가 쓴다. */
-let conversationFocusView = false;
+let conversationTimelineView = false;
 
-function focusViewOn() {
-  return conversationFocusView;
+function foldedView() {
+  return !conversationTimelineView;
 }
 
-/* 토글이 움직였다. 서 있는 목록은 그 자리에서 따라가고 — 사람이 누른 그
+/* 토글이 움직였다. 서 있는 목록은 그 자리에서 다시 그리고 — 사람이 누른 그
  * 페이지가 다음 폴을 기다리지 않게 — 아직 안 그려진 페이지는 제 다음 그림의
  * `syncHelperTurns` 첫 줄에서 따라온다. */
-function repaintFocusView() {
-  const on = focusViewOn();
-  for (const list of document.querySelectorAll(".helper-turns")) applyFocusView(list, on);
+function repaintTimelineView() {
+  for (const list of document.querySelectorAll(".helper-turns")) {
+    if (list.__run) syncHelperTurns(list, list.__run);
+  }
   for (const button of document.querySelectorAll(".worker-focus")) {
-    writeAttribute(button, "aria-pressed", on ? "true" : "false");
+    writeAttribute(button, "aria-pressed", conversationTimelineView ? "true" : "false");
   }
 }
 
 /* 설정을 쓰는 한 곳. 값은 먼저 화면에 서고(사람의 손끝은 왕복을 기다리지
  * 않는다) 권위 있는 스냅샷이 돌아와 같은 값을 다시 놓는다. */
-function setConversationFocusView(on) {
-  conversationFocusView = on;
-  repaintFocusView();
-  void commitSetting("conversation_focus_view", "set_conversation_focus_view", { on });
+function setConversationTimelineView(on) {
+  conversationTimelineView = on;
+  repaintTimelineView();
+  void commitSetting("conversation_timeline_view", "set_conversation_timeline_view", { on });
 }
 
-/* 머리의 토글. 아이콘 단추라 이름을 두 번 단다(`labelButton`) — 손끝의
- * 말풍선에게 한 번, 보조기술에게 한 번. */
-function focusViewButtonNode() {
+/* 머리의 토글 「걸음 모두 펼치기」. 아이콘 단추라 이름을 두 번 단다
+ * (`labelButton`) — 손끝의 말풍선에게 한 번, 보조기술에게 한 번. */
+function timelineViewButtonNode() {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "worker-focus";
   button.appendChild(iconNode("list-filter"));
-  labelButton(button, t("worker.focusView", "집중 보기"));
-  button.setAttribute("aria-pressed", focusViewOn() ? "true" : "false");
-  button.addEventListener("click", () => setConversationFocusView(!focusViewOn()));
+  labelButton(button, t("worker.timelineView", "걸음 모두 펼치기"));
+  button.setAttribute("aria-pressed", conversationTimelineView ? "true" : "false");
+  button.addEventListener("click", () => setConversationTimelineView(!conversationTimelineView));
   return button;
 }
 
-/* 묶음 머리 하나. 요약의 말과, 지금 나가 있는 호출을 말하는 자리 — 그 자리는
- * 도구 행의 마크업 그대로(`.helper-tool-name` + `.helper-tool-arg`)라 규칙이
- * 두 벌 되지 않는다. 계수는 여기서 0으로 시작한다. */
-function focusGroupNode() {
+/* 활동인가 — 도구 호출, 호출 없이 온 결과, 생각이 알약에 든다. */
+function isActivityTurn(turn) {
+  return turn.role === "tool" || turn.role === "tool_result" || turn.role === "thinking";
+}
+
+/* 마지막으로 말해진 것(사람이든 에이전트든)의 번호 — 그 뒤의 호출은 아직 나가 있다. */
+function spokenSeq(run) {
+  return run.helper.turns.findLast((turn) => turn.role === "user" || turn.role === "assistant")?.seq ?? -1;
+}
+
+/* 한 턴이 알약의 셈에서 서는 칸 — 도구 행이 쓰는 규칙(`dressToolTurn`)과 같다. */
+function activityState(turn, run, spoken) {
+  if (turn.role === "thinking") return "thought";
+  const failed = turn.role === "tool_result" ? turn.tool?.is_error === true : turn.outputError === true;
+  if (failed) return "failed";
+  return turn.role === "tool" && turn.output === undefined && run.status === "running" && turn.seq > spoken ? "live" : "done";
+}
+
+/* 알약 하나: 머리(누르는 단추)와, 펼쳤을 때만 서는 몸. 머리는 상태의 점(CSS),
+ * 요약의 말, 지금 나가 있는 호출 — 네 노드다. */
+function activityPillNode() {
   const group = document.createElement("article");
-  group.className = "helper-group is-step";
+  group.className = "helper-group";
   const cap = document.createElement("button");
   cap.type = "button";
   cap.className = "helper-group-cap";
+  // Enter and Space, while it has focus, are its own (`rearmKeySink`).
+  cap.dataset.keyboardOwner = "true";
+  cap.setAttribute("aria-expanded", "false");
   const words = document.createElement("span");
   words.className = "helper-group-words";
   const live = document.createElement("span");
   live.className = "helper-group-live";
-  const name = document.createElement("span");
-  name.className = "helper-tool-name";
-  const arg = document.createElement("span");
-  arg.className = "helper-tool-arg";
-  live.append(name, arg);
   live.hidden = true;
   cap.append(words, live);
   group.appendChild(cap);
-  group.__calls = 0;
-  group.__failed = 0;
-  group.__live = 0;
-  group.__members = 0;
-  group.__liveRow = null;
+  group.__members = [];
   group.__open = false;
-  cap.addEventListener("click", () => openFocusGroup(group, !group.__open));
+  cap.addEventListener("click", () => openActivityPill(group, !group.__open));
   return group;
 }
 
-/* 활동 행인가 — 도구 호출과 생각만이 묶인다. 스트리밍 행과 상태 행은
- * `data-turn`이 없어 부르는 쪽에서 이미 걸러진다. */
-function isFocusActivityRow(row) {
-  return row.classList.contains("is-tool") || row.classList.contains("is-thinking");
-}
-
-/* 행이 지금 계상되는 칸. 생각 행은 호출이 아니므로 제 칸을 따로 갖는다. */
-function focusRowState(row) {
-  if (row.classList.contains("is-thinking")) return "thought";
-  if (row.classList.contains("is-failed")) return "failed";
-  if (row.classList.contains("is-live")) return "live";
-  return "done";
-}
-
-/* 계수 한 칸을 옮긴다 — 붙을 때 +1, 상태가 바뀌거나 떨어질 때 -1. 셋을 한
- * 곳에서 옮기므로 「호출 수」와 「실패 수」가 서로 다른 셈을 하지 못한다. */
-function tallyFocusState(group, state, by) {
-  if (state === undefined || state === "thought") return;
-  group.__calls += by;
-  if (state === "failed") group.__failed += by;
-  if (state === "live") group.__live += by;
-}
-
-/* 한 행이 바뀐 만큼만 묶음의 계수를 옮긴다 — 행당 O(1). */
-function accountFocusMember(group, row) {
-  const after = focusRowState(row);
-  if (row.__focusState === after) return;
-  tallyFocusState(group, row.__focusState, -1);
-  tallyFocusState(group, after, 1);
-  row.__focusState = after;
-  if (after === "live") group.__liveRow = row;
-  else if (group.__liveRow === row) group.__liveRow = null;
-}
-
-/* 앞이 잘려 나가는 행 하나를 묶음에서 뺀다. 마지막 구성원이 떠나면 묶음
- * 노드도 그 자리에서 사라진다 — 빈 머리가 남으면 그것이 곧 거짓 요약이다. */
-function dropFocusMember(row) {
-  const group = row.__group;
-  if (!group) return;
-  tallyFocusState(group, row.__focusState, -1);
-  if (group.__liveRow === row) group.__liveRow = null;
-  row.__group = null;
-  row.__focusState = undefined;
-  group.__members -= 1;
-  if (group.__members <= 0) group.remove();
-}
-
-/* 새로 선 활동 행 하나를 열린 묶음에 들인다 — 없으면 이 행 바로 앞에 새
- * 묶음을 세운다. */
-function attachFocusRow(list, row) {
-  let group = list.__focusOpen;
-  if (!group || !group.isConnected) {
-    group = focusGroupNode();
-    list.insertBefore(group, row);
-    list.__focusOpen = group;
+/* 머리의 말과 상태 — 구성원의 턴에서 세고, 바뀐 것만 쓴다(조용한 폴은 mutation 0).
+ * 한 종류뿐이면 그 종류로(「명령 5개」), 섞였으면 도구로, 생각뿐이면 「생각」.
+ * 걸린 시간은 다 돌아온 뒤에만, 실패는 있을 때만 말한다. */
+function paintActivityPill(group, run, spoken) {
+  let calls = 0;
+  let failed = 0;
+  let live = null;
+  let first = null;
+  let last = null;
+  const kinds = new Set();
+  // A call whose result has not come yet: the pill is counted again on each
+  // paint until it has, whether the run still works or not.
+  group.__waiting = false;
+  for (const turn of group.__members) {
+    const state = activityState(turn, run, spoken);
+    if (state === "thought") continue;
+    if (turn.role === "tool" && turn.output === undefined) group.__waiting = true;
+    calls += 1;
+    kinds.add(stepKindOf(turn, run));
+    first ??= turn;
+    last = turn;
+    if (state === "failed") failed += 1;
+    if (state === "live") live = turn;
   }
-  row.classList.add("is-grouped");
-  row.__group = group;
-  group.__members += 1;
-  accountFocusMember(group, row);
-  writeHidden(row, !group.__open && !row.__standing);
-  paintFocusGroup(group);
-}
-
-/* 새로 선 행 하나가 묶음 회계에 들어가거나, 묶음을 닫는다. */
-function holdFocusRow(list, row) {
-  if (isFocusActivityRow(row)) attachFocusRow(list, row);
-  else list.__focusOpen = null;
-}
-
-/* 머리가 말할 살아 있는 호출 한 행 — 가장 최근에 나간 것. 계상이 그때그때
- * 적어 두므로 보통은 물어보기만 하면 되고, 형제가 먼저 끝나 비었을 때만
- * 구성원을 따라가며 다시 찾는다(폴마다가 아니라 그 한 번). */
-function liveFocusMember(group) {
-  const held = group.__liveRow;
-  if (held && held.__group === group && held.__focusState === "live") return held;
-  let row = group.nextElementSibling;
-  while (row && row.__group === group) {
-    if (row.__focusState === "live") {
-      group.__liveRow = row;
-      return row;
-    }
-    row = row.nextElementSibling;
-  }
-  group.__liveRow = null;
-  return null;
-}
-
-/* 나가 있는 호출 하나를 머리가 말한다 — 도구 행이 이미 쓴 낱말 그대로
- * 옮겨 적는다(`dressToolTurn`이 `toolWords`로 쓴 그 두 칸), 같은 규칙을
- * 두 번 돌리지 않기 위해서다. */
-function paintFocusGroupLive(group) {
-  const live = group.querySelector(":scope > .helper-group-cap > .helper-group-live");
-  const row = group.__live > 0 ? liveFocusMember(group) : null;
-  writeHidden(live, row === null);
-  if (!row) return;
-  writeTextContent(live.querySelector(".helper-tool-name"), row.querySelector(".helper-step-kind")?.textContent ?? "");
-  writeTextContent(live.querySelector(".helper-tool-arg"), row.querySelector(".helper-step-target")?.textContent ?? "");
-}
-
-/* 계수에서 말과 클래스와 live 표시를 — 바뀔 때만 쓴다. 조용한 폴은
- * mutation 0이어야 하므로 여기의 모든 쓰기는 문지기를 지난다. 머리의 이름은
- * 펼침 여부에만 달려 있으니 그 비트가 움직일 때만 다시 단다. */
-function paintFocusGroup(group) {
-  const cap = group.querySelector(":scope > .helper-group-cap");
-  const calls = group.__calls;
-  const words = calls === 0
+  const head = calls === 0
     ? t("worker.focusThinking", "생각")
-    : t("worker.focusCalls", "도구 호출 {{n}}회", { n: calls }) +
-      (group.__failed > 0 ? t("worker.focusFailed", " · 실패 {{n}}", { n: group.__failed }) : "");
-  writeTextContent(cap.querySelector(".helper-group-words"), words);
-  const open = group.__open === true;
-  writeAttribute(cap, "aria-expanded", open ? "true" : "false");
-  if (group.__labelled !== open) {
-    labelButton(cap, open
-      ? t("worker.focusCollapse", "도구 호출 접기")
-      : t("worker.focusExpand", "도구 호출 펼치기"));
-    group.__labelled = open;
+    : kinds.size === 1
+      ? t("worker.stepRun", "{{kind}} {{n}}개", { kind: stepLook([...kinds][0]).word(), n: calls })
+      : t("worker.focusCalls", "도구 {{n}}개", { n: calls });
+  const took = first && !live ? stepTook(first, last) : "";
+  const lost = failed > 0 ? t("worker.tallyFailed", "실패 {{n}}", { n: failed }) : "";
+  const cap = group.firstElementChild;
+  writeTextContent(cap.querySelector(".helper-group-words"), [head, took, lost].filter(Boolean).join(" · "));
+  const now = cap.querySelector(".helper-group-live");
+  writeHidden(now, live === null);
+  if (live) {
+    const kind = stepKindOf(live, run);
+    const words = toolWords(live);
+    writeTextContent(now, `${stepLook(kind).word()} ${stepTitleWords(kind, words.arg, words.whole)}`);
   }
-  // 점은 묶음의 상태다: 하나라도 나가 있으면 액센트, 아니면 실패가 있으면
-  // 멈춤의 잉크, 아니면 초록 — 도구 행의 규칙을 그대로 입는다.
-  writeClass(group, "is-live", group.__live > 0);
-  writeClass(group, "is-failed", group.__live === 0 && group.__failed > 0);
-  writeClass(group, "is-done", group.__live === 0 && group.__failed === 0);
-  paintFocusGroupLive(group);
+  // 점은 알약의 상태다: 하나라도 나가 있으면 액센트, 아니면 실패가 있으면
+  // 멈춤의 잉크, 아니면 초록 — 실패는 말로도 선다(색만으로 말하지 않는다).
+  writeClass(group, "is-live", live !== null);
+  writeClass(group, "is-failed", live === null && failed > 0);
+  writeClass(group, "is-done", live === null && failed === 0);
 }
 
-/* 묶음을 펼치거나 접는다 — 구성원만 따라가며, 사람의 한 동작에만. */
-function openFocusGroup(group, open) {
+/* 알약을 펼치거나 접는다 — 사람의 한 동작에만. 펼치면 구성원의 행을 그때
+ * 짓고, 접으면 버린다(B2). 나중에 든 구성원은 펼쳐져 있을 때 그 자리에서
+ * 몸에 이어진다(`syncHelperTurns`). */
+function openActivityPill(group, open) {
   group.__open = open;
+  writeAttribute(group.firstElementChild, "aria-expanded", open ? "true" : "false");
   const list = group.parentElement;
-  let row = group.nextElementSibling;
-  while (row && row.__group === group) {
-    writeHidden(row, !open && !row.__standing);
-    // A row that gave up its body before the fold hid it takes it back
-    // now, beside the head the person pressed (B1).
-    if (open && row.__shelved && list?.__run) unshelveRow(row, list.__run);
-    row = row.nextElementSibling;
-  }
-  if (list) askShelfAgain(list);
-  // The rows it let out, or folded away, are the rail's to stand for (t-22100).
-  if (list) askTurnRail(list);
-  paintFocusGroup(group);
-}
-
-/* 묶음을 모두 거둔다 — 구성원은 제자리에 남고 표시만 벗는다. */
-function clearFocusGroups(list) {
-  for (const group of list.querySelectorAll(":scope > .helper-group")) group.remove();
-  for (const row of list.querySelectorAll(":scope > .is-grouped")) {
-    row.classList.remove("is-grouped");
-    row.__group = null;
-    row.__focusState = undefined;
-    writeHidden(row, false);
-  }
-  list.__focusOpen = null;
-}
-
-/* 목록 하나를 토글의 지금 값에 맞춘다. 켤 때만 목록을 **한 번** 훑고, 그
- * 값이 이미 적용되어 있으면 아무것도 만지지 않는다 — 그래서 폴마다 불러도
- * 조용하다. */
-function applyFocusView(list, on) {
-  if (list.__focus === on) return;
-  const was = list.__focus;
-  clearFocusGroups(list);
-  list.__focus = on;
-  // Steps of one kind stand as one row unless the page folds by turn: a group
-  // counts calls, so it counts single rows (t-15682).
-  let lands = null;
-  if (on) lands = dissolveSteps(list, list.__run);
-  else if (was === true) regroupSteps(list, list.__run);
-  if (on) {
-    for (const row of [...list.children]) {
-      // 묶음 머리·스트리밍 행·상태 행은 턴이 아니다.
-      if (row.dataset.turn === undefined) continue;
-      if (isFocusActivityRow(row)) attachFocusRow(list, row);
-      else list.__focusOpen = null;
+  const run = list?.__run;
+  let body = group.querySelector(":scope > .helper-group-body");
+  if (!open || !run) {
+    body?.remove();
+  } else {
+    if (!body) {
+      body = document.createElement("div");
+      body.className = "helper-group-body";
+      group.appendChild(body);
+    }
+    const spoken = spokenSeq(run);
+    for (let at = body.children.length; at < group.__members.length; at += 1) {
+      body.appendChild(helperTurnRowNode(run, group.__members[at], spoken));
     }
   }
-  // The newest todo list stands out of its fold, or goes back (A7).
-  standLatestTodo(list, on);
-  // Rows the fold had hidden are judged again where they now stand (B1).
-  askShelfAgain(list);
-  // The keyboard goes where it was, on what stands for it under the folds.
-  if (lands) landFocus(lands);
+  // The rail stands for the rows on screen (t-22100).
+  if (list) askTurnRail(list);
+}
+
+/* 상한이 앞의 턴들을 지웠다: 알약은 남은 구성원만 든다. 펼쳐져 있었으면
+ * 남은 것으로 다시 펼친다 — 사람이 연 것을 그 아래서 닫지 않는다. */
+function trimActivityPill(group, first) {
+  const kept = group.__members.filter((turn) => turn.seq >= first);
+  if (kept.length === group.__members.length) return false;
+  group.__members = kept;
+  group.querySelector(":scope > .helper-group-body")?.remove();
+  if (group.__open) openActivityPill(group, true);
+  return true;
+}
+
+/* 새로 선 활동 턴 하나를 알약에 들인다 — 바로 위의 행이 알약이면 거기에,
+ * 아니면 `before` 앞에 새 알약을 세운다. 그 알약을 돌려준다. */
+function holdActivityTurn(list, run, turn, before, spoken) {
+  const above = before ? before.previousElementSibling : list.lastElementChild;
+  let group = above?.classList.contains("helper-group") ? above : null;
+  if (!group) {
+    group = activityPillNode();
+    list.insertBefore(group, before);
+  }
+  group.__members.push(turn);
+  group.__turn = turn;
+  group.dataset.turn = String(turn.seq);
+  if (group.__open) {
+    group.querySelector(":scope > .helper-group-body")?.appendChild(helperTurnRowNode(run, turn, spoken));
+  }
+  return group;
+}
+
+/* 목록 하나를 토글의 지금 값에 맞춘다. 값이 바뀌었으면 턴의 행을 모두 거두고
+ * 다음 그림이 그 값으로 다시 세운다 — 사람의 한 동작에 한 번이다. 같으면
+ * 아무것도 만지지 않으므로 폴마다 불러도 조용하다. */
+function applyFoldedView(list, folded) {
+  if (list.__folded === folded) return;
+  const drawn = list.__folded !== undefined;
+  list.__folded = folded;
+  if (!drawn) return;
+  for (const row of list.querySelectorAll(":scope > [data-turn]")) {
+    forgetShelf(list, row);
+    row.remove();
+  }
+  list.__lastAnswer = null;
+  list.__lastPerson = null;
 }
 
 /* 전사를 장부에 맞춘다 — 통째로 다시 세우지 않고.
@@ -15092,12 +15128,12 @@ function syncHelperTurns(list, run) {
   list.__run = run;
   // 이 목록이 입고 있는 값이 토글의 값과 다르면 먼저 맞춘다 — 같으면
   // 아무것도 만지지 않으므로 조용한 폴은 여기서 값을 치르지 않는다.
-  const focus = focusViewOn();
-  applyFocusView(list, focus);
+  const folded = foldedView();
+  applyFoldedView(list, folded);
   if (!held.length) {
-    clearFocusGroups(list);
     for (const row of list.querySelectorAll(":scope > [data-turn]")) row.remove();
     list.__lastAnswer = null;
+    list.__lastPerson = null;
     syncHelperTasks(list, run);
     syncStreamingTurns(list, run);
     syncHelperReport(list, run);
@@ -15110,22 +15146,25 @@ function syncHelperTurns(list, run) {
   // a read here lays out a page whose rows just changed (t-55369).
   let before = null;
   let dropped = false;
-  // 앞에서 지워지는 것은 장부가 놓은 턴들이다. 그 사이에 선 묶음 머리는
-  // `data-turn`이 없으므로 건너뛰고(`Number(undefined) < first`는 거짓이라
-  // 예전 루프는 거기서 멈춰 상한을 잃었다), 턴이 아닌 다른 행 — 스트리밍과
-  // 상태 — 에서는 멈춘다: 그 뒤로는 지울 턴이 없다. 지워지는 행은 제 묶음의
-  // 계수에서 빠지고, 비게 된 묶음은 그 자리에서 사라진다.
+  // 앞에서 지워지는 것은 장부가 놓은 턴들이다. 보고 카드는 건너뛰고, 턴이
+  // 아닌 다른 행 — 스트리밍과 상태 — 에서는 멈춘다: 그 뒤로는 지울 턴이 없다.
+  // 알약은 마지막 구성원의 열쇠를 들므로, 구성원이 다 지워졌을 때 통째로
+  // 가고, 일부만 지워졌으면 남은 구성원을 들고 선다(B2).
+  const spoken = spokenSeq(run);
+  const pills = new Set();
   let front = list.firstElementChild;
   while (front) {
     const next = front.nextElementSibling;
     if (front.dataset.turn === undefined) {
-      if (!front.classList.contains("helper-group") && !front.classList.contains("helper-report")) break;
+      if (!front.classList.contains("helper-report")) break;
       front = next;
       continue;
     }
-    if (Number(front.dataset.turn) >= first) break;
+    if (Number(front.dataset.turn) >= first) {
+      if (front.classList.contains("helper-group") && trimActivityPill(front, first)) pills.add(front);
+      break;
+    }
     before ??= { height: list.scrollHeight, top: list.scrollTop };
-    dropFocusMember(front);
     forgetShelf(list, front);
     front.remove();
     dropped = true;
@@ -15140,8 +15179,6 @@ function syncHelperTurns(list, run) {
   while (last && last.dataset.turn === undefined) last = last.previousElementSibling;
   const drawn = last ? Number(last.dataset.turn) : -1;
   const streaming = list.querySelector(":scope > .is-streaming");
-  // What was last said, by either voice: a call after it is still out.
-  const spoken = held.findLast((turn) => turn.role === "user" || turn.role === "assistant")?.seq ?? -1;
   let newest = null;
   const people = [];
   // A batch builds whole only its last rows; the rest are born without their
@@ -15149,10 +15186,18 @@ function syncHelperTurns(list, run) {
   let cold = held.reduce((count, turn) => count + (turn.seq > drawn ? 1 : 0), 0) - CHAT_SHELF.warm;
   for (const turn of held) {
     if (turn.seq <= drawn) continue;
+    // The tool work between two answers is one pill (t-81525 B1): the turn
+    // joins the pill right above it, or stands one — no row of its own until
+    // the pill opens (B2).
+    if (folded && isActivityTurn(turn)) {
+      pills.add(holdActivityTurn(list, run, turn, streaming ?? helperListTail(list), spoken));
+      cold -= 1;
+      settlePaneLive(run, turn.role);
+      continue;
+    }
     // A step that came back whole joins the steps of its kind right above it
-    // (t-15682): one row for them, drawn once, its members when it opens. The
-    // Focus view folds by turn and keeps its rows single.
-    if (!focus && turn.role === "tool") {
+    // (t-15682): one row for them, drawn once, its members when it opens.
+    if (!folded && turn.role === "tool") {
       const tail = streaming ?? helperListTail(list);
       const above = tail ? tail.previousElementSibling : list.lastElementChild;
       if (stepJoins(above, turn, stepKindOf(turn, run))) {
@@ -15182,37 +15227,28 @@ function syncHelperTurns(list, run) {
     if (before?.classList.contains("is-thinking") && before.__turn?.thoughtMs !== undefined) {
       dressThoughtRow(before, before.__turn);
     }
-    // 활동 행은 열린 묶음에 들고, 말한 행은 묶음을 닫는다 — 앞줄의 이웃을
-    // 물은 뒤라야 묶음 머리가 그 사이에 끼어들지 않는다.
-    if (focus) holdFocusRow(list, row);
   }
   // A result that joined its call after the row stood, a word that closed
   // the calls before it, a run that ended: the rows still out are dressed
-  // again — and only those, so a settled row is never touched.
-  // 이 루프가 도는 행이 곧 상태가 움직일 수 있는 행 전부다(살아 있던 호출이
-  // 결과를 받아 done/failed가 되는 자리가 여기뿐이다). 그래서 묶음의 계수도
-  // 여기서만 옮기면 되고, 목록을 다시 훑을 이유가 없다. 행은 문서 차례로
-  // 오므로 한 묶음의 행들은 붙어 있고, 묶음은 한 번만 다시 그린다.
-  let touched = null;
-  for (const row of list.querySelectorAll(":scope > .is-tool.is-live")) {
+  // again — and only those, so a settled row is never touched; an open
+  // pill's rows the same. The pills that took a turn, and those with a call
+  // still out, say their words again: counted from their members' turns.
+  for (const row of list.querySelectorAll(":scope > .is-tool.is-live, :scope > .helper-group > .helper-group-body > .is-tool.is-live")) {
     dressToolTurn(row, row.__turn, run, spoken);
+    if (row.parentElement !== list) continue;
     // A shell step that came back shows its first lines, which the shelf
     // keeps to the rows in reach (t-22100).
     watchShelf(list, row);
-    if (!focus) foldSettledStep(row, run);
-    const group = row.__group;
-    if (!group) continue;
-    accountFocusMember(group, row);
-    if (touched && group !== touched) paintFocusGroup(touched);
-    touched = group;
+    if (!folded) foldSettledStep(row, run);
   }
-  if (touched) paintFocusGroup(touched);
+  for (const group of list.querySelectorAll(":scope > .helper-group")) if (group.__waiting) pills.add(group);
+  for (const group of pills) paintActivityPill(group, run, spoken);
   // A turn that arrived stands whole, the moment it arrived — the terminal
   // already showed these words as they were said, and a page that released
   // them again a word at a time (09-16 → 09-20) only lagged behind it. The
   // wire's page streams the words themselves (`syncStreamingTurns`).
   dressLastAnswer(list, run, newest);
-  standLatestTodo(list, focus);
+  dressLastPerson(list, people.at(-1));
   askShelfAgain(list);
   syncHelperTasks(list, run);
   syncStreamingTurns(list, run);
@@ -15352,7 +15388,7 @@ function streamingTurnNode(role) {
     return row;
   }
   const row = document.createElement("article");
-  row.className = "helper-turn is-assistant is-step is-streaming";
+  row.className = "helper-turn is-assistant is-streaming";
   row.dataset.role = role;
   const said = document.createElement("div");
   said.className = "helper-said";
@@ -15370,7 +15406,9 @@ function helperTurnsNode(run) {
   list.setAttribute("aria-label", t("worker.transcript", "헬퍼 대화 기록"));
   list.tabIndex = 0;
   list.__run = run;
+  // The answer's copy follows the pointer and the focus (t-81525 C8), and
   // 「그림·페이지로 설명」 단추는 답변 행에 포인터나 초점이 처음 닿을 때 짓는다(t-32787).
+  watchAnswerActions(list);
   watchExplainTurns(list);
   // It keeps to its foot until the person leaves it (t-6323 A5).
   keepToFoot(list);
@@ -15517,6 +15555,9 @@ function workerComposerNode(run, owner = null) {
     ? t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다")
     : t("worker.say", "부모 에이전트에게 보내기…");
   form.__composerOwn = ownPane;
+  // The sentence's first half, for a box too narrow for the whole of it on
+  // its one line (`fitComposerSay`).
+  if (ownPane) form.__composerSays = { whole: box.placeholder, short: t("composer.placeholderShort", "다음 지시를 쓰세요") };
   box.setAttribute("aria-label", box.placeholder);
   // 실행 중에는 상자가 「대기열에 추가」라고 말하고 턴 사이에는 제 본래의
   // 말로 돌아온다 — 그 본래의 말은 여기서 한 번 정해지므로, 갈아입히는
@@ -15657,6 +15698,29 @@ function workerComposerNode(run, owner = null) {
   return form;
 }
 
+/* The box's own sentence on one line (t-81525 r2). The box is one row that
+ * grows only with what is typed, so a sentence folded to a second line hid
+ * that line under the box's foot — at 390 px, 「들어갑니다」 half shown. A box
+ * too narrow for the whole sentence says its first half; measured in the
+ * box's own font, so every language and every width is asked the same
+ * question. Asked when the dock's box changes (`watchChatDock`), and only
+ * when the box's width did. */
+let composerPen = null;
+function fitComposerSay(form) {
+  const box = form?.querySelector(".worker-composer-box");
+  if (!form?.__composerSays || !box || box.clientWidth === form.__composerSayWidth) return;
+  form.__composerSayWidth = box.clientWidth;
+  const style = getComputedStyle(box);
+  composerPen ??= document.createElement("canvas").getContext("2d");
+  composerPen.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const room = box.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const { whole, short } = form.__composerSays;
+  const say = room <= 0 || composerPen.measureText(whole).width <= room ? whole : short;
+  if (say === form.__composerSay) return;
+  form.__composerSay = say;
+  paintWorkerComposerState(form, form.__workerRun);
+}
+
 function paintWorkerComposerState(form, run, delivered = null) {
   const box = form.querySelector(".worker-composer-box");
   if (delivered !== null && box.value === delivered && run.draft === "") {
@@ -15778,7 +15842,7 @@ function updateWorkerHead(head, run) {
   // 토글의 눌림은 창의 한 값이라, 다른 페이지에서 바뀌었어도 이 머리가
   // 다음 그림에 따라온다 — 값이 움직였을 때만 쓴다.
   const focus = head.querySelector(".worker-focus");
-  if (focus) writeAttribute(focus, "aria-pressed", focusViewOn() ? "true" : "false");
+  if (focus) writeAttribute(focus, "aria-pressed", conversationTimelineView ? "true" : "false");
   head.querySelector(".worker-name").textContent = run.name;
   head.querySelector(".worker-elapsed").textContent = workerElapsedWords(run);
   head.querySelector(".worker-uses").textContent = toolUsesWords(run.toolCalls ?? 0);
@@ -15824,7 +15888,7 @@ function chatHeadNode(run) {
   // A pane's own conversation: where its tab head's line and switch stand while
   // it is the pane in front, so the two heads read as one (`placePaneHeadLine`).
   if (run.helper?.id === PANE_LOG_ID) meta.append(Object.assign(document.createElement("span"), { className: "chat-head-pane" }));
-  meta.append(focusViewButtonNode());
+  meta.append(timelineViewButtonNode());
   head.append(mark, name, meta);
   updateChatHead(head, run);
   return head;
@@ -15838,7 +15902,7 @@ function updateChatHead(head, run) {
   writeTextContent(mark, agentVoice(run.agent).glyph);
   writeAttribute(mark, "aria-label", agentName(run.agent));
   const focus = head.querySelector(".worker-focus");
-  if (focus) writeAttribute(focus, "aria-pressed", focusViewOn() ? "true" : "false");
+  if (focus) writeAttribute(focus, "aria-pressed", conversationTimelineView ? "true" : "false");
   writeTextContent(head.querySelector(".worker-name"), run.name);
   const model = runModelWords(run) ?? "";
   const pill = head.querySelector(".chat-model");
@@ -15851,13 +15915,18 @@ function updateChatHead(head, run) {
   paintChatTally(head.querySelector(".chat-tally"), run);
 }
 
-/* The head's count of what the conversation did (t-22100, the mockup's
- * 「도구 9 · 웹 2 · 셸 1 · 파일 6 · 실패 0」): every call the page holds, each
- * family of them in the order it first came, how many failed — counted by the
- * steps' own table (`helperTally`, `stepLook`), so the head and the rows say
- * one thing. Repainted only when the log moved. */
+/* The head's count of what the conversation did: 「도구 20 · 실패 0」 (t-81525
+ * C9). Every call the page holds and how many failed stand on the line; each
+ * family of them in the order it first came — counted by the steps' own table
+ * (`helperTally`, `stepLook`), so the head and the rows say one thing — and the
+ * session the pane holds are its tooltip, where the line had them as words.
+ * Repainted only when the log or the session moved. */
 function paintChatTally(strip, run) {
-  const said = `${run.helper.seq}|${locale}`;
+  // The session is a wire's own or a pane's own conversation's; a helper's
+  // page stands in its parent's pane and names no session of the parent's.
+  const session = run.wire ? run.session ?? ""
+    : run.helper?.id === PANE_LOG_ID ? paneSessions.get(run.term)?.session?.id ?? "" : "";
+  const said = `${run.helper.seq}|${session}|${locale}`;
   if (strip.__said === said) return;
   strip.__said = said;
   const { total, failed, kinds, partial } = helperTally(run);
@@ -15874,13 +15943,10 @@ function paintChatTally(strip, run) {
   const whole = document.createElement("span");
   whole.className = "chat-tally-total";
   whole.textContent = tallyTotalWords(total, partial);
-  const parts = [...families].map(([family, count]) => {
-    const one = document.createElement("span");
-    one.className = "chat-tally-kind";
-    one.textContent = `${STEP_FAMILY_WORDS[family]()} ${count}`;
-    return one;
-  });
-  strip.replaceChildren(whole, ...parts, tallyFailedNode("chat-tally-failed", failed));
+  strip.replaceChildren(whole, tallyFailedNode("chat-tally-failed", failed));
+  const tip = [...families].map(([family, count]) => `${STEP_FAMILY_WORDS[family]()} ${count}`);
+  if (session) tip.push(t("paneHead.pick", "대화 {{session}}", { session }));
+  strip.dataset.tip = tip.join(" · ");
 }
 
 /* The two ends of a tally, the helper's strip's and the head's alike: the
@@ -16107,7 +16173,7 @@ function helperPageHeadNode(run, owner) {
   state.append(said, clock);
   const uses = document.createElement("span");
   uses.className = "worker-uses";
-  meta.append(focusViewButtonNode(), model, state, uses);
+  meta.append(timelineViewButtonNode(), model, state, uses);
   row.append(mark, name, role, meta);
   head.append(helperPageCrumbNode(run, owner), row);
   updateHelperPageHead(head, run, owner);
@@ -16119,7 +16185,7 @@ function updateHelperPageHead(head, run, owner) {
   writeTextContent(mark, agentVoice(run.agent).glyph);
   writeAttribute(mark, "aria-label", agentName(run.agent));
   const focus = head.querySelector(".worker-focus");
-  if (focus) writeAttribute(focus, "aria-pressed", focusViewOn() ? "true" : "false");
+  if (focus) writeAttribute(focus, "aria-pressed", conversationTimelineView ? "true" : "false");
   writeTextContent(head.querySelector(".worker-name"), run.name);
   updateHelperPageRole(head.querySelector(".helper-role"), run);
   updateHelperPageModel(head.querySelector(".helper-model"), run);
@@ -16838,6 +16904,7 @@ function watchChatDock(host, dock) {
     chatDockSeen = height;
     for (const reader of readers()) reader.style.setProperty("--chat-dock-h", height);
     if (follow) carryToFoot(list);
+    fitComposerSay(dock.querySelector(":scope > .worker-composer"));
   });
   watch.observe(dock);
   return watch;

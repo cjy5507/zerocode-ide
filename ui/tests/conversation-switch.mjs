@@ -700,7 +700,9 @@ async function testPaneHandover(browser, origin, ok, { refuse }) {
     seen.whileHanding = await page.evaluate((term) => ({
       paste: [...window.__HAND__.paste],
       wire: [...window.__HAND__.wire],
-      says: Boolean(document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat .pane-chat-notice[data-says="worker.handingOver"]`)),
+      // The head's running chip says it under the pointer (t-81525 C5).
+      says: document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat .chat-head .chat-run`)?.dataset.tip ===
+        t("worker.handingOver", "실시간 대화로 잇는 중입니다 — 그동안 보낸 글은 이어진 뒤에 갑니다."),
     }), term);
     // The wire stands (or is refused), and every word that waited has gone.
     await page.waitForTimeout(standMs + 200);

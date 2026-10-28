@@ -76,10 +76,9 @@ export async function testPaneConversation(browser, origin, ok) {
         answerLeftGap: Math.round(answerBox.left - listBox.left),
       };
     });
-    ok("what the person said is the extension's sticky header — the row sticks at the list's top, the box spans the list between its gutters with the input's 1px edge — and what the agent said stands on the rail beside it",
+    ok("what the person said last is the one sticky row — it sticks at the list's top — and their words stand on the right, under the hand that typed them, while the answer reads from the column's left (t-81525 B4)",
       placed.sticky === "sticky" && placed.stickyTop === "0px" &&
-      placed.boxLeftGap === placed.gutter && placed.boxRightGap === placed.gutter &&
-      placed.boxEdge === "1px" &&
+      placed.boxRightGap === placed.gutter && placed.boxLeftGap >= placed.gutter &&
       placed.answerLeftGap <= placed.boxLeftGap,
       JSON.stringify(placed));
 
@@ -304,14 +303,16 @@ export async function testPaneConversation(browser, origin, ok) {
       return {
         floats: style?.position === "absolute",
         inset: style ? [style.bottom, style.left, style.right].join(",") : "",
-        wantInset: [read("--chat-dock-inset"), read("--chat-dock-inset"), read("--chat-dock-inset")].join(","),
+        // Its left inset starts past the turn rail (t-22100).
+        wantInset: [read("--chat-dock-inset"), `${parseFloat(read("--chat-turn-rail-w")) + parseFloat(read("--chat-dock-inset"))}px`, read("--chat-dock-inset")].join(","),
         measure: style?.maxWidth ?? "",
         wantMeasure: read("--chat-dock-max"),
-        composerInDock: dock?.firstElementChild?.classList.contains("worker-composer") === true,
+        // The composer is the dock's last child: the state line stands joined over it (t-81525 C1).
+        composerInDock: dock?.lastElementChild?.classList.contains("worker-composer") === true,
         roomUnder: list && dock
           ? parseFloat(getComputedStyle(list).paddingBottom) >= dock.offsetHeight + parseFloat(read("--chat-list-pad-bottom"))
           : false,
-        fades: getComputedStyle(host, "::after").height === read("--chat-fade"),
+        fades: getComputedStyle(host, "::after").height === read("--chat-dock-fade") && getComputedStyle(host, "::after").maxWidth === read("--chat-dock-max"),
         statusLast: list?.lastElementChild?.classList.contains("helper-status") === true,
       };
     });
@@ -476,8 +477,8 @@ export async function testPaneConversation(browser, origin, ok) {
       nowLine.thinking.now === nowLine.wantThinking &&
       [nowLine.read, nowLine.bash, nowLine.waiting, nowLine.reconnecting, nowLine.thinking].every((one) => one.lead === nowLine.lead && !one.seeing.includes(nowLine.busy)),
       JSON.stringify(nowLine));
-    ok("a shell command behind a cd lead is said as 「셸 cargo test -p zo-ide · zo-ide」 — its command and its folder, no cd",
-      nowLine.shell.now === "셸 cargo test -p zo-ide · zo-ide",
+    ok("a shell command behind a cd lead is said as 「명령 cargo test -p zo-ide · zo-ide」 (t-81525 C7) — its command and its folder, no cd",
+      nowLine.shell.now === "명령 cargo test -p zo-ide · zo-ide",
       JSON.stringify(nowLine.shell));
     ok("a status that says quiet names nothing the page can name, and a status frame with no activity takes the line back to 「작업 중…」",
       nothingKnown(nowLine.quiet) && nothingKnown(nowLine.cleared),
@@ -485,6 +486,30 @@ export async function testPaneConversation(browser, origin, ok) {
     ok("the turn's end and the next turn's start take the activity away, and another session's status is not this pane's",
       nothingKnown(nowLine.ended) && nothingKnown(nowLine.restarted) && nothingKnown(nowLine.elsewhere),
       JSON.stringify({ ended: nowLine.ended, restarted: nowLine.restarted, elsewhere: nowLine.elsewhere }));
+
+    // ------------------------------------------------------- the window's own note (t-81525 C3)
+    const note = await page.evaluate(async () => {
+      const typed = "Commands still running under you when the window restarted were cut: `cargo test` — run again whichever you still need.";
+      window.__LOG__ = { next: 200, turns: [{ role: "window", text: typed }] };
+      await pollHelperPages();
+      window.__LOG__ = { next: 200, turns: [] };
+      await new Promise((r) => requestAnimationFrame(r));
+      const row = [...document.querySelectorAll(".helper-turns > [data-turn]")].at(-1);
+      const seen = {
+        note: row?.classList.contains("is-window-note") === true,
+        notPerson: !row?.classList.contains("is-user"),
+        words: row?.querySelector(".helper-window-note-words")?.textContent ?? "",
+        want: `${t("worker.windowNote", "창 알림 · 창이 다시 시작되어 이어 가라고 알렸습니다")} · ${t("worker.windowNoteOpen", "원문")}`,
+        bornClosed: !row?.querySelector(".helper-window-note-said"),
+      };
+      row?.querySelector("summary")?.click();
+      await new Promise((r) => requestAnimationFrame(r));
+      seen.opened = row?.querySelector(".helper-window-note-said")?.textContent === typed;
+      return seen;
+    });
+    ok("a nudge the window typed into the pane stands as its own thin 「창 알림」 line, not the person's bubble, its words behind 「원문」 (t-81525 C3)",
+      note.note && note.notPerson && note.words === note.want && note.bornClosed && note.opened,
+      JSON.stringify(note));
 
     await page.screenshot({ path: "output/playwright/pane-conversation/chat.png" });
     ok("the conversation raised no page errors", faults.length === 0, faults.join("\n"));

@@ -754,7 +754,8 @@ export async function testConversationScroll(browser, origin, ok) {
     // The one way back to the foot is the person's button (사용자 요청 09-24),
     // and at the foot it is not shown.
     seen.footDoor = await page.evaluate(() => {
-      const doors = document.querySelector("#worker-view").querySelectorAll(".chat-foot-door, [class*='latest'], [class*='jump']");
+      // `is-latest` marks the newest answer and words (t-81525 B3·B4), not a door.
+      const doors = document.querySelector("#worker-view").querySelectorAll(".chat-foot-door, [class*='latest']:not(.is-latest), [class*='jump']");
       return { doors: doors.length, shown: doors[0]?.classList.contains("is-shown") ?? null };
     });
     ok(
@@ -911,6 +912,27 @@ export async function testConversationFoot(browser, origin, ok) {
       const rect = window.__FOOT__.door()?.getBoundingClientRect();
       return rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
     });
+    // Centred on the column over the composer, a round 28px mark that says
+    // its name twice (t-81525 C6).
+    seen.doorPlace = await page.evaluate(() => {
+      const door = window.__FOOT__.door();
+      const dock = door?.closest(".worker-view")?.querySelector(":scope > .chat-dock");
+      if (!door || !dock) return null;
+      const at = door.getBoundingClientRect();
+      const under = dock.getBoundingClientRect();
+      const probe = document.createElement("i");
+      probe.style.width = "var(--control-height-sm)";
+      document.body.append(probe);
+      const want = probe.getBoundingClientRect().width;
+      probe.remove();
+      return {
+        off: Math.round(Math.abs((at.left + at.width / 2) - (under.left + under.width / 2))),
+        above: Math.round(under.top - at.bottom),
+        size: [Math.round(at.width), Math.round(at.height)],
+        want,
+        tip: door.dataset.tip === door.getAttribute("aria-label"),
+      };
+    });
     if (doorAt) await page.mouse.click(doorAt.x, doorAt.y);
     seen.pressed = await still();
     seen.followsAgain = await grow();
@@ -928,6 +950,12 @@ export async function testConversationFoot(browser, origin, ok) {
         seen.pressed.gap <= 1 && seen.pressed.door === false && seen.followsAgain.gap <= 1 && seen.followsAgain.door === false &&
         seen.leftAgain.door === true && seen.entered.gap <= 1 && seen.entered.door === false,
       JSON.stringify(seen),
+    );
+    ok(
+      "the way back to the foot is a round 28px mark centred over the composer, named twice (t-81525 C6)",
+      seen.doorPlace !== null && seen.doorPlace.off <= 1 && seen.doorPlace.above >= 0 &&
+        seen.doorPlace.size[0] === seen.doorPlace.want && seen.doorPlace.size[1] === seen.doorPlace.want && seen.doorPlace.tip,
+      JSON.stringify(seen.doorPlace),
     );
 
     // --- reopening_the_same_conversation_keeps_the_readers_place ----------
@@ -985,6 +1013,7 @@ export async function testConversationFoot(browser, origin, ok) {
         const door = window.__FOOT__.door();
         words[code] = door && {
           label: door.getAttribute("aria-label"),
+          tip: door.dataset.tip,
           said: door.textContent.trim(),
           titled: door.hasAttribute("title") || door.querySelector("[title]") !== null,
         };
@@ -994,8 +1023,8 @@ export async function testConversationFoot(browser, origin, ok) {
     });
     const spoken = Object.values(seen.words);
     ok(
-      "the_button_names_itself_in_five_languages_without_a_title: the button says its name in ko, en, ja, zh and es — five different sentences, the words it shows the same as the name it is read by — and carries no title tooltip",
-      spoken.every((one) => one && one.label && one.said === one.label && !one.titled) &&
+      "the_button_names_itself_in_five_languages_without_a_title: the round mark (t-81525 C6) says its name in ko, en, ja, zh and es — five different sentences, read by the same words its tooltip shows — and carries no title",
+      spoken.every((one) => one && one.label && one.tip === one.label && one.said === "" && !one.titled) &&
         new Set(spoken.map((one) => one?.label)).size === 5,
       JSON.stringify(seen.words),
     );
@@ -1097,9 +1126,8 @@ export async function testConversationAgents(browser, origin, ok) {
  * `qD1` / `PG0`) under the head 「Update Todos」: the items' content beside a
  * box — ticked when done, `✽` under way, empty waiting — a done item faded
  * and struck through, and no count, `activeForm` or result line. Every call
- * is its own row. In the Focus view the newest call that has not failed
- * stands out of its fold, out or back (`ew0`), and none stands when that
- * call emptied the list. */
+ * is its own row on the whole timeline; folded, a turn's calls are one pill
+ * (t-81525 B1). */
 export async function testConversationTodos(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -1108,6 +1136,8 @@ export async function testConversationTodos(browser, origin, ok) {
     }, null, 2);
     const call = (id, states) => ({ role: "tool", text: "TodoWrite", tool: { call_id: id, name: "TodoWrite", kind: "TodoWrite", input: todos(states), is_error: false } });
     const result = (id) => ({ role: "tool_result", text: "Todos have been modified successfully.", tool: { call_id: id, name: "TodoWrite", kind: "TodoWrite", input: "", is_error: false } });
+    // The rows themselves are read on the whole timeline, the harness's
+    // (t-81525 B1); the folded page is read at the end.
     await openConversation(page, [
       { role: "user", text: "시작" },
       call("t1", ["in_progress", "pending", "pending"]),
@@ -1163,41 +1193,22 @@ export async function testConversationTodos(browser, origin, ok) {
       seen.argEmpty = rows.every((row) => row.querySelector(".helper-step-target")?.textContent === "");
       for (const row of rows) row.open = false;
       await settle();
-      // The Focus view: the newest list stands out of its fold.
-      face.querySelector(".worker-focus").click();
+      // Folded (t-81525 B1): the todo calls and the reads between two answers
+      // are one pill, their rows built only when it opens; the whole timeline
+      // again, every list stands as its own row.
+      conversationTimelineView = false;
+      repaintTimelineView();
       await settle();
-      const shown = (row) => row && !row.hidden && row.getBoundingClientRect().height > 0;
-      const standing = () => todoRows().map(shown);
-      seen.focusFirst = shown(rows[0]);
-      seen.focusLatest = shown(rows[1]);
-      seen.focusListStands = rows[1]?.open === true && rows[1].querySelector(".helper-todos") !== null && rows[0]?.open === false;
-      seen.readsFolded = [...face.querySelectorAll(".helper-turn.is-tool:not(.is-todo)")].every((row) => row.hidden);
-      // A newer list takes its place, and the one before goes back in.
-      const log = window.__CONVERSATION__;
-      log.turns.push(call("t3", ["completed", "completed", "in_progress"]), result("t3"));
+      const pills = [...face.querySelectorAll(".helper-turns > .helper-group")];
+      seen.foldedRows = todoRows().length;
+      seen.pills = pills.length;
+      pills[0]?.querySelector(".helper-group-cap")?.click();
       await settle();
-      seen.afterThird = standing();
-      // A call still out stands already; one that failed gives way to the one
-      // before it. (A row is dressed again while it is out — while the run
-      // runs — so the turn is out for those two beats.)
-      log.status = "working";
-      log.turns.push(call("t4", ["completed", "completed", "completed"]));
+      seen.openedRows = todoRows().length;
+      conversationTimelineView = true;
+      repaintTimelineView();
       await settle();
-      seen.whileOut = standing();
-      seen.outIsLive = todoRows().at(-1)?.classList.contains("is-live");
-      log.turns.push({ ...result("t4"), text: "InputValidationError", tool: { ...result("t4").tool, is_error: true } });
-      await settle();
-      log.status = "idle";
-      await settle();
-      seen.afterFailure = standing();
-      // A call that empties the list is a head alone, and nothing stands.
-      log.turns.push({ role: "tool", text: "TodoWrite", tool: { call_id: "t5", name: "TodoWrite", kind: "TodoWrite", input: JSON.stringify({ todos: [] }), is_error: false } }, result("t5"));
-      await settle();
-      seen.emptied = standing();
-      seen.emptyHead = todoRows().at(-1)?.querySelector(".helper-todos") === null;
-      face.querySelector(".worker-focus").click();
-      await settle();
-      seen.allBack = todoRows().every(shown);
+      seen.allBack = todoRows().length === 2 && todoRows().every((row) => !row.hidden);
       return seen;
     });
     ok(
@@ -1211,13 +1222,8 @@ export async function testConversationTodos(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A7: in the Focus view the newest list stands out of its fold, open, while the older ones and the reads stay folded — a call still out stands at once, a failed one gives way to the one before it, a call that emptied the list leaves none standing — and off again every list stands",
-      seen?.focusFirst === false && seen.focusLatest === true && seen.focusListStands && seen.readsFolded &&
-        JSON.stringify(seen.afterThird) === JSON.stringify([false, false, true]) &&
-        JSON.stringify(seen.whileOut) === JSON.stringify([false, false, false, true]) && seen.outIsLive === true &&
-        JSON.stringify(seen.afterFailure) === JSON.stringify([false, false, true, false]) &&
-        JSON.stringify(seen.emptied) === JSON.stringify([false, false, false, false, false]) && seen.emptyHead &&
-        seen.allBack,
+      "A7: folded (t-81525 B1), the todo calls and the reads of one turn are one pill with no row of their own until it opens — then both lists stand — and with the whole timeline every list stands again",
+      seen?.foldedRows === 0 && seen.pills === 1 && seen.openedRows === 2 && seen.allBack,
       JSON.stringify(seen),
     );
     ok("A7: the todo lists raised no page errors", faults.length === 0, faults.join("\n"));
@@ -1568,7 +1574,9 @@ export async function testConversationShelf(browser, origin, ok) {
       list.scrollTop = 0;
       await frames(4);
       await new Promise((done) => setTimeout(done, 50));
-      const focused = rows().find((row) => row.classList.contains("is-assistant") && reach()(row) && row.querySelector(":scope > .helper-actions .helper-copy"));
+      // The list's one copy comes to the answer the pointer reaches (t-81525 C8).
+      const focused = rows().find((row) => row.classList.contains("is-assistant") && reach()(row));
+      focused?.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
       const door = focused?.querySelector(":scope > .helper-actions .helper-copy") ?? null;
       door?.focus();
       list.scrollTop = list.scrollHeight;
@@ -1836,7 +1844,6 @@ export async function testConversationSteps(browser, origin, ok) {
   await stepsThoughtLine(browser, origin, ok);
   await stepsThoughtHandOver(browser, origin, ok);
   await stepsThoughtWrites(browser, origin, ok);
-  await stepsFocusKeepsOpen(browser, origin, ok);
   await stepsSpaceOnALine(browser, origin, ok);
   await stepsSpaceBesideTheGraph(browser, origin, ok);
   await stepsStillPage(browser, origin, ok);
@@ -2466,7 +2473,7 @@ async function stepsByKind(browser, origin, ok) {
         looks: {
           read: t("worker.stepRead", "파일 읽기"),
           grep: t("worker.stepSearch", "검색"),
-          bash: t("worker.stepShell", "셸"),
+          bash: t("worker.stepShell", "명령"),
           web: t("worker.stepWeb", "웹 읽기"),
           websearch: t("worker.stepWebSearch", "웹 검색"),
           task: t("worker.stepTask", "헬퍼 호출"),
@@ -2763,98 +2770,6 @@ async function stepsThoughtWrites(browser, origin, ok) {
   }
 }
 
-/* C15 — turning the Focus view on keeps what a person had open. The Focus
- * view keeps its rows single, so a row of steps gives its members back as
- * rows of their own: the member that was open comes back open, the others
- * closed, and the keyboard, where it was on the row or on that member, is held
- * by what stands for it — the row's line, or the head of the fold that now
- * covers it. */
-async function stepsFocusKeepsOpen(browser, origin, ok) {
-  const seen = {};
-  const faulted = [];
-  for (const scenario of ["member", "run"]) {
-    const { page, faults } = await openWindowTestPage(browser, origin);
-    try {
-      await openConversation(page, stepsFixture(), { status: "idle" });
-      await installStepsProbe(page);
-      seen[scenario] = await page.evaluate(async ({ scenario, file }) => {
-        const { list, rows, lineOf, shown, settle } = window.__STEPS__;
-        const wait = (ms) => new Promise((done) => setTimeout(done, ms));
-        const out = {};
-        const run = rows().find((row) => row.classList.contains("is-run"));
-        out.hasRun = run !== undefined;
-        lineOf(run).click();
-        await wait(60);
-        await settle();
-        const members = [...run.querySelectorAll(":scope > .helper-run-body > .helper-turn")];
-        out.members = members.length;
-        const seqs = members.map((member) => member.dataset.turn);
-        if (scenario === "member") {
-          lineOf(members[2]).click();
-          await wait(60);
-          await settle();
-          lineOf(members[2]).focus();
-        } else {
-          lineOf(run).focus();
-        }
-        out.before = {
-          run: run.open,
-          open: members.map((member) => member.open),
-          held: document.activeElement === lineOf(scenario === "member" ? members[2] : run),
-        };
-        document.querySelector("#worker-view .worker-focus").click();
-        await wait(60);
-        await settle();
-        const row = (seq) => list().querySelector(`:scope > [data-turn="${seq}"]`);
-        // What stands for a row on screen: its line, or — when the Focus view
-        // has folded it under a head — the head.
-        const standing = (seq) => {
-          const one = row(seq);
-          return one === null ? null : one.hidden ? one.__group?.firstElementChild ?? null : lineOf(one);
-        };
-        const stands = standing(scenario === "member" ? seqs[2] : seqs[0]);
-        out.after = {
-          runs: list().querySelectorAll(":scope > .is-run").length,
-          singles: seqs.map((seq) => row(seq) !== null),
-          open: seqs.map((seq) => row(seq)?.open === true),
-          held: stands !== null && document.activeElement === stands,
-          active: document.activeElement?.tagName ?? null,
-        };
-        if (scenario === "member") {
-          // The fold opened, the member is open in it with its file.
-          row(seqs[2])?.__group?.firstElementChild?.click();
-          await wait(60);
-          await settle();
-          out.shown = row(seqs[2]) !== null && shown(row(seqs[2]), `MARK_TWO ${file}`);
-        }
-        return out;
-      }, { scenario, file: READ_FIRST[2] });
-      faulted.push(...faults);
-    } finally {
-      await page.close();
-    }
-  }
-  const only = (open, at) => JSON.stringify(open) === JSON.stringify([0, 1, 2, 3, 4, 5].map((one) => one === at));
-  ok(
-    "C15: the Focus view gives a row of steps back as single rows, and the member a person had open comes back open — the others closed — with its file in it when the fold that covers it is pressed",
-    seen.member.hasRun && seen.member.members === 6 && seen.member.before.open[2] === true && seen.member.after.runs === 0 &&
-      seen.member.after.singles.every(Boolean) && only(seen.member.after.open, 2) && seen.member.shown === true,
-    JSON.stringify(seen.member),
-  );
-  ok(
-    "C15: the keyboard, on the line of the member that was open, is held by what stands for it when the Focus view comes on — not dropped to the body",
-    seen.member.before.held && seen.member.after.held,
-    JSON.stringify(seen.member),
-  );
-  ok(
-    "C15: the keyboard on a row of steps itself is held by what stands for that row when the Focus view comes on — the first of its members, or the fold's head — and no member is opened that was not",
-    seen.run.hasRun && seen.run.before.held && seen.run.after.singles.every(Boolean) && only(seen.run.after.open, -1) &&
-      seen.run.after.held,
-    JSON.stringify(seen.run),
-  );
-  ok("C15: the Focus view raised no page errors", faulted.length === 0, faulted.join("\n"));
-}
-
 /* Enough turns before the fixture's own that the list scrolls. */
 function paddedFixture() {
   const filler = Array.from({ length: 30 }, (_, at) => ({
@@ -3114,7 +3029,10 @@ async function stepsShellTitle(browser, origin, ok) {
       seen.search = targetOf(rowOf("q1"));
       const run = steps().find((row) => row.classList.contains("is-run") && row.__kind === "bash");
       seen.run = targetOf(run);
+      seen.runRes = lineOf(run)?.querySelector(".helper-step-res")?.textContent ?? null;
+      seen.runKind = lineOf(run)?.querySelector(".helper-step-kind")?.textContent ?? null;
       seen.runMore = t("worker.stepMore", "외 {{n}}개", { n: 1 });
+      seen.wantRunKind = t("worker.stepShellRun", "명령 {{n}}개 실행", { n: 2 });
       // The opened row keeps the whole command.
       lineOf(rowOf("s1")).click();
       await settle();
@@ -3145,7 +3063,7 @@ async function stepsShellTitle(browser, origin, ok) {
     ok(
       "D1: only a shell step is read as a command — a search of the web whose query begins `cd /tmp &&` keeps its words — and a row of shell steps is titled like one step, then how many more stand behind it",
       seen.search === "cd /tmp && ls" && seen.run.includes("git status") && seen.run.includes(" · shop-app") &&
-        !/(^|\s)cd\s/.test(seen.run) && seen.run.endsWith(seen.runMore),
+        !/(^|\s)cd\s/.test(seen.run) && !seen.run.endsWith(seen.runMore) && seen.runRes === seen.runMore && seen.runKind === seen.wantRunKind,
       JSON.stringify({ search: seen.search, run: seen.run }),
     );
     ok(
@@ -3794,6 +3712,7 @@ async function stepsWebResults(browser, origin, ok) {
         fetch: partOf("wf1", ".helper-step-res"),
         empty: partOf("ws2", ".helper-step-res"),
         shell: partOf("sh1", ".helper-step-kind"),
+        wantShell: t("worker.stepShell", "명령"),
         gone: partOf("wf2", ".helper-step-res"),
         goneInk: lineOf(rowOf("wf2"))?.querySelector(".helper-step-status")?.classList.contains("is-bad") ?? false,
         fetched: partOf("wf3", ".helper-step-res"),
@@ -3812,8 +3731,8 @@ async function stepsWebResults(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "D7: a shell step's kind is worded 「셸」 — the mockup's word — not 「셸 실행」",
-      seen.shell === "셸",
+      "D7: a shell step's kind is worded 「명령」 — the passed conversation's word (t-81525 C7) — not 「셸」",
+      seen.shell === seen.wantShell,
       JSON.stringify(seen),
     );
     ok("D7: the web results raised no page errors", faults.length === 0, faults.join("\n"));
@@ -4239,7 +4158,7 @@ async function stepsWebKinds(browser, origin, ok) {
       kinds: strip ? [...strip.querySelectorAll(".helper-tally-kind")].map((one) => one.textContent) : null,
       web: t("worker.stepWeb", "웹 읽기"),
       search: t("worker.stepWebSearch", "웹 검색"),
-      shell: t("worker.stepShell", "셸"),
+      shell: t("worker.stepShell", "명령"),
       reads: t("worker.stepRead", "파일 읽기"),
     };
   });

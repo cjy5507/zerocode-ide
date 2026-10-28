@@ -312,7 +312,9 @@ pub(crate) fn pane_log(
             about: None,
         });
     };
-    transcript_log_at(&path, after)
+    let mut log = transcript_log_at(&path, after)?;
+    restart_nudge_runtime::mark_window_notes(&mut log.turns);
+    Ok(log)
 }
 
 /// The longest line a transcript read takes whole: past a message with a

@@ -103,7 +103,11 @@ async function testChromeSidebarAndTabs(browser, origin, ok) {
       };
       const nav = document.querySelector(".nav-rows");
       const rows = [...nav.querySelectorAll(":scope > .nav-row")].filter((row) => !row.hidden);
-      const lines = new Set(rows.map((row) => Math.round(box(row).top)));
+      const cells = [...rows, nav.querySelector(":scope > .nav-search")];
+      const lines = new Set(cells.map((row) => Math.round(box(row).top)));
+      const lefts = new Set(cells.map((row) => Math.round(box(row).left)));
+      const widths = new Set(cells.map((row) => Math.round(box(row).width)));
+      const badge = document.getElementById("inbox-badge");
       const tab = [...document.querySelectorAll(".tab")].find((one) => one.querySelector(".tab-age")?.textContent);
       const label = tab?.querySelector(".tab-label");
       const age = tab?.querySelector(".tab-age");
@@ -115,6 +119,12 @@ async function testChromeSidebarAndTabs(browser, origin, ok) {
       const resting = document.querySelector(".proj-resting");
       return {
         navLines: lines.size,
+        navColumns: lefts.size,
+        navWidths: widths.size,
+        navCells: cells.length,
+        navWhole: rows.every((row) => [...row.querySelectorAll(":scope > span:not(.nav-badge)")].every((name) => name.scrollWidth <= name.clientWidth + 1)),
+        badgeInk: badge ? getComputedStyle(badge).backgroundColor : null,
+        you: token("--signal-you-solid"),
         navRows: rows.length,
         navHeight: Math.round(box(nav).height),
         tabAge: age?.textContent ?? null,
@@ -136,8 +146,33 @@ async function testChromeSidebarAndTabs(browser, origin, ok) {
         floor: token("--surface-abyss"),
       };
     });
-    ok("the seven destinations stand on two lines, not seven (시안 3)",
-      seen.navLines === 2 && seen.navRows >= 6, JSON.stringify(seen));
+    ok("the destinations and the search stand in two even columns, every name whole (t-81525 S1)",
+      seen.navColumns === 2 && seen.navWidths === 1 && seen.navLines === Math.ceil(seen.navCells / 2) && seen.navRows >= 6 && seen.navWhole,
+      JSON.stringify(seen));
+    ok("the inbox's number is the one blue, not a lane's hue (t-81525 S1)",
+      seen.badgeInk === seen.you, JSON.stringify(seen));
+    // Every destination's name stands whole at 12px in each language, in the
+    // column the person reads (378px) and the window's default (t-81525 S1).
+    const names = await page.evaluate(async () => {
+      const cut = {};
+      const root = document.documentElement;
+      const was = root.style.getPropertyValue("--sidebar-width");
+      for (const width of ["378px", ""]) {
+        root.style.setProperty("--sidebar-width", width);
+        for (const code of ["ko", "en", "ja", "zh", "es"]) {
+          setLocale(code, { persist: false });
+          await window.__PAINTED__();
+          const spans = [...document.querySelectorAll(".nav-rows > .nav-row:not([hidden]) > span:not(.nav-badge)")];
+          cut[`${width || "default"}-${code}`] = spans.filter((name) => name.scrollWidth > name.clientWidth + 1 || name.scrollHeight > name.clientHeight + 1).map((name) => name.textContent);
+        }
+      }
+      root.style.setProperty("--sidebar-width", was);
+      setLocale("ko", { persist: false });
+      await window.__PAINTED__();
+      return cut;
+    });
+    ok("every destination's name stands whole at 12px in all five languages — a second line where the column is narrow —, at the person's 378px column and the default width (t-81525 S1)",
+      Object.values(names).every((cut) => cut.length === 0), JSON.stringify(names));
     ok("a tab with an agent wears its state dot and how long it has run, right after its name (시안 2)",
       seen.dotShown && seen.dotInk === seen.ready && /^(now|\d+[mhd])$/.test(seen.tabAge ?? "") && seen.ageAfterName !== null && seen.ageAfterName < 12,
       JSON.stringify(seen));

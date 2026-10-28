@@ -535,9 +535,17 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 
 /* A notice stands above the conversation's body, its words on the list's
  * left edge: the rail's column and the list's gutter, as the rows below. */
+/* A notice over the turns is a small pill centred over the list (t-81525 C5):
+ * the margins keep it off the turn rail's column, `align-self` stands it in
+ * the middle of what is left, and a long reason wraps inside it. */
 .pane-chat-notice {
-  margin: var(--space-3) var(--helper-gutter, var(--chat-list-pad-x)) 0
+  align-self: center;
+  max-width: min(var(--reading-column), calc(100% - var(--chat-turn-rail-w) - 2 * var(--helper-gutter, var(--chat-list-pad-x))));
+  margin: var(--space-2) var(--helper-gutter, var(--chat-list-pad-x)) 0
     calc(var(--chat-turn-rail-w) + var(--helper-gutter, var(--chat-list-pad-x)));
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
+  background: var(--chat-tool-bg);
   color: var(--ink-mist);
   font-size: var(--text-xs);
 }
@@ -804,17 +812,19 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   padding-inline-start: var(--nav-inset);
 }
 
-/* The two rows Orca heads this column with, above the project tree. Quieter
- * than a worktree row — they are shortcuts to somewhere else, not the thing
- * this column is about — and set at the same 13px so the column has one
- * reading size rather than three. */
+/* The destinations Orca heads this column with, above the project tree.
+ * Quieter than a worktree row — they are shortcuts to somewhere else, not the
+ * thing this column is about.
+ *
+ * Two even columns (t-81525 S1, the menu the person passed on 2026-10-29):
+ * seven destinations and the search in four lines of two, the height the
+ * wrapped rows took (about 130 px), with every line ending on the same edge
+ * and no destination left alone on a line of its own. The menu reads its
+ * column's width (`@container threads`), so a narrow column folds it, not the
+ * window. */
 .nav-rows {
-  display: flex;
-  /* 2차 A (t-78107, 시안 「또렷한 Geist」 3): the seven destinations wrap in
-   * their own words onto two lines instead of standing seven rows tall — the
-   * column's top went from 245 px to about 106, and the agents at work start
-   * that much higher. The setup entry and the search keep a line each. */
-  flex-flow: row wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   /* The layer's own inset, now that the column has none: `gap-0.5 px-2 pt-2
    * pb-1` (SidebarNav.tsx:106). The bottom is the shallow side because the
    * header below brings its own `mt-2`. */
@@ -822,9 +832,66 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   padding: var(--space-2) var(--space-2) var(--space-1);
 }
 
-.nav-rows > .guide-entry,
-.nav-rows > .nav-search {
-  flex-basis: 100%;
+/* The setup entry keeps a line of its own; the search is the eighth cell. */
+.nav-rows > .guide-entry {
+  grid-column: 1 / -1;
+}
+
+/* A name too long for its half takes a second line rather than lose its
+ * end — a long language in a narrow column (Spanish at the default 280px);
+ * one long word breaks at a hyphen in the document's language, and only in
+ * these names; past two lines it ends in an ellipsis and the tooltip says it
+ * whole. A name that fits stays one line, so the rows keep their height. */
+.nav-row > span:not(.nav-badge) {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  hyphens: auto;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: var(--leading-tight);
+}
+
+/* Under about 240 px the halves cannot hold a name: the menu becomes one line
+ * of marks. The names stay in the buttons for a screen reader — clipped, not
+ * removed, so each button is still named once — and the tooltip (`data-tip`)
+ * says them to the eye. */
+@container threads (max-width: 240px) {
+  .nav-rows {
+    grid-template-columns: repeat(auto-fill, minmax(var(--control-height-sm), 1fr));
+  }
+
+  .nav-row {
+    position: relative;
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .nav-row > span:not(.nav-badge),
+  .nav-search > :not(.nav-search-glyph) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .nav-row > .nav-badge {
+    position: absolute;
+    top: 0;
+    right: 0;
+  }
+
+  .nav-search {
+    padding-inline: 0;
+  }
+
+  .nav-search-glyph {
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
 }
 
 /* In its original seat the setup entry is the nav's FIRST row
@@ -850,10 +917,11 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   background: none;
   color: var(--ink-mist);
   font: inherit;
-  /* `text-[13px]` — not the 12px of a list row. These four are DESTINATIONS
-   * rather than contents, and Orca sets them a step above the rows they sit
-   * among for that reason (`App-BaqTRjaA.js:8921`). */
-  font-size: var(--text-sm);
+  /* 12px, the two-column menu's own size (t-81525 S1): Orca's 13px left
+   * three names to a line and the seventh alone on the next; at 12 every name
+   * stands whole in half the column. */
+  font-size: var(--text-xs);
+  min-width: 0;
   font-weight: 500;
   /* `tracking-tight`, which Orca sets on this row and on no other in the
    * column (`App-BaqTRjaA.js:8758`). At 13px it is the difference between a
@@ -1379,6 +1447,10 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
  * titanium active recipe below: routine navigation keeps presence without
  * becoming a raised card. */
 .threads {
+  /* The menu above the tree folds on the column's width (t-81525 S1). The
+   * column's width is its grid track's, never its content's, so the
+   * containment changes nothing it lays out. */
+  container: threads / inline-size;
   display: flex;
   flex-direction: column;
   /* No inset of its own, and nothing here scrolls: Orca's column is
@@ -6074,8 +6146,16 @@ svg.wt-agent-dot {
 
 /* Untitled, the bar is chromeless — Orca's `data-chromeless`: no strip, no
  * rule, no layout room, only the actions floating in the pane's top-right
- * corner. The bar itself lets the pointer through; the buttons take it back. */
-.pane-title-bar[data-chromeless] {
+ * corner. The bar itself lets the pointer through; the buttons take it back.
+ * A pane whose head already says its name (`.is-named-above`, a tab of one
+ * pane, t-81525 C14) wears its bar the same way — the name once, in the head
+ * — except while the name is being typed there. */
+.pane-slot.is-named-above > .pane-title-bar:not(:has(> .pane-title-input)) > .pane-title-text {
+  display: none;
+}
+
+.pane-title-bar[data-chromeless],
+.pane-slot.is-named-above > .pane-title-bar:not(:has(> .pane-title-input)) {
   position: absolute;
   top: 2px;
   right: 2px;
@@ -6087,7 +6167,8 @@ svg.wt-agent-dot {
   pointer-events: none;
 }
 
-.pane-title-bar[data-chromeless] .pane-title-act {
+.pane-title-bar[data-chromeless] .pane-title-act,
+.pane-slot.is-named-above > .pane-title-bar .pane-title-act {
   pointer-events: auto;
 }
 
@@ -14565,6 +14646,15 @@ body.mod-held .term-link,
   clip-path: inset(50%);
 }
 
+/* Clipped to nothing is not stopped: the ring and the live dots of a page set
+ * aside kept turning under the clip (t-81525 C11). They hold still while the
+ * page stands behind — only the animated parts are named, the same ones
+ * reduced motion names, so a press restyles those and not every row. */
+:is(.pane > .worker-view, .pane-slot > .pane-chat).is-behind :is(.helper-step-dot, .helper-state-dot, .helper-agent-dot, .helper-status, .helper-status-ring, .chat-run-dot),
+:is(.pane > .worker-view, .pane-slot > .pane-chat).is-behind .helper-group-cap::before {
+  animation-play-state: paused;
+}
+
 .worker-head {
   display: flex;
   flex-wrap: wrap;
@@ -14700,11 +14790,12 @@ body.mod-held .term-link,
   background: var(--chat-dot-failed);
 }
 
-/* What it did, counted: the whole, each family, how many failed — at the
- * right, cut before it can push the chips. */
+/* What it did, counted: the whole and how many failed, 「도구 20 · 실패 0」 —
+ * at the right, cut before it can push the chips. Each family and the session
+ * are its tooltip (t-81525 C9). */
 .chat-tally {
   display: inline-flex;
-  gap: var(--space-2);
+  gap: var(--space-1);
   min-width: 0;
   margin-left: auto;
   overflow: hidden;
@@ -14724,6 +14815,11 @@ body.mod-held .term-link,
 
 .chat-tally-failed.is-failed {
   color: var(--signal-halt-ink);
+}
+
+.chat-tally-total + .chat-tally-failed::before {
+  content: "· ";
+  color: var(--ink-mist);
 }
 
 .is-chat-page .worker-where {
@@ -14917,17 +15013,34 @@ details.worker-command {
  * turn scrolls under it, padded above and below, its last stretch fading to
  * the ground; the box with the words is its child (`.helper-said`). */
 .helper-turn.is-user {
-  position: sticky;
-  top: 0;
-  z-index: 2;
   display: block;
   margin: var(--chat-bubble-gap) 0;
   padding: var(--chat-sticky-pad-top) 0 var(--chat-sticky-pad-bottom);
-  background-image: linear-gradient(
-    to bottom,
-    var(--chat-ground) calc(100% - var(--chat-sticky-fade)),
-    transparent 100%
-  );
+}
+
+/* Only the newest words stick (t-81525 B4, `dressLastPerson`): one sticky
+ * row and one layer a page, not one for every time the person spoke. */
+.helper-turn.is-user.is-latest {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background-color: var(--chat-ground);
+}
+
+/* The extension's fade hangs under the row, past its pad (t-81525 r2): drawn
+ * inside the pad, its 12px lay exactly over the pad under the bubble, and
+ * with the bubble standing narrow on the right, the answer scrolling under it
+ * showed through on the left. The row is the ground to its foot; the rows
+ * scrolling under it fade in below. */
+.helper-turn.is-user.is-latest::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  right: 0;
+  left: 0;
+  height: var(--chat-sticky-fade);
+  background-image: linear-gradient(to bottom, var(--chat-ground), transparent);
+  pointer-events: none;
 }
 
 .helper-turn.is-user:first-child {
@@ -14939,60 +15052,69 @@ details.worker-command {
   white-space: pre-wrap;
 }
 
-/* Every step the agent takes stands on one timeline — the extension's
- * panel (2.1.278 `timelineMessage`): the row padded left for the rail, a dot
- * in the gutter at the first line, and a 1px rail from the dot down to the
- * next step's, so a turn's steps read as one thread. The answer's dot is the
- * quiet one; a tool row's dot is the state of the call (below). Dot and
- * rail are the row's pseudo-elements, so a 400-turn page pays no node for
- * them. The rail starts at the first step's dot, ends a dot's reach below
- * the last step's, and a lone step has none. */
-/* 걸음 하나 — 턴의 행이거나, Focus view가 그 행들 앞에 세운 묶음 머리다.
- * 둘은 같은 자 위에 서므로 규칙도 하나다(`:is()`): 묶음 머리를 다른 자에
- * 세우면 레일이 그 한 줄에서 어긋난다. */
-:is(.helper-turn, .helper-group).is-step {
+/* An answer is bare prose in the reading column (t-81525 B3): no dot, no
+ * rail, the row's pad above and below. The newest answer reads in the full
+ * ink; the ones before it a step back (`--chat-said-earlier`), so the eye
+ * lands on what was said last. */
+.helper-turn.is-assistant {
   position: relative;
-  padding: var(--chat-row-pad) 0 var(--chat-row-pad) var(--chat-gutter);
+  /* The room under the words is the action row's (`.helper-actions`, C8). */
+  padding: var(--chat-row-pad) 0 var(--chat-actions-h);
 }
 
-:is(.helper-turn, .helper-group).is-step::before {
-  content: "";
-  position: absolute;
-  left: var(--chat-rail-dot-x);
-  top: calc(var(--chat-row-pad) + var(--chat-rail-dot-y));
-  z-index: 1;
-  width: var(--chat-dot);
-  height: var(--chat-dot);
-  border-radius: 50%;
-  background: var(--chat-work-ink);
+.helper-turn.is-assistant:not(.is-latest, .is-streaming) > .helper-said {
+  color: var(--chat-said-earlier);
 }
 
-:is(.helper-turn, .helper-group).is-step::after {
-  content: "";
-  position: absolute;
-  left: var(--chat-rail-x);
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: var(--chat-divider);
+/* The window's own note to the agent (t-81525 C3): a thin line across the
+ * column with its words in the middle, the words it typed behind 「원문」. */
+.helper-turn.is-window-note {
+  margin: var(--space-2) 0;
+  color: var(--ink-mist);
+  font-size: var(--text-xs);
 }
 
-:is(.helper-turn, .helper-group).is-step:not(:is(.helper-turn, .helper-group).is-step + :is(.helper-turn, .helper-group).is-step)::after {
-  top: calc(var(--chat-row-pad) + var(--chat-rail-dot-y) + var(--chat-dot) / 2);
+.helper-window-note-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  list-style: none;
+  cursor: pointer;
 }
 
-:is(.helper-turn, .helper-group).is-step:not(:has(+ :is(.helper-turn, .helper-group).is-step))::after {
-  bottom: auto;
-  height: calc(var(--chat-row-pad) + var(--chat-rail-dot-y) + var(--chat-dot) / 2);
-}
-
-:is(.helper-turn, .helper-group).is-step:not(:is(.helper-turn, .helper-group).is-step + :is(.helper-turn, .helper-group).is-step):not(:has(+ :is(.helper-turn, .helper-group).is-step))::after {
+.helper-window-note-line::-webkit-details-marker {
   display: none;
+}
+
+.helper-window-note-line::before,
+.helper-window-note-line::after {
+  content: "";
+  flex: 1 1 0;
+  min-width: var(--space-4);
+  height: var(--rule-width);
+  /* A filled hairline reads only in the mark's ink (the rule is border-only). */
+  background: var(--edge-mark);
+}
+
+.helper-window-note-words {
+  min-width: 0;
+  text-align: center;
+}
+
+.helper-window-note-door {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.helper-window-note-said {
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
 }
 
 /* A line off the rail — a system word — is the extension's meta message
  * (`metaMessage`): italic, in the secondary ink, a little faded. */
-.helper-turn:not(.is-step):not(.is-user):not(.is-tool):not(.is-thinking) {
+.helper-turn:not(.is-step):not(.is-user):not(.is-assistant):not(.is-tool):not(.is-thinking):not(.is-window-note) {
   margin: var(--chat-meta-gap) 0;
   padding: var(--chat-meta-pad);
   color: var(--chat-work-ink);
@@ -15036,30 +15158,43 @@ details.worker-command {
 
 .is-chat-page .helper-said .helper-code > pre {
   margin: 0;
-  padding: var(--space-1) var(--space-3) var(--space-3);
+  padding: var(--space-2) var(--space-3) var(--space-3);
   border-radius: 0;
   background: none;
 }
 
+/* The bar is its own band over the code, as LM Studio's is (t-81525, the
+ * person's 「typescript 라고 쓰고 그 안에 코드 스타일처럼」): the language the
+ * fence names — 「코드」 when it names none — at the left in the mono label,
+ * the copy at the right, a hairline between the band and the code. */
 .helper-code-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-3) 0;
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
-  color: var(--ink-mist);
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  font: var(--type-label-12-mono);
+  color: var(--ink-figure);
+}
+
+.helper-code-lang {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .helper-code-bar > .helper-code-copy {
   position: static;
-  padding: 0 var(--space-1);
+  flex: none;
+  padding: var(--space-1) var(--space-2);
   border: 0;
   border-radius: var(--radius-xs);
   background: none;
-  color: var(--ink-mist);
-  font: inherit;
+  color: var(--ink-figure);
+  font: var(--type-label-12);
   opacity: 1;
 }
 
@@ -15134,6 +15269,13 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   background: var(--chat-chip-bg);
   font-family: var(--font-mono);
   font-size: var(--chat-chip-size);
+}
+
+/* A long path or command in a chip breaks inside it rather than push the
+ * column sideways — on the chip alone, never the prose (the keep-all
+ * contract). */
+.is-chat-page .helper-said :not(pre) > code {
+  overflow-wrap: anywhere;
 }
 
 /* 답 안의 링크는 액센트 — 파일 경로든 주소든 같은 문의 같은 색. 맨 경로가
@@ -15265,9 +15407,17 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   background: var(--row-hover);
 }
 
-/* The extension's `assistantActions`: a short row under every answer, its
- * copy shown only while the pointer or the focus is on the answer. */
+/* The extension's `assistantActions`: a short row under an answer — the
+ * list's one, carried to the answer the pointer or the focus reaches
+ * (t-81525 C8). Every answer keeps its room under the words — the one still
+ * streaming too, so the turn that replaces it stands no taller — and the row
+ * moving from one to the next moves no line of the page; it is drawn in that
+ * room, shown on the newest answer and while the pointer or the focus is on
+ * the one it stands in. */
 .helper-actions {
+  position: absolute;
+  bottom: 0;
+  left: 0;
   display: flex;
   align-items: center;
   gap: var(--chat-actions-gap);
@@ -15276,15 +15426,8 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   transition: opacity var(--motion-fast) var(--ease-standard);
 }
 
-.helper-turn.is-assistant:hover .helper-actions,
-.helper-turn.is-assistant:focus-within .helper-actions {
+.helper-turn.is-assistant:is(.is-latest, :hover, :focus-within) > .helper-actions {
   opacity: 1;
-}
-
-/* An answer with its action row keeps no pad under it: the row is the pad
- * (`message:has([data-message-actions])`). */
-.helper-turn.is-assistant:has(> .helper-actions) {
-  padding-bottom: 0;
 }
 
 .helper-copy {
@@ -15327,9 +15470,12 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   box-sizing: border-box;
   width: fit-content;
   max-width: var(--chat-said-max);
+  /* On the right, under the hand that typed it (t-81525 B4), rounded as
+   * what floats. */
+  margin-left: auto;
   padding: var(--space-2) var(--space-3);
   border: 0;
-  border-radius: var(--chat-panel-radius);
+  border-radius: var(--radius-xl);
   background: var(--chat-bubble);
   color: var(--chat-bubble-ink);
   font-size: var(--chat-prose-size);
@@ -15371,20 +15517,19 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   color: var(--ink-mist);
 }
 
-/* A Focus group's head stands on the rail like an answer does, and wears its
- * state as the dot: green when its calls are in, the halt ink when one
- * failed, the agent's accent with its halo while one is out — the extension's
- * beat (`dotProgress`: 1s, linear), which a helper at work wears too
- * (t-6323 A6). */
-.helper-group.is-done::before {
+/* A pill wears its state as the dot at its front: green when its calls are
+ * in, the halt ink when one failed (its words say how many), the agent's
+ * accent with its halo while one is out — the extension's beat
+ * (`dotProgress`: 1s, linear), which a helper at work wears too (t-6323 A6). */
+.helper-group.is-done > .helper-group-cap::before {
   background: var(--chat-dot-done);
 }
 
-.helper-group.is-failed::before {
+.helper-group.is-failed > .helper-group-cap::before {
   background: var(--chat-dot-failed);
 }
 
-.helper-group.is-live::before,
+.helper-group.is-live > .helper-group-cap::before,
 .helper-agent-dot {
   background: var(--chat-accent);
   box-shadow: 0 0 0 var(--chat-dot-halo) color-mix(in srgb, var(--chat-accent) 18%, transparent);
@@ -16100,6 +16245,11 @@ details[open] > .helper-step-line::after {
   scrollbar-width: thin;
 }
 
+/* The pictures the person sent stand over their words, on the same side. */
+.helper-turn.is-user > .helper-images {
+  justify-content: flex-end;
+}
+
 .helper-image {
   display: inline-flex;
   align-items: center;
@@ -16281,59 +16431,80 @@ details[open] > .helper-step-line::after {
   opacity: var(--chat-todo-done-alpha);
 }
 
-/* 묶음 머리는 도구 행의 자를 그대로 쓴다: `.is-step`이 여백과 레일과 점을
- * 주고(위), 상태의 점은 도구 행과 같은 규칙에서 온다. 여기서 더하는 것은
- * 그 줄의 글자뿐이다. */
+/* The pill (t-81525 B1): the tool work between two answers as one line —
+ * the state's dot, 「명령 5개 · 68.0초」, and the call that is out now —
+ * pressed (pointer, Enter, Space) to open the steps under it, built then
+ * (B2). Round as a pill, on no ground until the pointer or the keyboard is on
+ * it; opened, the steps stand on the tool's soft ground. */
 .helper-group {
   min-width: 0;
-  margin: 0;
-  border: 0;
-  background: none;
-  font-size: var(--chat-prose-size);
-  color: var(--chat-work-ink);
+  margin: var(--space-1) 0;
 }
 
 .helper-group-cap {
-  display: flex;
-  align-items: baseline;
+  display: inline-flex;
+  align-items: center;
   gap: var(--space-2);
-  width: 100%;
+  max-width: 100%;
   min-width: 0;
+  min-height: var(--row-height);
   margin: 0;
-  padding: 0;
+  padding: 0 var(--space-3) 0 var(--space-2);
   border: 0;
+  border-radius: var(--radius-pill);
   background: none;
   font-family: var(--font-ui);
-  font-size: var(--chat-prose-size);
-  line-height: var(--chat-prose-leading);
-  color: var(--chat-work-ink);
+  font-size: var(--text-sm);
+  color: var(--ink-mist);
   text-align: left;
   cursor: pointer;
-  transition: color var(--motion-fast) var(--ease-standard);
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-group-cap::before {
+  content: "";
+  flex: none;
+  width: var(--chat-run-dot);
+  height: var(--chat-run-dot);
+  border-radius: 50%;
+  background: var(--chat-work-ink);
 }
 
 .helper-group-cap:hover,
-.helper-group-cap:focus-visible {
+.helper-group-cap:focus-visible,
+.helper-group-cap[aria-expanded="true"] {
+  background: var(--chat-tool-bg);
   color: var(--ink-chalk);
 }
 
-/* 요약은 줄지 않는다 — 줄어드는 것은 나가 있는 호출의 이름 쪽이다. */
+/* 요약은 줄지 않는다 — 줄어드는 것은 나가 있는 호출 쪽이다. */
 .helper-group-words {
   flex: none;
   font-weight: 500;
+  color: var(--ink-figure);
+  white-space: nowrap;
 }
 
-/* 지금 나가 있는 호출 하나. 도구 행의 두 칸(`.helper-tool-name` ·
- * `.helper-tool-arg`)을 그대로 입으므로 이름과 대상의 규칙은 한 벌뿐이다. */
 .helper-group-live {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-1);
   min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .helper-group-live[hidden] {
   display: none;
+}
+
+.helper-group-body {
+  margin: var(--space-1) 0 var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+  background: var(--chat-tool-bg);
 }
 
 /* 머리의 토글. 대화 페이지의 조용한 아이콘 단추(`.helper-copy`)와 같은 자
@@ -16522,9 +16693,16 @@ details[open] > .helper-cap::after {
   z-index: 3;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  /* No gap: the conversation's state is the composer's first line, one box
+   * with it (t-81525 C1) — an 8px gap between them let the rows behind show
+   * through. The question card keeps its own room above them. */
+  gap: 0;
   max-width: var(--chat-dock-max);
   margin: 0 auto;
+}
+
+.chat-dock > .pane-chat-ask {
+  margin-bottom: var(--space-2);
 }
 
 /* The dock's watched height (`chatDockNode`), on the two that read it — the
@@ -16539,19 +16717,24 @@ details[open] > .helper-cap::after {
 }
 
 /* The way back to the foot (t-6824, the person's ask — the extension has
- * none): a pill over the list's lower right, above the dock when there is
- * one, shown while the list is not following its words. One class shows it
- * (`is-shown`); hidden it is out of the tab order and the reader's way. */
+ * none): a round button centred on the reading column, just over the dock
+ * (t-81525 C6 — it stood at the window's far right, away from the words it
+ * returns to), shown while the list is not following its words. One class
+ * shows it (`is-shown`); hidden it is out of the tab order and the reader's
+ * way. */
 .chat-foot-door {
   position: absolute;
-  right: var(--helper-gutter);
+  right: 0;
   bottom: calc(var(--chat-dock-h) + var(--chat-dock-inset) + var(--space-2));
+  left: var(--chat-turn-rail-w);
   z-index: 3;
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
-  height: var(--chat-send-size);
-  padding: 0 var(--space-3) 0 var(--space-2);
+  justify-content: center;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  margin-inline: auto;
+  padding: 0;
   border: 1px solid var(--chat-composer-edge);
   border-radius: var(--radius-pill);
   background: var(--chat-composer-bg);
@@ -16599,15 +16782,20 @@ details[open] > .helper-cap::after {
   height: 1.1em;
 }
 
-/* The list's last stretch fades under the dock (`messageGradient`). */
+/* The list's last stretch fades under the dock, and only there (t-81525
+ * C13): the dock's own span — its insets and its measure — and
+ * `--chat-dock-fade` tall, where the extension's `messageGradient` laid
+ * 150px over the panel's whole width. */
 .worker-view.is-chat-page:has(> .chat-dock)::after {
   content: "";
   position: absolute;
-  right: 0;
+  right: var(--chat-dock-inset);
   bottom: 0;
-  left: var(--chat-turn-rail-w);
+  left: calc(var(--chat-turn-rail-w) + var(--chat-dock-inset));
   z-index: 2;
-  height: var(--chat-fade);
+  max-width: var(--chat-dock-max);
+  margin: 0 auto;
+  height: var(--chat-dock-fade);
   background: linear-gradient(to bottom, transparent 0%, var(--chat-ground) 100%);
   pointer-events: none;
 }
@@ -16869,6 +17057,16 @@ details[open] > .helper-cap::after {
   resize: none;
   overflow-y: auto;
   max-height: var(--chat-composer-max-h);
+}
+
+/* The sentence in the empty box stays on the box's one line (t-81525 r2): a
+ * box too narrow says the sentence's first half (`fitComposerSay`), and a box
+ * narrower still cuts that with an ellipsis rather than fold it under its
+ * foot. */
+.worker-composer-box::placeholder {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* The box lights its own edge on `:focus-within` (above), so the measured
@@ -17990,8 +18188,11 @@ button.helper-sib:hover {
   outline-offset: 2px;
 }
 
-/* 스크롤 지역의 고리는 안쪽으로 — 바깥은 이미 잘려 나가는 상자다. */
-.helper-turns:focus-visible {
+/* 스크롤 지역의 고리는 안쪽으로 — 바깥은 이미 잘려 나가는 상자다. 레일이
+ * 초점을 건넨 답(t-81525 r2)도 목록 안에서 잘리지 않게 안쪽으로 두른다. */
+.helper-turns:focus-visible,
+.worker-view .helper-turn.is-assistant:focus-visible {
+  outline: 2px solid var(--ink-chalk);
   outline-offset: -2px;
 }
 
@@ -18019,7 +18220,7 @@ button.helper-sib:hover {
   }
 
   .helper-turn.is-tool.is-live > .helper-step-line > .helper-step-dot,
-  .helper-group.is-live::before,
+  .helper-group.is-live > .helper-group-cap::before,
   .helper-state-dot,
   .helper-agent-dot,
   .helper-status,
@@ -18035,9 +18236,40 @@ button.helper-sib:hover {
 
 /* 720px: 옆이 접힌 창에서도 전사가 제 폭을 갖는다 — 단의 좌우 여백만 한
  * 단 줄이고, 아무것도 지워지지 않는다. */
-@media (max-width: 720px) {
-  .worker-view.is-chat-page {
+/* The page measures its own width, not the window's (t-81525 ②): a split
+ * pane reads the way a window of its width does. A wide page's answers take
+ * more air between lines; under 720px the column's sides narrow, and under
+ * 560px the prose steps down one size — 390px still holds a phrase a line.
+ * The values are set on the page's children, which the rows inherit; they
+ * move only when the page crosses a step. */
+.worker-view.is-chat-page {
+  container-type: inline-size;
+}
+
+@container (min-width: 1000px) {
+  .worker-view.is-chat-page > * {
+    --chat-prose-leading: var(--chat-read-leading-wide);
+  }
+}
+
+@container (max-width: 719px) {
+  .worker-view.is-chat-page > * {
     --helper-gutter: var(--space-3);
+  }
+}
+
+@container (max-width: 559px) {
+  .worker-view.is-chat-page > * {
+    --chat-prose-size: var(--chat-read-size-narrow);
+  }
+
+  /* A line of code longer than a narrow page folds inside its block (t-81525
+   * r2): scrolled sideways inside the block, its end read as cut off — the
+   * overlay scroll bar shows only once it scrolls. Only the code folds; the
+   * prose keeps its own breaking. A wider page keeps the scroll. */
+  .is-chat-page .helper-said .helper-code > pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 }
 
@@ -24822,8 +25054,10 @@ progress:indeterminate::-webkit-progress-bar {
 }
 
 .nav-badge.is-attention {
-  background: var(--lane-3);
-  color: var(--surface-abyss);
+  /* What waits on the person is the one blue (`--signal-you`), never a lane's
+   * hue (t-81525 S1). */
+  background: var(--signal-you-solid);
+  color: var(--ink-on-solid);
   font-weight: 700;
 }
 
@@ -53566,6 +53800,10 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .pane-head-name {
   min-width: 0;
   overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
   color: var(--ink-chalk);
   font: var(--type-label-13);
   font-weight: 600;
@@ -53654,14 +53892,16 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   gap: var(--space-2);
 }
 
+/* The session stands in the tally's tooltip there (t-81525 C9): the head says
+ * what was done, not the conversation's id. */
+.chat-head-pane .pane-head-pick {
+  display: none;
+}
+
 /* A narrow pane keeps the head on one line: the conversation's line gives way
  * first, the switch says itself by its glyphs (its words stay its name), then
  * the model's pill folds — the composer's chip still says it. */
 @container pane-chat (max-width: 560px) {
-  .chat-head-pane .pane-head-pick {
-    display: none;
-  }
-
   .chat-head-pane .view-toggle .segment-btn > :not(.view-toggle-glyph) {
     position: absolute;
     width: 1px;

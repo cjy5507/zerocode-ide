@@ -682,12 +682,12 @@
   --nav-inset: 8px;
   --nav-gutter: 8px;
 
-  /* The glyph on a navigable row is `size-4` = 16px, a step ABOVE the
-   * window's 14px default. Deliberately its own token rather than a nudge to
-   * `--icon-size`: the same 14px still draws the disclosure twist and the
-   * file tree, and the tab strip's kind glyph is smaller still. A row a
-   * person aims at all day is the one place that earns the larger mark. */
-  --nav-icon-size: 16px;
+  /* The glyph on a navigable row. Orca's `size-4` (16px) stood here; the
+   * two-column menu the person passed (t-81525 S1, 2026-10-29) draws it at
+   * the draft's own 14px beside a 12px name, which is what lets every
+   * destination keep its whole name in half the column. Still its own token,
+   * so the menu's mark moves without moving the window's `--icon-size`. */
+  --nav-icon-size: 14px;
 
   /* A child list indents by 18px per level, which is Orca's own
    * `getWorktreeCardContentIndent` (:4603) rather than a sum of ours.
@@ -2651,6 +2651,9 @@
   --chat-ground: var(--surface-abyss);
   --chat-bubble: var(--surface-raised);
   --chat-bubble-ink: var(--ink-chalk);
+  /* An answer before the newest one (t-81525 B3): a step back from the
+   * newest, still the reading ink — 88% of it toward the secondary. */
+  --chat-said-earlier: color-mix(in srgb, var(--ink-chalk) 88%, var(--ink-mist));
   --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
   --chat-composer-bg: var(--surface-raised);
   --chat-composer-edge: var(--edge-glint);
@@ -2714,6 +2717,13 @@
   --chat-radius-composer: var(--radius-xl);
   --chat-prose-size: var(--text-lg);
   --chat-prose-leading: 1.5;
+  /* The reading follows the page's own width (t-81525, the person's 「화면
+   * 크기에 따라 가독성」): a wide page's long lines take a little more air,
+   * a narrow one reads a step smaller so a line still holds a phrase. The
+   * page measures itself (shell.css, `@container`); these are the values it
+   * steps to — 16 on 1.5 between them. */
+  --chat-read-leading-wide: 1.6;
+  --chat-read-size-narrow: var(--text-md);
   --chat-dot: 7px;
   --chat-dot-halo: 3px;
   --chat-gutter: 30px;
@@ -2780,7 +2790,12 @@
   --chat-list-pad-x: 20px;
   --chat-list-pad-top: 20px;
   --chat-list-pad-bottom: 40px;
-  --chat-fade: 150px;
+  /* What the window fades instead (t-81525 C13): the extension's 150px
+   * gradient ran the panel's whole width over the list, and nothing here
+   * draws it any more, so it is not kept as a token (r2); the page fades only under the
+   * dock, as wide as the dock and 48px tall, so the opaque composer box
+   * covers the rest and the rows stay readable beside it. */
+  --chat-dock-fade: 48px;
   --chat-sticky-pad-top: 14px;
   --chat-sticky-pad-bottom: 12px;
   --chat-sticky-fade: 12px;
@@ -3417,6 +3432,9 @@
   --chat-ground: var(--surface-abyss);
   --chat-bubble: var(--surface-raised);
   --chat-bubble-ink: var(--ink-chalk);
+  /* An answer before the newest one (t-81525 B3): a step back from the
+   * newest, still the reading ink — 88% of it toward the secondary. */
+  --chat-said-earlier: color-mix(in srgb, var(--ink-chalk) 88%, var(--ink-mist));
   --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 7%, transparent);
   --chat-composer-bg: var(--surface-deck);
   --chat-composer-edge: var(--edge-rule);

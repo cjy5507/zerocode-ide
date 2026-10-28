@@ -142,7 +142,11 @@ const BOOT = {
     },
   },
   diff_side_by_side: true,
-  conversation_focus_view: false,
+  // The harness reads every step's own row, so its pages stand on the whole
+  // timeline; the folded page — the product's default, pinned by
+  // `the_conversation_timeline_view_is_one_remembered_bit` — is read by the
+  // scenes that turn it on (`foldConversations`, t-81525 B1).
+  conversation_timeline_view: true,
   terminal_prefs: {
     font_size: 14,
     font_family: "",
@@ -2434,6 +2438,13 @@ const lagFrames = (surface) => {
  *    ring or the end of a flash fails for a reason that is the machine's. A
  *    check that wants the preference sets it itself (`emulateMedia`), and gives
  *    it back as THIS value — `null` would hand it back to the host. */
+/* The folded page (t-81525 B1): the tool work between two answers as pills,
+ * the product's default — the harness stands on the whole timeline. */
+export const foldConversations = (page) => page.evaluate(() => {
+  conversationTimelineView = false;
+  repaintTimelineView();
+});
+
 export const WINDOW_BROWSER_ARGS = Object.freeze(["--disable-3d-apis"]);
 export const WINDOW_MOTION_REST = "no-preference";
 

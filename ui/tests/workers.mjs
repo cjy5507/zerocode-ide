@@ -2038,7 +2038,7 @@ async function testHelperPage(page, ok) {
       await refreshAgents();
     };
     const cleanup = async () => {
-      setConversationFocusView(false);
+      setConversationTimelineView(false);
       if (window.__ANSWER__.list_agents) {
         delete window.__ANSWER__.list_agents;
         await refreshAgents();
@@ -2835,7 +2835,7 @@ async function testHelperPage(page, ok) {
       : activeTabId === `helper:${at.term}:h-b` ? "sibling" : activeTabId;
     const effects = [
       where,
-      () => String(focusViewOn()),
+      () => String(conversationTimelineView),
       where,
       () => parts().sibs?.querySelector(".helper-sib-fold")?.getAttribute("aria-expanded") ?? null,
       () => parts().card?.querySelector(".helper-brief-more")?.getAttribute("aria-expanded") ?? null,
@@ -2843,9 +2843,9 @@ async function testHelperPage(page, ok) {
       () => String(window.__STOPPED__.length),
     ];
     window.__HPK__ = {
-      // 페이지를 제자리로 — 이 도우미의 페이지, 접힌 띠, 접힌 카드, 꺼진 집중 보기 — 놓고 그 조종에 초점을 준다.
+      // 페이지를 제자리로 — 이 도우미의 페이지, 접힌 띠, 접힌 카드, 펼치지 않은 타임라인 — 놓고 그 조종에 초점을 준다.
       async prepare(index) {
-        setConversationFocusView(false);
+        setConversationTimelineView(false);
         // A fresh stop button: the page stands anew when it is left and come back to.
         if (index === 6) {
           setActiveTab(window.__HPS__.blank);

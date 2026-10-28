@@ -321,11 +321,11 @@ function applyAgentSettingsSnapshot(snapshot) {
     harnessSettings = snapshot.harness;
     paintHarnessSettings();
   }
-  // 대화의 Focus view(확장 2.1.221): 이 창의 모든 대화가 입는 한 값이라,
+  // 대화의 펼친 타임라인(t-81525 B1): 이 창의 모든 대화가 입는 한 값이라,
   // 권위 있는 스냅샷이 올 때마다 서 있는 목록들이 그 값을 따라간다.
-  if (hasSetting(snapshot, "conversation_focus_view")) {
-    conversationFocusView = snapshot.conversation_focus_view === true;
-    repaintFocusView();
+  if (hasSetting(snapshot, "conversation_timeline_view")) {
+    conversationTimelineView = snapshot.conversation_timeline_view === true;
+    repaintTimelineView();
   }
 }
 

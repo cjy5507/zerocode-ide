@@ -364,21 +364,19 @@ function paintFootDoor(list) {
   list.__door?.classList.toggle("is-shown", chatOffFoot(list));
 }
 
-/* The way back to the foot (t-6824): a button over the list's lower right,
- * shown while the list is not following its words, that glides home and
- * follows again. Named by the words it shows; no tooltip. */
+/* The way back to the foot (t-6824): a round button centred on the reading
+ * column just over the composer (t-81525 C6), shown while the list is not
+ * following its words, that glides home and follows again. A mark alone, so
+ * it says its name twice — tooltip and name (`labelButton`). */
 function chatFootDoorNode(list) {
   const door = document.createElement("button");
   door.type = "button";
   door.className = "chat-foot-door";
-  const words = t("worker.toFoot", "맨 아래로");
-  door.setAttribute("aria-label", words);
+  labelButton(door, t("worker.toFoot", "맨 아래로"));
   // Enter and Space, while it has focus, are its own — the window's key
   // sink (`rearmKeySink`) would otherwise take them for the terminal.
   door.dataset.keyboardOwner = "true";
-  const said = document.createElement("span");
-  said.textContent = words;
-  door.append(iconNode("arrow-down"), said);
+  door.append(iconNode("arrow-down"));
   door.addEventListener("click", () => {
     returnToFoot(list);
     // Pressed from the keyboard, the button hides under the focus: the keys
@@ -1011,10 +1009,9 @@ function syncHelperTasks(list, run, now = Date.now()) {
  * no count, no numbering, never the `activeForm`, and no result line (the
  * list says what the result would). Every call is its own row with the whole
  * list as that call left it; nothing is updated in place — the session's
- * newest list (`todos`) is kept by the extension but drawn nowhere else. In
- * the Focus view the newest list stands out of its fold (`ew0`): the newest
- * call that has not failed — out or back — and none when that call emptied
- * the list. Which tool is the todo tool is the catalog's fact (`todo_tool`):
+ * newest list (`todos`) is kept by the extension but drawn nowhere else; on
+ * the folded page it is the state line over the composer that says it
+ * (`paintChatStack`). Which tool is the todo tool is the catalog's fact (`todo_tool`):
  * a CLI that names none keeps its generic row, and so does a call whose
  * input is not a list, as the extension's falls back to its generic body. */
 function todosOf(turn, agent) {
@@ -1062,35 +1059,6 @@ function dressTodoRow(row, turn, run) {
   if (row.__todos === null) return false;
   row.classList.add("is-todo");
   return true;
-}
-
-/* In the Focus view the newest todo list stands out of its fold, its row
- * open; the one before it goes back in (and closes, if it was this that
- * opened it). Asked once per paint, and it touches the page only when the one
- * that stands changes. */
-function standLatestTodo(list, focus) {
-  const newest = focus ? [...list.querySelectorAll(":scope > .helper-turn.is-todo:not(.is-failed)")].at(-1) : null;
-  const latest = newest?.__todos?.length > 0 ? newest : null;
-  const before = list.__standingTodo ?? null;
-  if (before === latest) return;
-  if (before) {
-    before.__standing = false;
-    before.classList.remove("is-standing");
-    if (before.__group) writeHidden(before, !before.__group.__open);
-    if (before.__openedByFocus) {
-      before.__openedByFocus = false;
-      before.open = false;
-    }
-  }
-  list.__standingTodo = latest;
-  if (!latest) return;
-  latest.__standing = true;
-  latest.classList.add("is-standing");
-  writeHidden(latest, false);
-  if (!latest.open) {
-    latest.__openedByFocus = true;
-    latest.open = true;
-  }
 }
 
 /* ---- images (t-6323 A8) ------------------------------------------------------
@@ -2072,8 +2040,8 @@ function askShelfAgain(list) {
  * steps holds a line each and not a body each. Steps of one kind in a row
  * (nothing said between them) fold into one row that opens to its members; a
  * step that failed is never folded, and one still out waits for its answer
- * before it may join. The Focus view folds by turn instead and keeps its rows
- * single (`applyFocusView`). */
+ * before it may join. The folded page (t-81525 B1) holds a turn's steps in
+ * one pill instead and builds them when it opens (`holdActivityTurn`). */
 
 /* A kind's words and the family the head counts it in (t-22100), keyed by the
  * words the core reduces a tool's name to (`hook::Tool::as_str`): a turn
@@ -2084,7 +2052,7 @@ const STEP_LOOKS = new Map(Object.entries({
   read: { family: "file", word: () => t("worker.stepRead", "파일 읽기") },
   edit: { family: "file", word: () => t("worker.stepEdit", "파일 수정") },
   write: { family: "file", word: () => t("worker.stepWrite", "파일 쓰기") },
-  bash: { family: "shell", word: () => t("worker.stepShell", "셸") },
+  bash: { family: "shell", word: () => t("worker.stepShell", "명령") },
   grep: { family: "search", word: () => t("worker.stepSearch", "검색") },
   web: { family: "web", word: () => t("worker.stepWeb", "웹 읽기") },
   websearch: { family: "web", word: () => t("worker.stepWebSearch", "웹 검색") },
@@ -2095,6 +2063,9 @@ const STEP_LOOKS = new Map(Object.entries({
  * catalog's own `todo_tool`). */
 const STEP_OWN_LOOKS = new Map(Object.entries({
   todo: { family: "todo", word: () => t("worker.todoHead", "할 일 갱신") },
+  // A result that arrived with no call the page holds — a command left
+  // running in the background answering later (t-81525 C4).
+  result: { family: "other", word: () => t("worker.stepResultOnly", "배경 실행") },
 }));
 
 /* The families the head's tally counts by (t-22100, the approved mockup's
@@ -2103,7 +2074,7 @@ const STEP_OWN_LOOKS = new Map(Object.entries({
  * core has no word for is counted with the others. */
 const STEP_FAMILY_WORDS = Object.freeze({
   web: () => t("worker.familyWeb", "웹"),
-  shell: () => t("worker.familyShell", "셸"),
+  shell: () => t("worker.familyShell", "명령"),
   file: () => t("worker.familyFile", "파일"),
   search: () => t("worker.familySearch", "검색"),
   helper: () => t("worker.familyHelper", "헬퍼"),
@@ -2116,6 +2087,7 @@ const STEP_FAMILY_WORDS = Object.freeze({
  * has no word for, or a call written before turns carried a kind — is a kind of
  * its own, worded as the tool's own name (`tool:<name>`). */
 function stepKindOf(turn, run) {
+  if (turn.role === "tool_result" && !turn.tool?.name) return "result";
   const todo = agentVoice(run.agent).todo_tool;
   if (todo && turn.tool?.name === todo) return "todo";
   const kind = turn.tool?.kind;
@@ -2164,6 +2136,14 @@ function shellTargetWords(command) {
  * its target as the line says it. */
 function stepTitleWords(kind, arg, whole = arg) {
   return kind === "bash" ? shellTargetWords(whole) : stepTargetWords(arg);
+}
+
+/* What names a result that came with no call: the id the CLI gave the work
+ * it left in the background, or else its first words. */
+const STEP_RESULT_ID_RE = /\bID:?\s*([A-Za-z0-9_-]{4,})/;
+
+function resultOnlyTarget(text) {
+  return STEP_RESULT_ID_RE.exec(text)?.[1] ?? stepTargetWords(stepFirstLine(text));
 }
 
 function stepFirstLine(text) {
@@ -2340,9 +2320,12 @@ function dressFetchResult(node, facts) {
 function dressStepLine(row, turn, words, state) {
   const line = row.firstElementChild;
   writeTextContent(line.querySelector(".helper-step-kind"), state.todo ? t("worker.todoHead", "할 일 갱신") : stepLook(row.__kind).word());
-  writeTextContent(line.querySelector(".helper-step-target"), state.todo ? "" : stepTitleWords(row.__kind, words.arg, words.whole));
+  const orphan = row.__kind === "result";
+  writeTextContent(line.querySelector(".helper-step-target"), state.todo ? ""
+    : orphan ? resultOnlyTarget(turn.text) : stepTitleWords(row.__kind, words.arg, words.whole));
   let res = "";
   if (state.live) res = t("worker.stepLive", "진행 중");
+  else if (orphan && !state.failed) res = t("worker.stepResultArrived", "결과만 도착");
   else if (state.output !== undefined) res = stepResultWords(row.__kind, turn, state.output, state.failed, row);
   const resNode = line.querySelector(".helper-step-res");
   const facts = row.__kind === "web" && state.output !== undefined && !state.failed ? stepFetchFacts(turn) : null;
@@ -2511,13 +2494,18 @@ function runRowNode(run, turns) {
   return row;
 }
 
+/* The row says what was done and the first one done — 「명령 6개 실행 ls -la」
+ * — and how many more stand behind it in the quiet result slot, not as more
+ * words of the first one's (t-81525 C7). */
 function dressRunLine(row) {
   const line = row.firstElementChild;
   const turns = row.__members;
-  writeTextContent(line.querySelector(".helper-step-kind"), t("worker.stepRun", "{{kind}} {{n}}개", { kind: stepLook(row.__kind).word(), n: turns.length }));
+  writeTextContent(line.querySelector(".helper-step-kind"), row.__kind === "bash"
+    ? t("worker.stepShellRun", "명령 {{n}}개 실행", { n: turns.length })
+    : t("worker.stepRun", "{{kind}} {{n}}개", { kind: stepLook(row.__kind).word(), n: turns.length }));
   const first = toolWords(turns[0]);
-  writeTextContent(line.querySelector(".helper-step-target"),
-    `${stepTitleWords(row.__kind, first.arg, first.whole)} ${t("worker.stepMore", "외 {{n}}개", { n: turns.length - 1 })}`);
+  writeTextContent(line.querySelector(".helper-step-target"), stepTitleWords(row.__kind, first.arg, first.whole));
+  writeTextContent(line.querySelector(".helper-step-res"), t("worker.stepMore", "외 {{n}}개", { n: turns.length - 1 }));
   writeTextContent(line.querySelector(".helper-step-meta"), stepTook(turns[0], turns.at(-1)));
 }
 
@@ -2599,48 +2587,10 @@ function foldSettledStep(row, run) {
   }
 }
 
-/* The Focus view folds by turn and keeps its rows single: turned on, every
- * row of steps gives its members back as rows; turned off, they fold again.
- * What a reader had of a row of steps is kept: a member that was open comes
- * back open, and the row that stands for where the keyboard was — the member
- * it was on or in, else the first — is returned, for `landFocus` once the
- * Focus view has laid its folds. */
-function dissolveSteps(list, run) {
-  const held = document.activeElement;
-  let lands = null;
-  for (const row of list.querySelectorAll(":scope > .is-run")) {
-    const members = [...(row.querySelector(":scope > .helper-run-body")?.children ?? [])];
-    const rows = row.__members.map((turn) => stepRowNode(run, turn, -1));
-    row.replaceWith(...rows);
-    members.forEach((member, at) => {
-      if (!member.open) return;
-      rows[at].open = true;
-      paintStepBody(rows[at], run);
-    });
-    if (row.contains(held)) lands = rows[Math.max(0, members.findIndex((member) => member.contains(held)))];
-  }
-  return lands;
-}
-
 /* The keyboard, put back on what stands for `row` now that the row was
- * rebuilt: its line — or, when the Focus view has folded the row away under a
- * head, that head, the one thing on screen that stands for it. */
+ * rebuilt: its line. */
 function landFocus(row) {
-  const line = row.hidden ? row.__group?.firstElementChild : row.firstElementChild;
-  line?.focus({ preventScroll: true });
-}
-
-function regroupSteps(list, run) {
-  let before = null;
-  for (const row of [...list.querySelectorAll(":scope > .helper-turn")]) {
-    const kind = row.__kind;
-    if (before && kind !== undefined && stepFolds(row, kind) && stepReceives(before, kind)) {
-      before = absorbStep(run, before, row.__turn);
-      dropStep(row);
-      continue;
-    }
-    before = row.classList.contains("is-tool") ? row : null;
-  }
+  row.firstElementChild?.focus({ preventScroll: true });
 }
 
 /* ---- a thought is one line (t-15682) -----------------------------------------
@@ -3073,6 +3023,8 @@ function syncHelperReport(list, run) {
 function turnRailNode(list) {
   const rail = document.createElement("div");
   rail.className = "chat-rail";
+  // The ticks are a way to a turn, and the pointer is told so (t-81525 C10).
+  rail.dataset.tip = t("worker.railTip", "차례로 가기");
   const handle = document.createElement("div");
   handle.className = "chat-rail-handle";
   handle.setAttribute("role", "slider");
@@ -3090,12 +3042,19 @@ function turnRailNode(list) {
   rail.addEventListener("click", (event) => {
     const tick = event.target instanceof Element ? event.target.closest(".chat-rail-tick") : null;
     const row = (tick ?? nearestRailTick(rail, event.clientY))?.__row;
-    if (row?.isConnected) railJump(list, row);
+    if (row?.isConnected) railJump(list, row, { focus: true });
   });
   handle.addEventListener("keydown", (event) => {
     const rows = railRows(list);
     if (rows.length === 0) return;
     const at = railAt(list, rows);
+    // Enter goes into the row the handle stands on; the arrows keep the
+    // handle, so a second press still moves it.
+    if (event.key === "Enter") {
+      event.preventDefault();
+      railJump(list, rows[railAt(list, rows)], { focus: true });
+      return;
+    }
     const page = Math.max(1, railRoom(rail) - 1);
     const to = {
       ArrowUp: at - 1, ArrowDown: at + 1, PageUp: at - page, PageDown: at + page, Home: 0, End: rows.length - 1,
@@ -3258,9 +3217,11 @@ function paintTurnRail(rail) {
 
 /* What a row is, in a few words, for the handle's value: the person's words,
  * what a step or a thought was (not a shell step's lines), an answer's first
- * words. */
+ * words, a window note's line without its 「원문」 door (t-81525 r2). */
 function railRowWords(row) {
-  const words = row.querySelector(":scope > .helper-step-line > .helper-step-what") ?? row.querySelector(":scope > .helper-said");
+  const words = row.querySelector(":scope > .helper-step-line > .helper-step-what") ?? row.querySelector(":scope > .helper-said") ??
+    row.querySelector(":scope > .helper-group-cap > .helper-group-words") ??
+    row.querySelector(":scope > .helper-window-note-line > .helper-window-note-words")?.firstChild;
   return stepFirstLine(words?.textContent ?? row.getAttribute("aria-label") ?? "");
 }
 
@@ -3281,8 +3242,9 @@ function nearestRailTick(rail, y) {
 
 /* Go to `row`: it stands at the list's top — under the person's words of its
  * turn, which stick there — and the list stops following its foot unless the
- * row is the last one. */
-function railJump(list, row) {
+ * row is the last one. With `focus`, an answer takes the focus too, and with
+ * it the list's copy (`watchAnswerActions`). */
+function railJump(list, row, { focus = false } = {}) {
   const view = list.getBoundingClientRect();
   let header = null;
   if (!row.classList.contains("is-user")) {
@@ -3301,6 +3263,7 @@ function railJump(list, row) {
   state.away = chatFootGap(list) >= CHAT_FOLLOW.slack;
   paintFootDoor(list);
   askTurnRail(list);
+  if (focus && row.tabIndex === -1) row.focus({ preventScroll: true });
 }
 
 /* ---- the conversation's state, over the composer (t-22100) --------------------
@@ -3430,20 +3393,24 @@ function paintChatStack(stack, run) {
     );
     rows.push(row);
   }
-  const factsRow = document.createElement("div");
-  factsRow.className = "chat-stack-row is-facts";
-  factsRow.append(
-    chatStackSpan("chat-stack-work", helpers.length === 0
-      ? t("worker.stackNoWork", "배경 작업 없음")
-      : t("worker.stackWork", "배경 작업 {{n}}", { n: helpers.length })),
-    chatStackSpan("chat-stack-sep", "·"),
-    chatStackSpan("chat-stack-queue", t("worker.stackQueue", "대기 메시지 {{n}}", { n: queued })),
-  );
+  // A count of nothing is not said (t-81525 C2): the work in the background
+  // and the waiting messages stand only while there are some.
+  const spoken = [];
+  if (helpers.length > 0) spoken.push(chatStackSpan("chat-stack-work", t("worker.stackWork", "배경 작업 {{n}}", { n: helpers.length })));
+  if (queued > 0) spoken.push(chatStackSpan("chat-stack-queue", t("worker.stackQueue", "대기 메시지 {{n}}", { n: queued })));
   if (git) {
     const changes = git.changes === null ? "" : ` · ${t("worker.stackChanges", "변경 {{n}}", { n: git.changes })}`;
-    factsRow.appendChild(chatStackSpan("chat-stack-git", `git ${git.branch}${changes}`));
+    spoken.push(chatStackSpan("chat-stack-git", `git ${git.branch}${changes}`));
   }
-  rows.push(factsRow);
+  if (spoken.length > 0) {
+    const factsRow = document.createElement("div");
+    factsRow.className = "chat-stack-row is-facts";
+    spoken.forEach((span, at) => {
+      if (at > 0 && !span.classList.contains("chat-stack-git")) factsRow.appendChild(chatStackSpan("chat-stack-sep", "·"));
+      factsRow.appendChild(span);
+    });
+    rows.push(factsRow);
+  }
   if (todos.length > 0 || helpers.length > 0) {
     const items = document.createElement("ul");
     items.className = "chat-stack-items";

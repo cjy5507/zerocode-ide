@@ -408,7 +408,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "artifacts_retention_days": 0,
   "artifacts_auto_open_beside": true,
   "diff_side_by_side": true,
-  "conversation_focus_view": false,
+  "conversation_timeline_view": false,
   "window_material": { "terminal_opacity": 1.0, "blur": false },
   "default_agent": { "kind": "auto" },
   "agent_teams_mode": "panes",
@@ -831,7 +831,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_terminal_opacity",
   "set_window_blur", "set_agent_teams_mode", "set_claude_autoswitch_mode", "set_harness_settings", "set_default_agent",
   "set_shortcut_visibility", "set_task_source_visibility", "set_keybinding",
-  "set_diff_side_by_side", "set_conversation_focus_view", "set_confirm_close_pinned",
+  "set_diff_side_by_side", "set_conversation_timeline_view", "set_confirm_close_pinned",
   "set_computer_live_reflex", "set_computer_generator_road", "set_computer_input_policy", "set_computer_share_required",
   "set_skip_close_terminal_with_running_process_confirm", "set_ctrl_tab_order_mode",
   "patch_workspace_creation_prefs",
@@ -1453,9 +1453,9 @@ class StatefulBackend {
         this.settings.artifacts_auto_open_beside = args.on === true;
         keys = ["artifacts_auto_open_beside"];
         break;
-      case "set_conversation_focus_view":
-        this.settings.conversation_focus_view = args.on === true;
-        keys = ["conversation_focus_view"];
+      case "set_conversation_timeline_view":
+        this.settings.conversation_timeline_view = args.on === true;
+        keys = ["conversation_timeline_view"];
         break;
       case "set_computer_live_reflex":
         this.settings.computer_live_reflex = args.on === true;

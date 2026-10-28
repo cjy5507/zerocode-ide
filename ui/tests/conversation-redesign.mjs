@@ -126,15 +126,16 @@ async function redesignHead(browser, origin, ok) {
         wantState: t("worker.live", "실행 중"),
         clock: words(head?.querySelector(".chat-run .worker-elapsed")),
         total: words(head?.querySelector(".chat-tally .chat-tally-total")),
-        kinds: [...(head?.querySelectorAll(".chat-tally .chat-tally-kind") ?? [])].map(words),
+        kinds: head?.querySelector(".chat-tally")?.dataset.tip ?? "",
+        parts: head?.querySelector(".chat-tally")?.childElementCount ?? 0,
         failed: words(head?.querySelector(".chat-tally .chat-tally-failed")),
         want: {
           total: t("worker.tallyTotal", "도구 {{n}}", { n: 9 }),
           kinds: [
             `${t("worker.familyWeb", "웹")} 2`,
-            `${t("worker.familyShell", "셸")} 1`,
+            `${t("worker.familyShell", "명령")} 1`,
             `${t("worker.familyFile", "파일")} 6`,
-          ],
+          ].join(" · "),
           failed: t("worker.tallyFailed", "실패 {{n}}", { n: 0 }),
         },
         hairline: head ? getComputedStyle(head).borderBottomWidth : null,
@@ -152,8 +153,8 @@ async function redesignHead(browser, origin, ok) {
       JSON.stringify({ state: seen.state, clock: seen.clock }),
     );
     ok(
-      "R1: on the right the head counts what was done — 「도구 9」, then each family (웹 2 · 셸 1 · 파일 6) in the order it first came, then 「실패 0」",
-      seen.total === seen.want.total && JSON.stringify(seen.kinds) === JSON.stringify(seen.want.kinds) && seen.failed === seen.want.failed,
+      "R1: on the right the head says 「도구 9 · 실패 0」, each family (웹 2 · 셸 1 · 파일 6) in the order it first came in its tooltip (t-81525 C9)",
+      seen.total === seen.want.total && seen.parts === 2 && seen.kinds.startsWith(seen.want.kinds) && seen.failed === seen.want.failed,
       JSON.stringify({ total: seen.total, kinds: seen.kinds, failed: seen.failed }),
     );
     ok("R1: the head stands on one hairline", seen.hairline === "1px", JSON.stringify({ hairline: seen.hairline }));
@@ -245,6 +246,8 @@ async function redesignRows(browser, origin, ok) {
         fill: saidStyle.backgroundColor,
         wantFill: probe("--chat-bubble", "backgroundColor"),
         left: Math.round(box.left - left),
+        // On the right, under the hand that typed it (t-81525 B4).
+        right: Math.round(left + width - box.right),
         share: Math.round((box.width / width) * 100) / 100,
         max: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--chat-said-max")) / 100,
       };
@@ -275,7 +278,7 @@ async function redesignRows(browser, origin, ok) {
         wantKinds: [
           t("worker.stepWeb", "웹 읽기"),
           t("worker.stepWebSearch", "웹 검색"),
-          t("worker.stepShell", "셸"),
+          t("worker.stepShell", "명령"),
           t("worker.stepRun", "{{kind}} {{n}}개", { kind: t("worker.stepRead", "파일 읽기"), n: 6 }),
         ],
         results: rows.map(res),
@@ -311,6 +314,9 @@ async function redesignRows(browser, origin, ok) {
         fill: frame ? getComputedStyle(frame).backgroundColor : null,
         wantFill: probe("--chat-code-bg", "backgroundColor"),
         edge: frame ? getComputedStyle(frame).borderTopWidth : null,
+        // Its own band over the code, a hairline between them, the code in mono (t-81525).
+        band: bar ? getComputedStyle(bar).borderBottomWidth : null,
+        mono: /mono/i.test(getComputedStyle(frame?.querySelector("pre") ?? document.body).fontFamily),
       };
       copy?.click();
       await settle();
@@ -321,8 +327,8 @@ async function redesignRows(browser, origin, ok) {
       return seen;
     });
     ok(
-      "R2: the person's words stand on a soft fill with no border, left aligned, no wider than the measure — not a bordered box as wide as the list",
-      seen.person.border === "0px" && seen.person.fill === seen.person.wantFill && seen.person.left === 0 &&
+      "R2: the person's words stand on a soft fill with no border, on the right (t-81525 B4), no wider than the measure — not a bordered box as wide as the list",
+      seen.person.border === "0px" && seen.person.fill === seen.person.wantFill && seen.person.right === 0 &&
         seen.person.share <= seen.person.max + 0.01,
       JSON.stringify(seen.person),
     );
@@ -348,7 +354,7 @@ async function redesignRows(browser, origin, ok) {
     ok(
       "R6: a fence wears a flat panel — the code ground, no edge — with its language and a 「복사」 that is there without hovering, which writes the code and says it did",
       seen.fence.language === "tsx" && seen.fence.copyWords === seen.fence.wantCopy && seen.fence.shown === "1" &&
-        seen.fence.fill === seen.fence.wantFill && seen.fence.edge === "0px" &&
+        seen.fence.fill === seen.fence.wantFill && seen.fence.edge === "0px" && seen.fence.band === "1px" && seen.fence.mono &&
         seen.fence.copied === seen.fence.wantCopied && seen.fence.said === seen.fence.wantSaid,
       JSON.stringify(seen.fence),
     );
@@ -501,7 +507,7 @@ async function redesignNow(browser, origin, ok) {
       await pollHelperPages();
       await settle();
       seen.calling = read();
-      seen.wantCalling = `${t("worker.stepShell", "셸")} cargo test -p shop`;
+      seen.wantCalling = `${t("worker.stepShell", "명령")} cargo test -p shop`;
       return seen;
     });
     ok(
@@ -733,10 +739,14 @@ async function redesignStack(browser, origin, ok) {
         wantTodo: t("worker.stackTodos", "할 일 {{done}}/{{total}}", { done: 2, total: 3 }),
         items: words(stack()?.querySelector(".chat-stack-todo-words")),
         wantItems: ["목록 화면 찾기", "폭 상수 찾기", "보고"].join(" · "),
-        work: words(stack()?.querySelector(".chat-stack-work")),
-        wantWork: t("worker.stackNoWork", "배경 작업 없음"),
-        queue: words(stack()?.querySelector(".chat-stack-queue")),
-        wantQueue: t("worker.stackQueue", "대기 메시지 {{n}}", { n: 0 }),
+        // A count of nothing is not said (t-81525 C2).
+        work: Boolean(stack()?.querySelector(".chat-stack-work")),
+        queue: Boolean(stack()?.querySelector(".chat-stack-queue")),
+        // The state is the composer's first line, one box with it (t-81525 C1).
+        joined: (() => {
+          const composer = document.querySelector(".pane-chat .chat-dock > .worker-composer");
+          return stack() && composer ? Math.round(composer.getBoundingClientRect().top - stack().getBoundingClientRect().bottom) : null;
+        })(),
         git: words(stack()?.querySelector(".chat-stack-git")),
         branch,
       };
@@ -777,9 +787,9 @@ async function redesignStack(browser, origin, ok) {
       return seen;
     });
     ok(
-      "R9: over the composer the conversation's state — 「할 일 2/3」 and the items, 「배경 작업 없음」, 「대기 메시지 0」, and the checkout's branch",
-      seen.shown && seen.todo === seen.wantTodo && seen.items === seen.wantItems && seen.work === seen.wantWork &&
-        seen.queue === seen.wantQueue && (seen.branch === null ? seen.git === "" : seen.git.includes(seen.branch)),
+      "R9: over the composer the conversation's state — 「할 일 2/3」 and the items and the checkout's branch, no count of nothing (C2), joined to the composer with no gap (C1)",
+      seen.shown && seen.todo === seen.wantTodo && seen.items === seen.wantItems && seen.work === false &&
+        seen.queue === false && seen.joined === 0 && (seen.branch === null ? seen.git === "" : seen.git.includes(seen.branch)),
       JSON.stringify(seen),
     );
     ok(

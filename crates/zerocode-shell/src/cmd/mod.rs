@@ -271,7 +271,7 @@ pub(crate) use settings::{
     set_artifacts_auto_open_beside, set_artifacts_retention_days, set_claude_autoswitch_mode,
     set_computer_confirm, set_computer_generator_road, set_computer_input_policy,
     set_computer_live_reflex, set_computer_share_required, set_confirm_close_pinned,
-    set_conversation_focus_view, set_ctrl_tab_order_mode, set_default_task_source,
+    set_conversation_timeline_view, set_ctrl_tab_order_mode, set_default_task_source,
     set_diff_side_by_side, set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
     set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
     set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,

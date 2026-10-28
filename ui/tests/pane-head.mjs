@@ -124,6 +124,23 @@ export async function testPaneHead(browser, origin, ok) {
       const screenLines = [...host.querySelectorAll(".pane-head, .chat-head")].filter(shown);
       seen.headLinesOnScreen = screenLines.length;
       seen.screenLineHolds = screenLines[0] === head && head.contains(el("view-toggle")) && Boolean(head.querySelector(".pane-head-pick"));
+      // The head names a tab of one pane, so its name bar keeps only its actions, and
+      // the rename starts from the head's name (t-81525 C14).
+      const named = tabOfTerm(term);
+      named.paneNames = { ...(named.paneNames ?? {}), [term]: "Claude Agent Teams" };
+      renderPanes(named);
+      paintPaneHead(named, term);
+      await window.__PAINTED__();
+      const nameBar = document.querySelector(`.pane-slot[data-term="${term}"] > .pane-title-bar`);
+      const nameWords = nameBar?.querySelector(".pane-title-text");
+      seen.nameOnce = Boolean(nameWords) && getComputedStyle(nameWords).display === "none" &&
+        getComputedStyle(nameBar).position === "absolute";
+      head.querySelector(".pane-head-name")?.click();
+      await window.__PAINTED__();
+      const renaming = document.querySelector(`.pane-slot[data-term="${term}"] .pane-title-input`);
+      seen.renameFromHead = Boolean(renaming) && renaming.checkVisibility();
+      renaming?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await window.__PAINTED__();
       // A second agent pane whose question is only on its screen opens on the screen.
       const other = await openTermTab({ placement: "tab" });
       await window.__PAINTED__();
@@ -163,6 +180,11 @@ export async function testPaneHead(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
+      "a tab of one pane says its name once, in its head — the name bar keeps only its actions — and the head's name starts the rename (t-81525 C14)",
+      seen.nameOnce && seen.renameFromHead,
+      JSON.stringify({ nameOnce: seen.nameOnce, renameFromHead: seen.renameFromHead }),
+    );
+    ok(
       "the pane reads as its conversation by default, without a hand-over, and the person's pick of the screen survives the next hook",
       seen.chatByDefault && seen.chatPressed === "true" && seen.wires === 0 && seen.chatShown &&
         seen.screenKept && seen.whoShownOnScreen && seen.askOnScreen,
@@ -180,8 +202,8 @@ export async function testPaneHead(browser, origin, ok) {
       JSON.stringify({ quietChat: seen.quietChat, quietReads: seen.quietReads, workingReads: seen.workingReads, endedReads: seen.endedReads }),
     );
     ok(
-      "the answer reads at Geist 16 on 24 in one column of at most 760 px, code in a fixed-width chip, and the composer floats under that column",
-      seen.proseSize === "16px" && seen.proseLine === "24px" && seen.turnWidth > 0 && seen.turnWidth <= 760 &&
+      "the answer reads at Geist 16 in one column of at most 760 px — on 24, or on 25.6 where the page is 1000 px or wider (t-81525) — code in a fixed-width chip, and the composer floats under that column",
+      seen.proseSize === "16px" && (seen.columnWidth >= 1000 ? seen.proseLine === "25.6px" : seen.proseLine === "24px") && seen.turnWidth > 0 && seen.turnWidth <= 760 &&
         seen.columnWidth > 760 && /mono|Menlo|SF Mono/i.test(seen.codeFont) && seen.codeGround !== "rgba(0, 0, 0, 0)" &&
         seen.dockRadius === "12px" && seen.dockAligned,
       JSON.stringify(seen),
