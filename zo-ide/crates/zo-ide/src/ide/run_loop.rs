@@ -45,6 +45,7 @@ const KEEP_LIST_HELP: &str = "\
 /goal [command]       지속 목표·bounded autonomous gate
 /loop [command]       횟수·간격·파일 변화 반복
 /status               사용량 카드 — 모델·권한·세션·컨텍스트·한도
+/context              컨텍스트 창을 무엇이 채우나·언제 압축하나
 /help                 이 목록
 /exit                 종료 (Ctrl-D 도 같다)
 그 외 슬래시는 zerocode IDE 에서 하세요.";
@@ -556,6 +557,10 @@ fn handle_slash<W: Write>(
             notice(renderer, &crate::status_format::card_text(&rows));
             SlashOutcome::Continue
         }
+        Some(Slash::Context) => {
+            notice(renderer, &session.runtime.context_breakdown_report());
+            SlashOutcome::Continue
+        }
         Some(Slash::Model) => {
             if arg.is_empty() {
                 note(renderer, &format!(
@@ -647,10 +652,22 @@ fn handle_slash<W: Write>(
             | Slash::Warnings
             | Slash::Rewind
             | Slash::Clear,
-        )
-        | None => {
-            unknown_command(renderer, name)
-        }
+        ) => unknown_command(renderer, name),
+        None => unlisted_command(renderer, &session.cwd, name, arg),
+    }
+}
+
+/// 목록에 없는 낱말 — 프롬프트 명령이면 그 펼친 본문이 턴이 되고, 아니면
+/// [`unknown_command`] 의 한 문구다.
+fn unlisted_command<W: Write>(
+    renderer: &mut Renderer<W>,
+    cwd: &std::path::Path,
+    name: &str,
+    arg: &str,
+) -> SlashOutcome {
+    match crate::slash::prompt_command(cwd, name, arg) {
+        Some(prompt) => SlashOutcome::Turn(prompt),
+        None => unknown_command(renderer, name),
     }
 }
 
@@ -1225,7 +1242,8 @@ mod tests {
     use tokio::sync::{mpsc, watch};
 
     use super::{
-        forward_subagent_frames, start_subagent_frame_relay, SubagentFrameSink, KEEP_LIST_HELP,
+        forward_subagent_frames, start_subagent_frame_relay, unlisted_command, SlashOutcome,
+        SubagentFrameSink, KEEP_LIST_HELP,
     };
     use crate::ide::events::SubagentsFrame;
     use crate::session::subagent_progress::{RosterSnapshot, SubagentProgress, SubagentProgressWatcher};
@@ -1378,6 +1396,35 @@ mod tests {
             "session-a".to_string()
         )
         .is_none());
+    }
+
+    /// A word the keep-list does not have is a turn in the pipe when a command
+    /// file in the working folder names it — its body expanded with the
+    /// arguments — and the one line otherwise (adversarial review A, Z12).
+    #[test]
+    fn an_unlisted_word_that_names_a_prompt_command_is_a_turn() {
+        let folder = tempfile::tempdir().expect("a working folder");
+        let commands = folder.path().join(".zo").join("commands");
+        std::fs::create_dir_all(&commands).expect("the command folder");
+        std::fs::write(commands.join("fruit.md"), "Name the fruit $ARGUMENTS in one word.\n")
+            .expect("the prompt command");
+        let mut written = Vec::new();
+        let (expanded, unknown) = {
+            let mut renderer = super::Renderer::new(&mut written, super::RenderOptions::default());
+            (
+                unlisted_command(&mut renderer, folder.path(), "fruit", "pineapple"),
+                unlisted_command(&mut renderer, folder.path(), "no-such-command-z12", ""),
+            )
+        };
+        assert!(
+            matches!(&expanded, SlashOutcome::Turn(text) if text.trim() == "Name the fruit pineapple in one word."),
+            "/fruit did not become its expanded turn"
+        );
+        assert!(matches!(unknown, SlashOutcome::Continue));
+        assert!(
+            String::from_utf8_lossy(&written).contains("/no-such-command-z12"),
+            "the unknown word is answered with its one line"
+        );
     }
 
     /// 파이프의 `/help` 목록과 파이프가 실제로 드는 명령은 같은 사실을 읽는다.

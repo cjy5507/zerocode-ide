@@ -1731,6 +1731,7 @@ pub fn shortcut_card() -> Vec<String> {
         "/goal [command]       persistent goal · bounded autonomous gates".to_string(),
         "/loop [command]       bounded count · interval · file-watch loops".to_string(),
         "/status               model · permissions · effort · session · context".to_string(),
+        "/context              what fills the context window · when it compacts".to_string(),
         "/warnings             this conversation's warnings, one page each (F2 too)".to_string(),
         "/help                 this list          /exit  quit (Ctrl-D too)".to_string(),
         "/clear [name]         clear terminal + start a new chat".to_string(),

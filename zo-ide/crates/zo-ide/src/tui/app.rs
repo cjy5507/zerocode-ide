@@ -3844,6 +3844,12 @@ impl Ui {
                 let rows = crate::status_format::card_from_facts(&self.status_facts(), width);
                 self.history(&rows);
             }
+            // The breakdown is the session's to count, and the turn holds the
+            // session — so it is answered the moment the turn ends.
+            Some(Slash::Context) => {
+                self.deferred.push(Deferred::Slash(command.to_string()));
+                self.note(SystemLevel::Info, "↳ /context runs when this turn ends");
+            }
             Some(Slash::Goal) if arg.is_empty() || matches!(arg, "status" | "show") => {
                 self.note(
                     SystemLevel::Info,
@@ -3883,13 +3889,15 @@ impl Ui {
                 self.deferred.push(Deferred::Slash(command.to_string()));
                 self.note(SystemLevel::Info, "↳ /loop runs when this turn ends");
             }
+            // A prompt command is a prompt: expanded, it waits in the queue
+            // like a line typed now.
+            None => match crate::slash::prompt_command(&self.session_cwd, name, arg) {
+                Some(text) => self.pending_input.push_queued(Submission { text, image_paths: Vec::new() }),
+                None => self.note(SystemLevel::Info, &not_in_zo(name)),
+            },
             // `/exit` 는 여기 오지 않는다 — 제출 자리에서 먼저 걸러 턴을 끝까지
             // 돌리고 나간다.
-            Some(Slash::Exit) | None => {
-                let text =
-                    format!("/{name} is not in zo — use zerocode IDE for it (? for shortcuts)");
-                self.note(SystemLevel::Info, &text);
-            }
+            Some(Slash::Exit) => self.note(SystemLevel::Info, &not_in_zo(name)),
         }
     }
 
@@ -5358,6 +5366,11 @@ impl App {
                 // 꼬리 빈 줄 **하나** 뒤에 곧장 상자를 세운다(부팅 카드와 같다).
                 self.ui.history(&rows);
             }
+            Some(Slash::Context) => {
+                let report = self.session().runtime.context_breakdown_report();
+                let rows: Vec<Line> = report.lines().map(Line::from_text).collect();
+                self.ui.history(&rows);
+            }
             Some(Slash::Model) => {
                 if arg.is_empty() {
                     self.ui.open_model_picker();
@@ -5421,11 +5434,12 @@ impl App {
             Some(Slash::Clear) => {
                 self.start_fresh_session((!arg.is_empty()).then_some(arg), true);
             }
-            None => {
-                let text =
-                    format!("/{name} is not in zo — use zerocode IDE for it (? for shortcuts)");
-                self.ui.note(SystemLevel::Info, &text);
-            }
+            // A prompt command runs as the turn its expanded body is; the
+            // screen already shows the line as typed.
+            None => match crate::slash::prompt_command(&self.session().cwd, name, arg) {
+                Some(text) => self.asked = Some(Work::Turn(Submission { text, image_paths: Vec::new() })),
+                None => self.ui.note(SystemLevel::Info, &not_in_zo(name)),
+            },
         }
     }
 
@@ -6587,6 +6601,11 @@ impl TerminationSignals {
             _ => std::future::pending::<()>().await,
         }
     }
+}
+
+/// What a `/word` that is neither zo's nor a prompt command answers.
+fn not_in_zo(name: &str) -> String {
+    format!("/{name} is not in zo — use zerocode IDE for it (? for shortcuts)")
 }
 
 #[cfg(test)]

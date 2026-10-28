@@ -2,11 +2,14 @@
 //!
 //! 여기 한 자리에만 적힌다 — 컴포저 팝업(`tui::slash`)도, 맨 터미널과 파이프
 //! 두 프런트엔드의 디스패치도 이 열거에서 이름을 읽으므로 목록과 처리가
-//! 갈라질 수 없다.
+//! 갈라질 수 없다. 목록에 없는 `/이름` 은 프롬프트 명령으로 한 번 더 찾는다
+//! ([`prompt_command`]).
+
+use std::path::Path;
 
 use crate::tui::fast;
 
-/// zo 가 실제로 처리하는 슬래시 열다섯.
+/// zo 가 실제로 처리하는 슬래시 열여섯.
 ///
 /// 순서는 팝업이 그리는 순서다. `/new` 는 codex `SlashCommand` 열거와 같이
 /// `/permissions` 와 `/resume` 사이에, `/clear` 는 종료 명령 뒤에 선다.
@@ -38,6 +41,10 @@ pub enum Slash {
     Goal,
     Loop,
     Status,
+    /// Claude Code's `/context`: what fills the context window and where each
+    /// compaction tier sits (`ConversationRuntime::context_breakdown_report`).
+    /// Read-only, so it stands beside `/status`.
+    Context,
     /// codex 0.157.1 `/warnings`: page through the warnings this conversation
     /// has shown (F2 opens the same viewer). Read-only, so it stands beside
     /// `/status`.
@@ -91,6 +98,7 @@ impl Slash {
         Self::Goal,
         Self::Loop,
         Self::Status,
+        Self::Context,
         Self::Warnings,
         Self::Help,
         Self::Exit,
@@ -112,6 +120,7 @@ impl Slash {
             Self::Goal => "/goal",
             Self::Loop => "/loop",
             Self::Status => "/status",
+            Self::Context => "/context",
             Self::Warnings => "/warnings",
             Self::Help => "/help",
             Self::Exit => "/exit",
@@ -144,6 +153,7 @@ impl Slash {
             Self::Goal => "persist a goal and run bounded autonomous checks",
             Self::Loop => "repeat a prompt on a bounded session schedule",
             Self::Status => "model, account, limits, session and context",
+            Self::Context => "what fills the context window and when it compacts",
             // codex `slash_command.rs:117`.
             Self::Warnings => "view retained warnings and diagnostic details",
             Self::Help => "show the shortcut card",
@@ -207,9 +217,45 @@ impl Slash {
     }
 }
 
+/// The turn a `/word` the keep-list does not have runs as, when it names a
+/// prompt command: that command's body with `arg` filled in, expanded against
+/// `cwd`. Where commands are looked for and which wins a shared name is the
+/// commands crate's ([`commands::discover_prompt_commands`]): `.zo/commands/`
+/// in `cwd` and every folder above it, then `commands/` in zo's home. The
+/// keep-list is asked first, so a command file cannot shadow one of zo's own.
+#[must_use]
+pub fn prompt_command(cwd: &Path, name: &str, arg: &str) -> Option<String> {
+    let found = commands::discover_prompt_commands(cwd);
+    commands::find_prompt_command(&found, name).map(|command| command.render_prompt_in(arg, cwd))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{render_catalog, Slash};
+    use super::{prompt_command, render_catalog, Slash};
+
+    /// A command file in the working folder expands with its arguments; a
+    /// word no file names is not a prompt command. The folder is a fresh one,
+    /// so neither the person's home nor this checkout decides the answer.
+    #[test]
+    fn a_prompt_command_expands_by_its_name_from_the_working_folder() {
+        let folder = tempfile::tempdir().expect("a working folder");
+        let commands = folder.path().join(".zo").join("commands");
+        std::fs::create_dir_all(&commands).expect("the command folder");
+        std::fs::write(
+            commands.join("fruit.md"),
+            "---\ndescription: name one fruit\n---\nName the fruit $ARGUMENTS in one word.\n",
+        )
+        .expect("the prompt command");
+        let expanded = prompt_command(folder.path(), "fruit", "pineapple").expect("/fruit expands");
+        assert_eq!(expanded.trim(), "Name the fruit pineapple in one word.");
+        assert_eq!(
+            prompt_command(folder.path(), "FRUIT", "kiwi").map(|text| text.trim().to_string()),
+            Some("Name the fruit kiwi in one word.".to_string()),
+            "names match without case, as the commands crate finds them"
+        );
+        assert_eq!(prompt_command(folder.path(), "no-such-command-z12", ""), None);
+    }
+
     #[test]
     fn zo_commands_prints_the_catalog_it_handles_in_popup_order() {
         let json: Vec<serde_json::Value> =

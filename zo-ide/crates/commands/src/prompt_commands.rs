@@ -38,7 +38,14 @@ impl PromptCommandDef {
     #[must_use]
     pub fn render_prompt(&self, args: &str) -> String {
         let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        expand_command_template(&self.body, args, &base_dir)
+        self.render_prompt_in(args, &base_dir)
+    }
+
+    /// [`Self::render_prompt`] against `base_dir` rather than the process cwd:
+    /// the session's working folder, where `!cmd` runs and `@path` resolves.
+    #[must_use]
+    pub fn render_prompt_in(&self, args: &str, base_dir: &Path) -> String {
+        expand_command_template(&self.body, args, base_dir)
     }
 }
 
