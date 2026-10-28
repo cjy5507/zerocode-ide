@@ -804,17 +804,19 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   padding-inline-start: var(--nav-inset);
 }
 
-/* The two rows Orca heads this column with, above the project tree. Quieter
- * than a worktree row — they are shortcuts to somewhere else, not the thing
- * this column is about — and set at the same 13px so the column has one
- * reading size rather than three. */
+/* The destinations Orca heads this column with, above the project tree.
+ * Quieter than a worktree row — they are shortcuts to somewhere else, not the
+ * thing this column is about.
+ *
+ * Two even columns (t-81525 S1, the menu the person passed on 2026-10-29):
+ * seven destinations and the search in four lines of two, the height the
+ * wrapped rows took (about 130 px), with every line ending on the same edge
+ * and no destination left alone on a line of its own. The menu measures its
+ * own width — a container — so a narrow column folds it, not the window. */
 .nav-rows {
-  display: flex;
-  /* 2차 A (t-78107, 시안 「또렷한 Geist」 3): the seven destinations wrap in
-   * their own words onto two lines instead of standing seven rows tall — the
-   * column's top went from 245 px to about 106, and the agents at work start
-   * that much higher. The setup entry and the search keep a line each. */
-  flex-flow: row wrap;
+  container: nav-rows / inline-size;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   /* The layer's own inset, now that the column has none: `gap-0.5 px-2 pt-2
    * pb-1` (SidebarNav.tsx:106). The bottom is the shallow side because the
    * header below brings its own `mt-2`. */
@@ -822,9 +824,62 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   padding: var(--space-2) var(--space-2) var(--space-1);
 }
 
-.nav-rows > .guide-entry,
-.nav-rows > .nav-search {
-  flex-basis: 100%;
+/* The setup entry keeps a line of its own; the search is the eighth cell. */
+.nav-rows > .guide-entry {
+  grid-column: 1 / -1;
+}
+
+/* A name too long for its half ends in an ellipsis; the tooltip says it whole. */
+.nav-row > span:not(.nav-badge) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Under about 240 px the halves cannot hold a name: the menu becomes one line
+ * of marks. The names stay in the buttons for a screen reader — clipped, not
+ * removed, so each button is still named once — and the tooltip (`data-tip`)
+ * says them to the eye. */
+@container threads (max-width: 240px) {
+  .nav-rows {
+    grid-template-columns: repeat(auto-fill, minmax(var(--control-height-sm), 1fr));
+  }
+
+  .nav-rows > .guide-entry {
+    grid-column: 1 / -1;
+  }
+
+  .nav-row {
+    position: relative;
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .nav-row > span:not(.nav-badge),
+  .nav-search > :not(.nav-search-glyph) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .nav-row > .nav-badge {
+    position: absolute;
+    top: 0;
+    right: 0;
+  }
+
+  .nav-search {
+    padding-inline: 0;
+  }
+
+  .nav-search-glyph {
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
 }
 
 /* In its original seat the setup entry is the nav's FIRST row
@@ -850,10 +905,11 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   background: none;
   color: var(--ink-mist);
   font: inherit;
-  /* `text-[13px]` — not the 12px of a list row. These four are DESTINATIONS
-   * rather than contents, and Orca sets them a step above the rows they sit
-   * among for that reason (`App-BaqTRjaA.js:8921`). */
-  font-size: var(--text-sm);
+  /* 12px, the two-column menu's own size (t-81525 S1): Orca's 13px left
+   * three names to a line and the seventh alone on the next; at 12 every name
+   * stands whole in half the column. */
+  font-size: var(--text-xs);
+  min-width: 0;
   font-weight: 500;
   /* `tracking-tight`, which Orca sets on this row and on no other in the
    * column (`App-BaqTRjaA.js:8758`). At 13px it is the difference between a
@@ -1379,6 +1435,10 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
  * titanium active recipe below: routine navigation keeps presence without
  * becoming a raised card. */
 .threads {
+  /* The menu above the tree folds on the column's width (t-81525 S1). The
+   * column's width is its grid track's, never its content's, so the
+   * containment changes nothing it lays out. */
+  container: threads / inline-size;
   display: flex;
   flex-direction: column;
   /* No inset of its own, and nothing here scrolls: Orca's column is
@@ -24831,8 +24891,10 @@ progress:indeterminate::-webkit-progress-bar {
 }
 
 .nav-badge.is-attention {
-  background: var(--lane-3);
-  color: var(--surface-abyss);
+  /* What waits on the person is the one blue (`--signal-you`), never a lane's
+   * hue (t-81525 S1). */
+  background: var(--signal-you-solid);
+  color: var(--ink-on-solid);
   font-weight: 700;
 }
 

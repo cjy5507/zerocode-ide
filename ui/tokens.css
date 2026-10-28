@@ -682,12 +682,12 @@
   --nav-inset: 8px;
   --nav-gutter: 8px;
 
-  /* The glyph on a navigable row is `size-4` = 16px, a step ABOVE the
-   * window's 14px default. Deliberately its own token rather than a nudge to
-   * `--icon-size`: the same 14px still draws the disclosure twist and the
-   * file tree, and the tab strip's kind glyph is smaller still. A row a
-   * person aims at all day is the one place that earns the larger mark. */
-  --nav-icon-size: 16px;
+  /* The glyph on a navigable row. Orca's `size-4` (16px) stood here; the
+   * two-column menu the person passed (t-81525 S1, 2026-10-29) draws it at
+   * the draft's own 14px beside a 12px name, which is what lets every
+   * destination keep its whole name in half the column. Still its own token,
+   * so the menu's mark moves without moving the window's `--icon-size`. */
+  --nav-icon-size: 14px;
 
   /* A child list indents by 18px per level, which is Orca's own
    * `getWorktreeCardContentIndent` (:4603) rather than a sum of ours.
