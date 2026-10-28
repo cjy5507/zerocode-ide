@@ -263,7 +263,7 @@ impl TeamJudge {
 /// [`INERT_ESCAPE`], the glyph the window's own paste puts in its place, so
 /// nothing inside can close the paste early. Line feeds stay line feeds — a
 /// pipe is not a terminal, and zo splits its stdin on them (the window's own
-/// paste, `zerocode_pty::input::sanitize_paste`, turns them into returns for a
+/// paste, `zerocode_pty::sanitize_paste`, turns them into returns for a
 /// terminal's Enter).
 #[must_use]
 pub fn pasted(prompt: &str) -> String {
