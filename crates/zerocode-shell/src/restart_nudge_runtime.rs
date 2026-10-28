@@ -1213,6 +1213,21 @@ pub(super) fn forgotten(state: &AppState, term: TermId) {
     }
 }
 
+/// The resume nudges the window types into a pane it brought back
+/// ([`RESTART_NUDGE`], [`COORDINATOR_NUDGE`], [`CUT_COMMANDS_NUDGE`]) reach the transcript as the
+/// person's prompt, because the pane cannot tell who typed them. They are the
+/// window's words to the agent, so the page draws them as a window note, not
+/// as something the person said (t-81525 C3, read by `pane_log`). Display only: the file keeps
+/// every byte.
+pub(crate) fn mark_window_notes(turns: &mut [zerocode_core::transcript::TranscriptTurn]) {
+    let nudges = [RESTART_NUDGE, COORDINATOR_NUDGE, CUT_COMMANDS_NUDGE];
+    for turn in turns.iter_mut().filter(|turn| turn.role == "user") {
+        if nudges.iter().any(|nudge| turn.text.starts_with(nudge)) {
+            turn.role = "window".into();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2745,5 +2760,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn said(role: &str, text: String) -> zerocode_core::transcript::TranscriptTurn {
+        zerocode_core::transcript::TranscriptTurn {
+            role: role.into(),
+            text,
+            at_ms: None,
+            tool: None,
+            images: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_nudge_the_window_typed_is_its_note_and_the_persons_words_stay_theirs() {
+        let mut turns = vec![
+            said(
+                "user",
+                format!(
+                    "{} `cargo test` — run again whichever you still need.",
+                    CUT_COMMANDS_NUDGE
+                ),
+            ),
+            said(
+                "user",
+                format!("{RESTART_NUDGE} Worktree now: HEAD abc1234."),
+            ),
+            said("user", COORDINATOR_NUDGE.to_string()),
+            said("user", "Commands still running? Check them.".to_string()),
+            said("assistant", CUT_COMMANDS_NUDGE.to_string()),
+        ];
+        mark_window_notes(&mut turns);
+        let roles: Vec<&str> = turns.iter().map(|turn| turn.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            ["window", "window", "window", "user", "assistant"],
+            "only the window's own nudges, said as the person's prompt, become its notes"
+        );
+    }
+
+    /// `pane_log` reads every agent's file through the one reader, so the
+    /// nudge the window typed into a Claude, a Codex or a zo pane comes back
+    /// a note on each.
+    #[test]
+    fn every_agents_transcript_brings_the_nudge_back_as_the_windows_note() {
+        let nudge = format!("{RESTART_NUDGE} Worktree now: HEAD abc1234.");
+        let lines = [
+            serde_json::json!({ "type": "user", "message": { "role": "user", "content": nudge } }),
+            serde_json::json!({ "type": "response_item", "payload": { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": nudge }] } }),
+            serde_json::json!({ "type": "message", "message": { "role": "user", "content": nudge } }),
+            serde_json::json!({ "type": "user", "message": { "role": "user", "content": "go on" } }),
+        ];
+        let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let mut turns = zerocode_core::transcript::turns_in(&text);
+        mark_window_notes(&mut turns);
+        let roles: Vec<&str> = turns.iter().map(|turn| turn.role.as_str()).collect();
+        assert_eq!(roles, ["window", "window", "window", "user"], "{turns:?}");
     }
 }
