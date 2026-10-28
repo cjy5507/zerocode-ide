@@ -39,7 +39,7 @@ import { createRequire } from "node:module";
 import { cpus, loadavg } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { chromium, createWindowServer, foldConversations, openWindowTestPage } from "./window-boot.mjs";
 
 /* A 1×1 PNG — what an attached picture or a screenshot answers with when the
  * page asks for its bytes. The page's cost is the node and the fetch, not the
@@ -313,7 +313,10 @@ export function standingPids() {
 
 /* One page, one set of numbers. `cdp` is null on WebKit, whose heap and node
  * counts come from the DOM alone. */
-export async function measureConversation(page, { engine = "chromium", before = new Set(), deltas = 300, wheels = 60 } = {}) {
+export async function measureConversation(page, { engine = "chromium", before = new Set(), deltas = 300, wheels = 60, folded = false } = {}) {
+  // `folded`: the product's default page, the tool work between two answers
+  // as pills (t-81525 B1); without it the harness's whole timeline.
+  if (folded) await foldConversations(page);
   const cdp = engine === "chromium" ? await page.context().newCDPSession(page) : null;
   const gc = async () => {
     if (!cdp) return;
@@ -436,7 +439,7 @@ export async function measureConversation(page, { engine = "chromium", before = 
 }
 
 /* Rounds of fresh pages, the median of each number. */
-export async function measureRounds({ engine = "chromium", rounds = 5 } = {}) {
+export async function measureRounds({ engine = "chromium", rounds = 5, folded = false } = {}) {
   const { files, origin } = await createWindowServer();
   const browserType = engine === "webkit" ? webkitType() : chromium;
   const browser = await browserType.launch({ headless: true });
@@ -446,7 +449,7 @@ export async function measureRounds({ engine = "chromium", rounds = 5 } = {}) {
       const before = standingPids();
       const { page, faults } = await openWindowTestPage(browser, origin);
       try {
-        taken.push(await measureConversation(page, { engine, before }));
+        taken.push(await measureConversation(page, { engine, before, folded }));
         if (faults.length) taken.at(-1).faults = faults.slice(0, 3);
       } finally {
         await page.close();
@@ -1366,7 +1369,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
     if (out) writeFileSync(out, `${JSON.stringify(result, null, 2)}\n`);
     process.exit(0);
   }
-  const { summary, taken } = await measureRounds({ engine, rounds });
+  const { summary, taken } = await measureRounds({ engine, rounds, folded: argv.includes("--folded") });
   const mb = (bytes) => (bytes === null ? "—" : `${(bytes / 1024 / 1024).toFixed(1)} MB`);
   console.log(`engine ${summary.engine}, ${summary.rounds} rounds (medians)`);
   console.log(`  rows ${summary.rows} of ${summary.turns} turns · list elements ${summary.listElements} · document elements ${summary.documentElements} · diff rows ${summary.diffRows}`);
