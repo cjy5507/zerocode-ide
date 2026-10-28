@@ -15076,7 +15076,8 @@ details.worker-command {
   flex: 1 1 0;
   min-width: var(--space-4);
   height: var(--rule-width);
-  background: var(--edge-rule);
+  /* A filled hairline reads only in the mark's ink (the rule is border-only). */
+  background: var(--edge-mark);
 }
 
 .helper-window-note-words {
