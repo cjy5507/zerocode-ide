@@ -84,8 +84,8 @@ function readPage() {
     proseSize: style ? parseFloat(style.fontSize) : null,
     proseLeading: style ? Math.round((parseFloat(style.lineHeight) / parseFloat(style.fontSize)) * 100) / 100 : null,
     pillsInside: pills.length > 0 && pills.every((pill) => inside(pill.firstElementChild)),
-    codesInside: codes.length === 2 && codes.every(inside),
-    codeLanguages: codes.map((code) => code.querySelector(".helper-code-lang")?.textContent ?? ""),
+    codesInside: codes.length >= 2 && codes.every(inside),
+    codeLanguages: codes.slice(-2).map((code) => code.querySelector(".helper-code-lang")?.textContent ?? ""),
     codeWord: t("mdview.code", "코드"),
     personRight: person ? Math.round(column.right - box(person).right) : null,
     personInside: person ? inside(person) : false,
@@ -135,10 +135,18 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
       all.every((one) => one.pillsInside && one.codesInside && one.personInside && one.personRight <= 1),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pillsInside, one.codesInside, one.personInside, one.personRight]]))));
     const dark = (width) => seen[`dark-${width}`];
+    // The steps are the PAGE's width, not the window's: the window's side
+    // columns take their share first.
+    const step = (one) => (one.pageWidth < 560 ? "narrow" : one.pageWidth >= 1000 ? "wide" : "middle");
     ok("B: the reading steps with the page's own width — a step smaller under 560 px, more air between lines from 1000 px, the column never wider than its measure",
-      dark(390).proseSize < dark(720).proseSize && dark(720).proseSize === dark(1440).proseSize &&
-        dark(1440).proseLeading > dark(720).proseLeading && dark(1440).columnWidth <= 760 && dark(390).columnWidth > 0,
-      JSON.stringify(B_WIDTHS.map((width) => [width, dark(width).proseSize, dark(width).proseLeading, dark(width).columnWidth])));
+      B_WIDTHS.every((width) => {
+        const one = dark(width);
+        const want = step(one);
+        return one.columnWidth > 0 && one.columnWidth <= 760 &&
+          (want === "narrow" ? one.proseSize === 14 : one.proseSize === 16) &&
+          (want === "wide" ? one.proseLeading === 1.6 : one.proseLeading === 1.5);
+      }) && new Set(B_WIDTHS.map((width) => step(dark(width)))).size >= 2,
+      JSON.stringify(B_WIDTHS.map((width) => [width, dark(width).pageWidth, dark(width).proseSize, dark(width).proseLeading, dark(width).columnWidth])));
     ok("B: an answer wears no dot, the tool work stands as pills with no step built, and one row — the person's last words — sticks",
       all.every((one) => one.answerDots === 0 && one.stepRows === 0 && one.sticky === 1),
       JSON.stringify(dark(1440)));

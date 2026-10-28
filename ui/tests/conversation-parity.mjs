@@ -754,7 +754,8 @@ export async function testConversationScroll(browser, origin, ok) {
     // The one way back to the foot is the person's button (사용자 요청 09-24),
     // and at the foot it is not shown.
     seen.footDoor = await page.evaluate(() => {
-      const doors = document.querySelector("#worker-view").querySelectorAll(".chat-foot-door, [class*='latest'], [class*='jump']");
+      // `is-latest` marks the newest answer and words (t-81525 B3·B4), not a door.
+      const doors = document.querySelector("#worker-view").querySelectorAll(".chat-foot-door, [class*='latest']:not(.is-latest), [class*='jump']");
       return { doors: doors.length, shown: doors[0]?.classList.contains("is-shown") ?? null };
     });
     ok(
@@ -1012,6 +1013,7 @@ export async function testConversationFoot(browser, origin, ok) {
         const door = window.__FOOT__.door();
         words[code] = door && {
           label: door.getAttribute("aria-label"),
+          tip: door.dataset.tip,
           said: door.textContent.trim(),
           titled: door.hasAttribute("title") || door.querySelector("[title]") !== null,
         };
@@ -1021,8 +1023,8 @@ export async function testConversationFoot(browser, origin, ok) {
     });
     const spoken = Object.values(seen.words);
     ok(
-      "the_button_names_itself_in_five_languages_without_a_title: the button says its name in ko, en, ja, zh and es — five different sentences, the words it shows the same as the name it is read by — and carries no title tooltip",
-      spoken.every((one) => one && one.label && one.said === one.label && !one.titled) &&
+      "the_button_names_itself_in_five_languages_without_a_title: the round mark (t-81525 C6) says its name in ko, en, ja, zh and es — five different sentences, read by the same words its tooltip shows — and carries no title",
+      spoken.every((one) => one && one.label && one.tip === one.label && one.said === "" && !one.titled) &&
         new Set(spoken.map((one) => one?.label)).size === 5,
       JSON.stringify(seen.words),
     );
@@ -3710,6 +3712,7 @@ async function stepsWebResults(browser, origin, ok) {
         fetch: partOf("wf1", ".helper-step-res"),
         empty: partOf("ws2", ".helper-step-res"),
         shell: partOf("sh1", ".helper-step-kind"),
+        wantShell: t("worker.stepShell", "명령"),
         gone: partOf("wf2", ".helper-step-res"),
         goneInk: lineOf(rowOf("wf2"))?.querySelector(".helper-step-status")?.classList.contains("is-bad") ?? false,
         fetched: partOf("wf3", ".helper-step-res"),
@@ -3729,7 +3732,7 @@ async function stepsWebResults(browser, origin, ok) {
     );
     ok(
       "D7: a shell step's kind is worded 「명령」 — the passed conversation's word (t-81525 C7) — not 「셸」",
-      seen.shell === t("worker.stepShell", "명령"),
+      seen.shell === seen.wantShell,
       JSON.stringify(seen),
     );
     ok("D7: the web results raised no page errors", faults.length === 0, faults.join("\n"));

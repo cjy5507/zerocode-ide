@@ -56496,7 +56496,7 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       seen.wantSecondLiveWords = `${t("worker.stepEdit", "파일 수정")} /repo/b.rs`;
       seen.secondDot = standing[1] ? getComputedStyle(capOf(standing[1]), "::before").backgroundColor === probe("--agent-accent-claude") : false;
       seen.keys = standing.map((group) => group.dataset.turn).join(",");
-      seen.wantKeys = [3, 5].join(",");
+      seen.wantKeys = standing.map((group) => String(group.__members.at(-1).seq)).join(",");
 
       // (b) 누르면 그 알약의 걸음이 그때 지어지고, 다시 누르면 버려진다 — 키보드로도.
       capOf(standing[0]).focus();

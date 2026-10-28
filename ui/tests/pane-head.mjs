@@ -202,8 +202,8 @@ export async function testPaneHead(browser, origin, ok) {
       JSON.stringify({ quietChat: seen.quietChat, quietReads: seen.quietReads, workingReads: seen.workingReads, endedReads: seen.endedReads }),
     );
     ok(
-      "the answer reads at Geist 16 on 24 in one column of at most 760 px, code in a fixed-width chip, and the composer floats under that column",
-      seen.proseSize === "16px" && seen.proseLine === "24px" && seen.turnWidth > 0 && seen.turnWidth <= 760 &&
+      "the answer reads at Geist 16 in one column of at most 760 px — on 24, or on 25.6 where the page is 1000 px or wider (t-81525) — code in a fixed-width chip, and the composer floats under that column",
+      seen.proseSize === "16px" && (seen.columnWidth >= 1000 ? seen.proseLine === "25.6px" : seen.proseLine === "24px") && seen.turnWidth > 0 && seen.turnWidth <= 760 &&
         seen.columnWidth > 760 && /mono|Menlo|SF Mono/i.test(seen.codeFont) && seen.codeGround !== "rgba(0, 0, 0, 0)" &&
         seen.dockRadius === "12px" && seen.dockAligned,
       JSON.stringify(seen),

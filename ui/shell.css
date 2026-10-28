@@ -839,12 +839,15 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 
 /* A name too long for its half takes a second line rather than lose its
  * end — a long language in a narrow column (Spanish at the default 280px);
- * past two it ends in an ellipsis and the tooltip says it whole. A name that
- * fits stays one line, so the rows keep their height. */
+ * one long word breaks at a hyphen in the document's language, and only in
+ * these names; past two lines it ends in an ellipsis and the tooltip says it
+ * whole. A name that fits stays one line, so the rows keep their height. */
 .nav-row > span:not(.nav-badge) {
   display: -webkit-box;
   min-width: 0;
   overflow: hidden;
+  overflow-wrap: anywhere;
+  hyphens: auto;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   line-height: var(--leading-tight);

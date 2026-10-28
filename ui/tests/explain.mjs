@@ -325,7 +325,8 @@ export async function testExplain(browser, origin, ok) {
       seen.term = term;
       seen.cwd = answer?.__run?.cwd ?? tabOfTerm(term)?.worktree ?? null;
       seen.beforeTouch = document.querySelectorAll(".helper-actions .explain-open").length;
-      seen.copy = Boolean(answer?.querySelector(":scope > .helper-actions > .helper-copy"));
+      // The list's one copy stands in the newest answer until the pointer moves it (t-81525 C8).
+      seen.copy = Boolean(document.querySelector(".helper-turn.is-assistant.is-latest > .helper-actions > .helper-copy"));
       // 포인터가 처음 닿으면 한 번 짓는다.
       answer.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
       seen.afterTouch = answer.querySelectorAll(":scope > .helper-actions > .explain-open").length;
@@ -369,6 +370,8 @@ export async function testExplain(browser, origin, ok) {
     const keys = await page.evaluate(async () => {
       const answer = document.querySelector(".helper-turn.is-assistant");
       answer.querySelector(".explain-open")?.remove();
+      // The pointer brings the list's one action row to this answer (t-81525 C8).
+      answer.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
       const copy = answer.querySelector(":scope > .helper-actions > .helper-copy");
       copy.focus();
       const made = answer.querySelector(":scope > .helper-actions > .explain-open");
