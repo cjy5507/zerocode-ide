@@ -169,6 +169,32 @@ mod tests {
         assert!(queue.lock().unwrap().is_empty());
     }
 
+    /// Adversarial review A, P2-4: a ledger worker whose start is still under
+    /// way has only its starting receipt (`ledgerStart`) on the manifest —
+    /// no binding, no `execution` yet — and every agent has a process queue
+    /// registered. A steer then must not land on that queue, which nothing
+    /// for a ledger worker reads: it is turned away with a reason that says
+    /// the worker is starting and when to send again.
+    #[test]
+    fn a_steer_to_a_ledger_worker_still_starting_is_turned_away_not_queued() {
+        let isolated = crate::misc_tools::agent_tools::tests::IsolatedStore::new("steer-ledger-start");
+        let mut manifest = isolated.running_manifest("agent-ledger-start");
+        manifest.lifecycle.ledger_start = Some(super::super::ledger::Start {
+            run: "run-1".into(),
+            task: "t-4".into(),
+            retry_request: "zo-start-agent-ledger-start".into(),
+        });
+        super::super::manifest::write_agent_manifest(&manifest).unwrap();
+        let queue = runtime::SteeringQueue::default();
+        super::super::register_agent_steering(manifest.agent_id.clone(), manifest.run_generation, queue.clone());
+        let receipt = steer_agent_with_receipt(&manifest, "follow up".into());
+        super::super::unregister_agent_steering(&manifest.agent_id, manifest.run_generation);
+        assert_eq!(receipt.receipt, SteerReceipt::Rejected, "{receipt:?}");
+        assert!(queue.lock().unwrap().is_empty(), "the words went to a queue nothing reads");
+        let why = receipt.reason.unwrap_or_default();
+        assert!(why.contains("still starting") && why.contains("t-4"), "{why}");
+    }
+
     /// An in-process child with no live queue is a rejection that says so;
     /// with one, the push is `queued` — never `consumed`, which only a
     /// boundary that read the words may say.
