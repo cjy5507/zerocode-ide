@@ -137,6 +137,10 @@
 //! cache would keep a JavaScript repository's `dist/`, `.next/` and
 //! `node_modules/` for good, which is the full disk this file exists to
 //! prevent; evidence a person still needs belongs outside the checkout.
+//!
+//! And a checkout that is kept still gives its build trees back (t-78886):
+//! what kept it is the work in it, and a directory a build tool tagged as its
+//! cache is no part of that work (`shed_build_trees`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1217,6 +1221,7 @@ fn settle(
             remember_as(
                 candidate, standing, &because, kind, waits, data_root, now_ms,
             );
+            shed_build_trees(candidate, &orchestrator, kind, recheck, data_root);
             return Settled::Kept;
         }
         Verdict::Reclaim {
@@ -1338,6 +1343,79 @@ fn settle(
             remember(candidate, Standing::Kept, &refusal, data_root, now_ms);
             Settled::Kept
         }
+    }
+}
+
+/// What a build tool writes into a directory it keeps as a cache — the Cache
+/// Directory Tagging Specification, which cargo follows for every `target/`.
+const CACHE_DIRECTORY_TAG: &str = "CACHEDIR.TAG";
+
+/// The first bytes of that file, which make it the tag and not a file of the
+/// same name.
+const CACHE_DIRECTORY_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+
+/// The build trees of a finished worker's checkout that is kept (t-78886,
+/// adversarial review O9): the work in it stays for whoever comes to look,
+/// and the build goes.
+///
+/// A kept checkout used to keep everything in it, `target/` with the rest —
+/// on 2026-10-28 one of 14 GiB and one of 9 GiB stood in checkouts whose
+/// branches waited to land, and the disk fell under its floor four times in
+/// 25 minutes. A build tree is the one thing in a checkout nobody needs back:
+/// the next build makes it again from the commits that are kept.
+///
+/// So only what is provably a build tree goes: an ignored directory, a real
+/// one and not a link (a shared directory is the repository's own), holding
+/// the cache tag a build tool wrote. And only from a checkout this window
+/// cut, kept for what is in it rather than for who has it — a locked one is a
+/// person's word to leave it be, and one that is not ours is somebody's —
+/// while the ledger still counts it finished with and no terminal and no
+/// process on this machine stands in it. Every doubt keeps the build.
+fn shed_build_trees(
+    candidate: &orchestration::SettledCheckout,
+    orchestrator: &Orchestrator,
+    kind: ReclaimKind,
+    recheck: &Recheck<'_>,
+    data_root: &Path,
+) {
+    if !matches!(
+        kind,
+        ReclaimKind::Kept | ReclaimKind::IgnoredFile | ReclaimKind::Unlanded
+    ) {
+        return;
+    }
+    let path = Path::new(&candidate.path);
+    let nobody_stands_in_it = (recheck.settled)(&candidate.path)
+        && (recheck.terminals)(path) == 0
+        && recheck.everyone.and_then(|count| count(path)) == Some(0);
+    if !nobody_stands_in_it {
+        return;
+    }
+    let Ok(loss) = orchestrator.pending_loss(path) else {
+        return;
+    };
+    let went: Vec<String> = loss
+        .ignored
+        .into_iter()
+        .filter(|one| {
+            let tree = path.join(one);
+            std::fs::symlink_metadata(&tree).is_ok_and(|meta| meta.is_dir())
+                && std::fs::read(tree.join(CACHE_DIRECTORY_TAG))
+                    .is_ok_and(|tag| tag.starts_with(CACHE_DIRECTORY_SIGNATURE))
+                && std::fs::remove_dir_all(&tree).is_ok()
+        })
+        .collect();
+    if !went.is_empty() {
+        crate::note_window_event(
+            data_root,
+            &format!(
+                "orchestration: the checkout worker {} left at {} stays, and its build \
+                 tree(s) went: {}",
+                candidate.worker,
+                path.display(),
+                went.join(", ")
+            ),
+        );
     }
 }
 

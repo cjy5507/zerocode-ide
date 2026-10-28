@@ -277,6 +277,12 @@ pub fn start(local_data_root: &Path) -> Option<HookBridgeReceivers> {
         .with_turn_brief(std::sync::Arc::new(crate::pane_guard::PaneBrief))
         .with_file_find(std::sync::Arc::new(crate::pane_guard::PaneFind));
     let state = state.with_pointer_mailbox(crate::orchestration_pointer_mailbox::mailbox());
+    // A hook post that needed more than one try is written down in the
+    // window's log (t-78634), so the posts a slow bridge lost can be counted.
+    let notes_root = local_data_root.to_path_buf();
+    let state = state.with_delivery_notes(std::sync::Arc::new(move |line: String| {
+        crate::note_window_event(&notes_root, &line);
+    }));
     let computer_sender = state.computer_requests();
     let addr = tauri::async_runtime::block_on(async {
         zerocode_hookd::serve(state, 0)

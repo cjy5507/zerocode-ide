@@ -209,6 +209,7 @@ mod orchestration_contract;
 pub mod plugin;
 pub mod pointer_mailbox;
 mod private_file;
+mod replays;
 pub mod session_notify;
 pub mod toml_lines;
 
@@ -584,6 +585,8 @@ pub struct BridgeState {
     /// [`pointer_mailbox::PointerMailbox`]. `None` until the window installs
     /// one, and `None` is a bridge that simply never answers with a pointer.
     pointers: Option<Arc<dyn pointer_mailbox::PointerMailbox>>,
+    /// The hook posts tried again, answered once ([`replays`]).
+    replays: Arc<std::sync::Mutex<replays::Replays>>,
     /// Where a hook delivery that needed more than one try is written down
     /// for the window — see [`BridgeState::with_delivery_notes`].
     delivery_notes: Option<Arc<dyn Fn(String) + Send + Sync>>,
@@ -902,6 +905,7 @@ impl BridgeState {
                 finder: None,
                 artifacts: None,
                 pointers: None,
+                replays: Arc::new(std::sync::Mutex::new(replays::Replays::default())),
                 delivery_notes: None,
                 selection_context: Arc::new(std::sync::Mutex::new(
                     orchestration_contract::SelectionContextTracker::default(),
@@ -938,6 +942,13 @@ struct HookForm {
     selection_seeded: String,
     #[serde(default)]
     delivery_id: String,
+    /// Which try of the script's this post is ([`hook_tries`]), and the
+    /// curl exits the tries before it gave up with — empty from a first try
+    /// and from an older script.
+    #[serde(default, rename = "try")]
+    attempt: String,
+    #[serde(default)]
+    gave_up: String,
     payload: String,
 }
 
@@ -1519,7 +1530,7 @@ async fn receive_hook(
     };
 
     let json = body_is_json(request.headers());
-    let (envelope, selection_seeded, delivery_id) = if json {
+    let (envelope, selection_seeded, delivery_id, tried) = if json {
         match axum::Json::<HookJson>::from_request(request, &()).await {
             Ok(axum::Json(body)) => {
                 let seeded = body.selection_seeded;
@@ -1545,6 +1556,7 @@ async fn receive_hook(
                     },
                     seeded,
                     delivery_id,
+                    HookTried::default(),
                 )
             }
             Err(rejection) => return rejection.into_response(),
@@ -1554,6 +1566,10 @@ async fn receive_hook(
             Ok(Form(form)) => {
                 let seeded = matches!(form.selection_seeded.trim(), "1" | "true");
                 let delivery_id = form.delivery_id;
+                let tried = HookTried {
+                    attempt: form.attempt,
+                    gave_up: form.gave_up,
+                };
                 (
                     HookEnvelope {
                         agent,
@@ -1568,12 +1584,118 @@ async fn receive_hook(
                     },
                     seeded,
                     delivery_id,
+                    tried,
                 )
             }
             Err(rejection) => return rejection.into_response(),
         }
     };
 
+    /* A post tried again is answered once (t-78634). The script gave up on
+     * an earlier try whose body may be here already, and posts again under
+     * the same delivery id: that post is given the first one's answer, and
+     * the window is handed the event once. */
+    let key = brief_receipts::Key {
+        agent,
+        pane: envelope.pane_key.clone(),
+        launch: envelope.launch_token.clone(),
+        id: delivery_id.clone(),
+    };
+    let claim = key.valid().then(|| {
+        state
+            .replays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .claim(key, std::time::Instant::now())
+    });
+    if claim.is_some() {
+        note_tried(
+            &state,
+            &envelope,
+            &tried,
+            matches!(claim, Some(replays::Claim::Again(_))),
+        );
+    }
+    let first = match claim {
+        Some(replays::Claim::Again(answer)) => return replays::replay(answer).await,
+        Some(replays::Claim::First(first)) => Some(first),
+        None => None,
+    };
+    /* The work runs on its own task: a client that stops waiting drops this
+     * handler, never the event on its way to the window or the answer a post
+     * again is owed. */
+    let work = tokio::spawn(async move {
+        let answer = answer_hook(state, envelope, selection_seeded, delivery_id).await;
+        if let Some(first) = first {
+            first.send_replace(Some(answer.clone()));
+        }
+        answer
+    });
+    work.await.map_or_else(
+        |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        IntoResponse::into_response,
+    )
+}
+
+/// What one hook post says of its own delivery (t-78634): which try it is,
+/// and the curl exits the tries before it gave up with. Only the shell
+/// scripts try again; a plugin's JSON post is always a first.
+#[derive(Debug, Default)]
+struct HookTried {
+    attempt: String,
+    gave_up: String,
+}
+
+/// Write down a post that came on a later try, for the window — the try,
+/// the exits before it, and whether the first one had arrived after all.
+/// What the script says is held to its shape first: it is local input.
+fn note_tried(state: &BridgeState, envelope: &HookEnvelope, tried: &HookTried, again: bool) {
+    let Some(note) = state.delivery_notes.as_ref().map(Arc::clone) else {
+        return;
+    };
+    let Ok(attempt) = tried.attempt.parse::<u8>() else {
+        return;
+    };
+    if attempt < 2
+        || tried.gave_up.is_empty()
+        || tried.gave_up.len() > 32
+        || !tried
+            .gave_up
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b',')
+    {
+        return;
+    }
+    let event: String = zerocode_core::hook::envelope_event_and_session(envelope)
+        .0
+        .unwrap_or_default()
+        .chars()
+        .take(64)
+        .collect();
+    let line = format!(
+        "hook {} {} from {} reached the bridge on try {attempt} after curl gave up with {}: {}",
+        envelope.agent.slug(),
+        event.escape_debug(),
+        envelope.pane_key.escape_debug(),
+        tried.gave_up,
+        if again {
+            "a try before it had arrived, answered once"
+        } else {
+            "the first try to arrive"
+        }
+    );
+    drop(tokio::task::spawn_blocking(move || note(line)));
+}
+
+/// The hook's work and its answer: the envelope to the window, then the
+/// reply composed from the contract, the vault, the turn's brief and the
+/// pointer.
+async fn answer_hook(
+    state: BridgeState,
+    envelope: HookEnvelope,
+    selection_seeded: bool,
+    delivery_id: String,
+) -> replays::HookAnswer {
     // An empty payload is not an event. The POSIX script never posts one
     // (it exits before the post); the Windows batch script cannot look at
     // stdin without an interpreter and pipes it straight into curl, so the
@@ -1584,7 +1706,7 @@ async fn receive_hook(
         if envelope.agent == AgentKind::Antigravity {
             envelope.payload = "{}".to_string();
         } else {
-            return StatusCode::ACCEPTED.into_response();
+            return replays::HookAnswer::Status(StatusCode::ACCEPTED);
         }
     }
     // Decode the vendor payload before taking the shared delivery lock. A hook
@@ -1660,7 +1782,7 @@ async fn receive_hook(
         if let Some(mailbox) = state.pointers.as_ref() {
             mailbox.restore(&pane_key);
         }
-        return (StatusCode::SERVICE_UNAVAILABLE, "window is gone").into_response();
+        return replays::HookAnswer::Said(StatusCode::SERVICE_UNAVAILABLE, "window is gone");
     }
     // Context is spent only after the payload has a consumer. Advancing the
     // per-session tracker before the send would make a refused delivery steal
@@ -1749,7 +1871,7 @@ async fn receive_hook(
      * context field, and the event it answers is not one this bridge has
      * context for anyway. */
     if let Some(PointerAnswer::Continuation(decision)) = pointer {
-        return (StatusCode::ACCEPTED, axum::Json(decision)).into_response();
+        return replays::HookAnswer::Json(StatusCode::ACCEPTED, decision);
     }
     /* A context pointer is COMPOSED with whatever else this knock was owed,
      * never substituted for it. Returning the pointer alone would drop the
@@ -1761,21 +1883,20 @@ async fn receive_hook(
         _ => None,
     };
     match compose_additional_context(additional_context, knowledge, brief, pointer) {
-        Some((event_name, context)) => (
+        Some((event_name, context)) => replays::HookAnswer::Json(
             if wants_receipt {
                 StatusCode::OK
             } else {
                 StatusCode::ACCEPTED
             },
-            axum::Json(serde_json::json!({
+            serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": event_name,
                     "additionalContext": context,
                 }
-            })),
-        )
-            .into_response(),
-        None => StatusCode::ACCEPTED.into_response(),
+            }),
+        ),
+        None => replays::HookAnswer::Status(StatusCode::ACCEPTED),
     }
 }
 
@@ -2029,7 +2150,9 @@ fn set_executable(path: &Path) -> io::Result<()> {
 ///    the agent is running outside this window; a hook that complains — or
 ///    waits — turns our absence into the agent's problem.
 /// 5. **Bounded curl, every failure swallowed.** Half a second to connect, a
-///    second and a half total, `exit 0`. Providers that accept context receive
+///    second and a half a try, tried again on a give-up that may have left the
+///    body with the bridge ([`hook_tries`], [`HOOK_RETRY_EXITS`]) under one
+///    delivery id, five seconds at most in all, `exit 0`. Providers that accept context receive
 ///    only the bridge's valid JSON body; every other response is discarded.
 ///    A POST that provably did not arrive creates the path the window handed
 ///    this pane, and a successful one removes it — a give-up that leaves the
@@ -2153,16 +2276,46 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
     lines.push(format!("if not defined {port} goto :unconfigured"));
     lines.push(format!("if not defined {token} goto :unconfigured"));
     lines.push(format!("if not defined {pane_key} goto :unconfigured"));
-    let quiet = if spec.prints_context {
-        ""
-    } else {
-        " >nul 2>nul"
-    };
     let post = format!(
-        "curl.exe -fsS -X POST \"http://127.0.0.1:%{port}%/hook/{slug}\" --connect-timeout {connect} --max-time {budget} -H \"Content-Type: application/x-www-form-urlencoded\" -H \"{HOOK_TOKEN_HEADER}: %{token}%\" --data-urlencode \"pane_key=%{pane_key}%\" --data-urlencode \"tab_id=%{tab_id}%\" --data-urlencode \"launch_token=%{launch_token}%\" --data-urlencode \"worktree_id=%{worktree_id}%\" --data-urlencode \"selection_seeded=%{seeded}%\" --data-urlencode \"hook_event_name=%{event_var}%\" --data-urlencode \"env=%{agent_env}%\" --data-urlencode \"version={HOOK_CONTRACT_VERSION}\" --data-urlencode \"payload@-\"{quiet}",
+        "curl.exe -fsS -X POST \"http://127.0.0.1:%{port}%/hook/{slug}\" --connect-timeout {connect} --max-time %hook_budget% -H \"Content-Type: application/x-www-form-urlencoded\" -H \"{HOOK_TOKEN_HEADER}: %{token}%\" --data-urlencode \"pane_key=%{pane_key}%\" --data-urlencode \"tab_id=%{tab_id}%\" --data-urlencode \"launch_token=%{launch_token}%\" --data-urlencode \"worktree_id=%{worktree_id}%\" --data-urlencode \"selection_seeded=%{seeded}%\" --data-urlencode \"hook_event_name=%{event_var}%\" --data-urlencode \"env=%{agent_env}%\" --data-urlencode \"version={HOOK_CONTRACT_VERSION}\" --data-urlencode \"delivery_id=%hook_id%\" --data-urlencode \"try=%hook_try%\" --data-urlencode \"gave_up=%hook_gave_up%\" --data-urlencode \"payload@-\"",
         connect = HOOK_CONNECT_BUDGET.as_secs_f64(),
-        budget = HOOK_REPLY_BUDGET.as_secs_f64(),
     );
+    // The tries of `hook_tries`, without their pauses: cmd has no sleep under
+    // a second without starting a program, and a try that timed out has
+    // already waited. Each road counts its own tries and sends the window
+    // the same delivery id every time (t-78634).
+    let tries = hook_tries(agent);
+    let try_lines = |road: &str, post: String| -> Vec<String> {
+        let mut lines = vec![
+            "set \"hook_try=0\"".to_string(),
+            "set \"hook_gave_up=\"".to_string(),
+            format!(":{road}_try"),
+            "set /a hook_try+=1 >nul 2>nul".to_string(),
+        ];
+        for (number, one) in tries.iter().enumerate() {
+            lines.push(format!(
+                "if \"%hook_try%\"==\"{}\" set \"hook_budget={}\"",
+                number + 1,
+                one.budget.as_secs_f64()
+            ));
+        }
+        lines.push(post);
+        lines.push("set \"curl_exit=%ERRORLEVEL%\"".to_string());
+        lines.push(format!("if \"%curl_exit%\"==\"0\" goto :{road}_sent"));
+        lines.push(
+            "if defined hook_gave_up (set \"hook_gave_up=%hook_gave_up%,%curl_exit%\") else (set \"hook_gave_up=%curl_exit%\")"
+                .to_string(),
+        );
+        lines.push(format!(
+            "if \"%hook_try%\"==\"{}\" goto :{road}_gave_up",
+            tries.len()
+        ));
+        for exit in HOOK_RETRY_EXITS {
+            lines.push(format!("if \"%curl_exit%\"==\"{exit}\" goto :{road}_try"));
+        }
+        lines.push(format!(":{road}_gave_up"));
+        lines
+    };
     if spec.prints_context {
         // Only cmd builtins and the existing curl are needed. Numeric status
         // comes from curl's formatter, never from untrusted response text.
@@ -2181,15 +2334,22 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
             "if %brief_attempt% LSS 3 goto :brief_nonce".into(),
             "goto :plain_post".into(),
             ":brief_post".into(),
-            format!("{post} --data-urlencode \"delivery_id=%brief_id%\" -o \"%brief_dir%\\reply\" -w \"%%{{http_code}}\" >\"%brief_dir%\\status\" 2>nul"),
-            "set \"curl_exit=%ERRORLEVEL%\"".into(),
-            "if not \"%curl_exit%\"==\"0\" (call :gave_up %curl_exit% & goto :brief_cleanup)".into(),
+            "set \"hook_id=%brief_id%\"".into(),
+        ]);
+        lines.extend(try_lines(
+            "brief",
+            format!("{post} -o \"%brief_dir%\\reply\" -w \"%%{{http_code}}\" >\"%brief_dir%\\status\" 2>nul"),
+        ));
+        lines.extend([
+            "call :gave_up %curl_exit%".into(),
+            "goto :brief_cleanup".into(),
+            ":brief_sent".into(),
             "call :succeeded".into(),
             "type \"%brief_dir%\\reply\" 2>nul".into(),
             "if errorlevel 1 goto :brief_cleanup".into(),
             "set \"brief_status=\"".into(),
             "set /p brief_status=<\"%brief_dir%\\status\"".into(),
-            format!("if \"%brief_status%\"==\"200\" curl.exe -fsS -X POST \"http://127.0.0.1:%{port}%/hook-receipt/{slug}\" --connect-timeout 0.1 --max-time 0.25 -H \"{HOOK_TOKEN_HEADER}: %{token}%\" --data-urlencode \"pane_key=%{pane_key}%\" --data-urlencode \"launch_token=%{launch_token}%\" --data-urlencode \"delivery_id=%brief_id%\" >nul 2>nul"),
+            format!("if \"%brief_status%\"==\"200\" curl.exe -fsS -X POST \"http://127.0.0.1:%{port}%/hook-receipt/{slug}\" --connect-timeout 0.1 --max-time 0.25 -H \"{HOOK_TOKEN_HEADER}: %{token}%\" --data-urlencode \"pane_key=%{pane_key}%\" --data-urlencode \"launch_token=%{launch_token}%\" --data-urlencode \"delivery_id=%hook_id%\" >nul 2>nul"),
             ":brief_cleanup".into(),
             "del /q \"%brief_dir%\\reply\" \"%brief_dir%\\status\" >nul 2>nul".into(),
             "rmdir \"%brief_dir%\" >nul 2>nul".into(),
@@ -2197,11 +2357,21 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
             ":plain_post".into(),
         ]);
     }
-    lines.push(post);
-    lines.push("set \"curl_exit=%ERRORLEVEL%\"".into());
-    lines.push(
-        "if \"%curl_exit%\"==\"0\" (call :succeeded) else (call :gave_up %curl_exit%)".into(),
-    );
+    let quiet = if spec.prints_context {
+        ""
+    } else {
+        " >nul 2>nul"
+    };
+    lines.push("set \"hook_clock=%TIME: =0%\"".into());
+    lines.push("set \"hook_clock=%hook_clock::=%\"".into());
+    lines.push("set \"hook_clock=%hook_clock:.=%\"".into());
+    lines.push("set \"hook_clock=%hook_clock:,=%\"".into());
+    lines.push("set \"hook_id=w-%hook_clock%-%RANDOM%-%RANDOM%-%RANDOM%\"".into());
+    lines.extend(try_lines("plain", format!("{post}{quiet}")));
+    lines.push("call :gave_up %curl_exit%".into());
+    lines.push("exit /b 0".into());
+    lines.push(":plain_sent".into());
+    lines.push("call :succeeded".into());
     lines.push("exit /b 0".into());
     lines.push(":unconfigured".into());
     lines.push("call :failed".into());
@@ -2217,9 +2387,9 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
     // window may already have read it, so they mark nothing (the POSIX
     // script's rule, word for word).
     lines.push(":gave_up".into());
-    lines.push("if \"%~1\"==\"28\" exit /b 0".into());
-    lines.push("if \"%~1\"==\"52\" exit /b 0".into());
-    lines.push("if \"%~1\"==\"56\" exit /b 0".into());
+    for exit in HOOK_RETRY_EXITS {
+        lines.push(format!("if \"%~1\"==\"{exit}\" exit /b 0"));
+    }
     lines.push("call :failed".into());
     lines.push("exit /b 0".into());
     lines.join("\r\n") + "\r\n"
@@ -2261,7 +2431,7 @@ pub fn hook_script(agent: AgentKind) -> String {
     // by the readiness deadline, which is `unreachable`'s other half.
     lines.push("delivery_gave_up() {".into());
     lines.push(r#"  case "$1" in"#.into());
-    lines.push("    28|52|56) : ;;".into());
+    lines.push(format!("    {}) : ;;", posix_retry_exits()));
     lines.push("    *) delivery_failed ;;".into());
     lines.push("  esac".into());
     lines.push("}".into());
@@ -2329,76 +2499,110 @@ pub fn hook_script(agent: AgentKind) -> String {
     extra_fields.push(("hook_event_name", format!("${{{}}}", spec.event_var)));
 
     let slug = agent.slug();
+    // The posts, tried again on a give-up that may have left the body with
+    // the bridge (t-78634). Every try carries the same delivery id, so the
+    // bridge answers a post again with the first one's answer and hands the
+    // window the event once; the try's number and the exits before it ride
+    // along, so the window can write down a delivery that needed them.
+    let plan = hook_tries(agent)
+        .iter()
+        .map(|one| format!("{}:{}", one.pause.as_secs_f64(), one.budget.as_secs_f64()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    lines.push("hook_id=p-$$".into());
     if context_hook.is_some() {
-        lines.push("brief_id=p-$$".into());
         lines.push("brief_nl='\n'".into());
         lines.push("reply=".into());
-        lines.push("if reply=$(".into());
+    }
+    lines.push("hook_try=0".into());
+    lines.push("hook_gave_up=".into());
+    lines.push("hook_exit=".into());
+    lines.push(format!("for hook_plan in {plan}; do"));
+    lines.push("  hook_pause=${hook_plan%%:*}".into());
+    lines.push("  hook_budget=${hook_plan#*:}".into());
+    lines.push(r#"  if [ "$hook_try" -gt 0 ]; then"#.into());
+    lines.push(r#"    command -p sleep "$hook_pause" 2>/dev/null || :"#.into());
+    lines.push("  fi".into());
+    lines.push("  hook_try=$((hook_try + 1))".into());
+    if context_hook.is_some() {
+        lines.push("  if reply=$(".into());
     } else {
-        lines.push("if".into());
+        lines.push("  if".into());
     }
     lines.push(format!(
-        r#"printf '%s' "$payload" | curl -fsS -X POST "http://127.0.0.1:${{{port}}}/hook/{slug}" \"#
+        r#"  printf '%s' "$payload" | curl -fsS -X POST "http://127.0.0.1:${{{port}}}/hook/{slug}" \"#
     ));
     lines.push(format!(
-        "  --connect-timeout {} --max-time {} \\",
+        r#"    --connect-timeout {} --max-time "$hook_budget" \"#,
         HOOK_CONNECT_BUDGET.as_secs_f64(),
-        HOOK_REPLY_BUDGET.as_secs_f64()
     ));
-    lines.push(r#"  -H "Content-Type: application/x-www-form-urlencoded" \"#.into());
-    lines.push(format!(r#"  -H "{HOOK_TOKEN_HEADER}: ${{{token}}}" \"#));
+    lines.push(r#"    -H "Content-Type: application/x-www-form-urlencoded" \"#.into());
+    lines.push(format!(r#"    -H "{HOOK_TOKEN_HEADER}: ${{{token}}}" \"#));
     let (tab_id, launch_token) = (env_var::TAB_ID, env_var::LAUNCH_TOKEN);
     let (worktree_id, agent_env) = (env_var::WORKTREE_ID, env_var::AGENT_ENV);
     lines.push(format!(
-        r#"  --data-urlencode "pane_key=${{{pane_key}}}" \"#
+        r#"    --data-urlencode "pane_key=${{{pane_key}}}" \"#
     ));
-    lines.push(format!(r#"  --data-urlencode "tab_id=${{{tab_id}}}" \"#));
+    lines.push(format!(r#"    --data-urlencode "tab_id=${{{tab_id}}}" \"#));
     lines.push(format!(
-        r#"  --data-urlencode "launch_token=${{{launch_token}}}" \"#
-    ));
-    lines.push(format!(
-        r#"  --data-urlencode "worktree_id=${{{worktree_id}}}" \"#
+        r#"    --data-urlencode "launch_token=${{{launch_token}}}" \"#
     ));
     lines.push(format!(
-        r#"  --data-urlencode "selection_seeded=${{{}}}" \"#,
+        r#"    --data-urlencode "worktree_id=${{{worktree_id}}}" \"#
+    ));
+    lines.push(format!(
+        r#"    --data-urlencode "selection_seeded=${{{}}}" \"#,
         env_var::SELECTION_SEEDED
     ));
     for (field, value) in extra_fields {
-        lines.push(format!(r#"  --data-urlencode "{field}={value}" \"#));
+        lines.push(format!(r#"    --data-urlencode "{field}={value}" \"#));
     }
-    lines.push(format!(r#"  --data-urlencode "env=${{{agent_env}}}" \"#));
+    lines.push(format!(r#"    --data-urlencode "env=${{{agent_env}}}" \"#));
     lines.push(format!(
-        r#"  --data-urlencode "version={HOOK_CONTRACT_VERSION}" \"#
+        r#"    --data-urlencode "version={HOOK_CONTRACT_VERSION}" \"#
     ));
+    lines.push(r#"    --data-urlencode "delivery_id=$hook_id" \"#.into());
+    lines.push(r#"    --data-urlencode "try=$hook_try" \"#.into());
+    lines.push(r#"    --data-urlencode "gave_up=$hook_gave_up" \"#.into());
     if context_hook.is_some() {
-        lines.push(r#"  --data-urlencode "delivery_id=$brief_id" -w '\n%{http_code}' \"#.into());
-        lines.push(r#"  --data-urlencode "payload@-" 2>/dev/null"#.into());
-        lines.push(")".into());
-        lines.push("then".into());
-        lines.push("  delivery_succeeded".into());
-        lines.push("else".into());
-        // Before the assignment, which is a command and answers 0.
-        lines.push("  delivery_gave_up $?".into());
+        lines.push(r#"    -w '\n%{http_code}' --data-urlencode "payload@-" 2>/dev/null"#.into());
+        lines.push("  )".into());
+    } else {
+        lines.push(r#"    --data-urlencode "payload@-" >/dev/null 2>&1"#.into());
+    }
+    lines.push("  then".into());
+    lines.push("    hook_exit=0".into());
+    lines.push("    break".into());
+    lines.push("  else".into());
+    // Before anything else, which is a command and answers 0.
+    lines.push("    hook_exit=$?".into());
+    lines.push("  fi".into());
+    if context_hook.is_some() {
         lines.push("  reply=".into());
-        lines.push("fi".into());
-        lines.push(r#"  brief_status=${reply##*"$brief_nl"}"#.into());
-        lines.push(r#"  reply=${reply%"$brief_nl"*}"#.into());
-        lines.push(r#"  case "$reply" in"#.into());
-        lines.push(r#"    \{*\}) trap '' PIPE"#.into());
+    }
+    lines.push("  hook_gave_up=${hook_gave_up:+$hook_gave_up,}$hook_exit".into());
+    lines.push(r#"  case "$hook_exit" in"#.into());
+    lines.push(format!("    {}) : ;;", posix_retry_exits()));
+    lines.push("    *) break ;;".into());
+    lines.push("  esac".into());
+    lines.push("done".into());
+    lines.push(r#"if [ "$hook_exit" = 0 ]; then"#.into());
+    lines.push("  delivery_succeeded".into());
+    lines.push("else".into());
+    lines.push(r#"  delivery_gave_up "$hook_exit""#.into());
+    lines.push("fi".into());
+    if context_hook.is_some() {
+        lines.push(r#"brief_status=${reply##*"$brief_nl"}"#.into());
+        lines.push(r#"reply=${reply%"$brief_nl"*}"#.into());
+        lines.push(r#"case "$reply" in"#.into());
+        lines.push(r#"  \{*\}) trap '' PIPE"#.into());
         lines.push(
-            r#"    if printf '%s\n' "$reply" 2>/dev/null && [ "$brief_status" = 200 ]; then"#
+            r#"  if printf '%s\n' "$reply" 2>/dev/null && [ "$brief_status" = 200 ]; then"#
                 .into(),
         );
-        lines.push(format!(r#"      curl -fsS -X POST "http://127.0.0.1:${{{port}}}/hook-receipt/{slug}" --connect-timeout 0.1 --max-time 0.25 -H "{HOOK_TOKEN_HEADER}: ${{{token}}}" --data-urlencode "pane_key=${{{pane_key}}}" --data-urlencode "launch_token=${{{launch_token}}}" --data-urlencode "delivery_id=$brief_id" >/dev/null 2>&1 || :"#));
-        lines.push("    fi ;;".into());
-        lines.push("  esac".into());
-    } else {
-        lines.push(r#"  --data-urlencode "payload@-" >/dev/null 2>&1"#.into());
-        lines.push("then".into());
-        lines.push("  delivery_succeeded".into());
-        lines.push("else".into());
-        lines.push("  delivery_gave_up $?".into());
-        lines.push("fi".into());
+        lines.push(format!(r#"    curl -fsS -X POST "http://127.0.0.1:${{{port}}}/hook-receipt/{slug}" --connect-timeout 0.1 --max-time 0.25 -H "{HOOK_TOKEN_HEADER}: ${{{token}}}" --data-urlencode "pane_key=${{{pane_key}}}" --data-urlencode "launch_token=${{{launch_token}}}" --data-urlencode "delivery_id=$hook_id" >/dev/null 2>&1 || :"#));
+        lines.push("  fi ;;".into());
+        lines.push("esac".into());
     }
     lines.push("exit 0".into());
     lines.push(String::new());
