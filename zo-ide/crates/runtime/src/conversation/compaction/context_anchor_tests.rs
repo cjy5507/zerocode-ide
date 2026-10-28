@@ -115,3 +115,98 @@ fn the_gates_stand_on_the_providers_count_not_on_thinking_it_dropped() {
         "a turn's first request compacts on the local estimate {estimate} though the provider counted 300k"
     );
 }
+
+/// The figure is the provider's count of the last answered request and the
+/// local estimate of what came after the answer.
+#[test]
+fn the_anchored_figure_adds_what_came_after_the_answer() {
+    let mut runtime = runtime_on("claude-opus-5-5");
+    let usage = turn_after_a_trim(&mut runtime, 3, 300_000);
+    let after = runtime.session.messages.len() - 1;
+    let since = crate::compact::estimate_messages_tokens(&runtime.session.messages[after..]);
+    let expected = u64::from(usage.context_tokens()) + since;
+    assert_eq!(runtime.provider_anchored_context_tokens(), Some(expected));
+    assert_eq!(runtime.effective_context_tokens(), expected);
+    assert_eq!(runtime.preflight_context_tokens(), expected);
+}
+
+/// Before any answer the local estimate stands alone, as it always did.
+#[test]
+fn without_an_answer_the_local_estimate_stands_alone() {
+    let mut runtime = runtime_on("claude-opus-5-5");
+    runtime.session.push_user_text("first prompt").expect("prompt");
+    assert_eq!(runtime.provider_anchored_context_tokens(), None);
+    assert_eq!(runtime.preflight_context_tokens(), runtime.estimated_request_context_tokens());
+    assert_eq!(runtime.effective_context_tokens(), runtime.estimated_request_context_tokens());
+}
+
+/// An answer the last compaction kept in its tail was counted against the
+/// history the compaction folded away, so it anchors nothing; the first
+/// answer after the compaction does.
+#[test]
+fn an_answer_the_compaction_kept_in_its_tail_is_not_an_anchor() {
+    let mut runtime = runtime_on("claude-opus-5-5");
+    turn_after_a_trim(&mut runtime, 2, 300_000);
+    runtime.session.compaction = Some(crate::SessionCompaction {
+        count: 1,
+        removed_message_count: 10,
+        summary: "folded".to_string(),
+        first_kept_message_index: None,
+        anchor: None,
+    });
+    let messages = std::sync::Arc::make_mut(&mut runtime.session.messages);
+    let continuation_at = messages
+        .iter()
+        .filter_map(|message| message.updated_at_ms)
+        .max()
+        .expect("pushed messages carry a time")
+        + 1;
+    messages[0].updated_at_ms = Some(continuation_at);
+    assert_eq!(runtime.provider_anchored_context_tokens(), None);
+    assert_eq!(
+        runtime.effective_context_tokens(),
+        u64::from(runtime.usage_tracker.current_turn_usage().context_tokens())
+            .max(runtime.estimated_request_context_tokens())
+    );
+
+    let fresh = TokenUsage {
+        input_tokens: 1,
+        cache_read_input_tokens: 79_999,
+        output_tokens: 200,
+        ..TokenUsage::default()
+    };
+    let mut answer =
+        ConversationMessage::assistant_with_usage(vec![ContentBlock::Text { text: "done".to_string() }], Some(fresh));
+    answer.updated_at_ms = Some(continuation_at + 1);
+    std::sync::Arc::make_mut(&mut runtime.session.messages).push(answer);
+    assert_eq!(runtime.provider_anchored_context_tokens(), Some(80_000));
+}
+
+/// A firing's quote says what the gate's figure and tiers came from: the
+/// provider's count and the local estimate apart, the window and the 650k
+/// cap the tiers are a share of, the two overrides, the share, the model.
+#[test]
+fn a_firing_stamps_where_its_figure_and_tiers_came_from() {
+    let _env = crate::test_env_lock();
+    let mut runtime = runtime_on("claude-opus-5-5");
+    turn_after_a_trim(&mut runtime, 45, 300_000);
+    let mut row = api::ContextTrimQuote::default();
+    runtime.stamp_context_sources(&mut row);
+    assert_eq!(row.provider_tokens, Some(300_000));
+    assert_eq!(row.estimate_tokens, runtime.estimated_request_context_tokens());
+    assert_eq!(row.window_tokens, runtime.context_window());
+    assert_eq!(row.compaction_window_tokens, super::auto_compaction_window(runtime.context_window()));
+    assert_eq!(
+        (row.compaction_window_env, row.threshold_env),
+        (
+            std::env::var_os(super::AUTO_COMPACT_WINDOW_ENV_VAR).is_some(),
+            std::env::var_os(super::AUTO_COMPACTION_THRESHOLD_ENV_VAR).is_some()
+        )
+    );
+    assert_eq!(
+        row.microcompact_percent * row.compaction_window_tokens / 100,
+        runtime.microcompact_input_tokens_threshold()
+    );
+    assert_eq!(row.model, "claude-opus-5-5");
+    assert_eq!(row.microcompact_streak, 0);
+}

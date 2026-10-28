@@ -11,7 +11,7 @@
 
 use decision_core::deep_lane::VerifierParse;
 
-use crate::session::{seal_orphan_tool_uses, ContentBlock, ConversationMessage};
+use crate::session::{seal_orphan_tool_uses, ContentBlock, ConversationMessage, MessageRole};
 use crate::usage::TokenUsage;
 
 use super::PromptCacheEvent;
@@ -698,6 +698,9 @@ impl MicrocompactPricing {
                 .map(requests),
             drops_orphaned_thinking: self.drops_orphaned_thinking,
             decision: decision.to_string(),
+            // Where the gate's figure and tiers came from is the runtime's
+            // to say (`stamp_context_sources`).
+            ..api::ContextTrimQuote::default()
         }
     }
 }
@@ -888,11 +891,12 @@ fn local_compaction(
 impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// Local estimate of the request context that would be sent right now.
     ///
-    /// At the start of a new turn, provider usage telemetry can be stale: it
+    /// At the start of a new turn, provider usage telemetry alone is stale: it
     /// describes the previous request, while the local transcript already
     /// includes the just-submitted user message and any queued automation prompt.
-    /// Use this estimate for first-request preflight so long sessions cannot
-    /// jump past the 85% threshold before compaction gets a chance to run.
+    /// [`Self::preflight_context_tokens`] adds what came after the provider's
+    /// count to that count; this estimate stands alone only where the
+    /// transcript holds no answer since its last compaction.
     pub(super) fn estimated_request_context_tokens(&self) -> u64 {
         // Estimate WITHOUT running recall — do NOT call
         // `request_wire_reminders` here. On the streaming path this runs in the
@@ -920,22 +924,83 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         }
     }
 
-    /// Live context-window occupancy used to gate compaction after the turn has
-    /// fresh usage. Provider telemetry is authoritative when present, but taking
-    /// the max with the local estimate keeps post-tool transcript growth visible
-    /// before the provider emits another usage event.
-    /// The context number to SHOW and to gate on.
+    /// The context number to SHOW and to gate on once a turn has answered.
     ///
-    /// `provider_live.max(estimate)`: once a turn has answered, the provider's
-    /// own count governs; before that the `chars / 4` estimate stands alone.
-    /// Public because the status card must not render a different number than
-    /// the footer — the estimate runs about 30% low against
-    /// `/v1/messages/count_tokens`, so a card reading the estimate while the
-    /// footer reads the provider put two disagreeing percentages on one screen.
+    /// The provider's own count of the last answered request, plus the local
+    /// estimate of what the transcript gained after that answer
+    /// ([`Self::provider_anchored_context_tokens`]). Before any answer since the
+    /// last compaction, the larger of the provider's latest count and the
+    /// local estimate.
+    ///
+    /// Not the larger of the two once an answer is on record (t-78937). The
+    /// local estimate counts every thinking block the transcript keeps, its
+    /// signature by length, and a model that binds thinking to its prefix
+    /// (Opus 5.5, sent with `thinking.block_binding: drop_block`) stops being
+    /// billed for every block after a message a trim rewrote. On this machine
+    /// (36 hours to 2026-10-28) the estimate ran at about twice the provider's
+    /// count once a turn had been trimmed (490k against 229k), and the larger
+    /// of the two put 51 of 69 microcompacts, and every full compaction, below
+    /// their tiers by the provider's count. Public because the status card
+    /// must not render a different number than the footer, which reads the
+    /// provider's count.
     #[must_use]
     pub fn effective_context_tokens(&self) -> u64 {
-        let provider_live = u64::from(self.usage_tracker.current_turn_usage().context_tokens());
-        provider_live.max(self.estimated_request_context_tokens())
+        self.provider_anchored_context_tokens().unwrap_or_else(|| {
+            let provider_live = u64::from(self.usage_tracker.current_turn_usage().context_tokens());
+            provider_live.max(self.estimated_request_context_tokens())
+        })
+    }
+
+    /// The context counted by the provider where the transcript holds an
+    /// answer since its last compaction: what that answered request carried,
+    /// plus the local estimate of every message after the answer — the tool
+    /// results and prompts the provider has not counted yet. The answer itself
+    /// is left to the next request's count, as the provider-led figure always
+    /// left it.
+    ///
+    /// `None` when the latest answer carries no usage, or is older than the
+    /// last compaction's continuation: the tail a compaction keeps holds
+    /// answers counted against the history it folded away.
+    pub(super) fn provider_anchored_context_tokens(&self) -> Option<u64> {
+        let (index, usage) = self.latest_answer_since_compaction()?;
+        Some(u64::from(usage.context_tokens()).saturating_add(crate::compact::estimate_messages_tokens(
+            &self.session.messages[index + 1..],
+        )))
+    }
+
+    /// The latest answer and its index, when it carries the provider's usage
+    /// and is newer than the last compaction's continuation
+    /// (`Session::apply_compaction_atomic` stamps the continuation with the
+    /// compaction's time; the kept tail keeps the times it had). A latest
+    /// answer without usage says nothing about the latest request, and an
+    /// older answer's count is not the context now.
+    fn latest_answer_since_compaction(&self) -> Option<(usize, TokenUsage)> {
+        let messages = &self.session.messages;
+        let (index, answer) = messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, message)| message.role == MessageRole::Assistant)?;
+        let usage = answer.usage?;
+        if self.session.compaction.is_some() {
+            let compacted_at = messages.first().and_then(|message| message.updated_at_ms)?;
+            // Strictly older: the kept tail was written well before the
+            // summary came back, and an answer after the compaction can land
+            // in the same millisecond only by arriving after it.
+            if messages[index].updated_at_ms? < compacted_at {
+                return None;
+            }
+        }
+        Some((index, usage))
+    }
+
+    /// The context figure a turn's first request is gated on: the
+    /// provider-anchored count when the transcript holds an answer since its
+    /// last compaction — the previous turn's last answer plus everything after
+    /// it, the new prompt included — and the local estimate before that.
+    pub(super) fn preflight_context_tokens(&self) -> u64 {
+        self.provider_anchored_context_tokens()
+            .unwrap_or_else(|| self.estimated_request_context_tokens())
     }
 
     /// `/context` breakdown (CC parity): what occupies the window right now
@@ -1103,7 +1168,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     // gate has to be assertable on its own, without `apply_auto_compaction`
     // making a summarize round-trip inside the assertion.
     pub(super) fn auto_compaction_config_if_preflight_ready(&mut self) -> Option<CompactionConfig> {
-        let context_tokens = self.estimated_request_context_tokens();
+        let context_tokens = self.preflight_context_tokens();
         if self.auto_compaction_enabled {
             if self.request_reaches_hard_context_ceiling(context_tokens)
                 || context_tokens >= u64::from(self.auto_compaction_input_tokens_threshold)
@@ -1278,6 +1343,18 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             api::note_context_trim_declined(&self.session.session_id, reason);
             return None;
         }
+        // The quote this firing leaves on the ledger, with what the gate's
+        // figure and tiers came from — read before the clear rewrites the
+        // transcript the estimate is taken over.
+        let decision = if last_resort {
+            "last_resort"
+        } else if pricing.prices.is_some() {
+            "pays_back"
+        } else {
+            "token_rule"
+        };
+        let mut row = pricing.ledger_quote(&quote, micro_threshold, context_tokens, decision);
+        self.stamp_context_sources(&mut row);
         let event = crate::microcompact_session(
             &mut self.session,
             keep_recent,
@@ -1289,18 +1366,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             // trim is about to cause on the next request — the third column
             // that makes microcompact economics measurable per firing — and
             // the quote it fired on.
-            let decision = if last_resort {
-                "last_resort"
-            } else if pricing.prices.is_some() {
-                "pays_back"
-            } else {
-                "token_rule"
-            };
-            api::note_context_trim(
-                &self.session.session_id,
-                fired.estimated_tokens_saved,
-                Some(pricing.ledger_quote(&quote, micro_threshold, context_tokens, decision)),
-            );
+            api::note_context_trim(&self.session.session_id, fired.estimated_tokens_saved, Some(row));
             // Recompute recall dedup for the same reason as full compaction:
             // reclaimed full bodies must be free to reseed, while any full
             // entries that survived this trim must remain deduplicated.
@@ -1432,6 +1498,25 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         }
     }
 
+    /// Where the trim gate's figure and tiers came from, stamped on the quote
+    /// a firing leaves (t-78937): the provider's count and the local estimate
+    /// apart, the model's window and the window the tiers are a share of, the
+    /// two environment overrides that move them, the tier's share, the model
+    /// and the streak so far.
+    fn stamp_context_sources(&self, row: &mut api::ContextTrimQuote) {
+        row.provider_tokens = self
+            .latest_answer_since_compaction()
+            .map(|(_, usage)| u64::from(usage.context_tokens()));
+        row.estimate_tokens = self.estimated_request_context_tokens();
+        row.window_tokens = self.context_window;
+        row.compaction_window_tokens = auto_compaction_window(self.context_window);
+        row.compaction_window_env = std::env::var_os(AUTO_COMPACT_WINDOW_ENV_VAR).is_some();
+        row.threshold_env = std::env::var_os(AUTO_COMPACTION_THRESHOLD_ENV_VAR).is_some();
+        row.microcompact_percent = self.context_policy.microcompact;
+        row.model = self.context_model.clone().unwrap_or_default();
+        row.microcompact_streak = u64::try_from(self.consecutive_microcompacts).unwrap_or(u64::MAX);
+    }
+
     /// Requests a firing has to pay for itself in: until the conversation
     /// reaches the full-compaction tier at the pace it has been growing, past
     /// which the summary rewrites everything anyway. With no pace on record
@@ -1460,7 +1545,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     }
 
     pub(super) fn maybe_microcompact_preflight(&mut self) -> Option<MicrocompactEvent> {
-        self.maybe_microcompact_for_tokens(self.estimated_request_context_tokens())
+        self.maybe_microcompact_for_tokens(self.preflight_context_tokens())
     }
 
     pub(super) async fn maybe_microcompact_streaming(
@@ -1626,7 +1711,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     }
 
     pub(super) fn maybe_state_distill_preflight(&mut self) -> bool {
-        self.maybe_state_distill_for_tokens(self.estimated_request_context_tokens())
+        self.maybe_state_distill_for_tokens(self.preflight_context_tokens())
     }
 
     /// Union of this session's already-edited file paths from two sources, for

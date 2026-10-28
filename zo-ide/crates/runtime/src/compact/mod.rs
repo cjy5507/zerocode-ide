@@ -170,6 +170,15 @@ pub fn estimate_session_tokens(session: &Session) -> usize {
     session.messages.iter().map(estimate_message_tokens).sum()
 }
 
+/// The same estimate over a run of messages — what a transcript gained after
+/// a request the provider has already counted.
+pub(crate) fn estimate_messages_tokens(messages: &[ConversationMessage]) -> u64 {
+    messages
+        .iter()
+        .map(|message| u64::try_from(estimate_message_tokens(message)).unwrap_or(u64::MAX))
+        .sum()
+}
+
 /// At least this many messages must remain summarizable after the preserved
 /// tail is carved off, or a token-budgeted tail could swallow the whole
 /// transcript and turn the round into a no-op that immediately re-triggers.

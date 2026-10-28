@@ -576,6 +576,37 @@ pub struct ContextTrimQuote {
     /// `pays_back`, `token_rule` (an unpriced model, tokens on both sides) or
     /// `last_resort` (the hard context ceiling, past any price).
     pub decision: String,
+    /// The provider's count of the last answered request since the last
+    /// compaction, when there is one — the figure the gate stands on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_tokens: Option<u64>,
+    /// The local `chars / 4` estimate of the same request, for comparison.
+    #[serde(default)]
+    pub estimate_tokens: u64,
+    /// The model's context window.
+    #[serde(default)]
+    pub window_tokens: u64,
+    /// The window the compaction tiers are a share of: the model's, capped
+    /// at Claude Code's 650k unless `CLAUDE_CODE_AUTO_COMPACT_WINDOW` says
+    /// otherwise.
+    #[serde(default)]
+    pub compaction_window_tokens: u64,
+    /// Whether `CLAUDE_CODE_AUTO_COMPACT_WINDOW` was set.
+    #[serde(default)]
+    pub compaction_window_env: bool,
+    /// Whether `CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS` was set.
+    #[serde(default)]
+    pub threshold_env: bool,
+    /// The microcompact tier's share of the compaction window, in percent.
+    #[serde(default)]
+    pub microcompact_percent: u64,
+    /// The session model the tiers and prices were read for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// Consecutive firings before this one that did not bring the context
+    /// back under the tier.
+    #[serde(default)]
+    pub microcompact_streak: u64,
 }
 
 /// Deposit a microcompact's estimated cleared tokens for `session_id`, with
@@ -4755,6 +4786,15 @@ mod tests {
                 breakeven_requests: Some(70),
                 drops_orphaned_thinking: true,
                 decision: "last_resort".to_string(),
+                provider_tokens: Some(298_762),
+                estimate_tokens: 490_564,
+                window_tokens: 1_000_000,
+                compaction_window_tokens: 650_000,
+                compaction_window_env: false,
+                threshold_env: false,
+                microcompact_percent: 64,
+                model: "claude-opus-5-5".to_string(),
+                microcompact_streak: 1,
             }),
             ..CacheBreakLedgerRow::default()
         };
