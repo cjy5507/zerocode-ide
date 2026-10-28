@@ -808,7 +808,12 @@ pub fn save_staged_cookies(
     cookies: &[ValidatedCookie],
 ) -> Result<(), String> {
     let text = serde_json::to_vec(cookies).map_err(|error| error.to_string())?;
-    std::fs::write(staging_file(config_root, profile_id), text).map_err(|error| error.to_string())
+    std::fs::write(staging_file(config_root, profile_id), text)
+        .map_err(|error| error.to_string())?;
+    // 새로 가져온 쿠키는 아직 아무 판에도 앉지 않았다 — 지난 주입의 결과를
+    // 카드에 남겨 두면 새 가져오기를 두고 옛 숫자를 말한다.
+    let _ = std::fs::remove_file(apply_file(config_root, profile_id));
+    Ok(())
 }
 
 /// 스테이징을 읽는다 — 소거는 하지 않는다. 판을 짓기 **전에** 읽어야
@@ -892,7 +897,7 @@ impl Dropped {
     }
 
     /// 아무것도 버리지 않았다.
-    #[cfg(any(all(target_os = "macos", feature = "chromium-browser"), test))]
+    #[cfg(test)]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.total() == 0
@@ -974,10 +979,203 @@ pub fn discard_staged_cookies(config_root: &Path, profile_id: &str) {
     let _ = std::fs::remove_file(staging_file(config_root, profile_id));
 }
 
+/// CEF `set_cookie`에 건넬 Domain 속성. 호스트 전용 쿠키(앞에 점이 없는
+/// 도메인)는 빈 칸이다: CEF는 Domain이 서 있으면 앞에 점을 붙여 하위
+/// 도메인까지 보이는 쿠키로 만들고, `__Host-` 쿠키는 Domain 속성이 있으면
+/// 통째로 거절한다(RFC 6265bis §4.1.3). 2026-10-28 스테이징 둘의 `__Host-`
+/// 쿠키 13개가 이 거절을 받아, 거절 하나에 스테이징 전체가 「적용 대기」로
+/// 남았다.
+#[cfg(any(all(target_os = "macos", feature = "chromium-browser"), test))]
+#[must_use]
+pub fn domain_attribute(cookie: &StagedCookie) -> &str {
+    if cookie.domain.starts_with('.') {
+        &cookie.domain
+    } else {
+        ""
+    }
+}
+
+/// 쿠키 하나를 저장소에 건넨 결과.
+#[cfg(any(all(target_os = "macos", feature = "chromium-browser"), test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOutcome {
+    /// 저장소가 받았다.
+    Seated,
+    /// 저장소가 답하며 받지 않았다. 같은 쿠키는 다음 판에서도 같은 답을
+    /// 받으므로 다시 시도하지 않는다.
+    Refused,
+    /// 저장소에 닿지 못했다(부름 자체가 거절됐거나 답이 오기 전에 끝났다).
+    /// 이것만 스테이징에 남아 다음 판이 다시 시도한다.
+    Unsent,
+}
+
+/// 한 프로필의 마지막 주입 결과 — 설정 카드의 「N개 적용 · M개 거절」 한 줄.
+/// 수만 든다. 이름·도메인은 창 로그 한 줄에만 간다.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CookieApply {
+    /// 저장소가 받은 수.
+    pub applied: usize,
+    /// 저장소가 받지 않아 버린 수.
+    pub refused: usize,
+    /// 저장소에 닿지 못해 스테이징에 남긴 수.
+    pub retained: usize,
+    /// 시도하기 전에 버린 수(`keep_acceptable`: 만료·이름 없음·접두사 규칙).
+    pub dropped: usize,
+    /// 주입이 끝난 시각(unix 초).
+    pub at_unix: i64,
+}
+
+/// 마지막 주입 결과가 앉는 곁파일 — 스테이징 파일 옆, 프로필마다 하나.
+pub fn apply_file(config_root: &Path, profile_id: &str) -> PathBuf {
+    config_root.join(format!("browser-cookie-applied-{profile_id}.json"))
+}
+
+/// 마지막 주입 결과. 아직 주입된 적이 없거나 새로 가져온 뒤면 없다.
+pub fn last_apply(config_root: &Path, profile_id: &str) -> Option<CookieApply> {
+    let text = std::fs::read_to_string(apply_file(config_root, profile_id)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// 프로필을 잊을 때 결과 곁파일도 함께 거둔다.
+pub fn discard_last_apply(config_root: &Path, profile_id: &str) {
+    let _ = std::fs::remove_file(apply_file(config_root, profile_id));
+}
+
+/// 저장소가 받지 않은 쿠키 하나 — 창 로그에 적는 이름·도메인·이유. 값은
+/// 들지 않는다.
+#[cfg(any(all(target_os = "macos", feature = "chromium-browser"), test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedCookie {
+    pub name: String,
+    pub domain: String,
+    pub reason: &'static str,
+}
+
+/// 한 번의 주입을 마무리한 결과: 카드에 갈 수와 로그에 갈 거절 목록.
+#[cfg(any(all(target_os = "macos", feature = "chromium-browser"), test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settled {
+    pub apply: CookieApply,
+    pub refused: Vec<RefusedCookie>,
+}
+
+/// 창 로그 한 줄에 이름을 적는 거절의 최대 수 — 나머지는 수로만 적는다.
+#[cfg(any(all(target_os = "macos", feature = "chromium-browser"), test))]
+const LOGGED_REFUSALS: usize = 20;
+
+#[cfg(any(all(target_os = "macos", feature = "chromium-browser"), test))]
+impl Settled {
+    /// 창 로그 한 줄. 수와 거절된 쿠키의 이름·도메인·이유만 적는다.
+    #[must_use]
+    pub fn log_line(&self, profile_id: &str) -> String {
+        let apply = &self.apply;
+        let tried = apply.applied + apply.refused + apply.retained;
+        let mut line = format!(
+            "cookie staging: profile {profile_id} applied {}/{tried} ({} refused, {} kept for retry, {} dropped before trying)",
+            apply.applied, apply.refused, apply.retained, apply.dropped
+        );
+        if !self.refused.is_empty() {
+            let named = self
+                .refused
+                .iter()
+                .take(LOGGED_REFUSALS)
+                .map(|cookie| format!("{} @ {}: {}", cookie.name, cookie.domain, cookie.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            line.push_str("; refused: ");
+            line.push_str(&named);
+            if let Some(more) = self.refused.len().checked_sub(LOGGED_REFUSALS)
+                && more > 0
+            {
+                line.push_str(&format!("; and {more} more"));
+            }
+        }
+        line
+    }
+}
+
+/// 저장소가 받지 않은 이유의 짐작. CEF의 답은 성공 여부 하나뿐이라, 우리가
+/// 아는 Chromium 규칙에 걸리면 그 이름을 대고 아니면 저장소의 거절이라고만
+/// 적는다.
+#[cfg(any(all(target_os = "macos", feature = "chromium-browser"), test))]
+fn refusal_reason(cookie: &StagedCookie) -> &'static str {
+    if cookie.same_site == Some(SameSite::NoRestriction) && !cookie.secure {
+        "SameSite=None without Secure"
+    } else if cookie.secure && cookie.url.starts_with("http://") {
+        "Secure on an http address"
+    } else if !cookie.path.is_empty() && !cookie.path.starts_with('/') {
+        "path does not start with /"
+    } else {
+        "refused by Chromium"
+    }
+}
+
+/// 한 번의 주입을 마무리한다: 저장소가 받은 쿠키와 받지 않은 쿠키는
+/// 스테이징에서 빼고, 저장소에 닿지 못한 쿠키만 남긴다. 남길 것이 없으면
+/// 스테이징을 지운다 — 그래야 「적용 대기」가 끝난다. 결과 수는 곁파일에
+/// 적는다.
+///
+/// 예전 규칙은 거절이 하나라도 있으면 스테이징을 통째로 남겼다. 거절은
+/// 다음 판에서도 같은 답을 받으므로 「적용 대기」가 영영 끝나지 않았고,
+/// 판이 설 때마다 이미 앉은 쿠키를 가져온 날의 옛 값으로 다시 덮었다 —
+/// 사이트가 그 뒤에 새로 준 세션 쿠키까지.
+///
+/// `flushed`가 거짓이면(저장소가 디스크에 쓰겠다고 답하지 않았다) 받은
+/// 쿠키도 다시 시도하도록 남긴다. `outcomes`가 짧으면 모자란 자리는
+/// 닿지 못한 것으로 센다.
+#[cfg(any(all(target_os = "macos", feature = "chromium-browser"), test))]
+pub fn settle_staging(
+    config_root: &Path,
+    profile_id: &str,
+    cookies: &[StagedCookie],
+    outcomes: &[SetOutcome],
+    dropped: Dropped,
+    flushed: bool,
+    at_unix: i64,
+) -> Settled {
+    let mut apply = CookieApply {
+        dropped: dropped.total(),
+        at_unix,
+        ..CookieApply::default()
+    };
+    let mut refused = Vec::new();
+    let mut retained = Vec::new();
+    for (index, cookie) in cookies.iter().enumerate() {
+        match outcomes.get(index).copied().unwrap_or(SetOutcome::Unsent) {
+            SetOutcome::Seated => {
+                apply.applied += 1;
+                if !flushed {
+                    retained.push(cookie);
+                }
+            }
+            SetOutcome::Refused => refused.push(RefusedCookie {
+                name: cookie.name.clone(),
+                domain: cookie.domain.clone(),
+                reason: refusal_reason(cookie),
+            }),
+            SetOutcome::Unsent => retained.push(cookie),
+        }
+    }
+    apply.refused = refused.len();
+    apply.retained = retained.len();
+    if retained.is_empty() {
+        discard_staged_cookies(config_root, profile_id);
+    } else if let Ok(text) = serde_json::to_vec(&retained) {
+        // 쓰지 못하면 옛 스테이징이 그대로 남아 다음 판이 전부 다시
+        // 시도한다 — 잃는 것은 없다.
+        let _ = std::fs::write(staging_file(config_root, profile_id), text);
+    }
+    if let Ok(text) = serde_json::to_vec(&apply) {
+        let _ = std::fs::write(apply_file(config_root, profile_id), text);
+    }
+    Settled { apply, refused }
+}
+
 /// 스테이징에서 돌아오는 모양 — 저장은 ValidatedCookie로 하고, 주입은
 /// 이 완화된 모양으로 읽는다: 낡은 스테이징 파일의 낯선 필드가 전체
 /// 주입을 죽이면 안 된다.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct StagedCookie {
     // 쿠키를 앉히는 `chromium_browser`(macOS에서 `chromium-browser` 기능을 켠 빌드)만 읽는다 — 파일 모양은 어느 빌드에서나 같다.
     #[cfg_attr(
@@ -1296,6 +1494,238 @@ mod tests {
         assert_eq!(kept.len(), 1);
         assert!(dropped.is_empty());
         assert_eq!(dropped.to_string(), "none");
+    }
+
+    /// 호스트 전용 쿠키는 Domain 없이 건넨다. 2026-10-28 스테이징 둘의
+    /// `__Host-` 쿠키 13개는 `keep_acceptable`을 지났지만(점 없는 호스트,
+    /// path `/`, secure) Domain이 서 있어 CEF가 모두 거절했다.
+    #[test]
+    fn a_host_only_cookie_goes_to_chromium_without_a_domain() {
+        let now = 1_700_000_000;
+        let host = staged("__Host-session");
+        assert_eq!(
+            unacceptable(&host, now),
+            None,
+            "the shape is a valid __Host- cookie"
+        );
+        assert_eq!(
+            domain_attribute(&host),
+            "",
+            "a Domain attribute makes Chromium refuse it"
+        );
+        assert_eq!(domain_attribute(&staged("plain")), "");
+        let mut dotted = staged("shared");
+        dotted.domain = ".example.com".into();
+        assert_eq!(domain_attribute(&dotted), ".example.com");
+    }
+
+    /// 스테이징 하나와 그 쿠키들을 차례대로 적는다.
+    fn stage(yard: &Path, id: &str, cookies: &[StagedCookie]) {
+        std::fs::write(
+            staging_file(yard, id),
+            serde_json::to_vec(cookies).expect("json"),
+        )
+        .expect("staging");
+    }
+
+    /// 거절이 섞인 주입도 받은 것은 받은 것이다: 받은 것과 받지 않은 것은
+    /// 스테이징에서 빠지고, 저장소에 닿지 못한 것만 남는다. 결과 수는
+    /// 곁파일에, 받지 않은 쿠키의 이름·도메인·이유는 로그 한 줄에 간다.
+    #[test]
+    fn a_partly_refused_injection_keeps_what_was_seated_and_retries_only_the_unsent() {
+        let yard = tempfile::tempdir().expect("root");
+        let id = "c".repeat(32);
+        let mut lax = staged("lax_insecure_none");
+        lax.secure = false;
+        lax.url = "http://example.com/".into();
+        lax.same_site = Some(SameSite::NoRestriction);
+        let cookies = vec![staged("a"), lax, staged("b"), staged("late")];
+        stage(yard.path(), &id, &cookies);
+        let dropped = Dropped {
+            expired: 3,
+            ..Dropped::default()
+        };
+
+        let settled = settle_staging(
+            yard.path(),
+            &id,
+            &cookies,
+            &[
+                SetOutcome::Seated,
+                SetOutcome::Refused,
+                SetOutcome::Seated,
+                SetOutcome::Unsent,
+            ],
+            dropped,
+            true,
+            1_700_000_000,
+        );
+
+        assert_eq!(
+            settled.apply,
+            CookieApply {
+                applied: 2,
+                refused: 1,
+                retained: 1,
+                dropped: 3,
+                at_unix: 1_700_000_000,
+            }
+        );
+        let left = peek_staged_cookies(yard.path(), &id);
+        assert_eq!(
+            left.len(),
+            1,
+            "only the cookie that never reached the store waits"
+        );
+        assert_eq!(left[0].name, "late");
+        assert_eq!(
+            left[0].value, "v",
+            "a retained cookie keeps its value for the retry"
+        );
+        assert_eq!(last_apply(yard.path(), &id), Some(settled.apply.clone()));
+        assert_eq!(
+            settled.refused,
+            vec![RefusedCookie {
+                name: "lax_insecure_none".into(),
+                domain: "example.com".into(),
+                reason: "SameSite=None without Secure",
+            }]
+        );
+        let line = settled.log_line(&id);
+        assert!(line.contains("applied 2/4"), "{line}");
+        assert!(
+            line.contains("1 refused, 1 kept for retry, 3 dropped"),
+            "{line}"
+        );
+        assert!(
+            line.contains("lax_insecure_none @ example.com: SameSite=None without Secure"),
+            "{line}"
+        );
+        assert!(!line.contains("=v"), "a value reached the log: {line}");
+
+        // 다음 판이 남은 하나를 앉히면 스테이징이 사라진다 — 「적용 대기」가 끝난다.
+        let settled = settle_staging(
+            yard.path(),
+            &id,
+            &left,
+            &[SetOutcome::Seated],
+            Dropped::default(),
+            true,
+            1_700_000_100,
+        );
+        assert_eq!(settled.apply.applied, 1);
+        assert!(
+            !staging_file(yard.path(), &id).exists(),
+            "the profile still waits"
+        );
+    }
+
+    /// 거절만 있어도 스테이징은 끝난다. 거절은 다음 판에서도 같은 답이고,
+    /// 남겨 두면 판이 설 때마다 이미 앉은 쿠키를 옛 값으로 다시 덮는다.
+    #[test]
+    fn refusals_alone_do_not_hold_the_staging() {
+        let yard = tempfile::tempdir().expect("root");
+        let id = "d".repeat(32);
+        let cookies = vec![staged("a"), staged("b")];
+        stage(yard.path(), &id, &cookies);
+        let settled = settle_staging(
+            yard.path(),
+            &id,
+            &cookies,
+            &[SetOutcome::Seated, SetOutcome::Refused],
+            Dropped::default(),
+            true,
+            1,
+        );
+        assert_eq!((settled.apply.applied, settled.apply.refused), (1, 1));
+        assert_eq!(settled.apply.retained, 0);
+        assert!(!staging_file(yard.path(), &id).exists());
+        assert_eq!(settled.refused[0].reason, "refused by Chromium");
+
+        // 이름을 적는 거절은 스무 개까지 — 나머지는 수로만.
+        let many: Vec<StagedCookie> = (0..25).map(|n| staged(&format!("n{n}"))).collect();
+        stage(yard.path(), &id, &many);
+        let settled = settle_staging(
+            yard.path(),
+            &id,
+            &many,
+            &[SetOutcome::Refused; 25],
+            Dropped::default(),
+            true,
+            1,
+        );
+        let line = settled.log_line(&id);
+        assert!(line.contains("n19 @"), "{line}");
+        assert!(!line.contains("n20 @"), "{line}");
+        assert!(line.ends_with("; and 5 more"), "{line}");
+    }
+
+    /// 저장소가 디스크에 쓰겠다고 답하지 않았으면 받은 것도 다시 시도한다.
+    /// 답이 모자란 자리는 닿지 못한 것으로 센다.
+    #[test]
+    fn an_unflushed_store_or_a_missing_answer_keeps_the_cookie_for_retry() {
+        let yard = tempfile::tempdir().expect("root");
+        let id = "e".repeat(32);
+        let cookies = vec![staged("a"), staged("b")];
+        stage(yard.path(), &id, &cookies);
+        let settled = settle_staging(
+            yard.path(),
+            &id,
+            &cookies,
+            &[SetOutcome::Seated],
+            Dropped::default(),
+            false,
+            1,
+        );
+        assert_eq!(settled.apply.applied, 1);
+        assert_eq!(settled.apply.retained, 2);
+        assert_eq!(peek_staged_cookies(yard.path(), &id).len(), 2);
+
+        // 앉힐 것이 하나도 없던 주입(전부 만료)도 결과를 남기고 끝난다.
+        let settled = settle_staging(
+            yard.path(),
+            &id,
+            &[],
+            &[],
+            Dropped {
+                expired: 2,
+                ..Dropped::default()
+            },
+            true,
+            1,
+        );
+        assert_eq!(settled.apply.dropped, 2);
+        assert!(!staging_file(yard.path(), &id).exists());
+        assert_eq!(
+            last_apply(yard.path(), &id).map(|apply| apply.dropped),
+            Some(2)
+        );
+    }
+
+    /// 새로 가져오면 지난 주입의 결과는 지워진다 — 카드가 새 가져오기를
+    /// 두고 옛 숫자를 말하지 않는다.
+    #[test]
+    fn a_fresh_import_forgets_the_last_injection() {
+        let yard = tempfile::tempdir().expect("root");
+        let id = "f".repeat(32);
+        std::fs::write(apply_file(yard.path(), &id), "{}").expect("apply");
+        assert!(
+            last_apply(yard.path(), &id).is_none(),
+            "a half file reads as nothing"
+        );
+        let applied = CookieApply {
+            applied: 1,
+            ..CookieApply::default()
+        };
+        std::fs::write(
+            apply_file(yard.path(), &id),
+            serde_json::to_vec(&applied).expect("json"),
+        )
+        .expect("apply");
+        assert_eq!(last_apply(yard.path(), &id), Some(applied));
+        save_staged_cookies(yard.path(), &id, &[]).expect("save");
+        assert!(last_apply(yard.path(), &id).is_none());
+        assert!(!apply_file(yard.path(), &id).exists());
     }
 
     /// 스테이징 왕복 — 읽는 순간 파일이 사라진다(한 번의 주입).

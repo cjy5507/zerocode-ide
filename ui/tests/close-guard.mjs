@@ -13,8 +13,9 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * Two scenes, each on its own page and built from the window's own doors and a
  * fake ledger — nobody's pane, conversation or file is read:
  *
- *   close-guard     ① a tab holding two coordinators reads 「코디 2 · …」 and
- *                      its tip names them and its folder; a restored tab not
+ *   close-guard     ① a tab holding two coordinators says so on its tip —
+ *                      both seats and its folder (its name no longer leads
+ *                      with 「코디 2 ·」, t-78107); a restored tab not
  *                      woken yet says it holds conversations to wake;
  *                   ② the person's × on it asks one line naming the seats —
  *                      with the running switch OFF, as theirs was — and
@@ -122,7 +123,7 @@ export async function testCloseGuard({ browser, origin, ok, faults }) {
       const coordinator = t("agent.role.coordinator", "코디");
       return {
         coordLabel: node(ids.coord)?.querySelector(".tab-label")?.textContent ?? null,
-        coordLead: `${t("agent.role.count", "{{role}} {{n}}", { role: coordinator, n: 2 })} · `,
+        coordLead: `${coordinator} `,
         coordTip: node(ids.coord)?.dataset.tip ?? null,
         holds: t("terminal.holdsCoordinators", "코디 판 {{n}}개({{names}})", {
           n: 2, names: seats.map((seat) => seat.name).join("·"),
@@ -134,9 +135,9 @@ export async function testCloseGuard({ browser, origin, ok, faults }) {
       };
     }, { ids, seats: SEATS });
     ok(
-      "a tab holding two runs' coordinators reads 「코디 2 · …」 on the strip and its tip names both seats and its folder; a restored tab not woken yet says it holds conversations to wake (t-67936)",
+      "a tab holding two runs' coordinators names both seats and its folder on its tip, and its name on the strip leads with no role word (t-78107); a restored tab not woken yet says it holds conversations to wake (t-67936)",
       strip.roles.every((kind) => kind === "coordinator") &&
-        strip.coordLabel?.startsWith(strip.coordLead) &&
+        strip.coordLabel !== null && !strip.coordLabel.startsWith(strip.coordLead) &&
         strip.coordTip?.includes(strip.holds) && strip.coordTip.includes(strip.folder) &&
         strip.asleepTip?.includes(strip.stored) && strip.asleepTip.includes(strip.folder),
       JSON.stringify(strip),
@@ -287,7 +288,6 @@ export async function testCloseGuard({ browser, origin, ok, faults }) {
         "terminal.holdsStored": "다시 열 대화",
         "terminal.holdsTitle": "{{held}}가 들어 있습니다 — 닫을까요?",
         "terminal.closeRefused": "사람 손이 아닌 입력이 탭을 닫으려 해서 막았습니다 — {{held}}",
-        "agent.role.count": "{{role}} {{n}}",
       };
       const found = {};
       for (const code of ["en", "ja", "zh", "es"]) {

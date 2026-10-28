@@ -6445,9 +6445,23 @@ listen("browser:nav", (event) => {
   syncBrowserPanes();
 });
 
+/* 한 프로필의 주입이 끝났다 — 설정 카드의 「적용 대기」와 「N개 적용」이
+ * 그 자리에서 바뀌도록 목록을 다시 읽는다. */
+listen("browser:cookie-import-applied", () => {
+  if (isPopout) return;
+  void refreshBrowserProfiles().then(paintBrowserProfiles);
+});
+
 listen("browser:cookie-import-error", (event) => {
-  if (isPopout || typeof event.payload?.message !== "string") return;
-  showError(event.payload.message);
+  const said = event.payload;
+  if (isPopout || typeof said?.message !== "string") return;
+  showError(Number.isInteger(said.applied)
+    ? t(
+      "browser.cookieApplyIncomplete",
+      "가져온 쿠키 {{applied}}개를 적용했습니다. {{refused}}개는 Chromium이 받지 않았고 {{retained}}개는 다음에 다시 시도합니다. 받지 않은 쿠키의 이름은 창 로그에 적었습니다.",
+      { applied: said.applied, refused: said.refused, retained: said.retained },
+    )
+    : said.message);
 });
 
 listen("browser:title", (event) => {

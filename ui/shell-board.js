@@ -2658,6 +2658,11 @@ const DESK_RELEASE_PHASES = Object.freeze({
   sweep: { key: "board.now.phaseSweep", word: "정리" },
 });
 
+/* A release lane's name: its version, or its commit when it has none yet. */
+function deskReleaseVersionWord(lane) {
+  return lane.version ? `v${lane.version}` : String(lane.sha).slice(0, SHORT_COMMIT_LENGTH);
+}
+
 function deskReleasePhaseWord(name) {
   const known = DESK_RELEASE_PHASES[name];
   return known ? t(known.key, known.word) : String(name);
