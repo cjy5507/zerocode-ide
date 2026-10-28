@@ -414,7 +414,9 @@ The shape of a session is always the same:
    when it is one of the last four), or files and folders under
    `"evidencePaths":["/abs/file","/abs/dir"]` (an entry may be
    `{"path":"/abs/red.log","expected":"fails at the assertion","expect":"fail"}`, so an
-   intended failure is said and not guessed from the file name),
+   intended failure is said and not guessed from the file name; a report that
+   cites a file it named writes that file's absolute path in its text, not only
+   its name — a log called `red.log` cannot be found afterwards),
    the ledger copies them into the artifact store — masked of home paths,
    mailboxes, private addresses and credentials, text and pictures only, at most
    24 MB a hand-in — and the task's row on the board says what was kept, what was
@@ -427,8 +429,10 @@ The shape of a session is always the same:
    whose title has the word 검수 / 읽기 전용 / review / read-only / audit (a
    whole word: 「preview」 is not one) — has no code to land: your
    `verified` of it is written with `nothingToLand` added (the answer says
-   so) and, when it handed in a commit, that commit as `reviewedHead`, and
-   `landing_stalled` never asks it to merge.
+   why under `nothingToLandBecause`) and, when it handed in a commit, that
+   commit as `reviewedHead`, and `landing_stalled` never asks it to merge —
+   unless your result says something of landing itself (`merged`,
+   `nothingToLand: false`): your word stands over the worker's.
    **A review brief requires `"reportKind":"review"` in the worker's
    `worker_done` payload**: a reviewer that hands in the head it reviewed is
    told from code waiting to land by that word alone.

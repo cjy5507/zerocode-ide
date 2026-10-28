@@ -51,7 +51,7 @@ use std::hash::{Hash, Hasher};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{Dispatch, MessageKind, Run, TaskStatus, attempt_time};
+use super::{Dispatch, MessageKind, Run, TaskStatus, attempt_time, coordinator_take};
 use crate::agent::AgentKind;
 use crate::jev::{self, JevUse, summary};
 use crate::{usage_ledger, usage_stats, usage_stats_codex};
@@ -590,11 +590,15 @@ pub fn task_cost(
         attempts: attempts.len(),
         shape: task_shape(run, task_id),
         wall_ms: wall_ms(&attempts),
-        completion_wall_ms: run.task(task_id).and_then(|task| {
-            let completed = run.completion_ms(task)?;
-            let first = attempts.iter().map(|attempt| attempt.started_ms).min()?;
-            completed.checked_sub(first).filter(|elapsed| *elapsed >= 0)
-        }),
+        // A backfilled task's landing time is the backfill's own moment: left out, not measured.
+        completion_wall_ms: run
+            .task(task_id)
+            .filter(|task| !coordinator_take::backfilled(task))
+            .and_then(|task| {
+                let completed = run.completion_ms(task)?;
+                let first = attempts.iter().map(|attempt| attempt.started_ms).min()?;
+                completed.checked_sub(first).filter(|elapsed| *elapsed >= 0)
+            }),
         generation: generation(run, &attempts, sessions, attribution),
         jev: JevCost::of(jev),
     }

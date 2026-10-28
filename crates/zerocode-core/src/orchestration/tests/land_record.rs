@@ -51,6 +51,11 @@ fn result_of(bench: &Bench, task: &str) -> serde_json::Value {
     serde_json::from_str(run.task(task).expect("the task").result.as_str()).expect("a JSON result")
 }
 
+fn completion_of(bench: &Bench, task: &str) -> Option<i64> {
+    let run = &bench.ledger.runs()[0];
+    run.completion_ms(run.task(task).expect("the task"))
+}
+
 #[test]
 fn a_stack_is_recorded_merged_on_every_member_in_one_call_bound_to_each_members_own_review() {
     let mut bench = Bench::new();
@@ -62,6 +67,7 @@ fn a_stack_is_recorded_merged_on_every_member_in_one_call_bound_to_each_members_
     let said = bench.json(&format!(
         "task-update --members {one},{two} --result {{\"merged\":true,\"mergeHead\":\"{MAIN}\"}}"
     ));
+    let landed_at = bench.clock;
     let rows = said["recorded"].as_array().expect("rows");
     assert_eq!(rows.len(), 2, "{said}");
     for ((task, attempt, head), row) in [(&one, &one_attempt, FIRST), (&two, &two_attempt, SECOND)]
@@ -78,12 +84,8 @@ fn a_stack_is_recorded_merged_on_every_member_in_one_call_bound_to_each_members_
         assert_eq!(now.source.as_deref(), Some(head));
         // The review's own words stay; the landing is added beside them.
         assert_eq!(result_of(&bench, task)["testedHead"], head);
-        let run = &bench.ledger.runs()[0];
-        assert!(
-            run.completion_ms(run.task(task).expect("the task"))
-                .is_some(),
-            "the hand-in to main time the board measures"
-        );
+        // The hand-in to main time the board measures is the moment of this write, on both.
+        assert_eq!(completion_of(&bench, task), Some(landed_at), "{task}");
     }
 
     // The release, the same way: the landing stays, the shipping is added.
@@ -96,6 +98,9 @@ fn a_stack_is_recorded_merged_on_every_member_in_one_call_bound_to_each_members_
         assert!(now.verified && now.merged && now.deployed, "{now:?}");
         assert_eq!(now.merge_head.as_deref(), Some(MAIN));
         assert_eq!(result_of(&bench, task)["release"], "v1.1.101");
+        // The release is later, and the landing moment stays where the merge put it.
+        assert!(bench.clock > landed_at);
+        assert_eq!(completion_of(&bench, task), Some(landed_at), "{task}");
     }
 }
 
@@ -181,6 +186,10 @@ fn a_member_with_nothing_handed_in_or_no_verified_review_refuses_the_call_and_wr
     assert!(why.contains(&format!("{carrying}: ")), "{why}");
     assert!(why.contains("handed nothing in"), "{why}");
     assert!(why.contains("t-999999: unknown task"), "{why}");
+    assert!(
+        why.contains("--run <id>"),
+        "a task of another run is told its way: {why}"
+    );
     assert_eq!(result_of(&bench, &one), before, "nothing was written");
     assert!(!facts(&bench, &one).merged);
 }
@@ -204,4 +213,53 @@ fn members_take_landing_keys_only() {
         assert_ne!(refused.reply.exit_code, 0, "`{line}` was taken");
     }
     assert!(!facts(&bench, &one).merged);
+}
+
+/// What lands is a commit and a tag (t-79642, review t-79586 P3-7): a merge without a head, or with
+/// a branch name for it, and a deployment without a tag are refused, and a deployment needs a merge
+/// — on the task already, or in the same call.
+#[test]
+fn a_landing_names_a_commit_and_a_tag_and_a_deployment_follows_a_merge() {
+    let mut bench = Bench::new();
+    let (one, one_attempt) = handed(&mut bench, FIRST);
+    verified(&mut bench, &one, &one_attempt, FIRST);
+    for (line, why) in [
+        ("{\"merged\":true}", "naming the commit"),
+        (
+            "{\"merged\":true,\"mergeHead\":\"main\"}",
+            "naming the commit",
+        ),
+        ("{\"mergeHead\":\"abc12\"}", "records what landed"),
+        (
+            "{\"merged\":\"a1b2c3d\",\"mergeHead\":\"main\"}",
+            "naming the commit",
+        ),
+        ("{\"deployed\":true}", "naming the tag"),
+        (
+            "{\"deployed\":true,\"release\":\"v1.1.101\"}",
+            "nothing says it merged",
+        ),
+    ] {
+        let refused = bench.run(&format!("task-update --members {one} --result {line}"));
+        assert_ne!(refused.reply.exit_code, 0, "`{line}` was taken");
+        assert!(
+            refused.reply.stderr.contains(why),
+            "`{line}`: {}",
+            refused.reply.stderr
+        );
+    }
+    assert!(
+        !facts(&bench, &one).merged && completion_of(&bench, &one).is_none(),
+        "a refusal wrote something"
+    );
+
+    let said = bench.json(&format!(
+        "task-update --members {one} --result \
+         {{\"merged\":true,\"mergeHead\":\"{MAIN}\",\"deployed\":true,\"release\":\"v1.1.101\"}}"
+    ));
+    assert_eq!(said["recorded"].as_array().map(Vec::len), Some(1), "{said}");
+    let now = facts(&bench, &one);
+    assert!(now.merged && now.deployed, "{now:?}");
+    assert_eq!(now.merge_head.as_deref(), Some(MAIN));
+    assert!(completion_of(&bench, &one).is_some());
 }

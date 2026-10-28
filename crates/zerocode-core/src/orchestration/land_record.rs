@@ -22,6 +22,14 @@ pub const MEMBERS_FLAG: &str = "--members";
 /// The key a release tag is written under beside `deployed`: `v1.1.101`.
 pub const RELEASE_KEY: &str = "release";
 
+/// The key the commit that landed is written under beside `merged` — the middle of
+/// [`REVIEW_KEY_GROUPS`]' merge keys, and the one `land-batch` writes.
+const MERGE_HEAD_KEY: &str = REVIEW_KEY_GROUPS[1][1];
+
+/// Why a member is refused when this run holds no task of that id.
+const UNKNOWN_TASK: &str =
+    "unknown task in this run — a task of another run is written with --run <id>";
+
 /// The `task-update` flags that speak of one task, refused beside [`MEMBERS_FLAG`].
 const ONE_TASK_FLAGS: &[&str] = &[
     "--task",
@@ -73,6 +81,22 @@ fn landing_of(result: &str) -> Result<serde_json::Map<String, serde_json::Value>
              NOT, or a release nothing deployed, is written one task at a time"
         ));
     }
+    // What lands is a commit and a tag, as `land-batch` writes them: a branch name or a missing
+    // head would be read as merged by every reader and name nothing to find (review t-79586 P3-7).
+    let head_is_not_a_commit = map
+        .get(MERGE_HEAD_KEY)
+        .is_some_and(|head| head.as_str().and_then(commit_named).is_none());
+    if speaks_of_merge && (facts.merge_head.is_none() || head_is_not_a_commit) {
+        return Err(format!(
+            "{MEMBERS_FLAG} writes a merge with `{MERGE_HEAD_KEY}` naming the commit that landed \
+             (a hash of seven hexadecimal digits or more), not a branch or a word"
+        ));
+    }
+    if facts.deployed && release.is_none() {
+        return Err(format!(
+            "{MEMBERS_FLAG} writes a deployment with `{RELEASE_KEY}` naming the tag, like v1.1.101"
+        ));
+    }
     Ok(map)
 }
 
@@ -83,7 +107,7 @@ fn member(
     id: &str,
     landing: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(Option<String>, String, String), String> {
-    let task = run.task(id).ok_or("unknown task")?;
+    let task = run.task(id).ok_or(UNKNOWN_TASK)?;
     if let Some(newest) = run.newest_attempt(id)
         && newest.source.is_none()
     {
@@ -110,12 +134,20 @@ fn member(
         ));
     }
     let [_, merged_keys, _] = REVIEW_KEY_GROUPS;
-    if review.nothing_to_land
-        && landing
-            .keys()
-            .any(|key| merged_keys.contains(&key.as_str()))
-    {
+    let lands_a_merge = landing
+        .keys()
+        .any(|key| merged_keys.contains(&key.as_str()));
+    if review.nothing_to_land && lands_a_merge {
         return Err("its review says there is nothing to land".to_string());
+    }
+    // A deployment is of what merged: written on a task nothing says merged, `completion_ms` would
+    // never be stamped, since it waits for `merged` (review t-79586 P3-7).
+    if landing.contains_key(DEPLOYED_KEY) && !(lands_a_merge || review.merged) {
+        return Err(
+            "nothing says it merged, and a deployment is of what merged — write the merge first, \
+             or in the same call"
+                .to_string(),
+        );
     }
     let source = review.source.clone().ok_or("its review names no source")?;
     let mut result = match serde_json::from_str::<serde_json::Value>(task.result.as_str()) {

@@ -1053,7 +1053,7 @@ fn a_review_hand_in_is_never_told_as_unlanded_and_its_verification_says_nothing_
         None,
     );
     let (said, verified_at) = verify_review(&mut bench, &handed);
-    assert_eq!(said["nothingToLand"], "reportKind review", "{said}");
+    assert_eq!(said["nothingToLandBecause"], "reportKind review", "{said}");
     let facts = {
         let run = &bench.ledger.runs()[0];
         run.review_of(run.task(&handed.task).expect("the task"))
@@ -1073,10 +1073,10 @@ fn a_review_hand_in_is_never_told_as_unlanded_and_its_verification_says_nothing_
 }
 
 /// The watch reads the hand-in itself, not only the key the verification wrote: a review hand-in
-/// whose verification was written without `nothingToLand` — an older window, or a coordinator that
-/// wrote the key `false` — is still not told as unlanded.
+/// whose verification says nothing of landing — one an older window wrote, before the key was added
+/// — is still not told as unlanded.
 #[test]
-fn a_review_hand_in_verified_without_the_key_is_not_told_as_unlanded_either() {
+fn a_review_hand_in_verified_without_a_word_on_landing_is_not_told_as_unlanded_either() {
     let mut bench = Bench::new();
     let handed = review_handed_in(
         &mut bench,
@@ -1084,19 +1084,81 @@ fn a_review_hand_in_verified_without_the_key_is_not_told_as_unlanded_either() {
         "{\"reportKind\":\"review\"}",
         None,
     );
-    let source = handed_source(&bench, &handed);
-    bench.json(&format!(
-        "task-update --task {} --result {{\"verified\":true,\"nothingToLand\":false}} --attempt {} \
-         --source {source}",
-        handed.task, handed.dispatch
-    ));
-    let verified_at = bench.clock;
+    let (_, verified_at) = verify_review(&mut bench, &handed);
+    let run_id = bench.ledger.runs()[0].id.clone();
+    let task = bench
+        .ledger
+        .run_mut(&run_id)
+        .expect("the run")
+        .tasks
+        .iter_mut()
+        .find(|held| held.id == handed.task)
+        .expect("the task");
+    task.result = Text("{\"verified\":true}".to_string());
     assert_eq!(
         bench
             .ledger
             .landing_watch(&silent(), verified_at + MERGE_OVERDUE_MS),
         0
     );
+}
+
+/// The coordinator's word on landing stands over the worker's `reportKind` (t-79642, review t-79586
+/// P3-1) — as it does when the verification is written, where `nothingToLand` is added only if the
+/// result says nothing of landing. A review verified with `nothingToLand: false` is code the
+/// coordinator means to land, and is told `no_merge`; one it wrote `merged` on that git does not
+/// hold is told `ledger_merged_git_not`, as any merged claim git denies is.
+#[test]
+fn a_coordinators_word_on_a_review_hand_ins_landing_stands_over_the_workers_report_kind() {
+    let mut said_false = Bench::new();
+    let handed = review_handed_in(
+        &mut said_false,
+        "t-1-review",
+        "{\"reportKind\":\"review\"}",
+        None,
+    );
+    let source = handed_source(&said_false, &handed);
+    said_false.json(&format!(
+        "task-update --task {} --result {{\"verified\":true,\"nothingToLand\":false}} --attempt {} \
+         --source {source}",
+        handed.task, handed.dispatch
+    ));
+    let verified_at = said_false.clock;
+    assert_eq!(
+        said_false
+            .ledger
+            .landing_watch(&silent(), verified_at + MERGE_OVERDUE_MS),
+        1
+    );
+    let told = news(&said_false, MessageKind::LandingStalled);
+    assert_eq!(body(&told[0])["reason"], "no_merge");
+
+    let mut said_merged = Bench::new();
+    let handed = review_handed_in(
+        &mut said_merged,
+        "stack-pass",
+        "{\"reportKind\":\"review\"}",
+        Some(HEAD),
+    );
+    said_merged.json(&format!(
+        "task-update --task {} --result {{\"verified\":true,\"mergeHead\":\"{HEAD}\"}} \
+         --attempt {} --source {HEAD}",
+        handed.task, handed.dispatch
+    ));
+    let merged_at = said_merged.clock;
+    let missing = vec![witness(
+        CHECKOUT,
+        HEAD,
+        GitSays::Unlanded {
+            behind: None,
+            far_behind: false,
+            conflict: None,
+        },
+        false,
+    )];
+    assert_eq!(said_merged.ledger.landing_watch(&missing, merged_at + 1), 1);
+    let told = news(&said_merged, MessageKind::LandingStalled);
+    assert_eq!(body(&told[0])["reason"], "ledger_merged_git_not");
 }
 
 /// The title the coordinator gave the task — 「검수」, 「읽기 전용」 — says the same thing of a hand-in
@@ -1113,7 +1175,7 @@ fn a_read_only_title_marks_a_report_hand_in_as_a_review_but_never_a_commit() {
         None,
     );
     let (said, verified_at) = verify_review(&mut report, &handed);
-    assert_eq!(said["nothingToLand"], "read-only title", "{said}");
+    assert_eq!(said["nothingToLandBecause"], "read-only title", "{said}");
     assert_eq!(
         report
             .ledger
@@ -1124,7 +1186,7 @@ fn a_read_only_title_marks_a_report_hand_in_as_a_review_but_never_a_commit() {
     let mut commit = Bench::new();
     let handed = review_handed_in(&mut commit, "검수-P2-고침", "", Some(HEAD));
     let (said, verified_at) = verify_review(&mut commit, &handed);
-    assert!(said["nothingToLand"].is_null(), "{said}");
+    assert!(said["nothingToLandBecause"].is_null(), "{said}");
     assert_eq!(
         commit
             .ledger
@@ -1171,7 +1233,7 @@ fn a_title_says_review_by_a_whole_word_and_never_by_a_piece_of_one() {
         let mut bench = Bench::new();
         let handed = review_handed_in(&mut bench, title, "", None);
         let (said, verified_at) = verify_review(&mut bench, &handed);
-        assert!(said["nothingToLand"].is_null(), "{title}: {said}");
+        assert!(said["nothingToLandBecause"].is_null(), "{title}: {said}");
         assert_eq!(
             bench
                 .ledger
@@ -1192,7 +1254,10 @@ fn a_title_says_review_by_a_whole_word_and_never_by_a_piece_of_one() {
         let mut bench = Bench::new();
         let handed = review_handed_in(&mut bench, title, "", None);
         let (said, _) = verify_review(&mut bench, &handed);
-        assert_eq!(said["nothingToLand"], REVIEW_BY_TITLE, "{title}: {said}");
+        assert_eq!(
+            said["nothingToLandBecause"], REVIEW_BY_TITLE,
+            "{title}: {said}"
+        );
     }
 }
 
@@ -1210,7 +1275,7 @@ fn a_review_that_hands_in_the_head_it_reviewed_is_a_review_and_names_that_head_a
         Some(HEAD),
     );
     let (said, verified_at) = verify_review(&mut bench, &handed);
-    assert_eq!(said["nothingToLand"], REVIEW_BY_KIND, "{said}");
+    assert_eq!(said["nothingToLandBecause"], REVIEW_BY_KIND, "{said}");
     let (facts, result) = {
         let run = &bench.ledger.runs()[0];
         let task = run.task(&handed.task).expect("the task");
