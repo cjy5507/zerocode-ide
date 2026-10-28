@@ -66,16 +66,32 @@ impl PtySpawner for RecordingSpawner {
 
 // ------------------------------------------------------------------- doubles
 
+/// How late a child's first line may arrive after the call that started it has
+/// returned. A shell script launched on a loaded machine has been seen to run
+/// seconds later, so the tests that wait for one are held to a start later than
+/// any fixed wait they could pick.
+const LATE_START: Duration = Duration::from_secs(6);
+
 /// A `zo` that appends `"<args>|<token>"` to `marker` and echoes its arguments.
 /// The marker path is baked into the script so parallel tests never share state.
 fn fake_zo(dir: &Path, marker: &Path) -> ZoBinary {
+    fake_zo_after(dir, marker, Duration::ZERO)
+}
+
+/// [`fake_zo`] whose script does nothing for `delay` before it runs.
+fn fake_zo_after(dir: &Path, marker: &Path, delay: Duration) -> ZoBinary {
     use std::os::unix::fs::PermissionsExt;
 
     let path = dir.join(ZO_EXECUTABLE);
+    let start_late = if delay.is_zero() {
+        String::new()
+    } else {
+        format!("sleep {}\n", delay.as_secs())
+    };
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\nprintf '%s|%s\\n' \"$*\" \"${TOKEN_ENV}\" >> '{}'\n\
+            "#!/bin/sh\n{start_late}printf '%s|%s\\n' \"$*\" \"${TOKEN_ENV}\" >> '{}'\n\
              if [ -n \"${ZO_EVENTS_ADDR_FILE_ENV}\" ]; then printf '127.0.0.1:49152\\n%s\\n' \"${TOKEN_ENV}\" > \"${ZO_EVENTS_ADDR_FILE_ENV}\"; fi\n\
              printf 'fake-zo ran: %s pane=%s cwd=%s' \"$*\" \"$ZEROCODE_PANE_KEY\" \"$PWD\"\n",
             marker.display()
@@ -373,7 +389,7 @@ fn a_non_loopback_bind_address_is_refused() {
 fn an_absent_server_is_spawned_with_the_serve_arguments_and_the_token() {
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("calls.log");
-    let zo = fake_zo(dir.path(), &marker);
+    let zo = fake_zo_after(dir.path(), &marker, LATE_START);
     // Kept to the end of the test, so nobody is given the port meanwhile.
     let silent = QuietPort::silent();
     let addr = silent.addr().to_string();
@@ -536,7 +552,10 @@ fn a_pane_that_exits_before_publishing_is_refused_at_once_with_its_last_words() 
     let worktree = dir.path().join("wt-refused");
     fs::create_dir_all(&worktree).expect("worktree");
     let silent = QuietPort::silent();
-    let supervisor = supervisor_for(refusing_zo(dir.path()), &silent.addr().to_string());
+    let supervisor = supervisor_for(
+        refusing_zo(dir.path(), LATE_START),
+        &silent.addr().to_string(),
+    );
 
     let started = Instant::now();
     let error = supervisor
@@ -574,13 +593,16 @@ fn a_pane_that_exits_before_publishing_is_refused_at_once_with_its_last_words() 
 
 /// A `zo` that refuses the way a lease-held `--resume` does: one line on its
 /// terminal, a non-zero exit, and no address file.
-fn refusing_zo(dir: &Path) -> ZoBinary {
+fn refusing_zo(dir: &Path, delay: Duration) -> ZoBinary {
     use std::os::unix::fs::PermissionsExt;
 
     let path = dir.join(ZO_EXECUTABLE);
     fs::write(
         &path,
-        "#!/bin/sh\nprintf 'resume failed: fixture lease held by zo pid 1\\n' >&2\nexit 3\n",
+        format!(
+            "#!/bin/sh\nsleep {}\nprintf 'resume failed: fixture lease held by zo pid 1\\n' >&2\nexit 3\n",
+            delay.as_secs()
+        ),
     )
     .expect("write refusing zo");
     let mut perms = fs::metadata(&path).expect("metadata").permissions();

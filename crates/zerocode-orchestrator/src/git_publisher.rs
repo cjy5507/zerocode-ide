@@ -905,7 +905,8 @@ mod tests {
         fs::write(
             &wrapper,
             format!(
-                "#!/bin/sh\ncase \" $* \" in\n  *\" update-ref --no-deref --stdin \"*)\n    git -C '{}' update-ref refs/heads/feature {} {} || exit 91\n    ;;\nesac\nexec git \"$@\"\n",
+                "#!/bin/sh\ncase \" $* \" in\n  *\" update-ref --no-deref --stdin \"*)\n    sleep {}\n    git -C '{}' update-ref refs/heads/feature {} {} || exit 91\n    ;;\nesac\nexec git \"$@\"\n",
+                (PUBLISH_GIT_TIMEOUT + Duration::from_secs(1)).as_secs(),
                 repository.root.path().display(),
                 later,
                 repository.source_oid
