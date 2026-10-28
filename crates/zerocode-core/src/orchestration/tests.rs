@@ -6719,6 +6719,7 @@ fn an_agents_words_never_reach_a_debug_rendering() {
             pane_missing_since_ms: None,
             taken_over: false,
             checkout: None,
+            in_worktree: false,
             quiet_at: None,
             archive: Some(secret.to_string()),
             adopted_by: None,
@@ -25575,6 +25576,9 @@ mod letter_answers;
 /// t-68069: one conversation is one worker's, whatever seat a report comes by
 /// (`tests/one_conversation.rs`).
 mod one_conversation;
+/// t-78914: `process-sweep` lists by plain text and ends only the pids a list
+/// showed, each read again before its signal (`tests/process_sweep.rs`).
+mod process_sweep;
 /// t-47538: one reading of where a task's work stands (`tests/progress.rs`).
 mod progress;
 /// t-65286: which project a run belongs to, and the run a verb answers in

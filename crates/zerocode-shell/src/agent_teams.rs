@@ -1294,6 +1294,15 @@ pub trait Host {
         None
     }
 
+    /// The calling pane's own process and the process trees no pane but their
+    /// own may signal — the window and every other pane, as the kill guard
+    /// reads them (t-80602) — for `process-sweep` (t-78914). `caller` is the
+    /// asking pane's terminal. `None` is a host that cannot say, and the sweep
+    /// then ends nothing.
+    fn kill_roots(&self, _caller: Option<u32>) -> Option<zerocode_hookd::KillRoots> {
+        None
+    }
+
     /// A conversation the ledger binds to a run sat its run's empty coordinator
     /// chair from the pane at `leader_term` (t-21908), and the chair's sleepers
     /// are asked for their seats the way a restored coordinator tab asks at
@@ -1660,7 +1669,8 @@ pub fn run(
         | Effect::WorktreeEvidence { .. }
         | Effect::WorkerTranscript { .. }
         | Effect::LandCheck(..)
-        | Effect::LandBatch(..) => answer(zerocode_core::agent_teams::Reply::refused(
+        | Effect::LandBatch(..)
+        | Effect::ProcessSweep(..) => answer(zerocode_core::agent_teams::Reply::refused(
             "the tmux road reads its own panes only",
         )),
         Effect::Focus { term } => {

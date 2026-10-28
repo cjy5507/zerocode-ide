@@ -184,6 +184,15 @@ pub(crate) struct OwnedProcessMatch {
     pub(crate) command: String,
 }
 
+/// One row of [`ProcessSample::identified`].
+pub(crate) struct IdentifiedProcess<'a> {
+    pub(crate) pid: u32,
+    pub(crate) ppid: u32,
+    pub(crate) pgid: u32,
+    pub(crate) started: &'a str,
+    pub(crate) command: &'a str,
+}
+
 impl ProcessSample {
     fn available(&self) -> bool {
         !self.rows.is_empty()
@@ -246,6 +255,25 @@ impl ProcessSample {
 
     pub(crate) fn contains_pid(&self, pid: u32) -> bool {
         self.rows.iter().any(|row| row.pid == pid)
+    }
+
+    /// Every row whose start identity and command line were both read — the
+    /// rows a pid can be named by and read again later (t-78914
+    /// `process-sweep`). The group is 0 where the table carries none (Windows).
+    pub(crate) fn identified(&self) -> impl Iterator<Item = IdentifiedProcess<'_>> + '_ {
+        self.rows.iter().filter_map(|row| {
+            Some(IdentifiedProcess {
+                pid: row.pid,
+                ppid: row.ppid,
+                pgid: self
+                    .process_groups
+                    .get(&row.pid)
+                    .copied()
+                    .unwrap_or_default(),
+                started: self.identities.get(&row.pid)?.as_str(),
+                command: self.commands.get(&row.pid)?.as_str(),
+            })
+        })
     }
 
     /// The commands an agent is running under the pane rooted at `root`
@@ -643,11 +671,8 @@ fn parse_ps_output(output: &str) -> ParsedProcesses {
         });
         uids.insert(pid, uid);
         process_groups.insert(pid, process_group);
-        // `lstart` is five whitespace-delimited fields under LC_ALL=C.
-        let started = (0..5).filter_map(|_| fields.next()).collect::<Vec<_>>();
-        if started.len() == 5 {
-            identities.insert(pid, started.join(" "));
-            let command = bounded_command(fields);
+        if let Some((started, command)) = start_and_command(fields) {
+            identities.insert(pid, started);
             if !command.is_empty() {
                 commands.insert(pid, command);
             }
@@ -661,6 +686,61 @@ fn parse_ps_output(output: &str) -> ParsedProcesses {
         uids,
         process_groups,
     }
+}
+
+/// The start identity and the command line after it, as one `ps` row prints
+/// them — `lstart` is five whitespace-delimited fields under LC_ALL=C — in the
+/// words and bounds every reader of the table keys a process by. `None` for a
+/// row with fewer than five start fields.
+#[cfg(any(not(windows), test))]
+fn start_and_command<'a>(mut fields: impl Iterator<Item = &'a str>) -> Option<(String, String)> {
+    let started = fields.by_ref().take(5).collect::<Vec<_>>();
+    (started.len() == 5).then(|| (started.join(" "), bounded_command(fields)))
+}
+
+/// Several known pids' start identities and command lines in ONE `ps`
+/// (t-78914 `process-sweep`'s settle wait), in the words and bounds the table
+/// read gives each, so a mark made from the table matches. A pid missing from
+/// the answer does not stand. The read asks for this process too — always
+/// standing — so `ps` answers even when none of `pids` does, and an `Err` is
+/// only ever a read that failed, never "all gone".
+#[cfg(not(windows))]
+pub(crate) fn process_identities(pids: &[u32]) -> Result<HashMap<u32, (String, String)>, String> {
+    let own = std::process::id();
+    let asked: Vec<String> = pids
+        .iter()
+        .chain(std::iter::once(&own))
+        .map(u32::to_string)
+        .collect();
+    let mut command = crate::proc::quiet_command("ps");
+    command
+        .args(["-ww", "-p", &asked.join(","), "-o", "pid=,lstart=,command="])
+        .env("LC_ALL", "C")
+        .env("LANG", "C");
+    let output = run_sampler(command, PROCESS_IDENTITY_TIMEOUT)?;
+    Ok(parse_identities(
+        &String::from_utf8_lossy(&output.stdout),
+        pids,
+    ))
+}
+
+/// The rows of `ps -o pid=,lstart=,command=` for `pids` — a row for any
+/// other pid, this process's own among them, is not an answer.
+#[cfg(any(not(windows), test))]
+fn parse_identities(output: &str, pids: &[u32]) -> HashMap<u32, (String, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_ascii_whitespace();
+            let pid = fields
+                .next()?
+                .parse::<u32>()
+                .ok()
+                .filter(|pid| pids.contains(pid))?;
+            let (started, command) = start_and_command(fields)?;
+            (!command.is_empty()).then_some((pid, (started, command)))
+        })
+        .collect()
 }
 
 fn bounded_command<'a>(words: impl Iterator<Item = &'a str>) -> String {
@@ -828,6 +908,16 @@ pub(crate) fn process_has_args(pid: u32, required: &[&str]) -> Result<bool, Stri
     if pid == 0 {
         return Ok(false);
     }
+    let command = process_command(pid)?;
+    Ok(!command.is_empty() && command_has_args(&command, required))
+}
+
+/// One known pid's command line, in the same words and bounds the table read
+/// gives it — empty when no such process stands.
+pub(crate) fn process_command(pid: u32) -> Result<String, String> {
+    if pid == 0 {
+        return Ok(String::new());
+    }
     #[cfg(not(windows))]
     let command = {
         let mut command = crate::proc::quiet_command("ps");
@@ -849,8 +939,42 @@ pub(crate) fn process_has_args(pid: u32, required: &[&str]) -> Result<bool, Stri
         command
     };
     let output = run_sampler(command, PROCESS_IDENTITY_TIMEOUT)?;
-    let command = bounded_command(String::from_utf8_lossy(&output.stdout).split_ascii_whitespace());
-    Ok(!command.is_empty() && command_has_args(&command, required))
+    Ok(bounded_command(
+        String::from_utf8_lossy(&output.stdout).split_ascii_whitespace(),
+    ))
+}
+
+/// Ask exactly one pid to end, once (t-78914 `process-sweep`): TERM on Unix,
+/// and on Windows `taskkill` of that pid alone — never `/T`, so no tree goes
+/// with it. No wait and no escalation: the caller read the pid's identity
+/// immediately before and lists again to see what stands.
+pub(crate) fn end_one_process(pid: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let pid = libc::pid_t::try_from(pid)
+            .ok()
+            .filter(|pid| *pid > 1)
+            .ok_or_else(|| format!("{pid} is not a process id that may be signalled"))?;
+        // SAFETY: one positive pid above 1, never a group (a negative pid) or
+        // every process (-1); `kill` dereferences no pointer.
+        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "TERM was not delivered: {}",
+                io::Error::last_os_error()
+            ))
+        }
+    }
+    #[cfg(windows)]
+    {
+        if pid <= 1 {
+            return Err(format!("{pid} is not a process id that may be signalled"));
+        }
+        let mut command = crate::proc::quiet_command("taskkill.exe");
+        command.args(["/PID", &pid.to_string(), "/F"]);
+        run_sampler(command, PROCESS_IDENTITY_TIMEOUT).map(|_| ())
+    }
 }
 
 /// Stop a durable native child only while its pid still has the recorded
@@ -1243,6 +1367,28 @@ mod tests {
         assert_eq!(parsed.commands[&10], "/sdk/emulator -avd Pixel");
         assert_eq!(parsed.uids[&10], 501);
         assert_eq!(parsed.process_groups[&10], 7);
+    }
+
+    /// One settle read for several pids (t-78914 r2 P2-1) keys each asked
+    /// pid exactly as the table read keys it — so a mark made from the table
+    /// matches — and answers nothing for a pid it was not asked about (the
+    /// reader's own row) or one that is missing.
+    #[test]
+    fn one_read_for_several_pids_keys_them_as_the_table_does() {
+        let table = parse_ps_output(
+            " 501 10 1 7 12.5 2048 Thu Aug 27 13:14:15 2026 /sdk/emulator -avd Pixel\n",
+        );
+        let read = parse_identities(
+            "   10 Thu Aug 27 13:14:15 2026 /sdk/emulator -avd Pixel\n\
+             \x2077 Thu Aug 27 09:00:00 2026 zerocode-shell\n\
+             \x20 12 Thu Aug 27 13:14:16 2026\n",
+            &[10, 11, 12],
+        );
+        assert_eq!(
+            read.get(&10),
+            Some(&(table.identities[&10].clone(), table.commands[&10].clone()))
+        );
+        assert_eq!(read.len(), 1, "{read:?}");
     }
 
     /// The three pane shapes measured on this machine (t-6428, 2026-09-24),

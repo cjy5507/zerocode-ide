@@ -46,6 +46,7 @@ pub mod land_batch;
 pub mod land_check;
 pub mod land_record;
 pub mod landing_watch;
+pub mod process_sweep;
 mod progress;
 pub mod project_scope;
 mod session_history;
@@ -1553,6 +1554,15 @@ pub struct Worker {
     /// absence of the fact, never a fact of absence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout: Option<String>,
+    /// Whether this summons asked for a checkout of the worker's own — a
+    /// `--worktree` cut, or the inherited tree of an attempt that had one —
+    /// written at the reservation from the summons' own words (t-78914).
+    /// `false` is a pane opened in the coordinator's tree (no `--worktree`,
+    /// `--bare`) and every row written before this field existed: the
+    /// checkout it reports is then somebody else's tree, never the worker's,
+    /// and `process-sweep` reads only these rows as worker checkouts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_worktree: bool,
     /// The last quiet turn this worker's hook reported.
     ///
     /// This is the duplicate-event watermark, not the coordinator-notification
@@ -1646,6 +1656,7 @@ impl std::fmt::Debug for Worker {
             .field("pane_missing_since_ms", &self.pane_missing_since_ms)
             .field("taken_over", &self.taken_over)
             .field("checkout_bytes", &self.checkout.as_ref().map(String::len))
+            .field("in_worktree", &self.in_worktree)
             .field("quiet_at", &self.quiet_at)
             .field("archive_bytes", &self.archive.as_ref().map(String::len))
             .field("adopted_by", &self.adopted_by)
@@ -7002,6 +7013,8 @@ fn changes_the_ledger(verb: &str, words: &Words) -> bool {
         // Reading the batches changes nothing; every press hands the window work whose
         // records come back as receipts.
         land_batch::LAND_BATCH_VERB => land_batch::presses(words),
+        // A list signals nothing; naming pids to end does.
+        process_sweep::VERB => words.value("--kill").is_some(),
         _ => true,
     };
     doing(verb).is_some_and(|what| what.changes(spending))
@@ -9078,6 +9091,19 @@ impl Ledger {
         // this ledger got wrong.
         let binding_revision = self.bind(&binding, run_id);
         let run = self.run_mut(run_id).ok_or_else(|| unknown_run(run_id))?;
+        // A tree of the worker's own: a fresh cut, or the tree of the very
+        // attempt this one inherits (`--retry-of`) when that attempt's worker
+        // had one. An inherited tree a worker without one reported is the
+        // coordinator's, and stays so under the replacement — whatever other
+        // worker reported the same path.
+        let in_worktree = worktree
+            || (inherit_checkout.is_some()
+                && tuning
+                    .retry_of
+                    .as_deref()
+                    .and_then(|attempt| run.dispatch(attempt))
+                    .and_then(|attempt| run.worker(&attempt.worker))
+                    .is_some_and(|ended| ended.in_worktree));
         run.workers.push(Worker {
             id: worker_id.clone(),
             team: team.to_string(),
@@ -9095,6 +9121,7 @@ impl Ledger {
             pane_missing_since_ms: None,
             taken_over: false,
             checkout: None,
+            in_worktree,
             quiet_at: None,
             archive: None,
             adopted_by: None,
@@ -19522,6 +19549,29 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         Doing::Policy,
     ),
     (
+        process_sweep::VERB,
+        "--find <text> | --kill <pid@mark>[,<pid@mark>…] · the coordinator's one road to end a \
+         stray process: --find lists every process whose command line holds <text> as plain \
+         text (never a pattern) with its pid@mark, parent, start, place, the worker checkout it \
+         stands in and whether it is protected, and changes nothing; --kill (the run's live \
+         coordinator seat only) ends only pids a list could show, one at a time, each read \
+         again right before its TERM (taskkill /F on Windows) so a reused pid is left alone, \
+         refuses protected ones with the reason, waits up to 2 s (no read after 3 s) and says of each whether it \
+         is gone or still running (nothing stronger is sent), and writes one line to the run. \
+         A process no pane holds (an orphaned build) is ended only by its pid@mark from a list \
+         (코디가 목록을 읽고 고른 pid = 물음에 대한 예, 판 안·창은 예외 없음), and only while \
+         it and every process above it up to pid 1 stand in one worker's own tree the ledger \
+         knows (a --worktree checkout, never a coordinator's tree or the project root) — a \
+         runner's job or a person's terminal is refused, and so is the orphan of a worker \
+         seated before the ledger wrote down whether its tree was its own (worker-list says \
+         inWorktree: false), which this verb cannot end; --kill needs --retry-request, and the \
+         line is filed once under it; places are read on macOS \
+         only, so elsewhere only the caller's own tree ends. \
+         There is no pattern, parent or everything mode. 패턴으로 죽이는 명령은 쓰지 않는다 — \
+         인자가 패턴이 된다",
+        Doing::Policy,
+    ),
+    (
         gate_reuse::PIN,
         "--gate <gate-root|gate-zo> --body <policy-json> · pin exact policy and producer identities for the current authenticated coordinator",
         Doing::Mutation,
@@ -20056,6 +20106,7 @@ impl std::fmt::Debug for Decided {
             Effect::WorkerTranscript { .. } => "worker-transcript",
             Effect::LandCheck(..) => "land-check",
             Effect::LandBatch(..) => "land-batch",
+            Effect::ProcessSweep(..) => "process-sweep",
             Effect::WorkerTerminal { .. } => "worker-terminal",
             Effect::Focus { .. } => "focus",
             Effect::Close { .. } => "close",
@@ -24202,6 +24253,21 @@ fn plan_inner(
             planned
         }
 
+        /* A stray process, listed or ended (t-78914). The ledger reads the mode, the needle and
+         * the pids, refuses the end road to every pane but the run's live coordinator seat and
+         * names the worker checkouts it knows;
+         * the process table, the protection judgment and the signal are the window's, and so is
+         * the reply. */
+        process_sweep::VERB => {
+            let reading: &Ledger = ledger;
+            let ask = process_sweep::ask(reading, &words, &team.id, pane, || {
+                bound(reading, &words, &caller, &seat)
+            })?;
+            let mut planned = said(serde_json::Value::Null);
+            planned.effect = Effect::ProcessSweep(ask);
+            planned
+        }
+
         /* The integration queue (t-45315). A read is answered here; a press is judged here and
          * carried by the window, which reads the repository's switch before anything is written
          * and hands every record back as a receipt the ledger judges again
@@ -25339,6 +25405,9 @@ fn worker_json(run: &Run, worker: &Worker, team: &Team) -> serde_json::Value {
         // The window's placement fact, as reported — `null` for a seat the
         // window has not placed, which is an unknown, not a location.
         "checkout": worker.checkout,
+        // Whether that checkout is the worker's own tree (t-78914) — `false`
+        // for a pane opened in its coordinator's tree.
+        "inWorktree": worker.in_worktree,
         // The reconciler's proof of absence, when it has one — what the
         // window reads `seat: gone` from for a row no table maps.
         "paneMissingSinceMs": worker.pane_missing_since_ms,
@@ -25925,6 +25994,9 @@ pub struct WorkerRow {
     pub taken_over: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout: Option<String>,
+    /// Whether that checkout is the worker's own (t-78914), same posture.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_worktree: bool,
     pub quiet_at: Option<i64>,
     pub archive: Option<Text>,
     /// The adopting seat's generation, on the same posture as the seat
@@ -26275,6 +26347,7 @@ impl Ledger {
                     pane_missing_since_ms: worker.pane_missing_since_ms,
                     taken_over: worker.taken_over,
                     checkout: worker.checkout.clone(),
+                    in_worktree: worker.in_worktree,
                     quiet_at: worker.quiet_at,
                     archive: worker.archive.clone().map(Text),
                     adopted_by: worker.adopted_by,
@@ -26524,6 +26597,7 @@ impl Ledger {
                     pane_missing_since_ms: row.pane_missing_since_ms,
                     taken_over: row.taken_over,
                     checkout: row.checkout,
+                    in_worktree: row.in_worktree,
                     quiet_at: row.quiet_at,
                     archive: row.archive.map(Text::into_string),
                     adopted_by: row.adopted_by,
