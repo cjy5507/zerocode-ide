@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::capabilities::{
     AuthProbeKind, BlockedSignal, CLAUDE_EFFORT_LADDER, CLAUDE_EFFORT_PICKER,
     CLAUDE_RESUME_SELECTORS, CODEX_EFFORT_LADDER, Harness, IdShape, MoveRoad, OneShotRoad,
-    PointerRoute, SpawnRoad, StoreResume, Submit, SubmitAck, TrustMenu, TurnMoves, WakeMark,
+    PointerRoute, SignInLog, SpawnRoad, StoreResume, Submit, SubmitAck, TrustMenu, TurnMoves,
+    WakeMark,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1068,6 +1069,20 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 BlockedSignal::LoginGate,
             ],
             vault_resume_carries_launch_args: true,
+            // agy keeps its login in its own keyring, which this window does
+            // not read (it would put a keychain dialog on the person's
+            // screen). Every start writes how it signed in to its newest log,
+            // which `cli.log` links to. Measured 2026-10-28 over 57 logs of
+            // agy 1.4.x: every start wrote its first sign-in 18–25 KB in,
+            // whether from the keyring or a browser, and an account switch
+            // wrote its sign-out before the next sign-in, the last of them
+            // 39 KB in.
+            auth_probes: &[AuthProbeKind::SignInLog(SignInLog {
+                path: ".gemini/antigravity-cli/cli.log",
+                head_bytes: 64 * 1024,
+                signed_in: &["OAuth: authenticated successfully"],
+                signed_out: &["Logging out current user"],
+            })],
             // Gemini CLI's `/model` opens its manage dialog (the console table's
             // own note) and `--effort` is a launch flag on this machine
             // (`orchestration::TUNABLE`): shown and relaunched, no ladder read.
