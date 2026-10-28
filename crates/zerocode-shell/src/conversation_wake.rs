@@ -177,6 +177,25 @@ pub(crate) struct WakeClaims {
 /// it may end first five more (`pane_leftovers::BOOT_PLAN`).
 pub(crate) const WAKE_IN_FLIGHT_PATIENCE: Duration = Duration::from_secs(30);
 
+#[cfg(test)]
+thread_local! {
+    /// This thread's patience instead of [`WAKE_IN_FLIGHT_PATIENCE`], for a
+    /// test whose door asks from inside the very wake it waits on — the
+    /// ledger's reseat cutting a pane on the test's own thread — so the wait
+    /// can only end at its deadline, and thirty seconds of it proves nothing
+    /// fifty milliseconds does not (t-80605).
+    pub(crate) static WAKE_IN_FLIGHT_PATIENCE_HERE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn wake_in_flight_patience() -> Duration {
+    #[cfg(test)]
+    if let Some(here) = WAKE_IN_FLIGHT_PATIENCE_HERE.with(std::cell::Cell::get) {
+        return here;
+    }
+    WAKE_IN_FLIGHT_PATIENCE
+}
+
 /// The window's one set: one process, one set of panes — the same reason the
 /// keychain's write lock is process-wide.
 pub(crate) static WAKES: WakeClaims = WakeClaims::new();
@@ -316,7 +335,7 @@ pub(crate) fn claim_among(
         return Ok(None);
     };
     WAKES
-        .claim_settled(wanted, term, holder, WAKE_IN_FLIGHT_PATIENCE)
+        .claim_settled(wanted, term, holder, wake_in_flight_patience())
         .map(Some)
 }
 
