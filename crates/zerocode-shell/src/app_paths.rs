@@ -59,6 +59,11 @@ pub(crate) mod artifact_file {
     /// first effect and removed after its last receipt, so a window that
     /// dies halfway finishes the receipts on its next look (t-7538).
     pub(crate) const CLAUDE_ACCOUNT_SWITCH: &str = "claude-account-switch.json";
+    /// The Claude account the person picked themselves, and when (t-78096):
+    /// the beat leaves it until its wall, and a restart still knows it.
+    /// Written by the person's pick, removed when any other road moves the
+    /// default.
+    pub(crate) const CLAUDE_ACCOUNT_PICK: &str = "claude-account-pick.json";
     pub(crate) const CODEX_USAGE: &str = "codex-usage.json";
     pub(crate) const ANTIGRAVITY_USAGE: &str = "antigravity-usage.json";
     /// Kimi 게이지의 스냅샷 — 프로바이더마다 자기 파일이다(한 파일을 나눠

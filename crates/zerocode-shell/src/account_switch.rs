@@ -127,7 +127,31 @@ pub(crate) struct Situation {
     /// ([`owed_followers`], t-46106) — what the plan's census says of a pane
     /// left on another account: moving, or left.
     pub(crate) owed: Vec<String>,
+    /// The account the person picked themselves, and when ([`person_pick`],
+    /// t-78096) — read off the disk at every look, so a restart keeps it.
+    pub(crate) picked: Option<PersonPick>,
     pub(crate) now_ms: i64,
+}
+
+/// The person's own pick of the default (t-78096): which account, and the
+/// moment. While the default is still this account, the beat leaves it
+/// until its wall; any other road that moves the default ends it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PersonPick {
+    pub(crate) account: String,
+    pub(crate) at_ms: i64,
+}
+
+fn pick_file(dir: &Path) -> PathBuf {
+    dir.join(app_paths::artifact_file::CLAUDE_ACCOUNT_PICK)
+}
+
+/// The pick written down in `dir`, when one is. A file that is missing or
+/// cannot be read is no pick: the beat judges the default as it would any
+/// account, and invents nothing.
+pub(crate) fn person_pick(dir: &Path) -> Option<PersonPick> {
+    let text = std::fs::read_to_string(pick_file(dir)).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// The doors a switch walks through: everything it does to the world
@@ -208,6 +232,7 @@ impl SwitchDoors for WindowDoors<'_> {
                 .map(|account| (account.id.clone(), claude_login_key(account)))
                 .collect(),
             owed: owed_followers(&self.journal_dir()),
+            picked: person_pick(&self.journal_dir()),
             now_ms,
         })
     }
@@ -472,6 +497,9 @@ pub(crate) struct SwitchPlan {
     /// Candidates left out because a switch to them failed inside the
     /// cooldown.
     pub(crate) failed_recently: Vec<String>,
+    /// When the person picked the default themselves, while it is still
+    /// that account (t-78096): the beat leaves it until its wall.
+    pub(crate) picked_at_ms: Option<i64>,
     /// Names this exact plan: mode, source, decision, every walled pane's
     /// seat, generation and verdict, and which login every account id names
     /// (astra R6). `apply` re-plans and compares.
@@ -543,6 +571,7 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
         failures,
         logins,
         owed,
+        picked: _,
         now_ms,
     } = situation;
     let failed_recently: Vec<String> = failures
@@ -585,6 +614,7 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
             walled: walled
                 .iter()
                 .any(|row| row.account.as_deref() == Some(source.as_str())),
+            picked: false,
             now_ms,
         }),
     };
@@ -628,6 +658,7 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
         last_switch_ms,
         cooldown_until_ms,
         failed_recently,
+        picked_at_ms: None,
         token,
         logins,
         now_ms,
@@ -3130,6 +3161,7 @@ mod tests {
                 model: None,
                 last_switch_ms: None,
                 walled: false,
+                picked: false,
                 now_ms: now,
             });
             assert_eq!(

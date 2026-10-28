@@ -105,6 +105,12 @@ pub struct AutoSwitchPolicy {
     /// the reserve. Room decides within one type; the id breaks what is
     /// left, so two runs of the same numbers name the same account.
     pub org_type_order: &'static [&'static str],
+    /// An account the person picked themselves is left until a window that
+    /// limits the launch reads this full (t-78096) — the person's own
+    /// words, 「한도 100%까지」: the whole window, not a line short of it.
+    /// Neither the warn line nor the blocked line moves it; a pane on it
+    /// at its wall still does.
+    pub picked_moves_at_percent: u8,
 }
 
 /// The name every receipt written under this table carries, so a row can
@@ -119,6 +125,7 @@ pub const CLAUDE_ACCOUNT_AUTOSWITCH: AutoSwitchPolicy = AutoSwitchPolicy {
     near_reset_ms: QUOTA_POLICY.reset_soon_ms,
     cooldown_ms: QUOTA_WAIT_POLICY.lift_read_ms,
     org_type_order: &["claude_team", "claude_max"],
+    picked_moves_at_percent: 100,
 };
 
 /// Which launches one gauge window limits (t-7538, astra A3).
@@ -364,6 +371,11 @@ pub struct Question<'a> {
     /// second trigger, which does not wait for the source's own gauge to
     /// say so (the wall's witness already did).
     pub walled: bool,
+    /// Whether the person picked `source` themselves and nothing has moved
+    /// the default since (t-78096): such an account is theirs until its
+    /// wall — `picked_moves_at_percent` or the wall's witness — and another
+    /// account's larger room is no reason to leave it.
+    pub picked: bool,
     pub now_ms: i64,
 }
 
@@ -637,6 +649,7 @@ mod tests {
             model: None,
             last_switch_ms: None,
             walled: false,
+            picked: false,
             now_ms: NOW,
         }
     }
@@ -1208,6 +1221,92 @@ mod tests {
         assert_eq!(json, "\"auto\"");
     }
 
+    /// 2026-10-27, four times: the person picked an account at its warn
+    /// line and the beat moved the default back to one that read 2%,
+    /// minutes later. An account the person picked is kept until its wall
+    /// (t-78096) — past the warn line, past the blocked line — and moves
+    /// only when a window that limits the launch is full or a pane on it
+    /// stands at its wall. The same numbers, unpicked, move as before.
+    #[test]
+    fn an_account_the_person_picked_is_kept_until_its_wall_whatever_room_another_has() {
+        let at = |session: u8| {
+            [
+                gauge(
+                    "picked",
+                    "claude_team",
+                    &[("session", session, HOUR), ("weekly", 96, DAYS6)],
+                ),
+                gauge(
+                    "other",
+                    "claude_max",
+                    &[("session", 2, HOUR), ("weekly", 2, DAYS6)],
+                ),
+            ]
+        };
+        let warned = at(95);
+        let mut question = ask("picked", &warned);
+        question.picked = true;
+        assert_eq!(decide(&question), Decision::Stay { why: "picked" });
+        question.picked = false;
+        assert_eq!(
+            decide(&question),
+            Decision::Switch {
+                from: "picked".into(),
+                to: "other".into(),
+                reason: SwitchReason::NearLimit {
+                    window: "weekly".into(),
+                    used_percent: 96
+                },
+            },
+            "an account nobody picked still moves at the warn line"
+        );
+        // Past the blocked line, still short of full: still the person's.
+        let blocked = at(CLAUDE_ACCOUNT_AUTOSWITCH.picked_moves_at_percent - 1);
+        let mut question = ask("picked", &blocked);
+        question.picked = true;
+        assert_eq!(decide(&question), Decision::Stay { why: "picked" });
+        // Full: the wall. It moves, and the receipt names the window.
+        let full = at(CLAUDE_ACCOUNT_AUTOSWITCH.picked_moves_at_percent);
+        let mut question = ask("picked", &full);
+        question.picked = true;
+        assert_eq!(
+            decide(&question),
+            Decision::Switch {
+                from: "picked".into(),
+                to: "other".into(),
+                reason: SwitchReason::NearLimit {
+                    window: "session".into(),
+                    used_percent: CLAUDE_ACCOUNT_AUTOSWITCH.picked_moves_at_percent
+                },
+            }
+        );
+        // A pane on it at its wall is the wall too, whatever the gauge says.
+        let quiet = [
+            gauge(
+                "picked",
+                "claude_team",
+                &[("session", 30, HOUR), ("weekly", 40, DAYS6)],
+            ),
+            gauge(
+                "other",
+                "claude_max",
+                &[("session", 2, HOUR), ("weekly", 2, DAYS6)],
+            ),
+        ];
+        let mut question = ask("picked", &quiet);
+        question.picked = true;
+        assert_eq!(decide(&question), Decision::Stay { why: "room" });
+        question.walled = true;
+        assert_eq!(
+            decide(&question),
+            Decision::Switch {
+                from: "picked".into(),
+                to: "other".into(),
+                reason: SwitchReason::Walled,
+            }
+        );
+    }
+
     #[test]
     fn the_table_reads_the_summons_tables_numbers_and_invents_none() {
         let policy = &CLAUDE_ACCOUNT_AUTOSWITCH;
@@ -1217,6 +1316,7 @@ mod tests {
         assert_eq!(policy.near_reset_ms, QUOTA_POLICY.reset_soon_ms);
         assert_eq!(policy.cooldown_ms, QUOTA_WAIT_POLICY.lift_read_ms);
         assert!(policy.default_moves_at_percent < policy.blocked_at_percent);
+        assert!(policy.blocked_at_percent < policy.picked_moves_at_percent);
         assert!(
             policy.near_reset_ms < QUOTA_WAIT_POLICY.max_wait_ms,
             "near is not the wall's lifetime"
