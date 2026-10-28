@@ -264,7 +264,11 @@ pub struct RequestTimingRecord {
     pub request_messages: usize,
     /// Times the request was sent.
     pub attempts: u32,
-    /// Assembly began → last attempt left.
+    /// Assembly began → last attempt left. Takes in the recall seat's wait
+    /// when the seat is waited for; a project whose last waited judgment
+    /// missed the wall takes the record-only road with no wait until a
+    /// recorded judgment answers inside it, a chance about once per turn
+    /// since t-78938 rather than once per request (t-80327).
     pub assemble_ms: Option<u64>,
     /// Last attempt left → first block.
     pub ttfb_ms: Option<u64>,
@@ -316,9 +320,13 @@ pub struct RequestTimingRecord {
     /// How long each tool whose result this request carries back ran, in the
     /// order the answer before it asked for them, by tool name only; a tool
     /// that did not run has no `ms`, and one the person stopped while it ran
-    /// has none either and says `"cancelled": true`. Read beside the row of the answer that
-    /// asked for them — the same `attempt`, the iteration before — so a row
-    /// with no attempt to be joined by never carries it.
+    /// has none either and says `"cancelled": true`. Read beside the row of
+    /// the answer that asked for them — the same `attempt`, the iteration
+    /// before — so a row with no attempt to be joined by never carries it.
+    /// Only a request that is sent and completes carries them: when the turn
+    /// ends after its tools — a hard stop, the iteration limit, Esc, a next
+    /// request that fails — the last tools' times are on no row, so a week's
+    /// figures lean away from the tools that end turns (t-80327).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_ran_ms: Vec<ToolMark>,
 }
