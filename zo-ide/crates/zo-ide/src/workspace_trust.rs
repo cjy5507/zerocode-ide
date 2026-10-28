@@ -953,16 +953,24 @@ mod tests {
 
         /// [`Self::run_probe`] with `cwd` as the working folder.
         fn run_probe_in(&self, cwd: &Path) -> String {
+            self.run_probe_as(cwd, Self::mode(cwd), crate::slash::ModeOrigin::default())
+        }
+
+        /// `/probe` in `cwd` under `mode`, with `origin` saying who stands
+        /// behind it.
+        fn run_probe_as(
+            &self,
+            cwd: &Path,
+            mode: runtime::PermissionMode,
+            origin: crate::slash::ModeOrigin,
+        ) -> String {
             with_env_paths(
                 &[
                     ("HOME", Some(self.home.as_path())),
                     ("ZO_CONFIG_HOME", None),
                     ("ZO_HOME", None),
                 ],
-                || {
-                    let origin = crate::slash::ModeOrigin::default();
-                    crate::slash::prompt_command(cwd, "probe", "", Self::mode(cwd), origin)
-                },
+                || crate::slash::prompt_command(cwd, "probe", "", mode, origin),
             )
             .expect("/probe expands")
             .text
@@ -991,9 +999,16 @@ mod tests {
         }
 
         fn untrusted_notice(&self) -> String {
+            self.untrusted_notice_for(&self.project)
+        }
+
+        /// The line that stands in for the probe when nobody has trusted
+        /// `folder`, the one whose `.zo/commands` holds the file.
+        fn untrusted_notice_for(&self, folder: &Path) -> String {
             format!(
-                "[!{}: not run — this folder is not trusted; a repository's command file runs no ! line until you trust its folder]\nDone.\n",
-                self.touch()
+                "[!{}: not run — {} is not trusted; a repository's command file runs its ! lines only in a folder you trust, or under a --permission-mode you name]\nDone.\n",
+                self.touch(),
+                folder.display()
             )
         }
     }
@@ -1038,25 +1053,47 @@ mod tests {
         assert_eq!(ran, "\nDone.\n");
     }
 
-    /// Trust is the working folder's, by its exact path: a command file in a
-    /// folder above the working one runs under the working folder's trust,
-    /// and the person's trust in that upper folder alone does not run it.
+    /// Trust is the decision for the folder that holds the command file:
+    /// a file in a folder above the working one runs only when the person
+    /// trusted that upper folder. Trust in the working folder covers the
+    /// working folder's own `.zo/commands`, not a file someone left above it.
     #[test]
-    fn an_upper_folders_command_file_asks_the_working_folders_trust() {
+    fn an_upper_folders_command_file_asks_that_folders_trust() {
         let _guard = crate::test_env_lock();
         let trial = BangTrial::new("bang-upper-folder");
         trial.write_probe(&trial.project.join(".zo"));
         let below = trial.project.join("below");
         std::fs::create_dir_all(&below).expect("a folder below the project");
 
-        trial.record_trust_for(&trial.project, "workspace-write");
+        trial.record_trust_for(&below, "workspace-write");
         let refused = trial.run_probe_in(&below);
-        assert!(!trial.marker.exists(), "trust in the upper folder ran the `!` line below it");
+        assert!(!trial.marker.exists(), "trust in the working folder ran a `!` line from above it");
         assert_eq!(refused, trial.untrusted_notice());
 
-        trial.record_trust_for(&below, "workspace-write");
+        trial.record_trust_for(&trial.project, "workspace-write");
         let ran = trial.run_probe_in(&below);
-        assert!(trial.marker.exists(), "trust in the working folder did not run the `!` line");
+        assert!(trial.marker.exists(), "trust in the folder holding the file did not run its `!` line");
+        assert_eq!(ran, "\nDone.\n");
+    }
+
+    /// A mode the person names with `--permission-mode` is their word for
+    /// the folder, as a trust record is: in a repository that pins its own
+    /// mode, with no record, the named workspace-write runs the granted
+    /// line. A named read-only still runs nothing.
+    #[test]
+    fn a_named_permission_mode_is_the_persons_word_for_the_folder() {
+        use runtime::PermissionMode;
+        let _guard = crate::test_env_lock();
+        let trial = BangTrial::new("bang-named-mode");
+        trial.pin_accept_edits_with_probe();
+        let named = crate::slash::ModeOrigin { named: true, piped: false };
+
+        let read_only = trial.run_probe_as(&trial.project, PermissionMode::ReadOnly, named);
+        assert!(!trial.marker.exists(), "a named read-only ran the `!` line");
+        assert_eq!(read_only, format!("[!{}: not run in read-only mode]\nDone.\n", trial.touch()));
+
+        let ran = trial.run_probe_as(&trial.project, PermissionMode::WorkspaceWrite, named);
+        assert!(trial.marker.exists(), "a named workspace-write did not run the `!` line");
         assert_eq!(ran, "\nDone.\n");
     }
 
