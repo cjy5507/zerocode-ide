@@ -672,7 +672,7 @@ impl PromptCache {
                 paths,
                 stats,
                 previous,
-                sent: None,
+                sent: Vec::new(),
             })),
         }
     }
@@ -745,16 +745,25 @@ impl PromptCache {
 
     /// Deposit what the client is about to send for `request`: the length
     /// and hash of the prefix every marker in `payload` closes
-    /// ([`sent_prefixes`]), and how long working that out took. The next
-    /// request recorded with the same model and message count withdraws it
-    /// onto its ledger row.
+    /// ([`sent_prefixes`]), and how long working that out took. The request
+    /// recorded as this same request ([`sent_request_key`]) withdraws it onto
+    /// its ledger row.
     pub(crate) fn note_sent_payload(&self, request: &MessageRequest, payload: &[u8]) {
         let started = std::time::Instant::now();
+        let Some(key) = sent_request_key(request) else {
+            return;
+        };
         let prefixes = sent_prefixes(payload);
         let hash_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-        self.lock().sent = Some(SentRequest {
-            model: request.model.clone(),
-            message_count: request.messages.len(),
+        let mut inner = self.lock();
+        // A restart sends the same request again: its newer bytes replace
+        // the deposit rather than queue beside it.
+        inner.sent.retain(|sent| sent.key != key);
+        if inner.sent.len() == SENT_DEPOSITS {
+            inner.sent.remove(0);
+        }
+        inner.sent.push(SentRequest {
+            key,
             prefixes,
             hash_micros,
             transformations: None,
@@ -762,9 +771,13 @@ impl PromptCache {
     }
 
     /// Deposit what the response's `message_start` said the server did to
-    /// the prompt, beside the payload [`Self::note_sent_payload`] left.
-    pub(crate) fn note_input_transformations(&self, seen: crate::sse::InputTransformations) {
-        if let Some(sent) = self.lock().sent.as_mut() {
+    /// the prompt, beside the payload [`Self::note_sent_payload`] left for
+    /// the same `request`.
+    pub(crate) fn note_input_transformations(&self, request: &MessageRequest, seen: crate::sse::InputTransformations) {
+        let Some(key) = sent_request_key(request) else {
+            return;
+        };
+        if let Some(sent) = self.lock().sent.iter_mut().find(|sent| sent.key == key) {
             sent.transformations = Some(seen);
         }
     }
@@ -961,9 +974,9 @@ struct PromptCacheInner {
     paths: PromptCachePaths,
     stats: PromptCacheStats,
     previous: Option<TrackedPromptState>,
-    /// The request the client last put on the wire, until a recorded request
-    /// withdraws it ([`SentRequest`]).
-    sent: Option<SentRequest>,
+    /// The requests the client put on the wire, oldest first, until each is
+    /// recorded and withdraws its own ([`SentRequest`]).
+    sent: Vec<SentRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3163,12 +3176,13 @@ fn request_ledger_row(
 ///
 /// A deposit, like the trim credit, because the bytes exist only in the
 /// client's send path and the ledger row is written when the response ends.
-/// Keyed by model and message count: a request recorded with another shape
-/// takes nothing rather than another request's facts.
+/// Keyed by the request itself ([`sent_request_key`]): a recorded request
+/// takes only its own, and leaves another request's deposit where it is —
+/// a refresh still on the wire when the person sends the next request
+/// answers after that request went out (adversarial review W3, P3-1).
 #[derive(Debug, Clone, Default)]
 struct SentRequest {
-    model: String,
-    message_count: usize,
+    key: u64,
     prefixes: Vec<SentPrefix>,
     hash_micros: u64,
     transformations: Option<crate::sse::InputTransformations>,
@@ -3188,11 +3202,39 @@ impl SentPrefix {
     }
 }
 
+/// How many requests may be on the wire at once with their deposits kept:
+/// the turn and a refresh that overlaps it, and a sub-agent sharing the
+/// client, with room to spare. A deposit nobody recorded (the request failed)
+/// is the oldest one dropped when a new one would pass this.
+const SENT_DEPOSITS: usize = 4;
+
 fn withdraw_sent_request(inner: &mut PromptCacheInner, request: &MessageRequest) -> Option<SentRequest> {
-    inner
-        .sent
-        .take()
-        .filter(|sent| sent.model == request.model && sent.message_count == request.messages.len())
+    let key = sent_request_key(request)?;
+    let at = inner.sent.iter().position(|sent| sent.key == key)?;
+    Some(inner.sent.remove(at))
+}
+
+/// What ties a deposit to the request recorded for it: a hash of the request
+/// itself — model, limit, messages, system, tools and the parameters — with
+/// `stream` left out, because a streamed request is sent with the flag set
+/// (`with_streaming`) and recorded as its caller built it. Hashed word at a
+/// time ([`PrefixHasher`]) as it serializes, without a buffer: `request_hash_hex`
+/// would hash the same bytes one at a time, on the send path. `None` when the
+/// request does not serialize: nothing is deposited for it or withdrawn.
+fn sent_request_key(request: &MessageRequest) -> Option<u64> {
+    let fields = (
+        &request.model,
+        request.max_tokens,
+        &request.messages,
+        &request.system,
+        &request.tools,
+        &request.tool_choice,
+        &request.thinking,
+        &request.output_config,
+    );
+    let mut hasher = PrefixHasher::default();
+    serde_json::to_writer(&mut hasher, &fields).ok()?;
+    Some(hasher.finish())
 }
 
 /// [`detect_cache_break`], then what the client sent weighed in: this
@@ -3232,6 +3274,11 @@ fn judge_cache_break(
                 seen.count,
                 seen.kinds.join(", ")
             );
+        } else if changed_at.as_deref() == Some(REQUEST_PARAMETERS_AT) {
+            event.reason = "cache reads dropped on a pure append — the request parameters sent changed \
+                            (model, thinking, output_config or tool_choice), which the provider keys \
+                            the messages' cache entry on"
+                .to_string();
         } else if let Some(at) = &changed_at {
             event.reason = format!(
                 "cache reads dropped on a pure append — the bytes sent changed before marker {at} \
@@ -3244,7 +3291,8 @@ fn judge_cache_break(
 
 /// The `at` of the first entry of `current` whose prefix differs from the
 /// one `previous` carried at the same marker; a marker only one side carried
-/// compares nothing.
+/// compares nothing. The request-parameter line leads `current`
+/// ([`sent_prefixes`]), so it is compared first.
 fn first_changed_prefix(previous: &[String], current: &[String]) -> Option<String> {
     current.iter().find_map(|label| {
         let (at, prefix) = label.split_once(':')?;
@@ -3292,16 +3340,33 @@ impl SentColumns {
 /// its marked block; only blocks that never take a marker (thinking, an empty
 /// text) can follow one.
 ///
+/// In front of them stands one line for the request parameters the provider
+/// also keys a cache entry on but which sit outside those three arrays —
+/// [`REQUEST_PARAMETER_KEYS`], key and value as sent, in that order whatever
+/// the body's — at `p` ([`REQUEST_PARAMETERS_AT`]). A request that changes
+/// only its effort or its thinking has byte-identical prefixes, and the
+/// provider still rewrites the messages' entry (adversarial review W3, P3-3).
+///
 /// Measured on a 520 KB body of 640 messages: see
 /// `sent_prefixes_cost_little_beside_the_send` for the number this test
 /// prints on the build at hand.
 fn sent_prefixes(payload: &[u8]) -> Vec<SentPrefix> {
     let layout = BodyLayout::scan(payload);
+    let mut parameters = PrefixHasher::default();
+    for key in 0..REQUEST_PARAMETER_KEYS.len() {
+        for &(_, start, end) in layout.parameters.iter().filter(|(found, _, _)| *found == key) {
+            parameters.write(&payload[start..end]);
+        }
+    }
+    let mut prefixes = vec![SentPrefix {
+        at: REQUEST_PARAMETERS_AT.to_string(),
+        bytes: parameters.bytes,
+        hash: parameters.finish(),
+    }];
     let mut hasher = PrefixHasher::default();
     if let Some((start, end)) = layout.tools {
         hasher.write(&payload[start..end]);
     }
-    let mut prefixes = Vec::new();
     for (section, elements) in [("s", &layout.system), ("m", &layout.messages)] {
         for (index, element) in elements.iter().enumerate() {
             let mut from = element.start;
@@ -3322,12 +3387,23 @@ fn sent_prefixes(payload: &[u8]) -> Vec<SentPrefix> {
     prefixes
 }
 
+/// The top-level request keys the `p` line of [`sent_prefixes`] hashes, in
+/// the order it hashes them: what the provider keys the messages' cache entry
+/// on besides tools, system and messages.
+const REQUEST_PARAMETER_KEYS: [&[u8]; 4] = [b"model", b"output_config", b"thinking", b"tool_choice"];
+
+/// The `at` of the request-parameter line in [`RequestLedgerRow::prefix_hashes`].
+const REQUEST_PARAMETERS_AT: &str = "p";
+
 /// Where a compact JSON request body keeps what [`sent_prefixes`] hashes.
 #[derive(Debug, Default)]
 struct BodyLayout {
     tools: Option<(usize, usize)>,
     system: Vec<BodyElement>,
     messages: Vec<BodyElement>,
+    /// Each [`REQUEST_PARAMETER_KEYS`] entry found: its index there and the
+    /// byte range of its key and value.
+    parameters: Vec<(usize, usize, usize)>,
 }
 
 /// One element of `system` or `messages`: its byte range and the
@@ -3360,6 +3436,9 @@ impl BodyLayout {
         // The open `cache_control` span: where it starts, the depth of the
         // object holding its key, and whether it took the comma before it.
         let mut open: Option<(usize, usize, bool)> = None;
+        // The open request parameter: its key's index and where it starts.
+        // It ends at the next comma or brace back at the body's own depth.
+        let mut parameter: Option<(usize, usize)> = None;
         let mut at = 0;
         while at < payload.len() {
             match payload[at] {
@@ -3372,6 +3451,10 @@ impl BodyLayout {
                     }
                     let key = &payload[start + 1..end];
                     if depth == 1 {
+                        parameter = REQUEST_PARAMETER_KEYS
+                            .iter()
+                            .position(|name| *name == key)
+                            .map(|found| (found, start));
                         section = match key {
                             b"tools" => BodySection::Tools,
                             b"system" => BodySection::System,
@@ -3400,6 +3483,9 @@ impl BodyLayout {
                     }
                 }
                 byte @ (b'}' | b']') => {
+                    if depth == 1 {
+                        layout.close_parameter(&mut parameter, at);
+                    }
                     if let Some((start, key_depth, comma)) = open {
                         if depth == key_depth + 1 && byte == b'}' {
                             let mut end = at + 1;
@@ -3423,11 +3509,18 @@ impl BodyLayout {
                     }
                     depth = depth.saturating_sub(1);
                 }
+                b',' if depth == 1 => layout.close_parameter(&mut parameter, at),
                 _ => {}
             }
             at += 1;
         }
         layout
+    }
+
+    fn close_parameter(&mut self, parameter: &mut Option<(usize, usize)>, end: usize) {
+        if let Some((found, start)) = parameter.take() {
+            self.parameters.push((found, start, end));
+        }
     }
 
     fn section_mut(&mut self, section: BodySection) -> &mut Vec<BodyElement> {
@@ -3518,6 +3611,18 @@ impl PrefixHasher {
         state = (state ^ (state >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         state = (state ^ (state >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         state ^ (state >> 31)
+    }
+}
+
+/// So a value can be hashed as it serializes ([`sent_request_key`]).
+impl std::io::Write for PrefixHasher {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        Self::write(self, bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -4569,10 +4674,13 @@ mod tests {
     /// transformation columns only the rare row that has one. At ~24,700 rows
     /// a month that is about 3.7 MB a month more on the ordinary row. The
     /// worst case below, every optional column at once, went from 447 to
-    /// about 780 bytes.
+    /// about 780 bytes. The same day the request-parameter line `p` joined
+    /// them (W3 review, P3-3): one more `p:bytes:hash` entry, 26 bytes with
+    /// its quotes and comma, on every Anthropic row — about 0.6 MB a month —
+    /// taking the worst case to about 810 bytes.
     #[test]
     fn a_request_ledger_row_stays_small_enough_to_keep_forever() {
-        const CEILING_BYTES: usize = 800;
+        const CEILING_BYTES: usize = 830;
 
         let marker = |index: i32, slot: &str, role: &str, ttl: &str| super::MarkerRecord {
             index,
@@ -4616,11 +4724,11 @@ mod tests {
             // A refresh row carries the flag but nothing a turn adds — no
             // output, no movement, no drop — so it stays far under this.
             refresh: false,
-            // The same four markers, prefixes up to 10 MB, with a change
-            // named and the server's two longest transformation kinds.
-            prefix_hashes: ["s0", "s1", "m633", "m634"]
-                .iter()
-                .map(|at| format!("{at}:9999999:0123456789abcdef"))
+            // The request-parameter line (parameters up to 10 KB) and the
+            // same four markers, prefixes up to 10 MB, with a change named
+            // and the server's two longest transformation kinds.
+            prefix_hashes: std::iter::once("p:9999:0123456789abcdef".to_string())
+                .chain(["s0", "s1", "m633", "m634"].iter().map(|at| format!("{at}:9999999:0123456789abcdef")))
                 .collect(),
             prefix_changed_at: "m633".to_string(),
             prefix_hash_us: Some(99_999),
@@ -7287,12 +7395,13 @@ mod sent_prefix_tests {
         let second = sent_prefixes(&body(longer));
 
         let labels = |prefixes: &[SentPrefix]| prefixes.iter().map(|prefix| prefix.at.clone()).collect::<Vec<_>>();
-        assert_eq!(labels(&first), ["s0", "s1", "m0", "m2"]);
-        assert_eq!(labels(&second), ["s0", "s1", "m2", "m4"]);
-        for label in ["s0", "s1", "m2"] {
+        // The request-parameter line leads both, and the parameters did not change.
+        assert_eq!(labels(&first), ["p", "s0", "s1", "m0", "m2"]);
+        assert_eq!(labels(&second), ["p", "s0", "s1", "m2", "m4"]);
+        for label in ["p", "s0", "s1", "m2"] {
             assert_eq!(at(&first, label), at(&second, label), "{label}");
         }
-        assert!(first.windows(2).all(|pair| pair[0].bytes < pair[1].bytes), "{first:?}");
+        assert!(first[1..].windows(2).all(|pair| pair[0].bytes < pair[1].bytes), "{first:?}");
         let labelled = |prefixes: &[SentPrefix]| prefixes.iter().map(SentPrefix::label).collect::<Vec<_>>();
         assert_eq!(first_changed_prefix(&labelled(&first), &labelled(&second)), None);
     }
@@ -7328,7 +7437,7 @@ mod sent_prefix_tests {
         let budget = with(Some(EffortLevel::High), Some(ThinkingConfig::enabled(1_024)));
 
         assert!(high.first().is_some_and(|label| label.starts_with("p:")), "{high:?}");
-        assert_eq!(first_changed_prefix(&high, &high.clone()), None);
+        assert_eq!(first_changed_prefix(&high, &high), None);
         assert_eq!(first_changed_prefix(&high, &low).as_deref(), Some("p"), "effort only: {high:?} → {low:?}");
         assert_eq!(first_changed_prefix(&high, &budget).as_deref(), Some("p"), "thinking only: {high:?} → {budget:?}");
         assert_eq!(high[1..], low[1..], "the content prefixes do not move with the parameters");
@@ -7340,7 +7449,7 @@ mod sent_prefix_tests {
         let tricky = r#"look: "cache_control":{"type":"ephemeral"} \" \\ ]}{["#;
         let prefixes = sent_prefixes(&body(vec![message("user", tricky, false), message("user", "tail", true)]));
         let labels: Vec<_> = prefixes.iter().map(|prefix| prefix.at.as_str()).collect();
-        assert_eq!(labels, ["s0", "s1", "m1"]);
+        assert_eq!(labels, ["p", "s0", "s1", "m1"]);
     }
 
     /// What the hashing adds to the request path, on a body the size of a
@@ -7364,7 +7473,7 @@ mod sent_prefix_tests {
         }
         let each = started.elapsed() / runs;
         println!("sent_prefixes: {} bytes in {} µs ({found} markers)", payload.len(), each.as_micros());
-        assert_eq!(found, 4);
+        assert_eq!(found, 5, "the request-parameter line and four markers");
         assert!(payload.len() > 500_000, "{} bytes", payload.len());
         assert!(each < std::time::Duration::from_millis(50), "{each:?} for {} bytes", payload.len());
     }

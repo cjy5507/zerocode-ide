@@ -847,15 +847,17 @@ fn mark_breakpoints_with_ttl(
     // The tail marker rolls; slot one is an ANCHOR, not a second rolling
     // marker (see [`previous_request_tail`]). Without it both markers sit on
     // content this request invented, so neither can ever be an exact hit.
-    // Both are found on durable messages and then carried over the reminder
-    // messages persisted right behind them (see [`reminder_tail_end`]).
+    // All three are found on durable messages and then carried over the
+    // reminder messages persisted right behind them (see
+    // [`reminder_tail_end`]) — the VERIFY boundary too, so it stands where a
+    // request ending at that boundary rolled.
     let durable = messages
         .iter()
         .rposition(is_cache_marker_eligible);
     let rolling = durable.map(|index| reminder_tail_end(messages, index));
-    let anchor = verify_boundary.or_else(|| {
-        previous_request_tail(messages, durable?).map(|index| reminder_tail_end(messages, index))
-    });
+    let anchor = verify_boundary
+        .or_else(|| previous_request_tail(messages, durable?))
+        .map(|index| reminder_tail_end(messages, index));
     if let Some(index) = anchor {
         if mark_last_cacheable_block(&mut messages[index].content, anchor_ttl) {
             marked += 1;
