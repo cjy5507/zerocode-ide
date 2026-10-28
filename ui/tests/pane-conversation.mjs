@@ -488,9 +488,9 @@ export async function testPaneConversation(browser, origin, ok) {
     // ------------------------------------------------------- the window's own note (t-81525 C3)
     const note = await page.evaluate(async () => {
       const typed = "Commands still running under you when the window restarted were cut: `cargo test` — run again whichever you still need.";
-      window.__LOG__ = { next: 90, turns: [{ role: "window", text: typed }] };
+      window.__LOG__ = { next: 200, turns: [{ role: "window", text: typed }] };
       await pollHelperPages();
-      window.__LOG__ = { next: 90, turns: [] };
+      window.__LOG__ = { next: 200, turns: [] };
       await new Promise((r) => requestAnimationFrame(r));
       const row = [...document.querySelectorAll(".helper-turns > [data-turn]")].at(-1);
       const seen = {
