@@ -2375,8 +2375,6 @@ where
             // its row leaves the tools' times to the request that re-carries
             // their results.
             stream_stamps.tools_ran = tools_ran.take().unwrap_or_default();
-            #[cfg(test)]
-            crate::request_timings::note_recorded(&stream_stamps);
             self.record_request_timing(iterations, &stream_stamps, "completed");
             prompt_cache_events.extend(turn_prompt_cache_events);
             let pending_tool_use_count = assistant_message
