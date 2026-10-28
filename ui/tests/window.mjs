@@ -37037,8 +37037,8 @@ const answerTail = await page.evaluate(async () => {
     window.__CLIPBOARD_WRITES__.at(-1) === answer;
   // 포인터 없이도 앞선 답의 복사에 닿는다(t-81525 r2): 레일 손잡이의 화살표가
   // 앞선 답에 서고 Enter가 그 답에 초점을 건네면 목록의 복사가 그리로 옮겨 가
-  // 그 답의 마지막 탭 멈춤이 된다. 답 행과 복사는 Tab·Enter를 창의 키 싱크에
-  // 내주지 않는다.
+  // 그 답의 탭 멈춤 가운데 하나가 된다(그 곁에 「설명」 단추도 선다). 답 행과
+  // 복사는 Tab·Enter를 창의 키 싱크에 내주지 않는다.
   const handle = list.__rail?.querySelector(".chat-rail-handle");
   const key = (name) => handle?.dispatchEvent(new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true }));
   handle?.focus();
@@ -37046,10 +37046,11 @@ const answerTail = await page.evaluate(async () => {
   key("ArrowUp");
   seen.arrowsKeepHandle = document.activeElement === handle;
   key("Enter");
-  const stops = [...turns[1].querySelectorAll("button, [tabindex='0']")];
-  seen.keyboardReachesEarlierCopy = turns[1].tabIndex === -1 && document.activeElement === turns[1] &&
-    copyIn(turns[1]) && onePerList() && stops.at(-1)?.classList.contains("helper-copy") &&
-    turns[1].dataset.keyboardOwner === "true" && stops.at(-1)?.dataset.keyboardOwner === "true";
+  const reached = [...turns[1].querySelectorAll("button, [tabindex='0']")].find((stop) => stop.classList.contains("helper-copy"));
+  seen.earlierAnswerFocus = [turns[1].tabIndex === -1, document.activeElement === turns[1],
+    copyIn(turns[1]) && onePerList(), Boolean(reached),
+    turns[1].dataset.keyboardOwner === "true" && reached?.dataset.keyboardOwner === "true"];
+  seen.keyboardReachesEarlierCopy = seen.earlierAnswerFocus.every(Boolean);
   turns[1].blur();
   // 새 답이 오면 꼬리가 옮겨 가고, 이름한 것이 없으면 카드는 없다.
   const tab = tabs.find((one) => one.id === `helper:${term}:tail`);
