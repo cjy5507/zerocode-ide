@@ -39,7 +39,7 @@ pub use error::{ApiError, CapacityScope, ProviderErrorClass, context_overflow_ce
 pub use prompt_cache::{
     attempt_for_session, conversation_marker_ttl, conversation_markers, note_plan_shape,
     plan_shape_for_attempt, warm_prefixes_for_session, WarmPrefix,
-    doctor_cache_summary, note_attempt, note_context_trim, prompt_cache_roots, read_break_ledger,
+    doctor_cache_summary, note_attempt, note_context_trim, note_context_trim_declined, prompt_cache_roots, read_break_ledger, ContextTrimQuote,
     read_request_ledger, read_sweep_marker, CacheBreakEvent,
     break_row_axis, summarize_cache_ledger, CacheBreakLedgerRow, CacheLedgerSummary,
     DivergedWireMessage, MarkerRecord, NoAxisBreakCause, PromptCache, PromptCacheConfig,

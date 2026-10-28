@@ -11,7 +11,7 @@
 
 use decision_core::deep_lane::VerifierParse;
 
-use crate::session::{seal_orphan_tool_uses, ContentBlock, ConversationMessage};
+use crate::session::{seal_orphan_tool_uses, ContentBlock, ConversationMessage, MessageRole};
 use crate::usage::TokenUsage;
 
 use super::PromptCacheEvent;
@@ -600,6 +600,7 @@ use super::{
     format_microcompact_notice, format_precompaction_warning, COMPACTION_RESUME_REMINDER,
     POST_COMPACTION_SYSTEM_REMINDER, STATE_DISTILL_REMINDER_PREFIX,
 };
+use crate::compact::{token_count, CachePrices};
 use crate::MicrocompactEvent;
 
 /// Most recent tool results never cleared by the tier-1 trim. Sized to cover a
@@ -637,19 +638,96 @@ pub(super) const MICROCOMPACT_THRASH_PROMOTION: usize = 3;
 /// relevance seat spends no question under it either, for the same reason
 /// (`crate::compact::relevance`).
 pub const MICROCOMPACT_MIN_OUTPUT_BYTES: usize = 240;
-/// How many more requests a trim is assumed to have left to pay itself back.
+/// How many more requests a trim is assumed to have left to pay itself back,
+/// where nothing better is known.
 ///
-/// A firing re-bills its invalidated suffix ONCE and saves `clearable` on every
-/// request after, so it is worth it when `clearable × requests_left ≥ rebilled`.
-/// Nobody knows `requests_left`, so it is a bet — and five is the bet this gate
-/// was already making implicitly (`clearable >= context / 5` with the whole
-/// context assumed re-billed). Kept at five so making the pricing accurate does
-/// not silently also change how eager the trim is; the live ledger's realized
-/// break-even was ~3.3 requests per firing, so five is on the safe side of it.
+/// Two places: the token rule for a model the price table does not price
+/// (`clearable × requests_left ≥ rebilled`, five being the bet this gate made
+/// implicitly as `clearable >= context / 5` with the whole context assumed
+/// re-billed), and a priced model's horizon before any request in the
+/// transcript has been answered, when there is no pace to measure the way to
+/// the full-compaction tier by (t-78937).
 const MICROCOMPACT_PAYBACK_REQUESTS: u64 = 5;
+/// The least a trim must clear to be worth the cache it invalidates, in the
+/// provider's tokens: the gate scales the estimate's `chars / 4` by the ratio
+/// measured on the last answered request before comparing (t-78937).
+const MICROCOMPACT_MIN_CLEARED_TOKENS: u64 = 4_000;
+
 use crate::message_stream::types::StreamPhase;
 use crate::message_stream::{BlockIdGen, RenderBlock, SystemLevel};
 use tokio::sync::mpsc;
+
+/// What the trim gate weighed one firing by — see
+/// [`ConversationRuntime::microcompact_pricing`].
+struct MicrocompactPricing {
+    /// `None` for a model the price table does not price.
+    prices: Option<CachePrices>,
+    ttl: api::CacheTtl,
+    horizon_requests: f64,
+    drops_orphaned_thinking: bool,
+}
+
+impl MicrocompactPricing {
+    /// The quote a firing leaves on the next break row of the session's
+    /// cache ledger.
+    // Both casts take a non-negative float already rounded to a whole number
+    // and kept under `u32::MAX`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn ledger_quote(
+        &self,
+        quote: &crate::MicrocompactQuote,
+        threshold_tokens: u64,
+        context_tokens: u64,
+        decision: &str,
+    ) -> api::ContextTrimQuote {
+        // Rates are price-table multiples of input, a few thousandths at the
+        // finest, so a thousandth is exact for every row.
+        let per_mille = |rate: f64| (rate * 1_000.0).round().clamp(0.0, f64::from(u32::MAX)) as u32;
+        let requests = |requests: f64| requests.ceil().clamp(0.0, f64::from(u32::MAX)) as u32;
+        api::ContextTrimQuote {
+            clearable_tokens: quote.clearable_tokens,
+            rebilled_tokens: quote.rebilled_tokens,
+            resent_tokens: quote.resent_tokens,
+            orphaned_thinking_tokens: quote.orphaned_thinking_tokens,
+            frontier: quote.frontier,
+            threshold_tokens,
+            context_tokens,
+            read_per_mille: self.prices.map(|prices| per_mille(prices.read)),
+            write_per_mille: self.prices.map(|prices| per_mille(prices.write)),
+            ttl: self.prices.map(|_| self.ttl.label().to_string()),
+            horizon_requests: requests(self.horizon_requests),
+            breakeven_requests: self
+                .prices
+                .and_then(|prices| quote.breakeven_requests(prices, self.drops_orphaned_thinking))
+                .map(requests),
+            drops_orphaned_thinking: self.drops_orphaned_thinking,
+            decision: decision.to_string(),
+            // Where the gate's figure and tiers came from is the runtime's
+            // to say (`stamp_context_sources`).
+            ..api::ContextTrimQuote::default()
+        }
+    }
+}
+
+/// The median rise of the provider's context count from one answered request
+/// to the next among those still in the transcript — the requests since the
+/// last full compaction and the tail it kept. A fall (a trim, the compaction
+/// itself) is not growth and is left out. `None` until two answered requests
+/// rose.
+fn recent_context_growth_per_request(messages: &[ConversationMessage]) -> Option<u64> {
+    let counts: Vec<u64> = messages
+        .iter()
+        .filter_map(|message| message.usage)
+        .map(|usage| u64::from(usage.context_tokens()))
+        .collect();
+    let mut rises: Vec<u64> = counts
+        .windows(2)
+        .filter_map(|pair| pair[1].checked_sub(pair[0]))
+        .filter(|rise| *rise > 0)
+        .collect();
+    rises.sort_unstable();
+    rises.get(rises.len() / 2).copied()
+}
 
 /// How long a compaction waits for the model's summary, start to end, before
 /// it stops the request and folds the conversation with the local summary
@@ -817,12 +895,20 @@ fn local_compaction(
 impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// Local estimate of the request context that would be sent right now.
     ///
-    /// At the start of a new turn, provider usage telemetry can be stale: it
+    /// At the start of a new turn, provider usage telemetry alone is stale: it
     /// describes the previous request, while the local transcript already
     /// includes the just-submitted user message and any queued automation prompt.
-    /// Use this estimate for first-request preflight so long sessions cannot
-    /// jump past the 85% threshold before compaction gets a chance to run.
+    /// [`Self::preflight_context_tokens`] adds what came after the provider's
+    /// count to that count; this estimate stands alone only where the
+    /// transcript holds no answer since its last compaction.
     pub(super) fn estimated_request_context_tokens(&self) -> u64 {
+        self.request_estimate_over(&self.session.messages)
+    }
+
+    /// [`Self::estimated_request_context_tokens`] for a request carrying
+    /// `messages` — the whole transcript, or the prefix an answered request
+    /// was sent.
+    fn request_estimate_over(&self, messages: &[ConversationMessage]) -> u64 {
         // Estimate WITHOUT running recall — do NOT call
         // `request_wire_reminders` here. On the streaming path this runs in the
         // drive-loop preflight (micro + auto compaction), and for the dense
@@ -830,7 +916,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         // re-introducing the very freeze the off-thread seam removes (and twice,
         // once per preflight). Transient reminders are cheap locals, so they
         // are counted directly.
-        let base = estimate_session_tokens(&self.session) as u64
+        let base = crate::compact::estimate_messages_tokens(messages)
             + estimate_system_prompt_tokens(&self.system_prompt)
             + estimate_system_prompt_tokens(&self.transient_reminders);
         // The streaming turn injects a recalled-memory section into the wire
@@ -849,22 +935,86 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         }
     }
 
-    /// Live context-window occupancy used to gate compaction after the turn has
-    /// fresh usage. Provider telemetry is authoritative when present, but taking
-    /// the max with the local estimate keeps post-tool transcript growth visible
-    /// before the provider emits another usage event.
-    /// The context number to SHOW and to gate on.
+    /// The context number to SHOW and to gate on once a turn has answered.
     ///
-    /// `provider_live.max(estimate)`: once a turn has answered, the provider's
-    /// own count governs; before that the `chars / 4` estimate stands alone.
-    /// Public because the status card must not render a different number than
-    /// the footer — the estimate runs about 30% low against
-    /// `/v1/messages/count_tokens`, so a card reading the estimate while the
-    /// footer reads the provider put two disagreeing percentages on one screen.
+    /// The provider's own count of the last answered request, plus the local
+    /// estimate of that answer and of what the transcript gained after it
+    /// ([`Self::provider_anchored_context_tokens`]). Before any answer since the
+    /// last compaction, the larger of the provider's latest count and the
+    /// local estimate.
+    ///
+    /// Not the larger of the two once an answer is on record (t-78937). The
+    /// local estimate counts every thinking block the transcript keeps, its
+    /// signature by length, and a model that binds thinking to its prefix
+    /// (Opus 5.5, sent with `thinking.block_binding: drop_block`) stops being
+    /// billed for every block after a message a trim rewrote. On this machine
+    /// (36 hours to 2026-10-28) the estimate ran at about twice the provider's
+    /// count once a turn had been trimmed (490k against 229k), and the larger
+    /// of the two put 51 of 69 microcompacts, and every full compaction, below
+    /// their tiers by the provider's count. Public because the status card
+    /// must not render a different number than the footer, which reads the
+    /// provider's count.
     #[must_use]
     pub fn effective_context_tokens(&self) -> u64 {
-        let provider_live = u64::from(self.usage_tracker.current_turn_usage().context_tokens());
-        provider_live.max(self.estimated_request_context_tokens())
+        self.provider_anchored_context_tokens().unwrap_or_else(|| {
+            let provider_live = u64::from(self.usage_tracker.current_turn_usage().context_tokens());
+            provider_live.max(self.estimated_request_context_tokens())
+        })
+    }
+
+    /// The context counted by the provider where the transcript holds an
+    /// answer since its last compaction: what that answered request carried,
+    /// plus the local estimate of the answer and of every message after it —
+    /// what the provider has not counted as input yet. The provider counted
+    /// the request, not what came back on it, and the answer (its thinking,
+    /// text and tool calls) goes out on the next request. Answers on this
+    /// machine (Opus 5.5, 6,341 requests over 60 hours to 2026-10-28) ran to
+    /// 7k output tokens at p90 and 66k at most, against about 30k between the
+    /// full tier and the hard ceiling on a 200k window (t-78937).
+    ///
+    /// `None` when the latest answer carries no usage, or is older than the
+    /// last compaction's continuation: the tail a compaction keeps holds
+    /// answers counted against the history it folded away.
+    pub(super) fn provider_anchored_context_tokens(&self) -> Option<u64> {
+        let (index, usage) = self.latest_answer_since_compaction()?;
+        Some(u64::from(usage.context_tokens()).saturating_add(crate::compact::estimate_messages_tokens(
+            &self.session.messages[index..],
+        )))
+    }
+
+    /// The latest answer and its index, when it carries the provider's usage
+    /// and is newer than the last compaction's continuation
+    /// (`Session::apply_compaction_atomic` stamps the continuation with the
+    /// compaction's time; the kept tail keeps the times it had). A latest
+    /// answer without usage says nothing about the latest request, and an
+    /// older answer's count is not the context now.
+    fn latest_answer_since_compaction(&self) -> Option<(usize, TokenUsage)> {
+        let messages = &self.session.messages;
+        let (index, answer) = messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, message)| message.role == MessageRole::Assistant)?;
+        let usage = answer.usage?;
+        if self.session.compaction.is_some() {
+            let compacted_at = messages.first().and_then(|message| message.updated_at_ms)?;
+            // Strictly older: the kept tail was written well before the
+            // summary came back, and an answer after the compaction can land
+            // in the same millisecond only by arriving after it.
+            if messages[index].updated_at_ms? < compacted_at {
+                return None;
+            }
+        }
+        Some((index, usage))
+    }
+
+    /// The context figure a turn's first request is gated on: the
+    /// provider-anchored count when the transcript holds an answer since its
+    /// last compaction — the previous turn's last answer plus everything after
+    /// it, the new prompt included — and the local estimate before that.
+    pub(super) fn preflight_context_tokens(&self) -> u64 {
+        self.provider_anchored_context_tokens()
+            .unwrap_or_else(|| self.estimated_request_context_tokens())
     }
 
     /// `/context` breakdown (CC parity): what occupies the window right now
@@ -958,9 +1108,11 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// re-work right after each compact). `ZO_COMPACT_TAIL_TOKENS`
     /// overrides the budget; `0` restores the legacy 4-message tail.
     fn auto_compaction_preserved_tail_len(&self) -> usize {
+        // The budget is the provider's tokens; the tail is counted by the
+        // local estimate, so the budget goes over in the estimate's unit.
         crate::compact::preserved_tail_len_for_budget(
             &self.session.messages,
-            auto_compaction_tail_budget(self.context_window_for_guards()),
+            self.estimate_tokens_for_provider(auto_compaction_tail_budget(self.context_window_for_guards())),
         )
     }
 
@@ -986,8 +1138,13 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     }
 
     pub(super) fn request_reaches_hard_context_ceiling(&self, context_tokens: u64) -> bool {
-        let window = self.context_window_for_guards();
-        window > 0 && context_tokens > window.saturating_mul(95) / 100
+        self.context_window_for_guards() > 0 && context_tokens > self.hard_context_ceiling_tokens()
+    }
+
+    /// The most a request may carry before the hard ceiling: 95% of the real
+    /// context window.
+    pub(super) fn hard_context_ceiling_tokens(&self) -> u64 {
+        self.context_window_for_guards().saturating_mul(95) / 100
     }
 
     fn request_would_exceed_context_window(&self, context_tokens: u64) -> bool {
@@ -1032,7 +1189,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     // gate has to be assertable on its own, without `apply_auto_compaction`
     // making a summarize round-trip inside the assertion.
     pub(super) fn auto_compaction_config_if_preflight_ready(&mut self) -> Option<CompactionConfig> {
-        let context_tokens = self.estimated_request_context_tokens();
+        let context_tokens = self.preflight_context_tokens();
         if self.auto_compaction_enabled {
             if self.request_reaches_hard_context_ceiling(context_tokens)
                 || context_tokens >= u64::from(self.auto_compaction_input_tokens_threshold)
@@ -1136,6 +1293,13 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         &mut self,
         context_tokens: u64,
     ) -> Option<MicrocompactEvent> {
+        // Measure the estimate against the provider while the prefix the last
+        // answer was counted on is still the one it was sent: nothing rewrote
+        // it between that request and this gate, and a trim below may.
+        if let Some(ratio) = self.measured_estimate_ratio() {
+            self.context_estimate_ratio = Some(ratio);
+        }
+        self.forget_dropped_thinking_past_the_end();
         if !self.auto_compaction_enabled {
             return None;
         }
@@ -1163,32 +1327,63 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         } else {
             MICROCOMPACT_KEEP_RECENT_RESULTS
         };
-        let quote = crate::microcompact_quote(
+        let quote = crate::compact::microcompact_quote_after_drops(
             &self.session,
             keep_recent,
             MICROCOMPACT_MIN_OUTPUT_BYTES,
+            &self.dropped_thinking_spans,
         );
         let clearable = quote.clearable_tokens;
-        // Price the firing by WHERE it rewrites, not by how much it frees.
+        // Price the firing at the model's own cache rates (t-78937).
         //
-        // The old rule was `clearable >= context / 5`: a bet that five more
-        // requests follow, with the whole context assumed re-billed. That is
-        // right for a rewrite at the head of the history and badly wrong for
-        // one near the tail, which re-bills almost nothing — and it is the
-        // cheap tail trims that get declined, leaving the pressure to be
-        // resolved by full compaction instead (an LLM round-trip, not a
-        // rewrite). The appetite is deliberately UNCHANGED: at the head,
-        // `rebilled ≈ context`, so this reduces to the old comparison exactly.
-        // What changes is that a cheap firing is now recognized as cheap.
-        let worth_it =
-            quote.pays_back_within(MICROCOMPACT_PAYBACK_REQUESTS) && clearable >= 4_000;
-        if !worth_it && !self.microcompact_is_last_resort(context_tokens) {
+        // A firing writes the conversation back into the cache once, at the
+        // write rate of the lifetime the markers ask for, and saves only the
+        // read rate on every request after it. Counting both sides in tokens
+        // (`clearable × 5 ≥ rebilled`) priced a written token like a read one —
+        // on Opus 5.5 a twentieth of input against 1.25 or 2 times it — and
+        // took trims that never paid back: over 36 hours on this machine
+        // (2026-10-27/28) 69 firings re-wrote 13.35M tokens to clear 2.79M.
+        // The horizon is how long the clear keeps paying: until the
+        // conversation reaches the full-compaction tier at the pace it has
+        // been growing, where the summary rewrites everything anyway. A model
+        // the price table does not price keeps the token comparison.
+        let pricing = self.microcompact_pricing(context_tokens);
+        let pays_back = match pricing.prices {
+            Some(prices) => quote.pays_back_at(
+                prices,
+                pricing.horizon_requests,
+                pricing.drops_orphaned_thinking,
+            ),
+            None => quote.pays_back_within(MICROCOMPACT_PAYBACK_REQUESTS),
+        };
+        let worth_it = pays_back && self.provider_tokens_for_estimate(clearable) >= MICROCOMPACT_MIN_CLEARED_TOKENS;
+        let last_resort = !worth_it && self.microcompact_is_last_resort(context_tokens);
+        if !worth_it && !last_resort {
             // In the trim zone but the batch is not worth the cache
             // invalidation: this is not a firing, so it must not count toward
             // the thrash-promotion streak (the streak only tracks rounds that
-            // actually trimmed and still didn't recover).
+            // actually trimmed and still didn't recover). It is counted on the
+            // session's cache stats, so a declined trim is visible too.
+            let reason = match (pays_back, pricing.prices.is_some()) {
+                (true, _) => "below_floor",
+                (false, true) => "price",
+                (false, false) => "token_rule",
+            };
+            api::note_context_trim_declined(&self.session.session_id, reason);
             return None;
         }
+        // The quote this firing leaves on the ledger, with what the gate's
+        // figure and tiers came from — read before the clear rewrites the
+        // transcript the estimate is taken over.
+        let decision = if last_resort {
+            "last_resort"
+        } else if pricing.prices.is_some() {
+            "pays_back"
+        } else {
+            "token_rule"
+        };
+        let mut row = pricing.ledger_quote(&quote, micro_threshold, context_tokens, decision);
+        self.stamp_context_sources(&mut row);
         let event = crate::microcompact_session(
             &mut self.session,
             keep_recent,
@@ -1198,15 +1393,18 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             // Price this firing: deposit the cleared estimate for the ledger
             // (`api::prompt_cache`), which pairs it with the cache re-bill the
             // trim is about to cause on the next request — the third column
-            // that makes microcompact economics measurable per firing.
-            api::note_context_trim(
-                &self.session.session_id,
-                fired.estimated_tokens_saved,
-            );
+            // that makes microcompact economics measurable per firing — and
+            // the quote it fired on.
+            api::note_context_trim(&self.session.session_id, fired.estimated_tokens_saved, Some(row));
             // Recompute recall dedup for the same reason as full compaction:
             // reclaimed full bodies must be free to reseed, while any full
             // entries that survived this trim must remain deduplicated.
             self.recalled_memory_slugs = super::recalled_slugs_from_session(&self.session);
+            if pricing.drops_orphaned_thinking {
+                if let Some(frontier) = quote.frontier {
+                    self.note_dropped_thinking(frontier..self.session.messages.len());
+                }
+            }
             // Trimmed again while still over the floor: the thrash signature
             // (read → clear → re-read). Count it; the compaction gate promotes
             // to full compaction once the streak reaches the threshold.
@@ -1220,6 +1418,35 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             );
         }
         event
+    }
+
+    /// Record that the provider drops the thinking in `stretch` from the next
+    /// request on, merged into the stretches already on record.
+    fn note_dropped_thinking(&mut self, stretch: std::ops::Range<usize>) {
+        let spans = &mut self.dropped_thinking_spans;
+        spans.push(stretch);
+        spans.sort_by_key(|span| span.start);
+        let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(spans.len());
+        for span in spans.drain(..) {
+            match merged.last_mut() {
+                Some(last) if span.start <= last.end => last.end = last.end.max(span.end),
+                _ => merged.push(span),
+            }
+        }
+        *spans = merged;
+    }
+
+    /// Cut the stretches of dropped thinking back to the transcript as it
+    /// stands: a cancelled turn or a rewind takes back messages from the end,
+    /// and an answer later written at the same index was produced under the
+    /// trimmed prefix, so its thinking is read. Run on every pass through the
+    /// trim gate, before any request can append such an answer.
+    fn forget_dropped_thinking_past_the_end(&mut self) {
+        let length = self.session.messages.len();
+        self.dropped_thinking_spans.retain_mut(|span| {
+            span.end = span.end.min(length);
+            span.start < span.end
+        });
     }
 
     /// Whether a batch that FAILED the break-even test must still be cleared
@@ -1313,6 +1540,99 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         self.request_reaches_hard_context_ceiling(context_tokens)
     }
 
+    /// What the trim gate weighs a firing by (t-78937): the session model's
+    /// cache rates from the price table, the write rate of the lifetime the
+    /// conversation markers ask for, how many requests the clear has to pay
+    /// back in, and whether the model drops thinking whose prefix changed.
+    fn microcompact_pricing(&self, context_tokens: u64) -> MicrocompactPricing {
+        let model = self.context_model.as_deref();
+        let ttl = crate::convert_messages::conversation_anchor_ttl();
+        let prices = model
+            .and_then(api::CacheRates::for_anthropic_model)
+            .map(|rates| CachePrices {
+                read: rates.read,
+                write: rates.write(ttl),
+            });
+        MicrocompactPricing {
+            prices,
+            ttl,
+            horizon_requests: self.microcompact_payback_horizon(context_tokens),
+            drops_orphaned_thinking: model.is_some_and(api::preserved_thinking_generation),
+        }
+    }
+
+    /// Where the trim gate's figure and tiers came from, stamped on the quote
+    /// a firing leaves (t-78937): the provider's count and the local estimate
+    /// apart, the model's window and the window the tiers are a share of, the
+    /// two environment overrides that move them, the tier's share, the model
+    /// and the streak so far.
+    fn stamp_context_sources(&self, row: &mut api::ContextTrimQuote) {
+        row.provider_tokens = self
+            .latest_answer_since_compaction()
+            .map(|(_, usage)| u64::from(usage.context_tokens()));
+        row.estimate_tokens = self.estimated_request_context_tokens();
+        row.window_tokens = self.context_window;
+        row.compaction_window_tokens = auto_compaction_window(self.context_window);
+        row.compaction_window_env = std::env::var_os(AUTO_COMPACT_WINDOW_ENV_VAR).is_some();
+        row.threshold_env = std::env::var_os(AUTO_COMPACTION_THRESHOLD_ENV_VAR).is_some();
+        row.microcompact_percent = self.context_policy.microcompact;
+        row.model = self.context_model.clone().unwrap_or_default();
+        row.microcompact_streak = u64::try_from(self.consecutive_microcompacts).unwrap_or(u64::MAX);
+    }
+
+    /// The provider's count of the latest answered request over the local
+    /// estimate of what that request was sent — the same messages, system
+    /// prompt and reminders — when the transcript holds an answer since its
+    /// last compaction (t-78937). Fresh only while nothing has rewritten that
+    /// prefix, which is why the microcompact gate takes it first.
+    fn measured_estimate_ratio(&self) -> Option<f64> {
+        let (index, usage) = self.latest_answer_since_compaction()?;
+        let counted = u64::from(usage.context_tokens());
+        let estimate = self.request_estimate_over(&self.session.messages[..index]);
+        (counted > 0 && estimate > 0).then(|| token_count(counted) / token_count(estimate))
+    }
+
+    /// `tokens` of the local estimate in the provider's count: scaled by the
+    /// last fresh ratio (none yet reads as one), never below zero nor above
+    /// the window the compaction tiers are a share of.
+    fn provider_tokens_for_estimate(&self, tokens: u64) -> u64 {
+        self.within_compaction_window(token_count(tokens) * self.context_estimate_ratio.unwrap_or(1.0))
+    }
+
+    /// `tokens` of the provider's count in the local estimate's unit, bounded
+    /// the same way.
+    fn estimate_tokens_for_provider(&self, tokens: u64) -> u64 {
+        self.within_compaction_window(token_count(tokens) / self.context_estimate_ratio.unwrap_or(1.0))
+    }
+
+    // The value is clamped to `0..=window` first, so the cast keeps it whole.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn within_compaction_window(&self, tokens: f64) -> u64 {
+        let window = auto_compaction_window(self.context_window_for_guards());
+        tokens.clamp(0.0, token_count(window)) as u64
+    }
+
+    /// Requests a firing has to pay for itself in: until the conversation
+    /// reaches the full-compaction tier at the pace it has been growing, past
+    /// which the summary rewrites everything anyway. A conversation already
+    /// past that tier is one whose summary did not run (a failed summary
+    /// call), and what rewrites everything next is the last-resort trim at
+    /// the hard ceiling, so the room runs to the ceiling (t-78937). With no
+    /// pace on record yet, the bet the token rule makes.
+    fn microcompact_payback_horizon(&self, context_tokens: u64) -> f64 {
+        let full = u64::from(self.auto_compaction_input_tokens_threshold);
+        let rewrite_at = if context_tokens < full {
+            full
+        } else {
+            self.hard_context_ceiling_tokens()
+        };
+        let room = rewrite_at.saturating_sub(context_tokens);
+        match recent_context_growth_per_request(&self.session.messages) {
+            Some(growth) => token_count(room) / token_count(growth),
+            None => token_count(MICROCOMPACT_PAYBACK_REQUESTS),
+        }
+    }
+
     /// True when the P6a Anthropic server-side trim executor owns tool-result
     /// hygiene for this session: the gate is on AND the bound model actually
     /// talks to the Anthropic endpoint (the flag on a GPT/Gemini session is
@@ -1329,7 +1649,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     }
 
     pub(super) fn maybe_microcompact_preflight(&mut self) -> Option<MicrocompactEvent> {
-        self.maybe_microcompact_for_tokens(self.estimated_request_context_tokens())
+        self.maybe_microcompact_for_tokens(self.preflight_context_tokens())
     }
 
     pub(super) async fn maybe_microcompact_streaming(
@@ -1495,7 +1815,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     }
 
     pub(super) fn maybe_state_distill_preflight(&mut self) -> bool {
-        self.maybe_state_distill_for_tokens(self.estimated_request_context_tokens())
+        self.maybe_state_distill_for_tokens(self.preflight_context_tokens())
     }
 
     /// Union of this session's already-edited file paths from two sources, for
@@ -1661,6 +1981,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         let before = estimate_session_tokens(&self.session);
         self.resolved_tool_use_fingerprints.get_mut().clear();
         self.session = result.compacted_session;
+        // The stretches of dropped thinking name messages of the transcript
+        // this round rewrote.
+        self.dropped_thinking_spans.clear();
         // Recompute recall dedup against the compacted transcript. The summary
         // erased the bodies it evicted, so those entries must be free to reseed
         // in full — but compaction keeps a preserved tail, and a body still
@@ -1670,15 +1993,18 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             // A relevance trim preserved the conversation, so it must not erase
             // repetition evidence or pretend that a new summary was generated.
             api::note_context_trim(&self.session.session_id,
-                u64::try_from(before.saturating_sub(estimate_session_tokens(&self.session))).unwrap_or(u64::MAX));
+                u64::try_from(before.saturating_sub(estimate_session_tokens(&self.session))).unwrap_or(u64::MAX),
+                None);
             self.consecutive_microcompacts = self.consecutive_microcompacts.saturating_add(1);
             self.precompaction_warned = false;
             self.clear_state_distill_compaction_state();
             return true;
         }
         // Full compaction summarized the transcript, breaking any microcompact
-        // thrash cycle: reset the streak so the escape re-arms cleanly.
+        // thrash cycle: reset the streak so the escape re-arms cleanly. The
+        // estimate's ratio was measured on the history the summary replaced.
         self.consecutive_microcompacts = 0;
+        self.context_estimate_ratio = None;
         self.full_compactions_this_turn = self.full_compactions_this_turn.saturating_add(1);
         // A real compaction just shrank the transcript back below the ceiling:
         // re-arm the pre-compaction early-warning latch so the next climb toward
@@ -2445,3 +2771,15 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         Ok(text)
     }
 }
+
+/// The tier-1 trim priced at the session model's cache rates (t-78937 Z1).
+#[cfg(test)]
+mod microcompact_price_tests;
+
+/// The gates' context figure in the provider's own count (t-78937 Z2).
+#[cfg(test)]
+mod context_anchor_tests;
+
+/// Budgets written in tokens met in the provider's tokens (t-78937 Z3).
+#[cfg(test)]
+mod estimate_ratio_tests;
