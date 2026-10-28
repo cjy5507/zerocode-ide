@@ -246,6 +246,8 @@ async function redesignRows(browser, origin, ok) {
         fill: saidStyle.backgroundColor,
         wantFill: probe("--chat-bubble", "backgroundColor"),
         left: Math.round(box.left - left),
+        // On the right, under the hand that typed it (t-81525 B4).
+        right: Math.round(left + width - box.right),
         share: Math.round((box.width / width) * 100) / 100,
         max: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--chat-said-max")) / 100,
       };
@@ -312,6 +314,9 @@ async function redesignRows(browser, origin, ok) {
         fill: frame ? getComputedStyle(frame).backgroundColor : null,
         wantFill: probe("--chat-code-bg", "backgroundColor"),
         edge: frame ? getComputedStyle(frame).borderTopWidth : null,
+        // Its own band over the code, a hairline between them, the code in mono (t-81525).
+        band: bar ? getComputedStyle(bar).borderBottomWidth : null,
+        mono: /mono/i.test(getComputedStyle(frame?.querySelector("pre") ?? document.body).fontFamily),
       };
       copy?.click();
       await settle();
@@ -322,8 +327,8 @@ async function redesignRows(browser, origin, ok) {
       return seen;
     });
     ok(
-      "R2: the person's words stand on a soft fill with no border, left aligned, no wider than the measure — not a bordered box as wide as the list",
-      seen.person.border === "0px" && seen.person.fill === seen.person.wantFill && seen.person.left === 0 &&
+      "R2: the person's words stand on a soft fill with no border, on the right (t-81525 B4), no wider than the measure — not a bordered box as wide as the list",
+      seen.person.border === "0px" && seen.person.fill === seen.person.wantFill && seen.person.right === 0 &&
         seen.person.share <= seen.person.max + 0.01,
       JSON.stringify(seen.person),
     );
@@ -349,7 +354,7 @@ async function redesignRows(browser, origin, ok) {
     ok(
       "R6: a fence wears a flat panel — the code ground, no edge — with its language and a 「복사」 that is there without hovering, which writes the code and says it did",
       seen.fence.language === "tsx" && seen.fence.copyWords === seen.fence.wantCopy && seen.fence.shown === "1" &&
-        seen.fence.fill === seen.fence.wantFill && seen.fence.edge === "0px" &&
+        seen.fence.fill === seen.fence.wantFill && seen.fence.edge === "0px" && seen.fence.band === "1px" && seen.fence.mono &&
         seen.fence.copied === seen.fence.wantCopied && seen.fence.said === seen.fence.wantSaid,
       JSON.stringify(seen.fence),
     );

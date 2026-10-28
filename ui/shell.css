@@ -15148,30 +15148,43 @@ details.worker-command {
 
 .is-chat-page .helper-said .helper-code > pre {
   margin: 0;
-  padding: var(--space-1) var(--space-3) var(--space-3);
+  padding: var(--space-2) var(--space-3) var(--space-3);
   border-radius: 0;
   background: none;
 }
 
+/* The bar is its own band over the code, as LM Studio's is (t-81525, the
+ * person's 「typescript 라고 쓰고 그 안에 코드 스타일처럼」): the language the
+ * fence names — 「코드」 when it names none — at the left in the mono label,
+ * the copy at the right, a hairline between the band and the code. */
 .helper-code-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-3) 0;
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
-  color: var(--ink-mist);
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  font: var(--type-label-12-mono);
+  color: var(--ink-figure);
+}
+
+.helper-code-lang {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .helper-code-bar > .helper-code-copy {
   position: static;
-  padding: 0 var(--space-1);
+  flex: none;
+  padding: var(--space-1) var(--space-2);
   border: 0;
   border-radius: var(--radius-xs);
   background: none;
-  color: var(--ink-mist);
-  font: inherit;
+  color: var(--ink-figure);
+  font: var(--type-label-12);
   opacity: 1;
 }
 
