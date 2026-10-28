@@ -153,8 +153,11 @@ fn the_window_itself_is_refused_by_name_and_by_number() {
     let reason = denied("pkill -f zerocode-shell");
     assert!(reason.contains("the ZeroCode window"), "{reason}");
     assert!(denied("kill 100").contains("the ZeroCode window"));
-    // Every process: the first kept one met is the window.
-    assert!(denied("kill -1").contains("the ZeroCode window"));
+    // Every process: the first kept one met is the window. A lone `-1` is
+    // the signal (HUP) with nothing to send it to.
+    assert!(denied("kill -9 -1").contains("the ZeroCode window"));
+    assert!(denied("kill -- -1").contains("the ZeroCode window"));
+    assert_eq!(kill_calls("kill -1")[0].targets, Vec::new());
     denied("pkill -u nobody");
     denied("pkill -v -f nothing-by-this-name");
 }

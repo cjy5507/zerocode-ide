@@ -239,7 +239,7 @@ pub type HookBridgeReceivers = (
     tokio::sync::mpsc::UnboundedReceiver<zerocode_hookd::FederationRequest>,
 );
 
-pub fn start(local_data_root: &Path, app: tauri::AppHandle) -> Option<HookBridgeReceivers> {
+pub fn start(local_data_root: &Path) -> Option<HookBridgeReceivers> {
     let token = random_token()?;
     let delivery_epoch = random_token()?;
     // The browser capability's OWN secret: reporting lifecycle events must not
@@ -280,9 +280,7 @@ pub fn start(local_data_root: &Path, app: tauri::AppHandle) -> Option<HookBridge
     // A pane's command that would signal the window or another pane is
     // refused in its own pre-tool hook's reply (t-80602): the window says
     // which process is whose, and reads the process table when asked.
-    let state = state.with_kill_witness(std::sync::Arc::new(crate::kill_witness::PaneProcesses {
-        app,
-    }));
+    let state = state.with_kill_witness(std::sync::Arc::new(crate::kill_witness::PaneProcesses));
     // A hook post that needed more than one try is written down in the
     // window's log (t-78634), so the posts a slow bridge lost can be counted.
     let notes_root = local_data_root.to_path_buf();
