@@ -140,6 +140,9 @@ fn a_substitution_in_double_quotes_xargs_and_kill_of_pgrep_are_refused() {
         "(pkill -f zo-step)",
         "echo ok && pkill -f zo-step || true",
         "echo 'pkill -f zo-step' | sh",
+        "cat <<'EOF' | bash\npkill -f zo-step\nEOF",
+        "cat <<EOF | sh -s\npkill -f zo-step\nEOF",
+        "cat - <<'EOF' | sudo bash\npkill -f zo-step\nEOF",
         "kill 310",
         "kill -- -310",
         "pkill -P 300",
@@ -181,6 +184,7 @@ fn a_kill_that_is_only_letters_is_allowed_and_reads_no_table() {
         "kill -0 310",
         "pkill -0 -f zo-step",
         "killall -s zo",
+        "cat <<'EOF' > notes.md\npkill -f zo-step\nEOF",
     ] {
         assert_eq!(kill_calls(command), Vec::new(), "{command:?}");
         allowed(command);
@@ -276,6 +280,21 @@ fn a_command_without_kill_is_not_read() {
         assert_eq!(kill_calls(command), Vec::new(), "{command:?}");
     }
     assert!(might_signal("PKILL -f x"));
+}
+
+/// `pgrep` and `killall` match a process's name, and a login shell's name
+/// is its program's: the `-` its command line opens with is not part of it.
+#[test]
+fn a_login_shells_name_is_its_program_without_the_dash() {
+    assert_eq!(row(1, 0, 1, "-zsh").name(), "zsh");
+    assert_eq!(row(1, 0, 1, "/bin/zsh -l").name(), "zsh");
+    for command in ["killall zsh", "pkill -x zsh", "killall -9 zsh"] {
+        let reason = denied(command);
+        assert!(
+            reason.contains("pid 300") && reason.contains("pane term-2"),
+            "{command:?}: {reason}"
+        );
+    }
 }
 
 #[test]

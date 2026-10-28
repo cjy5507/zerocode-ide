@@ -746,8 +746,7 @@ pub const TURN_BRIEF_WALL: std::time::Duration = HOOK_REPLY_BUDGET
 /// How long the kill guard may take to judge a command (t-80602): core's
 /// table wall, which is the same wall as a turn's brief for the same reason —
 /// a reply later than the script waits is thrown away, and a refusal thrown
-/// away is a command that runs. A judgment not in by then is a question put
-/// to a person.
+/// away is a command that runs. A judgment not in by then is refused.
 pub const KILL_GUARD_WALL: std::time::Duration = zerocode_core::shell_rule::kill::TABLE_READ_WALL;
 
 /// The most characters a turn's brief may carry: under the smallest context
@@ -867,7 +866,7 @@ impl BridgeState {
 
     /// Install what the window knows of its panes' processes: a pane's
     /// command that would signal the window or another pane is then refused
-    /// in its own pre-tool hook's reply ([`kill_guard`], t-80602).
+    /// in its own pre-tool hook's reply (`kill_guard`, t-80602).
     #[must_use]
     pub fn with_kill_witness(mut self, witness: Arc<dyn KillWitness>) -> Self {
         self.kill_witness = Some(witness);
