@@ -251,7 +251,9 @@ pub struct PromptExpansion {
 /// or a mode they named (`origin.named`). A mode the default or a settings
 /// file gives — a repository can pin its own — is not that word, and a pipe
 /// (`origin.piped`) takes only a named mode: nobody there can answer for the
-/// folder, so an old trust record does not speak for this run.
+/// folder, so an old trust record does not speak for this run. Every `!`
+/// command, a zo-home file's too, also answers to the person's permission
+/// rules: a deny or an ask rule that matches leaves it unrun.
 #[must_use]
 pub fn prompt_command(
     cwd: &Path,
@@ -271,9 +273,18 @@ pub fn prompt_command(
         }
         Some(_) => commands::WorkspaceTrust::Untrusted,
     };
+    // The rules the session's Bash was built with
+    // (`conversation_support::permission_policy`), read again here because
+    // a turn may be holding the session.
+    let config = runtime::ConfigLoader::default_for(cwd).load();
+    let unreadable = config.as_ref().err().map(ToString::to_string).unwrap_or_default();
     let gate = commands::InlineShellGate {
         read_only: mode == core_types::PermissionMode::ReadOnly,
         workspace,
+        rules: config
+            .as_ref()
+            .map(runtime::RuntimeConfig::permission_rules)
+            .map_err(|_| unreadable.as_str()),
     };
     Some(PromptExpansion {
         text: command.render_prompt_as(arg, cwd, gate),

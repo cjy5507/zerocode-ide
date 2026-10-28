@@ -39,13 +39,17 @@ pub enum PromptCommandScope {
 /// What the session lets a command file's `!` commands run, decided once by
 /// the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InlineShellGate {
+pub struct InlineShellGate<'a> {
     /// The session is read-only: no `!` command runs.
     pub read_only: bool,
     /// What the person has said for the folder a workspace file is in
     /// ([`PromptCommandDef::workspace_folder`]). A file in zo's home does
     /// not ask.
     pub workspace: WorkspaceTrust,
+    /// The person's permission rules, the ones the session's Bash answers
+    /// to: every `!` command a deny or an ask rule matches stays unrun.
+    /// `Err` carries why they could not be read, and then none runs.
+    pub rules: Result<&'a runtime::RuntimePermissionRuleConfig, &'a str>,
 }
 
 /// The person's word for the folder that holds a workspace command file.
@@ -100,9 +104,11 @@ impl PromptCommandDef {
     /// [`Self::render_prompt_as`].
     #[must_use]
     pub fn render_prompt_in(&self, args: &str, base_dir: &Path) -> String {
+        let no_rules = runtime::RuntimePermissionRuleConfig::default();
         let gate = InlineShellGate {
             read_only: false,
             workspace: WorkspaceTrust::Trusted,
+            rules: Ok(&no_rules),
         };
         self.render_prompt_as(args, base_dir, gate)
     }
@@ -119,6 +125,7 @@ impl PromptCommandDef {
             read_only: gate.read_only,
             workspace: if workspace { gate.workspace } else { WorkspaceTrust::Trusted },
             folder,
+            rules: gate.rules,
             confined: workspace,
         };
         expand_command_template(&self.body, args, base_dir, &shell)
@@ -578,6 +585,7 @@ struct InlineShell<'a> {
     read_only: bool,
     workspace: WorkspaceTrust,
     folder: &'a Path,
+    rules: Result<&'a runtime::RuntimePermissionRuleConfig, &'a str>,
     confined: bool,
 }
 
@@ -601,18 +609,50 @@ impl InlineShell<'_> {
                 ));
             }
         }
-        if self
+        if !self
             .allowed_tools
             .iter()
             .any(|spec| bash_rule_grants(spec, command))
         {
-            return None;
+            return Some(format!(
+                "[!{command}: not run — allowed-tools does not grant Bash for it]"
+            ));
         }
-        Some(format!(
-            "[!{command}: not run — allowed-tools does not grant Bash for it]"
-        ))
+        self.rules_refusal(command)
+    }
+
+    /// The notice for a command the person's permission rules stop: what
+    /// the model's Bash would meet, with no prompt to ask at.
+    fn rules_refusal(&self, command: &str) -> Option<String> {
+        let rules = match self.rules {
+            Ok(rules) => rules,
+            Err(why) => {
+                return Some(format!(
+                    "[!{command}: not run — your permission settings did not load: {why}]"
+                ));
+            }
+        };
+        // The mode is the session's to apply; this asks the rules alone, so
+        // the policy stands in full access and only a rule can say no.
+        let policy = runtime::PermissionPolicy::new(runtime::PermissionMode::DangerFullAccess)
+            .with_permission_rules(rules);
+        let input = serde_json::json!({ "command": command }).to_string();
+        if policy.deny_reason(BASH_TOOL, &input).is_some() {
+            return Some(format!(
+                "[!{command}: not run — a deny rule in your permission settings forbids it]"
+            ));
+        }
+        match policy.authorize(BASH_TOOL, &input, None) {
+            runtime::PermissionOutcome::Allow => None,
+            runtime::PermissionOutcome::Deny { .. } => Some(format!(
+                "[!{command}: not run — an ask rule in your permission settings wants your approval, and a command file cannot ask; run it yourself if you approve]"
+            )),
+        }
     }
 }
+
+/// The name the session's Bash tool is registered and ruled under.
+const BASH_TOOL: &str = "bash";
 
 /// Characters that let one shell line chain, substitute or redirect beyond its
 /// first command.
@@ -725,11 +765,13 @@ mod tests {
     /// [`expand_command_template`] for a file whose `allowed-tools` is `Bash`.
     fn expand(body: &str, args: &str, base_dir: &Path) -> String {
         let allowed_tools = ["Bash".to_string()];
+        let no_rules = runtime::RuntimePermissionRuleConfig::default();
         let shell = InlineShell {
             allowed_tools: &allowed_tools,
             read_only: false,
             workspace: WorkspaceTrust::Trusted,
             folder: base_dir,
+            rules: Ok(&no_rules),
             confined: true,
         };
         expand_command_template(body, args, base_dir, &shell)
@@ -957,9 +999,11 @@ mod tests {
         let body = format!(
             "@inside.md\n@../outside/secret.md\n@{absolute_outside}\n@{absolute_inside}\n"
         );
+        let no_rules = runtime::RuntimePermissionRuleConfig::default();
         let trusted = InlineShellGate {
             read_only: false,
             workspace: WorkspaceTrust::Trusted,
+            rules: Ok(&no_rules),
         };
         let refused = |raw: &str| {
             format!("[@{raw}: not read — a repository's command file reads only inside the working folder]")
