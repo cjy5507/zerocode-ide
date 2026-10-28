@@ -3699,9 +3699,16 @@ pub(super) fn pump_loop(app: &AppHandle) {
         };
         // The window's history budget, on the reaping beat and outside the
         // walk: each pane is read and shed under its own lock alone, with no
-        // `deliveries` guard held.
+        // `deliveries` guard held. Its own clock, after the round's: a pane
+        // read back reads as moved later than any pane that printed in it.
         if reaping {
-            history_budget::hold(state.terminals(), &mut history_moved, looked_at);
+            history_budget::hold(
+                state.terminals(),
+                &mut entries,
+                &readers,
+                &mut history_moved,
+                Instant::now(),
+            );
         }
         // Counted before the notices go out, because telling a window to come
         // is work this round did — a round that had something to show is not

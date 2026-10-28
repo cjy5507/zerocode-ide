@@ -2969,9 +2969,14 @@ impl TerminalGrid {
 
     /// Whether a whole history's worth of lines has left since the tables
     /// were last swept — so a sweep, which reads every kept line, costs a
-    /// read per trimmed line however long the pane lives.
+    /// read per trimmed line however long the pane lives. The worth is what
+    /// the pane holds, not its cap: a pane the window's budget cut to a tenth
+    /// of its cap sweeps right after the cut, not a cap's worth of lines
+    /// later. Never under the smallest cap a person can choose, so a pane
+    /// with next to no history does not sweep on every line.
     fn tables_turned(&self) -> bool {
-        self.scrollback_trimmed.saturating_sub(self.tables_swept_at) >= self.scrollback_cap.max(1)
+        let worth = self.scrollback_cap.max(1);
+        self.scrollback_trimmed.saturating_sub(self.tables_swept_at) >= worth
     }
 
     /// Empty the link rows and drop the fold regions nothing left in this
@@ -3449,6 +3454,8 @@ impl TerminalGrid {
         }) {
             let uri: Arc<str> = Arc::from(uri);
             self.links[at] = Arc::clone(&uri);
+            // Once, though the row may be emptied and taken again before
+            // the next delta: the consumer needs its newest address.
             if at < self.links_sent {
                 self.links_resent.push(at);
             }
@@ -6884,6 +6891,48 @@ mod tests {
         let frame = grid.take_delta().expect("a frame");
         assert!(!frame.full);
         assert_eq!(frame.links, vec![(1, Arc::from("https://fresh"))]);
+    }
+
+    /// A row emptied and taken again twice before the consumer's next delta
+    /// is sent once, with its newest address (t-80604).
+    #[test]
+    fn a_row_taken_twice_between_deltas_is_sent_once() {
+        let mut term = Terminal::new(4, 30);
+        term.grid_mut().scrollback_cap = 4;
+        term.feed(b"\x1b]8;;https://gone\x1b\\old\x1b]8;;\x1b\\\r\n");
+        let _ = term.grid_mut().take_delta();
+        for address in ["first", "second"] {
+            for n in 0..12 {
+                term.feed(format!("filler{n}\r\n").as_bytes());
+            }
+            term.feed(format!("\x1b]8;;https://{address}\x1b\\new\x1b]8;;\x1b\\\r\n").as_bytes());
+        }
+        let frame = term.grid_mut().take_delta().expect("a frame");
+        assert!(!frame.full);
+        assert_eq!(frame.links, vec![(1, Arc::from("https://second"))]);
+    }
+
+    /// A pane the window's budget cuts far under its cap sweeps its tables
+    /// at the cut, not a cap's worth of lines later (t-80604).
+    #[test]
+    fn a_pane_cut_under_its_cap_sweeps_its_tables_at_the_cut() {
+        let mut term = Terminal::new(4, 30);
+        term.grid_mut().scrollback_cap = 2 * MIN_SCROLLBACK_LINES;
+        term.feed(b"\x1b]8;;https://gone\x1b\\old\x1b]8;;\x1b\\\r\n");
+        let mut text = String::new();
+        for n in 0..MIN_SCROLLBACK_LINES + 500 {
+            text.push_str(&format!("filler{n}\r\n"));
+        }
+        term.feed(text.as_bytes());
+        let grid = term.grid_mut();
+        let gone = NonZeroU32::new(1).expect("one");
+        assert_eq!(grid.link_uri(gone), Some("https://gone"));
+        assert!(grid.shed_history(100) >= MIN_SCROLLBACK_LINES);
+        assert_eq!(
+            grid.link_uri(gone),
+            Some(""),
+            "a pane cut to a twentieth of its cap kept an address nothing names"
+        );
     }
 
     /// A fold region whose rows all left history leaves the table, so the
