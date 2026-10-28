@@ -2409,9 +2409,20 @@ pub(super) fn antigravity_usage_cache(
         Mutex::new(
             std::fs::read_to_string(antigravity_usage_file(local_data_root))
                 .ok()
-                .and_then(|text| serde_json::from_str(&text).ok()),
+                .and_then(|text| seeded_antigravity_usage(&text)),
         )
     })
+}
+
+/// What the gauge starts a process holding: the reading on file, but not a
+/// refusal. A refusal holds the gauge until a person presses refresh, yet it
+/// answered the build that asked, and this one may ask as another client —
+/// the gauge took zo's identity after its own was refused (2026-10-28) — so
+/// a new process asks once, and holds again only on a refusal of its own.
+pub(super) fn seeded_antigravity_usage(text: &str) -> Option<usage::ProviderUsage> {
+    serde_json::from_str::<usage::ProviderUsage>(text)
+        .ok()
+        .filter(|held| held.status != "refused")
 }
 
 pub(super) static ANTIGRAVITY_USAGE_SCANNING: std::sync::atomic::AtomicBool =

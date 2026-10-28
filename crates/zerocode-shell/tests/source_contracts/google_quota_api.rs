@@ -4,7 +4,9 @@
 //! subscription sign-in zo and the window share — with two read-only calls on
 //! `daily-cloudcode-pa.googleapis.com/v1internal`: `loadCodeAssist`, then
 //! `retrieveUserQuota`. The person restored that one gauge on 2026-10-19
-//! (「이것만 예외로 되살리기」), with ZeroCode's own headers (「정직한 신원으로 먼저」).
+//! (「이것만 예외로 되살리기」), first with ZeroCode's own headers (「정직한 신원으로
+//! 먼저」); Google refused those, and on 2026-10-28 the person moved the two reads
+//! to the identity zo sends for the same login (「zo와 같은 신원이면 될거같은데」).
 //! The rest of the subscription login stays the vendor's own clients' (「구독 OAuth로
 //! 제품 호출 금지」, decided 2026-10-17 14:04). This file keeps that scope fixed: the
 //! host, the version segment and the two methods are named only in
