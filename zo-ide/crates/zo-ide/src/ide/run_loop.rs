@@ -117,7 +117,7 @@ fn decide_unattended<W: Write>(
                 && !inner
                     .choices
                     .iter()
-                    .any(|choice| choice.decision == runtime::message_stream::PermissionDecision::Allow) =>
+                    .any(|choice| choice.decision == runtime::message_stream::PermissionDecision::AllowAlways) =>
         {
             let tool = inner.tool_name.clone();
             PendingPrompt::Permission(inner).dismiss();
