@@ -479,7 +479,8 @@ fn await_pane_channel_addr(
         }
         // A process that has ended will never publish. Its last words are the
         // reason, so they are read off its own terminal rather than guessed.
-        if let Ok(Some(code)) = pty.try_wait() {
+        // RED (t-78852): the process is looked at only once the patience is spent.
+        if let Ok(Some(code)) = (Instant::now() >= deadline).then(|| pty.try_wait()).unwrap_or(Ok(None)) {
             // The file and the exit can land in the same instant: one more look
             // before calling it a refusal.
             if let Ok(Some(identity)) = read_pane_channel(addr_file) {
