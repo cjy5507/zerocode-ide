@@ -1217,6 +1217,19 @@ impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
 }
 
 impl agent_teams::Host for TeamWindow {
+    /// The kill guard's own reading of the window's panes (t-80602), asked for
+    /// `process-sweep` (t-78914).
+    fn kill_roots(&self, caller: Option<u32>) -> Option<zerocode_hookd::KillRoots> {
+        use zerocode_hookd::KillWitness as _;
+        let pane_key = caller
+            .map(|term| format!("term-{term}"))
+            .unwrap_or_default();
+        let witness = crate::kill_witness::PaneProcesses {
+            app: self.app.clone(),
+        };
+        Some(witness.roots(&pane_key))
+    }
+
     /// The Codex lease a split of `command` will need, taken now — before its
     /// caller takes the team table (t-51380).
     fn prepare_launch(&self, command: &str) -> Option<hooks::PreparedLaunch> {

@@ -4,15 +4,20 @@
 //! The ledger decided the mode, the needle or the pids and the run
 //! (`zerocode_core::orchestration::process_sweep`); this reads the system and
 //! carries it out. The table is the status bar's own read
-//! ([`crate::resource_usage::enumerate_processes`]) and the places are the
-//! port list's ([`crate::system_runtime::process_cwds`]), so there is one
-//! reading of each and nothing here to disagree with them.
+//! ([`crate::resource_usage::enumerate_processes`]), read once per call, and
+//! the places are the port list's ([`crate::system_runtime::process_cwds`]).
+//! The judgment is the kill guard's (t-80602, [`kill::judge_kill`]) over that
+//! same read and the guard's own reading of the window's panes
+//! ([`crate::kill_witness`]), so a pane's `kill` and this verb are judged by
+//! one rule.
 
 use std::collections::HashMap;
 
 use zerocode_core::orchestration::process_sweep::{
     self as sweep, Judge, Judgment, ProcessRow, ProcessSweepAsk, Signals,
 };
+use zerocode_core::shell_rule::kill::{self, KillCall, KillTarget, KillVerdict, ProcessTable};
+use zerocode_hookd::KillRoots;
 
 /// What one call carried: the verb's answer, and for an end call the line the
 /// ledger keeps of it.
@@ -28,12 +33,18 @@ pub(crate) struct Filed {
     pub(crate) receipt: String,
 }
 
-/// Carry one decided call against this machine.
-pub(crate) fn carry(ask: &ProcessSweepAsk, now_ms: i64) -> Result<Carried, String> {
-    let judge = judge();
+/// Carry one decided call against this machine. `roots` is the asking pane's
+/// own process and the trees it may not signal, as the window reads them.
+pub(crate) fn carry(
+    ask: &ProcessSweepAsk,
+    roots: Option<KillRoots>,
+    now_ms: i64,
+) -> Result<Carried, String> {
+    let (rows, table) = table()?;
+    let judge = judge(roots, table);
     carry_with(
         ask,
-        &table,
+        rows,
         &crate::system_runtime::process_cwds,
         judge.as_ref(),
         &System,
@@ -42,23 +53,59 @@ pub(crate) fn carry(ask: &ProcessSweepAsk, now_ms: i64) -> Result<Carried, Strin
 }
 
 /// The protection judgment this window stands behind the verb — the ONE place
-/// it is chosen. The judgment itself belongs to the blocking road (t-80602,
-/// `zerocode_core::shell_rule::kill::judge_kill`, which answers for the
-/// window body and its helpers, the ledger's panes and worker CLIs, the build
-/// line's runners, the caller's own ancestors, a person's tabs and the
-/// system's processes); until that road is joined here, every row is
-/// protected, so the verb lists and ends nothing.
-fn judge() -> Box<dyn Judge> {
-    Box::new(NotJoined)
+/// it is chosen. A window that cannot say whose processes are whose ends
+/// nothing.
+fn judge(roots: Option<KillRoots>, table: ProcessTable) -> Box<dyn Judge> {
+    match roots {
+        Some(roots) => Box::new(KillRule {
+            table,
+            caller: roots.caller,
+            protected: roots.protected,
+        }),
+        None => Box::new(NoRoots),
+    }
 }
 
-struct NotJoined;
+/// The kill guard's rule, asked of one pid at a time as a `kill <pid>` would
+/// be: a process in the asking pane's own tree may end; one in the window's
+/// or another pane's tree may not; anything else is a question for a person —
+/// and this verb puts no question to anybody mid-call, so a question is a
+/// refusal that says so.
+struct KillRule {
+    /// The same read the rows came from, in the guard's shape.
+    table: ProcessTable,
+    caller: Option<u32>,
+    protected: Vec<kill::ProtectedRoot>,
+}
 
-impl Judge for NotJoined {
+impl Judge for KillRule {
+    /// `_table` is the same read as `self.table`; the guard's rule reads its
+    /// own shape of it.
+    fn judge(&self, row: &ProcessRow, _table: &[ProcessRow]) -> Judgment {
+        let call = KillCall {
+            written: format!("kill {}", row.pid),
+            targets: vec![KillTarget::Pid(row.pid)],
+        };
+        match kill::judge_kill(&[call], &self.table, self.caller, &self.protected) {
+            KillVerdict::Allow => Judgment::Allow,
+            KillVerdict::Deny { reason } => Judgment::Deny { why: reason },
+            KillVerdict::Ask { reason } => Judgment::Deny {
+                why: format!(
+                    "물을 수 없음 — {} asks nobody mid-call, so what a person would be asked \
+                     about is refused: {reason}",
+                    sweep::VERB
+                ),
+            },
+        }
+    }
+}
+
+struct NoRoots;
+
+impl Judge for NoRoots {
     fn judge(&self, _row: &ProcessRow, _table: &[ProcessRow]) -> Judgment {
         Judgment::Deny {
-            why: "the protection judgment is not joined to this window yet (t-80602 \
-                  judge_kill), so nothing is ended"
+            why: "this window could not say which processes are its panes', so nothing is ended"
                 .to_string(),
         }
     }
@@ -66,13 +113,12 @@ impl Judge for NotJoined {
 
 fn carry_with(
     ask: &ProcessSweepAsk,
-    read_table: &dyn Fn() -> Result<Vec<ProcessRow>, String>,
+    mut table: Vec<ProcessRow>,
     read_cwds: &dyn Fn(&[u32]) -> HashMap<u32, String>,
     judge: &dyn Judge,
     signals: &dyn Signals,
     now_ms: i64,
 ) -> Result<Carried, String> {
-    let mut table = read_table()?;
     match ask {
         ProcessSweepAsk::Find { needle, checkouts } => {
             let cwds = read_cwds(&sweep::matching_pids(&table, needle));
@@ -96,25 +142,33 @@ fn carry_with(
     }
 }
 
-/// The table, every row that carries both halves of its identity. An empty
-/// read is a failed read — this process itself is always in the table — and
-/// nothing is listed or ended on it.
-fn table() -> Result<Vec<ProcessRow>, String> {
+/// The table, every row that carries both halves of its identity, and the
+/// same rows in the guard's shape. An empty read is a failed read — this
+/// process itself is always in the table — and nothing is listed or ended on
+/// it.
+fn table() -> Result<(Vec<ProcessRow>, ProcessTable), String> {
     let sample = crate::resource_usage::enumerate_processes()?;
-    let rows: Vec<ProcessRow> = sample
-        .identified()
-        .map(|(pid, ppid, started, args)| ProcessRow {
-            pid,
-            ppid,
-            started: started.to_string(),
-            args: args.to_string(),
+    let mut rows = Vec::new();
+    let mut guarded = Vec::new();
+    for process in sample.identified() {
+        rows.push(ProcessRow {
+            pid: process.pid,
+            ppid: process.ppid,
+            started: process.started.to_string(),
+            args: process.command.to_string(),
             cwd: None,
-        })
-        .collect();
+        });
+        guarded.push(kill::ProcessRow {
+            pid: process.pid,
+            ppid: process.ppid,
+            pgid: process.pgid,
+            command: process.command.to_string(),
+        });
+    }
     if rows.is_empty() {
         return Err("the process table read empty, so nothing is listed or ended".to_string());
     }
-    Ok(rows)
+    Ok((rows, ProcessTable::new(guarded)))
 }
 
 struct System;
@@ -153,6 +207,17 @@ mod tests {
         }
     }
 
+    fn target(pid: u32, args: &str) -> Target {
+        Target {
+            pid,
+            mark: mark(pid, STARTED, args),
+        }
+    }
+
+    fn no_cwds(_: &[u32]) -> HashMap<u32, String> {
+        HashMap::new()
+    }
+
     struct Allow;
 
     impl Judge for Allow {
@@ -166,6 +231,15 @@ mod tests {
     struct Recorded {
         table: Vec<ProcessRow>,
         ended: RefCell<Vec<u32>>,
+    }
+
+    impl Recorded {
+        fn over(table: &[ProcessRow]) -> Self {
+            Self {
+                table: table.to_vec(),
+                ended: RefCell::new(Vec::new()),
+            }
+        }
     }
 
     impl Signals for Recorded {
@@ -182,6 +256,13 @@ mod tests {
         }
     }
 
+    fn end_call(targets: Vec<Target>) -> ProcessSweepAsk {
+        ProcessSweepAsk::End {
+            run: "run-1".to_string(),
+            targets,
+        }
+    }
+
     /// A list asks where only its own matches stand, and says the place.
     #[test]
     fn a_list_reads_the_places_of_its_matches_only() {
@@ -190,21 +271,17 @@ mod tests {
             row(4200, "node server.js"),
         ];
         let asked = RefCell::new(Vec::new());
-        let read_table = || -> Result<Vec<ProcessRow>, String> { Ok(fixture.clone()) };
         let read_cwds = |pids: &[u32]| {
             asked.borrow_mut().extend_from_slice(pids);
             HashMap::from([(4100, "/w/t-1".to_string())])
         };
-        let signals = Recorded {
-            table: fixture.clone(),
-            ended: RefCell::new(Vec::new()),
-        };
+        let signals = Recorded::over(&fixture);
         let carried = carry_with(
             &ProcessSweepAsk::Find {
                 needle: "cargo".to_string(),
                 checkouts: Vec::new(),
             },
-            &read_table,
+            fixture,
             &read_cwds,
             &Allow,
             &signals,
@@ -221,24 +298,13 @@ mod tests {
     /// An end call answers and files one line for its run, under a receipt.
     #[test]
     fn an_end_call_files_one_line_for_its_run() {
-        let fixture = vec![row(4100, "cargo build -p zerocode-shell")];
-        let read_table = || -> Result<Vec<ProcessRow>, String> { Ok(fixture.clone()) };
-        let read_cwds = |_: &[u32]| HashMap::<u32, String>::new();
-        let signals = Recorded {
-            table: fixture.clone(),
-            ended: RefCell::new(Vec::new()),
-        };
-        let targets = vec![Target {
-            pid: 4100,
-            mark: mark(4100, STARTED, "cargo build -p zerocode-shell"),
-        }];
+        let args = "cargo build -p zerocode-shell";
+        let fixture = vec![row(4100, args)];
+        let signals = Recorded::over(&fixture);
         let carried = carry_with(
-            &ProcessSweepAsk::End {
-                run: "run-1".to_string(),
-                targets,
-            },
-            &read_table,
-            &read_cwds,
+            &end_call(vec![target(4100, args)]),
+            fixture,
+            &no_cwds,
             &Allow,
             &signals,
             7,
@@ -255,28 +321,17 @@ mod tests {
         assert!(filed.receipt.contains("run-1"), "{}", filed.receipt);
     }
 
-    /// Until the blocking road's judgment is joined, the window's own judge
-    /// protects every row: a list says so and an end call ends nothing.
+    /// A window that cannot say whose processes are whose ends nothing.
     #[test]
-    fn the_window_ends_nothing_until_the_judgment_is_joined() {
+    fn without_the_panes_roots_nothing_is_ended() {
         let fixture = vec![row(4100, "cargo build")];
-        let read_table = || -> Result<Vec<ProcessRow>, String> { Ok(fixture.clone()) };
-        let read_cwds = |_: &[u32]| HashMap::<u32, String>::new();
-        let signals = Recorded {
-            table: fixture.clone(),
-            ended: RefCell::new(Vec::new()),
-        };
+        let signals = Recorded::over(&fixture);
+        let judge = judge(None, ProcessTable::new(Vec::new()));
         let carried = carry_with(
-            &ProcessSweepAsk::End {
-                run: "run-1".to_string(),
-                targets: vec![Target {
-                    pid: 4100,
-                    mark: mark(4100, STARTED, "cargo build"),
-                }],
-            },
-            &read_table,
-            &read_cwds,
-            judge().as_ref(),
+            &end_call(vec![target(4100, "cargo build")]),
+            fixture,
+            &no_cwds,
+            judge.as_ref(),
             &signals,
             7,
         )
@@ -284,34 +339,82 @@ mod tests {
         assert!(signals.ended.borrow().is_empty());
         let said: serde_json::Value = serde_json::from_str(&carried.said).expect("JSON");
         assert_eq!(said["rows"][0]["outcome"], "refused");
-        assert!(
-            said["rows"][0]["why"]
-                .as_str()
-                .is_some_and(|why| why.contains("t-80602")),
-            "{said}"
-        );
     }
 
-    /// A table that could not be read is a refusal, never an empty list.
+    /// Through the kill guard's real rule over one fixture table (`ps -o
+    /// pid=,ppid=,pgid=,command=` text): the asking pane's own build ends;
+    /// another pane's build and the window are refused by name; an orphan
+    /// nobody's pane holds would be a question for a person, so it is refused
+    /// as one that cannot be asked. Nothing real is signalled.
     #[test]
-    fn an_unread_table_is_refused() {
-        let read_table = || -> Result<Vec<ProcessRow>, String> { Err("ps timed out".to_string()) };
-        let read_cwds = |_: &[u32]| HashMap::<u32, String>::new();
-        let signals = Recorded {
-            table: Vec::new(),
-            ended: RefCell::new(Vec::new()),
+    fn the_kill_guards_rule_decides_each_pid() {
+        let listing = "\
+            500 1 500 /Applications/ZeroCode.app/Contents/MacOS/zerocode-shell\n\
+            600 500 600 -zsh\n\
+            700 600 600 claude --model opus\n\
+            4100 700 4100 cargo build -p zerocode-shell\n\
+            610 500 610 -zsh\n\
+            4200 610 4200 cargo test -p zerocode-core\n\
+            4300 1 4300 cargo build -p orphaned\n";
+        let rows: Vec<ProcessRow> = listing
+            .lines()
+            .map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid: u32 = fields.next().expect("pid").parse().expect("a pid");
+                let ppid: u32 = fields.next().expect("ppid").parse().expect("a ppid");
+                let _pgid = fields.next();
+                let args = fields.collect::<Vec<_>>().join(" ");
+                ProcessRow {
+                    ppid,
+                    ..row(pid, &args)
+                }
+            })
+            .collect();
+        let roots = KillRoots {
+            caller: Some(600),
+            protected: vec![
+                kill::ProtectedRoot {
+                    pid: 500,
+                    label: "the ZeroCode window".to_string(),
+                },
+                kill::ProtectedRoot {
+                    pid: 610,
+                    label: "pane term-3".to_string(),
+                },
+            ],
         };
+        let judge = judge(Some(roots), ProcessTable::from_listing(listing, None));
+        let signals = Recorded::over(&rows);
+        let targets: Vec<Target> = [500, 4100, 4200, 4300]
+            .into_iter()
+            .map(|pid| {
+                let held = rows.iter().find(|row| row.pid == pid).expect("a row");
+                target(pid, &held.args)
+            })
+            .collect();
         let carried = carry_with(
-            &ProcessSweepAsk::Find {
-                needle: "cargo".to_string(),
-                checkouts: Vec::new(),
-            },
-            &read_table,
-            &read_cwds,
-            &Allow,
+            &end_call(targets),
+            rows,
+            &no_cwds,
+            judge.as_ref(),
             &signals,
-            1,
-        );
-        assert!(carried.is_err());
+            7,
+        )
+        .expect("an end call");
+        assert_eq!(*signals.ended.borrow(), vec![4100], "only the own build");
+        let said: serde_json::Value = serde_json::from_str(&carried.said).expect("JSON");
+        let why = |at: usize| {
+            said["rows"][at]["why"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(said["rows"][0]["outcome"], "refused");
+        assert!(why(0).contains("the ZeroCode window"), "{said}");
+        assert_eq!(said["rows"][1]["outcome"], "ended");
+        assert_eq!(said["rows"][2]["outcome"], "refused");
+        assert!(why(2).contains("pane term-3"), "{said}");
+        assert_eq!(said["rows"][3]["outcome"], "refused");
+        assert!(why(3).starts_with("물을 수 없음"), "{said}");
     }
 }

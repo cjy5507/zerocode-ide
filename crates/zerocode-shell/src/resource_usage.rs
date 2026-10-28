@@ -184,6 +184,15 @@ pub(crate) struct OwnedProcessMatch {
     pub(crate) command: String,
 }
 
+/// One row of [`ProcessSample::identified`].
+pub(crate) struct IdentifiedProcess<'a> {
+    pub(crate) pid: u32,
+    pub(crate) ppid: u32,
+    pub(crate) pgid: u32,
+    pub(crate) started: &'a str,
+    pub(crate) command: &'a str,
+}
+
 impl ProcessSample {
     fn available(&self) -> bool {
         !self.rows.is_empty()
@@ -248,17 +257,22 @@ impl ProcessSample {
         self.rows.iter().any(|row| row.pid == pid)
     }
 
-    /// Every row whose start identity and command line were both read, as
-    /// `(pid, parent, started, command)` — the rows a pid can be named by and
-    /// read again later (t-78914 `process-sweep`).
-    pub(crate) fn identified(&self) -> impl Iterator<Item = (u32, u32, &str, &str)> + '_ {
+    /// Every row whose start identity and command line were both read — the
+    /// rows a pid can be named by and read again later (t-78914
+    /// `process-sweep`). The group is 0 where the table carries none (Windows).
+    pub(crate) fn identified(&self) -> impl Iterator<Item = IdentifiedProcess<'_>> + '_ {
         self.rows.iter().filter_map(|row| {
-            Some((
-                row.pid,
-                row.ppid,
-                self.identities.get(&row.pid)?.as_str(),
-                self.commands.get(&row.pid)?.as_str(),
-            ))
+            Some(IdentifiedProcess {
+                pid: row.pid,
+                ppid: row.ppid,
+                pgid: self
+                    .process_groups
+                    .get(&row.pid)
+                    .copied()
+                    .unwrap_or_default(),
+                started: self.identities.get(&row.pid)?.as_str(),
+                command: self.commands.get(&row.pid)?.as_str(),
+            })
         })
     }
 
