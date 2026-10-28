@@ -77,6 +77,7 @@ fn a_pane_mid_turn_or_with_the_persons_words_on_its_line_refuses_the_press() {
         Stuck::NeverHeard,
         Stuck::ShellInFront,
         Stuck::SeatMoving,
+        Stuck::PressMoving,
     ] {
         let chip = chip(Some(&moves), Some("high"), None, None, Err(busy));
         assert_eq!(chip.stuck, Some(busy));

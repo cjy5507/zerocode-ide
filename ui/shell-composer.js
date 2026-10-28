@@ -948,6 +948,7 @@ function effortStuckWords(said) {
     case "shell_in_front": return t("composer.effort.stuck.shellInFront", "에이전트 앞에 셸이 있습니다");
     case "draft": return t("composer.effort.stuck.draft", "판의 입력줄에 쓰던 글이 있습니다");
     case "seat_moving": return t("composer.effort.stuck.seatMoving", "자동 노력 조절이 이 판을 옮기는 중입니다");
+    case "press_moving": return t("composer.effort.stuck.pressMoving", "앞서 누른 바꾸기가 아직 진행 중입니다 — 끝나면 다시 누를 수 있습니다");
     default: return "";
   }
 }

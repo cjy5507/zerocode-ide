@@ -206,3 +206,50 @@ fn the_step_effort_seat_leaves_a_pane_the_person_moved_alone() {
     assert!(raise.asked().is_empty(), "the seat asked about it");
     assert_eq!(stood.sent_at_worker().len(), typed, "the seat typed at it");
 }
+
+/// Two presses overlap: while the first waits for the picker's legend, a
+/// second is refused before it types — a second `/effort⏎` landing on an open
+/// picker would press its "Enter to confirm" and save the account's default.
+#[test]
+fn a_second_press_while_the_first_is_typing_is_refused_before_any_key() {
+    let stood = StoppedWorker::stand_with(
+        98_600,
+        "--agent claude --model claude-opus-5-5 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let term = stood.host.worker_term;
+    let ran = a_progressed_turn("read it", "medium");
+    let owned: Vec<&str> = ran.iter().map(String::as_str).collect();
+    stood.stops_on(&owned, stood.began + 5_000);
+    let tail = tail_of(&stood);
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| press(&stood.host, term, tail.as_deref(), "max"));
+        let since = std::time::Instant::now();
+        while stood.sent_at_worker().len() < 2 {
+            assert!(
+                since.elapsed() < std::time::Duration::from_secs(5),
+                "the first press never typed its command"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            pane_effort(&stood.host, term, tail.as_deref()).stuck,
+            Some(Stuck::PressMoving),
+            "the chip offers a press while one is typing"
+        );
+        assert_eq!(
+            press(&stood.host, term, tail.as_deref(), "low"),
+            Err(PressRefused::Stuck(Stuck::PressMoving))
+        );
+        assert_eq!(
+            stood.sent_at_worker(),
+            [CLAUDE_EFFORT_PICKER.open, "\r"],
+            "the second press typed at a pane the first is moving"
+        );
+        picker_up(&stood);
+        let first = first.join().expect("the first press").expect("lands");
+        assert_eq!(first.pending.as_deref(), Some("max"));
+        assert_eq!(first.stuck, None, "the pane is free once the press is done");
+    });
+}

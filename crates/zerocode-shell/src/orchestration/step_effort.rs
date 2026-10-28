@@ -100,10 +100,22 @@ mod door_outcome {
 pub(super) struct MoveBook {
     /// One seat per open attempt, by dispatch.
     seats: HashMap<String, Seat>,
-    /// The panes a person moved from the composer's chip, by terminal, and
-    /// the word the last press put the session on until a turn has run at
-    /// it. A pane here is the person's: the seat never moves it again.
-    pressed: HashMap<u32, Option<String>>,
+    /// The panes a person moved from the composer's chip, by terminal. A
+    /// pane here is the person's: the seat never moves it again.
+    pressed: HashMap<u32, Pressed>,
+}
+
+/// One pane a person moved from the composer's chip.
+#[derive(Clone, Default)]
+struct Pressed {
+    /// A press is typing at the pane now — for up to [`PRESS_DELIVERY_WAIT`]
+    /// and [`PICKER_WAIT_MS`]. A second press refuses itself meanwhile: its
+    /// `/effort` line landing on the first one's open picker would confirm
+    /// the picker, which saves the word as the account's default.
+    moving: bool,
+    /// The word the last press put the session on, until a turn has run at
+    /// it and the session's own record says so.
+    pending: Option<String>,
 }
 
 /// One attempt's standing with the seat.
@@ -747,8 +759,7 @@ pub(crate) fn pane_effort(host: &dyn Host, term: u32, tail: Option<&str>) -> Eff
             .unwrap_or_else(|held| held.into_inner())
             .pressed
             .get(&term)
-            .cloned()
-            .flatten()
+            .and_then(|pressed| pressed.pending.clone())
     });
     let chip = effort_chip::chip(
         moves.as_ref(),
@@ -762,21 +773,22 @@ pub(crate) fn pane_effort(host: &dyn Host, term: u32, tail: Option<&str>) -> Eff
     if pending.is_some()
         && chip.pending.is_none()
         && let Some(held) = held.as_ref()
-        && let Some(word) = held
+        && let Some(pressed) = held
             .moves
             .lock()
             .unwrap_or_else(|held| held.into_inner())
             .pressed
             .get_mut(&term)
     {
-        *word = None;
+        pressed.pending = None;
     }
     chip
 }
 
 /// Why a press may not type at `term` now, read the way every door that
 /// types unasked reads it ([`composer_at_rest`]), then the person's own
-/// words on the pane's line, then a move of the seat's own on its way there.
+/// words on the pane's line, then a move of the seat's own on its way there,
+/// then an earlier press still typing there.
 fn moment(host: &dyn Host, held: Option<&super::LiveRuntime>, term: u32) -> Result<(), Stuck> {
     let heard = super::pane_turns()
         .lock()
@@ -792,16 +804,22 @@ fn moment(host: &dyn Host, held: Option<&super::LiveRuntime>, term: u32) -> Resu
     if host.line_holds_a_draft(term) {
         return Err(Stuck::Draft);
     }
-    let seat_moving = held.is_some_and(|held| {
-        held.moves
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .seats
-            .values()
-            .any(|seat| seat.open.as_ref().is_some_and(|open| open.term == term))
+    let (seat_moving, pressing) = held.map_or((false, false), |held| {
+        let book = held.moves.lock().unwrap_or_else(|held| held.into_inner());
+        (
+            book.seats
+                .values()
+                .any(|seat| seat.open.as_ref().is_some_and(|open| open.term == term)),
+            book.pressed
+                .get(&term)
+                .is_some_and(|pressed| pressed.moving),
+        )
     });
     if seat_moving {
         return Err(Stuck::SeatMoving);
+    }
+    if pressing {
+        return Err(Stuck::PressMoving);
     }
     Ok(())
 }
@@ -882,24 +900,42 @@ pub(crate) fn press(
     let Some(keys) = effort_chip::press(&moves, from, to).map_err(PressRefused::Stuck)? else {
         return Ok(chip);
     };
-    // The seat is told first, so a beat between here and the keys does not
-    // judge the pane the person is moving; a press the door refused gives
-    // back a pane no earlier press had made the person's.
-    let first = with_pressed(held.as_ref(), |pressed| {
-        let first = !pressed.contains_key(&term);
-        pressed.entry(term).or_default();
-        first
-    })
-    .unwrap_or(false);
-    if let Err(refused) = carry(host, term, &keys) {
-        if first {
-            with_pressed(held.as_ref(), |pressed| pressed.remove(&term));
+    // The pane is claimed under the book's lock before any key, so a beat
+    // between here and the keys does not judge the pane the person is
+    // moving and a second press refuses itself until this one is done.
+    let before = with_pressed(held.as_ref(), |pressed| {
+        let before = pressed.get(&term).cloned();
+        if before.as_ref().is_some_and(|before| before.moving) {
+            return Err(PressRefused::Stuck(Stuck::PressMoving));
         }
-        return Err(refused);
-    }
-    with_pressed(held.as_ref(), |pressed| {
-        pressed.insert(term, Some(to.to_string()))
+        let moving = Pressed {
+            moving: true,
+            ..before.clone().unwrap_or_default()
+        };
+        pressed.insert(term, moving);
+        Ok(before)
+    })
+    .transpose()?
+    .flatten();
+    let carried = carry(host, term, &keys);
+    // A press the door refused gives the pane back as it stood — no pane
+    // of the person's when no earlier press had made it one.
+    with_pressed(held.as_ref(), |pressed| match (&carried, before) {
+        (Ok(()), _) => {
+            let landed = Pressed {
+                moving: false,
+                pending: Some(to.to_string()),
+            };
+            pressed.insert(term, landed);
+        }
+        (Err(_), Some(before)) => {
+            pressed.insert(term, before);
+        }
+        (Err(_), None) => {
+            pressed.remove(&term);
+        }
     });
+    carried?;
     Ok(pane_effort(host, term, tail))
 }
 
@@ -907,7 +943,7 @@ pub(crate) fn press(
 /// window whose runtime never started, where no seat moves anything.
 fn with_pressed<R>(
     held: Option<&super::LiveRuntime>,
-    write: impl FnOnce(&mut HashMap<u32, Option<String>>) -> R,
+    write: impl FnOnce(&mut HashMap<u32, Pressed>) -> R,
 ) -> Option<R> {
     held.map(|held| {
         write(

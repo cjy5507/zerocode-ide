@@ -60,6 +60,9 @@ pub enum Stuck {
     Draft,
     /// The step-effort seat is moving this pane's effort itself.
     SeatMoving,
+    /// An earlier press is still typing at the pane: a second `/effort` line
+    /// landing on its open picker would confirm it as the account's default.
+    PressMoving,
 }
 
 /// What the chip shows and whether a press can move it now.
