@@ -2547,7 +2547,7 @@ const files = createServer(async (request, response) => {
     response.writeHead(404).end();
     return;
   }
-  const type = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
+  const type = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".woff2": "font/woff2" };
   response.writeHead(200, { "content-type": type[extname(path)] ?? "text/plain" });
   response.end(bootstrapSource !== null && extname(path) === ".html"
     ? content.toString("utf8").replace("<head>", '<head><script src="/__window-fixture.js"></script>')
