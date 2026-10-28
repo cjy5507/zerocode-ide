@@ -21757,7 +21757,6 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "worker.railAt",
         "worker.stackLabel",
         "worker.stackTodos",
-        "worker.stackNoWork",
         "worker.stackWork",
         "worker.stackQueue",
         "worker.stackChanges",
@@ -21848,7 +21847,6 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
             "function paintChatStack(stack, run) {",
             vec![
                 "worker.stackTodos",
-                "worker.stackNoWork",
                 "worker.stackWork",
                 "worker.stackQueue",
                 "worker.stackChanges",

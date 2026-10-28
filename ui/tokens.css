@@ -2781,6 +2781,11 @@
   --chat-list-pad-top: 20px;
   --chat-list-pad-bottom: 40px;
   --chat-fade: 150px;
+  /* What the window fades instead (t-81525 C13): the extension's 150px ran
+   * the panel's whole width over the list; the page fades only under the
+   * dock, as wide as the dock and 48px tall, so the opaque composer box
+   * covers the rest and the rows stay readable beside it. */
+  --chat-dock-fade: 48px;
   --chat-sticky-pad-top: 14px;
   --chat-sticky-pad-bottom: 12px;
   --chat-sticky-fade: 12px;

@@ -3430,20 +3430,24 @@ function paintChatStack(stack, run) {
     );
     rows.push(row);
   }
-  const factsRow = document.createElement("div");
-  factsRow.className = "chat-stack-row is-facts";
-  factsRow.append(
-    chatStackSpan("chat-stack-work", helpers.length === 0
-      ? t("worker.stackNoWork", "배경 작업 없음")
-      : t("worker.stackWork", "배경 작업 {{n}}", { n: helpers.length })),
-    chatStackSpan("chat-stack-sep", "·"),
-    chatStackSpan("chat-stack-queue", t("worker.stackQueue", "대기 메시지 {{n}}", { n: queued })),
-  );
+  // A count of nothing is not said (t-81525 C2): the work in the background
+  // and the waiting messages stand only while there are some.
+  const spoken = [];
+  if (helpers.length > 0) spoken.push(chatStackSpan("chat-stack-work", t("worker.stackWork", "배경 작업 {{n}}", { n: helpers.length })));
+  if (queued > 0) spoken.push(chatStackSpan("chat-stack-queue", t("worker.stackQueue", "대기 메시지 {{n}}", { n: queued })));
   if (git) {
     const changes = git.changes === null ? "" : ` · ${t("worker.stackChanges", "변경 {{n}}", { n: git.changes })}`;
-    factsRow.appendChild(chatStackSpan("chat-stack-git", `git ${git.branch}${changes}`));
+    spoken.push(chatStackSpan("chat-stack-git", `git ${git.branch}${changes}`));
   }
-  rows.push(factsRow);
+  if (spoken.length > 0) {
+    const factsRow = document.createElement("div");
+    factsRow.className = "chat-stack-row is-facts";
+    spoken.forEach((span, at) => {
+      if (at > 0 && !span.classList.contains("chat-stack-git")) factsRow.appendChild(chatStackSpan("chat-stack-sep", "·"));
+      factsRow.appendChild(span);
+    });
+    rows.push(factsRow);
+  }
   if (todos.length > 0 || helpers.length > 0) {
     const items = document.createElement("ul");
     items.className = "chat-stack-items";

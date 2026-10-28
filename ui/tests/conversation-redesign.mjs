@@ -733,10 +733,14 @@ async function redesignStack(browser, origin, ok) {
         wantTodo: t("worker.stackTodos", "할 일 {{done}}/{{total}}", { done: 2, total: 3 }),
         items: words(stack()?.querySelector(".chat-stack-todo-words")),
         wantItems: ["목록 화면 찾기", "폭 상수 찾기", "보고"].join(" · "),
-        work: words(stack()?.querySelector(".chat-stack-work")),
-        wantWork: t("worker.stackNoWork", "배경 작업 없음"),
-        queue: words(stack()?.querySelector(".chat-stack-queue")),
-        wantQueue: t("worker.stackQueue", "대기 메시지 {{n}}", { n: 0 }),
+        // A count of nothing is not said (t-81525 C2).
+        work: Boolean(stack()?.querySelector(".chat-stack-work")),
+        queue: Boolean(stack()?.querySelector(".chat-stack-queue")),
+        // The state is the composer's first line, one box with it (t-81525 C1).
+        joined: (() => {
+          const composer = document.querySelector(".pane-chat .chat-dock > .worker-composer");
+          return stack() && composer ? Math.round(composer.getBoundingClientRect().top - stack().getBoundingClientRect().bottom) : null;
+        })(),
         git: words(stack()?.querySelector(".chat-stack-git")),
         branch,
       };
@@ -777,9 +781,9 @@ async function redesignStack(browser, origin, ok) {
       return seen;
     });
     ok(
-      "R9: over the composer the conversation's state — 「할 일 2/3」 and the items, 「배경 작업 없음」, 「대기 메시지 0」, and the checkout's branch",
-      seen.shown && seen.todo === seen.wantTodo && seen.items === seen.wantItems && seen.work === seen.wantWork &&
-        seen.queue === seen.wantQueue && (seen.branch === null ? seen.git === "" : seen.git.includes(seen.branch)),
+      "R9: over the composer the conversation's state — 「할 일 2/3」 and the items and the checkout's branch, no count of nothing (C2), joined to the composer with no gap (C1)",
+      seen.shown && seen.todo === seen.wantTodo && seen.items === seen.wantItems && seen.work === false &&
+        seen.queue === false && seen.joined === 0 && (seen.branch === null ? seen.git === "" : seen.git.includes(seen.branch)),
       JSON.stringify(seen),
     );
     ok(

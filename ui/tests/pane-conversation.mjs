@@ -311,7 +311,7 @@ export async function testPaneConversation(browser, origin, ok) {
         roomUnder: list && dock
           ? parseFloat(getComputedStyle(list).paddingBottom) >= dock.offsetHeight + parseFloat(read("--chat-list-pad-bottom"))
           : false,
-        fades: getComputedStyle(host, "::after").height === read("--chat-fade"),
+        fades: getComputedStyle(host, "::after").height === read("--chat-dock-fade") && getComputedStyle(host, "::after").maxWidth === read("--chat-dock-max"),
         statusLast: list?.lastElementChild?.classList.contains("helper-status") === true,
       };
     });

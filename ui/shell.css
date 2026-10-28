@@ -16591,9 +16591,16 @@ details[open] > .helper-cap::after {
   z-index: 3;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  /* No gap: the conversation's state is the composer's first line, one box
+   * with it (t-81525 C1) — an 8px gap between them let the rows behind show
+   * through. The question card keeps its own room above them. */
+  gap: 0;
   max-width: var(--chat-dock-max);
   margin: 0 auto;
+}
+
+.chat-dock > .pane-chat-ask {
+  margin-bottom: var(--space-2);
 }
 
 /* The dock's watched height (`chatDockNode`), on the two that read it — the
@@ -16668,15 +16675,20 @@ details[open] > .helper-cap::after {
   height: 1.1em;
 }
 
-/* The list's last stretch fades under the dock (`messageGradient`). */
+/* The list's last stretch fades under the dock, and only there (t-81525
+ * C13): the dock's own span — its insets and its measure — and
+ * `--chat-dock-fade` tall, where the extension's `messageGradient` laid
+ * 150px over the panel's whole width. */
 .worker-view.is-chat-page:has(> .chat-dock)::after {
   content: "";
   position: absolute;
-  right: 0;
+  right: var(--chat-dock-inset);
   bottom: 0;
-  left: var(--chat-turn-rail-w);
+  left: calc(var(--chat-turn-rail-w) + var(--chat-dock-inset));
   z-index: 2;
-  height: var(--chat-fade);
+  max-width: var(--chat-dock-max);
+  margin: 0 auto;
+  height: var(--chat-dock-fade);
   background: linear-gradient(to bottom, transparent 0%, var(--chat-ground) 100%);
   pointer-events: none;
 }
