@@ -7,7 +7,7 @@
 //! it, so the window is handed the event once and the agent the reply once.
 
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -15,8 +15,17 @@ use tokio::sync::watch;
 
 use crate::brief_receipts::Key;
 
-/// More deliveries than every pane of a window starts within one budget.
+/// More deliveries than every pane of a window starts while an id is
+/// remembered.
 const LIMIT: usize = 256;
+
+/// How long an id is remembered — well past [`crate::HOOK_DELIVERY_BUDGET`]
+/// and every agent's own hook timeout. The budget bounds when the last try
+/// starts, not when it lands: a busy machine spends more on starting curl and
+/// sleep, and the first claim came a little after the script began, so an
+/// id remembered for the budget alone was forgotten under its last try and
+/// the window was handed the event twice. Kept as long as a brief receipt.
+const REMEMBERED_FOR: Duration = Duration::from_secs(60);
 
 /// What the bridge answered a hook post — kept whole so a post again can be
 /// given the same.
@@ -57,13 +66,12 @@ struct Entry {
 }
 
 impl Replays {
-    /// Claim `key` — a valid one ([`Key::valid`]). An id older than a whole
-    /// delivery budget cannot be tried again and is forgotten; past the
+    /// Claim `key` — a valid one ([`Key::valid`]). An id older than
+    /// [`REMEMBERED_FOR`] cannot be tried again and is forgotten; past the
     /// limit the oldest goes, which costs it only its replay.
     pub fn claim(&mut self, key: Key, now: Instant) -> Claim {
-        self.0.retain(|entry| {
-            now.saturating_duration_since(entry.created) < crate::HOOK_DELIVERY_BUDGET
-        });
+        self.0
+            .retain(|entry| now.saturating_duration_since(entry.created) < REMEMBERED_FOR);
         if let Some(entry) = self.0.iter().find(|entry| entry.key == key) {
             return Claim::Again(entry.answer.clone());
         }
@@ -115,8 +123,39 @@ mod tests {
         assert!(matches!(replays.claim(key("p-1"), now), Claim::First(_)));
         assert!(matches!(replays.claim(key("p-1"), now), Claim::Again(_)));
         assert!(matches!(replays.claim(key("p-2"), now), Claim::First(_)));
-        let later = now + crate::HOOK_DELIVERY_BUDGET;
+        let later = now + REMEMBERED_FOR;
         assert!(matches!(replays.claim(key("p-1"), later), Claim::First(_)));
+    }
+
+    /// The last try lands at the end of the budget or, on a busy machine,
+    /// after it — still a replay, never a second event for the window.
+    #[test]
+    fn the_last_try_landing_at_or_past_the_budget_is_still_a_replay() {
+        for agent in [
+            zerocode_core::AgentKind::Claude,
+            zerocode_core::AgentKind::Codex,
+            zerocode_core::AgentKind::Copilot,
+        ] {
+            assert!(crate::install::hook_timeout(agent) < REMEMBERED_FOR);
+        }
+        let mut replays = Replays::default();
+        let now = Instant::now();
+        assert!(matches!(replays.claim(key("p-1"), now), Claim::First(_)));
+        for late in [
+            crate::HOOK_DELIVERY_BUDGET,
+            crate::HOOK_DELIVERY_BUDGET + Duration::from_millis(500),
+            crate::install::hook_timeout(zerocode_core::AgentKind::Claude),
+        ] {
+            assert!(
+                matches!(replays.claim(key("p-1"), now + late), Claim::Again(_)),
+                "{late:?}"
+            );
+        }
+        let just_before = now + REMEMBERED_FOR - Duration::from_millis(1);
+        assert!(matches!(
+            replays.claim(key("p-1"), just_before),
+            Claim::Again(_)
+        ));
     }
 
     #[test]
