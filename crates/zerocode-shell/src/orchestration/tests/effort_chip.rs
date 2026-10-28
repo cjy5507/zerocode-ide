@@ -254,6 +254,51 @@ fn a_second_press_while_the_first_is_typing_is_refused_before_any_key() {
     });
 }
 
+/// The session's record said another rung than the press put it on: the
+/// record wins, the chip drops the pressed word, and the next press counts
+/// its arrows from the rung the record names.
+#[test]
+fn a_pressed_word_the_next_turn_contradicts_is_dropped_and_the_next_press_counts_from_the_record() {
+    let stood = StoppedWorker::stand_with(
+        98_700,
+        "--agent claude --model claude-opus-5-5 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let term = stood.host.worker_term;
+    let ran = a_progressed_turn("read it", "high");
+    let owned: Vec<&str> = ran.iter().map(String::as_str).collect();
+    stood.stops_on(&owned, stood.began + 5_000);
+    picker_up(&stood);
+    let chip = press(&stood.host, term, tail_of(&stood).as_deref(), "max").expect("the press");
+    assert_eq!(chip.pending.as_deref(), Some("max"));
+
+    let mut next = ran.clone();
+    next.extend(a_progressed_turn("go on", "xhigh"));
+    let owned: Vec<&str> = next.iter().map(String::as_str).collect();
+    stood.stops_on(&owned, stood.began + 9_000);
+    let tail = tail_of(&stood);
+    let read = pane_effort(&stood.host, term, tail.as_deref());
+    assert_eq!(read.current.as_deref(), Some("xhigh"));
+    assert_eq!(
+        read.pending, None,
+        "the chip kept a word the record contradicts"
+    );
+
+    let typed = stood.sent_at_worker().len();
+    press(&stood.host, term, tail.as_deref(), "high").expect("the next press");
+    assert_eq!(
+        &stood.sent_at_worker()[typed..],
+        [
+            CLAUDE_EFFORT_PICKER.open,
+            "\r",
+            CLAUDE_EFFORT_PICKER.lower,
+            CLAUDE_EFFORT_PICKER.session_only,
+        ],
+        "one arrow down from the recorded xhigh, not two from the pressed max"
+    );
+}
+
 /// The step-effort seat under `shadow` judged a turn and typed nothing: its
 /// move waits for the next turn to label it, and a person's press between
 /// the two turns goes through.

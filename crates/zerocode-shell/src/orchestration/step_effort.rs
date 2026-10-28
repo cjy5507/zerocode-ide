@@ -45,7 +45,7 @@ use zerocode_core::step_effort::{
     self, Followed, Move, STEP_EFFORT_LABEL_WINDOW_MS, STEP_EFFORT_RUBRIC_VERSION, Standing,
     StepAsk, StepLook,
 };
-use zerocode_core::transcript::{effort_in, tail_lines, turns_in};
+use zerocode_core::transcript::{effort_in, effort_record_in, tail_lines, turns_in};
 use zerocode_pty::DeliveryOutcome;
 
 use super::{ComposerBusy, PaneTurn, composer_at_rest};
@@ -113,9 +113,12 @@ struct Pressed {
     /// `/effort` line landing on the first one's open picker would confirm
     /// the picker, which saves the word as the account's default.
     moving: bool,
-    /// The word the last press put the session on, until a turn has run at
-    /// it and the session's own record says so.
+    /// The word the last press put the session on, until a turn has run.
     pending: Option<String>,
+    /// The session's newest effort record when that press went in: a newer
+    /// one is a turn that ran since, and the record says where the session
+    /// stands, whatever word it says.
+    record: Option<u64>,
 }
 
 /// One attempt's standing with the seat.
@@ -753,11 +756,19 @@ pub(crate) fn pane_effort(host: &dyn Host, term: u32, tail: Option<&str>) -> Eff
     let moves = moves_of(host, worker.as_ref(), term);
     let turn = tail.and_then(effort_in);
     let summons = worker.and_then(|worker| worker.floor);
+    let record = record_of(tail);
     let pending = held.as_ref().and_then(|held| {
         let mut book = held.moves.lock().unwrap_or_else(|held| held.into_inner());
         let book = &mut *book;
         match book.pressed.get_mut(&term) {
-            Some(pressed) => pressed.pending.clone(),
+            Some(pressed) => {
+                // A turn has run since the press: the session's own record
+                // says where it stands now, whatever word the press waited on.
+                if pressed.record != record {
+                    pressed.pending = None;
+                }
+                pressed.pending.clone()
+            }
             None => seat_keyed(&book.seats, term),
         }
     });
@@ -794,6 +805,16 @@ fn seat_keyed(seats: &HashMap<String, Seat>, term: u32) -> Option<String> {
             .then(|| open.to.clone())
             .flatten()
     })
+}
+
+/// The mark of the session's newest effort record in `tail`, the one a
+/// press is read against afterwards.
+fn record_of(tail: Option<&str>) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let (line, _) = effort_record_in(tail?)?;
+    let mut mark = std::hash::DefaultHasher::new();
+    line.hash(&mut mark);
+    Some(mark.finish())
 }
 
 /// Why a press may not type at `term` now, read the way every door that
@@ -952,6 +973,7 @@ pub(crate) fn press(
             let landed = Pressed {
                 moving: false,
                 pending: Some(to.to_string()),
+                record: record_of(tail),
             };
             pressed.insert(term, landed);
         }
