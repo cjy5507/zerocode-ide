@@ -18,12 +18,13 @@
 //! provider's, so the numbers match what the screen showed.
 
 use std::io::{self, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::message_stream::types::{RenderBlock, StreamPhase};
+use crate::message_stream::types::{RenderBlock, StreamPhase, ToolCallStatus};
 #[cfg(test)]
 use crate::message_stream::types::BlockId;
 
@@ -32,8 +33,17 @@ const TIMINGS_FILE: &str = "timings.jsonl";
 
 /// The stamps one request collects while its stream is in flight. Monotonic
 /// instants; converted to millisecond waits only when the record is written.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct StreamStamps {
+    /// When the turn this request belongs to began: the runtime took the
+    /// person's words, before the turn-start hooks and judgments.
+    pub turn_started: Option<Instant>,
+    /// When the turn-start judgments began holding this request, and when
+    /// they let it go — the turn's first request only.
+    pub judge_wait: Option<Range<Instant>>,
+    /// When the compaction preflight in front of this request began and
+    /// ended — the turn's first request only.
+    pub preflight: Option<Range<Instant>>,
     /// When the runtime began assembling this request (before recall,
     /// reminders and the wire build).
     pub assemble_started: Option<Instant>,
@@ -48,6 +58,47 @@ pub struct StreamStamps {
     pub completed: Option<Instant>,
     /// How many times the request was sent (1 for a clean run).
     pub attempts: u32,
+    /// When each tool block of the answer closed — its input complete — by
+    /// the call's id and the tool's name, in the order they closed.
+    tool_closed: Vec<(String, String, Instant)>,
+    /// The tools whose results this request carries back, and how long each
+    /// ran.
+    pub tools_ran: ToolRuns,
+}
+
+/// One tool on a row, by name only — never its input or its result — with a
+/// time in ms, absent for a tool that did not run (t-78938).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolMark {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ms: Option<u64>,
+}
+
+/// The tools one answer asked for, in the order asked, each with how long it
+/// ran: what the request that carries their results back says of them
+/// (t-78938). A tool that did not run — refused, or answered by the
+/// repetition guard — keeps no time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolRuns {
+    marks: Vec<ToolMark>,
+}
+
+impl ToolRuns {
+    /// The tools an answer asked for, by name, none of them run yet.
+    #[must_use]
+    pub fn asked<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        Self {
+            marks: names.into_iter().map(|name| ToolMark { name: name.to_string(), ms: None }).collect(),
+        }
+    }
+
+    /// The `index`th tool asked for ran from `started` to `finished`.
+    pub fn ran(&mut self, index: usize, started: Instant, finished: Instant) {
+        if let Some(mark) = self.marks.get_mut(index) {
+            mark.ms = millis_between(Some(started), Some(finished));
+        }
+    }
 }
 
 impl StreamStamps {
@@ -60,6 +111,20 @@ impl StreamStamps {
         }
     }
 
+    /// A request of the turn `clock` keeps, whose assembly began at
+    /// `assemble_started` after the compaction `preflight`, when one ran in
+    /// front of it. The judgments' wait goes with the first request that
+    /// takes it off the clock: only the turn's first request waited for them.
+    #[must_use]
+    pub fn in_turn(assemble_started: Instant, clock: &mut TurnClock, preflight: Option<Range<Instant>>) -> Self {
+        Self {
+            turn_started: clock.started,
+            judge_wait: clock.judge_wait.take(),
+            preflight,
+            ..Self::begun(assemble_started)
+        }
+    }
+
     /// Observe a block on the probe channel, now.
     pub fn observe(&mut self, block: &RenderBlock) {
         self.observe_at(block, Instant::now());
@@ -69,19 +134,30 @@ impl StreamStamps {
     /// on a retry, re-opens) the attempt; other phase blocks are the status
     /// line's own and stamp nothing; every provider block is the first byte
     /// once, and text, reasoning and tool calls are the first visible content
-    /// once.
+    /// once; a tool call announced `Running` is its block's close, once per
+    /// call, and a re-opened attempt forgets the closes of the one before.
     pub fn observe_at(&mut self, block: &RenderBlock, now: Instant) {
         match block {
             RenderBlock::StreamPhase(StreamPhase::RequestSent { .. }) => {
                 self.sent = Some(now);
                 self.first_byte = None;
                 self.first_visible = None;
+                self.tool_closed.clear();
                 self.attempts = self.attempts.saturating_add(1);
             }
             RenderBlock::StreamPhase(_) => {}
-            RenderBlock::TextDelta { .. } | RenderBlock::Reasoning { .. } | RenderBlock::ToolCall { .. } => {
+            RenderBlock::TextDelta { .. } | RenderBlock::Reasoning { .. } => {
                 self.first_byte.get_or_insert(now);
                 self.first_visible.get_or_insert(now);
+            }
+            RenderBlock::ToolCall { tool_call_id, name, status, .. } => {
+                self.first_byte.get_or_insert(now);
+                self.first_visible.get_or_insert(now);
+                // A call is announced `Running` once its input is complete:
+                // its block has closed, and its tool could have started.
+                if *status == ToolCallStatus::Running && !self.tool_closed.iter().any(|(id, ..)| *id == tool_call_id.0) {
+                    self.tool_closed.push((tool_call_id.0.clone(), name.clone(), now));
+                }
             }
             _ => {
                 self.first_byte.get_or_insert(now);
@@ -104,6 +180,27 @@ impl StreamStamps {
     #[must_use]
     pub fn left_the_runtime(&self) -> bool {
         self.sent.is_some()
+    }
+}
+
+/// What a turn stamps before any of its requests is assembled: when it
+/// began, and how long its turn-start judgments held it — the waits in front
+/// of its first request that the request's own stamps begin too late to see
+/// (t-78938).
+#[derive(Debug, Clone, Default)]
+pub struct TurnClock {
+    /// When the runtime took the person's words.
+    pub started: Option<Instant>,
+    /// When the turn-start judgments began holding the turn's first
+    /// request, and when they let it go; `None` when none was asked.
+    pub judge_wait: Option<Range<Instant>>,
+}
+
+impl TurnClock {
+    /// A turn that began at `now`.
+    #[must_use]
+    pub fn began(now: Instant) -> Self {
+        Self { started: Some(now), judge_wait: None }
     }
 }
 
@@ -140,6 +237,33 @@ pub struct RequestTimingRecord {
     /// written before this column and wherever no attempt was declared.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub attempt: String,
+    /// The turn began → last attempt left: the whole wait from the person's
+    /// words to this request, of which `judge_wait_ms`, `preflight_ms` and
+    /// `assemble_ms` are parts. Absent on every row written before this
+    /// column, and on a request no turn start was stamped for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_start_ms: Option<u64>,
+    /// How long the turn-start judgments held this request — the turn's
+    /// first request only, and only when one was asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge_wait_ms: Option<u64>,
+    /// How long the compaction preflight in front of this request took —
+    /// the turn's first request only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_ms: Option<u64>,
+    /// When each tool block of this answer closed — its input complete, the
+    /// moment its tool could have started — counted from the last attempt's
+    /// send, in the order they closed, by tool name only. Absent when the
+    /// answer called no tool.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_closed_ms: Vec<ToolMark>,
+    /// How long each tool whose result this request carries back ran, in the
+    /// order the answer before it asked for them, by tool name only; a tool
+    /// that did not run has no `ms`. Read beside the row of the answer that
+    /// asked for them — the same `attempt`, the iteration before — so a row
+    /// with no attempt to be joined by never carries it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_ran_ms: Vec<ToolMark>,
 }
 
 /// The turn context a record carries next to its waits.
@@ -160,6 +284,10 @@ fn millis_between(from: Option<Instant>, to: Option<Instant>) -> Option<u64> {
     Some(u64::try_from(to.saturating_duration_since(from).as_millis()).unwrap_or(u64::MAX))
 }
 
+fn span_millis(span: Option<&Range<Instant>>) -> Option<u64> {
+    span.and_then(|span| millis_between(Some(span.start), Some(span.end)))
+}
+
 /// Fold the stamps into a record.
 #[must_use]
 pub fn timing_record(context: &TimingContext<'_>, stamps: &StreamStamps) -> RequestTimingRecord {
@@ -176,7 +304,39 @@ pub fn timing_record(context: &TimingContext<'_>, stamps: &StreamStamps) -> Requ
         stream_ms: millis_between(stamps.sent, stamps.completed),
         outcome: context.outcome.to_string(),
         attempt: context.attempt.to_string(),
+        turn_start_ms: millis_between(stamps.turn_started, stamps.sent),
+        judge_wait_ms: span_millis(stamps.judge_wait.as_ref()),
+        preflight_ms: span_millis(stamps.preflight.as_ref()),
+        tool_closed_ms: stamps
+            .tool_closed
+            .iter()
+            .map(|(_, name, closed)| ToolMark { name: name.clone(), ms: millis_between(stamps.sent, Some(*closed)) })
+            .collect(),
+        tool_ran_ms: if context.attempt.is_empty() { Vec::new() } else { stamps.tools_ran.marks.clone() },
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The stamps of each request this thread's turns would have written a
+    /// row for. A test runtime arms no durable traces and writes no row, so a
+    /// test reads them back here ([`take_recorded`]).
+    static RECORDED: std::cell::RefCell<Vec<StreamStamps>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keep `stamps` for [`take_recorded`] when the ledger would write a row for
+/// them.
+#[cfg(test)]
+pub(crate) fn note_recorded(stamps: &StreamStamps) {
+    if stamps.left_the_runtime() {
+        RECORDED.with(|recorded| recorded.borrow_mut().push(stamps.clone()));
+    }
+}
+
+/// The stamps this thread's turns recorded since the last call, oldest first.
+#[cfg(test)]
+pub(crate) fn take_recorded() -> Vec<StreamStamps> {
+    RECORDED.with(std::cell::RefCell::take)
 }
 
 /// Where a project's ledger lives.
@@ -280,6 +440,125 @@ mod tests {
             !written.contains(r#""attempt":"#),
             "an empty attempt costs no bytes on a file kept forever: {written}"
         );
+    }
+
+    fn tool_call(id: &str, name: &str, status: crate::message_stream::types::ToolCallStatus) -> RenderBlock {
+        use crate::message_stream::types::{ToolCallId, ToolCallStatus, ToolPreview};
+        RenderBlock::ToolCall {
+            id: BlockId(2),
+            tool_call_id: ToolCallId(id.to_string()),
+            name: name.to_string(),
+            summary: String::new(),
+            preview: ToolPreview::Generic { name: name.to_string(), input_summary: String::new() },
+            input_print: (status == ToolCallStatus::Running).then(String::new),
+            status,
+        }
+    }
+
+    /// Z13: each tool block of an answer closes at its own time — its input
+    /// complete, the moment its tool could have started — and the row says
+    /// when, counted from the send, by the tool's name alone. A block
+    /// announced while its input still streams has not closed.
+    #[test]
+    fn a_row_says_when_each_tool_block_of_the_answer_closed() {
+        use crate::message_stream::types::ToolCallStatus::{Pending, Running};
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut stamps = StreamStamps::begun(t0);
+        stamps.observe_at(&sent(1), t0 + ms(5));
+        stamps.observe_at(&tool_call("toolu_a", "read_file", Pending), t0 + ms(40));
+        stamps.observe_at(&tool_call("toolu_a", "read_file", Running), t0 + ms(100));
+        stamps.observe_at(&tool_call("toolu_b", "Bash", Pending), t0 + ms(120));
+        stamps.observe_at(&tool_call("toolu_b", "Bash", Running), t0 + ms(305));
+        stamps.complete_at(t0 + ms(400));
+
+        let row = serde_json::to_value(timing_record(&context("completed"), &stamps)).expect("a row");
+        assert_eq!(
+            row["tool_closed_ms"],
+            serde_json::json!([{"name": "read_file", "ms": 95}, {"name": "Bash", "ms": 300}]),
+            "the first block's close and the second's: {row}"
+        );
+    }
+
+    /// A retry re-opens the attempt, and the blocks of the attempt before it
+    /// closed in an answer nobody read: only the answering attempt's closes
+    /// count, from its own send.
+    #[test]
+    fn a_retry_forgets_the_tool_blocks_of_the_attempt_before() {
+        use crate::message_stream::types::ToolCallStatus::Running;
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut stamps = StreamStamps::begun(t0);
+        stamps.observe_at(&sent(1), t0 + ms(5));
+        stamps.observe_at(&tool_call("toolu_a", "read_file", Running), t0 + ms(50));
+        stamps.observe_at(&sent(2), t0 + ms(100));
+        stamps.observe_at(&tool_call("toolu_a", "read_file", Running), t0 + ms(180));
+        stamps.observe_at(&tool_call("toolu_a", "read_file", Running), t0 + ms(190));
+        let row = serde_json::to_value(timing_record(&context("completed"), &stamps)).expect("a row");
+        assert_eq!(row["tool_closed_ms"], serde_json::json!([{"name": "read_file", "ms": 80}]), "{row}");
+    }
+
+    /// Z13: the request that carries an answer's tool results back says how
+    /// long each tool ran, in the order the answer asked for them, by name; a
+    /// tool that did not run has no time; and a row with no attempt to join
+    /// it to its answer's row says none of it.
+    #[test]
+    fn a_row_says_how_long_each_tool_whose_result_it_carries_ran() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut runs = ToolRuns::asked(["read_file", "Bash", "write_file"]);
+        runs.ran(0, t0, t0 + ms(12));
+        runs.ran(2, t0 + ms(12), t0 + ms(40));
+        runs.ran(7, t0, t0 + ms(1));
+        let mut stamps = StreamStamps::begun(t0 + ms(50));
+        stamps.tools_ran = runs;
+        stamps.observe_at(&sent(1), t0 + ms(52));
+
+        let row = serde_json::to_value(timing_record(&context("completed"), &stamps)).expect("a row");
+        assert_eq!(
+            row["tool_ran_ms"],
+            serde_json::json!([{"name": "read_file", "ms": 12}, {"name": "Bash"}, {"name": "write_file", "ms": 28}]),
+            "{row}"
+        );
+        let unjoinable = TimingContext { attempt: "", ..context("completed") };
+        let row = serde_json::to_value(timing_record(&unjoinable, &stamps)).expect("a row");
+        assert!(row.get("tool_ran_ms").is_none(), "a row with no attempt carries no tool times: {row}");
+    }
+
+    /// Every row written before the turn's columns parses, and a request no
+    /// turn start was stamped for spells none of them: a file kept forever
+    /// pays no bytes for a wait nobody measured.
+    #[test]
+    fn a_row_without_the_turn_columns_parses_and_spells_none_of_them() {
+        let old_line = r#"{"recorded_at":1789000000,"session_id":"s","model":null,"iteration":1,"request_messages":2,"attempts":1,"assemble_ms":1,"ttfb_ms":2,"ttfv_ms":3,"stream_ms":4,"outcome":"completed","attempt":"s@1"}"#;
+        let parsed: RequestTimingRecord = serde_json::from_str(old_line).expect("an older row must still parse");
+        assert_eq!((parsed.turn_start_ms, parsed.judge_wait_ms, parsed.preflight_ms), (None, None, None));
+        assert!(parsed.tool_closed_ms.is_empty() && parsed.tool_ran_ms.is_empty());
+
+        let t0 = Instant::now();
+        let mut stamps = StreamStamps::begun(t0);
+        stamps.observe_at(&sent(1), t0 + Duration::from_millis(5));
+        let written = serde_json::to_string(&timing_record(&context("completed"), &stamps)).expect("serialize");
+        for column in ["turn_start_ms", "judge_wait_ms", "preflight_ms", "tool_closed_ms", "tool_ran_ms"] {
+            assert!(!written.contains(column), "{column} was spelled for nothing: {written}");
+        }
+    }
+
+    /// The turn-start judgments held only the turn's first request: the
+    /// first request a turn's clock stamps takes their wait off it, and every
+    /// request after carries the turn's start alone.
+    #[test]
+    fn the_judgments_wait_rides_the_turns_first_request_only() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut clock = TurnClock::began(t0);
+        clock.judge_wait = Some(t0 + ms(1)..t0 + ms(9));
+        let first = StreamStamps::in_turn(t0 + ms(20), &mut clock, Some(t0 + ms(9)..t0 + ms(20)));
+        let second = StreamStamps::in_turn(t0 + ms(900), &mut clock, None);
+        assert_eq!(first.judge_wait, Some(t0 + ms(1)..t0 + ms(9)));
+        assert_eq!(second.judge_wait, None);
+        assert_eq!((first.turn_started, second.turn_started), (Some(t0), Some(t0)));
+        assert_eq!(second.preflight, None);
     }
 
     /// The three waits are read off the probe channel in order: the phase

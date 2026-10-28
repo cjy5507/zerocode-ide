@@ -744,6 +744,9 @@ pub struct ConversationRuntime<C, T> {
     /// Seated beside the retriever and shown every recall after it settles;
     /// its answer is the order the turn reads. See [`crate::RecallSeat`].
     recall_seat: Option<Arc<dyn crate::RecallSeat>>,
+    /// The reading this turn's seat last settled, so a turn asks it once per
+    /// reading and not once per request ([`turn_support::SettledOnce`]).
+    turn_settled: Arc<Mutex<Option<turn_support::SettledReading>>>,
     /// Seated beside full compaction and asked, once per boundary, which
     /// tool results the summary still needs to read. See
     /// [`crate::CompactionSeat`].
@@ -765,6 +768,9 @@ pub struct ConversationRuntime<C, T> {
     /// that is always late would otherwise cost every turn the whole wait
     /// and still miss its first request.
     slow_turn_notes: HashSet<&'static str>,
+    /// When this turn began and how long its turn-start judgments held it,
+    /// for its requests' timing rows (t-78938).
+    turn_clock: crate::request_timings::TurnClock,
     /// The start-of-turn reading awaiting its actual edited-file label.
     file_pick_pending_turn: Option<FilePickPendingTurn>,
     /// Seated beside the tools and handed each shell command before it runs
@@ -1832,6 +1838,7 @@ where
             memory_retriever: None,
             user_preference_source: None,
             recall_seat: None,
+            turn_settled: Arc::default(),
             compaction_seat: None,
             patch_review_seat: None,
             file_pick_seat: None,
@@ -1839,6 +1846,7 @@ where
             skill_suggestion_turn_start: None,
             pending_turn_notes: Vec::new(),
             slow_turn_notes: HashSet::new(),
+            turn_clock: crate::request_timings::TurnClock::default(),
             file_pick_pending_turn: None,
             tool_guard_seat: None,
             max_iterations: default_max_iterations(),
@@ -2112,7 +2120,8 @@ where
         if self.pending_turn_notes.is_empty() {
             return;
         }
-        let until = std::time::Instant::now() + TURN_START_JUDGMENT_WAIT;
+        let waited_from = std::time::Instant::now();
+        let until = waited_from + TURN_START_JUDGMENT_WAIT;
         let slow = &self.slow_turn_notes;
         let pending = &mut self.pending_turn_notes;
         // The timers are made inside the async block: `timeout_at` binds its
@@ -2128,6 +2137,8 @@ where
             }
             landed
         });
+        // The wait the turn's first request carries on its timing row.
+        self.turn_clock.judge_wait = Some(waited_from..std::time::Instant::now());
         let mut landed = landed.into_iter();
         for note in std::mem::take(&mut self.pending_turn_notes) {
             if let Some(joined) = landed.next().flatten() {
@@ -2230,6 +2241,9 @@ where
         &mut self,
         user_input: &str,
     ) -> Result<(), StreamingTurnError> {
+        // The person's words reached the runtime: what every wait in front
+        // of this turn's requests is counted from.
+        self.turn_clock = crate::request_timings::TurnClock::began(std::time::Instant::now());
         let _ = self.run_lifecycle_hook(
             HookEvent::TurnStart,
             &json!({"session_id": self.session.session_id}),
@@ -3537,3 +3551,5 @@ mod refusal_repeat_tests;
 
 #[cfg(test)]
 mod surface_repetition_tests;
+#[cfg(test)]
+mod turn_time_tests;

@@ -4,7 +4,7 @@
 //! methods, now `pub(super)` so the loop in `mod.rs` still calls them.
 
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Value, json};
 use telemetry::SessionTracer;
@@ -29,6 +29,71 @@ use crate::prompt::{render_reminders, ReminderCandidate, MAX_REMINDER_LINES};
 /// both cheaper and the only way the two can be guaranteed disjoint — a second
 /// query could return an entry the first already rendered.
 const RECALL_AND_REMINDER_LIMIT: usize = DEFAULT_MEMORY_RECALL_LIMIT + MAX_REMINDER_LINES;
+
+/// One reading a turn's seat settled: the query and the hits recall handed
+/// it, and the hits it handed back ([`SettledOnce`]).
+pub(super) struct SettledReading {
+    attempt: String,
+    query: String,
+    hits: Vec<core_types::MemoryHit>,
+    read: Vec<core_types::MemoryHit>,
+}
+
+/// The seat beside recall as one turn's requests reach it (t-78938): asked
+/// once per reading — the same query over the same hits — and its answer
+/// handed to every later request of the turn that recalls that reading
+/// again.
+///
+/// A turn's query is the person's last words, the same on every request of
+/// the turn, and a store that holds still recalls the same notes for them,
+/// so asking the judgment per request asked one question again and again:
+/// on 2026-10-28 the installed 1.1.99 waited the judgment's 1.5 s wall on
+/// 280 of its 292 requests, most of them a turn's repeat requests. Kept, a
+/// turn's later requests read the order its first request read — a
+/// judgment that lands late cannot reorder a section the turn already
+/// reads. A memory written mid-turn changes the hits and words typed
+/// mid-turn change the query: either is a new reading, asked once more. The
+/// hits are compared whole, not by a fingerprint, so what goes back is
+/// always an answer the seat gave for exactly these hits.
+pub(super) struct SettledOnce {
+    seat: Arc<dyn crate::RecallSeat>,
+    settled: Arc<Mutex<Option<SettledReading>>>,
+}
+
+impl SettledOnce {
+    /// `seat`, asked through the turn's one kept reading, `settled`.
+    pub(super) fn over(seat: Arc<dyn crate::RecallSeat>, settled: Arc<Mutex<Option<SettledReading>>>) -> Self {
+        Self { seat, settled }
+    }
+}
+
+impl crate::RecallSeat for SettledOnce {
+    fn settle(&self, attempt: &str, query: &str, hits: Vec<core_types::MemoryHit>) -> Vec<core_types::MemoryHit> {
+        let kept = self
+            .settled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|kept| kept.attempt == attempt && kept.query == query && kept.hits == hits)
+            .map(|kept| kept.read.clone());
+        if let Some(read) = kept {
+            return read;
+        }
+        // Not held across the seat: an acting seat waits out its wall here.
+        let read = self.seat.settle(attempt, query, hits.clone());
+        *self.settled.lock().unwrap_or_else(PoisonError::into_inner) = Some(SettledReading {
+            attempt: attempt.to_string(),
+            query: query.to_string(),
+            hits,
+            read: read.clone(),
+        });
+        read
+    }
+
+    fn observe(&self, attempt: &str, progress: crate::TurnProgress<'_>) {
+        self.seat.observe(attempt, progress);
+    }
+}
 
 /// Split one recall into the section a turn reads and the reminders behind it.
 ///
@@ -196,6 +261,11 @@ where
     /// Once per turn, never per request: the deposit is one map write, and the
     /// per-request recorder only reads.
     pub(super) fn begin_attempt(&mut self) {
+        // A turn's seat asks afresh: an attempt key can come round again (a
+        // child inherits one for its whole run, and a main session's counts
+        // the user messages a compaction left), and the last turn's reading
+        // must not answer this one's first request.
+        self.turn_settled = Arc::default();
         self.attempt = self.next_attempt();
         ::api::note_attempt(self.attempt_cache_scope(), &self.attempt);
     }
@@ -410,6 +480,13 @@ where
             }
         };
         section
+    }
+
+    /// The seat this request's recall settles through: the seat beside
+    /// recall, asked once per reading of the turn ([`SettledOnce`]).
+    pub(super) fn turn_recall_seat(&self) -> Option<Arc<dyn crate::RecallSeat>> {
+        let seat = self.recall_seat.clone()?;
+        Some(Arc::new(SettledOnce::over(seat, Arc::clone(&self.turn_settled))))
     }
 
     /// Tell the recall seat what the turn appended since it last heard, from
