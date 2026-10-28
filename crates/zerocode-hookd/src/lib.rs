@@ -44,6 +44,8 @@ use tokio::sync::mpsc;
 use zerocode_core::computer_use::COMPUTER_CLI;
 use zerocode_core::{ALL_AGENTS, AgentKind, HookEnvelope};
 
+pub use kill_guard::{KillRoots, KillWitness};
+
 /// Header carrying the per-run shared secret.
 pub const HOOK_TOKEN_HEADER: &str = "x-zerocode-hook-token";
 
@@ -205,6 +207,7 @@ pub mod codex_runtime_auth;
 pub mod codex_trust;
 pub mod endpoint;
 pub mod install;
+mod kill_guard;
 mod orchestration_contract;
 pub mod plugin;
 pub mod pointer_mailbox;
@@ -590,6 +593,9 @@ pub struct BridgeState {
     /// Where a hook delivery that needed more than one try is written down
     /// for the window — see [`BridgeState::with_delivery_notes`].
     delivery_notes: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    /// What the window knows of its panes' processes, for the kill guard
+    /// ([`kill_guard`]). `None` is a bridge that refuses nothing.
+    kill_witness: Option<Arc<dyn KillWitness>>,
 }
 
 /// The second brain's answer to a prompt, for the providers whose prompt hook
@@ -734,6 +740,12 @@ pub const TURN_BRIEF_WALL: std::time::Duration = HOOK_REPLY_BUDGET
     .saturating_sub(HOOK_CONNECT_BUDGET)
     .saturating_sub(HOOK_REPLY_MARGIN);
 
+/// How long the kill guard may take to judge a command (t-80602): the same
+/// wall as a turn's brief, for the same reason — a reply later than the
+/// script waits is thrown away, and a refusal thrown away is a command that
+/// runs. A judgment not in by then is a question put to a person.
+pub const KILL_GUARD_WALL: std::time::Duration = TURN_BRIEF_WALL;
+
 /// The most characters a turn's brief may carry: under the smallest context
 /// any measured provider takes from a hook — Codex's `additionalContextLimit`,
 /// about 2,500 tokens by default, which no tokenizer makes fewer than as
@@ -849,6 +861,15 @@ impl BridgeState {
         self
     }
 
+    /// Install what the window knows of its panes' processes: a pane's
+    /// command that would signal the window or another pane is then refused
+    /// in its own pre-tool hook's reply ([`kill_guard`], t-80602).
+    #[must_use]
+    pub fn with_kill_witness(mut self, witness: Arc<dyn KillWitness>) -> Self {
+        self.kill_witness = Some(witness);
+        self
+    }
+
     /// Install the window's turn brief as a further answer to prompt hooks.
     #[must_use]
     pub fn with_turn_brief(mut self, source: Arc<dyn TurnBrief>) -> Self {
@@ -933,6 +954,7 @@ impl BridgeState {
                 pointers: None,
                 replays: Arc::new(std::sync::Mutex::new(replays::Replays::default())),
                 delivery_notes: None,
+                kill_witness: None,
                 selection_context: Arc::new(std::sync::Mutex::new(
                     orchestration_contract::SelectionContextTracker::default(),
                 )),
@@ -1796,6 +1818,12 @@ async fn answer_hook(
     };
     let pane_key = envelope.pane_key.clone();
     let pointer = pointer_reply(&state, &pane_key, &knock);
+    // Whether this knock is a command about to signal something — read off
+    // the copy the knock kept, and only with a witness installed.
+    let kill_pending = state.kill_witness.as_ref().and_then(|witness| {
+        kill_guard::pending(knock.agent, &knock.event, &knock.payload)
+            .map(|pending| (Arc::clone(witness), pending))
+    });
     // A dropped receiver means the server outlived the window half of the
     // bridge. A 202 here would tell the script its payload landed when nobody
     // can consume it; 503 lets the script leave its silent marker instead.
@@ -1852,7 +1880,13 @@ async fn answer_hook(
         .filter(|text| !text.trim().is_empty() && text.chars().count() <= TURN_BRIEF_CHAR_CAP)?;
         Some((ask, text))
     };
-    let (knowledge, brief) = tokio::join!(knowledge, brief);
+    // The kill guard's judgment, beside the other two and held to its own
+    // wall; nothing at all for a knock it has nothing to say about.
+    let refusal = async {
+        let (witness, pending) = kill_pending?;
+        kill_guard::reply(witness, pane_key.clone(), pending, KILL_GUARD_WALL).await
+    };
+    let (knowledge, brief, refusal) = tokio::join!(knowledge, brief, refusal);
     let knowledge = event_name.clone().zip(knowledge);
     let mut wants_receipt = false;
     let brief = brief.and_then(|(ask, text)| {
@@ -1880,6 +1914,11 @@ async fn answer_hook(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .unused(&receipt_key);
+    }
+    /* A refusal is its own whole answer, like a turn-end continuation: the
+     * pre-tool event it answers is not one this bridge has context for. */
+    if let Some(refusal) = refusal {
+        return replays::HookAnswer::Json(StatusCode::ACCEPTED, refusal);
     }
     /* The pointer's own moment. Decided above, before the envelope went, and
      * answered here ahead of the context reply.

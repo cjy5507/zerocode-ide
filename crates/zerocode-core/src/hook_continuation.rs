@@ -95,6 +95,41 @@ pub const fn stop_continuation(agent: AgentKind) -> Option<StopContinuation> {
     }
 }
 
+/// How a provider's hook refuses a tool call before it runs (t-80602, the kill
+/// guard), when it can.
+///
+/// **Measured on the installed CLIs, 10-28.** Claude Code 2.1.312 reads
+/// `hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision:
+/// allow|deny|ask, permissionDecisionReason}`. Codex 0.165.0's own schema for
+/// the same reply lists `ask`, and its handler answers it with "PreToolUse
+/// hook returned unsupported permissionDecision:ask" — so a question goes to
+/// Codex as a refusal, never as something it would drop and run anyway; its
+/// `deny` needs a non-empty reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreToolDecision {
+    /// The event whose reply carries the decision.
+    pub event: &'static str,
+    /// Whether `permissionDecision: "ask"` puts the call before a person.
+    pub asks: bool,
+}
+
+/// Whether this provider's hook can refuse a tool call before it runs, and
+/// how. `None` for every provider whose behaviour has not been measured.
+#[must_use]
+pub const fn pre_tool_decision(agent: AgentKind) -> Option<PreToolDecision> {
+    match agent {
+        AgentKind::Claude => Some(PreToolDecision {
+            event: "PreToolUse",
+            asks: true,
+        }),
+        AgentKind::Codex => Some(PreToolDecision {
+            event: "PreToolUse",
+            asks: false,
+        }),
+        _ => None,
+    }
+}
+
 /// Whether this `Stop` payload says the turn is already a hook's continuation.
 ///
 /// Read off the payload rather than remembered, because the provider is the
@@ -131,6 +166,26 @@ mod tests {
         ] {
             assert!(
                 stop_continuation(unmeasured).is_none(),
+                "{unmeasured:?} claimed a capability nobody measured"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_measured_providers_refuse_a_tool_before_it_runs() {
+        let claude = pre_tool_decision(AgentKind::Claude).expect("claude was measured");
+        assert_eq!((claude.event, claude.asks), ("PreToolUse", true));
+        let codex = pre_tool_decision(AgentKind::Codex).expect("codex was measured");
+        assert_eq!((codex.event, codex.asks), ("PreToolUse", false));
+        for unmeasured in [
+            AgentKind::Zo,
+            AgentKind::Cursor,
+            AgentKind::Droid,
+            AgentKind::Amp,
+            AgentKind::Antigravity,
+        ] {
+            assert!(
+                pre_tool_decision(unmeasured).is_none(),
                 "{unmeasured:?} claimed a capability nobody measured"
             );
         }
