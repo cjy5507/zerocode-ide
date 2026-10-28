@@ -67,18 +67,24 @@ pub struct StreamStamps {
 }
 
 /// One tool on a row, by name only — never its input or its result — with a
-/// time in ms, absent for a tool that did not run (t-78938).
+/// time in ms, absent for a tool that did not run to its end (t-78938).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolMark {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ms: Option<u64>,
+    /// The person stopped the tool while it ran (Esc): it began but did not
+    /// finish, so it keeps no time — the wait up to the keypress is not how
+    /// long the tool takes (t-80327).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
 }
 
 /// The tools one answer asked for, in the order asked, each with how long it
 /// ran: what the request that carries their results back says of them
 /// (t-78938). A tool that did not run — refused, or answered by the
-/// repetition guard — keeps no time.
+/// repetition guard — keeps no time, and neither does one the person
+/// stopped while it ran, which is marked `cancelled` (t-80327).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolRuns {
     marks: Vec<ToolMark>,
@@ -89,7 +95,10 @@ impl ToolRuns {
     #[must_use]
     pub fn asked<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
-            marks: names.into_iter().map(|name| ToolMark { name: name.to_string(), ms: None }).collect(),
+            marks: names
+                .into_iter()
+                .map(|name| ToolMark { name: name.to_string(), ms: None, cancelled: false })
+                .collect(),
         }
     }
 
@@ -97,6 +106,15 @@ impl ToolRuns {
     pub fn ran(&mut self, index: usize, started: Instant, finished: Instant) {
         if let Some(mark) = self.marks.get_mut(index) {
             mark.ms = millis_between(Some(started), Some(finished));
+        }
+    }
+
+    /// The `index`th tool asked for began and the person stopped it before
+    /// it finished: it keeps no time.
+    pub fn stopped(&mut self, index: usize) {
+        if let Some(mark) = self.marks.get_mut(index) {
+            mark.ms = None;
+            mark.cancelled = true;
         }
     }
 }
@@ -259,7 +277,8 @@ pub struct RequestTimingRecord {
     pub tool_closed_ms: Vec<ToolMark>,
     /// How long each tool whose result this request carries back ran, in the
     /// order the answer before it asked for them, by tool name only; a tool
-    /// that did not run has no `ms`. Read beside the row of the answer that
+    /// that did not run has no `ms`, and one the person stopped while it ran
+    /// has none either and says `"cancelled": true`. Read beside the row of the answer that
     /// asked for them — the same `attempt`, the iteration before — so a row
     /// with no attempt to be joined by never carries it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -310,7 +329,11 @@ pub fn timing_record(context: &TimingContext<'_>, stamps: &StreamStamps) -> Requ
         tool_closed_ms: stamps
             .tool_closed
             .iter()
-            .map(|(_, name, closed)| ToolMark { name: name.clone(), ms: millis_between(stamps.sent, Some(*closed)) })
+            .map(|(_, name, closed)| ToolMark {
+                name: name.clone(),
+                ms: millis_between(stamps.sent, Some(*closed)),
+                cancelled: false,
+            })
             .collect(),
         tool_ran_ms: if context.attempt.is_empty() { Vec::new() } else { stamps.tools_ran.marks.clone() },
     }

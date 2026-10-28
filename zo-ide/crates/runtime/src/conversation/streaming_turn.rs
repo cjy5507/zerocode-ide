@@ -442,6 +442,8 @@ struct PrecomputedStreamingToolResult {
     tool_start: std::time::Instant,
     /// When its dispatch came back — not when the wave finished.
     finished: std::time::Instant,
+    /// The person stopped it before it came back on its own.
+    cancelled: bool,
 }
 
 struct StreamingToolRenderContext<'a> {
@@ -2762,7 +2764,11 @@ where
                     }
                 }
                 let result_message = if let Some(precomputed_result) = precomputed.remove(&idx) {
-                    tool_runs.ran(idx, precomputed_result.tool_start, precomputed_result.finished);
+                    if precomputed_result.cancelled {
+                        tool_runs.stopped(idx);
+                    } else {
+                        tool_runs.ran(idx, precomputed_result.tool_start, precomputed_result.finished);
+                    }
                     self.finalize_streaming_tool_result(
                         iterations,
                         p,
@@ -2903,7 +2909,11 @@ where
                                     )
                                 }
                             };
-                            tool_runs.ran(idx, tool_start, std::time::Instant::now());
+                            if tool_was_cancelled {
+                                tool_runs.stopped(idx);
+                            } else {
+                                tool_runs.ran(idx, tool_start, std::time::Instant::now());
+                            }
 
                             self.finalize_streaming_tool_result(
                                 iterations,
@@ -3229,6 +3239,7 @@ where
                         kind,
                         tool_start,
                         finished,
+                        cancelled,
                     },
                 );
             }
