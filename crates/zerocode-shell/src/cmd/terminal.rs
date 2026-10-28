@@ -2514,7 +2514,7 @@ pub(crate) fn resize_lane(
 }
 
 #[cfg(test)]
-mod window_note_tests {
+mod tests {
     use super::*;
     use zerocode_core::transcript::TranscriptTurn;
 
