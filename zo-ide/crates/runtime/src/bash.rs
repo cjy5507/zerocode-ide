@@ -813,14 +813,22 @@ pub fn execute_bash_with_tasks(
     // The kill guard (t-80732), at the same chokepoint for the same reason: a
     // signal to the window or a process it started is refused in every mode
     // and on every path. A question for a person is the permission layer's
-    // to ask (`PermissionPolicy`), so only a refusal is acted on here.
-    if let Some(zerocode_core::shell_rule::kill::KillVerdict::Deny { reason }) =
-        crate::kill_guard::judge(&input.command)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            crate::kill_guard::refusal(&reason),
-        ));
+    // to ask (`PermissionPolicy`), so it goes ahead here — save in a pane the
+    // ledger summoned as a worker, which nobody watches, where no path can
+    // have asked it.
+    let refused = match crate::kill_guard::judge(&input.command) {
+        Some(zerocode_core::shell_rule::kill::KillVerdict::Deny { reason }) => {
+            Some(crate::kill_guard::refusal(&reason))
+        }
+        Some(zerocode_core::shell_rule::kill::KillVerdict::Ask { reason })
+            if crate::kill_guard::in_a_summoned_worker_pane() =>
+        {
+            Some(crate::kill_guard::unanswered(&reason))
+        }
+        _ => None,
+    };
+    if let Some(refused) = refused {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, refused));
     }
 
     // A per-agent tool context can pin the working directory (worktree

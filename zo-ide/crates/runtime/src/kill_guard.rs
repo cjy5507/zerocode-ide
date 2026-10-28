@@ -14,7 +14,9 @@
 //! asked; [`crate::permission_enforcer::PermissionEnforcer::check_bash`] has
 //! nobody to ask, so a question is a refusal there; and the bash chokepoint
 //! ([`crate::execute_bash`]) refuses the window in every mode and on every
-//! path, a question having been the permission layer's to ask.
+//! path, a question having been the permission layer's to ask — save in a
+//! pane the ledger summoned as a worker, where no path can have asked it, so
+//! a question is a refusal there too.
 
 use zerocode_core::agent_teams::{TEAM_LEADER_VAR, TEAM_PANE_VAR};
 use zerocode_core::shell_rule::kill::{self, KillCall, KillVerdict, ProcessTable, ProtectedRoot};
