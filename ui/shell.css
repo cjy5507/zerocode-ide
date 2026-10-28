@@ -36140,6 +36140,7 @@ details.task-board-section > summary {
 
 .board-ask-title {
   min-width: 0;
+  overflow-wrap: anywhere; /* 띄어쓰기 없는 경로·URL은 칸 안에서 끊는다(창 기본은 keep-all) */
   padding-top: calc(var(--space-1) / 2); /* 배지 높이의 가운데에 14/20 글줄을 맞춘다 */
 }
 
@@ -36229,11 +36230,15 @@ details.task-board-section > summary {
   grid-column: 2;
   grid-row: 1 / span 2;
   justify-content: flex-end;
+  min-width: 0;
 }
 
-/* 선택지가 문장이면 단추가 그 몫 안에서 제 글을 줄바꿈한다 — 짧은 글은 그대로 한 줄 단추다. */
+/* 선택지가 문장이면 단추가 그 몫 안에서 제 글을 줄바꿈한다 — 짧은 글은 그대로 한 줄 단추다.
+ * 띄어쓰기 없는 경로·URL은 `anywhere`로 끊어야 fit-content의 바닥(최소 폭)이 그 낱말 폭이 되지 않는다. */
 .board-ask-acts > .board-btn {
   max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
   padding-block: var(--space-1);
   text-align: start;
   white-space: normal;
