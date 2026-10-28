@@ -3071,6 +3071,8 @@ function syncHelperReport(list, run) {
 function turnRailNode(list) {
   const rail = document.createElement("div");
   rail.className = "chat-rail";
+  // The ticks are a way to a turn, and the pointer is told so (t-81525 C10).
+  rail.dataset.tip = t("worker.railTip", "차례로 가기");
   const handle = document.createElement("div");
   handle.className = "chat-rail-handle";
   handle.setAttribute("role", "slider");
