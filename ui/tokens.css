@@ -2717,6 +2717,13 @@
   --chat-radius-composer: var(--radius-xl);
   --chat-prose-size: var(--text-lg);
   --chat-prose-leading: 1.5;
+  /* The reading follows the page's own width (t-81525, the person's 「화면
+   * 크기에 따라 가독성」): a wide page's long lines take a little more air,
+   * a narrow one reads a step smaller so a line still holds a phrase. The
+   * page measures itself (shell.css, `@container`); these are the values it
+   * steps to — 16 on 1.5 between them. */
+  --chat-read-leading-wide: 1.6;
+  --chat-read-size-narrow: var(--text-md);
   --chat-dot: 7px;
   --chat-dot-halo: 3px;
   --chat-gutter: 30px;

@@ -15253,6 +15253,13 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   font-size: var(--chat-chip-size);
 }
 
+/* A long path or command in a chip breaks inside it rather than push the
+ * column sideways — on the chip alone, never the prose (the keep-all
+ * contract). */
+.is-chat-page .helper-said :not(pre) > code {
+  overflow-wrap: anywhere;
+}
+
 /* 답 안의 링크는 액센트 — 파일 경로든 주소든 같은 문의 같은 색. 맨 경로가
  * 된 문(`.helper-link`)은 아이콘 하나를 앞에 단다. */
 .is-chat-page .md-link {
@@ -18201,9 +18208,31 @@ button.helper-sib:hover {
 
 /* 720px: 옆이 접힌 창에서도 전사가 제 폭을 갖는다 — 단의 좌우 여백만 한
  * 단 줄이고, 아무것도 지워지지 않는다. */
-@media (max-width: 720px) {
-  .worker-view.is-chat-page {
+/* The page measures its own width, not the window's (t-81525 ②): a split
+ * pane reads the way a window of its width does. A wide page's answers take
+ * more air between lines; under 720px the column's sides narrow, and under
+ * 560px the prose steps down one size — 390px still holds a phrase a line.
+ * The values are set on the page's children, which the rows inherit; they
+ * move only when the page crosses a step. */
+.worker-view.is-chat-page {
+  container-type: inline-size;
+}
+
+@container (min-width: 1000px) {
+  .worker-view.is-chat-page > * {
+    --chat-prose-leading: var(--chat-read-leading-wide);
+  }
+}
+
+@container (max-width: 719px) {
+  .worker-view.is-chat-page > * {
     --helper-gutter: var(--space-3);
+  }
+}
+
+@container (max-width: 559px) {
+  .worker-view.is-chat-page > * {
+    --chat-prose-size: var(--chat-read-size-narrow);
   }
 }
 
