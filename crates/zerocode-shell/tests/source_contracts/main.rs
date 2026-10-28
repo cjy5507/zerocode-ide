@@ -9775,7 +9775,7 @@ mod tests {
         );
         let team = block_after(shell, "fn answer_team_command(");
         assert!(
-            team.contains("is_worker_done(&request.argv)")
+            team.contains("is_worker_done(argv)")
                 && team.contains(
                     "crate::emulator::borrower_gone(term, crate::emulator::LoanEnd::WorkerDone)"
                 ),

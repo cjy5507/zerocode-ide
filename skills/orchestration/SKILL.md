@@ -297,7 +297,7 @@ leader's pane too), and only then decide.
 sits you. `run-use <run>` binds you and sits you only if the chair is empty
 or its holder's pane is gone; a chair somebody holds answers `"seated":
 false` with the holder and the one verb that replaces a holder:
-`run-takeover --run <id> --from <seat> --reason <why> --retry-request
+`run-takeover --run <id> --from <seat> --reason-file <file> --retry-request
 <name>`. `--from` names the holder as `run-use`/`run-current` spell it
 (`team/pane`, or its bare pane). A takeover raises the seat's generation,
 files a `handoff` receipt in the old seat's own pane inbox, and ends the old
@@ -355,6 +355,29 @@ not an empty run — a watcher that parses the error as "no workers" will report
 that everyone finished at the moment the ledger died. Read the failure as a
 failure.
 
+**Give a verb its text as a file, never inside double quotes.** `--prompt`,
+`--body`, `--spec`, `--question`, `--resolution` and `--reason` each have a
+file form — `--prompt-file`, `--body-file`, `--spec-file`, `--question-file`,
+`--resolution-file`, `--reason-file` — that takes the ABSOLUTE path of a UTF-8
+file and reads it as it lies, with no shell in between. Do not write a
+backtick, `$(…)` or `$VAR` inside an inline double-quoted text: the shell runs
+or replaces it before `zerocode-orc` sees a word. Twice (2026-10-28) a `pkill`
+inside a briefing ran that way and took the window's panes down. Write the
+text with a quoted heredoc and name the file:
+
+```sh
+cat > /tmp/slice-1.md <<'EOF'
+Any characters at all: backticks, $(not run), $HOME, "quotes", 한글.
+EOF
+zerocode-orc worker-start --agent <name> --task <id> --prompt-file /tmp/slice-1.md --retry-request start-<id>
+```
+
+A text and its file form together are refused, and so is a file that is
+missing, empty, a link or not UTF-8. One plain word inline (`--resolution harvest`,
+`--reason quota-wall`) is safe; an inline text with a backtick or `$(` still goes through, with
+a warning line on stderr. Every example below that takes text is written in the
+file form: `--spec-file <file>` stands for a file written like this one.
+
 The shape of a session is always the same:
 
 1. `run-create --name <run> --retry-request open-<run>` — open a run, bind
@@ -364,12 +387,12 @@ The shape of a session is always the same:
    `run-use <run>` moves you; nothing else does, and a retry of an old request
    never moves you back. Binding and sitting are two facts: `run-use` answers
    `"seated": true` only when the chair was empty (see the seat rule above).
-2. `task-create --spec '<slice>' --retry-request task-<run>-1` — write each
+2. `task-create --spec-file <file> --retry-request task-<run>-1` — write each
    slice down BEFORE summoning anyone. A task carries its own spec, and
    `--deps` holds a slice back until the slices it needs have finished.
    Write `--title` in English: checkout and branch names are ASCII-only, so
    Korean words fall away and a title led by `t-<id>` keeps only that id.
-3. `worker-start --agent <name> --task <id> --prompt '<slice>' --retry-request
+3. `worker-start --agent <name> --task <id> --prompt-file <file> --retry-request
    start-<id>` — this cuts a real pane and starts that agent in it, with your
    prompt already on its command line. Any agent in the catalog: `claude`,
    `codex`, and the rest.
@@ -384,7 +407,7 @@ The shape of a session is always the same:
    dispatch carrying that task, so a later `dispatch --task <id> --to <pane>
    --inject` is refused as *already carried on this very pane*. Abandon the
    worker and summon again WITH `--prompt`.
-   So: say the slice in `--prompt` every time, even when the spec already
+   So: say the slice in `--prompt` (or `--prompt-file`) every time, even when the spec already
    reads like one. The deliberate road to a silent pane is `--bare` with no
    `--task` at all, spoken to afterwards by `dispatch --inject`.
 4. `check --wait` — read your inbox. Workers report to you here. A plain look
@@ -471,7 +494,7 @@ stored word. Each row names its `team` too, so two leaders' `%2` cannot be
 confused.
 
 Three more doors, when you need them. A worker that is BLOCKED asks —
-`ask --body '<question>' --retry-request <name>` — and the verb itself waits
+`ask --body-file <file> --retry-request <name>` — and the verb itself waits
 for the answer (ten minutes unless `--timeout-ms` says otherwise, half an
 hour at most). A timeout is not a failure: the answer names the question, and
 `ask --resume <questionId>` walks back to it without asking twice. One
@@ -486,14 +509,14 @@ those is an answer, and `cancelled`/`exited` are final: the seat will never
 answer, the blocked `ask` wakes on them, and `cancelled` says in so many words
 not to ask again and not to summon a replacement — that is its coordinator's
 decision. On the answering side you are just reading mail:
-`check --types question`, then `reply --to-message <id> --body '<answer>'`.
+`check --types question`, then `reply --to-message <id> --body-file <file>`.
 A question from ANOTHER run's coordinator (`send --run <run> --to run:<run> --type question`) is answered the same way: one `reply --to-message <id>` closes it here and is delivered to the run that asked (`deliveredTo` in its answer) — do not answer with a `send --type status`, which leaves the question standing on the board.
 
 `delegate` is the three steps of a new piece of work in one: it writes the task,
 summons a worker on it (`worker-start`'s own gates: the quota wall, `--on-quota-wall`, the
 disk check for `--worktree`) and leaves the worker a letter that tells it its own worker,
-dispatch and task ids, which a worker cannot learn by itself. `zerocode-orc delegate --spec
-'<the work>' --agent <a> [--title <t>] [--deps a,b] [--prompt <p>] [--model <id> [--effort
+dispatch and task ids, which a worker cannot learn by itself. `zerocode-orc delegate --spec-file
+<file> --agent <a> [--title <t>] [--deps a,b] [--prompt-file <file>] [--model <id> [--effort
 <level>]] [--on-quota-wall …] [--worktree] --retry-request <name>`. The worker's first words
 are the spec unless you give `--prompt`. A refusal anywhere leaves no task, worker or letter
 behind; the same `--retry-request` answers with the first answer and makes nothing twice.
@@ -605,7 +628,7 @@ worker that is alive and at work is seated as it is, briefing or no briefing —
 it picked its task straight back up, and the window does not tear it down for
 being busy. The one case you end yourself is a `sleeping` worker with nothing
 running behind it — you looked (`ps`, the roster) and found no process:
-`worker-stop --worker <id> --reason <what you saw>` ends the attempt through
+`worker-stop --worker <id> --reason-file <file>` (what you saw) ends the attempt through
 the sleeping road, closes nothing (that pane id may be somebody else's in this
 window), and hands the task back `ready` — after which `worker-start --task …
 --retry-of <dispatchId>` takes it (add `--inherit-checkout` to seat the
@@ -635,13 +658,14 @@ These are the ones that cost you a run when you get them wrong.
   coordinator recoverable — but it also means an unacknowledged batch is an
   infinite loop. Ack after you have acted, never before.
 - **Report finishing; do not announce it twice.** As a worker, `send --type
-  worker_done --retry-request done-<your task id> --body '{"ok":true,"summary":"…"}'`
+  worker_done --retry-request done-<your task id> --body-file <file>` (the file holds
+  `{"ok":true,"summary":"…"}`)
   closes your task and your dispatch. You do not name the task,
   the dispatch, or the address — the run already knows what you were carrying,
   and naming it yourself is how you close somebody else's work. Do not follow
   it with `task-update`.
 - **Say whether you succeeded — you must, in so many words.** A `worker_done`
-  carries `--body '{"ok":true,"summary":"…"}'` or `--body '{"ok":false}'`, and
+  carries a body (`--body-file`) of `{"ok":true,"summary":"…"}` or `{"ok":false}`, and
   a body with no readable verdict is REFUSED rather than read as a success. It
   used to be read as one, and that was the last road by which a failure got
   written down as a completion. A refusal costs you one more command and
@@ -980,7 +1004,7 @@ coordinator seat (a worker's pane is refused):
   earlier sitting of the seat took (a window restart, a `run-takeover`) is ended by the
   take. A task with no attempt at all takes one too. A closed task is refused; use
   `task-backfill` for closed work that landed.
-- `hand-in --task <id> --head <commit> --body '{"ok":true,"summary":"…"}' [--base main]
+- `hand-in --task <id> --head <commit> --body-file <file> [--base main]
   [--checkout <path>] --retry-request handin-<id>` hands one commit in on the seat's own
   open attempt, once. The window asks git in `--checkout` (an absolute path; default: the
   pane's project) that the commit exists — and, with `--base`, that the ref holds it —
@@ -1014,16 +1038,15 @@ held moves under `backfill.replaced`, and `backfill.by` reads `task-backfill`.
 
 When a slice reaches a decision that is a person's or the coordinator's to
 make — an API shape, a destructive step, a tradeoff the spec left open — hold
-the work instead of guessing. `gate-create --task <id> --question '<the
-decision>' --options '["a","b"]' --retry-request gate-<task>` blocks the task:
+the work instead of guessing. `gate-create --task <id> --question-file <file> --options '["a","b"]' --retry-request gate-<task>` blocks the task:
 it leaves `task-list --ready`, `worker-start` refuses it, and it stays held
-until `gate-resolve --gate <id> --resolution '<the answer>' --retry-request
+until `gate-resolve --gate <id> --resolution-file <file> --retry-request
 answer-<gate>` frees it. `gate-list` shows what is standing and what was
 decided. A resolved gate is not re-resolved — the first answer stands, and a
 different second one is refused rather than written over it.
 
 Workers do not open gates. A worker that hits a decision sends it up —
-`send --type decision_gate --body '<the question>'` — and stops; whether the
+`send --type decision_gate --body-file <file>` — and stops; whether the
 question deserves to hold the DAG is the coordinator's call, made from the
 coordinator's own pane.
 

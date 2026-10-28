@@ -48,7 +48,11 @@ pub(crate) const SHIM_DIR_NAME: &str = "agent-teams-bin";
 /// never do to an agent that did not ask for it.
 const SHIMS: &[(&str, &str, &str)] = &[
     (SHIM_DIR_NAME, "tmux", "tmux"),
-    (ORC_DIR_NAME, ORC_SHIM_NAME, "orchestration"),
+    (
+        ORC_DIR_NAME,
+        ORC_SHIM_NAME,
+        zerocode_core::agent_teams::ORCHESTRATION_VOICE,
+    ),
 ];
 
 /// What an agent types to reach the ledger.

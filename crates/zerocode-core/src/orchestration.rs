@@ -51,6 +51,7 @@ pub mod project_scope;
 mod session_history;
 pub mod settle;
 pub mod task_cost;
+pub mod text_file;
 
 pub use progress::{NextStep, WorkProgress, WorkStage};
 pub use project_scope::{ProjectSource, Reach, RunProject, Scope};
@@ -21507,6 +21508,7 @@ fn plan_inner(
         }
         words
     };
+    text_file::refuse_unexpanded(&words)?;
     within_bounds(&words)?;
 
     project_scope::require_project(ledger, argv, &team.id, pane, actor, project)?;
@@ -21767,10 +21769,13 @@ fn plan_inner(
                 .collect();
             said(serde_json::json!({
                 "verbs": table,
-                "everyVerb": "--run <id> · answer this one call in that run \
-                              instead of the one you are bound to — your \
-                              binding does not move, and `run:<id>` is that \
-                              run's coordinator seat",
+                "everyVerb": format!(
+                    "--run <id> · answer this one call in that run \
+                     instead of the one you are bound to — your \
+                     binding does not move, and `run:<id>` is that \
+                     run's coordinator seat · {}",
+                    text_file::help_line()
+                ),
             }))
         }
 
