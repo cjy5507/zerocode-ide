@@ -615,6 +615,11 @@ export async function testBoardNow(browser, origin, ok) {
             tops: [...new Set(buttons.map((one) => Math.round(one.getBoundingClientRect().top)))].length,
             words: buttons.map((one) => one.textContent),
             asked: Math.round(row.querySelector(".board-ask-acts").getBoundingClientRect().width),
+            // The goal line hangs right under the question line, however tall the answers beside them stand.
+            gapBelowQuestion: Math.round(row.querySelector(".board-ask-meta").getBoundingClientRect().top
+              - row.querySelector(".board-ask-line").getBoundingClientRect().bottom),
+            rowGap: parseFloat(getComputedStyle(row).rowGap),
+            idLines: Math.max(...[...row.querySelectorAll(".board-meta-id")].map((one) => one.getClientRects().length)),
           };
         };
         return { long: read("gate-703"), short: read("gate-702"), sideways: surface.scrollWidth > surface.clientWidth + 1 };
@@ -622,6 +627,8 @@ export async function testBoardNow(browser, origin, ok) {
       ok(`at ${width}px a decision with three long answers keeps its question and goal line readable (at most three lines, over a third of the row)`,
         squeeze.long.titleLines <= 3 && squeeze.long.titleWidth * 3 >= squeeze.long.row
           && squeeze.long.metaWidth * 3 >= squeeze.long.row, JSON.stringify(squeeze.long));
+      ok(`at ${width}px the goal line hangs right under the question, whatever the height of the answers, and the task number stays in one piece`,
+        squeeze.long.gapBelowQuestion <= squeeze.long.rowGap + 1 && squeeze.long.idLines === 1, JSON.stringify(squeeze.long));
       ok(`at ${width}px the long answers are read whole and nothing runs sideways`,
         squeeze.long.clipped === 0 && squeeze.long.outside === 0 && !squeeze.long.sidewaysRow && !squeeze.sideways
           && squeeze.long.words.length === 4 && squeeze.long.words[0].startsWith("예시 설정의 기본값은") && squeeze.long.words[3] === "직접 답하기",
