@@ -978,3 +978,179 @@ fn a_coordinators_row_from_before_the_verification_time_reads_and_writes_back_wi
         read
     );
 }
+
+/// A task handed in as a review: what it handed in, as the ledger named it (the report's message
+/// id), and the ids. `title` and `payload` are what the coordinator and the worker wrote.
+fn review_handed_in(bench: &mut Bench, title: &str, payload: &str, head: Option<&str>) -> Handed {
+    if bench.ledger.runs().is_empty() {
+        bench.json("run-create --name watch");
+    }
+    let task = bench.json(&format!("task-create --spec review-task --title {title}"))["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    assert!(bench.ledger.worker_seated(("team-1", &pane), CHECKOUT));
+    let dispatch = bench.ledger.runs()[0]
+        .dispatches
+        .last()
+        .expect("an attempt")
+        .id
+        .clone();
+    let said = match head {
+        Some(head) => format!("{{\"ok\":true,\"head\":\"{head}\"}}"),
+        None => "{\"ok\":true,\"summary\":\"two-findings\"}".to_string(),
+    };
+    let payload = match payload {
+        "" => String::new(),
+        given => format!(" --payload {given}"),
+    };
+    bench.json_at(
+        &pane,
+        &format!("send --type worker_done --body {said}{payload}"),
+    );
+    Handed {
+        task,
+        worker,
+        dispatch,
+        pane,
+        done_at: bench.clock,
+    }
+}
+
+/// What the attempt handed in, as the ledger named it.
+fn handed_source(bench: &Bench, handed: &Handed) -> String {
+    bench.ledger.runs()[0]
+        .dispatch(&handed.dispatch)
+        .and_then(|held| held.source.clone())
+        .expect("a hand-in")
+}
+
+/// The coordinator's `verified: true` of a review hand-in, against what it handed in. Answers the
+/// verb's answer and the time it was written.
+fn verify_review(bench: &mut Bench, handed: &Handed) -> (serde_json::Value, i64) {
+    let source = handed_source(bench, handed);
+    let said = bench.json(&format!(
+        "task-update --task {} --result {{\"verified\":true}} --attempt {} --source {source}",
+        handed.task, handed.dispatch
+    ));
+    (said, bench.clock)
+}
+
+/// O8 (t-78890, VERDICT F1): two of the six landing notices at 09:30 on 10-28 were review tasks —
+/// read-only work whose hand-in is a report, not a commit — told `no_merge` two hours after the
+/// coordinator verified them. A hand-in whose worker said `reportKind: review` has nothing to land:
+/// it is never told as unlanded, and the coordinator's verification of it carries `nothingToLand`
+/// without the coordinator having to remember the key.
+#[test]
+fn a_review_hand_in_is_never_told_as_unlanded_and_its_verification_says_nothing_to_land() {
+    let mut bench = Bench::new();
+    let handed = review_handed_in(
+        &mut bench,
+        "t-1-review",
+        "{\"reportKind\":\"review\"}",
+        None,
+    );
+    let (said, verified_at) = verify_review(&mut bench, &handed);
+    assert_eq!(said["nothingToLand"], "reportKind review", "{said}");
+    let facts = {
+        let run = &bench.ledger.runs()[0];
+        run.review_of(run.task(&handed.task).expect("the task"))
+    };
+    assert!(
+        facts.verified && facts.nothing_to_land && !facts.merged,
+        "{facts:?}"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .landing_watch(&silent(), verified_at + 10 * MERGE_OVERDUE_MS),
+        0,
+        "a review hand-in told as unlanded: {:?}",
+        news(&bench, MessageKind::LandingStalled)
+    );
+}
+
+/// The watch reads the hand-in itself, not only the key the verification wrote: a review hand-in
+/// whose verification was written without `nothingToLand` — an older window, or a coordinator that
+/// wrote the key `false` — is still not told as unlanded.
+#[test]
+fn a_review_hand_in_verified_without_the_key_is_not_told_as_unlanded_either() {
+    let mut bench = Bench::new();
+    let handed = review_handed_in(
+        &mut bench,
+        "t-1-review",
+        "{\"reportKind\":\"review\"}",
+        None,
+    );
+    let source = handed_source(&bench, &handed);
+    bench.json(&format!(
+        "task-update --task {} --result {{\"verified\":true,\"nothingToLand\":false}} --attempt {} \
+         --source {source}",
+        handed.task, handed.dispatch
+    ));
+    let verified_at = bench.clock;
+    assert_eq!(
+        bench
+            .ledger
+            .landing_watch(&silent(), verified_at + MERGE_OVERDUE_MS),
+        0
+    );
+}
+
+/// The title the coordinator gave the task — 「검수」, 「읽기 전용」 — says the same thing of a hand-in
+/// that names no commit (both 09:30 notices handed in a report id, `m-78620`). A task so titled that
+/// handed in a commit is code waiting to land and is told as before: the title alone never hides
+/// a commit.
+#[test]
+fn a_read_only_title_marks_a_report_hand_in_as_a_review_but_never_a_commit() {
+    let mut report = Bench::new();
+    let handed = review_handed_in(
+        &mut report,
+        "t-78356-검수-(Fable-high,-읽기-전용)",
+        "",
+        None,
+    );
+    let (said, verified_at) = verify_review(&mut report, &handed);
+    assert_eq!(said["nothingToLand"], "read-only title", "{said}");
+    assert_eq!(
+        report
+            .ledger
+            .landing_watch(&silent(), verified_at + MERGE_OVERDUE_MS),
+        0
+    );
+
+    let mut commit = Bench::new();
+    let handed = review_handed_in(&mut commit, "검수-P2-고침", "", Some(HEAD));
+    let (said, verified_at) = verify_review(&mut commit, &handed);
+    assert!(said["nothingToLand"].is_null(), "{said}");
+    assert_eq!(
+        commit
+            .ledger
+            .landing_watch(&silent(), verified_at + MERGE_OVERDUE_MS),
+        1
+    );
+    let told = news(&commit, MessageKind::LandingStalled);
+    assert_eq!(body(&told[0])["reason"], "no_merge");
+}
+
+/// A review nobody has read is still told: `no_review` is about the coordinator's reading, not
+/// about landing, and a review waiting two hours for its reader is the stall F4 counted.
+#[test]
+fn a_review_hand_in_nobody_read_is_still_told_as_no_review() {
+    let mut bench = Bench::new();
+    let handed = review_handed_in(
+        &mut bench,
+        "t-1-review",
+        "{\"reportKind\":\"review\"}",
+        None,
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .landing_watch(&silent(), handed.done_at + VERIFY_OVERDUE_MS),
+        1
+    );
+    let told = news(&bench, MessageKind::LandingStalled);
+    assert_eq!(body(&told[0])["reason"], "no_review");
+}
