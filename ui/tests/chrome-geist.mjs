@@ -151,6 +151,28 @@ async function testChromeSidebarAndTabs(browser, origin, ok) {
       JSON.stringify(seen));
     ok("the inbox's number is the one blue, not a lane's hue (t-81525 S1)",
       seen.badgeInk === seen.you, JSON.stringify(seen));
+    // Every destination's name stands whole at 12px in each language, in the
+    // column the person reads (378px) and the window's default (t-81525 S1).
+    const names = await page.evaluate(async () => {
+      const cut = {};
+      const root = document.documentElement;
+      const was = root.style.getPropertyValue("--sidebar-width");
+      for (const width of ["378px", ""]) {
+        root.style.setProperty("--sidebar-width", width);
+        for (const code of ["ko", "en", "ja", "zh", "es"]) {
+          setLocale(code, { persist: false });
+          await window.__PAINTED__();
+          const spans = [...document.querySelectorAll(".nav-rows > .nav-row:not([hidden]) > span:not(.nav-badge)")];
+          cut[`${width || "default"}-${code}`] = spans.filter((name) => name.scrollWidth > name.clientWidth + 1).map((name) => name.textContent);
+        }
+      }
+      root.style.setProperty("--sidebar-width", was);
+      setLocale("ko", { persist: false });
+      await window.__PAINTED__();
+      return cut;
+    });
+    ok("every destination's name stands whole at 12px in all five languages, at the person's 378px column and the default width (t-81525 S1)",
+      Object.values(names).every((cut) => cut.length === 0), JSON.stringify(names));
     ok("a tab with an agent wears its state dot and how long it has run, right after its name (시안 2)",
       seen.dotShown && seen.dotInk === seen.ready && /^(now|\d+[mhd])$/.test(seen.tabAge ?? "") && seen.ageAfterName !== null && seen.ageAfterName < 12,
       JSON.stringify(seen));
