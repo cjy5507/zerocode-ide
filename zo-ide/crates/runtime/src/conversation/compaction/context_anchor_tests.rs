@@ -266,7 +266,10 @@ fn an_answer_the_compaction_kept_in_its_tail_is_not_an_anchor() {
         ConversationMessage::assistant_with_usage(vec![ContentBlock::Text { text: "done".to_string() }], Some(fresh));
     answer.updated_at_ms = Some(continuation_at + 1);
     std::sync::Arc::make_mut(&mut runtime.session.messages).push(answer);
-    assert_eq!(runtime.provider_anchored_context_tokens(), Some(80_000));
+    // The provider's count, and the answer that goes out on the next request.
+    let last = runtime.session.messages.len() - 1;
+    let answer = crate::compact::estimate_messages_tokens(&runtime.session.messages[last..]);
+    assert_eq!(runtime.provider_anchored_context_tokens(), Some(80_000 + answer));
 }
 
 /// A firing's quote says what the gate's figure and tiers came from: the

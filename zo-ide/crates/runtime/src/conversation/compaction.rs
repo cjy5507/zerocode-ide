@@ -934,7 +934,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// The context number to SHOW and to gate on once a turn has answered.
     ///
     /// The provider's own count of the last answered request, plus the local
-    /// estimate of what the transcript gained after that answer
+    /// estimate of that answer and of what the transcript gained after it
     /// ([`Self::provider_anchored_context_tokens`]). Before any answer since the
     /// last compaction, the larger of the provider's latest count and the
     /// local estimate.
@@ -960,10 +960,13 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
 
     /// The context counted by the provider where the transcript holds an
     /// answer since its last compaction: what that answered request carried,
-    /// plus the local estimate of every message after the answer — the tool
-    /// results and prompts the provider has not counted yet. The answer itself
-    /// is left to the next request's count, as the provider-led figure always
-    /// left it.
+    /// plus the local estimate of the answer and of every message after it —
+    /// what the provider has not counted as input yet. The provider counted
+    /// the request, not what came back on it, and the answer (its thinking,
+    /// text and tool calls) goes out on the next request. Answers on this
+    /// machine (Opus 5.5, 6,341 requests over 60 hours to 2026-10-28) ran to
+    /// 7k output tokens at p90 and 66k at most, against about 30k between the
+    /// full tier and the hard ceiling on a 200k window (t-78937).
     ///
     /// `None` when the latest answer carries no usage, or is older than the
     /// last compaction's continuation: the tail a compaction keeps holds
@@ -971,7 +974,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     pub(super) fn provider_anchored_context_tokens(&self) -> Option<u64> {
         let (index, usage) = self.latest_answer_since_compaction()?;
         Some(u64::from(usage.context_tokens()).saturating_add(crate::compact::estimate_messages_tokens(
-            &self.session.messages[index + 1..],
+            &self.session.messages[index..],
         )))
     }
 
