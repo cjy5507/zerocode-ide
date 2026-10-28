@@ -14630,7 +14630,7 @@ body.mod-held .term-link,
  * page stands behind — only the animated parts are named, the same ones
  * reduced motion names, so a press restyles those and not every row. */
 :is(.pane > .worker-view, .pane-slot > .pane-chat).is-behind :is(.helper-step-dot, .helper-state-dot, .helper-agent-dot, .helper-status, .helper-status-ring, .chat-run-dot),
-:is(.pane > .worker-view, .pane-slot > .pane-chat).is-behind .helper-group::before {
+:is(.pane > .worker-view, .pane-slot > .pane-chat).is-behind .helper-group::after {
   animation-play-state: paused;
 }
 
@@ -15016,6 +15016,9 @@ details.worker-command {
  * rail are the row's pseudo-elements, so a 400-turn page pays no node for
  * them. The rail starts at the first step's dot, ends a dot's reach below
  * the last step's, and a lone step has none. */
+/* The rail is the row's `::before` and the dot its `::after`, so the dot is
+ * drawn over the rail by the order the two are painted in — no `z-index`, and
+ * no stacking context per row (t-81525 C12). */
 /* 걸음 하나 — 턴의 행이거나, Focus view가 그 행들 앞에 세운 묶음 머리다.
  * 둘은 같은 자 위에 서므로 규칙도 하나다(`:is()`): 묶음 머리를 다른 자에
  * 세우면 레일이 그 한 줄에서 어긋난다. */
@@ -15024,19 +15027,18 @@ details.worker-command {
   padding: var(--chat-row-pad) 0 var(--chat-row-pad) var(--chat-gutter);
 }
 
-:is(.helper-turn, .helper-group).is-step::before {
+:is(.helper-turn, .helper-group).is-step::after {
   content: "";
   position: absolute;
   left: var(--chat-rail-dot-x);
   top: calc(var(--chat-row-pad) + var(--chat-rail-dot-y));
-  z-index: 1;
   width: var(--chat-dot);
   height: var(--chat-dot);
   border-radius: 50%;
   background: var(--chat-work-ink);
 }
 
-:is(.helper-turn, .helper-group).is-step::after {
+:is(.helper-turn, .helper-group).is-step::before {
   content: "";
   position: absolute;
   left: var(--chat-rail-x);
@@ -15046,16 +15048,16 @@ details.worker-command {
   background: var(--chat-divider);
 }
 
-:is(.helper-turn, .helper-group).is-step:not(:is(.helper-turn, .helper-group).is-step + :is(.helper-turn, .helper-group).is-step)::after {
+:is(.helper-turn, .helper-group).is-step:not(:is(.helper-turn, .helper-group).is-step + :is(.helper-turn, .helper-group).is-step)::before {
   top: calc(var(--chat-row-pad) + var(--chat-rail-dot-y) + var(--chat-dot) / 2);
 }
 
-:is(.helper-turn, .helper-group).is-step:not(:has(+ :is(.helper-turn, .helper-group).is-step))::after {
+:is(.helper-turn, .helper-group).is-step:not(:has(+ :is(.helper-turn, .helper-group).is-step))::before {
   bottom: auto;
   height: calc(var(--chat-row-pad) + var(--chat-rail-dot-y) + var(--chat-dot) / 2);
 }
 
-:is(.helper-turn, .helper-group).is-step:not(:is(.helper-turn, .helper-group).is-step + :is(.helper-turn, .helper-group).is-step):not(:has(+ :is(.helper-turn, .helper-group).is-step))::after {
+:is(.helper-turn, .helper-group).is-step:not(:is(.helper-turn, .helper-group).is-step + :is(.helper-turn, .helper-group).is-step):not(:has(+ :is(.helper-turn, .helper-group).is-step))::before {
   display: none;
 }
 
@@ -15445,15 +15447,15 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
  * failed, the agent's accent with its halo while one is out — the extension's
  * beat (`dotProgress`: 1s, linear), which a helper at work wears too
  * (t-6323 A6). */
-.helper-group.is-done::before {
+.helper-group.is-done::after {
   background: var(--chat-dot-done);
 }
 
-.helper-group.is-failed::before {
+.helper-group.is-failed::after {
   background: var(--chat-dot-failed);
 }
 
-.helper-group.is-live::before,
+.helper-group.is-live::after,
 .helper-agent-dot {
   background: var(--chat-accent);
   box-shadow: 0 0 0 var(--chat-dot-halo) color-mix(in srgb, var(--chat-accent) 18%, transparent);
@@ -18100,7 +18102,7 @@ button.helper-sib:hover {
   }
 
   .helper-turn.is-tool.is-live > .helper-step-line > .helper-step-dot,
-  .helper-group.is-live::before,
+  .helper-group.is-live::after,
   .helper-state-dot,
   .helper-agent-dot,
   .helper-status,
