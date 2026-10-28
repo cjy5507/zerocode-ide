@@ -20082,7 +20082,7 @@ mod tests {
         // window (t-74919) — and its outcome goes back to the watch.
         assert!(
             confirming.contains("let deadline = ready_timeout_for(agent);")
-                && confirming.contains("deadline + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE"),
+                && confirming.contains("deadline + RECEIPT_WAIT"),
             "the retype's outcome is no longer waited for on the agent's own deadline:\n{confirming}"
         );
         let retyping = block_after(backend, "fn retype(&mut self)");

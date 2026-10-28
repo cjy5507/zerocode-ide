@@ -659,6 +659,14 @@ pub struct HookTry {
 /// first try is the whole [`HOOK_REPLY_BUDGET`]; each later one waits its
 /// pause and takes what is left, up to the same budget, and is made only
 /// while what is left can still reach the bridge ([`HOOK_CONNECT_BUDGET`]).
+///
+/// Only an agent whose prompt hook carries a briefing's submission receipt
+/// ([`AgentKind::hook_additional_context`]) has more than the first try, and
+/// the script makes them only on that prompt event ([`hook_retries_on`]):
+/// every other hook waits its agent 1.5 s at most, as it did before the
+/// receipt could be lost (review t-79535 P3-1, P3-2) — a Copilot hook, whose
+/// own timeout leaves a post again half a second, is never the one that is
+/// killed for it.
 #[must_use]
 pub fn hook_tries(agent: AgentKind) -> Vec<HookTry> {
     let budget =
@@ -667,6 +675,9 @@ pub fn hook_tries(agent: AgentKind) -> Vec<HookTry> {
         pause: std::time::Duration::ZERO,
         budget: HOOK_REPLY_BUDGET.min(budget),
     }];
+    if hook_retries_on(agent).is_none() {
+        return tries;
+    }
     let mut spent = HOOK_REPLY_BUDGET.min(budget);
     for pause in HOOK_RETRY_PAUSES {
         let left = budget.saturating_sub(spent + pause);
@@ -682,6 +693,21 @@ pub fn hook_tries(agent: AgentKind) -> Vec<HookTry> {
     }
     tries
 }
+
+/// The one event on which an agent's hook script posts again: the prompt
+/// hook of a provider that takes context from it, which is where a briefing's
+/// submission receipt rides. `None` for an agent whose hooks are posted once.
+#[must_use]
+pub fn hook_retries_on(agent: AgentKind) -> Option<&'static str> {
+    agent
+        .hook_additional_context()
+        .map(|context| context.prompt_submit_event)
+}
+
+/// The curl exit of a bridge that answered and refused the payload (`-f` on
+/// an HTTP error, which the window's 503 produces): it is certain the window
+/// did not get the body, on any try.
+pub const HOOK_REFUSED_EXIT: u8 = 22;
 
 /// The curl exits after which a hook script posts again: it stopped waiting
 /// (28), or the answer was lost (52, 56) — each with the body possibly with
@@ -2152,8 +2178,10 @@ fn set_executable(path: &Path) -> io::Result<()> {
 /// 5. **Bounded curl, every failure swallowed.** Half a second to connect, a
 ///    second and a half a try, tried again on a give-up that may have left the
 ///    body with the bridge ([`hook_tries`], [`HOOK_RETRY_EXITS`]) under one
-///    delivery id, five seconds at most in all, `exit 0` — the POSIX script;
-///    the batch one posts once, since it cannot hold stdin for a second post. Providers that accept context receive
+///    delivery id, five seconds at most in all, `exit 0` — the POSIX script,
+///    and only on the prompt event of a provider that takes context from it
+///    ([`hook_retries_on`]); the batch one posts once, since it cannot hold
+///    stdin for a second post. Providers that accept context receive
 ///    only the bridge's valid JSON body; every other response is discarded.
 ///    A POST that provably did not arrive creates the path the window handed
 ///    this pane, and a successful one removes it — a give-up that leaves the
@@ -2466,7 +2494,19 @@ pub fn hook_script(agent: AgentKind) -> String {
         .map(|one| format!("{}:{}", one.pause.as_secs_f64(), one.budget.as_secs_f64()))
         .collect::<Vec<_>>()
         .join(" ");
-    lines.push("hook_id=p-$$".into());
+    // A process number comes round on a long-lived machine; with the second
+    // it was posted in, an id a post again is claimed under is this hook's
+    // own for as long as the bridge remembers it (review t-79535 P3-4).
+    lines.push("hook_id=p-$$-$(command -p date +%s 2>/dev/null || :)".into());
+    // Only the prompt event is posted again (review t-79535 P3-2): that is
+    // where the receipt rides, and a bridge that is slow makes every other
+    // hook of the turn wait the pauses for nothing.
+    lines.push("hook_again=".into());
+    if let Some(event) = hook_retries_on(agent) {
+        lines.push(format!(r#"case "${{{}}}" in"#, spec.event_var));
+        lines.push(format!("  {event}) hook_again=1 ;;"));
+        lines.push("esac".into());
+    }
     if context_hook.is_some() {
         lines.push("brief_nl='\n'".into());
         lines.push("reply=".into());
@@ -2539,15 +2579,25 @@ pub fn hook_script(agent: AgentKind) -> String {
     }
     lines.push("  hook_gave_up=${hook_gave_up:+$hook_gave_up,}$hook_exit".into());
     lines.push(r#"  case "$hook_exit" in"#.into());
-    lines.push(format!("    {}) : ;;", posix_retry_exits()));
+    lines.push(format!(
+        r#"    {}) [ -n "$hook_again" ] || break ;;"#,
+        posix_retry_exits()
+    ));
     lines.push("    *) break ;;".into());
     lines.push("  esac".into());
     lines.push("done".into());
     // Judged by the FIRST give-up: the loop only goes on after one that may
     // have left the body with the bridge, so a refused connection on a later
     // try (a bridge gone meanwhile) does not prove the window never got it.
+    // The one later exit that does is the bridge's own refusal (22): it
+    // answered the post again, and what it answered is that the window
+    // took nothing (review t-79535 P3-3).
     lines.push(r#"if [ "$hook_exit" = 0 ]; then"#.into());
     lines.push("  delivery_succeeded".into());
+    lines.push(format!(
+        r#"elif [ "$hook_exit" = {HOOK_REFUSED_EXIT} ]; then"#
+    ));
+    lines.push("  delivery_failed".into());
     lines.push("else".into());
     lines.push(r#"  delivery_gave_up "${hook_gave_up%%,*}""#.into());
     lines.push("fi".into());
