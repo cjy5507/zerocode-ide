@@ -170,6 +170,15 @@ class RunsTheExecutable(unittest.TestCase):
 
 
 class Arguments(unittest.TestCase):
+    def test_a_filtered_or_single_thread_run_keeps_a_file_of_its_own(self):
+        def path(**given):
+            args = times.argparse.Namespace(package="p", bin=None, test=None, threads=None, mode="json", filters=[])
+            vars(args).update(given)
+            return times.result_path(args).name
+        whole = path()
+        self.assertEqual(len({whole, path(threads=1), path(filters=["orchestration::"]), path(mode="groups")}), 4)
+        self.assertIn("-threads1-orchestration_-", path(threads=1, filters=["orchestration::"]))
+
     def test_filters_after_the_double_dash_go_to_libtest(self):
         self.assertEqual(times.split_filters(["measure", "--jobs", "4", "--", "orchestration::"]),
                          (["measure", "--jobs", "4"], ["orchestration::"]))

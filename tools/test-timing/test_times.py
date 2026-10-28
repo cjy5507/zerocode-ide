@@ -36,8 +36,10 @@ seconds: a before and an after are comparable only when those agree.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -59,9 +61,13 @@ def git(*args: str) -> str:
 
 
 def commit_label() -> str:
-    """The commit the tree is at, `-dirty` when the tree holds changes the commit does not."""
+    """The commit the tree is at, and `-dirty<hash of the diff>` when the tree holds changes the commit does not.
+
+    The diff's hash, not `-dirty` alone: two different edits on one commit are two different trees to measure.
+    """
     head = git("rev-parse", "--short=12", "HEAD")
-    return head + ("-dirty" if git("status", "--porcelain", "--untracked-files=no") else "")
+    diff = subprocess.run(["git", "-C", str(REPO), "diff", "HEAD"], capture_output=True, check=True).stdout
+    return head + (f"-dirty{hashlib.sha256(diff).hexdigest()[:8]}" if diff else "")
 
 
 def target_args(args: argparse.Namespace) -> list[str]:
@@ -71,8 +77,11 @@ def target_args(args: argparse.Namespace) -> list[str]:
 
 
 def result_path(args: argparse.Namespace) -> Path:
+    """Named by what was measured: a filtered or single-thread run never stands in for the whole suite."""
     kind, name = target_args(args)
-    return RESULTS / f"{args.package}-{kind.lstrip('-')}-{name}-{commit_label()}.json"
+    variant = "".join([f"-threads{args.threads}" if args.threads else "", f"-{args.mode}" if args.mode != "json" else "",
+                       *(f"-{re.sub(r'[^A-Za-z0-9_]+', '_', word)}" for word in args.filters)])
+    return RESULTS / f"{args.package}-{kind.lstrip('-')}-{name}{variant}-{commit_label()}.json"
 
 
 def load_average() -> list[float]:
@@ -82,12 +91,25 @@ def load_average() -> list[float]:
         return []
 
 
+def power() -> dict:
+    """Where the power comes from and the power mode (macOS `pmset`): a run on battery is not comparable with one on AC."""
+    try:
+        source = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout.splitlines()
+        settings = subprocess.run(["pmset", "-g"], capture_output=True, text=True).stdout.split()
+    except OSError:
+        return {}
+    mode = settings[settings.index("powermode") + 1] if "powermode" in settings else None
+    return {"source": source[0].strip() if source else None, "powermode": mode}
+
+
 def build(args: argparse.Namespace) -> tuple[Path, Path, float]:
     """Build the target's test executable; its path, the directory cargo runs it from, and the seconds."""
     command = ["cargo", "test", "-p", args.package, *target_args(args), "--no-run",
                "--message-format=json-render-diagnostics"]
     if args.jobs:
         command += ["-j", str(args.jobs)]
+    if args.timings:
+        command.append("--timings")   # cargo writes target/cargo-timings/cargo-timing.html: the slowest crates
     print("build:", " ".join(command), file=sys.stderr)
     started = time.monotonic()
     done = subprocess.run(command, cwd=REPO, stdout=subprocess.PIPE, text=True)
@@ -225,7 +247,7 @@ def measure(args: argparse.Namespace) -> Path:
         "package": args.package, "target": " ".join(target_args(args)), "commit": commit_label(),
         "mode": args.mode, "threads": args.threads or os.cpu_count(), "jobs": args.jobs,
         "filters": args.filters, "measured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "load_before": load_before, "load_after": load_average(),
+        "load_before": load_before, "load_after": load_average(), "power": power(),
         "condition": {key: value for key, value in sorted(os.environ.items()) if key.startswith(CONDITION_PREFIXES)},
         "build_seconds": round(build_seconds, 1), "run_seconds": round(time.monotonic() - started, 1),
         **ran,
@@ -256,7 +278,7 @@ def table(result: dict, top: int, depth: int) -> str:
     total = facts["sum"] or 1.0
     lines = [
         f"{result['package']} {result['target']} at {result['commit']} ({result['mode']}, {result['threads']} threads,"
-        f" load {result['load_before']} → {result['load_after']})",
+        f" load {result['load_before']} → {result['load_after']}, power {result.get('power')})",
         f"build {facts['build']} s · run {facts['run']} s · {facts['tests']} tests "
         f"({', '.join(f'{k} {v}' for k, v in sorted(facts['outcomes'].items()))}) · sum of test seconds {facts['sum']:.1f} s"
         + (f" · {facts['parallel']:.1f} tests at once on average" if facts["parallel"] else ""),
@@ -300,6 +322,7 @@ def compare(before: dict, after: dict, top: int) -> str:
         f"| run s | {change(one['run'], two['run'])} |",
         f"| sum of test s | {change(one['sum'], two['sum'])} |",
         f"| threads · load before | {before['threads']} · {before['load_before']} → {after['threads']} · {after['load_before']} |",
+        f"| power | {before.get('power')} → {after.get('power')} |",
     ]
     if before.get("condition") != after.get("condition"):
         lines.append(f"\nthe environments differ: {before.get('condition')} → {after.get('condition')}")
@@ -325,6 +348,7 @@ def main(argv: list[str]) -> int:
     target.add_argument("--bin", help="the binary target (default: the package's name)")
     target.add_argument("--test", help="an integration test target instead")
     parser.add_argument("--jobs", type=int, help="cargo -j for the build")
+    parser.add_argument("--timings", action="store_true", help="cargo --timings for the build")
     parser.add_argument("--threads", type=int, help="libtest --test-threads (default: libtest's own)")
     parser.add_argument("--mode", choices=("json", "groups"), default="json")
     parser.add_argument("--depth", type=int, default=DEFAULT_DEPTH)
