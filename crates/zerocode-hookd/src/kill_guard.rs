@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use zerocode_core::AgentKind;
 use zerocode_core::hook_continuation::{self, PreToolDecision};
-use zerocode_core::shell_rule::kill::{self, KillCall, KillVerdict, ProcessTable, ProtectedRoot};
+use zerocode_core::shell_rule::kill::{
+    self, KillCall, KillVerdict, PaneMark, ProcessTable, ProtectedRoot,
+};
 
 /// What the window knows of its panes' processes, asked only for a command
 /// that would signal something.
@@ -30,6 +32,11 @@ pub trait KillWitness: Send + Sync {
 pub struct KillRoots {
     /// The pane's own process, `None` when the window does not know it.
     pub caller: Option<u32>,
+    /// The mark the window wrote into the calling pane's environment when it
+    /// started it (t-81714) — what a job the pane set loose names. The window
+    /// knows it whatever the pane runs: the pane's own process may be a
+    /// program whose environment does not read (macOS's `/bin/zsh`).
+    pub caller_mark: Option<PaneMark>,
     pub protected: Vec<ProtectedRoot>,
 }
 
@@ -70,7 +77,12 @@ pub(crate) async fn reply(
     let judging = tokio::task::spawn_blocking(move || {
         let roots = witness.roots(&pane_key);
         let table = if calls.iter().any(KillCall::needs_table) {
-            witness.table()
+            match (roots.caller, roots.caller_mark) {
+                // The window's word for the pane it started the caller in:
+                // the caller's own environment may not read (t-81714).
+                (Some(caller), Some(mark)) => witness.table().with_pane_mark(caller, mark),
+                _ => witness.table(),
+            }
         } else {
             ProcessTable::new(Vec::new())
         };
