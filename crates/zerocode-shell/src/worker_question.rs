@@ -120,6 +120,9 @@ pub(crate) enum Step {
     Answer(Vec<AskSelection>),
     /// Tell the coordinator the pane moved past the question, and forget it.
     RefusePassed,
+    /// Tell the coordinator the person holds the question — it was given to
+    /// them, or they took the pane — type nothing, and forget it.
+    RefuseHeld,
     /// Put the question on the person's screen, saying why.
     Raise(Raised),
     /// Forget the question: there is nobody left to answer it or to tell.
@@ -131,8 +134,8 @@ pub(crate) enum Step {
 /// `passed` is the hook's word that the pane is no longer asking. `seat` is
 /// the run as the ledger holds it now. `raised` is whether the person already
 /// holds the question, so it is not raised twice — an answer the coordinator
-/// gives after that is still typed, and the door decides whether the picker
-/// still waits for it.
+/// gives after that, or while the person has the pane, is refused back to it
+/// rather than typed between the person's own keys.
 pub(crate) fn step(
     prompt: &AskPrompt,
     standing: &Standing,
@@ -145,10 +148,12 @@ pub(crate) fn step(
     match standing {
         Standing::Closed => return Step::Forget,
         Standing::Answered(_) if passed => return Step::RefusePassed,
+        Standing::Answered(_) if raised || seat.is_some_and(|seat| seat.taken) => {
+            return Step::RefuseHeld;
+        }
         Standing::Answered(words) => {
             return match selections_from_reply(prompt, words) {
                 Some(selections) => Step::Answer(selections),
-                None if raised => Step::Wait,
                 None => Step::Raise(Raised::CoordinatorSilent),
             };
         }
@@ -290,6 +295,14 @@ fn picked_rows(words: &str, rows: usize, several: bool) -> Option<Vec<usize>> {
 pub(crate) fn passed_letter(worker: &str, term: u32, question: &str) -> String {
     format!(
         "지나간 질문 — 워커 {worker}의 판(term-{term})은 질문 {question}을 이미 지나갔습니다. 답은 판에 넣지 않았습니다."
+    )
+}
+
+/// The words the coordinator is told when its answer came after the person
+/// was given the question or took the pane.
+pub(crate) fn held_letter(worker: &str, term: u32, question: &str) -> String {
+    format!(
+        "사람이 맡은 질문 — 워커 {worker}의 판(term-{term}) 질문 {question}은 사람에게 넘어가 있습니다. 답은 판에 넣지 않았습니다."
     )
 }
 
@@ -596,6 +609,26 @@ fn carry(app: &AppHandle, term: u32, standing: &Asked, question: &str, now_ms: i
             );
             settled(term);
         }
+        Step::RefuseHeld => {
+            tell(
+                seat,
+                question,
+                &held_letter(&seat.worker, term, question),
+                now_ms,
+            );
+            settled(term);
+            // Taken between two beats, before it was raised: the person's
+            // screen gets it now, as a pane the person has asks them.
+            if standing.raised.is_none() {
+                raise(
+                    app,
+                    term,
+                    &standing.report,
+                    standing.worktree.as_deref(),
+                    Raised::TakenOver,
+                );
+            }
+        }
         Step::Raise(why) => {
             // Only a question the pane still asks: a hook that moved on in
             // the meantime has the last word.
@@ -875,9 +908,9 @@ mod tests {
                 other: String::new(),
             }])
         );
-        // Raised to the person and then answered by the coordinator: the door
-        // decides who was first.
-        assert!(matches!(
+        // Raised to the person and then answered by the coordinator: the
+        // person holds it, and the late answer goes back with no key typed.
+        assert_eq!(
             step(
                 &asked,
                 &Standing::Answered("멈추고 보고해".to_string()),
@@ -887,8 +920,8 @@ mod tests {
                 NOW,
                 NOW
             ),
-            Step::Answer(_)
-        ));
+            Step::RefuseHeld
+        );
         assert_eq!(
             step(
                 &asked,
@@ -901,6 +934,60 @@ mod tests {
             ),
             Step::Forget
         );
+    }
+
+    #[test]
+    fn a_late_answer_to_a_question_the_person_holds_is_refused_and_never_typed() {
+        let asked = prompt(false);
+        let answered = Standing::Answered("2".to_string());
+        let late = NOW + COORDINATOR_ANSWER_WAIT_MS + 1;
+        // Given to the person after ten silent minutes, for an empty seat, or
+        // because the person took the pane: every raised question refuses.
+        for live in [seat(true, false), seat(false, false), seat(true, true)] {
+            assert_eq!(
+                step(&asked, &answered, false, Some(&live), true, NOW, late),
+                Step::RefuseHeld,
+                "{live:?}"
+            );
+        }
+        assert_eq!(
+            step(&asked, &answered, false, None, true, NOW, late),
+            Step::RefuseHeld
+        );
+        // Taken but not raised yet — the answer and the hand met between two
+        // beats: the hand wins.
+        assert_eq!(
+            step(
+                &asked,
+                &answered,
+                false,
+                Some(&seat(true, true)),
+                false,
+                NOW,
+                NOW
+            ),
+            Step::RefuseHeld
+        );
+        // Nobody holds it but the coordinator: typed as before.
+        assert_eq!(
+            step(
+                &asked,
+                &answered,
+                false,
+                Some(&seat(true, false)),
+                false,
+                NOW,
+                NOW
+            ),
+            Step::Answer(vec![AskSelection {
+                indices: vec![1],
+                other: String::new(),
+            }])
+        );
+        let words = held_letter("w-2", 7, "m-5");
+        assert!(words.starts_with("사람이 맡은 질문"), "{words}");
+        assert!(words.contains("m-5") && words.contains("term-7"), "{words}");
+        assert!(words.contains("넣지 않았습니다"), "{words}");
     }
 
     #[test]
