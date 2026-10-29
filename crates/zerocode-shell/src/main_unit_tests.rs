@@ -1182,8 +1182,14 @@ fn the_settings_view_marks_staged_and_default_profiles() {
         }],
         skipped: 0,
     };
-    browser_profile_data::save_imported(dir.path(), &b, &carried, 1_793_200_000)
-        .expect("carried");
+    browser_profile_data::save_imported(
+        dir.path(),
+        &b,
+        &carried,
+        &browser_profile_data::WebDataRead::default(),
+        1_793_200_000,
+    )
+    .expect("carried");
     let views = browser_profile_views(dir.path());
     let view_b = views.iter().find(|view| view.id == b).expect("b is listed");
     let wire = serde_json::to_value(view_b).expect("wire");
@@ -1260,6 +1266,7 @@ fn deleting_a_profile_takes_its_staging_and_default_with_it() {
         dir.path(),
         &a,
         &browser_profile_data::BookmarksRead::default(),
+        &browser_profile_data::WebDataRead::default(),
         1,
     )
     .expect("carried");
@@ -1267,8 +1274,9 @@ fn deleting_a_profile_takes_its_staging_and_default_with_it() {
     remove_browser_profile(dir.path(), &a).expect("remove");
     assert!(
         !browser_profile_data::bookmarks_file(dir.path(), &a).exists()
+            && !browser_profile_data::address_book_file(dir.path(), &a).exists()
             && !browser_profile_data::imported_file(dir.path(), &a).exists(),
-        "the carried bookmarks outlived the profile"
+        "the carried bookmarks or addresses outlived the profile"
     );
     assert!(
         !browser_cookie_import::generation_file(dir.path(), &a).exists(),

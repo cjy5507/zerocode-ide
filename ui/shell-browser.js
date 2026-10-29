@@ -1782,7 +1782,15 @@ function buildBrowserView() {
   closeNote.className = "browser-agent-close-note";
   closeNote.hidden = true;
   closeNote.setAttribute("role", "status");
-  host.append(bar, buildBrowserWorkspaceBar(), closeNote, artifactStripNode(), artifactHintNode(), suggest, bookmarks, dlbar, notes, grabbar, findbar, body);
+  // 폼 채움 띠(t-79331 ③): 다운로드 줄처럼 판을 밀어내는 형제다 — 판은 창 DOM
+  // 위에 뜨므로 그 위에 선 것은 판에 삼켜진다. 채움은 사람의 손만 한다:
+  // 에이전트의 누름은 이 띠에서 막힌다.
+  const fillbar = document.createElement("div");
+  fillbar.className = "browser-fillbar";
+  fillbar.hidden = true;
+  fillbar.setAttribute("role", "status");
+  fillbar.dataset.personOnly = "";
+  host.append(bar, buildBrowserWorkspaceBar(), closeNote, artifactStripNode(), artifactHintNode(), suggest, bookmarks, dlbar, fillbar, notes, grabbar, findbar, body);
   return host;
 }
 
@@ -4943,6 +4951,7 @@ function paintBrowserView(tab) {
   dlbar.replaceChildren();
   dlbar.hidden = downloadsHeld.length === 0;
   for (const row of downloadsHeld) dlbar.appendChild(browserDownloadRow(tab, row));
+  paintBrowserFillBar(host.querySelector(".browser-fillbar"), tab);
   // 마크업(B02 ②): 편집기가 판의 자리(.browser-body)에 선다 — 판은
   // syncBrowserPanes가 marking을 보고 눕힌다. 캔버스 상태는 세션 소유라
   // 노드는 한 번 지어 지니고 다닌다.
@@ -5927,10 +5936,19 @@ function showCookieImportSummary(target, summary, box) {
     }),
   );
   // 같은 누름에 옮긴 프로필 자료(t-79331) — 브라우저에서 읽었을 때만 선다.
-  if (summary.profileData) {
-    line(t("browser.importProfileData", "북마크 {{bookmarks}}개 가져옴", {
-      bookmarks: summary.profileData.bookmarks,
+  // 결제 카드와 비밀로 보이는 입력값은 옮기지 않는다: 그 수를 숨기지 않는다.
+  const carried = summary.profileData;
+  if (carried) {
+    line(t("browser.importProfileData", "북마크 {{bookmarks}}개 · 주소 {{addresses}}개 · 입력값 {{entries}}개 가져옴", {
+      bookmarks: carried.bookmarks,
+      addresses: carried.addresses ?? 0,
+      entries: carried.autofillEntries ?? 0,
     }));
+    if (carried.heldBack > 0) {
+      line(t("browser.importHeldBack", "결제 카드·비밀로 보이는 입력값 {{count}}건은 옮기지 않음", {
+        count: carried.heldBack,
+      }), true);
+    }
   }
   // 숨기지 않는 세 가지 — Orca도 요약에 같은 셋을 신는다
   // (browser-workspace-types.ts:139-160).
@@ -5979,6 +5997,100 @@ function showCookieImportSummary(target, summary, box) {
 }
 
 dismissable(cookieImportPop, closeCookieImportPop, ".browser-menu", ".browser-profile-import");
+
+/* ---- 폼 채움 띠 (t-79331 ③) -----------------------------------------------
+ *
+ * 새 문서가 다 뜨면 시스템 손에게 한 번 묻는다: 이 페이지의 폼에 내밀 저장된
+ * 주소가 있는가. 그 프로필로 가져온 주소가 없으면 묻지도 않는다 — 대부분의
+ * 페이지가 여기서 끝난다. 고르면 시스템 손이 값을 칸에 직접 쓰고, 돌아오는
+ * 것은 몇 칸에 들어갔는지뿐이다. 채움은 사람의 손만 한다(person-only). 띠의
+ * 모양은 판을 밀어내는 한 줄 — 말, 고르는 단추들, 닫기. */
+
+async function offerSavedAddresses(tab, url) {
+  if (!/^https?:/i.test(url ?? "") || tab.artifact || !tab.profile) return;
+  const carried = browserProfiles.find((one) => one.id === tab.profile)?.imported;
+  if (!(carried?.addresses > 0)) return;
+  let found;
+  try {
+    found = await invoke("browser_address_candidates", { label: tab.label });
+  } catch {
+    // 띠가 없는 것은 실패가 아니다 — 판은 평소처럼 쓰인다.
+    return;
+  }
+  // 묻는 사이 문서가 또 떠났으면 그 답은 옛 문서의 것이다.
+  if (tab.url !== url || !Array.isArray(found) || found.length === 0) return;
+  tab.fillOffer = { url, candidates: found, state: "offer", report: null };
+  if (stillShowing(tab)) paintBrowserView(tab);
+}
+
+async function fillSavedAddress(tab, candidate) {
+  const offer = tab.fillOffer;
+  if (!offer) return;
+  let report = null;
+  try {
+    report = await invoke("browser_address_fill", { label: tab.label, id: candidate.id }, { hand: handNow() });
+  } catch (error) {
+    showError(String(error));
+  }
+  if (tab.fillOffer !== offer) return;
+  offer.state = (report?.fields ?? 0) + (report?.entries ?? 0) > 0 ? "filled" : "failed";
+  offer.report = report;
+  if (stillShowing(tab)) paintBrowserView(tab);
+}
+
+function paintBrowserFillBar(bar, tab) {
+  const offer = tab.fillOffer;
+  bar.hidden = !offer;
+  if (!offer) {
+    bar.replaceChildren();
+    delete bar.dataset.key;
+    return;
+  }
+  // 같은 모양이면 다시 짓지 않는다 — 판 그리기마다 같은 노드를 지우고 쓰지 않게.
+  const key = `${offer.url}|${offer.state}|${offer.candidates.map((one) => one.id).join(",")}`;
+  if (bar.dataset.key === key) return;
+  bar.dataset.key = key;
+  const words = document.createElement("span");
+  words.className = "browser-fillbar-words";
+  const acts = document.createElement("div");
+  acts.className = "browser-fillbar-acts";
+  if (offer.state === "offer") {
+    words.textContent = t("browser.fill.offer", "이 페이지에 채울 수 있는 저장된 주소");
+    for (const candidate of offer.candidates) {
+      const pick = document.createElement("button");
+      pick.type = "button";
+      pick.className = "browser-fillbar-act is-primary";
+      pick.textContent = candidate.label;
+      const said = t("browser.fill.pick", "{{label}} 채우기", { label: candidate.label });
+      pick.dataset.tip = said;
+      pick.setAttribute("aria-label", said);
+      pick.addEventListener("click", () => void fillSavedAddress(tab, candidate));
+      acts.appendChild(pick);
+    }
+  } else if (offer.state === "filled") {
+    const entries = offer.report?.entries ?? 0;
+    words.textContent = entries > 0
+      ? t("browser.fill.filledEntries", "{{fields}}칸에 주소, {{entries}}칸에 입력했던 값을 채웠습니다. 제출은 직접 하세요", {
+        fields: offer.report?.fields ?? 0,
+        entries,
+      })
+      : t("browser.fill.filled", "{{fields}}칸에 주소를 채웠습니다. 제출은 직접 하세요", {
+        fields: offer.report?.fields ?? 0,
+      });
+  } else {
+    words.textContent = t("browser.fill.failed", "저장된 주소를 채우지 못했습니다");
+  }
+  const dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.className = "browser-fillbar-act";
+  dismiss.textContent = t("app.close", "닫기");
+  dismiss.addEventListener("click", () => {
+    tab.fillOffer = null;
+    if (stillShowing(tab)) paintBrowserView(tab);
+  });
+  acts.appendChild(dismiss);
+  bar.replaceChildren(words, acts);
+}
 
 /* ---- 북마크 (t-79331 ④) ---------------------------------------------------
  *
@@ -6620,6 +6732,9 @@ listen("browser:nav", (event) => {
   // (wry never reports a failed provisional navigation, and a dead dev
   // server's tab span forever, 2026-09-07). Either one stops the wheel.
   applyBrowserNavigation(tab, said);
+  // 문서가 떠나면 그 문서의 채움 띠도 간다; 새 문서가 다 뜨면 한 번 묻는다.
+  if (said.state === "started") tab.fillOffer = null;
+  else if (said.state === "finished") void offerSavedAddresses(tab, said.url);
   // 아티팩트 미리보기 탭이 링크·뒤로 가기로 제 아티팩트를 떠나면 남는 탭이 된다(t-55370).
   keepGlanceLeaving(tab);
   // 아티팩트 페이지의 여는 시계가 첫 그림을 듣는다(t-59665 ⑤·⑧).

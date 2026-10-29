@@ -10564,6 +10564,65 @@ body.is-dragging-pane {
   color: var(--ink-chalk);
 }
 
+/* The form-fill strip: one line under the toolbar, a pane-pushing sibling
+ * like the downloads strip above it. The words wrap by word and the acts fold
+ * under them at a narrow pane; a primary act is a saved entry the person can
+ * press to fill the page's form (t-79331 — the sign-in strip of t-79326 is
+ * the same strip with its own entries). */
+.browser-fillbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px var(--space-3);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: var(--surface-deck);
+  font-size: var(--text-xs);
+  color: var(--ink-chalk);
+}
+
+.browser-fillbar-words {
+  flex: 1 1 16em;
+  min-width: 0;
+}
+
+.browser-fillbar-acts {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.browser-fillbar-act {
+  max-width: 24em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: var(--rule-width) solid var(--edge-mark);
+  border-radius: var(--radius-sm);
+  background: none;
+  padding: 2px var(--space-2);
+  font: inherit;
+  font-size: var(--text-xs);
+  color: var(--ink-mist);
+  cursor: pointer;
+}
+
+.browser-fillbar-act.is-primary {
+  color: var(--ink-chalk);
+}
+
+.browser-fillbar-act:hover {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+.browser-fillbar-act:focus-visible {
+  outline: 2px solid var(--ink-chalk);
+  outline-offset: 1px;
+}
+
 /* The bookmarks strip — Chrome's bookmarks bar under the toolbar, one row of
  * the bar's own order: a bookmark is its words, a first-level folder wears
  * the folder glyph and opens its bookmarks as a menu, and the trailing
@@ -27678,6 +27737,7 @@ select {
 .browser-suggest-row,
 .browser-dl-act,
 .browser-bookmark,
+.browser-fillbar-act,
 .browser-markup-tool,
 .browser-markup-width,
 .browser-markup-size,

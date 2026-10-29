@@ -1355,6 +1355,85 @@ pub(crate) fn browser_bookmarks(
     ))
 }
 
+/// 이 판의 프로필로 가져온 주소와 입력값. 프로필이 없거나 가져온 적이 없으면
+/// 비어 있다.
+fn pane_address_book(state: &AppState, label: &str) -> browser_profile_data::AddressBook {
+    let profile = state
+        .browser_records()
+        .get(label)
+        .and_then(|record| record.profile.clone());
+    profile.map_or_else(browser_profile_data::AddressBook::default, |profile| {
+        browser_profile_data::load_address_book(state.config_root(), &profile)
+    })
+}
+
+async fn detect_page_form(pane: &BrowserPane) -> Result<browser_form_fill::PageForm, String> {
+    let answer = page_json(
+        pane,
+        browser_form_fill::detect_script(),
+        BROWSER_CALLBACK_DEADLINE,
+    )
+    .await?;
+    serde_json::from_value(answer).map_err(|_| PAGE_ANSWER_UNREADABLE.to_string())
+}
+
+/// 지금 이 판의 폼에 내밀 저장된 주소들(t-79331 ③) — 고를 때 읽는 한 줄과
+/// 채울 수 있는 칸 수만 간다. 가져온 주소가 없는 판은 페이지를 평가하지 않는다:
+/// 대부분의 페이지가 이 답에서 끝난다. 탐지는 한 번의 평가이고 칸의 값은 읽지
+/// 않는다.
+#[tauri::command]
+pub(crate) async fn browser_address_candidates(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    label: String,
+) -> Result<Vec<browser_form_fill::AddressCandidate>, String> {
+    from_the_main_webview(&webview)?;
+    let pane = browser_pane_of(&app, &state, &label)?;
+    let book = pane_address_book(&state, &label);
+    if book.addresses.is_empty() {
+        return Ok(Vec::new());
+    }
+    let form = detect_page_form(&pane).await?;
+    Ok(browser_form_fill::offer(&book, &form))
+}
+
+/// 고른 주소를 판의 폼에 쓴다. 사람이 띠에서 고른 일이라 에이전트의 문이
+/// 아니다(`self_surface`). 값은 이 호출 안에서 저장소에서 나와 렌더러로만
+/// 가고, 돌려주는 것은 몇 칸에 들어갔는지뿐이다. 고른 주소가 지금 페이지에
+/// 내밀어질 것이 아니면 쓰지 않는다. 그 폼에서 종류를 모르는 빈 칸은 같은
+/// 이름으로 입력했던 값이 있으면 그것으로 채운다.
+#[tauri::command]
+pub(crate) async fn browser_address_fill(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    label: String,
+    id: String,
+) -> Result<browser_form_fill::FillReport, String> {
+    from_the_main_webview(&webview)?;
+    let pane = browser_pane_of(&app, &state, &label)?;
+    let book = pane_address_book(&state, &label);
+    let form = detect_page_form(&pane).await?;
+    if !browser_form_fill::offer(&book, &form)
+        .iter()
+        .any(|candidate| candidate.id == id)
+    {
+        return Err("이 페이지에 쓸 수 없는 주소입니다".to_string());
+    }
+    let address = book
+        .addresses
+        .iter()
+        .find(|address| address.id == id)
+        .ok_or_else(|| "저장된 주소를 읽을 수 없습니다".to_string())?;
+    let script = browser_form_fill::fill_script(
+        &browser_form_fill::fill_values(address, &form.kinds),
+        &browser_form_fill::entry_values(&book, &form.names),
+    );
+    let answer = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+    Ok(browser_form_fill::fill_report(&answer))
+}
+
 /// 이 기계에 설치된 소스 브라우저들 — 가져오기 메뉴의 재료 (지시서 C2,
 /// Orca `detectInstalledBrowsers`).
 #[tauri::command(async)]
@@ -1431,16 +1510,25 @@ pub(crate) async fn import_browser_cookies(
         // 쿠키는 이미 앉았으니, 여기서 실패해도 가져오기는 실패가 아니다:
         // 그 몫이 카드에서 빠지고 이유는 창 로그 한 줄에 간다.
         let profile_data = if browser_cookie_import::is_chromium_family(&family) {
-            let carried =
-                browser_profile_data::read_chromium_profile_data(&family, source_profile, &home)
-                    .and_then(|read| {
-                        browser_profile_data::save_imported(
-                            &config_root,
-                            &target,
-                            &read,
-                            browser_cookie_import::now_unix(),
-                        )
-                    });
+            let carried = browser_profile_data::read_chromium_profile_data(
+                &family,
+                source_profile,
+                &home,
+                &scratch,
+            )
+            .and_then(|(bookmarks, web_data)| {
+                note_window_event(
+                    &local_data_root,
+                    &browser_profile_data::import_log_line(&bookmarks, &web_data),
+                );
+                browser_profile_data::save_imported(
+                    &config_root,
+                    &target,
+                    &bookmarks,
+                    &web_data,
+                    browser_cookie_import::now_unix(),
+                )
+            });
             match carried {
                 Ok(counts) => Some(counts),
                 Err(error) => {

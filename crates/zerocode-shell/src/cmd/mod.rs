@@ -77,13 +77,14 @@ pub(crate) use remote::{
 };
 
 pub(crate) use browser::{
-    browser_bookmarks, browser_click, browser_console, browser_devtools, browser_diagnose,
-    browser_eval, browser_find, browser_find_clear, browser_grab_arm, browser_grab_disarm,
-    browser_grab_take, browser_history, browser_menu_take, browser_navigate, browser_network,
-    browser_place, browser_profiles, browser_read, browser_reload, browser_scroll, browser_stop,
-    browser_type, browser_wait, browser_zoom, close_browser_pane, cookie_sources,
-    create_browser_profile, delete_browser_profile, focus_main, import_browser_cookies,
-    import_cookie_file, note_webview_error, open_browser_pane, set_browser_default_profile,
+    browser_address_candidates, browser_address_fill, browser_bookmarks, browser_click,
+    browser_console, browser_devtools, browser_diagnose, browser_eval, browser_find,
+    browser_find_clear, browser_grab_arm, browser_grab_disarm, browser_grab_take, browser_history,
+    browser_menu_take, browser_navigate, browser_network, browser_place, browser_profiles,
+    browser_read, browser_reload, browser_scroll, browser_stop, browser_type, browser_wait,
+    browser_zoom, close_browser_pane, cookie_sources, create_browser_profile,
+    delete_browser_profile, focus_main, import_browser_cookies, import_cookie_file,
+    note_webview_error, open_browser_pane, set_browser_default_profile,
 };
 
 pub(crate) use fs::{

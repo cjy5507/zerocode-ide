@@ -12619,13 +12619,14 @@ function browserProfileRow(profile) {
     }
     identity.append(outcome);
   }
-  // 쿠키와 함께 옮긴 북마크(t-79331) — 브라우저에서 가져온 적이 있을 때만 선다.
+  // 쿠키와 함께 옮긴 북마크·주소(t-79331) — 브라우저에서 가져온 적이 있을 때만 선다.
   const carried = profile.imported;
   if (carried && Number.isInteger(carried.bookmarks)) {
     const said = document.createElement("p");
     said.className = "browser-profile-note browser-profile-carried";
-    said.textContent = t("settings.browser.profileCarried", "북마크 {{bookmarks}}개", {
+    said.textContent = t("settings.browser.profileCarried", "북마크 {{bookmarks}}개 · 주소 {{addresses}}개", {
       bookmarks: carried.bookmarks,
+      addresses: carried.addresses ?? 0,
     });
     identity.append(said);
   }

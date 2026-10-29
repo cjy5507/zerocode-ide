@@ -156,6 +156,7 @@ window-browser-test:
 # Guest error/network observation must also run in a fresh protocol session.
 browser-observation-test:
     node ui/tests/browser-ring.mjs
+    node ui/tests/browser-form-fill.mjs
 
 # The browser door's page scripts (zcSelect, click, wait) against a page with
 # hidden twins of its controls: the element a selector names is the first one

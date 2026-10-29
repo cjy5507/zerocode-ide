@@ -110,6 +110,8 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "set_opencode_cookie",
     "import_browser_cookies",
     "import_cookie_file",
+    // A saved address written into a page's form — the person's pick (t-79331).
+    "browser_address_fill",
     "jira_connect",
     "jira_disconnect",
     "linear_connect",

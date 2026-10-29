@@ -360,8 +360,8 @@ pub(super) struct BrowserProfileView {
     /// 가져온 뒤면 없다 — 앞의 칸들은 그대로 두고 더하기만 한 칸이다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) last_apply: Option<browser_cookie_import::CookieApply>,
-    /// 쿠키와 함께 옮긴 북마크의 수(t-79331). 브라우저에서 가져온 적이 없으면
-    /// 없다 — 이것도 더하기만 한 칸이다.
+    /// 쿠키와 함께 옮긴 북마크·주소·입력값의 수(t-79331). 브라우저에서 가져온
+    /// 적이 없으면 없다 — 이것도 더하기만 한 칸이다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) imported: Option<browser_profile_data::ImportedData>,
 }
@@ -450,8 +450,8 @@ pub(super) struct BrowserCookieImportSummary {
     pub(super) domains: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) warning: Option<BrowserCookieImportWarning>,
-    /// 같은 누름에 옮긴 북마크의 수(t-79331). 브라우저에서 읽은 Chromium
-    /// 가족만 싣고, 그 몫을 읽지 못했으면 없다.
+    /// 같은 누름에 옮긴 북마크·주소·입력값의 수(t-79331). 브라우저에서 읽은
+    /// Chromium 가족만 싣고, 그 몫을 읽지 못했으면 없다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) profile_data: Option<browser_profile_data::ImportedData>,
 }
