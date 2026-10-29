@@ -22009,7 +22009,6 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "list-pad-bottom",
         "sticky-pad-top",
         "sticky-pad-bottom",
-        "sticky-fade",
         "status-h",
         "status-in",
         // A step is one line (t-15682): the row, the column of its dot and its
