@@ -968,9 +968,9 @@ fn taking_up(
     if !seated {
         return TakeUp::Later;
     }
-    // The pane asked again since: the hook has the word.
+    // The pane asked again since — its hook came before this beat.
     if asking_there {
-        return TakeUp::Drop;
+        return TakeUp::Meet;
     }
     if up() {
         return TakeUp::Carry;
@@ -996,10 +996,27 @@ enum Met {
     Dropped,
 }
 
-/// A written-down question meets `held`, what the pane at `term` asks now.
+/// A written-down question meets `held`, what the pane at `term` asks now
+/// (t-84470, r2 P3-1): the same question its hook filed nothing for yet takes
+/// the written letter on — one letter, its ten minutes from the first asking,
+/// the person's again if it was theirs — and anything else leaves the
+/// written letter, so an answer to it is refused as passed, never lost.
 fn meet(held: &mut Asked, kept: Kept, seat: AskSeat, term: u32) -> Met {
-    let _ = (held, kept, seat, term);
-    Met::Dropped
+    let Some(back) = taken_up(kept, seat, term) else {
+        return Met::Dropped;
+    };
+    if back.signature != held.signature || !matches!(held.filed, Filing::Unfiled) {
+        return Met::Left(back);
+    }
+    let given = if held.raised.is_none() {
+        back.raised
+    } else {
+        None
+    };
+    held.filed = back.filed;
+    held.filed_ms = back.filed_ms;
+    held.raised = held.raised.or(back.raised);
+    Met::Adopted(given)
 }
 
 /// Write down what the window carries now, when it changed since the last
