@@ -2833,9 +2833,10 @@ async fn e2e_workflow_first_tool_frame_shows_both_live_helpers() {
 /// the other helper's tool must not stand alone on the first frame.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_workflow_first_tool_frame_shows_both_live_helpers_when_one_helper_answers_late() {
-    // Far past a frame and the harness's 10 ms poll, so an unmatched answer
-    // always paints alone first; far under the 20 s waits below.
-    const LATE: Duration = Duration::from_millis(400);
+    // Past the one-second beat the helper rows are redrawn on
+    // (`session::pulse`), so a beat always falls between the two first
+    // tools unless the script answers both together; under the 20 s waits.
+    const LATE: Duration = Duration::from_secs(2);
     let service =
         ScriptedAnthropicService::workflow_two_helpers_one_late(WORKFLOW_TWO_HELPERS_DONE, LATE)
             .await
