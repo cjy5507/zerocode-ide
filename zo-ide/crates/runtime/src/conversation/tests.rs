@@ -17472,19 +17472,21 @@ fn context_breakdown_report_keeps_a_gap_after_the_compaction_window_name() {
     );
 }
 
-/// The ladder's percentages are of the window the compaction-window row names
-/// (t-79938): the tiers come from that window, and the row says so, so a
-/// percentage of the model's window reads low against it.
-#[test]
-fn context_breakdown_report_measures_the_ladder_against_the_compaction_window() {
-    let _env = crate::test_env_lock();
-    let (wide, compaction_window, report) = wide_context_report();
-    for (tier, threshold) in [
-        ("Microcompact", wide.microcompact_input_tokens_threshold()),
-        ("State distill", wide.state_distill_input_tokens_threshold()),
-        ("Warn", wide.precompaction_input_tokens_threshold()),
-        ("Auto compact", u64::from(wide.auto_compaction_input_tokens_threshold())),
-    ] {
+/// The percentage each ladder row of `report` shows, checked to be its tier's
+/// share of `compaction_window`, the window the tiers come from.
+fn ladder_percentages_of(
+    runtime: &ConversationRuntime<NoopApiClient, StaticToolExecutor>,
+    compaction_window: u64,
+    report: &str,
+) -> Vec<(&'static str, u64)> {
+    [
+        ("Microcompact", runtime.microcompact_input_tokens_threshold()),
+        ("State distill", runtime.state_distill_input_tokens_threshold()),
+        ("Warn", runtime.precompaction_input_tokens_threshold()),
+        ("Auto compact", u64::from(runtime.auto_compaction_input_tokens_threshold())),
+    ]
+    .into_iter()
+    .map(|(tier, threshold)| {
         let line = report
             .lines()
             .map(str::trim_start)
@@ -17493,13 +17495,26 @@ fn context_breakdown_report_measures_the_ladder_against_the_compaction_window() 
         let shown = line
             .rsplit_once('(')
             .and_then(|(_, pct)| pct.strip_suffix("%)"))
+            .and_then(|pct| pct.parse::<u64>().ok())
             .unwrap_or_else(|| panic!("no percentage on {line:?}"));
         assert_eq!(
             shown,
-            (threshold * 100 / compaction_window).to_string(),
+            threshold * 100 / compaction_window,
             "`{tier}` must be a % of the compaction window the report names:\n{report}"
         );
-    }
+        (tier, shown)
+    })
+    .collect()
+}
+
+/// The ladder's percentages are of the window the compaction-window row names
+/// (t-79938): the tiers come from that window, and the row says so, so a
+/// percentage of the model's window reads low against it.
+#[test]
+fn context_breakdown_report_measures_the_ladder_against_the_compaction_window() {
+    let _env = crate::test_env_lock();
+    let (wide, compaction_window, report) = wide_context_report();
+    ladder_percentages_of(&wide, compaction_window, &report);
 }
 
 /// `In use` stays a share of the model's window while the ladder moves to the
@@ -17538,6 +17553,85 @@ fn context_breakdown_report_names_no_compaction_window_for_a_session_without_one
     std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
     let report = runtime_for_context_policy(None, 0).context_breakdown_report();
     assert!(!report.contains("Compaction window"), "{report}");
+}
+
+/// Both compaction knobs cleared for as long as the guards live, and put back
+/// as the shell had them when they drop.
+fn compaction_env_cleared() -> [EnvVarGuard; 2] {
+    [
+        EnvVarGuard::unset("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS"),
+        EnvVarGuard::unset("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+    ]
+}
+
+/// An operator's `CLAUDE_CODE_AUTO_COMPACT_WINDOW` over the model's window is
+/// a second window too (t-82752 P3-1): the report names it, and the ladder is
+/// a share of it rather than 320% of the model's window.
+#[test]
+fn context_breakdown_report_names_a_compaction_window_over_the_models() {
+    let _env = crate::test_env_lock();
+    let _cleared = compaction_env_cleared();
+    let _window = EnvVarGuard::set("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "1000000");
+    let runtime = runtime_for_context_policy(Some("claude-sonnet-4-5"), 200_000);
+    let compaction_window = super::compaction::auto_compaction_window(runtime.context_window);
+    assert!(
+        compaction_window > runtime.context_window,
+        "the case needs a compaction window over the model's: {compaction_window}"
+    );
+    let report = runtime.context_breakdown_report();
+    let row = report
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("Compaction window"))
+        .unwrap_or_else(|| panic!("no compaction-window row:\n{report}"));
+    let named = super::format_kilo_tokens(usize::try_from(compaction_window).expect("window"));
+    assert!(row.contains(&named), "the row must name {named}: {row:?}");
+    for (tier, shown) in ladder_percentages_of(&runtime, compaction_window, &report) {
+        assert!(shown <= 100, "`{tier}` reads {shown}% of its own window:\n{report}");
+    }
+}
+
+/// A compaction window under the fallback window keeps Warn under Auto compact
+/// (t-82752 P3-2). The fallback stands in for a session with no window of its
+/// own; as a floor under every window it put the GPT ladder's Warn on a 50k
+/// compaction window at 74k, 148% of it and over its 42.5k Auto compact.
+#[test]
+fn a_compaction_window_under_the_fallback_keeps_warn_under_auto_compact() {
+    use super::compaction::ContextPolicy;
+    let _env = crate::test_env_lock();
+    let _cleared = compaction_env_cleared();
+    let small = u64::from(FALLBACK_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD) / 2;
+    let check = |runtime: &ConversationRuntime<NoopApiClient, StaticToolExecutor>,
+                 model: Option<&str>,
+                 case: &str| {
+        let warn = runtime.precompaction_input_tokens_threshold();
+        let auto = u64::from(runtime.auto_compaction_input_tokens_threshold());
+        assert!(
+            warn < auto,
+            "{model:?}, {case}: Warn {warn} must sit under Auto compact {auto}"
+        );
+        assert_eq!(
+            warn,
+            ContextPolicy::for_model(model).precompaction_threshold(small),
+            "{model:?}, {case}: Warn must be the policy's share of the {small}-token window"
+        );
+    };
+    for model in [Some("claude-opus-4-1"), Some("gpt-5.5"), Some("gemini-2.5-pro"), None] {
+        {
+            let _window =
+                EnvVarGuard::set("CLAUDE_CODE_AUTO_COMPACT_WINDOW", small.to_string());
+            check(
+                &runtime_for_context_policy(model, 1_000_000),
+                model,
+                "operator's compaction window",
+            );
+        }
+        check(&runtime_for_context_policy(model, small), model, "declared window");
+        // A provider-stated ceiling or a `/model` switch lands on it later.
+        let mut runtime = runtime_for_context_policy(model, 1_000_000);
+        runtime.set_context_window(small);
+        check(&runtime, model, "switched window");
+    }
 }
 
 /// P4: the summary-model override applies only within the session's provider
