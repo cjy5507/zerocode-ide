@@ -899,6 +899,15 @@
   /* Over the stage and its scrims, with the chat preview, under the tab switcher (100). */
   --your-turn-list-layer: 90;
   --reading-column: 760px;
+  /* The column widens with the page (t-81786 P3-16, the person's 「폭이 너무
+   * 좁은 느낌 — 화면 크기에 따라서」): at a page of 1000, 1200, 1400 and 1700px
+   * it steps to these (shell.css, `@container`). 1120px is the ceiling — about
+   * 70 Korean characters a line at 16px, past which a line is hard to follow
+   * back to its start. */
+  --reading-column-wide-1: 880px;
+  --reading-column-wide-2: 960px;
+  --reading-column-wide-3: 1040px;
+  --reading-column-wide-4: 1120px;
   /* 쌓인 일's bar of the branches not in main: the draft's 6 px, 2 px apart. */
   --pile-bar-height: 6px;
   --pile-bar-gap: 2px;

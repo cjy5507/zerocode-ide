@@ -3,12 +3,13 @@
  * tool work between two answers is one pill; the person's words stand on the
  * right; a code block opens with its own band; the window's own note is a thin
  * line. Read off the laid-out page, on the folded page (the product's
- * default), at four page widths and in both treatments: nothing pushes the
- * page sideways, the reading steps with the width, every word reads at 4.5:1,
- * and the page builds no more than it shows.
+ * default), at seven window widths and in both treatments: nothing pushes the
+ * page sideways, the reading steps with the width — the column widens with a
+ * wide page (t-81786 P3-16) — every word reads at 4.5:1, and the page builds
+ * no more than it shows.
  *
- * `CONVERSATION_B_SHOTS=<folder>` keeps a picture of each treatment at 390 and
- * 1440 px there; without it nothing is written. */
+ * `CONVERSATION_B_SHOTS=<folder>` keeps a picture of each treatment at 390,
+ * 1440 and 2000 px there; without it nothing is written. */
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -16,8 +17,8 @@ import { openConversation } from "./conversation-parity.mjs";
 import { mockupTurns } from "./conversation-redesign.mjs";
 import { chromium, createWindowServer, foldConversations, openWindowTestPage } from "./window-boot.mjs";
 
-export const B_WIDTHS = Object.freeze([390, 720, 1000, 1440]);
-const SHOT_WIDTHS = Object.freeze([390, 1440]);
+export const B_WIDTHS = Object.freeze([390, 720, 1000, 1200, 1440, 2000, 2560]);
+const SHOT_WIDTHS = Object.freeze([390, 1440, 2000]);
 
 /* The mockup's turns with what draft B adds to them: a second answer before
  * the last (so one answer is not the newest), a fenced block named
@@ -91,8 +92,16 @@ function readPage() {
       oneLine: getComputedStyle(composer, "::placeholder").whiteSpace === "nowrap",
     };
   })();
+  const dock = page.querySelector(".chat-dock");
+  const root = getComputedStyle(document.documentElement);
   return {
     pageWidth: Math.round(box(page).width),
+    // The column's measures as the token file states them: the base, then the
+    // wide page's steps (t-81786 P3-16).
+    measures: ["--reading-column", "--reading-column-wide-1", "--reading-column-wide-2", "--reading-column-wide-3", "--reading-column-wide-4"]
+      .map((name) => parseFloat(root.getPropertyValue(name))),
+    dockMax: dock ? parseFloat(getComputedStyle(dock).maxWidth) : null,
+    fadeMax: parseFloat(getComputedStyle(page, "::after").maxWidth),
     pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     listOverflow: list.scrollWidth - list.clientWidth,
     columnWidth: Math.round(column.right - column.left),
@@ -168,7 +177,7 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
       }
     }
     const all = Object.values(seen);
-    ok("B: at 390, 720, 1000 and 1440 px, in both treatments, nothing pushes the page or the column sideways",
+    ok(`B: at ${B_WIDTHS.join(", ")} px, in both treatments, nothing pushes the page or the column sideways`,
       all.every((one) => one.pageOverflow === 0 && one.listOverflow === 0),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pageOverflow, one.listOverflow]]))));
     ok("B: on a page under 560 px a line of code folds inside its block — nothing to scroll sideways inside it — and a wider page keeps the line whole, to scroll",
@@ -182,15 +191,26 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
     // The steps are the PAGE's width, not the window's: the window's side
     // columns take their share first.
     const step = (one) => (one.pageWidth < 560 ? "narrow" : one.pageWidth >= 1000 ? "wide" : "middle");
+    // The column's measure at a page's width: the base under 1000 px, then a
+    // step at 1000, 1200, 1400 and 1700 px (t-81786 P3-16).
+    const measureOf = (one) => {
+      const reached = [1000, 1200, 1400, 1700].filter((from) => one.pageWidth >= from).length;
+      return one.measures[reached];
+    };
     ok("B: the reading steps with the page's own width — a step smaller under 560 px, more air between lines from 1000 px, the column never wider than its measure",
       B_WIDTHS.every((width) => {
         const one = dark(width);
         const want = step(one);
-        return one.columnWidth > 0 && one.columnWidth <= 760 &&
+        return one.columnWidth > 0 && one.columnWidth <= measureOf(one) &&
           (want === "narrow" ? one.proseSize === 14 : one.proseSize === 16) &&
           (want === "wide" ? one.proseLeading === 1.6 : one.proseLeading === 1.5);
       }) && new Set(B_WIDTHS.map((width) => step(dark(width)))).size >= 2,
       JSON.stringify(B_WIDTHS.map((width) => [width, dark(width).pageWidth, dark(width).proseSize, dark(width).proseLeading, dark(width).columnWidth])));
+    ok("B: a wide page widens its column to the step its width reached — 880, 960, 1040, then at most 1120 px — and the composer and the fade under it follow; under 1000 px the column stays at 760 px (t-81786 P3-16)",
+      all.every((one) => one.measures.every((value) => value > 0) && one.dockMax === measureOf(one) && one.fadeMax === measureOf(one) &&
+        (one.pageWidth >= 1000 ? Math.abs(one.columnWidth - measureOf(one)) <= 1 : one.columnWidth <= one.measures[0])) &&
+        new Set(B_WIDTHS.map((width) => measureOf(dark(width)))).size >= 3,
+      JSON.stringify(B_WIDTHS.map((width) => [width, dark(width).pageWidth, measureOf(dark(width)), dark(width).columnWidth, dark(width).dockMax, dark(width).fadeMax])));
     ok("B: the empty box's sentence stays on its one line at every width — the whole of it where it fits, its first half on a box too narrow for it, cut short rather than folded under the box",
       all.every((one) => one.say?.fits && one.say.oneLine) &&
         dark(390).say.words === dark(390).sayShort && dark(1440).say.words === dark(1440).sayWhole,

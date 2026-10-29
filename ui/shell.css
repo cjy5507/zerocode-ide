@@ -18246,9 +18246,46 @@ button.helper-sib:hover {
   container-type: inline-size;
 }
 
+/* A wide page widens its column (t-81786 P3-16): at 1000, 1200, 1400 and
+ * 1700px it steps to the next `--reading-column-wide-*`, never past the last.
+ * The composer's measure and the fade under it read the column again here: a
+ * custom property is resolved where it is declared, so the root's
+ * `--chat-dock-max` stays the root's 760px. The page's own fade (`::after`)
+ * asks the page's width, as the page's children do. */
+.worker-view.is-chat-page > *,
+.worker-view.is-chat-page::after {
+  --chat-dock-max: var(--reading-column);
+}
+
 @container (min-width: 1000px) {
   .worker-view.is-chat-page > * {
     --chat-prose-leading: var(--chat-read-leading-wide);
+  }
+
+  .worker-view.is-chat-page > *,
+  .worker-view.is-chat-page::after {
+    --reading-column: var(--reading-column-wide-1);
+  }
+}
+
+@container (min-width: 1200px) {
+  .worker-view.is-chat-page > *,
+  .worker-view.is-chat-page::after {
+    --reading-column: var(--reading-column-wide-2);
+  }
+}
+
+@container (min-width: 1400px) {
+  .worker-view.is-chat-page > *,
+  .worker-view.is-chat-page::after {
+    --reading-column: var(--reading-column-wide-3);
+  }
+}
+
+@container (min-width: 1700px) {
+  .worker-view.is-chat-page > *,
+  .worker-view.is-chat-page::after {
+    --reading-column: var(--reading-column-wide-4);
   }
 }
 
