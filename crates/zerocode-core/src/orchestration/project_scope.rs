@@ -20,7 +20,10 @@
 //! how it was learned, when, and from which seat, so "why is this run that
 //! project's" has an answer in the ledger itself.
 
-use super::{BOOL_FLAGS, Ledger, Run, WORKTREE_EVIDENCE_VERB, split_words, standing_in};
+use super::{
+    BOOL_FLAGS, Ledger, QUESTION_CLOSE, Run, WORKTREE_EVIDENCE_VERB, run_holding, split_words,
+    standing_in,
+};
 
 /// The longest project root a run may hold. A root is a path, and a platform
 /// bounds its paths well inside this.
@@ -301,7 +304,15 @@ pub fn acting_run(
     let caller = actor
         .filter(|actor| !actor.is_empty())
         .map_or_else(|| seat.clone(), str::to_string);
-    standing_in(ledger, &caller, &seat)
+    let standing = standing_in(ledger, &caller, &seat);
+    // A question is closed where it was filed, which for the asking side is
+    // another run (t-83289): the plan finds it by id, and so does the check.
+    match words.value("--message") {
+        Some(id) if verb == QUESTION_CLOSE => {
+            run_holding(ledger, standing.as_deref(), id).or(standing)
+        }
+        _ => standing,
+    }
 }
 
 /// Where a verb reaches, against the project its pane works in — read in one
@@ -442,22 +453,22 @@ pub fn reach(
         ),
         _ => None,
     };
-    let reply_run = if argv.first().is_some_and(|verb| verb == "reply") {
+    let carried_to = if argv.first().is_some_and(|verb| verb == "reply") {
         target
             .as_deref()
             .and_then(|target| ledger.asker_run(target, &run.id))
             .and_then(|id| ledger.run(&id))
-            .map(|run| (run.id.clone(), run.project.clone()))
     } else {
         None
     };
+    let reply_run = carried_to.map(|asker| (asker.id.clone(), asker.project.clone()));
     let from = super::sender(
         ledger,
         crate::agent_teams::LEADER_PANE,
         &run.id,
         (team, pane),
     );
-    let recipient_seats = target
+    let mut recipient_seats: Vec<String> = target
         .as_deref()
         .and_then(|target| ledger.resolve_address(&run.id, target, &from).ok())
         .unwrap_or_default()
@@ -477,6 +488,19 @@ pub fn reach(
             None
         })
         .collect();
+    /* A reply to a pane that sat in the asking run's chair and sits there no
+     * more (t-83289): the answer that reaches anybody is the copy that run's
+     * chair reads, so that chair is the recipient placed — not the gone pane,
+     * which no window can place and which refused every answer to it. */
+    if let Some(asker) = carried_to
+        && let Some(gone) = target
+            .as_deref()
+            .and_then(|target| target.strip_prefix(super::PANE_ADDRESS_PREFIX))
+        && asker.seat_is_coordinator(gone) != Some(true)
+    {
+        recipient_seats.retain(|seat| seat != gone);
+        recipient_seats.extend(asker.coordinator_live().map(|chair| chair.seat.clone()));
+    }
     Reach {
         run: Some((run.id.clone(), run.project.clone())),
         coordinator: run.seat_is_coordinator(&format!("{team}/{pane}")) == Some(true),

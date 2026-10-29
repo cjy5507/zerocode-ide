@@ -1088,7 +1088,7 @@ fn the_look_reads_the_letters_facts_off_the_run() {
     let receipts = Vec::new();
     let room = Mailroom::of_run(run, &receipts);
     let letter = room.message(&question).expect("the letter");
-    let situation = room.situation(run, Some(false));
+    let situation = room.situation(&ledger, run, Some(false), 20_010);
     assert_eq!(
         situation,
         Situation {

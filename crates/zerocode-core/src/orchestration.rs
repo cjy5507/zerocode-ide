@@ -3990,6 +3990,17 @@ impl Run {
     /// Whether the asker still waits by the clock is the ledger's to say
     /// ([`Ledger::still_owed`]), since that reads other runs' chairs.
     pub fn question_is_answerable(&self, question: &Message) -> Result<(), String> {
+        if let Some(closed) = hand_closed(self, question) {
+            let said: serde_json::Value =
+                serde_json::from_str(closed.body.as_str()).unwrap_or_default();
+            return Err(format!(
+                "question {} is closed — {} closed it without an answer ({}): {}",
+                question.id,
+                said["closedBy"].as_str().unwrap_or("its coordinator"),
+                closed.id,
+                said["note"].as_str().unwrap_or_default()
+            ));
+        }
         if question_closed(self, question) {
             return Err(format!(
                 "question {} is closed — its dispatch ended \
@@ -4582,6 +4593,16 @@ const TERMINAL_EXITED: &str = "the terminal holding this worker exited";
 pub const NOT_RESUMED: &str =
     "the window restarted and nothing resumed this worker's conversation within the grace";
 
+/// What the receipt a coordinator taken over is handed says it is
+/// ([`Ledger::take_over_coordinator`]) — and how [`chair_witnessed`] knows
+/// the seat it names sat in the chair.
+const SEAT_TAKEN_OVER: &str = "coordinator seat taken over";
+
+/// The verb that closes a question without an answer (t-83289), named once
+/// for the plan, the table of verbs and the run a verb answers in
+/// ([`project_scope::acting_run`]).
+pub const QUESTION_CLOSE: &str = "question-close";
+
 /// The final word an ending is to the askers of the worker it ended: a
 /// terminal that died or a sleeper the restart lost EXITED, and everything
 /// else — a stop, an abandon — is its coordinator CANCELLING it. Read off
@@ -4704,11 +4725,16 @@ fn awaiting_reply(run: &Run, worker_id: &str) -> bool {
 }
 
 /// A thread's ROOT of the question kind with no [`Message::answers`] in its
-/// thread — both words as [`awaiting_reply`] explains them.
+/// thread — both words as [`awaiting_reply`] explains them — and not closed
+/// by a coordinator without one ([`closes_question`], t-83289): nobody waits
+/// on a question its own side closed.
 fn awaits_answer(run: &Run, message: &Message) -> bool {
     message.kind == MessageKind::Question
         && message.thread.is_none()
-        && !run.messages.iter().any(|one| one.answers(message))
+        && !run
+            .messages
+            .iter()
+            .any(|one| one.answers(message) || closes_question(one, message))
 }
 
 /// How long a quiet pane must remain still before the window calls it stalled.
@@ -5498,22 +5524,79 @@ fn answered_by_letters<'a>(
 }
 
 /// Every seat that has sat in `run`'s chair, as far as the run itself can
-/// tell: the seat its chair names now, held or vacated, and the seat behind
+/// tell: the seat its chair names now, held or vacated, the seat behind
 /// every letter it signed as the run ([`Message::author_seat`]) — an address
-/// [`sender`] mints for the chair and nobody else. Derived, never stored:
-/// the history of a chair is read off the letters written from it.
+/// [`sender`] mints for the chair and nobody else — and every seat the
+/// ledger itself wrote down in the chair ([`chair_witnessed`]). Derived,
+/// never stored: the history of a chair is read off the letters written
+/// from it and about it.
+///
+/// The ledger's own word is not optional (t-83289). A chair that writes
+/// only into other runs signs nothing as its own: ZO's chair of 06:42–09:41
+/// on 2026-10-29 wrote sixteen letters, every one into another run, and
+/// once a restart sat a new pane in its place the letter it had answered
+/// m-81909 with stopped counting — though the ledger's notice m-81908 had
+/// named that pane in the chair.
 fn chair_seats(run: &Run) -> std::collections::HashSet<&str> {
     let address = run.address();
-    run.coordinator
+    let mut seats: std::collections::HashSet<&str> = run
+        .coordinator
         .iter()
         .map(|chair| chair.seat.as_str())
-        .chain(
-            run.messages()
-                .iter()
-                .filter(|letter| letter.from == address)
-                .filter_map(|letter| letter.author_seat.as_deref()),
-        )
-        .collect()
+        .collect();
+    for letter in run.messages() {
+        if letter.from == address {
+            seats.extend(letter.author_seat.as_deref());
+        } else if letter.from == LEDGER_ITSELF {
+            seats.extend(chair_witnessed(run, &address, letter));
+        }
+    }
+    seats
+}
+
+/// The seat the ledger's own `letter` in `run` saw in the run's chair, when
+/// it says so: a notice to an asker in a question's thread, naming the chair
+/// at `address` it waited on ([`ReceiverSeat::Coordinator`],
+/// [`Ledger::receivers_told`]), or the receipt a holder taken over was handed
+/// ([`SEAT_TAKEN_OVER`]). Only these two shapes are read, and only in the
+/// ledger's voice — a pane writing the same words is not the ledger.
+fn chair_witnessed<'a>(run: &Run, address: &str, letter: &'a Message) -> Option<&'a str> {
+    let notice = match letter.kind {
+        MessageKind::Status if letter.thread.is_some() => true,
+        MessageKind::Handoff => false,
+        _ => return None,
+    };
+    let said: ChairWitness<'a> = serde_json::from_str(letter.body.as_str()).ok()?;
+    if notice {
+        (said.receiver? == address).then_some(())?;
+        said.receiver_seat?.seat
+    } else {
+        (said.handoff? == SEAT_TAKEN_OVER && said.run? == run.id).then_some(())?;
+        said.from
+    }
+}
+
+/// The fields of the ledger's own lines [`chair_witnessed`] reads, borrowed
+/// from the body and nothing else parsed out of it.
+#[derive(serde::Deserialize)]
+struct ChairWitness<'a> {
+    #[serde(default, borrow)]
+    receiver: Option<&'a str>,
+    #[serde(default, borrow, rename = "receiverSeat")]
+    receiver_seat: Option<WitnessedSeat<'a>>,
+    #[serde(default, borrow)]
+    handoff: Option<&'a str>,
+    #[serde(default, borrow)]
+    run: Option<&'a str>,
+    #[serde(default, borrow)]
+    from: Option<&'a str>,
+}
+
+/// A notice's `receiverSeat`: a chair's names its seat, a worker's does not.
+#[derive(serde::Deserialize)]
+struct WitnessedSeat<'a> {
+    #[serde(default, borrow)]
+    seat: Option<&'a str>,
 }
 
 /// The ledger's own lines in a question's thread, oldest first, each with
@@ -7199,18 +7282,23 @@ impl Ledger {
         self.runs.iter_mut().find(|run| run.id == id)
     }
 
-    /// The other run a pane coordinates, when `address` is that pane's.
+    /// The other run a pane coordinates, or coordinated, when `address` is
+    /// that pane's.
     ///
     /// A question one run's coordinator puts to another (`send --run B`)
     /// lands in B under the asker's PANE address — a stranger there — while
     /// the asker reads its own run's inbox. This is how an answer finds the
-    /// run the asker actually sits in.
+    /// run the asker actually sits in: the run whose chair the pane holds,
+    /// and, once a restart has moved that chair to a new pane, the run whose
+    /// chair it sat in ([`chair_seats`], t-83289) — whoever sits there now
+    /// reads the answer. Live chairs first, so a pane that moved on to
+    /// another run's chair is answered where it sits.
     fn asker_run(&self, address: &str, answered_in: &str) -> Option<String> {
         let seat = address.strip_prefix(PANE_ADDRESS_PREFIX)?;
-        self.runs
-            .iter()
-            .filter(|run| run.id != answered_in)
+        let others = || self.runs.iter().filter(|run| run.id != answered_in);
+        others()
             .find(|run| run.seat_is_coordinator(seat) == Some(true))
+            .or_else(|| others().find(|run| chair_seats(run).contains(seat)))
             .map(|run| run.id.clone())
     }
 
@@ -7451,7 +7539,7 @@ impl Ledger {
             to: format!("{PANE_ADDRESS_PREFIX}{}", held.seat),
             kind: MessageKind::Handoff,
             body: serde_json::json!({
-                "handoff": "coordinator seat taken over",
+                "handoff": SEAT_TAKEN_OVER,
                 "run": run_id,
                 "from": held.seat,
                 "to": seat,
@@ -19669,7 +19757,16 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "reply",
-        "--to-message <id> [--body <text>] · answer in thread",
+        "--to-message <id> [--body <text>] · answer in thread; when the pane that asked sat in \
+         another run's chair and sits there no more, the answer also goes to that run's chair",
+        Doing::Mutation,
+    ),
+    (
+        QUESTION_CLOSE,
+        "--message <questionId> --reason <one line> [--run <id>] · close a question without an \
+         answer, from the coordinator seat of the run asked or of the run that asked: the \
+         ledger's line in its thread, every count leaves it, a waiting `ask` wakes as closed, \
+         `reply` refuses it; a second close answers with the first (already: true)",
         Doing::Mutation,
     ),
     (
@@ -20876,15 +20973,74 @@ fn thread_answer<'a>(run: &'a Run, question: &Message) -> Option<&'a Message> {
 ///
 /// Derived, never stored: a question rode in on a dispatch, and when that
 /// dispatch ends the asker is gone — there is nobody to hand the answer to.
-/// A question with no dispatch (a coordinator's own) is not closed by this;
-/// the clocks in [`expiry`] end it for the counts and the reply verb
-/// (t-59383 r2). No Question table, no flag to fall out of step.
+/// And a coordinator of either side may close one without an answer
+/// (`question-close`, t-83289), which leaves the ledger's line in its thread
+/// ([`hand_closed`]). A question with no dispatch (a coordinator's own) is
+/// not otherwise closed by this; the clocks in [`expiry`] end it for the
+/// counts and the reply verb (t-59383 r2). No Question table, no flag to
+/// fall out of step.
 fn question_closed(run: &Run, question: &Message) -> bool {
     question
         .dispatch
         .as_deref()
         .and_then(|id| run.dispatch(id))
         .is_some_and(|held| held.ended_ms.is_some())
+        || hand_closed(run, question).is_some()
+}
+
+/// The line `question-close` left in `question`'s thread, if a coordinator
+/// closed it without an answer (t-83289): in the ledger's voice, so it is
+/// never the question's answer ([`Message::answers`]) nor a letter about it
+/// ([`Message::writes_about`]), and saying `closed` — the receiver notices
+/// beside it in the thread say `reason` instead ([`receiver_notices`]).
+fn hand_closed<'a>(run: &'a Run, question: &Message) -> Option<&'a Message> {
+    run.messages()
+        .iter()
+        .find(|held| closes_question(held, question))
+}
+
+/// Whether `held` is the line `question-close` left in `question`'s thread
+/// ([`hand_closed`]). The body is read only for the ledger's own lines in
+/// that thread.
+fn closes_question(held: &Message, question: &Message) -> bool {
+    held.thread.as_deref() == Some(question.id.as_str())
+        && held.from == LEDGER_ITSELF
+        && held.kind == MessageKind::Status
+        && serde_json::from_str::<serde_json::Value>(held.body.as_str())
+            .is_ok_and(|body| body[QUESTION_CLOSED_KEY] == true)
+}
+
+/// The key the line [`hand_closed`] reads says `true` under.
+const QUESTION_CLOSED_KEY: &str = "closed";
+
+/// The run a verb about the message `id` answers in when no `--run` names
+/// one: the caller's own (`standing`) when it holds the message, and
+/// otherwise the run that does — message ids are minted once for the whole
+/// ledger, so a question filed in another run's mail is found by its id
+/// alone (t-83289: the asking side closes its question where it was filed).
+fn run_holding(ledger: &Ledger, standing: Option<&str>, id: &str) -> Option<String> {
+    let holds = |run: &&Run| run.message(id).is_some();
+    standing
+        .and_then(|own| ledger.run(own))
+        .filter(holds)
+        .or_else(|| ledger.runs().iter().find(holds))
+        .map(|run| run.id.clone())
+}
+
+/// The chair `seat` closes `question` (filed in `run`) for, when it may:
+/// the live coordinator of `run` — the side asked, or the asking side when
+/// the run's own chair asked — or the live coordinator of the run whose
+/// chair the asking pane holds or held ([`Ledger::asker_run`]). Answered as
+/// that chair's address, the record's `closedBy`.
+fn question_closer(ledger: &Ledger, run: &Run, question: &Message, seat: &str) -> Option<String> {
+    if run.seat_is_coordinator(seat) == Some(true) {
+        return Some(run.address());
+    }
+    let asking = ledger.asker_run(&question.from, &run.id)?;
+    ledger
+        .run(&asking)
+        .filter(|there| there.seat_is_coordinator(seat) == Some(true))
+        .map(Run::address)
 }
 
 /// The key a look that hands nothing over names its kind under, in the page
@@ -24678,6 +24834,144 @@ fn plan_inner(
                             serde_json::json!({ "runId": asker, "messageId": held });
                     }
                     said(said_back)
+                }
+            }
+        }
+
+        QUESTION_CLOSE => {
+            /* A question closed without an answer (t-83289), by the chair it
+             * was asked of or the chair that asked it — the one road out for
+             * a question nobody will answer and nobody can: on 2026-10-29
+             * m-81883 stood six hours on the inbox, its asking pane gone and
+             * `reply` refused. The close is the ledger's line in the thread,
+             * so it is never the answer and `ask` wakes on it as closed
+             * ([`thread_look`]); every count leaves the question out
+             * ([`question_closed`]); a second close answers with the first. */
+            let id = words
+                .value("--message")
+                .ok_or("question-close needs --message <questionId>")?
+                .to_string();
+            let note = words
+                .value("--reason")
+                .map(str::trim)
+                .filter(|held| !held.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "question-close needs --reason <one line> — why {id} closes \
+                         without an answer is the record it leaves"
+                    )
+                })?
+                .to_string();
+            let run_id = match words.value("--run") {
+                Some(_) => bound(ledger, &words, &caller, &seat)?,
+                None => run_holding(ledger, standing_in(ledger, &caller, &seat).as_deref(), &id)
+                    .ok_or_else(|| format!("unknown message: {id}"))?,
+            };
+            let run = ledger.run(&run_id).ok_or_else(|| unknown_run(&run_id))?;
+            let question = run
+                .message(&id)
+                .ok_or_else(|| format!("unknown message: {id}"))?;
+            if question.kind != MessageKind::Question || question.thread.is_some() {
+                return Err(format!(
+                    "{id} is not a question — only a thread's root question closes"
+                ));
+            }
+            let closer = question_closer(ledger, run, question, &seat).ok_or_else(|| {
+                format!(
+                    "question {id} was asked of {} by {} — only the coordinator of {run_id}, \
+                     or of the run that asked it, closes it",
+                    question.to, question.from
+                )
+            })?;
+            // Closed already — answered in its thread, by a close, or by its
+            // attempt ending: the standing fact, and nothing written. Read
+            // before anything is written, and answered as the arm's value
+            // so the retry name still files its receipt.
+            let already = |close_id: Option<&str>, closed_by: Option<&str>| {
+                serde_json::json!({
+                    "questionId": id,
+                    "runId": run_id,
+                    "closed": true,
+                    "already": true,
+                    "closeId": close_id,
+                    "closedBy": closed_by,
+                })
+            };
+            let standing = if let Some(answer) = thread_answer(run, question) {
+                let mut standing = already(None, None);
+                standing["answerId"] = serde_json::Value::String(answer.id.clone());
+                Some(standing)
+            } else if let Some(closed) = hand_closed(run, question) {
+                let first: serde_json::Value =
+                    serde_json::from_str(closed.body.as_str()).unwrap_or_default();
+                Some(already(Some(&closed.id), first["closedBy"].as_str()))
+            } else if question_closed(run, question) {
+                Some(already(None, None))
+            } else {
+                None
+            };
+            match standing {
+                Some(standing) => said(standing),
+                None => {
+                    let asker = question.from.clone();
+                    let asked = question.to.clone();
+                    let asking = ledger
+                        .asker_run(&asker, &run_id)
+                        .filter(|there| format!("{RUN_ADDRESS_PREFIX}{there}") != closer);
+                    let line = Draft {
+                        from: LEDGER_ITSELF.to_string(),
+                        to: asker,
+                        kind: MessageKind::Status,
+                        body: serde_json::json!({
+                            "questionId": id,
+                            QUESTION_CLOSED_KEY: true,
+                            "closedBy": closer,
+                            "note": note,
+                        })
+                        .to_string()
+                        .into(),
+                        subject: Text::default(),
+                        priority: Priority::Normal,
+                        payload: Text::default(),
+                        thread: Some(id.clone()),
+                        task: question.task.clone(),
+                        dispatch: question.dispatch.clone(),
+                    };
+                    /* Told to the asker; and where its address takes nothing
+                     * any more (a worker released under an attempt still
+                     * open), filed to the side asked instead — the record is
+                     * what closes it. */
+                    let close_id = match ledger.post_as(&run_id, line.clone(), Some(&seat), now_ms)
+                    {
+                        Ok(posted) => posted,
+                        Err(_) => ledger.post_as(
+                            &run_id,
+                            Draft {
+                                to: asked,
+                                ..line.clone()
+                            },
+                            Some(&seat),
+                            now_ms,
+                        )?,
+                    };
+                    let mut answer = serde_json::json!({
+                        "questionId": id,
+                        "runId": run_id,
+                        "closed": true,
+                        "already": false,
+                        "closeId": close_id,
+                        "closedBy": closer,
+                    });
+                    if let Some(there) = asking {
+                        let copy = Draft {
+                            to: format!("{RUN_ADDRESS_PREFIX}{there}"),
+                            ..line
+                        };
+                        let held = ledger.post_as(&there, copy, Some(&seat), now_ms)?;
+                        answer["deliveredTo"] =
+                            serde_json::json!({ "runId": there, "messageId": held });
+                    }
+                    said(answer)
                 }
             }
         }

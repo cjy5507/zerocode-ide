@@ -243,7 +243,7 @@ pub(super) fn sweep(host: &dyn Host, now_ms: i64) {
         label_waiting(&mut book, &ledger, now_ms)
     };
     crate::systemone::record_rows(&MAIL_TRIAGE, &path, &labels, now_ms);
-    ask_about(host, &wire, &held.mail, &path, &seated, now_ms);
+    ask_about(host, &wire, &held.mail, &path, &ledger, &seated, now_ms);
 }
 
 /// Gather the fresh letters of every run this window seats — one batch a
@@ -254,6 +254,7 @@ fn ask_about(
     wire: &Wire,
     book: &Arc<Mutex<MailBook>>,
     path: &Path,
+    ledger: &Ledger,
     seated: &[(&Run, u32)],
     now_ms: i64,
 ) {
@@ -276,7 +277,7 @@ fn ask_about(
             .unwrap_or_else(|held| held.into_inner())
             .get(term)
             .map(|turn| matches!(turn.as_read(), super::PaneTurn::Running { .. }));
-        let situation = room.situation(run, coordinator_busy);
+        let situation = room.situation(ledger, run, coordinator_busy, now_ms);
         let mut looks = Vec::with_capacity(fresh.len());
         for letter in &fresh {
             looks.push(room.look(run, letter, now_ms));

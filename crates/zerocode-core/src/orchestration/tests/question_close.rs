@@ -123,6 +123,18 @@ fn a_letter_from_a_chair_that_signed_nothing_as_its_run_still_answers_after_the_
         (open.clone(), open),
         "the question the old chair answered opened again once the chair moved"
     );
+    // The count Jev reads of the coordinator's mail is the same count.
+    let run = bench.ledger.run(&answering).expect("the run");
+    let receipts = Vec::new();
+    assert_eq!(
+        crate::mail_triage::Mailroom::of_run(run, &receipts).open_questions(
+            &bench.ledger,
+            run,
+            bench.clock
+        ),
+        2,
+        "Jev's count of open questions reads another rule"
+    );
 }
 
 /// ②, the other road a chair changes hands by: a holder taken over
