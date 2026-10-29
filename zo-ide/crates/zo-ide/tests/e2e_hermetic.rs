@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use e2e::contract::{self, Rule};
 use e2e::harness::{find_bytes, history_rows_raw, run_pipe, run_pipe_with_env, visible_row_occupancy, PtyRun, Screen, SYNC_END};
-use e2e::scripted::{user_text_contains, ScriptedAnthropicService};
+use e2e::scripted::{user_text_contains, ScriptedAnthropicService, HELPER_RENDEZVOUS_DEADLINE};
 use mock_anthropic_service::{CapturedRequest, MockAnthropicService};
 use tempfile::TempDir;
 use zerocode_harness::{method, Client};
@@ -2822,12 +2822,39 @@ fn read_timing_rows(layout: &Layout) -> Vec<serde_json::Value> {
 /// late for the person deciding whether the run is hung.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_workflow_first_tool_frame_shows_both_live_helpers() {
+    let service = ScriptedAnthropicService::workflow_two_helpers(WORKFLOW_TWO_HELPERS_DONE)
+        .await
+        .expect("start workflow script");
+    first_tool_frame_shows_both_live_helpers(&service);
+}
+
+/// The same first frame when one helper's first request reaches the provider
+/// late, the spread two child spawns land with on a loaded machine (t-82615):
+/// the other helper's tool must not stand alone on the first frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_workflow_first_tool_frame_shows_both_live_helpers_when_one_helper_answers_late() {
+    // Past the one-second beat the helper rows are redrawn on
+    // (`session::pulse`), so a beat always falls between the two first
+    // tools unless the script answers both together; under the 20 s waits.
+    const LATE: Duration = Duration::from_secs(2);
+    const _: () = assert!(LATE.as_millis() < HELPER_RENDEZVOUS_DEADLINE.as_millis());
+    let service =
+        ScriptedAnthropicService::workflow_two_helpers_one_late(WORKFLOW_TWO_HELPERS_DONE, LATE)
+            .await
+            .expect("start workflow script");
+    first_tool_frame_shows_both_live_helpers(&service);
+}
+
+const WORKFLOW_TWO_HELPERS_DONE: &str = "### Workflow done\n\n- both helpers returned\n";
+
+/// How long a two-helper scene waits for each screen it expects. The script's
+/// barrier gives up first, so a helper that never asks still ends the scene on
+/// its own assertion rather than on a wait.
+const WORKFLOW_HELPER_WAIT: Duration = Duration::from_secs(20);
+const _: () = assert!(HELPER_RENDEZVOUS_DEADLINE.as_millis() < WORKFLOW_HELPER_WAIT.as_millis());
+
+fn first_tool_frame_shows_both_live_helpers(service: &ScriptedAnthropicService) {
     let layout = Layout::new();
-    let service = ScriptedAnthropicService::workflow_two_helpers(
-        "### Workflow done\n\n- both helpers returned\n",
-    )
-    .await
-    .expect("start workflow script");
     // Both helpers must be live together, which is the cap the child reads:
     // cores minus two but at least four. Hand the child its own two, so the
     // run does not depend on the machine's core count.
@@ -2837,7 +2864,7 @@ async fn e2e_workflow_first_tool_frame_shows_both_live_helpers() {
         &interactive_args(),
         &[("ZO_WORKFLOW_MAX_CONCURRENCY", "2")],
     );
-    let timeout = Duration::from_secs(20);
+    let timeout = WORKFLOW_HELPER_WAIT;
 
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(b"Run the two-helper workflow\r")
