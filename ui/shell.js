@@ -13446,6 +13446,7 @@ function paintWireAsk(host, run, force = false) {
   if (!ask) {
     card?.remove();
     run.askDraft = null;
+    run.askShape = null;
     return;
   }
   const sig = JSON.stringify(ask.id);
@@ -13479,6 +13480,11 @@ function paintWireAsk(host, run, force = false) {
     ? askPanelNode(run.askShape, run.askDraft)
     : approvalPanelNode(run.askShape, run.askDraft);
   standAskCard(host, panel);
+  // The box under the card says where its words go for this question — the
+  // page's composer was painted before the card took its shape (t-81786 r2
+  // P2-2: the first question read the box's own sentence, the next the one
+  // before it).
+  syncWorkerComposers(run);
 }
 
 /* A helper's open page learns that its helper finished from the roster, the
@@ -14055,6 +14061,9 @@ function paintPaneAsk(held, force = false) {
   const shape = paneAskShape(term, ask);
   const panel = ask.ask_prompt ? askPanelNode(shape, held.askDraft) : approvalPanelNode(shape, held.askDraft);
   standAskCard(held.host, panel);
+  // The box under it says whether its words answer the card or wait — the
+  // card's answer going out moves that (t-81786 r2 P2-1).
+  syncWorkerComposers(held.run);
 }
 
 /* A pane's question in the card's shape — the card's, and the composer's
@@ -14082,12 +14091,17 @@ function standingAskOf(run) {
  * takes words takes them as its free answer, down the card's own road
  * (`confirmAsk` — the next question, or the answers sent), and the box lets
  * them go; a permission takes none, so they stay in the box, the person is
- * told to answer the question first, and the keyboard goes to the card. */
+ * told to answer the question first, and the keyboard goes to the card.
+ * Asked only before the card's answer went: words sent after it wait in the
+ * queue (the composer's submit, r2 P2-1). */
 function answerAskFromComposer(form, box, run, { card, draft }) {
   const words = box.value.trim();
   if (words === "") return;
-  if (card.ask_prompt && draft && !draft.sending) {
-    draft.other[draft.index] = words;
+  if (card.ask_prompt && draft) {
+    // The card's own field and the box are two places for one answer: what
+    // the field already held stays, and the box's words follow it (r2 P3-3).
+    const held = (draft.other[draft.index] ?? "").trim();
+    draft.other[draft.index] = held ? `${held} ${words}` : words;
     box.value = "";
     run.draft = "";
     form.__workerFit?.();
@@ -15698,9 +15712,12 @@ function workerComposerNode(run, owner = null) {
     event.preventDefault();
     if (run.sending || run.sendUncertain) return;
     // A question standing as its card is answered there, not on the input
-    // line under the CLI's menu.
+    // line under the CLI's menu. Once its answer went, the card stands until
+    // the hook says the agent moved (t-81786 r2 P2-1 — after 「대신 지시하기」
+    // the refusing key is in and the box is where the instruction goes): the
+    // words wait in the queue as words sent mid-turn do.
     const asking = standingAskOf(run);
-    if (asking) {
+    if (asking && !asking.draft?.sending) {
       answerAskFromComposer(form, box, run, asking);
       return;
     }
@@ -15724,7 +15741,7 @@ function workerComposerNode(run, owner = null) {
       // So do words sent while the pane hands its conversation to its wire:
       // the wire's page sends them (`carryPaneChat`), or the pane, refused
       // (t-54304).
-      if (composerWorking(run) || composerHolding(run)) queueComposerMessage(run, message);
+      if (composerWorking(run) || composerHolding(run) || asking) queueComposerMessage(run, message);
       // 아니면 그 자리에서 실행의 길로 — 선이면 한 요청, 판이면
       // 붙여넣기·숨·Enter. `pasted`는 Enter가 실패했을 때 글이 이미 부모의
       // 상자에 있다는 사실을 남긴다.
@@ -15788,8 +15805,10 @@ function paintWorkerComposerState(form, run, delivered = null) {
   // 기다리는 글들, 그리고 상자가 무엇을 하겠다고 말하는지: 실행 중이면
   // 「대기열에 추가」, 턴 사이면 제 본래의 말.
   paintComposerQueue(form, run);
-  // Under a question's card the box says where its words go (t-81786 P0).
-  const asking = standingAskOf(run);
+  // Under a question's card the box says where its words go (t-81786 P0);
+  // once the card's answer went, they wait like any (r2 P2-1).
+  const standing = standingAskOf(run);
+  const asking = standing && !standing.draft?.sending ? standing : null;
   const saying = asking
     ? asking.card.ask_prompt
       ? t("worker.askAnswerHere", "위 질문의 답으로 보냅니다")

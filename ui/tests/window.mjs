@@ -56773,6 +56773,12 @@ suite("composer-under-question", async ({ browser, origin, ok }) => {
         value: field.value,
         says: field.placeholder,
         onCard: document.activeElement === chat.querySelector(".pane-chat-ask"),
+        onBox: document.activeElement === field,
+        // The ring the card wears once the keyboard is handed to it (r2 P3-2).
+        ring: document.activeElement === chat.querySelector(".pane-chat-ask")
+          ? `${getComputedStyle(document.activeElement).outlineStyle} ${getComputedStyle(document.activeElement).outlineWidth}`
+          : null,
+        queue: [...(paneChats.get(window.__TERM__)?.run?.queue ?? [])],
         sent: window.__SENT__.map(([name, args]) => [name, name === "answer_ask" ? args.selections : args.text ?? args.allow ?? null]),
         told: [...document.querySelectorAll(".toast")].map((note) => note.textContent.trim()),
       };
@@ -56782,6 +56788,7 @@ suite("composer-under-question", async ({ browser, origin, ok }) => {
       first: t("worker.askAnswerFirst", "먼저 위 질문에 답하세요"),
       plain: t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다"),
     }));
+    const firstToasts = (seen) => seen.told.filter((note) => note === words.first).length;
     const asked = await read();
     await box.click();
     await page.keyboard.type("B로 가 주세요");
@@ -56828,10 +56835,94 @@ suite("composer-under-question", async ({ browser, origin, ok }) => {
       JSON.stringify({ permission, held, words }),
     );
     ok(
+      "the card the keyboard is handed to wears the page's focus ring — 2 px of ink, as every stop on the page does (t-81786 r2 P3-2)",
+      held.onCard && held.ring === "solid 2px",
+      JSON.stringify({ ring: held.ring, onCard: held.onCard }),
+    );
+    ok(
       "once the card is gone the box says its own sentence again and sends to the pane as before",
       !after.card && after.says === words.plain &&
         JSON.stringify(after.sent) === JSON.stringify([["term_paste", "빌드는 지우지 말고 테스트만 돌려"], ["term_key", null]]) && after.value === "",
       JSON.stringify({ after, words }),
+    );
+    // 「대신 지시하기」 (t-81786 r2 P2-1): the refusing key goes and the box takes
+    // the instruction — but the card stands, its buttons quiet, until the hook
+    // says the agent moved. Words sent in that stretch wait in the queue.
+    await page.evaluate(async () => {
+      window.__SENT__.length = 0;
+      window.__TELL__({ term: window.__TERM__, state: "working", agent: "claude", session: "s-ask" });
+      for (let beat = 0; beat < 2; beat += 1) await window.__PAINTED__();
+      window.__TELL__({ term: window.__TERM__, state: "awaiting-permission", agent: "claude", session: "s-ask",
+        approval: { tool: "Bash", summary: "rm -rf dist" } });
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    });
+    await page.locator(".pane-chat .pane-chat-ask .board-approve-act.is-instead").click();
+    await page.waitForTimeout(100);
+    const instead = await read();
+    await page.keyboard.type("dist는 두고 lint만 돌려");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    const queued = await read();
+    // The agent works, then asks leave again: what waits does not fall on that menu.
+    await page.evaluate(async () => {
+      window.__TELL__({ term: window.__TERM__, state: "working", agent: "claude", session: "s-ask" });
+      for (let beat = 0; beat < 2; beat += 1) await window.__PAINTED__();
+      window.__TELL__({ term: window.__TERM__, state: "awaiting-permission", agent: "claude", session: "s-ask",
+        approval: { tool: "Bash", summary: "npm publish" } });
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    });
+    await page.waitForTimeout(300);
+    const standing = await read();
+    await page.evaluate(async () => {
+      window.__TELL__({ term: window.__TERM__, state: "done", agent: "claude", session: "s-ask" });
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    });
+    await page.waitForFunction(() => window.__SENT__.some(([name]) => name === "term_key"), null, { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(100);
+    const flushed = await read();
+    ok(
+      "after 「대신 지시하기」 the box says its own sentence — words wait their turn — and Enter before the hook queues them, not refused with 「먼저 위 질문에 답하세요」, the keyboard left in the box (t-81786 r2 P2-1)",
+      instead.card && instead.onBox && instead.says === words.plain &&
+        JSON.stringify(queued.sent) === JSON.stringify([["answer_approval", false]]) &&
+        JSON.stringify(queued.queue) === JSON.stringify(["dist는 두고 lint만 돌려"]) && queued.value === "" &&
+        firstToasts(queued) <= firstToasts(instead) && !queued.onCard,
+      JSON.stringify({ instead, queued, words }),
+    );
+    ok(
+      "what waits is not pasted under the next question's menu, and goes to the pane once the agent is done (t-81786 r2 P2-1)",
+      standing.card && JSON.stringify(standing.sent) === JSON.stringify([["answer_approval", false]]) && standing.queue.length === 1 &&
+        JSON.stringify(flushed.sent) === JSON.stringify([["answer_approval", false], ["term_paste", "dist는 두고 lint만 돌려"], ["term_key", null]]) &&
+        flushed.queue.length === 0 && !flushed.card,
+      JSON.stringify({ standing, flushed }),
+    );
+    // A question answered from the box: words sent while that answer is on its
+    // way wait too, rather than told to answer first (t-81786 r2 P3-1).
+    await page.evaluate(async () => {
+      window.__SENT__.length = 0;
+      window.__TELL__({ term: window.__TERM__, state: "working", agent: "claude", session: "s-ask" });
+      for (let beat = 0; beat < 2; beat += 1) await window.__PAINTED__();
+      window.__TELL__({ term: window.__TERM__, state: "waiting", agent: "claude", session: "s-ask",
+        ask_prompt: { questions: [{ question: "어느 이름으로 할까요?", header: "이름",
+          options: [{ label: "C", description: "다" }, { label: "D", description: "라" }], multi_select: false }] } });
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    });
+    const second = await read();
+    // The card's own field already holds the answer's start (t-81786 r2 P3-3).
+    await page.locator(".pane-chat .pane-chat-ask .board-ask-field").fill("이름은");
+    await box.click();
+    await page.keyboard.type("C로");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(200);
+    await page.keyboard.type("끝나면 알려 줘");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    const meanwhile = await read();
+    ok(
+      "the box's words follow what the card's own field already held, and Enter while that answer is on its way queues the words and says nothing about answering first (t-81786 r2 P3-1, P3-3)",
+      second.card && JSON.stringify(meanwhile.sent) === JSON.stringify([["answer_ask", [{ indices: [], other: "이름은 C로" }]]]) &&
+        JSON.stringify(meanwhile.queue) === JSON.stringify(["끝나면 알려 줘"]) && meanwhile.value === "" &&
+        firstToasts(meanwhile) <= firstToasts(second) && meanwhile.says === words.plain,
+      JSON.stringify({ second, meanwhile, words }),
     );
   } finally {
     await page.close();
@@ -56934,6 +57025,9 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       seen.cardActs = [...(card?.querySelectorAll(".board-approve-act") ?? [])].map((act) => act.textContent).join("|");
       seen.wantCardActs = [t("wire.allowOnce", "허용"), t("wire.allowAlways", "이 세션에서 항상 허용"), t("wire.rejectOnce", "거부")].join("|");
       seen.cardKinds = [...(card?.querySelectorAll(".board-approve-act") ?? [])].map((act) => act.className.replace("board-approve-act ", "")).join("|");
+      // The box under the card says where its words go as the card stands (t-81786 r2 P2-2).
+      seen.askSays = face.querySelector(".worker-composer-box")?.placeholder ?? "";
+      seen.wantAskSays = t("worker.askAnswerFirst", "먼저 위 질문에 답하세요");
       // A quiet poll leaves the card alone.
       const watch = new MutationObserver(() => {});
       if (card) watch.observe(card, { childList: true, subtree: true, attributes: true, characterData: true });
@@ -56958,6 +57052,26 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       seen.doneRow = face.querySelector(".helper-turn.is-tool.is-done") !== null;
       seen.busyGone = face.querySelector(".helper-status")?.hidden === true;
       seen.idleAgain = face.querySelector(".worker-state")?.textContent === seen.wantIdleWords;
+      // A second question, of the other kind: the box says where its words go
+      // for this one, not for the permission before it, and its own sentence
+      // once none stands (t-81786 r2 P2-2).
+      log = {
+        ...log, status: "asking",
+        asks: [{
+          id: 4, kind: "question",
+          questions: [{ question: "어느 파일로 할까요?", header: "파일", options: [{ label: "probe.txt" }, { label: "other.txt" }] }],
+        }],
+      };
+      await pollHelperPages();
+      await window.__PAINTED__();
+      await settle();
+      seen.secondAskSays = face.querySelector(".worker-composer-box")?.placeholder ?? "";
+      seen.wantSecondAskSays = t("worker.askAnswerHere", "위 질문의 답으로 보냅니다");
+      log = { ...log, status: "idle", asks: [] };
+      await pollHelperPages();
+      await window.__PAINTED__();
+      await settle();
+      seen.noAskSays = face.querySelector(".worker-composer-box")?.placeholder ?? "";
       // The words stream: the wire's live text stands as rows under the last
       // turn — a thought's closed line, the answer's row — grows in place, and
       // closes into turns in the same paint that brings them.
@@ -57091,6 +57205,12 @@ suite("wire-session", async ({ browser, origin, ok }) => {
         seen.paletteHead === seen.wantPaletteHead && seen.paletteRows === "/help,/artifact,/copy" &&
         seen.stopped && seen.tabGone,
       JSON.stringify(seen),
+    );
+    ok(
+      "a wire's box says where its words go for the question standing now — the first as it comes, a second of the other kind as its own, not the one before it — and its own sentence once none stands (t-81786 r2 P2-2)",
+      seen.askSays === seen.wantAskSays && seen.secondAskSays === seen.wantSecondAskSays && seen.noAskSays === seen.wantPlaceholder,
+      JSON.stringify({ askSays: seen.askSays, wantAskSays: seen.wantAskSays, secondAskSays: seen.secondAskSays,
+        wantSecondAskSays: seen.wantSecondAskSays, noAskSays: seen.noAskSays, wantPlaceholder: seen.wantPlaceholder }),
     );
   } finally {
     await page.close();
