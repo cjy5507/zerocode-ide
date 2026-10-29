@@ -5096,7 +5096,10 @@ pub const LAST_STATUS_LINE_CHARS: usize = 200;
 /// it was posted, so the walk back stops at the first letter older than
 /// that: a caller passing the moment the worker was summoned reads only the
 /// letters since, nothing it could not have written (the board's beat asks
-/// this of every live worker, t-56141). `i64::MIN` reads the whole run.
+/// this of every live worker, t-56141). `i64::MIN` reads the whole run —
+/// what the run still holds: a fold keeps a writer's last letter, not its
+/// last status, so the last status of an attempt long over may have gone
+/// (t-81273). A live worker's letters are never folded.
 pub fn last_status(run: &Run, worker_id: &str, since_ms: i64) -> Option<LastStatus> {
     let reporter = worker_address(worker_id);
     let said = run
@@ -6428,6 +6431,8 @@ pub struct Ledger {
     /// working ([`FoldedMail`], t-81273). In-process like the goodbye: zero
     /// at every start, so a window folds at the first sweep it makes and then
     /// once a day — never on a write, and never with every hourly sweep.
+    /// That first sweep keeps the ledger's own hourly clock (`swept_at_ms`),
+    /// so it comes up to an hour after the window opens, not at its boot.
     #[serde(skip)]
     folded_at_ms: i64,
     /// How often each verb was asked, by UTC day (t-6742) — see
@@ -11439,7 +11444,8 @@ impl Ledger {
     }
 
     /// Whether a sweep should fold old letters again ([`FoldedMail`],
-    /// t-81273): at the first sweep a window makes, then once a day.
+    /// t-81273): at the first sweep a window makes — up to an hour after it
+    /// opens — then once a day.
     const fn fold_due(&self, now_ms: i64) -> bool {
         self.folded_at_ms == 0 || now_ms >= self.folded_at_ms.saturating_add(DAY_MS)
     }
