@@ -99,13 +99,14 @@ pub async fn run(
 /// closed — so a parked prompt must be decided by policy rather than waited
 /// on: left parked it held the turn forever (a headless `zo --plain` under
 /// `workspace-write` sat on a `bash` approval for six minutes in a benchmark
-/// while Claude Code and codex finished; 2026-09-02). A tool call is approved
-/// once when the mode allows writes at all — by the answer that allows it
-/// once, never by the lasting allow, whose rule would outlive the run in the
-/// person's settings (t-81117) — and refused under read-only or when no answer
-/// allows it once; a call only a person may allow is refused whatever the
-/// mode; a question has no answer to give and is dismissed. Either way the
-/// turn goes on, and the note says what was decided in the person's absence.
+/// while Claude Code and codex finished; 2026-09-02). A permission prompt — a
+/// tool call's, or a question zo asks itself — is approved once when the mode
+/// allows writes at all: by the answer that allows it once, never by a lasting
+/// one, whose rule would outlive the run in the person's settings (t-81117).
+/// It is refused under read-only or when no answer allows it once, and a call
+/// only a person may allow is refused whatever the mode; a question from the
+/// model has no answer to give and is dismissed. Either way the turn goes on,
+/// and the note says what was decided in the person's absence.
 fn decide_unattended<W: Write>(
     prompt: PendingPrompt,
     mode: core_types::PermissionMode,
@@ -128,11 +129,16 @@ fn decide_unattended<W: Write>(
             None
         }
         // The default choices put the lasting allow on "y" (t-81117): answered
-        // by that key, the call's rule stayed for the rest of the run and was
-        // written into the person's `.zo/settings.local.json` at its end. So
-        // the answer is picked by what it decides, not by its key.
-        PendingPrompt::Permission(inner) if inner.question.is_none() => {
-            let tool = inner.tool_name.clone();
+        // by that key, a call's rule stayed for the rest of the run and was
+        // written into the person's `.zo/settings.local.json` at its end, and
+        // the ladder's switch went on for the session. So the answer is picked
+        // by what it decides, not by its key. A question names no tool; the
+        // note names it by its title.
+        PendingPrompt::Permission(inner) => {
+            let subject = inner
+                .question
+                .as_ref()
+                .map_or_else(|| inner.tool_name.clone(), |asked| asked.title.clone());
             let writes = !matches!(mode, core_types::PermissionMode::ReadOnly);
             let once = writes
                 && inner
@@ -149,32 +155,14 @@ fn decide_unattended<W: Write>(
             note(
                 renderer,
                 &if once {
-                    format!("unattended: {tool} approved once ({})", permission_label(mode))
+                    format!("unattended: {subject} approved once ({})", permission_label(mode))
                 } else if writes {
-                    format!("unattended: {tool} denied (no answer allows it once)")
+                    format!("unattended: {subject} denied (no answer allows it once)")
                 } else {
-                    format!("unattended: {tool} denied (read-only)")
+                    format!("unattended: {subject} denied (read-only)")
                 },
             );
             None
-        }
-        // A question zo puts to the person itself — the refusal ladder's —
-        // keeps its keys: its answer moves this run's model and writes no
-        // permission rule.
-        PendingPrompt::Permission(inner) => {
-            let tool = inner.tool_name.clone();
-            let writes = !matches!(mode, core_types::PermissionMode::ReadOnly);
-            let key = if writes { "y" } else { "n" };
-            let left = PendingPrompt::Permission(inner).answer(key);
-            note(
-                renderer,
-                &if writes {
-                    format!("unattended: {tool} approved once ({})", permission_label(mode))
-                } else {
-                    format!("unattended: {tool} denied (read-only)")
-                },
-            );
-            left
         }
         PendingPrompt::Question(inner) => {
             PendingPrompt::Question(inner).dismiss();

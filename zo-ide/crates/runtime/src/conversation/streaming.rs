@@ -84,9 +84,9 @@ pub(crate) fn default_permission_choices() -> Vec<AsyncPermissionChoice> {
 
 /// The answers to a call only a person may allow (t-80732): this once, or
 /// not at all. No lasting allow is offered — the next such call is asked
-/// again — and so a front-end that decides in a person's absence, which
-/// approves only where a lasting allow is offered, has nothing to approve it
-/// with.
+/// again. A front-end that decides in a person's absence reads a tool call
+/// with no lasting allow as one only a person may answer, and refuses it;
+/// every other call it approves by the allow-once answer alone (t-81117).
 pub(crate) fn person_only_choices() -> Vec<AsyncPermissionChoice> {
     default_permission_choices()
         .into_iter()

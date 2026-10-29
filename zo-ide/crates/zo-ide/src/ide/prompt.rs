@@ -2,9 +2,9 @@
 //!
 //! 렌더러는 `PermissionPrompt`/`UserQuestionPrompt` 블록을 화면에 찍고 **파킹만**
 //! 한다(responder 를 drop 하면 hard deny). 답은 다음 stdin 줄에서 온다:
-//! 권한은 선택지의 키 글자(zo TUI `key_to_permission_decision` 과 같은 어휘 —
-//! `y` once · `a` always · `n` deny · Enter = deny), 질문은 번호(쉼표 다중)·
-//! 라벨·자유 텍스트(`tui/modals/user_question.rs` 규칙 준용).
+//! 권한은 프롬프트가 준 선택지의 키 글자 그대로(키마다 어떤 결정인지는
+//! 선택지가 정한다 — 같은 `y` 가 지속 허락일 수도 있다; Enter = deny), 질문은
+//! 번호(쉼표 다중)·라벨·자유 텍스트(`tui/modals/user_question.rs` 규칙 준용).
 
 use runtime::message_stream::{
     PermissionDecision as RenderPermissionDecision, PermissionPrompt, UserQuestionPrompt,
