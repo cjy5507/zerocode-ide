@@ -23,6 +23,9 @@
 #   person    the person's own window, read only: idle.py for ten minutes now,
 #             and window.py for --follow-minutes in the background
 #
+# --levels normal,low,cpu4x and --scenes panes-10-normal,... pick part of a
+# stage, so the plan can run in two sittings.
+#
 # What it never does: type into, signal or read the screen of the person's
 # window (the person stage reads counters and region sizes of its processes);
 # build anything; start more than one measured thing at a time. Every stage
@@ -40,6 +43,7 @@ PROFILE_WORKTREES="/synthetic/one:/synthetic/two:/synthetic/three"
 stage="${1:-}"; shift || true
 data="" ref="" test_binary="" runs=5 boot_runs=6 settle_s=60 idle_s=45 max_load=6
 dense_cmd="" follow_minutes=120 probes_normal="" probes_low="" probes_cpu4x=""
+levels="" scenes=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --data) data="$2"; shift 2 ;;
@@ -55,6 +59,8 @@ while [[ $# -gt 0 ]]; do
     --probes-normal) probes_normal="$2"; shift 2 ;;
     --probes-low) probes_low="$2"; shift 2 ;;
     --probes-cpu4x) probes_cpu4x="$2"; shift 2 ;;
+    --levels) levels="$2"; shift 2 ;;
+    --scenes) scenes="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -70,6 +76,18 @@ ui="$data/ui"
 probes_normal="${probes_normal:-calibrate,frame-supply,memory-webkit,idle-webkit,idle-chromium,pane-switch,conversation-perf,sidebar-team-perf,board-live-perf,coordinator-desk-perf,terminal-pacing,terminal-throughput}"
 probes_low="${probes_low:-calibrate,frame-supply,idle-webkit,idle-chromium,conversation-perf,terminal-throughput}"
 probes_cpu4x="${probes_cpu4x:-frame-supply,pane-switch,conversation-perf,sidebar-team-perf,board-live-perf,coordinator-desk-perf,terminal-pacing}"
+
+# The steady scenes, as name:level:measure.sh options; --scenes picks some by name-level.
+STEADY_SCENES=(
+  "panes-1:normal:--panes 1 --browser-tabs 0"
+  "panes-5:normal:--panes 5 --browser-tabs 0"
+  "panes-10:normal:--panes 10 --browser-tabs 0"
+  "panes-1-tabs-3:normal:--panes 1 --browser-tabs 3"
+  "panes-10:low:--panes 10 --browser-tabs 0"
+)
+
+# Whether --levels (comma-separated; empty means every level) names this one.
+wanted() { [[ -z "$1" || ",$1," == *",$2,"* ]]; }
 
 quiet_or_stop() {
   local load cargo
@@ -133,6 +151,7 @@ case "$stage" in
     ;;
   boot)
     for level in normal low; do
+      wanted "$levels" "$level" || continue
       quiet_or_stop
       low=(); [[ "$level" = low ]] && low=(--low-spec)
       conditions "$data/boot-$level.conditions.json"
@@ -140,14 +159,16 @@ case "$stage" in
     done
     ;;
   steady)
-    steady_scene panes-1 normal --panes 1 --browser-tabs 0
-    steady_scene panes-5 normal --panes 5 --browser-tabs 0
-    steady_scene panes-10 normal --panes 10 --browser-tabs 0
-    steady_scene panes-1-tabs-3 normal --panes 1 --browser-tabs 3
-    steady_scene panes-10 low --panes 10 --browser-tabs 0
+    for scene in "${STEADY_SCENES[@]}"; do
+      IFS=: read -r name level options <<< "$scene"
+      wanted "$scenes" "$name-$level" || continue
+      # shellcheck disable=SC2086 # the options are words on purpose
+      steady_scene "$name" "$level" $options
+    done
     ;;
   idle-30m)
     for level in normal low; do
+      wanted "$levels" "$level" || continue
       quiet_or_stop
       low=(); [[ "$level" = low ]] && low=(--low-spec)
       conditions "$data/idle-30m-$level.conditions.json"
@@ -162,6 +183,7 @@ case "$stage" in
   dense)
     [[ -n "$dense_cmd" ]] || { echo "--dense-cmd <a producer that ends by itself> is required" >&2; exit 2; }
     for level in normal low; do
+      wanted "$levels" "$level" || continue
       quiet_or_stop
       low=(); [[ "$level" = low ]] && low=(--low-spec)
       conditions "$data/dense-$level.conditions.json"
@@ -174,14 +196,18 @@ case "$stage" in
   harness)
     [[ -d "$ui" ]] || { echo "no UI snapshot: run the prep stage first" >&2; exit 2; }
     for level in normal low cpu4x; do
+      wanted "$levels" "$level" || continue
       quiet_or_stop
       case "$level" in normal) probes="$probes_normal" ;; low) probes="$probes_low" ;; cpu4x) probes="$probes_cpu4x" ;; esac
       conditions "$data/harness-$level.conditions.json"
       ZEROCODE_WINDOW_UI="$ui" node "$ROOT/tools/low-spec/profile.mjs" run --level "$level" --runs "$runs" \
         --probe "$probes" --out "$data/harness/$level"
     done
-    node "$ROOT/tools/low-spec/profile.mjs" report "$data/harness/normal" "$data/harness/low" "$data/harness/cpu4x" \
-      > "$data/harness/table.md"
+    done_levels=()
+    for level in normal low cpu4x; do
+      if [[ -f "$data/harness/$level/runs.json" ]]; then done_levels+=("$data/harness/$level"); fi
+    done
+    node "$ROOT/tools/low-spec/profile.mjs" report "${done_levels[@]}" > "$data/harness/table.md"
     ;;
   person)
     conditions "$data/person.conditions.json"
