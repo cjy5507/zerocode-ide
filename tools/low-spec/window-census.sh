@@ -216,6 +216,10 @@ case "$stage" in
     ;;
   person)
     conditions "$data/person.conditions.json"
+    # The window's own record of its last start: phase names and numbers only.
+    timeline="$HOME/Library/Application Support/dev.zerocode.app/boot-timeline.json"
+    version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("app_version",""))' "$timeline")
+    cp "$timeline" "$data/person-boot-timeline-v$version.json"
     pid=$(ps -axo pid=,args= | awk '$2 == "/Applications/ZeroCode.app/Contents/MacOS/zerocode-shell" {print $1}')
     [[ $(printf '%s\n' "$pid" | grep -c .) = 1 ]] || { echo "not exactly one installed window: $pid" >&2; exit 2; }
     nohup python3 "$ROOT/tools/memory-census/window.py" --out "$data/person/memory" --pid "$pid" \
