@@ -155,7 +155,7 @@ impl PermissionEnforcer {
     #[must_use]
     pub fn check_bash(&self, command: &str) -> EnforcementResult {
         let mode = self.policy.active_mode();
-        if let Some(reason) = crate::kill_guard::refusal_where_nobody_can_ask(command) {
+        if let Err(reason) = crate::kill_guard::judge_where_nobody_can_ask(command) {
             return EnforcementResult::Denied {
                 tool: "bash".to_owned(),
                 active_mode: mode.as_str().to_owned(),
