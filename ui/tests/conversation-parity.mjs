@@ -278,11 +278,76 @@ export async function testConversationFolds(browser, origin, ok) {
       await window.__PAINTED__();
       seen.quiet = watch.takeRecords().length;
       watch.disconnect();
+      // The +/- column (t-83633): read on the short diff's lines in each
+      // theme — the sign each line draws, its ink and the line's words against
+      // the line's own ground (its see-through wash over the well), the
+      // wash's strength, and the words a copy takes.
+      const channels = (value) => {
+        const srgb = /color\(srgb (-?[\d.]+) (-?[\d.]+) (-?[\d.]+)(?: \/ ([\d.]+))?/.exec(value);
+        if (srgb) return [...srgb.slice(1, 4).map((one) => Math.min(1, Math.max(0, Number(one))) * 255), srgb[4] === undefined ? 1 : Number(srgb[4])];
+        const rgb = /rgba?\(([\d.]+),? ([\d.]+),? ([\d.]+)(?:,? ([\d.]+))?/.exec(value);
+        return [...rgb.slice(1, 4).map(Number), rgb[4] === undefined ? 1 : Number(rgb[4])];
+      };
+      const ground = (node) => {
+        const layers = [];
+        for (let at = node; at; at = at.parentElement) {
+          const layer = channels(getComputedStyle(at).backgroundColor);
+          if (layer[3] > 0) layers.push(layer);
+          if (layer[3] === 1) break;
+        }
+        return layers.reduceRight((under, top) => [0, 1, 2].map((at) => top[at] * top[3] + under[at] * (1 - top[3])), [255, 255, 255]);
+      };
+      const luminance = (colour) => colour.slice(0, 3).map((value) => {
+        const unit = value / 255;
+        return unit <= 0.04045 ? unit / 12.92 : ((unit + 0.055) / 1.055) ** 2.4;
+      }).reduce((sum, unit, at) => sum + unit * [0.2126, 0.7152, 0.0722][at], 0);
+      const ratio = (ink, under) => {
+        const [high, low] = [luminance(ink), luminance(under)].sort((one, other) => other - one);
+        return Math.round(((high + 0.05) / (low + 0.05)) * 100) / 100;
+      };
+      const root = document.documentElement;
+      const theme = root.getAttribute("data-theme");
+      seen.signs = {};
+      for (const one of ["dark", "light"]) {
+        root.setAttribute("data-theme", one);
+        await window.__PAINTED__();
+        seen.signs[one] = [...smallRows.querySelectorAll(".diff-line")].map((row) => {
+          const text = row.querySelector(".diff-text");
+          const sign = getComputedStyle(text, "::before");
+          const under = ground(row);
+          return {
+            kind: row.classList.contains("diff-line--add") ? "add" : row.classList.contains("diff-line--del") ? "del" : "other",
+            sign: sign.content,
+            signRatio: ratio(channels(sign.color), under),
+            wordsRatio: ratio(channels(getComputedStyle(text).color), under),
+            wash: Math.round(channels(getComputedStyle(row).backgroundColor)[3] * 100) / 100,
+            words: text.textContent,
+          };
+        });
+      }
+      if (theme === null) root.removeAttribute("data-theme");
+      else root.setAttribute("data-theme", theme);
+      await window.__PAINTED__();
       seen.more = more;
       seen.less = less;
       return seen;
     });
     const near = (value, want) => Math.abs(value - want) <= 1;
+    // The short diff's five lines as the fixture wrote them (`diff(5)`).
+    const smallWords = Array.from({ length: 5 }, (_, at) => [at % 3 === 0 ? "del" : "add", `const value_${at} = compute(${at});`]);
+    const signed = (theme) => {
+      const lines = seen.signs?.[theme] ?? [];
+      return lines.length === smallWords.length && lines.every((line, at) =>
+        line.kind === smallWords[at][0] && line.words === smallWords[at][1] &&
+        line.sign === (line.kind === "add" ? "\"+\"" : "\"-\"") && line.signRatio >= 4.5 && line.wordsRatio >= 4.5);
+    };
+    const washOf = (theme, kind) => seen.signs?.[theme]?.find((line) => line.kind === kind)?.wash;
+    ok(
+      "t-83633: every changed line of a conversation's diff draws its sign — + for an added line, - for a removed one, a shape beside the colour — in an ink that reads 4.5:1 or more on the line's own wash, as do the line's words, in the dark theme and the light one; the sign is drawn, so the words a copy takes are the code alone; and the dark wash is as strong as the light one (Monaco's measured 20%)",
+      signed("dark") && signed("light") &&
+        ["add", "del"].every((kind) => washOf("dark", kind) !== undefined && washOf("dark", kind) === washOf("light", kind)),
+      JSON.stringify(seen.signs),
+    );
     ok(
       "A1: what the person said stops at the extension's 60px (a token) with 「더 보기」, opens whole and closes back with 「접기」, and a short message stands whole with no door",
       seen.tokens.user === 60 && seen.userClipped && near(seen.userHeight, seen.tokens.user) &&
