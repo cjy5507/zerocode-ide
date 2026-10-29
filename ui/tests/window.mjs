@@ -468,7 +468,7 @@ suite("conversation-paths", ({ browser, origin, ok }) => testConversationPaths(b
  * 없으면 한 문장 한 번 (t-83039). */
 suite("conversation-link-lookup", ({ browser, origin, ok }) => testConversationLinkLookup(browser, origin, ok));
 /* 답이 온전한 경로로 댄 프로젝트 밖 파일 — 에이전트 세션 제 폴더의 글은 아무도 쓰지 못하는 탭으로, 그 밖은
- * 열지 않고 한 문장 한 번 (t-83039 ⑥). */
+ * 열지 않고 한 문장 한 번 (t-83039 ⑥). 다른 체크아웃의 답이 댄 이름도 프로젝트 밖이라 같은 한 문장. */
 suite("conversation-outside-links", ({ browser, origin, ok }) => testConversationOutsideLinks(browser, origin, ok));
 suite("conversation-keys", ({ browser, origin, ok }) => testConversationKeys(browser, origin, ok));
 suite("conversation-status", ({ browser, origin, ok }) => testConversationStatus(browser, origin, ok));

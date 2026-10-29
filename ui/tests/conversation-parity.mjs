@@ -572,6 +572,51 @@ export async function testConversationLinkLookup(browser, origin, ok) {
       doc.remove();
       return seenDoc;
     }, { deep });
+    // A link to a spot that holds nothing, where no look belongs: an absolute path in the checkout
+    // is where it says it is, and a vault page's link is the vault's — this checkout's finder would
+    // find a namesake. Each is the same one sentence, never the disk's own words.
+    seen.unlooked = await page.evaluate(async ({ root }) => {
+      const until = async (done) => {
+        for (let beat = 0; beat < 30 && !done(); beat += 1) await window.__PAINTED__();
+      };
+      const toasts = () => [...document.querySelectorAll(".toasts .toast")];
+      window.__SCRATCH__ = [];
+      window.__ANSWER__.session_scratch_document = (args) => {
+        window.__SCRATCH__.push(args.path);
+        return null;
+      };
+      secondBrainVault = "/vault";
+      const pressed = async (markdown, base) => {
+        const doc = document.createElement("div");
+        doc.className = "md-page";
+        document.body.appendChild(doc);
+        const before = [window.__READS__.length, window.__LOOKS__.length];
+        renderMarkdownPage(doc, markdown, base);
+        doc.querySelector(".md-link")?.click();
+        await until(() => toasts().length > 0);
+        for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+        const said = toasts();
+        const seenOne = {
+          reads: window.__READS__.slice(before[0]),
+          looks: window.__LOOKS__.length - before[1],
+          words: said.map((node) => node.textContent),
+          tip: said[0]?.dataset.tip ?? "",
+        };
+        for (const node of said) node.remove();
+        doc.remove();
+        return seenOne;
+      };
+      const absolute = await pressed(`[잃은 파일](${root}/crates/lost.rs)`, "docs");
+      const vault = await pressed("[없는 글](missing.md)", "/vault/wiki");
+      secondBrainVault = "";
+      return {
+        absolute,
+        vault,
+        wantAbsolute: t("file.linkUnfound", "이 파일을 체크아웃에서 찾지 못했어요: {{name}}", { name: "lost.rs" }),
+        wantVault: t("file.linkUnfound", "이 파일을 체크아웃에서 찾지 못했어요: {{name}}", { name: "missing.md" }),
+        scratch: [...window.__SCRATCH__],
+      };
+    }, { root });
     ok(
       "t-83039: a file the answer names by its name alone opens the checkout's one file whose path ends that way, at the line it named, with nothing said — the look is asked on the press, never while the answer is drawn",
       JSON.stringify(seen.drawn) === "[0,0]" &&
@@ -608,6 +653,19 @@ export async function testConversationLinkLookup(browser, origin, ok) {
       seen.doc.tab === `file:${deep}` && seen.doc.line === 7 && seen.doc.firstRead === "docs/terminal.rs" && seen.doc.toasts === 0,
       JSON.stringify(seen),
     );
+    ok(
+      "t-83039: an absolute path in the checkout that holds nothing, and a vault page's link that holds nothing, are each one sentence with the disk's words on its hover — nothing is looked for, and neither is taken for a file outside the project",
+      JSON.stringify(seen.unlooked.absolute.reads) === JSON.stringify([`${root}/crates/lost.rs`]) &&
+        seen.unlooked.absolute.looks === 0 &&
+        JSON.stringify(seen.unlooked.absolute.words) === JSON.stringify([seen.unlooked.wantAbsolute]) &&
+        seen.unlooked.absolute.tip.includes("No such file or directory (os error 2)") &&
+        JSON.stringify(seen.unlooked.vault.reads) === JSON.stringify(["/vault/wiki/missing.md"]) &&
+        seen.unlooked.vault.looks === 0 &&
+        JSON.stringify(seen.unlooked.vault.words) === JSON.stringify([seen.unlooked.wantVault]) &&
+        seen.unlooked.vault.tip.includes("No such file or directory (os error 2)") &&
+        seen.unlooked.scratch.length === 0,
+      JSON.stringify(seen.unlooked),
+    );
     ok("t-83039: the link lookup raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
@@ -621,7 +679,8 @@ export async function testConversationLinkLookup(browser, origin, ok) {
  * the backend's, pinned by `session_scratch`'s own tests) and answers nothing
  * for the other. Pressed, the note opens in a tab nobody can write with its
  * relative links inert; the other opens nothing and says so once, however
- * often it is pressed, with the refusal on its hover. */
+ * often it is pressed, with the refusal on its hover. A name an answer from
+ * another checkout gives lands outside the project the same way. */
 export async function testConversationOutsideLinks(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -708,6 +767,74 @@ export async function testConversationOutsideLinks(browser, origin, ok) {
     ok("t-83039 ⑥: the outside links raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
+  }
+  // A conversation in another checkout names 「gone.rs」, measured from that checkout. This
+  // checkout's finder would find a namesake, so nothing is looked for: the path lands outside the
+  // project, and the press says that in one sentence, however often it comes, the disk's words on
+  // its hover — the disk's own refusal was what stood there before.
+  const other = await openWindowTestPage(browser, origin);
+  try {
+    const root = "/tmp/zerocode-window-test";
+    const there = "/tmp/zerocode-window-other";
+    await other.page.evaluate(({ root }) => {
+      window.__READS__ = [];
+      window.__LOOKS__ = [];
+      window.__SCRATCH__ = [];
+      window.__ANSWER__.read_text_file = (args) => {
+        window.__READS__.push(args.path);
+        if (!args.path.startsWith(`${root}/`)) throw "No such file or directory (os error 2)";
+        return { text: "inside", version: 1, missing: false };
+      };
+      window.__ANSWER__.search_files = (args) => {
+        window.__LOOKS__.push(args.query);
+        return ["crates/zerocode-shell/src/gone.rs"];
+      };
+      window.__ANSWER__.session_scratch_document = (args) => {
+        window.__SCRATCH__.push(args.path);
+        return null;
+      };
+    }, { root });
+    await openConversation(other.page, [
+      { role: "user", text: "무엇을 지웠나요?" },
+      { role: "assistant", text: "gone.rs 를 지웠습니다." },
+    ], { cwd: there });
+    const seen = await other.page.evaluate(async ({ at }) => {
+      const until = async (done) => {
+        for (let beat = 0; beat < 30 && !done(); beat += 1) await window.__PAINTED__();
+      };
+      const gone = [...document.querySelectorAll("#worker-view .helper-turn.is-assistant .helper-link")]
+        .find((one) => one.textContent.trim() === "gone.rs");
+      const pageTab = activeTabId;
+      const tabsBefore = tabs.length;
+      for (let press = 0; press < 3; press += 1) {
+        gone?.click();
+        await until(() => window.__SCRATCH__.filter((path) => path === at).length === press + 1);
+      }
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      const said = [...document.querySelectorAll(".toasts .toast")];
+      return {
+        pressed: Boolean(gone),
+        reads: [...window.__READS__],
+        looks: window.__LOOKS__.length,
+        scratch: [...window.__SCRATCH__],
+        words: said.map((node) => node.textContent),
+        want: t("file.outsideProject", "프로젝트 밖 파일이라 여기서 열지 않아요"),
+        tip: said[0]?.dataset.tip ?? "",
+        tabs: tabs.length - tabsBefore,
+        front: activeTabId === pageTab,
+      };
+    }, { at: `${there}/gone.rs` });
+    ok(
+      "t-83039: a name an answer from another checkout gives, holding nothing there, is one sentence once however often it is pressed — the path outside the project on its hover with the disk's words — and this checkout's namesake is neither looked for nor opened",
+      seen.pressed && JSON.stringify(seen.reads) === JSON.stringify([`${there}/gone.rs`, `${there}/gone.rs`, `${there}/gone.rs`]) &&
+        seen.looks === 0 && JSON.stringify(seen.scratch) === JSON.stringify([`${there}/gone.rs`, `${there}/gone.rs`, `${there}/gone.rs`]) &&
+        JSON.stringify(seen.words) === JSON.stringify([seen.want]) &&
+        seen.tip.includes(`${there}/gone.rs: No such file or directory (os error 2)`) && seen.tabs === 0 && seen.front,
+      JSON.stringify(seen),
+    );
+    ok("t-83039: the link from another checkout raised no page errors", other.faults.length === 0, other.faults.join("\n"));
+  } finally {
+    await other.page.close();
   }
 }
 
