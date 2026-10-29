@@ -496,6 +496,9 @@ struct Kept {
 struct Memory {
     waiting: Vec<Kept>,
     written: Vec<u8>,
+    /// What the last write's failure said while the writes keep failing, so
+    /// the window's log says it once.
+    unwritten: Option<String>,
 }
 
 fn memory() -> MutexGuard<'static, Option<Memory>> {
@@ -532,25 +535,38 @@ fn kept_of(held: &HashMap<u32, Asked>, waiting: &[Kept]) -> Vec<Kept> {
     kept
 }
 
-/// Write `kept` down unless `written` already holds those bytes, and hold
-/// them — even when the write fails, so the next change tries again rather
-/// than every beat.
+/// Write `kept` down unless `written` already holds those bytes. A write
+/// that fails leaves `written` as it was, so the next beat tries again: the
+/// file a restart reads is never a change behind for longer than the fault
+/// lasts (t-84470, r2 P3-3).
 fn write_kept(path: &Path, kept: &[Kept], written: &mut Vec<u8>) -> std::io::Result<()> {
     let bytes = serde_json::to_vec(kept).map_err(std::io::Error::other)?;
     if *written == bytes {
         return Ok(());
     }
-    let wrote = crate::durable_file::replace_bytes(path, &bytes).map(drop);
+    crate::durable_file::replace_bytes(path, &bytes)?;
     *written = bytes;
-    wrote
+    Ok(())
 }
 
-/// Write `kept` down as [`write_kept`] does, and say what the window's log
-/// is to note of a write that failed.
+/// Write `kept` down as [`write_kept`] does, and say what the window's log is
+/// to note: a failure once, not on every beat it lasts, and again only after
+/// a write went.
 fn write_noting(path: &Path, kept: &[Kept], memory: &mut Memory) -> Option<String> {
-    write_kept(path, kept, &mut memory.written)
-        .err()
-        .map(|error| format!("worker-questions: {error}"))
+    match write_kept(path, kept, &mut memory.written) {
+        Ok(()) => {
+            memory.unwritten = None;
+            None
+        }
+        Err(error) => {
+            let line = format!("worker-questions: {error}");
+            if memory.unwritten.as_ref() == Some(&line) {
+                return None;
+            }
+            memory.unwritten = Some(line.clone());
+            Some(line)
+        }
+    }
 }
 
 /// What the last window wrote down. A file that is missing or cannot be read
@@ -560,10 +576,12 @@ fn read_kept(path: &Path) -> Memory {
         Ok(bytes) => Memory {
             waiting: serde_json::from_slice(&bytes).unwrap_or_default(),
             written: bytes,
+            unwritten: None,
         },
         Err(_) => Memory {
             waiting: Vec::new(),
             written: serde_json::to_vec(&Vec::<Kept>::new()).unwrap_or_default(),
+            unwritten: None,
         },
     }
 }
