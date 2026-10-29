@@ -1498,7 +1498,7 @@ pub(crate) async fn import_browser_cookies(
         let home = dirs::home_dir().ok_or_else(|| "홈 디렉터리가 없습니다".to_string())?;
         let source_profile = profile.as_deref().unwrap_or("Default");
         let scratch =
-            std::env::temp_dir().join(format!("zerocode-cookie-import-{}", std::process::id()));
+            std::env::temp_dir().join(format!("zerocode-profile-import-{}", std::process::id()));
         let outcome = match family.as_str() {
             "safari" => {
                 let path = browser_cookie_import::cookie_database_path("safari", "", &home)

@@ -59,11 +59,13 @@ pub struct Bookmark {
 }
 
 /// Bookmarks를 읽은 결과. 웹 주소가 아닌 북마크(`javascript:`·`chrome://`)는
-/// 판이 열 수 없어 옮기지 않고 센다.
+/// 판이 열 수 없어 옮기지 않고 세고, 상한([`BOOKMARKS_KEPT`])을 넘은 것은
+/// 따로 센다.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct BookmarksRead {
     pub bookmarks: Vec<Bookmark>,
     pub skipped: usize,
+    pub over_cap: usize,
 }
 
 fn is_web_address(address: &str) -> bool {
@@ -110,8 +112,12 @@ fn walk_bookmarks(
                     .get("url")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default();
-                if !is_web_address(url) || read.bookmarks.len() >= BOOKMARKS_KEPT {
+                if !is_web_address(url) {
                     read.skipped += 1;
+                    continue;
+                }
+                if read.bookmarks.len() >= BOOKMARKS_KEPT {
+                    read.over_cap += 1;
                     continue;
                 }
                 read.bookmarks.push(Bookmark {
@@ -659,10 +665,11 @@ impl std::fmt::Display for ProfileDataError {
 /// 어느 것도 적지 않는다.
 pub fn import_log_line(bookmarks: &BookmarksRead, web_data: &WebDataRead) -> String {
     format!(
-        "browser profile data imported: bookmarks {} (not web addresses {}), addresses {}, \
-         entries {}, held back {}, web data schema {}",
+        "browser profile data imported: bookmarks {} (not web addresses {}, over the cap {}), \
+         addresses {}, entries {}, held back {}, web data schema {}",
         bookmarks.bookmarks.len(),
         bookmarks.skipped,
+        bookmarks.over_cap,
         web_data.book.addresses.len(),
         web_data.book.entries.len(),
         web_data.held_back,
@@ -790,6 +797,26 @@ mod tests {
             read.bookmarks
                 .iter()
                 .all(|one| one.url.starts_with("https://") || one.url.starts_with("http://"))
+        );
+    }
+
+    /// 상한을 넘은 북마크는 웹 주소가 아닌 것과 따로 센다 — 로그를 읽는 사람이
+    /// 둘을 헷갈리지 않게.
+    #[test]
+    fn bookmarks_over_the_cap_are_counted_apart() {
+        let node = |url: &str| serde_json::json!({ "type": "url", "name": "[합성]", "url": url });
+        let mut children: Vec<serde_json::Value> = (0..BOOKMARKS_KEPT + 2)
+            .map(|at| node(&format!("https://bookmark-{at}.example.com/")))
+            .collect();
+        children.push(node("javascript:void(0)"));
+        let text = serde_json::json!({ "roots": { "bookmark_bar": { "children": children } } })
+            .to_string();
+        let read = parse_chromium_bookmarks(&text).expect("parses");
+        assert_eq!(read.bookmarks.len(), BOOKMARKS_KEPT);
+        assert_eq!(read.over_cap, 2);
+        assert_eq!(
+            read.skipped, 1,
+            "a bookmark over the cap counted as not a web address"
         );
     }
 
@@ -953,7 +980,7 @@ mod tests {
         );
         let line = import_log_line(&bookmarks, &read);
         assert!(
-            line.contains("bookmarks 6 (not web addresses 2)")
+            line.contains("bookmarks 6 (not web addresses 2, over the cap 0)")
                 && line.contains("addresses 2")
                 && line.contains("held back 5")
                 && line.contains("schema 134"),

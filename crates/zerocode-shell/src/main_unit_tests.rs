@@ -1180,7 +1180,7 @@ fn the_settings_view_marks_staged_and_default_profiles() {
             root: browser_profile_data::BookmarkRoot::Bar,
             folder: None,
         }],
-        skipped: 0,
+        ..browser_profile_data::BookmarksRead::default()
     };
     browser_profile_data::save_imported(
         dir.path(),
