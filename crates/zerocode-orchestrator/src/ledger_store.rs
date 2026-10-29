@@ -32,8 +32,8 @@ use sha2::{Digest, Sha256};
 use zerocode_core::orchestration::{
     AckedRow, AttachmentRow, Auto, BoundRow, CHECK_RENDERER, CheckV1, Closure, CoordinatorSeat,
     Delivery, DispatchRow, FoldedMail, GateRow, HandoverPolicy, InboxRow, LedgerProjectionV1,
-    MessageRow, Pinned, ResultAuthor, RunProject, RunRow, RunSummary, ServedAnswer, ServedRow,
-    TaskRow, Text, VerbTally, WorkerRow,
+    MarkedExport, MessageRow, Pinned, ResultAuthor, RunProject, RunRow, RunSummary, ServedAnswer,
+    ServedRow, TaskRow, Text, VerbTally, WorkerRow,
 };
 
 use crate::effect_journal::{EffectJournalError, from_sql_u64, to_sql_u64};
@@ -584,6 +584,150 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
     Ok(())
 }
 
+/// What ledger writes cost, counted where the work is done (t-82988).
+///
+/// Rows and bytes serialized for the table digests, rows the tables took,
+/// and the time each part held the write — kept twice: for the whole process
+/// ([`write_work`], which a measurement run alone reads) and for the thread
+/// that wrote ([`write_work_here`], which a test reads while other tests
+/// write beside it).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteWork {
+    pub writes: u64,
+    pub rows_digested: u64,
+    pub bytes_digested: u64,
+    pub rows_written: u64,
+    pub digest_ns: u64,
+    pub rows_ns: u64,
+}
+
+impl WriteWork {
+    const ZERO: Self = Self {
+        writes: 0,
+        rows_digested: 0,
+        bytes_digested: 0,
+        rows_written: 0,
+        digest_ns: 0,
+        rows_ns: 0,
+    };
+
+    /// What was counted after `earlier` was read.
+    #[must_use]
+    pub const fn since(self, earlier: Self) -> Self {
+        Self {
+            writes: self.writes.saturating_sub(earlier.writes),
+            rows_digested: self.rows_digested.saturating_sub(earlier.rows_digested),
+            bytes_digested: self.bytes_digested.saturating_sub(earlier.bytes_digested),
+            rows_written: self.rows_written.saturating_sub(earlier.rows_written),
+            digest_ns: self.digest_ns.saturating_sub(earlier.digest_ns),
+            rows_ns: self.rows_ns.saturating_sub(earlier.rows_ns),
+        }
+    }
+
+    /// Both counts together.
+    #[must_use]
+    pub const fn plus(self, more: Self) -> Self {
+        Self {
+            writes: self.writes.saturating_add(more.writes),
+            rows_digested: self.rows_digested.saturating_add(more.rows_digested),
+            bytes_digested: self.bytes_digested.saturating_add(more.bytes_digested),
+            rows_written: self.rows_written.saturating_add(more.rows_written),
+            digest_ns: self.digest_ns.saturating_add(more.digest_ns),
+            rows_ns: self.rows_ns.saturating_add(more.rows_ns),
+        }
+    }
+}
+
+static PROCESS_WORK: std::sync::Mutex<WriteWork> = std::sync::Mutex::new(WriteWork::ZERO);
+
+thread_local! {
+    static THREAD_WORK: std::cell::Cell<WriteWork> = const { std::cell::Cell::new(WriteWork::ZERO) };
+}
+
+fn count_work(more: WriteWork) {
+    THREAD_WORK.with(|held| held.set(held.get().plus(more)));
+    if let Ok(mut held) = PROCESS_WORK.lock() {
+        *held = held.plus(more);
+    }
+}
+
+/// Everything this process's ledger writes have cost so far.
+#[must_use]
+pub fn write_work() -> WriteWork {
+    PROCESS_WORK.lock().map_or_else(|_| WriteWork::default(), |held| *held)
+}
+
+/// What the ledger writes made on this thread have cost so far.
+#[must_use]
+pub fn write_work_here() -> WriteWork {
+    THREAD_WORK.with(std::cell::Cell::get)
+}
+
+fn nanos_since(at: std::time::Instant) -> u64 {
+    u64::try_from(at.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// The rows one write puts down: a bare projection, or an export that says
+/// how each run's rows last changed ([`MarkedExport`], t-82988).
+#[derive(Clone, Copy)]
+pub enum LedgerRows<'a> {
+    Bare(&'a LedgerProjectionV1),
+    Marked(&'a MarkedExport),
+}
+
+impl<'a> LedgerRows<'a> {
+    #[must_use]
+    pub const fn projection(self) -> &'a LedgerProjectionV1 {
+        match self {
+            Self::Bare(projection) => projection,
+            Self::Marked(export) => export.projection(),
+        }
+    }
+}
+
+impl<'a> From<&'a LedgerProjectionV1> for LedgerRows<'a> {
+    fn from(projection: &'a LedgerProjectionV1) -> Self {
+        Self::Bare(projection)
+    }
+}
+
+impl<'a> From<&'a MarkedExport> for LedgerRows<'a> {
+    fn from(export: &'a MarkedExport) -> Self {
+        Self::Marked(export)
+    }
+}
+
+/// What the last write of one ledger left in a store.
+#[derive(Debug, Default)]
+pub struct Written {}
+
+/// What each ledger's last write left in one store, shared by every handle
+/// to that store ([`crate::workflow_store::WorkflowStore`]).
+#[derive(Debug, Clone, Default)]
+pub struct WrittenLedgers(
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Written>>>,
+);
+
+/// Write a ledger through the store's memory of what it last wrote.
+pub fn write_remembered(
+    connection: &Connection,
+    _written: &WrittenLedgers,
+    ledger_id: &str,
+    expected_revision: u64,
+    next_revision: u64,
+    rows: LedgerRows<'_>,
+    at_ms: i64,
+) -> Result<(), EffectJournalError> {
+    write(
+        connection,
+        ledger_id,
+        expected_revision,
+        next_revision,
+        rows.projection(),
+        at_ms,
+    )
+}
+
 /// A ledger as it was found, and which revision it was.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Held {
@@ -975,6 +1119,10 @@ impl LedgerTable {
 
 fn table_digest(value: &impl serde::Serialize) -> Result<TableDigest, EffectJournalError> {
     let encoded = serde_json::to_vec(value).map_err(|_| EffectJournalError::Corrupt)?;
+    count_work(WriteWork {
+        bytes_digested: encoded.len() as u64,
+        ..WriteWork::default()
+    });
     Ok(Sha256::digest(encoded).into())
 }
 
@@ -1300,8 +1448,15 @@ pub fn write(
     if current.is_some_and(|(_, updated_at_ms)| at_ms < updated_at_ms) {
         return Err(EffectJournalError::TimestampRegression);
     }
+    let digesting = std::time::Instant::now();
     let digests = table_digests(projection)?;
     let digest_root = digest_rows(&digests);
+    count_work(WriteWork {
+        writes: 1,
+        rows_digested: projection_rows(projection),
+        digest_ns: nanos_since(digesting),
+        ..WriteWork::default()
+    });
     match current {
         Some(_) => {
             let changed = connection
@@ -1359,9 +1514,86 @@ pub fn write(
     }
 
     let changed = changed_tables(connection, ledger_id, &digests)?;
+    let writing = std::time::Instant::now();
     clear_rows(connection, ledger_id, &changed)?;
     write_rows(connection, ledger_id, projection, &changed)?;
+    count_work(WriteWork {
+        rows_written: changed_rows(projection, &changed),
+        rows_ns: nanos_since(writing),
+        ..WriteWork::default()
+    });
     store_table_digests(connection, ledger_id, &changed, &digests)
+}
+
+/// Every row of every table a projection holds, children included.
+fn projection_rows(projection: &LedgerProjectionV1) -> u64 {
+    let mut rows = [0_u64; LedgerTable::ALL.len()];
+    table_rows(projection, &mut rows);
+    rows.iter().sum()
+}
+
+/// The rows of the tables a write rewrote whole.
+fn changed_rows(projection: &LedgerProjectionV1, changed: &[bool; LedgerTable::ALL.len()]) -> u64 {
+    let mut rows = [0_u64; LedgerTable::ALL.len()];
+    table_rows(projection, &mut rows);
+    rows.iter()
+        .zip(changed)
+        .filter(|(_, changed)| **changed)
+        .map(|(rows, _)| rows)
+        .sum()
+}
+
+fn table_rows(projection: &LedgerProjectionV1, rows: &mut [u64; LedgerTable::ALL.len()]) {
+    let count = |held: usize| held as u64;
+    rows[LedgerTable::Runs.index()] = count(projection.runs.len());
+    rows[LedgerTable::RunAutos.index()] = count(
+        projection
+            .runs
+            .iter()
+            .filter(|row| row.auto.is_some())
+            .count(),
+    );
+    rows[LedgerTable::Tasks.index()] = count(projection.tasks.len());
+    rows[LedgerTable::TaskDeps.index()] =
+        count(projection.tasks.iter().map(|row| row.deps.len()).sum());
+    rows[LedgerTable::Gates.index()] = count(projection.gates.len());
+    rows[LedgerTable::GateOptions.index()] =
+        count(projection.gates.iter().map(|row| row.options.len()).sum());
+    rows[LedgerTable::Attachments.index()] = count(projection.attachments.len());
+    rows[LedgerTable::Dispatches.index()] = count(projection.dispatches.len());
+    rows[LedgerTable::Workers.index()] = count(projection.workers.len());
+    rows[LedgerTable::Messages.index()] = count(projection.messages.len());
+    rows[LedgerTable::Inboxes.index()] = count(projection.inboxes.len());
+    rows[LedgerTable::InboxPending.index()] =
+        count(projection.inboxes.iter().map(|row| row.pending.len()).sum());
+    rows[LedgerTable::InboxOpenMessages.index()] = count(
+        projection
+            .inboxes
+            .iter()
+            .filter_map(|row| row.open.as_ref())
+            .map(|open| open.messages.len())
+            .sum(),
+    );
+    rows[LedgerTable::Bound.index()] = count(projection.bound.len());
+    rows[LedgerTable::Served.index()] = count(projection.served.len());
+    rows[LedgerTable::ServedMessages.index()] = count(
+        projection
+            .served
+            .iter()
+            .map(|row| match &row.answer {
+                ServedAnswer::Inline(_) => 0,
+                ServedAnswer::Check(about) => about.messages.len(),
+            })
+            .sum(),
+    );
+    rows[LedgerTable::Acked.index()] = count(projection.acked.len());
+    rows[LedgerTable::AckedMessages.index()] = count(
+        projection
+            .acked
+            .iter()
+            .map(|row| row.messages.as_ref().map_or(0, Vec::len))
+            .sum(),
+    );
 }
 
 /// Everything belonging to one ledger, in the order the children must go

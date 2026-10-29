@@ -3699,7 +3699,7 @@ fn rebuild_stored_ledger(
     }
 
     journal
-        .advance_ledger(lease, held.revision, &ledger.export(), now_ms)
+        .advance_ledger(lease, held.revision, &ledger.export_marked(), now_ms)
         .map_err(runtime_error)?;
     let revision = held
         .revision
@@ -6356,7 +6356,7 @@ impl RuntimeState {
             .checked_add(1)
             .ok_or(RuntimeError::RevisionMismatch)?;
         let at_ms = self.stamped(now_ms);
-        let written_rows = self.ledger.export();
+        let written_rows = self.ledger.export_marked();
         let withdrawal = Withdrawal {
             operation_id: operation_id.to_string(),
             failure: HostEffectFailure::Unavailable,
@@ -6399,7 +6399,7 @@ impl RuntimeState {
             .prepare(
                 &self.lease,
                 self.revision,
-                &self.ledger.export(),
+                &self.ledger.export_marked(),
                 request,
                 at_ms,
             )
@@ -6485,7 +6485,7 @@ impl RuntimeState {
             &self.lease,
             permit,
             self.revision,
-            &self.ledger.export(),
+            &self.ledger.export_marked(),
             settlement,
         ) {
             let (permit, why) = *refused;
@@ -6905,17 +6905,18 @@ impl RuntimeState {
             .ok_or(RuntimeError::RevisionMismatch)?;
         let at_ms = self.stamped(now_ms);
         // The write's own rows, gone with it: a reader is lent the ledger,
-        // never handed this export (t-81273).
-        let written_rows = self.ledger.export();
-        /* One transaction, or nothing. `ledger_store::write` moves the head,
-         * clears every row and re-inserts the whole ledger, and it does so on
-         * whatever connection it is handed — the promise that a ledger is
-         * never half of two is the CALLER's transaction. Written without one,
-         * each statement committed on its own, and a write that died in the
-         * middle (measured 2026-08-27: the head at revision 132408 counting
-         * 448,542 bytes over rows that stopped twelve workers in) left a store
-         * every later read refused as corrupt — first as `NotDurable` until
-         * the window was restarted, then as "the authority store is corrupt"
+        // never handed this export (t-81273). Marked, so the store writes only
+        // the runs' rows that moved since it last wrote (t-82988).
+        let written_rows = self.ledger.export_marked();
+        /* One transaction, or nothing. `ledger_store::write` moves the head
+         * and the rows that changed, and it does so on whatever connection
+         * it is handed — the promise that a ledger is never half of two is
+         * the CALLER's transaction. Written without one, each statement
+         * committed on its own, and a write that died in the middle
+         * (measured 2026-08-27: the head at revision 132408 counting 448,542
+         * bytes over rows that stopped twelve workers in) left a store every
+         * later read refused as corrupt — first as `NotDurable` until the
+         * window was restarted, then as "the authority store is corrupt"
          * once it was. */
         let written = self
             .store
@@ -6925,12 +6926,13 @@ impl RuntimeState {
                 let transaction = connection
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(|_| RuntimeError::StoreUnavailable)?;
-                ledger_store::write(
+                ledger_store::write_remembered(
                     &transaction,
+                    self.store.written(),
                     &self.ledger_id,
                     self.revision,
                     next,
-                    &written_rows,
+                    (&written_rows).into(),
                     at_ms,
                 )
                 .map_err(runtime_error)?;

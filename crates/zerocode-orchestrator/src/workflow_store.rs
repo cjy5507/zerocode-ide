@@ -258,6 +258,9 @@ pub struct WorkflowStore {
     path: PathBuf,
     /// How long each connection waits out another writer's lock.
     busy: Duration,
+    /// What each ledger's last write left here, shared by every clone of this
+    /// handle — the runtime's and its journal's alike (t-82988).
+    written: crate::ledger_store::WrittenLedgers,
 }
 
 /// One idle connection kept open so this process stays attached to the
@@ -488,7 +491,11 @@ impl WorkflowStore {
         prepare_store_path(path.as_ref())?;
         let path =
             fs::canonicalize(path.as_ref()).map_err(|_| WorkflowStoreError::UnsafeStorePath)?;
-        let store = Self { path, busy };
+        let store = Self {
+            path,
+            busy,
+            written: crate::ledger_store::WrittenLedgers::default(),
+        };
         let mut connection = store.connection()?;
         /* Read the version BEFORE anything can write, because a file this
          * window will not touch has to leave here untouched.
@@ -1272,6 +1279,12 @@ impl WorkflowStore {
     #[doc(hidden)]
     pub fn fault_connection_for_tests(&self) -> Result<Connection, WorkflowStoreError> {
         self.connection()
+    }
+
+    /// What each ledger's last write through this store left in it — the
+    /// memory [`crate::ledger_store::write_remembered`] writes against.
+    pub(crate) const fn written(&self) -> &crate::ledger_store::WrittenLedgers {
+        &self.written
     }
 
     /// Keep this process attached to the store until the hold is dropped

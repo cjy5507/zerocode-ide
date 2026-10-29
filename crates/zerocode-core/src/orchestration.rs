@@ -46,6 +46,7 @@ pub mod land_batch;
 pub mod land_check;
 pub mod land_record;
 pub mod landing_watch;
+pub mod marked;
 pub mod process_sweep;
 mod progress;
 pub mod project_scope;
@@ -54,6 +55,7 @@ pub mod settle;
 pub mod task_cost;
 pub mod text_file;
 
+pub use marked::{Marked, MarkedExport, RunShare, Share};
 pub use progress::{NextStep, WorkProgress, WorkStage};
 pub use project_scope::{ProjectSource, Reach, RunProject, Scope};
 pub use session_history::{CONVERSATION_HELD_ELSEWHERE, SessionHistory};
@@ -2865,25 +2867,27 @@ pub struct Run {
     pub id: String,
     pub name: String,
     pub created_ms: i64,
-    pub tasks: Vec<Task>,
-    pub dispatches: Vec<Dispatch>,
-    pub workers: Vec<Worker>,
+    /// Each list of the run's rows is [`Marked`] (t-82988): the store learns
+    /// from its stamp which runs' rows moved since it last wrote them.
+    pub tasks: Marked<Task>,
+    pub dispatches: Marked<Dispatch>,
+    pub workers: Marked<Worker>,
     /// Private, and read through [`Run::messages`].
     ///
     /// The other half of the same door: a `&[Message]` cannot be edited, so a
     /// body a receipt was rebuilt from stays what it was. Serde reads and
     /// writes private fields, so the file shape does not move.
-    messages: Vec<Message>,
-    /// Keyed by address (`run:…`, `worker:…`). A `Vec` rather than a map
+    messages: Marked<Message>,
+    /// Keyed by address (`run:…`, `worker:…`). A list rather than a map
     /// because a run has a handful of holders and a linear walk over four
     /// entries beats a hash of a string every time.
-    inboxes: Vec<(String, Inbox)>,
+    inboxes: Marked<(String, Inbox)>,
     /// The decisions standing in front of this run's tasks.
     ///
     /// `default`, so every ledger written before gates existed reads back as
     /// a run with none — which is what it was.
     #[serde(default)]
-    pub gates: Vec<Gate>,
+    pub gates: Marked<Gate>,
     /// The standing order a coordinator wrote down, if it wrote one.
     ///
     /// `None` — the default, and what every run made before this existed reads
@@ -2898,8 +2902,8 @@ pub struct Run {
     /// Home windows borrowing this run's workers — the worker-server half of
     /// federation. `default`, so every ledger written before federation
     /// existed reads back as a run lending nobody anything.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachments: Vec<Attachment>,
+    #[serde(default, skip_serializing_if = "Marked::is_empty")]
+    pub attachments: Marked<Attachment>,
     /// What this run held before a sweep compacted it, when one has.
     ///
     /// The run ROW itself never goes: a caller bound to it would otherwise be
@@ -6540,8 +6544,10 @@ pub struct Ledger {
     /// `run-use` writes here; every verb that takes no `--run` reads it.
     bound: Vec<(String, String)>,
     /// Requests already carried out, so `--retry-request` can be answered with
-    /// the first answer rather than doing the thing twice.
-    served: Vec<Served>,
+    /// the first answer rather than doing the thing twice. [`Marked`] like a
+    /// run's rows (t-82988): receipts are appended once per verb, and the
+    /// store writes only the new ones.
+    served: Marked<Served>,
     next_id: u64,
     /// In-process CAS generations for seat bindings.
     ///
@@ -6633,7 +6639,7 @@ impl Default for Ledger {
         Self {
             runs: Vec::new(),
             bound: Vec::new(),
-            served: Vec::new(),
+            served: Marked::default(),
             next_id: 0,
             binding_revisions: Vec::new(),
             next_binding_revision: 0,
@@ -7800,15 +7806,15 @@ impl Ledger {
             id: id.clone(),
             name: name.to_string(),
             created_ms: now_ms,
-            tasks: Vec::new(),
-            dispatches: Vec::new(),
-            workers: Vec::new(),
-            messages: Vec::new(),
-            inboxes: Vec::new(),
-            gates: Vec::new(),
+            tasks: Marked::default(),
+            dispatches: Marked::default(),
+            workers: Marked::default(),
+            messages: Marked::default(),
+            inboxes: Marked::default(),
+            gates: Marked::default(),
             auto: None,
             handover: None,
-            attachments: Vec::new(),
+            attachments: Marked::default(),
             summary: None,
             coordinator: None,
             project: None,
@@ -14631,15 +14637,15 @@ impl Ledger {
             id: id.clone(),
             name,
             created_ms: now_ms,
-            tasks: Vec::new(),
-            dispatches: Vec::new(),
-            workers: Vec::new(),
-            messages: Vec::new(),
-            inboxes: Vec::new(),
-            gates: Vec::new(),
+            tasks: Marked::default(),
+            dispatches: Marked::default(),
+            workers: Marked::default(),
+            messages: Marked::default(),
+            inboxes: Marked::default(),
+            gates: Marked::default(),
             auto: None,
             handover: None,
-            attachments: Vec::new(),
+            attachments: Marked::default(),
             summary: None,
             coordinator: None,
             project: None,
@@ -27396,6 +27402,14 @@ impl Ledger {
     /// prepared host effect never crosses a process restart, so a projection —
     /// which exists precisely to cross one — has nothing to say about them.
     pub fn export(&self) -> LedgerProjectionV1 {
+        self.export_marked().into_projection()
+    }
+
+    /// This ledger as tables, with each run's share of them (t-82988): how
+    /// many rows the run put in each table, and the stamp of the list they
+    /// came from. A store that remembers the stamps it last wrote writes
+    /// only the rows whose list moved since — one letter, not 43,540.
+    pub fn export_marked(&self) -> MarkedExport {
         LEDGER_WORK
             .exports
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -27437,7 +27451,24 @@ impl Ledger {
             verb_tallies: self.verb_tallies.clone(),
         };
 
+        let mut shares = Vec::with_capacity(self.runs.len());
         for run in &self.runs {
+            /* How many rows this run added to a table, and the stamp of the
+             * list they came from. */
+            let share = |rows_before: usize, rows_after: usize, edit: u64| Share {
+                rows: rows_after - rows_before,
+                edit,
+            };
+            let before = (
+                projected.tasks.len(),
+                projected.dispatches.len(),
+                projected.workers.len(),
+                projected.attachments.len(),
+                projected.gates.len(),
+                projected.messages.len(),
+                projected.inboxes.len(),
+                projected.acked.len(),
+            );
             projected.runs.push(RunRow {
                 id: run.id.clone(),
                 name: Text::from(run.name.as_str()),
@@ -27583,9 +27614,31 @@ impl Ledger {
                     });
                 }
             }
+            shares.push(RunShare {
+                tasks: share(before.0, projected.tasks.len(), run.tasks.edit()),
+                dispatches: share(before.1, projected.dispatches.len(), run.dispatches.edit()),
+                workers: share(before.2, projected.workers.len(), run.workers.edit()),
+                attachments: share(
+                    before.3,
+                    projected.attachments.len(),
+                    run.attachments.edit(),
+                ),
+                gates: share(before.4, projected.gates.len(), run.gates.edit()),
+                messages: share(before.5, projected.messages.len(), run.messages.edit()),
+                inboxes: share(before.6, projected.inboxes.len(), run.inboxes.edit()),
+                acked: share(before.7, projected.acked.len(), run.inboxes.edit()),
+            });
         }
 
-        projected
+        let served = Share {
+            rows: projected.served.len(),
+            edit: self.served.edit(),
+        };
+        MarkedExport {
+            projection: projected,
+            runs: shares,
+            served,
+        }
     }
 
     /// A ledger from tables, or a named refusal.
@@ -27637,15 +27690,15 @@ impl Ledger {
                 id: row.id,
                 name: row.name.into_string(),
                 created_ms: row.created_ms,
-                tasks: Vec::new(),
-                dispatches: Vec::new(),
-                workers: Vec::new(),
-                messages: Vec::new(),
-                inboxes: Vec::new(),
-                gates: Vec::new(),
+                tasks: Marked::default(),
+                dispatches: Marked::default(),
+                workers: Marked::default(),
+                messages: Marked::default(),
+                inboxes: Marked::default(),
+                gates: Marked::default(),
                 auto: row.auto,
                 handover: row.handover,
-                attachments: Vec::new(),
+                attachments: Marked::default(),
                 summary: row.summary,
                 coordinator: row.coordinator,
                 project: row.project,
