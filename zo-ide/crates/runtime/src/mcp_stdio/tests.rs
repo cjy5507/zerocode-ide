@@ -319,11 +319,16 @@ fn write_manager_mcp_server_script() -> PathBuf {
             "LIST_TOOLS_DELAY_MS = int(os.environ.get('MCP_LIST_TOOLS_DELAY_MS', '0'))",
             "INITIALIZE_HANG_ALWAYS = os.environ.get('MCP_INITIALIZE_HANG_ALWAYS') == '1'",
             "SPAWN_LOG = os.environ.get('MCP_SPAWN_LOG')",
+            "BARRIER_DIR = os.environ.get('MCP_LIST_BARRIER_DIR')",
+            "BARRIER_COUNT = int(os.environ.get('MCP_LIST_BARRIER_COUNT', '0'))",
+            "BARRIER_DEADLINE_MS = int(os.environ.get('MCP_LIST_BARRIER_DEADLINE_MS', '0'))",
             "if SPAWN_LOG:",
             "    with open(SPAWN_LOG, 'a', encoding='utf-8') as handle:",
             "        handle.write('spawn\\n')",
             "initialize_count = 0",
             "tools_list_count = 0",
+            "barrier_since = None",
+            "barrier_pages = 0",
             "",
             "def log(method):",
             "    if LOG_PATH:",
@@ -343,6 +348,10 @@ fn write_manager_mcp_server_script() -> PathBuf {
             "    with open(FAIL_ONCE_MARKER, 'w', encoding='utf-8') as handle:",
             "        handle.write(FAIL_ONCE_MODE)",
             "    return True",
+            "",
+            "# Every server that asked for tools/list leaves its label in BARRIER_DIR.",
+            "def barrier_arrived():",
+            "    return len(os.listdir(BARRIER_DIR))",
             "",
             "def read_message():",
             "    while True:",
@@ -387,6 +396,32 @@ fn write_manager_mcp_server_script() -> PathBuf {
             "            send_message({'jsonrpc': '2.0', 'method': 'notifications/tools/list_changed'})",
             "    elif method == 'tools/list':",
             "        tools_list_count += 1",
+            "        # The barrier answers within 50 ms, far under the test build's",
+            "        # 300 ms tools/list timeout: until every server has asked, a page",
+            "        # with no tools and a fresh cursor, so the client asks again.",
+            "        if BARRIER_DIR:",
+            "            if barrier_since is None:",
+            "                barrier_since = time.monotonic()",
+            "                open(os.path.join(BARRIER_DIR, LABEL), 'w').close()",
+            "            held = time.monotonic()",
+            "            while barrier_arrived() < BARRIER_COUNT and time.monotonic() - held < 0.05:",
+            "                time.sleep(0.01)",
+            "            arrived = barrier_arrived()",
+            "            if arrived < BARRIER_COUNT:",
+            "                if (time.monotonic() - barrier_since) * 1000 >= BARRIER_DEADLINE_MS:",
+            "                    send_message({",
+            "                        'jsonrpc': '2.0',",
+            "                        'id': request['id'],",
+            "                        'error': {'code': -32000, 'message': f'barrier: {arrived} of {BARRIER_COUNT} servers asked for tools/list'},",
+            "                    })",
+            "                    continue",
+            "                barrier_pages += 1",
+            "                send_message({",
+            "                    'jsonrpc': '2.0',",
+            "                    'id': request['id'],",
+            "                    'result': {'tools': [], 'nextCursor': f'barrier-{barrier_pages}'}",
+            "                })",
+            "                continue",
             "        if LIST_TOOLS_DELAY_MS:",
             "            time.sleep(LIST_TOOLS_DELAY_MS / 1000)",
             "        tools = [",
@@ -3136,11 +3171,22 @@ fn reattach_after_failed_discovery_leaves_routes_untouched() {
     });
 }
 
+/// How long a server waits at the tools/list barrier for the others before it
+/// answers with an error: the bound that ends a failing run, not a condition
+/// of a passing one (t-84793).
+const LIST_BARRIER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How many discoveries the barrier test runs side by side. One drives them
+/// one at a time, as a discovery that serializes them would (t-84793).
+const DISCOVERY_WIDTH: usize = 1;
+
 #[test]
 fn concurrent_discovery_does_not_serialize_a_slow_server_behind_a_fast_one() {
-    // Six independent 100ms tools/list delays take at least 600ms when run
-    // serially. Detached ownership lets `buffer_unordered` overlap them while
-    // keeping every request comfortably below the 300ms test RPC timeout.
+    // No server answers tools/list until all six have asked for it (t-84793):
+    // discovery that serializes them never brings the first one past the
+    // barrier, however fast the machine, and discovery that overlaps them
+    // passes it, however slow. Each wait is a page answered within 50 ms, so
+    // no request comes near the 300ms test RPC timeout.
     let runtime = Builder::new_current_thread()
         .enable_all()
         .build()
@@ -3151,6 +3197,8 @@ fn concurrent_discovery_does_not_serialize_a_slow_server_behind_a_fast_one() {
         let script_path = write_manager_mcp_server_script();
         let parent = script_path.parent().expect("script parent");
         let names = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+        let barrier = parent.join("tools-list-barrier");
+        fs::create_dir_all(&barrier).expect("barrier dir");
 
         let mut servers = BTreeMap::new();
         for name in names {
@@ -3160,15 +3208,25 @@ fn concurrent_discovery_does_not_serialize_a_slow_server_behind_a_fast_one() {
                     &script_path,
                     name,
                     &parent.join(format!("{name}.log")),
-                    BTreeMap::from([(
-                        "MCP_LIST_TOOLS_DELAY_MS".to_string(),
-                        "100".to_string(),
-                    )]),
+                    BTreeMap::from([
+                        (
+                            "MCP_LIST_BARRIER_DIR".to_string(),
+                            barrier.to_string_lossy().into_owned(),
+                        ),
+                        ("MCP_LIST_BARRIER_COUNT".to_string(), names.len().to_string()),
+                        (
+                            "MCP_LIST_BARRIER_DEADLINE_MS".to_string(),
+                            LIST_BARRIER_DEADLINE.as_millis().to_string(),
+                        ),
+                    ]),
                 ),
             );
         }
         let mut manager = McpServerManager::from_servers(&servers);
-        manager.set_discover_server_timeout_ms(1_000);
+        // Wider than the barrier, so a failing run ends on the barrier's words.
+        manager.set_discover_server_timeout_ms(
+            u64::try_from(LIST_BARRIER_DEADLINE.as_millis() * 2).expect("timeout in ms"),
+        );
 
         let mut units = names
             .into_iter()
@@ -3185,7 +3243,7 @@ fn concurrent_discovery_does_not_serialize_a_slow_server_behind_a_fast_one() {
             let fresh = unit.refresh_server_tools(name).await;
             (name, unit, fresh)
         }))
-        .buffer_unordered(names.len())
+        .buffer_unordered(DISCOVERY_WIDTH)
         .collect::<Vec<_>>()
         .await;
         let elapsed = started.elapsed();
