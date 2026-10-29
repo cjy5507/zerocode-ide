@@ -6013,7 +6013,25 @@ dismissable(cookieImportPop, closeCookieImportPop, ".browser-menu", ".browser-pr
  * 주소가 있는가. 그 프로필로 가져온 주소가 없으면 묻지도 않는다 — 대부분의
  * 페이지가 여기서 끝난다. 고르면 시스템 손이 값을 칸에 직접 쓰고, 돌아오는
  * 것은 몇 칸에 들어갔는지뿐이다. 채움은 사람의 손만 한다(person-only). 띠의
- * 모양은 판을 밀어내는 한 줄 — 말, 고르는 단추들, 닫기. */
+ * 모양은 판을 밀어내는 한 줄 — 말, 고르는 단추들, 닫기.
+ *
+ * 주소 단추는 주소 칸만 채운다. 입력했던 값은 칸 이름으로만 이어지고 어느
+ * 사이트에서 쳤는지 모르므로, 값마다 따로 선 단추를 사람이 눌렀을 때 그 이름의
+ * 칸에만 간다. 채운 단추는 띠에서 빠지고 남은 단추는 그대로 선다. */
+
+/* 시스템 손의 답을 띠의 상태로: 고를 주소와 입력값, 이미 채운 것, 지금까지
+ * 채운 칸 수, 마지막 누름이 아무 칸도 못 채웠으면 그 단추의 종류. */
+function newFillOffer(url, found) {
+  return {
+    url,
+    candidates: found?.addresses ?? [],
+    entries: found?.entries ?? [],
+    addressDone: false,
+    entriesDone: [],
+    report: { fields: 0, entries: 0 },
+    failed: null,
+  };
+}
 
 async function offerSavedAddresses(tab, url) {
   if (!/^https?:/i.test(url ?? "") || tab.artifact || !tab.profile) return;
@@ -6027,36 +6045,52 @@ async function offerSavedAddresses(tab, url) {
     return;
   }
   // 묻는 사이 문서가 또 떠났으면 그 답은 옛 문서의 것이다.
-  if (tab.url !== url || !Array.isArray(found) || found.length === 0) return;
-  tab.fillOffer = { url, candidates: found, state: "offer", report: null };
+  if (tab.url !== url || !Array.isArray(found?.addresses) || found.addresses.length === 0) return;
+  tab.fillOffer = newFillOffer(url, found);
   if (stillShowing(tab)) paintBrowserView(tab);
 }
 
-async function fillSavedAddress(tab, candidate) {
+/* 사람이 누른 단추 하나를 시스템 손에게 맡기고, 채운 칸 수를 띠에 더한다. */
+async function fillFromBar(tab, kind, command, args, done) {
   const offer = tab.fillOffer;
   if (!offer) return;
   let report = null;
   try {
-    report = await invoke("browser_address_fill", { label: tab.label, id: candidate.id }, { hand: handNow() });
+    report = await invoke(command, { label: tab.label, ...args }, { hand: handNow() });
   } catch (error) {
     showError(String(error));
   }
   if (tab.fillOffer !== offer) return;
-  offer.state = (report?.fields ?? 0) + (report?.entries ?? 0) > 0 ? "filled" : "failed";
-  offer.report = report;
+  const fields = report?.fields ?? 0;
+  const entries = report?.entries ?? 0;
+  offer.report = { fields: offer.report.fields + fields, entries: offer.report.entries + entries };
+  offer.failed = fields + entries > 0 ? null : kind;
+  if (!offer.failed) done(offer);
   if (stillShowing(tab)) paintBrowserView(tab);
+}
+
+function fillSavedAddress(tab, candidate) {
+  return fillFromBar(tab, "address", "browser_address_fill", { id: candidate.id }, (offer) => {
+    offer.addressDone = true;
+  });
+}
+
+function fillSavedEntry(tab, entry) {
+  return fillFromBar(tab, "entry", "browser_entry_fill", { name: entry.name }, (offer) => {
+    offer.entriesDone.push(entry.name);
+  });
 }
 
 let browserFillPickSeq = 0;
 
-/* 띠의 고르는 단추 하나. 글자와 풍선 말은 사람이 고를 때 읽는 이름·주소다.
+/* 띠의 고르는 단추 하나. 글자와 풍선 말은 사람이 고를 때 읽는 이름·주소·값이다.
  * 접근성 이름은 몇 번째인지만 말한다 — self-act의 look이 이 이름을 에이전트에게
  * 답하므로(data-private-words) 사람의 주소가 글자로 가지 않는다. 화면 낭독기는
  * 그 글자를 설명으로 읽는다. */
-function fillBarPick(words, tip, name, run) {
+function fillBarPick(look, words, tip, name, run) {
   const pick = document.createElement("button");
   pick.type = "button";
-  pick.className = "browser-fillbar-act is-primary";
+  pick.className = `browser-fillbar-act ${look}`;
   pick.dataset.privateWords = "";
   const shown = document.createElement("span");
   shown.id = `browser-fillbar-pick-${++browserFillPickSeq}`;
@@ -6069,6 +6103,23 @@ function fillBarPick(words, tip, name, run) {
   return pick;
 }
 
+function fillBarWords(offer) {
+  const { fields, entries } = offer.report;
+  if (offer.failed === "entry") return t("browser.fill.failedEntry", "입력했던 값을 채우지 못했습니다");
+  if (offer.failed) return t("browser.fill.failed", "저장된 주소를 채우지 못했습니다");
+  if (fields > 0 && entries > 0) {
+    return t("browser.fill.filledEntries", "{{fields}}칸에 주소, {{entries}}칸에 입력했던 값을 채웠습니다. 제출은 직접 하세요", {
+      fields,
+      entries,
+    });
+  }
+  if (fields > 0) return t("browser.fill.filled", "{{fields}}칸에 주소를 채웠습니다. 제출은 직접 하세요", { fields });
+  if (entries > 0) {
+    return t("browser.fill.filledOnlyEntries", "{{entries}}칸에 입력했던 값을 채웠습니다. 제출은 직접 하세요", { entries });
+  }
+  return t("browser.fill.offer", "이 페이지에 채울 수 있는 저장된 주소");
+}
+
 function paintBrowserFillBar(bar, tab) {
   const offer = tab.fillOffer;
   bar.hidden = !offer;
@@ -6077,37 +6128,38 @@ function paintBrowserFillBar(bar, tab) {
     delete bar.dataset.key;
     return;
   }
+  const addresses = offer.addressDone ? [] : offer.candidates;
+  const entries = offer.entries.filter((one) => !offer.entriesDone.includes(one.name));
   // 같은 모양이면 다시 짓지 않는다 — 판 그리기마다 같은 노드를 지우고 쓰지 않게.
-  const key = `${offer.url}|${offer.state}|${offer.candidates.map((one) => one.id).join(",")}`;
+  const key = JSON.stringify([
+    offer.url, addresses.map((one) => one.id), entries.map((one) => one.name),
+    offer.report.fields, offer.report.entries, offer.failed,
+  ]);
   if (bar.dataset.key === key) return;
   bar.dataset.key = key;
   const words = document.createElement("span");
   words.className = "browser-fillbar-words";
+  words.textContent = fillBarWords(offer);
   const acts = document.createElement("div");
   acts.className = "browser-fillbar-acts";
-  if (offer.state === "offer") {
-    words.textContent = t("browser.fill.offer", "이 페이지에 채울 수 있는 저장된 주소");
-    offer.candidates.forEach((candidate, at) => {
-      acts.appendChild(fillBarPick(
-        candidate.label,
-        t("browser.fill.pick", "{{label}} 채우기", { label: candidate.label }),
-        t("browser.fill.pickNth", "저장된 주소 {{n}} 채우기", { n: at + 1 }),
-        () => void fillSavedAddress(tab, candidate),
-      ));
-    });
-  } else if (offer.state === "filled") {
-    const entries = offer.report?.entries ?? 0;
-    words.textContent = entries > 0
-      ? t("browser.fill.filledEntries", "{{fields}}칸에 주소, {{entries}}칸에 입력했던 값을 채웠습니다. 제출은 직접 하세요", {
-        fields: offer.report?.fields ?? 0,
-        entries,
-      })
-      : t("browser.fill.filled", "{{fields}}칸에 주소를 채웠습니다. 제출은 직접 하세요", {
-        fields: offer.report?.fields ?? 0,
-      });
-  } else {
-    words.textContent = t("browser.fill.failed", "저장된 주소를 채우지 못했습니다");
-  }
+  addresses.forEach((candidate, at) => {
+    acts.appendChild(fillBarPick(
+      "is-primary",
+      candidate.label,
+      t("browser.fill.pick", "{{label}} 채우기", { label: candidate.label }),
+      t("browser.fill.pickNth", "저장된 주소 {{n}} 채우기", { n: at + 1 }),
+      () => void fillSavedAddress(tab, candidate),
+    ));
+  });
+  entries.forEach((entry, at) => {
+    acts.appendChild(fillBarPick(
+      "is-entry",
+      t("browser.fill.entry", "입력값 · {{label}}", { label: entry.label }),
+      t("browser.fill.entryTip", "입력했던 값을 {{name}} 칸에 채우기", { name: entry.name }),
+      t("browser.fill.entryNth", "입력했던 값 {{n}} 채우기", { n: at + 1 }),
+      () => void fillSavedEntry(tab, entry),
+    ));
+  });
   const dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.className = "browser-fillbar-act";

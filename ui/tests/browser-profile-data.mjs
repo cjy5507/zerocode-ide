@@ -39,11 +39,15 @@ const SUMMARY = {
   partitionSkippedCookies: 0, domains: ["example.com"],
   profileData: IMPORTED,
 };
-// What `browser_address_candidates` answers on the fixture's shipping form.
-const CANDIDATES = [
-  { id: "00000000-0000-4000-8000-000000000002", label: "[합성-이름-나] · [합성-주소-1줄]", kinds: 6 },
-  { id: "00000000-0000-4000-8000-000000000001", label: "[합성-이름-가] · [합성-이메일-가]", kinds: 2 },
-];
+// What `browser_address_candidates` answers on the fixture's shipping form: two
+// addresses, and the one past entry its unnamed field has, offered apart.
+const CANDIDATES = {
+  addresses: [
+    { id: "00000000-0000-4000-8000-000000000002", label: "[합성-이름-나] · [합성-주소-1줄]", kinds: 6 },
+    { id: "00000000-0000-4000-8000-000000000001", label: "[합성-이름-가] · [합성-이메일-가]", kinds: 2 },
+  ],
+  entries: [{ name: "nickname", label: "[합성-별명]" }],
+};
 
 // A picture waits out the overlays' entrance (a menu and a card fade in).
 const SHOT_SETTLE_MS = 400;
@@ -88,14 +92,21 @@ export async function testBrowserProfileData(browser, origin, ok) {
       window.__ADDRESS_ASKS__ = [];
       window.__ADDRESS_FILLS__ = [];
       window.__ADDRESS_HANDS__ = [];
+      window.__ENTRY_FILLS__ = [];
+      window.__ENTRY_HANDS__ = [];
       window.__ANSWER__.browser_address_candidates = (args) => {
         window.__ADDRESS_ASKS__.push(args.label);
-        return window.__PROFILE_IMPORTED__ ? candidates : [];
+        return window.__PROFILE_IMPORTED__ ? candidates : { addresses: [], entries: [] };
       };
       window.__ANSWER__.browser_address_fill = (args, options) => {
         window.__ADDRESS_FILLS__.push(JSON.parse(JSON.stringify(args)));
         window.__ADDRESS_HANDS__.push(options?.headers?.["zerocode-hand"] ?? "");
-        return { fields: 6, entries: 1 };
+        return { fields: 6, entries: 0 };
+      };
+      window.__ANSWER__.browser_entry_fill = (args, options) => {
+        window.__ENTRY_FILLS__.push(JSON.parse(JSON.stringify(args)));
+        window.__ENTRY_HANDS__.push(options?.headers?.["zerocode-hand"] ?? "");
+        return { fields: 0, entries: 1 };
       };
       window.__ANSWER__.browser_place = () => null;
       window.__ANSWER__.browser_navigate = (args) => {
@@ -218,13 +229,15 @@ export async function testBrowserProfileData(browser, origin, ok) {
         asked: window.__ADDRESS_ASKS__.length,
         personOnly: bar.dataset.personOnly !== undefined,
         picks: [...bar.querySelectorAll(".browser-fillbar-act.is-primary")].map((one) => one.textContent),
+        entries: [...bar.querySelectorAll(".browser-fillbar-act.is-entry")].map((one) => one.textContent),
         acts: bar.querySelectorAll(".browser-fillbar-act").length,
       };
     });
     await shot(page, "after-fill-offer");
-    ok("after the import a finished page asks once and offers each saved address plus a dismiss",
-      fillBefore.asked === 0 && offered.asked === 1 && offered.picks.length === 2 && offered.acts === 3
-        && offered.picks[0].includes("[합성-이름-나]"), JSON.stringify(offered));
+    ok("after the import a finished page asks once and offers each saved address, the past entry apart, and a dismiss",
+      fillBefore.asked === 0 && offered.asked === 1 && offered.picks.length === 2 && offered.entries.length === 1
+        && offered.acts === 4 && offered.picks[0].includes("[합성-이름-나]") && offered.entries[0].includes("[합성-별명]"),
+      JSON.stringify(offered));
     ok("the fill strip is the person's alone", offered.personOnly);
     await page.click(".browser-view:not([hidden]) .browser-fillbar-act.is-primary");
     await page.waitForFunction(() => window.__ADDRESS_FILLS__.length === 1);
@@ -232,6 +245,7 @@ export async function testBrowserProfileData(browser, origin, ok) {
     const filled = await page.evaluate(() => ({
       fill: window.__ADDRESS_FILLS__[0],
       hand: window.__ADDRESS_HANDS__[0],
+      entryFills: window.__ENTRY_FILLS__.length,
       said: document.querySelector(".browser-view:not([hidden]) .browser-fillbar-words").textContent,
       acts: document.querySelectorAll(".browser-view:not([hidden]) .browser-fillbar-act").length,
     }));
@@ -239,8 +253,21 @@ export async function testBrowserProfileData(browser, origin, ok) {
     ok("the press sends only the pane's label and the address's id, with the person's hand",
       Object.keys(filled.fill).sort().join() === "id,label" && filled.fill.id === "00000000-0000-4000-8000-000000000002"
         && filled.hand === "person", JSON.stringify(filled));
-    ok("the strip then says how many fields took the address and the past entries, and offers only dismiss",
-      /6/.test(filled.said) && /1/.test(filled.said) && filled.acts === 1, JSON.stringify(filled));
+    ok("the address press fills no past entry: the strip says how many fields took the address and keeps the entry's button",
+      /6/.test(filled.said) && filled.entryFills === 0 && filled.acts === 2, JSON.stringify(filled));
+    await page.click(".browser-view:not([hidden]) .browser-fillbar-act.is-entry");
+    await page.waitForFunction(() => window.__ENTRY_FILLS__.length === 1);
+    await page.waitForFunction(() => document.querySelectorAll(".browser-view:not([hidden]) .browser-fillbar-act").length === 1);
+    const typed = await page.evaluate(() => ({
+      fill: window.__ENTRY_FILLS__[0],
+      hand: window.__ENTRY_HANDS__[0],
+      said: document.querySelector(".browser-view:not([hidden]) .browser-fillbar-words").textContent,
+    }));
+    ok("a past entry goes only when the person presses it: the press sends the pane's label and the field's name",
+      Object.keys(typed.fill).sort().join() === "label,name" && typed.fill.name === "nickname" && typed.hand === "person",
+      JSON.stringify(typed));
+    ok("the strip then counts the address's fields and the entry's, and offers only dismiss",
+      /6/.test(typed.said) && /1/.test(typed.said), JSON.stringify(typed));
     await page.evaluate(() => window.__PAGE_NAV__("started", "http://127.0.0.1:54321/next"));
     ok("a document that starts leaving takes its fill strip with it",
       await page.evaluate(() => document.querySelector(".browser-view:not([hidden]) .browser-fillbar").hidden));

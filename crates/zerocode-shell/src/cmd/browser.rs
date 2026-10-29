@@ -1377,32 +1377,32 @@ async fn detect_page_form(pane: &BrowserPane) -> Result<browser_form_fill::PageF
     serde_json::from_value(answer).map_err(|_| PAGE_ANSWER_UNREADABLE.to_string())
 }
 
-/// 지금 이 판의 폼에 내밀 저장된 주소들(t-79331 ③) — 고를 때 읽는 한 줄과
-/// 채울 수 있는 칸 수만 간다. 가져온 주소가 없는 판은 페이지를 평가하지 않는다:
-/// 대부분의 페이지가 이 답에서 끝난다. 탐지는 한 번의 평가이고 칸의 값은 읽지
-/// 않는다.
+/// 지금 이 판의 폼에 내밀 저장된 주소와 입력값(t-79331 ③) — 고를 때 읽는
+/// 한 줄과 채울 수 있는 칸 수만 간다. 가져온 주소가 없는 판은 페이지를
+/// 평가하지 않는다: 대부분의 페이지가 이 답에서 끝난다. 탐지는 한 번의
+/// 평가이고 칸의 값은 읽지 않는다.
 #[tauri::command]
 pub(crate) async fn browser_address_candidates(
     app: AppHandle,
     webview: tauri::Webview,
     state: State<'_, AppState>,
     label: String,
-) -> Result<Vec<browser_form_fill::AddressCandidate>, String> {
+) -> Result<browser_form_fill::FillOffer, String> {
     from_the_main_webview(&webview)?;
     let pane = browser_pane_of(&app, &state, &label)?;
     let book = pane_address_book(&state, &label);
     if book.addresses.is_empty() {
-        return Ok(Vec::new());
+        return Ok(browser_form_fill::FillOffer::default());
     }
     let form = detect_page_form(&pane).await?;
     Ok(browser_form_fill::offer(&book, &form))
 }
 
-/// 고른 주소를 판의 폼에 쓴다. 사람이 띠에서 고른 일이라 에이전트의 문이
-/// 아니다(`self_surface`). 값은 이 호출 안에서 저장소에서 나와 렌더러로만
-/// 가고, 돌려주는 것은 몇 칸에 들어갔는지뿐이다. 고른 주소가 지금 페이지에
-/// 내밀어질 것이 아니면 쓰지 않는다. 그 폼에서 종류를 모르는 빈 칸은 같은
-/// 이름으로 입력했던 값이 있으면 그것으로 채운다.
+/// 고른 주소를 판의 폼의 주소 칸에 쓴다. 사람이 띠에서 고른 일이라
+/// 에이전트의 문이 아니다(`self_surface`). 값은 이 호출 안에서 저장소에서
+/// 나와 렌더러로만 가고, 돌려주는 것은 몇 칸에 들어갔는지뿐이다. 고른 주소가
+/// 지금 페이지에 내밀어질 것이 아니면 쓰지 않는다. 종류를 모르는 칸은
+/// 건드리지 않는다 — 입력값은 [`browser_entry_fill`]로 따로 고른다.
 #[tauri::command]
 pub(crate) async fn browser_address_fill(
     app: AppHandle,
@@ -1416,6 +1416,7 @@ pub(crate) async fn browser_address_fill(
     let book = pane_address_book(&state, &label);
     let form = detect_page_form(&pane).await?;
     if !browser_form_fill::offer(&book, &form)
+        .addresses
         .iter()
         .any(|candidate| candidate.id == id)
     {
@@ -1428,7 +1429,37 @@ pub(crate) async fn browser_address_fill(
         .ok_or_else(|| "저장된 주소를 읽을 수 없습니다".to_string())?;
     let script = browser_form_fill::fill_script(
         &browser_form_fill::fill_values(address, &form.kinds),
-        &browser_form_fill::entry_values(&book, &form.names),
+        &std::collections::BTreeMap::new(),
+    );
+    let answer = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+    Ok(browser_form_fill::fill_report(&answer))
+}
+
+/// 사람이 띠에서 고른 입력값 하나를 그 이름의 빈 칸에만 쓴다(t-79331 ③).
+/// 주소처럼 사람 전용이고, 값은 저장소에서 렌더러로만 가며, 돌려주는 것은
+/// 칸 수뿐이다. 그 이름이 지금 페이지에 내밀어질 것이 아니면 쓰지 않는다.
+#[tauri::command]
+pub(crate) async fn browser_entry_fill(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    label: String,
+    name: String,
+) -> Result<browser_form_fill::FillReport, String> {
+    from_the_main_webview(&webview)?;
+    let pane = browser_pane_of(&app, &state, &label)?;
+    let book = pane_address_book(&state, &label);
+    let form = detect_page_form(&pane).await?;
+    if !browser_form_fill::offer(&book, &form)
+        .entries
+        .iter()
+        .any(|entry| entry.name == name)
+    {
+        return Err("이 페이지에 쓸 수 없는 입력값입니다".to_string());
+    }
+    let script = browser_form_fill::fill_script(
+        &std::collections::BTreeMap::new(),
+        &browser_form_fill::entry_values(&book, std::slice::from_ref(&name)),
     );
     let answer = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
     Ok(browser_form_fill::fill_report(&answer))

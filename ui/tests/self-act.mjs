@@ -208,10 +208,10 @@ export async function testSelfAct(browser, origin, ok) {
 
   await scenario(browser, origin, "private words", ok, async (page) => {
     // A browser pane's fill strip (t-79331): its buttons show the person a
-    // saved address — the window's own painter draws it over a synthetic one.
-    // A look names each button by its place, never by the name or the
-    // address it shows; a control in a private-words mark with no plain name
-    // is named nothing.
+    // saved address and a past entry — the window's own painter draws them
+    // over synthetic ones. A look names each button by its place, never by
+    // the name, the address or the value it shows; a control in a
+    // private-words mark with no plain name is named nothing.
     const said = await page.evaluate(async () => {
       const T = window.__SELF_T__;
       const bar = document.createElement("div");
@@ -220,13 +220,10 @@ export async function testSelfAct(browser, origin, ok) {
       bar.style.cssText = "position:fixed;left:8px;top:8px;z-index:2";
       document.body.appendChild(bar);
       paintBrowserFillBar(bar, {
-        fillOffer: {
-          url: "https://shop.example.com/order",
-          candidates: [{ id: "a", label: "SENTINEL-name-71 · SENTINEL-street-72", kinds: 6 }],
+        fillOffer: newFillOffer("https://shop.example.com/order", {
+          addresses: [{ id: "a", label: "SENTINEL-name-71 · SENTINEL-street-72", kinds: 6 }],
           entries: [{ name: "memo", label: "SENTINEL-entry-73" }],
-          state: "offer",
-          report: null,
-        },
+        }),
       });
       const marked = document.createElement("div");
       marked.dataset.privateWords = "";
@@ -236,12 +233,14 @@ export async function testSelfAct(browser, origin, ok) {
       const look = await T.ask({ kind: "look" });
       return {
         shown: bar.textContent,
+        named: bar.querySelectorAll("[data-private-words]").length,
         leaked: JSON.stringify(look).match(/SENTINEL-[a-z-]+-\d+/g) ?? [],
         picks: (look?.ok?.controls ?? []).filter((control) => /1/.test(control.name) && control.facts?.personOnly).map((control) => control.name),
       };
     });
     ok("a look names the fill strip's saved address by its place, never by the person's name or address",
-      said.shown.includes("SENTINEL-name-71") && said.leaked.length === 0 && said.picks.length > 0,
+      said.shown.includes("SENTINEL-name-71") && said.shown.includes("SENTINEL-entry-73") && said.named === 2
+        && said.leaked.length === 0 && said.picks.length === 2,
       JSON.stringify(said));
   });
 

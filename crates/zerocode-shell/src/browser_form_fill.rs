@@ -4,16 +4,21 @@
 //! (`detect`), 받은 값을 빈 칸에 쓴다(`fill`). 여기는 그 사이의 판단이다 —
 //! 저장된 주소 가운데 무엇을 이 페이지에 내밀지, 칸마다 어떤 값을 줄지.
 //!
-//! 창에 올라가는 것은 [`AddressCandidate`](고를 때 읽는 한 줄)뿐이고, 채운 뒤
+//! 창에 올라가는 것은 [`FillOffer`](고를 때 읽는 한 줄들)뿐이고, 채운 뒤
 //! 돌아오는 것은 [`FillReport`](몇 칸에 들어갔는지)뿐이다. 값은 채움 식에 실려
 //! 판의 렌더러로만 간다. 결제 카드는 이 길에 없다 — 가져오지 않았고
 //! (`browser_profile_data`), 페이지 쪽도 카드 칸을 칸 종류로 보지 않는다.
+//!
+//! 주소와 입력값은 따로 고른다. 주소 단추는 주소 칸만 채운다. 입력값은 칸
+//! 이름으로만 이어지고 크롬의 표에는 어느 사이트에서 쳤는지가 없어서, 다른
+//! 사이트에서 친 값이 이 페이지가 고른 이름의 칸에 들어갈 수 있다 — 그래서
+//! 입력값은 사람이 그 값 하나를 눌렀을 때 그 이름의 칸에만 간다.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::browser_profile_data::{AddressBook, SavedAddress};
+use crate::browser_profile_data::{AddressBook, AutofillEntry, SavedAddress};
 
 /// 페이지 쪽 스크립트 — 판의 문서에서 한 식으로 평가된다.
 pub const FORM_FILL_JS: &str = include_str!("../../../ui/browser-form-fill.js");
@@ -25,6 +30,10 @@ pub const MIN_KINDS: usize = 2;
 
 /// 고르는 줄에 이름과 함께 서는 값 — 주소의 첫 줄, 없으면 이메일.
 const LABEL_SECOND: [&str; 3] = ["address-line1", "street-address", "email"];
+
+/// 한 폼에 내미는 입력값 단추의 상한 — 칸을 많이 세운 페이지가 띠를 사람의
+/// 지난 입력으로 채우지 못하게.
+pub const MAX_ENTRY_OFFERS: usize = 3;
 
 /// 페이지 쪽 `detect`의 답. 칸의 값은 읽지 않는다.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -45,6 +54,24 @@ pub struct AddressCandidate {
     pub label: String,
     /// 이 주소가 이 폼에서 채울 수 있는 칸 종류의 수.
     pub kinds: usize,
+}
+
+/// 띠에 따로 서는 입력값 하나 — 그 칸 이름에 가장 많이 쓴 값.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryCandidate {
+    /// 페이지의 칸 이름(`name` 속성) — 누르면 이 이름의 빈 칸에만 간다.
+    pub name: String,
+    /// 사람이 고를 때 읽는 그 값의 첫 줄.
+    pub label: String,
+}
+
+/// 이 페이지의 폼에 내미는 것 — 주소들과, 따로 고르는 입력값들.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FillOffer {
+    pub addresses: Vec<AddressCandidate>,
+    pub entries: Vec<EntryCandidate>,
 }
 
 /// 채움의 결과 — 몇 칸에 들어갔는지뿐이다.
@@ -103,16 +130,18 @@ pub fn fill_values(address: &SavedAddress, kinds: &[String]) -> BTreeMap<String,
         .collect()
 }
 
-/// 종류를 모르는 칸마다 가장 많이 쓴 입력값. 같은 이름의 입력값은 많이 쓴
-/// 것이 앞에 서 있다(`browser_profile_data`).
+/// 한 칸 이름에 가장 많이 쓴 입력값. 같은 이름의 입력값은 많이 쓴 것이 앞에
+/// 서 있다(`browser_profile_data`).
+fn most_used<'a>(book: &'a AddressBook, name: &str) -> Option<&'a AutofillEntry> {
+    book.entries.iter().find(|entry| entry.name == name)
+}
+
+/// 종류를 모르는 칸마다 가장 많이 쓴 입력값.
 #[must_use]
 pub fn entry_values(book: &AddressBook, names: &[String]) -> BTreeMap<String, String> {
     names
         .iter()
-        .filter_map(|name| {
-            let entry = book.entries.iter().find(|entry| entry.name == *name)?;
-            Some((name.clone(), entry.value.clone()))
-        })
+        .filter_map(|name| Some((name.clone(), most_used(book, name)?.value.clone())))
         .collect()
 }
 
@@ -130,16 +159,18 @@ fn label_of(address: &SavedAddress, kinds: &BTreeSet<&str>) -> String {
         .join(" · ")
 }
 
-/// 이 페이지의 폼에 내밀 주소들. 폼의 칸 종류가 [`MIN_KINDS`]보다 적으면
+/// 이 페이지의 폼에 내밀 것. 폼의 칸 종류가 [`MIN_KINDS`]보다 적으면
 /// 아무것도 내밀지 않고, 이 폼에서 한 칸도 못 채우는 주소는 빠진다. 많이 쓴
-/// 주소가 앞이다(저장 순서).
+/// 주소가 앞이다(저장 순서). 입력값은 주소를 내미는 폼에서만, 종류를 모르는
+/// 빈 칸의 이름마다 가장 많이 쓴 값 하나를 [`MAX_ENTRY_OFFERS`]개까지 내민다.
 #[must_use]
-pub fn offer(book: &AddressBook, form: &PageForm) -> Vec<AddressCandidate> {
+pub fn offer(book: &AddressBook, form: &PageForm) -> FillOffer {
     let kinds: BTreeSet<&str> = form.kinds.iter().map(String::as_str).collect();
     if kinds.len() < MIN_KINDS {
-        return Vec::new();
+        return FillOffer::default();
     }
-    book.addresses
+    let addresses: Vec<AddressCandidate> = book
+        .addresses
         .iter()
         .filter_map(|address| {
             let filled = fill_values(address, &form.kinds).len();
@@ -149,7 +180,23 @@ pub fn offer(book: &AddressBook, form: &PageForm) -> Vec<AddressCandidate> {
                 kinds: filled,
             })
         })
-        .collect()
+        .collect();
+    if addresses.is_empty() {
+        return FillOffer::default();
+    }
+    let entries = form
+        .names
+        .iter()
+        .filter_map(|name| {
+            let entry = most_used(book, name)?;
+            Some(EntryCandidate {
+                name: name.clone(),
+                label: lines(&entry.value).next().unwrap_or_default().to_string(),
+            })
+        })
+        .take(MAX_ENTRY_OFFERS)
+        .collect();
+    FillOffer { addresses, entries }
 }
 
 /// 폼 탐지 식 — 값 인자가 없다.
@@ -187,7 +234,6 @@ pub fn fill_report(page_answer: &serde_json::Value) -> FillReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser_profile_data::AutofillEntry;
 
     fn address(id: &str, pairs: &[(&str, &str)]) -> SavedAddress {
         SavedAddress {
@@ -228,9 +274,9 @@ mod tests {
             addresses: vec![full()],
             entries: Vec::new(),
         };
-        assert!(offer(&book, &form(&[])).is_empty());
-        assert!(offer(&book, &form(&["email"])).is_empty());
-        let shown = offer(&book, &form(&["name", "postal-code", "street-address"]));
+        assert_eq!(offer(&book, &form(&[])), FillOffer::default());
+        assert_eq!(offer(&book, &form(&["email"])), FillOffer::default());
+        let shown = offer(&book, &form(&["name", "postal-code", "street-address"])).addresses;
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].kinds, 3);
         assert_eq!(shown[0].label, "[합성-이름] [합성-성] · [합성-주소-1줄]");
@@ -247,7 +293,7 @@ mod tests {
             ],
             entries: Vec::new(),
         };
-        let shown = offer(&book, &form(&["email", "tel"]));
+        let shown = offer(&book, &form(&["email", "tel"])).addresses;
         assert_eq!(
             shown.iter().map(|one| one.id.as_str()).collect::<Vec<_>>(),
             ["a", "mail"]
@@ -309,6 +355,64 @@ mod tests {
         let values = entry_values(&book, &["nickname".into(), "q".into()]);
         assert_eq!(values.len(), 1);
         assert_eq!(values["nickname"], "[합성-별명-많이]");
+    }
+
+    /// 입력값은 주소 단추에 섞이지 않고 따로 선다: 주소를 내미는 폼에서만,
+    /// 저장된 입력값이 있는 칸 이름마다 한 줄로, 상한까지. 주소가 없는 폼에는
+    /// 입력값도 내밀지 않는다.
+    #[test]
+    fn past_entries_are_offered_apart_from_the_addresses() {
+        let entry = |name: &str, value: &str| AutofillEntry {
+            name: name.into(),
+            value: value.into(),
+            count: 1,
+        };
+        let book = AddressBook {
+            addresses: vec![full()],
+            entries: vec![
+                entry("memo", "[합성-메모-1줄]\n[합성-메모-2줄]"),
+                entry("nickname", "[합성-별명]"),
+                entry("a", "[합성-가]"),
+                entry("b", "[합성-나]"),
+            ],
+        };
+        let names = |list: &[&str]| list.iter().map(|name| (*name).to_string()).collect();
+        let shown = offer(
+            &book,
+            &PageForm {
+                kinds: vec!["name".into(), "postal-code".into()],
+                names: names(&["memo", "q", "nickname", "a", "b"]),
+            },
+        );
+        assert_eq!(shown.addresses.len(), 1);
+        // 페이지의 칸 순서대로, 저장된 입력값이 없는 「q」는 빠지고, 상한에서 멈춘다.
+        assert_eq!(
+            shown
+                .entries
+                .iter()
+                .map(|one| one.name.as_str())
+                .collect::<Vec<_>>(),
+            ["memo", "nickname", "a"]
+        );
+        assert_eq!(MAX_ENTRY_OFFERS, 3);
+        assert_eq!(shown.entries[0].label, "[합성-메모-1줄]");
+        let wire = serde_json::to_value(&shown).expect("wire");
+        assert!(wire["addresses"].is_array() && wire["entries"][0]["name"].is_string());
+
+        let no_address = AddressBook {
+            addresses: Vec::new(),
+            entries: book.entries.clone(),
+        };
+        assert_eq!(
+            offer(
+                &no_address,
+                &PageForm {
+                    kinds: vec!["name".into(), "postal-code".into()],
+                    names: names(&["memo"]),
+                },
+            ),
+            FillOffer::default()
+        );
     }
 
     /// 채움 식은 값을 싣고 가고, 탐지 식은 아무 값도 싣지 않으며, 돌아오는
