@@ -3,8 +3,9 @@
 // Rust reads it (`board_inbox`: the ledger's desk and the panes, counted once). This
 // suite stands in for that answer and checks the window: the sidebar's one door and its
 // number, the page's tabs and their numbers, the list beside the preview, the answer given
-// where the letter is read (the ledger's own `desk_reply`), a read that costs no frame, and
-// the 100-letter paint. The numbers come from Rust's `counts`; this screen never recounts.
+// where the letter is read (the ledger's own `desk_reply`), a question closed without an
+// answer (the ledger's own `question-close`, t-83281), a read that costs no frame, and the
+// 100-letter paint. The numbers come from Rust's `counts`; this screen never recounts.
 //
 //   WINDOW_SUITES=inbox node ui/tests/window.mjs
 //   INBOX_REPORT=1 prints the measured numbers (screens crossed, read delay, 100-letter paint).
@@ -75,19 +76,27 @@ export async function testInbox(browser, origin, standBackend, ok) {
   await standBackend(page);
   await page.addInitScript(() => {
     const base = window.__TAURI__.core.invoke;
-    window.__INBOX__ = { snapshot: { items: [], counts: { all: 0, question: 0, handoff: 0, blocked: 0, notice: 0, waiting: 0 } }, calls: [], fail: new Set(), asks: 0 };
+    window.__INBOX__ = { snapshot: { items: [], counts: { all: 0, question: 0, handoff: 0, blocked: 0, notice: 0, waiting: 0 } }, calls: [], fail: new Set(), already: new Set(), asks: 0 };
     window.__TAURI__.core.invoke = (name, args) => {
       const state = window.__INBOX__;
       if (name === "board_inbox") {
         state.asks += 1;
         return Promise.resolve(JSON.parse(JSON.stringify(state.snapshot)));
       }
-      if (["desk_reply", "desk_ack", "desk_review_pass", "clear_finish_mark"].includes(name)) {
+      if (["desk_reply", "desk_ack", "desk_review_pass", "desk_question_close", "clear_finish_mark"].includes(name)) {
         state.calls.push({ name, args: JSON.parse(JSON.stringify(args ?? {})) });
         const key = `${name}:${args?.message ?? args?.delivery ?? args?.task ?? ""}`;
         if (state.fail.has(key)) {
           state.fail.delete(key);
           return Promise.reject("the ledger refused");
+        }
+        if (name === "desk_question_close") {
+          // The verb's own answer: the close's record, or the standing one with `already`.
+          const already = state.already.has(args.message);
+          return Promise.resolve({
+            questionId: args.message, runId: args.run, closed: true, already,
+            closeId: `m-close-${args.message}`, closedBy: `run:${args.run}`, ...(already ? {} : { note: args.reason }),
+          });
         }
         return Promise.resolve(name === "clear_finish_mark" ? false : { receipt: "r-1" });
       }
@@ -264,10 +273,13 @@ export async function testInbox(browser, origin, standBackend, ok) {
     return {
       field: view.querySelector(".inbox-reply-field").checkVisibility(),
       reply: view.querySelector('[data-inbox-act="reply"]').checkVisibility(),
+      closeField: view.querySelector(".inbox-close-field")?.checkVisibility() ?? false,
+      close: view.querySelector('[data-inbox-act="close"]')?.checkVisibility() ?? false,
       note: view.querySelector(".inbox-preview .inbox-note")?.textContent ?? "",
     };
   });
   ok("without the run's seat there is no answer box, only the reason", !noSeat.field && !noSeat.reply && noSeat.note.length > 0, JSON.stringify(noSeat));
+  ok("without the run's seat there is no 답 없이 닫기 either", !noSeat.closeField && !noSeat.close, JSON.stringify(noSeat));
 
   // A failed answer keeps its retry name, so pressing again replays one receipt.
   const retried = await page.evaluate(async () => {
@@ -285,6 +297,108 @@ export async function testInbox(browser, origin, standBackend, ok) {
     return window.__INBOX__.calls.filter((call) => call.name === "desk_reply").map((call) => call.args.retryRequest);
   });
   ok("a refused answer is retried under the same name", retried.length === 2 && retried[0] === retried[1], JSON.stringify(retried));
+
+  // A question nobody will answer closes without an answer (t-83281): one line of why, one call
+  // to the ledger's own `question-close` as the run's seat, and the row reads 「닫힘 · 까닭」 until
+  // the ledger's next reading leaves it out of the list and out of Rust's numbers.
+  const withOpen = (() => {
+    const base = inboxFixture();
+    const now = Date.now();
+    const open = (id, ago, body) => ({
+      ...base.items[0], id: `run-a/${id}`, at_ms: now - ago * MINUTE,
+      letter: { ...base.items[0].letter, id, body, created_ms: now - ago * MINUTE, delivery_id: `d-${id}` },
+    });
+    return {
+      items: [open("m-q4", 1, "예전 결제 화면도 같이 고칠까요?"), open("m-q5", 2, "로그 파일을 지워도 될까요?"), ...base.items],
+      counts: { ...base.counts, all: base.counts.all + 2, question: base.counts.question + 2, waiting: base.counts.waiting + 2 },
+    };
+  })();
+  await setSnapshot(withOpen);
+  const closing = await page.evaluate(async () => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    window.__INBOX__.calls.length = 0;
+    view.querySelector('.inbox-tab[data-inbox-tab="question"]').click();
+    view.querySelector('.inbox-row[data-id="run-a/m-q4"]').click();
+    const field = () => view.querySelector(".inbox-close-field");
+    const button = () => view.querySelector('[data-inbox-act="close"]');
+    const shown = (node) => node?.checkVisibility() ?? false;
+    const offered = shown(field()) && shown(button()) && button().textContent === "답 없이 닫기";
+    // Without a reason nothing leaves: the page asks for the one line instead.
+    button()?.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const unreasoned = {
+      sent: window.__INBOX__.calls.length,
+      error: view.querySelector(".inbox-close .inbox-error")?.textContent ?? "",
+    };
+    if (field()) {
+      field().value = "이미 다른 과업에서 끝난 일";
+      field().dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    button()?.click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const row = view.querySelector('.inbox-row[data-id="run-a/m-q4"]');
+    return {
+      offered, unreasoned,
+      calls: window.__INBOX__.calls.filter((call) => call.name === "desk_question_close").map((call) => call.args),
+      rowTitle: row?.querySelector(".inbox-row-title").textContent ?? null,
+      title: view.querySelector(".inbox-pv-title").textContent,
+      left: [shown(field()), shown(button()), shown(view.querySelector(".inbox-reply-field")), shown(view.querySelector('[data-inbox-act="reply"]'))],
+      note: view.querySelector(".inbox-preview .inbox-note")?.textContent ?? "",
+    };
+  });
+  ok("a question in a run this window sits for offers 답 없이 닫기 beside one line of why", closing.offered, JSON.stringify(closing));
+  ok("a close without a reason sends nothing and says the one line is needed", closing.unreasoned.sent === 0 && closing.unreasoned.error.length > 0, JSON.stringify(closing.unreasoned));
+  ok(
+    "답 없이 닫기 calls the ledger's question-close once, with the run, the question, the reason and a retry name",
+    closing.calls.length === 1 && closing.calls[0].run === "run-a" && closing.calls[0].message === "m-q4"
+      && closing.calls[0].reason === "이미 다른 과업에서 끝난 일" && /^ui-inbox-close-/.test(closing.calls[0].retryRequest ?? ""),
+    JSON.stringify(closing.calls),
+  );
+  ok(
+    "the closed question reads 「닫힘 · 까닭」 in its row and its preview, with nothing left to answer or close",
+    closing.rowTitle === "닫힘 · 이미 다른 과업에서 끝난 일" && closing.title === closing.rowTitle
+      && closing.left.every((one) => one === false) && closing.note === "답 없이 닫음 · 원장에 적히면 목록에서 빠져요",
+    JSON.stringify(closing),
+  );
+
+  // A close the ledger refused keeps its name, so pressing again replays one receipt; a question the
+  // ledger already holds closed answers `already` and reads the same, with no error left.
+  const again = await page.evaluate(async () => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    window.__INBOX__.fail.add("desk_question_close:m-q5");
+    window.__INBOX__.already.add("m-q5");
+    view.querySelector('.inbox-row[data-id="run-a/m-q5"]').click();
+    const field = view.querySelector(".inbox-close-field");
+    if (field) {
+      field.value = "질문한 판이 사라짐";
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    view.querySelector('[data-inbox-act="close"]')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const refused = view.querySelector(".inbox-close .inbox-error")?.textContent ?? "";
+    view.querySelector('[data-inbox-act="close"]')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return {
+      refused,
+      names: window.__INBOX__.calls.filter((call) => call.name === "desk_question_close" && call.args.message === "m-q5").map((call) => call.args.retryRequest),
+      rowTitle: view.querySelector('.inbox-row[data-id="run-a/m-q5"] .inbox-row-title')?.textContent ?? null,
+      error: view.querySelector(".inbox-close .inbox-error")?.checkVisibility() ?? false,
+    };
+  });
+  ok("a refused close says so and is retried under the same name", again.refused.length > 0 && again.names.length === 2 && again.names[0] === again.names[1], JSON.stringify(again));
+  ok("a question the ledger already holds closed reads 「닫힘 · 까닭」 the same, with no error", again.rowTitle === "닫힘 · 질문한 판이 사라짐" && !again.error, JSON.stringify(again));
+
+  // The ledger's next reading leaves both out; the numbers are Rust's again, one fewer each.
+  await setSnapshot(inboxFixture());
+  const closedOut = await page.evaluate(() => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    return {
+      rows: ["run-a/m-q4", "run-a/m-q5"].filter((id) => view.querySelector(`.inbox-row[data-id="${id}"]`)),
+      count: view.querySelector('.inbox-tab[data-inbox-tab="question"] .inbox-tab-count').textContent,
+      badge: document.querySelector("#nav-inbox .nav-badge").textContent,
+    };
+  });
+  ok("closed questions leave the list and the open numbers when the ledger reads them out", closedOut.rows.length === 0 && closedOut.count === "3" && closedOut.badge === "7", JSON.stringify(closedOut));
 
   // An agent pressing in the window (t-74825): the page answers a look with the marks it draws, and the
   // backend refuses a control whose marks say it is the person's (core `judge`). This stands in for that
