@@ -4378,6 +4378,11 @@ mod tests {
             rows[2]
         );
         assert_eq!(
+            rows[1].sent_effort, "high",
+            "the refresh's row takes its own deposit's effort: {:?}",
+            rows[1]
+        );
+        assert_eq!(
             rows[2].sent_effort, "max",
             "the effort rides the same deposit and stays with its request: {:?}",
             rows[2]

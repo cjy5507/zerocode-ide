@@ -2708,16 +2708,17 @@ fn a_claude_credential_is_configured_on_any_rung_and_never_refreshed_to_find_out
     drop(isolation);
 }
 
-/// Smart mode sends a band, not a level: the floor rides on `effort` and the
-/// client picks the level per request (`normalize_thinking_for_wire`). The
-/// request ledger must say which level went out, beside the level the
-/// request asked for — otherwise a band that moved reads as one that held,
-/// and the cache rewrite every move costs (Z11: 45 of 45 effort changes)
-/// cannot be counted from the ledger.
-// Single-threaded test; the env lock across `.await` only serialises env access.
+/// Send `request` through a client whose prompt cache is a fresh session,
+/// to a one-shot server that answers with an empty turn, and return the body
+/// that went out and the request ledger rows it left. The env the effort
+/// resolves from is cleared (no Ultra band, no per-model ceiling override),
+/// so the level on the wire is the request's and the model's alone.
+// Single-threaded callers; the env lock across `.await` only serialises env access.
 #[allow(clippy::await_holding_lock)]
-#[tokio::test]
-async fn a_band_raised_request_is_recorded_at_the_effort_it_sent() {
+async fn send_and_read_request_ledger(
+    tag: &str,
+    request: &MessageRequest,
+) -> (serde_json::Value, Vec<serde_json::Value>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -2725,10 +2726,11 @@ async fn a_band_raised_request_is_recorded_at_the_effort_it_sent() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());
-    let session = format!("band-sent-effort-{}-{nonce}", std::process::id());
+    let session = format!("{tag}-{}-{nonce}", std::process::id());
     let home = std::env::temp_dir().join(format!("zo-{session}"));
     let _home = EnvVarGuard::set("ZO_CONFIG_HOME", Some(home.to_str().expect("utf8 home")));
     let _band = EnvVarGuard::set(super::super::ULTRA_BAND_ENV, None);
+    let _ceilings = EnvVarGuard::set(super::super::MODEL_EFFORT_CEILINGS_ENV, None);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -2775,9 +2777,25 @@ async fn a_band_raised_request_is_recorded_at_the_effort_it_sent() {
     let client = AnthropicClient::new("test-key")
         .with_base_url(format!("http://{addr}"))
         .with_prompt_cache(crate::PromptCache::new(session.clone()));
-    // A heavy-intent ask on a Smart band: floor xhigh, ceiling max.
-    let request = MessageRequest {
-        model: "claude-opus-5-5".to_string(),
+    let mut stream = client.stream_message(request).await.expect("stream starts");
+    while stream.next_event().await.expect("event parses").is_some() {}
+    let sent = server.await.unwrap();
+
+    let ledger = std::fs::read_to_string(crate::PromptCachePaths::for_session(&session).requests_path)
+        .expect("request ledger");
+    let rows = ledger
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("ledger row"))
+        .collect();
+    let _ = std::fs::remove_dir_all(&home);
+    (sent, rows)
+}
+
+/// A one-message request for `model` asking for `xhigh`, with a Smart band
+/// up to `band_ceiling` when one is given.
+fn xhigh_request(model: &str, band_ceiling: Option<crate::types::EffortLevel>) -> MessageRequest {
+    MessageRequest {
+        model: model.to_string(),
         max_tokens: 64,
         messages: vec![InputMessage::user_text("please refactor this module")],
         system: None,
@@ -2787,24 +2805,43 @@ async fn a_band_raised_request_is_recorded_at_the_effort_it_sent() {
         thinking: None,
         output_config: None,
         effort: Some(crate::types::EffortLevel::Xhigh),
-        effort_band_ceiling: Some(crate::types::EffortLevel::Max),
-    };
-    let mut stream = client.stream_message(&request).await.expect("stream starts");
-    while stream.next_event().await.expect("event parses").is_some() {}
-    let sent = server.await.unwrap();
+        effort_band_ceiling: band_ceiling,
+    }
+}
+
+/// Smart mode sends a band, not a level: the floor rides on `effort` and the
+/// client picks the level per request (`normalize_thinking_for_wire`). The
+/// request ledger must say which level went out, beside the level the
+/// request asked for — otherwise a band that moved reads as one that held,
+/// and the cache rewrite every move costs (Z11: 45 of 45 effort changes)
+/// cannot be counted from the ledger.
+#[tokio::test]
+async fn a_band_raised_request_is_recorded_at_the_effort_it_sent() {
+    // A heavy-intent ask on a Smart band: floor xhigh, ceiling max.
+    let request = xhigh_request("claude-opus-5-5", Some(crate::types::EffortLevel::Max));
+    let (sent, rows) = send_and_read_request_ledger("band-sent-effort", &request).await;
 
     assert_eq!(
         sent["output_config"]["effort"], "max",
         "the band must have raised this request on the wire: {sent}"
     );
-    let ledger = std::fs::read_to_string(crate::PromptCachePaths::for_session(&session).requests_path)
-        .expect("request ledger");
-    let rows: Vec<serde_json::Value> = ledger
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("ledger row"))
-        .collect();
-    let _ = std::fs::remove_dir_all(&home);
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0]["effort"], "xhigh", "effort stays what the request asked for: {}", rows[0]);
     assert_eq!(rows[0]["sent_effort"], "max", "the row must carry the effort that went out: {}", rows[0]);
+}
+
+/// The two columns agree when the client sends the level asked for, and
+/// part when it lowers a level the model does not take (Sonnet 4.6 has no
+/// `xhigh`): the ledger reads a clamp the way it reads a band move.
+#[tokio::test]
+async fn a_kept_or_lowered_effort_is_recorded_at_the_effort_it_sent() {
+    for (model, wire) in [("claude-opus-5-5", "xhigh"), ("claude-sonnet-4-6", "high")] {
+        let request = xhigh_request(model, None);
+        let (sent, rows) = send_and_read_request_ledger("kept-or-lowered-effort", &request).await;
+
+        assert_eq!(sent["output_config"]["effort"], wire, "{model}: {sent}");
+        assert_eq!(rows.len(), 1, "{model}: {rows:?}");
+        assert_eq!(rows[0]["effort"], "xhigh", "{model}: effort stays what the request asked for: {}", rows[0]);
+        assert_eq!(rows[0]["sent_effort"], wire, "{model}: the row must carry the effort that went out: {}", rows[0]);
+    }
 }
