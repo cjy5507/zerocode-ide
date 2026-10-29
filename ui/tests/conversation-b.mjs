@@ -122,6 +122,10 @@ function readPage() {
     personRight: person ? Math.round(column.right - box(person).right) : null,
     personInside: person ? inside(person) : false,
     answerDots: answers.filter((row) => ["::before", "::after"].some((part) => getComputedStyle(row, part).content !== "none")).length,
+    // How the newest answer, the person's last words and a pill are smoothed
+    // (draft C1): the platform's way, as the terminal's are.
+    smoothing: [said, person, pills[0]?.querySelector(".helper-group-words")]
+      .map((node) => (node ? getComputedStyle(node).getPropertyValue("-webkit-font-smoothing") : null)),
     say,
     sayWhole: t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다"),
     sayShort: t("composer.placeholderShort", "다음 지시를 쓰세요"),
@@ -211,6 +215,9 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
       all.every((one) => one.sticky === 0 && one.personFlows && !["sticky", "fixed"].includes(one.personFlows.position) &&
         one.personFlows.ground === "rgba(0, 0, 0, 0)" && one.personFlows.fade === "none"),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.sticky, one.personFlows]]))));
+    ok("B: the answer, the person's words and a pill are drawn with the platform's smoothing, as the terminal is — not the chrome's thinner antialiasing (draft C1, t-82195)",
+      all.every((one) => one.smoothing.length === 3 && one.smoothing.every((value) => value === "auto")),
+      JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, one.smoothing]))));
     ok("B: an answer wears no dot and the tool work stands as pills with no step built",
       all.every((one) => one.answerDots === 0 && one.stepRows === 0),
       JSON.stringify(dark(1440)));

@@ -14617,6 +14617,12 @@ body.mod-held .term-link,
   /* The page's face is the platform's, as the panel wears VS Code's
    * (`--vscode-chat-font-family`); every rule below reads `--font-ui`. */
   --font-ui: var(--chat-font-ui);
+  /* And so is its smoothing, as the terminal's is (`.term`, t-82195 C1). The
+   * body antialiases chrome copy; a page that is nothing but words inherited
+   * it and read thinner than the terminal beside it — the stems the window
+   * measured at 0.76 coverage antialiased against 0.99 under `auto`
+   * (tools/terminal-fidelity, 2026-09-17). */
+  -webkit-font-smoothing: auto;
 }
 
 /* A conversation set aside keeps its own page standing in the leaf
