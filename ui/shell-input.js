@@ -3653,11 +3653,12 @@ async function runPaletteQuery() {
   // The finder changed — or closed — while this was in flight; its rows
   // belong to a question nobody is asking now.
   if (paletteMode !== asked) return;
-  paintPaletteRows(finder, found);
+  paintPaletteRows(finder, found, unlisted);
 }
 
-/* A finder's answer, as its rows — the first one chosen. */
-function paintPaletteRows(finder, found) {
+/* A finder's answer, as its rows — the first one chosen. `unlisted` is the
+ * reading the question was asked with, so the note answers the same one. */
+function paintPaletteRows(finder, found, unlisted = false) {
   qoResults.replaceChildren();
   paletteRows = found.slice(0, 50).map((item) => finder.row(item));
   let heading = null;
