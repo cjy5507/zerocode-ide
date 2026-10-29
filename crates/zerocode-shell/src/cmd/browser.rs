@@ -1508,44 +1508,51 @@ pub(crate) async fn import_browser_cookies(
         browser_cookie_import::save_staged_cookies(&config_root, &target, &outcome.cookies)?;
         // 같은 누름에 그 프로필의 북마크도 옮긴다(t-79331) — Chromium 가족만.
         // 쿠키는 이미 앉았으니, 여기서 실패해도 가져오기는 실패가 아니다:
-        // 그 몫이 카드에서 빠지고 이유는 창 로그 한 줄에 간다.
-        let profile_data = if browser_cookie_import::is_chromium_family(&family) {
-            let carried = browser_profile_data::read_chromium_profile_data(
-                &family,
-                source_profile,
-                &home,
-                &scratch,
-            )
-            .and_then(|(bookmarks, web_data)| {
-                note_window_event(
-                    &local_data_root,
-                    &browser_profile_data::import_log_line(&bookmarks, &web_data),
-                );
-                browser_profile_data::save_imported(
-                    &config_root,
-                    &target,
-                    &bookmarks,
-                    &web_data,
-                    browser_cookie_import::now_unix(),
+        // 카드는 그 몫을 읽지 못한 까닭의 종류로 사람 말을 적고, 자세한
+        // 글자는 창 로그 한 줄에 간다.
+        let (profile_data, profile_data_skipped) =
+            if browser_cookie_import::is_chromium_family(&family) {
+                let carried = browser_profile_data::read_chromium_profile_data(
+                    &family,
+                    source_profile,
+                    &home,
+                    &scratch,
                 )
-            });
-            match carried {
-                Ok(counts) => Some(counts),
-                Err(error) => {
+                .and_then(|(bookmarks, web_data)| {
                     note_window_event(
                         &local_data_root,
-                        &format!("browser profile data import skipped: {error}"),
+                        &browser_profile_data::import_log_line(&bookmarks, &web_data),
                     );
-                    None
+                    browser_profile_data::save_imported(
+                        &config_root,
+                        &target,
+                        &bookmarks,
+                        &web_data,
+                        browser_cookie_import::now_unix(),
+                    )
+                    .map_err(|detail| browser_profile_data::ProfileDataError {
+                        kind: browser_profile_data::ProfileDataSkipped::Unsaved,
+                        detail,
+                    })
+                });
+                match carried {
+                    Ok(counts) => (Some(counts), None),
+                    Err(error) => {
+                        note_window_event(
+                            &local_data_root,
+                            &format!("browser profile data import skipped: {error}"),
+                        );
+                        (None, Some(error.kind))
+                    }
                 }
-            }
-        } else {
-            None
-        };
+            } else {
+                (None, None)
+            };
         remember_cookie_source(&config_root, &target, &family, profile);
         let undecryptable = outcome.app_bound + outcome.decrypt_failed;
         Ok(BrowserCookieImportSummary {
             profile_data,
+            profile_data_skipped,
             total_cookies: outcome.total,
             imported_cookies: outcome.cookies.len(),
             skipped_cookies: outcome.total - outcome.cookies.len(),
@@ -1602,6 +1609,7 @@ pub(crate) async fn import_cookie_file(
         Ok::<_, String>(BrowserCookieImportSummary {
             // cookies.txt는 쿠키뿐이다 — 북마크·주소는 브라우저에서 가져올 때만.
             profile_data: None,
+            profile_data_skipped: None,
             total_cookies: outcome.total,
             imported_cookies: outcome.cookies.len(),
             skipped_cookies: outcome.total - outcome.cookies.len(),

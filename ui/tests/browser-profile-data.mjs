@@ -268,6 +268,23 @@ export async function testBrowserProfileData(browser, origin, ok) {
     ok("the settings card says how many bookmarks and addresses the profile carries",
       /북마크 6개 · 주소 2개/.test(cards.carried) && cards.never === 0, JSON.stringify(cards));
 
+    // 8b. an import whose bookmarks and addresses could not be read says why — the
+    // backend carries only the kind, the card speaks it.
+    const skipped = await page.evaluate((profile) => {
+      const said = {};
+      for (const kind of ["locked", "unreadable", "unsaved"]) {
+        showCookieImportSummary(profile, {
+          totalCookies: 1, importedCookies: 1, skippedCookies: 0, domains: ["example.com"], profileDataSkipped: kind,
+        }, { left: 8, bottom: 8 });
+        said[kind] = cookieImportPop.textContent;
+      }
+      closeCookieImportPop();
+      return said;
+    }, PROFILE);
+    ok("an import that could not read the bookmarks and addresses says why instead of leaving them out",
+      /브라우저를 끄고/.test(skipped.locked) && /읽지 못해/.test(skipped.unreadable) && /저장하지 못해/.test(skipped.unsaved)
+        && Object.values(skipped).every((text) => !/북마크 \d+개 · 주소/.test(text)), JSON.stringify(skipped));
+
     // 9. a pane on the built-in store carries no bookmarks and asks nothing.
     const plain = await page.evaluate(() => {
       const tab = window.__PROFILE_TAB__;

@@ -5949,6 +5949,15 @@ function showCookieImportSummary(target, summary, box) {
         count: carried.heldBack,
       }), true);
     }
+  } else if (summary.profileDataSkipped) {
+    // 그 몫을 읽지 못했으면 말없이 빠지지 않는다 — 시스템 손은 까닭의 종류만
+    // 싣고, 사람 말은 여기서 고른다. 자세한 글자는 창 로그에 있다.
+    const skipped = {
+      locked: () => t("browser.importProfileDataLocked", "북마크·주소는 읽지 못함 — 브라우저가 그 파일을 쓰고 있었습니다. 브라우저를 끄고 다시 가져오세요"),
+      unsaved: () => t("browser.importProfileDataUnsaved", "북마크·주소를 저장하지 못해 옮기지 않음 — 디스크 빈 공간을 확인하세요"),
+    }[summary.profileDataSkipped]
+      ?? (() => t("browser.importProfileDataUnreadable", "북마크·주소 파일을 읽지 못해 옮기지 않음"));
+    line(skipped(), true);
   }
   // 숨기지 않는 세 가지 — Orca도 요약에 같은 셋을 신는다
   // (browser-workspace-types.ts:139-160).

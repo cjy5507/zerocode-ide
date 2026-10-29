@@ -76,11 +76,11 @@ fn is_web_address(address: &str) -> bool {
 /// 각 뿌리 안에서는 크롬이 보여 주는 순서 그대로다.
 pub fn parse_chromium_bookmarks(text: &str) -> Result<BookmarksRead, String> {
     let parsed: serde_json::Value =
-        serde_json::from_str(text).map_err(|_| "북마크 파일을 읽을 수 없습니다".to_string())?;
+        serde_json::from_str(text).map_err(|_| "the Bookmarks file is not JSON".to_string())?;
     let roots = parsed
         .get("roots")
         .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| "북마크 파일에 뿌리가 없습니다".to_string())?;
+        .ok_or_else(|| "the Bookmarks file has no roots".to_string())?;
     let mut read = BookmarksRead::default();
     for (key, root) in BOOKMARK_ROOTS {
         if let Some(node) = roots.get(key) {
@@ -622,6 +622,39 @@ pub fn save_imported(
     Ok(counts)
 }
 
+/// 프로필 자료를 옮기지 못한 까닭의 종류 — 가져오기 카드가 이 값으로 사람
+/// 말을 고른다(i18n 키). 자세한 글자는 창 로그 한 줄에만 간다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProfileDataSkipped {
+    /// 브라우저가 Web Data를 계속 고쳐 써서 안정된 사본을 뜨지 못했다 —
+    /// 브라우저가 켜져 일하는 동안 흔하다.
+    Locked,
+    /// 북마크나 Web Data 파일을 읽거나 풀지 못했다.
+    Unreadable,
+    /// 읽은 자료를 프로필 저장소에 두지 못했다.
+    Unsaved,
+}
+
+/// 프로필 자료를 옮기지 못한 일 — 종류는 카드로, 글자는 창 로그로 간다.
+#[derive(Debug)]
+pub struct ProfileDataError {
+    pub kind: ProfileDataSkipped,
+    pub detail: String,
+}
+
+impl ProfileDataError {
+    fn of(kind: ProfileDataSkipped) -> impl FnOnce(String) -> Self {
+        move |detail| Self { kind, detail }
+    }
+}
+
+impl std::fmt::Display for ProfileDataError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.kind, self.detail)
+    }
+}
+
 /// 창 로그 한 줄 — 수와 Web Data의 스키마 버전만 적는다. 값·이름·주소는
 /// 어느 것도 적지 않는다.
 pub fn import_log_line(bookmarks: &BookmarksRead, web_data: &WebDataRead) -> String {
@@ -641,23 +674,26 @@ pub fn import_log_line(bookmarks: &BookmarksRead, web_data: &WebDataRead) -> Str
 
 /// 한 Chromium 프로필의 북마크와 Web Data를 읽는다. 원본이 없으면 그 몫은
 /// 비어 있다 — 북마크를 하나도 만든 적 없는 프로필도 흔하다. Web Data는
-/// 브라우저가 쥐고 고쳐 쓰는 DB라 쿠키처럼 안정된 사본에서 읽는다.
+/// 브라우저가 쥐고 고쳐 쓰는 DB라 쿠키처럼 안정된 사본에서 읽는다. 사본을
+/// 뜨지 못하면 [`ProfileDataSkipped::Locked`], 그 밖에 읽지 못하면
+/// [`ProfileDataSkipped::Unreadable`]이다.
 pub fn read_chromium_profile_data(
     family: &str,
     profile: &str,
     home: &Path,
     scratch: &Path,
-) -> Result<(BookmarksRead, WebDataRead), String> {
+) -> Result<(BookmarksRead, WebDataRead), ProfileDataError> {
+    let unreadable = || ProfileDataError::of(ProfileDataSkipped::Unreadable);
     let bookmarks = match crate::browser_cookie_import::chromium_profile_file(
         family,
         profile,
         home,
         BOOKMARKS_FILE,
     ) {
-        Some(path) => {
-            let text = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
-            parse_chromium_bookmarks(&text)?
-        }
+        Some(path) => std::fs::read_to_string(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|text| parse_chromium_bookmarks(&text))
+            .map_err(unreadable())?,
         None => BookmarksRead::default(),
     };
     let web_data = match crate::browser_cookie_import::chromium_profile_file(
@@ -668,7 +704,8 @@ pub fn read_chromium_profile_data(
     ) {
         Some(path) => {
             let read = crate::browser_cookie_import::snapshot_sqlite(&path, scratch)
-                .and_then(|copy| read_chromium_web_data(&copy));
+                .map_err(ProfileDataError::of(ProfileDataSkipped::Locked))
+                .and_then(|copy| read_chromium_web_data(&copy).map_err(unreadable()));
             // 사본은 읽었든 못 읽었든 남지 않는다 — 사람의 주소가 든 파일이다.
             let _ = std::fs::remove_dir_all(scratch);
             read?
@@ -1002,6 +1039,17 @@ mod tests {
                 .is_empty()
         );
         std::fs::write(folder.join(BOOKMARKS_FILE), "{not json").expect("broken");
-        assert!(read_chromium_profile_data("chrome", "Default", home.path(), &scratch).is_err());
+        let broken = read_chromium_profile_data("chrome", "Default", home.path(), &scratch)
+            .expect_err("a broken Bookmarks file reads");
+        assert_eq!(broken.kind, ProfileDataSkipped::Unreadable);
+        // 카드에는 종류 낱말 하나만 간다 — 글자는 로그 몫이다.
+        assert_eq!(
+            serde_json::to_value(broken.kind).expect("wire"),
+            "unreadable"
+        );
+        assert_eq!(
+            serde_json::to_value(ProfileDataSkipped::Locked).expect("wire"),
+            "locked"
+        );
     }
 }
