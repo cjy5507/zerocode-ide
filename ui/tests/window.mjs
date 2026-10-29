@@ -57431,7 +57431,8 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       const tab = tabs.find((one) => one.id === tabId);
       seen.opened = Boolean(tab) && tab.kind === "worker" && tab.worker.wire === 7 && activeTabId === tabId;
       seen.startArgs = JSON.stringify(calls.find((call) => call[0] === "start")?.[1]);
-      seen.wantStartArgs = JSON.stringify({ agent: "codex", cwd: "/tmp/zerocode-window-test", resume: null, from_pane: null });
+      // A wire opened from the menu hands nothing over: no deadline (t-84670).
+      seen.wantStartArgs = JSON.stringify({ agent: "codex", cwd: "/tmp/zerocode-window-test", resume: null, from_pane: null, deadlineMs: null });
       const face = document.querySelector("#worker-view");
       seen.head = face?.querySelector(".worker-name")?.textContent ?? "";
       seen.wantHead = agentName("codex");
@@ -58380,13 +58381,22 @@ suite("pane-hands-over-to-wire", async ({ browser, origin, ok }) => {
       tell("hook:agent", { term, state: "working", agent: "claude", session: { key: "session_id", id: "s-hand" }, resumable: true });
       tell("hook:agent", { term, state: "done", agent: "claude", session: { key: "session_id", id: "s-hand" }, resumable: true });
       await window.__PAINTED__();
-      el("view-toggle-chat").click();
+      // The hand-over's wire must stand by its start plus
+      // `COMPOSER_HAND_OVER_DUE_MS` (t-84670): the press reads one known moment.
+      const realNow = Date.now;
+      const pressedAt = realNow();
+      Date.now = () => pressedAt;
+      try {
+        el("view-toggle-chat").click();
+      } finally {
+        Date.now = realNow;
+      }
       seen.handed = await until(() => tabs.some((tab) => tab.worker?.wire === 11));
       await window.__PAINTED__();
       await settle();
       const started = calls.find((call) => call[0] === "start")?.[1];
       seen.startArgs = JSON.stringify(started);
-      seen.wantStartArgs = JSON.stringify({ agent: "claude", cwd: paneTab.worktree, resume: "s-hand", from_pane: term });
+      seen.wantStartArgs = JSON.stringify({ agent: "claude", cwd: paneTab.worktree, resume: "s-hand", from_pane: term, deadlineMs: pressedAt + COMPOSER_HAND_OVER_DUE_MS });
       const wireTab = tabs.find((tab) => tab.worker?.wire === 11);
       seen.seat = tabs.indexOf(wireTab) === at;
       seen.active = activeTabId === wireTab?.id;

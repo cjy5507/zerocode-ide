@@ -139,6 +139,7 @@ export async function testComposerHold(browser, origin, ok) {
   await testNothingHolds(browser, origin, ok);
   await testHandOverReadsOnce(browser, origin, ok);
   await testHandOverReadStalls(browser, origin, ok);
+  await testHandOverReadAnswersLate(browser, origin, ok);
   await testWireStartStalls(browser, origin, ok);
   await testAnsweredCardHolds(browser, origin, ok);
   await testSentTurnHolds(browser, origin, ok);
@@ -256,7 +257,7 @@ async function testHandOverReadStalls(browser, origin, ok) {
     const words = await page.evaluate(() => ({
       idle: t("worker.idle", "대기 중"),
       why: t("composer.queue.why.handing", "대화를 실시간으로 잇는 중 — 이어지면, 늦어도 {{s}}초 뒤 보냅니다", { s: 60 }),
-      stalled: t("worker.handOverStalled", "대화 기록 읽기가 {{s}}초 안에 끝나지 않았습니다", { s: 60 }),
+      stalled: t("worker.handOverStalled", "대화 기록 읽기가 {{s}}초 안에 끝나지 않았습니다", { s: 45 }),
     }));
     const seen = await heldThenPassed(page);
     ok(
@@ -277,6 +278,39 @@ async function testHandOverReadStalls(browser, origin, ok) {
         seen.passed.wires === 0 && typeof seen.passed.refused === "string" && seen.passed.refused.includes(words.stalled) &&
         JSON.stringify(seen.after.sent) === JSON.stringify(BOTH_WENT) && seen.after.queue.length === 0,
       JSON.stringify({ passed: seen.passed, after: seen.after, words }),
+    );
+  });
+}
+
+/* The read answers, but only after the hand-over's deadline: the wire is not
+ * asked — no wire process starts only for the backend to stop it. */
+async function testHandOverReadAnswersLate(browser, origin, ok) {
+  await scene(browser, origin, ok, "hand-over read answers late", async (page) => {
+    const seen = await page.evaluate(async () => {
+      let answer = null;
+      window.__ANSWER__.pane_log = () => new Promise((done) => { answer = done; });
+      window.__ANSWER__.wire_start = (args) => {
+        window.__HOLD__.wires.push({ ...args, askedAt: Date.now() });
+        return new Promise(() => {});
+      };
+      el("view-toggle-chat").click();
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      for (let tries = 0; tries < 100 && answer === null; tries += 1) {
+        await new Promise((done) => window.__REAL_TIMEOUT__(done, 10));
+      }
+      const realNow = Date.now;
+      const due = typeof COMPOSER_HAND_OVER_DUE_MS === "number" ? COMPOSER_HAND_OVER_DUE_MS : 45_000;
+      Date.now = () => realNow() + due + 1000;
+      answer?.({ found: true, start: 0, next: 1, more: false, skipped: false, turns: [{ role: "user", text: "늦은 읽기" }] });
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      await new Promise((done) => window.__REAL_TIMEOUT__(done, 200));
+      return { read: answer !== null, wires: window.__HOLD__.wires.length, handing: paneChats.get(window.__TERM__)?.handing ?? null };
+    });
+    const refused = await page.evaluate(LOOK);
+    ok(
+      "a_read_that_answers_after_the_deadline_asks_no_wire: the hand-over's read answered only after its deadline — the wire is never asked, the hand-over ends and the page says why",
+      seen.read && seen.wires === 0 && seen.handing === false && typeof refused.refused === "string" && refused.refused.length > 0,
+      JSON.stringify({ seen, refused: refused.refused }),
     );
   });
 }

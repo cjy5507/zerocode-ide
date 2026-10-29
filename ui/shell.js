@@ -13469,21 +13469,22 @@ async function handPaneToWire(term) {
     // that threw left `handing` up for good, the queue with it.
     paintPaneChat(term);
     const owner = tabOfTerm(term);
-    // The read before the wire is asked is the window's own, bounded by the
-    // hold it puts on the queue: one that has not answered by then hands
-    // nothing over — the wire is never asked, so no late wire takes the
-    // conversation from a pane the words have gone to (t-84670).
-    const history = await withinComposerHold(readPaneTranscript(term));
+    // By when the wire must stand: one that stands later leaves the pane
+    // alone, for by then the held words may have gone to it
+    // (`COMPOSER_HAND_OVER_DUE_MS`, t-84670).
+    const deadline = held.handingSince + COMPOSER_HAND_OVER_DUE_MS;
+    // The read before the wire is asked is the window's own, bounded by that
+    // deadline: one that has not answered by then hands nothing over — the
+    // wire is never asked, and no wire process is started only to be stopped.
+    const history = await beforeHandOverDeadline(readPaneTranscript(term), deadline);
     if (history === null) {
-      held.wireRefusal = t("worker.handOverStalled", "대화 기록 읽기가 {{s}}초 안에 끝나지 않았습니다", { s: Math.round(COMPOSER_HOLD_MS / 1000) });
+      held.wireRefusal = t("worker.handOverStalled", "대화 기록 읽기가 {{s}}초 안에 끝나지 않았습니다", { s: Math.round(COMPOSER_HAND_OVER_DUE_MS / 1000) });
       return false;
     }
     tabId = await openWirePage(row.id, owner?.worktree ?? activeWorktreePath, {
       resume: session,
       fromTerm: term,
-      // A wire that stands after this leaves the pane alone: by then the held
-      // words may have gone to it (`COMPOSER_HAND_OVER_DUE_MS`, t-84670).
-      deadline: held.handingSince + COMPOSER_HAND_OVER_DUE_MS,
+      deadline,
       at: owner ? tabs.indexOf(owner) : -1,
       history: history.turns,
       historyFrom: history.start,
@@ -13511,12 +13512,15 @@ async function handPaneToWire(term) {
   }
 }
 
-/* What `promise` answers, or null when it has not answered within the hold a
- * hand-over puts on the queue (`COMPOSER_HOLD_MS`, t-84670). */
-function withinComposerHold(promise) {
+/* What `promise` answers, or null when it has not answered before `deadline`
+ * (epoch ms) — a hand-over's (`COMPOSER_HAND_OVER_DUE_MS`, t-84670). A read
+ * that answers after the deadline is null too: the wire is not asked then. */
+function beforeHandOverDeadline(promise, deadline) {
   let timer = null;
-  const late = new Promise((done) => { timer = setTimeout(() => done(null), COMPOSER_HOLD_MS); });
-  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+  const late = new Promise((done) => { timer = setTimeout(() => done(null), Math.max(0, deadline - Date.now())); });
+  return Promise.race([promise, late])
+    .then((answer) => (Date.now() >= deadline ? null : answer))
+    .finally(() => clearTimeout(timer));
 }
 
 /* What a pane's transcript view hands the wire's page that continues its
