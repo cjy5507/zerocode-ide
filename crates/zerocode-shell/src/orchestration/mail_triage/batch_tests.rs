@@ -557,6 +557,7 @@ fn run_the_day(
             &window.wire,
             book,
             ledger,
+            &inbox.ledger,
             &seated,
             at + SWEEP_AFTER_MS,
         );
@@ -927,6 +928,7 @@ impl Stand {
             &self.window.wire,
             &self.book,
             &self.ledger,
+            &inbox.ledger,
             &seated,
             DAY_START_MS + SWEEP_AFTER_MS,
         );
@@ -1290,6 +1292,7 @@ fn a_letter_is_asked_about_once_and_a_restart_asks_none_again() {
         &stand.window.wire,
         &stand.book,
         &stand.ledger,
+        &inbox.ledger,
         &seated,
         DAY_START_MS + 2 * SWEEP_AFTER_MS,
     );
@@ -1305,6 +1308,7 @@ fn a_letter_is_asked_about_once_and_a_restart_asks_none_again() {
         &stand.window.wire,
         &restarted,
         &stand.ledger,
+        &inbox.ledger,
         &seated,
         DAY_START_MS + 3 * SWEEP_AFTER_MS,
     );
@@ -1484,6 +1488,7 @@ fn a_request_is_booked_to_a_letter_that_names_a_task() {
         &stand.window.wire,
         &stand.book,
         &stand.ledger,
+        &inbox.ledger,
         &seated,
         DAY_START_MS + SWEEP_AFTER_MS,
     );
@@ -1756,6 +1761,7 @@ fn burst(stand: &Stand, history: usize, fresh: usize, reps: usize) -> Value {
             &stand.window.wire,
             &book,
             &ledger,
+            &inbox.ledger,
             &seated,
             DAY_START_MS + SWEEP_AFTER_MS,
         );

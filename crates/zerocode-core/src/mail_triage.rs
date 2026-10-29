@@ -1063,24 +1063,35 @@ impl<'a> Mailroom<'a> {
     }
 
     /// How many questions put to the coordinator wait for an answer that can
-    /// still reach their asker — the desk's 「답할 우편」 rule
-    /// ([`Run::awaits_answer`], [`Run::question_is_answerable`]).
+    /// still reach their asker at `now_ms` — the desk's 「답할 우편」 rule
+    /// whole ([`Run::awaits_answer`], [`Run::question_is_answerable`], and
+    /// [`Ledger::still_owed`]: not written back about in a letter naming it,
+    /// not expired). It read the thread alone until t-83289, and counted
+    /// questions the inbox no longer showed.
     #[must_use]
-    pub fn open_questions(&self, run: &Run) -> usize {
-        self.letters()
+    pub fn open_questions(&self, ledger: &Ledger, run: &Run, now_ms: i64) -> usize {
+        let asked: Vec<&Message> = self
+            .letters()
             .filter(|one| run.awaits_answer(one) && run.question_is_answerable(one).is_ok())
-            .count()
+            .collect();
+        ledger.still_owed(run, asked, now_ms).len()
     }
 
-    /// What holds for every letter of `run`'s batch: whether the coordinator
-    /// is mid-turn (`coordinator_busy`, the window's to say) and how many
-    /// questions wait on it ([`Self::open_questions`]) — read once per look
-    /// at a run, whatever the number of letters.
+    /// What holds for every letter of `run`'s batch at `now_ms`: whether the
+    /// coordinator is mid-turn (`coordinator_busy`, the window's to say) and
+    /// how many questions wait on it ([`Self::open_questions`]) — read once
+    /// per look at a run, whatever the number of letters.
     #[must_use]
-    pub fn situation(&self, run: &Run, coordinator_busy: Option<bool>) -> Situation {
+    pub fn situation(
+        &self,
+        ledger: &Ledger,
+        run: &Run,
+        coordinator_busy: Option<bool>,
+        now_ms: i64,
+    ) -> Situation {
         Situation {
             coordinator_busy,
-            open_questions: self.open_questions(run),
+            open_questions: self.open_questions(ledger, run, now_ms),
         }
     }
 }

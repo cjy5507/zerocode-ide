@@ -54,7 +54,7 @@ pub(super) fn letter(from: &str, to: &str, body: &str) -> Draft {
 /// The questions the run's own seat is counted as owing, as both counts read
 /// them at the bench's clock: [`open_questions_to`] (the receiver notices)
 /// and [`open_questions`] (the rings of waiting), each sorted.
-fn held_open(bench: &Bench, run_id: &str) -> (Vec<String>, Vec<String>) {
+pub(super) fn held_open(bench: &Bench, run_id: &str) -> (Vec<String>, Vec<String>) {
     let run = bench.ledger.run(run_id).expect("the run");
     let mut to_seat: Vec<String> =
         open_questions_to(&bench.ledger, run, &run.address(), bench.clock)
@@ -71,7 +71,7 @@ fn held_open(bench: &Bench, run_id: &str) -> (Vec<String>, Vec<String>) {
     (to_seat, every)
 }
 
-fn sorted(mut ids: Vec<String>) -> Vec<String> {
+pub(super) fn sorted(mut ids: Vec<String>) -> Vec<String> {
     ids.sort();
     ids
 }
@@ -285,7 +285,7 @@ pub(super) fn ask_another_run(
 
 /// A letter `team`'s leader files in `run_id`, to that run's chair: the road
 /// a coordinator answers another run's question by.
-fn write_to_run(bench: &mut Bench, team: &mut Team, run_id: &str, body: &str) -> String {
+pub(super) fn write_to_run(bench: &mut Bench, team: &mut Team, run_id: &str, body: &str) -> String {
     let chair = format!("run:{run_id}");
     as_leader_of(
         bench,
