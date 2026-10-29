@@ -541,6 +541,34 @@ mod real_run {
         assert!(person.asked.is_empty());
     }
 
+    /// Dispatch runs a call to `Bash` or `BASH` as `bash`, so the guard judges
+    /// it as `bash` (t-81312): a signal to the window is refused unasked, and
+    /// a kill that needs a person's yes is refused with nobody to ask. A
+    /// `Bash` call used to skip the guard and run.
+    #[test]
+    fn kill_guard_authorize_judges_a_call_to_bash_whatever_its_spelling() {
+        // 0: no other bait's marker is a prefix of this one, nor this of theirs.
+        let bait = Bait::start(0);
+        let _window = GuardEnv::window(bait.pid());
+        let aimed = bash(&format!("pkill -f {}", bait.marker));
+        let unknown = bash("kill \"$TARGET\"");
+        let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess);
+        for tool in ["Bash", "BASH"] {
+            let mut person = Person::saying(true);
+            match policy.authorize(tool, &aimed, Some(&mut person)) {
+                PermissionOutcome::Deny { reason } => {
+                    assert!(reason.contains(&bait.pid().to_string()), "{tool}: {reason}");
+                }
+                PermissionOutcome::Allow => panic!("{tool}: the guard let `pkill` at the window through"),
+            }
+            assert!(person.asked.is_empty(), "{tool}: a refusal is not a question");
+            match policy.authorize(tool, &unknown, None) {
+                PermissionOutcome::Deny { reason } => assert!(reason.contains("yes"), "{tool}: {reason}"),
+                PermissionOutcome::Allow => panic!("{tool}: an unasked kill ran with nobody to ask"),
+            }
+        }
+    }
+
     #[test]
     fn kill_guard_authorize_refuses_a_question_in_a_summoned_worker_pane_unasked() {
         let bait = Bait::start(9);

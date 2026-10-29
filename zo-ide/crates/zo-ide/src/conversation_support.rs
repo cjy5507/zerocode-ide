@@ -205,4 +205,84 @@ mod system_prompt_tests {
     }
 }
 
+#[cfg(test)]
+mod unknown_rule_warning_tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+
+    use super::unknown_rule_warnings;
+
+    /// The warnings for the settings `home` and `project` hold, with
+    /// `disabled` tools turned off in the registry.
+    fn warnings_for(home: &str, project: Option<&str>, disabled: &[&str]) -> (Vec<String>, String, String) {
+        let root = tempfile::tempdir().expect("a scratch folder");
+        let home_dir = root.path().join("home");
+        let cwd = root.path().join("work");
+        fs::create_dir_all(&home_dir).expect("home");
+        fs::create_dir_all(cwd.join(".zo")).expect(".zo");
+        let home_file = home_dir.join("settings.json");
+        let project_file = cwd.join(".zo").join("settings.json");
+        fs::write(&home_file, home).expect("home settings");
+        if let Some(project) = project {
+            fs::write(&project_file, project).expect("project settings");
+        }
+        let config = runtime::ConfigLoader::new(&cwd, &home_dir).load().expect("settings load");
+        let registry = tools::GlobalToolRegistry::builtin();
+        registry
+            .context()
+            .set_disabled_tools(disabled.iter().map(|tool| (*tool).to_string()).collect::<BTreeSet<_>>());
+        (
+            unknown_rule_warnings(config.feature_config(), &registry),
+            home_file.display().to_string(),
+            project_file.display().to_string(),
+        )
+    }
+
+    /// One line per rule no tool answers to (t-81312). The same rule in two
+    /// files names both, comma-separated; a rule in the ordered `rules` list
+    /// is warned of too; a tool that is only turned off is still zo's. The
+    /// alias hint gives zo's tool and says the rule does not reach it — and
+    /// Claude Code's `Task`, a sub-agent, gets no hint at zo's `TaskCreate`.
+    #[test]
+    fn unknown_rule_warnings_name_the_rule_its_files_and_zos_tool_only_where_it_is_the_same_tool() {
+        let (lines, home, project) = warnings_for(
+            r#"{"permissions": {"deny": ["Edti(x)", "WebSearch", "Task(x)", "Edit(*.env)"]}}"#,
+            Some(r#"{"permissions": {"deny": ["Edti(x)"]}}"#),
+            &["WebSearch"],
+        );
+        assert!(
+            lines.contains(&format!(
+                "permissions.deny rule 'Edti(x)' in {home}, {project} names no zo tool, so it never applies"
+            )),
+            "the rule in two files: {lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("'WebSearch'")),
+            "a turned-off tool is warned of as unknown: {lines:#?}"
+        );
+
+        let (ordered, ordered_home, _) =
+            warnings_for(r#"{"permissions": {"rules": ["Edti(x)=deny"]}}"#, None, &[]);
+        assert_eq!(
+            ordered,
+            vec![format!(
+                "permissions.rules rule 'Edti(x)=deny' in {ordered_home} names no zo tool, so it never applies"
+            )]
+        );
+
+        assert!(
+            lines.contains(&format!(
+                "permissions.deny rule 'Task(x)' in {home} names no zo tool, so it never applies"
+            )),
+            "Claude Code's Task is pointed at zo's TaskCreate: {lines:#?}"
+        );
+        assert!(
+            lines.contains(&format!(
+                "permissions.deny rule 'Edit(*.env)' in {home} names no zo tool; zo's tool for Edit is edit_file, and this rule does not reach it"
+            )),
+            "the alias hint: {lines:#?}"
+        );
+        assert_eq!(lines.len(), 3, "{lines:#?}");
+    }
+}
 

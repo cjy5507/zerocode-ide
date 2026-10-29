@@ -1308,6 +1308,30 @@ mod tests {
         }
     }
 
+    /// The classifier reads a call to `Bash` or `BASH` as it reads `bash`,
+    /// the tool dispatch runs for it (t-81312): a provably read-only command
+    /// runs in a read-only session, and an unprovable one stays denied.
+    #[test]
+    fn read_only_mode_classifies_bash_whatever_its_spelling() {
+        let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
+            .with_tool_requirement("bash", PermissionMode::DangerFullAccess);
+
+        for tool in ["Bash", "BASH"] {
+            assert_eq!(
+                policy.authorize(tool, r#"{"command":"git status --short"}"#, None),
+                PermissionOutcome::Allow,
+                "{tool}: a read-only-safe command must pass"
+            );
+            assert!(
+                matches!(
+                    policy.authorize(tool, r#"{"command":"rm notes.txt"}"#, None),
+                    PermissionOutcome::Deny { .. }
+                ),
+                "{tool}: an unprovable command must stay denied"
+            );
+        }
+    }
+
     #[test]
     fn read_only_mode_still_denies_unprovable_bash() {
         let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
