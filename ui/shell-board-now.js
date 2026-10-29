@@ -575,7 +575,7 @@ function paintBoardReview(row, ask, now, view) {
   // What it handed in (the commit, the conditions) is the report's, behind 보고 읽기. The line
   // under it is the draft's: the goal, the task and its id, the model, how long ago it handed in.
   const handed = Number(task.times?.handed_ms) || 0;
-  // 거둔 검증은 통과 대신 다시 검수 길 하나다: 보고를 다시 읽고, 새 검수 결과나 새 넘김으로만 통과한다.
+  // 거둔 검증에는 통과가 없다: 보고 읽기만 남고, 다시 통과하는 길(새 검수 결과나 새 넘김)은 줄 끝 말이 말한다.
   const withdrawn = boardReviewWithdrawn(task) !== null;
   paintBoardMeta(row.querySelector(".board-ask-meta"), boardMetaPieces([
     [task.parent_title], [task.title, { id: task.id }], [boardModelName(carrier)],
@@ -587,8 +587,7 @@ function paintBoardReview(row, ask, now, view) {
   const press = boardPressNote(row, ask.key);
   const open = boardNowChoice.reports.has(ask.key);
   const read = boardAskButton(acts, "read", withdrawn);
-  writeTextContent(read, open ? t("board.now.reportFold", "보고 접기")
-    : withdrawn ? t("board.now.reviewRedo", "다시 검수") : t("board.now.reportRead", "보고 읽기"));
+  writeTextContent(read, open ? t("board.now.reportFold", "보고 접기") : t("board.now.reportRead", "보고 읽기"));
   writeAttribute(read, "aria-expanded", String(open));
   read.onclick = () => {
     if (boardNowChoice.reports.has(ask.key)) boardNowChoice.reports.delete(ask.key);

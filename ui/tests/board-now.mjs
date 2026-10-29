@@ -583,7 +583,7 @@ export async function testBoardNow(browser, origin, ok) {
         && now.runsFoot === "오늘 끝난 일 6개 · 기록에서 보기" && now.runningHint === "목표별 · 먼저 시작한 일부터",
       JSON.stringify(now));
 
-    /* ---- 검증 철회(t-81913): 통과 대신 철회 사실·까닭, 다시 검수 길만 ---- */
+    /* ---- 검증 철회(t-81913): 통과 대신 철회 사실·까닭, 단추는 보고 읽기 하나, 다시 통과하는 길은 줄 끝 말 ---- */
     const withdrawnRow = async (why) => {
       await draftScene(page, { withdrawn: why });
       return page.evaluate(() => {
@@ -606,10 +606,10 @@ export async function testBoardNow(browser, origin, ok) {
       return window.__DESK_SENT__.filter((one) => one.verb === "pass").length;
     });
     const withdrawn = await withdrawnRow("독립 검수가 가격 가드의 시험이 없다고 봄");
-    ok("a withdrawn verification's row says so and why in place of the pass, and leaves re-review as its one road",
+    ok("a withdrawn verification's row says so and why in place of the pass, leaves reading the report as its one button, and its line names the road to pass again",
       withdrawn.kind === "검토" && withdrawn.pass
         && withdrawn.title === "헬퍼 회차 A·B·C 검증이 철회됐습니다 — 독립 검수가 가격 가드의 시험이 없다고 봄"
-        && JSON.stringify(withdrawn.buttons) === JSON.stringify(["다시 검수"])
+        && JSON.stringify(withdrawn.buttons) === JSON.stringify(["보고 읽기"])
         && withdrawn.meta.endsWith(" — 새 검수 결과를 적거나 새로 넘겨야 다시 통과됩니다"),
       JSON.stringify(withdrawn));
     const slipped = await forced();
@@ -617,17 +617,18 @@ export async function testBoardNow(browser, origin, ok) {
     const unsaid = await withdrawnRow("");
     ok("a withdrawal written without words says that it gave none, never a pass",
       unsaid.pass && unsaid.title === "헬퍼 회차 A·B·C 검증이 철회됐습니다 — 까닭은 적지 않았습니다"
-        && JSON.stringify(unsaid.buttons) === JSON.stringify(["다시 검수"]), JSON.stringify(unsaid));
+        && JSON.stringify(unsaid.buttons) === JSON.stringify(["보고 읽기"]), JSON.stringify(unsaid));
     await page.click('#board-view [data-ask="review:run-desk/t-66790"] [data-act="read"]');
     const reread = await page.evaluate(async () => {
       await new Promise((done) => requestAnimationFrame(done));
       const row = document.querySelector('#board-view [data-ask="review:run-desk/t-66790"]');
-      return { open: row.querySelector('[data-act="read"]').getAttribute("aria-expanded"),
+      const read = row.querySelector('[data-act="read"]');
+      return { open: read.getAttribute("aria-expanded"), name: read.textContent,
         report: Boolean(row.querySelector(":scope > .board-ask-report")),
         sent: window.__DESK_SENT__.filter((one) => one.verb === "pass").length };
     });
-    ok("다시 검수 opens the report to look at again and writes nothing to the ledger",
-      reread.open === "true" && reread.report && reread.sent === 1, JSON.stringify(reread));
+    ok("보고 읽기 on a withdrawn row opens the report, turns into 보고 접기 and writes nothing to the ledger",
+      reread.open === "true" && reread.name === "보고 접기" && reread.report && reread.sent === 1, JSON.stringify(reread));
     await page.evaluate(() => boardNowChoice.reports.clear());
 
     /* ---- 결정: 우리말 한 줄 · 원문은 접힌 안 · 단추는 원장의 두 답 ---- */
