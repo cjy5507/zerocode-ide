@@ -117,13 +117,7 @@ pub(crate) fn spawn_on_idle(
     let session_id = session_id.to_string();
     let model = model.to_string();
     let _ = thread::Builder::new().name("dreamer-idle".to_string()).spawn(move || {
-        let result = runtime::memory::try_auto_dream(
-            &cwd, runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL, Some(&model),
-        );
-        if let Ok(AutoDream::Ran(report)) = &result {
-            promote_to_second_brain(&cwd, &session_id, report);
-        }
-        let reply = IdleReply::of(&result);
+        let reply = idle_pass(&cwd, &session_id, &model);
         settle(&attempt, &reply, crate::autonomy::scheduler::now_unix_ms());
         match reply {
             IdleReply::Ran { summary, promoted } => {
@@ -166,6 +160,20 @@ impl IdleReply {
 fn unix_ms(at: std::time::SystemTime) -> u64 {
     at.duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn idle_pass(cwd: &Path, session_id: &str, model: &str) -> IdleReply {
+    let result = runtime::memory::try_auto_dream(
+        cwd, runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL, Some(model),
+    );
+    if let Ok(AutoDream::Ran(report)) = &result {
+        promote_to_second_brain(cwd, session_id, report);
+    }
+    IdleReply::of(&result)
+}
+
+pub(crate) fn run_idle_pass(_zo: &Path, cwd: &Path, session_id: &str, model: &str) -> IdleReply {
+    idle_pass(cwd, session_id, model)
 }
 
 /// Move the idle clock by what the pass found: a pass that ran waits the full
@@ -354,5 +362,47 @@ mod tests {
         let ran = IdleDreamer::new(true, 0, minute);
         pass(&ran, minute, &IdleReply::Ran { summary: String::new(), promoted: Vec::new() });
         assert_eq!(ran.next_wakeup(true), Some(minute + 6 * 60 * minute));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_idle_pass_runs_in_a_process_of_its_own_and_the_session_keeps_only_its_reply() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = temp_root("child");
+        let cwd = root.join("workspace");
+        let config_home = root.join("config");
+        fs::create_dir_all(&cwd).expect("workspace should be created");
+        fs::create_dir_all(&config_home).expect("config home should be created");
+        let seen = root.join("seen");
+        let zo = root.join("zo");
+        fs::write(
+            &zo,
+            format!(
+                "#!/bin/sh\npwd > '{seen}'\nprintf '%s\\n' \"$@\" >> '{seen}'\necho '{{\"outcome\":\"locked\"}}'\n",
+                seen = seen.display(),
+            ),
+        )
+        .expect("a stand-in zo should be written");
+        fs::set_permissions(&zo, fs::Permissions::from_mode(0o755))
+            .expect("the stand-in zo should be executable");
+
+        let reply = with_dream_env(&config_home, "0", || {
+            super::run_idle_pass(&zo, &cwd, "session-7", "model-x")
+        });
+        assert_eq!(reply, super::IdleReply::Locked);
+        let seen = fs::read_to_string(&seen).expect("the pass ran in the program it was given");
+        let mut lines = seen.lines();
+        let ran_in = lines.next().expect("the child says where it ran");
+        assert_eq!(
+            fs::canonicalize(ran_in).expect("the child's folder exists"),
+            fs::canonicalize(&cwd).expect("the workspace exists"),
+        );
+        let cwd_arg = cwd.to_str().expect("the test root is UTF-8");
+        assert_eq!(
+            lines.collect::<Vec<_>>(),
+            ["auto-dream", "--cwd", cwd_arg, "--session", "session-7", "--model", "model-x"]
+        );
+
+        fs::remove_dir_all(root).expect("test root should be removed");
     }
 }
