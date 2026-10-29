@@ -3010,11 +3010,12 @@ class StatefulBackend {
         return this.modelConnections();
       }
       case "test_router_connection": {
-        /* `api_routers::test_router_endpoint` hands a refusal back as one
-           string: its own prefix, the status, and whatever the server put in
-           the body — which is the shape the pane has to keep off its first
-           line. */
-        if (this.routerProbeRefusal) throw new Error(this.routerProbeRefusal);
+        /* `api_routers::test_router_endpoint` hands a refusal back as its
+           own reading of the request (`ProbeFailure`, t-77116): a kind, the
+           status, and a sentence — its own prefix, the status, and whatever
+           the server put in the body, which is the shape the pane has to
+           keep off its first line. */
+        if (this.routerProbeRefusal) throw clone(this.routerProbeRefusal);
         if (this.routerProbeHold) await this.routerProbeHold;
         const answered = this.routerProbeAnswers?.[args.baseUrl];
         if (answered) return answered.map((id) => ({ id, context_length: null }));
@@ -15014,13 +15015,19 @@ await test("모델 연결: 네 묶음이 실제 상태로 서고, 로그인 줄�
   await modelScenePictures("connections");
   backend.keychain.set("dev.zerocode.router.ZEROCODE_ROUTER_GATEWAY_KEY", "[합성-키]");
   await pageA.evaluate(() => modelConnectionsController.refresh());
-  backend.routerProbeRefusal = "서버 오류: HTTP 401 — fixture refused";
+  backend.routerProbeRefusal = { kind: "http", status: 401, message: "서버 오류: HTTP 401 — fixture refused" };
   await key.locator("[data-connection-check]").click();
   await pageA.waitForFunction(() => modelConnectionsController.checks.get("gateway")?.state === "badkey");
   assertEqual(await key.locator(".model-state").getAttribute("data-model-state"), "badkey", "a 401 is not said as a wrong key");
-  backend.routerProbeRefusal = "연결 실패: error sending request";
+  backend.routerProbeRefusal = { kind: "transport", message: "연결 실패: error sending request" };
   await key.locator("[data-connection-check]").click();
   await pageA.waitForFunction(() => modelConnectionsController.checks.get("gateway")?.state === "down");
+  // t-77116: a 503 whose body quotes `HTTP 401` as an example is a server that
+  // is down — the kind is read off the status, never off the body's words.
+  backend.routerProbeRefusal = { kind: "http", status: 503, message: "서버 오류: HTTP 503 Service Unavailable — upstream busy (e.g. HTTP 401 when the key is wrong)" };
+  await key.locator("[data-connection-check]").click();
+  await pageA.waitForFunction(() => ["down", "badkey"].includes(modelConnectionsController.checks.get("gateway")?.state) && modelConnectionsController.checks.get("gateway")?.raw?.includes("HTTP 503"));
+  assertEqual(await key.locator(".model-state").getAttribute("data-model-state"), "down", "a 503 whose body quotes HTTP 401 was said as a wrong key");
   return "login · API key · this computer · Jev, each row's state from its answer";
 }));
 
@@ -15064,13 +15071,13 @@ await test("② API 키: 연결 확인이 「연결됨 — 모델 N개」로 답
   await pageA.click('[data-model-choice="key"]');
   await pageA.selectOption("#model-setup-service", "fixture-router");
   await pageA.fill("#model-setup-key", "[합성-키]");
-  backend.routerProbeRefusal = "서버 오류: HTTP 401 — fixture refused";
+  backend.routerProbeRefusal = { kind: "http", status: 401, message: "서버 오류: HTTP 401 — fixture refused" };
   await pageA.click("#model-setup-check");
   await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "fail");
   const badkey = await pageA.evaluate(() => t("settings.models.state.badkey", "키가 맞지 않습니다"));
   assert((await pageA.locator("#model-setup").textContent()).includes(badkey), "a 401 is not said as a wrong key");
   assertEqual(backend.zoSettings.providers.length, 0, "a refused check saved the connection");
-  backend.routerProbeRefusal = "연결 실패: error sending request for url";
+  backend.routerProbeRefusal = { kind: "transport", message: "연결 실패: error sending request for url" };
   await pageA.fill("#model-setup-key", "[합성-키]");
   await pageA.click("#model-setup-check");
   await pageA.waitForFunction(() => modelConnectionsController.setup?.failure === "down");
@@ -15443,7 +15450,7 @@ await test("검수 F1: 연결 확인의 거절에 키가 되돌아와도 화면�
     await pageA.fill("#model-setup-key", key);
     // An answer that carries the key back whole: whatever road brought it,
     // the screen keeps it off every line it draws.
-    backend.routerProbeRefusal = `서버 오류: HTTP 401 Unauthorized — invalid token Bearer ${key}`;
+    backend.routerProbeRefusal = { kind: "http", status: 401, message: `서버 오류: HTTP 401 Unauthorized — invalid token Bearer ${key}` };
     const at = backend.calls.length;
     await pageA.click("#model-setup-check");
     await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "fail");
@@ -15794,7 +15801,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
 
     // ---- 3. a refusal says ours first and folds the server's away --------
     const body = '서버 오류: HTTP 401 Unauthorized — 无效的令牌 (request id: 20260918103344512345678901234)';
-    backend.routerProbeRefusal = body;
+    backend.routerProbeRefusal = { kind: "http", status: 401, message: body };
     try {
       await pageA.fill("#router-base-url-input", origin);
       await pageA.fill("#router-name-input", "refused");

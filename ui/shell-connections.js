@@ -35,18 +35,29 @@ const MODEL_STATES = Object.freeze({
 
 /* What a failure a command answered is, in the table's states: a door's
  * token (`no_key`, `unauthorized`, `transport`, `schema_…`, `http_503`…) or
- * a router probe's sentence (`연결 실패: …`, `서버 오류: HTTP 401 …`). */
-/* A reader, not a label: the router probe says a transport failure in fixed
- * Korean (api_routers.rs `연결 실패: {err}`) whatever the window speaks. */
-const PROBE_TRANSPORT_FAILURE = /^연결 실패/;
+ * the router probe's own reading of its request (api_routers.rs
+ * `ProbeFailure`: a kind and the answer's status, t-77116). Never a word of
+ * what a server said: a 503 whose body quotes `HTTP 401` as an example is a
+ * server that is down, not a wrong key. */
+function probeFailureState(failure) {
+  const status = Number.isInteger(failure.status) ? failure.status : null;
+  if (failure.kind === "http") {
+    if (status === 401 || status === 403) return "badkey";
+    return status !== null && status >= 500 ? "down" : "failed";
+  }
+  if (failure.kind === "transport" || failure.kind === "timeout") return "down";
+  if (failure.kind === "schema") return "schema";
+  // Sent nowhere: the backend's own token or sentence says why.
+  return modelFailureState(failure.message);
+}
 
 function modelFailureState(error) {
+  if (error && typeof error === "object" && typeof error.kind === "string") return probeFailureState(error);
   const token = String(typeof error === "string" ? error : error?.message ?? error ?? "");
   if (token === "no_key") return "nokey";
-  if (token === "unauthorized" || /HTTP 40[13]\b/.test(token)) return "badkey";
+  if (token === "unauthorized") return "badkey";
   if (token === "schema" || token.startsWith("schema_")) return "schema";
-  if (["transport", "timeout", "provider_request", "overloaded"].includes(token) || /^http_5\d\d$/.test(token) ||
-      PROBE_TRANSPORT_FAILURE.test(token) || /HTTP 5\d\d\b/.test(token)) return "down";
+  if (["transport", "timeout", "provider_request", "overloaded"].includes(token) || /^http_5\d\d$/.test(token)) return "down";
   return "failed";
 }
 
@@ -893,7 +904,7 @@ const modelConnectionsController = {
       answer = { state: "ok", count: models.length };
     } catch (error) {
       const raw = typeof error === "string" ? error : error?.message ?? String(error);
-      answer = { state: connection.provider.requires_auth && !connection.keyAvailable ? this.keyMissing(connection) : modelFailureState(raw), raw };
+      answer = { state: connection.provider.requires_auth && !connection.keyAvailable ? this.keyMissing(connection) : modelFailureState(error), raw };
     }
     Object.assign(answer, { generation: connection.generation, checkedMs: this.nowMs() });
     this.checks.set(connection.id, answer);
