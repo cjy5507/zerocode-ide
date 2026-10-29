@@ -17,7 +17,7 @@ pub use classification::{
 pub use model_tag::MemoryModelTag;
 
 pub use dreamer::{
-    auto_dream_retry_interval, dream_at_cwd, evaluate_manual_apply_gate, latest_dream_fusion_report,
+    auto_dream_held, auto_dream_retry_interval, dream_at_cwd, evaluate_manual_apply_gate, latest_dream_fusion_report,
     mark_self_improve_candidate_applied, mark_self_improve_candidate_rejected,
     maybe_auto_dream, maybe_auto_dream_on_compaction, read_self_improve_candidates, read_self_improve_schedule_state,
     read_self_improve_schedule_state_readonly, record_auto_dream_failure, record_automation_event,

@@ -59,6 +59,11 @@ fn main() -> ExitCode {
     // never in the person's checkout. The crates keep the in-tree default for
     // their own tests; the host is the one that asks.
     runtime::relocate_traces_out_of_tree();
+    // This binary answers `auto-dream`, so an idle session curates in a
+    // process of its own and the memory a pass reads goes back when it ends.
+    if let Ok(zo) = std::env::current_exe() {
+        zo_ide::session::curate_idle_passes_in(zo);
+    }
     let mut process_exit = zo_ide::session::process_lifecycle::install();
     match run(&mut process_exit) {
         Ok((reason, code)) => {
@@ -139,6 +144,7 @@ const ANSWERED_BEFORE_A_SESSION: &[(&str, Answer)] = &[
     ("hooks", run_hooks),
     ("settings", run_settings),
     ("vault", run_vault),
+    ("auto-dream", run_auto_dream),
 ];
 
 fn run_doctor(_: &[String]) -> Answered {
@@ -454,6 +460,23 @@ fn run_mcp(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Er
         Err(message) => {
             eprintln!("zo mcp: {message}");
             ("mcp-refused", 1)
+        }
+    })
+}
+
+/// `zo auto-dream --cwd <dir> --session <id> --model <name>` is one idle
+/// curation pass, which a session runs in a process of its own: one JSON line
+/// on stdout saying what the pass found, no model call, no session.
+#[allow(clippy::unnecessary_wraps)]
+fn run_auto_dream(args: &[String]) -> Answered {
+    Ok(match zo_ide::session::answer_auto_dream(args) {
+        Ok(reply) => {
+            println!("{reply}");
+            success("auto-dream")
+        }
+        Err(message) => {
+            eprintln!("zo auto-dream: {message}");
+            ("auto-dream-refused", 1)
         }
     })
 }

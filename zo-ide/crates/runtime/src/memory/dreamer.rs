@@ -3683,15 +3683,8 @@ pub fn try_auto_dream(
     min_interval: std::time::Duration,
     active_model: Option<&str>,
 ) -> Result<AutoDream, DreamError> {
-    if !automatic_dream_enabled(cwd) {
-        return Ok(AutoDream::Disabled);
-    }
-    let dir = dream_dir(cwd);
-    if let Some(until) = automatic_dream_not_due_until(&dir, SystemTime::now(), min_interval) {
-        return Ok(AutoDream::NotDueUntil(until));
-    }
-    if !has_automatic_curation_evidence(cwd) {
-        return Ok(AutoDream::NoEvidence);
+    if let Some(held) = auto_dream_held(cwd, min_interval) {
+        return Ok(held);
     }
     let dir = ensure_repo_dream_dir_no_symlink(cwd)?;
     let Some(_lock) = crate::secure_fs::try_lock_owner_only(&dir, Path::new(AUTO_DREAM_LOCK_FILE))? else {
@@ -3723,6 +3716,21 @@ pub fn maybe_auto_dream(
     active_model: Option<&str>,
 ) -> Result<Option<DreamReport>, DreamError> {
     try_auto_dream(cwd, min_interval, active_model).map(AutoDream::into_report)
+}
+
+/// Why an automatic pass would not run now, read from the switches, the shared
+/// markers and whether any evidence exists; `None` when it would. Takes no lock
+/// and reads no log, so a host can ask before it spends a process on
+/// [`try_auto_dream`], which asks the same again under the lock.
+#[must_use]
+pub fn auto_dream_held(cwd: &Path, min_interval: std::time::Duration) -> Option<AutoDream> {
+    if !automatic_dream_enabled(cwd) {
+        return Some(AutoDream::Disabled);
+    }
+    if let Some(until) = automatic_dream_not_due_until(&dream_dir(cwd), SystemTime::now(), min_interval) {
+        return Some(AutoDream::NotDueUntil(until));
+    }
+    (!has_automatic_curation_evidence(cwd)).then_some(AutoDream::NoEvidence)
 }
 
 /// When the next automatic pass may start: `None` when it may start now.
