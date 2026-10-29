@@ -96,7 +96,7 @@ fn value_for(address: &SavedAddress, kind: &str, kinds: &BTreeSet<&str>) -> Opti
     let field = |key: &str| address.fields.get(key).map(String::as_str);
     let street = field("street-address");
     let joined = |parts: &[&str], with: &str| {
-        let held: Vec<&str> = parts.iter().filter_map(|key| field(*key)).collect();
+        let held: Vec<&str> = parts.iter().filter_map(|key| field(key)).collect();
         (!held.is_empty()).then(|| held.join(with))
     };
     match kind {
