@@ -17,6 +17,9 @@ and nothing paused:
   interrupt wake-ups  timer and interrupt wake-ups (ri_interrupt_wkups), per second
   energy              the kernel's billed energy (ri_billed_energy), mW
   footprint           phys_footprint at the end of the stretch, and its lifetime peak
+  children cpu        CPU of the process's children that ended and were reaped in the
+                      stretch (ri_child_*): what the main process spends through the
+                      short commands it runs (lsof, git, ps) shows here, not above
 
 for the main process, each Chromium helper by its kind, the WebKit services that
 work for the window (found the way window.py finds them), and the pane programs:
@@ -104,6 +107,8 @@ def rusage(pid):
         return None
     return {
         "cpu_ns": ticks_ns(info.ri_user_time + info.ri_system_time),
+        "child_cpu_ns": ticks_ns(info.ri_child_user_time + info.ri_child_system_time),
+        "child_wakeups": info.ri_child_pkg_idle_wkups + info.ri_child_interrupt_wkups,
         "idle_wakeups": info.ri_pkg_idle_wkups,
         "interrupt_wakeups": info.ri_interrupt_wkups,
         "energy_nj": info.ri_billed_energy,
@@ -215,6 +220,8 @@ def delta_row(one, before, after, wall_s):
         "idle_wakeups_per_s": round(take("idle_wakeups") / wall_s, 2),
         "interrupt_wakeups_per_s": round(take("interrupt_wakeups") / wall_s, 2),
         "energy_mw": round(take("energy_nj") / wall_s / 1e6, 2),
+        "children_cpu_pct": round(take("child_cpu_ns") / (wall_s * 1e9) * 100, 3),
+        "children_wakeups_per_s": round(take("child_wakeups") / wall_s, 2),
         "footprint": sum(after[pid]["footprint"] for pid in both),
         "peak": max(after[pid]["peak"] for pid in both),
     })
@@ -251,11 +258,11 @@ def fmt_row(row):
         return f"{row['role']:<7} {row['kind'][:34]:<34} gone"
     return (f"{row['role']:<7} {row['kind'][:34]:<34} {row['processes']:>3} {row['cpu_pct']:>8.2f} "
             f"{row['idle_wakeups_per_s']:>9.1f} {row['interrupt_wakeups_per_s']:>9.1f} "
-            f"{row['energy_mw']:>8.1f} {row['footprint'] / MIB:>9.1f}")
+            f"{row['energy_mw']:>8.1f} {row['footprint'] / MIB:>9.1f} {row.get('children_cpu_pct', 0):>8.2f}")
 
 
 HEADER = (f"{'role':<7} {'kind':<34} {'n':>3} {'cpu %':>8} {'idle w/s':>9} {'intr w/s':>9} "
-          f"{'mW':>8} {'fp MiB':>9}")
+          f"{'mW':>8} {'fp MiB':>9} {'child %':>8}")
 
 
 def follow(asked):
@@ -287,7 +294,7 @@ def follow(asked):
     return 0
 
 
-SUMMED = ("cpu_pct", "idle_wakeups_per_s", "interrupt_wakeups_per_s", "energy_mw", "footprint")
+SUMMED = ("cpu_pct", "idle_wakeups_per_s", "interrupt_wakeups_per_s", "energy_mw", "footprint", "children_cpu_pct")
 
 
 def by_kind(line):

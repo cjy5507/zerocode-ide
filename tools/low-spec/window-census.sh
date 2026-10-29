@@ -43,7 +43,7 @@ PROFILE_WORKTREES="/synthetic/one:/synthetic/two:/synthetic/three"
 stage="${1:-}"; shift || true
 data="" ref="" test_binary="" runs=5 boot_runs=6 settle_s=60 idle_s=45 max_load=6
 dense_cmd="" follow_minutes=120 probes_normal="" probes_low="" probes_cpu4x=""
-levels="" scenes=""
+levels="" scenes="" start_timeout=90
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --data) data="$2"; shift 2 ;;
@@ -61,6 +61,7 @@ while [[ $# -gt 0 ]]; do
     --probes-cpu4x) probes_cpu4x="$2"; shift 2 ;;
     --levels) levels="$2"; shift 2 ;;
     --scenes) scenes="$2"; shift 2 ;;
+    --start-timeout) start_timeout="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -118,7 +119,11 @@ PY
 measure() {  # measure <out> [measure.sh options...]
   local out="$1"; shift
   [[ -f "$profile/pane-layouts.json" ]] || { echo "no profile: run the prep stage first" >&2; exit 2; }
-  bash "$ROOT/tools/boot-profile/measure.sh" --binary "$INSTALLED" --profile "$profile" --out "$out" "$@"
+  # Started behind the person's work and checked to stay there (measure.sh
+  # --launch background): a window behind others may not paint, so a start that
+  # never reaches its first frame ends after --start-timeout rather than 300 s.
+  bash "$ROOT/tools/boot-profile/measure.sh" --binary "$INSTALLED" --profile "$profile" --out "$out" \
+    --launch background --start-timeout "$start_timeout" "$@"
 }
 
 # One steady scene: boot, settle, one memory sample and one idle stretch per run.
