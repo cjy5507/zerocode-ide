@@ -24257,6 +24257,159 @@ fn a_review_needs_the_observed_attempt_and_source_at_commit() {
     assert_eq!(facts.source_now.as_deref(), Some("123abcd"));
 }
 
+/// A coordinator's withdrawal of its own verification stands until a new
+/// review or a new hand-in (t-81913, ZO 2026-10-28 22:27). The board's
+/// 「통과」 sends a bare `{"verified":true}` naming the attempt and the source
+/// it drew, and the commit point asked only the seat, the attempt and the
+/// source — so t-78937's withdrawal at 20:12 was covered by a press at
+/// 20:14:43. The bare pass is refused with the withdrawal's own words; a
+/// verification that names the new review it rests on goes through; and a new
+/// hand-in leaves the withdrawal with the attempt it was written against.
+#[test]
+fn a_withdrawn_verification_is_not_covered_by_a_bare_pass_of_the_same_attempt_and_source() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name withdrawn");
+    let task = bench.json("task-create --spec board-pass")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (_, first_pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let first = bench.ledger.runs()[0].dispatches[0].id.clone();
+    bench.json_at(
+        &first_pane,
+        "send --type worker_done --body {\"ok\":true,\"head\":\"abc1234\"}",
+    );
+    let why = "the independent review found the price guard untested";
+    let withdraw = |bench: &mut Bench, attempt: &str, source: &str| {
+        let result = serde_json::json!({ "verified": false, "verificationWithdrawn": why });
+        let wrote = bench.at_argv(
+            agent_teams::LEADER_PANE,
+            [
+                "task-update",
+                "--task",
+                &task,
+                "--result",
+                &result.to_string(),
+                "--attempt",
+                attempt,
+                "--source",
+                source,
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        );
+        assert_eq!(wrote.reply.exit_code, 0, "{:?}", wrote.reply);
+    };
+    let review_row = |bench: &mut Bench| {
+        bench.json("task-list")["tasks"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|row| row["taskId"] == task.as_str())
+            .expect("the task's row")["review"]
+            .clone()
+    };
+    bench.json(&format!(
+        "task-update --task {task} --result {{\"verified\":true,\"testedHead\":\"abc1234\"}} --attempt {first} --source abc1234"
+    ));
+    withdraw(&mut bench, &first, "abc1234");
+    let review = review_row(&mut bench);
+    assert_eq!(review["verified"], false, "{review}");
+    assert_eq!(review["withdrawn"], why, "the withdrawal is read: {review}");
+    let progress = |bench: &Bench| {
+        let run = &bench.ledger.runs()[0];
+        run.progress_of(run.task(&task).expect("the task"))
+    };
+    let standing = progress(&bench);
+    assert_eq!(
+        (standing.stage, standing.withdrawn.as_deref()),
+        (WorkStage::ReportOnly, Some(why)),
+        "the board draws the work as waiting on a review that was withdrawn: {standing:?}"
+    );
+
+    // The board's press, as `desk::pass_review` sends it — and the same bare
+    // verification with landing keys beside it, which names no review either.
+    for bare in [r#"{"verified":true}"#, r#"{"verified":true,"merged":true}"#] {
+        let before = bench.ledger.export();
+        let pressed = bench.at_argv(
+            agent_teams::LEADER_PANE,
+            [
+                "task-update",
+                "--task",
+                &task,
+                "--result",
+                bare,
+                "--attempt",
+                &first,
+                "--source",
+                "abc1234",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        );
+        assert_ne!(
+            pressed.reply.exit_code, 0,
+            "{bare} covered the withdrawal: {:?}",
+            pressed.reply
+        );
+        let said = pressed.reply.stderr.trim();
+        assert!(
+            said.contains("withdrew") && said.contains(why) && !said.contains('\n'),
+            "the refusal says, in one line, that the verification was withdrawn and why: {said}"
+        );
+        assert_eq!(bench.ledger.export().tasks, before.tasks, "{bare}");
+    }
+
+    // A verification that names the new review it rests on goes through: the
+    // review's task, its report, or the coordinator's own run of the source.
+    for named in [
+        r#"{"verified":true,"reviewedBy":"t-90001"}"#,
+        r#"{"verified":true,"report":"/reviews/t-90001/REPORT.md"}"#,
+        r#"{"verified":true,"testedHead":"abc1234","coordinatorTests":"12 passed"}"#,
+    ] {
+        withdraw(&mut bench, &first, "abc1234");
+        let accepted = bench.at_argv(
+            agent_teams::LEADER_PANE,
+            [
+                "task-update",
+                "--task",
+                &task,
+                "--result",
+                named,
+                "--attempt",
+                &first,
+                "--source",
+                "abc1234",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        );
+        assert_eq!(accepted.reply.exit_code, 0, "{named}: {:?}", accepted.reply);
+        let review = review_row(&mut bench);
+        assert_eq!(review["verified"], true, "{named}: {review}");
+        assert!(review["withdrawn"].is_null(), "{named}: {review}");
+    }
+
+    // A new hand-in: the withdrawal was of the first attempt, and the second
+    // attempt's work takes a plain pass.
+    withdraw(&mut bench, &first, "abc1234");
+    bench.json(&format!("task-update --task {task} --status ready"));
+    let (_, second_pane) = bench.seat(&format!("worker-start --agent codex --task {task}"));
+    let second = bench.ledger.runs()[0].dispatches[1].id.clone();
+    bench.json_at(
+        &second_pane,
+        "send --type worker_done --body {\"ok\":true,\"head\":\"def5678\"}",
+    );
+    let review = review_row(&mut bench);
+    assert!(review["withdrawn"].is_null(), "{review}");
+    assert_eq!(progress(&bench).withdrawn, None);
+    bench.json(&format!(
+        "task-update --task {task} --result {{\"verified\":true}} --attempt {second} --source def5678"
+    ));
+    let review = review_row(&mut bench);
+    assert_eq!(review["verified"], true, "{review}");
+}
+
 /// A result nobody is known to have written is a claim, however it is
 /// spelled — and a coordinator's row stays the fact across a rebuild.
 ///

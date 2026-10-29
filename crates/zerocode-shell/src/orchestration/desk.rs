@@ -3188,6 +3188,7 @@ mod tests {
             source: None,
             merge_head: None,
             reviewed: None,
+            withdrawn: None,
             next: None,
         };
         for stage in STAGES {

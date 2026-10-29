@@ -229,6 +229,7 @@ pub(super) fn record(
                 attempt: Some(attempt.as_deref().unwrap_or(NO_ATTEMPT)),
                 source: Some(&source),
                 review: true,
+                bare_verification: verifies_on_nothing_new(&result),
                 tested_head: None,
             },
         )?;
