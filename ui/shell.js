@@ -13415,6 +13415,11 @@ function standAskCard(host, panel) {
     card = document.createElement("section");
     card.className = "pane-chat-ask";
     card.setAttribute("aria-label", t("board.tasks.needsInput", "진행하려면 확인이 필요해요."));
+    // The composer hands the keyboard here when its words cannot answer the
+    // question (`answerAskFromComposer`); the keys pressed on the card are
+    // its own, not the terminal's behind the page (`rearmKeySink`).
+    card.tabIndex = -1;
+    card.dataset.keyboardOwner = "true";
   }
   card.replaceChildren(panel);
   // Inside the dock, above the composer — the extension's card stands in its
@@ -14039,9 +14044,50 @@ function paintPaneAsk(held, force = false) {
     force = true;
   }
   if (card && !force) return;
-  const shape = { pane: `term:${term}`, agent: ask.agent, approval: ask.approval, ask_prompt: ask.ask_prompt };
+  const shape = paneAskShape(term, ask);
   const panel = ask.ask_prompt ? askPanelNode(shape, held.askDraft) : approvalPanelNode(shape, held.askDraft);
   standAskCard(held.host, panel);
+}
+
+/* A pane's question in the card's shape — the card's, and the composer's
+ * under it (`standingAskOf`). */
+function paneAskShape(term, ask) {
+  return { pane: `term:${term}`, agent: ask.agent, approval: ask.approval, ask_prompt: ask.ask_prompt };
+}
+
+/* The question standing as a card over the conversation `run`'s composer
+ * speaks into — its shape, and the draft its card answers through once the
+ * card stands — or null. A pane's conversation keeps the draft on its page
+ * (`paintPaneAsk`), a wire's page on the run (`paintWireAsk`); a helper's
+ * page shows no card. */
+function standingAskOf(run) {
+  if (run.wire) return run.wireLog?.asks?.[0] && run.askShape ? { card: run.askShape, draft: run.askDraft } : null;
+  const ask = run.helper?.id === PANE_LOG_ID ? paneAsks.get(run.term) : undefined;
+  if (!ask) return null;
+  const draft = paneChats.get(run.term)?.askDraft;
+  return { card: paneAskShape(run.term, ask), draft: draft?.sig === ask.sig ? draft : null };
+}
+
+/* Words typed in the composer while a question stands as its card
+ * (t-81786 P0): pasted into the CLI's input line, they fell on the menu it
+ * was showing and were gone, the question still standing. A question that
+ * takes words takes them as its free answer, down the card's own road
+ * (`confirmAsk` — the next question, or the answers sent), and the box lets
+ * them go; a permission takes none, so they stay in the box, the person is
+ * told to answer the question first, and the keyboard goes to the card. */
+function answerAskFromComposer(form, box, run, { card, draft }) {
+  const words = box.value.trim();
+  if (words === "") return;
+  if (card.ask_prompt && draft && !draft.sending) {
+    draft.other[draft.index] = words;
+    box.value = "";
+    run.draft = "";
+    form.__workerFit?.();
+    confirmAsk(card, draft);
+    return;
+  }
+  toast(t("worker.askAnswerFirst", "먼저 위 질문에 답하세요"));
+  form.closest(".worker-view")?.querySelector(".pane-chat-ask")?.focus();
 }
 
 function paintHelperSurface(tab) {
@@ -15665,6 +15711,13 @@ function workerComposerNode(run, owner = null) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (run.sending || run.sendUncertain) return;
+    // A question standing as its card is answered there, not on the input
+    // line under the CLI's menu.
+    const asking = standingAskOf(run);
+    if (asking) {
+      answerAskFromComposer(form, box, run, asking);
+      return;
+    }
     const draft = box.value;
     run.draft = draft;
     const text = box.value.trim();
@@ -15749,9 +15802,15 @@ function paintWorkerComposerState(form, run, delivered = null) {
   // 기다리는 글들, 그리고 상자가 무엇을 하겠다고 말하는지: 실행 중이면
   // 「대기열에 추가」, 턴 사이면 제 본래의 말.
   paintComposerQueue(form, run);
-  const saying = working && !form.__composerOwn
-    ? t("composer.queue.placeholder", "다음 메시지 대기열에 추가…")
-    : form.__composerSay;
+  // Under a question's card the box says where its words go (t-81786 P0).
+  const asking = standingAskOf(run);
+  const saying = asking
+    ? asking.card.ask_prompt
+      ? t("worker.askAnswerHere", "위 질문의 답으로 보냅니다")
+      : t("worker.askAnswerFirst", "먼저 위 질문에 답하세요")
+    : working && !form.__composerOwn
+      ? t("composer.queue.placeholder", "다음 메시지 대기열에 추가…")
+      : form.__composerSay;
   writeAttribute(box, "placeholder", saying);
   writeAttribute(box, "aria-label", saying);
 

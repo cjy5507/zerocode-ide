@@ -56729,6 +56729,113 @@ suite("focus-view", async ({ browser, origin, ok }) => {
   }
 });
 
+/* 질문 카드가 선 동안의 입력칸(t-81786 P0, 사람 10-29 「퀘스천 창이 떴을 때 인풋창에다
+ * 글을 쓰면 아무것도 안 됨」): 입력칸의 Enter가 글을 CLI 입력줄에 붙여 넣으면, 질문
+ * 메뉴를 띄운 CLI 위에서 글이 사라지고 카드는 그대로 남았다. 카드가 선 동안 입력칸의
+ * 글은 카드의 길로 간다 — 묻는 질문이면 그 질문의 자유 답으로 `answer_ask`에, 권한이면
+ * 글이 입력칸에 남고 「먼저 위 질문에 답하세요」를 말하며 키보드는 카드로. 입력줄
+ * (`term_paste`)에는 아무것도 가지 않는다. 카드가 닫히면 입력칸은 평소대로 말하고 보낸다. */
+suite("composer-under-question", async ({ browser, origin, ok }) => {
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(async () => {
+      window.__SENT__ = [];
+      for (const name of ["term_paste", "term_key", "answer_ask", "answer_approval"]) {
+        window.__ANSWER__[name] = (args) => {
+          window.__SENT__.push([name, args]);
+          return null;
+        };
+      }
+      window.__TELL__ = (payload) => {
+        for (const handler of window.__LISTENERS__["hook:agent"] ?? []) handler({ payload });
+      };
+      const term = await openTermTab({ placement: "tab" });
+      window.__TERM__ = term;
+      const turns = [{ role: "user", text: "둘 중 하나 골라 줘." }, { role: "assistant", text: "질문을 드립니다." }];
+      window.__ANSWER__.pane_log = () => ({ found: true, next: turns.length, turns, skipped: false, more: false, folded: false });
+      window.__TELL__({ term, state: "working", agent: "claude", session: "s-ask" });
+      await setPaneChat(term, true);
+      await pollHelperPages();
+      window.__TELL__({ term, state: "waiting", agent: "claude", session: "s-ask",
+        ask_prompt: { questions: [{ question: "어느 쪽으로 할까요?", header: "방향",
+          options: [{ label: "A", description: "가" }, { label: "B", description: "나" }], multi_select: false }] } });
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    });
+    const box = page.locator(".pane-chat .worker-composer-box");
+    const read = () => page.evaluate(() => {
+      const chat = document.querySelector(".pane-chat");
+      const field = chat.querySelector(".worker-composer-box");
+      return {
+        card: chat.querySelector(".pane-chat-ask") !== null,
+        value: field.value,
+        says: field.placeholder,
+        onCard: document.activeElement === chat.querySelector(".pane-chat-ask"),
+        sent: window.__SENT__.map(([name, args]) => [name, name === "answer_ask" ? args.selections : args.text ?? args.allow ?? null]),
+        told: [...document.querySelectorAll(".toast")].map((note) => note.textContent.trim()),
+      };
+    });
+    const words = await page.evaluate(() => ({
+      here: t("worker.askAnswerHere", "위 질문의 답으로 보냅니다"),
+      first: t("worker.askAnswerFirst", "먼저 위 질문에 답하세요"),
+      plain: t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다"),
+    }));
+    const asked = await read();
+    await box.click();
+    await page.keyboard.type("B로 가 주세요");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    const answered = await read();
+    // The agent moves on, then asks leave to run a command.
+    await page.evaluate(async () => {
+      window.__SENT__.length = 0;
+      window.__TELL__({ term: window.__TERM__, state: "working", agent: "claude", session: "s-ask" });
+      for (let beat = 0; beat < 2; beat += 1) await window.__PAINTED__();
+      window.__TELL__({ term: window.__TERM__, state: "awaiting-permission", agent: "claude", session: "s-ask",
+        approval: { tool: "Bash", summary: "rm -rf build" } });
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    });
+    const permission = await read();
+    await box.click();
+    await page.keyboard.type("빌드는 지우지 말고 테스트만 돌려");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    const held = await read();
+    // The question answered, the box is the composer again.
+    await page.evaluate(async () => {
+      window.__TELL__({ term: window.__TERM__, state: "done", agent: "claude", session: "s-ask" });
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    });
+    await box.click();
+    await page.keyboard.press("Enter");
+    // The pane's road pastes, takes its submit breath, then presses Enter.
+    await page.waitForFunction(() => window.__SENT__.some(([name]) => name === "term_key"), null, { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(100);
+    const after = await read();
+    ok(
+      "under a question card the box says its words go as the question's answer, and Enter sends them down the card's road as the question's own words — none to the CLI's input line under its menu (t-81786 P0)",
+      asked.card && asked.says === words.here &&
+        JSON.stringify(answered.sent) === JSON.stringify([["answer_ask", [{ indices: [], other: "B로 가 주세요" }]]]) &&
+        answered.value === "",
+      JSON.stringify({ asked, answered, words }),
+    );
+    ok(
+      "under a permission card, which takes no words, the box keeps them and says to answer the question first, the keyboard goes to the card, and nothing is sent (t-81786 P0)",
+      permission.card && permission.says === words.first &&
+        held.sent.length === 0 && held.value === "빌드는 지우지 말고 테스트만 돌려" && held.onCard && held.told.includes(words.first),
+      JSON.stringify({ permission, held, words }),
+    );
+    ok(
+      "once the card is gone the box says its own sentence again and sends to the pane as before",
+      !after.card && after.says === words.plain &&
+        JSON.stringify(after.sent) === JSON.stringify([["term_paste", "빌드는 지우지 말고 테스트만 돌려"], ["term_key", null]]) && after.value === "",
+      JSON.stringify({ after, words }),
+    );
+  } finally {
+    await page.close();
+  }
+});
+
 /* 단위 6(docs/design/agent-wire-sessions-20260915.md): 선(wire) 위의 세션 — 화면 없는
  * CLI(Codex app-server)를 창이 JSON-RPC로 몰고, 그 탭은 대화 그 자체다. 턴은
  * `wire_log`로 오고, 입력줄은 `wire_send`로 보내고, 물음은 선이 준 선택지를 단추로
