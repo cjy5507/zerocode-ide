@@ -24410,6 +24410,20 @@ fn a_withdrawn_verification_is_not_covered_by_a_bare_pass_of_the_same_attempt_an
     assert_eq!(review["verified"], true, "{review}");
 }
 
+/// `help` names every key a new review may rest on (t-81913 r1 P3-1): the
+/// `task-update` line is a literal in a `const` table, so it is held to
+/// [`new_review_keys`] here — a coordinator who reads only `help` must not
+/// learn that `coordinatorTests` is refused over a withdrawal.
+#[test]
+fn task_update_help_names_every_key_a_new_review_rests_on() {
+    let (_, about, _) = VERBS
+        .iter()
+        .find(|(verb, _, _)| *verb == "task-update")
+        .expect("task-update in VERBS");
+    let named = format!("({})", new_review_keys().collect::<Vec<_>>().join(", "));
+    assert!(about.contains(&named), "{named} missing from: {about}");
+}
+
 /// A result nobody is known to have written is a claim, however it is
 /// spelled — and a coordinator's row stays the fact across a rebuild.
 ///

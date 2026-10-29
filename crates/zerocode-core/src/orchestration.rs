@@ -19447,8 +19447,8 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          source it reviewed — task-list shows both — and is refused when either is missing \
          or has moved; a bare verification over the coordinator's own withdrawal \
          (verificationWithdrawn) of that attempt and source is refused — a result naming its \
-         new review (reviewedBy, report, testedHead) or a new hand-in verifies it again; a \
-         verification of a review hand-in (reportKind review) carries \
+         new review (reviewedBy, coordinatorTests, testedHead, report) or a new hand-in \
+         verifies it again; a verification of a review hand-in (reportKind review) carries \
          nothingToLand, and the answer says why under nothingToLandBecause | --members \
          <t-1,t-2,…> --result <landing> · write a stack's landing \
          ({\"merged\":true,\"mergeHead\":…}, later {\"deployed\":true,\"release\":…}) on every \
