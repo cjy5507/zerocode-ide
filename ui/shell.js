@@ -13503,9 +13503,14 @@ async function handPaneToWire(term) {
   } finally {
     held.handing = false;
     held.handingSince = null;
+    // The pane that left during the hand-over goes now, once the wire's page
+    // has taken its seat and what waited on it.
+    const left = held.left;
+    held.left = null;
+    if (left) left();
     // A wire that never stood leaves the pane its conversation: the view says
     // why, and what waited goes the pane's own way, once (t-54304).
-    if (tabId === null) {
+    else if (tabId === null) {
       paintPaneChat(term);
       settleComposerQueue(held.run);
     }
@@ -18049,9 +18054,17 @@ listen("term:exited", (event) => {
   // every leaf has spawned, and a resume that dies inside that window would
   // otherwise slip this prune and mount as a pane nothing ever clears. The
   // id is parked and `mountStoredLayout` prunes it before the layout stands.
-  if (!dropClosedTermLeaf(term, "exit") && waking.size > 0) {
-    exitedUnheld.add(term);
-  }
+  const dropLeaf = () => {
+    if (!dropClosedTermLeaf(term, "exit") && waking.size > 0) exitedUnheld.add(term);
+  };
+  // A pane that leaves while its conversation is being handed to its wire
+  // leaves because of it: `wire_start` typed its exit command and answers
+  // only once the screen has gone, so this event comes first. Its tab, and
+  // what waited on its page, stay for the wire's page to take — the
+  // hand-over drops the leaf once that page stands (`handPaneToWire`).
+  const handing = paneChats.get(term);
+  if (handing?.handing) handing.left = dropLeaf;
+  else dropLeaf();
 });
 
 /* An orchestration worker owns a terminal in its resolved worktree.
