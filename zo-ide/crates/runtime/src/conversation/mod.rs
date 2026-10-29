@@ -42,7 +42,9 @@ pub use api::{
     AssistantEvent, AsyncApiClient, PromptCacheEvent, ProviderStateBlob,
     DEFAULT_STREAMING_CHANNEL_CAPACITY,
 };
-use compaction::{auto_compaction_threshold_from_env_or_policy, ContextPolicy};
+use compaction::{
+    auto_compaction_threshold_from_env_or_policy, precompaction_threshold_from_policy, ContextPolicy,
+};
 pub use compaction::{
     auto_compaction_tail_budget, auto_compaction_threshold_for_model, auto_compaction_threshold_from_env, MICROCOMPACT_MIN_OUTPUT_BYTES,
     count_progress_tool_results, final_assistant_text, AutoCompactionEvent, BudgetExhausted,
@@ -1021,6 +1023,14 @@ pub struct ConversationRuntime<C, T> {
     /// [`REPETITION_CLEAR_MAX_FULL_COMPACTIONS_PER_TURN`], letting the guard
     /// finally accumulate across cycles and trip. Reset at turn start.
     full_compactions_this_turn: usize,
+    /// The preflight figure right after the last full compaction, on the
+    /// estimate the next preflight starts from. At or over Warn, compacting
+    /// at Warn again lands on the same floor, so the Warn arm waits for Auto
+    /// compact (`last_compaction_stayed_over_warn`). Every full compaction
+    /// rewrites it; a retained compaction (a relevance trim that clears tool
+    /// results and writes no summary) leaves it as it was; a replaced session
+    /// drops it.
+    post_compaction_context_tokens: Option<u64>,
     /// Cross-turn tally of identical (normalized) tool-call fingerprints. Unlike
     /// [`Self::tool_fingerprint_counts`] this is SESSION-scoped: it is NOT
     /// cleared at turn start, so a no-progress re-read loop that spans turn
@@ -1880,9 +1890,9 @@ where
                 compaction::auto_compaction_window(context_window),
                 context_policy,
             ),
-            precompaction_input_tokens_threshold: context_policy.precompaction_threshold(
-                compaction::auto_compaction_window(context_window)
-                    .max(u64::from(FALLBACK_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD)),
+            precompaction_input_tokens_threshold: precompaction_threshold_from_policy(
+                compaction::auto_compaction_window(context_window),
+                context_policy,
             ),
             context_policy,
             full_compaction_override_percent,
@@ -1928,6 +1938,7 @@ where
             dropped_thinking_spans: Vec::new(),
             context_estimate_ratio: None,
             full_compactions_this_turn: 0,
+            post_compaction_context_tokens: None,
             cross_turn_tool_fingerprints: HashMap::new(),
             cross_turn_tool_repetition_pending_hard_stop_fps: HashSet::new(),
             cross_turn_tool_repetition_hard_stop_fps: HashSet::new(),

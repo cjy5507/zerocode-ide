@@ -14,12 +14,12 @@ use crate::hooks::HookProgressEvent;
 
 use super::{
     auto_compaction_threshold_from_env_or_policy, estimate_session_tokens,
-    is_long_running, lifecycle_hook_outcome, trace_attrs, AgentNotification,
+    is_long_running, lifecycle_hook_outcome, precompaction_threshold_from_policy, trace_attrs,
+    AgentNotification,
     AgentNotificationInbox, ApiClient, AsyncApiClient, CompactionConfig, CompactionResult, ConcurrentDispatchFn, ContextPolicy, ConversationRuntime,
     HookAbortSignal, HookEvent, HookProgressReporter, HookRunResult, LongRunningPredicate,
     MemoryRetriever, PermissionMode, PermissionPolicy, RuntimeError, Session, SteeringQueue,
     TemporaryAllowGrant, ToolExecutor, UsageTracker,
-    FALLBACK_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
 };
 use crate::tool_cancel::ToolCancelSignal;
 
@@ -967,9 +967,8 @@ where
         let compaction_window = self.auto_compaction_window();
         self.auto_compaction_input_tokens_threshold =
             auto_compaction_threshold_from_env_or_policy(compaction_window, self.context_policy);
-        self.precompaction_input_tokens_threshold = self.context_policy.precompaction_threshold(
-            compaction_window.max(u64::from(FALLBACK_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD)),
-        );
+        self.precompaction_input_tokens_threshold =
+            precompaction_threshold_from_policy(compaction_window, self.context_policy);
     }
 
     /// Re-derive both the context window and model-family cheap-trim policy
@@ -1336,8 +1335,10 @@ where
         // and carrying the outgoing session's set would collapse an entry to a
         // pointer aimed at a body that is not in this context.
         self.recalled_memory_slugs = super::recalled_slugs_from_session(&session);
-        // The stretches name messages of the outgoing transcript.
+        // The stretches name messages of the outgoing transcript, and so does
+        // the floor its last compaction left.
         self.dropped_thinking_spans.clear();
+        self.post_compaction_context_tokens = None;
         self.session = session;
     }
 
