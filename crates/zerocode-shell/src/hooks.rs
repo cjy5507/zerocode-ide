@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, OnceLock};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use zerocode_core::AgentKind;
 #[cfg(any(windows, test))]
 pub(crate) use zerocode_core::agent_shims::powershell_shim_script_with_private_tokens;
@@ -1706,7 +1706,11 @@ pub fn statuses(config_root: &Path, local_data_root: &Path) -> Vec<HookStatus> {
 // -------------------------------------------------------------- the envelope
 
 /// What one hook event tells the window, already reduced to what it can draw.
-#[derive(Debug, Clone, Serialize)]
+///
+/// Read back as well as written: a worker's question its coordinator holds is
+/// written down with the report that asked it, so the window that comes back
+/// after a restart can carry it again (t-82296).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneHookReport {
     pub term: u32,
     pub agent: AgentKind,
@@ -1794,7 +1798,7 @@ pub struct PaneHookReport {
     /// here because the list of such words is the core's. Also set on a
     /// prompt held until its own record says who wrote it
     /// ([`settle_prompt_name`]) — not a name YET.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub prompt_names_nothing: bool,
     /// The number the CLI gave the prompt that opened this turn — Claude
     /// Code's `prompt_id`, on every event of the turn, and the `promptId` of

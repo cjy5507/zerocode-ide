@@ -1998,6 +1998,22 @@ pub(crate) fn worker_ask_seat(term: u32) -> Option<crate::worker_question::AskSe
     })?
 }
 
+/// The term this window seats `worker` of `run` at while it is a live worker
+/// in a pane — how a question it asked before the window restarted finds its
+/// pane again (t-82296).
+pub(crate) fn worker_term(run: &str, worker: &str) -> Option<u32> {
+    with_ledger_seats(|ledger, seats| {
+        let worker =
+            ledger.run(run)?.workers.iter().find(|one| {
+                one.id == worker && one.state.is_live() && one.state.may_occupy_pane()
+            })?;
+        seats
+            .get(worker.team.as_str())?
+            .get(worker.pane.as_str())
+            .copied()
+    })?
+}
+
 /// Where a question the window filed for a worker stands in `run`
 /// (t-82296): the coordinator's answer once one landed, closed when it can
 /// no longer be answered or is gone, waiting otherwise. A ledger this window

@@ -30,11 +30,18 @@
 //!
 //! A permission request is not routed: the automatic approval rules read it
 //! first and what they leave is the person's, as before.
+//!
+//! What the window carries is written down beside its other state
+//! ([`crate::app_paths::artifact_file::WORKER_QUESTIONS`]): a restart forgets
+//! it, and a picker that still stands reports nothing again. The window that
+//! comes back takes each question up when its worker sits in a pane again and
+//! the screen still shows it, its ten minutes counted from the asking.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use zerocode_core::ask::{AskPrompt, AskSelection};
 
 use crate::agent_teams::Host;
@@ -43,6 +50,11 @@ use crate::hooks::PaneHookReport;
 /// How long a coordinator is given to answer its worker's question before
 /// the person is asked instead.
 pub(crate) const COORDINATOR_ANSWER_WAIT_MS: i64 = 10 * 60 * 1000;
+
+/// How long a question read back after a restart waits, once its worker
+/// sits in a pane again, for the pane's screen to show it: a pane that has
+/// just come back may not have drawn yet.
+const TAKE_UP_GRACE_MS: i64 = 5_000;
 
 /// The window event that tells the page a worker's question reached the
 /// person after all, and why: `{ term, why }` (t-82296).
@@ -67,7 +79,7 @@ pub(crate) struct AskSeat {
 }
 
 /// Why a worker's question is on the person's screen after all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Raised {
     /// The coordinator did not answer within [`COORDINATOR_ANSWER_WAIT_MS`].
@@ -375,6 +387,111 @@ fn asked() -> MutexGuard<'static, HashMap<u32, Asked>> {
         .unwrap_or_else(|held| held.into_inner())
 }
 
+/// One worker's question in the ledger as the window writes it down for the
+/// window that comes back after a restart.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Kept {
+    run: String,
+    worker: String,
+    question: String,
+    filed_ms: i64,
+    raised: Option<Raised>,
+    report: PaneHookReport,
+    worktree: Option<String>,
+    /// When this window first found its worker in a pane, for
+    /// [`TAKE_UP_GRACE_MS`].
+    #[serde(skip)]
+    seated_ms: Option<i64>,
+}
+
+/// What the window wrote down last, and what it read back and has not yet
+/// taken up — `None` until the first beat reads the file.
+struct Memory {
+    waiting: Vec<Kept>,
+    written: Vec<u8>,
+}
+
+fn memory() -> MutexGuard<'static, Option<Memory>> {
+    static MEMORY: OnceLock<Mutex<Option<Memory>>> = OnceLock::new();
+    MEMORY
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+}
+
+/// What is written down of what the window carries: every question in the
+/// ledger the pane still asks, and what was read back but not yet taken up —
+/// in one order, so the same questions are the same bytes.
+fn kept_of(held: &HashMap<u32, Asked>, waiting: &[Kept]) -> Vec<Kept> {
+    let mut kept: Vec<Kept> = held
+        .values()
+        .filter(|standing| !standing.passed)
+        .filter_map(|standing| match &standing.filed {
+            Filing::Filed(question) => Some(Kept {
+                run: standing.seat.run.clone(),
+                worker: standing.seat.worker.clone(),
+                question: question.clone(),
+                filed_ms: standing.filed_ms,
+                raised: standing.raised,
+                report: standing.report.clone(),
+                worktree: standing.worktree.clone(),
+                seated_ms: None,
+            }),
+            Filing::Unfiled => None,
+        })
+        .chain(waiting.iter().cloned())
+        .collect();
+    kept.sort_by(|one, other| one.question.cmp(&other.question));
+    kept
+}
+
+/// Write `kept` down unless `written` already holds those bytes, and hold
+/// them — even when the write fails, so the next change tries again rather
+/// than every beat.
+fn write_kept(path: &Path, kept: &[Kept], written: &mut Vec<u8>) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(kept).map_err(std::io::Error::other)?;
+    if *written == bytes {
+        return Ok(());
+    }
+    let wrote = crate::durable_file::replace_bytes(path, &bytes).map(drop);
+    *written = bytes;
+    wrote
+}
+
+/// What the last window wrote down. A file that is missing or cannot be read
+/// carries nothing: its questions are dropped, as before the file existed.
+fn read_kept(path: &Path) -> Memory {
+    match std::fs::read(path) {
+        Ok(bytes) => Memory {
+            waiting: serde_json::from_slice(&bytes).unwrap_or_default(),
+            written: bytes,
+        },
+        Err(_) => Memory {
+            waiting: Vec::new(),
+            written: serde_json::to_vec(&Vec::<Kept>::new()).unwrap_or_default(),
+        },
+    }
+}
+
+/// A written-down question as the window carries it again, at the term its
+/// worker sits at now; `None` when the report it kept asks nothing.
+fn taken_up(kept: Kept, seat: AskSeat, term: u32) -> Option<Asked> {
+    let mut report = kept.report;
+    report.term = term;
+    let prompt = asking(&report)?.clone();
+    Some(Asked {
+        signature: signature(&prompt),
+        prompt,
+        report,
+        worktree: kept.worktree,
+        seat,
+        filed: Filing::Filed(kept.question),
+        filed_ms: kept.filed_ms,
+        passed: false,
+        raised: kept.raised,
+    })
+}
+
 fn signature(prompt: &AskPrompt) -> String {
     serde_json::to_string(prompt).unwrap_or_default()
 }
@@ -490,6 +607,11 @@ pub(crate) fn forget(term: u32) {
 /// is not filed yet, type what the coordinator answered, refuse what the pane
 /// moved past, and give the person what nobody answers.
 pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
+    let path = app
+        .state::<crate::AppState>()
+        .local_data_root()
+        .join(crate::app_paths::artifact_file::WORKER_QUESTIONS);
+    take_up(app, &path, now_ms);
     let gone: Vec<(String, Left)> = left()
         .iter()
         .map(|(question, was)| (question.clone(), was.clone()))
@@ -521,6 +643,75 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
             Filing::Unfiled => file(app, host, term, &standing, now_ms),
             Filing::Filed(question) => carry(app, term, &standing, question, now_ms),
         }
+    }
+    write_down(app, &path);
+}
+
+/// Take up what the last window wrote down as each worker sits in a pane
+/// again: a question the screen still shows is carried on, given back to the
+/// person if it was theirs; one the ledger closed is dropped, and one the
+/// pane no longer shows is left, so a late answer is refused as passed —
+/// nothing of either reaches the person's screen.
+fn take_up(app: &AppHandle, path: &Path, now_ms: i64) {
+    let waiting = std::mem::take(&mut memory().get_or_insert_with(|| read_kept(path)).waiting);
+    let mut later = Vec::new();
+    for mut kept in waiting {
+        if crate::orchestration::question_standing(&kept.run, &kept.question) == Standing::Closed {
+            continue;
+        }
+        let seated = crate::orchestration::worker_term(&kept.run, &kept.worker)
+            .and_then(|term| crate::orchestration::worker_ask_seat(term).map(|seat| (term, seat)));
+        let Some((term, seat)) = seated else {
+            later.push(kept);
+            continue;
+        };
+        // The pane asked again since: the hook has the word.
+        if asked().contains_key(&term) {
+            continue;
+        }
+        let up = asking(&kept.report)
+            .and_then(|prompt| prompt.questions.first())
+            .is_some_and(|question| crate::cmd::terminal::question_is_up(app, term, question));
+        if !up {
+            let since = *kept.seated_ms.get_or_insert(now_ms);
+            if now_ms.saturating_sub(since) < TAKE_UP_GRACE_MS {
+                later.push(kept);
+            } else if let Some(standing) = taken_up(kept, seat, term) {
+                leave(term, standing);
+            }
+            continue;
+        }
+        let Some(standing) = taken_up(kept, seat, term) else {
+            continue;
+        };
+        let back = standing
+            .raised
+            .map(|why| (why, standing.report.clone(), standing.worktree.clone()));
+        asked().insert(term, standing);
+        if let Some((why, report, worktree)) = back {
+            raise(app, term, &report, worktree.as_deref(), why);
+        }
+    }
+    if let Some(memory) = memory().as_mut() {
+        memory.waiting.extend(later);
+    }
+}
+
+/// Write down what the window carries now, when it changed since the last
+/// writing.
+fn write_down(app: &AppHandle, path: &Path) {
+    let held = asked();
+    let mut memory = memory();
+    let Some(memory) = memory.as_mut() else {
+        return;
+    };
+    let kept = kept_of(&held, &memory.waiting);
+    drop(held);
+    if let Err(error) = write_kept(path, &kept, &mut memory.written) {
+        crate::system_runtime::note_window_event(
+            app.state::<crate::AppState>().local_data_root(),
+            &format!("worker-questions: {error}"),
+        );
     }
 }
 
@@ -1033,6 +1224,155 @@ mod tests {
         assert!(body.contains("  2. 멈춤\n"), "{body}");
         assert!(body.contains("  3. 다시\n"), "{body}");
         assert!(body.contains("10분"), "{body}");
+    }
+
+    fn asking_report(term: u32) -> PaneHookReport {
+        serde_json::from_value(serde_json::json!({
+            "term": term,
+            "agent": "claude",
+            "state": "needs-attention",
+            "event": "PreToolUse",
+            "resumable": false,
+            "ask_prompt": prompt(false),
+        }))
+        .expect("an asking report reads back")
+    }
+
+    fn filed(term: u32, question: &str) -> Asked {
+        Asked {
+            signature: signature(&prompt(false)),
+            prompt: prompt(false),
+            report: asking_report(term),
+            worktree: Some("/work/t-1".to_string()),
+            seat: seat(true, false),
+            filed: Filing::Filed(question.to_string()),
+            filed_ms: NOW,
+            passed: false,
+            raised: None,
+        }
+    }
+
+    #[test]
+    fn a_question_written_down_before_a_restart_is_carried_on_by_the_next_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join(crate::app_paths::artifact_file::WORKER_QUESTIONS);
+        let mut held = HashMap::new();
+        held.insert(7, filed(7, "m-5"));
+        held.insert(
+            8,
+            Asked {
+                raised: Some(Raised::CoordinatorSilent),
+                ..filed(8, "m-6")
+            },
+        );
+        // Not in the ledger yet, or moved past: nothing to carry on.
+        held.insert(
+            9,
+            Asked {
+                filed: Filing::Unfiled,
+                ..filed(9, "m-7")
+            },
+        );
+        held.insert(
+            10,
+            Asked {
+                passed: true,
+                ..filed(10, "m-8")
+            },
+        );
+        let mut written = Vec::new();
+        write_kept(&path, &kept_of(&held, &[]), &mut written).unwrap();
+        // The window restarts: what it carried is gone, the file is not.
+        drop(held);
+        let memory = read_kept(&path);
+        assert_eq!(memory.written, written);
+        let questions: Vec<(&str, Option<Raised>)> = memory
+            .waiting
+            .iter()
+            .map(|kept| (kept.question.as_str(), kept.raised))
+            .collect();
+        assert_eq!(
+            questions,
+            vec![("m-5", None), ("m-6", Some(Raised::CoordinatorSilent))]
+        );
+        let kept = memory.waiting[0].clone();
+        assert_eq!((kept.run.as_str(), kept.worker.as_str()), ("run-1", "w-2"));
+        // Its worker sits at another term in the new window.
+        let live = seat(true, false);
+        let back = taken_up(kept, live.clone(), 12).expect("the kept report still asks");
+        assert_eq!(back.report.term, 12);
+        assert_eq!(back.prompt, prompt(false));
+        assert_eq!(back.signature, signature(&prompt(false)));
+        assert!(matches!(&back.filed, Filing::Filed(question) if question == "m-5"));
+        let after = |standing: &Standing, now_ms: i64| {
+            step(
+                &back.prompt,
+                standing,
+                back.passed,
+                Some(&live),
+                back.raised.is_some(),
+                back.filed_ms,
+                now_ms,
+            )
+        };
+        // The coordinator's answer goes into the picker...
+        assert_eq!(
+            after(&Standing::Answered("2".to_string()), NOW + 60_000),
+            Step::Answer(vec![AskSelection {
+                indices: vec![1],
+                other: String::new(),
+            }])
+        );
+        // ...and with none, the ten minutes count from the asking, not from
+        // the restart.
+        assert_eq!(
+            after(&Standing::Waiting, NOW + COORDINATOR_ANSWER_WAIT_MS - 1),
+            Step::Wait
+        );
+        assert_eq!(
+            after(&Standing::Waiting, NOW + COORDINATOR_ANSWER_WAIT_MS),
+            Step::Raise(Raised::CoordinatorSilent)
+        );
+        // The same questions are the same bytes: nothing is written again.
+        let mut again = memory.written.clone();
+        write_kept(
+            &path,
+            &kept_of(&HashMap::new(), &memory.waiting),
+            &mut again,
+        )
+        .unwrap();
+        assert_eq!(again, memory.written);
+    }
+
+    #[test]
+    fn a_file_that_is_missing_or_unreadable_carries_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join(crate::app_paths::artifact_file::WORKER_QUESTIONS);
+        let mut nothing = read_kept(&path);
+        assert!(nothing.waiting.is_empty());
+        // Nothing carried and nothing written before: no file appears.
+        write_kept(&path, &[], &mut nothing.written).unwrap();
+        assert!(!path.exists());
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(read_kept(&path).waiting.is_empty());
+        // A kept report that asks nothing is not taken up.
+        let mut said = asking_report(3);
+        said.ask_prompt = None;
+        let kept = Kept {
+            run: "run-1".to_string(),
+            worker: "w-2".to_string(),
+            question: "m-5".to_string(),
+            filed_ms: NOW,
+            raised: None,
+            report: said,
+            worktree: None,
+            seated_ms: None,
+        };
+        assert!(taken_up(kept, seat(true, false), 4).is_none());
     }
 
     #[test]
