@@ -3463,7 +3463,17 @@ function worktreeFinderShut() {
 let paletteFailureNote = null;
 function sayPaletteFailure(words, error) {
   if (paletteFailureNote?.isConnected) return;
-  paletteFailureNote = toast(words, "halt", { tip: String(error?.message ?? error) });
+  paletteFailureNote = toast(words, "halt", { tip: paletteFailureTip(error) });
+}
+
+/* What the hover keeps of a refusal: its own words. A command refuses with a
+ * string and the page's own failures are Errors, but a refusal made of an
+ * object carries its words in `message` or `code`, and the object itself
+ * spelled out is 「[object Object]」 (t-82875). One with no words leaves no
+ * hover. */
+function paletteFailureTip(error) {
+  if (error === null || typeof error !== "object") return String(error ?? "");
+  return String(error.message ?? error.code ?? "");
 }
 
 const FINDERS = {

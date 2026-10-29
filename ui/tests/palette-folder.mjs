@@ -17,6 +17,7 @@
 //   5. 카탈로그를 못 읽은 창(읽기 실패)에서는 백엔드가 서 있는 폴더의 행이 없다 — 누르면 거절 토스트였다.
 //      찾기 창은 그 대신 「프로젝트 목록을 아직 못 읽었다」는 사람 말 한 줄을 보인다.
 //   6. 카탈로그를 읽은 창에서도 워크트리 묶음은 카탈로그가 아는 경로만 세운다.
+//   7. 객체로 거절된 실패의 hover는 그 객체의 말(message·code)이다 — 「[object Object]」가 아니다.
 // 합성 데이터만 쓴다(/Users/dev).
 import { PRIMARY_EVENT } from "./test-platform.mjs";
 import { openWindowTestPage } from "./window-boot.mjs";
@@ -176,6 +177,8 @@ export async function testPaletteFolder(browser, origin, ok) {
     const said = await toasts(page);
     ok("a failed file search is said in a sentence of the person's, not as 「[object Object]」",
       said.length === 1 && raw(said[0].text).length === 0 && said[0].text.length > 0, JSON.stringify(said));
+    ok("an object refusal's hover is its own word, not 「[object Object]」",
+      said[0]?.tip === "search.failed", JSON.stringify(said));
     ok("the failing-search scene raised no page error", faults.length === 0, faults.join(" | "));
     await page.close();
   }
