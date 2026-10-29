@@ -247,6 +247,7 @@ fn workflow(value: &Value) -> NormalizedWorkflow {
 
 fn fast_opts() -> RunOptions<'static> {
     RunOptions {
+        graph: None,
         phase_timeout: Duration::from_millis(50),
         cancel: None,
         cache: None,
@@ -1490,6 +1491,7 @@ fn cancel_before_first_phase_spawns_nothing() {
     }));
     let flag = AtomicBool::new(true);
     let opts = RunOptions {
+        graph: None,
         phase_timeout: Duration::from_millis(50),
         cancel: Some(&flag),
         cache: None,
@@ -1552,6 +1554,7 @@ fn cancel_between_phases_stops_after_current() {
         Outcome::Completed("done".to_string())
     });
     let opts = RunOptions {
+        graph: None,
         phase_timeout: Duration::from_millis(50),
         cancel: Some(&flag),
         cache: None,
@@ -1602,6 +1605,7 @@ fn worktree_isolation_injects_per_agent_cwd() {
     let mut backend = MockBackend::echo("r");
     let provider = TempWorktreeProvider::new();
     let opts = RunOptions {
+        graph: None,
         phase_timeout: Duration::from_millis(50),
         cancel: None,
         cache: None,
@@ -1641,6 +1645,7 @@ fn apply_none_isolates_but_does_not_merge_back() {
     let mut backend = MockBackend::echo("r");
     let provider = TempWorktreeProvider::new();
     let opts = RunOptions {
+        graph: None,
         phase_timeout: Duration::from_millis(50),
         cancel: None,
         cache: None,
@@ -1678,6 +1683,7 @@ fn apply_sequential_merges_each_agent_change_set() {
     let mut backend = MockBackend::echo("r");
     let provider = TempWorktreeProvider::new();
     let opts = RunOptions {
+        graph: None,
         phase_timeout: Duration::from_millis(50),
         cancel: None,
         cache: None,
@@ -1738,6 +1744,7 @@ fn fix_until_verified_repair_agents_honor_worktree_isolation_and_apply() {
     });
     let provider = TempWorktreeProvider::new();
     let opts = RunOptions {
+        graph: None,
         phase_timeout: Duration::from_millis(50),
         cancel: None,
         cache: None,
@@ -1784,6 +1791,7 @@ fn apply_sequential_records_conflict_note_and_keeps_going() {
     // The first guard's patch is "PATCH:edit-0"; fail exactly that one.
     let provider = TempWorktreeProvider::with_conflict(Some("edit-0"));
     let opts = RunOptions {
+        graph: None,
         phase_timeout: Duration::from_millis(50),
         cancel: None,
         cache: None,
@@ -2769,6 +2777,7 @@ fn pipeline_route_modifies_worktree_and_verifies() {
         i32::from(n == 0) // red on round 1, green on round 2 (the TDD loop)
     };
     let opts = RunOptions {
+        graph: None,
         phase_timeout: Duration::from_millis(50),
         cancel: None,
         cache: None,
@@ -3045,6 +3054,7 @@ fn pipeline_cancel_between_stages_stops_after_current() {
         Outcome::Completed("done".to_string())
     });
     let opts = RunOptions {
+        graph: None,
         phase_timeout: Duration::from_millis(50),
         cancel: Some(&flag),
         cache: None,
@@ -3232,6 +3242,7 @@ fn cached_phase(id: &str, result: &str) -> PhaseReport {
 
 fn opts_with_cache(cache: &dyn WorkflowCache) -> RunOptions<'_> {
     RunOptions {
+        graph: None,
         phase_timeout: Duration::from_millis(50),
         cancel: None,
         cache: Some(cache),

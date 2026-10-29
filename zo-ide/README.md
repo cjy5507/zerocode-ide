@@ -47,6 +47,28 @@ zo decision-shadow eval --labels labels.jsonl   # probe·typed 판단을 사람�
 슬래시: `/model /effort /fast /permissions /compact /status /new /new-project /resume /goal /loop /clear /help /exit`.
 권한 모드 `read-only | workspace-write | danger-full-access`(Claude Code 별칭 수용), effort `off…max|ultra|smart`.
 
+## 자동화 그래프
+
+`Workflow`의 `mode: "graph"`는 `agent`·`check`·`branch`·`dream`·`end` 노드를 실행한다.
+[검증·수리 예제](examples/workflows/verified-repair-graph.json)를 `WorkflowValidate`로 확인한 뒤
+`Workflow`에 `{"spec": <예제>, "input": "작업 내용", "runId": "repair-1"}` 형태로 전달한다.
+검증 명령은 해당 프로젝트의 명령으로 바꾸고, 실제 변경을 검증하는 조건을 사용한다.
+
+- `agent`는 기존 `phases`의 에이전트를 실행한다. 단일 실행의 `{item}`에는 직전 노드 결과가 들어온다.
+- `check`는 실제 명령 종료 코드로 성공·실패 경로를 고른다. `branch`는 지정한 노드 결과의 JSON pointer 값을 비교한다.
+- 순환 경로는 `graph.max_steps`로 제한한다. 에이전트 수·출력 토큰·비용 예산도 재개 시 이어진다.
+- `dream`은 마지막 작업 이후 통과한 검증 명령을 기존 Dreamer에 기록한다. 서로 다른 세션에서 반복·검증된 교훈만 기억으로 승격한다. 모델 재학습이나 자동 스킬 활성화는 하지 않는다.
+
+같은 `runId`로 다시 호출하면 완료한 노드를 재실행하지 않는다. `resumeFromRunId`도 같은 경로이며,
+그래프 재개는 원래 명세와 입력이 같아야 한다. 새 작업이나 다음 예약 실행에는 새 `runId`를 사용한다.
+실행 중 프로세스가 죽어 결과가 불확실하면 `blocked`로 멈춘다. 외부 효과를 확인하기 전에는 새 실행을 만들지 않는다.
+재개 후 dreaming에는 새 검증이 필요하며, 완료 기록 재생의 검증 표시는 과거 실행을 뜻한다.
+창의 원장 워커를 쓰는 그래프는 전용 작업 워크트리에서 실행하고, 참조하는 phase에 `worktree: false`를 명시한다.
+별도 원장 워커 워크트리의 자동 병합은 지원하지 않으므로 해당 조합은 실행 전에 거부한다.
+네이티브 격리 실행은 `isolation: "worktree"`와 `apply: "sequential"`을 함께 써야 한다.
+
+체크포인트는 기존 workflow 저장소의 `<runId>.graph.json`에 남고, `WorkflowRuns`로 단계 기록을 확인한다.
+
 ## 구조
 ```
 zo-ide/

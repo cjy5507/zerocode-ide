@@ -154,6 +154,7 @@ fn phase_and_units(count: usize) -> (NormalizedPhase, Vec<SpawnUnit>) {
 
 fn opts() -> RunOptions<'static> {
     RunOptions {
+        graph: None,
         phase_timeout: Duration::from_secs(60), cancel: None, cache: None,
         semantic_cache: None, worktree: None, progress: None, check: None,
     }

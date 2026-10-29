@@ -22,6 +22,9 @@ use crate::ToolError;
 
 use super::auto_lanes::infer_auto_lane_fanout;
 
+mod graph;
+pub(crate) use graph::{GraphEndStatus, GraphNode, GraphSpec};
+
 // ---------------------------------------------------------------------------
 // External representation (deserialized from the model's JSON)
 // ---------------------------------------------------------------------------
@@ -38,6 +41,8 @@ pub(crate) struct WorkflowSpec {
     pub mode: WorkflowMode,
     #[serde(default)]
     pub phases: Vec<PhaseSpec>,
+    #[serde(default)]
+    pub graph: Option<GraphSpec>,
     #[serde(default)]
     pub budget: Option<BudgetSpec>,
     #[serde(default)]
@@ -193,6 +198,7 @@ pub(crate) enum WorkflowMode {
     #[default]
     Phases,
     Pipeline,
+    Graph,
 }
 
 /// Per-workflow isolation. `worktree` runs each agent in its own git worktree
@@ -319,6 +325,7 @@ pub(crate) struct NormalizedWorkflow {
     pub description: String,
     pub mode: WorkflowMode,
     pub phases: Vec<NormalizedPhase>,
+    pub graph: Option<GraphSpec>,
     pub max_agents: Option<usize>,
     /// Cumulative sub-agent output-token cap (`budget.max_output_tokens`).
     /// `None` leaves output unbounded.
@@ -379,13 +386,28 @@ impl WorkflowSpec {
 impl WorkflowSpec {
     /// Check the semantic invariants and normalize into a [`NormalizedWorkflow`].
     /// Each failure names the offending phase and field.
+    #[expect(clippy::too_many_lines, reason = "validate the complete authored workflow before any execution")]
     pub(crate) fn validate(self) -> Result<NormalizedWorkflow, ToolError> {
         // (1) name + phases non-empty.
         if self.name.trim().is_empty() {
             return Err(invalid("workflow `name` must not be empty"));
         }
-        if self.phases.is_empty() {
+        if self.phases.is_empty() && self.mode != WorkflowMode::Graph {
             return Err(invalid("workflow must declare at least one phase"));
+        }
+        match (self.mode, self.graph.as_ref()) {
+            (WorkflowMode::Graph, None) => {
+                return Err(invalid("graph mode requires a `graph` definition"));
+            }
+            (WorkflowMode::Graph, Some(_)) => {
+                if self.synthesize.is_some() || self.judge.is_some() {
+                    return Err(invalid(
+                        "graph mode does not support top-level `synthesize` or `judge`; declare agent nodes instead",
+                    ));
+                }
+            }
+            (_, Some(_)) => return Err(invalid("`graph` requires `mode: \"graph\"`")),
+            (_, None) => {}
         }
         // (6a) budget caps, when present, must be greater than 0 — a 0 cap would
         // forbid all work, which is never what the author meant.
@@ -464,6 +486,15 @@ impl WorkflowSpec {
                 "pipeline mode does not support `repeat` or `fix_until_verified` (use `mode: \"phases\"`)",
             ));
         }
+        if self.mode == WorkflowMode::Graph
+            && phases
+                .iter()
+                .any(|phase| phase.repeat.is_some() || phase.repair_loop.is_some())
+        {
+            return Err(invalid(
+                "graph mode uses explicit cycles and check nodes; phase `repeat` and `fix_until_verified` are not supported",
+            ));
+        }
 
         // (9) merge-back only means something when agents are isolated — there is
         // no separate change-set to apply back without a per-agent worktree.
@@ -471,6 +502,10 @@ impl WorkflowSpec {
             return Err(invalid(
                 "`apply: \"sequential\"` requires `isolation: \"worktree\"`",
             ));
+        }
+
+        if let Some(graph) = &self.graph {
+            graph.validate(&phases)?;
         }
 
         let synthesize = self.synthesize.map(normalize_synthesize).transpose()?;
@@ -491,6 +526,7 @@ impl WorkflowSpec {
             description: self.description,
             mode: self.mode,
             phases,
+            graph: self.graph,
             max_agents,
             max_output_tokens,
             max_cost_usd,

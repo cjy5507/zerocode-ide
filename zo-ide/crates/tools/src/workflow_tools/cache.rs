@@ -234,7 +234,7 @@ pub(crate) fn compute_run_id(spec: &Value, input: &Value) -> String {
 /// `to_string` is NOT canonical: two semantically identical specs could
 /// hash to different run ids. Sorting here keeps the id order-independent
 /// regardless of that feature.
-fn canonical_json(value: &Value) -> String {
+pub(super) fn canonical_json(value: &Value) -> String {
     match value {
         Value::Object(map) => {
             let mut entries: Vec<(&String, &Value)> = map.iter().collect();
