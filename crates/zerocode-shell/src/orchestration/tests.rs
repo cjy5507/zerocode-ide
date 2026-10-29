@@ -29105,6 +29105,136 @@ fn a_write_and_the_reads_after_it_hold_the_ledger_once() {
     );
 }
 
+/// `beats` beats from `first`, a second apart; answers the revision they
+/// left and the whole-ledger walks they made.
+fn beats_and_their_walks(
+    host: &dyn Host,
+    first: i64,
+    beats: i64,
+) -> (u64, zerocode_core::orchestration::LedgerWork) {
+    let before = zerocode_core::orchestration::ledger_work();
+    for beat in 0..beats {
+        tick(host, &[], first + beat * 1_000);
+    }
+    let revision = super::runtime()
+        .expect("this window's runtime")
+        .actor
+        .view()
+        .expect("the image")
+        .revision();
+    (
+        revision,
+        zerocode_core::orchestration::ledger_work().since(before),
+    )
+}
+
+/// A window with a worker at work beats without copying the ledger
+/// (t-81273 r2). Every beat sees the worker's pane and tells the actor so;
+/// the beat used to tell it while still holding the image it had read, and
+/// the actor took its ledger to write before finding nothing to clear — one
+/// whole copy a second for as long as one worker lived. Now the beat lets
+/// its reads go before it asks, and the actor asks itself whether anything
+/// would move before it takes the ledger: a beat that changes nothing copies
+/// nothing, even while a reader elsewhere holds the revision it was handed,
+/// and a beat that does change something writes in place.
+#[test]
+fn a_beat_beside_a_live_worker_copies_the_ledger_only_for_a_write_a_reader_holds() {
+    const LEADER_TERM: u32 = 83_100;
+    const WORKER_TERM: u32 = 83_101;
+    const BEATS: i64 = 10;
+    let (_window, _store) = PrivateWindow::boot();
+    let _beat = one_beat_at_a_time();
+    let _reconcile = ReconcilePanesHere::begin();
+    let team = format!("team-cow-beat-{LEADER_TERM}");
+    let _carrying = a_worker_carrying_work(&team, LEADER_TERM, WORKER_TERM);
+    let host = Counting::default();
+    host.set_pane(WORKER_TERM, true);
+    let began = clock();
+    let (settled, _) = beats_and_their_walks(&host, began, 1);
+
+    let (idle, walked) = beats_and_their_walks(&host, began + 1_000, BEATS);
+    assert_eq!(idle, settled, "{BEATS} beats on a seen pane moved the ledger");
+    assert_eq!(
+        walked.clones, 0,
+        "{BEATS} beats beside a live worker copied the ledger {walked:?}"
+    );
+
+    let reader = super::runtime()
+        .expect("this window's runtime")
+        .actor
+        .view()
+        .expect("a reader's image");
+    let (held, walked) = beats_and_their_walks(&host, began + 11_000, BEATS);
+    drop(reader);
+    assert_eq!(held, settled, "{BEATS} beats on a seen pane moved the ledger");
+    assert_eq!(
+        walked.clones, 0,
+        "{BEATS} beats that wrote nothing copied the ledger a reader held {walked:?}"
+    );
+
+    // The pane goes for five beats and comes back: two writes, in place.
+    host.set_pane(WORKER_TERM, false);
+    let confirmations = i64::from(MISSING_PANE_CONFIRMATIONS);
+    let (missing, gone) = beats_and_their_walks(&host, began + 21_000, confirmations);
+    host.set_pane(WORKER_TERM, true);
+    let (seen, back) =
+        beats_and_their_walks(&host, began + 21_000 + confirmations * 1_000, 1);
+    assert!(
+        settled < missing && missing < seen,
+        "the missing pane and its return were not two writes: {settled} -> {missing} -> {seen}"
+    );
+    assert_eq!(
+        (gone.clones, back.clones),
+        (0, 0),
+        "a beat copied the ledger it was writing with no reader holding it"
+    );
+}
+
+/// The same for a worker gone quiet (t-81273 r2): the stall sweep tells the
+/// actor its quiet workers every beat, and only the first is news. The
+/// beats after it change nothing and copy nothing, whoever holds an image.
+#[test]
+fn a_quiet_workers_beats_after_its_notice_copy_nothing() {
+    use crate::quota_wall::tests::{CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION};
+    const BEATS: i64 = 10;
+    let stood = StoppedWorker::stand(96_700, "", Vec::new());
+    stood.stops_on(
+        &[CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION],
+        stood.began + 9_000,
+    );
+    let (told, _) = beats_and_their_walks(&stood.host, stood.began + 10_000, 1);
+    assert_eq!(
+        stood.news("went_quiet", stood.began + 10_001).len(),
+        1,
+        "the stop was not a silence"
+    );
+
+    let (idle, walked) = beats_and_their_walks(&stood.host, stood.began + 11_000, BEATS);
+    assert_eq!(idle, told, "{BEATS} beats on a told silence moved the ledger");
+    assert_eq!(
+        walked.clones, 0,
+        "{BEATS} beats on a told silence copied the ledger {walked:?}"
+    );
+
+    let reader = super::runtime()
+        .expect("this window's runtime")
+        .actor
+        .view()
+        .expect("a reader's image");
+    let (held, walked) = beats_and_their_walks(&stood.host, stood.began + 21_000, BEATS);
+    drop(reader);
+    assert_eq!(held, told, "{BEATS} beats on a told silence moved the ledger");
+    assert_eq!(
+        walked.clones, 0,
+        "{BEATS} beats that wrote nothing copied the ledger a reader held {walked:?}"
+    );
+    assert_eq!(
+        stood.news("went_quiet", stood.began + 31_001).len(),
+        1,
+        "one silence was told twice"
+    );
+}
+
 /// The idle beat's price on the ledger above, before and after a change:
 /// the cost of one beat (p50/p95) and the CPU the process spends per minute
 /// of beats — the window beats once a second, so a minute is 60 of them.
