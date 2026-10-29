@@ -1346,7 +1346,48 @@ pub(crate) fn saved_probe_key(
     })
 }
 
-pub async fn test_router_endpoint(probe: &RouterProbe<'_>) -> Result<Vec<DiscoveredModel>, String> {
+/// Why a router probe got no model list (t-77116), as the window's own
+/// request saw it — never read off any words, the server's least of all: a
+/// 503 whose body quotes `HTTP 401` as an example is a server that is down,
+/// not a key that is wrong. `kind` is `transport` or `timeout` (no answer),
+/// `http` with the answer's `status`, `schema` (an answer that is no model
+/// list) or `failed` (no request was sent). `message` is the sentence the
+/// page shows, every value the probe sent masked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProbeFailure {
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    pub message: String,
+}
+
+impl ProbeFailure {
+    fn of(kind: &'static str, message: String) -> Self {
+        Self {
+            kind,
+            status: None,
+            message,
+        }
+    }
+}
+
+/// A probe that was never sent — a key it could not read, settings that
+/// moved under it — in the backend's own sentence.
+impl From<String> for ProbeFailure {
+    fn from(message: String) -> Self {
+        Self::of("failed", message)
+    }
+}
+
+impl std::fmt::Display for ProbeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+pub async fn test_router_endpoint(
+    probe: &RouterProbe<'_>,
+) -> Result<Vec<DiscoveredModel>, ProbeFailure> {
     let RouterProbe {
         base_url,
         auth,
@@ -1370,7 +1411,7 @@ pub async fn test_router_endpoint(probe: &RouterProbe<'_>) -> Result<Vec<Discove
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| ProbeFailure::from(err.to_string()))?;
 
     let mut req = client.get(&url);
 
@@ -1397,30 +1438,40 @@ pub async fn test_router_endpoint(probe: &RouterProbe<'_>) -> Result<Vec<Discove
     }
 
     let sent = sent_values(key, &auth.header, headers);
-    let res = req
-        .send()
-        .await
-        .map_err(|err| without_sent(&format!("연결 실패: {err}"), &sent))?;
+    let res = req.send().await.map_err(|err| {
+        ProbeFailure::of(
+            if err.is_timeout() {
+                "timeout"
+            } else {
+                "transport"
+            },
+            without_sent(&format!("연결 실패: {err}"), &sent),
+        )
+    })?;
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
         let detail = refusal_detail(&body).unwrap_or_else(|| body.trim().to_string());
         let detail = without_sent(&detail, &sent);
-        return Err(if detail.is_empty() {
-            format!("서버 오류: HTTP {status}")
-        } else {
-            format!("서버 오류: HTTP {status} — {detail}")
+        return Err(ProbeFailure {
+            kind: "http",
+            status: Some(status.as_u16()),
+            message: if detail.is_empty() {
+                format!("서버 오류: HTTP {status}")
+            } else {
+                format!("서버 오류: HTTP {status} — {detail}")
+            },
         });
     }
 
     let body: serde_json::Value = res
         .json()
         .await
-        .map_err(|err| format!("응답 파싱 실패: {err}"))?;
+        .map_err(|err| ProbeFailure::of("schema", format!("응답 파싱 실패: {err}")))?;
     let data_arr = body
         .get("data")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| "응답에 data 배열이 없습니다".to_string())?;
+        .ok_or_else(|| ProbeFailure::of("schema", "응답에 data 배열이 없습니다".to_string()))?;
 
     let id_key = id_field.unwrap_or("id");
     let ctx_key = context_field.unwrap_or("context_length");
@@ -1594,11 +1645,9 @@ mod tests {
         assert_eq!(refusal_detail(r#"{"error":{"code":401}}"#), None);
     }
 
-    /// A loopback gateway that refuses every probe 401 and says back the
-    /// `Authorization` value it was sent — inside a JSON message on
-    /// `/models`, as a bare body on `/raw`, and on `/token` only the token
-    /// behind the scheme — with a key-shaped word beside it.
-    fn echoing_gateway() -> String {
+    /// A loopback gateway answering every request with the status line and
+    /// the body `answer` gives for its head.
+    fn gateway(answer: impl Fn(&str) -> (&'static str, String) + Send + 'static) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -1614,36 +1663,107 @@ mod tests {
                         Ok(read) => bytes.extend_from_slice(&buffer[..read]),
                     }
                 }
-                let head = String::from_utf8_lossy(&bytes).into_owned();
-                let sent = head
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("authorization")
-                            .then(|| value.trim().to_string())
-                    })
-                    .unwrap_or_default();
-                let sent = if head.starts_with("GET /token") {
-                    sent.split_once(' ')
-                        .map_or(sent.as_str(), |(_, token)| token)
-                        .to_string()
-                } else {
-                    sent
-                };
-                let echoed = format!("invalid token {sent} near fixtureShapedWord000111222333");
-                let body = if head.starts_with("GET /raw") {
-                    echoed
-                } else {
-                    serde_json::json!({"error": {"message": echoed}}).to_string()
-                };
+                let (status, body) = answer(&String::from_utf8_lossy(&bytes));
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 );
             }
         });
         format!("http://{addr}")
+    }
+
+    /// A loopback gateway that refuses every probe 401 and says back the
+    /// `Authorization` value it was sent — inside a JSON message on
+    /// `/models`, as a bare body on `/raw`, and on `/token` only the token
+    /// behind the scheme — with a key-shaped word beside it.
+    fn echoing_gateway() -> String {
+        gateway(|head| {
+            let sent = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("authorization")
+                        .then(|| value.trim().to_string())
+                })
+                .unwrap_or_default();
+            let sent = if head.starts_with("GET /token") {
+                sent.split_once(' ')
+                    .map_or(sent.as_str(), |(_, token)| token)
+                    .to_string()
+            } else {
+                sent
+            };
+            let echoed = format!("invalid token {sent} near fixtureShapedWord000111222333");
+            let body = if head.starts_with("GET /raw") {
+                echoed
+            } else {
+                serde_json::json!({"error": {"message": echoed}}).to_string()
+            };
+            ("401 Unauthorized", body)
+        })
+    }
+
+    /// t-77116: a refusal is told by the answer's status, never by the words
+    /// of its body. A 503 whose body quotes `HTTP 401` as an example is a
+    /// server that is down — its words still reach the page's fold; no
+    /// answer at all is transport; an answer that is no model list is
+    /// schema. Before, the page ran a pattern over the whole sentence, and
+    /// the 503 read as a wrong key.
+    #[tokio::test]
+    async fn a_refusal_is_told_by_its_status_never_by_the_words_of_its_body() {
+        let auth = RouterAuth {
+            header: "Authorization".to_string(),
+            scheme: Some("Bearer".to_string()),
+        };
+        let probe = |base: &str| {
+            let base = base.to_string();
+            let auth = auth.clone();
+            async move {
+                test_router_endpoint(&RouterProbe {
+                    base_url: &base,
+                    auth: &auth,
+                    key: None,
+                    models_path: None,
+                    id_field: None,
+                    context_field: None,
+                    client_fingerprint: None,
+                    headers: None,
+                })
+                .await
+            }
+        };
+        let busy = gateway(|_| {
+            (
+                "503 Service Unavailable",
+                serde_json::json!({"error": {"message": "upstream busy (e.g. HTTP 401 when the key is wrong)"}})
+                    .to_string(),
+            )
+        });
+        let refusal = probe(&busy).await.expect_err("a 503 is a refusal");
+        assert_eq!((refusal.kind, refusal.status), ("http", Some(503)));
+        assert!(
+            refusal.message.contains("HTTP 503") && refusal.message.contains("HTTP 401"),
+            "the server's words are gone from the fold: {}",
+            refusal.message
+        );
+
+        let gone = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            format!("http://{}", listener.local_addr().expect("addr"))
+        };
+        let refusal = probe(&gone).await.expect_err("nobody answers");
+        assert_eq!((refusal.kind, refusal.status), ("transport", None));
+
+        let listless = gateway(|_| ("200 OK", serde_json::json!({"models": []}).to_string()));
+        let refusal = probe(&listless).await.expect_err("no model list");
+        assert_eq!((refusal.kind, refusal.status), ("schema", None));
+        assert_eq!(
+            serde_json::to_value(&refusal).expect("json"),
+            serde_json::json!({"kind": "schema", "message": refusal.message}),
+            "the page reads the kind and the status by name"
+        );
     }
 
     /// A refusal that says the key back (t-76028 F1): the words the probe
@@ -1670,6 +1790,12 @@ mod tests {
             })
             .await
             .expect_err("a 401 is a refusal");
+            assert_eq!(
+                (refusal.kind, refusal.status),
+                ("http", Some(401)),
+                "{path}: the status stays, as a number"
+            );
+            let refusal = refusal.message;
             assert!(refusal.contains("HTTP 401"), "{path}: the status stays");
             assert!(
                 refusal.contains("invalid token"),
@@ -1718,7 +1844,8 @@ mod tests {
                     headers,
                 })
                 .await
-                .expect_err("a 401 is a refusal");
+                .expect_err("a 401 is a refusal")
+                .message;
                 assert!(refusal.contains("HTTP 401"), "{path}: the status stays");
                 assert!(
                     refusal.contains("invalid token"),

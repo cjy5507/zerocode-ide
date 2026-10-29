@@ -198,7 +198,8 @@ fn a_plain_text_secret_is_named_and_its_value_said_nowhere() {
     assert_eq!(
         notice,
         Some(SecretNotice {
-            names: vec![NAME.to_string()]
+            names: vec![NAME.to_string()],
+            ..SecretNotice::default()
         })
     );
     assert_eq!(bench.calls(), vec![list_call()]);
@@ -563,6 +564,123 @@ fn a_settings_path_that_is_a_link_is_neither_named_nor_read() {
     let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(reason(&outcome), Some("file_swapped"));
     nothing_kept(&bench, &keys, &outcome);
+}
+
+/// A settings file laid by stow or home-manager: its own name is a link to
+/// the person's dotfiles, every folder above it a folder of its own.
+fn linked_by_stow(bench: &Bench) -> PathBuf {
+    let dotfiles = bench.dir.path().join("dotfiles");
+    std::fs::create_dir(&dotfiles).expect("dotfiles");
+    let target = dotfiles.join("zo-settings.json");
+    std::fs::rename(bench.settings(), &target).expect("move into dotfiles");
+    std::os::unix::fs::symlink(&target, bench.settings()).expect("link");
+    target
+}
+
+/// t-77216: zo reads a settings file whose own name is a link through to
+/// its target when the target passes its checks (t-78117), and says so on
+/// the row (`via_link`). The line names what zo read there, beside the file
+/// the link stands on — and the window moves none of it: its move refuses a
+/// link before a byte is read. A row zo read through a link at any other
+/// path, or one claiming a link where the settings file is a plain one, is
+/// not named. Before, the link dropped the file out of the line with nothing
+/// said.
+#[test]
+fn a_settings_file_linked_by_stow_names_what_zo_read_through_it_and_moves_none() {
+    let bench = Bench::new();
+    let target = linked_by_stow(&bench);
+    let row = |file: &Path| {
+        serde_json::json!({
+            "file": file,
+            "path": ["mcpServers", "fixture-server", "env", NAME],
+            "name": NAME,
+            "via_link": target,
+        })
+    };
+    bench.answer(
+        "list",
+        &serde_json::json!({"literals": [row(&bench.settings())], "skipped": []}).to_string(),
+        0,
+    );
+    let shown = notice(&bench.zo(), &bench.file());
+    assert_eq!(
+        shown,
+        Some(SecretNotice {
+            linked: vec![NAME.to_string()],
+            linked_to: Some(target.display().to_string()),
+            ..SecretNotice::default()
+        })
+    );
+    said_nowhere(&bench, &[serde_json::to_string(&shown).expect("json")]);
+    let keys = HeldKeys::default();
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert_eq!(reason(&outcome), Some("file_swapped"));
+    nothing_kept(&bench, &keys, &outcome);
+
+    // At another path, it is not the person's file the line speaks of.
+    let other = bench.dir.path().join("other.json");
+    bench.answer(
+        "list",
+        &serde_json::json!({"literals": [row(&other)]}).to_string(),
+        0,
+    );
+    assert_eq!(notice(&bench.zo(), &bench.file()), None);
+
+    // A plain settings file is pinned and read by the window itself: a row
+    // claiming a link there is not taken on zo's word.
+    let plain = Bench::new();
+    plain.answer(
+        "list",
+        &serde_json::json!({"literals": [{
+            "file": plain.settings(),
+            "path": ["mcpServers", "fixture-server", "env", NAME],
+            "name": NAME,
+            "via_link": target,
+        }]})
+        .to_string(),
+        0,
+    );
+    assert_eq!(notice(&plain.zo(), &plain.file()), None);
+}
+
+/// t-77216: a settings file zo did not read — its link's target another
+/// user's, writable by others, gone, in the workspace, unreadable — is said
+/// with zo's word for why (t-78117's five), which the page turns into its
+/// own sentence, and zo's sentence for a word the page does not know. A
+/// file outside the person's folder, or a row without a word, is left out.
+#[test]
+fn a_settings_file_zo_did_not_read_is_said_with_its_word_for_why() {
+    let bench = Bench::new();
+    linked_by_stow(&bench);
+    let skipped = |file: &Path, reason: &str| serde_json::json!({"file": file, "reason": reason, "why": "fixture: the link's target is writable by others"});
+    bench.answer(
+        "list",
+        &serde_json::json!({
+            "literals": [],
+            "skipped": [
+                skipped(&bench.settings(), "link_target_writable_by_others"),
+                skipped(Path::new("/elsewhere/settings.json"), "unreadable"),
+                skipped(&bench.settings(), "Not A Word"),
+                {"file": bench.settings(), "why": "fixture: no word"},
+            ],
+        })
+        .to_string(),
+        0,
+    );
+    assert_eq!(
+        notice(&bench.zo(), &bench.file()),
+        Some(SecretNotice {
+            skipped: vec![Skipped {
+                file: bench.settings().display().to_string(),
+                reason: "link_target_writable_by_others".to_string(),
+                why: "fixture: the link's target is writable by others".to_string(),
+            }],
+            ..SecretNotice::default()
+        })
+    );
+    // An older zo says nothing of what it skipped: nothing to show.
+    bench.answer("list", r#"{"literals":[]}"#, 0);
+    assert_eq!(notice(&bench.zo(), &bench.file()), None);
 }
 
 #[test]

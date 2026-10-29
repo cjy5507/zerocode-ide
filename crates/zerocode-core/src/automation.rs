@@ -604,6 +604,13 @@ pub struct MissedRecord {
     /// The earliest of them. The row's `scheduled_for_epoch_minutes` is the
     /// latest, the one that fences the gap.
     pub first_epoch_minutes: i64,
+    /// The earliest's instant, in UTC milliseconds (t-78091): said by the
+    /// backend, which knows the offset that night, so the page does not count
+    /// back from the row's own date across a daylight-saving change. A row
+    /// written before this was kept has none, and the page counts back as
+    /// it did; an older build ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_at_epoch_ms: Option<i64>,
 }
 
 /// One gap's unrun occurrences, as the scheduler counted them.
@@ -1760,6 +1767,7 @@ mod tests {
             missed: Some(MissedRecord {
                 count: 1,
                 first_epoch_minutes: nth,
+                first_at_epoch_ms: None,
             }),
             launch: None,
             ..ran("a1", nth)
@@ -1799,6 +1807,7 @@ mod tests {
             missed: Some(MissedRecord {
                 count: 3,
                 first_epoch_minutes: 7,
+                first_at_epoch_ms: None,
             }),
             ..ran("a1", 9)
         };

@@ -31,7 +31,10 @@ const { listen: listenToBackend } = window.__TAURI__.event;
  *    for the rest of the flow it started, when the flow carries its hand;
  *  - `none` anywhere else: after an await that left the event behind, a
  *    timer, a backend event. A flow that awaits before its person-only
- *    command carries the hand it started with (`flowHand`);
+ *    command carries the hand it started with (`flowHand`); and an event
+ *    the page itself sets off in a later step — the text `execCommand`
+ *    inserts, which the browser marks trusted whoever asked — is the hand
+ *    that step carries (`asHand`, t-75676);
  *  - `program`, asked for by name, for the one road no hand starts and the
  *    window still runs a person-only command on: the update clock's quiet
  *    download.
@@ -43,27 +46,45 @@ const PERSON_MOVES = [
   "touchstart", "touchend", "keydown", "keyup",
 ];
 let agentPressing = false;
+// The hand a step runs under, for the events the page sets off in it
+// (`asHand`); `null` outside one.
+let carriedHand = null;
 // The person's own event the browser is dispatching, if one is: a page's
 // `click()` inside it (Enter pressing a button) is still the person's.
 let personEvent = null;
 // The last click the page saw, whoever made it, with its hand: a checkbox's
 // change is fired after that click's dispatch, and answers it.
 let lastClick = null;
+// A label's own click() forwards a click to its control, and the browser
+// marks that click trusted whoever clicked the label (t-75676): it, and the
+// change it flips, are the label click's hand. Held until the click() that
+// set it off returns.
+let labelForward = null;
+let forwardedClick = null;
 
-for (const kind of PERSON_MOVES) {
-  window.addEventListener(kind, (event) => {
-    if (event.isTrusted && !agentPressing) personEvent = event;
-  }, true);
-}
+// Before the person's moves are read: a forwarded click is none of theirs.
 window.addEventListener("click", (event) => {
+  forwardedClick = labelForward?.control === event.target ? { event, hand: labelForward.hand } : null;
+  labelForward = null;
+  const label = event.target instanceof Element ? event.target.closest("label") : null;
+  if (!event.isTrusted && label?.control && !label.control.contains(event.target)) {
+    labelForward = { control: label.control, hand: handNow() };
+    queueMicrotask(() => { labelForward = null; });
+  }
   lastClick = { target: event.target, hand: handNow() };
 }, true);
+for (const kind of PERSON_MOVES) {
+  window.addEventListener(kind, (event) => {
+    if (event.isTrusted && !agentPressing && forwardedClick?.event !== event) personEvent = event;
+  }, true);
+}
 
 /* Whether a trusted event is the person's own move: a pointer, a touch, a
- * key, or text typed, pasted or dropped (an InputEvent — the input a
- * checkbox's click() fires is a plain Event). */
+ * key, a paste — the page cannot set one off — or text typed, pasted or
+ * dropped (an InputEvent — the input a checkbox's click() fires is a plain
+ * Event). */
 function personMove(event) {
-  return PERSON_MOVES.includes(event.type) || event instanceof InputEvent;
+  return PERSON_MOVES.includes(event.type) || event.type === "paste" || event instanceof InputEvent;
 }
 
 /* One key, one press (t-75153, R7b). A held Enter or Space repeats, and each
@@ -90,8 +111,10 @@ window.addEventListener("keydown", stopRepeatedControlPress, true);
 /* The hand of the event the page is answering right now. */
 function handNow() {
   if (agentPressing) return "agent";
+  if (carriedHand !== null) return carriedHand;
   const event = window.event;
   if (!event) return "none";
+  if (forwardedClick !== null && forwardedClick.event === event) return forwardedClick.hand;
   if (event.isTrusted && personMove(event)) return "person";
   const flipped = event.target;
   if (event.isTrusted && (event.type === "change" || event.type === "input")
@@ -111,6 +134,21 @@ function flowHand(started) {
   const now = handNow();
   if (started === "agent" || now === "agent") return "agent";
   return now === "person" ? "person" : started;
+}
+
+/* `step` runs with `hand` as the hand of every event the page sets off in it
+ * (t-75676): a later step of a flow that inserts text by `execCommand` — the
+ * paste the person started, or a road no hand did — answers the input event
+ * the browser marks trusted with the hand the flow carries, not as the
+ * person's typing. */
+function asHand(hand, step) {
+  const outer = carriedHand;
+  carriedHand = hand;
+  try {
+    return step();
+  } finally {
+    carriedHand = outer;
+  }
 }
 
 /* An agent's press: `press` runs as the agent's, and the flow it starts

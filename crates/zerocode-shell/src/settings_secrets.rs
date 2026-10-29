@@ -335,11 +335,14 @@ fn give_up(child: &mut Child) {
 }
 
 /// One plain-text cell zo's listing named: the file as zo spelled it (and is
-/// handed back), the keys down to the cell, and the name it is to refer to.
+/// handed back), the keys down to the cell, the name it is to refer to, and
+/// — for a settings file whose own name is a link zo read through
+/// (t-77216, zo's t-78117) — the file the link stands on.
 struct Literal {
     file: String,
     path: Vec<String>,
     name: String,
+    via_link: Option<String>,
 }
 
 impl Literal {
@@ -355,6 +358,10 @@ impl Literal {
             .map(|key| key.as_str().map(str::to_string))
             .collect::<Option<Vec<_>>>()?;
         let name = row.get("name")?.as_str()?;
+        let via_link = match row.get("via_link") {
+            None | Some(Value::Null) => None,
+            Some(target) => Some(target.as_str().filter(|at| Path::new(at).is_absolute())?),
+        };
         let [top, server, env, last] = path.as_slice() else {
             return None;
         };
@@ -368,6 +375,7 @@ impl Literal {
             file: file.to_string(),
             path,
             name: name.to_string(),
+            via_link: via_link.map(str::to_string),
         })
     }
 }
@@ -380,6 +388,41 @@ fn is_name(name: &str) -> bool {
         .next()
         .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
         && chars.all(|rest| rest.is_ascii_alphanumeric() || rest == '_')
+}
+
+/// The most of zo's own sentence about a file it did not read that the page
+/// is handed, in characters.
+const SKIPPED_WHY_CHARS: usize = 300;
+
+/// A person's settings file zo did not read (t-77216, zo's t-78117): the
+/// file as zo's listing saw it, zo's word for why — the page picks its own
+/// sentence for a word it knows — and zo's own sentence, said for a word it
+/// does not. zo never read the file, so neither carries a value of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Skipped {
+    pub file: String,
+    pub reason: String,
+    pub why: String,
+}
+
+impl Skipped {
+    /// One row: an absolute file and a word of lower-case letters and `_`;
+    /// any other row is left out.
+    fn of(row: &Value) -> Option<Self> {
+        let file = row.get("file")?.as_str()?;
+        let reason = row.get("reason")?.as_str()?;
+        let why = row.get("why").and_then(Value::as_str).unwrap_or_default();
+        (Path::new(file).is_absolute()
+            && !reason.is_empty()
+            && reason
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_'))
+        .then(|| Self {
+            file: file.to_string(),
+            reason: reason.to_string(),
+            why: why.chars().take(SKIPPED_WHY_CHARS).collect(),
+        })
+    }
 }
 
 /// Whether zo's `file` is the person's settings file the window pinned: its
@@ -426,6 +469,20 @@ impl SettingsFile {
     /// r4).
     #[cfg(unix)]
     fn open(&self) -> std::io::Result<((u64, u64), File)> {
+        let (folder, name) = self.holding_folder()?;
+        // Not blocking: a pipe put at the path is not waited on.
+        let file = open_at(&folder, name, libc::O_NONBLOCK)?;
+        let meta = file.metadata()?;
+        if !meta.file_type().is_file() || !one_name(&meta) {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        Ok((identity(&folder.metadata()?), file))
+    }
+
+    /// The folder holding the file, opened from the root a folder at a time
+    /// without following a link, and the file's own name in it.
+    #[cfg(unix)]
+    fn holding_folder(&self) -> std::io::Result<(File, &std::ffi::OsStr)> {
         use std::os::unix::fs::OpenOptionsExt;
         let names = self
             .path
@@ -443,13 +500,29 @@ impl SettingsFile {
         for below in folders {
             folder = open_at(&folder, below, libc::O_DIRECTORY)?;
         }
-        // Not blocking: a pipe put at the path is not waited on.
-        let file = open_at(&folder, name, libc::O_NONBLOCK)?;
-        let meta = file.metadata()?;
-        if !meta.file_type().is_file() || !one_name(&meta) {
-            return Err(std::io::ErrorKind::InvalidInput.into());
-        }
-        Ok((identity(&folder.metadata()?), file))
+        Ok((folder, *name))
+    }
+
+    /// Whether the file's own name is a link, every folder above it down
+    /// from the root a folder of its own (t-77216): the settings file stow
+    /// or home-manager lays, which zo reads through its link and the window
+    /// never does. A folder on the way that is a link is no settings file
+    /// of the person's at all.
+    #[cfg(unix)]
+    fn ends_in_a_link(&self) -> bool {
+        let Ok((folder, name)) = self.holding_folder() else {
+            return false;
+        };
+        matches!(
+            open_at(&folder, name, libc::O_NONBLOCK),
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP)
+        )
+    }
+
+    /// Elsewhere no notice is drawn at all (no keychain, [`ZoDoor`]).
+    #[cfg(not(unix))]
+    fn ends_in_a_link(&self) -> bool {
+        false
     }
 
     /// Elsewhere each name on the way is looked at for a link, then the file
@@ -593,10 +666,21 @@ impl Drop for Moving {
 }
 
 /// What the settings show: the names of the secrets written as plain text,
-/// each once — never a value, a piece of one or its length.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// each once — never a value, a piece of one or its length. When the
+/// settings file's own name is a link zo read through (t-77216), the names
+/// it read there are `linked`, beside the file the link stands on: the
+/// window moves none of them, and the person edits that file. The settings
+/// files zo did not read are `skipped`, each with zo's word for why.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SecretNotice {
     pub names: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub linked: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linked_to: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<Skipped>,
 }
 
 /// One cell moved: the name it now refers to and zo's backup of the file.
@@ -633,11 +717,13 @@ pub fn keychain_service(name: &str) -> String {
     format!("{SERVICE_KEYCHAIN_SERVICE_PREFIX}{name}")
 }
 
-/// The plain-text cells of the person's settings file zo lists; `None` when
-/// zo does not answer the door, says the move is not supported here (no
+/// zo's listing whole: every plain-text cell it names, and the person's
+/// settings files it did not read (t-77216) — an older zo says nothing of
+/// those, and a skipped row of another shape is left out. `None` when zo
+/// does not answer the door, says the move is not supported here (no
 /// keychain to refer to, as on Windows; a zo that does not say is taken to
-/// support it), or answers a row of another shape.
-fn literals(zo: &ZoDoor, settings: &SettingsFile, pinned: Pinned) -> Option<Vec<Literal>> {
+/// support it), or answers a cell of another shape.
+fn listing(zo: &ZoDoor) -> Option<(Vec<Literal>, Vec<Skipped>)> {
     let (code, said) = zo.ask(&["settings", "secrets", "--json"])?;
     if code != 0 || said.get("supported") == Some(&Value::Bool(false)) {
         return None;
@@ -648,26 +734,75 @@ fn literals(zo: &ZoDoor, settings: &SettingsFile, pinned: Pinned) -> Option<Vec<
         .iter()
         .map(Literal::of)
         .collect::<Option<Vec<_>>>()?;
+    let skipped = said
+        .get("skipped")
+        .and_then(Value::as_array)
+        .map(|rows| rows.iter().filter_map(Skipped::of).collect())
+        .unwrap_or_default();
+    Some((rows, skipped))
+}
+
+/// The plain-text cells of the person's settings file zo lists that the
+/// window may move: never one zo read through a link (t-77216). `None` as
+/// for [`listing`].
+fn literals(zo: &ZoDoor, settings: &SettingsFile, pinned: Pinned) -> Option<Vec<Literal>> {
+    let (rows, _) = listing(zo)?;
     Some(
         rows.into_iter()
-            .filter(|literal| is_settings_file(&literal.file, settings, pinned))
+            .filter(|literal| {
+                literal.via_link.is_none() && is_settings_file(&literal.file, settings, pinned)
+            })
             .collect(),
     )
 }
 
 /// The names the settings line shows, or `None` when there is nothing to show
 /// — none written as plain text, or a zo that does not know the door.
+///
+/// A settings file whose own name is a link (stow, home-manager) is zo's to
+/// read through when its target passes zo's checks (t-77216, zo's t-78117):
+/// the names zo read there are said as `linked`, at the window's own path
+/// only, and a file zo did not read is said with zo's word for why. Before,
+/// such a file dropped out of the line with nothing said. Any other file
+/// the window cannot pin — a folder on the way that is a link, a second
+/// name — still shows nothing, and zo is not asked.
 pub(crate) fn notice(zo: &ZoDoor, settings: &SettingsFile) -> Option<SecretNotice> {
     if !zo.supported {
         return None;
     }
-    let mut names: Vec<String> = Vec::new();
-    for literal in literals(zo, settings, Pinned::at(settings)?)? {
-        if !names.contains(&literal.name) {
+    let pinned = Pinned::at(settings);
+    let linked_here = pinned.is_none() && settings.ends_in_a_link();
+    if pinned.is_none() && !linked_here {
+        return None;
+    }
+    let (rows, skipped) = listing(zo)?;
+    let mut notice = SecretNotice::default();
+    for literal in rows {
+        let (names, ours) = match literal.via_link {
+            Some(target) => {
+                let ours = linked_here && Path::new(&literal.file) == settings.path;
+                if ours && notice.linked_to.is_none() {
+                    notice.linked_to = Some(target);
+                }
+                (&mut notice.linked, ours)
+            }
+            None => (
+                &mut notice.names,
+                pinned.is_some_and(|pinned| is_settings_file(&literal.file, settings, pinned)),
+            ),
+        };
+        if ours && !names.contains(&literal.name) {
             names.push(literal.name);
         }
     }
-    (!names.is_empty()).then_some(SecretNotice { names })
+    notice.skipped = skipped
+        .into_iter()
+        .filter(|row| {
+            SettingsFile::under(settings.root.clone(), PathBuf::from(&row.file)).is_some()
+        })
+        .collect();
+    (!notice.names.is_empty() || !notice.linked.is_empty() || !notice.skipped.is_empty())
+        .then_some(notice)
 }
 
 /// Every plain-text cell of the person's settings file, moved in the order zo

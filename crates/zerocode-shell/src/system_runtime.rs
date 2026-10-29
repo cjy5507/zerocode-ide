@@ -1038,8 +1038,8 @@ pub(super) fn exit_notices(
 /// found no saved leaf naming (t-76489): written into its workspace as a tab
 /// of its own, put into the leaf that held its shell or the one that named
 /// it from a pane gone, or — named once more as the run's — placed nowhere,
-/// or lost with a write that was cancelled or failed. Nothing for one a leaf
-/// already named. Only the run, the pane, the agent, the conversation's
+/// left to a tab no pane stood for (t-77269), or lost with a write that was
+/// cancelled or failed. Nothing for one a leaf already named. Only the run, the pane, the agent, the conversation's
 /// first characters, the workspace and the write's error: nothing anybody
 /// wrote.
 pub(super) fn coordinator_filed_line(
@@ -1082,12 +1082,16 @@ pub(super) fn coordinator_filed_line(
         pane_layout::Filed::Unplaced => Some(format!(
             "{head} was in no saved tab and named no workspace — the next window cannot bring it back on its own"
         )),
+        pane_layout::Filed::Asleep => Some(format!(
+            "{head} was named only by a saved tab no pane stood for, and named no workspace — the next window brings it back only when that tab's workspace is opened"
+        )),
     }
 }
 
 /// The run's own letter for a coordinator conversation the next window will
-/// not bring back on its own (t-76489) — placed nowhere, or its write
-/// cancelled or failed — as its body and its receipt: its coordinator card
+/// not bring back on its own (t-76489) — placed nowhere, left to a tab no
+/// pane stood for (t-77269), or its write cancelled or failed — as its body
+/// and its receipt: its coordinator card
 /// says so, with the way back. The run, the agent and the conversation's id
 /// — nothing anybody wrote, not the error's words either. Nothing for one
 /// the file holds.
@@ -1110,6 +1114,10 @@ pub(super) fn coordinator_lost_letter(
         (pane_layout::Filed::Unplaced, Written::Done) => (
             "in no saved tab and no workspace it could name",
             "exit-unplaced",
+        ),
+        (pane_layout::Filed::Asleep, Written::Done) => (
+            "named only by a saved tab no pane stood for, and no workspace it could name",
+            "exit-asleep",
         ),
         (_, Written::Done) => return None,
     };

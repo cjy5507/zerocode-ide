@@ -936,12 +936,89 @@ fn returning_from_a_connection_restores_the_previous_managed_selection() {
     .expect("restore");
     let restored: Value =
         serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
-    assert_eq!(restored["smart"], before_smart);
+    // The selection is restored as it was; the connection's own format is
+    // no part of it and stays, for the next time it is picked (t-76211).
+    let mut selection = restored["smart"].clone();
+    let remembered = selection
+        .as_object_mut()
+        .expect("smart")
+        .remove("judgmentFormats");
+    assert_eq!(selection, before_smart);
+    assert_eq!(remembered, Some(json!({"restore-fixture": "system_one"})));
     assert_eq!(selected_provider(&path).expect("managed again"), selected);
     assert!(
         restored["smart"]
             .get(connections::JUDGMENT_CONNECTION_KEY)
             .is_none()
+    );
+}
+
+/// t-76211: a connection's judgment format is kept with the settings it was
+/// applied in, by the connection. Judgment applied on A in System One, then
+/// moved to B: a fresh read of the settings — what a restarted window sees —
+/// still says A was used in System One, while a connection never applied to
+/// judgment says nothing. Before, only the connection judgment named now
+/// carried a format, and the page asked A in OpenAI JSON after a restart.
+#[test]
+fn a_connections_judgment_format_outlives_judgment_moving_elsewhere_and_a_restart() {
+    use judgment_provider::connections::Reference;
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    let (selected, _) = selected_with_managed_model(&path);
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", preflight_answer().to_string(), 0);
+    let mut root: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    let row = |name: &str, id: &str| json!({"name":name,"base_url":endpoint.base(),"auth_env":"ZEROCODE_ROUTER_FORMAT_FIXTURE_KEY","requires_auth":false,"models":["fixture-model"],"connection":{"id":id,"generation":0}});
+    root["providers"] = json!([
+        row("First", "format-a"),
+        row("Second", "format-b"),
+        row("Third", "format-c")
+    ]);
+    std::fs::write(&path, root.to_string()).expect("write");
+    let reference = |id: &str| Reference {
+        id: id.to_string(),
+        generation: 0,
+        model: "fixture-model".to_string(),
+        protocol: Protocol::SystemOne,
+    };
+    crate::model_connection_store::apply_judgment(
+        &path,
+        &reference("format-a"),
+        &selected.identity(),
+        &HeldKeys::default(),
+        &settings_wire(&path),
+    )
+    .expect("apply A");
+    let on_a = selected_provider(&path).expect("A judges");
+    crate::model_connection_store::apply_judgment(
+        &path,
+        &reference("format-b"),
+        &on_a.identity(),
+        &HeldKeys::default(),
+        &settings_wire(&path),
+    )
+    .expect("apply B");
+
+    let catalog =
+        crate::model_connection_store::catalog(&path, &HeldKeys::default()).expect("catalog");
+    let format = |id: &str| {
+        catalog
+            .connections
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.judgment_format)
+            .expect("the row")
+    };
+    assert_eq!(
+        format("format-a"),
+        Some(Protocol::SystemOne),
+        "A's format was forgotten when judgment moved to B"
+    );
+    assert_eq!(format("format-b"), Some(Protocol::SystemOne));
+    assert_eq!(
+        format("format-c"),
+        None,
+        "a connection never applied has no format"
     );
 }
 

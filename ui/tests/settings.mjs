@@ -2974,6 +2974,10 @@ class StatefulBackend {
         if (args.role === "judgment") {
           if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
           smart.previousJudgmentSelection ??= { judgmentProvider: smart.judgmentProvider ?? null };
+          // `remember_formats`: the format of the connection judgment left and
+          // of the one it is on now, kept by id (t-76211).
+          const left = smart.judgmentConnection;
+          smart.judgmentFormats = { ...(smart.judgmentFormats ?? {}), ...(left ? { [left.id]: left.protocol } : {}), [args.reference.id]: args.reference.protocol };
           smart.judgmentConnection = clone(args.reference);
           smart.judgmentProvider = { kind: "remote", protocol: args.reference.protocol, baseUrl: row.provider.base_url, model: args.reference.model, requiresAuth: row.provider.requires_auth };
           // Another window edits the connection's address right after this
@@ -3006,11 +3010,12 @@ class StatefulBackend {
         return this.modelConnections();
       }
       case "test_router_connection": {
-        /* `api_routers::test_router_endpoint` hands a refusal back as one
-           string: its own prefix, the status, and whatever the server put in
-           the body — which is the shape the pane has to keep off its first
-           line. */
-        if (this.routerProbeRefusal) throw new Error(this.routerProbeRefusal);
+        /* `api_routers::test_router_endpoint` hands a refusal back as its
+           own reading of the request (`ProbeFailure`, t-77116): a kind, the
+           status, and a sentence — its own prefix, the status, and whatever
+           the server put in the body, which is the shape the pane has to
+           keep off its first line. */
+        if (this.routerProbeRefusal) throw clone(this.routerProbeRefusal);
         if (this.routerProbeHold) await this.routerProbeHold;
         const answered = this.routerProbeAnswers?.[args.baseUrl];
         if (answered) return answered.map((id) => ({ id, context_length: null }));
@@ -3589,6 +3594,7 @@ class StatefulBackend {
           keyAvailable: !provider.requires_auth || this.keychain.has(`dev.zerocode.router.${provider.auth_env}`),
           legacyKey: provider.requires_auth && !this.keychain.has(`dev.zerocode.router.${provider.auth_env}`) && this.legacyKeys.has(id),
           uses: [["coding",coding],["judgment",judgment]].filter(([, ref]) => ref?.id === id).map(([role]) => role),
+          judgmentFormat: smart.judgmentFormats?.[id] ?? (judgment?.id === id ? judgment.protocol : null),
         };
       }), coding, judgment, codingModel: this.zoSettings.model ?? null,
       activeProviderIdentity: this.typesafeSettings().providerIdentity, legacyKeyPresent: false,
@@ -10040,7 +10046,27 @@ await test("a completed run shows the agent's result and opens its evidence fold
     runs: 1,
   };
   backend.automations = [job];
+  // t-78091: three nights missed, the first an hour away from where counting
+  // back from the row's own date in local minutes lands — the backend dated
+  // it across a daylight-saving change.
+  const missedFirstAt = 1_756_600_000_000 - 2 * 86_400_000 + 3_600_000;
   backend.automationRuns = [{
+    id: "1756600000000-missed-auto-qa",
+    automation_id: "auto-qa",
+    scheduled_for_epoch_minutes: 28_996_000,
+    at_epoch_ms: 1_756_600_000_000,
+    root: BOOT_BASE.project_root,
+    term: 0,
+    made_worktree: null,
+    skipped: null,
+    failure: null,
+    missed: { count: 3, first_epoch_minutes: 28_996_000 - 2 * 1440, first_at_epoch_ms: missedFirstAt },
+    ended_at_epoch_ms: null,
+    exit_code: null,
+    completed_at_epoch_ms: null,
+    result: null,
+    evidence_dir: null,
+  }, {
     id: "1756700000000-5",
     automation_id: "auto-qa",
     scheduled_for_epoch_minutes: 28_998_560,
@@ -10110,6 +10136,13 @@ await test("a completed run shows the agent's result and opens its evidence fold
     // the verdict: a run whose agent reported done is painted completed.
     const completed = pageA.locator("#auto-runs-list .auto-run-completed");
     assertEqual(await completed.count(), 2, "runs whose agents reported done were not painted as completed");
+    // The first missed night is the instant the backend dated (t-78091), not
+    // the row's date counted back in local minutes.
+    assertEqual(
+      await pageA.locator("#auto-runs-list .auto-run-missed").getAttribute("data-tip"),
+      await pageA.evaluate((at) => t("auto.runMissedFirst", "처음 놓친 회차 {{at}}", { at: runClock(at) }), missedFirstAt),
+      "the first missed night was counted back from the row instead of read",
+    );
     // Newest first: the proven run leads, the one that only said so follows.
     const state = completed.nth(0);
     const unproven = completed.nth(1);
@@ -15009,13 +15042,19 @@ await test("모델 연결: 네 묶음이 실제 상태로 서고, 로그인 줄�
   await modelScenePictures("connections");
   backend.keychain.set("dev.zerocode.router.ZEROCODE_ROUTER_GATEWAY_KEY", "[합성-키]");
   await pageA.evaluate(() => modelConnectionsController.refresh());
-  backend.routerProbeRefusal = "서버 오류: HTTP 401 — fixture refused";
+  backend.routerProbeRefusal = { kind: "http", status: 401, message: "서버 오류: HTTP 401 — fixture refused" };
   await key.locator("[data-connection-check]").click();
   await pageA.waitForFunction(() => modelConnectionsController.checks.get("gateway")?.state === "badkey");
   assertEqual(await key.locator(".model-state").getAttribute("data-model-state"), "badkey", "a 401 is not said as a wrong key");
-  backend.routerProbeRefusal = "연결 실패: error sending request";
+  backend.routerProbeRefusal = { kind: "transport", message: "연결 실패: error sending request" };
   await key.locator("[data-connection-check]").click();
   await pageA.waitForFunction(() => modelConnectionsController.checks.get("gateway")?.state === "down");
+  // t-77116: a 503 whose body quotes `HTTP 401` as an example is a server that
+  // is down — the kind is read off the status, never off the body's words.
+  backend.routerProbeRefusal = { kind: "http", status: 503, message: "서버 오류: HTTP 503 Service Unavailable — upstream busy (e.g. HTTP 401 when the key is wrong)" };
+  await key.locator("[data-connection-check]").click();
+  await pageA.waitForFunction(() => ["down", "badkey"].includes(modelConnectionsController.checks.get("gateway")?.state) && modelConnectionsController.checks.get("gateway")?.raw?.includes("HTTP 503"));
+  assertEqual(await key.locator(".model-state").getAttribute("data-model-state"), "down", "a 503 whose body quotes HTTP 401 was said as a wrong key");
   return "login · API key · this computer · Jev, each row's state from its answer";
 }));
 
@@ -15059,13 +15098,13 @@ await test("② API 키: 연결 확인이 「연결됨 — 모델 N개」로 답
   await pageA.click('[data-model-choice="key"]');
   await pageA.selectOption("#model-setup-service", "fixture-router");
   await pageA.fill("#model-setup-key", "[합성-키]");
-  backend.routerProbeRefusal = "서버 오류: HTTP 401 — fixture refused";
+  backend.routerProbeRefusal = { kind: "http", status: 401, message: "서버 오류: HTTP 401 — fixture refused" };
   await pageA.click("#model-setup-check");
   await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "fail");
   const badkey = await pageA.evaluate(() => t("settings.models.state.badkey", "키가 맞지 않습니다"));
   assert((await pageA.locator("#model-setup").textContent()).includes(badkey), "a 401 is not said as a wrong key");
   assertEqual(backend.zoSettings.providers.length, 0, "a refused check saved the connection");
-  backend.routerProbeRefusal = "연결 실패: error sending request for url";
+  backend.routerProbeRefusal = { kind: "transport", message: "연결 실패: error sending request for url" };
   await pageA.fill("#model-setup-key", "[합성-키]");
   await pageA.click("#model-setup-check");
   await pageA.waitForFunction(() => modelConnectionsController.setup?.failure === "down");
@@ -15438,7 +15477,7 @@ await test("검수 F1: 연결 확인의 거절에 키가 되돌아와도 화면�
     await pageA.fill("#model-setup-key", key);
     // An answer that carries the key back whole: whatever road brought it,
     // the screen keeps it off every line it draws.
-    backend.routerProbeRefusal = `서버 오류: HTTP 401 Unauthorized — invalid token Bearer ${key}`;
+    backend.routerProbeRefusal = { kind: "http", status: 401, message: `서버 오류: HTTP 401 Unauthorized — invalid token Bearer ${key}` };
     const at = backend.calls.length;
     await pageA.click("#model-setup-check");
     await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "fail");
@@ -15524,7 +15563,8 @@ await test("검수 F3: 판단 형식은 연결이 쓰던 그대로 — System On
   assertEqual(openApply, openCheck, "the apply wrote another reference than the one checked");
   // The everyday list names no format; 「고급」 changes one, and the same
   // model can then be applied in it.
-  assert(!(await pageA.locator('[data-model-role="judgment"]').innerText()).match(/OpenAI JSON|System One/), "the everyday list speaks a format");
+  const everyday = await pageA.locator('[data-model-role="judgment"]').innerText();
+  assert(!everyday.match(/OpenAI JSON|System One/), "the everyday list speaks a format", everyday);
   await pageA.evaluate(() => { document.getElementById("model-advanced").open = true; document.getElementById("model-advanced-format-fold").open = true; });
   const format = pageA.locator('#model-advanced [data-judgment-format="judge"]');
   assertEqual(await format.inputValue(), "openai_json", "「고급」 does not show the connection's format");
@@ -15569,7 +15609,18 @@ await test("재검수 R3: System One 연결 → 다른 연결 → 원래 연결�
   assertEqual(benchCheck, { id: "bench", generation: 4, model: "bench-a", protocol: "system_one" }, "coming back to Bench asked it in another format");
   assertEqual(benchApply, benchCheck, "the apply wrote another reference than the one checked");
   assertEqual(await pageA.locator('#model-advanced [data-judgment-format="judge"]').inputValue(), "openai_json", "Judge's format changed with nobody touching 「고급」");
-  return "Bench system_one → Judge openai_json → (screen reopened) Bench system_one for check+apply";
+
+  // t-76211: judgment on Judge again, then the window starts over — its
+  // memory of formats gone, the connections read afresh from the settings.
+  await pickAndApply("judge", "judge-model");
+  await pageA.evaluate(() => {
+    for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.formats, modelConnectionsController.usedFormats]) held.clear();
+    return refreshApiRouters();
+  });
+  await renderSettled(pageA);
+  const [restartedCheck] = await pickAndApply("bench", "bench-a");
+  assertEqual(restartedCheck.protocol, "system_one", "after a restart Bench was asked in another format than it was last applied in");
+  return "Bench system_one → Judge openai_json → (screen reopened) Bench system_one for check+apply → Judge → (restart) Bench system_one";
 }));
 
 await test("검수 F4: 멈춘 이 컴퓨터 모델을 고르면 요청 없이 「실행 뒤 확인합니다」라고만 말하고, 확인 전에는 통과라고 하지 않는다 (t-76028)", async () => withModelScene(() => {
@@ -15778,7 +15829,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
 
     // ---- 3. a refusal says ours first and folds the server's away --------
     const body = '서버 오류: HTTP 401 Unauthorized — 无效的令牌 (request id: 20260918103344512345678901234)';
-    backend.routerProbeRefusal = body;
+    backend.routerProbeRefusal = { kind: "http", status: 401, message: body };
     try {
       await pageA.fill("#router-base-url-input", origin);
       await pageA.fill("#router-name-input", "refused");

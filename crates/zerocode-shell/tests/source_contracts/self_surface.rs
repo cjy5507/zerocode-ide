@@ -205,6 +205,42 @@ fn a_command_that_cannot_be_taken_back_is_decided_for() {
     }
 }
 
+/// t-75676: the input event `document.execCommand` sets off is trusted
+/// whoever asked, and a trusted InputEvent reads as the person's typing — so
+/// the page's own text insertion stands only inside `asHand`, answering it
+/// with the hand of the flow that inserts (a paste carries the hand of its
+/// own event). Before, a paste destination called from no person's event
+/// wrote the cookie box as the person's.
+#[test]
+fn the_pages_own_text_insertion_carries_its_flows_hand() {
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
+    let mut inserting = 0;
+    for entry in std::fs::read_dir(&ui).expect("ui reads") {
+        let path = entry.expect("ui entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("js") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("ui file reads");
+        for line in source
+            .lines()
+            .filter(|line| line.contains("document.execCommand("))
+        {
+            inserting += 1;
+            assert!(
+                line.contains("asHand("),
+                "{}: execCommand outside asHand: {line}",
+                path.display()
+            );
+        }
+    }
+    assert!(inserting > 0, "the paste's insertion left the page");
+    let boot = ui_file("shell-boot.js");
+    assert!(
+        block_after(&boot, "function handNow() {").contains("carriedHand"),
+        "the hand a step carries is not the hand of the events it sets off"
+    );
+}
+
 /// The page presses with the document's own calls: no synthetic key or
 /// pointer event, no focus move, no clipboard.
 #[test]

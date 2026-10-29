@@ -14,6 +14,13 @@ const JUDGMENT_KEYS: [&str; 3] = [
     local_judgment::MANAGED_MODEL_KEY,
 ];
 
+/// The format each saved connection was last applied to judgment in, by its
+/// id (t-76211), kept in zo's `smart` beside the role keys. Not a part of
+/// the judgment selection: clearing judgment leaves it, so a connection
+/// picked again is asked in its own format after a restart, not in OpenAI
+/// JSON. Only the window reads it.
+const JUDGMENT_FORMATS_KEY: &str = "judgmentFormats";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -34,6 +41,10 @@ pub struct ConnectionRow {
     /// that the row itself cannot reach — what the pane offers to move.
     pub legacy_key: bool,
     pub uses: Vec<Role>,
+    /// The format judgment last used this connection in (t-76211): the one
+    /// applied last, else the judgment reference's own when it names this
+    /// row; `None` for one never applied to judgment.
+    pub judgment_format: Option<judgment_provider::Protocol>,
 }
 
 #[derive(Serialize)]
@@ -58,6 +69,40 @@ fn reference(root: &Value, key: &str) -> Result<Option<Reference>, String> {
             serde_json::from_value(value.clone()).map_err(|_| "provider_settings".to_string())
         })
         .transpose()
+}
+
+/// The format `id` was last applied to judgment in, as [`JUDGMENT_FORMATS_KEY`]
+/// keeps it; a word this build does not know is no format.
+fn remembered_format(root: &Value, id: &str) -> Option<judgment_provider::Protocol> {
+    let held = root.get("smart")?.get(JUDGMENT_FORMATS_KEY)?.get(id)?;
+    serde_json::from_value(held.clone()).ok()
+}
+
+/// Keep each of `references`' formats as its connection's, the last word
+/// for a connection named twice, and only the formats of connections still
+/// saved (`ids`): a deleted row's goes with the next apply.
+fn remember_formats<'a>(
+    smart: &mut Map<String, Value>,
+    ids: &[String],
+    references: impl IntoIterator<Item = &'a Reference>,
+) -> Result<(), String> {
+    let formats = smart
+        .entry(JUDGMENT_FORMATS_KEY)
+        .or_insert_with(|| json!({}));
+    if !formats.is_object() {
+        *formats = json!({});
+    }
+    let formats = formats.as_object_mut().ok_or("provider_settings")?;
+    formats.retain(|id, _| ids.contains(id));
+    for reference in references {
+        if ids.contains(&reference.id) {
+            formats.insert(
+                reference.id.clone(),
+                serde_json::to_value(reference.protocol).map_err(|error| error.to_string())?,
+            );
+        }
+    }
+    Ok(())
 }
 
 fn coding_matches(root: &Value, reference: &Reference) -> bool {
@@ -169,6 +214,12 @@ pub fn catalog(path: &Path, keys: &dyn RouterKeys) -> Result<Catalog, String> {
                 .map(|_| role)
         })
         .collect();
+        let judgment_format = remembered_format(&root, &metadata.id).or_else(|| {
+            judgment
+                .as_ref()
+                .filter(|reference| reference.id == metadata.id)
+                .map(|reference| reference.protocol)
+        });
         connections.push(ConnectionRow {
             id: metadata.id,
             generation: metadata.generation,
@@ -178,6 +229,7 @@ pub fn catalog(path: &Path, keys: &dyn RouterKeys) -> Result<Catalog, String> {
             key_available,
             legacy_key,
             uses,
+            judgment_format,
         });
     }
     Ok(Catalog {
@@ -264,7 +316,19 @@ pub fn apply_judgment(
             return Err("settings_changed".to_string());
         }
         persist_identity(document, &reference.id)?;
+        let saved: Vec<String> = document
+            .get("providers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|row| connections::metadata(row).ok().map(|metadata| metadata.id))
+            .collect();
         let smart = smart(document)?;
+        // The connection judgment leaves keeps the format it was used in,
+        // even one applied before the window kept formats (t-76211).
+        let replaced: Option<Reference> = smart
+            .get(connections::JUDGMENT_CONNECTION_KEY)
+            .and_then(|held| serde_json::from_value(held.clone()).ok());
         if !smart.contains_key(connections::JUDGMENT_CONNECTION_KEY) {
             let previous: Map<String, Value> = JUDGMENT_KEYS
                 .iter()
@@ -288,6 +352,7 @@ pub fn apply_judgment(
             connections::JUDGMENT_CONNECTION_KEY.to_string(),
             serde_json::to_value(reference).map_err(|error| error.to_string())?,
         );
+        remember_formats(smart, &saved, replaced.iter().chain([reference]))?;
         smart.remove(local_judgment::MANAGED_MODEL_KEY);
         Ok(())
     })

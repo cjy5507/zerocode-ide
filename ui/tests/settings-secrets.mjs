@@ -96,6 +96,7 @@ const look = () => {
     backupNote: said("settings-secrets-backup-note"),
     where: said("settings-secrets-where"),
     why: said("settings-secrets-why"),
+    linked: said("settings-secrets-linked"),
     move: said("settings-secrets-move"),
     asked: window.__SECRET_CALLS__.filter((call) => call.name === "settings_secret_literals").length,
     moves: window.__SECRET_CALLS__.filter((call) => call.name === "move_settings_secrets"),
@@ -269,6 +270,50 @@ async function stoppedByZo(browser, origin, ok) {
       "a refused move says zo's own reason and that the keychain item was left for the next try",
       seen.shown && seen.why ===
         `zo가 설정 파일의 ${NAMES[0]} 칸을 고치지 않았습니다. zo: ${why} 키체인 항목 ${NAMES[0]}은(는) 그대로 두었습니다 — 다음에 옮길 때 그대로 씁니다.`,
+      JSON.stringify(seen),
+    );
+  });
+}
+
+/* t-77216: a settings file whose own name is a link (stow, home-manager).
+ * The names zo read through it are said with the file the link stands on,
+ * and no move is offered for them; a file zo did not read is said with the
+ * page's sentence for zo's word, and zo's own sentence for a word the page
+ * does not know. Before, the line showed nothing at all. */
+async function linkedSettings(browser, origin, ok) {
+  const target = "/fixture/home/dotfiles/zo-settings.json";
+  const file = "/fixture/home/.zo/settings.json";
+  await scenario(browser, origin, "linked settings", ok, async (page) => {
+    await page.evaluate(([names, target]) => {
+      window.__SECRETS__.listed = { names: [], linked: [names[0]], linkedTo: target };
+    }, [NAMES, target]);
+    await openSettings(page);
+    const seen = await page.evaluate(look);
+    ok(
+      "names zo read through the settings file's link are said with the file it points to, and offer no move",
+      seen.shown && seen.title === "설정 파일에 비밀 1개가 그대로 적혀 있습니다" && seen.move === null &&
+        seen.body === null &&
+        seen.linked === `설정 파일이 링크라 창은 옮기지 않습니다: ${NAMES[0]} — 링크가 가리키는 ${target}에서 직접 고쳐 주세요.`,
+      JSON.stringify(seen),
+    );
+  });
+  await scenario(browser, origin, "skipped settings", ok, async (page) => {
+    const why = "fixture: a word this page does not know";
+    await page.evaluate(([file, why]) => {
+      window.__SECRETS__.listed = {
+        names: [],
+        skipped: [
+          { file, reason: "link_target_writable_by_others", why: "fixture: writable by others" },
+          { file, reason: "a_word_from_a_later_zo", why },
+        ],
+      };
+    }, [file, why]);
+    await openSettings(page);
+    const seen = await page.evaluate(look);
+    ok(
+      "a settings file zo did not read is said with the page's sentence for zo's word, and zo's own for a word it does not know",
+      seen.shown && seen.title === "zo가 읽지 않은 설정 파일이 있습니다" && seen.move === null &&
+        seen.linked === `${file}이(가) 가리키는 파일은 다른 사용자도 고칠 수 있어 zo가 읽지 않았습니다. 그 파일의 그룹·다른 사용자 쓰기 권한을 끄면 읽습니다. zo: ${why}`,
       JSON.stringify(seen),
     );
   });
@@ -454,6 +499,7 @@ export async function testSettingsSecrets(browser, origin, ok) {
   await moved(browser, origin, ok);
   await stoppedDiffers(browser, origin, ok);
   await stoppedByZo(browser, origin, ok);
+  await linkedSettings(browser, origin, ok);
   await stoppedUnlisted(browser, origin, ok);
   await stoppedUnconfirmed(browser, origin, ok);
   await oldZo(browser, origin, ok);

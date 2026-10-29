@@ -17502,6 +17502,46 @@ fn a_reseated_continuation_reports_unknown_delivery_without_claiming_submission(
     }
 }
 
+/// t-68069 (2): a summons whose pane opened in a checkout another worker
+/// still sits in says who, in the answer's own JSON and in one stderr
+/// line — and is not refused: where a pane opens is the coordinator's
+/// choice. Nobody beside it, or an answer that is not an object, leaves
+/// the answer as it was.
+#[test]
+fn a_summons_into_a_neighbours_checkout_says_who_shares_it() {
+    let summoned = || zerocode_core::agent_teams::Reply::ok("{\"workerId\":\"w-2\"}\n");
+    let sharing = vec![(
+        "run-4275".to_string(),
+        "w-1".to_string(),
+        "claude".to_string(),
+    )];
+    let told = super::with_shared_checkout(summoned(), "/wt/main", &sharing);
+    assert_eq!(told.exit_code, 0, "a shared checkout refused the summons");
+    let body: serde_json::Value = serde_json::from_str(&told.stdout).expect("json");
+    assert_eq!(body["workerId"], "w-2");
+    assert_eq!(body["sharedCheckout"]["checkout"], "/wt/main");
+    assert_eq!(
+        body["sharedCheckout"]["workers"],
+        serde_json::json!([{ "run": "run-4275", "workerId": "w-1", "agent": "claude" }])
+    );
+    assert!(
+        told.stderr.contains("w-1 (run-4275)") && told.stderr.contains("--worktree"),
+        "{}",
+        told.stderr
+    );
+
+    assert_eq!(
+        super::with_shared_checkout(summoned(), "/wt/main", &[]),
+        summoned(),
+        "a checkout of its own was told of a neighbour"
+    );
+    let text = zerocode_core::agent_teams::Reply::ok("not json\n");
+    assert_eq!(
+        super::with_shared_checkout(text.clone(), "/wt/main", &sharing),
+        text
+    );
+}
+
 #[test]
 fn an_idle_reseated_worker_reports_no_continuation_submission() {
     let answer = super::continuation_answer(

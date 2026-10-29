@@ -39,7 +39,7 @@ pub(crate) async fn test_router_connection(
     context_field: Option<String>,
     client_fingerprint: Option<String>,
     headers: Option<std::collections::BTreeMap<String, String>>,
-) -> Result<Vec<DiscoveredModel>, String> {
+) -> Result<Vec<DiscoveredModel>, api_routers::ProbeFailure> {
     let key = if key.as_deref().is_none_or(|key| key.trim().is_empty()) {
         if let (Some(id), Some(generation)) = (source_id, expected_generation) {
             let base = base_url.clone();

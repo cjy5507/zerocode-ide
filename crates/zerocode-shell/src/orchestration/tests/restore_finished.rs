@@ -856,7 +856,7 @@ fn a_tab_of_a_coordinator_and_a_zo_beside_it_comes_back_whole() {
             .expect("not leaving");
     assert_eq!(
         doubled,
-        vec!["zo session-".to_string()],
+        vec!["zo 1792758210243-0".to_string()],
         "the dead split's copy"
     );
     crate::pane_layout::rewrite(&file, |layouts| {

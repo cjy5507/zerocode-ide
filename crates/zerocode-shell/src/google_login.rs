@@ -95,10 +95,14 @@ const SEAT_TRIES: u32 = 10;
 const SEAT_WAIT: Duration = Duration::from_millis(50);
 /// How often the waiting road looks at the socket and at the cancel flag.
 const CONSENT_POLL: Duration = Duration::from_millis(100);
-/// How long an accepted connection may stay silent before it is let go — a
-/// browser opens sockets it never sends on (a preconnect), and the redirect
-/// arrives on another. A real redirect's request line comes with its connection.
-const REQUEST_WAIT: Duration = Duration::from_secs(2);
+/// A connection that sends this much without ending its first line is not
+/// bringing the redirect — zo's own bound (`OAUTH_CALLBACK_LINE_LIMIT`).
+const REQUEST_LINE_LIMIT: usize = 8 * 1024;
+/// Connections held at once while none has brought the redirect; one more
+/// lets the oldest go — zo's own bound (`OAUTH_CALLBACK_HELD_LIMIT`).
+const HELD_LIMIT: usize = 32;
+/// How long the browser is given to take the page that ends the sign-in.
+const RESPONSE_WAIT: Duration = Duration::from_secs(2);
 
 /// A refresh is asked for this many seconds before expiry, so a token that
 /// dies mid-request is renewed before the request rather than after it.
@@ -763,29 +767,56 @@ impl Flow {
     }
 
     /// The redirect's authorization code, or `None` when the person cancelled.
+    ///
+    /// zo's design for its own callback (`mcp_oauth::wait_for_callback_on`,
+    /// t-78016): a browser opens connections it sends nothing on yet (a
+    /// preconnect) and may send the redirect on one of them later, so every
+    /// accepted connection is held and read without waiting, and the first
+    /// to bring a whole request line is the redirect. One pass every
+    /// [`CONSENT_POLL`] looks at the cancel flag and the ceiling too: a
+    /// silent connection delays neither. Before, each accepted connection
+    /// was read blocking for up to two seconds — a cancel waited that long,
+    /// and a preconnect that later carried the redirect was let go.
     fn await_code(&self, cancelled: &AtomicBool) -> Result<Option<String>, String> {
         let deadline = Instant::now() + CONSENT_CEILING;
-        let (mut stream, target) = loop {
+        let mut held: Vec<(std::net::TcpStream, Vec<u8>)> = Vec::new();
+        let (mut stream, line) = 'redirect: loop {
             if cancelled.load(Ordering::Relaxed) {
                 return Ok(None);
             }
-            match self.listener.accept() {
-                Ok((mut stream, _)) => {
-                    // A connection that says nothing is not the redirect.
-                    if let Some(target) = request_target(&mut stream) {
-                        break (stream, target);
+            loop {
+                match self.listener.accept() {
+                    // macOS hands an accepted socket the listener's
+                    // non-blocking mode and Linux does not: set it, so no
+                    // read waits.
+                    Ok((stream, _)) => {
+                        if stream.set_nonblocking(true).is_ok() {
+                            if held.len() == HELD_LIMIT {
+                                drop(held.remove(0));
+                            }
+                            held.push((stream, Vec::new()));
+                        }
                     }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => return Err(error.to_string()),
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        return Err("Google 로그인이 시간 안에 끝나지 않았습니다".to_string());
-                    }
-                    std::thread::sleep(CONSENT_POLL);
-                }
-                Err(error) => return Err(error.to_string()),
             }
+            let mut index = 0;
+            while index < held.len() {
+                let (stream, received) = &mut held[index];
+                match read_request_line(stream, received) {
+                    RequestLine::Whole(line) => break 'redirect (held.remove(index).0, line),
+                    RequestLine::Partial => index += 1,
+                    RequestLine::Gone => drop(held.remove(index)),
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err("Google 로그인이 시간 안에 끝나지 않았습니다".to_string());
+            }
+            std::thread::sleep(CONSENT_POLL);
         };
-        let answer = self.attempt.code_of(&target);
+        let target = line.split_whitespace().nth(1).unwrap_or_default();
+        let answer = self.attempt.code_of(target);
         // The browser is answered either way — a hung tab reads as a hung
         // sign-in — and the page never carries the code it just delivered.
         let page = if answer.is_ok() {
@@ -802,46 +833,50 @@ impl Flow {
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
-        let _ = stream.write_all(response.as_bytes());
+        // A browser that never takes the page holds the sign-in no longer
+        // than this.
+        if stream.set_nonblocking(false).is_ok()
+            && stream.set_write_timeout(Some(RESPONSE_WAIT)).is_ok()
+        {
+            let _ = stream.write_all(response.as_bytes());
+        }
         answer.map(Some)
     }
 }
 
-/// The request line's target, read off one accepted connection — or `None`
-/// when it closes or stays silent past [`REQUEST_WAIT`] first.
-///
-/// On macOS an accepted socket inherits the listener's non-blocking mode, and
-/// a read made before the browser's bytes land answers `WouldBlock`, so the
-/// connection is made blocking with a bounded wait. The request line is all
-/// this needs and 8 KiB is more than a redirect's whole header block; a body
-/// is never read.
-fn request_target(stream: &mut std::net::TcpStream) -> Option<String> {
-    stream.set_nonblocking(false).ok()?;
-    stream.set_read_timeout(Some(REQUEST_WAIT)).ok()?;
-    let mut buffer = [0_u8; 8192];
-    let mut filled = 0;
-    while filled < buffer.len() {
-        let read = stream.read(&mut buffer[filled..]).ok()?;
-        if read == 0 {
-            break;
+/// What a held callback connection has brought so far — zo's own reading
+/// (`mcp_oauth::RequestLine`).
+enum RequestLine {
+    /// Its first line is whole.
+    Whole(String),
+    /// Not yet.
+    Partial,
+    /// It closed, broke, or ran past [`REQUEST_LINE_LIMIT`].
+    Gone,
+}
+
+/// Read what `stream` has brought without waiting, and say whether its first
+/// line is whole. The request line is all this needs; a body is never read.
+fn read_request_line(stream: &mut std::net::TcpStream, received: &mut Vec<u8>) -> RequestLine {
+    let mut chunk = [0_u8; 1024];
+    loop {
+        if let Some(end) = received.iter().position(|&byte| byte == b'\n') {
+            let line = String::from_utf8_lossy(&received[..end]);
+            return RequestLine::Whole(line.trim_end_matches('\r').to_string());
         }
-        filled += read;
-        if buffer[..filled].windows(2).any(|pair| pair == b"\r\n") {
-            break;
+        if received.len() > REQUEST_LINE_LIMIT {
+            return RequestLine::Gone;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return RequestLine::Gone,
+            Ok(read) => received.extend_from_slice(&chunk[..read]),
+            Err(error) => match error.kind() {
+                std::io::ErrorKind::WouldBlock => return RequestLine::Partial,
+                std::io::ErrorKind::Interrupted => {}
+                _ => return RequestLine::Gone,
+            },
         }
     }
-    if filled == 0 {
-        return None;
-    }
-    let request = String::from_utf8_lossy(&buffer[..filled]);
-    Some(
-        request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or_default()
-            .to_string(),
-    )
 }
 
 #[cfg(test)]
@@ -1340,6 +1375,90 @@ mod tests {
         assert!(
             page.starts_with("HTTP/1.1 200 OK") && !page.contains("c-1"),
             "{page}"
+        );
+    }
+
+    /// A seat for one test: the flow on a quiet port, its listener not
+    /// blocking, as `begin` lays it.
+    fn quiet_flow() -> (crate::test_host::quiet_ports::QuietPort, Flow) {
+        let (lease, listener) = crate::test_host::quiet_ports::QuietPort::claim(bind_seat);
+        listener
+            .set_nonblocking(true)
+            .expect("the seat waits without blocking");
+        let flow = Flow {
+            attempt: Attempt::new().expect("attempt"),
+            listener,
+        };
+        (lease, flow)
+    }
+
+    /// t-78016, zo's design for its own callback: a browser's preconnect can
+    /// stay silent past any wait and then carry the redirect itself. The
+    /// connection is held, not let go, and the sign-in ends on it. Before,
+    /// a silent connection was read for two seconds and dropped, and the
+    /// redirect it carried later never landed.
+    #[test]
+    fn a_preconnect_that_carries_the_redirect_later_signs_in() {
+        let (lease, flow) = quiet_flow();
+        let port = lease.port();
+        let state = flow.attempt.expected_state.clone();
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let browser = std::thread::spawn(move || {
+            let mut preconnect =
+                std::net::TcpStream::connect(("127.0.0.1", port)).expect("a preconnect");
+            // Past the two seconds a silent connection used to be given.
+            std::thread::sleep(Duration::from_millis(2_500));
+            let _ = write!(
+                preconnect,
+                "GET /oauth-callback?code=c-1&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            );
+            let _ = preconnect.set_read_timeout(Some(Duration::from_secs(60)));
+            let mut page = String::new();
+            let _ = preconnect.read_to_string(&mut page);
+            page
+        });
+        // Only a hang guard: a seat that let the preconnect go waits for a
+        // redirect that never comes.
+        let _guard = {
+            let cancelled = std::sync::Arc::clone(&cancelled);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(15));
+                cancelled.store(true, Ordering::Relaxed);
+            })
+        };
+        let code = flow.await_code(&cancelled);
+        drop(flow);
+        assert_eq!(code, Ok(Some("c-1".to_string())));
+        let page = browser.join().expect("the browser");
+        assert!(page.starts_with("HTTP/1.1 200 OK"), "{page}");
+    }
+
+    /// t-78016: a cancel is taken at the next look, whatever connection is
+    /// open and silent. Before, a silent connection held the seat in a
+    /// blocking read for up to two seconds, and the cancel waited for it.
+    #[test]
+    fn a_cancel_is_taken_at_once_while_a_connection_stays_silent() {
+        let (lease, flow) = quiet_flow();
+        let silent =
+            std::net::TcpStream::connect(("127.0.0.1", lease.port())).expect("a preconnect");
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let pressed = {
+            let cancelled = std::sync::Arc::clone(&cancelled);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                cancelled.store(true, Ordering::Relaxed);
+                Instant::now()
+            })
+        };
+        let code = flow.await_code(&cancelled);
+        let ended = Instant::now();
+        let pressed = pressed.join().expect("the press");
+        drop(silent);
+        assert_eq!(code, Ok(None));
+        assert!(
+            ended.saturating_duration_since(pressed) < Duration::from_secs(1),
+            "the cancel waited {:?} on a silent connection",
+            ended.saturating_duration_since(pressed)
         );
     }
 

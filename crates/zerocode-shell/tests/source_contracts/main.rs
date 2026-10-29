@@ -36558,11 +36558,30 @@ mod tests {
     /// They were placed in column 2 of a one-column grid, which opens an
     /// implicit second column and puts them BESIDE the stage — the opposite
     /// of the folding the rule sets out to do.
+    ///
+    /// The fold is the media block holding the side panels' own rule, found
+    /// by that rule (t-77867). The first `max-width: 900px` block it was
+    /// once read from is a Jira table's, and the contract held nothing.
     #[test]
     fn a_narrow_window_stacks_instead_of_widening() {
         let css = include_str!("../../../../ui/shell.css");
-        let folded = block_after(css, "@media (max-width: 900px) {");
+        let panels = css
+            .find("\n  .threads,\n  .files {")
+            .expect("the side panels' rule in a narrow window");
+        let opens = css[..panels]
+            .rfind("\n@media")
+            .map(|at| at + 1)
+            .expect("the media block it stands in");
+        let folded = block_after(&css[opens..], "@media");
 
+        assert!(
+            folded.contains(".body {")
+                && folded.contains("grid-template-columns: minmax(0, 1fr);")
+                && folded.contains(".threads,\n  .files {")
+                && folded.contains("grid-column: 1;"),
+            "the block read is not the one that folds the panels under the \
+             stage:\n{folded}"
+        );
         assert!(
             !folded.contains("grid-column: 2"),
             "a folded panel is still placed in a column the grid does not \
