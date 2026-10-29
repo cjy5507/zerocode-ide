@@ -165,6 +165,9 @@ pub struct RuntimeFeatureConfig {
     model: Option<String>,
     permission_mode: Option<ResolvedPermissionMode>,
     permission_rules: RuntimePermissionRuleConfig,
+    /// The settings file behind each rule, so a warning about a rule can name
+    /// the file to fix (t-81312).
+    permission_rule_sources: Vec<PermissionRuleSource>,
     sandbox: SandboxConfig,
     /// Extra environment variables declared under settings.json `env`, injected
     /// into every zo-spawned subprocess (bash tool, hooks, powershell). CC
@@ -221,6 +224,7 @@ impl Default for RuntimeFeatureConfig {
             model: None,
             permission_mode: None,
             permission_rules: RuntimePermissionRuleConfig::default(),
+            permission_rule_sources: Vec::new(),
             sandbox: SandboxConfig::default(),
             env: BTreeMap::new(),
             auto_compact_enabled: true,
@@ -366,6 +370,15 @@ pub struct RuntimeHookConfig {
     file_changed: Vec<HookRule>,
     notification: Vec<HookRule>,
     timeout_seconds: Option<u64>,
+}
+
+/// One permission rule as a settings file wrote it: the file, the
+/// `permissions` list, and the rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PermissionRuleSource {
+    path: PathBuf,
+    list: &'static str,
+    rule: String,
 }
 
 /// Raw permission rule lists grouped by allow, deny, and ask behavior.
@@ -828,10 +841,12 @@ impl ConfigLoader {
         // always safe. Written back over the merged arrays after the loop.
         let mut cumulative_deny: Vec<JsonValue> = Vec::new();
         let mut cumulative_ask: Vec<JsonValue> = Vec::new();
+        let [_, deny_key, ask_key, _] = RuntimePermissionRuleConfig::LISTS;
         // Provider registrations are global; accumulate them by name so a
         // project-scoped `providers` array adds to (and overrides by name) the
         // global registry instead of replacing it wholesale.
         let mut cumulative_providers: Vec<JsonValue> = Vec::new();
+        let mut permission_rule_sources = Vec::new();
 
         for entry in discovered_entries {
             if !loaded_project_mcp && entry.path == local_settings_path {
@@ -978,8 +993,9 @@ impl ConfigLoader {
             // Fold this scope's (post-strip) deny/ask into the cumulative unions
             // so the final policy is a superset of every scope's restrictions,
             // regardless of merge order.
-            collect_permission_list(&value, "deny", &mut cumulative_deny);
-            collect_permission_list(&value, "ask", &mut cumulative_ask);
+            collect_permission_list(&value, deny_key, &mut cumulative_deny);
+            collect_permission_list(&value, ask_key, &mut cumulative_ask);
+            collect_permission_rule_sources(&value, &entry.path, &mut permission_rule_sources);
             collect_provider_entries(&value, &mut cumulative_providers);
             deep_merge_objects(&mut merged, &value);
             loaded_entries.push(entry);
@@ -1025,6 +1041,7 @@ impl ConfigLoader {
             model: parse_optional_model(&merged_value),
             permission_mode: parse_optional_permission_mode(&merged_value)?,
             permission_rules: parse_optional_permission_rules(&merged_value)?,
+            permission_rule_sources,
             sandbox: parse_optional_sandbox_config(&merged_value)?,
             env: optional_string_map(&merged, "env", "merged settings.env")?.unwrap_or_default(),
             auto_compact_enabled: parse_enabled_flag(&merged_value, "autoCompactEnabled")?,
@@ -1957,6 +1974,30 @@ fn collect_permission_list(
     }
 }
 
+/// Note the file behind every rule one settings document's (post-strip)
+/// `permissions` lists carry.
+fn collect_permission_rule_sources(
+    value: &BTreeMap<String, JsonValue>,
+    path: &Path,
+    acc: &mut Vec<PermissionRuleSource>,
+) {
+    let Some(permissions) = value.get("permissions").and_then(JsonValue::as_object) else {
+        return;
+    };
+    for list in RuntimePermissionRuleConfig::LISTS {
+        let Some(rules) = permissions.get(list).and_then(JsonValue::as_array) else {
+            continue;
+        };
+        for rule in rules.iter().filter_map(JsonValue::as_str) {
+            acc.push(PermissionRuleSource {
+                path: path.to_path_buf(),
+                list,
+                rule: rule.to_string(),
+            });
+        }
+    }
+}
+
 /// Write the cumulative deny/ask unions back into the merged `permissions`
 /// object, replacing whatever last-writer array `deep_merge_objects` produced, so
 /// the effective restrictions are a superset of every scope's regardless of merge
@@ -2614,6 +2655,17 @@ impl RuntimeFeatureConfig {
         &self.permission_rules
     }
 
+    /// The settings files whose `permissions.<list>` holds `rule`, in load
+    /// order.
+    #[must_use]
+    pub fn permission_rule_files(&self, list: &str, rule: &str) -> Vec<&Path> {
+        self.permission_rule_sources
+            .iter()
+            .filter(|source| source.list == list && source.rule == rule)
+            .map(|source| source.path.as_path())
+            .collect()
+    }
+
     #[must_use]
     pub fn sandbox(&self) -> &SandboxConfig {
         &self.sandbox
@@ -3240,6 +3292,24 @@ impl RuntimePermissionRuleConfig {
     #[must_use]
     pub fn rules(&self) -> &[String] {
         &self.rules
+    }
+
+    /// The `permissions` keys a settings file writes rules under, in the
+    /// order [`Self::listed`] answers. The settings parser reads the keys
+    /// from here.
+    pub const LISTS: [&'static str; 4] = ["allow", "deny", "ask", "rules"];
+
+    /// Each list's rules beside its settings key: `allow`, `deny`, `ask`,
+    /// then the ordered `rules`.
+    #[must_use]
+    pub fn listed(&self) -> [(&'static str, &[String]); 4] {
+        let [allow, deny, ask, rules] = Self::LISTS;
+        [
+            (allow, &self.allow),
+            (deny, &self.deny),
+            (ask, &self.ask),
+            (rules, &self.rules),
+        ]
     }
 }
 

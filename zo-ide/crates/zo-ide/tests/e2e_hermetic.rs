@@ -112,6 +112,21 @@ impl Layout {
         .expect("rewrite e2e settings with hooks");
     }
 
+    /// Rewrite `settings.json` with the person's `permissions` beside the
+    /// routing-probe switch, which has to survive for the same reason as in
+    /// [`Self::with_hooks`].
+    fn with_permissions(&self, permissions: &serde_json::Value) {
+        let settings = serde_json::json!({
+            "smart": {"autoClassifier": "off"},
+            "permissions": permissions.clone(),
+        });
+        fs::write(
+            self.home.join("settings.json"),
+            serde_json::to_vec(&settings).expect("serialize permission settings"),
+        )
+        .expect("rewrite e2e settings with permissions");
+    }
+
     /// Write an executable hook whose whole stdout is `stdout`, and answer with
     /// its path.
     ///
@@ -9612,4 +9627,151 @@ async fn e2e_footer_keys_open_their_views_at_80x24() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_footer_keys_open_their_views_at_120x30() {
     footer_keys_open_their_views(30, 120).await;
+}
+
+/// t-81312 — the person's deny rule in Claude Code's spelling, `Bash(rm:*)`,
+/// stops the model's `rm` on zo's own `bash` tool. The rule used to compare
+/// `Bash` with `bash` letter by letter, never matched, and the file was gone
+/// without a word.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_deny_rule_in_claude_code_spelling_stops_the_models_rm() {
+    let layout = Layout::new();
+    layout.with_permissions(&serde_json::json!({"deny": ["Bash(rm:*)"]}));
+    let victim = layout.cwd.join("victim.txt");
+    fs::write(&victim, "keep").expect("victim file");
+    let service = ScriptedAnthropicService::tool_calls(
+        &[("bash", serde_json::json!({"command": "rm victim.txt"}))],
+        "rm-rule-finished-marker",
+    )
+    .await
+    .expect("start rm script");
+    let output = run_pipe(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &["--plain", "--permission-mode", "danger-full-access"],
+        b"Remove victim.txt\n/exit\n",
+    )
+    .expect("run zo in pipe mode");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "pipe exited with {:?}:\n{stdout}", output.status);
+    assert!(
+        victim.exists(),
+        "deny Bash(rm:*) let the model's bash remove victim.txt:\n{stdout}"
+    );
+    let requests = service.request_bodies().await;
+    assert_eq!(requests.len(), 2, "one request for the tool and one final turn");
+    assert!(
+        requests[1].contains("denied by rule 'Bash(rm:*)'"),
+        "the model is not told which rule refused it: {}",
+        requests[1]
+    );
+}
+
+/// The lines of a plain transcript that warn of `rule` as naming no zo tool.
+fn rule_warnings<'a>(stdout: &'a str, rule: &str) -> Vec<&'a str> {
+    let quoted = format!("'{rule}'");
+    stdout
+        .lines()
+        .filter(|line| line.contains(&quoted) && line.contains("names no zo tool"))
+        .collect()
+}
+
+/// t-81312 — a permission rule whose tool name no zo tool answers to never
+/// applies, so the session says so once, at start, with the settings file
+/// and the rule — and the zo name when the alias table knows one (`Edit` is
+/// zo's `edit_file`). A typo used to sit in the settings doing nothing, and
+/// nobody was told.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_rule_naming_no_zo_tool_is_warned_once_at_start_on_a_pipe() {
+    let layout = Layout::new();
+    layout.with_permissions(&serde_json::json!({"deny": ["Edti(x)", "Edit(*.env)"]}));
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start pipe mock service");
+    let output = run_pipe(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        &service.base_url(),
+        &["--plain", "--permission-mode", "danger-full-access"],
+        b"/exit\n",
+    )
+    .expect("run zo in pipe mode");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "pipe exited with {:?}:\n{stdout}", output.status);
+
+    let typo = rule_warnings(&stdout, "Edti(x)");
+    assert_eq!(typo.len(), 1, "the rule Edti(x) is not warned of exactly once:\n{stdout}");
+    assert!(
+        typo[0].contains("permissions.deny") && typo[0].contains("settings.json"),
+        "the warning does not say which file and list hold the rule: {}",
+        typo[0]
+    );
+    let alias = rule_warnings(&stdout, "Edit(*.env)");
+    assert_eq!(alias.len(), 1, "the rule Edit(*.env) is not warned of exactly once:\n{stdout}");
+    assert!(
+        alias[0].contains("edit_file"),
+        "the warning does not give zo's name for Edit: {}",
+        alias[0]
+    );
+}
+
+/// t-81312 — the same warning reaches the TUI at start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_rule_naming_no_zo_tool_is_warned_at_start_in_the_tui() {
+    let layout = Layout::new();
+    layout.with_permissions(&serde_json::json!({"deny": ["Edti(x)"]}));
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start mock service");
+    let mut run = pty(&layout, &service.base_url(), &interactive_args());
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.wait_for("'Edti(x)'", TEST_TIMEOUT);
+    let capture = run.finish();
+    let rows = history_text(&capture);
+    // The line wraps at the PTY's width; read it as words.
+    let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        words.matches("'Edti(x)'").count(),
+        1,
+        "the TUI does not warn of Edti(x) exactly once at start:\n{rows}"
+    );
+    assert!(
+        words.contains("names no zo tool, so it never applies"),
+        "the TUI's warning does not say the rule never applies:\n{rows}"
+    );
+}
+
+/// t-81312 — no warning for a rule that does apply: zo's `bash` in Claude
+/// Code's spelling, zo's own `edit_file`, and an MCP tool, whose server
+/// registers it only after start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_rules_naming_zo_or_mcp_tools_are_not_warned() {
+    let layout = Layout::new();
+    layout.with_permissions(&serde_json::json!({
+        "deny": ["mcp__x__y", "mcp__x__y(*)", "Bash(rm:*)", "edit_file(*.env)"],
+    }));
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start pipe mock service");
+    let output = run_pipe(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        &service.base_url(),
+        &["--plain", "--permission-mode", "danger-full-access"],
+        b"/exit\n",
+    )
+    .expect("run zo in pipe mode");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "pipe exited with {:?}:\n{stdout}", output.status);
+    assert!(
+        !stdout.contains("names no zo tool"),
+        "a rule that applies was warned of:\n{stdout}"
+    );
 }

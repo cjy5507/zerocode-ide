@@ -341,7 +341,7 @@ impl PermissionPolicy {
     #[must_use]
     pub fn required_mode_for_input(&self, tool_name: &str, input: &str) -> PermissionMode {
         let base = self.required_mode_for(tool_name);
-        if tool_name == "bash" && base == PermissionMode::DangerFullAccess {
+        if is_shell_tool(tool_name) && base == PermissionMode::DangerFullAccess {
             if let Some(command) = extract_bash_command(input) {
                 return crate::bash_validation::required_mode_for_command(&command);
             }
@@ -404,7 +404,7 @@ impl PermissionPolicy {
         context: &PermissionContext,
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
-        let verdict = (tool_name == "bash")
+        let verdict = is_shell_tool(tool_name)
             .then(|| extract_bash_command(input))
             .flatten()
             .and_then(|command| crate::kill_guard::judge(&command));
@@ -659,10 +659,10 @@ impl PermissionPolicy {
 
     fn find_matching_rule<'a>(
         rules: &'a [PermissionRule],
-        tool_name: &str,
+        tool: &str,
         input: &str,
     ) -> Option<&'a PermissionRule> {
-        rules.iter().find(|rule| rule.matches(tool_name, input))
+        rules.iter().find(|rule| rule.matches(tool, input))
     }
 
     /// Resolve what the configured rules say about a `(tool, input)` pair,
@@ -672,12 +672,15 @@ impl PermissionPolicy {
     /// authority and the *last* matching rule wins. Otherwise the legacy
     /// category vectors apply (first match within each, deny > ask > allow).
     fn rule_signals(&self, tool_name: &str, input: &str) -> RuleSignals {
+        // A rule holds its tool name normalized; the call's is read the same
+        // way, so `Bash(rm:*)` meets a call to `bash` (t-81312).
+        let tool = normalize_tool_name(tool_name);
         if !self.ordered_rules.is_empty() {
             let matched = self
                 .ordered_rules
                 .iter()
                 .rev()
-                .find(|rule| rule.rule.matches(tool_name, input));
+                .find(|rule| rule.rule.matches(&tool, input));
             return match matched.map(|rule| (rule.action, rule.rule.raw.as_str())) {
                 Some((PermissionRuleAction::Deny, raw)) => RuleSignals {
                     deny: Some(deny_rule_reason(tool_name, raw)),
@@ -699,11 +702,11 @@ impl PermissionPolicy {
         }
 
         RuleSignals {
-            deny: Self::find_matching_rule(&self.deny_rules, tool_name, input)
+            deny: Self::find_matching_rule(&self.deny_rules, &tool, input)
                 .map(|rule| deny_rule_reason(tool_name, &rule.raw)),
-            ask: Self::find_matching_rule(&self.ask_rules, tool_name, input)
+            ask: Self::find_matching_rule(&self.ask_rules, &tool, input)
                 .map(|rule| ask_rule_reason(tool_name, &rule.raw)),
-            allow: Self::find_matching_rule(&self.allow_rules, tool_name, input).is_some(),
+            allow: Self::find_matching_rule(&self.allow_rules, &tool, input).is_some(),
         }
     }
 }
@@ -859,11 +862,9 @@ impl std::fmt::Display for PermissionRuleSpecError {
 fn parse_decision_rule(spec: &str) -> Result<PermissionDecisionRule, PermissionRuleSpecError> {
     let trimmed = spec.trim();
     let (rule_part, action_part) =
-        trimmed
-            .rsplit_once('=')
-            .ok_or_else(|| PermissionRuleSpecError::MissingAction {
-                spec: trimmed.to_string(),
-            })?;
+        split_decision_rule(trimmed).ok_or_else(|| PermissionRuleSpecError::MissingAction {
+            spec: trimmed.to_string(),
+        })?;
     let action = PermissionRuleAction::parse(action_part).ok_or_else(|| {
         PermissionRuleSpecError::UnknownAction {
             spec: trimmed.to_string(),
@@ -874,6 +875,12 @@ fn parse_decision_rule(spec: &str) -> Result<PermissionDecisionRule, PermissionR
         rule: PermissionRule::parse(rule_part.trim()),
         action,
     })
+}
+
+/// An ordered rule spec's rule and action: the text either side of its final
+/// `=`, so a subject may itself carry `=`.
+fn split_decision_rule(spec: &str) -> Option<(&str, &str)> {
+    spec.rsplit_once('=')
 }
 
 /// Validate an ordered rule spec without retaining the parsed result. Used by
@@ -893,6 +900,7 @@ pub struct TemporaryAllowGrant(Vec<PermissionRule>);
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PermissionRule {
     raw: String,
+    /// The tool name the rule names, through [`normalize_tool_name`].
     tool_name: String,
     matcher: PermissionRuleMatcher,
 }
@@ -913,33 +921,18 @@ enum PermissionRuleMatcher {
 impl PermissionRule {
     fn parse(raw: &str) -> Self {
         let trimmed = raw.trim();
-        let open = find_first_unescaped(trimmed, '(');
-        let close = find_last_unescaped(trimmed, ')');
-
-        if let (Some(open), Some(close)) = (open, close) {
-            if close == trimmed.len() - 1 && open < close {
-                let tool_name = trimmed[..open].trim();
-                let content = &trimmed[open + 1..close];
-                if !tool_name.is_empty() {
-                    let matcher = parse_rule_matcher(content);
-                    return Self {
-                        raw: trimmed.to_string(),
-                        tool_name: tool_name.to_string(),
-                        matcher,
-                    };
-                }
-            }
-        }
-
+        let (tool_name, content) = split_rule(trimmed);
         Self {
             raw: trimmed.to_string(),
-            tool_name: trimmed.to_string(),
-            matcher: PermissionRuleMatcher::Any,
+            tool_name: normalize_tool_name(tool_name),
+            matcher: content.map_or(PermissionRuleMatcher::Any, parse_rule_matcher),
         }
     }
 
-    fn matches(&self, tool_name: &str, input: &str) -> bool {
-        if self.tool_name != tool_name {
+    /// Whether the rule meets a call to `tool` — the call's tool name through
+    /// [`normalize_tool_name`] — with `input`.
+    fn matches(&self, tool: &str, input: &str) -> bool {
+        if self.tool_name != tool {
             return false;
         }
 
@@ -956,6 +949,74 @@ impl PermissionRule {
                 .any(|candidate| pattern.matches(candidate)),
         }
     }
+}
+
+/// A rule's tool name as written and its parenthesised subject, when the rule
+/// has one: `Bash(rm:*)` is `Bash` and `rm:*`, a bare `Bash` only `Bash`.
+fn split_rule(trimmed: &str) -> (&str, Option<&str>) {
+    let open = find_first_unescaped(trimmed, '(');
+    let close = find_last_unescaped(trimmed, ')');
+    if let (Some(open), Some(close)) = (open, close) {
+        if close == trimmed.len() - 1 && open < close {
+            let tool_name = trimmed[..open].trim();
+            if !tool_name.is_empty() {
+                return (tool_name, Some(&trimmed[open + 1..close]));
+            }
+        }
+    }
+    (trimmed, None)
+}
+
+/// Whether `tool_name` is zo's shell tool in a spelling dispatch runs as it:
+/// `Bash` and `BASH` run `bash`, so the kill guard and the read-only
+/// classifier judge them as `bash` (t-81312).
+fn is_shell_tool(tool_name: &str) -> bool {
+    normalize_tool_name(tool_name) == crate::tool_guard::SHELL_TOOL
+}
+
+/// Lower-case a tool name and replace `-` with `_`, so `Bash`, `BASH` and
+/// `bash` are one name, and `read-file` is `read_file`. Dispatch resolves a
+/// tool through it, and a permission rule meets a call through it, so a rule
+/// holds for every spelling dispatch would run (t-81312).
+#[must_use]
+pub fn normalize_tool_name(value: &str) -> String {
+    value.trim().replace('-', "_").to_ascii_lowercase()
+}
+
+/// A configured permission rule beside the tool name it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleToolName<'a> {
+    /// The `permissions` list that holds it.
+    pub list: &'static str,
+    /// The rule as configured.
+    pub rule: &'a str,
+    /// The tool name as written: `Bash` in `Bash(rm:*)` and in the ordered
+    /// `Bash(rm:*)=deny`.
+    pub tool: &'a str,
+}
+
+/// Every rule `config` holds with the tool name it names, so a front end can
+/// tell the person about a rule no tool answers to (t-81312). An ordered rule
+/// with no `=action`, which config load refuses, is left out.
+#[must_use]
+pub fn rule_tool_names(config: &RuntimePermissionRuleConfig) -> Vec<RuleToolName<'_>> {
+    let [allow, deny, ask, (ordered, specs)] = config.listed();
+    let category = [allow, deny, ask].into_iter().flat_map(|(list, rules)| {
+        rules.iter().map(move |rule| RuleToolName {
+            list,
+            rule: rule.as_str(),
+            tool: split_rule(rule.trim()).0,
+        })
+    });
+    let ordered = specs.iter().filter_map(move |spec| {
+        let (rule_part, _) = split_decision_rule(spec.trim())?;
+        Some(RuleToolName {
+            list: ordered,
+            rule: spec.as_str(),
+            tool: split_rule(rule_part.trim()).0,
+        })
+    });
+    category.chain(ordered).collect()
 }
 
 fn parse_rule_matcher(content: &str) -> PermissionRuleMatcher {
@@ -1250,6 +1311,30 @@ mod tests {
                 policy.authorize("bash", input, None),
                 PermissionOutcome::Allow,
                 "read-only-safe command must pass: {input}"
+            );
+        }
+    }
+
+    /// The classifier reads a call to `Bash` or `BASH` as it reads `bash`,
+    /// the tool dispatch runs for it (t-81312): a provably read-only command
+    /// runs in a read-only session, and an unprovable one stays denied.
+    #[test]
+    fn read_only_mode_classifies_bash_whatever_its_spelling() {
+        let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
+            .with_tool_requirement("bash", PermissionMode::DangerFullAccess);
+
+        for tool in ["Bash", "BASH"] {
+            assert_eq!(
+                policy.authorize(tool, r#"{"command":"git status --short"}"#, None),
+                PermissionOutcome::Allow,
+                "{tool}: a read-only-safe command must pass"
+            );
+            assert!(
+                matches!(
+                    policy.authorize(tool, r#"{"command":"rm notes.txt"}"#, None),
+                    PermissionOutcome::Deny { .. }
+                ),
+                "{tool}: an unprovable command must stay denied"
             );
         }
     }
@@ -2093,6 +2178,131 @@ mod tests {
         assert_eq!(
             policy.authorize("edit_file", r#"{"file_path":".env"}"#, None),
             PermissionOutcome::Allow
+        );
+    }
+
+    /// A rule names its tool the way the person wrote it — Claude Code's
+    /// `Bash(rm:*)`, a shouted `BASH(rm:*)`, a kebab `edit-file(...)` — and
+    /// zo registers and calls the same tools as `bash` and `edit_file`. The
+    /// rule holds whatever the case or the `-`/`_` spelling, as dispatch
+    /// already reads a tool name (t-81312): in every list, the ordered form
+    /// too, and on the enforcement layer's deny check.
+    #[test]
+    fn a_rule_holds_whatever_case_or_separator_it_names_its_tool_in() {
+        let rm = r#"{"command":"rm -rf x"}"#;
+        for deny in ["Bash(rm:*)", "BASH(rm:*)"] {
+            let rules =
+                RuntimePermissionRuleConfig::new(Vec::new(), vec![deny.to_string()], Vec::new());
+            let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+                .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+                .with_permission_rules(&rules);
+            assert!(
+                matches!(
+                    policy.authorize("bash", rm, None),
+                    PermissionOutcome::Deny { ref reason } if reason.contains(deny)
+                ),
+                "deny {deny} let bash run `rm -rf x`"
+            );
+            assert!(
+                policy.deny_reason("bash", rm).is_some(),
+                "the enforcement layer's deny check missed {deny}"
+            );
+            assert_eq!(
+                policy.authorize("bash", r#"{"command":"ls"}"#, None),
+                PermissionOutcome::Allow,
+                "deny {deny} stopped a command it does not name"
+            );
+        }
+
+        let ordered = RuntimePermissionRuleConfig::new(Vec::new(), Vec::new(), Vec::new())
+            .with_rules(vec!["Bash(rm:*)=deny".to_string()]);
+        let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+            .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+            .with_permission_rules(&ordered);
+        assert!(
+            matches!(policy.authorize("bash", rm, None), PermissionOutcome::Deny { .. }),
+            "the ordered rule Bash(rm:*)=deny let bash run `rm -rf x`"
+        );
+
+        let ask = RuntimePermissionRuleConfig::new(
+            Vec::new(),
+            vec!["edit-file(*.env)".to_string()],
+            vec!["Bash(git push:*)".to_string()],
+        );
+        let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+            .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+            .with_tool_requirement("edit_file", PermissionMode::WorkspaceWrite)
+            .with_permission_rules(&ask);
+        let mut prompter = RecordingPrompter {
+            seen: Vec::new(),
+            allow: false,
+        };
+        assert!(matches!(
+            policy.authorize("bash", r#"{"command":"git push origin"}"#, Some(&mut prompter)),
+            PermissionOutcome::Deny { .. }
+        ));
+        assert_eq!(prompter.seen.len(), 1, "ask Bash(git push:*) did not ask before bash ran");
+        assert!(
+            matches!(
+                policy.authorize("edit_file", r#"{"file_path":".env"}"#, None),
+                PermissionOutcome::Deny { ref reason } if reason.contains("edit-file(*.env)")
+            ),
+            "deny edit-file(*.env) let edit_file write .env"
+        );
+    }
+
+    /// The allow side of the same rule: `Bash(git:*)` — the form every one
+    /// of a person's Claude Code allow lines takes — lets `bash` run
+    /// `git status` without a prompt, where a session would otherwise ask.
+    #[test]
+    fn an_allow_rule_naming_bash_as_claude_code_does_allows_the_call() {
+        let rules =
+            RuntimePermissionRuleConfig::new(vec!["Bash(git:*)".to_string()], Vec::new(), Vec::new());
+        let policy = PermissionPolicy::new(PermissionMode::Prompt)
+            .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+            .with_permission_rules(&rules);
+
+        assert_eq!(
+            policy.authorize("bash", r#"{"command":"git status"}"#, None),
+            PermissionOutcome::Allow,
+            "allow Bash(git:*) did not let bash run `git status`"
+        );
+        assert!(
+            matches!(
+                policy.authorize("bash", r#"{"command":"npm test"}"#, None),
+                PermissionOutcome::Deny { .. }
+            ),
+            "allow Bash(git:*) let bash run a command it does not name"
+        );
+    }
+
+    /// What a front end needs to warn of a rule no tool answers to: each
+    /// rule, its list, and the tool name as the person wrote it — the
+    /// ordered form without its `=action`.
+    #[test]
+    fn rule_tool_names_give_each_rules_list_and_tool_as_written() {
+        use super::{rule_tool_names, RuleToolName};
+
+        let category = RuntimePermissionRuleConfig::new(
+            vec!["Bash(git:*)".to_string()],
+            vec![" Edti(x) ".to_string(), "WebFetch".to_string()],
+            vec!["mcp__x__y(*)".to_string()],
+        );
+        assert_eq!(
+            rule_tool_names(&category),
+            vec![
+                RuleToolName { list: "allow", rule: "Bash(git:*)", tool: "Bash" },
+                RuleToolName { list: "deny", rule: " Edti(x) ", tool: "Edti" },
+                RuleToolName { list: "deny", rule: "WebFetch", tool: "WebFetch" },
+                RuleToolName { list: "ask", rule: "mcp__x__y(*)", tool: "mcp__x__y" },
+            ]
+        );
+
+        let ordered = RuntimePermissionRuleConfig::new(Vec::new(), Vec::new(), Vec::new())
+            .with_rules(vec!["Edit(FOO=bar)=deny".to_string(), "no-action".to_string()]);
+        assert_eq!(
+            rule_tool_names(&ordered),
+            vec![RuleToolName { list: "rules", rule: "Edit(FOO=bar)=deny", tool: "Edit" }]
         );
     }
 
