@@ -1788,6 +1788,18 @@ mod tests {
             format!("{}。", TO_PERSON[0]),
             format!("{}!!", TO_PERSON[1]),
             format!("{} ?", TO_PERSON[0]),
+            // t-84343 r2 (P2-1): written as the letter shows it, in one pair
+            // of quotes — a sentence's end inside or after them too.
+            format!("「{}」", TO_PERSON[0]),
+            format!("『{}』", TO_PERSON[0]),
+            format!("\"{}\"", TO_PERSON[1]),
+            format!("`{}`", TO_PERSON[0]),
+            format!("「{}」.", TO_PERSON[0]),
+            format!("“ {}. ”", TO_PERSON[1].to_uppercase()),
+            // A full-width sentence's end is a sentence's end.
+            format!("{}！", TO_PERSON[0]),
+            format!("{}？", TO_PERSON[1]),
+            format!("{}．", TO_PERSON[0]),
         ]);
         for word in spoken {
             let handed = Standing::Answered(word.clone());
@@ -1828,6 +1840,30 @@ mod tests {
                 other,
             }])
         );
+        // Quotes that hold more than the word, or that do not pair, are not
+        // taken off: the reply goes to the picker as the picker reads it.
+        for words in [
+            format!("「{} 물어봐」", TO_PERSON[0]),
+            format!("「{}", TO_PERSON[0]),
+            format!("「{}』", TO_PERSON[0]),
+            format!("「「{}」」", TO_PERSON[0]),
+            "「1」".to_string(),
+        ] {
+            let picked = selections_from_reply(&asked, &words).expect("an answer");
+            assert_eq!(
+                step(
+                    &asked,
+                    &Standing::Answered(words.clone()),
+                    false,
+                    Some(&live),
+                    false,
+                    NOW,
+                    NOW
+                ),
+                Step::Answer(picked),
+                "{words:?}"
+            );
+        }
         // The window's one record of it: the letter, the pane, the seat.
         let line = handed_line(&live, 7, "m-5");
         assert!(line.contains("코디가 사람 몫으로 올림"), "{line}");
