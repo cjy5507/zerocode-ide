@@ -8995,6 +8995,53 @@ async fn e2e_an_unattended_run_still_approves_an_ordinary_escalation_once() {
     );
 }
 
+/// t-81117: an unattended approval is for the one call it answers. The run
+/// answered with the lasting allow, so its note said "approved once" while the
+/// same call later in the run was never asked again, and at the session's end
+/// the rule was written into the person's own `.zo/settings.local.json` — the
+/// untracked file in a git repository that zo trusts to hold lasting allows.
+/// Here the model runs one call twice: both are asked, and the file keeps its
+/// bytes.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_an_unattended_approval_is_for_one_call_and_writes_no_lasting_allow() {
+    let layout = Layout::new();
+    let git = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&layout.cwd)
+        .status()
+        .expect("git runs");
+    assert!(git.success(), "the workspace is a git repository");
+    let settings = layout.cwd.join(".zo").join("settings.local.json");
+    fs::create_dir_all(settings.parent().expect("the .zo folder")).expect("make .zo");
+    let before: &[u8] = b"{\"permissions\":{\"allow\":[]}}\n";
+    fs::write(&settings, before).expect("the person's local settings");
+    let call = serde_json::json!({ "command": "touch approved-once.txt && printf approved-once-ran" });
+    let service = ScriptedAnthropicService::tool_calls(&[("bash", call.clone()), ("bash", call)], "approved-twice")
+        .await
+        .unwrap();
+    let output = run_pipe(&layout.cwd, &layout.home, &layout.sessions, &layout.state, service.base_url(),
+        &["--plain", "--permission-mode", "workspace-write"], b"Touch the marker twice.\n/exit\n").unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let after = fs::read(&settings).expect("the local settings are still there");
+    assert_eq!(
+        String::from_utf8_lossy(&after),
+        String::from_utf8_lossy(before),
+        "nobody said always, so no lasting allow reached the person's settings"
+    );
+    let screen = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        screen.matches("unattended: bash approved once").count(),
+        2,
+        "the second call was asked again: {screen}"
+    );
+    assert!(layout.cwd.join("approved-once.txt").exists(), "both calls were approved and ran");
+}
+
 /// t-68408: two zo sessions in one folder never hand each other their plans.
 /// The first writes a plan and leaves it in progress; the second, opened in the
 /// same folder, runs a tool and writes a plan of its own, and is handed none

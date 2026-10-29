@@ -1510,6 +1510,76 @@ mod tests {
         assert_eq!(last, "", "the shown lines reached the last answer");
     }
 
+    /// t-81117: nobody at the keyboard approves a tool call by the answer that
+    /// allows it this once, whatever key that answer carries — never by the
+    /// lasting allow, whose rule outlives the run and lands in the person's
+    /// settings. A prompt that offers no allow-once answer is refused, and
+    /// read-only refuses as before.
+    #[test]
+    fn an_unattended_approval_is_the_allow_once_answer_and_never_the_lasting_one() {
+        use runtime::message_stream::{
+            BlockId, PermissionChoice, PermissionDecision, PermissionPrompt, ToolCallId,
+        };
+        let decide = |offered: &[(char, PermissionDecision)], mode| {
+            let (responder, mut answered) = tokio::sync::oneshot::channel();
+            let prompt = PermissionPrompt {
+                id: BlockId(1),
+                tool_call_id: ToolCallId(String::new()),
+                tool_name: "bash".to_string(),
+                reasoning: "touch a marker".to_string(),
+                audit_hint: None,
+                risk_level: None,
+                choices: offered
+                    .iter()
+                    .map(|&(key, decision)| PermissionChoice {
+                        key,
+                        label: format!("{decision:?}"),
+                        decision,
+                    })
+                    .collect(),
+                question: None,
+                responder,
+            };
+            let mut written = Vec::new();
+            let left = {
+                let mut renderer = super::Renderer::new(&mut written, super::RenderOptions::default());
+                super::decide_unattended(super::PendingPrompt::Permission(prompt), mode, &mut renderer)
+            };
+            assert!(left.is_none(), "nobody is left to answer, so the prompt is settled");
+            let decision = answered.try_recv().expect("the prompt was answered");
+            (decision, String::from_utf8_lossy(&written).into_owned())
+        };
+        let write = core_types::PermissionMode::WorkspaceWrite;
+        let (decision, said) = decide(
+            &[
+                ('y', PermissionDecision::AllowAlways),
+                ('o', PermissionDecision::AllowOnce),
+                ('n', PermissionDecision::Deny),
+            ],
+            write,
+        );
+        assert_eq!(decision, PermissionDecision::AllowOnce, "{said}");
+        assert!(said.contains("unattended: bash approved once"), "{said}");
+
+        let (decision, said) = decide(
+            &[('y', PermissionDecision::AllowAlways), ('n', PermissionDecision::Deny)],
+            write,
+        );
+        assert_eq!(decision, PermissionDecision::Deny, "no answer allows it once: {said}");
+        assert!(!said.contains("approved"), "{said}");
+
+        let (decision, said) = decide(
+            &[
+                ('y', PermissionDecision::AllowAlways),
+                ('o', PermissionDecision::AllowOnce),
+                ('n', PermissionDecision::Deny),
+            ],
+            core_types::PermissionMode::ReadOnly,
+        );
+        assert_eq!(decision, PermissionDecision::Deny, "{said}");
+        assert!(said.contains("unattended: bash denied (read-only)"), "{said}");
+    }
+
     /// 파이프의 `/help` 목록과 파이프가 실제로 드는 명령은 같은 사실을 읽는다.
     /// 예전에는 둘이 손으로 적혀 있어, keep-list 에 명령을 더하면 도움말이
     /// 조용히 뒤처졌다(맨 터미널 단축키 카드가 `/resume` 를 빠뜨린 채 있었던
