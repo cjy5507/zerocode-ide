@@ -519,12 +519,6 @@ impl MessageStream {
         }
     }
 
-    /// Install a mid-stream retry sink. The `ChatGpt`, `OpenAiCompat`, and
-    /// `GeminiCodeAssist` backends perform internal transparent pre-commit
-    /// restarts that the establish-time retry layer never sees, so without
-    /// this the reconnect pause reads as a freeze. `Anthropic` deliberately
-    /// stays silent (see its `restart` doc: transparent recovery must not
-    /// write into the TUI).
     /// Say whether this stream carries a compaction's summary request: the
     /// `ChatGpt` backend names it in the record a quiet stretch leaves
     /// (t-71285); the other backends keep no such record.
@@ -538,6 +532,12 @@ impl MessageStream {
         }
     }
 
+    /// Install a mid-stream retry sink. The `ChatGpt`, `OpenAiCompat`, and
+    /// `GeminiCodeAssist` backends perform internal transparent pre-commit
+    /// restarts that the establish-time retry layer never sees, so without
+    /// this the reconnect pause reads as a freeze. `Anthropic` deliberately
+    /// stays silent (see its `restart` doc: transparent recovery must not
+    /// write into the TUI).
     #[must_use]
     pub fn with_stream_retry_notice(
         self,

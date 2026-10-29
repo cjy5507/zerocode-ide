@@ -2451,19 +2451,16 @@ impl std::fmt::Debug for ChatGptStream {
 const CHATGPT_STREAM_COOPERATIVE_YIELD_EVERY: usize = 16;
 
 /// How long the stream may stay quiet (keep-alive chunks arriving, no decoded
-/// event) before the one-shot quiet-reasoning heartbeat notice fires. Kept just
-/// under the CLI's 20-second "no output" stall-badge threshold
-/// (`STALL_THRESHOLD_SECS`) so that, whenever keep-alives are still arriving,
-/// the badge latches to the calm "reasoning · stream alive" *before* it would
-/// ever read "no output" — the whole point of the heartbeat. At the old 60s it
-/// lost that race by 40 seconds, so a healthy gpt-5.x reasoning pass showed the
-/// alarming "no output" for most of a minute (live report: users could not tell
-/// a reasoning turn from a hang). Still above any normal first-token gap — a
-/// real delta resets `quiet_since`, so fast turns never trip it — and firing the
-/// notice only pre-arms the badge; nothing is shown until the 20s threshold, so
-/// an earlier fire adds no visual noise. A dead/congested connection sends no
-/// chunks at all, so this branch never runs and the idle/startup timeouts own
-/// that case instead.
+/// event) before the one-shot quiet-stretch notice fires. The notice names the
+/// stretch as the attempt's events tell it ([`core_types::QuietStretch`]):
+/// reasoning inside a reasoning item the model opened and has not closed, a
+/// wait otherwise (t-71285); the status line and a helper's manifest say its
+/// words. The value was first kept under a 20-second "no output" badge the CLI
+/// no longer has, so a live stream never read as a hang, and t-71285 keeps it.
+/// Still above any normal first-token gap — a real delta resets `quiet_since`,
+/// so fast turns never trip it. A dead/congested connection sends no chunks at
+/// all, so this branch never runs and the idle/startup timeouts own that case
+/// instead.
 const CHATGPT_QUIET_REASONING_NOTICE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(15);
 
@@ -2661,7 +2658,10 @@ impl AttemptHeard {
 
 /// The notice a ChatGPT stream raises for a quiet stretch that has lasted
 /// `quiet_for` after an attempt heard `events` (t-71285): the one the stream
-/// sends, readable by a consumer's test without opening a stream.
+/// sends, readable by a consumer's test without opening a stream. For tests
+/// only — zo-ide's status-card scenes, which `#[cfg(test)]` cannot reach
+/// across crates — so it stays off the documented surface.
+#[doc(hidden)]
 #[must_use]
 pub fn chatgpt_quiet_stretch_notice(
     events: &[Value],

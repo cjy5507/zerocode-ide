@@ -603,11 +603,6 @@ fn destination_of(
     Some(format!("{}/v1/messages", client.base_url().trim_end_matches('/')))
 }
 
-/// One transcript row for a mid-stream notice. Reconnects render as warnings
-/// with the backoff/attempt detail; the quiet-reasoning heartbeat renders as
-/// an informational row (nothing is wrong — the model is thinking silently on
-/// a connection that is verifiably alive), so minutes of "no output" stop
-/// reading as a hang. Pure so the wording is unit-testable.
 /// What a stream notice becomes on screen: a quiet stretch is a PHASE the
 /// status line wears (content ends it), a reconnect is a transcript row.
 fn stream_notice_block(
@@ -640,7 +635,7 @@ fn stream_notice_block(
 /// phase ([`stream_notice_block`]), and for a reconnect the `Retrying` phase a
 /// turn's own retry sends too (t-69472). The Working line and the window's
 /// activity card then say the turn is reconnecting — the attempt, and the
-/// pause counted down — until the stream's text or a quiet-reasoning notice
+/// pause counted down — until the stream's text or a quiet-stretch notice
 /// says it is live again.
 pub(crate) fn stream_notice_blocks(
     notice: &core_types::StreamRetryNotice,
@@ -661,6 +656,10 @@ pub(crate) fn stream_notice_blocks(
     blocks
 }
 
+/// The transcript row for a reconnect notice: a warning with the
+/// backoff/attempt detail. Pure so the wording is unit-testable. A quiet
+/// stretch is a phase, not a row ([`stream_notice_block`]); its arm here only
+/// keeps the match whole.
 fn stream_notice_row(notice: &core_types::StreamRetryNotice) -> (SystemLevel, String) {
     match notice.kind {
         core_types::StreamNoticeKind::QuietReasoning | core_types::StreamNoticeKind::QuietWaiting => (

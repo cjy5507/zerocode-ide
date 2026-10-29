@@ -520,8 +520,8 @@ pub struct QuietWords {
 }
 
 impl QuietStretch {
-    /// The one table of a quiet stretch's words: the status line, the
-    /// transcript row and a helper's manifest all read them here.
+    /// The one table of a quiet stretch's words: the status line's phrase
+    /// and the notice's label, which a helper's manifest shows, are read here.
     #[must_use]
     pub const fn words(self) -> QuietWords {
         match self {
@@ -546,13 +546,10 @@ impl QuietStretch {
     }
 }
 
-/// Label of the quiet-reasoning heartbeat notice, from [`QuietStretch::words`].
-/// A shared constant because two layers key on the exact wording: the streaming
-/// backend stamps it on the [`StreamNoticeKind::QuietReasoning`] notice, and
-/// the TUI matches the transcript row's prefix to flip its "no output" stall
-/// badge into a calm "reasoning · stream alive" state (the
-/// `STEERING_ECHO_PREFIX` precedent — keep every emitter and matcher on this
-/// constant).
+/// Label of the [`StreamNoticeKind::QuietReasoning`] notice, from
+/// [`QuietStretch::words`]: the name the tests that pin the wording read it by.
+/// Nothing matches on it at run time — a quiet stretch reaches the status line
+/// as a phase, not as a row whose text is read (t-71285).
 pub const QUIET_REASONING_LABEL: &str = QuietStretch::Reasoning.words().label;
 
 /// Prefix of the quota-hold warning the runtime emits when a hard 429 parks
