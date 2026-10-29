@@ -1107,6 +1107,47 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// A command file asks nobody, whatever the mode or the rules: a `!` line
+    /// the kill guard refuses says what to do instead as a sub-agent's bash
+    /// says it, and never that the session runs calls without asking — under
+    /// no rule, an allow rule and an ask rule alike (t-82854, review w-83819
+    /// P3-1).
+    #[test]
+    fn a_bang_lines_kill_refusal_reads_as_check_bashs_under_any_rule() {
+        let root = temp_dir("bang-kill-rules");
+        fs::create_dir_all(&root).expect("base dir");
+        let line = "kill \"$TARGET\"";
+        let command = parse_prompt_command_file(
+            "stop".to_string(),
+            PathBuf::from("stop.md"),
+            &format!("---\nallowed-tools: Bash\n---\n!{line}\n"),
+        )
+        .expect("command parsed");
+        let check_bash = runtime::permission_enforcer::PermissionEnforcer::new(runtime::PermissionPolicy::new(
+            runtime::PermissionMode::DangerFullAccess,
+        ))
+        .check_bash(line);
+        let runtime::permission_enforcer::EnforcementResult::Denied { reason, .. } = check_bash else {
+            panic!("check_bash ran a kill no person said yes to");
+        };
+        let kill_rule = || vec!["bash(kill:*)".to_string()];
+        for (name, rules) in [
+            ("no rule", runtime::RuntimePermissionRuleConfig::new(Vec::new(), Vec::new(), Vec::new())),
+            ("an allow rule", runtime::RuntimePermissionRuleConfig::new(kill_rule(), Vec::new(), Vec::new())),
+            ("an ask rule", runtime::RuntimePermissionRuleConfig::new(Vec::new(), Vec::new(), kill_rule())),
+        ] {
+            let gate = InlineShellGate {
+                read_only: false,
+                workspace: WorkspaceTrust::Trusted,
+                rules: Ok(&rules),
+            };
+            let rendered = command.render_prompt_as("", &root, gate);
+            assert!(!rendered.contains("runs calls without asking"), "{name}: {rendered}");
+            assert_eq!(rendered, format!("[!{line}: not run — {reason}]\n"), "{name}");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// A repository's command file reads `@path` only inside the working
     /// folder: an absolute path, a `..` that climbs out, and a link inside
     /// that points out each leave one notice line. The same file in zo's
