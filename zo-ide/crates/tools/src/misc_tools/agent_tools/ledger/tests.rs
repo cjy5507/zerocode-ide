@@ -429,8 +429,9 @@ fn settled_failure(manifest: &AgentOutput) -> String {
 
 /// How much longer the call's own part takes on a loaded machine than on a
 /// quiet one: its three fixture processes (run-current, task-create,
-/// dispatch-show) took 3.6 s in all at load 15 on gate l87f, where a quiet run
-/// takes 0.8 s. The test adds it before the worker-start is even asked (t-84792).
+/// dispatch-show) took 3.6 s in all on gate l87f, where the same test run on
+/// its own took 0.8 s, at load 15 too. The test adds it before the
+/// worker-start is even asked (t-84792).
 const LOADED_CALL: Duration = Duration::from_millis(1_200);
 
 /// Adversarial review A (Z7): the window opening a worker's pane held the
