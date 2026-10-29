@@ -12601,6 +12601,9 @@ listen("hook:agent", (event) => {
   // 그래서 기다리던 글을 내보내는 문은 상태가 실제로 옮겨 앉은 이 줄 뒤에
   // 선다(그리는 문과 보내는 문은 여전히 따로다).
   settleComposerQueuesFor(term);
+  // A turn's edge is where the effort's word can move: asked again here, and
+  // never on the dozens of paints a turn's tool events bring (t-81532).
+  refreshComposerEffortFor(term);
   agentClock.sync();
   helperClock.sync();
   // A conversation view asked for mid-turn is handed to the wire now that the
@@ -13613,6 +13616,7 @@ function forgetPaneChat(term) {
   paneLive.delete(term);
   paneNow.delete(term);
   paneUsage.delete(term);
+  paneEfforts.delete(term);
 }
 
 /* The active pane's term when it runs an agent — the pane the toggle speaks
@@ -15593,6 +15597,9 @@ function workerComposerNode(run, owner = null) {
   const cwd = owner?.worktree ?? helperBase(run);
   if (spec) {
     tools.appendChild(composerAgentChip(run, spec));
+    // The effort the pane runs at, beside the model it runs (t-81532) — a
+    // pane's own, so a wire's composer, which has no pane, wears none.
+    if (!run.wire && run.term !== undefined && run.term !== null) tools.appendChild(composerEffortChip(run));
     tools.appendChild(composerModeChip(run, spec));
     tools.appendChild(composerContextChip(run, spec));
   }
@@ -15755,6 +15762,8 @@ function paintWorkerComposerState(form, run, delivered = null) {
   const spec = installedAgents().find((row) => row.id === run.agent) ?? null;
   const agentChip = form.querySelector(".worker-composer-agent");
   if (agentChip) paintComposerAgentChip(agentChip, run, runModelList(run));
+  const effortChip = form.querySelector(".worker-composer-effort");
+  if (effortChip) paintComposerEffortChip(effortChip, run);
   const modeChip = form.querySelector(".worker-composer-mode");
   if (modeChip && spec) paintComposerModeChip(modeChip, run, spec);
   const agentsChip = form.querySelector(".worker-composer-agents");
@@ -17300,6 +17309,7 @@ listen("term:exited", (event) => {
   forgetMailWaiting(term);
   forgetTakenOver(term);
   paneUsage.delete(term);
+  paneEfforts.delete(term);
   orphanWorkersOf(term);
   if (term === FLOAT_TERM) {
     // The chord is read inside, not captured: it can be rebound while the

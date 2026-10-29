@@ -17260,6 +17260,23 @@ details[open] > .helper-cap::after {
   cursor: pointer;
 }
 
+/* The effort chip: the word the pane's session runs at, beside the model it
+ * runs (t-81532). The word keeps its ink whatever a press can do — it is the
+ * fact; a road no typed key moves takes the chevron away instead, so the chip
+ * says "shown, not offered" by its shape and its tip, never by a colour. */
+.worker-composer-effort {
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.worker-composer-effort[hidden] {
+  display: none;
+}
+
+.worker-composer-effort.is-stuck .worker-composer-chevron {
+  visibility: hidden;
+}
+
 .worker-composer-mode:disabled {
   cursor: default;
 }
@@ -17353,11 +17370,22 @@ details[open] > .helper-cap::after {
   transition: background-color var(--motion-fast) var(--ease-standard);
 }
 
-.composer-menu-item:hover,
+.composer-menu-item:hover:not([aria-disabled="true"]),
 .composer-menu-item:focus-visible,
 .composer-slash-row:hover,
 .composer-slash-row.is-hot {
   background: color-mix(in srgb, var(--chat-accent) 14%, transparent);
+}
+
+/* A row that cannot act now (the effort menu's rungs between two turns it
+ * cannot reach): read in the secondary ink, and no hover that promises a
+ * press. The row the session stands on keeps its ink and its tick. */
+.composer-menu-item[aria-disabled="true"] {
+  cursor: default;
+}
+
+.composer-menu-item[aria-disabled="true"]:not([aria-current="true"]) {
+  color: var(--ink-mist);
 }
 
 .composer-menu-item[aria-current="true"] .composer-menu-name::before {
@@ -18183,7 +18211,7 @@ button.helper-sib:hover {
 /* 이 페이지의 키보드 초점 — 플랫폼 계약의 잉크 외곽선. 입력 상자만 전역
  * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`). */
 .worker-view
-  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door):focus-visible {
+  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }

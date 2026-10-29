@@ -19,6 +19,7 @@ mod continue_gate;
 mod cookie_import_card;
 mod coordinator_desk;
 mod crash_report;
+mod effort_chip;
 mod fixture_cases;
 mod git_doors;
 mod google_quota_api;

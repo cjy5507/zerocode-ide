@@ -1907,6 +1907,14 @@ fn turn_context(row: &serde_json::Value) -> Option<&serde_json::Value> {
 /// what the request went out at, never the word the window typed.
 #[must_use]
 pub fn effort_in(chunk: &str) -> Option<String> {
+    effort_record_in(chunk).map(|(_, effort)| effort)
+}
+
+/// [`effort_in`], with the record that said it: the line itself, which a
+/// reader holds to tell a turn that ran since from the same record read
+/// twice, whatever word the newer one says (t-81532).
+#[must_use]
+pub fn effort_record_in(chunk: &str) -> Option<(&str, String)> {
     chunk.lines().rev().find_map(|line| {
         let row: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
         let effort = if row.get("type").and_then(serde_json::Value::as_str) == Some("assistant") {
@@ -1915,7 +1923,7 @@ pub fn effort_in(chunk: &str) -> Option<String> {
             turn_context(&row)?.get("effort")?
         };
         let effort = effort.as_str()?.trim();
-        (!effort.is_empty()).then(|| effort.to_string())
+        (!effort.is_empty()).then(|| (line, effort.to_string()))
     })
 }
 
