@@ -12417,11 +12417,22 @@ fn carried(
                      * happens here, and a report that could not land leaves
                      * the row honestly UNREPORTED — `@worktree:`'s refusal
                      * counts such rows out loud rather than guessing. */
+                    let mut sharing = None;
                     if let Some(checkout) = seated
                         && let Ok((moved, _)) =
                             actor.worker_seated(team_id, &new_pane, &checkout, now_ms)
                     {
                         rang(moved);
+                        /* Two workers in one folder (t-68069) are said in
+                         * the answer, never refused: where a pane opens is
+                         * the coordinator's choice. Read off the rows the
+                         * report above just wrote. */
+                        sharing = worker_named(&decided.reply.stdout).and_then(|worker| {
+                            let image = actor.view().ok()?;
+                            let others =
+                                image.ledger().workers_sharing_checkout(&checkout, &worker);
+                            Some((checkout, others))
+                        });
                     }
                     // The pane really opened. NOW the receipt may be written —
                     // the failure arms are the whole reason it could not be
@@ -12430,7 +12441,12 @@ fn carried(
                         Ok((moved, _)) => rang(moved),
                         Err(why) => return refused_by_runtime(why),
                     }
-                    answer(decided.reply)
+                    answer(match sharing {
+                        Some((checkout, others)) => {
+                            with_shared_checkout(decided.reply, &checkout, &others)
+                        }
+                        None => decided.reply,
+                    })
                 }
                 Ok(None) => {
                     // The host refused to spawn. The refusal is itself the
@@ -13185,6 +13201,53 @@ fn worker_named(stdout: &str) -> Option<String> {
         .get("workerId")?
         .as_str()
         .map(str::to_string)
+}
+
+/// A `worker-start` answer that names the other workers already seated in
+/// the checkout its pane opened in (t-68069): `sharedCheckout` beside the
+/// answer's own fields, and one line on stderr for a coordinator reading
+/// the text. With nobody beside it, or an answer that is not an object,
+/// the answer is left as it is.
+///
+/// On 2026-10-21 two workers shared one checkout; after a tab closed, one
+/// pane was continued and ran its neighbour's conversation, for an agent's
+/// own "continue" picks the newest conversation of its folder.
+pub(crate) fn with_shared_checkout(
+    mut reply: zerocode_core::agent_teams::Reply,
+    checkout: &str,
+    sharing: &[(String, String, String)],
+) -> zerocode_core::agent_teams::Reply {
+    if sharing.is_empty() {
+        return reply;
+    }
+    let Ok(mut body) = serde_json::from_str::<serde_json::Value>(&reply.stdout) else {
+        return reply;
+    };
+    let Some(object) = body.as_object_mut() else {
+        return reply;
+    };
+    let workers: Vec<_> = sharing
+        .iter()
+        .map(|(run, worker, agent)| {
+            serde_json::json!({ "run": run, "workerId": worker, "agent": agent })
+        })
+        .collect();
+    object.insert(
+        "sharedCheckout".to_string(),
+        serde_json::json!({ "checkout": checkout, "workers": workers }),
+    );
+    reply.stdout = format!("{body}\n");
+    let names: Vec<String> = sharing
+        .iter()
+        .map(|(run, worker, _)| format!("{worker} ({run})"))
+        .collect();
+    reply.stderr.push_str(&format!(
+        "this worker shares the checkout {checkout} with {} — an agent's own continue picks \
+         the newest conversation of its folder, which may be a neighbour's; --worktree gives \
+         each worker a folder of its own\n",
+        names.join(", ")
+    ));
+    reply
 }
 
 fn answer(reply: zerocode_core::agent_teams::Reply) -> zerocode_hookd::TeamAnswer {

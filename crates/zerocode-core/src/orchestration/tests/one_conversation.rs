@@ -181,3 +181,49 @@ fn a_new_conversation_or_an_ended_workers_one_is_still_taken() {
         }
     }
 }
+
+/// t-68069 (2): a pane seated in a checkout another worker still holds a
+/// pane in is told who it shares it with — every run's rows, never itself,
+/// never a worker released or asleep — so the summons that made two
+/// workers in one folder says so. A checkout of its own shares nothing.
+#[test]
+fn a_worker_seated_in_a_neighbours_checkout_is_told_who_it_shares_it_with() {
+    let mut bench = Bench::new();
+    let run = bench.json("run-create --name shared-checkout")["runId"]
+        .as_str()
+        .expect("a run")
+        .to_string();
+    let (first, _) = a_worker_on(&mut bench, MINE);
+    assert!(
+        bench
+            .ledger
+            .workers_sharing_checkout(CHECKOUT, &first)
+            .is_empty(),
+        "a worker alone in its checkout was told of a neighbour"
+    );
+    let (second, _) = a_worker_on(&mut bench, THEIRS);
+    assert_eq!(
+        bench.ledger.workers_sharing_checkout(CHECKOUT, &second),
+        vec![(run.clone(), first.clone(), "claude".to_string())]
+    );
+    assert_eq!(
+        bench.ledger.workers_sharing_checkout(CHECKOUT, &first),
+        vec![(run.clone(), second.clone(), "claude".to_string())]
+    );
+    assert!(
+        bench
+            .ledger
+            .workers_sharing_checkout("/wt/its-own", &second)
+            .is_empty()
+    );
+    for gone in [WorkerState::Released, WorkerState::Sleeping] {
+        set_state(&mut bench, &first, gone);
+        assert!(
+            bench
+                .ledger
+                .workers_sharing_checkout(CHECKOUT, &second)
+                .is_empty(),
+            "a {gone:?} worker holds no pane to share"
+        );
+    }
+}

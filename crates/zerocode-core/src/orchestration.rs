@@ -13902,6 +13902,33 @@ impl Ledger {
         Ok(std::mem::take(&mut worker.taken_over))
     }
 
+    /// The other workers a pane seated in `checkout` shares it with
+    /// (t-68069): every row of any run that still holds a pane there,
+    /// `worker` itself aside, as `(run, worker, agent)`.
+    ///
+    /// On 2026-10-21 two workers shared one checkout, and after a tab closed
+    /// one pane ran its neighbour's conversation: an agent's own "continue"
+    /// picks the newest conversation of its folder, and two workers make
+    /// two of them. The summons that seats the second is where that is
+    /// still a choice — a `--worktree` cut is a folder of its own.
+    #[must_use]
+    pub fn workers_sharing_checkout(
+        &self,
+        checkout: &str,
+        worker: &str,
+    ) -> Vec<(String, String, String)> {
+        self.runs
+            .iter()
+            .flat_map(|run| run.workers.iter().map(move |one| (run, one)))
+            .filter(|(_, one)| {
+                one.id != worker
+                    && one.state.may_occupy_pane()
+                    && one.checkout.as_deref() == Some(checkout)
+            })
+            .map(|(run, one)| (run.id.clone(), one.id.clone(), one.agent.clone()))
+            .collect()
+    }
+
     /// The window reports where a summoned pane actually sits.
     ///
     /// Written once, when the seat exists: the split host resolved the
