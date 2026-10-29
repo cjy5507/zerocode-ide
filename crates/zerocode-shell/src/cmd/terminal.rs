@@ -391,8 +391,9 @@ pub(crate) struct BackReach {
     /// stands inside with no line taken yet is read whole, up to `long_line`,
     /// so every read makes its way up.
     pub(crate) budget: u64,
-    /// The longest line it takes whole: a longer one is passed over, and the
-    /// answer says so (`skipped`).
+    /// The longest line it takes whole: a read that meets a longer one stops
+    /// inside it and says so (`skipped`), and the next read passes over the
+    /// rest.
     pub(crate) long_line: u64,
 }
 
@@ -658,10 +659,11 @@ fn read_below<F: std::io::Read + std::io::Seek>(
 /// What follows the last line end at or before `end` is not a turn yet: at
 /// the file's end, a line still being written — `next` waits at its start, as
 /// a read on from a cursor does — and read back from inside a line longer
-/// than the long-line cap, the part of it the last read left. Such a line is
-/// passed over and said (`skipped`), its start the next read's place; a read
-/// stopped by its budget inside one says so with that place too, so every
-/// read makes its way up. `file` is read here and never opened, and `size` is
+/// than the long-line cap, the part of it the last read left. A read that
+/// meets such a line stops inside it and says so (`skipped`), that place its
+/// `start`; the next read goes on from there to the line's start and above
+/// it, so every read makes its way up and no read takes more than its budget
+/// or the cap and a step. `file` is read here and never opened, and `size` is
 /// what its opener measured: every byte this reads lies below `end`, which
 /// lies within it. Only a read from the file's end names a model and a
 /// context — older lines say nothing of the conversation now.
@@ -701,8 +703,6 @@ pub(crate) fn transcript_log_back<F: std::io::Read + std::io::Seek>(
     let mut lines: Vec<Vec<LineTurn>> = Vec::new();
     let (mut said, mut rows) = (0, 0);
     let (mut model, mut usage) = (None, None);
-    // Inside a line too long to take, looking for where it begins.
-    let mut passing = false;
     // Nothing whole below `end`: nothing to take.
     if stop > 0 {
         'back: loop {
@@ -737,39 +737,43 @@ pub(crate) fn transcript_log_back<F: std::io::Read + std::io::Seek>(
             if cursor == 0 {
                 break;
             }
-            if below.len() as u64 > reach.long_line {
-                // Longer than the cap: passed over, and said.
-                skipped = true;
-                passing = true;
-                below.clear();
-            }
-            // A line this read stands inside, none taken yet, is read whole.
-            let inside = start == stop && !below.is_empty();
-            if spent >= reach.budget && !inside {
-                if passing {
-                    // Its start not found within the budget: the next read looks
-                    // on from here.
+            // The steps above, gathered until one holds a line end — where the
+            // piece in `below` begins — or the file's first byte, and joined
+            // once: a line read a step at a time is not copied again at every
+            // step (t-84136; a 32 MiB line was 2 GiB of copying).
+            let mut above: Vec<Vec<u8>> = Vec::new();
+            let mut piece = below.len() as u64;
+            loop {
+                if piece > reach.long_line {
+                    // Longer than the cap: passed over, and said. The read
+                    // stops inside it, and the next goes on from here.
+                    skipped = true;
                     start = cursor;
+                    break 'back;
                 }
-                break;
-            }
-            let mut bytes = read_below(file, &mut cursor, reach.step)?;
-            spent += bytes.len() as u64;
-            if passing {
-                match bytes.iter().rposition(|byte| *byte == b'\n') {
-                    Some(at) => {
-                        passing = false;
-                        start = cursor + at as u64 + 1;
-                        bytes.truncate(at + 1);
-                        below = bytes;
-                    }
-                    None if cursor == 0 => start = 0,
-                    None => {}
+                // A line this read stands inside, none taken yet, is read whole.
+                let inside = start == stop;
+                if spent >= reach.budget && !inside {
+                    break 'back;
                 }
-                continue;
+                let bytes = read_below(file, &mut cursor, reach.step)?;
+                spent += bytes.len() as u64;
+                let ends = bytes.contains(&b'\n');
+                if !ends {
+                    piece += bytes.len() as u64;
+                }
+                above.push(bytes);
+                if ends || cursor == 0 {
+                    break;
+                }
             }
-            bytes.extend_from_slice(&below);
-            below = bytes;
+            let mut stretch =
+                Vec::with_capacity(above.iter().map(Vec::len).sum::<usize>() + below.len());
+            for bytes in above.iter().rev() {
+                stretch.extend_from_slice(bytes);
+            }
+            stretch.extend_from_slice(&below);
+            below = stretch;
         }
     }
     Ok(SubagentLog {
