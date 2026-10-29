@@ -73,6 +73,10 @@ export const PROBES = {
   "sidebar-team-perf": JSON_OUT("sidebar-team-perf.mjs"),
   // A pane's tab brought to the front until its frame is drawn, over ten panes (t-82914).
   "pane-switch": JSON_OUT("memory-census.mjs", "--engine", "chromium", "--scenarios", "panes-10", "--switch-rounds", "3"),
+  // A long pane turned from its terminal to its conversation by the head's switch, press to first turn drawn (t-82901's
+  // --open; the person's 「대화창이 열 때 바로 안 그려짐」 10-29). Its first read is the last 256 KiB chunk, as both
+  // v1.1.104's backend and v1.1.105's answer it, so one probe gives the page's before and after.
+  "pane-open": JSON_OUT("conversation-earlier.mjs", "--open", "--tail", "chunk"),
 };
 
 const sh = (cmd, args) => spawnSync(cmd, args, { encoding: "utf8" }).stdout ?? "";
@@ -190,8 +194,9 @@ function report(dirs) {
   // The control: a level whose empty page cannot make a frame inside one display frame
   // (DISPLAY_FRAME_MS) cannot judge a frame metric.
   const supply = loaded.map((rows) => median(rows.filter((r) => r.probe === "frame-supply").map((r) => r.numbers["frame supply · controlGapP50"]).filter((n) => n !== undefined)));
-  // A pane switch waits for its frame (memory-census --switch-rounds), so it is a frame row too.
-  const FRAME_ROW = /scroll|over16|over20|frame|프레임|놓친|gap|switch/i;
+  // A pane switch waits for its frame (memory-census --switch-rounds), and so do a pane's first turn and its rows
+  // filled (conversation-earlier --open): frame rows too.
+  const FRAME_ROW = /scroll|over16|over20|frame|프레임|놓친|gap|switch|TurnMs|filledMs/i;
   const out = ["Frame supply (empty page rAF gap p50, ms): " + levels.map((l, at) => `${l} ${fmt(supply[at])}${supply[at] > DISPLAY_FRAME_MS ? ` (${(1000 / supply[at]).toFixed(0)} Hz)` : ""}`).join(", "), "",
     "| probe | metric | " + levels.join(" | ") + " | budget | low-spec |", "|---|---|" + levels.map(() => "---:").join("|") + "|---|---|"];
   for (const full of keys.keys()) {

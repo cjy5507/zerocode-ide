@@ -83,9 +83,9 @@ HARNESS_READS=(crates/zerocode-shell/src/terminal_themes.json crates/zerocode-co
 # scheduling policy does not change what a scene holds), frame rows on normal
 # and cpu4x (taskpolicy -b coalesces frames), idle CPU on normal and low (a CDP
 # throttle stops the page rather than slowing it, so it shows no CPU).
-probes_normal="${probes_normal:-calibrate,frame-supply,memory-webkit,idle-webkit,idle-chromium,pane-switch,conversation-perf,sidebar-team-perf,board-live-perf,coordinator-desk-perf,terminal-pacing,terminal-throughput}"
+probes_normal="${probes_normal:-calibrate,frame-supply,memory-webkit,idle-webkit,idle-chromium,pane-switch,pane-open,conversation-perf,sidebar-team-perf,board-live-perf,coordinator-desk-perf,terminal-pacing,terminal-throughput}"
 probes_low="${probes_low:-calibrate,frame-supply,idle-webkit,idle-chromium,conversation-perf,terminal-throughput}"
-probes_cpu4x="${probes_cpu4x:-frame-supply,pane-switch,conversation-perf,sidebar-team-perf,board-live-perf,coordinator-desk-perf,terminal-pacing}"
+probes_cpu4x="${probes_cpu4x:-frame-supply,pane-switch,pane-open,conversation-perf,sidebar-team-perf,board-live-perf,coordinator-desk-perf,terminal-pacing}"
 
 # The steady scenes, as name:level:measure.sh options; --scenes picks some by name-level.
 STEADY_SCENES=(
