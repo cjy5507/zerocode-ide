@@ -2974,6 +2974,10 @@ class StatefulBackend {
         if (args.role === "judgment") {
           if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
           smart.previousJudgmentSelection ??= { judgmentProvider: smart.judgmentProvider ?? null };
+          // `remember_formats`: the format of the connection judgment left and
+          // of the one it is on now, kept by id (t-76211).
+          const left = smart.judgmentConnection;
+          smart.judgmentFormats = { ...(smart.judgmentFormats ?? {}), ...(left ? { [left.id]: left.protocol } : {}), [args.reference.id]: args.reference.protocol };
           smart.judgmentConnection = clone(args.reference);
           smart.judgmentProvider = { kind: "remote", protocol: args.reference.protocol, baseUrl: row.provider.base_url, model: args.reference.model, requiresAuth: row.provider.requires_auth };
           // Another window edits the connection's address right after this
@@ -3589,6 +3593,7 @@ class StatefulBackend {
           keyAvailable: !provider.requires_auth || this.keychain.has(`dev.zerocode.router.${provider.auth_env}`),
           legacyKey: provider.requires_auth && !this.keychain.has(`dev.zerocode.router.${provider.auth_env}`) && this.legacyKeys.has(id),
           uses: [["coding",coding],["judgment",judgment]].filter(([, ref]) => ref?.id === id).map(([role]) => role),
+          judgmentFormat: smart.judgmentFormats?.[id] ?? (judgment?.id === id ? judgment.protocol : null),
         };
       }), coding, judgment, codingModel: this.zoSettings.model ?? null,
       activeProviderIdentity: this.typesafeSettings().providerIdentity, legacyKeyPresent: false,
@@ -15569,7 +15574,18 @@ await test("재검수 R3: System One 연결 → 다른 연결 → 원래 연결�
   assertEqual(benchCheck, { id: "bench", generation: 4, model: "bench-a", protocol: "system_one" }, "coming back to Bench asked it in another format");
   assertEqual(benchApply, benchCheck, "the apply wrote another reference than the one checked");
   assertEqual(await pageA.locator('#model-advanced [data-judgment-format="judge"]').inputValue(), "openai_json", "Judge's format changed with nobody touching 「고급」");
-  return "Bench system_one → Judge openai_json → (screen reopened) Bench system_one for check+apply";
+
+  // t-76211: judgment on Judge again, then the window starts over — its
+  // memory of formats gone, the connections read afresh from the settings.
+  await pickAndApply("judge", "judge-model");
+  await pageA.evaluate(() => {
+    for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.formats, modelConnectionsController.usedFormats]) held.clear();
+    return refreshApiRouters();
+  });
+  await renderSettled(pageA);
+  const [restartedCheck] = await pickAndApply("bench", "bench-a");
+  assertEqual(restartedCheck.protocol, "system_one", "after a restart Bench was asked in another format than it was last applied in");
+  return "Bench system_one → Judge openai_json → (screen reopened) Bench system_one for check+apply → Judge → (restart) Bench system_one";
 }));
 
 await test("검수 F4: 멈춘 이 컴퓨터 모델을 고르면 요청 없이 「실행 뒤 확인합니다」라고만 말하고, 확인 전에는 통과라고 하지 않는다 (t-76028)", async () => withModelScene(() => {

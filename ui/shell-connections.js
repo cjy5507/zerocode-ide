@@ -548,8 +548,12 @@ const modelConnectionsController = {
     return { group: "check", state: judged?.state ?? "unknown" };
   },
   /* A connections answer, taken: judgment's format is kept by connection,
-   * so moving judgment elsewhere does not forget it (t-76028 R3). */
+   * so moving judgment elsewhere does not forget it (t-76028 R3) — and the
+   * settings keep it too, so a restart does not either (t-76211). */
   hold(state) {
+    for (const row of state?.connections ?? []) {
+      if (typeof row?.judgmentFormat === "string") this.usedFormats.set(row.id, row.judgmentFormat);
+    }
     if (state?.judgment?.protocol) this.usedFormats.set(state.judgment.id, state.judgment.protocol);
     this.state = state;
   },
