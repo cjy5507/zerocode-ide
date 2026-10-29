@@ -18,12 +18,14 @@
 //! ([`PaneMark`], t-81714).
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::SHELL_COMMANDS;
 use super::parse::WRAPPER_COMMANDS;
 use super::script::{self, Command, Script, Word};
 use crate::hook::PANE_KEY_ENV;
+
+mod environ;
 
 /// How many times an `sh -c` or `eval` string is read inside another before
 /// the rest is called unreadable. Chosen, not measured: the incident nested
@@ -154,6 +156,12 @@ impl PaneMark {
             pane: env(PANE_KEY_ENV).filter(|key| !key.is_empty())?,
         })
     }
+
+    /// The mark `pid`'s environment names, read with `environs`.
+    fn of_process(environs: &mut environ::Environs, pid: u32) -> Option<Self> {
+        let environ = environs.of(pid)?;
+        Self::from_env(|name| environ.var(name))
+    }
 }
 
 /// The window's pid as `env` names it ([`WINDOW_PID_ENV`]); `None` for a
@@ -200,17 +208,50 @@ impl ProcessTable {
         self
     }
 
-    /// The host's process table, read with `ps` and waited for at most
-    /// `within`. A listing that does not start, finish in time or exit
-    /// cleanly is unreadable — never an empty table, which would read as
-    /// nothing to hit. The listing's own `ps` is left out, as `pgrep` leaves
-    /// itself out.
+    /// The host's process table, read with `ps`, and the pane each process
+    /// was started in, read from its environment ([`PaneMark`]) — the two
+    /// waited for at most `within` together. A listing that does not start,
+    /// finish in time or exit cleanly is unreadable — never an empty table,
+    /// which would read as nothing to hit. The listing's own `ps` is left
+    /// out, as `pgrep` leaves itself out. A process whose environment is not
+    /// read in time, or does not read (another user's; an Apple program's on
+    /// macOS; every process on a host with no way to read one), names no
+    /// pane.
     #[must_use]
     pub fn read(within: Duration) -> Self {
+        let started = Instant::now();
         match listing(within) {
-            Ok((text, sampler)) => Self::from_listing(&text, Some(sampler)),
+            Ok((text, sampler)) => {
+                let mut environs = environ::Environs::new();
+                Self::from_listing(&text, Some(sampler)).marked_within(started, within, |pid| {
+                    PaneMark::of_process(&mut environs, pid)
+                })
+            }
             Err(why) => Self::unreadable(why),
         }
+    }
+
+    /// The table with each row `mark_of` names a pane for marked, asked row
+    /// by row while `within` of `started` lasts; the rows it does not reach
+    /// name no pane.
+    fn marked_within(
+        mut self,
+        started: Instant,
+        within: Duration,
+        mut mark_of: impl FnMut(u32) -> Option<PaneMark>,
+    ) -> Self {
+        let Ok(rows) = &self.rows else {
+            return self;
+        };
+        for row in rows {
+            if started.elapsed() >= within {
+                break;
+            }
+            if let Some(mark) = mark_of(row.pid) {
+                self.marks.insert(row.pid, mark);
+            }
+        }
+        self
     }
 
     /// A table from `ps -o pid=,ppid=,pgid=,command=` text, leaving `except`

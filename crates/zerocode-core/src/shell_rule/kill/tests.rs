@@ -556,3 +556,135 @@ fn a_mark_needs_both_the_window_and_the_pane() {
         );
     }
 }
+
+/// The environments are read inside the table's wall: once it has passed,
+/// no more are read and the rows not reached name no pane.
+#[test]
+fn marks_are_read_only_while_the_wall_lasts() {
+    let asked = std::cell::Cell::new(0);
+    let every = |pid: u32| {
+        asked.set(asked.get() + 1);
+        Some(mark(WINDOW, &format!("term-{pid}")))
+    };
+    let rows = match &table().rows {
+        Ok(rows) => rows.len(),
+        Err(why) => panic!("the fixture table reads: {why}"),
+    };
+    let passed = table().marked_within(Instant::now(), Duration::ZERO, every);
+    assert!(passed.marks.is_empty(), "{:?}", passed.marks);
+    assert_eq!(asked.get(), 0);
+    let lasting = table().marked_within(Instant::now(), Duration::MAX, every);
+    assert_eq!(lasting.marks.len(), rows);
+    assert_eq!(asked.get(), rows);
+    assert_eq!(lasting.marks.get(&CALLER), Some(&mark(WINDOW, "term-200")));
+    let unread =
+        ProcessTable::unreadable("no ps").marked_within(Instant::now(), Duration::MAX, every);
+    assert!(unread.marks.is_empty());
+    assert_eq!(
+        asked.get(),
+        rows,
+        "a table that did not read asks of no row"
+    );
+}
+
+/* ---- the processes themselves (t-81714) -------------------------------------- */
+
+/// What a probe is started with besides its pane's mark.
+const PROBE: &str = "ZEROCODE_KILL_PROBE";
+
+/// A probe: started by the test below with [`PROBE`] in its environment, it
+/// waits for its input to close, so it is surely there while it is read.
+/// Run without it, it returns at once.
+#[test]
+fn a_probe_waits_for_its_input() {
+    use std::io::Read as _;
+
+    if std::env::var_os(PROBE).is_some() {
+        let _ = std::io::stdin().read_to_end(&mut Vec::new());
+    }
+}
+
+/// A process started with `env` that waits for its input to close: `program`
+/// reading it, or this test's own program as [`a_probe_waits_for_its_input`].
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn probe(program: Option<&[&str]>, env: &[(&str, &str)]) -> std::process::Child {
+    use std::process::{Command, Stdio};
+
+    let mut command = match program {
+        Some([program, args @ ..]) => {
+            let mut command = Command::new(program);
+            command.args(args);
+            command
+        }
+        _ => {
+            let module = module_path!()
+                .split_once("::")
+                .map_or(module_path!(), |(_, path)| path);
+            let mut command = Command::new(std::env::current_exe().expect("this test's program"));
+            command.args([
+                "--exact",
+                &format!("{module}::a_probe_waits_for_its_input"),
+                "--test-threads=1",
+            ]);
+            command
+        }
+    };
+    command
+        .env(PROBE, "1")
+        .envs(env.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the probe starts")
+}
+
+/// 10-29's two shapes, on processes this test starts and never signals —
+/// each ends when its input closes. A program that is not Apple's (homebrew's
+/// `python3` then, this test's own program here), started with the calling
+/// pane's mark and hanging outside the caller's tree, is read as the pane's
+/// own; one started with another pane's mark is asked. Apple's `/bin/zsh`
+/// with the pane's own mark is asked all the same on macOS, which leaves
+/// its own programs' environments out: the reach this has.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_started_process_is_judged_by_the_pane_its_environment_names() {
+    let own = [(WINDOW_PID_ENV, "4242"), (PANE_KEY_ENV, "term-1")];
+    let other = [(WINDOW_PID_ENV, "4242"), (PANE_KEY_ENV, "term-2")];
+    let mut probes = vec![probe(None, &own), probe(None, &own), probe(None, &other)];
+    if cfg!(target_os = "macos") {
+        probes.push(probe(Some(&["/bin/zsh", "-c", "read -r line || :"]), &own));
+    }
+    let pids: Vec<u32> = probes.iter().map(std::process::Child::id).collect();
+    let me = std::process::id();
+    let rows = pids.iter().map(|&pid| row(pid, me, pid, "probe")).collect();
+    let mut environs = environ::Environs::new();
+    let table = ProcessTable::new(rows).marked_within(Instant::now(), Duration::MAX, |pid| {
+        PaneMark::of_process(&mut environs, pid)
+    });
+    let verdicts: Vec<KillVerdict> = pids[1..]
+        .iter()
+        .map(|pid| {
+            judge_kill(
+                &kill_calls(&format!("kill {pid}")),
+                &table,
+                Some(pids[0]),
+                &[],
+            )
+        })
+        .collect();
+    for mut probe in probes {
+        drop(probe.stdin.take());
+        let ended = probe.wait().expect("a probe ends when its input closes");
+        assert!(ended.success(), "{ended}");
+    }
+    assert_eq!(table.marks.get(&pids[0]), Some(&mark(4242, "term-1")));
+    assert_eq!(
+        verdicts[0],
+        KillVerdict::Allow,
+        "the pane's own loose program"
+    );
+    for verdict in &verdicts[1..] {
+        assert!(matches!(verdict, KillVerdict::Ask { .. }), "{verdict:?}");
+    }
+}
