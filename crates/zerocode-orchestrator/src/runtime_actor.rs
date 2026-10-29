@@ -8323,6 +8323,56 @@ mod tests {
         );
     }
 
+    /// A letter sent through the runtime adds its one row and touches no other
+    /// letter (t-82988): the runtime writes an export that says how each run's
+    /// rows last changed, through the store's memory of what it last wrote.
+    /// The first letter after the seeded boot and the one after it, both.
+    #[test]
+    fn a_letter_sent_through_the_runtime_adds_its_one_row() {
+        const LETTERS: usize = 1_000;
+        let fixture = Fixture::new();
+        let seeded = ledger_store::a_ledger_with_mail(LETTERS);
+        let busy = seeded.runs()[0].id.clone();
+        let actor = start(
+            &fixture,
+            RuntimeBoot::Cutover {
+                legacy: Some(Box::new((seeded.export(), digest(7)))),
+                now_ms: 10,
+            },
+            2,
+        );
+        let connection = fixture.store.connection().expect("store connection");
+        ledger_store::count_letter_rows(&connection);
+        for (at, name) in ["r-first-letter", "r-second-letter"].into_iter().enumerate() {
+            let (sent, _) = actor
+                .plan(a_command(
+                    &[
+                        "send",
+                        "--run",
+                        &busy,
+                        "--to",
+                        &format!("run:{busy}"),
+                        "--type",
+                        "status",
+                        "--body",
+                        "one more",
+                        "--retry-request",
+                        name,
+                    ],
+                    20 + at as i64,
+                ))
+                .expect("the letter");
+            assert_eq!(sent.reply.exit_code, 0, "{}", sent.reply.stderr);
+        }
+        assert_eq!(
+            ledger_store::letter_rows_touched(&connection),
+            (2, 0, 0),
+            "(inserted, updated, deleted) letters for two new letters"
+        );
+        drop(connection);
+        actor.shutdown().expect("release owner");
+    }
+
     /// A write that dies half-way leaves the ledger that was there, whole.
     ///
     /// `ledger_store::write` moves the head, clears every row and re-inserts

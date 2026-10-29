@@ -3190,6 +3190,126 @@ fn each(
     Ok(())
 }
 
+/// A ledger whose first run holds `letters` letters to its coordinator,
+/// every one read and acknowledged in batches of fifty, and whose second run
+/// holds none — a long-lived run beside a fresh one (t-82988).
+#[cfg(test)]
+pub(crate) fn a_ledger_with_mail(letters: usize) -> zerocode_core::orchestration::Ledger {
+    use zerocode_core::orchestration::{Ledger, MessageKind};
+    const BATCH: usize = 50;
+    let mut ledger = Ledger::new();
+    let busy = ledger.create_run("busy", 1);
+    ledger.create_run("quiet", 1);
+    let mut rows = ledger.export();
+    let address = format!("run:{busy}");
+    let mut next = rows.next_id;
+    let mut mint = |prefix: &str| {
+        next += 1;
+        format!("{prefix}{next}")
+    };
+    let mut batch = Vec::new();
+    let mut seq = 0;
+    for at in 0..letters {
+        let id = mint("m-");
+        rows.messages.push(MessageRow {
+            run: busy.clone(),
+            id: id.clone(),
+            from: "worker:w-writer".to_string(),
+            to: address.clone(),
+            kind: MessageKind::Status,
+            body: Text::from(format!("{at:0>500}")),
+            subject: Text::default(),
+            priority: Default::default(),
+            payload: Text::default(),
+            thread: None,
+            task: None,
+            dispatch: None,
+            author_seat: None,
+            created_ms: 2,
+        });
+        batch.push(id);
+        if batch.len() == BATCH || at + 1 == letters {
+            rows.acked.push(AckedRow {
+                run: busy.clone(),
+                address: address.clone(),
+                delivery: mint("d-"),
+                messages: Some(std::mem::take(&mut batch)),
+                seq,
+                current: at + 1 == letters,
+            });
+            seq += 1;
+        }
+    }
+    rows.inboxes.push(InboxRow {
+        run: busy,
+        address,
+        pending: Vec::new(),
+        open: None,
+    });
+    rows.next_id = next + 1;
+    Ledger::rebuild(rows).expect("a ledger with mail")
+}
+
+/// One more status letter from the writer to the first run of
+/// [`a_ledger_with_mail`].
+#[cfg(test)]
+pub(crate) fn one_more_letter(ledger: &mut zerocode_core::orchestration::Ledger, now_ms: i64) {
+    use zerocode_core::orchestration::{Draft, MessageKind};
+    let busy = ledger.runs()[0].id.clone();
+    ledger
+        .post(
+            &busy,
+            Draft {
+                from: "worker:w-writer".to_string(),
+                to: format!("run:{busy}"),
+                kind: MessageKind::Status,
+                body: Text::from("one more"),
+                subject: Text::default(),
+                priority: Default::default(),
+                payload: Text::default(),
+                thread: None,
+                task: None,
+                dispatch: None,
+            },
+            now_ms,
+        )
+        .expect("one more letter");
+}
+
+/// Count every statement that touches a row of the letters' table, by kind,
+/// from here on (t-82988).
+#[cfg(test)]
+pub(crate) fn count_letter_rows(connection: &Connection) {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS letter_rows_touched (op TEXT NOT NULL);
+             CREATE TRIGGER IF NOT EXISTS letter_inserted AFTER INSERT ON ledger_messages
+                BEGIN INSERT INTO letter_rows_touched VALUES ('insert'); END;
+             CREATE TRIGGER IF NOT EXISTS letter_updated AFTER UPDATE ON ledger_messages
+                BEGIN INSERT INTO letter_rows_touched VALUES ('update'); END;
+             CREATE TRIGGER IF NOT EXISTS letter_deleted AFTER DELETE ON ledger_messages
+                BEGIN INSERT INTO letter_rows_touched VALUES ('delete'); END;
+             DELETE FROM letter_rows_touched;",
+        )
+        .expect("count the letters' rows");
+}
+
+/// The letters' rows inserted, updated and deleted since
+/// [`count_letter_rows`].
+#[cfg(test)]
+pub(crate) fn letter_rows_touched(connection: &Connection) -> (i64, i64, i64) {
+    connection
+        .query_row(
+            "SELECT COUNT(CASE WHEN op = 'insert' THEN 1 END),
+                    COUNT(CASE WHEN op = 'update' THEN 1 END),
+                    COUNT(CASE WHEN op = 'delete' THEN 1 END)
+               FROM letter_rows_touched",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("the letters' rows touched")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4606,6 +4726,54 @@ mod tests {
             .expect("it is there");
         assert_eq!(held.projection, second);
         assert_eq!(held.revision, 2);
+    }
+
+    /// One letter's write adds its one row to the letters' table, touches no
+    /// other letter, and digests only what moved (t-82988).
+    ///
+    /// Before it a letter's write deleted and re-inserted every letter the
+    /// ledger held — 43,540 on the person's machine — and serialized the
+    /// whole ledger, 44 MB, for its table digests.
+    #[test]
+    fn one_letter_adds_one_row_and_digests_only_what_moved() {
+        const LETTERS: usize = 2_000;
+        const LETTER_BYTES: usize = 500;
+        let store = a_store();
+        let written = WrittenLedgers::default();
+        let mut ledger = a_ledger_with_mail(LETTERS);
+        write_remembered(
+            &store,
+            &written,
+            "one",
+            0,
+            1,
+            (&ledger.export_marked()).into(),
+            10,
+        )
+        .expect("the ledger's first write");
+        count_letter_rows(&store);
+
+        one_more_letter(&mut ledger, 11);
+        let export = ledger.export_marked();
+        let before = write_work_here();
+        write_remembered(&store, &written, "one", 1, 2, (&export).into(), 11)
+            .expect("the letter's write");
+        let spent = write_work_here().since(before);
+
+        assert_eq!(
+            letter_rows_touched(&store),
+            (1, 0, 0),
+            "(inserted, updated, deleted) letters for one new letter"
+        );
+        assert!(
+            spent.rows_digested < (LETTERS / 10) as u64
+                && spent.bytes_digested < (LETTERS * LETTER_BYTES / 10) as u64,
+            "one letter's write digested {spent:?} of a ledger of {LETTERS} letters"
+        );
+        let held = read(&store, "one", export.projection().schema)
+            .expect("it reads")
+            .expect("it is there");
+        assert_eq!(held.projection, *export.projection());
     }
 
     /// The revision a writer expects is the revision it gets, or nothing.
