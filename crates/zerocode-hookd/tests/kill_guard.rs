@@ -330,9 +330,12 @@ async fn an_unmeasured_provider_is_answered_as_before() {
 }
 
 /// The window's witness on this machine's own process table, read now
-/// within the guard's wall: the calling pane is this test's process.
+/// within the guard's wall: the calling pane is this test's process. Only
+/// the unix measurement below reads it, so it carries that test's cfg.
+#[cfg(unix)]
 struct ThisMachine;
 
+#[cfg(unix)]
 impl KillWitness for ThisMachine {
     fn roots(&self, _pane_key: &str) -> KillRoots {
         KillRoots {
