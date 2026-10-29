@@ -2805,8 +2805,11 @@
    * dock, as wide as the dock and 48px tall, so the opaque composer box
    * covers the rest and the rows stay readable beside it. */
   --chat-dock-fade: 48px;
-  --chat-sticky-pad-top: 14px;
-  --chat-sticky-pad-bottom: 12px;
+  /* The person's row, padded above and below as the extension's header row
+   * is (`stickyHeader`); the row no longer sticks (t-81786 P3-17), so the
+   * names say whose row it is. */
+  --chat-person-pad-top: 14px;
+  --chat-person-pad-bottom: 12px;
   --chat-status-h: 1.85em;
   --chat-status-in: 300ms;
   /* A step is one line (t-15682): a 30px row whose state dot stands centred in

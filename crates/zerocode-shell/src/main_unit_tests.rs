@@ -22007,8 +22007,8 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "list-pad-x",
         "list-pad-top",
         "list-pad-bottom",
-        "sticky-pad-top",
-        "sticky-pad-bottom",
+        "person-pad-top",
+        "person-pad-bottom",
         "status-h",
         "status-in",
         // A step is one line (t-15682): the row, the column of its dot and its
@@ -22335,11 +22335,11 @@ fn the_conversation_wears_the_extensions_own_measures() {
         ("chat-dock-inset", rule("inputContainer", "bottom")),
         ("chat-dock-max", rule("inputContainer", "max-width")),
         (
-            "chat-sticky-pad-top",
+            "chat-person-pad-top",
             rule("message.stickyHeader", "padding-top"),
         ),
         (
-            "chat-sticky-pad-bottom",
+            "chat-person-pad-bottom",
             rule("message.stickyHeader", "padding-bottom"),
         ),
         ("chat-send-size", rule("sendButton", "width")),

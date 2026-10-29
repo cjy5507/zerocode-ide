@@ -15015,7 +15015,7 @@ details.worker-command {
   position: relative;
   display: block;
   margin: var(--chat-bubble-gap) 0;
-  padding: var(--chat-sticky-pad-top) 0 var(--chat-sticky-pad-bottom);
+  padding: var(--chat-person-pad-top) 0 var(--chat-person-pad-bottom);
 }
 
 .helper-turn.is-user:first-child {
@@ -15476,7 +15476,7 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 }
 
 .helper-turn.is-user > .helper-said.is-clipped:not(.is-open) + .helper-expand {
-  bottom: calc(var(--chat-sticky-pad-bottom) + var(--space-1));
+  bottom: calc(var(--chat-person-pad-bottom) + var(--space-1));
 }
 
 .helper-who {
