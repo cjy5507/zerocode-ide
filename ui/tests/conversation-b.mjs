@@ -147,6 +147,12 @@ function readPage() {
       };
     }),
     headAir: { above: space(5), below: space(2) },
+    // An inline code chip's size (draft C5), beside the terminal's.
+    chip: (() => {
+      const code = list.querySelector(".helper-turn.is-assistant .helper-said :not(pre) > code");
+      return code ? parseFloat(getComputedStyle(code).fontSize) : null;
+    })(),
+    termSize: parseFloat(root.getPropertyValue("--term-font-size")),
     // A rule an answer draws (draft C4), and the ink of the page's own
     // divider, read off a probe that stands for one breath.
     rule: (() => {
@@ -271,6 +277,10 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
         one.rule.top[2] === one.rule.divider && one.rule.sides.every((side) => side === "none") &&
         one.rule.above === one.rule.air && one.rule.below === one.rule.air),
       JSON.stringify(Object.fromEntries(["dark-1440", "light-1440"].map((key) => [key, seen[key].rule]))));
+    ok("B: an inline code chip reads at the terminal's own size — 14 px wherever the prose is 16 px, not 14.72 — and under the prose on a narrow page too (draft C5, t-82195)",
+      all.every((one) => one.chip !== null && one.chip < one.proseSize && (one.proseSize !== 16 || one.chip === one.termSize)) &&
+        dark(1440).chip === 14,
+      JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.proseSize, one.chip, one.termSize]]))));
     ok("B: an answer wears no dot and the tool work stands as pills with no step built",
       all.every((one) => one.answerDots === 0 && one.stepRows === 0),
       JSON.stringify(dark(1440)));

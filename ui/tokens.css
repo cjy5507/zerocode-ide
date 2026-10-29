@@ -2751,7 +2751,11 @@
   --agent-accent-codex: #10a37f;
   --agent-accent-zo: #8b7cf6;
   --agent-accent-antigravity: #4e8cf7;
-  --chat-chip-size: 0.92em;
+  /* An inline code chip, and the turn list's command in one (t-82195 C5):
+   * on the 16px prose it is the terminal's own 14px (`--term-font-size`) —
+   * 0.92em read 14.72px, larger than the chat panels drawn for draft C
+   * (0.85~0.9em) and than the code it quotes. */
+  --chat-chip-size: 0.875em;
   --chat-send-size: 26px;
   /* The extension's pills: 18px tall, .85em words, 8px sides, round. */
   --chat-pill-height: 18px;
