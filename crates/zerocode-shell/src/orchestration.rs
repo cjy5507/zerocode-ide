@@ -1948,20 +1948,30 @@ pub(crate) fn tell_seat_of_term(term: u32, body: &str, receipt: &str, now_ms: i6
     }
 }
 
-/// The run side of the worker seated at `term`, for a question its CLI asks
-/// (t-82296): its run, its seat, the run's coordinator address and whether
-/// somebody sits there, whether the person has taken the pane, and the
-/// dispatch it is on. `None` where no run's live worker sits at `term` — a
-/// coordinator's own pane, or one a person opened.
-pub(crate) fn worker_ask_seat(term: u32) -> Option<crate::worker_question::AskSeat> {
-    with_ledger_seats(|ledger, seats| {
-        ledger.runs().iter().find_map(|run| {
+/// The ledger as a beat of worker questions reads it (t-82296, t-84470):
+/// every fact the beat needs — the worker's seat at a pane, the pane a
+/// worker sits at, where a question stands — out of ONE snapshot
+/// ([`read_questions`]), so ten questions waiting are one reading a beat, not
+/// twenty.
+pub(crate) struct QuestionLedger<'a> {
+    ledger: &'a Ledger,
+    seats: &'a TeamSeatIndex,
+}
+
+impl QuestionLedger<'_> {
+    /// The run side of the worker seated at `term`, for a question its CLI
+    /// asks: its run, its seat, the run's coordinator address and whether
+    /// somebody sits there, whether the person has taken the pane, and the
+    /// dispatch it is on. `None` where no run's live worker sits at `term` —
+    /// a coordinator's own pane, or one a person opened.
+    pub(crate) fn ask_seat(&self, term: u32) -> Option<crate::worker_question::AskSeat> {
+        self.ledger.runs().iter().find_map(|run| {
             let worker = run
                 .workers
                 .iter()
                 .filter(|worker| worker.state.is_live() && worker.state.may_occupy_pane())
                 .find(|worker| {
-                    seats
+                    self.seats
                         .get(worker.team.as_str())
                         .and_then(|panes| panes.get(worker.pane.as_str()))
                         == Some(&term)
@@ -1977,33 +1987,27 @@ pub(crate) fn worker_ask_seat(term: u32) -> Option<crate::worker_question::AskSe
                 dispatch: worker.dispatch.clone(),
             })
         })
-    })?
-}
+    }
 
-/// The term this window seats `worker` of `run` at while it is a live worker
-/// in a pane — how a question it asked before the window restarted finds its
-/// pane again (t-82296).
-pub(crate) fn worker_term(run: &str, worker: &str) -> Option<u32> {
-    with_ledger_seats(|ledger, seats| {
-        let worker =
-            ledger.run(run)?.workers.iter().find(|one| {
-                one.id == worker && one.state.is_live() && one.state.may_occupy_pane()
-            })?;
-        seats
-            .get(worker.team.as_str())?
-            .get(worker.pane.as_str())
-            .copied()
-    })?
-}
+    /// The term this window seats `worker` of `run` at while it is a live
+    /// worker in a pane — how a question it asked before the window
+    /// restarted finds its pane again. Read as the board reads it
+    /// ([`seated_term`]): only the worker in that pane now.
+    pub(crate) fn seated_term(&self, run: &str, worker: &str) -> Option<u32> {
+        let run = self.ledger.run(run)?;
+        let worker = run
+            .workers
+            .iter()
+            .find(|one| one.id == worker && one.state.is_live() && one.state.may_occupy_pane())?;
+        seated_term(run, worker, self.seats)
+    }
 
-/// Where a question the window filed for a worker stands in `run`
-/// (t-82296): the coordinator's answer once one landed, closed when it can
-/// no longer be answered or is gone, waiting otherwise. A ledger this window
-/// cannot read is answered as waiting — the beat looks again.
-pub(crate) fn question_standing(run: &str, question: &str) -> crate::worker_question::Standing {
-    use crate::worker_question::Standing;
-    with_ledger_seats(|ledger, _| {
-        let Some(run) = ledger.run(run) else {
+    /// Where a question the window filed for a worker stands in `run`: the
+    /// coordinator's answer once one landed, closed when it can no longer be
+    /// answered or is gone, waiting otherwise.
+    pub(crate) fn standing(&self, run: &str, question: &str) -> crate::worker_question::Standing {
+        use crate::worker_question::Standing;
+        let Some(run) = self.ledger.run(run) else {
             return Standing::Closed;
         };
         let Some(asked) = run.message(question) else {
@@ -2014,8 +2018,20 @@ pub(crate) fn question_standing(run: &str, question: &str) -> crate::worker_ques
             None if run.question_is_answerable(asked).is_err() => Standing::Closed,
             None => Standing::Waiting,
         }
-    })
-    .unwrap_or(Standing::Waiting)
+    }
+}
+
+/// Read the ledger once for a beat of worker questions. `None` where this
+/// window has no orchestration runtime to ask — the beat reads every
+/// question as waiting and looks again.
+pub(crate) fn read_questions<T>(read: impl FnOnce(&QuestionLedger<'_>) -> T) -> Option<T> {
+    with_ledger_seats(|ledger, seats| read(&QuestionLedger { ledger, seats }))
+}
+
+/// [`QuestionLedger::ask_seat`] on its own reading, for the moment a pane
+/// first asks (t-82296).
+pub(crate) fn worker_ask_seat(term: u32) -> Option<crate::worker_question::AskSeat> {
+    read_questions(|ledger| ledger.ask_seat(term))?
 }
 
 /// The run and the address of the seat this window holds at `term`: a live

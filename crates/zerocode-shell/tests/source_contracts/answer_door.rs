@@ -218,6 +218,24 @@ fn the_screen_is_read_only_where_a_pane_waits_or_an_answer_is_about_to_be_typed(
     );
 }
 
+/// The contract above reads which files name `answer_door::`. A `pub use`
+/// of the door's items in an allowed file would let any other file reach
+/// them under that file's name, and the reading would never see it — so the
+/// door is not handed on (t-84470, r1 P3-4). A caller outside the answer
+/// commands asks them for what it needs to know, in functions of their own.
+#[test]
+fn no_source_hands_the_answer_door_on() {
+    for (name, source) in shell_sources() {
+        for line in code_only(&source).lines() {
+            let line = line.trim_start();
+            assert!(
+                !(line.starts_with("pub") && line.contains("use ") && line.contains("answer_door")),
+                "{name} hands the answer door on: {line}"
+            );
+        }
+    }
+}
+
 /// What the page does with a refusal and with a wait it was only told about:
 /// the backend refuses with a WORD, and the page turns it into its own
 /// sentence in all five catalogs (the Korean default stands in the call, the

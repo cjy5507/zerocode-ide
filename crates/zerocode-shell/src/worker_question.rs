@@ -16,16 +16,26 @@
 //! the same answer door a card's answer takes
 //! ([`crate::cmd::terminal::answer_ask`]) — no new verb, no new key road.
 //!
-//! The person is asked after all in three cases only: the run's coordinator
-//! seat is empty, the person has taken the pane, or the coordinator has not
-//! answered within [`COORDINATOR_ANSWER_WAIT_MS`]. A question given to the
-//! person while it waited says why on the card (`ask:raised`).
+//! A question that is the person's to answer — an account to pick, a secret
+//! value, a payment, a login, a pane the person works in — the coordinator
+//! does not answer: it replies with one of [`TO_PERSON`]'s words, and the
+//! window gives the question to the person at once and types nothing
+//! (t-84343). The worker's picker waits for the person; the window holds the
+//! question until the person answers, and lets it go quietly when the worker
+//! or its pane goes first.
+//!
+//! The person is asked after all in these cases only: the coordinator gave it
+//! to them, the run's coordinator seat is empty, the person has taken the
+//! pane, the coordinator has not answered within
+//! [`COORDINATOR_ANSWER_WAIT_MS`], the ledger would not file the letter, or
+//! it can no longer take an answer while the pane still asks. A question
+//! given to the person says why on the card (`ask:raised`).
 //!
 //! A question the pane moved past before the answer came is refused back to
 //! the coordinator as 「지나간 질문」 and leaves nothing on the person's
 //! screen: the moving past is the hook's word (a report that is no longer the
-//! asking), or the answer door's, which reads the screen and refuses with
-//! [`crate::cmd::terminal::QUESTION_CHANGED`] — the judgement t-82287 made
+//! asking), or the answer door's, which reads the screen and refuses
+//! ([`crate::cmd::terminal::refused_as_passed`]) — the judgement t-82287 made
 //! for the person's own answers.
 //!
 //! A permission request is not routed: the automatic approval rules read it
@@ -51,6 +61,23 @@ use crate::hooks::PaneHookReport;
 /// the person is asked instead.
 pub(crate) const COORDINATOR_ANSWER_WAIT_MS: i64 = 10 * 60 * 1000;
 
+/// What a coordinator may leave after a word of [`TO_PERSON`] — 「사람에게.」
+/// is the word too, never an answer typed into the picker; a full-width end
+/// is an end.
+const SENTENCE_ENDS: &[char] = &['.', '。', '．', '!', '！', '?', '？'];
+
+/// The quotes a coordinator may write a word of [`TO_PERSON`] in, opening and
+/// closing, as the letter shows it — 「사람에게」. One pair is taken off.
+const QUOTE_PAIRS: &[(char, char)] = &[
+    ('「', '」'),
+    ('『', '』'),
+    ('“', '”'),
+    ('‘', '’'),
+    ('"', '"'),
+    ('\'', '\''),
+    ('`', '`'),
+];
+
 /// How long a question read back after a restart waits, once its worker
 /// sits in a pane again, for the pane's screen to show it: a pane that has
 /// just come back may not have drawn yet.
@@ -59,6 +86,13 @@ const TAKE_UP_GRACE_MS: i64 = 5_000;
 /// The window event that tells the page a worker's question reached the
 /// person after all, and why: `{ term, why }` (t-82296).
 pub(crate) const RAISED_EVENT: &str = "ask:raised";
+
+/// The coordinator's whole answer that gives its worker's question to the
+/// person at once (t-84343): a question that is the person's to answer — an
+/// account to pick, a secret value, a payment, a login, a pane the person
+/// works in. Either word, alone; the letter, the guide and the tests all read
+/// them from here.
+pub(crate) const TO_PERSON: &[&str] = &["사람에게", "to-person"];
 
 /// Where the run's side of a worker's pane stands, read from the ledger
 /// ([`crate::orchestration::worker_ask_seat`]).
@@ -90,6 +124,10 @@ pub(crate) enum Raised {
     TakenOver,
     /// The ledger would not file the letter.
     Unsent,
+    /// The coordinator answered with [`TO_PERSON`].
+    CoordinatorHanded,
+    /// The ledger can no longer take an answer to the letter.
+    Unanswerable,
 }
 
 /// Where a question a pane just asked goes.
@@ -137,7 +175,8 @@ pub(crate) enum Step {
     RefuseHeld,
     /// Put the question on the person's screen, saying why.
     Raise(Raised),
-    /// Forget the question: there is nobody left to answer it or to tell.
+    /// Forget the question: the pane moved past it or the person holds it,
+    /// and there is nobody left to answer it or to tell.
     Forget,
 }
 
@@ -158,7 +197,22 @@ pub(crate) fn step(
     now_ms: i64,
 ) -> Step {
     match standing {
-        Standing::Closed => return Step::Forget,
+        // Moved past, or the person holds it already: nothing to give.
+        Standing::Closed if passed || raised => return Step::Forget,
+        // The pane still asks what nobody can answer by letter any more.
+        Standing::Closed => return Step::Raise(Raised::Unanswerable),
+        // The coordinator gave it to the person: given at once, then the
+        // person's until they answer — or until the worker or its pane goes,
+        // when it is let go with nobody told.
+        Standing::Answered(words) if hands_to_person(words) => {
+            return if passed || seat.is_none() {
+                Step::Forget
+            } else if raised {
+                Step::Wait
+            } else {
+                Step::Raise(Raised::CoordinatorHanded)
+            };
+        }
         Standing::Answered(_) if passed => return Step::RefusePassed,
         Standing::Answered(_) if raised || seat.is_some_and(|seat| seat.taken) => {
             return Step::RefuseHeld;
@@ -238,25 +292,64 @@ pub(crate) fn letter(prompt: &AskPrompt, seat: &AskSeat, term: u32) -> (String, 
         }
     }
     body.push_str(&format!(
-        "\n답: reply --to-message 로 고른 번호(여러 개면 1,3) 또는 자유 글{}. {}분 안에 답이 없으면 사람에게 올립니다.",
-        if several { "을 질문마다 한 줄에" } else { "" },
+        "\n답: reply --to-message 로 {} 또는 자유 글. {}분 안에 답이 없으면 사람에게 올립니다.",
+        if several {
+            "질문마다 한 줄에 고른 번호만(여러 개면 1,3)"
+        } else {
+            "첫 줄에 고른 번호만(여러 개면 1,3) — 그 아래 줄은 판에 넣지 않음 —"
+        },
         COORDINATOR_ANSWER_WAIT_MS / 60_000,
+    ));
+    body.push_str(&format!(
+        "\n사람 몫(계정 고르기·비밀 값·결제·로그인·사람이 쓰는 판)이면 답하지 말고 본문에 {} 한 마디만 써서 reply 하세요 — 바로 사람 화면에 올립니다.",
+        TO_PERSON
+            .iter()
+            .map(|word| format!("「{word}」"))
+            .collect::<Vec<_>>()
+            .join(" 또는 "),
     ));
     (subject, body)
 }
 
+/// Whether the coordinator's `reply` is one of [`TO_PERSON`]'s words alone —
+/// spaces and a sentence's end around it, inside one pair of quotes or none,
+/// English in any case.
+fn hands_to_person(reply: &str) -> bool {
+    let word = bare(reply);
+    let word = unquoted(word).map_or(word, bare);
+    TO_PERSON.iter().any(|one| word.eq_ignore_ascii_case(one))
+}
+
+/// `words` without the spaces around it and the [`SENTENCE_ENDS`] after it.
+fn bare(words: &str) -> &str {
+    words.trim().trim_end_matches(SENTENCE_ENDS).trim_end()
+}
+
+/// `words` without the pair of [`QUOTE_PAIRS`] it opens and closes with.
+fn unquoted(words: &str) -> Option<&str> {
+    QUOTE_PAIRS
+        .iter()
+        .find_map(|(open, close)| words.strip_prefix(*open)?.strip_suffix(*close))
+}
+
 /// The coordinator's reply as the picks a card would have sent.
 ///
-/// One question takes the whole reply; several take one line each, in
-/// order. A line that is only choice numbers inside the question's range —
-/// one for a single-select, any for a multi-select — picks those rows;
-/// anything else is the question's free answer. `None` when no question got
-/// an answer at all.
+/// One question takes its choice numbers off the reply's first line — the
+/// lines under them are the coordinator's own note, not the answer — or else
+/// the whole reply as its free answer; several take one line each, in order.
+/// A line that is only choice numbers inside the question's range — one for
+/// a single-select, any for a multi-select, each with or without a `.` or
+/// `)` after it — picks those rows; anything else is the question's free
+/// answer. `None` when no question got an answer at all.
 pub(crate) fn selections_from_reply(prompt: &AskPrompt, reply: &str) -> Option<Vec<AskSelection>> {
     let reply = reply.trim();
-    let lines: Vec<&str> = match prompt.questions.len() {
-        0 => return None,
-        1 => vec![reply],
+    let lines: Vec<&str> = match prompt.questions.as_slice() {
+        [] => return None,
+        [question] => {
+            let first = reply.lines().next().unwrap_or_default().trim();
+            let numbers = picked_rows(first, question.options.len(), question.multi_select);
+            vec![if numbers.is_some() { first } else { reply }]
+        }
         _ => reply.lines().map(str::trim).collect(),
     };
     let selections: Vec<AskSelection> = prompt
@@ -281,10 +374,12 @@ pub(crate) fn selections_from_reply(prompt: &AskPrompt, reply: &str) -> Option<V
 }
 
 /// The rows `words` names when it is only choice numbers, 1-based, all in
-/// `1..=rows`, and one of them unless `several` — as 0-based indices.
+/// `1..=rows`, and one of them unless `several` — as 0-based indices. A
+/// number written as a list writes it, 「1.」 or 「1)」, is the number.
 fn picked_rows(words: &str, rows: usize, several: bool) -> Option<Vec<usize>> {
     let numbers: Vec<&str> = words
         .split(|c: char| c == ',' || c.is_whitespace())
+        .map(|one| one.trim_end_matches(['.', ')']))
         .filter(|one| !one.is_empty())
         .collect();
     if numbers.is_empty() || (!several && numbers.len() > 1) {
@@ -318,6 +413,16 @@ pub(crate) fn held_letter(worker: &str, term: u32, question: &str) -> String {
     )
 }
 
+/// The window's one record of a question its coordinator gave to the person
+/// (t-84343): the letter, the pane and the coordinator's seat, on the log's
+/// own clock. The letter's thread holds the coordinator's word itself.
+fn handed_line(seat: &AskSeat, term: u32, question: &str) -> String {
+    format!(
+        "worker-question: 코디가 사람 몫으로 올림 — 질문 {question}, 워커 {}의 판 term-{term}, 코디 자리 {}",
+        seat.worker, seat.coordinator
+    )
+}
+
 /// The words the coordinator is told when its answer could not be typed.
 pub(crate) fn unanswered_letter(worker: &str, term: u32, question: &str, why: &str) -> String {
     format!("질문 {question}의 답을 워커 {worker}의 판(term-{term})에 넣지 못했습니다 — {why}")
@@ -347,6 +452,10 @@ struct Asked {
     filed_ms: i64,
     passed: bool,
     raised: Option<Raised>,
+    /// The coordinator's answer is being typed into the picker: the person's
+    /// screen keeps the question off until the pane says it moved on, or
+    /// the answer door lets go without it saying so.
+    typed: bool,
 }
 
 /// A question a pane left before its coordinator answered — the pane asked
@@ -366,8 +475,13 @@ fn left() -> MutexGuard<'static, HashMap<String, Left>> {
 }
 
 /// Keep what `term` asked of its coordinator after the window stops carrying
-/// it: only a question already in the ledger can still be answered.
+/// it: only a question already in the ledger can still be answered, and one
+/// whose answer was typed, or the coordinator gave to the person, has had
+/// its word.
 fn leave(term: u32, old: Asked) {
+    if old.typed || old.raised == Some(Raised::CoordinatorHanded) {
+        return;
+    }
     if let Filing::Filed(question) = old.filed {
         left().insert(
             question,
@@ -409,6 +523,9 @@ struct Kept {
 struct Memory {
     waiting: Vec<Kept>,
     written: Vec<u8>,
+    /// What the last write's failure said while the writes keep failing, so
+    /// the window's log says it once.
+    unwritten: Option<String>,
 }
 
 fn memory() -> MutexGuard<'static, Option<Memory>> {
@@ -425,7 +542,7 @@ fn memory() -> MutexGuard<'static, Option<Memory>> {
 fn kept_of(held: &HashMap<u32, Asked>, waiting: &[Kept]) -> Vec<Kept> {
     let mut kept: Vec<Kept> = held
         .values()
-        .filter(|standing| !standing.passed)
+        .filter(|standing| !standing.passed && !standing.typed)
         .filter_map(|standing| match &standing.filed {
             Filing::Filed(question) => Some(Kept {
                 run: standing.seat.run.clone(),
@@ -445,17 +562,38 @@ fn kept_of(held: &HashMap<u32, Asked>, waiting: &[Kept]) -> Vec<Kept> {
     kept
 }
 
-/// Write `kept` down unless `written` already holds those bytes, and hold
-/// them — even when the write fails, so the next change tries again rather
-/// than every beat.
+/// Write `kept` down unless `written` already holds those bytes. A write
+/// that fails leaves `written` as it was, so the next beat tries again: the
+/// file a restart reads is never a change behind for longer than the fault
+/// lasts (t-84470, r2 P3-3).
 fn write_kept(path: &Path, kept: &[Kept], written: &mut Vec<u8>) -> std::io::Result<()> {
     let bytes = serde_json::to_vec(kept).map_err(std::io::Error::other)?;
     if *written == bytes {
         return Ok(());
     }
-    let wrote = crate::durable_file::replace_bytes(path, &bytes).map(drop);
+    crate::durable_file::replace_bytes(path, &bytes)?;
     *written = bytes;
-    wrote
+    Ok(())
+}
+
+/// Write `kept` down as [`write_kept`] does, and say what the window's log is
+/// to note: a failure once, not on every beat it lasts, and again only after
+/// a write went.
+fn write_noting(path: &Path, kept: &[Kept], memory: &mut Memory) -> Option<String> {
+    match write_kept(path, kept, &mut memory.written) {
+        Ok(()) => {
+            memory.unwritten = None;
+            None
+        }
+        Err(error) => {
+            let line = format!("worker-questions: {error}");
+            if memory.unwritten.as_ref() == Some(&line) {
+                return None;
+            }
+            memory.unwritten = Some(line.clone());
+            Some(line)
+        }
+    }
 }
 
 /// What the last window wrote down. A file that is missing or cannot be read
@@ -465,10 +603,12 @@ fn read_kept(path: &Path) -> Memory {
         Ok(bytes) => Memory {
             waiting: serde_json::from_slice(&bytes).unwrap_or_default(),
             written: bytes,
+            unwritten: None,
         },
         Err(_) => Memory {
             waiting: Vec::new(),
             written: serde_json::to_vec(&Vec::<Kept>::new()).unwrap_or_default(),
+            unwritten: None,
         },
     }
 }
@@ -489,6 +629,7 @@ fn taken_up(kept: Kept, seat: AskSeat, term: u32) -> Option<Asked> {
         filed_ms: kept.filed_ms,
         passed: false,
         raised: kept.raised,
+        typed: false,
     })
 }
 
@@ -519,8 +660,11 @@ pub(crate) fn heard(
     if let Some(prompt) = asking(report) {
         let sig = signature(prompt);
         let mut held = asked();
+        // An answer typed into it ended that question: the same words asked
+        // again are a new question.
         if let Some(standing) = held.get_mut(&term)
             && standing.signature == sig
+            && !standing.typed
         {
             standing.passed = false;
             return match standing.raised {
@@ -551,6 +695,7 @@ pub(crate) fn heard(
                 filed_ms: now_ms,
                 passed: false,
                 raised: None,
+                typed: false,
             },
         );
         return quiet(report);
@@ -568,7 +713,8 @@ pub(crate) fn heard(
             };
         }
         standing.passed = true;
-        if matches!(standing.filed, Filing::Unfiled) {
+        // Nothing to refuse: not in the ledger yet, or its answer just landed.
+        if matches!(standing.filed, Filing::Unfiled) || standing.typed {
             held.remove(&term);
         }
     }
@@ -611,14 +757,33 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
         .state::<crate::AppState>()
         .local_data_root()
         .join(crate::app_paths::artifact_file::WORKER_QUESTIONS);
-    take_up(app, &path, now_ms);
+    let waiting = std::mem::take(&mut memory().get_or_insert_with(|| read_kept(&path)).waiting);
     let gone: Vec<(String, Left)> = left()
         .iter()
         .map(|(question, was)| (question.clone(), was.clone()))
         .collect();
+    let carried: Vec<(u32, Asked)> = asked()
+        .iter()
+        .filter(|(_, standing)| matches!(standing.filed, Filing::Filed(_)) && !standing.typed)
+        .map(|(term, standing)| (*term, standing.clone()))
+        .collect();
+    // The beat's one reading of the ledger — none while nothing waits on it.
+    let facts = if waiting.is_empty() && gone.is_empty() && carried.is_empty() {
+        Facts::default()
+    } else {
+        crate::orchestration::read_questions(|ledger| {
+            Facts::read(ledger, &waiting, &gone, &carried)
+        })
+        .unwrap_or_else(|| Facts::unread(&carried))
+    };
+    take_up(app, waiting, &facts, now_ms);
     for (question, was) in gone {
-        match crate::orchestration::question_standing(&was.seat.run, &question) {
+        match facts.standing(&was.seat.run, &question) {
             Standing::Waiting => {}
+            // Given to the person: nobody to tell.
+            Standing::Answered(words) if hands_to_person(&words) => {
+                left().remove(&question);
+            }
             Standing::Answered(_) => {
                 tell(
                     &was.seat,
@@ -641,60 +806,279 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
         match &standing.filed {
             Filing::Unfiled if standing.raised.is_some() => {}
             Filing::Unfiled => file(app, host, term, &standing, now_ms),
-            Filing::Filed(question) => carry(app, term, &standing, question, now_ms),
+            // Typed: until the pane says it moved on (`heard`), or the door
+            // lets go without it saying so.
+            Filing::Filed(_) if standing.typed => {
+                if !crate::cmd::terminal::answer_in_flight(term) {
+                    let_go_typed(term);
+                }
+            }
+            Filing::Filed(question) => {
+                // Read for at the beat's start: a question taken up since is
+                // carried from the next beat.
+                let Some(seat_now) = facts.seats.get(&term).cloned() else {
+                    continue;
+                };
+                let ledger = facts.standing(&standing.seat.run, question);
+                carry(app, term, &standing, question, seat_now, &ledger, now_ms);
+            }
         }
     }
     write_down(app, &path);
 }
 
+/// What one beat reads of the ledger for every question the window carries
+/// for a worker, in one reading ([`crate::orchestration::read_questions`]):
+/// the written-down ones waiting to be taken up, the ones a pane left, and
+/// the ones in the ledger it carries (t-84470, r1 P3-6).
+#[derive(Default)]
+struct Facts {
+    /// Where each letter stands, by run and message id.
+    standings: HashMap<(String, String), Standing>,
+    /// The worker's seat now at each pane a carried question asks at —
+    /// `None` where no live worker sits there.
+    seats: HashMap<u32, Option<AskSeat>>,
+    /// The pane each written-down worker sits at, and its seat there, by run
+    /// and worker.
+    seated: HashMap<(String, String), (u32, AskSeat)>,
+}
+
+impl Facts {
+    fn read(
+        ledger: &crate::orchestration::QuestionLedger<'_>,
+        waiting: &[Kept],
+        gone: &[(String, Left)],
+        carried: &[(u32, Asked)],
+    ) -> Self {
+        let mut facts = Self::default();
+        for kept in waiting {
+            facts.note_standing(ledger, &kept.run, &kept.question);
+            if let Some(term) = ledger.seated_term(&kept.run, &kept.worker)
+                && let Some(seat) = ledger.ask_seat(term)
+            {
+                facts
+                    .seated
+                    .insert((kept.run.clone(), kept.worker.clone()), (term, seat));
+            }
+        }
+        for (question, was) in gone {
+            facts.note_standing(ledger, &was.seat.run, question);
+        }
+        for (term, standing) in carried {
+            if let Filing::Filed(question) = &standing.filed {
+                facts.note_standing(ledger, &standing.seat.run, question);
+                facts.seats.insert(*term, ledger.ask_seat(*term));
+            }
+        }
+        facts
+    }
+
+    /// The facts of a beat with no ledger to read: every letter waiting and
+    /// no live worker at any carried pane — so a question nobody can answer
+    /// by letter is given to the person, as when each was read alone.
+    fn unread(carried: &[(u32, Asked)]) -> Self {
+        Self {
+            seats: carried.iter().map(|(term, _)| (*term, None)).collect(),
+            ..Self::default()
+        }
+    }
+
+    fn note_standing(
+        &mut self,
+        ledger: &crate::orchestration::QuestionLedger<'_>,
+        run: &str,
+        question: &str,
+    ) {
+        self.standings
+            .entry((run.to_string(), question.to_string()))
+            .or_insert_with(|| ledger.standing(run, question));
+    }
+
+    /// Where `question` of `run` stands — waiting when this beat could not
+    /// read the ledger, so the next beat looks again.
+    fn standing(&self, run: &str, question: &str) -> Standing {
+        self.standings
+            .get(&(run.to_string(), question.to_string()))
+            .cloned()
+            .unwrap_or(Standing::Waiting)
+    }
+}
+
 /// Take up what the last window wrote down as each worker sits in a pane
 /// again: a question the screen still shows is carried on, given back to the
-/// person if it was theirs; one the ledger closed is dropped, and one the
-/// pane no longer shows is left, so a late answer is refused as passed —
-/// nothing of either reaches the person's screen.
-fn take_up(app: &AppHandle, path: &Path, now_ms: i64) {
-    let waiting = std::mem::take(&mut memory().get_or_insert_with(|| read_kept(path)).waiting);
+/// person if it was theirs; one the ledger closed, or answered while the
+/// screen no longer shows it, is dropped, and one the pane no longer shows is
+/// left, so a late answer is refused as passed — nothing of any reaches the
+/// person's screen. A pane asking again before this beat meets the written
+/// letter ([`meet`]).
+fn take_up(app: &AppHandle, waiting: Vec<Kept>, facts: &Facts, now_ms: i64) {
     let mut later = Vec::new();
     for mut kept in waiting {
-        if crate::orchestration::question_standing(&kept.run, &kept.question) == Standing::Closed {
-            continue;
-        }
-        let seated = crate::orchestration::worker_term(&kept.run, &kept.worker)
-            .and_then(|term| crate::orchestration::worker_ask_seat(term).map(|seat| (term, seat)));
+        let standing = facts.standing(&kept.run, &kept.question);
+        let seated = facts
+            .seated
+            .get(&(kept.run.clone(), kept.worker.clone()))
+            .cloned();
+        let waited_ms = seated.as_ref().map_or(0, |_| {
+            now_ms.saturating_sub(*kept.seated_ms.get_or_insert(now_ms))
+        });
+        let at = seated.as_ref().map(|(term, _)| *term);
+        let asking_there = at.is_some_and(|term| asked().contains_key(&term));
+        let next = taking_up(
+            &standing,
+            at.is_some(),
+            asking_there,
+            || {
+                at.zip(asking(&kept.report).and_then(|prompt| prompt.questions.first()))
+                    .is_some_and(|(term, question)| {
+                        crate::cmd::terminal::question_is_up(app, term, question)
+                    })
+            },
+            waited_ms,
+        );
         let Some((term, seat)) = seated else {
-            later.push(kept);
-            continue;
-        };
-        // The pane asked again since: the hook has the word.
-        if asked().contains_key(&term) {
-            continue;
-        }
-        let up = asking(&kept.report)
-            .and_then(|prompt| prompt.questions.first())
-            .is_some_and(|question| crate::cmd::terminal::question_is_up(app, term, question));
-        if !up {
-            let since = *kept.seated_ms.get_or_insert(now_ms);
-            if now_ms.saturating_sub(since) < TAKE_UP_GRACE_MS {
+            if next == TakeUp::Later {
                 later.push(kept);
-            } else if let Some(standing) = taken_up(kept, seat, term) {
-                leave(term, standing);
             }
             continue;
-        }
-        let Some(standing) = taken_up(kept, seat, term) else {
-            continue;
         };
-        let back = standing
-            .raised
-            .map(|why| (why, standing.report.clone(), standing.worktree.clone()));
-        asked().insert(term, standing);
-        if let Some((why, report, worktree)) = back {
-            raise(app, term, &report, worktree.as_deref(), why);
+        match next {
+            TakeUp::Drop => {}
+            TakeUp::Later => later.push(kept),
+            TakeUp::Leave => {
+                if let Some(standing) = taken_up(kept, seat, term) {
+                    leave(term, standing);
+                }
+            }
+            TakeUp::Meet => {
+                let mut held = asked();
+                // The pane's question was settled in between: look again on
+                // the next beat.
+                let Some(there) = held.get_mut(&term) else {
+                    drop(held);
+                    later.push(kept);
+                    continue;
+                };
+                match meet(there, kept, seat, term) {
+                    Met::Adopted(Some(why)) => {
+                        let (report, worktree) = (there.report.clone(), there.worktree.clone());
+                        drop(held);
+                        raise(app, term, &report, worktree.as_deref(), why);
+                    }
+                    Met::Adopted(None) | Met::Dropped => {}
+                    Met::Left(old) => {
+                        drop(held);
+                        leave(term, *old);
+                    }
+                }
+            }
+            TakeUp::Carry => {
+                let Some(standing) = taken_up(kept, seat, term) else {
+                    continue;
+                };
+                let back = standing
+                    .raised
+                    .map(|why| (why, standing.report.clone(), standing.worktree.clone()));
+                asked().insert(term, standing);
+                if let Some((why, report, worktree)) = back {
+                    raise(app, term, &report, worktree.as_deref(), why);
+                }
+            }
         }
     }
     if let Some(memory) = memory().as_mut() {
         memory.waiting.extend(later);
     }
+}
+
+/// What one written-down question does on a beat ([`taking_up`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TakeUp {
+    /// Nothing to carry and nobody to tell.
+    Drop,
+    /// Its worker sits in no pane yet, or the pane has not drawn it yet.
+    Later,
+    /// The pane at its worker's term asks already: the hook came first.
+    Meet,
+    /// The screen shows it: carry it on.
+    Carry,
+    /// The screen no longer shows it: keep its letter, so a late answer is
+    /// refused as passed.
+    Leave,
+}
+
+/// The judgement on one written-down question: `standing` is the ledger's
+/// word on its letter, `seated` whether its worker sits in a pane,
+/// `asking_there` whether the window carries a question at that pane already,
+/// `up` whether the screen shows it — read only when it decides — and
+/// `waited_ms` how long the worker has sat there.
+fn taking_up(
+    standing: &Standing,
+    seated: bool,
+    asking_there: bool,
+    up: impl FnOnce() -> bool,
+    waited_ms: i64,
+) -> TakeUp {
+    if *standing == Standing::Closed {
+        return TakeUp::Drop;
+    }
+    if !seated {
+        return TakeUp::Later;
+    }
+    // The pane asked again since — its hook came before this beat.
+    if asking_there {
+        return TakeUp::Meet;
+    }
+    if up() {
+        return TakeUp::Carry;
+    }
+    if waited_ms < TAKE_UP_GRACE_MS {
+        return TakeUp::Later;
+    }
+    match standing {
+        // Answered and gone from the screen: the answer most likely went in
+        // just before the last window died, before it could write that down
+        // (t-84470, r2 P3-2) — nobody is told 「지나간 질문」.
+        Standing::Answered(_) => TakeUp::Drop,
+        _ => TakeUp::Leave,
+    }
+}
+
+/// What became of a written-down question that met its pane asking already.
+#[derive(Debug)]
+enum Met {
+    /// The pane asks the same question and has not filed it yet: it carries
+    /// the written-down letter on — given to the person now, when it was
+    /// theirs before the restart.
+    Adopted(Option<Raised>),
+    /// The pane asks something else: the written-down letter is left, so a
+    /// late answer to it is refused as passed.
+    Left(Box<Asked>),
+    /// The written-down report asks nothing.
+    Dropped,
+}
+
+/// A written-down question meets `held`, what the pane at `term` asks now
+/// (t-84470, r2 P3-1): the same question its hook filed nothing for yet takes
+/// the written letter on — one letter, its ten minutes from the first asking,
+/// the person's again if it was theirs — and anything else leaves the
+/// written letter, so an answer to it is refused as passed, never lost.
+fn meet(held: &mut Asked, kept: Kept, seat: AskSeat, term: u32) -> Met {
+    let Some(back) = taken_up(kept, seat, term) else {
+        return Met::Dropped;
+    };
+    if back.signature != held.signature || !matches!(held.filed, Filing::Unfiled) {
+        return Met::Left(Box::new(back));
+    }
+    let given = if held.raised.is_none() {
+        back.raised
+    } else {
+        None
+    };
+    held.filed = back.filed;
+    held.filed_ms = back.filed_ms;
+    held.raised = held.raised.or(back.raised);
+    Met::Adopted(given)
 }
 
 /// Write down what the window carries now, when it changed since the last
@@ -707,10 +1091,10 @@ fn write_down(app: &AppHandle, path: &Path) {
     };
     let kept = kept_of(&held, &memory.waiting);
     drop(held);
-    if let Err(error) = write_kept(path, &kept, &mut memory.written) {
+    if let Some(line) = write_noting(path, &kept, memory) {
         crate::system_runtime::note_window_event(
             app.state::<crate::AppState>().local_data_root(),
-            &format!("worker-questions: {error}"),
+            &line,
         );
     }
 }
@@ -774,13 +1158,20 @@ fn file(app: &AppHandle, host: &dyn Host, term: u32, standing: &Asked, now_ms: i
     }
 }
 
-/// One beat for a question in the ledger.
-fn carry(app: &AppHandle, term: u32, standing: &Asked, question: &str, now_ms: i64) {
-    let seat_now = crate::orchestration::worker_ask_seat(term);
-    let ledger = crate::orchestration::question_standing(&standing.seat.run, question);
+/// One beat for a question in the ledger: `seat_now` and `ledger` are what
+/// the beat's one reading found at its pane and of its letter.
+fn carry(
+    app: &AppHandle,
+    term: u32,
+    standing: &Asked,
+    question: &str,
+    seat_now: Option<AskSeat>,
+    ledger: &Standing,
+    now_ms: i64,
+) {
     let next = step(
         &standing.prompt,
-        &ledger,
+        ledger,
         standing.passed,
         seat_now.as_ref(),
         standing.raised.is_some(),
@@ -838,6 +1229,12 @@ fn carry(app: &AppHandle, term: u32, standing: &Asked, question: &str, now_ms: i
                     standing.worktree.as_deref(),
                     why,
                 );
+                if why == Raised::CoordinatorHanded {
+                    crate::system_runtime::note_window_event(
+                        app.state::<crate::AppState>().local_data_root(),
+                        &handed_line(seat, term, question),
+                    );
+                }
             }
         }
         Step::Answer(selections) => {
@@ -848,9 +1245,9 @@ fn carry(app: &AppHandle, term: u32, standing: &Asked, question: &str, now_ms: i
                 standing.prompt.clone(),
                 selections,
             ) {
-                Ok(()) => settled(term),
-                Err(why) if why == crate::cmd::terminal::ANSWER_IN_FLIGHT => {}
-                Err(why) if why == crate::cmd::terminal::QUESTION_CHANGED => {
+                Ok(()) => typed(term),
+                Err(why) if crate::cmd::terminal::refused_in_flight(&why) => {}
+                Err(why) if crate::cmd::terminal::refused_as_passed(&why) => {
                     tell(
                         seat,
                         question,
@@ -876,6 +1273,23 @@ fn carry(app: &AppHandle, term: u32, standing: &Asked, question: &str, now_ms: i
 /// The window is done with `term`'s question: answered, refused or closed.
 fn settled(term: u32) {
     asked().remove(&term);
+}
+
+/// The coordinator's answer to `term`'s question is going into the picker:
+/// held off the person's screen while the walk types it (t-84470, r1 P3-3).
+fn typed(term: u32) {
+    if let Some(now) = asked().get_mut(&term) {
+        now.typed = true;
+    }
+}
+
+/// The answer door let go of `term` without the pane saying it moved on: the
+/// window is done with the question it typed.
+fn let_go_typed(term: u32) {
+    let mut held = asked();
+    if held.get(&term).is_some_and(|standing| standing.typed) {
+        held.remove(&term);
+    }
 }
 
 /// One letter from the ledger to the run's coordinator about `question`.
@@ -1113,6 +1527,8 @@ mod tests {
             ),
             Step::RefuseHeld
         );
+        // A letter nobody can answer while the pane still asks is the
+        // person's (t-84470, r1 P3-1) — it was forgotten here before.
         assert_eq!(
             step(
                 &asked,
@@ -1123,7 +1539,7 @@ mod tests {
                 NOW,
                 NOW
             ),
-            Step::Forget
+            Step::Raise(Raised::Unanswerable)
         );
     }
 
@@ -1249,6 +1665,7 @@ mod tests {
             filed_ms: NOW,
             passed: false,
             raised: None,
+            typed: false,
         }
     }
 
@@ -1380,5 +1797,406 @@ mod tests {
         let words = passed_letter("w-2", 7, "m-5");
         assert!(words.starts_with("지나간 질문"), "{words}");
         assert!(words.contains("m-5") && words.contains("term-7"), "{words}");
+    }
+
+    /// t-84343: an account to pick, a secret value, a payment, a login — the
+    /// coordinator gives the question to the person with one word, and the
+    /// person is asked at once rather than after ten silent minutes.
+    #[test]
+    fn a_coordinator_who_answers_to_person_gives_the_question_to_the_person_at_once() {
+        let asked = prompt(false);
+        let live = seat(true, false);
+        // Spaces around it, English in any case, and a sentence's end after
+        // it — 「사람에게.」 is the word too, never an answer typed in.
+        let spoken = TO_PERSON.iter().map(|word| (*word).to_string()).chain([
+            format!(" {}\n", TO_PERSON[0]),
+            TO_PERSON[1].to_uppercase(),
+            format!("{}.", TO_PERSON[0]),
+            format!("{}。", TO_PERSON[0]),
+            format!("{}!!", TO_PERSON[1]),
+            format!("{} ?", TO_PERSON[0]),
+            // t-84343 r2 (P2-1): written as the letter shows it, in one pair
+            // of quotes — a sentence's end inside or after them too.
+            format!("「{}」", TO_PERSON[0]),
+            format!("『{}』", TO_PERSON[0]),
+            format!("\"{}\"", TO_PERSON[1]),
+            format!("`{}`", TO_PERSON[0]),
+            format!("「{}」.", TO_PERSON[0]),
+            format!("“ {}. ”", TO_PERSON[1].to_uppercase()),
+            // A full-width sentence's end is a sentence's end.
+            format!("{}！", TO_PERSON[0]),
+            format!("{}？", TO_PERSON[1]),
+            format!("{}．", TO_PERSON[0]),
+        ]);
+        for word in spoken {
+            let handed = Standing::Answered(word.clone());
+            // At once, and nothing is typed into the picker.
+            assert_eq!(
+                step(&asked, &handed, false, Some(&live), false, NOW, NOW),
+                Step::Raise(Raised::CoordinatorHanded),
+                "{word:?}"
+            );
+            // Given already: the worker waits for the person, and the word is
+            // never refused back to the coordinator as a late answer.
+            assert_eq!(
+                step(&asked, &handed, false, Some(&live), true, NOW, NOW + 1),
+                Step::Wait,
+                "{word:?}"
+            );
+            // The person answered — the pane moved past it: nobody is told.
+            assert_eq!(
+                step(&asked, &handed, true, Some(&live), true, NOW, NOW + 2),
+                Step::Forget,
+                "{word:?}"
+            );
+        }
+        // Any other words are the answer, typed into the picker as before.
+        let other = format!("{} 물어봐", TO_PERSON[0]);
+        assert_eq!(
+            step(
+                &asked,
+                &Standing::Answered(other.clone()),
+                false,
+                Some(&live),
+                false,
+                NOW,
+                NOW
+            ),
+            Step::Answer(vec![AskSelection {
+                indices: Vec::new(),
+                other,
+            }])
+        );
+        // Quotes that hold more than the word, or that do not pair, are not
+        // taken off: the reply goes to the picker as the picker reads it.
+        for words in [
+            format!("「{} 물어봐」", TO_PERSON[0]),
+            format!("「{}", TO_PERSON[0]),
+            format!("「{}』", TO_PERSON[0]),
+            format!("「「{}」」", TO_PERSON[0]),
+            "「1」".to_string(),
+        ] {
+            let picked = selections_from_reply(&asked, &words).expect("an answer");
+            assert_eq!(
+                step(
+                    &asked,
+                    &Standing::Answered(words.clone()),
+                    false,
+                    Some(&live),
+                    false,
+                    NOW,
+                    NOW
+                ),
+                Step::Answer(picked),
+                "{words:?}"
+            );
+        }
+        // The window's one record of it: the letter, the pane, the seat.
+        let line = handed_line(&live, 7, "m-5");
+        assert!(line.contains("코디가 사람 몫으로 올림"), "{line}");
+        assert!(
+            line.contains("m-5") && line.contains("term-7") && line.contains("run:run-1"),
+            "{line}"
+        );
+    }
+
+    /// t-84343 (4275's word): a question given to the person whose worker
+    /// ends, or whose pane goes, before the person answers is let go quietly —
+    /// no letter to the coordinator, nothing left to refuse later.
+    #[test]
+    fn a_question_given_to_the_person_goes_quietly_with_its_worker_or_its_pane() {
+        let question = prompt(false);
+        let handed = Standing::Answered(TO_PERSON[0].to_string());
+        // The worker is no live worker at that pane any more.
+        for raised in [false, true] {
+            assert_eq!(
+                step(&question, &handed, false, None, raised, NOW, NOW),
+                Step::Forget,
+                "raised: {raised}"
+            );
+        }
+        // The pane goes: nothing is kept for a late answer to refuse.
+        let term = u32::MAX - 84_343;
+        asked().insert(
+            term,
+            Asked {
+                raised: Some(Raised::CoordinatorHanded),
+                ..filed(term, "m-handed")
+            },
+        );
+        forget(term);
+        assert!(asked().get(&term).is_none());
+        assert!(left().get("m-handed").is_none());
+    }
+
+    #[test]
+    fn the_letter_ends_on_the_words_that_give_the_question_to_the_person() {
+        let (_, body) = letter(&prompt(false), &seat(true, false), 7);
+        let last = body.lines().last().unwrap_or_default();
+        // Each word in quotes, so it reads as what to write, not whom to ask.
+        for word in TO_PERSON {
+            assert!(last.contains(&format!("「{word}」")), "{last}");
+        }
+        // The answer line says a number stands alone on the first line.
+        assert!(body.contains("번호만"), "{body}");
+    }
+
+    /// t-84470 (r1 P3-1): a letter the ledger can no longer take an answer to
+    /// — the worker's dispatch ended, the letter is gone — while the pane
+    /// still asks is the person's, with its bell and its reason.
+    #[test]
+    fn a_question_the_ledger_closed_while_the_pane_still_asks_is_given_to_the_person() {
+        let asked = prompt(false);
+        for live in [Some(seat(true, false)), None] {
+            assert_eq!(
+                step(
+                    &asked,
+                    &Standing::Closed,
+                    false,
+                    live.as_ref(),
+                    false,
+                    NOW,
+                    NOW
+                ),
+                Step::Raise(Raised::Unanswerable),
+                "{live:?}"
+            );
+        }
+        // Moved past, or the person holds it already: nothing to give.
+        assert_eq!(
+            step(
+                &asked,
+                &Standing::Closed,
+                true,
+                Some(&seat(true, false)),
+                false,
+                NOW,
+                NOW
+            ),
+            Step::Forget
+        );
+        assert_eq!(
+            step(
+                &asked,
+                &Standing::Closed,
+                false,
+                Some(&seat(true, false)),
+                true,
+                NOW,
+                NOW
+            ),
+            Step::Forget
+        );
+    }
+
+    /// t-84470 (r1 P3-5): 「2」 and a reason under it picks row 2; 「1.」 and
+    /// 「3)」 are numbers.
+    #[test]
+    fn a_choice_number_is_read_off_the_first_line_with_or_without_its_dot() {
+        let single = prompt(false);
+        for (reply, row) in [
+            ("2\n이유: clippy 먼저", 1),
+            ("1.", 0),
+            ("3)", 2),
+            (" 2. \n\n왜냐하면", 1),
+        ] {
+            let picked = selections_from_reply(&single, reply).expect(reply);
+            assert_eq!(picked[0].indices, vec![row], "{reply:?}");
+            assert!(picked[0].other.is_empty(), "{reply:?}");
+        }
+        // Words on the first line are the free answer, the whole of it.
+        let words = "clippy 먼저\n그다음 2";
+        assert_eq!(
+            selections_from_reply(&single, words).expect(words)[0].other,
+            words
+        );
+        let multi = prompt(true);
+        assert_eq!(
+            selections_from_reply(&multi, "1., 3)\n둘 다").expect("multi")[0].indices,
+            vec![0, 2]
+        );
+    }
+
+    /// t-84470 (r1 P3-3): the walk that types an answer takes hundreds of
+    /// milliseconds; until the pane says it moved on, the person's screen does
+    /// not see the question come back for that moment.
+    #[test]
+    fn an_answer_being_typed_keeps_the_question_off_the_persons_screen_until_the_pane_moves_on() {
+        // Terms no other test holds: the table is the window's own.
+        let term = u32::MAX - 84_470;
+        asked().insert(term, filed(term, "m-typed"));
+        assert!(hidden(term));
+        typed(term);
+        assert!(
+            hidden(term),
+            "the answer is still being typed and the person's screen shows the question"
+        );
+        // The pane moved on: the answer landed, and nothing is left to refuse.
+        let mut working = asking_report(term);
+        working.state = zerocode_core::hook::HookState::Working;
+        working.ask_prompt = None;
+        heard(&working, None, NOW);
+        assert!(!hidden(term));
+        assert!(asked().get(&term).is_none());
+        assert!(left().get("m-typed").is_none());
+        // A pane that goes while its answer is typed leaves nothing either.
+        let gone = u32::MAX - 84_471;
+        asked().insert(gone, filed(gone, "m-typed-gone"));
+        typed(gone);
+        forget(gone);
+        assert!(left().get("m-typed-gone").is_none());
+    }
+
+    /// t-84470 (r2 P3-1): after a restart the pane asks the same question
+    /// again and its hook comes before the beat that would take the written
+    /// letter up — one letter, not two, and a late answer is never lost.
+    #[test]
+    fn a_question_the_hook_asks_again_before_the_beat_takes_it_up_keeps_its_first_letter() {
+        assert_eq!(
+            taking_up(
+                &Standing::Waiting,
+                true,
+                true,
+                || panic!("the screen is not read"),
+                0
+            ),
+            TakeUp::Meet
+        );
+        let written = HashMap::from([(
+            7,
+            Asked {
+                raised: Some(Raised::CoordinatorSilent),
+                ..filed(7, "m-5")
+            },
+        )]);
+        let kept = kept_of(&written, &[]).remove(0);
+        // The same question, not filed yet: it takes the written letter on,
+        // its ten minutes from the first asking, the person's again.
+        let mut same = Asked {
+            filed: Filing::Unfiled,
+            filed_ms: NOW + 90_000,
+            ..filed(12, "unused")
+        };
+        match meet(&mut same, kept.clone(), seat(true, false), 12) {
+            Met::Adopted(raise) => assert_eq!(raise, Some(Raised::CoordinatorSilent)),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(&same.filed, Filing::Filed(question) if question == "m-5"));
+        assert_eq!(same.filed_ms, NOW);
+        assert_eq!(same.raised, Some(Raised::CoordinatorSilent));
+        // Another question at the pane: the written letter is left.
+        let mut other = Asked {
+            signature: "another question".to_string(),
+            filed: Filing::Unfiled,
+            ..filed(12, "unused")
+        };
+        match meet(&mut other, kept.clone(), seat(true, false), 12) {
+            Met::Left(old) => {
+                assert!(matches!(&old.filed, Filing::Filed(question) if question == "m-5"));
+                assert_eq!(old.report.term, 12);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(other.filed, Filing::Unfiled));
+        // The same question filed again already — a second letter went before
+        // this beat: the first is left, so an answer to it is refused.
+        let mut again = filed(12, "m-9");
+        assert!(matches!(
+            meet(&mut again, kept, seat(true, false), 12),
+            Met::Left(_)
+        ));
+        assert!(matches!(&again.filed, Filing::Filed(question) if question == "m-9"));
+    }
+
+    /// A beat that has no ledger to read gives a waiting question to the
+    /// person as the seat-by-seat reading did — never holds it unseen.
+    #[test]
+    fn a_beat_with_no_ledger_to_read_gives_a_waiting_question_to_the_person() {
+        let carried = vec![(7, filed(7, "m-5"))];
+        let facts = Facts::unread(&carried);
+        let seat_now = facts
+            .seats
+            .get(&7)
+            .cloned()
+            .expect("the carried pane is read for");
+        let standing = facts.standing("run-1", "m-5");
+        assert_eq!(standing, Standing::Waiting);
+        assert_eq!(
+            step(
+                &prompt(false),
+                &standing,
+                false,
+                seat_now.as_ref(),
+                false,
+                NOW,
+                NOW
+            ),
+            Step::Raise(Raised::CoordinatorGone)
+        );
+    }
+
+    /// t-84470 (r2 P3-2): the answer was typed and the window died before it
+    /// wrote that down. The next window finds the letter answered and the
+    /// screen past it: the answer went in, and nobody is told otherwise.
+    #[test]
+    fn a_written_question_answered_and_gone_from_the_screen_is_dropped_quietly() {
+        let answered = Standing::Answered("2".to_string());
+        assert_eq!(
+            taking_up(&answered, true, false, || false, TAKE_UP_GRACE_MS),
+            TakeUp::Drop
+        );
+        // Unanswered and gone: kept, so a late answer is refused as passed.
+        assert_eq!(
+            taking_up(&Standing::Waiting, true, false, || false, TAKE_UP_GRACE_MS),
+            TakeUp::Leave
+        );
+        // Not drawn yet, shown, unseated, closed: as before.
+        assert_eq!(
+            taking_up(&answered, true, false, || false, TAKE_UP_GRACE_MS - 1),
+            TakeUp::Later
+        );
+        assert_eq!(taking_up(&answered, true, false, || true, 0), TakeUp::Carry);
+        assert_eq!(
+            taking_up(&Standing::Waiting, false, false, || true, 0),
+            TakeUp::Later
+        );
+        assert_eq!(
+            taking_up(&Standing::Closed, true, false, || true, 0),
+            TakeUp::Drop
+        );
+    }
+
+    /// t-84470 (r2 P3-3): a write that fails is tried again on the next beat
+    /// rather than at the next change, and the window's log says it once.
+    #[test]
+    fn a_write_that_fails_is_tried_again_and_noted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file where the folder should be: every write fails until it goes.
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, b"").unwrap();
+        let path = blocked.join(crate::app_paths::artifact_file::WORKER_QUESTIONS);
+        let mut memory = read_kept(&path);
+        let kept = kept_of(&HashMap::from([(7, filed(7, "m-5"))]), &[]);
+        assert!(write_noting(&path, &kept, &mut memory).is_some());
+        assert_eq!(
+            write_noting(&path, &kept, &mut memory),
+            None,
+            "the same failure is noted once"
+        );
+        std::fs::remove_file(&blocked).unwrap();
+        assert_eq!(write_noting(&path, &kept, &mut memory), None);
+        assert_eq!(
+            std::fs::read(&path).ok(),
+            serde_json::to_vec(&kept).ok(),
+            "the next beat wrote what the failed one could not"
+        );
+        // A failure after a write that went is noted again.
+        std::fs::remove_dir_all(&blocked).unwrap();
+        std::fs::write(&blocked, b"").unwrap();
+        let more = kept_of(
+            &HashMap::from([(7, filed(7, "m-5")), (8, filed(8, "m-6"))]),
+            &[],
+        );
+        assert!(write_noting(&path, &more, &mut memory).is_some());
     }
 }

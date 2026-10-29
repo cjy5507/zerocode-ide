@@ -46,6 +46,7 @@ mod support;
 mod type_value_keys;
 mod update;
 mod window_forks;
+mod worker_question;
 pub(crate) use support as ui_source;
 
 mod tests {

@@ -57382,6 +57382,59 @@ suite("worker-question-raised", async ({ browser, origin, ok }) => {
       gone.card && gone.why === words.gone && plain.card && plain.why === "",
       JSON.stringify({ gone, plain, words }),
     );
+
+    /* Every other reason says itself too (t-84343 ①, t-84470 r1 P3-2): the coordinator gave the question to the
+     * person (「사람에게」), the person took the pane, the letter could not be sent, the coordinator can no longer
+     * answer it. */
+    const reasons = await page.evaluate(() => ({
+      "coordinator-handed": t("board.ask.raisedHanded", "코디가 사람 몫이라 올림"),
+      "taken-over": t("board.ask.raisedTaken", "판을 가져가서 올림"),
+      unsent: t("board.ask.raisedUnsent", "코디에게 보내지 못해 올림"),
+      unanswerable: t("board.ask.raisedClosed", "코디가 더는 답할 수 없어 올림"),
+    }));
+    const said = {};
+    for (const why of Object.keys(reasons)) {
+      await page.evaluate(async (why) => {
+        window.__TELL__("hook:agent", { term: window.__TERM__, state: "working", agent: "claude", session: "s-raised" });
+        await window.__BEATS__();
+        window.__TELL__("ask:raised", { term: window.__TERM__, why });
+        window.__TELL__("hook:agent", { term: window.__TERM__, state: "waiting", agent: "claude", session: "s-raised",
+          ask_prompt: window.__ASK__(`${why} — 어느 계정으로 로그인할까요?`) });
+        await window.__BEATS__();
+      }, why);
+      said[why] = (await read()).why;
+    }
+    await shoot("after-3-every-reason-says-itself");
+    ok(
+      "a worker's question the coordinator gave to the person says 「코디가 사람 몫이라 올림」, and one the person took, one that could not be sent and one the coordinator can no longer answer each say why on the card (t-84343 ①, t-84470 r1 P3-2)",
+      Object.entries(reasons).every(([why, line]) => line !== "" && said[why] === line),
+      JSON.stringify({ said, reasons }),
+    );
+
+    /* A question given to the person goes with its pane, and its reason goes too (t-84343, 4275): a card a later
+     * pane at the same number draws — a question that was never a coordinator's — says nothing of one. The words
+     * are read off the one function every card at that pane opens with. */
+    const exited = {};
+    for (const why of ["coordinator-handed", "coordinator-silent"]) {
+      exited[why] = await page.evaluate(async (why) => {
+        const pane = `term:${window.__TERM__}`;
+        window.__TELL__("ask:raised", { term: window.__TERM__, why });
+        window.__TELL__("hook:agent", { term: window.__TERM__, state: "waiting", agent: "claude", session: "s-raised",
+          ask_prompt: window.__ASK__("어느 계정으로 로그인할까요?") });
+        await window.__BEATS__();
+        const before = askRaisedWords(pane);
+        window.__TELL__("term:exited", { term: window.__TERM__ });
+        await window.__BEATS__();
+        return { before, after: askRaisedWords(pane) };
+      }, why);
+    }
+    ok(
+      "a question given to the person whose pane goes takes its reason with it — a card the next pane at that number draws carries no 「코디가 …」 line (t-84343, 4275)",
+      exited["coordinator-handed"].before === reasons["coordinator-handed"] &&
+        exited["coordinator-silent"].before === words.silent &&
+        Object.values(exited).every(({ after }) => after === ""),
+      JSON.stringify({ exited }),
+    );
   } finally {
     await page.close();
   }
