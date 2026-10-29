@@ -800,6 +800,62 @@ export async function testConversationEarlier(browser, origin, ok) {
     }
   }
 
+  // ---- a read from above that brings nothing to see says what it did (t-84136)
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      await openLongPane(page);
+      const door = () => page.evaluate(() => {
+        const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null);
+        return list.querySelector(":scope > .chat-earlier-door .chat-earlier-words")?.textContent ?? null;
+      });
+      const words = await page.evaluate(() => ({
+        more: t("worker.earlierMore", "이전 기록 더 보기"),
+        failed: t("worker.earlierFailed", "이전 기록을 읽지 못했습니다 — 다시 읽기"),
+        skipped: t("worker.earlierSkipped", "너무 긴 기록 한 줄을 건너뛰었습니다 — 이어서 보기"),
+        empty: t("worker.earlierEmpty", "그 구간엔 보여 줄 턴이 없었습니다 — 이어서 보기"),
+      }));
+      const press = async (next) => {
+        await page.evaluate((kind) => {
+          window.__NEXT_ABOVE__ = kind === null ? null : (args) => {
+            // A file replaced under the page, as the backend refuses it.
+            if (kind === "failed") throw new Error(`the transcript is shorter than the place ${args.before} the page reads back from — it was replaced`);
+            // One line passed over, too long to take — or records that draw no turn.
+            const start = args.before - window.__TRANSCRIPT__.stride;
+            return { found: true, skipped: kind === "skipped", turns: [], start, next: args.before, more: true, folded: start > 0 };
+          };
+        }, next);
+        const before = await page.evaluate(readList);
+        await pressEarlier(page);
+        return { before, after: await page.evaluate(readList), words: await door() };
+      };
+      const failed = await press("failed");
+      ok("a read from above the backend refuses leaves the page where it held and the way up says the read failed and that a press reads again",
+        failed.words === words.failed && failed.after.from === failed.before.from && failed.after.said === failed.before.said,
+        JSON.stringify({ words: failed.words, from: [failed.before.from, failed.after.from] }));
+      const again = await press(null);
+      ok("the press after it reads up as any press does, and the way up says what it does again",
+        again.words === words.more && again.after.said === again.before.said + BACK.said && again.after.from < again.before.from,
+        JSON.stringify({ words: again.words, said: [again.before.said, again.after.said] }));
+      const skipped = await press("skipped");
+      const marked = await page.evaluate(() => [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null).__run.helper.skipped);
+      ok("a read that passed over a line too long to show says so on the way up, the page reads on from above that line, and it counts among what the page skipped",
+        skipped.words === words.skipped && skipped.after.from < skipped.before.from && skipped.after.said === skipped.before.said && marked === true,
+        JSON.stringify({ words: skipped.words, from: [skipped.before.from, skipped.after.from], marked }));
+      const empty = await press("empty");
+      ok("a read through records that draw no turn says so on the way up, and the page reads on from above them",
+        empty.words === words.empty && empty.after.from < empty.before.from && empty.after.said === empty.before.said,
+        JSON.stringify({ words: empty.words, from: [empty.before.from, empty.after.from] }));
+      const onward = await press(null);
+      ok("and a press after that reads the turns above, worded as the way up again",
+        onward.words === words.more && onward.after.said === onward.before.said + BACK.said,
+        JSON.stringify({ words: onward.words, said: [onward.before.said, onward.after.said] }));
+      ok("the page that read nothing to see raised no errors", faults.length === 0, faults.join("\n"));
+    } finally {
+      await page.close();
+    }
+  }
+
   // ---- a reader gone down to the newest turns while a read from above is out keeps them (t-84136)
   {
     const { page, faults } = await openWindowTestPage(browser, origin);

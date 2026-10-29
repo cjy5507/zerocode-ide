@@ -39195,6 +39195,9 @@ fn every_conversation_page_reads_up_past_its_first_turn_down_one_road() {
         "worker.earlierMore",
         "worker.earlierMoreTip",
         "worker.earlierReading",
+        "worker.earlierFailed",
+        "worker.earlierSkipped",
+        "worker.earlierEmpty",
         "worker.toNewest",
     ] {
         assert!(

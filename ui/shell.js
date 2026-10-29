@@ -13260,6 +13260,7 @@ function forgetHeldTurns(held) {
   held.lost = false;
   held.above = false;
   held.gone?.clear();
+  held.earlierSaid = null;
   held.from = held.id === WIRE_LOG_ID ? held.historyEnd ?? 0 : null;
   held.epoch = (held.epoch ?? 0) + 1;
 }
@@ -14640,15 +14641,21 @@ function readerAway(run) {
  * wire's session continues (`wire_history`) — one read at a time, and only
  * while something stands above (`from` past the file's first line). Asked by
  * the pill's press or the reader's push at the list's top, never by the poll
- * or by a scroll that is no one's push. A reader who went down to the newest
- * turns while the read was out keeps them: what would push them out of the
- * page's hold waits for a press from above, its place kept (t-84136). */
+ * or by a scroll that is no one's push.
+ *
+ * What a read that brought nothing to see did, the way up says in its own
+ * words until the next read (`earlierSaid`, t-84136) — a press that seemed to
+ * do nothing was a read that failed, passed over a line too long to show, or
+ * went through records that draw no turn. A reader who went down to the
+ * newest turns while the read was out keeps them: what would push them out of
+ * the page's hold waits for a press from above, its place kept. */
 async function readEarlierTurns(run) {
   const held = run?.helper;
   if (!held || held.reaching || !(held.from > 0)) return;
   const before = held.from;
   const epoch = held.epoch;
   held.reaching = true;
+  held.earlierSaid = null;
   repaintRunDoors(run);
   let above = null;
   try {
@@ -14664,8 +14671,15 @@ async function readEarlierTurns(run) {
   }
   // A page that went back to its newest turns, or whose file was replaced,
   // while the read was out holds from elsewhere: what came is not above it.
-  if (above?.found && held.epoch === epoch && held.from === before && Number.isFinite(above.start) && above.start < before) {
-    holdEarlierTurns(held, above.turns ?? [], above.start, { keepNewest: !readerAway(run) });
+  if (held.epoch === epoch && held.from === before) {
+    if (above === null || above.found === false) {
+      held.earlierSaid = "failed";
+    } else if (Number.isFinite(above.start) && above.start < before) {
+      if (holdEarlierTurns(held, above.turns ?? [], above.start, { keepNewest: !readerAway(run) })) {
+        held.skipped = held.skipped || above.skipped === true;
+        held.earlierSaid = above.skipped === true ? "skipped" : (above.turns?.length ?? 0) === 0 ? "empty" : null;
+      }
+    }
   }
   const page = activeHelperPage();
   if (page?.worker === run && !document.hidden) paintHelperSurface(page);
