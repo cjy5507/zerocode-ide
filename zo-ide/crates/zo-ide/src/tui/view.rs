@@ -77,8 +77,8 @@ pub struct Status {
     retry: Option<(u32, Duration)>,
     /// The turn-elapsed at which the model went quiet mid-stream, and whether
     /// that quiet is reasoning or a wait (set by a `QuietReasoning` or
-    /// `QuietWaiting` phase, cleared by content), so the phrase keeps a clock
-    /// of its own (t-71285).
+    /// `QuietWaiting` phase, cleared by content or the next request), so the
+    /// phrase keeps a clock of its own (t-71285).
     quiet_stretch: Option<(core_types::QuietStretch, Duration)>,
     /// The compaction the turn stopped for, from its start phase to its end
     /// phase (t-68694) — or the `/compact` the row stands for.
@@ -261,6 +261,7 @@ impl Status {
             StreamPhase::RequestSent { .. } => {
                 self.request_sent_at = Some(self.elapsed);
                 self.retry = None;
+                self.quiet_stretch = None;
             }
             StreamPhase::Retrying { attempt, delay_secs } => {
                 self.request_sent_at = None;
