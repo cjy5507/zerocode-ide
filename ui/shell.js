@@ -15168,9 +15168,11 @@ function paintHelperProse(host, text, base, { colour = true } = {}) {
  * 모양은 셋: http(s) 주소, 슬래시로 시작하는(또는 ./ ../ ~/) 경로, 확장자를
  * 단 파일 이름(디렉터리 접두 허용, 뒤에 `:줄` 허용). 문장 끝의 문장부호는
  * 낱말의 것이 아니다. 문은 `mdLink`의 것이다 — 주소는 브라우저 링크 라우팅,
- * 경로는 문서 뷰어 — 여기서는 옷(아이콘·액센트)만 입힌다. */
+ * 경로는 문서 뷰어 — 여기서는 옷(아이콘·액센트)만 입힌다. 확장자는 답이 파일을
+ * 이름하는 언어들의 것이다(시안 C7, t-82196) — 웹과 Rust만이 아니라 Java·Kotlin·
+ * Go·Swift·C·C++·Ruby·PHP·C#·Scala·셸·SQL과 빌드·설정 파일. */
 const HELPER_FILE_EXTENSIONS =
-  "html?|md|rs|js|mjs|cjs|ts|tsx|jsx|css|json|toml|ya?ml|py|sh|txt|csv|svg|png|jpe?g|gif|pdf";
+  "html?|md|rs|js|mjs|cjs|ts|tsx|jsx|vue|svelte|css|scss|json|toml|ya?ml|xml|ini|cfg|conf|lock|gradle|py|rb|php|java|kts?|scala|go|swift|dart|c|cc|cpp|hpp|h|cs|lua|sql|proto|sh|bash|zsh|txt|log|csv|svg|png|jpe?g|gif|pdf";
 const HELPER_LINK_RE = new RegExp(
   String.raw`(?<![\w/.:@-])(?:(https?:\/\/[^\s<>()"'「」『』]+)|((?:~\/|\.{1,2}\/|\/)[\w.@%+~-]+(?:\/[\w.@%+~-]+)*)|((?:[\w@%+-]+\/)*[\w@%+-]+\.(?:${HELPER_FILE_EXTENSIONS})))(?::\d+(?:-\d+)?)?(?![\w/])`,
   "g",
@@ -15187,14 +15189,29 @@ function helperLinkHits(text) {
 }
 
 /* 문장 안의 경로·주소를 찾아 문으로 바꾼다. 코드 칩·블록과 이미 문인 것 안은
- * 건드리지 않는다 — 코드는 기계의 글이고, 문 안의 문은 없다. */
+ * 건드리지 않는다 — 코드는 기계의 글이고, 문 안의 문은 없다. 다만 글 전체가
+ * 경로 하나(뒤에 `:줄` 허용)인 칩은 그 파일로 가는 문이다(시안 C7, t-82196):
+ * 문이 칩을 바깥에서 감싸고, 칩 안의 글자는 한 자도 바뀌지 않는다. 명령 칩과
+ * 블록 안의 경로는 그대로다. */
 function linkifyHelperProse(host) {
   const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
   const found = [];
+  const chips = [];
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    if (node.parentElement?.closest("code, pre, .md-link, a")) continue;
+    const held = node.parentElement?.closest("code, pre, .md-link, a");
+    if (held) {
+      if (held.localName === "code" && held.childNodes.length === 1 && !held.parentElement.closest("pre, .md-link, a") &&
+        helperChipPath(node.data)) chips.push(held);
+      continue;
+    }
     const hits = helperLinkHits(node.data);
     if (hits.length) found.push([node, hits]);
+  }
+  for (const chip of chips) {
+    const door = helperLinkNode(chip.textContent, false);
+    door.classList.add("is-chip");
+    chip.replaceWith(door);
+    door.lastChild.replaceWith(chip);
   }
   for (const [node, hits] of found) {
     const parts = [];
@@ -15209,6 +15226,12 @@ function linkifyHelperProse(host) {
     if (last < node.data.length) parts.push(node.data.slice(last));
     node.replaceWith(...parts);
   }
+}
+
+/* 칩의 글이 경로 하나뿐인가 — 주소가 아닌, 칩 전체를 덮는 한 낱말. */
+function helperChipPath(words) {
+  const hits = helperLinkHits(words);
+  return hits.length === 1 && !hits[0][1] && hits[0][0] === words;
 }
 
 function helperLinkNode(said, isUrl) {

@@ -105,6 +105,12 @@ function readPage() {
     const well = span?.closest(".helper-code");
     return span ? contrast(getComputedStyle(span).color, over(getComputedStyle(well).backgroundColor, ground)) : null;
   })();
+  // A path chip's door (draft C7): the chip's words in the link's ink, on the
+  // chip's own see-through ground over the page.
+  const chipDoor = (() => {
+    const code = list.querySelector(".helper-turn.is-assistant .helper-said .helper-link.is-chip > code");
+    return code ? contrast(getComputedStyle(code).color, over(getComputedStyle(code).backgroundColor, ground)) : null;
+  })();
   const answers = [...list.querySelectorAll(":scope > .helper-turn.is-assistant")];
   const latest = answers.find((row) => row.classList.contains("is-latest"));
   const earlier = answers.find((row) => !row.classList.contains("is-latest"));
@@ -232,6 +238,7 @@ function readPage() {
       stack: ink(page.querySelector(".chat-stack")),
       link: ink(list.querySelector(".helper-turn.is-assistant .helper-said .md-link")),
       comment,
+      chipDoor,
     },
   };
 }
@@ -329,9 +336,9 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
       JSON.stringify(dark(1440).codeLanguages));
     for (const theme of ["dark", "light"]) {
       const read = seen[`${theme}-1440`].contrast;
-      ok(`B: every word reads at 4.5:1 or more in the ${theme} treatment — the newest answer, the ones before it, a pill, the window's note, a code band, the state line, a link and a code comment`,
+      ok(`B: every word reads at 4.5:1 or more in the ${theme} treatment — the newest answer, the ones before it, a pill, the window's note, a code band, the state line, a link, a code comment and a path chip's door`,
         Object.values(read).every((ratio) => ratio === null || ratio >= 4.5) && read.latest !== null && read.earlier !== null && read.pill !== null && read.note !== null &&
-          read.link !== null && read.comment !== null,
+          read.link !== null && read.comment !== null && read.chipDoor !== null,
         JSON.stringify(read));
       // t-81525 B3 stepped the answers before the newest back to 88% of the
       // ink; the person passed draft C, which reads every answer the same

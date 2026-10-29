@@ -148,7 +148,7 @@ import { testSidebarScroll } from "./sidebar-scroll.mjs";
 import { testLandingAlerts } from "./landing-alerts.mjs";
 import { testLandCheckLetter } from "./land-check-letter.mjs";
 import { testLandBatch } from "./land-batch.mjs";
-import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationLinkLookup, testConversationOutsideLinks, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
+import { testConversationAgents, testConversationChipDoors, testConversationFolds, testConversationFont, testConversationKeys, testConversationLinkLookup, testConversationOutsideLinks, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
 import { testConversationB, testConversationBTail } from "./conversation-b.mjs";
@@ -466,6 +466,8 @@ suite("land-batch", testLandBatch);
 suite("conversation-font", ({ browser, origin, ok }) => testConversationFont(browser, origin, ok));
 suite("conversation-folds", ({ browser, origin, ok }) => testConversationFolds(browser, origin, ok));
 suite("conversation-paths", ({ browser, origin, ok }) => testConversationPaths(browser, origin, ok));
+/* 답 안 코드 칩이 통째로 경로면 칩을 감싼 문 — 칩 안 글자는 그대로, 명령 칩·코드 블록은 문이 아님 (시안 C7, t-82196). */
+suite("conversation-chip-doors", ({ browser, origin, ok }) => testConversationChipDoors(browser, origin, ok));
 /* 답이 이름만 댄 파일 — 누를 때 체크아웃에서 끝이 맞는 파일을 찾아 연다: 하나면 그 파일, 둘이면 파일 찾기,
  * 없으면 한 문장 한 번 (t-83039). */
 suite("conversation-link-lookup", ({ browser, origin, ok }) => testConversationLinkLookup(browser, origin, ok));
@@ -36969,7 +36971,8 @@ ok(
 );
 
 /* 마지막 답의 꼬리(t-2973 §3.5·§3.6): 답 안의 맨 경로는 문서 뷰어로 가는
- * 문이 되고(코드 칩 안은 아니다), 마지막 어시스턴트 턴이 .html을 이름하면
+ * 문이 되고(코드 칩 안의 글자는 그대로다 — 글 전체가 경로인 칩은 칩 바깥을
+ * 감싼 문이 되고, 명령 칩은 문이 아니다: 시안 C7, t-82196), 마지막 어시스턴트 턴이 .html을 이름하면
  * 미리보기 카드가 서며 그 알약의 두 문은 창의 브라우저 탭과 기본 앱 — 새 문은
  * 없다. 복사 단추는 그 턴의 원문을 창의 클립보드 문으로 쓴다. 새 턴이 오면
  * 꼬리는 그리로 옮겨 가고, 이름한 것이 없으면 카드는 서지 않는다. */
@@ -36989,7 +36992,7 @@ const answerTail = await page.evaluate(async () => {
     next: 3,
     turns: [
       { role: "user", text: "페이지를 만들어라" },
-      { role: "assistant", text: "먼저 `ui/shell.js`를 보고 docs/plan.md 를 읽었습니다." },
+      { role: "assistant", text: "먼저 `ui/shell.js`를 보고 docs/plan.md 를 읽은 뒤 `npm test`를 돌렸습니다." },
       { role: "assistant", text: answer },
     ],
   });
@@ -37001,15 +37004,22 @@ const answerTail = await page.evaluate(async () => {
   const face = document.querySelector("#worker-view");
   const list = face.querySelector(".helper-turns");
   const turns = [...list.querySelectorAll(".helper-turn")];
-  // 맨 경로 하나가 문이 된다 — 아이콘과 액센트를 입고, 코드 칩은 그대로다.
-  const links = [...turns[1].querySelectorAll(".helper-link")];
+  // 맨 경로 하나가 문이 된다 — 아이콘과 액센트를 입고, 코드 칩의 글자는 그대로다.
+  // 경로뿐인 칩은 칩을 감싼 문이고(C7), 명령 칩은 문이 아니다.
+  const answerDoors = [...turns[1].querySelectorAll(".helper-link")];
+  const links = answerDoors.filter((door) => !door.classList.contains("is-chip"));
+  const chipDoors = answerDoors.filter((door) => door.classList.contains("is-chip"));
   seen.linkCount = links.length;
+  seen.doorCount = answerDoors.length;
   seen.linkWords = links[0]?.textContent;
   seen.linkTip = links[0]?.dataset.tip;
   seen.linkIcon = links[0]?.querySelector(".icon use")?.getAttribute("href");
   seen.linkIsButton = links[0]?.getAttribute("role") === "button" && links[0]?.tabIndex === 0;
-  seen.codeUntouched = turns[1].querySelector("code")?.textContent === "ui/shell.js" &&
-    turns[1].querySelector("code .helper-link") === null;
+  const answerChips = [...turns[1].querySelectorAll("code")];
+  seen.codeUntouched = answerChips.map((code) => code.textContent).join("|") === "ui/shell.js|npm test" &&
+    answerChips.every((code) => code.childElementCount === 0) && turns[1].querySelector("code .helper-link") === null;
+  seen.pathChipDoor = chipDoors.length === 1 && chipDoors[0].querySelector(":scope > code") === answerChips[0] &&
+    chipDoors[0].dataset.tip === "ui/shell.js" && answerChips[1].closest(".helper-link") === null;
   const probe = document.createElement("span");
   probe.style.color = "var(--chat-link)";
   document.body.appendChild(probe);
@@ -37113,8 +37123,8 @@ const answerTail = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a bare path in the answer is an accent link with a file icon that opens the document viewer against the parent's checkout (code chips stay), the last answer naming index.html gets a preview card whose two doors are the browser tab and the default app, a copy button under every answer writes that answer through the window's clipboard and is reached from the keyboard too (the rail's Enter hands an earlier answer the focus and the copy follows it), and the tail goes with the last answer — no card, and no tail, when nothing is named",
-  answerTail.linkCount === 1 && answerTail.linkWords === "docs/plan.md" &&
+  "a bare path in the answer is an accent link with a file icon that opens the document viewer against the parent's checkout (a chip keeps its words letter for letter: a chip that is a path stands inside a door of its own, a command chip in none — draft C7), the last answer naming index.html gets a preview card whose two doors are the browser tab and the default app, a copy button under every answer writes that answer through the window's clipboard and is reached from the keyboard too (the rail's Enter hands an earlier answer the focus and the copy follows it), and the tail goes with the last answer — no card, and no tail, when nothing is named",
+  answerTail.linkCount === 1 && answerTail.doorCount === 2 && answerTail.pathChipDoor && answerTail.linkWords === "docs/plan.md" &&
     answerTail.linkTip === "docs/plan.md" && answerTail.linkIcon === "#i-file" &&
     answerTail.linkIsButton && answerTail.codeUntouched && answerTail.linkAccent &&
     JSON.stringify(answerTail.opened) === JSON.stringify(answerTail.wantOpened) &&
