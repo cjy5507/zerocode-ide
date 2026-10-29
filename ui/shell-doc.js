@@ -1137,7 +1137,7 @@ async function openFile(path, opts = {}) {
       ...(opts.allowMissing && { allowMissing: true }),
     });
   } catch (error) {
-    showError(`${path}: ${error}`);
+    sayUnopened(path, error, opts);
     return;
   }
   const mode = renderedAs(path);
@@ -1253,7 +1253,7 @@ async function openImage(path, opts = {}) {
   try {
     image = await invoke("read_image_file", { path });
   } catch (error) {
-    showError(`${path}: ${error}`);
+    sayUnopened(path, error, opts);
     return;
   }
   openTab({ id: `file:${path}`, kind: "image", path, image, preview: Boolean(opts.preview) });
@@ -1271,6 +1271,14 @@ function openPath(path, opts = {}) {
   // `renderedAs` 한 곳만 안다.
   if (renderedAs(path) === "notebook") return openIpynb(path, opts);
   return openFile(path, opts);
+}
+
+/* A file that would not open, said — or handed to the caller that asked to
+ * hear it first (`unread`): a link that can still look for its file elsewhere
+ * says nothing until the look has its answer (t-83039). */
+function sayUnopened(path, error, opts) {
+  if (opts.unread) opts.unread(error);
+  else showError(`${path}: ${error}`);
 }
 
 function paintImageView(tab) {
@@ -3430,10 +3438,54 @@ function mdLink(label, href, line = undefined) {
   }
   const place = docHrefPlace(href);
   const at = line ?? place.line;
-  actsAsButton(node, () =>
-    openPath(resolveDocPath(where?.base ?? "", place.path), { preview: true, ...(at !== undefined && { line: at }) }),
-  );
+  actsAsButton(node, () => openDocLink(where?.base ?? "", place.path, at));
   return node;
+}
+
+/* A relative link, opened where it points — and when nothing can be read
+ * there, looked for by its tail among the checkout's files (t-83039).
+ *
+ * An answer names a file the way a person does: 「terminal.rs」 for
+ * crates/zerocode-shell/src/cmd/terminal.rs. Measured from the checkout's top
+ * that is no file, and the press handed the person the disk's own refusal. The
+ * look is the file finder's (`search_files`), asked only by a press whose open
+ * failed — drawing a link asks the disk nothing. Only a link measured inside
+ * the checkout that look walks is looked for: one from another checkout would
+ * find a namesake here. An absolute path is where it says it is. */
+function openDocLink(base, path, line) {
+  const opts = { preview: true, ...(line !== undefined && { line }) };
+  const at = resolveDocPath(base, path);
+  const tail = path.replace(/^(?:\.{1,2}\/)+/, "");
+  const here = !base.startsWith("/") || artifactPathUnder(base, activeWorktreePath);
+  if (path.startsWith("/") || tail === "" || !here) return openPath(at, opts);
+  return openPath(at, { ...opts, unread: (error) => void findDocLink(tail, opts, `${at}: ${error}`) });
+}
+
+/* The checkout's files whose path ends with the link's: one opens at the line
+ * the link named, several stand in the file finder with the name typed in, and
+ * none is one sentence with what the disk said on its hover — said once
+ * however often the link is pressed. */
+async function findDocLink(tail, opts, refusal) {
+  const root = activeWorktreePath;
+  const name = basename(tail);
+  let hits = [];
+  try {
+    hits = (await invoke("search_files", { query: name })) ?? [];
+  } catch {
+    // A look that could not run found nothing; the sentence below says so.
+  }
+  if (root !== activeWorktreePath) return;
+  const found = hits.filter((hit) => hit === tail || hit.endsWith(`/${tail}`));
+  if (found.length === 1) {
+    openPath(found[0], opts);
+    return;
+  }
+  if (found.length > 1) {
+    openPalette("file", { query: name, found });
+    return;
+  }
+  const words = t("file.linkUnfound", "이 파일을 체크아웃에서 찾지 못했어요: {{name}}", { name: tail });
+  if (!standingToast(words, "halt")) toast(words, "halt", { tip: refusal });
 }
 
 /* 그림. 바깥 그림은 이 창이 대신 받아오지 않는다 — 문서가 가리킨 곳으로 창이
@@ -5673,7 +5725,7 @@ async function openCsv(path, opts = {}) {
   try {
     opened = await invoke("read_text_file", { path });
   } catch (error) {
-    showError(`${path}: ${error}`);
+    sayUnopened(path, error, opts);
     return;
   }
   openTab({

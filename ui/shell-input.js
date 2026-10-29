@@ -3556,7 +3556,9 @@ const FINDERS = {
   },
 };
 
-function openPalette(mode) {
+/* `seed` opens a finder already answering: the word typed in and what it
+ * found — a link that named a file several folders hold (t-83039). */
+function openPalette(mode, seed = null) {
   const finder = FINDERS[mode];
   if (!finder) return;
   const opener = document.activeElement;
@@ -3576,7 +3578,7 @@ function openPalette(mode) {
   say(qoTitle, finder.title);
   say(qoFoot, finder.keys);
   qoInput.placeholder = finder.placeholder();
-  qoInput.value = "";
+  qoInput.value = seed?.query ?? "";
   qoResults.replaceChildren();
   // Opening is not an answer, so a fresh panel does not claim it found nothing.
   qoEmpty.hidden = true;
@@ -3584,7 +3586,8 @@ function openPalette(mode) {
   showModal(qoScrim, { animated: true, opener });
   paintNavCurrent();
   markFirstRun("used_palette");
-  if (finder.listsEmpty) runPaletteQuery();
+  if (seed) paintPaletteRows(finder, seed.found);
+  else if (finder.listsEmpty) runPaletteQuery();
 }
 
 function closePalette() {
@@ -3622,6 +3625,11 @@ async function runPaletteQuery() {
   // The finder changed — or closed — while this was in flight; its rows
   // belong to a question nobody is asking now.
   if (paletteMode !== asked) return;
+  paintPaletteRows(finder, found);
+}
+
+/* A finder's answer, as its rows — the first one chosen. */
+function paintPaletteRows(finder, found) {
   qoResults.replaceChildren();
   paletteRows = found.slice(0, 50).map((item) => finder.row(item));
   let heading = null;
