@@ -39,7 +39,10 @@ const STRIDE = 16 * 1024;
  * would — on from a cursor, back from the end within its last chunk, back
  * from a place by turns — and counts every ask (`__ASKS__`). `holdAbove`
  * holds every read from a place until `__LET_ABOVE__()`, so a test reads the
- * page as it stands before anything above its newest turns is answered. */
+ * page as it stands before anything above its newest turns is answered;
+ * `__HOLD_ABOVE__()` holds the reads from then on the same way. A function
+ * in `__NEXT_ABOVE__` answers the next read from a place in its stead, once —
+ * a refusal it throws, or an answer that brings nothing to see. */
 function standTranscript({ blocks, back, stride, tailFrom = null, holdAbove = false }) {
   const lines = [];
   const at0 = Date.parse("2026-10-29T04:00:00Z");
@@ -80,16 +83,26 @@ function standTranscript({ blocks, back, stride, tailFrom = null, holdAbove = fa
     return backFrom(size, size - back.chunk);
   };
   let letAbove = null;
-  const above = holdAbove ? new Promise((done) => { letAbove = done; }) : null;
+  let above = holdAbove ? new Promise((done) => { letAbove = done; }) : null;
   window.__LET_ABOVE__ = () => letAbove?.();
+  window.__HOLD_ABOVE__ = () => {
+    above = new Promise((done) => { letAbove = done; });
+  };
+  window.__NEXT_ABOVE__ = null;
   window.__ASKS__ = [];
   window.__TRANSCRIPT__ = {
     size,
+    stride,
     // What the first read answers, asked by no page.
     tail,
     read(args) {
       window.__ASKS__.push({ after: args.after ?? null, before: args.before ?? null });
-      if (Number.isFinite(args.before)) return above ? above.then(() => backFrom(args.before)) : backFrom(args.before);
+      if (Number.isFinite(args.before)) {
+        const once = window.__NEXT_ABOVE__;
+        window.__NEXT_ABOVE__ = null;
+        const answer = () => (once ? once(args) : backFrom(args.before));
+        return above ? above.then(answer) : answer();
+      }
       if (args.after === null || args.after === undefined) return tail();
       if (args.after === 0) return { found: true, skipped: false, turns: placed.flat(), start: 0, next: size, more: false, folded: false };
       return { found: true, skipped: false, turns: [], start: args.after, next: size, more: false, folded: false };
@@ -782,6 +795,56 @@ export async function testConversationEarlier(browser, origin, ok) {
           block(pressed.first) < block(opened.first) && pressed.held <= cap && pressed.cut && pressed.twice === 0 && pressed.ordered,
         JSON.stringify({ from: opened.from, door: opened.door, asks, first: [opened.first, pressed.first], held: [opened.held, pressed.held] }));
       ok("the helper's page raised no errors", faults.length === 0, faults.join("\n"));
+    } finally {
+      await page.close();
+    }
+  }
+
+  // ---- a reader gone down to the newest turns while a read from above is out keeps them (t-84136)
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      await openLongPane(page);
+      const cap = await page.evaluate(() => HELPER_TURN_CAP);
+      // Up until one more read would pass the page's hold.
+      let step = 0;
+      for (let press = 0; press < 12; press += 1) {
+        const before = (await page.evaluate(readList)).held;
+        if (step > 0 && before + step > cap) break;
+        await pressEarlier(page);
+        step = (await page.evaluate(readList)).held - before;
+      }
+      const stood = await page.evaluate(async () => {
+        const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null);
+        window.__HOLD_ABOVE__();
+        list.scrollTop = 0;
+        await new Promise((done) => requestAnimationFrame(done));
+        list.querySelector(":scope > .chat-earlier-door").click();
+        // Down to the newest turns while the read is out.
+        list.scrollTop = list.scrollHeight;
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        return { top: list.scrollTop, gap: list.scrollHeight - list.scrollTop - list.clientHeight };
+      });
+      const before = await page.evaluate(readList);
+      await page.evaluate(() => window.__LET_ABOVE__());
+      await reached(page);
+      await settle(page);
+      const kept = await page.evaluate(readList);
+      const now = await page.evaluate(() => {
+        const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null);
+        return { top: list.scrollTop, gap: list.scrollHeight - list.scrollTop - list.clientHeight };
+      });
+      ok("a read from above that would push the newest turns out of the page's hold while its reader is among them is not held: the newest turns, the reader's place and where the page reads up from all stay",
+        step > 0 && before.held + step > cap && stood.gap <= 2 && kept.held === before.held && kept.last === `답 ${EARLIER_BLOCKS - 1}` &&
+          !kept.cut && kept.from === before.from && Math.abs(now.top - stood.top) <= 1 && now.gap <= 2,
+        JSON.stringify({ step, cap, held: [before.held, kept.held], last: kept.last, cut: kept.cut, from: [before.from, kept.from], stood, now }));
+      // From the top, the same read is held, and the newest end goes.
+      await pressEarlier(page);
+      const up = await page.evaluate(readList);
+      ok("pressed again from the top, the read is held, the newest turns far from the reader go and the foot's button says the way back",
+        up.from < kept.from && up.held <= cap && up.cut && up.foot?.shown === true,
+        JSON.stringify({ from: [kept.from, up.from], held: up.held, cut: up.cut, foot: up.foot }));
+      ok("the page whose reader went down raised no errors", faults.length === 0, faults.join("\n"));
     } finally {
       await page.close();
     }

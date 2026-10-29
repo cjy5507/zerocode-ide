@@ -13197,10 +13197,21 @@ function letOldestGo(held, over) {
  * 그리는 쪽(`syncHelperTurns`)은 그 열쇠로 위에 세운다. 경계 아래에 제 호출 없이
  * 서 있던 결과는 이제 위로 온 호출의 것이 되어 행을 떠난다(`gone`). `start`는
  * 그 읽기가 시작한 줄이다: 페이지는 이제 거기부터 위로 읽는다. 상한을 넘치면
- * 가장 새 쪽 — 위를 읽는 사람에게서 먼 쪽 — 이 간다(`letNewestGo`). */
-function holdEarlierTurns(held, turns, start) {
+ * 가장 새 쪽 — 위를 읽는 사람에게서 먼 쪽 — 이 간다(`letNewestGo`). 그런데
+ * `keepNewest`이면(읽는 사람이 가장 새 턴 곁으로 내려가 있다) 그 사람이 보는 행을
+ * 놓는 대신 들이지 않고 장부를 그대로 둔다(t-84136) — 들였으면 참. */
+function holdEarlierTurns(held, turns, start, { keepNewest = false } = {}) {
   const batch = { turns: [], seq: 0, from: start };
   holdHelperTurns(batch, turns);
+  // 장부의 결과 가운데 위로 온 호출의 것 — 그 호출에 합쳐지고 행을 떠난다.
+  const joined = [];
+  for (const result of held.turns.filter((turn) => turn.role === "tool_result" && turn.tool?.call_id)) {
+    const call = callAwaiting(batch.turns, result.tool.call_id);
+    if (!call) continue;
+    foldResultInto(call, result);
+    joined.push(result.seq);
+  }
+  if (keepNewest && batch.turns.length + held.turns.length - joined.length > HELPER_TURN_CAP) return false;
   const low = held.low ?? 0;
   const count = batch.turns.length;
   batch.turns.forEach((turn, at) => {
@@ -13208,12 +13219,7 @@ function holdEarlierTurns(held, turns, start) {
   });
   held.low = low - count;
   held.gone ??= new Set();
-  for (const result of held.turns.filter((turn) => turn.role === "tool_result" && turn.tool?.call_id)) {
-    const call = callAwaiting(batch.turns, result.tool.call_id);
-    if (!call) continue;
-    foldResultInto(call, result);
-    held.gone.add(result.seq);
-  }
+  for (const seq of joined) held.gone.add(seq);
   const kept = held.turns.filter((turn) => !held.gone.has(turn.seq));
   held.turns.splice(0, held.turns.length, ...batch.turns, ...kept);
   held.from = batch.from;
@@ -13227,6 +13233,7 @@ function holdEarlierTurns(held, turns, start) {
   }
   if (batch.clockBroken) held.clockBroken = true;
   letNewestGo(held);
+  return true;
 }
 
 /* 상한을 넘친 만큼 가장 새 행들을 놓는다 — 위를 읽는 사람에게서 먼 쪽. 놓은
@@ -14633,7 +14640,9 @@ function readerAway(run) {
  * wire's session continues (`wire_history`) — one read at a time, and only
  * while something stands above (`from` past the file's first line). Asked by
  * the pill's press or the reader's push at the list's top, never by the poll
- * or by a scroll that is no one's push. */
+ * or by a scroll that is no one's push. A reader who went down to the newest
+ * turns while the read was out keeps them: what would push them out of the
+ * page's hold waits for a press from above, its place kept (t-84136). */
 async function readEarlierTurns(run) {
   const held = run?.helper;
   if (!held || held.reaching || !(held.from > 0)) return;
@@ -14656,7 +14665,7 @@ async function readEarlierTurns(run) {
   // A page that went back to its newest turns, or whose file was replaced,
   // while the read was out holds from elsewhere: what came is not above it.
   if (above?.found && held.epoch === epoch && held.from === before && Number.isFinite(above.start) && above.start < before) {
-    holdEarlierTurns(held, above.turns ?? [], above.start);
+    holdEarlierTurns(held, above.turns ?? [], above.start, { keepNewest: !readerAway(run) });
   }
   const page = activeHelperPage();
   if (page?.worker === run && !document.hidden) paintHelperSurface(page);

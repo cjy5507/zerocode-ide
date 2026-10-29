@@ -39214,7 +39214,9 @@ fn every_conversation_page_reads_up_past_its_first_turn_down_one_road() {
             && read.contains("invoke(\"pane_log\", { term: run.term, before })")
             && read.contains("invoke(\"wire_history\", { id: run.wire, before })")
             && read.contains("invoke(\"subagent_log\", { term: run.term, id: held.id, before })")
-            && read.contains("holdEarlierTurns(held, above.turns ?? [], above.start);"),
+            && read.contains(
+                "holdEarlierTurns(held, above.turns ?? [], above.start, { keepNewest: !readerAway(run) })"
+            ),
         "a page reads up down a road of its own:\n{read}"
     );
     let poll = support::block_after(shell, "async function pollHelperPages() {");
@@ -39289,7 +39291,10 @@ fn every_conversation_page_reads_up_past_its_first_turn_down_one_road() {
         "turns read from above do not stand over the rows, or move the reader:\n{sync}"
     );
     // The hold stays bounded: past it the end farther from the reader goes.
-    let cap = support::block_after(shell, "function holdEarlierTurns(held, turns, start) {");
+    let cap = support::block_after(
+        shell,
+        "function holdEarlierTurns(held, turns, start, { keepNewest = false } = {}) {",
+    );
     assert!(
         cap.contains("letNewestGo(held);") && shell.contains("const HELPER_TURN_CAP = 400;"),
         "turns read from above are held past the page's bound:\n{cap}"
