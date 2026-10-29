@@ -194,13 +194,16 @@ PY
     "${clean[@]}" /usr/bin/open -g -n "$out/ZeroCode.app" \
       --env ZEROCODE_BYPASS_SINGLE_INSTANCE_LOCK=1 --env ZEROCODE_DISABLE_CREDENTIAL_STORE=1 \
       --stdout "$out/run-$at.stdout" --stderr "$out/run-$at.stderr"
-    # The window is LaunchServices' child, not ours: found by its own binary's path.
+    # The window is LaunchServices' child, not ours: found by its own binary's path. awk reads
+    # ps to its end: one that left early would close the pipe on ps, and under pipefail
+    # the SIGPIPE (141) ended this script with the window just started and left running.
     for _ in $(seq 1 100); do
-      pid=$(ps -axo pid=,args= | awk -v shim="$shim" '$2 == shim {print $1; exit}')
+      pid=$(ps -axo pid=,args= | awk -v shim="$shim" '$2 == shim && !found {print $1; found = 1}')
       [[ -n "$pid" ]] && break
       sleep 0.1
     done
     [[ -n "$pid" ]] || { echo "run $at: the window did not start" >&2; exit 4; }
+    live="$pid"
     if $low; then taskpolicy -b -p "$pid"; fi
   else
     ( cd "$repo" && exec "${clean[@]}" ZEROCODE_BYPASS_SINGLE_INSTANCE_LOCK=1 ZEROCODE_DISABLE_CREDENTIAL_STORE=1 \
@@ -259,6 +262,7 @@ PY
   kill -KILL "$pid" 2>/dev/null || true
   if [[ "$launch" = background ]]; then
     while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done
+    live=""
   else
     wait "$pid" 2>/dev/null || true
   fi
@@ -269,6 +273,10 @@ PY
   cat "$out/timeline-$at.json"; echo
 }
 
+# A background window is no child of this script: whatever ends it early, the
+# window it started goes with it.
+live=""
+trap '[[ -z "$live" ]] || kill -KILL "$live" 2>/dev/null || true' EXIT
 for at in $(seq 1 "$runs"); do run_once "$at"; done
 
 # The bundle shim holds a copy of the Chromium framework (hundreds of MB), and
