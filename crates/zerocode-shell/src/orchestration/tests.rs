@@ -1263,6 +1263,98 @@ fn the_desks_mail_is_the_coordinators_inbox_letter_by_letter() {
     );
 }
 
+/// A question the coordinator closes without an answer leaves the desk
+/// (t-83289): the window's close button calls `question-close` and reads
+/// nothing else — the close's id, and on a second press the same id with
+/// `already`, nothing written twice.
+#[test]
+fn a_question_closed_without_an_answer_leaves_the_desk() {
+    use zerocode_core::agent_teams::Team;
+    use zerocode_core::orchestration::{Draft, MessageKind, Priority, Text};
+    const LEADER_TERM: u32 = 9_420;
+    fn verb(held: &mut Ledger, table: &mut Team, argv: &[String], at: i64) -> serde_json::Value {
+        let decided = zerocode_core::orchestration::plan(
+            held,
+            table,
+            &Catalog::new(Vec::new()),
+            argv,
+            zerocode_core::agent_teams::LEADER_PANE,
+            at,
+            Some(&test_actor(LEADER_TERM)),
+        );
+        assert_eq!(
+            decided.reply.exit_code, 0,
+            "{argv:?}: {}",
+            decided.reply.stderr
+        );
+        serde_json::from_str(&decided.reply.stdout).expect("the verb answers JSON")
+    }
+    let mut held = Ledger::new();
+    let mut table = Team::new("team-desk-close", TEST_CAPABILITY, LEADER_TERM);
+    let opened = verb(
+        &mut held,
+        &mut table,
+        &words("run-create --name desk-close"),
+        1_000,
+    );
+    let run_id = opened["runId"].as_str().expect("a run id").to_string();
+    let address = held.run(&run_id).expect("the run").address();
+    let question = held
+        .post(
+            &run_id,
+            Draft {
+                from: "pane:team-desk-close/%7".to_string(),
+                to: address,
+                kind: MessageKind::Question,
+                body: Text::from("아직 필요한가요?"),
+                subject: Text::default(),
+                priority: Priority::Normal,
+                payload: Text::default(),
+                thread: None,
+                task: None,
+                dispatch: None,
+            },
+            1_100,
+        )
+        .expect("a question");
+    let owed = |ledger: &Ledger| {
+        super::desk::desk_letters(ledger, ledger.run(&run_id).expect("the run"), 1_600).mail
+    };
+    assert_eq!(owed(&held).len(), 1);
+
+    let close = |held: &mut Ledger, table: &mut Team, retry: &str, at: i64| {
+        let argv = [
+            "question-close",
+            "--message",
+            question.as_str(),
+            "--reason",
+            "이미 끝난 일",
+            "--retry-request",
+            retry,
+        ]
+        .map(str::to_string);
+        verb(held, table, &argv, at)
+    };
+    let closed = close(&mut held, &mut table, "desk-close-1", 1_200);
+    assert_eq!(closed["closed"], true, "{closed}");
+    assert_eq!(closed["already"], false, "{closed}");
+    let close_id = closed["closeId"]
+        .as_str()
+        .expect("the close's id")
+        .to_string();
+    assert!(owed(&held).is_empty(), "a closed question is still owed");
+
+    let written = held.run(&run_id).expect("the run").messages().len();
+    let again = close(&mut held, &mut table, "desk-close-2", 1_300);
+    assert_eq!(again["already"], true, "{again}");
+    assert_eq!(again["closeId"], close_id.as_str(), "{again}");
+    assert_eq!(
+        held.run(&run_id).expect("the run").messages().len(),
+        written,
+        "a second close wrote again"
+    );
+}
+
 /// A classifier's decline and the switch of model it caused reach the desk
 /// as news owed an acknowledgement (t-6747), with the facts their second
 /// lines are written from: the category, whether it is routed and on which
