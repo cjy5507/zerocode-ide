@@ -2406,8 +2406,8 @@ pub(crate) fn term_paste(
 ///
 /// The page is not its only caller: a worker's coordinator answering the
 /// question the worker's CLI asked (t-82296) walks the same door, under the
-/// same refusals ([`crate::worker_question`]), and reads them by the words
-/// below.
+/// same refusals ([`crate::worker_question`]), and tells them apart through
+/// [`refused_as_passed`] and [`refused_in_flight`].
 #[tauri::command(async)]
 pub(crate) fn answer_ask(
     app: AppHandle,
@@ -2486,10 +2486,19 @@ pub(crate) fn question_is_up(
         .is_some_and(|held| answer_door::question_is_up(&held, question))
 }
 
-/// The refusals [`answer_ask`] can come back with that a caller outside the
-/// page tells apart (t-82296): the question passed, or another answer is on
-/// its way.
-pub(crate) use crate::answer_door::{ANSWER_IN_FLIGHT, QUESTION_CHANGED};
+/// Whether [`answer_ask`] refused because the pane's screen no longer shows
+/// the question — the refusal a caller outside the page tells apart
+/// (t-82296), asked here so the door's own words stay behind the answer
+/// commands (t-84470).
+pub(crate) fn refused_as_passed(why: &str) -> bool {
+    why == answer_door::QUESTION_CHANGED
+}
+
+/// Whether [`answer_ask`] refused because another answer is still being
+/// typed into the pane.
+pub(crate) fn refused_in_flight(why: &str) -> bool {
+    why == answer_door::ANSWER_IN_FLIGHT
+}
 
 /// A card's choice on the numbered menu of a CLI whose TUI nobody measured:
 /// the row it picked, walked to and taken through the answer door.

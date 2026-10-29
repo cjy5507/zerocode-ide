@@ -24,8 +24,8 @@
 //! A question the pane moved past before the answer came is refused back to
 //! the coordinator as 「지나간 질문」 and leaves nothing on the person's
 //! screen: the moving past is the hook's word (a report that is no longer the
-//! asking), or the answer door's, which reads the screen and refuses with
-//! [`crate::cmd::terminal::QUESTION_CHANGED`] — the judgement t-82287 made
+//! asking), or the answer door's, which reads the screen and refuses
+//! ([`crate::cmd::terminal::refused_as_passed`]) — the judgement t-82287 made
 //! for the person's own answers.
 //!
 //! A permission request is not routed: the automatic approval rules read it
@@ -970,8 +970,8 @@ fn carry(app: &AppHandle, term: u32, standing: &Asked, question: &str, now_ms: i
                 selections,
             ) {
                 Ok(()) => typed(term),
-                Err(why) if why == crate::cmd::terminal::ANSWER_IN_FLIGHT => {}
-                Err(why) if why == crate::cmd::terminal::QUESTION_CHANGED => {
+                Err(why) if crate::cmd::terminal::refused_in_flight(&why) => {}
+                Err(why) if crate::cmd::terminal::refused_as_passed(&why) => {
                     tell(
                         seat,
                         question,
