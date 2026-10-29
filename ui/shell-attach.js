@@ -102,8 +102,9 @@ function composerAttachTargetAt(x, y) {
 
 /* 입력줄 하나에 첨부를 붙인다. `form`은 제출하는 form, `box`는 textarea, `tools`는
  * 그 아래 도구 줄. 칩 줄은 textarea 위에 선다. `start`는 브라우저의 시작
- * 폴더 — 부모 판의 체크아웃. */
-function composerAttachments(form, box, tools, { start = null } = {}) {
+ * 폴더 — 부모 판의 체크아웃. `changed`는 칩이 서거나 빠질 때마다 불린다 —
+ * 칩 하나도 보낼 것이라 입력줄의 보내기가 제 얼굴을 다시 묻는다(t-83633). */
+function composerAttachments(form, box, tools, { start = null, changed = null } = {}) {
   const row = document.createElement("div");
   row.className = "composer-attach-row";
   row.hidden = true;
@@ -139,6 +140,7 @@ function composerAttachments(form, box, tools, { start = null } = {}) {
         t("composer.attach.more", "… 외 {{count}}", { count: all.length - ATTACH_LIMITS.shown }));
       row.appendChild(more);
     }
+    changed?.();
   };
 
   const chipNode = (chip) => {

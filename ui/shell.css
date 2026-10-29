@@ -10590,7 +10590,8 @@ body.is-dragging-pane {
 
 /* Where inside the changed line the change is — the char-level emphasis the
  * original's Monaco draws over its line tints: the span's own stronger wash
- * of the same diff ink, over the 14% the whole line already wears. */
+ * of the same diff ink, over the wash the whole line already wears
+ * (`--diff-add-surface`). */
 .diff-line--add .diff-word {
   background: color-mix(in srgb, var(--diff-add) 32%, transparent);
   border-radius: 2px;
@@ -15821,6 +15822,29 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 
 .helper-tool-diff .diff-num {
   width: 4ch;
+}
+
+/* The +/- column (t-83633). A conversation's diff is most often a snippet
+ * whose place in its file the call never said, so both gutters stand blank
+ * and the line's wash was the only mark of what the line is — a colour
+ * alone. The sign says it in a shape as well, in the diff's own ink
+ * (`--diff-add-ink`, which clears AA on its line in both themes). It is
+ * drawn, not written: a copy of the code carries no sign. A line that did
+ * not change keeps the column's width, so the code stays in one column. */
+.helper-tool-diff .diff-text::before {
+  display: inline-block;
+  width: 2ch;
+  content: "";
+}
+
+.helper-tool-diff .diff-line--add .diff-text::before {
+  content: "+";
+  color: var(--diff-add-ink);
+}
+
+.helper-tool-diff .diff-line--del .diff-text::before {
+  content: "-";
+  color: var(--diff-del-ink);
 }
 
 /* A thought is one line (t-22100): how long it lasted leads — the

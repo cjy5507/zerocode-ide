@@ -426,11 +426,21 @@
   /* Diff is the second place a hue answers something other than "which
    * agent", and it earns it: the +/- sign alone cannot be read at a glance
    * down a hunk. Desaturated to sit inside the graphite palette rather than
-   * shout across it, and used in the diff surface and nowhere else. */
+   * shout across it, and used in the diff surface and nowhere else.
+   *
+   * The line's wash is 20% of its ink — the strength Monaco's measured light
+   * pair already wears (`#…33`, below). At 14% a changed line read as barely
+   * tinted on the black floor (t-83633, the person: 「diff가 좀 컬러풀하게」);
+   * at 20% the sign below still reads 4.6:1 or more on it.
+   *
+   * The ink of a diff's +/- sign, where the sign is words on that wash: here
+   * the diff ink itself, which clears 4.5:1 on its own line. */
   --diff-add: #7fb896;
   --diff-del: #d9877f;
-  --diff-add-surface: color-mix(in srgb, var(--diff-add) 14%, transparent);
-  --diff-del-surface: color-mix(in srgb, var(--diff-del) 14%, transparent);
+  --diff-add-surface: color-mix(in srgb, var(--diff-add) 20%, transparent);
+  --diff-del-surface: color-mix(in srgb, var(--diff-del) 20%, transparent);
+  --diff-add-ink: var(--diff-add);
+  --diff-del-ink: var(--diff-del);
 
   /* Modal scrim. Always a darkening layer, never a tint of the surface: a
    * permission dialog has to focus attention on itself while leaving the lane
@@ -3245,6 +3255,12 @@
   --diff-del: #ff0000;
   --diff-add-surface: #9bb95533;
   --diff-del-surface: #ff000033;
+  /* On paper Monaco's pair is a wash, not an ink: as words the green reads
+   * 1.5:1 on its own line and the red 2.5:1. The sign takes the pair walked
+   * 55% of the way to this block's ink — the hue kept, 4.8:1 (green) and
+   * 6.7:1 (red) on their lines (t-83633). */
+  --diff-add-ink: color-mix(in srgb, var(--diff-add) 45%, var(--ink-chalk));
+  --diff-del-ink: color-mix(in srgb, var(--diff-del) 45%, var(--ink-chalk));
   --scrim: rgb(10 10 10 / 34%);
 
   /* The terminal screen, flipped WHOLE.

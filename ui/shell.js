@@ -16159,15 +16159,22 @@ function workerComposerNode(run, owner = null) {
   };
   form.__workerFit = fit;
   requestAnimationFrame(fit);
+  // Every key asks the send what it now does: a box that holds words while
+  // the turn runs queues them, an empty one stops the turn (t-83633).
   box.addEventListener("input", () => {
     run.draft = box.value;
     fit();
+    paintComposerSend(form, run);
   });
   const tools = document.createElement("div");
   tools.className = "worker-composer-tools";
   // 첨부(t-2993)는 제 모듈의 것 — 칩 줄은 상자 위에, 「+」는 도구 줄 맨 왼쪽에.
-  // 브라우저의 시작점은 부모 판의 체크아웃이다.
-  const attachments = composerAttachments(form, box, tools, { start: owner?.worktree ?? null });
+  // 브라우저의 시작점은 부모 판의 체크아웃이다. 칩 하나도 보낼 것이라 칩이
+  // 서고 빠질 때도 보내기의 얼굴을 다시 묻는다.
+  const attachments = composerAttachments(form, box, tools, {
+    start: owner?.worktree ?? null,
+    changed: () => paintComposerSend(form, run),
+  });
   // 턴이 끝나기를 기다리는 글들 — 첨부 칩 줄 위, 상자 바로 위 두 층.
   form.prepend(composerQueueNode());
   // The extension's row: after `+`, the agent chip (mark · name · model, opening
@@ -16193,12 +16200,11 @@ function workerComposerNode(run, owner = null) {
   // a key it took is not taken twice (t-6323 A3).
   composerKeys(form, box, run, spec);
   right.appendChild(palette.slash);
+  // Its name, mark and whether it can be pressed are its painter's
+  // (`paintComposerSend`), which runs once the form stands.
   const send = document.createElement("button");
   send.type = "submit";
   send.className = "worker-composer-send";
-  send.disabled = Boolean(run.sendUncertain);
-  send.setAttribute("aria-label", t("worker.send", "보내기"));
-  send.appendChild(iconNode("arrow-up"));
   send.addEventListener("click", async (event) => {
     if (send.classList.contains("is-stop")) {
       event.preventDefault();
@@ -16267,7 +16273,7 @@ function workerComposerNode(run, owner = null) {
       // So do words sent while the pane hands its conversation to its wire:
       // the wire's page sends them (`carryPaneChat`), or the pane, refused
       // (t-54304).
-      if (composerWorking(run) || composerHolding(run) || asking) queueComposerMessage(run, message);
+      if (composerQueues(run, asking)) queueComposerMessage(run, message);
       // 아니면 그 자리에서 실행의 길로 — 선이면 한 요청, 판이면
       // 붙여넣기·숨·Enter. `pasted`는 Enter가 실패했을 때 글이 이미 부모의
       // 상자에 있다는 사실을 남긴다.
@@ -16318,6 +16324,40 @@ function fitComposerSay(form) {
   paintWorkerComposerState(form, form.__workerRun);
 }
 
+/* The send's face: what a press does now, by the extension's own rule
+ * (2.1.312: `busy && !canSendMessage` stops, else it sends, and
+ * `canSendMessage` is words or a chip). While the turn runs, an empty box's
+ * button stops it and a box holding words — or a chip — puts them in the
+ * queue, so the button never stops the turn the person was writing the next
+ * instruction for; Esc stops it from the box all the same
+ * (`interruptOnEscape`), and the queue face says so. A question's card still
+ * waiting for its answer takes the words as that answer: the face is send.
+ * Asked on every key, so each write is guarded and the mark is rebuilt only
+ * when the face moves — a key that changes nothing here writes nothing. */
+function paintComposerSend(form, run, standing = standingAskOf(run)) {
+  const send = form.querySelector(".worker-composer-send");
+  if (!send) return;
+  const words = /\S/.test(form.querySelector(".worker-composer-box").value)
+    || (composerAttachmentsOf(form)?.count() ?? 0) > 0;
+  const answering = Boolean(standing) && !standing.draft?.sending;
+  const busy = Boolean(run.sending || run.sendUncertain);
+  let face = "send";
+  if (!busy && composerWorking(run) && !words) face = "stop";
+  else if (!busy && words && !answering && composerQueues(run, standing)) face = "queue";
+  const name = face === "stop"
+    ? t("worker.stop", "중지")
+    : face === "queue"
+      ? t("composer.queue.add", "대기열에 추가 — 멈추려면 Esc")
+      : t("worker.send", "보내기");
+  writeDisabled(send, busy);
+  writeClass(send, "is-stop", face === "stop");
+  writeAttribute(send, "aria-label", name);
+  writeAttribute(send, "data-tip", name);
+  if (send.__face === face) return;
+  send.__face = face;
+  send.replaceChildren(iconNode(face === "stop" ? "square" : "arrow-up"));
+}
+
 function paintWorkerComposerState(form, run, delivered = null) {
   const box = form.querySelector(".worker-composer-box");
   if (delivered !== null && box.value === delivered && run.draft === "") {
@@ -16325,9 +16365,7 @@ function paintWorkerComposerState(form, run, delivered = null) {
     form.__workerFit?.();
   }
   box.readOnly = Boolean(run.sending);
-  const send = form.querySelector(".worker-composer-send");
   const working = composerWorking(run);
-  const stopping = working && !run.sending && !run.sendUncertain;
   // 기다리는 글들, 그리고 상자가 무엇을 하겠다고 말하는지: 실행 중이면
   // 「대기열에 추가」, 턴 사이면 제 본래의 말.
   paintComposerQueue(form, run);
@@ -16344,18 +16382,7 @@ function paintWorkerComposerState(form, run, delivered = null) {
       : form.__composerSay;
   writeAttribute(box, "placeholder", saying);
   writeAttribute(box, "aria-label", saying);
-
-  if (stopping) {
-    send.disabled = false;
-    send.classList.add("is-stop");
-    send.setAttribute("aria-label", t("worker.stop", "중지"));
-    send.replaceChildren(iconNode("square"));
-  } else {
-    send.classList.remove("is-stop");
-    send.disabled = Boolean(run.sending || run.sendUncertain);
-    send.setAttribute("aria-label", t("worker.send", "보내기"));
-    send.replaceChildren(iconNode("arrow-up"));
-  }
+  paintComposerSend(form, run, standing);
 
   const spec = installedAgents().find((row) => row.id === run.agent) ?? null;
   const agentChip = form.querySelector(".worker-composer-agent");
