@@ -35,6 +35,7 @@ import { testUsageGoogleLogin, testUsageRefresh, testUsageWords } from "./usage-
 import { testTerminalDoor } from "./terminal-door.mjs";
 import { testInbox } from "./inbox.mjs";
 import { testPaletteRecent } from "./palette-recent.mjs";
+import { testPaletteFolder } from "./palette-folder.mjs";
 import { testDesignSystem } from "./design-system.mjs";
 import { testAccountSwitch } from "./account-switch.mjs";
 import { testToastClearOfDrawer } from "./toast-clear-of-drawer.mjs";
@@ -295,6 +296,7 @@ suite("terminal-door", ({ browser, origin, ok }) => testTerminalDoor(browser, or
 suite("account-switch", ({ browser, origin, ok }) => testAccountSwitch(browser, origin, standBackend, ok));
 suite("inbox", ({ browser, origin, ok }) => testInbox(browser, origin, standBackend, ok));
 suite("palette-recent", ({ browser, origin, ok }) => testPaletteRecent(browser, origin, standBackend, ok));
+suite("palette-folder", ({ browser, origin, ok }) => testPaletteFolder(browser, origin, ok));
 suite("design-system", ({ browser, origin, ok }) => testDesignSystem(browser, origin, standBackend, ok));
 suite("toast-clear-of-drawer", ({ browser, origin, ok }) => testToastClearOfDrawer(browser, origin, ok));
 suite("skills-pickers", ({ browser, origin, ok }) => testSkillsPickers(browser, origin, ok));
