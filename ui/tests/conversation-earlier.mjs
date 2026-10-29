@@ -450,16 +450,23 @@ export async function measureLongPaneOpen(page, { tail = "chunk", readMs = {} } 
  * ones standing in the conversation's rows that are not among the parts a page
  * behind the front holds still. Those the stylesheet names (`.is-behind` …
  * `animation-play-state: paused`, shell.css), read from it here, start again;
- * nothing else in a row has a reason to. The press back
- * that cost a long pane 46 ms at a 4x CPU restyled every span in the window
- * and matched the whole document again, for `hidden`s that changed elsewhere.
- * Chromium only: the trace is its own. */
+ * nothing else in a row has a reason to. An element the page builds in that
+ * frame — a row's body the shelf builds as it comes within reach — is styled
+ * for the first time, not again: it is counted apart, and the rows themselves
+ * must be the ones that stood before the press. The press back that cost a
+ * long pane 46 ms at a 4x CPU restyled every span in the window and matched
+ * the whole document again, for `hidden`s that changed elsewhere. Chromium
+ * only: the trace is its own. */
 export async function restyledOnReturn(browser, page) {
   await measureLongPaneOpen(page);
   await page.evaluate(async (awayMs) => {
     el("view-toggle-term").click();
     await window.__PAINTED__();
     await new Promise((done) => setTimeout(done, awayMs));
+    // The rows standing behind the screen, to tell after the press whether
+    // they came back or were built again.
+    const list = [...document.querySelectorAll(".pane-chat .helper-turns")][0];
+    window.__ROWS_BEFORE__ = list ? [...list.querySelectorAll(":scope > [data-turn]")] : [];
   }, OPEN.awayMs);
   await browser.startTracing(page, { categories: ["blink.user_timing", "devtools.timeline", "disabled-by-default-devtools.timeline.invalidationTracking"] });
   const rows = await page.evaluate(async () => {
@@ -472,16 +479,25 @@ export async function restyledOnReturn(browser, page) {
     }));
     performance.mark("restyle-drawn");
     const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility());
-    return list?.querySelectorAll(":scope > [data-turn]").length ?? 0;
+    const now = list ? [...list.querySelectorAll(":scope > [data-turn]")] : [];
+    const before = window.__ROWS_BEFORE__;
+    return { count: now.length, kept: now.length === before.length && now.every((row, at) => row === before[at]) };
   });
   const trace = JSON.parse((await browser.stopTracing()).toString());
   const events = trace.traceEvents ?? trace;
   const at = (name) => events.find((one) => one.name === name && String(one.cat).includes("user_timing"))?.ts ?? null;
   const [from, to] = [at("restyle-press"), at("restyle-drawn")];
-  const restyled = new Set(events
-    .filter((one) => one.name === "StyleRecalcInvalidationTracking" && from !== null && to !== null && one.ts >= from && one.ts <= to)
-    .map((one) => one.args?.data?.nodeId)
-    .filter(Number.isFinite));
+  // Each element styled in the press, and why: one the frame built is styled
+  // for the first time ("Node was inserted into tree"), not again.
+  const reasons = new Map();
+  for (const one of events) {
+    if (one.name !== "StyleRecalcInvalidationTracking" || from === null || to === null || one.ts < from || one.ts > to) continue;
+    const id = one.args?.data?.nodeId;
+    if (!Number.isFinite(id)) continue;
+    reasons.set(id, (reasons.get(id) ?? new Set()).add(String(one.args.data.reason ?? "")));
+  }
+  const built = (id) => [...reasons.get(id)].every((reason) => reason === "Node was inserted into tree");
+  const restyled = new Set([...reasons.keys()].filter((id) => !built(id)));
   // The parts a page behind the front holds still, as the stylesheet names
   // them: what each paused rule styles under `.is-behind`.
   const held = await page.evaluate(() => [...document.styleSheets].flatMap((sheet) => [...sheet.cssRules])
@@ -507,7 +523,8 @@ export async function restyledOnReturn(browser, page) {
   }
   await cdp.detach();
   const still = inRows.filter((one) => !one.held);
-  return { rows, held, restyled: restyled.size, inRows: inRows.length, still: still.length, names: [...new Set(still.map((one) => one.name))].slice(0, 6) };
+  return { rows: rows.count, kept: rows.kept, held, built: reasons.size - restyled.size, restyled: restyled.size, inRows: inRows.length,
+    still: still.length, names: [...new Set(still.map((one) => one.name))].slice(0, 6) };
 }
 
 /* Rounds of the open, each on a fresh page; medians. */
@@ -929,8 +946,8 @@ export async function testConversationEarlier(browser, origin, ok) {
     try {
       await page.setViewportSize({ width: 1440, height: 900 });
       const seen = await restyledOnReturn(browser, page);
-      ok(`turned back to from its terminal, a long pane's conversation of ${seen.rows} rows is drawn restyling none of them — only the parts held still behind it start again`,
-        seen.rows > BACK.said && seen.held !== "" && seen.still === 0,
+      ok(`turned back to from its terminal, a long pane's conversation of ${seen.rows} rows comes back as it stood, restyling none of them — only the parts held still behind it start again`,
+        seen.rows > BACK.said && seen.kept && seen.held !== "" && seen.still === 0,
         JSON.stringify(seen));
       ok("the press back raised no errors", faults.length === 0, faults.join("\n"));
     } finally {
