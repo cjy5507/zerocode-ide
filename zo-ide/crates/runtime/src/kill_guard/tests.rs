@@ -210,10 +210,15 @@ fn kill_guard_a_summoned_worker_pane_has_nobody_to_ask() {
 /// Every run here starts a real `sleep` and reads the real `ps`: unix only.
 #[cfg(unix)]
 mod real_run {
+    use std::ffi::CString;
     use std::io::Read as _;
+    use std::marker::PhantomData;
     use std::os::fd::{AsRawFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStringExt as _;
     use std::process::{Child, Command, Stdio};
 
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
     use zerocode_core::agent_teams::{TEAM_LEADER_VAR, TEAM_PANE_VAR};
     use zerocode_core::hook::PANE_KEY_ENV;
     use zerocode_core::shell_rule::kill::WINDOW_PID_ENV;
@@ -225,24 +230,152 @@ mod real_run {
         PermissionPromptDecision, PermissionPrompter, PermissionRequest,
     };
 
-    /// A `sleep` this test started, whose duration no other process carries, so
-    /// a pattern naming it can only ever match it.
-    struct Bait {
-        child: Child,
-        marker: String,
+    /// How long a bait or an orphan lives when nothing ends it, in seconds,
+    /// and so the whole part of every marker. It was a day; a run killed
+    /// outright left its baits standing that long (t-83535). Longer than any
+    /// test here takes under a release lane's load: the longest stands on a
+    /// 20-second bash timeout.
+    const BAIT_LIFE_SECS: u32 = 120;
+
+    /// What every marker of this process begins with. The pid is written at
+    /// the width of the largest one Linux gives (2^22, seven digits), so no
+    /// other process's markers begin with this one's: a copy of this binary
+    /// whose pid began with this pid's digits had them.
+    fn marker_prefix() -> String {
+        format!("{BAIT_LIFE_SECS}.{:07}", std::process::id())
     }
 
-    impl Bait {
-        fn start(n: u32) -> Self {
-            let marker = format!("86400.{}{n}", std::process::id());
-            let child = Command::new("sleep")
-                .arg(&marker)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+    /// The marker of bait `n`: a `sleep` duration no other process carries, so
+    /// a pattern naming it can only ever match it.
+    fn marker(n: u32) -> String {
+        format!("{}{n}", marker_prefix())
+    }
+
+    /// Set in the copy of this test binary that [`clean_start`] starts: the
+    /// script it runs once it has closed every descriptor above stderr.
+    const CLEAN_START_ENV: &str = "ZO_KILL_GUARD_CLEAN_START";
+
+    /// `sh -c script`, started holding no descriptor but the three it is given
+    /// (t-83535). std starts a child with every descriptor this process holds
+    /// without close-on-exec, and on macOS another thread's pipe is one until
+    /// std marks it; a `pre_exec` closure that closes them would be unsafe
+    /// code, which the workspace forbids. So a copy of this binary starts
+    /// first and runs [`clean_start_child`] alone, which closes every
+    /// descriptor above stderr and becomes the shell by `exec`: an end it took
+    /// along is open only while that copy starts.
+    fn clean_start(script: &str) -> Command {
+        let mut command = this_binary_running("clean_start_child");
+        command
+            .env(CLEAN_START_ENV, script)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    /// Not a test of its own: the copy of this binary that [`clean_start`]
+    /// starts runs only this, closes every descriptor above stderr and becomes
+    /// the shell it was asked for. In a run of the suite it does nothing.
+    #[test]
+    fn clean_start_child() {
+        let Some(script) = std::env::var_os(CLEAN_START_ENV) else {
+            return;
+        };
+        let open: Vec<i32> = std::fs::read_dir("/dev/fd")
+            .expect("this process's descriptors")
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+            .collect();
+        // The listing's own descriptor is closed by now and fails to close again.
+        for fd in open.into_iter().filter(|fd| *fd > 2) {
+            let _ = nix::unistd::close(fd);
+        }
+        let script = CString::new(script.into_vec()).expect("a script without NUL");
+        let Err(error) = nix::unistd::execvp(c"sh", &[c"sh", c"-c", script.as_c_str()]);
+        panic!("the shell did not start: {error}");
+    }
+
+    /// Whether `pid` still runs a command that names `marker`: one that ended,
+    /// or whose pid another process has taken since, does not.
+    fn runs(pid: u32, marker: &str) -> bool {
+        Command::new("ps")
+            .args(["-o", "command=", "-p", &pid.to_string()])
+            .stderr(Stdio::null())
+            .output()
+            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(marker))
+    }
+
+    /// Whether `pid` stops running `marker` within [`SETTLE`].
+    fn ends(pid: u32, marker: &str) -> bool {
+        let since = std::time::Instant::now();
+        while runs(pid, marker) {
+            if since.elapsed() >= SETTLE {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        true
+    }
+
+    /// The pids of the processes whose command line carries `text`.
+    fn carrying(text: &str) -> Vec<u32> {
+        let output = Command::new("ps")
+            .args(["-A", "-o", "pid=,command="])
+            .stderr(Stdio::null())
+            .output()
+            .expect("ps lists the processes");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains(text))
+            .filter_map(|line| line.split_whitespace().next()?.parse().ok())
+            .collect()
+    }
+
+    /// `pid` sent a `SIGKILL`.
+    fn end(pid: u32) {
+        let _ = kill(Pid::from_raw(i32::try_from(pid).expect("a pid")), Signal::SIGKILL);
+    }
+
+    /// A test left `what` running: red, unless the test is red already and a
+    /// second panic would abort the run.
+    fn left_running(what: &str) {
+        if std::thread::panicking() {
+            eprintln!("a test left running {what}");
+        } else {
+            panic!("a test left running {what}");
+        }
+    }
+
+    /// A `sleep` this test started, whose duration no other process carries, so
+    /// a pattern naming it can only ever match it. It starts only while the
+    /// crate's env lock is held and cannot outlive it ([`GuardEnv`]), holds no
+    /// descriptor but the three it is given ([`clean_start`]), and is ended
+    /// and reaped when dropped.
+    struct Bait<'env> {
+        child: Child,
+        marker: String,
+        _env: PhantomData<&'env GuardEnv>,
+    }
+
+    impl<'env> Bait<'env> {
+        fn start(_env: &'env GuardEnv, n: u32) -> Self {
+            let marker = marker(n);
+            let mut child = clean_start(&format!("exec sleep {marker} >/dev/null"))
+                .stdout(Stdio::piped())
                 .spawn()
                 .expect("the bait starts");
-            Self { child, marker }
+            // The shell's command line names the marker, and the shell lets its
+            // stdout go as it becomes the `sleep`: once that stdout ends, the
+            // marker names the bait.
+            let mut stdout = child.stdout.take().expect("the bait's stdout");
+            std::io::copy(&mut stdout, &mut std::io::sink()).expect("the bait's stdout reads");
+            assert!(
+                child.try_wait().expect("the bait can be asked").is_none(),
+                "the bait stands"
+            );
+            Self {
+                child,
+                marker,
+                _env: PhantomData,
+            }
         }
 
         fn pid(&self) -> u32 {
@@ -254,92 +387,113 @@ mod real_run {
         }
     }
 
-    impl Drop for Bait {
+    impl Drop for Bait<'_> {
         fn drop(&mut self) {
             let _ = self.child.kill();
-            let _ = self.child.wait();
+            if let Err(error) = self.child.wait() {
+                left_running(&format!("bait {} ({}): {error}", self.child.id(), self.marker));
+            }
         }
     }
 
     /// A `sleep` this test set loose: a shell started it in the background
     /// and exited, so it hangs under pid 1, outside this process's tree — a
     /// process zo started that is no longer its child. It carries no pane
-    /// key, so no pane can claim it as its own job. Ended when dropped.
-    struct Orphan {
+    /// key, so no pane can claim it as its own job. Like a [`Bait`], it starts
+    /// only while the env lock is held and holds no descriptor it was not
+    /// given; it is ended when dropped, and a test it outlives is red.
+    struct Orphan<'env> {
         pid: u32,
         marker: String,
+        _env: PhantomData<&'env GuardEnv>,
     }
 
-    impl Orphan {
-        fn start(n: u32) -> Self {
-            let marker = format!("86400.{}{n}", std::process::id());
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg(format!("sleep {marker} </dev/null >/dev/null 2>&1 & echo $!"))
-                .env_remove(PANE_KEY_ENV)
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
-                .output()
-                .expect("the orphan starts");
+    impl<'env> Orphan<'env> {
+        fn start(_env: &'env GuardEnv, n: u32) -> Self {
+            let marker = marker(n);
+            let output = clean_start(&format!(
+                "sleep {marker} </dev/null >/dev/null 2>&1 & echo \"pid $!\""
+            ))
+            .env_remove(PANE_KEY_ENV)
+            .output()
+            .expect("the orphan starts");
+            // The copy of this binary says what it runs before it becomes the shell.
             let pid = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .parse()
+                .lines()
+                .find_map(|line| line.strip_prefix("pid ")?.trim().parse().ok())
                 .expect("the shell names the orphan's pid");
-            Self { pid, marker }
+            Self {
+                pid,
+                marker,
+                _env: PhantomData,
+            }
         }
 
         fn alive(&self) -> bool {
-            Command::new("kill")
-                .args(["-0", &self.pid.to_string()])
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
+            runs(self.pid, &self.marker)
         }
     }
 
-    impl Drop for Orphan {
+    impl Drop for Orphan<'_> {
         fn drop(&mut self) {
-            let _ = Command::new("kill").arg(self.pid.to_string()).status();
+            // Signalled only while it is still this test's `sleep`: a pid that
+            // has ended may be another process's by now.
+            if self.alive() {
+                end(self.pid);
+            }
+            if !ends(self.pid, &self.marker) {
+                left_running(&format!("orphan {} ({})", self.pid, self.marker));
+            }
         }
     }
 
-    /// The environment the guard reads, held under the crate's env lock and put
-    /// back when dropped: the window this process runs in is `window`, and it
-    /// runs in the pane `pane` of a team led from `leader` — so a test's answer
-    /// never depends on the pane the suite happens to run in.
+    /// What the guard reads from the environment.
+    const GUARD_VARS: [&str; 3] = [WINDOW_PID_ENV, TEAM_PANE_VAR, TEAM_LEADER_VAR];
+
+    /// The crate's env lock, held, and the environment the guard reads, put
+    /// back when dropped: the window this process runs in, and the pane and
+    /// team leader it runs under — so a test's answer never depends on the
+    /// pane the suite happens to run in. A [`Bait`] or an [`Orphan`] starts
+    /// only while one is held and cannot outlive it (t-83535): a test that
+    /// started its bait and then waited for the lock held the pipe of the test
+    /// that had the lock, and neither moved again. When dropped it ends
+    /// whatever still carries a marker of this process, and the test that
+    /// left it is red.
     struct GuardEnv {
         before: Vec<(&'static str, Option<String>)>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl GuardEnv {
-        fn set(window: u32, pane: Option<&str>, leader: Option<&str>) -> Self {
+        /// Takes the crate's env lock and notes what the guard reads, to put
+        /// back.
+        fn hold() -> Self {
             let lock = crate::test_env_lock();
-            let window = window.to_string();
-            let wanted = [
-                (WINDOW_PID_ENV, Some(window.as_str())),
-                (TEAM_PANE_VAR, pane),
-                (TEAM_LEADER_VAR, leader),
-            ];
-            let before = wanted
+            let before = GUARD_VARS
                 .iter()
-                .map(|(name, _)| (*name, std::env::var(name).ok()))
+                .map(|name| (*name, std::env::var(name).ok()))
                 .collect();
-            for (name, value) in wanted {
-                match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
-                }
-            }
             Self {
                 before,
                 _lock: lock,
             }
         }
 
+        /// The window this process runs in is `window`, and it runs in the
+        /// pane `pane` of a team led from `leader`.
+        fn set(&self, window: u32, pane: Option<&str>, leader: Option<&str>) {
+            let window = window.to_string();
+            for (name, value) in GUARD_VARS.into_iter().zip([Some(window.as_str()), pane, leader]) {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+
         /// The window is `pid`, in a pane a person opened.
-        fn window(pid: u32) -> Self {
-            Self::set(pid, None, None)
+        fn window(&self, pid: u32) {
+            self.set(pid, None, None);
         }
     }
 
@@ -351,11 +505,19 @@ mod real_run {
                     None => std::env::remove_var(name),
                 }
             }
+            let prefix = marker_prefix();
+            let left = carrying(&prefix);
+            for pid in &left {
+                end(*pid);
+            }
+            if !left.is_empty() {
+                left_running(&format!("{left:?}, which carry this process's marker {prefix}"));
+            }
         }
     }
 
     /// How long the read end of a pipe is given to see its end once its last
-    /// write end here is closed.
+    /// write end here is closed, and a process this test ended to be gone.
     const SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
 
     /// Set in a copy of this test binary that runs one test of this module
@@ -429,17 +591,37 @@ mod real_run {
             run_alone("kill_guard_bait_and_orphan_take_no_pipe_along");
             return;
         }
+        let env = GuardEnv::hold();
         let (bait_end, write) = nix::unistd::pipe().expect("a pipe a child takes along");
-        let _bait = Bait::start(50);
+        let _bait = Bait::start(&env, 50);
         drop(write);
         let (orphan_end, write) = nix::unistd::pipe().expect("a pipe a child takes along");
-        let _orphan = Orphan::start(51);
+        let _orphan = Orphan::start(&env, 51);
         drop(write);
         let held = still_written(vec![("the bait", bait_end), ("the orphan", orphan_end)]);
         assert!(
             held.is_empty(),
             "{held:?} took along the write end of a pipe nobody gave them"
         );
+    }
+
+    /// A test that leaves a bait standing is red, and the bait does not
+    /// outlive it (t-83535): the env lock's holder ends, as it goes, whatever
+    /// still carries a marker of this process.
+    #[test]
+    fn kill_guard_a_bait_left_standing_turns_its_test_red() {
+        let env = GuardEnv::hold();
+        let bait = Bait::start(&env, 52);
+        let (pid, marker) = (bait.pid(), bait.marker.clone());
+        std::mem::forget(bait);
+        let red = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(env)))
+            .expect_err("a test that left its bait standing is red");
+        let said = red.downcast::<String>().expect("the panic says what was left");
+        assert!(
+            said.contains("a test left running") && said.contains(&pid.to_string()),
+            "{said}"
+        );
+        assert!(ends(pid, &marker), "the bait did not outlive its test");
     }
 
     fn run(command: &str) -> std::io::Result<crate::BashCommandOutput> {
@@ -459,8 +641,9 @@ mod real_run {
 
     #[test]
     fn kill_guard_execute_bash_refuses_a_signal_to_the_window_in_every_shape() {
-        let mut bait = Bait::start(1);
-        let _window = GuardEnv::window(bait.pid());
+        let env = GuardEnv::hold();
+        let mut bait = Bait::start(&env, 1);
+        env.window(bait.pid());
         let marker = bait.marker.clone();
         let pid = bait.pid();
         for command in [
@@ -487,9 +670,10 @@ mod real_run {
 
     #[test]
     fn kill_guard_execute_bash_lets_zo_end_what_it_started() {
-        let window = Bait::start(2);
-        let mut own = Bait::start(3);
-        let _window = GuardEnv::window(window.pid());
+        let env = GuardEnv::hold();
+        let window = Bait::start(&env, 2);
+        let mut own = Bait::start(&env, 3);
+        env.window(window.pid());
         let output = run(&format!("pkill -f '[{}]{}'", &own.marker[..1], &own.marker[1..]))
             .expect("a signal to zo's own child runs");
         assert_eq!(output.return_code_interpretation, None, "{output:?}");
@@ -505,8 +689,9 @@ mod real_run {
 
     #[test]
     fn kill_guard_execute_bash_refuses_a_question_in_a_summoned_worker_pane() {
-        let window = Bait::start(7);
-        let mut bait = Bait::start(8);
+        let env = GuardEnv::hold();
+        let window = Bait::start(&env, 7);
+        let mut bait = Bait::start(&env, 8);
         let pid_file = std::env::temp_dir().join(format!("{}.pid", bait.marker));
         std::fs::write(&pid_file, bait.pid().to_string()).expect("the pid file is written");
         // A pid read at run time is a question, and the paths that reach the
@@ -514,7 +699,7 @@ mod real_run {
         // never put it to anyone.
         let command = format!("kill $(cat {})", pid_file.display());
         {
-            let _worker = GuardEnv::set(window.pid(), Some("%3"), Some("%1"));
+            env.set(window.pid(), Some("%3"), Some("%1"));
             let refused = match run(&command) {
                 Ok(output) => panic!("`{command}` ran in a worker's pane: {output:?}"),
                 Err(refused) => refused,
@@ -524,7 +709,7 @@ mod real_run {
             assert!(bait.alive(), "the refusal left the bait alive");
         }
         // A pane a person opened keeps the question the permission layer's.
-        let _person = GuardEnv::window(window.pid());
+        env.window(window.pid());
         let output = run(&command).expect("a question a person could answer runs");
         assert_eq!(output.return_code_interpretation, None, "{output:?}");
         let ended = std::time::Instant::now();
@@ -581,8 +766,9 @@ mod real_run {
 
     #[test]
     fn kill_guard_check_bash_refuses_in_every_mode_and_cannot_ask() {
-        let bait = Bait::start(4);
-        let _window = GuardEnv::window(bait.pid());
+        let env = GuardEnv::hold();
+        let bait = Bait::start(&env, 4);
+        env.window(bait.pid());
         let aimed = format!("pkill -f {}", bait.marker);
         for mode in EVERY_MODE {
             let enforcer = PermissionEnforcer::new(PermissionPolicy::new(mode));
@@ -607,8 +793,9 @@ mod real_run {
 
     #[test]
     fn kill_guard_authorize_refuses_the_window_without_asking_whatever_the_mode_or_rules() {
-        let bait = Bait::start(5);
-        let _window = GuardEnv::window(bait.pid());
+        let env = GuardEnv::hold();
+        let bait = Bait::start(&env, 5);
+        env.window(bait.pid());
         let aimed = bash(&format!("echo \"`pkill -f {}`\"", bait.marker));
         for mode in EVERY_MODE {
             let policy = PermissionPolicy::new(mode).with_permission_rules(
@@ -631,8 +818,9 @@ mod real_run {
 
     #[test]
     fn kill_guard_authorize_asks_a_person_once_and_refuses_when_nobody_can_answer() {
-        let bait = Bait::start(6);
-        let _window = GuardEnv::window(bait.pid());
+        let env = GuardEnv::hold();
+        let bait = Bait::start(&env, 6);
+        env.window(bait.pid());
         let unknown = bash("kill \"$TARGET\"");
         // The modes that would ask about this call anyway. Where the mode
         // runs it unasked, the question is refused instead (t-82420, below).
@@ -678,8 +866,9 @@ mod real_run {
     #[test]
     fn kill_guard_authorize_judges_a_call_to_bash_whatever_its_spelling() {
         // 0: no other bait's marker is a prefix of this one, nor this of theirs.
-        let bait = Bait::start(0);
-        let _window = GuardEnv::window(bait.pid());
+        let env = GuardEnv::hold();
+        let bait = Bait::start(&env, 0);
+        env.window(bait.pid());
         let aimed = bash(&format!("pkill -f {}", bait.marker));
         let unknown = bash("kill \"$TARGET\"");
         let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess);
@@ -708,11 +897,12 @@ mod real_run {
     /// time.
     #[test]
     fn kill_guard_authorize_refuses_unasked_where_the_mode_or_a_rule_would_run_the_call() {
-        let window = Bait::start(40);
-        let orphan = Orphan::start(41);
+        let env = GuardEnv::hold();
+        let window = Bait::start(&env, 40);
+        let orphan = Orphan::start(&env, 41);
         let pid_file = std::env::temp_dir().join(format!("{}.pid", orphan.marker));
         std::fs::write(&pid_file, orphan.pid.to_string()).expect("the pid file is written");
-        let _window = GuardEnv::window(window.pid());
+        env.window(window.pid());
         let kill_rule = crate::RuntimePermissionRuleConfig::new(
             vec!["bash(kill:*)".to_string()],
             Vec::new(),
@@ -754,10 +944,11 @@ mod real_run {
     /// refused in every mode; and zo's own child is zo's to end.
     #[test]
     fn kill_guard_authorize_still_asks_where_the_mode_would_and_keeps_its_deny_and_allow() {
-        let window = Bait::start(43);
-        let own = Bait::start(44);
-        let orphan = Orphan::start(45);
-        let _window = GuardEnv::window(window.pid());
+        let env = GuardEnv::hold();
+        let window = Bait::start(&env, 43);
+        let own = Bait::start(&env, 44);
+        let orphan = Orphan::start(&env, 45);
+        env.window(window.pid());
 
         let loose = bash(&format!("kill {}", orphan.pid));
         let mut yes = Person::saying(true);
@@ -797,8 +988,9 @@ mod real_run {
 
     #[test]
     fn kill_guard_authorize_refuses_a_question_in_a_summoned_worker_pane_unasked() {
-        let bait = Bait::start(9);
-        let _env = GuardEnv::set(bait.pid(), Some("%3"), Some("%1"));
+        let env = GuardEnv::hold();
+        let bait = Bait::start(&env, 9);
+        env.set(bait.pid(), Some("%3"), Some("%1"));
         let unknown = bash("kill \"$TARGET\"");
         for mode in [PermissionMode::DangerFullAccess, PermissionMode::WorkspaceWrite, PermissionMode::Allow] {
             let mut person = Person::saying(true);
