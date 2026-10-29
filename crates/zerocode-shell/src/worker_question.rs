@@ -249,8 +249,12 @@ pub(crate) fn letter(prompt: &AskPrompt, seat: &AskSeat, term: u32) -> (String, 
         }
     }
     body.push_str(&format!(
-        "\n답: reply --to-message 로 고른 번호(여러 개면 1,3) 또는 자유 글{}. {}분 안에 답이 없으면 사람에게 올립니다.",
-        if several { "을 질문마다 한 줄에" } else { "" },
+        "\n답: reply --to-message 로 {} 또는 자유 글. {}분 안에 답이 없으면 사람에게 올립니다.",
+        if several {
+            "질문마다 한 줄에 고른 번호만(여러 개면 1,3)"
+        } else {
+            "첫 줄에 고른 번호만(여러 개면 1,3) — 그 아래 줄은 판에 넣지 않음 —"
+        },
         COORDINATOR_ANSWER_WAIT_MS / 60_000,
     ));
     (subject, body)
@@ -258,16 +262,22 @@ pub(crate) fn letter(prompt: &AskPrompt, seat: &AskSeat, term: u32) -> (String, 
 
 /// The coordinator's reply as the picks a card would have sent.
 ///
-/// One question takes the whole reply; several take one line each, in
-/// order. A line that is only choice numbers inside the question's range —
-/// one for a single-select, any for a multi-select — picks those rows;
-/// anything else is the question's free answer. `None` when no question got
-/// an answer at all.
+/// One question takes its choice numbers off the reply's first line — the
+/// lines under them are the coordinator's own note, not the answer — or else
+/// the whole reply as its free answer; several take one line each, in order.
+/// A line that is only choice numbers inside the question's range — one for
+/// a single-select, any for a multi-select, each with or without a `.` or
+/// `)` after it — picks those rows; anything else is the question's free
+/// answer. `None` when no question got an answer at all.
 pub(crate) fn selections_from_reply(prompt: &AskPrompt, reply: &str) -> Option<Vec<AskSelection>> {
     let reply = reply.trim();
-    let lines: Vec<&str> = match prompt.questions.len() {
-        0 => return None,
-        1 => vec![reply],
+    let lines: Vec<&str> = match prompt.questions.as_slice() {
+        [] => return None,
+        [question] => {
+            let first = reply.lines().next().unwrap_or_default().trim();
+            let numbers = picked_rows(first, question.options.len(), question.multi_select);
+            vec![if numbers.is_some() { first } else { reply }]
+        }
         _ => reply.lines().map(str::trim).collect(),
     };
     let selections: Vec<AskSelection> = prompt
@@ -292,10 +302,12 @@ pub(crate) fn selections_from_reply(prompt: &AskPrompt, reply: &str) -> Option<V
 }
 
 /// The rows `words` names when it is only choice numbers, 1-based, all in
-/// `1..=rows`, and one of them unless `several` — as 0-based indices.
+/// `1..=rows`, and one of them unless `several` — as 0-based indices. A
+/// number written as a list writes it, 「1.」 or 「1)」, is the number.
 fn picked_rows(words: &str, rows: usize, several: bool) -> Option<Vec<usize>> {
     let numbers: Vec<&str> = words
         .split(|c: char| c == ',' || c.is_whitespace())
+        .map(|one| one.trim_end_matches(['.', ')']))
         .filter(|one| !one.is_empty())
         .collect();
     if numbers.is_empty() || (!several && numbers.len() > 1) {
