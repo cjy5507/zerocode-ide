@@ -17413,7 +17413,7 @@ fn context_breakdown_report_lists_window_split_ladder_and_headroom() {
     );
 
     // A 1M session compacts against 650k, and the report says so — otherwise
-    // "Auto compact 520.0k (52%)" reads as a bug rather than as the policy.
+    // its ladder reads as shares of the 1M window rather than as the policy.
     let wide = runtime_for_context_policy(Some("claude-opus-4-1[1m]"), 1_000_000);
     let wide_report = wide.context_breakdown_report();
     assert!(

@@ -1027,10 +1027,20 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// from the REPL instead of from traces.
     pub fn context_breakdown_report(&self) -> String {
         let window = self.context_window_for_guards();
+        // The ladder's tiers come from the compaction window. When that is
+        // under the model's window, the ladder is a share of it and a row
+        // below names it; `In use` stays a share of the model's window.
+        let compaction_window = Some(auto_compaction_window(self.context_window))
+            .filter(|compaction| (1..window).contains(compaction));
+        let ladder_window = compaction_window.unwrap_or(window);
         let used = self.effective_context_tokens();
-        let pct = |tokens: u64| tokens.saturating_mul(100) / window;
+        let pct = |tokens: u64, of: u64| tokens.saturating_mul(100) / of;
         let kilo =
             |tokens: u64| super::format_kilo_tokens(usize::try_from(tokens).unwrap_or(usize::MAX));
+        // One name column for every row: the longest name and two spaces. A
+        // sub-row indents two more, so its values stay in the same column.
+        let name = "Compaction window".len() + 2;
+        let sub = name - 2;
 
         let system_prompt = estimate_system_prompt_tokens(&self.system_prompt);
         let messages = estimate_session_tokens(&self.session) as u64;
@@ -1039,29 +1049,29 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
 
         let mut lines = vec![
             "Context".to_string(),
-            format!("  {:<17}{} tokens", "Window", kilo(window)),
-            format!("  {:<17}{} ({}%)", "In use", kilo(used), pct(used)),
-            format!("    {:<15}{}", "System prompt", kilo(system_prompt)),
+            format!("  {:<name$}{} tokens", "Window", kilo(window)),
+            format!("  {:<name$}{} ({}%)", "In use", kilo(used), pct(used, window)),
+            format!("    {:<sub$}{}", "System prompt", kilo(system_prompt)),
             format!(
-                "    {:<15}{} · {} messages",
+                "    {:<sub$}{} · {} messages",
                 "Messages",
                 kilo(messages),
                 self.session.messages.len()
             ),
         ];
         if reminders > 0 {
-            lines.push(format!("    {:<15}{}", "Reminders", kilo(reminders)));
+            lines.push(format!("    {:<sub$}{}", "Reminders", kilo(reminders)));
         }
         if self.memory_retriever.is_some() {
             let reserve = crate::memory::recall::recall_section_reserve_tokens();
-            lines.push(format!("    {:<15}{}", "Recall reserve", kilo(reserve)));
+            lines.push(format!("    {:<sub$}{}", "Recall reserve", kilo(reserve)));
         }
-        // Name the compaction window whenever it is not the model's, or the
-        // ladder reads as an unexplained "auto compact at 52%".
-        let compaction_window = auto_compaction_window(self.context_window);
-        if compaction_window < window {
+        // Name the compaction window whenever it is under the model's, or the
+        // ladder's percentages read as shares of the window above and its
+        // "auto compact" as an unexplained policy.
+        if let Some(compaction_window) = compaction_window {
             lines.push(format!(
-                "  {:<17}{} tokens (tiers are a % of this, not the window)",
+                "  {:<name$}{} tokens (the ladder is a % of this; In use is a % of the window)",
                 "Compaction window",
                 kilo(compaction_window)
             ));
@@ -1074,20 +1084,20 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             ("Auto compact", auto_threshold),
         ] {
             lines.push(format!(
-                "    {:<15}{} ({}%)",
+                "    {:<sub$}{} ({}%)",
                 tier,
                 kilo(threshold),
-                pct(threshold)
+                pct(threshold, ladder_window)
             ));
         }
         if self.auto_compaction_enabled {
             lines.push(format!(
-                "  {:<17}{} until auto-compact",
+                "  {:<name$}{} until auto-compact",
                 "Headroom",
                 kilo(auto_threshold.saturating_sub(used))
             ));
         } else {
-            lines.push(format!("  {:<17}auto-compaction disabled", "Headroom"));
+            lines.push(format!("  {:<name$}auto-compaction disabled", "Headroom"));
         }
         lines.join("\n")
     }
