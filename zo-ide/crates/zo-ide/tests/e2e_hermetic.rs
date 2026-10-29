@@ -9728,3 +9728,76 @@ async fn e2e_rules_naming_zo_or_mcp_tools_are_not_warned() {
         "a rule that applies was warned of:\n{stdout}"
     );
 }
+
+/// t-82420: a full-access TUI refuses a kill that needs a person's yes
+/// without putting the question. The person's words (10-29 11:1x): the
+/// allow/deny prompt kept standing in an unattended full-access pane. The
+/// model hears why and what to do instead, and the bait lives. The test
+/// plays the window as `e2e_an_unattended_run_refuses_a_kill_only_a_person_may_allow`
+/// does; the bait's pid is read from a file by the command.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_full_access_tui_refuses_a_kill_question_without_putting_it() {
+    /// The bait, ended however the test ends.
+    struct Bait(std::process::Child);
+    impl Drop for Bait {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let layout = Layout::new();
+    // A duration no other process carries, so nothing else is aimed at it.
+    let marker = format!("86400.{}6", std::process::id());
+    let mut bait = Bait(
+        std::process::Command::new("sleep")
+            .arg(&marker)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the bait starts"),
+    );
+    let pid_file = layout.state.join("bait.pid");
+    fs::write(&pid_file, bait.0.id().to_string()).expect("write the bait's pid");
+    let window = std::process::id().to_string();
+    let service = ScriptedAnthropicService::tool_calls(
+        &[("bash", serde_json::json!({ "command": format!("kill $(cat {})", pid_file.display()) }))],
+        "kill-refused-unasked",
+    )
+    .await
+    .expect("start the kill script");
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &interactive_args(),
+        &[("ZEROCODE_WINDOW_PID", window.as_str())],
+    )
+    .expect("spawn zo in PTY");
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"Stop the stray sleep.\r").expect("send the prompt");
+    run.wait_for_history_row("kill-refused-unasked", TEST_TIMEOUT);
+    let capture = run.finish();
+
+    assert!(
+        bait.0.try_wait().expect("the bait can be asked").is_none(),
+        "nobody said yes, so the bait lived"
+    );
+    let screen = strip_ansi(&String::from_utf8_lossy(&capture));
+    assert!(
+        !screen.contains("Allow once"),
+        "a full-access pane put the kill question:\n{screen}"
+    );
+    let requests = service.request_bodies().await;
+    assert!(
+        requests
+            .iter()
+            .any(|body| body.contains("no person said yes") && body.contains("its pid as a number")),
+        "the model heard why it was refused and what to do instead: {requests:?}"
+    );
+}
+
