@@ -5298,7 +5298,10 @@ async fn quick_failures_then_silence_end_at_the_ceiling_websocket() {
 /// outlast the ceiling by the machine's time. The scene holds the bundle's
 /// clock still ([`held_restart_clock`]), so the bundle is judged by the count
 /// and order of its connections, not by how fast the machine opens them, and
-/// no elapsed time is asserted; [`SCENE_LIMIT`] still bounds a hang.
+/// no elapsed time is asserted; [`SCENE_LIMIT`] still bounds a hang. That the
+/// eighth waits only the bundle's rest is read from the final error, which
+/// says how long it waited: the whole ceiling on the held clock, not the
+/// window.
 #[tokio::test]
 async fn seven_server_errors_then_silence_names_the_bundle_and_ends_at_the_ceiling() {
     let slow = SCENE_CEILING / 5;
@@ -5327,9 +5330,10 @@ async fn seven_server_errors_then_silence_names_the_bundle_and_ends_at_the_ceili
         "eight connections were tried: {error}"
     );
     assert_eq!(connections, 8, "seven server errors and the silent eighth");
+    let rest = format!("for {:.1}s after server_error x7", SCENE_CEILING.as_secs_f64());
     assert!(
-        error.to_string().contains("server_error x7"),
-        "the final error names the bundle's seven server errors: {error}"
+        error.to_string().contains(&rest),
+        "the silent eighth waits only the bundle's rest, after its seven server errors: {error}"
     );
 }
 
