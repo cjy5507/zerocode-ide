@@ -1270,7 +1270,10 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         None
     }
 
-    /// Whether the last full compaction left the context at or over Warn.
+    /// Whether the last full compaction left the context at or over Warn. A
+    /// retained compaction (a relevance trim that clears tool results and
+    /// writes no summary) returns before the figure is written, so it does not
+    /// move it.
     ///
     /// Compacting at Warn again would land on the same floor — system prompt,
     /// summary and kept tail — and summarize every turn for nothing: on a 32k

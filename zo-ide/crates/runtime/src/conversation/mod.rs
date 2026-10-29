@@ -1027,7 +1027,9 @@ pub struct ConversationRuntime<C, T> {
     /// estimate the next preflight starts from. At or over Warn, compacting
     /// at Warn again lands on the same floor, so the Warn arm waits for Auto
     /// compact (`last_compaction_stayed_over_warn`). Every full compaction
-    /// rewrites it; a replaced session drops it.
+    /// rewrites it; a retained compaction (a relevance trim that clears tool
+    /// results and writes no summary) leaves it as it was; a replaced session
+    /// drops it.
     post_compaction_context_tokens: Option<u64>,
     /// Cross-turn tally of identical (normalized) tool-call fingerprints. Unlike
     /// [`Self::tool_fingerprint_counts`] this is SESSION-scoped: it is NOT

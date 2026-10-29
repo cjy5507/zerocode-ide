@@ -4440,8 +4440,11 @@ fn manual_compaction_clears_stale_state_distill_prompt_and_resets_defer_gate() {
             .iter()
             .any(|section| section == COMPACTION_RESUME_REMINDER)
     );
+    // The deferral, not the Warn arm waiting on the floor the compaction left,
+    // is what must say no here.
     assert!(
-        runtime.maybe_auto_compact_preflight().is_none(),
+        runtime.maybe_auto_compact_preflight().is_none()
+            && runtime.state_distill_deferred_precompaction,
         "manual compaction reset should permit one fresh state-distill defer"
     );
     assert!(runtime.maybe_state_distill_preflight());
