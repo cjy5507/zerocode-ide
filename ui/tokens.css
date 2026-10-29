@@ -3379,10 +3379,12 @@
    *
    * Measured against `--editor-surface: #ffffff`, the plane these are drawn
    * on: keyword 5.70, string 6.06, number 5.41, function 6.45, type 5.47,
-   * variable 17.93, constant 6.11, operator 6.39, invalid 7.47. Comment is
-   * again the floor and again on purpose — 4.83, which clears AA with less
-   * room than the rest because a comment that competes with code is a comment
-   * drawn wrong.
+   * variable 17.93, constant 6.11, operator 6.39, invalid 7.47. Comment was
+   * the floor on purpose — #6b7280, 4.83 here — until an answer's code well
+   * (the 6% ink over `#fafafa`) took it to 4.1, under AA. It is the
+   * secondary ink now (t-82195 C11, the person's draft C of 10-29): 8.59 on
+   * this plane, 7.29 in an answer's well — a step under the variable and
+   * over the operator, so on paper a comment reads before the punctuation.
    *
    * The furniture above is mixed rather than fixed, so it follows this block
    * without being restated: the gutter inks re-mix from the light `--ink-*`.
@@ -3391,7 +3393,7 @@
   --syntax-keyword: #7c3aed;
   --syntax-string: #2f6f3f;
   --syntax-number: #9a5b12;
-  --syntax-comment: #6b7280;
+  --syntax-comment: var(--ink-mist);
   --syntax-function: #1d5fa8;
   --syntax-type: #0f766e;
   --syntax-variable: #171717;
@@ -3450,7 +3452,10 @@
   --chat-send-ink: #faf9f5;
   --chat-send-stop-bg: var(--ink-figure);
   --chat-send-stop-ink: var(--surface-abyss);
-  --chat-link: var(--ai-accent);
+  /* On paper the accent alone read 4.22:1 on the page (t-82195 C11): a link
+   * leans 78% of the way the step's argument always did, 5.75:1, and the
+   * argument is the link's ink. */
+  --chat-link: color-mix(in srgb, var(--ai-accent) 78%, var(--ink-chalk));
   --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
   --chat-pill-hover-bg: color-mix(in srgb, var(--ink-chalk) 18%, transparent);
   --chat-meter-track: var(--edge-mark);
@@ -3463,7 +3468,7 @@
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 3%, transparent);
   --chat-code-bg: color-mix(in srgb, var(--ink-chalk) 6%, transparent);
-  --chat-arg-ink: color-mix(in srgb, var(--chat-link) 78%, var(--ink-chalk));
+  --chat-arg-ink: var(--chat-link);
   --chat-rail-tick: color-mix(in srgb, var(--ink-mist) 30%, transparent);
   --chat-accent: var(--ai-accent);
   --agent-accent-claude: #c8643a;
