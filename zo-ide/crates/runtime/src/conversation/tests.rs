@@ -17678,6 +17678,91 @@ fn the_ladder_keeps_its_values_from_the_fallback_window_up() {
     }
 }
 
+/// A full compaction that leaves the context at or over Warn is not run again
+/// at Warn on the next turn (t-83940 P3-1). On a 32k window Warn and Auto
+/// compact sit a few thousand tokens apart, and a floor of system prompt,
+/// summary and kept tail inside that band would be summarized every turn and
+/// land on the same floor. Auto compact still fires over it, and a compaction
+/// that gets under Warn leaves the tier armed.
+#[test]
+fn a_compaction_that_leaves_the_context_over_warn_is_not_repeated_at_warn() {
+    let _env = crate::test_env_lock();
+    let _cleared = compaction_env_cleared();
+    let model = Some("gemini-2.5-pro");
+    let window = 32_768;
+    let chars = |tokens: u64| usize::try_from(tokens * 4).expect("text");
+    // Twelve short requests under a system prompt of `prompt` tokens, compacted
+    // once: what is left is the floor the next turn starts from.
+    let compacted = |prompt: u64| {
+        let mut runtime = runtime_for_context_policy(model, window);
+        runtime.system_prompt = Arc::from(vec!["s".repeat(chars(prompt))]);
+        for index in 0..12 {
+            runtime
+                .session
+                .push_user_text(format!("request {index}: {}", "m".repeat(400)))
+                .expect("message");
+        }
+        let config = runtime.compaction_config_if_possible().expect("twelve requests compact");
+        assert!(runtime.apply_auto_compaction(config).is_some(), "the first compaction runs");
+        runtime
+    };
+    // The next turn's prompt brings the context to `tokens`. Its one
+    // state-distill deferral goes first, as on a real turn, so the next look is
+    // the Warn arm's.
+    let next_turn_at = |runtime: &mut ConversationRuntime<NoopApiClient, StaticToolExecutor>,
+                        tokens: u64| {
+        let missing = tokens.saturating_sub(runtime.preflight_context_tokens());
+        runtime
+            .session
+            .push_user_text(format!("next: {}", "n".repeat(chars(missing))))
+            .expect("message");
+        assert!(
+            runtime.auto_compaction_config_if_preflight_ready().is_none()
+                && runtime.state_distill_deferred_precompaction,
+            "premise: the state-distill deferral goes first"
+        );
+        runtime.preflight_context_tokens()
+    };
+    let probe = runtime_for_context_policy(model, window);
+    let warn = probe.precompaction_input_tokens_threshold();
+    let auto = u64::from(probe.auto_compaction_input_tokens_threshold());
+
+    // A system prompt over Warn: no compaction gets under it.
+    let mut over = compacted(warn);
+    let floor = over.preflight_context_tokens();
+    assert!(
+        floor >= warn && floor < auto,
+        "premise: the floor {floor} sits in [Warn {warn}, Auto compact {auto})"
+    );
+    let context = next_turn_at(&mut over, floor);
+    assert!(context < auto, "premise: the next turn stays under Auto compact: {context}");
+    assert!(
+        over.auto_compaction_config_if_preflight_ready().is_none(),
+        "a compaction that left {floor} tokens, over Warn {warn}, must not run again at {context}"
+    );
+    over.session
+        .push_user_text("a".repeat(chars(auto - context)))
+        .expect("message");
+    assert!(
+        over.auto_compaction_config_if_preflight_ready().is_some(),
+        "Auto compact {auto} still fires over the floor"
+    );
+
+    // A compaction that gets under Warn leaves the Warn arm armed.
+    let mut under = compacted(0);
+    let floor = under.preflight_context_tokens();
+    assert!(floor < warn, "premise: the floor {floor} is under Warn {warn}");
+    let context = next_turn_at(&mut under, warn);
+    assert!(
+        context >= warn && context < auto,
+        "premise: the next turn at {context} sits in [Warn {warn}, Auto compact {auto})"
+    );
+    assert!(
+        under.auto_compaction_config_if_preflight_ready().is_some(),
+        "a compaction down to {floor} leaves Warn {warn} armed at {context}"
+    );
+}
+
 /// P4: the summary-model override applies only within the session's provider
 /// family — a cross-provider value is ignored (the bound client cannot reach
 /// another provider's endpoint), and unset means no override.
