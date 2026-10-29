@@ -16,6 +16,13 @@
  * backup holds the old values, and the line says that beside its path.
  * `aria-busy` is true while the line asks or moves.
  *
+ * A settings file whose own name is a link (stow, home-manager) is zo's to
+ * read through when its target passes zo's checks (t-77216): the names zo
+ * read there are said with the file the link stands on, and that the window
+ * moves none of them — the person edits that file. A settings file zo did
+ * not read is said with the page's sentence for zo's word, or zo's own
+ * sentence for a word the page does not know.
+ *
  * What the page keeps of a value: nothing. No value reaches it — the backend
  * answers names, zo's backup path and zo's reason — and the page writes none
  * of what it is told to storage, the console or a log. The source contract
@@ -88,9 +95,45 @@ const SETTINGS_SECRET_STOPS = Object.freeze({
   ),
 });
 
+/* The page's sentence for each word zo gives for a settings file it did not
+ * read (t-77216, zo's t-78117), given the file; a word not here is said as
+ * zo's own sentence. */
+const SETTINGS_SECRET_SKIPS = Object.freeze({
+  link_target_other_owner: (file) => t(
+    "settings.secrets.skip.otherOwner",
+    "{{file}}은(는) 다른 사용자의 파일을 가리키는 링크라 zo가 읽지 않았습니다. 그 안의 참조는 풀리지 않습니다.",
+    { file },
+  ),
+  link_target_writable_by_others: (file) => t(
+    "settings.secrets.skip.writableByOthers",
+    "{{file}}이(가) 가리키는 파일은 다른 사용자도 고칠 수 있어 zo가 읽지 않았습니다. 그 파일의 그룹·다른 사용자 쓰기 권한을 끄면 읽습니다.",
+    { file },
+  ),
+  link_target_not_a_file: (file) => t(
+    "settings.secrets.skip.notAFile",
+    "{{file}}의 링크가 끊어졌거나 일반 파일을 가리키지 않아 zo가 읽지 않았습니다.",
+    { file },
+  ),
+  in_workspace: (file) => t(
+    "settings.secrets.skip.inWorkspace",
+    "{{file}}은(는) 작업 공간 안에 있어 zo가 사람의 설정으로 읽지 않았습니다.",
+    { file },
+  ),
+  unreadable: (file) => t(
+    "settings.secrets.skip.unreadable",
+    "zo가 {{file}}을(를) 읽지 못했습니다.",
+    { file },
+  ),
+});
+
 /* What the line last showed: the names zo listed, and the last move's answer
  * — or the failure of the call itself, as the backend's sentence. */
 let settingsSecretNames = [];
+/* What zo read through the settings file's link, the file it stands on, and
+ * the settings files zo did not read (t-77216). */
+let settingsSecretLinked = [];
+let settingsSecretLinkedTo = "";
+let settingsSecretSkipped = [];
 let settingsSecretOutcome = null;
 let settingsSecretFailure = null;
 let settingsSecretAsking = false;
@@ -105,14 +148,21 @@ function paintSettingsSecrets() {
   line.setAttribute("aria-busy", String(settingsSecretAsking || settingsSecretMoving));
   const outcome = settingsSecretOutcome;
   const moved = outcome?.moved ?? [];
-  const shown = settingsSecretNames.length > 0 || moved.length > 0 || !!outcome?.stopped || !!settingsSecretFailure;
+  const linked = settingsSecretLinked.length > 0;
+  const skipped = settingsSecretSkipped.length > 0;
+  const shown = settingsSecretNames.length > 0 || linked || skipped || moved.length > 0 || !!outcome?.stopped || !!settingsSecretFailure;
   line.hidden = !shown;
   if (!shown) return;
 
   const listed = settingsSecretNames.length > 0;
   const finished = !!outcome && !outcome.stopped && !settingsSecretFailure && moved.length > 0;
+  const moving = listed || moved.length > 0 || !!outcome?.stopped || !!settingsSecretFailure;
   say(el("settings-secrets-title"), () => {
-    if (listed) return t("settings.secrets.title", "설정 파일에 비밀 {{count}}개가 그대로 적혀 있습니다", { count: settingsSecretNames.length });
+    if (listed || (linked && !moving)) {
+      const count = settingsSecretNames.length + settingsSecretLinked.length;
+      return t("settings.secrets.title", "설정 파일에 비밀 {{count}}개가 그대로 적혀 있습니다", { count });
+    }
+    if (!moving) return t("settings.secrets.skippedTitle", "zo가 읽지 않은 설정 파일이 있습니다");
     return finished
       ? t("settings.secrets.allMoved", "설정 파일의 비밀을 키체인으로 옮겼습니다")
       : t("settings.secrets.stoppedTitle", "설정 파일의 비밀을 다 옮기지 못했습니다");
@@ -125,6 +175,26 @@ function paintSettingsSecrets() {
     "settings.secrets.body",
     "옮기면 값은 키체인에 들어가고 설정 파일에는 이름 참조만 남습니다. 값은 이 화면에 보이지 않습니다. zo는 고치기 전의 파일을 백업하며, 그 백업에는 옛 값이 그대로 들어 있습니다.",
   ));
+
+  // What zo read through the settings file's link, and what it did not read
+  // (t-77216): said, never moved.
+  const linkNote = el("settings-secrets-linked");
+  linkNote.hidden = !linked && !skipped;
+  say(linkNote, () => {
+    const parts = [];
+    if (linked) {
+      parts.push(t(
+        "settings.secrets.linked",
+        "설정 파일이 링크라 창은 옮기지 않습니다: {{names}} — 링크가 가리키는 {{target}}에서 직접 고쳐 주세요.",
+        { names: settingsSecretLinked.join(", "), target: settingsSecretLinkedTo },
+      ));
+    }
+    for (const row of settingsSecretSkipped) {
+      const known = Object.hasOwn(SETTINGS_SECRET_SKIPS, row.reason) ? SETTINGS_SECRET_SKIPS[row.reason] : null;
+      parts.push(known ? known(row.file) : t("settings.secrets.zoSaid", "zo: {{why}}", { why: row.why }));
+    }
+    return parts.join(" ");
+  });
 
   const button = el("settings-secrets-move");
   button.hidden = !listed;
@@ -193,9 +263,18 @@ async function askSettingsSecrets() {
   el("settings-secrets")?.setAttribute("aria-busy", "true");
   try {
     const notice = await invoke("settings_secret_literals");
-    settingsSecretNames = Array.isArray(notice?.names) ? notice.names.filter((name) => typeof name === "string") : [];
+    const words = (list) => Array.isArray(list) ? list.filter((name) => typeof name === "string") : [];
+    settingsSecretNames = words(notice?.names);
+    settingsSecretLinked = words(notice?.linked);
+    settingsSecretLinkedTo = typeof notice?.linkedTo === "string" ? notice.linkedTo : "";
+    settingsSecretSkipped = Array.isArray(notice?.skipped)
+      ? notice.skipped.filter((row) => typeof row?.file === "string" && typeof row?.reason === "string" && typeof row?.why === "string")
+      : [];
   } catch {
     settingsSecretNames = [];
+    settingsSecretLinked = [];
+    settingsSecretLinkedTo = "";
+    settingsSecretSkipped = [];
   } finally {
     settingsSecretAsking = false;
   }
