@@ -18153,9 +18153,10 @@ button.helper-sib:hover {
 }
 
 /* 이 페이지의 키보드 초점 — 플랫폼 계약의 잉크 외곽선. 입력 상자만 전역
- * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`). */
+ * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`).
+ * 입력칸이 키보드를 넘긴 질문 카드도 같은 고리를 두른다(t-81786 r2 P3-2). */
 .worker-view
-  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally):focus-visible {
+  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }

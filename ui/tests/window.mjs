@@ -56774,6 +56774,10 @@ suite("composer-under-question", async ({ browser, origin, ok }) => {
         says: field.placeholder,
         onCard: document.activeElement === chat.querySelector(".pane-chat-ask"),
         onBox: document.activeElement === field,
+        // The ring the card wears once the keyboard is handed to it (r2 P3-2).
+        ring: document.activeElement === chat.querySelector(".pane-chat-ask")
+          ? `${getComputedStyle(document.activeElement).outlineStyle} ${getComputedStyle(document.activeElement).outlineWidth}`
+          : null,
         queue: [...(paneChats.get(window.__TERM__)?.run?.queue ?? [])],
         sent: window.__SENT__.map(([name, args]) => [name, name === "answer_ask" ? args.selections : args.text ?? args.allow ?? null]),
         told: [...document.querySelectorAll(".toast")].map((note) => note.textContent.trim()),
@@ -56829,6 +56833,11 @@ suite("composer-under-question", async ({ browser, origin, ok }) => {
       permission.card && permission.says === words.first &&
         held.sent.length === 0 && held.value === "빌드는 지우지 말고 테스트만 돌려" && held.onCard && held.told.includes(words.first),
       JSON.stringify({ permission, held, words }),
+    );
+    ok(
+      "the card the keyboard is handed to wears the page's focus ring — 2 px of ink, as every stop on the page does (t-81786 r2 P3-2)",
+      held.onCard && held.ring === "solid 2px",
+      JSON.stringify({ ring: held.ring, onCard: held.onCard }),
     );
     ok(
       "once the card is gone the box says its own sentence again and sends to the pane as before",
