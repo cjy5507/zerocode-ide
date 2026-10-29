@@ -35,7 +35,7 @@ const SHOTS = "output/playwright/board-now";
  * 표에 서지 않는다). 데스크 픽스처가 세운 답 위에 덮는다(그 픽스처가 응답 손·보드 열기를 맡는다).
  * `extra`는 과업 수를 늘려 성능을 잰다. `lane`이 "green"이면 레인은 07:31 무렵 초록으로 끝났고
  * 빌드 줄은 비어 있다. A page function: no closure. */
-export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = false, extra = 0, ledger = true, lane = "running" } = {}) {
+export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = false, extra = 0, ledger = true, lane = "running", withdrawn = null } = {}) {
   const minute = 60_000;
   const run = "run-desk";
   const goal = (parent, parentTitle) => ({ parent, parent_title: parentTitle });
@@ -60,7 +60,8 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = 
     task("t-66410", "증거 계약 설계", "failed", { ...hands, progress: { stage: "failed", attempt: "dp-66411" } }),
     task("t-66790", "헬퍼 회차 A·B·C", "reported", {
       ...hands, created_ms: now - 12 * minute,
-      progress: { stage: "report_only", attempt: "dp-66791", source: head(7) },
+      // `withdrawn`: the coordinator took back its verification of this attempt and source (t-81913).
+      progress: { stage: "report_only", attempt: "dp-66791", source: head(7), ...(withdrawn === null ? {} : { withdrawn }) },
       times: { started_ms: now - 64 * minute, handed_ms: now - 12 * minute },
       hand_in: { conditions: [{ number: 1, text: "빨강 시험이 초록이 됨", state: "checked" }],
         decisions: "헬퍼가 같은 창을 세 번 보던 것을 한 번으로", blocked: "", next: "" },
@@ -581,6 +582,54 @@ export async function testBoardNow(browser, origin, ok) {
       !now.reported && JSON.stringify(now.doneFold) === JSON.stringify(["끝난 과업 3개"])
         && now.runsFoot === "오늘 끝난 일 6개 · 기록에서 보기" && now.runningHint === "목표별 · 먼저 시작한 일부터",
       JSON.stringify(now));
+
+    /* ---- 검증 철회(t-81913): 통과 대신 철회 사실·까닭, 단추는 보고 읽기 하나, 다시 통과하는 길은 줄 끝 말 ---- */
+    const withdrawnRow = async (why) => {
+      await draftScene(page, { withdrawn: why });
+      return page.evaluate(() => {
+        boardPresses.clear();
+        paintCoordinatorDesk(document.querySelector("#board-view"));
+        const row = document.querySelector('#board-view [data-ask="review:run-desk/t-66790"]');
+        return {
+          kind: row.querySelector(".board-ask-kind").textContent,
+          title: row.querySelector(".board-ask-title").textContent,
+          meta: row.querySelector(".board-ask-meta").textContent,
+          buttons: [...row.querySelectorAll(".board-ask-acts > button:not([hidden])")].map((one) => one.textContent),
+          pass: row.querySelector('[data-act="pass"]')?.hidden ?? true,
+        };
+      });
+    };
+    // A press that slips through to the hidden pass (the button forced) sends nothing either.
+    const forced = async () => page.evaluate(async () => {
+      document.querySelector('#board-view [data-ask="review:run-desk/t-66790"] [data-act="pass"]')?.click();
+      await new Promise((done) => setTimeout(done, 0));
+      return window.__DESK_SENT__.filter((one) => one.verb === "pass").length;
+    });
+    const withdrawn = await withdrawnRow("독립 검수가 가격 가드의 시험이 없다고 봄");
+    ok("a withdrawn verification's row says so and why in place of the pass, leaves reading the report as its one button, and its line names the road to pass again",
+      withdrawn.kind === "검토" && withdrawn.pass
+        && withdrawn.title === "헬퍼 회차 A·B·C 검증이 철회됐습니다 — 독립 검수가 가격 가드의 시험이 없다고 봄"
+        && JSON.stringify(withdrawn.buttons) === JSON.stringify(["보고 읽기"])
+        && withdrawn.meta.endsWith(" — 새 검수 결과를 적거나 새로 넘겨야 다시 통과됩니다"),
+      JSON.stringify(withdrawn));
+    const slipped = await forced();
+    ok("a forced press on a withdrawn row's hidden pass sends nothing to the ledger", slipped === 1, String(slipped));
+    const unsaid = await withdrawnRow("");
+    ok("a withdrawal written without words says that it gave none, never a pass",
+      unsaid.pass && unsaid.title === "헬퍼 회차 A·B·C 검증이 철회됐습니다 — 까닭은 적지 않았습니다"
+        && JSON.stringify(unsaid.buttons) === JSON.stringify(["보고 읽기"]), JSON.stringify(unsaid));
+    await page.click('#board-view [data-ask="review:run-desk/t-66790"] [data-act="read"]');
+    const reread = await page.evaluate(async () => {
+      await new Promise((done) => requestAnimationFrame(done));
+      const row = document.querySelector('#board-view [data-ask="review:run-desk/t-66790"]');
+      const read = row.querySelector('[data-act="read"]');
+      return { open: read.getAttribute("aria-expanded"), name: read.textContent,
+        report: Boolean(row.querySelector(":scope > .board-ask-report")),
+        sent: window.__DESK_SENT__.filter((one) => one.verb === "pass").length };
+    });
+    ok("보고 읽기 on a withdrawn row opens the report, turns into 보고 접기 and writes nothing to the ledger",
+      reread.open === "true" && reread.name === "보고 접기" && reread.report && reread.sent === 1, JSON.stringify(reread));
+    await page.evaluate(() => boardNowChoice.reports.clear());
 
     /* ---- 결정: 우리말 한 줄 · 원문은 접힌 안 · 단추는 원장의 두 답 ---- */
     await draftScene(page, { holds: true });

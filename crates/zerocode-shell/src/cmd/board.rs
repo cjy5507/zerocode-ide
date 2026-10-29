@@ -392,7 +392,8 @@ pub(crate) async fn desk_hold_resolve(
 /// Pass, from the task board, a task a worker reported (t-67607,
 /// `desk::pass_review`): a verified review naming the attempt and the source
 /// the board drew, as the run's coordinator seat this window must hold. The
-/// main window only, and only on the person's press.
+/// main window only, and only on the person's press. Refused by the ledger
+/// over the coordinator's withdrawal of that attempt and source (t-81913).
 #[tauri::command]
 pub(crate) async fn desk_review_pass(
     webview: tauri::Webview,

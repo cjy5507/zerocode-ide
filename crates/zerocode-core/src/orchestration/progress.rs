@@ -220,6 +220,12 @@ pub struct WorkProgress {
     /// named.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reviewed: Option<String>,
+    /// On [`WorkStage::ReportOnly`]: the coordinator withdrew its verification
+    /// of this attempt and source, and these are its words why — empty where
+    /// it gave none ([`ReviewFacts::withdrawn`], t-81913). The work waits on a
+    /// new review, and a bare pass of it is refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawn: Option<String>,
     /// A command to read or check the work with from here, scoped to its run
     /// and its ids quoted for a POSIX shell — shown to a person, never run, and
     /// never one that writes a review.
@@ -269,6 +275,10 @@ impl Run {
             source,
             merge_head: review.merge_head.clone().filter(|_| stage.reviewed()),
             reviewed: review.source.clone().filter(|_| stage == WorkStage::Stale),
+            withdrawn: review
+                .withdrawn
+                .clone()
+                .filter(|_| stage == WorkStage::ReportOnly),
         }
     }
 
