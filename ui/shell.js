@@ -13780,8 +13780,11 @@ function placePaneHeadLine(tab, term) {
 }
 
 /* The one line that says which conversation this pane holds — the session its
- * agent named, the one a 「계속」 resumes. t-68069 writes here why a resume
- * picked it; until a hook names a session the line stands empty. */
+ * agent named, the one a 「계속」 resumes — short on the line, whole in its
+ * tooltip; until a hook names a session the line stands empty. In the
+ * conversation's head it stands aside, and the head's count says the session
+ * to a pointer, a keyboard and a screen reader (`paintChatTally`, t-81786
+ * P3-12). */
 function paintPaneHeadPick(head, term) {
   const pick = head.__line.querySelector(".pane-head-pick");
   const session = paneSessions.get(term)?.session?.id ?? "";

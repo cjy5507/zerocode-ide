@@ -53901,8 +53901,8 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   gap: var(--space-2);
 }
 
-/* The session stands in the tally's tooltip there (t-81525 C9): the head says
- * what was done, not the conversation's id. */
+/* The session stands in the tally's tooltip and name there (t-81525 C9,
+ * t-81786 P3-12): the head says what was done, not the conversation's id. */
 .chat-head-pane .pane-head-pick {
   display: none;
 }
