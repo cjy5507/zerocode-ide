@@ -5599,6 +5599,41 @@ struct WitnessedSeat<'a> {
     seat: Option<&'a str>,
 }
 
+/// The last moment at or before `at_ms` that `seat` is known to have sat in
+/// `run`'s chair, read off the records [`chair_seats`] reads, each at its
+/// time: the chair while it names the seat (from `since_ms` until it was
+/// vacated), a letter signed as the run from it, and the ledger's own word
+/// that it sat there ([`chair_witnessed`]). Paired with when that sitting
+/// began, so of two chairs a pane held at once the one it sat in later is
+/// the later; `None` when nothing puts the seat in the chair by then.
+fn chair_seen(run: &Run, seat: &str, at_ms: i64) -> Option<(i64, i64)> {
+    let address = run.address();
+    let mut seen = run
+        .coordinator
+        .as_ref()
+        .filter(|chair| chair.seat == seat && chair.since_ms <= at_ms)
+        .map(|chair| {
+            let held_until = chair.vacated_ms.map_or(at_ms, |gone| gone.min(at_ms));
+            (held_until, chair.since_ms)
+        });
+    for letter in run.messages() {
+        if letter.created_ms > at_ms {
+            continue;
+        }
+        let named = if letter.from == address {
+            letter.author_seat.as_deref()
+        } else if letter.from == LEDGER_ITSELF && letter.body.as_str().contains(seat) {
+            chair_witnessed(run, &address, letter)
+        } else {
+            None
+        };
+        if named == Some(seat) {
+            seen = seen.max(Some((letter.created_ms, letter.created_ms)));
+        }
+    }
+    seen
+}
+
 /// The ledger's own lines in a question's thread, oldest first, each with
 /// the facts it carried. The lines are the record: dedupe, cadence, the
 /// bound and the deadline answer all read them back rather than a counter
@@ -7282,22 +7317,29 @@ impl Ledger {
         self.runs.iter_mut().find(|run| run.id == id)
     }
 
-    /// The other run a pane coordinates, or coordinated, when `address` is
-    /// that pane's.
+    /// The other run a pane asked `question` from, when the question's
+    /// asker is a pane.
     ///
     /// A question one run's coordinator puts to another (`send --run B`)
     /// lands in B under the asker's PANE address — a stranger there — while
     /// the asker reads its own run's inbox. This is how an answer finds the
-    /// run the asker actually sits in: the run whose chair the pane holds,
-    /// and, once a restart has moved that chair to a new pane, the run whose
-    /// chair it sat in ([`chair_seats`], t-83289) — whoever sits there now
-    /// reads the answer. Live chairs first, so a pane that moved on to
-    /// another run's chair is answered where it sits.
-    fn asker_run(&self, address: &str, answered_in: &str) -> Option<String> {
-        let seat = address.strip_prefix(PANE_ADDRESS_PREFIX)?;
+    /// run the asker sits in, or sat in: whoever sits in that chair now
+    /// reads the answer, once a restart has moved it to a new pane (t-83289).
+    ///
+    /// The run whose chair the pane was last seen in when it asked
+    /// ([`chair_seen`]), because a pane sits in more than one chair over a
+    /// day: one that coordinated A and went on to B asked its later
+    /// questions from B, and the first run it had ever sat in took them all
+    /// (t-83289 r2). A pane seen in no chair by then — it sat down after
+    /// asking — is answered where it sits, or where it ever sat.
+    fn asker_run(&self, question: &Message, answered_in: &str) -> Option<String> {
+        let seat = question.from.strip_prefix(PANE_ADDRESS_PREFIX)?;
         let others = || self.runs.iter().filter(|run| run.id != answered_in);
         others()
-            .find(|run| run.seat_is_coordinator(seat) == Some(true))
+            .filter_map(|run| Some((chair_seen(run, seat, question.created_ms)?, run)))
+            .max_by_key(|(seen, _)| *seen)
+            .map(|(_, run)| run)
+            .or_else(|| others().find(|run| run.seat_is_coordinator(seat) == Some(true)))
             .or_else(|| others().find(|run| chair_seats(run).contains(seat)))
             .map(|run| run.id.clone())
     }
@@ -7738,9 +7780,22 @@ impl Ledger {
             && let Some(team_pane) = message.to.strip_prefix(PANE_ADDRESS_PREFIX)
             && let Some(seat_run) = self.vacated_pane_seat(team_pane)
         {
+            /* An answer to a question that pane asked has two ways out
+             * (t-83289 r2): the run's next chair reads the copy `reply`
+             * delivers to the run, once somebody sits there, and the
+             * question closes without an answer by `question-close`. */
+            let ways_out = match (message.kind, message.thread.as_deref()) {
+                (MessageKind::Question, Some(question)) => format!(
+                    " — `reply` again once {RUN_ADDRESS_PREFIX}{seat_run}'s next coordinator \
+                     sits, and the answer reaches it there; or close the question without an \
+                     answer: `{QUESTION_CLOSE} --message {question} --reason <one line>`"
+                ),
+                _ => String::new(),
+            };
             return Err(format!(
                 "unroutable address: {} — that pane no longer holds a seat (its window \
-                 restarted or its pane ended); the run it sat in is {RUN_ADDRESS_PREFIX}{seat_run}",
+                 restarted or its pane ended); the run it sat in is \
+                 {RUN_ADDRESS_PREFIX}{seat_run}{ways_out}",
                 message.to
             ));
         }
@@ -19765,8 +19820,9 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         QUESTION_CLOSE,
         "--message <questionId> --reason <one line> [--run <id>] · close a question without an \
          answer, from the coordinator seat of the run asked or of the run that asked: the \
-         ledger's line in its thread, every count leaves it, a waiting `ask` wakes as closed, \
-         `reply` refuses it; a second close answers with the first (already: true)",
+         ledger's line in its thread, every count leaves it, a waiting `ask` wakes as closed \
+         and told `closedBy` and `note`, `reply` refuses it; a second close answers with the \
+         first (already: true)",
         Doing::Mutation,
     ),
     (
@@ -20898,11 +20954,22 @@ fn thread_look(ledger: &Ledger, run_id: &str, question: &str) -> Option<Decided>
         })));
     }
     if question_closed(run, asked) {
-        return Some(said(serde_json::json!({
+        let mut closed = serde_json::json!({
             "questionId": question,
             "answered": false,
             "closed": true,
-        })));
+        });
+        // Closed by a coordinator (t-83289 r2): who closed it and why, the
+        // words its line in the thread says, so the asker woken by it is
+        // not left to guess between a close and its own attempt ending.
+        if let Some(line) = hand_closed(run, asked) {
+            let record: serde_json::Value =
+                serde_json::from_str(line.body.as_str()).unwrap_or_default();
+            closed["closeId"] = line.id.as_str().into();
+            closed["closedBy"] = record["closedBy"].clone();
+            closed["note"] = record["note"].clone();
+        }
+        return Some(said(closed));
     }
     /* And the receiver being GONE (t-6740): a seat no road will ever sign
      * for again is not going to answer, and holding the asker to the
@@ -21013,6 +21080,19 @@ fn closes_question(held: &Message, question: &Message) -> bool {
 /// The key the line [`hand_closed`] reads says `true` under.
 const QUESTION_CLOSED_KEY: &str = "closed";
 
+/// The refusal of a copy `reply` or `question-close` delivers to the asking
+/// run, after the line it copies — the answer or the close, `filed` — is
+/// already in the question's thread (t-83289 r2). Said as what happened: the
+/// line stands, only the copy to `there` did not land, and the same verb
+/// again answers with the standing line (`already: true`) and writes no copy.
+fn copy_refused(filed: &str, there: &str, refused: &str) -> String {
+    format!(
+        "{filed} is filed in the question's thread and stands — only its copy to \
+         {RUN_ADDRESS_PREFIX}{there} was refused: {refused}; the same verb again answers \
+         already: true and copies nothing, so tell {RUN_ADDRESS_PREFIX}{there} by `send`"
+    )
+}
+
 /// The run a verb about the message `id` answers in when no `--run` names
 /// one: the caller's own (`standing`) when it holds the message, and
 /// otherwise the run that does — message ids are minted once for the whole
@@ -21036,7 +21116,7 @@ fn question_closer(ledger: &Ledger, run: &Run, question: &Message, seat: &str) -
     if run.seat_is_coordinator(seat) == Some(true) {
         return Some(run.address());
     }
-    let asking = ledger.asker_run(&question.from, &run.id)?;
+    let asking = ledger.asker_run(question, &run.id)?;
     ledger
         .run(&asking)
         .filter(|there| there.seat_is_coordinator(seat) == Some(true))
@@ -24731,7 +24811,7 @@ fn plan_inner(
             // coordinator: the answer is delivered there too, so one
             // `reply` reaches it whatever run the question was filed in.
             let asker_run = match kind == MessageKind::Question {
-                true => ledger.asker_run(&to, &run_id),
+                true => ledger.asker_run(answered, &run_id),
                 false => None,
             };
             let me = sender(ledger, &team.leader_pane, &run_id, (&team.id, pane));
@@ -24829,7 +24909,9 @@ fn plan_inner(
                     let id = ledger.post_as(&run_id, draft, Some(&seat), now_ms)?;
                     let mut said_back = serde_json::json!({ "messageId": id });
                     if let Some((asker, copy)) = carried {
-                        let held = ledger.post_as(&asker, copy, Some(&seat), now_ms)?;
+                        let held = ledger
+                            .post_as(&asker, copy, Some(&seat), now_ms)
+                            .map_err(|refused| copy_refused(&id, &asker, &refused))?;
                         said_back["deliveredTo"] =
                             serde_json::json!({ "runId": asker, "messageId": held });
                     }
@@ -24913,11 +24995,11 @@ fn plan_inner(
             match standing {
                 Some(standing) => said(standing),
                 None => {
+                    let asking = ledger
+                        .asker_run(question, &run_id)
+                        .filter(|there| format!("{RUN_ADDRESS_PREFIX}{there}") != closer);
                     let asker = question.from.clone();
                     let asked = question.to.clone();
-                    let asking = ledger
-                        .asker_run(&asker, &run_id)
-                        .filter(|there| format!("{RUN_ADDRESS_PREFIX}{there}") != closer);
                     let line = Draft {
                         from: LEDGER_ITSELF.to_string(),
                         to: asker,
@@ -24967,7 +25049,9 @@ fn plan_inner(
                             to: format!("{RUN_ADDRESS_PREFIX}{there}"),
                             ..line
                         };
-                        let held = ledger.post_as(&there, copy, Some(&seat), now_ms)?;
+                        let held = ledger
+                            .post_as(&there, copy, Some(&seat), now_ms)
+                            .map_err(|refused| copy_refused(&close_id, &there, &refused))?;
                         answer["deliveredTo"] =
                             serde_json::json!({ "runId": there, "messageId": held });
                     }

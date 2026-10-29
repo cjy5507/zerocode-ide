@@ -454,9 +454,10 @@ pub fn reach(
         _ => None,
     };
     let carried_to = if argv.first().is_some_and(|verb| verb == "reply") {
-        target
-            .as_deref()
-            .and_then(|target| ledger.asker_run(target, &run.id))
+        words
+            .value("--to-message")
+            .and_then(|id| run.message(id))
+            .and_then(|answered| ledger.asker_run(answered, &run.id))
             .and_then(|id| ledger.run(&id))
     } else {
         None

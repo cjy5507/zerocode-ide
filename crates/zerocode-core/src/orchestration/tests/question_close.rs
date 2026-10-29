@@ -467,11 +467,9 @@ fn a_question_from_a_pane_that_sat_in_two_chairs_goes_to_the_run_it_asked_from()
         format!("run:{second}"),
         "{right_side}"
     );
-    assert_eq!(
-        right_side["deliveredTo"]["runId"],
-        second.as_str(),
-        "{right_side}"
-    );
+    // The asking side closes it where it was filed, and tells nobody else.
+    assert_eq!(right_side["runId"], answering.as_str(), "{right_side}");
+    assert!(right_side["deliveredTo"].is_null(), "{right_side}");
 }
 
 /// P3-3 (r2 review): the roads `question-close` was asked to take that the
