@@ -1019,6 +1019,7 @@ impl ProviderRuntimeClient {
                 .as_deref()
                 .unwrap_or(self.model.as_str()),
         );
+        let compaction_summary = request.compaction_summary;
         let mut message_request = MessageRequest {
             model: wire_model.clone(),
             max_tokens: max_tokens_for_model(&wire_model),
@@ -1290,7 +1291,9 @@ impl ProviderRuntimeClient {
                 };
                 let notice_manifest_path = manifest_path.clone();
                 let notice_cancel_signal = self.cancel_signal.clone();
-                let mut stream = stream.with_stream_retry_notice(move |notice| {
+                let mut stream = stream
+                    .for_compaction_summary(compaction_summary)
+                    .with_stream_retry_notice(move |notice| {
                     if !notice_cancel_signal
                         .as_ref()
                         .is_some_and(runtime::HookAbortSignal::is_aborted)
@@ -2201,6 +2204,7 @@ mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         }
     }
 

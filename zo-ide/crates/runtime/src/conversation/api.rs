@@ -90,6 +90,10 @@ pub struct ApiRequest {
     /// otherwise ignore it. Stored history is never rewritten by it: the next
     /// turn starts again from the budget.
     pub picture_cap: Option<usize>,
+    /// Whether this is a compaction's summary request. Only the record a
+    /// quiet stream leaves reads it (t-71285): a summary's quiet is the
+    /// compaction's wait.
+    pub compaction_summary: bool,
 }
 
 pub const GEMINI_THOUGHT_SIGNATURE_PROVIDER_STATE: &str = "gemini.thought_signature";

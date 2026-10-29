@@ -2674,6 +2674,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 effort_step: None,
                 model_override: None,
                 picture_cap: None,
+                compaction_summary: true,
             };
         }
         // Same seal on the fresh shape. It runs BEFORE the P3 pretrim only so
@@ -2693,6 +2694,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             effort_step: None,
             model_override,
             picture_cap: None,
+            compaction_summary: true,
         }
     }
 

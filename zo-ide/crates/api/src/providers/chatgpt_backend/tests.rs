@@ -5632,6 +5632,41 @@ async fn a_quiet_stretch_inside_an_open_reasoning_item_is_called_reasoning() {
     assert_eq!(notice.label, core_types::QUIET_REASONING_LABEL);
 }
 
+/// The record a quiet stretch leaves in the restart log names the request, the
+/// stretch, the event kinds and the keep-alives, and nothing the events
+/// carried: no text, no reasoning, no id, and no event kind the server chose
+/// off zo's list (t-71285).
+#[test]
+fn the_quiet_stretch_record_names_kinds_and_counts_and_carries_no_content() {
+    let mut heard = super::AttemptHeard::sent_at(std::time::Instant::now());
+    heard.hear(&[json!({"type":"response.created","response":{"id":"resp_PRIVATE"}})]);
+    heard.hear(&[json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_PRIVATE","summary":[{"text":"PRIVATE summary"}]}})]);
+    heard.hear(&[json!({"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"PRIVATE thought"})]);
+    heard.hear(&[json!({"type":"response.PRIVATE_kind","text":"PRIVATE text"})]);
+    heard.hear(&[]);
+    heard.hear(&[]);
+
+    let words = heard.quiet_words(true);
+    assert!(!words.contains("PRIVATE"), "the record carries content: {words}");
+    for said in [
+        "compaction summary request",
+        core_types::QuietStretch::Reasoning.words().phrase,
+        "response.created",
+        "response.output_item.added (reasoning)",
+        "response.reasoning_summary_text.delta",
+        "another response event",
+        "2 keep-alives",
+    ] {
+        assert!(words.contains(said), "the record does not say {said:?}: {words}");
+    }
+    assert!(
+        super::AttemptHeard::sent_at(std::time::Instant::now())
+            .quiet_words(false)
+            .starts_with("turn request, waiting for the model;"),
+        "a turn's record with nothing heard"
+    );
+}
+
 /// Scene E: the server accepts the response (`response.created`), then goes
 /// silent with keep-alives only. The window must still end that connection, so a
 /// response-level event never switches the window off for good.

@@ -525,6 +525,19 @@ impl MessageStream {
     /// this the reconnect pause reads as a freeze. `Anthropic` deliberately
     /// stays silent (see its `restart` doc: transparent recovery must not
     /// write into the TUI).
+    /// Say whether this stream carries a compaction's summary request: the
+    /// `ChatGpt` backend names it in the record a quiet stretch leaves
+    /// (t-71285); the other backends keep no such record.
+    #[must_use]
+    pub fn for_compaction_summary(self, compaction_summary: bool) -> Self {
+        match self {
+            Self::ChatGpt(stream) => {
+                Self::ChatGpt(Box::new(stream.for_compaction_summary(compaction_summary)))
+            }
+            other => other,
+        }
+    }
+
     #[must_use]
     pub fn with_stream_retry_notice(
         self,

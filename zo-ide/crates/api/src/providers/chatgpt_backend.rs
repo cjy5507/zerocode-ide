@@ -2042,6 +2042,7 @@ impl ChatGptBackendClient {
             heard: AttemptHeard::sent_at(startup_started_at),
             no_progress_cuts: Vec::new(),
             request_seq: NEXT_STREAM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            compaction_summary: false,
         })
     }
 
@@ -2408,6 +2409,9 @@ pub struct ChatGptStream {
     no_progress_cuts: Vec<String>,
     /// This stream's number among the process's streams, for the restart log.
     request_seq: u64,
+    /// Whether this stream carries a compaction's summary request, which the
+    /// quiet-stretch record names (t-71285).
+    compaction_summary: bool,
 }
 
 /// Sink for [`ChatGptStream`] mid-stream restart notices. Boxed `Fn` so the
@@ -2439,6 +2443,7 @@ impl std::fmt::Debug for ChatGptStream {
             .field("heard", &self.heard)
             .field("no_progress_cuts", &self.no_progress_cuts)
             .field("request_seq", &self.request_seq)
+            .field("compaction_summary", &self.compaction_summary)
             .finish()
     }
 }
@@ -2596,6 +2601,24 @@ impl AttemptHeard {
             delay: quiet_for,
             no_progress: None,
         }
+    }
+
+    /// The quiet-stretch record, for the restart log (t-71285): which request
+    /// went quiet and as what, and what the attempt heard — event kinds and
+    /// keep-alive counts, never what the events carried:
+    /// `turn request, waiting for the model; heard response.created@0.4s; 3
+    /// keep-alives after it, the last 1.2s ago`.
+    fn quiet_words(&self, compaction_summary: bool) -> String {
+        let request = if compaction_summary {
+            "compaction summary request"
+        } else {
+            "turn request"
+        };
+        format!(
+            "{request}, {}; heard {}",
+            self.quiet_stretch().words().phrase,
+            self.numbers()
+        )
     }
 
     /// The record in words, for the error: `response.created, then keep-alives
@@ -2796,6 +2819,14 @@ impl ChatGptStream {
         self
     }
 
+    /// Mark this stream as a compaction's summary request, for the record a
+    /// quiet stretch leaves (t-71285).
+    #[must_use]
+    pub fn for_compaction_summary(mut self, compaction_summary: bool) -> Self {
+        self.compaction_summary = compaction_summary;
+        self
+    }
+
     pub async fn next_event(&mut self) -> Result<Option<StreamEvent>, ApiError> {
         let idle_timeout = stream_idle_timeout();
         let mut quiet_chunks = 0usize;
@@ -2898,6 +2929,15 @@ impl ChatGptStream {
                             && since.elapsed() >= self.client.quiet_notice_after
                         {
                             quiet_notified = true;
+                            eprintln!(
+                                "[zo] gpt stream quiet for {:.1}s ({}) (attempt {}, request {}, session {}, at {}ms)",
+                                since.elapsed().as_secs_f64(),
+                                self.heard.quiet_words(self.compaction_summary),
+                                self.restart_attempts.saturating_add(1),
+                                self.request_seq,
+                                self.client.cache_scope(),
+                                unix_millis(),
+                            );
                             if let Some(notice) = &self.retry_notice {
                                 notice(self.heard.quiet_notice(since.elapsed()));
                             }

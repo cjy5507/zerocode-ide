@@ -405,6 +405,7 @@ impl AsyncApiClient for LiveAsyncApiClient {
     > {
         Box::pin(async move {
             let __wire_t = std::time::Instant::now();
+            let compaction_summary = request.compaction_summary;
             // Build the wire request off the async executor thread. `convert_messages`
             // re-compresses every historical tool result (uncached) and clones the
             // whole conversation into the provider payload; right after an auto
@@ -552,7 +553,9 @@ impl AsyncApiClient for LiveAsyncApiClient {
             // establish-time Anthropic notice wording.
             let restart_ids = ids.clone();
             let restart_tx = render_tx.clone();
-            let stream = stream.with_stream_retry_notice(move |notice| {
+            let stream = stream
+                .for_compaction_summary(compaction_summary)
+                .with_stream_retry_notice(move |notice| {
                 for block in stream_notice_blocks(&notice, &restart_ids) {
                     let _ = restart_tx.try_send(block);
                 }
@@ -881,6 +884,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         };
         build_message_request(&request, model, true, None, registry, None, None, None)
             .tools
@@ -923,6 +927,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         };
         // No step: byte-identical to the turn's own reading.
         let turn = request_effort(&request, Some(L::Xhigh), Some(L::Max), Some(28_000));
@@ -976,6 +981,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         }
     }
 
@@ -1329,6 +1335,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         };
         let wire = build_message_request(
             &request,
@@ -1367,6 +1374,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         };
         let wire = build_message_request(
             &request,
@@ -1397,6 +1405,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         };
         let wire = build_message_request(
             &request,
@@ -1783,6 +1792,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         };
         (live, request, seen)
     }
