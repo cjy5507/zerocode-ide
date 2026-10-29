@@ -1881,6 +1881,13 @@ const yourTurnLater = new Map();
  * pane on lands a beat after the keys, and a chip that waited for it would say
  * the answer went nowhere. Dropped once the column stops listing the turn. */
 const yourTurnAnswered = new Set();
+/* Turns whose pane the window saw move past them while the column still lists
+ * them (t-82287): its own hook said it is no longer asking, or asks something
+ * else, or the answer door read its screen and the question was not on it. A
+ * column a beat behind, or one that missed the move, is not believed for
+ * these. Dropped once the column stops listing the turn, and lifted by a hook
+ * that asks the very question again. */
+const yourTurnPassed = new Set();
 /* One draft per turn — the picks, the words typed, the refusal — kept across
  * repaints and dropped with the turn. */
 const yourTurnDrafts = new Map();
@@ -1917,7 +1924,7 @@ function yourTurnKindWord(kind) {
 function yourTurns(now = Date.now()) {
   return attentionCards.filter((card) => {
     const key = yourTurnKey(card);
-    return !yourTurnAnswered.has(key) && (yourTurnLater.get(key) ?? 0) <= now;
+    return !yourTurnAnswered.has(key) && !yourTurnPassed.has(key) && (yourTurnLater.get(key) ?? 0) <= now;
   });
 }
 
@@ -1926,6 +1933,7 @@ function yourTurns(now = Date.now()) {
 function forgetGoneTurns(now = Date.now()) {
   const listed = new Set(attentionCards.map(yourTurnKey));
   for (const key of yourTurnAnswered) if (!listed.has(key)) yourTurnAnswered.delete(key);
+  for (const key of yourTurnPassed) if (!listed.has(key)) yourTurnPassed.delete(key);
   for (const [key, until] of yourTurnLater) if (!listed.has(key) || until <= now) yourTurnLater.delete(key);
   for (const key of yourTurnDrafts.keys()) if (!listed.has(key)) yourTurnDrafts.delete(key);
 }
@@ -1944,6 +1952,24 @@ function countTurnAnswered(key) {
   yourTurnAnswered.add(key);
   yourTurnDrafts.delete(key);
   paintYourTurn();
+}
+
+/* What the window now knows of the questions the column lists for `pane`:
+ * `passes` answers each question's signature with true (moved past), false
+ * (asked again) or null (not this one). */
+function passTurns(pane, passes) {
+  let moved = false;
+  for (const card of attentionCards) {
+    const kind = yourTurnKind(card);
+    if (card.pane !== pane || (kind !== "question" && kind !== "permission")) continue;
+    const key = yourTurnKey(card);
+    const passed = passes(askSignature(card));
+    if (passed === null || passed === yourTurnPassed.has(key)) continue;
+    if (passed) yourTurnPassed.add(key);
+    else yourTurnPassed.delete(key);
+    moved = true;
+  }
+  if (moved) paintYourTurn();
 }
 
 function putTurnAway(card) {
@@ -12513,10 +12539,17 @@ listen("hook:agent", (event) => {
   } else {
     paneAsks.delete(term);
   }
+  const askNow = paneAsks.get(term)?.sig ?? null;
+  // The 「당신 차례」 rows follow the same word at once (t-82287): a pane not
+  // asking has moved past every question the column lists for it, and one
+  // asking a described question has moved past the others. A wait it only
+  // signalled says nothing of which question is up.
+  if (!asking) passTurns(`term:${term}`, () => true);
+  else if (shaped) passTurns(`term:${term}`, (sig) => sig !== askNow);
   if (agent && !(asking && !shaped)) standPaneConversation(term);
   if (paneChatOn(term)) {
     if (asking && !shaped) setPaneChat(term, false);
-    else if ((paneAsks.get(term)?.sig ?? null) !== askBefore) paintPaneChat(term);
+    else if (askNow !== askBefore) paintPaneChat(term);
     // The transcript this page reads was written before the hook fired — the
     // answer before Stop, the call before PreToolUse — so the page on this
     // pane reads it now, not on its next tick.
@@ -12571,6 +12604,10 @@ listen("hook:agent", (event) => {
       // arrived. Consume that origin once so all state-change consumers hear
       // the real push; later repeated tool events remain on the quiet path.
       scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
+    } else if (askNow !== askBefore) {
+      // Another question under the same state: the column the badge reads
+      // is asked again, as a state move asks it (t-82287).
+      scheduleAgentPaint(["cards", "badge", "board"]);
     } else if (clearedRestoreBirth || event.payload.prompt || event.payload.said || modelMoved) {
       scheduleAgentPaint(["cards", "board"]);
     }
