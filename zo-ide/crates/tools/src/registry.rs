@@ -1151,11 +1151,29 @@ impl GlobalToolRegistry {
         self.execute_result(name, input).map(|result| result.text)
     }
 
+    /// Execute a registered graph for the session scheduler, preserving the
+    /// same gates and audit while returning machine-readable, undigested JSON.
+    pub fn execute_workflow_for_host(&self, input: &Value) -> Result<String, ToolError> {
+        let Some(enforcer) = &self.enforcer else {
+            return Err(ToolError::Execution("scheduled workflow requires the live permission policy".to_string()));
+        };
+        let mode = match enforcer.active_mode() {
+            PermissionMode::Prompt | PermissionMode::Allow => PermissionMode::WorkspaceWrite,
+            mode => mode,
+        };
+        self.clone().with_enforcer(enforcer.clone().with_active_mode(mode))
+            .execute_result_inner("Workflow", input, true).map(|result| result.text)
+    }
+
+    pub fn execute_result(&self, name: &str, input: &Value) -> Result<runtime::ToolExecutionResult, ToolError> {
+        self.execute_result_inner(name, input, false)
+    }
+
     // The linear order of toggle, agent-only, plan-mode, builtin, and plugin
     // gates is security-significant; splitting it would hide early-return
     // precedence merely to meet a line-count heuristic.
     #[allow(clippy::too_many_lines)]
-    pub fn execute_result(&self, name: &str, input: &Value) -> Result<runtime::ToolExecutionResult, ToolError> {
+    fn execute_result_inner(&self, name: &str, input: &Value, host_raw: bool) -> Result<runtime::ToolExecutionResult, ToolError> {
         // Accept PascalCase (`Read`, `Write`, ...) and short forms (`read`)
         // by resolving to the canonical handler name before lookup/dispatch.
         let canonical = crate::aliases::canonical_tool_name(name);
@@ -1238,6 +1256,9 @@ impl GlobalToolRegistry {
             .iter()
             .any(|spec| spec.name == canonical_ref)
         {
+            if host_raw {
+                return crate::dispatch::execute_workflow_for_host(&self.context, self.enforcer.as_ref(), input);
+            }
             return crate::dispatch::execute_tool_result_with_context(
                 &self.context,
                 self.enforcer.as_ref(),

@@ -3,6 +3,7 @@
 
 pub mod crons;
 pub mod driver;
+pub(crate) mod dreaming;
 pub mod limits;
 pub mod loops;
 pub mod runner;
@@ -50,6 +51,8 @@ pub struct SessionBudgetStatus {
     pub max_output_tokens: u64,
     pub active_millis: u64,
     pub max_wall_clock_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +60,8 @@ struct SessionBudget {
     assistant_turns: u32,
     output_tokens: u64,
     active_millis: u64,
+    #[serde(default)]
+    blocked: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +123,7 @@ impl Autonomy {
 
     #[must_use]
     pub fn exhaustion(&self) -> Option<String> {
+        if let Some(reason) = &self.budget.blocked { return Some(reason.clone()); }
         let continuations = self.budget.assistant_turns.saturating_sub(1);
         if continuations >= self.limits.max_continuations {
             return Some(format!(
@@ -148,6 +154,12 @@ impl Autonomy {
         None
     }
 
+    /// Unknown scheduled execution cost cannot become a free retry after resume.
+    pub(crate) fn block(&mut self, reason: &str) -> io::Result<()> {
+        self.budget.blocked = Some(reason.to_string());
+        self.persist_budget()
+    }
+
     pub fn record_usage(&mut self, output_tokens: u64, active_millis: u64) -> io::Result<()> {
         self.budget.assistant_turns = self.budget.assistant_turns.saturating_add(1);
         self.budget.output_tokens = self.budget.output_tokens.saturating_add(output_tokens);
@@ -166,6 +178,7 @@ impl Autonomy {
             max_output_tokens: self.limits.max_output_tokens,
             active_millis: self.budget.active_millis,
             max_wall_clock_secs: self.limits.max_wall_clock_secs,
+            blocked: self.budget.blocked.clone(),
         }
     }
 
@@ -217,4 +230,16 @@ mod tests {
         assert_eq!(loaded.status().budget.output_tokens, 9);
         assert_eq!(loaded.status().budget.active_millis, 11);
     }
+    #[test]
+    fn unknown_execution_cost_blocks_automation_after_session_reload() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("s.jsonl");
+        let mut autonomy = Autonomy::load(&transcript, None, false);
+        autonomy.block("unknown graph cost").unwrap();
+        assert_eq!(autonomy.exhaustion().as_deref(), Some("unknown graph cost"));
+        let loaded = Autonomy::load(&transcript, None, true);
+        assert_eq!(loaded.status().budget.blocked.as_deref(), Some("unknown graph cost"));
+        assert_eq!(loaded.exhaustion().as_deref(), Some("unknown graph cost"));
+    }
+
 }

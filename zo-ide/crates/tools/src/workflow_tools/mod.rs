@@ -384,8 +384,11 @@ pub(crate) fn run_workflow(
     let prepared = prepare_workflow_input(input)?;
     let validated = WorkflowSpec::from_value(&prepared.spec_value)?.validate()?;
     if validated.mode == WorkflowMode::Graph {
-        graph_host::validate_execution_scope(&validated, parent_permission_mode,
-            crate::misc_tools::agent_tools::ledger::available())?;
+        let ledger_available = crate::misc_tools::agent_tools::ledger::available();
+        graph_host::validate_execution_scope(&validated, parent_permission_mode, ledger_available)?;
+        if input.get("__zo_scheduled").and_then(Value::as_bool) == Some(true) {
+            graph_host::validate_scheduled_accounting(&validated, parent_permission_mode, ledger_available)?;
+        }
     }
     let run_id = if validated.mode == WorkflowMode::Graph {
         graph_host::run_id(input, &prepared.spec_value, &prepared.workflow_input)?
@@ -454,6 +457,7 @@ pub(crate) fn run_workflow(
     opts = opts.with_progress(&tee).with_check(&check);
     if let Some(store) = &graph_store {
         opts.graph = Some(engine::graph::GraphRunOptions {
+            strict_accounting: input.get("__zo_scheduled").and_then(Value::as_bool) == Some(true),
             check: Some(&graph_check),
             store, fingerprint: &graph_fingerprint,
             session_id: parent_session_id.unwrap_or_default(), dream: Some(&dream),
@@ -608,6 +612,46 @@ pub(crate) fn validate_workflow(input: &Value) -> Result<String, ToolError> {
     let prepared = prepare_workflow_input(input)?;
     let workflow = WorkflowSpec::from_value(&prepared.spec_value)?.validate()?;
     crate::to_pretty_json(workflow_preview(&workflow))
+}
+
+/// Freeze a scheduled graph at registration. Library edits cannot change an
+/// armed schedule, and the host assigns a fresh run identity to each cron slot.
+pub(crate) fn prepare_scheduled_graph(input: &Value) -> Result<Value, ToolError> {
+    prepare_scheduled_graph_with_loader(input, library::load_spec)
+}
+
+fn prepare_scheduled_graph_with_loader(
+    input: &Value,
+    load_library_spec: impl Fn(&str) -> Result<Value, ToolError>,
+) -> Result<Value, ToolError> {
+    let object = input.as_object().ok_or_else(|| ToolError::InvalidInput(
+        "scheduled workflow must contain `spec` or `library`, with optional `input`".to_string()
+    ))?;
+    if object.contains_key("runId") || object.contains_key("resumeFromRunId") {
+        return Err(ToolError::InvalidInput(
+            "scheduled workflow runId/resumeFromRunId belong to the cron slot, not the registration".to_string()
+        ));
+    }
+    if object.keys().any(|key| !matches!(key.as_str(), "spec" | "library" | "input"))
+        || object.contains_key("spec") == object.contains_key("library") {
+        return Err(ToolError::InvalidInput(
+            "scheduled workflow requires exactly one of `spec` or `library`, with optional `input`".to_string()
+        ));
+    }
+    let prepared = prepare_workflow_input_with_loader(input, load_library_spec)?;
+    let workflow = WorkflowSpec::from_value(&prepared.spec_value)?.validate()?;
+    if workflow.mode != WorkflowMode::Graph {
+        return Err(ToolError::InvalidInput("scheduled workflows require `mode: graph`".to_string()));
+    }
+    let has_agents = workflow.graph.as_ref().is_some_and(|graph| {
+        graph.nodes.iter().any(|node| matches!(node, spec::GraphNode::Agent { .. }))
+    });
+    if has_agents && (workflow.max_agents.is_none() || workflow.max_output_tokens.is_none()) {
+        return Err(ToolError::InvalidInput(
+            "scheduled graphs with agents require both budget.max_agents and budget.max_output_tokens".to_string()
+        ));
+    }
+    Ok(json!({"spec":prepared.spec_value, "input":prepared.workflow_input}))
 }
 
 pub(crate) fn run_workflow_library(input: &Value) -> Result<String, ToolError> {
@@ -2270,5 +2314,71 @@ mod tests {
         let err = run_workflow_with_backend(&input, &mut backend, &fast_opts())
             .expect_err("invalid spec");
         assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    fn scheduled_graph_spec(with_agent: bool) -> Value {
+        let mut spec = json!({
+            "name":"scheduled", "mode":"graph",
+            "graph":{"entry":"check", "max_steps":3, "nodes":[
+                {"kind":"check", "id":"check", "command":"true", "on_pass":"done", "on_fail":"done"},
+                {"kind":"end", "id":"done", "status":"completed"}
+            ]}
+        });
+        if with_agent {
+            spec["phases"] = json!([{"id":"work", "prompt":"Do the bounded task"}]);
+            spec["graph"]["entry"] = json!("work");
+            spec["graph"]["nodes"].as_array_mut().unwrap().push(json!({
+                "kind":"agent", "id":"work", "phase":"work", "next":"check"
+            }));
+        }
+        spec
+    }
+
+    #[test]
+    fn scheduled_graph_snapshots_library_content_instead_of_its_live_name() {
+        let library = std::cell::RefCell::new(scheduled_graph_spec(false));
+        let snapshot = prepare_scheduled_graph_with_loader(
+            &json!({"library":"nightly", "input":{"target":"parser"}}),
+            |name| {
+                assert_eq!(name, "nightly");
+                Ok(library.borrow().clone())
+            },
+        ).unwrap();
+        library.borrow_mut()["graph"]["nodes"][0]["command"] = json!("false");
+        assert_eq!(snapshot["spec"]["graph"]["nodes"][0]["command"], "true");
+        assert_eq!(snapshot["input"], json!({"target":"parser"}));
+        assert!(snapshot.get("library").is_none());
+    }
+
+    #[test]
+    fn scheduled_agent_graphs_require_explicit_agent_and_token_budgets() {
+        let mut spec = scheduled_graph_spec(true);
+        for budget in [Value::Null, json!({"max_agents":2}), json!({"max_output_tokens":1000})] {
+            spec["budget"] = budget;
+            let error = prepare_scheduled_graph(&json!({"spec":spec})).unwrap_err();
+            assert!(error.to_string().contains("both budget.max_agents and budget.max_output_tokens"));
+        }
+        spec["budget"] = json!({"max_agents":2,"max_output_tokens":1000});
+        let snapshot = prepare_scheduled_graph(&json!({"spec":spec})).unwrap();
+        assert_eq!(snapshot["spec"]["budget"]["max_agents"], 2);
+        assert_eq!(snapshot["input"], Value::Null);
+        prepare_scheduled_graph(&json!({"spec":scheduled_graph_spec(false)}))
+            .expect("a bounded check-only graph creates no model calls");
+    }
+
+    #[test]
+    fn scheduled_graphs_reject_caller_run_identity_and_other_modes() {
+        for key in ["runId", "resumeFromRunId"] {
+            let mut request = json!({"spec":scheduled_graph_spec(false)});
+            request[key] = json!("reused-every-day");
+            assert!(prepare_scheduled_graph(&request).unwrap_err().to_string().contains("cron slot"));
+        }
+        for request in [
+            json!({"spec":scheduled_graph_spec(false),"library":"also"}),
+            json!({"preset":"cross_model_verified"}),
+            json!({"spec":{"name":"legacy","phases":[{"id":"work","prompt":"work"}]}}),
+        ] {
+            assert!(prepare_scheduled_graph(&request).is_err());
+        }
     }
 }

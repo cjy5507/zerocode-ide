@@ -1043,6 +1043,17 @@ where
         self.permission_policy.active_mode()
     }
 
+    /// Snapshot the live policy for host-scheduled tools. Ask rules remain
+    /// denials without a prompter; scheduled execution cannot widen authority.
+    #[must_use]
+    pub fn host_permission_enforcer(&self) -> crate::permission_enforcer::PermissionEnforcer {
+        let mode = match self.permission_policy.active_mode() {
+            PermissionMode::Prompt | PermissionMode::Allow => PermissionMode::WorkspaceWrite,
+            mode => mode,
+        };
+        crate::permission_enforcer::PermissionEnforcer::new(self.permission_policy.clone()).with_active_mode(mode)
+    }
+
     /// Swap the active permission mode in place, returning the previous one, so a
     /// host can install a one-turn override and restore it after. Mirrors the
     /// internal `DeepSubturnPermissionGuard` PLAN/VERIFY downgrade, exposed for

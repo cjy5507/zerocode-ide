@@ -20,6 +20,7 @@ pub const DEFAULT_MAX_STALLED_TURNS: u32 = 2;
 pub const DEFAULT_MAX_FAILURE_OUTPUT_CHARS: u64 = 12_000;
 pub const DEFAULT_STREAM_PHASE_AFTER_SECS: u64 = 15;
 pub const DEFAULT_QUIET_AFTER_SECS: u64 = 60;
+pub const DEFAULT_IDLE_DREAM_DELAY_SECS: u64 = 60;
 
 /// Process exit vocabulary for a bounded headless loop.
 pub const HEADLESS_LOOP_EXIT_DONE: u8 = 0;
@@ -46,6 +47,7 @@ pub struct AutonomyLimits {
     pub max_failure_output_chars: u64,
     pub stream_phase_after_secs: u64,
     pub quiet_after_secs: u64,
+    pub idle_dream_delay_secs: u64,
 }
 
 impl Default for AutonomyLimits {
@@ -69,6 +71,7 @@ impl Default for AutonomyLimits {
             max_failure_output_chars: DEFAULT_MAX_FAILURE_OUTPUT_CHARS,
             stream_phase_after_secs: DEFAULT_STREAM_PHASE_AFTER_SECS,
             quiet_after_secs: DEFAULT_QUIET_AFTER_SECS,
+            idle_dream_delay_secs: DEFAULT_IDLE_DREAM_DELAY_SECS,
         };
         resolved.max_model_wakeup_secs = resolved
             .max_model_wakeup_secs
@@ -229,6 +232,9 @@ impl AutonomyLimits {
                 "ZO_AUTONOMY_STREAM_PHASE_AFTER_SECS",
                 defaults.stream_phase_after_secs,
             ),
+            idle_dream_delay_secs: number(
+                "idleDreamDelaySecs", "ZO_AUTONOMY_IDLE_DREAM_DELAY_SECS", defaults.idle_dream_delay_secs,
+            ).min(DEFAULT_MAX_INTERVAL_SECS),
             quiet_after_secs: number(
                 "quietAfterSecs",
                 "ZO_AUTONOMY_QUIET_AFTER_SECS",

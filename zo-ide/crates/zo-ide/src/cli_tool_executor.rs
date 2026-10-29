@@ -71,6 +71,18 @@ impl CliToolExecutor {
         }
     }
 
+    /// The scheduler uses the same explicit tool filters as an ordinary turn.
+    pub(crate) fn scheduled_workflow_registry(
+        &self, enforcer: runtime::permission_enforcer::PermissionEnforcer,
+    ) -> Result<GlobalToolRegistry, ToolError> {
+        check_disallowed_tools(self.disallowed_tools.as_ref(), "Workflow")?;
+        if self.allowed_tools.as_ref().is_some_and(|tools| !tools.contains("Workflow")) {
+            return Err(ToolError::new("Workflow is not enabled by --allowedTools"));
+        }
+        check_turn_allowed_tools(&self.turn_allowed_tools, "Workflow")?;
+        Ok(self.tool_registry.clone().with_enforcer(enforcer))
+    }
+
     /// Route runtime (MCP) tool calls to the parent's channel — a pane child.
     #[must_use]
     pub(crate) fn with_remote_mcp(mut self, remote_mcp: Option<Arc<crate::remote_mcp::RemoteMcp>>) -> Self {

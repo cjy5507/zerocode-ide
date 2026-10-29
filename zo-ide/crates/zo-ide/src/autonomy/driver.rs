@@ -89,7 +89,10 @@ pub(crate) async fn drive<F: AutonomyFrontend>(front: &mut F) -> Drive {
         match drive_crons(front).await {
             CronPass::Leaving => return Drive::Leaving,
             CronPass::Ran => {}
-            CronPass::Idle => return Drive::Idle,
+            CronPass::Idle => {
+                if let Some(session) = front.session() { session.dream_when_idle(); }
+                return Drive::Idle;
+            }
         }
     }
 }
