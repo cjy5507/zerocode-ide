@@ -27,6 +27,7 @@ mod hand_in_keep;
 mod handoff_code;
 mod jev_pane_seats;
 mod land_batch;
+mod plain_words;
 mod pre_handin;
 mod quiet_children;
 mod quota_wall;

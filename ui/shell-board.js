@@ -357,7 +357,7 @@ listen("emulator:loans", () => scheduleDeskPaint());
  * 몇 통인지는 백엔드가 준 목록과 수(`counts`)가 말한다. */
 const DESK_MAIL = Object.freeze({
   question: { state: "needs-attention", key: "board.desk.mailQuestion", word: "질문" },
-  quota_walled: { state: "needs-attention", key: "board.desk.mailWalled", word: "한도 벽" },
+  quota_walled: { state: "needs-attention", key: "board.desk.mailWalled", word: "한도 도달" },
   worker_died: { state: "failed", key: "board.desk.mailDied", word: "워커 끝남" },
   went_quiet: { state: "idle", key: "board.desk.mailQuiet", word: "조용해짐" },
   deadlocked: { state: "needs-attention", key: "board.desk.mailDeadlocked", word: "서로 기다림" },
@@ -767,7 +767,7 @@ function paintDeskFoldedAcks(line, batches, seats, view) {
 const DESK_HEALTH = Object.freeze([
   { id: "gone", state: "failed", dot: "halt", key: "board.desk.healthGone", word: "판 없음",
     holds: (row) => Number.isFinite(row.pane_missing_since_ms) },
-  { id: "walled", state: "needs-attention", dot: "halt", key: "board.desk.healthWalled", word: "한도 벽",
+  { id: "walled", state: "needs-attention", dot: "halt", key: "board.desk.healthWalled", word: "한도 도달",
     holds: (row, card, now) => Boolean(row.wall) && now < row.wall.stands_until_ms },
   { id: "asking", state: "needs-attention", dot: "you", key: "board.desk.healthAsking", word: "답 기다림",
     holds: (row, card) => row.asking === true || card?.state === "needs-attention" },
@@ -1345,9 +1345,9 @@ const QUOTA_WALL_REFUSALS = {
       : t("quotaWall.why.workerReleasing", "워커 {{worker}}가 손을 놓는 중이거나, 놓았는지 아직 확인되지 않았습니다", { worker: said.worker }),
   pane_taken_over: (said) => t("quotaWall.why.paneTakenOver", "워커 {{worker}}의 판을 사람이 가져갔습니다 — 그 터미널은 이제 사람의 것입니다", { worker: said.worker }),
   no_open_attempt: (said) => t("quotaWall.why.noOpenAttempt", "워커 {{worker}}에게 열린 시도가 없습니다", { worker: said.worker }),
-  no_wall: (said) => t("quotaWall.why.noWall", "원장이 본 한도 벽이 워커 {{worker}}에게 없습니다", { worker: said.worker }),
+  no_wall: (said) => t("quotaWall.why.noWall", "원장에 워커 {{worker}}가 한도에 닿은 기록이 없습니다", { worker: said.worker }),
   wall_lifted: (said) => t("quotaWall.why.wallLifted", "워커 {{worker}}의 한도가 이미 풀렸습니다", { worker: said.worker }),
-  account_moved: (said) => t("quotaWall.why.accountMoved", "워커 {{worker}}는 이 벽 뒤에 다른 계정으로 다시 앉았습니다 — 그 벽은 떠난 계정의 것입니다", { worker: said.worker }),
+  account_moved: (said) => t("quotaWall.why.accountMoved", "워커 {{worker}}는 이 한도에 닿은 뒤 다른 계정으로 옮겨 갔습니다 — 그 한도는 떠난 계정의 것입니다", { worker: said.worker }),
   pane_not_here: (said) => t("quotaWall.why.paneNotHere", "이 창은 워커 {{worker}}의 판을 갖고 있지 않습니다", { worker: said.worker }),
   no_transient_order: (said) => t("quotaWall.why.noTransientOrder", "일시 오류 뒤에 이어서 하라는 지시가 이 실행에 없습니다"),
   unknown_run: (said) => t("quotaWall.why.unknownRun", "실행 {{run}}을 원장에서 찾을 수 없습니다", { run: said.run }),
@@ -1356,12 +1356,12 @@ const QUOTA_WALL_REFUSALS = {
   unknown_task: (said) => t("quotaWall.why.unknownTask", "과업 {{task}}를 원장에서 찾을 수 없습니다", { task: said.task }),
   seat_lost: (said) => t("quotaWall.why.seatLost", "워커 {{worker}}의 판을 다른 워커가 차지했습니다", { worker: said.worker }),
   awaiting_answer: (said) => t("quotaWall.why.awaitingAnswer", "워커 {{worker}}가 자기가 물은 질문의 답을 기다리고 있습니다", { worker: said.worker }),
-  at_wall: (said) => t("quotaWall.why.atWall", "시도 {{dispatch}}는 한도 벽에 서 있습니다 — 넘기기가 그 답입니다", { dispatch: said.dispatch }),
-  wall_not_now: (said) => t("quotaWall.why.wallNotNow", "이 누름은 시도 {{dispatch}}가 지금 서 있지 않은 지난 벽에 대한 것입니다", { dispatch: said.dispatch }),
+  at_wall: (said) => t("quotaWall.why.atWall", "시도 {{dispatch}}는 사용 한도에 닿아 멈춰 있습니다 — 넘기기가 그 답입니다", { dispatch: said.dispatch }),
+  wall_not_now: (said) => t("quotaWall.why.wallNotNow", "이 누름은 지난 한도에 대한 것입니다 — 시도 {{dispatch}}가 지금 닿아 있는 한도가 아닙니다", { dispatch: said.dispatch }),
   turn_not_now: (said) => t("quotaWall.why.turnNotNow", "이 누름은 시도 {{dispatch}}가 지금 서 있지 않은 지난 실패에 대한 것입니다 — 워커가 그 뒤에 다시 말했습니다", { dispatch: said.dispatch }),
   resume_in_flight: (said) => t("quotaWall.why.resumeInFlight", "이어서 하라는 한 줄을 지금 넣는 중입니다"),
   resume_ceiling: (said) => t("quotaWall.why.resumeCeiling", "시도 {{dispatch}}에 이미 {{count}}번 이어 쓰기를 넣어 상한에 닿았습니다", { dispatch: said.dispatch, count: said.count }),
-  already_typed: (said) => t("quotaWall.why.alreadyTyped", "이 벽에 대해 시도 {{dispatch}}에 이미 한 줄을 넣었습니다 — 그 글이 입력 칸에 남아 있을 수 있습니다", { dispatch: said.dispatch }),
+  already_typed: (said) => t("quotaWall.why.alreadyTyped", "이번 한도에 대해 시도 {{dispatch}}에 이미 한 줄을 넣었습니다 — 그 글이 입력 칸에 남아 있을 수 있습니다", { dispatch: said.dispatch }),
   too_soon: (said) => t("quotaWall.why.tooSoon", "시도 {{dispatch}}의 마지막 이어 쓰기가 {{seconds}}초 전이라 아직 간격이 지나지 않았습니다",
     { dispatch: said.dispatch, seconds: Math.ceil(Number(said.typed_ms_ago) / 1_000) }),
   coordinator_seat_elsewhere: (said) => t("quotaWall.why.coordinatorSeatElsewhere", "이 창은 실행 {{run}}의 코디네이터 자리를 갖고 있지 않습니다", { run: said.run }),
@@ -1371,7 +1371,7 @@ const QUOTA_WALL_REFUSALS = {
   no_checkout: (said) => t("quotaWall.why.noCheckout", "워커 {{worker}}가 체크아웃을 알리지 않아 물려줄 것이 없습니다", { worker: said.worker }),
   already_walked: (said) => t("quotaWall.why.alreadyWalked", "시도 {{dispatch}}는 이미 넘어갔습니다 — 한 시도는 한 번만 넘깁니다", { dispatch: said.dispatch }),
   handover_ceiling: (said) => t("quotaWall.why.handoverCeiling", "과업 {{task}}는 이미 {{count}}번 넘어가 상한에 닿았습니다", { task: said.task, count: said.count }),
-  wall_row_gone: (said) => t("quotaWall.why.wallRowGone", "벽 {{wall}}의 기록이 원장에서 사라졌습니다", { wall: said.wall }),
+  wall_row_gone: (said) => t("quotaWall.why.wallRowGone", "한도 {{wall}}의 기록이 원장에서 사라졌습니다", { wall: said.wall }),
   no_runtime: (said) => t("quotaWall.why.noRuntime", "이 창에서 오케스트레이션이 시작되지 않았습니다"),
   ledger_unread: (said) => t("quotaWall.why.ledgerUnread", "원장을 읽지 못했습니다: {{detail}}", { detail: said.detail }),
   composer_never_heard: (said) => t("quotaWall.why.composerNeverHeard", "이 창이 워커 {{worker}}의 판에서 아직 아무것도 듣지 못해 넣지 않았습니다", { worker: said.worker }),
@@ -1413,7 +1413,7 @@ function paintDeskWall(node, row, now) {
   const retry = strip.querySelector(".board-desk-worker-wall-retry");
   writeTextContent(retry, t("quotaWall.retry", "지금 다시 시도"));
   writeDisabled(retry, sending || Boolean(chip.retry_refusal));
-  writeAttribute(retry, "data-tip", t("quotaWall.retryTip", "입력 칸에 이어서 하라는 한 줄을 넣습니다 — 이 벽에서는 한 번만"));
+  writeAttribute(retry, "data-tip", t("quotaWall.retryTip", "입력 칸에 이어서 하라는 한 줄을 넣습니다 — 한도마다 한 번만"));
   const targets = paintQuotaWallTargets(strip.querySelector(".board-desk-worker-wall-to"), row, chip);
   const hand = strip.querySelector(".board-desk-worker-wall-handover");
   writeTextContent(hand, t("quotaWall.handOver", "다른 에이전트로 넘기기"));
@@ -1450,7 +1450,7 @@ async function pressQuotaWall(view, row, act, to) {
   const said = await askConfirm(act === "retry"
     ? {
       title: t("quotaWall.retryTitle", "지금 다시 시도할까요?"),
-      body: t("quotaWall.retryBody", "이 워커({{worker}})의 입력 칸에 이어서 하라는 한 줄을 넣습니다. 한도가 아직 풀리지 않았으면 다시 멈출 수 있고, 이 벽에서는 한 번만 넣습니다.", { worker }),
+      body: t("quotaWall.retryBody", "이 워커({{worker}})의 입력 칸에 이어서 하라는 한 줄을 넣습니다. 한도가 아직 풀리지 않았으면 다시 멈출 수 있고, 한도마다 한 번만 넣습니다.", { worker }),
       confirm: t("quotaWall.retry", "지금 다시 시도"),
       deny: t("app.cancel", "취소"),
       cancel: false,
@@ -2049,7 +2049,7 @@ function taskCostWords(cost) {
   const text = ownLine ? [shape, jevWords].join(" · ") : [
     ...(shape ? [shape] : []),
     t("board.desk.cost.attempts", "시도 {{count}}", { count: Number(cost.attempts) || 0 }),
-    wall ? t("board.desk.cost.wall", "{{time}}(대기 포함)", { time: wall }) : t("board.desk.cost.wallOpen", "벽시계 —"),
+    wall ? t("board.desk.cost.wall", "{{time}}(대기 포함)", { time: wall }) : t("board.desk.cost.wallOpen", "걸린 시간 —"),
     Number(generation.sessionsLinked) > 0
       ? t("board.desk.cost.tokens", "생성 {{tokens}} 토큰", { tokens: formatTokens(tokens) })
       : t("board.desk.cost.tokensNone", "생성 —"),
