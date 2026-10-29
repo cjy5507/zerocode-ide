@@ -1309,47 +1309,40 @@ pub(crate) fn pass_review(
     if attempt.trim().is_empty() || source.trim().is_empty() {
         return Err("a pass names the attempt and the source it read".into());
     }
-    let argv = with_cached_run(run_id, |run| {
-        pass_argv(run, run_id, task, attempt, source, retry_request, now_ms)
-    })??;
-    as_the_coordinator(run_id, argv, now_ms)
+    let result = with_cached_run(run_id, |run| pass_result(run, run_id, task, now_ms))??;
+    as_the_coordinator(
+        run_id,
+        [
+            "task-update",
+            "--run",
+            run_id,
+            "--task",
+            task,
+            "--result",
+            &result,
+            "--attempt",
+            attempt,
+            "--source",
+            source,
+            "--retry-request",
+            retry_request,
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        now_ms,
+    )
 }
 
-/// The board's pass as a `task-update` line (t-82501): the result the task
-/// holds now with the pass added ([`board_pass_result`]) — `task-update`
-/// replaces a result whole, so a pass that sent its one key would take the
-/// worker's summary, tests and report with it. Read from the image the board
-/// drew from; a task that image does not hold is not written over blind.
-fn pass_argv(
-    run: Option<&Run>,
-    run_id: &str,
-    task: &str,
-    attempt: &str,
-    source: &str,
-    retry_request: &str,
-    now_ms: i64,
-) -> Result<Vec<String>, String> {
+/// The result the board's pass sends (t-82501): the one the task holds now
+/// with the pass added ([`board_pass_result`]) — `task-update` replaces a
+/// result whole, so a pass that sent its one key would take the worker's
+/// summary, tests and report with it. Read from the image the board drew
+/// from; a task that image does not hold is not written over blind.
+fn pass_result(run: Option<&Run>, run_id: &str, task: &str, now_ms: i64) -> Result<String, String> {
     let held = run
         .and_then(|run| run.task(task))
         .ok_or_else(|| format!("the board holds no task {task} in {run_id}"))?;
-    let result = board_pass_result(held.result.as_str(), now_ms);
-    Ok([
-        "task-update",
-        "--run",
-        run_id,
-        "--task",
-        task,
-        "--result",
-        &result,
-        "--attempt",
-        attempt,
-        "--source",
-        source,
-        "--retry-request",
-        retry_request,
-    ]
-    .map(str::to_string)
-    .to_vec())
+    Ok(board_pass_result(held.result.as_str(), now_ms))
 }
 
 /// The machine strip's one answer: what `df -g`, `uptime` and `simctl` told a
@@ -2899,31 +2892,9 @@ mod tests {
             )
             .expect("the worker's report");
 
-        let argv = pass_argv(
-            ledger.run(&run_id),
-            &run_id,
-            &task,
-            "dp-2043",
-            "abc1234",
-            "ui-pass-1",
-            1_234,
-        )
-        .expect("a pass of a task the board holds");
-        let named = |flag: &str| {
-            argv.iter()
-                .position(|word| word == flag)
-                .and_then(|at| argv.get(at + 1))
-                .cloned()
-                .unwrap_or_else(|| panic!("{flag} missing from {argv:?}"))
-        };
-        assert_eq!(argv[0], "task-update");
-        assert_eq!(
-            [named("--task"), named("--attempt"), named("--source")],
-            [task.clone(), "dp-2043".into(), "abc1234".into()]
-        );
-        assert_eq!(named("--retry-request"), "ui-pass-1");
-        let sent: serde_json::Value =
-            serde_json::from_str(&named("--result")).expect("the result is JSON");
+        let sent = pass_result(ledger.run(&run_id), &run_id, &task, 1_234)
+            .expect("a pass of a task the board holds");
+        let sent: serde_json::Value = serde_json::from_str(&sent).expect("the result is JSON");
         for key in ["ok", "head", "summary", "tests", "reportPath"] {
             assert_eq!(
                 sent[key], worker_said[key],
@@ -2937,16 +2908,8 @@ mod tests {
             "{sent}"
         );
 
-        let unheld = pass_argv(
-            ledger.run(&run_id),
-            &run_id,
-            "t-404",
-            "dp-2043",
-            "abc1234",
-            "ui-pass-2",
-            1_235,
-        )
-        .expect_err("a task the board does not hold");
+        let unheld = pass_result(ledger.run(&run_id), &run_id, "t-404", 1_235)
+            .expect_err("a task the board does not hold");
         assert!(unheld.contains("t-404"), "{unheld}");
     }
 
