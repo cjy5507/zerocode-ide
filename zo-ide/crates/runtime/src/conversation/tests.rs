@@ -17421,7 +17421,7 @@ fn context_breakdown_report_lists_window_split_ladder_and_headroom() {
     );
 
     // A 1M session compacts against 650k, and the report says so — otherwise
-    // "Auto compact 520.0k (52%)" reads as a bug rather than as the policy.
+    // its ladder reads as shares of the 1M window rather than as the policy.
     let wide = runtime_for_context_policy(Some("claude-opus-4-1[1m]"), 1_000_000);
     let wide_report = wide.context_breakdown_report();
     assert!(
@@ -17437,6 +17437,107 @@ fn context_breakdown_report_lists_window_split_ladder_and_headroom() {
             .contains("auto-compaction disabled"),
         "disabled state must be explicit"
     );
+}
+
+/// A 1M session's `/context` report, beside the compaction window it is
+/// measured against — which must be under the model's window, or there is no
+/// compaction-window row to check.
+fn wide_context_report() -> (ConversationRuntime<NoopApiClient, StaticToolExecutor>, u64, String) {
+    std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
+    std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_WINDOW");
+    let wide = runtime_for_context_policy(Some("claude-opus-4-1[1m]"), 1_000_000);
+    let compaction_window = super::compaction::auto_compaction_window(wide.context_window);
+    assert!(
+        compaction_window < wide.context_window,
+        "the case needs a compaction window under the model's: {compaction_window}"
+    );
+    let report = wide.context_breakdown_report();
+    (wide, compaction_window, report)
+}
+
+/// The compaction-window row reads as a name, a gap and a value: the name is
+/// as long as the column it sat in, so it ran into its value (t-79938).
+#[test]
+fn context_breakdown_report_keeps_a_gap_after_the_compaction_window_name() {
+    let _env = crate::test_env_lock();
+    let (_, _, report) = wide_context_report();
+    let row = report
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("Compaction window"))
+        .unwrap_or_else(|| panic!("no compaction-window row:\n{report}"));
+    assert!(
+        row["Compaction window".len()..].starts_with(' '),
+        "the name runs into its value: {row:?}"
+    );
+}
+
+/// The ladder's percentages are of the window the compaction-window row names
+/// (t-79938): the tiers come from that window, and the row says so, so a
+/// percentage of the model's window reads low against it.
+#[test]
+fn context_breakdown_report_measures_the_ladder_against_the_compaction_window() {
+    let _env = crate::test_env_lock();
+    let (wide, compaction_window, report) = wide_context_report();
+    for (tier, threshold) in [
+        ("Microcompact", wide.microcompact_input_tokens_threshold()),
+        ("State distill", wide.state_distill_input_tokens_threshold()),
+        ("Warn", wide.precompaction_input_tokens_threshold()),
+        ("Auto compact", u64::from(wide.auto_compaction_input_tokens_threshold())),
+    ] {
+        let line = report
+            .lines()
+            .map(str::trim_start)
+            .find(|line| line.starts_with(tier))
+            .unwrap_or_else(|| panic!("no `{tier}` row:\n{report}"));
+        let shown = line
+            .rsplit_once('(')
+            .and_then(|(_, pct)| pct.strip_suffix("%)"))
+            .unwrap_or_else(|| panic!("no percentage on {line:?}"));
+        assert_eq!(
+            shown,
+            (threshold * 100 / compaction_window).to_string(),
+            "`{tier}` must be a % of the compaction window the report names:\n{report}"
+        );
+    }
+}
+
+/// `In use` stays a share of the model's window while the ladder moves to the
+/// compaction window (t-79938 review P3-4): a 1M session holding about 300k
+/// tokens reads as about 30% in use, not as a share of the smaller window.
+#[test]
+fn context_breakdown_report_keeps_in_use_on_the_model_window() {
+    let _env = crate::test_env_lock();
+    let (mut wide, compaction_window, _) = wide_context_report();
+    wide.session
+        .push_user_text("word ".repeat(240_000))
+        .expect("message");
+    let used = wide.effective_context_tokens();
+    assert_ne!(
+        used * 100 / wide.context_window,
+        used * 100 / compaction_window,
+        "the case needs the two windows to give different shares of {used}"
+    );
+    let report = wide.context_breakdown_report();
+    let line = report
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("In use"))
+        .unwrap_or_else(|| panic!("no `In use` row:\n{report}"));
+    assert!(
+        line.ends_with(&format!("({}%)", used * 100 / wide.context_window)),
+        "`In use` must be a % of the model's window: {line:?}\n{report}"
+    );
+}
+
+/// A session with no window of its own has no compaction window under it to
+/// name (t-79938 review P3-5): no "Compaction window 0 tokens" row.
+#[test]
+fn context_breakdown_report_names_no_compaction_window_for_a_session_without_one() {
+    let _env = crate::test_env_lock();
+    std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
+    let report = runtime_for_context_policy(None, 0).context_breakdown_report();
+    assert!(!report.contains("Compaction window"), "{report}");
 }
 
 /// P4: the summary-model override applies only within the session's provider
