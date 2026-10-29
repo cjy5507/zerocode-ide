@@ -172,10 +172,19 @@ const timer = setTimeout(() => {
 const exit = await new Promise((done) => child.on("exit", (code, signal) => done({ code, signal })));
 clearTimeout(timer);
 const wallMs = Date.now() - began;
-// Nothing is left running: anything still in the agent's group after its grace is ended and counted.
+/* Nothing is left running. Once its agent is gone, a stopped agent's group is
+ * told again at every look until it is gone: a process born while the stop went
+ * out — a fork the signal crossed, or a child the agent started on its way out —
+ * never heard it, and a forked shell still holding the agent's trap eats a stop
+ * that lands before its exec (t-84687). Whatever is still in the group after its
+ * grace is killed outright, and that is what was left over. */
 let leftover = false;
-for (let waited = 0; groupAlive() && waited < GROUP_GRACE_MS; waited += GROUP_POLL_MS) await sleep(GROUP_POLL_MS);
-if (groupAlive()) { leftover = true; group("SIGKILL"); }
+const outright = setTimeout(() => { if (groupAlive()) { leftover = true; group("SIGKILL"); } }, GROUP_GRACE_MS);
+while (groupAlive()) {
+  if (stopped) group("SIGTERM");
+  await sleep(GROUP_POLL_MS);
+}
+clearTimeout(outright);
 await Promise.race([new Promise((done) => (child.stdout.readableEnded ? done() : child.stdout.once("end", done))), sleep(STREAM_GRACE_MS)]);
 // A last line that came without its newline.
 const last = parsedLine(pending + decoder.end());
