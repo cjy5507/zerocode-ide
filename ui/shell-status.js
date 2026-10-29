@@ -4435,6 +4435,16 @@ function toast(words, kind = "", { action = null, sticky = false, aux = "", tip 
   return note;
 }
 
+/* The toast already saying these words, while it still stands. The same
+ * failure said again is the same news: a link pressed five times over a file
+ * that would not open stacked five toasts of one sentence (t-83039). One
+ * already leaving does not stand — the press that comes as it fades is told. */
+function standingToast(words, kind = "") {
+  const said = String(words ?? "").trim();
+  return [...toastLayer.children].find((note) => !note.classList.contains("is-closing") && !note.hidden &&
+    (note.dataset.kind ?? "") === kind && note.textContent === said) ?? null;
+}
+
 /* PR conditions. A condition is said once per occurrence: the first time the
  * window sees it unmarked. The ledger keeps that mark (shown_at), so a
  * restarted window does not say it again, and closing the toast writes
@@ -7085,6 +7095,7 @@ function showError(error) {
     // origin of the call may be anywhere or already gone, which is precisely
     // the case the toast layer exists for.
     console.error(error);
+    if (standingToast(String(error), "halt")) return;
     toast(String(error), "halt");
   }
 }

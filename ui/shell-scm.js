@@ -6064,7 +6064,7 @@ async function openIpynb(path, opts = {}) {
   try {
     opened = await invoke("read_text_file", { path });
   } catch (error) {
-    showError(`${path}: ${error}`);
+    sayUnopened(path, error, opts);
     return;
   }
   openTab({

@@ -1137,7 +1137,7 @@ async function openFile(path, opts = {}) {
       ...(opts.allowMissing && { allowMissing: true }),
     });
   } catch (error) {
-    showError(`${path}: ${error}`);
+    sayUnopened(path, error, opts);
     return;
   }
   const mode = renderedAs(path);
@@ -1253,7 +1253,7 @@ async function openImage(path, opts = {}) {
   try {
     image = await invoke("read_image_file", { path });
   } catch (error) {
-    showError(`${path}: ${error}`);
+    sayUnopened(path, error, opts);
     return;
   }
   openTab({ id: `file:${path}`, kind: "image", path, image, preview: Boolean(opts.preview) });
@@ -1271,6 +1271,14 @@ function openPath(path, opts = {}) {
   // `renderedAs` 한 곳만 안다.
   if (renderedAs(path) === "notebook") return openIpynb(path, opts);
   return openFile(path, opts);
+}
+
+/* A file that would not open, said — or handed to the caller that asked to
+ * hear it first (`unread`): a link that can still look for its file elsewhere
+ * says nothing until the look has its answer (t-83039). */
+function sayUnopened(path, error, opts) {
+  if (opts.unread) opts.unread(error);
+  else showError(`${path}: ${error}`);
 }
 
 function paintImageView(tab) {
@@ -3430,10 +3438,109 @@ function mdLink(label, href, line = undefined) {
   }
   const place = docHrefPlace(href);
   const at = line ?? place.line;
-  actsAsButton(node, () =>
-    openPath(resolveDocPath(where?.base ?? "", place.path), { preview: true, ...(at !== undefined && { line: at }) }),
-  );
+  actsAsButton(node, () => openDocLink(where?.base ?? "", place.path, at));
   return node;
+}
+
+/* A link's file, opened where it points — and only when nothing can be read
+ * there, looked for further (t-83039).
+ *
+ * A relative link is looked for by its tail among the checkout's files. An
+ * answer names a file the way a person does: 「terminal.rs」 for
+ * crates/zerocode-shell/src/cmd/terminal.rs. Measured from the checkout's top
+ * that is no file, and the press handed the person the disk's own refusal. The
+ * look is the file finder's (`search_files`), asked only by a press whose open
+ * failed — drawing a link asks the disk nothing. Only a link that lands inside
+ * the checkout that look walks is looked for: one measured from another
+ * checkout would find a namesake here. An absolute path is where it says it
+ * is. Whatever lands outside the checkout and the vault — an absolute path, or
+ * a link measured from another checkout — goes to `openOutsideDocLink` when the
+ * project's door refuses it. Every other failure is one sentence, never the
+ * disk's own refusal, which stays on its hover. */
+function openDocLink(base, path, line) {
+  const opts = { preview: true, ...(line !== undefined && { line }) };
+  const at = resolveDocPath(base, path);
+  const refusal = (error) => `${at}: ${error}`;
+  const inCheckout = !at.startsWith("/") || artifactPathUnder(at, activeWorktreePath);
+  if (!inCheckout && !artifactPathUnder(at, secondBrainVault)) {
+    return openPath(at, { ...opts, unread: (error) => void openOutsideDocLink(at, refusal(error)) });
+  }
+  const tail = path.startsWith("/") ? "" : path.replace(/^(?:\.{1,2}\/)+/, "");
+  if (inCheckout && tail !== "") {
+    return openPath(at, { ...opts, unread: (error) => void findDocLink(tail, opts, refusal(error)) });
+  }
+  return openPath(at, { ...opts, unread: (error) => sayLinkUnfound(tail || basename(at), refusal(error)) });
+}
+
+/* A file outside the project the person pressed (t-83039): an agent's answer
+ * named a note it wrote in its own scratch folder. The project's door refused
+ * it, as it must. When the path lies in the folder of a session this window
+ * holds — the backend asks its session table, never the path's spelling — it
+ * is read for a tab nobody can write, its relative links inert, as a gallery
+ * document from another project is (t-16006). Any other path is not opened:
+ * one sentence says so, with the refusal on its hover. */
+async function openOutsideDocLink(path, refusal) {
+  let held;
+  try {
+    held = await invoke("session_scratch_document", { path });
+  } catch (error) {
+    sayDocLinkFailure(t("file.scratchUnread", "이 파일은 글로 열 수 없어요: {{name}}", { name: basename(path) }), `${path}: ${error}`);
+    return;
+  }
+  if (!held) {
+    sayDocLinkFailure(t("file.outsideProject", "프로젝트 밖 파일이라 여기서 열지 않아요"), refusal);
+    return;
+  }
+  openTab({
+    id: `scratch-doc:${path}`,
+    kind: "file",
+    path,
+    text: held.text,
+    draft: held.text,
+    mode: renderedAs(path),
+    readOnly: true,
+    preview: true,
+  });
+  markFirstRun("opened_file");
+}
+
+/* A link that did not open, said in one sentence with what the disk said on
+ * its hover — once however often the link is pressed. */
+function sayDocLinkFailure(words, refusal) {
+  if (!standingToast(words, "halt")) toast(words, "halt", { tip: refusal });
+}
+
+/* A link whose file is not where it was looked for. */
+function sayLinkUnfound(name, refusal) {
+  sayDocLinkFailure(t("file.linkUnfound", "이 파일을 체크아웃에서 찾지 못했어요: {{name}}", { name }), refusal);
+}
+
+/* The checkout's files whose path ends with the link's: one opens at the line
+ * the link named, several stand in the file finder with the name typed in, and
+ * none is one sentence with what the disk said on its hover — said once
+ * however often the link is pressed. */
+async function findDocLink(tail, opts, refusal) {
+  const root = activeWorktreePath;
+  const name = basename(tail);
+  let hits = [];
+  // The finder's own cap (`hit_cap`, explorer_policy.json) bounds this look as it bounds the
+  // finder: a name more files hold than that can miss the one the link meant.
+  try {
+    hits = (await invoke("search_files", { query: name })) ?? [];
+  } catch {
+    // A look that could not run found nothing; the sentence below says so.
+  }
+  if (root !== activeWorktreePath) return;
+  const found = hits.filter((hit) => hit === tail || hit.endsWith(`/${tail}`));
+  if (found.length === 1) {
+    openPath(found[0], opts);
+    return;
+  }
+  if (found.length > 1) {
+    openPalette("file", { query: name, found });
+    return;
+  }
+  sayLinkUnfound(tail, refusal);
 }
 
 /* 그림. 바깥 그림은 이 창이 대신 받아오지 않는다 — 문서가 가리킨 곳으로 창이
@@ -5673,7 +5780,7 @@ async function openCsv(path, opts = {}) {
   try {
     opened = await invoke("read_text_file", { path });
   } catch (error) {
-    showError(`${path}: ${error}`);
+    sayUnopened(path, error, opts);
     return;
   }
   openTab({
