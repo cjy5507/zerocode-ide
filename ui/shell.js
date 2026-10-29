@@ -15563,23 +15563,48 @@ function trimActivityPill(group, first) {
   if (group.__open) openActivityPill(group, true);
 }
 
-/* 새로 선 활동 턴 하나를 알약에 들인다 — 바로 위의 행이 알약이면 거기에,
- * 아니면 `before` 앞에 새 알약을 세운다. 그 알약을 돌려준다. */
-function holdActivityTurn(list, run, turn, before, spoken) {
-  const above = before ? before.previousElementSibling : list.lastElementChild;
-  let group = above?.classList.contains("helper-group") ? above : null;
-  if (!group) {
-    group = activityPillNode();
-    list.insertBefore(group, before);
+/* 턴 하나가 곁의 행에 이어지는 규칙 — 목록의 두 끝이 함께 쓰는 하나(t-84136).
+ * 발에 온 턴은 바로 위의 행(`beside`)에 뒤로(`toEnd`), 위에서 읽어 올린 턴은
+ * 바로 아래의 행에 앞으로 잇는다. 접힌 보기에서 활동 턴은 그 알약에 들거나
+ * `at` 앞에 제 알약을 세우고, 펼친 보기에서 온전히 돌아온 단계는 같은 종류의
+ * 묶음에 들거나 만난 단계와 둘의 묶음이 된다. 턴이 선 행을 돌려준다 — 새
+ * 알약이든 옛 알약이든 칠하는 것은 부르는 쪽이다. 제 행이 따로 서야 하면 null. */
+function joinTurnBeside(list, run, turn, beside, at, toEnd, folded, spoken) {
+  if (folded && isActivityTurn(turn)) {
+    let group = beside?.classList.contains("helper-group") ? beside : null;
+    if (!group) {
+      group = activityPillNode();
+      list.insertBefore(group, at);
+    }
+    if (toEnd || group.__members.length === 0) {
+      group.__members.push(turn);
+      group.__turn = turn;
+      group.dataset.turn = String(turn.seq);
+      if (group.__open) {
+        dressSettledThought(group);
+        group.querySelector(":scope > .helper-group-body")?.appendChild(helperTurnRowNode(run, turn, spoken));
+      }
+    } else {
+      // 앞에 든 구성원은 열린 몸을 처음부터 다시 세운다 — 열쇠는 마지막 구성원의 것 그대로.
+      group.__members.unshift(turn);
+      group.querySelector(":scope > .helper-group-body")?.remove();
+      if (group.__open) openActivityPill(group, true);
+    }
+    return group;
   }
-  group.__members.push(turn);
-  group.__turn = turn;
-  group.dataset.turn = String(turn.seq);
-  if (group.__open) {
-    dressSettledThought(group);
-    group.querySelector(":scope > .helper-group-body")?.appendChild(helperTurnRowNode(run, turn, spoken));
+  if (folded || !stepJoins(beside, turn, stepKindOf(turn, run))) return null;
+  if (toEnd) return absorbStep(run, beside, turn);
+  if (!beside.classList.contains("is-run")) {
+    const row = runRowNode(run, [turn, beside.__turn]);
+    forgetShelf(list, beside);
+    beside.replaceWith(row);
+    return row;
   }
-  return group;
+  beside.__members.unshift(turn);
+  beside.querySelector(":scope > .helper-run-body")?.remove();
+  dressRunLine(beside);
+  if (beside.open) paintRunBody(beside, run);
+  return beside;
 }
 
 /* 목록 하나를 토글의 지금 값에 맞춘다. 값이 바뀌었으면 턴의 행을 모두 거두고
@@ -15698,30 +15723,24 @@ function syncHelperTurns(list, run) {
     if (turn.seq <= drawn) continue;
     // The tool work between two answers is one pill (t-81525 B1): the turn
     // joins the pill right above it, or stands one — no row of its own until
-    // the pill opens (B2).
-    if (folded && isActivityTurn(turn)) {
-      const group = holdActivityTurn(list, run, turn, streaming ?? helperListTail(list), spoken);
-      pills.add(group);
-      if (turn.role === "thinking" && streaming) noteThoughtSettled(list, turn, group);
+    // the pill opens (B2). A step that came back whole joins the steps of its
+    // kind right above it (t-15682): one row for them, drawn once, its members
+    // when it opens. The same rule stands what is read from above
+    // (`standEarlierRows`).
+    const tail = streaming ?? helperListTail(list);
+    const joined = joinTurnBeside(list, run, turn, tail ? tail.previousElementSibling : list.lastElementChild, tail, true, folded, spoken);
+    if (joined) {
+      if (joined.classList.contains("helper-group")) {
+        pills.add(joined);
+        if (turn.role === "thinking" && streaming) noteThoughtSettled(list, turn, joined);
+      }
       cold -= 1;
       settlePaneLive(run, turn.role);
       continue;
     }
-    // A step that came back whole joins the steps of its kind right above it
-    // (t-15682): one row for them, drawn once, its members when it opens.
-    if (!folded && turn.role === "tool") {
-      const tail = streaming ?? helperListTail(list);
-      const above = tail ? tail.previousElementSibling : list.lastElementChild;
-      if (stepJoins(above, turn, stepKindOf(turn, run))) {
-        absorbStep(run, above, turn);
-        cold -= 1;
-        settlePaneLive(run, turn.role);
-        continue;
-      }
-    }
     const row = helperTurnRowNode(run, turn, spoken, cold > 0);
     cold -= 1;
-    list.insertBefore(row, streaming ?? helperListTail(list));
+    list.insertBefore(row, tail);
     // The words a thought was streaming are this turn: what a reader had of
     // the streaming row passes to this one when that row goes.
     if (turn.role === "thinking" && streaming) noteThoughtSettled(list, turn, row);
@@ -15869,11 +15888,12 @@ function dropGoneRows(list, run, pills) {
   gone.clear();
 }
 
-/* What was read from above stands over the first row, newest first, as the
- * list draws a turn arriving at its foot: activity into the pill under it or
- * a pill of its own, a settled step into the run of its kind under it, any
- * other turn a row of its own — built cold but for the ones nearest the
- * reader, the shelf building the rest as they come within reach (B1). */
+/* What was read from above stands over the first row, newest first, by the
+ * rule a turn arriving at the foot keeps (`joinTurnBeside`): activity into the
+ * pill under it or a pill of its own, a settled step into the run of its kind
+ * under it, any other turn a row of its own — built cold but for the ones
+ * nearest the reader, the shelf building the rest as they come within reach
+ * (B1). */
 function standEarlierRows(list, run, earlier, folded, spoken, pills) {
   let front = firstTurnRow(list);
   if (!front || !earlier.length) return;
@@ -15881,34 +15901,10 @@ function standEarlierRows(list, run, earlier, folded, spoken, pills) {
   const people = [];
   for (let at = earlier.length - 1; at >= 0; at -= 1) {
     const turn = earlier[at];
-    if (folded && isActivityTurn(turn)) {
-      if (front.classList.contains("helper-group")) {
-        front.__members.unshift(turn);
-        front.querySelector(":scope > .helper-group-body")?.remove();
-        if (front.__open) openActivityPill(front, true);
-      } else {
-        const group = activityPillNode();
-        group.__members.push(turn);
-        group.__turn = turn;
-        group.dataset.turn = String(turn.seq);
-        list.insertBefore(group, front);
-        front = group;
-      }
-      pills.add(front);
-      continue;
-    }
-    if (!folded && stepJoins(front, turn, stepKindOf(turn, run))) {
-      if (front.classList.contains("is-run")) {
-        front.__members.unshift(turn);
-        front.querySelector(":scope > .helper-run-body")?.remove();
-        dressRunLine(front);
-        if (front.open) paintRunBody(front, run);
-      } else {
-        const row = runRowNode(run, [turn, front.__turn]);
-        forgetShelf(list, front);
-        front.replaceWith(row);
-        front = row;
-      }
+    const joined = joinTurnBeside(list, run, turn, front, front, false, folded, spoken);
+    if (joined) {
+      if (joined.classList.contains("helper-group")) pills.add(joined);
+      front = joined;
       continue;
     }
     const row = helperTurnRowNode(run, turn, spoken, warm <= 0);

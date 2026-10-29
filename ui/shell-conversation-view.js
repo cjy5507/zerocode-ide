@@ -2061,7 +2061,7 @@ function askShelfAgain(list) {
  * (nothing said between them) fold into one row that opens to its members; a
  * step that failed is never folded, and one still out waits for its answer
  * before it may join. The folded page (t-81525 B1) holds a turn's steps in
- * one pill instead and builds them when it opens (`holdActivityTurn`). */
+ * one pill instead and builds them when it opens (`joinTurnBeside`). */
 
 /* A kind's words and the family the head counts it in (t-22100), keyed by the
  * words the core reduces a tool's name to (`hook::Tool::as_str`): a turn
