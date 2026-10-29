@@ -221,15 +221,26 @@ function composerWorking(run) {
     && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)));
 }
 
-/* How long a hold that is not the turn itself keeps the queue (t-84670): the
- * conversation being handed to its wire, a question's card whose answer went,
- * a message the queue sent whose turn was never seen to start. Each ends by
- * itself when what it waits for happens; this bounds the one that does not
- * (10-30, right after v1.1.105's restart: a person's Enter went into the
- * queue under an idle head, again after ×, and nothing let it go). Longer
- * than the backend's own bound for a hand-over (`wire_start`: two 10 s probes
- * and the 8 s exit wait), so a hold that outlives it is stuck, not slow. */
+/* How long the conversation being handed to its wire keeps the queue
+ * (t-84670). The hand-over ends the hold itself when the wire stands or is
+ * refused; this bounds the one that does neither (10-30, right after
+ * v1.1.105's restart: a person's Enter went into the queue under an idle
+ * head, again after ×, and nothing let it go). The backend's own bound is
+ * longer — `wire_start` waits up to 90 s for each handshake request
+ * (`HANDSHAKE_WAIT`, two on a protocol that opens a session), 10 s for each
+ * of two probes and 8 s for the pane's exit — so a hand-over is not left to
+ * it: the window gives it a deadline (`COMPOSER_HAND_OVER_DUE_MS`) and lets
+ * the held words go to the pane at this bound. The other holds wait for their
+ * own event and nothing else: a question's card stands where the person sees
+ * it, and words let go under it would fall on its menu (t-81786 P0). */
 const COMPOSER_HOLD_MS = 60_000;
+
+/* By when, from the hand-over's start, its wire must have stood
+ * (`wire_start`'s `deadline_ms`): the hold less the pane's exit wait (8 s,
+ * `HAND_OVER_EXIT_WAIT`) and room for the answer to come back. The backend
+ * stops a wire that stands later, so none ever opens beside — or ends — a
+ * pane the held words were just given to. */
+const COMPOSER_HAND_OVER_DUE_MS = COMPOSER_HOLD_MS - 15_000;
 
 /* Whether a hold that began at `since` has run past its bound. A hold with no
  * stamp is not one this bound knows. */
@@ -247,47 +258,39 @@ function composerHolding(run) {
   return held?.handing === true && !composerHoldOver(held.handingSince);
 }
 
-/* Whether a question standing as its card holds the queue: one waiting for its
- * answer does (pasted now, the words would fall on the menu it shows,
- * t-81786 P0), and one whose answer went does until the pane moves on — or,
- * when no report ever says it did, until its hold runs out (t-84670). */
-function composerAskHolds(standing) {
-  if (!standing) return false;
-  return !standing.draft?.sending || !composerHoldOver(standing.draft.sentAt);
-}
-
 /* Whether words sent now wait in the queue rather than go — the submit's test
  * and the send's face (`paintComposerSend`) read this one answer. `asking` is
  * the question standing as its card once its answer went (t-81786 r2 P2-1):
  * the words after it wait as words sent mid-turn do. A card still waiting for
  * its answer takes the words as that answer, and is asked before this. */
 function composerQueues(run, asking) {
-  return composerWorking(run) || composerHolding(run) || composerAskHolds(asking);
+  return composerWorking(run) || composerHolding(run) || Boolean(asking);
 }
 
-/* The moment the earliest hold now keeping `run`'s queue runs out, or null
- * when none that time ends holds it — the turn itself, a card waiting for its
- * answer. */
+/* The moment the hand-over now keeping `run`'s queue stops holding it, or
+ * null when no hand-over holds it. */
 function composerHoldEnds(run, now = Date.now()) {
   const held = run.helper?.id === PANE_LOG_ID ? paneChats.get(run.term) : null;
-  const standing = standingAskOf(run);
-  const ends = [
-    held?.handing === true ? held.handingSince : null,
-    standing?.draft?.sending ? standing.draft.sentAt : null,
-    run.queueArmed === false ? run.queueSentAt : null,
-  ].filter(Number.isFinite).map((since) => since + COMPOSER_HOLD_MS).filter((at) => at > now);
-  return ends.length ? Math.min(...ends) : null;
+  const at = held?.handing === true && Number.isFinite(held.handingSince) ? held.handingSince + COMPOSER_HOLD_MS : null;
+  return at !== null && at > now ? at : null;
 }
 
-/* One timer per run for a queue held by something time ends: when that hold
- * runs out the queue is asked again. Nothing else moves when a hold sticks —
- * that is the case this is for (t-84670). */
+/* One timer per run for a queue a hand-over holds: when the hold runs out the
+ * queue is asked again. Nothing else moves when a hand-over sticks — that is
+ * the case this is for (t-84670). A queue no hand-over holds keeps no
+ * timer. */
 function armComposerRelease(run) {
-  if (!run.queue?.length) return;
-  const at = composerHoldEnds(run);
-  if (at === null || run.queueRelease?.at === at) return;
+  const at = run.queue?.length ? composerHoldEnds(run) : null;
+  if (at !== null && run.queueRelease?.at === at) return;
+  dropComposerRelease(run);
+  if (at !== null) run.queueRelease = { at, timer: setTimeout(() => releaseComposerHold(run), at - Date.now() + 1) };
+}
+
+/* The run's release timer gone — its hold ended by its own event, or the
+ * conversation it held for went. */
+function dropComposerRelease(run) {
   clearTimeout(run.queueRelease?.timer);
-  run.queueRelease = { at, timer: setTimeout(() => releaseComposerHold(run), at - Date.now() + 1) };
+  run.queueRelease = null;
 }
 
 function releaseComposerHold(run) {
@@ -297,8 +300,8 @@ function releaseComposerHold(run) {
 }
 
 /* Why the queue is waiting, in one line under its count — the turn, a
- * hand-over, a question, or the turn of what it sent last; a hold that time
- * ends says by when at the latest. */
+ * hand-over (and by when at the latest), a question, or the turn of what it
+ * sent last. */
 function composerQueueWhy(run) {
   const latest = { s: Math.round(COMPOSER_HOLD_MS / 1000) };
   if (composerWorking(run)) return t("composer.queue.why.turn", "이 턴이 끝나면 하나씩 보냅니다");
@@ -306,14 +309,12 @@ function composerQueueWhy(run) {
     return t("composer.queue.why.handing", "대화를 실시간으로 잇는 중 — 이어지면, 늦어도 {{s}}초 뒤 보냅니다", latest);
   }
   const standing = standingAskOf(run);
-  if (composerAskHolds(standing)) {
+  if (standing) {
     return standing.draft?.sending
-      ? t("composer.queue.why.answered", "질문에 보낸 답이 닿기를 기다립니다 — 늦어도 {{s}}초 뒤 보냅니다", latest)
+      ? t("composer.queue.why.answered", "질문에 보낸 답이 닿기를 기다립니다 — 판이 넘어가면 보냅니다")
       : t("composer.queue.why.asking", "위 질문에 답하면 보냅니다");
   }
-  if (run.queueArmed === false && !composerHoldOver(run.queueSentAt)) {
-    return t("composer.queue.why.started", "앞서 보낸 글의 턴이 시작되기를 기다립니다 — 늦어도 {{s}}초 뒤 보냅니다", latest);
-  }
+  if (run.queueArmed === false) return t("composer.queue.why.started", "앞서 보낸 글의 턴이 시작되기를 기다립니다");
   return t("composer.queue.why.going", "곧 보냅니다");
 }
 
@@ -402,9 +403,9 @@ function paintComposerQueue(form, run) {
  * 한 턴에 하나. 보낸 직후에는 훅도 선도 아직 「작업 중」이라 말하지 않아서,
  * 그 짧은 창에 이 문이 다시 불리면 대기열이 통째로 쏟아진다. 그래서 보낼
  * 때 빗장(`run.queueArmed`)을 내리고, 상태가 실제로 working으로 오른 것을
- * 본 뒤에만 다시 올린다 — 시계가 아니라 상태가 기준이다. 시계는 그 상태가
- * 끝내 오지 않을 때만 쓴다: 턴 아닌 붙잡음은 `COMPOSER_HOLD_MS` 뒤 풀린다
- * (`armComposerRelease`, t-84670). */
+ * 본 뒤에만 다시 올린다 — 시계가 아니라 상태가 기준이다. 시계는 판의 대화를
+ * 선으로 넘기는 일이 끝내 끝나지 않을 때만 쓴다: 그 붙잡음은
+ * `COMPOSER_HOLD_MS` 뒤 풀린다(`armComposerRelease`, t-84670). */
 function settleComposerQueue(run) {
   // Held for a hand-over under way: they go with the conversation (t-54304).
   if (composerHolding(run)) {
@@ -417,14 +418,11 @@ function settleComposerQueue(run) {
   }
   // Nor while a question stands as its card: pasted now, the words would fall
   // on the menu it shows (t-81786 P0). They go once the card is gone.
-  if (composerAskHolds(standingAskOf(run)) || (run.queueArmed === false && !composerHoldOver(run.queueSentAt))) {
-    armComposerRelease(run);
-    return;
-  }
+  if (standingAskOf(run)) return;
+  if (run.queueArmed === false) return;
   if (!run.queue?.length || run.sending || run.sendUncertain) return;
   const message = run.queue.shift();
   run.queueArmed = false;
-  run.queueSentAt = Date.now();
   run.sending = true;
   syncWorkerComposers(run);
   let pasted = false;
@@ -436,9 +434,6 @@ function settleComposerQueue(run) {
     .finally(() => {
       run.sending = false;
       syncWorkerComposers(run);
-      // What still waits goes once the turn this one starts is seen — or, if
-      // it never is, once that hold runs out (t-84670).
-      armComposerRelease(run);
     });
 }
 

@@ -36,6 +36,11 @@ struct WireUpdate {
 /// is — once the wire is up, the pane's CLI is told its own exit command, so
 /// one process speaks for the conversation at a time. A worker's pane is
 /// refused: the ledger drives it through its screen.
+///
+/// `deadline_ms` is the moment (epoch ms) past which the window no longer
+/// waits for this wire (t-84670): it gives what was sent meanwhile to the
+/// pane. A wire that stands after it is stopped and refused — it never opens
+/// beside a pane the words went to, nor tells that pane's CLI to exit.
 #[tauri::command(async)]
 pub(crate) fn wire_start(
     app: AppHandle,
@@ -44,6 +49,7 @@ pub(crate) fn wire_start(
     cwd: String,
     resume: Option<String>,
     from_pane: Option<TermId>,
+    deadline_ms: Option<i64>,
 ) -> Result<WireStarted, String> {
     // A refusal before the wire stands is logged beside the hand-over's own
     // receipt: a pane that asked for its conversation and kept its screen
@@ -66,6 +72,19 @@ pub(crate) fn wire_start(
                 );
             }
         })?;
+    // A wire that stood after the window stopped holding for it never takes
+    // the conversation: it is stopped here, before anything is remembered or
+    // typed, and the window keeps what it shows (t-84670).
+    if hand_over_overdue(deadline_ms, epoch_ms_now()) {
+        let _ = state.shell_runtime().wires.stop(session.id);
+        if let Some(term) = from_pane {
+            crate::system_runtime::note_window_event(
+                state.local_data_root(),
+                &wire_runtime::refusal_line(term, &agent, resume.as_deref(), HAND_OVER_OVERDUE),
+            );
+        }
+        return Err(HAND_OVER_OVERDUE.to_string());
+    }
     if let Some(path) = history {
         wire_runtime::remember_history(&session, std::path::PathBuf::from(path));
     }
@@ -158,6 +177,17 @@ fn stand_wire(
             }),
         },
     )
+}
+
+/// Why a wire that stood after the window's deadline was stopped (t-84670) —
+/// the refusal its log line and the page carry.
+const HAND_OVER_OVERDUE: &str =
+    "the wire stood after the window stopped waiting for it; the pane keeps the conversation";
+
+/// Whether a hand-over the window gave up on at `deadline_ms` is past it at
+/// `now_ms` — no deadline is never past.
+pub(crate) fn hand_over_overdue(deadline_ms: Option<i64>, now_ms: i64) -> bool {
+    deadline_ms.is_some_and(|deadline| now_ms >= deadline)
 }
 
 /// How long the pane's CLI gets to leave after its exit command. A TUI

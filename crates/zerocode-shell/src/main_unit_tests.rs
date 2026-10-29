@@ -32672,3 +32672,15 @@ fn only_a_mirror_the_window_opened_closes_without_a_hand() {
         Err(TerminalCloseError::NotMirror)
     ));
 }
+
+/// A wire that stands before the window's deadline takes the pane's
+/// conversation; one that stands at it or after never does, and a hand-over
+/// with no deadline is never late (t-84670).
+#[test]
+fn a_hand_over_past_the_windows_deadline_leaves_the_pane_alone() {
+    use crate::cmd::wire::hand_over_overdue;
+    assert!(!hand_over_overdue(None, 1_000));
+    assert!(!hand_over_overdue(Some(1_000), 999));
+    assert!(hand_over_overdue(Some(1_000), 1_000));
+    assert!(hand_over_overdue(Some(1_000), 61_000));
+}
