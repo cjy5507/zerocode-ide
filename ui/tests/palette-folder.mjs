@@ -18,6 +18,7 @@
 //      찾기 창은 그 대신 「프로젝트 목록을 아직 못 읽었다」는 사람 말 한 줄을 보인다.
 //   6. 카탈로그를 읽은 창에서도 워크트리 묶음은 카탈로그가 아는 경로만 세운다.
 //   7. 객체로 거절된 실패의 hover는 그 객체의 말(message·code)이다 — 「[object Object]」가 아니다.
+//   8. 토스트가 선 동안 다른 실패 문장은 새 토스트로 보인다(앞 것은 내려감). 같은 문장은 쌓이지 않는다.
 // 합성 데이터만 쓴다(/Users/dev).
 import { PRIMARY_EVENT } from "./test-platform.mjs";
 import { openWindowTestPage } from "./window-boot.mjs";
@@ -55,7 +56,9 @@ const palette = (page) => page.evaluate(() => ({
     return line && !line.hidden ? line.textContent : null;
   })(),
 }));
-
+// The toasts on screen now, beside every toast made: one that was replaced is made but no longer stands.
+const standing = (page) => page.evaluate(() => [...document.querySelectorAll(".toasts .toast")]
+  .filter((node) => !node.hidden).map((node) => node.textContent.trim()));
 // Every toast made since the scene was opened, read when it was made: a toast leaves on its own after a few
 // seconds, so the ones standing at the moment of asking would undercount a pile on a slow machine.
 const toasts = (page) => page.evaluate(() => window.__TOASTS_MADE__);
@@ -251,6 +254,44 @@ export async function testPaletteFolder(browser, origin, ok) {
     ok("the workspace group lists the catalog's folder and not a path the catalog does not know",
       trees.join("|") === "work" && shown.note === null, JSON.stringify(shown));
     ok("the stray-path scene raised no page error", faults.length === 0, faults.join(" | "));
+    await page.close();
+  }
+
+  // 7·8. Two finders failing in turn: a different sentence is a new toast, the same one is not a second.
+  {
+    const { page, faults } = await openOn(browser, origin, ({ failed }) => {
+      window.__ANSWER__.list_worktrees = () => Promise.reject(failed);
+      window.__ANSWER__.search_files = () => Promise.reject({ code: "search.failed", message: "the file index is being rebuilt" });
+    });
+    await markRows(page);
+    await page.click("#sidebar-search");
+    await answered(page).catch(() => null);
+    const first = await toasts(page);
+    await page.evaluate(() => {
+      togglePalette("file");
+      const input = document.getElementById("qo-input");
+      input.value = "pay";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await page.waitForFunction(() => window.__TOASTS_MADE__.length > 1).catch(() => null);
+    const both = await toasts(page);
+    const up = await standing(page);
+    ok("a different failure sentence while a toast stands is a new toast, which takes the earlier one's place",
+      first.length === 1 && both.length === 2 && both[1].text !== both[0].text
+        && up.length === 1 && up[0] === both[1].text, JSON.stringify({ both, up }));
+    ok("an object refusal with a message carries that message on the hover",
+      both[1]?.tip === "the file index is being rebuilt", JSON.stringify(both[1]));
+
+    await page.evaluate(() => {
+      const input = document.getElementById("qo-input");
+      input.value = "paym";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await page.waitForFunction(() => window.__COUNTS__.search_files >= 2).catch(() => null);
+    await page.evaluate(() => window.__PAINTED__());
+    const again = await toasts(page);
+    ok("the same failure sentence again piles no further toast", again.length === 2, JSON.stringify(again));
+    ok("the two-failures scene raised no page error", faults.length === 0, faults.join(" | "));
     await page.close();
   }
 }

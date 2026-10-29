@@ -3459,10 +3459,14 @@ function worktreeFinderShut() {
  * command's exit status, an exception's name or 「[object Object]」 was the
  * whole toast, and none of them is a sentence anybody can act on (t-82495).
  * One stands at a time: the finder asks again on every word typed, and a list
- * that will not read would otherwise pile a toast per key. */
+ * that will not read would otherwise pile a toast per key. A different
+ * sentence is different news — the file search failing while the workspace
+ * list's toast stands — so it takes the standing one's place rather than
+ * going unsaid for as long as that one stays (t-82875). */
 let paletteFailureNote = null;
 function sayPaletteFailure(words, error) {
-  if (paletteFailureNote?.isConnected) return;
+  if (paletteFailureNote?.isConnected && paletteFailureNote.textContent === words) return;
+  paletteFailureNote?.remove();
   paletteFailureNote = toast(words, "halt", { tip: paletteFailureTip(error) });
 }
 
