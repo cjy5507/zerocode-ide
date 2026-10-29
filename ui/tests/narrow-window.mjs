@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { chromium, createWindowServer, openWindowTestPage, recordBootPhases, waitBootSettled } from "./window-boot.mjs";
 
 /* The window on a laptop's own screen (t-77622).
  *
@@ -16,10 +16,34 @@ export const NARROW_WIDTHS = [1000, 900, 800, 720];
 export const WIDE_WIDTHS = [1440, 1920];
 export const LOCALES = ["ko", "en", "ja", "zh", "es"];
 
+/* What the harness stands on the bar, past every paint of the window's own:
+ * the project, the model and the terminal count (t-77829). */
+const STOOD = Object.freeze({ "sb-project": "zerocode", "sb-model": "claude-opus-5-5 · auto", "sb-count": "9" });
+
+/* The boot's own paints of the bar are behind it: the last phase it awaits
+ * and the last phase it reaches — the standing workspaces' resumes, not
+ * awaited — then two frames (t-77829). Needs `recordBootPhases` as the
+ * page's `before`. Values stood before then were painted over by the boot,
+ * differently in each run: ja, en and es measured an empty project, an
+ * empty model and three terminals. */
+export async function bootDone(page) {
+  await waitBootSettled(page);
+  await page.waitForFunction(() => window.__BOOT_PHASES__.includes("terminals_resumed"));
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+}
+
+/* Whether the bar still says what the harness stood. */
+export function standing(stood) {
+  const said = Object.fromEntries(Object.keys(stood).map((id) => [id, el(id).textContent]));
+  return { held: Object.entries(stood).every(([id, text]) => said[id] === text), said };
+}
+
 /* The account line the photo showed, spoken in the catalog's own words, and a
- * memory/terminal count — the longest thing the bar says. */
+ * memory/terminal count — the longest thing the bar says. The window's own
+ * paints its steps set going land first, and only then are the values put. */
 export async function stand(page, locale) {
-  await page.evaluate(async (locale) => {
+  await page.evaluate(async ([locale, stood]) => {
+    const twoFrames = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     setLocale(locale);
     for (let i = 0; i < 3; i++) await openTermTab();
     // The active pane runs an agent: the title bar's 터미널 | 대화 segment.
@@ -52,16 +76,16 @@ export async function stand(page, locale) {
     };
     await refreshClaudeUsage(false);
     await refreshClaudeAccountUsage(false);
-    el("sb-project").textContent = "zerocode";
-    el("sb-model").textContent = "claude-opus-5-5 · auto";
+    // The tab strip's and the status bar's paints the three tabs set going.
+    await twoFrames();
+    for (const [id, text] of Object.entries(stood)) el(id).textContent = text;
     el("sb-usage").textContent = `ctx ${(6693).toLocaleString()}`;
     el("sb-memory").textContent = "727.4 MB";
-    el("sb-count").textContent = "9";
     el("sb-ports").hidden = false;
     el("sb-ports-count").textContent = "3";
     el("commit-box").hidden = false;
-    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-  }, locale);
+    await twoFrames();
+  }, [locale, STOOD]);
 }
 
 /* What lies past an edge it belongs inside, by region. A box is out when a
@@ -186,9 +210,12 @@ const marks = () => ["sb-codex-route", "sb-scm-notices"].map((id) => {
 export async function testNarrowWindow(browser, origin, ok) {
   const rows = [];
   for (const locale of LOCALES) {
-    const { page, faults } = await openWindowTestPage(browser, origin);
+    const { page, faults } = await openWindowTestPage(browser, origin, { before: recordBootPhases });
     try {
+      await bootDone(page);
       await stand(page, locale);
+      const stood = await page.evaluate(standing, STOOD);
+      ok(`the bar says what was stood on it, past the window's own paints (${locale})`, stood.held, JSON.stringify(stood.said));
       for (const width of [...NARROW_WIDTHS, ...WIDE_WIDTHS]) {
         await page.setViewportSize({ width, height: 700 });
         await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
