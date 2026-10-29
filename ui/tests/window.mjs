@@ -148,7 +148,7 @@ import { testSidebarScroll } from "./sidebar-scroll.mjs";
 import { testLandingAlerts } from "./landing-alerts.mjs";
 import { testLandCheckLetter } from "./land-check-letter.mjs";
 import { testLandBatch } from "./land-batch.mjs";
-import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationLinkLookup, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
+import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationLinkLookup, testConversationOutsideLinks, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
 import { testConversationB } from "./conversation-b.mjs";
@@ -467,6 +467,9 @@ suite("conversation-paths", ({ browser, origin, ok }) => testConversationPaths(b
 /* 답이 이름만 댄 파일 — 누를 때 체크아웃에서 끝이 맞는 파일을 찾아 연다: 하나면 그 파일, 둘이면 파일 찾기,
  * 없으면 한 문장 한 번 (t-83039). */
 suite("conversation-link-lookup", ({ browser, origin, ok }) => testConversationLinkLookup(browser, origin, ok));
+/* 답이 온전한 경로로 댄 프로젝트 밖 파일 — 에이전트 세션 제 폴더의 글은 아무도 쓰지 못하는 탭으로, 그 밖은
+ * 열지 않고 한 문장 한 번 (t-83039 ⑥). */
+suite("conversation-outside-links", ({ browser, origin, ok }) => testConversationOutsideLinks(browser, origin, ok));
 suite("conversation-keys", ({ browser, origin, ok }) => testConversationKeys(browser, origin, ok));
 suite("conversation-status", ({ browser, origin, ok }) => testConversationStatus(browser, origin, ok));
 suite("conversation-scroll", ({ browser, origin, ok }) => testConversationScroll(browser, origin, ok));

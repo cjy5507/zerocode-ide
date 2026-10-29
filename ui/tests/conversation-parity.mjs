@@ -614,6 +614,103 @@ export async function testConversationLinkLookup(browser, origin, ok) {
   }
 }
 
+/* A file outside the project the answer names by its whole path (t-83039 ⑥):
+ * an agent's note in its own session folder, and a file somewhere else. The
+ * stubs answer as the backend does — the project's door refuses both as
+ * outside the project; the session door reads the note (the session table is
+ * the backend's, pinned by `session_scratch`'s own tests) and answers nothing
+ * for the other. Pressed, the note opens in a tab nobody can write with its
+ * relative links inert; the other opens nothing and says so once, however
+ * often it is pressed, with the refusal on its hover. */
+export async function testConversationOutsideLinks(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const root = "/tmp/zerocode-window-test";
+    const note = "/private/tmp/claude-501/-Users-dev-zerocode/s-1/scratchpad/tokens-render.md";
+    const elsewhere = "/Users/dev/notes/plan.md";
+    await page.evaluate(({ root, note }) => {
+      window.__READS__ = [];
+      window.__SCRATCH__ = [];
+      window.__ANSWER__.read_text_file = (args) => {
+        window.__READS__.push(args.path);
+        if (!args.path.startsWith(`${root}/`)) throw "path escapes the project";
+        return { text: "inside", version: 1, missing: false };
+      };
+      window.__ANSWER__.session_scratch_document = (args) => {
+        window.__SCRATCH__.push(args.path);
+        return args.path === note ? { text: "# 토큰\n\n[옆 파일](other.md)", bytes: 32, truncated: false } : null;
+      };
+    }, { root, note });
+    await openConversation(page, [
+      { role: "user", text: "결과는 어디에 있나요?" },
+      { role: "assistant", text: `정리한 글: ${note} 그리고 계획: ${elsewhere} 입니다.` },
+    ]);
+    const seen = await page.evaluate(async ({ note, elsewhere }) => {
+      const seen = {};
+      const until = async (done) => {
+        for (let beat = 0; beat < 30 && !done(); beat += 1) await window.__PAINTED__();
+      };
+      const toasts = () => [...document.querySelectorAll(".toasts .toast")];
+      const links = [...document.querySelectorAll("#worker-view .helper-turn.is-assistant .helper-link")];
+      const byLabel = (label) => links.find((one) => one.textContent.trim() === label);
+      const pageTab = activeTabId;
+      seen.drawn = [window.__READS__.length, window.__SCRATCH__.length];
+      // The agent's own note: a tab nobody can write, its relative link inert.
+      byLabel(note)?.click();
+      await until(() => activeTabId === `scratch-doc:${note}`);
+      const tab = tabs.find((one) => one.id === activeTabId);
+      const view = document.querySelector(`.file-view[data-tab="${CSS.escape(activeTabId)}"]`);
+      const inner = view?.querySelector(".file-body .md-link");
+      seen.note = {
+        tab: activeTabId,
+        readOnly: tab?.readOnly === true,
+        heading: view?.querySelector(".file-body h1, .file-body .md-head")?.textContent ?? null,
+        innerInert: Boolean(inner) && inner.getAttribute("role") !== "button" && inner.classList.contains("md-link--external"),
+        said: view?.querySelector(".file-view-note")?.textContent ?? "",
+        wantSaid: t("artifacts.readOnlyNote", "읽기 전용 — 열린 프로젝트 밖의 문서입니다."),
+        asked: [...window.__SCRATCH__],
+        toasts: toasts().length,
+      };
+      setActiveTab(pageTab);
+      await until(() => activeTabId === pageTab);
+      // Anywhere else: nothing opens, one sentence however often it is pressed.
+      const tabsBefore = tabs.length;
+      for (let press = 0; press < 3; press += 1) {
+        byLabel(elsewhere)?.click();
+        await until(() => window.__SCRATCH__.filter((path) => path === elsewhere).length === press + 1);
+      }
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      const said = toasts();
+      seen.elsewhere = {
+        count: said.length,
+        words: said.map((node) => node.textContent),
+        want: t("file.outsideProject", "프로젝트 밖 파일이라 여기서 열지 않아요"),
+        tip: said[0]?.dataset.tip ?? "",
+        tabs: tabs.length - tabsBefore,
+        front: activeTabId === pageTab,
+      };
+      return seen;
+    }, { note, elsewhere });
+    ok(
+      "t-83039 ⑥: a note the agent wrote in its own session folder opens, on the press, in a tab nobody can write that says so — its relative links inert — and nothing is said",
+      JSON.stringify(seen.drawn) === "[0,0]" &&
+        seen.note.tab === `scratch-doc:${note}` && seen.note.readOnly && seen.note.heading === "토큰" &&
+        seen.note.innerInert && seen.note.said.startsWith(seen.note.wantSaid) &&
+        JSON.stringify(seen.note.asked) === JSON.stringify([note]) && seen.note.toasts === 0,
+      JSON.stringify(seen),
+    );
+    ok(
+      "t-83039 ⑥: a file outside the project and outside every session folder opens nothing and is one sentence, once however often it is pressed, with the refusal on its hover",
+      seen.elsewhere.count === 1 && seen.elsewhere.words[0] === seen.elsewhere.want &&
+        seen.elsewhere.tip.includes("path escapes the project") && seen.elsewhere.tabs === 0 && seen.elsewhere.front,
+      JSON.stringify(seen),
+    );
+    ok("t-83039 ⑥: the outside links raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
 /* A3 — the keyboard. The extension's prompt keys (2.1.280 webview): a plain
  * Esc interrupts the turn from anywhere on the panel (`zU0` on body; a popup
  * takes it first, a permission card too); Shift+Tab steps the permission
@@ -5322,7 +5419,7 @@ async function inkShare(page, png, ink, plain) {
  * when it passes too — the numbers a receipt quotes. */
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const all = {
-    testConversationFont, testConversationFolds, testConversationPaths, testConversationLinkLookup, testConversationKeys, testConversationStatus,
+    testConversationFont, testConversationFolds, testConversationPaths, testConversationLinkLookup, testConversationOutsideLinks, testConversationKeys, testConversationStatus,
     testConversationScroll, testConversationFoot, testConversationAgents, testConversationTodos, testConversationImages,
     testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps,
     testConversationCodeColours, testConversationStreamWork, testConversationTypingWork,
