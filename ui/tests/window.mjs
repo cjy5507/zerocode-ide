@@ -56934,6 +56934,9 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       seen.cardActs = [...(card?.querySelectorAll(".board-approve-act") ?? [])].map((act) => act.textContent).join("|");
       seen.wantCardActs = [t("wire.allowOnce", "허용"), t("wire.allowAlways", "이 세션에서 항상 허용"), t("wire.rejectOnce", "거부")].join("|");
       seen.cardKinds = [...(card?.querySelectorAll(".board-approve-act") ?? [])].map((act) => act.className.replace("board-approve-act ", "")).join("|");
+      // The box under the card says where its words go as the card stands (t-81786 r2 P2-2).
+      seen.askSays = face.querySelector(".worker-composer-box")?.placeholder ?? "";
+      seen.wantAskSays = t("worker.askAnswerFirst", "먼저 위 질문에 답하세요");
       // A quiet poll leaves the card alone.
       const watch = new MutationObserver(() => {});
       if (card) watch.observe(card, { childList: true, subtree: true, attributes: true, characterData: true });
@@ -56958,6 +56961,26 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       seen.doneRow = face.querySelector(".helper-turn.is-tool.is-done") !== null;
       seen.busyGone = face.querySelector(".helper-status")?.hidden === true;
       seen.idleAgain = face.querySelector(".worker-state")?.textContent === seen.wantIdleWords;
+      // A second question, of the other kind: the box says where its words go
+      // for this one, not for the permission before it, and its own sentence
+      // once none stands (t-81786 r2 P2-2).
+      log = {
+        ...log, status: "asking",
+        asks: [{
+          id: 4, kind: "question",
+          questions: [{ question: "어느 파일로 할까요?", header: "파일", options: [{ label: "probe.txt" }, { label: "other.txt" }] }],
+        }],
+      };
+      await pollHelperPages();
+      await window.__PAINTED__();
+      await settle();
+      seen.secondAskSays = face.querySelector(".worker-composer-box")?.placeholder ?? "";
+      seen.wantSecondAskSays = t("worker.askAnswerHere", "위 질문의 답으로 보냅니다");
+      log = { ...log, status: "idle", asks: [] };
+      await pollHelperPages();
+      await window.__PAINTED__();
+      await settle();
+      seen.noAskSays = face.querySelector(".worker-composer-box")?.placeholder ?? "";
       // The words stream: the wire's live text stands as rows under the last
       // turn — a thought's closed line, the answer's row — grows in place, and
       // closes into turns in the same paint that brings them.
@@ -57091,6 +57114,12 @@ suite("wire-session", async ({ browser, origin, ok }) => {
         seen.paletteHead === seen.wantPaletteHead && seen.paletteRows === "/help,/artifact,/copy" &&
         seen.stopped && seen.tabGone,
       JSON.stringify(seen),
+    );
+    ok(
+      "a wire's box says where its words go for the question standing now — the first as it comes, a second of the other kind as its own, not the one before it — and its own sentence once none stands (t-81786 r2 P2-2)",
+      seen.askSays === seen.wantAskSays && seen.secondAskSays === seen.wantSecondAskSays && seen.noAskSays === seen.wantPlaceholder,
+      JSON.stringify({ askSays: seen.askSays, wantAskSays: seen.wantAskSays, secondAskSays: seen.secondAskSays,
+        wantSecondAskSays: seen.wantSecondAskSays, noAskSays: seen.noAskSays, wantPlaceholder: seen.wantPlaceholder }),
     );
   } finally {
     await page.close();

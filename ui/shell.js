@@ -13446,6 +13446,7 @@ function paintWireAsk(host, run, force = false) {
   if (!ask) {
     card?.remove();
     run.askDraft = null;
+    run.askShape = null;
     return;
   }
   const sig = JSON.stringify(ask.id);
@@ -13479,6 +13480,11 @@ function paintWireAsk(host, run, force = false) {
     ? askPanelNode(run.askShape, run.askDraft)
     : approvalPanelNode(run.askShape, run.askDraft);
   standAskCard(host, panel);
+  // The box under the card says where its words go for this question — the
+  // page's composer was painted before the card took its shape (t-81786 r2
+  // P2-2: the first question read the box's own sentence, the next the one
+  // before it).
+  syncWorkerComposers(run);
 }
 
 /* A helper's open page learns that its helper finished from the roster, the
