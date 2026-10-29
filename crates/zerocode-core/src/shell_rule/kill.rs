@@ -247,6 +247,18 @@ impl ProcessTable {
         lineage(&by_pid(rows), pid).into_iter().skip(1).collect()
     }
 
+    /// Whether `pid` names the pane `caller` names: a job the calling pane
+    /// set loose. Asked only of a process outside every tree the window
+    /// keeps. A pane cannot write its mark into a process it did not start —
+    /// a process's environment is what its parent handed it — so the mark
+    /// reaches only what the pane started, and what another pane started and
+    /// chose to hand it.
+    fn shares_pane(&self, caller: Option<u32>, pid: u32) -> bool {
+        caller
+            .and_then(|caller| self.marks.get(&caller))
+            .is_some_and(|own| self.marks.get(&pid) == Some(own))
+    }
+
     /// `root` and every pid under it — the tree a caller owns.
     #[must_use]
     pub fn tree_of(&self, root: u32) -> Vec<u32> {
@@ -426,9 +438,10 @@ pub fn kill_calls(command: &str) -> Vec<KillCall> {
 
 /// Judge `calls` for the pane whose own process is `caller` (`None` when
 /// the window does not know it): a target in the caller's own tree is its
-/// own business; one in a `protected` tree outside it is refused; one
-/// anywhere else, one known only at run time, or one the table could not be
-/// read for is asked of a person.
+/// own business, and so is one outside every tree that names the caller's
+/// pane ([`PaneMark`]) — a job the pane set loose; one in a `protected` tree
+/// outside the caller's is refused; one anywhere else, one known only at run
+/// time, or one the table could not be read for is asked of a person.
 #[must_use]
 pub fn judge_kill(
     calls: &[KillCall],
@@ -477,6 +490,7 @@ pub fn judge_kill(
             for row in matched {
                 match place(row.pid, by_pid, caller, protected) {
                     Place::Own => {}
+                    Place::Outside if table.shares_pane(caller, row.pid) => {}
                     Place::Kept(label) => {
                         return KillVerdict::Deny {
                             reason: format!(
