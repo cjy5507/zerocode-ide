@@ -22983,7 +22983,9 @@ fn a_chatty_run_still_working(bench: &mut Bench, look_at: i64, look: &str) -> Ch
     let batch: serde_json::Value =
         serde_json::from_str(&looked.reply.stdout).expect("the look's answer");
     let delivery = batch["deliveryId"].as_str().expect("a batch").to_string();
-    bench.json(&format!("check --ack {delivery} --retry-request {look}-ack"));
+    bench.json(&format!(
+        "check --ack {delivery} --retry-request {look}-ack"
+    ));
     bench.json(&format!("reply --to-message {question} --body this-way"));
     let late = (0..2)
         .map(|said| {

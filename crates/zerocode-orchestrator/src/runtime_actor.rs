@@ -1764,8 +1764,14 @@ impl std::fmt::Debug for RuntimeImage {
             .debug_struct("RuntimeImage")
             .field("revision", &self.revision)
             .field("ledger", &*self.ledger)
-            .field("tasks", &runs.iter().map(|run| run.tasks.len()).sum::<usize>())
-            .field("workers", &runs.iter().map(|run| run.workers.len()).sum::<usize>())
+            .field(
+                "tasks",
+                &runs.iter().map(|run| run.tasks.len()).sum::<usize>(),
+            )
+            .field(
+                "workers",
+                &runs.iter().map(|run| run.workers.len()).sum::<usize>(),
+            )
             .field(
                 "messages",
                 &runs.iter().map(|run| run.messages().len()).sum::<usize>(),
@@ -1787,8 +1793,7 @@ impl PartialEq for RuntimeImage {
             && self.recoveries == other.recoveries
             && self.repairs == other.repairs
             && self.said_goodbye == other.said_goodbye
-            && (Arc::ptr_eq(&self.ledger, &other.ledger)
-                || self.projection() == other.projection())
+            && (Arc::ptr_eq(&self.ledger, &other.ledger) || self.projection() == other.projection())
     }
 }
 

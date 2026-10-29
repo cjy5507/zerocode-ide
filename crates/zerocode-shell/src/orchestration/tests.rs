@@ -29045,10 +29045,7 @@ fn a_write_and_the_reads_after_it_hold_the_ledger_once() {
     // nobody (t-81273).
     assert_eq!(walked.clones, 0, "a read copied the ledger");
     assert!(
-        std::sync::Arc::ptr_eq(
-            one.ledger(),
-            &super::ledger_image().expect("a third read")
-        ),
+        std::sync::Arc::ptr_eq(one.ledger(), &super::ledger_image().expect("a third read")),
         "the window read a ledger that is not the actor's"
     );
 }

@@ -2726,10 +2726,11 @@ fn fold_old_letters(
                     continue;
                 };
                 // A batch a receipt can replay keeps every letter in it.
-                if replayed
-                    .batches
-                    .contains(&(run.id.as_str(), address.as_str(), spent.delivery.as_str()))
-                {
+                if replayed.batches.contains(&(
+                    run.id.as_str(),
+                    address.as_str(),
+                    spent.delivery.as_str(),
+                )) {
                     stays.extend(went.iter().map(String::as_str));
                 } else {
                     acknowledged.extend(went.iter().map(String::as_str));
