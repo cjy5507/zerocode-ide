@@ -4347,7 +4347,7 @@ mod tests {
     /// the request's deposit replaces the refresh's, and the refresh's answer
     /// must not take it away on its way to finding nothing of its own
     /// (adversarial review W3, P3-1). The next request's row keeps what it
-    /// sent.
+    /// sent, its effort included.
     #[test]
     fn a_refresh_answer_leaves_the_next_request_its_sent_prefixes() {
         let _env = test_env_lock();
@@ -4364,8 +4364,8 @@ mod tests {
             .into_bytes()
         };
 
-        cache.note_sent_payload(&refresh, &payload("b"));
-        cache.note_sent_payload(&next, &payload("c"));
+        cache.note_sent_payload(&refresh, &payload("b"), Some("high"));
+        cache.note_sent_payload(&next, &payload("c"), Some("max"));
         cache.record_refresh(&refresh, &plain_usage(0, 50_000, 2));
         let _ = cache.record_usage(&next, &plain_usage(0, 50_000, 2));
 
@@ -4375,6 +4375,11 @@ mod tests {
         assert_eq!(
             rows[2].prefix_hashes, sent,
             "the refresh's answer threw away the next request's deposit: {:?}",
+            rows[2]
+        );
+        assert_eq!(
+            rows[2].sent_effort, "max",
+            "the effort rides the same deposit and stays with its request: {:?}",
             rows[2]
         );
     }
