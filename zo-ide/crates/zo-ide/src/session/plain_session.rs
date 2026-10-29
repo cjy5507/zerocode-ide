@@ -214,6 +214,9 @@ pub struct PlainSession {
     /// Whether the person's interrupt of the running turn sends the words
     /// they typed while it ran. Each turn's scaffold takes it lowered.
     send_words: SendWords,
+    idle_dreamer: crate::autonomy::dreaming::IdleDreamer,
+    pending_scheduled_workflow: Option<serde_json::Value>,
+    last_scheduled_workflow_status: Option<String>,
 }
 
 /// `PlainSession::open` 에 들어간 런치 플래그의 되읽기 — `/resume` 으로 세션을
@@ -732,6 +735,10 @@ impl PlainSession {
         sync_dreamer_model_reminder(&mut runtime, crate::dream::last_pass_line().as_deref());
         let agent_completion_receiver = register_for_surface(options.headless);
 
+        let idle_dreamer = crate::autonomy::dreaming::IdleDreamer::new(
+            runtime::memory::dreamer::automatic_dream_enabled(&cwd), now_unix_ms(),
+            autonomy.limits.idle_dream_delay_secs.saturating_mul(1000),
+        );
         let session = Self {
             selection_origins,
             model_selection,
@@ -758,6 +765,9 @@ impl PlainSession {
             route_fact: super::route_fact::channel(),
             continuity: TaskContinuity::default(),
             send_words: SendWords::default(),
+            idle_dreamer,
+            pending_scheduled_workflow: None,
+            last_scheduled_workflow_status: None,
         };
         // A new session has no file yet, so this publishes its initial
         // snapshot. A resumed session is already persistence-bound and clean;
@@ -934,6 +944,7 @@ impl PlainSession {
 
     /// 스트리밍 턴 하나를 이미지 첨부와 함께 실행한다. 이미지 쌍은 엔진의
     /// `push_user_with_images` 입력과 같은 `(media_type, base64)` 모양이다.
+    #[expect(clippy::too_many_lines, reason = "shared turn entry keeps scheduled dispatch and model lifecycle in order")]
     pub(crate) async fn run_turn_with_images(
         &mut self,
         input: &str,
@@ -943,6 +954,9 @@ impl PlainSession {
         hook_abort_signal: HookAbortSignal,
         user_cancel_requested: Arc<AtomicBool>,
     ) -> Result<runtime::TurnSummary, String> {
+        if let Some(payload) = self.pending_scheduled_workflow.take() {
+            return self.run_scheduled_workflow(input, payload, block_tx, hook_abort_signal, user_cancel_requested).await;
+        }
         self.sync_project_rule_advice();
         self.refresh_credentials_for_turn(&block_tx).await.inspect_err(|_| self.clear_notice_mark())?;
         let origin = self.begin_task_continuity(input, &block_tx).await;
@@ -1048,11 +1062,71 @@ impl PlainSession {
         if let Some(plan) = plan_turn {
             plan.finish(&self.cwd, &self.handle.id, &result);
         }
+        self.idle_dreamer.activity(now_unix_ms());
         self.clear_notice_mark();
         self.end_task_continuity(origin, user_cancel_requested.load(Ordering::SeqCst));
         let summary = result?;
         self.persist().map_err(|error| error.to_string())?;
         Ok(summary)
+    }
+
+    async fn run_scheduled_workflow(
+        &mut self, notice: &str, payload: serde_json::Value,
+        blocks: tokio::sync::mpsc::Sender<RenderBlock>, stop: HookAbortSignal,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<runtime::TurnSummary, String> {
+        self.last_scheduled_workflow_status = None;
+        self.runtime.set_hook_abort_signal(stop.clone());
+        self.install_turn_stop(&stop);
+        self.arm_turn_limits();
+        let budget = self.autonomy.status().budget;
+        let remaining = budget.max_output_tokens.saturating_sub(budget.output_tokens);
+        if remaining == 0 { return Err("scheduled graph: session token budget exhausted".to_string()); }
+        if let Some(cap) = payload.pointer("/spec/budget/max_output_tokens").and_then(serde_json::Value::as_u64) {
+            if cap > remaining {
+                return Err("scheduled graph exceeds the remaining session token budget".to_string());
+            }
+        }
+        let remaining_ms = budget.max_wall_clock_secs.saturating_mul(1000).saturating_sub(budget.active_millis);
+        let timeout = std::time::Duration::from_millis(remaining_ms);
+        let registry = self.runtime.tool_executor()
+            .scheduled_workflow_registry(self.runtime.host_permission_enforcer()).map_err(|e| e.to_string())?;
+        self.runtime.session_mut().push_user_text(notice).map_err(|e| e.to_string())?;
+        self.persist().map_err(|e| e.to_string())?;
+        let result = super::scheduled_workflow::run(registry, payload, blocks.clone(), stop, cancelled, timeout).await;
+        self.idle_dreamer.activity(now_unix_ms());
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let reason = "scheduled graph outcome or cost is unknown; automatic execution stopped";
+                self.autonomy.block(reason).map_err(|persist| format!("{error}; {reason}; {persist}"))?;
+                return Err(error);
+            }
+        };
+        if result.status == "blocked" {
+            // A blocked graph can retain an in-flight agent or an uncertain
+            // effect. A fresh cron-slot id must not turn that into a retry.
+            let _ = self.autonomy.block("scheduled graph requires reconciliation; automatic execution stopped");
+        }
+        self.last_scheduled_workflow_status = Some(result.status);
+        let saved = (|| -> Result<(), String> {
+            for message in &result.summary.assistant_messages {
+                self.runtime.session_mut().push_message(message.clone()).map_err(|e| e.to_string())?;
+            }
+            self.persist().map_err(|e| e.to_string())
+        })();
+        if let Err(error) = saved {
+            // The work already ran: its known spend must still reach the shared
+            // budget even when the transcript cannot be saved.
+            let reason = "scheduled graph transcript could not be saved; automatic execution stopped";
+            let _ = self.autonomy.block(reason);
+            let _ = blocks.send(RenderBlock::System {
+                id: runtime::message_stream::BlockIdGen::default().next(),
+                level: runtime::message_stream::SystemLevel::Warn,
+                text: format!("{reason}: {error}"),
+            }).await;
+        }
+        Ok(result.summary)
     }
 
     /// The turn ended: tell the person's work how — run out, stopped by the
@@ -1834,10 +1908,18 @@ impl PlainSession {
             self.autonomy.goal.next_wakeup(),
             self.autonomy.loops.next_wakeup(),
             crons,
+            self.idle_dreamer.next_wakeup(self.permission_mode != PermissionMode::ReadOnly),
         ]
         .into_iter()
         .flatten()
         .min()
+    }
+
+    /// Called only when the shared driver has no due user automation left.
+    pub(crate) fn dream_when_idle(&self) {
+        if let Some(attempt) = self.idle_dreamer.begin(now_unix_ms(), self.permission_mode != PermissionMode::ReadOnly) {
+            super::dreamer_hook::spawn_on_idle(&self.cwd, &self.handle.id, &self.model, attempt);
+        }
     }
 
     /// The cron registry the session's tools write — fetched from the live
@@ -1868,8 +1950,20 @@ impl PlainSession {
                 None => Ok(None),
             };
         }
+        // Keep the registered spec byte-for-byte stable for graph recovery.
+        // Refuse before claiming a slot when its declared bound cannot fit.
+        let budget = self.autonomy.status().budget;
+        let remaining = budget.max_output_tokens.saturating_sub(budget.output_tokens);
+        if registry.due_at(now / 1000).iter().any(|due| due.entry.workflow.as_ref()
+            .and_then(|input| input.pointer("/spec/budget/max_output_tokens"))
+            .and_then(serde_json::Value::as_u64).is_some_and(|cap| cap > remaining)) {
+            let reason = "scheduled graph exceeds the remaining session token budget";
+            self.autonomy.block(reason).map_err(|error| error.to_string())?;
+            return Err(reason.to_string());
+        }
         let turn = crate::autonomy::crons::dispatch_due(&registry, now);
         if let Some(turn) = &turn {
+            self.pending_scheduled_workflow.clone_from(&turn.workflow);
             self.continuity
                 .unattended_dispatched(super::task_continuity::cron_label(&turn.id));
         }
@@ -1889,12 +1983,20 @@ impl PlainSession {
             self.autonomy.goal.pause_for_session_limit(&reason)?;
             self.autonomy.loops.pause_for_session_limit(&reason)?;
         }
-        Ok(format!(
-            "{} {} · {}",
-            crate::autonomy::crons::TURN_LABEL,
-            turn.id,
-            receipt.summary()
-        ))
+        let graph_status = if turn.workflow.is_some() {
+            let status = self.last_scheduled_workflow_status.take();
+            let blocked = status.as_deref().is_none_or(|status| status == "blocked");
+            if let Some(registry) = self.cron_registry() {
+                if !registry.settle_workflow_run(&turn.id, turn.due_at_secs, blocked)? {
+                    return Err("scheduled graph lease changed before settlement".to_string());
+                }
+            }
+            format!("graph {} · ", status.unwrap_or_else(|| "failed".to_string()))
+        } else { String::new() };
+        let detail = if turn.workflow.is_some() {
+            format!("{graph_status}output {} · active {}ms", receipt.output_tokens, receipt.active_millis)
+        } else { receipt.summary() };
+        Ok(format!("{} {} · {detail}", crate::autonomy::crons::TURN_LABEL, turn.id))
     }
 
     #[must_use]

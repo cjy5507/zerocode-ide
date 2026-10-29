@@ -65,15 +65,9 @@ pub(crate) fn run_on_session_end(
                 runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL,
                 Some(&active_model),
             );
-            match &result {
-                Ok(Some(report)) => {
-                    crate::dream::record(report);
-                    promote_to_second_brain(&cwd, &worker_session_id, report);
-                }
-                Err(error) => {
-                    let _ = runtime::record_auto_dream_failure(&cwd, error);
-                }
-                Ok(None) => {}
+            if let Ok(Some(report)) = &result {
+                crate::dream::record(report);
+                promote_to_second_brain(&cwd, &worker_session_id, report);
             }
             let _ = result_tx.send(result);
         });
@@ -112,6 +106,28 @@ pub(crate) fn run_on_session_end(
 /// same rule as every other seam of the feature — and loud only when it
 /// actually wrote something, so the session-end log can say what left the
 /// process.
+/// Start an idle pass without borrowing the session or blocking its renderer.
+pub(crate) fn spawn_on_idle(
+    cwd: &Path, session_id: &str, model: &str,
+    attempt: crate::autonomy::dreaming::DreamAttempt,
+) {
+    let cwd = cwd.to_path_buf();
+    let session_id = session_id.to_string();
+    let model = model.to_string();
+    let _ = thread::Builder::new().name("dreamer-idle".to_string()).spawn(move || {
+        match runtime::maybe_auto_dream(&cwd, runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL, Some(&model)) {
+            Ok(Some(report)) => {
+                crate::dream::record(&report);
+                promote_to_second_brain(&cwd, &session_id, &report);
+                attempt.completed(crate::autonomy::scheduler::now_unix_ms());
+                log_status(&session_id, &format!("idle {}", report.summary_line()));
+            }
+            Err(_) => log_status(&session_id, "idle_failed"),
+            Ok(None) => {}
+        }
+    });
+}
+
 fn promote_to_second_brain(cwd: &Path, session_id: &str, report: &runtime::memory::DreamReport) {
     let Some(promotion) =
         runtime::second_brain::promote::promote_session_lessons(cwd, session_id, report)

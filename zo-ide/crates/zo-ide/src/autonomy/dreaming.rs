@@ -1,0 +1,106 @@
+//! Memory curation on the existing session idle clock; no model turn or daemon.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+
+
+pub(crate) struct IdleDreamer {
+    enabled: bool,
+    delay_ms: u64,
+    idle_after: u64,
+    next_attempt: Arc<AtomicU64>,
+    running: Arc<AtomicBool>,
+}
+
+pub(crate) struct DreamAttempt {
+    next_attempt: Arc<AtomicU64>,
+    running: Arc<AtomicBool>,
+}
+
+impl IdleDreamer {
+    pub(crate) fn new(enabled: bool, now: u64, delay_ms: u64) -> Self {
+        Self {
+            enabled,
+            delay_ms: delay_ms.max(1),
+            idle_after: now.saturating_add(delay_ms.max(1)),
+            next_attempt: Arc::new(AtomicU64::new(0)),
+            running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn activity(&mut self, now: u64) {
+        self.idle_after = now.saturating_add(self.delay_ms);
+    }
+
+    pub(crate) fn next_wakeup(&self, may_write: bool) -> Option<u64> {
+        (self.enabled && may_write).then(|| {
+            self.idle_after.max(self.next_attempt.load(Ordering::Acquire))
+        })
+    }
+
+    pub(crate) fn begin(&self, now: u64, may_write: bool) -> Option<DreamAttempt> {
+        if self.next_wakeup(may_write).is_none_or(|due| due > now) {
+            return None;
+        }
+        // Advance before either spawning or observing a still-running worker.
+        // Otherwise a due timestamp would spin the shared idle select loop.
+        self.next_attempt.store(now.saturating_add(self.delay_ms), Ordering::Release);
+        self.running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).ok()?;
+        Some(DreamAttempt {
+            next_attempt: Arc::clone(&self.next_attempt),
+            running: Arc::clone(&self.running),
+        })
+    }
+}
+
+impl DreamAttempt {
+    pub(crate) fn completed(&self, now: u64) {
+        let interval = runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL.as_millis();
+        let interval = u64::try_from(interval).unwrap_or(u64::MAX);
+        self.next_attempt.store(now.saturating_add(interval), Ordering::Release);
+    }
+}
+
+impl Drop for DreamAttempt {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_enabled_writable_idle_session_becomes_due() {
+        let mut clock = IdleDreamer::new(true, 0, 60_000);
+        assert!(clock.begin(59_999, true).is_none());
+        clock.activity(40_000);
+        assert_eq!(clock.next_wakeup(true), Some(100_000));
+        assert!(clock.begin(100_000, false).is_none());
+        assert!(clock.begin(100_000, true).is_some());
+        assert!(IdleDreamer::new(false, 0, 60_000).next_wakeup(true).is_none());
+    }
+
+    #[test]
+    fn a_pending_or_failed_pass_never_spins_or_overlaps() {
+        let clock = IdleDreamer::new(true, 0, 60_000);
+        let attempt = clock.begin(60_000, true).unwrap();
+        assert_eq!(clock.next_wakeup(true), Some(120_000));
+        assert!(clock.begin(120_000, true).is_none());
+        assert_eq!(clock.next_wakeup(true), Some(180_000));
+        drop(attempt);
+        assert!(clock.begin(180_000, true).is_some());
+    }
+
+    #[test]
+    fn successful_curation_preserves_its_cooldown_across_more_activity() {
+        let mut clock = IdleDreamer::new(true, 0, 60_000);
+        let attempt = clock.begin(60_000, true).unwrap();
+        attempt.completed(61_000);
+        drop(attempt);
+        clock.activity(70_000);
+        assert_eq!(clock.next_wakeup(true), Some(61_000 + 6 * 60 * 60 * 1000));
+        assert!(clock.begin(131_000, true).is_none());
+    }
+}

@@ -126,6 +126,7 @@ fn workflow(value: Value) -> NormalizedWorkflow {
 fn options(store: &MemoryStore) -> RunOptions<'_> {
     let mut options = RunOptions::production();
     options.graph = Some(GraphRunOptions {
+        strict_accounting: false,
         check: None,
         store,
         fingerprint: "same-spec-and-input",
@@ -665,4 +666,24 @@ fn a_budget_truncated_fanout_cannot_follow_its_success_edge() {
     let replayed = engine::run(&workflow, &Value::Null, &mut resumed, &opts);
     assert_eq!(replayed.status, "budget_exhausted");
     assert!(resumed.prompts.is_empty());
+}
+
+#[test]
+fn scheduled_graph_stops_when_a_worker_has_no_measured_usage() {
+    let workflow = workflow(json!({
+        "name":"unmetered", "mode":"graph",
+        "phases":[{"id":"work", "prompt":"Do bounded work"}],
+        "graph":{"entry":"work", "max_steps":3, "nodes":[
+            {"kind":"agent", "id":"work", "phase":"work", "next":"done"},
+            {"kind":"end", "id":"done", "status":"completed"}
+        ]}
+    }));
+    let store = MemoryStore::default();
+    let mut opts = options(&store);
+    opts.graph.as_mut().unwrap().strict_accounting = true;
+    let mut backend = Backend::default();
+    let report = engine::run(&workflow, &Value::Null, &mut backend, &opts);
+    assert_eq!(report.status, "blocked");
+    assert_eq!(backend.prompts.len(), 1);
+    assert_eq!(report.graph.unwrap()["accounting_complete"], false);
 }

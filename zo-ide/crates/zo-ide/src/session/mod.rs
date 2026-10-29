@@ -8,6 +8,9 @@
 mod built_runtime;
 mod agent_completion_pump;
 mod dreamer_hook;
+mod scheduled_workflow;
+#[cfg(test)]
+mod automatic_work_tests;
 pub(crate) mod file_search;
 mod lsp_runtime;
 mod mcp_runtime;

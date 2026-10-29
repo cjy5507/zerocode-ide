@@ -37,6 +37,33 @@ fn with_config_home<T>(
     }
 }
 
+/// Automatic passes also read config and the opt-out; isolate every fallback
+/// home and remove trace relocation so their paths stay inside this fixture.
+fn with_automatic_home<T>(
+    _env: &std::sync::MutexGuard<'static, ()>,
+    home: &Path,
+    f: impl FnOnce() -> T,
+) -> T {
+    let keys = ["HOME", "ZO_HOME", "ZO_CONFIG_HOME", "ZO_STATE_DIR", "ZO_DREAM"];
+    let previous = keys.map(|key| (key, std::env::var_os(key)));
+    for key in ["HOME", "ZO_HOME", "ZO_CONFIG_HOME"] {
+        std::env::set_var(key, home);
+    }
+    std::env::remove_var("ZO_STATE_DIR");
+    std::env::set_var("ZO_DREAM", "1");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    for (key, value) in previous {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+    match result {
+        Ok(value) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 fn obs(sig: &str, session: &str, verified: bool) -> LessonObservation {
     LessonObservation {
         signature: sig.to_string(),
@@ -2155,18 +2182,15 @@ fn local_memory_cannot_override_a_read_only_global_slug() {
 
 #[test]
 fn compaction_curation_gate_skips_an_empty_workspace_without_writing_markers() {
-    let workspace = tempfile::tempdir().unwrap();
-    let report = super::maybe_auto_dream_on_compaction(
-        workspace.path(),
-        std::time::Duration::ZERO,
-        Some("claude-opus-5"),
-    )
-    .expect("an empty workspace is a normal gated skip");
-    assert!(report.is_none());
-    assert!(
-        !workspace.path().join(".zo").exists(),
-        "the cheap gate must not create a dream directory"
-    );
+    let home = tempfile::tempdir().unwrap();
+    let lock = crate::test_env_lock();
+    with_automatic_home(&lock, home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(super::maybe_auto_dream_on_compaction(workspace.path(), std::time::Duration::ZERO, None).unwrap().is_none());
+        assert!(super::maybe_auto_dream(workspace.path(), std::time::Duration::ZERO, None).unwrap().is_none());
+        assert_eq!(fs::read_dir(workspace.path()).unwrap().count(), 0, "empty workspaces create no state");
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0, "empty workspaces do not open a memory store");
+    });
 }
 
 #[test]
@@ -2175,7 +2199,7 @@ fn an_automatic_pass_that_promotes_nothing_leaves_the_config_home_untouched() {
     // workspace; a pass that writes no lesson must not create one there.
     let config_home = tempfile::tempdir().unwrap();
     let env_lock = crate::test_env_lock();
-    with_config_home(&env_lock, config_home.path(), || {
+    with_automatic_home(&env_lock, config_home.path(), || {
         let workspace = tempfile::tempdir().unwrap();
         let cwd = workspace.path();
         let dream_dir = cwd.join(".zo").join("dream");
@@ -2612,7 +2636,7 @@ fn composite_source_merges_both_producers() {
 fn maybe_auto_dream_throttles_second_call() {
     let config_home = tempfile::tempdir().unwrap();
     let env_lock = crate::test_env_lock();
-    with_config_home(&env_lock, config_home.path(), || {
+    with_automatic_home(&env_lock, config_home.path(), || {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
         let dream_dir = cwd.join(".zo").join("dream");
@@ -2635,6 +2659,182 @@ fn maybe_auto_dream_throttles_second_call() {
         let second =
             super::maybe_auto_dream(cwd, std::time::Duration::from_secs(3600), None).unwrap();
         assert!(second.is_none());
+    });
+}
+
+#[test]
+fn automatic_dreaming_ignores_markers_empty_logs_and_directories_as_evidence() {
+    let home = tempfile::tempdir().unwrap();
+    let lock = crate::test_env_lock();
+    with_automatic_home(&lock, home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = super::ensure_repo_dream_dir_no_symlink(workspace.path()).unwrap();
+        for name in [super::THROTTLE_MARKER, super::COMPACTION_THROTTLE_MARKER, super::AUTO_DREAM_LOCK_FILE] {
+            fs::write(dir.join(name), "0").unwrap();
+        }
+        fs::write(dir.join(super::AUTO_DREAM_ERROR_FILE), "{\"tsMs\":0}").unwrap();
+        fs::write(dir.join("empty.jsonl"), "").unwrap();
+        fs::create_dir(dir.join("directory.jsonl")).unwrap();
+        let before = fs::read_dir(&dir).unwrap().count();
+
+        assert!(!super::has_automatic_curation_evidence(workspace.path()));
+        assert!(super::maybe_auto_dream(workspace.path(), std::time::Duration::ZERO, None).unwrap().is_none());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), before);
+        assert_eq!(fs::read_to_string(dir.join(super::THROTTLE_MARKER)).unwrap(), "0");
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+    });
+}
+
+#[test]
+fn automatic_triggers_share_the_file_lock_and_success_throttle() {
+    let home = tempfile::tempdir().unwrap();
+    let lock = crate::test_env_lock();
+    with_automatic_home(&lock, home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path();
+        for session in ["s1", "s2"] {
+            super::record_observation(cwd, &obs("shared automatic pass", session, true)).unwrap();
+        }
+        let dir = super::dream_dir(cwd);
+        let held = crate::secure_fs::try_lock_owner_only(&dir, Path::new(super::AUTO_DREAM_LOCK_FILE)).unwrap().unwrap();
+        let interval = std::time::Duration::from_secs(60);
+        assert!(super::maybe_auto_dream(cwd, interval, None).unwrap().is_none());
+        assert!(super::maybe_auto_dream_on_compaction(cwd, interval, None).unwrap().is_none());
+        assert!(!dir.join(super::THROTTLE_MARKER).exists());
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+        drop(held);
+
+        let report = super::maybe_auto_dream_on_compaction(cwd, interval, None).unwrap().unwrap();
+        assert_eq!(report.applied.len(), 1);
+        let stamped = fs::read(dir.join(super::THROTTLE_MARKER)).unwrap();
+        assert!(super::maybe_auto_dream(cwd, interval, None).unwrap().is_none());
+        assert!(super::maybe_auto_dream_on_compaction(cwd, interval, None).unwrap().is_none());
+        assert_eq!(fs::read(dir.join(super::THROTTLE_MARKER)).unwrap(), stamped);
+        assert!(!dir.join(super::COMPACTION_THROTTLE_MARKER).exists());
+    });
+}
+
+#[test]
+fn automatic_dreaming_honors_config_and_environment_without_disabling_explicit_runs() {
+    let home = tempfile::tempdir().unwrap();
+    let lock = crate::test_env_lock();
+    with_automatic_home(&lock, home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path();
+        for session in ["s1", "s2"] {
+            super::record_observation(cwd, &obs("explicit lesson", session, true)).unwrap();
+        }
+        let settings = home.path().join("settings.json");
+        for (config, environment) in [(false, "1"), (true, "0")] {
+            fs::write(&settings, serde_json::json!({"autoDreamEnabled":config}).to_string()).unwrap();
+            std::env::set_var("ZO_DREAM", environment);
+            assert!(!super::automatic_dream_enabled(cwd));
+            assert!(super::maybe_auto_dream(cwd, std::time::Duration::ZERO, None).unwrap().is_none());
+            assert!(super::maybe_auto_dream_on_compaction(cwd, std::time::Duration::ZERO, None).unwrap().is_none());
+            assert!(!super::dream_dir(cwd).join(super::AUTO_DREAM_LOCK_FILE).exists());
+            assert!(!super::dream_dir(cwd).join(super::THROTTLE_MARKER).exists());
+            assert!(!crate::memory::paths::memory_write_dir(cwd, true).exists());
+        }
+        assert_eq!(super::dream_at_cwd(cwd, None).unwrap().applied.len(), 1);
+    });
+}
+
+#[test]
+fn automatic_dreaming_sees_each_source_including_global_user_patterns() {
+    let home = tempfile::tempdir().unwrap();
+    let lock = crate::test_env_lock();
+    with_automatic_home(&lock, home.path(), || {
+        for source in 0..4 {
+            let workspace = tempfile::tempdir().unwrap();
+            let cwd = workspace.path();
+            match source {
+                0 => super::record_observation(cwd, &obs("observed once", "s1", true)).unwrap(),
+                1 => {
+                    let mut record = crate::turn_trace::TurnRecord::terminal("s1", 0, crate::turn_trace::TurnOutcome::Completed, 0, None);
+                    record.error_tools = vec!["bash".to_string()];
+                    crate::turn_trace::append(cwd, &record).unwrap();
+                }
+                2 => super::record_automation_event(cwd, "s1", "goal", "repair_queued", false).unwrap(),
+                _ => {
+                    assert!(super::record_user_pattern_observation(cwd, "s1", "Prefer concise verification summaries", true));
+                    assert!(!super::dream_dir(cwd).exists(), "preferences are stored outside the trace directory");
+                }
+            }
+            assert!(super::has_automatic_curation_evidence(cwd), "missed source {source}");
+            assert!(super::maybe_auto_dream(cwd, std::time::Duration::ZERO, None).unwrap().is_some(), "missed source {source}");
+        }
+    });
+}
+
+#[test]
+fn automatic_failure_has_a_bounded_retry_and_never_stamps_success() {
+    let home = tempfile::tempdir().unwrap();
+    let lock = crate::test_env_lock();
+    with_automatic_home(&lock, home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path();
+        for session in ["s1", "s2"] {
+            super::record_observation(cwd, &obs("retry lesson", session, true)).unwrap();
+        }
+        let memory = crate::memory::paths::memory_write_dir(cwd, true);
+        fs::create_dir_all(memory.parent().unwrap()).unwrap();
+        fs::write(&memory, "not a directory").unwrap();
+        assert!(super::maybe_auto_dream(cwd, std::time::Duration::ZERO, None).is_err());
+        let dir = super::dream_dir(cwd);
+        assert!(!dir.join(super::THROTTLE_MARKER).exists());
+        let failure = fs::read(dir.join(super::AUTO_DREAM_ERROR_FILE)).unwrap();
+
+        fs::remove_file(memory).unwrap();
+        assert!(super::maybe_auto_dream_on_compaction(cwd, std::time::Duration::ZERO, None).unwrap().is_none());
+        assert_eq!(fs::read(dir.join(super::AUTO_DREAM_ERROR_FILE)).unwrap(), failure);
+        assert!(!dir.join(super::THROTTLE_MARKER).exists());
+        fs::write(dir.join(super::AUTO_DREAM_ERROR_FILE), "{\"tsMs\":0}").unwrap();
+        assert_eq!(super::maybe_auto_dream(cwd, std::time::Duration::ZERO, None).unwrap().unwrap().applied.len(), 1);
+        assert!(dir.join(super::THROTTLE_MARKER).exists());
+    });
+}
+
+#[test]
+fn a_later_failure_uses_retry_backoff_instead_of_the_last_success_interval() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    fs::write(dir.join(super::THROTTLE_MARKER), "100").unwrap();
+    fs::write(dir.join(super::AUTO_DREAM_ERROR_FILE), "{\"tsMs\":101000}").unwrap();
+    let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    assert!(!super::automatic_dream_due(dir, at(160), super::DEFAULT_AUTO_DREAM_INTERVAL));
+    assert!(super::automatic_dream_due(dir, at(161), super::DEFAULT_AUTO_DREAM_INTERVAL));
+    fs::write(dir.join(super::THROTTLE_MARKER), "162").unwrap();
+    assert!(!super::automatic_dream_due(dir, at(163), super::DEFAULT_AUTO_DREAM_INTERVAL));
+}
+
+#[cfg(unix)]
+#[test]
+fn automatic_decay_archives_only_the_local_store_it_promotes_into() {
+    let home = tempfile::tempdir().unwrap();
+    let lock = crate::test_env_lock();
+    with_automatic_home(&lock, home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path();
+        for (local, slug) in [(false, "durable-old"), (true, "local-old")] {
+            let store = FsMemoryStore { memory_dir: crate::memory::paths::memory_write_dir(cwd, local) };
+            let lesson = decision_core::dreamer::PromotedLesson {
+                slug: slug.to_string(), summary: slug.to_string(), lesson: slug.to_string(),
+                kind: LessonKind::Workflow, distinct_sessions: 2, verified: true,
+                confidence: 0.9, expiry_days: 1,
+            };
+            store.write_entry(&MemoryWriteRequest {
+                slug: slug.to_string(), summary: slug.to_string(),
+                body: super::render_entry_body(&lesson, 1, None),
+            }).unwrap();
+        }
+        super::record_observation(cwd, &obs("one current observation", "s1", true)).unwrap();
+        super::maybe_auto_dream(cwd, std::time::Duration::ZERO, None).unwrap().unwrap();
+        let local = crate::memory::paths::memory_write_dir(cwd, true);
+        let global = crate::memory::paths::memory_write_dir(cwd, false);
+        assert!(!local.join("local-old.md").exists());
+        assert!(local.join("archive/local-old.md").exists());
+        assert!(global.join("durable-old.md").exists());
+        assert!(!global.join("archive").exists());
     });
 }
 

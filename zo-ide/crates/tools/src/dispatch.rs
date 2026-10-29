@@ -289,6 +289,23 @@ fn execute_tool_result_with_context_and_artifact_dir(
     input: &Value,
     artifact_dir: Option<&Path>,
 ) -> Result<ToolExecutionResult, ToolError> {
+    execute_tool_result_with_output_policy(ctx, enforcer, name, input, artifact_dir, false)
+}
+
+pub(crate) fn execute_workflow_for_host(
+    ctx: &ToolContext, enforcer: Option<&PermissionEnforcer>, input: &Value,
+) -> Result<ToolExecutionResult, ToolError> {
+    execute_tool_result_with_output_policy(ctx, enforcer, "Workflow", input, None, true)
+}
+
+fn execute_tool_result_with_output_policy(
+    ctx: &ToolContext,
+    enforcer: Option<&PermissionEnforcer>,
+    name: &str,
+    input: &Value,
+    artifact_dir: Option<&Path>,
+    host_raw: bool,
+) -> Result<ToolExecutionResult, ToolError> {
     let canonical = canonical_tool_name(name);
     let canonical_ref = canonical.as_str();
     // A deferred tool's schema never reached the provider, so a boolean or an
@@ -324,6 +341,14 @@ fn execute_tool_result_with_context_and_artifact_dir(
             return Err(error);
         }
     };
+
+    if host_raw {
+        let chars = raw.text.chars().count();
+        ctx.record_tool_invocation(invocation.finish(successful_result(ToolResultMetadata {
+            output_chars: chars, returned_chars: chars, truncated: false, artifact: None,
+        }), gateway::epoch_millis_now()));
+        return Ok(raw);
+    }
 
     let text = finish_successful_tool_output(
         ctx,

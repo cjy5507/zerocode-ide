@@ -583,7 +583,7 @@ fn day_of_week_from_unix_days(days_since_unix_epoch: i64) -> u32 {
 }
 
 fn entry_next_due_at(entry: &CronEntry, now: u64) -> Option<u64> {
-    if !entry.enabled {
+    if !entry.enabled || entry.workflow_unavailable() {
         return None;
     }
     let created_floor = ceil_to_minute(entry.created_at);
@@ -597,7 +597,7 @@ fn entry_next_due_at(entry: &CronEntry, now: u64) -> Option<u64> {
 }
 
 fn entry_is_due_at(entry: &CronEntry, timestamp: u64) -> Option<CronDueEntry> {
-    if !entry.enabled {
+    if !entry.enabled || entry.workflow_unavailable() {
         return None;
     }
     let end = floor_to_minute(timestamp);
@@ -637,7 +637,7 @@ pub const CRON_REGISTRY_FILE: &str = "crons.json";
 /// one — spells it from here.
 pub const AUTOMATIC_SCHEDULER_STATUS: &str = "session_idle";
 pub const AUTOMATIC_SCHEDULER_NOTE: &str =
-    "a due cron opens a turn with its prompt in the idle zo session whose working directory owns this registry (schedules match the wall clock of the session's own time zone, named in the receipt); CronRunDue still enqueues due crons by hand as task records";
+    "a due cron opens its prompt turn or directly executes its frozen graph in the idle zo session whose working directory owns this registry (schedules match the wall clock of the session's own time zone, named in the receipt); CronRunDue enqueues only prompt crons by hand and leaves graph slots for the idle host";
 
 /// What [`CronRegistry::ensure_named`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -973,6 +973,16 @@ pub struct CronEntry {
     pub cron_id: String,
     pub schedule: String,
     pub prompt: String,
+    /// A frozen graph request (`spec` plus `input`) executed directly by the
+    /// idle host. Missing in legacy records, which remain prompt crons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<serde_json::Value>,
+    /// A durable slot lease. It survives process death and has no automatic
+    /// expiry: another slot must not repeat an uncertain graph's effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_active_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_blocked_reason: Option<String>,
     pub description: Option<String>,
     pub enabled: bool,
     pub created_at: u64,
@@ -985,6 +995,13 @@ pub struct CronEntry {
     /// write.
     #[serde(default)]
     pub rev: u64,
+}
+
+impl CronEntry {
+    fn workflow_unavailable(&self) -> bool {
+        self.workflow.is_some()
+            && (self.workflow_active_at.is_some() || self.workflow_blocked_reason.is_some())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1124,6 +1141,7 @@ impl CronRegistry {
         for entry in held {
             if keep.is_none()
                 && entry.enabled
+                && entry.workflow.is_none()
                 && entry.schedule == schedule
                 && entry.prompt == prompt
             {
@@ -1211,11 +1229,48 @@ impl CronRegistry {
             return Err("cron prompt must not be empty".to_string());
         }
 
+        self.create_entry_at(schedule, prompt, None, description, created_at_secs)
+    }
+
+    /// Register an already validated graph snapshot. Its registration must
+    /// persist before the caller is told the schedule is armed.
+    pub fn create_workflow(
+        &self,
+        schedule: &str,
+        workflow: &serde_json::Value,
+        description: Option<&str>,
+    ) -> Result<CronEntry, String> {
+        self.create_workflow_at(schedule, workflow, description, now_secs())
+    }
+
+    pub fn create_workflow_at(
+        &self,
+        schedule: &str,
+        workflow: &serde_json::Value,
+        description: Option<&str>,
+        created_at_secs: u64,
+    ) -> Result<CronEntry, String> {
+        validate_cron_schedule(schedule)?;
+        if !workflow.is_object() || workflow.get("spec").is_none() {
+            return Err("cron workflow must be a validated spec/input snapshot".to_string());
+        }
+        self.create_entry_at(schedule, "", Some(workflow), description, created_at_secs)
+    }
+
+    fn create_entry_at(
+        &self,
+        schedule: &str,
+        prompt: &str,
+        workflow: Option<&serde_json::Value>,
+        description: Option<&str>,
+        created_at_secs: u64,
+    ) -> Result<CronEntry, String> {
+
         let mut inner = lock_recovered(&self.inner);
         // Capacity check, counter/revision/id allocation, and insert all happen
         // INSIDE the transaction, after the merge of the newest disk state, so a
         // peer process that committed on the same base revision cannot collide.
-        self.commit_mutation(&mut inner, move |inner| {
+        let create = move |inner: &mut CronInner| {
             prune_crons_for_create(inner);
             if inner.entries.len() >= MAX_CRON_REGISTRY_ENTRIES {
                 return Err(format!(
@@ -1230,6 +1285,9 @@ impl CronRegistry {
                 cron_id: cron_id.clone(),
                 schedule: schedule.trim().to_owned(),
                 prompt: prompt.trim().to_owned(),
+                workflow: workflow.cloned(),
+                workflow_active_at: None,
+                workflow_blocked_reason: None,
                 description: description.map(str::to_owned),
                 enabled: true,
                 created_at: ts,
@@ -1240,7 +1298,14 @@ impl CronRegistry {
             };
             inner.entries.insert(cron_id, entry.clone());
             Ok(entry)
-        })
+        };
+        if workflow.is_some() {
+            let (result, persisted) = self.commit_mutation_status(&mut inner, create);
+            fold_persistence(result, persisted)
+        } else {
+            // Preserve the prompt registry's existing best-effort contract.
+            self.commit_mutation(&mut inner, create)
+        }
     }
 
     #[must_use]
@@ -1251,7 +1316,8 @@ impl CronRegistry {
 
     #[must_use]
     pub fn list(&self, enabled_only: bool) -> Vec<CronEntry> {
-        let inner = lock_recovered(&self.inner);
+        let mut inner = lock_recovered(&self.inner);
+        self.refresh_active_workflows(&mut inner);
         let mut entries = inner
             .entries
             .values()
@@ -1268,7 +1334,8 @@ impl CronRegistry {
 
     #[must_use]
     pub fn due_at(&self, timestamp: u64) -> Vec<CronDueEntry> {
-        let inner = lock_recovered(&self.inner);
+        let mut inner = lock_recovered(&self.inner);
+        self.refresh_active_workflows(&mut inner);
         let mut entries = inner
             .entries
             .values()
@@ -1284,7 +1351,8 @@ impl CronRegistry {
     }
 
     pub fn next_due_at(&self, cron_id: &str, now: u64) -> Result<Option<u64>, String> {
-        let inner = lock_recovered(&self.inner);
+        let mut inner = lock_recovered(&self.inner);
+        self.refresh_active_workflows(&mut inner);
         let entry = inner
             .entries
             .get(cron_id)
@@ -1303,6 +1371,9 @@ impl CronRegistry {
             if !entry.enabled {
                 return Err(format!("cron is disabled: {cron_id}"));
             }
+            if entry.workflow_unavailable() {
+                return Ok(false);
+            }
             let due_at = floor_to_minute(due_at);
             if entry
                 .last_run_at
@@ -1311,6 +1382,9 @@ impl CronRegistry {
                 return Ok(false);
             }
             entry.last_run_at = Some(due_at);
+            if entry.workflow.is_some() {
+                entry.workflow_active_at = Some(due_at);
+            }
             entry.run_count += 1;
             entry.updated_at = now_secs();
             entry.rev = rev;
@@ -1318,6 +1392,48 @@ impl CronRegistry {
             Ok(true)
         });
         fold_persistence(result, persisted)
+    }
+
+    /// Settle only the exact graph slot that owns the lease. Unknown outcomes
+    /// keep that lease and disable the shared schedule until explicit recovery.
+    pub fn settle_workflow_run(&self, cron_id: &str, due_at: u64, blocked: bool) -> Result<bool, String> {
+        let mut inner = lock_recovered(&self.inner);
+        let (result, persisted) = self.commit_mutation_status(&mut inner, |inner| {
+            let Some(entry) = inner.entries.get(cron_id) else {
+                return Err(format!("cron not found: {cron_id}"));
+            };
+            if entry.workflow.is_none() || entry.workflow_active_at != Some(due_at) {
+                return Ok(false);
+            }
+            let revision = inner.bump_revision();
+            let entry = inner.entries.get_mut(cron_id).expect("entry checked above");
+            if blocked {
+                entry.enabled = false;
+                entry.workflow_blocked_reason = Some(
+                    "scheduled graph outcome or cost is uncertain; reconcile before creating another schedule".to_string(),
+                );
+            } else {
+                entry.workflow_active_at = None;
+            }
+            entry.updated_at = now_secs();
+            entry.rev = revision;
+            Ok(true)
+        });
+        fold_persistence(result, persisted)
+    }
+
+    fn refresh_active_workflows(&self, inner: &mut CronInner) {
+        // A peer may have settled the lease since this instance last mutated.
+        // Without this refresh, an active entry's absent wakeup would park the
+        // peer forever even after the owner durably released it.
+        if !inner.entries.values().any(CronEntry::workflow_unavailable) {
+            return;
+        }
+        if let Some(path) = self.persistence_path.as_ref() {
+            if let Some(disk) = registry_io::load_registry_inner(path) {
+                registry_io::MergeInto::merge_in(inner, disk);
+            }
+        }
     }
 
     pub fn delete(&self, cron_id: &str) -> Result<CronEntry, String> {
@@ -1410,6 +1526,17 @@ impl CronRegistry {
         mutate: impl FnOnce(&mut CronInner) -> R,
     ) -> (R, Result<(), String>) {
         if let Some(path) = self.persistence_path.as_ref().as_ref() {
+            // registry_io already holds this lock on Unix. Its Windows path
+            // needs the same serialization for every cron mutation, not just
+            // graph claims: a prompt write otherwise could erase a new lease.
+            #[cfg(windows)]
+            let _workflow_lock = match acquire_cron_lock(path) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    self.persist_disabled.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return (mutate(inner), Err(error));
+                }
+            };
             registry_io::commit_registry_mutation_warn_once_status(
                 "cron registry",
                 path,
@@ -1422,6 +1549,22 @@ impl CronRegistry {
             )
         } else {
             (mutate(inner), Ok(()))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn acquire_cron_lock(path: &Path) -> Result<crate::secure_fs::ExclusiveFileLock, String> {
+    let root = path.parent().ok_or_else(|| "cron registry path has no parent".to_string())?;
+    std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
+    let mut name = path.file_name().ok_or_else(|| "cron registry path has no name".to_string())?.to_os_string();
+    name.push(".lock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match crate::secure_fs::try_lock_owner_only(root, Path::new(&name)).map_err(|error| error.to_string())? {
+            Some(lock) => return Ok(lock),
+            None if std::time::Instant::now() >= deadline => return Err("cron registry is locked by another process".to_string()),
+            None => std::thread::sleep(std::time::Duration::from_millis(5)),
         }
     }
 }
@@ -1487,8 +1630,12 @@ fn quarantine_invalid_crons_on_load(inner: &mut CronInner) -> bool {
             entry.prompt = trimmed_prompt;
             changed = true;
         }
+        let valid_action = match &entry.workflow {
+            Some(workflow) => entry.prompt.is_empty() && workflow.is_object() && workflow.get("spec").is_some(),
+            None => !entry.prompt.is_empty(),
+        };
         if entry.enabled
-            && (validate_cron_schedule(&entry.schedule).is_err() || entry.prompt.is_empty())
+            && (validate_cron_schedule(&entry.schedule).is_err() || !valid_action)
         {
             entry.enabled = false;
             entry.updated_at = ts;
@@ -1511,6 +1658,168 @@ fn quarantine_invalid_crons_on_load(inner: &mut CronInner) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+
+    fn graph_snapshot() -> serde_json::Value {
+        serde_json::json!({"spec":{
+            "name":"scheduled", "mode":"graph",
+            "graph":{"entry":"done", "max_steps":1, "nodes":[
+                {"kind":"end", "id":"done", "status":"completed"}
+            ]}
+        }, "input":null})
+    }
+
+    #[test]
+    fn workflow_cron_survives_reload_and_claims_one_slot_once() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("crons.json");
+        let registry = CronRegistry::with_persistence_path(Some(path.clone()));
+        let due = 1_700_000_040;
+        let snapshot = graph_snapshot();
+        let entry = registry.create_workflow_at("* * * * *", &snapshot, Some("graph"), due).unwrap();
+        let peer = CronRegistry::with_persistence_path(Some(path.clone()));
+        let restored = peer.get(&entry.cron_id).unwrap();
+        assert!(restored.enabled);
+        assert!(restored.prompt.is_empty());
+        assert_eq!(restored.workflow, Some(snapshot));
+        assert_eq!(peer.due_at(due).len(), 1);
+        assert!(registry.record_due_run_at(&entry.cron_id, due).unwrap());
+        assert!(!peer.record_due_run_at(&entry.cron_id, due).unwrap());
+        let restored = CronRegistry::with_persistence_path(Some(path));
+        assert_eq!(restored.get(&entry.cron_id).unwrap().run_count, 1);
+        assert!(restored.due_at(due).is_empty());
+    }
+
+    #[test]
+    fn workflow_lease_blocks_next_slot_across_peers_until_its_owner_settles() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("crons.json");
+        let owner = CronRegistry::with_persistence_path(Some(path.clone()));
+        let due = 1_700_000_040;
+        let entry = owner.create_workflow_at("* * * * *", &graph_snapshot(), None, due).unwrap();
+        let peer = CronRegistry::with_persistence_path(Some(path));
+        assert!(owner.record_due_run_at(&entry.cron_id, due).unwrap());
+        assert!(!peer.record_due_run_at(&entry.cron_id, due + 60).unwrap(), "a different slot cannot overlap the active graph");
+        assert!(peer.due_at(due + 60).is_empty());
+        assert_eq!(peer.next_due_at(&entry.cron_id, due + 60).unwrap(), None);
+        assert_eq!(peer.get(&entry.cron_id).unwrap().workflow_active_at, Some(due));
+
+        assert!(owner.settle_workflow_run(&entry.cron_id, due, false).unwrap());
+        assert_eq!(peer.next_due_at(&entry.cron_id, due + 60).unwrap(), Some(due + 60), "a cached peer observes the durable lease release");
+        assert_eq!(peer.due_at(due + 60).len(), 1);
+        assert!(peer.record_due_run_at(&entry.cron_id, due + 60).unwrap());
+        assert_eq!(peer.get(&entry.cron_id).unwrap().run_count, 2);
+    }
+
+    #[test]
+    fn stale_workflow_settlement_cannot_release_a_later_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("crons.json");
+        let first = CronRegistry::with_persistence_path(Some(path.clone()));
+        let due = 1_700_000_040;
+        let entry = first.create_workflow_at("* * * * *", &graph_snapshot(), None, due).unwrap();
+        assert!(first.record_due_run_at(&entry.cron_id, due).unwrap());
+        let stale = CronRegistry::with_persistence_path(Some(path.clone()));
+        assert!(!first.settle_workflow_run(&entry.cron_id, due + 1, false).unwrap(), "settlement matches the exact canonical slot");
+        assert!(first.settle_workflow_run(&entry.cron_id, due, false).unwrap());
+        assert!(first.record_due_run_at(&entry.cron_id, due + 60).unwrap());
+        assert!(!stale.settle_workflow_run(&entry.cron_id, due, false).unwrap());
+        let restored = CronRegistry::with_persistence_path(Some(path));
+        assert_eq!(restored.get(&entry.cron_id).unwrap().workflow_active_at, Some(due + 60));
+        assert!(restored.due_at(due + 120).is_empty());
+    }
+
+    #[test]
+    fn uncertain_workflow_quarantines_the_shared_schedule_without_expiring_its_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("crons.json");
+        let registry = CronRegistry::with_persistence_path(Some(path.clone()));
+        let due = 1_700_000_040;
+        let entry = registry.create_workflow_at("* * * * *", &graph_snapshot(), None, due).unwrap();
+        assert!(registry.record_due_run_at(&entry.cron_id, due).unwrap());
+        assert!(registry.settle_workflow_run(&entry.cron_id, due, true).unwrap());
+        let restored = CronRegistry::with_persistence_path(Some(path));
+        let blocked = restored.get(&entry.cron_id).unwrap();
+        assert!(!blocked.enabled);
+        assert_eq!(blocked.workflow_active_at, Some(due));
+        assert!(blocked.workflow_blocked_reason.as_deref().is_some_and(|reason| reason.contains("uncertain")));
+        assert!(restored.due_at(due + 31_536_000).is_empty());
+        assert_eq!(restored.next_due_at(&entry.cron_id, due + 31_536_000).unwrap(), None);
+        assert!(restored.record_due_run_at(&entry.cron_id, due + 60).is_err());
+    }
+
+    #[test]
+    fn prompt_crons_keep_their_slot_behavior_without_workflow_leases() {
+        let registry = CronRegistry::new_in_memory();
+        let due = 1_700_000_040;
+        let entry = registry.create_at("* * * * *", "a prompt", None, due).unwrap();
+        assert!(registry.record_due_run_at(&entry.cron_id, due).unwrap());
+        assert!(registry.record_due_run_at(&entry.cron_id, due + 60).unwrap());
+        assert!(!registry.settle_workflow_run(&entry.cron_id, due + 60, true).unwrap());
+        let prompt = registry.get(&entry.cron_id).unwrap();
+        assert!(prompt.workflow_active_at.is_none());
+        assert!(prompt.workflow_blocked_reason.is_none());
+        assert!(prompt.enabled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_workflow_settlement_never_releases_the_durable_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("crons.json");
+        let registry = CronRegistry::with_persistence_path(Some(path.clone()));
+        let due = 1_700_000_040;
+        let entry = registry.create_workflow_at("* * * * *", &graph_snapshot(), None, due).unwrap();
+        assert!(registry.record_due_run_at(&entry.cron_id, due).unwrap());
+        make_registry_path_unwritable(&path);
+        assert!(registry.settle_workflow_run(&entry.cron_id, due, false).is_err());
+        restore_registry_path(&path);
+        let restored = CronRegistry::with_persistence_path(Some(path));
+        assert_eq!(restored.get(&entry.cron_id).unwrap().workflow_active_at, Some(due));
+        assert!(restored.due_at(due + 60).is_empty());
+        assert!(!restored.record_due_run_at(&entry.cron_id, due + 60).unwrap());
+    }
+
+    #[test]
+    fn legacy_prompt_cron_without_workflow_field_stays_enabled() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("crons.json");
+        let registry = CronRegistry::with_persistence_path(Some(path.clone()));
+        let entry = registry.create("* * * * *", "legacy prompt", None).unwrap();
+        let disk: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(disk["entries"][&entry.cron_id].get("workflow").is_none());
+        let restored = CronRegistry::with_persistence_path(Some(path)).get(&entry.cron_id).unwrap();
+        assert!(restored.enabled);
+        assert_eq!(restored.prompt, "legacy prompt");
+        assert!(restored.workflow.is_none());
+    }
+
+    #[test]
+    fn mixed_prompt_and_workflow_record_is_disabled_on_reload() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("crons.json");
+        let registry = CronRegistry::with_persistence_path(Some(path.clone()));
+        let entry = registry.create_workflow("* * * * *", &graph_snapshot(), None).unwrap();
+        let mut disk: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        disk["entries"][&entry.cron_id]["prompt"] = serde_json::json!("ambiguous action");
+        fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
+        let restored = CronRegistry::with_persistence_path(Some(path)).get(&entry.cron_id).unwrap();
+        assert!(!restored.enabled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workflow_registration_reports_a_failed_persist_instead_of_arming() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("crons.json");
+        let registry = CronRegistry::with_persistence_path(Some(path.clone()));
+        let first = registry.create("* * * * *", "existing", None).unwrap();
+        make_registry_path_unwritable(&path);
+        assert!(registry.create_workflow("* * * * *", &graph_snapshot(), None).is_err());
+        restore_registry_path(&path);
+        let restored = CronRegistry::with_persistence_path(Some(path));
+        assert_eq!(restored.list(false).len(), 1);
+        assert_eq!(restored.list(false)[0].cron_id, first.cron_id);
+    }
 
     // ── Team tests ──────────────────────────────────────
 

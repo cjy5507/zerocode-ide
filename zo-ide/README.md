@@ -69,6 +69,35 @@ zo decision-shadow eval --labels labels.jsonl   # probe·typed 판단을 사람�
 
 체크포인트는 기존 workflow 저장소의 `<runId>.graph.json`에 남고, `WorkflowRuns`로 단계 기록을 확인한다.
 
+## 자동 시작과 예약
+
+zo 세션이 켜져 있으면 기본 60초 유휴 뒤 실행 기록을 확인하고 dreaming을 시작한다.
+실행 기록이 없으면 curation을 건너뛴다. 유휴 curation의 성공 간격은 6시간이며, 여러 세션과 압축·종료 훅은 같은 잠금과 성공 기록을 공유한다.
+`autoDreamEnabled: false` 또는 `ZO_DREAM=0`으로 자동 dreaming을 끈다.
+유휴 지연은 `autonomy.idleDreamDelaySecs` 또는 `ZO_AUTONOMY_IDLE_DREAM_DELAY_SECS`로 설정한다.
+
+그래프를 반복하려면 `WorkflowLibrary`에 저장한 뒤 `CronCreate`에 한 번 등록한다.
+예를 들어 저장된 `repair-check` 그래프를 30분마다 실행하는 등록 입력은 다음과 같다.
+
+```json
+{
+  "schedule": "*/30 * * * *",
+  "workflow": {"library": "repair-check", "input": "실패한 회귀 검사 수리"},
+  "description": "회귀 검사와 수리"
+}
+```
+
+`workflow`에는 `{"spec": <그래프 JSON>, "input": ...}`도 쓸 수 있다. 등록 시 라이브러리의 명세를 복사하므로 이후 라이브러리 수정이 예약을 바꾸지 않는다.
+에이전트가 있는 예약에는 `budget.max_agents`와 `budget.max_output_tokens`가 필요하다.
+현재 세션의 권한·도구 제한과 남은 예산을 적용하며, 부모 모델의 호출 없이 엔진이 직접 시작한다.
+사용량 영수증이 없는 원장 워커는 예약 그래프에서 거부한다. 네이티브 워커 또는 검사만 있는 그래프를 사용한다.
+
+주기마다 실행 ID를 새로 만들되, 같은 예약의 이전 실행이 끝나기 전에는 다른 세션도 다음 실행을 시작하지 않는다.
+결과나 사용량이 불확실하면 공유 예약을 중지한다. `CronList`의 `workflow_active_at`과 `workflow_blocked_reason`으로 확인한다.
+외부 효과를 확인한 뒤 `CronDelete`로 기존 예약을 지우고 다시 등록한다. 사용량 불확실성으로 멈춘 세션은 새 세션에서 다시 시작한다.
+`CronRunDue`는 그래프를 프롬프트 작업으로 바꾸지 않으며, `CronList`·`CronDelete`는 기존 예약 관리 도구를 그대로 쓴다.
+이 자동 실행은 켜져 있는 zo 세션의 유휴 엔진을 사용한다. 앱을 닫은 뒤 실행하는 OS 서비스는 설치하지 않는다.
+
 ## 구조
 ```
 zo-ide/

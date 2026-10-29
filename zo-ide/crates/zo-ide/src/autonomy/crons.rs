@@ -25,6 +25,7 @@ pub struct CronTurn {
     pub prompt: String,
     /// The local minute the run was recorded for, unix seconds.
     pub due_at_secs: u64,
+    pub workflow: Option<serde_json::Value>,
 }
 
 /// The earliest minute any enabled cron is next due, in unix milliseconds —
@@ -32,12 +33,15 @@ pub struct CronTurn {
 #[must_use]
 pub fn next_wakeup(registry: &CronRegistry, now_unix_ms: u64) -> Option<u64> {
     let now = now_unix_ms / 1_000;
-    registry
-        .list(true)
-        .iter()
+    let entries = registry.list(true);
+    let due = entries.iter()
         .filter_map(|entry| registry.next_due_at(&entry.cron_id, now).ok().flatten())
-        .min()
-        .map(|secs| secs.saturating_mul(1_000))
+        .min();
+    // A peer may release its lease while this headless session has no input.
+    // Recheck at the next cron minute instead of parking forever on None.
+    let lease_refresh = entries.iter().any(|entry| entry.workflow_active_at.is_some())
+        .then(|| (now / 60).saturating_add(1).saturating_mul(60));
+    due.into_iter().chain(lease_refresh).min().map(|secs| secs.saturating_mul(1_000))
 }
 
 /// The first due cron with its run recorded — the one turn to open now.
@@ -52,14 +56,20 @@ pub fn dispatch_due(registry: &CronRegistry, now_unix_ms: u64) -> Option<CronTur
             Ok(recorded) => recorded,
             // The registry keeps the record in memory when the disk refuses
             // it (and has already warned once); the turn still owes its run.
-            Err(_) => registry.get(&id).is_some_and(|entry| {
+            Err(_) => due.entry.workflow.is_none() && registry.get(&id).is_some_and(|entry| {
                 entry
                     .last_run_at
                     .is_some_and(|last| last / 60 >= due.due_at / 60)
             }),
         };
         if recorded {
+            let workflow = due.entry.workflow.clone().map(|mut payload| {
+                payload["runId"] = serde_json::json!(format!("{}-{}", id, due.due_at));
+                payload["__zo_scheduled"] = serde_json::json!(true);
+                payload
+            });
             return Some(CronTurn {
+                workflow,
                 prompt: prompt_for(&id, &due.entry.prompt, due.entry.description.as_deref()),
                 id,
                 due_at_secs: due.due_at,
@@ -169,4 +179,20 @@ mod tests {
         assert_eq!(turn.due_at_secs, (three_minutes_on / MINUTE_MS) * 60);
         assert_eq!(dispatch_due(&registry, three_minutes_on), None);
     }
+    #[test]
+    fn a_graph_slot_has_a_stable_identity_and_holds_later_slots_until_settled() {
+        let registry = CronRegistry::new_in_memory();
+        let start = CREATED_MID_MINUTE_SECS / 60 * 60;
+        let entry = registry.create_workflow_at("* * * * *", &serde_json::json!({"spec":{},"input":"task"}), None, start).unwrap();
+        let first = dispatch_due(&registry, start * 1000).unwrap();
+        let payload = first.workflow.unwrap();
+        assert_eq!(payload["runId"], format!("{}-{start}", entry.cron_id));
+        assert_eq!(payload["__zo_scheduled"], true);
+        assert_eq!(next_wakeup(&registry, (start + 60) * 1000), Some((start + 120) * 1000));
+        assert!(dispatch_due(&registry, (start + 60) * 1000).is_none());
+        registry.settle_workflow_run(&entry.cron_id, start, false).unwrap();
+        let second = dispatch_due(&registry, (start + 60) * 1000).unwrap();
+        assert_ne!(second.workflow.unwrap()["runId"], payload["runId"]);
+    }
+
 }

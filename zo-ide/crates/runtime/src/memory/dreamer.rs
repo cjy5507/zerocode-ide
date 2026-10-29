@@ -3645,7 +3645,19 @@ pub const DEFAULT_COMPACTION_DREAM_INTERVAL: std::time::Duration =
 /// Throttle marker file: stores the unix-seconds timestamp of the last
 /// automatic pass under `.zo/dream/`, alongside the candidate logs.
 const THROTTLE_MARKER: &str = ".last_auto_dream";
+// Read the old compaction marker during migration; new automatic triggers all
+// stamp THROTTLE_MARKER only after curation and local decay succeed.
 const COMPACTION_THROTTLE_MARKER: &str = ".last_compaction_dream";
+const AUTO_DREAM_LOCK_FILE: &str = ".automatic_dream.lock";
+const AUTO_DREAM_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether automatic curation is enabled for this workspace. Explicit
+/// [`dream_at_cwd`] calls remain independent of the automatic scheduling switch.
+#[must_use]
+pub fn automatic_dream_enabled(cwd: &Path) -> bool {
+    std::env::var("ZO_DREAM").ok().as_deref() != Some("0")
+        && dream_automation_enabled_for_cwd(cwd)
+}
 
 /// Pure throttle decision: should an automatic pass run, given the last-run
 /// timestamp, the current time, and the minimum interval? Kept separate from
@@ -3669,30 +3681,62 @@ pub fn should_auto_dream(
 }
 
 /// Fire an automatic dreaming pass if the throttle window has elapsed, updating
-/// the marker on success. Returns `Ok(None)` when throttled (the common case),
-/// `Ok(Some(report))` when a pass ran. Designed to be called fire-and-forget at
-/// session startup; it does no work and no IO beyond a single marker read when
-/// throttled.
+/// the shared marker on success. Disabled, empty, throttled, and already-running
+/// work returns `Ok(None)`. The lock spans the second throttle check, curation,
+/// local decay, and the success stamp, across processes and automatic triggers.
 pub fn maybe_auto_dream(
     cwd: &Path,
     min_interval: std::time::Duration,
     active_model: Option<&str>,
 ) -> Result<Option<DreamReport>, DreamError> {
-    let marker = trace_base(cwd)
-        .join(ZO_DIR_NAME)
-        .join(DREAM_DIR)
-        .join(THROTTLE_MARKER);
-    let last_run = read_marker(&marker);
-    if !should_auto_dream(last_run, std::time::SystemTime::now(), min_interval) {
+    if !automatic_dream_enabled(cwd) {
         return Ok(None);
     }
-    let report = dream_at_cwd(cwd, active_model)?;
-    // Best-effort hygiene: age off entries past their revisit window so memory
-    // does not creep unboundedly. A decay failure must not sink the dream pass,
-    // so its error is swallowed (the next pass retries).
-    let _ = FsMemoryStore::at_cwd(cwd).decay_expired(now_secs());
-    write_marker(&trace_base(cwd), &marker)?;
-    Ok(Some(report))
+    let dir = dream_dir(cwd);
+    if !automatic_dream_due(&dir, SystemTime::now(), min_interval)
+        || !has_automatic_curation_evidence(cwd)
+    {
+        return Ok(None);
+    }
+    let dir = ensure_repo_dream_dir_no_symlink(cwd)?;
+    let Some(_lock) = crate::secure_fs::try_lock_owner_only(&dir, Path::new(AUTO_DREAM_LOCK_FILE))? else {
+        return Ok(None);
+    };
+    // Another process may have completed between the cheap gate and the lock.
+    if !automatic_dream_due(&dir, SystemTime::now(), min_interval) {
+        return Ok(None);
+    }
+    let result = (|| {
+        let report = dream_at_cwd(cwd, active_model)?;
+        FsMemoryStore::local_at_cwd(cwd).decay_expired(now_secs())?;
+        write_marker(&trace_base(cwd), &dir.join(THROTTLE_MARKER))?;
+        Ok(Some(report))
+    })();
+    if let Err(error) = &result {
+        // Failure has its own bounded retry clock, never a success timestamp.
+        // A host still applies its scheduling bound if this error cannot persist.
+        let _ = record_auto_dream_failure(cwd, error);
+    }
+    result
+}
+
+fn automatic_dream_due(dir: &Path, now: SystemTime, min_interval: std::time::Duration) -> bool {
+    let succeeded = [THROTTLE_MARKER, COMPACTION_THROTTLE_MARKER]
+        .into_iter().filter_map(|name| read_marker(&dir.join(name))).max();
+    let failed = read_auto_dream_failure_time(dir)
+        .filter(|failed| succeeded.is_none_or(|success| *failed > success));
+    if failed.is_some() {
+        return should_auto_dream(failed, now, AUTO_DREAM_RETRY_INTERVAL);
+    }
+    should_auto_dream(succeeded, now, min_interval)
+}
+
+fn read_auto_dream_failure_time(dir: &Path) -> Option<SystemTime> {
+    let text = crate::secure_fs::read_regular_file_absolute_no_follow_bounded(
+        &dir.join(AUTO_DREAM_ERROR_FILE), 1_024,
+    ).ok()??;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(value.get("tsMs")?.as_u64()?))
 }
 
 /// Schedule curation after a successful conversation compaction without ever
@@ -3727,40 +3771,35 @@ pub fn maybe_auto_dream_on_compaction(
     min_interval: std::time::Duration,
     active_model: Option<&str>,
 ) -> Result<Option<DreamReport>, DreamError> {
-    let marker = trace_base(cwd)
-        .join(ZO_DIR_NAME)
-        .join(DREAM_DIR)
-        .join(COMPACTION_THROTTLE_MARKER);
-    if !should_auto_dream(read_marker(&marker), std::time::SystemTime::now(), min_interval)
-        || !has_compaction_curation_evidence(cwd)
-    {
-        return Ok(None);
-    }
-
-    // Claim the interval before doing the full scan. A simultaneous compaction
-    // therefore loses only a marker read/write, not a duplicate curation pass.
-    // If this worker fails, the next compact retries after the short interval.
-    write_marker(&trace_base(cwd), &marker)?;
-    let report = dream_at_cwd(cwd, active_model)?;
-    let _ = FsMemoryStore::local_at_cwd(cwd).decay_expired(now_secs());
-    Ok(Some(report))
+    maybe_auto_dream(cwd, min_interval, active_model)
 }
 
-/// Constant-time-ish prefilter for compaction-triggered curation. The actual
+/// Cheap file-presence prefilter for automatic curation. The actual
 /// promotion gate still rejects one-off noise, unsupported hypotheses, and
 /// transient tool output; this merely avoids opening every candidate/index
 /// file when neither producer has written any evidence at all.
-fn has_compaction_curation_evidence(cwd: &Path) -> bool {
-    [trace_base(cwd).join(ZO_DIR_NAME).join(DREAM_DIR), trace_base(cwd).join(ZO_DIR_NAME).join("turns")]
-        .into_iter()
-        .any(|dir| fs::read_dir(dir).ok().is_some_and(|mut entries| entries.next().is_some()))
+fn has_automatic_curation_evidence(cwd: &Path) -> bool {
+    let dream = dream_dir(cwd);
+    [dream.clone(), trace_base(cwd).join(ZO_DIR_NAME).join("turns"),
+        dream.join(AUTOMATION_DIR), user_pattern_dir(cwd)]
+        .into_iter().any(|dir| {
+            if !fs::symlink_metadata(&dir).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+                return false;
+            }
+            fs::read_dir(dir).ok().is_some_and(|entries| entries.flatten().any(|entry| {
+                entry.path().extension().is_some_and(|extension| extension == "jsonl")
+                    && entry.file_type().is_ok_and(|kind| kind.is_file())
+                    && entry.metadata().is_ok_and(|metadata| metadata.len() > 0)
+            }))
+        })
 }
 
 /// Read the unix-seconds timestamp from the throttle marker, if present and
 /// parseable. Any failure (missing, corrupt) reads as "never run".
 fn read_marker(marker: &Path) -> Option<std::time::SystemTime> {
-    let secs: u64 = fs::read_to_string(marker).ok()?.trim().parse().ok()?;
-    Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+    let text = crate::secure_fs::read_regular_file_absolute_no_follow_bounded(marker, 128).ok()??;
+    let secs: u64 = text.trim().parse().ok()?;
+    std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
 }
 
 /// Stamp the throttle marker with the current unix-seconds time without ever

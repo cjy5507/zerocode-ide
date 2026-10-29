@@ -68,6 +68,24 @@ pub(super) fn validate_execution_scope(
     Ok(())
 }
 
+/// Ledger completions currently carry no measured token usage. A recurring
+/// graph cannot treat those workers as free; fail before launching any of them.
+pub(super) fn validate_scheduled_accounting(
+    workflow: &NormalizedWorkflow, mode: Option<PermissionMode>, ledger_available: bool,
+) -> Result<(), ToolError> {
+    let Some(graph) = &workflow.graph else { return Ok(()); };
+    for node in &graph.nodes {
+        let GraphNode::Agent { phase, .. } = node else { continue; };
+        let phase = workflow.phases.iter().find(|candidate| &candidate.id == phase)
+            .ok_or_else(|| ToolError::InvalidInput("scheduled graph phase is missing".to_string()))?;
+        if ledger_available && (matches!(mode, None | Some(PermissionMode::DangerFullAccess))
+            || phase.launch.agent.is_some() || phase.launch.effort.is_some() || phase.launch.worktree.is_some()) {
+            return Err(ToolError::InvalidInput("scheduled graph requires measured worker usage; ZeroCode ledger workers do not yet provide token receipts".to_string()));
+        }
+    }
+    Ok(())
+}
+
 /// The dispatcher supplies fresh execution metadata on every tool call. Like
 /// `WorkflowSpec::from_value`, identity ignores only those reserved top-level
 /// fields; nested authored data remains part of the run's identity.

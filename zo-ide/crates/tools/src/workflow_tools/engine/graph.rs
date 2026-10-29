@@ -20,6 +20,7 @@ pub(crate) struct CheckResult {
 }
 
 pub(crate) struct GraphRunOptions<'a> {
+    pub strict_accounting: bool,
     pub check: Option<&'a dyn Fn(&str) -> CheckResult>,
     pub store: &'a dyn GraphStore,
     /// SHA-256 of the authored spec and input. Resume never accepts an edit.
@@ -347,8 +348,12 @@ fn execute(
                 && phase_report.items.iter().all(|item| item.status == super::STATUS_COMPLETED
                     && item.error.is_none() && (phase_spec.schema.is_none() || item.structured.is_some()));
             let output = json!({"items": &phase_report.items});
+            let unmetered = phase_report.items.iter().any(|item| !item.agent_id.is_empty() && item.output_tokens == 0);
             checkpoint.prior.insert(phase.clone(), phase_report.items.clone());
             checkpoint.phases.push(phase_report);
+            if unmetered && opts.graph.as_ref().is_some_and(|options| options.strict_accounting) {
+                return Err(format!("node `{id}` has no trustworthy token usage; scheduled execution stopped"));
+            }
             if uncertain || state.worktree_fallbacks > 0 || !state.apply_failures.is_empty() {
                 return Err(format!("node `{id}` has unfinished work or an uncertain worktree result"));
             }
@@ -419,7 +424,13 @@ fn report(
     resumed: bool,
     notes: Vec<String>,
 ) -> WorkflowReport {
+    let accounting_complete = state.agents_spawned == 0 || checkpoint.as_ref().is_some_and(|checkpoint| {
+        let items: Vec<_> = checkpoint.phases.iter().flat_map(|phase| &phase.items)
+            .filter(|item| !item.agent_id.is_empty()).collect();
+        items.len() == state.agents_spawned && items.iter().all(|item| item.output_tokens > 0)
+    });
     let graph = checkpoint.as_ref().map(|checkpoint| json!({
+        "accounting_complete":accounting_complete,
         "cursor":checkpoint.cursor, "steps":checkpoint.steps,
         "resumed":resumed, "verified":checkpoint.verified(),
         "verification_scope":"recorded_run",

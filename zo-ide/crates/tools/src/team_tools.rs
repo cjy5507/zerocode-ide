@@ -58,7 +58,10 @@ pub(crate) struct TeamDeleteInput {
 #[derive(Debug, Deserialize)]
 pub(crate) struct CronCreateInput {
     pub schedule: String,
+    #[serde(default)]
     pub prompt: String,
+    #[serde(default)]
+    pub workflow: Option<Value>,
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -287,15 +290,20 @@ fn cron_tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "CronCreate",
-            description: "Register a cron-like recurring task record. When this session is idle and the schedule is due, a turn opens with the prompt; CronRunDue also enqueues currently due enabled crons by hand as Created task records.",
+            description: "Register recurring idle-session work: exactly one prompt or workflow. A workflow is {spec: graphSpec, input?} or {library: name, input?}; its validated graph is frozen now and executed directly by the host each due slot, without a parent model turn. Agent graphs require max_agents and max_output_tokens budgets. Prompt crons retain their existing turn behavior.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "schedule": { "type": "string", "description": "Five-field cron read in this session's own time zone: minute hour day-of-month month day-of-week. The wall clock you write is the wall clock it fires on; the receipt names the zone." },
                     "prompt": { "type": "string" },
+                    "workflow": { "type": "object", "description": "Exactly one of {spec: graphSpec, input?} or {library: name, input?}. Graph mode only; the cron host owns runId/resumeFromRunId." },
                     "description": { "type": "string" }
                 },
-                "required": ["schedule", "prompt"],
+                "required": ["schedule"],
+                "oneOf": [
+                    { "required": ["prompt"], "not": { "required": ["workflow"] } },
+                    { "required": ["workflow"], "not": { "required": ["prompt"] } }
+                ],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::DangerFullAccess,
@@ -325,7 +333,7 @@ fn cron_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "CronRunDue",
-            description: "Manually enqueue currently due enabled cron records as Created task records — the by-hand path beside the idle session's own scheduler. Does not execute agents or run tasks itself; missed runs are coalesced to one task per cron per invocation.",
+            description: "Manually enqueue due prompt crons as Created task records. Workflow crons are reported as automatic-only and left unclaimed for direct execution by the idle host. Does not execute agents or run tasks itself; missed prompt runs are coalesced to one task per cron per invocation.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -988,23 +996,28 @@ const CRON_AUTOMATIC_SCHEDULER_NOTE: &str = AUTOMATIC_SCHEDULER_NOTE;
 
 fn run_cron_create(crons: &CronRegistry, input: &CronCreateInput) -> Result<String, ToolError> {
     validate_cron_schedule(&input.schedule).map_err(ToolError::InvalidInput)?;
-    if input.prompt.trim().is_empty() {
-        return Err(ToolError::InvalidInput(
-            "cron prompt must not be empty".to_string(),
-        ));
-    }
-
-    let entry = crons
-        .create(&input.schedule, &input.prompt, input.description.as_deref())
-        .map_err(ToolError::Execution)?;
+    let entry = match (&input.workflow, input.prompt.trim().is_empty()) {
+        (Some(workflow), true) => {
+            let snapshot = crate::workflow_tools::prepare_scheduled_graph(workflow)?;
+            crons.create_workflow(&input.schedule, &snapshot, input.description.as_deref())
+        }
+        (None, false) => crons.create(&input.schedule, &input.prompt, input.description.as_deref()),
+        _ => return Err(ToolError::InvalidInput(
+            "cron requires exactly one non-empty prompt or workflow".to_string()
+        )),
+    }.map_err(ToolError::Execution)?;
     let next_due_at = crons
         .next_due_at(&entry.cron_id, now_secs())
         .map_err(ToolError::Execution)?;
     let zone = cron_zone();
+    let scheduler_status = if entry.workflow.is_some() { "automatic_graph" } else { "manual_run_due" };
     to_pretty_json(json!({
         "cron_id": entry.cron_id,
         "schedule": entry.schedule,
         "prompt": entry.prompt,
+        "workflow": entry.workflow,
+        "workflow_active_at": entry.workflow_active_at,
+        "workflow_blocked_reason": entry.workflow_blocked_reason,
         "description": entry.description,
         "enabled": entry.enabled,
         "created_at": entry.created_at,
@@ -1014,7 +1027,7 @@ fn run_cron_create(crons: &CronRegistry, input: &CronCreateInput) -> Result<Stri
         "next_due_at": next_due_at,
         "time_zone": zone.label,
         "time_zone_utc_offset_secs": zone.offset_secs,
-        "scheduler_status": "manual_run_due",
+        "scheduler_status": scheduler_status,
         "automatic_scheduler_status": CRON_AUTOMATIC_SCHEDULER_STATUS,
         "automatic_scheduler_note": CRON_AUTOMATIC_SCHEDULER_NOTE
     }))
@@ -1039,10 +1052,14 @@ fn run_cron_list(crons: &CronRegistry) -> Result<String, ToolError> {
         .into_iter()
         .map(|entry| {
             let next_due_at = crons.next_due_at(&entry.cron_id, now).ok().flatten();
+            let scheduler_status = if entry.workflow.is_some() { "automatic_graph" } else { "manual_run_due" };
             json!({
                 "cron_id": entry.cron_id,
                 "schedule": entry.schedule,
                 "prompt": entry.prompt,
+                "workflow": entry.workflow,
+        "workflow_active_at": entry.workflow_active_at,
+        "workflow_blocked_reason": entry.workflow_blocked_reason,
                 "description": entry.description,
                 "enabled": entry.enabled,
                 "run_count": entry.run_count,
@@ -1050,7 +1067,7 @@ fn run_cron_list(crons: &CronRegistry) -> Result<String, ToolError> {
                 "created_at": entry.created_at,
                 "updated_at": entry.updated_at,
                 "next_due_at": next_due_at,
-                "scheduler_status": "manual_run_due",
+                "scheduler_status": scheduler_status,
                 "automatic_scheduler_status": CRON_AUTOMATIC_SCHEDULER_STATUS,
                 "automatic_scheduler_note": CRON_AUTOMATIC_SCHEDULER_NOTE
             })
@@ -1088,6 +1105,18 @@ fn run_cron_run_due_at(
 
     for due_entry in due {
         let cron_id = due_entry.entry.cron_id.clone();
+        if due_entry.entry.workflow.is_some() {
+            runs.push(json!({
+                "cron_id": cron_id,
+                "due_at": due_entry.due_at,
+                "next_due_at_after_run": due_entry.next_due_at,
+                "status": "automatic_only",
+                "kind": "workflow",
+                "task_id": null,
+                "message": "registered graph remains due for direct execution by the idle host"
+            }));
+            continue;
+        }
         if input.dry_run {
             runs.push(json!({
                 "cron_id": cron_id,
@@ -1156,7 +1185,7 @@ fn run_cron_run_due_at(
         "message": if input.dry_run {
             "Due cron records previewed; no tasks were created"
         } else {
-            "Due cron records were enqueued as Created task records; no agent execution was started"
+            "Due prompt crons were enqueued as Created task records; workflow crons remain due for the idle host; no execution was started"
         }
     }))
 }
@@ -2271,6 +2300,7 @@ mod tests {
             &CronCreateInput {
                 schedule: "@daily".to_string(),
                 prompt: "daily check".to_string(),
+                workflow: None,
                 description: None,
             },
         )
@@ -2282,6 +2312,7 @@ mod tests {
             &CronCreateInput {
                 schedule: "0 * * * *".to_string(),
                 prompt: "  ".to_string(),
+                workflow: None,
                 description: None,
             },
         )
@@ -2299,6 +2330,7 @@ mod tests {
             &CronCreateInput {
                 schedule: "  */15 * * * *  ".to_string(),
                 prompt: "  Check health  ".to_string(),
+                workflow: None,
                 description: Some("health".to_string()),
             },
         )
@@ -2325,6 +2357,58 @@ mod tests {
         assert!(first["updated_at"].as_u64().is_some());
         assert_eq!(list["time_zone"], zone.label);
         assert_eq!(list["time_zone_utc_offset_secs"], zone.offset_secs);
+    }
+
+    fn scheduled_check_graph() -> Value {
+        json!({"spec":{
+            "name":"scheduled-check", "mode":"graph",
+            "graph":{"entry":"check", "max_steps":2, "nodes":[
+                {"kind":"check", "id":"check", "command":"true", "on_pass":"done", "on_fail":"done"},
+                {"kind":"end", "id":"done", "status":"completed"}
+            ]}
+        }})
+    }
+
+    #[test]
+    fn cron_create_freezes_graph_and_lists_the_typed_action() {
+        let crons = CronRegistry::new_in_memory();
+        let input: CronCreateInput = serde_json::from_value(json!({
+            "schedule":"* * * * *", "workflow":scheduled_check_graph()
+        })).unwrap();
+        assert!(input.prompt.is_empty(), "workflow registration needs no fake prompt");
+        let created = parse_json(&run_cron_create(&crons, &input).unwrap());
+        assert_eq!(created["scheduler_status"], "automatic_graph");
+        assert_eq!(created["workflow"]["spec"]["mode"], "graph");
+        assert_eq!(created["workflow"]["input"], Value::Null);
+        let listed = parse_json(&run_cron_list(&crons).unwrap());
+        assert_eq!(listed["crons"][0]["workflow"], created["workflow"]);
+        assert_eq!(listed["crons"][0]["scheduler_status"], "automatic_graph");
+        let mut ambiguous = input;
+        ambiguous.prompt = "also run this prompt".to_string();
+        assert!(run_cron_create(&crons, &ambiguous).is_err());
+        assert_eq!(crons.len(), 1);
+    }
+
+    #[test]
+    fn manual_run_due_leaves_graph_slot_unclaimed_and_preserves_prompt_crons() {
+        let crons = CronRegistry::new_in_memory();
+        let tasks = TaskRegistry::new_in_memory();
+        let now = 1_700_000_040;
+        let graph = crate::workflow_tools::prepare_scheduled_graph(&scheduled_check_graph()).unwrap();
+        let workflow = crons.create_workflow_at("* * * * *", &graph, None, now).unwrap();
+        let prompt = crons.create_at("* * * * *", "prompt task", None, now).unwrap();
+        for dry_run in [true, false] {
+            let result = parse_json(&run_cron_run_due_at(&crons, &tasks, &CronRunDueInput { dry_run }, now).unwrap());
+            let graph_run = result["runs"].as_array().unwrap().iter()
+                .find(|run| run["cron_id"] == workflow.cron_id).unwrap();
+            assert_eq!(graph_run["status"], "automatic_only");
+            assert_eq!(graph_run["task_id"], Value::Null);
+            assert_eq!(crons.get(&workflow.cron_id).unwrap().run_count, 0);
+        }
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(crons.get(&prompt.cron_id).unwrap().run_count, 1);
+        assert_eq!(crons.due_at(now).len(), 1);
+        assert_eq!(crons.due_at(now)[0].entry.cron_id, workflow.cron_id);
     }
 
     #[test]
