@@ -413,6 +413,196 @@ export async function testConversationPaths(browser, origin, ok) {
   }
 }
 
+/* A file the answer names by its name alone (t-83039): 「terminal.rs」 for a
+ * file three folders down. Pressed, the link opens the checkout's one file
+ * whose path ends that way, at the line it named; two such files stand in the
+ * file finder with the name typed in; none is one sentence, said once however
+ * often it is pressed, with what the disk said on its hover. The look is asked
+ * on the press, never while the answer is drawn, a path that stands where it
+ * points looks for nothing, and the document viewer's links take the same
+ * road. The checkout is a list of files the stubs answer from the way the
+ * backend does: a read of a path not on it fails with the disk's words, and
+ * the finder's look is a file name holding the word. */
+export async function testConversationLinkLookup(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const root = "/tmp/zerocode-window-test";
+    const deep = "crates/zerocode-shell/src/cmd/terminal.rs";
+    await page.evaluate(({ root, deep }) => {
+      const files = [deep, "crates/one/src/mod.rs", "crates/two/src/mod.rs", "crates/three/src/pmod.rs"];
+      const text = Array.from({ length: 40 }, (_, at) => `line ${at + 1}`).join("\n");
+      window.__READS__ = [];
+      window.__LOOKS__ = [];
+      window.__ANSWER__.read_text_file = (args) => {
+        window.__READS__.push(args.path);
+        const relative = args.path.startsWith(`${root}/`) ? args.path.slice(root.length + 1) : args.path;
+        if (!files.includes(relative)) throw "No such file or directory (os error 2)";
+        return { text, version: 1, missing: false };
+      };
+      window.__ANSWER__.search_files = (args) => {
+        window.__LOOKS__.push(args.query);
+        const word = args.query.toLowerCase();
+        return files.filter((path) => path.split("/").at(-1).toLowerCase().includes(word)).sort();
+      };
+    }, { root, deep });
+    await openConversation(page, [
+      { role: "user", text: "어디를 고쳤나요?" },
+      { role: "assistant", text: "terminal.rs:12 를 고쳤고 crates/one/src/mod.rs:3 과 mod.rs 도 봤습니다. gone.rs 는 지웠습니다." },
+    ]);
+    const seen = await page.evaluate(async ({ root, deep }) => {
+      const seen = {};
+      const until = async (done) => {
+        for (let beat = 0; beat < 30 && !done(); beat += 1) await window.__PAINTED__();
+      };
+      const lineNow = () => {
+        const editor = window.__EDITOR__();
+        return editor ? editor.state.doc.lineAt(editor.state.selection.main.head).number : null;
+      };
+      const toasts = () => [...document.querySelectorAll(".toasts .toast")];
+      const counts = () => [window.__READS__.length, window.__LOOKS__.length];
+      const face = document.querySelector("#worker-view");
+      const links = [...face.querySelectorAll(".helper-turn.is-assistant .helper-link")];
+      const byLabel = (label) => links.find((one) => one.textContent.trim() === label);
+      const pageTab = activeTabId;
+      const back = async () => {
+        setActiveTab(pageTab);
+        await until(() => activeTabId === pageTab);
+      };
+      // Drawing the answer asked the disk nothing.
+      seen.drawn = counts();
+      // One file ends that way: it opens at the line the link named, and nothing is said.
+      byLabel("terminal.rs:12")?.click();
+      await until(() => activeTabId === `file:${deep}` && lineNow() === 12);
+      seen.one = { tab: activeTabId, line: lineNow(), reads: [...window.__READS__], looks: [...window.__LOOKS__], toasts: toasts().length };
+      await back();
+      // A path that stands where it points opens there and looks for nothing.
+      const before = counts();
+      byLabel("crates/one/src/mod.rs:3")?.click();
+      await until(() => activeTabId === `file:${root}/crates/one/src/mod.rs` && lineNow() === 3);
+      seen.direct = { tab: activeTabId, line: lineNow(), looks: counts()[1] - before[1] };
+      await back();
+      // Two files end that way: the file finder stands with the name typed in and those two in it.
+      byLabel("mod.rs")?.click();
+      await until(() => !qoScrim.hidden && qoResults.querySelector(".qo-row") !== null);
+      seen.two = {
+        finder: !qoScrim.hidden && paletteMode === "file",
+        query: qoInput.value,
+        rows: [...qoResults.querySelectorAll(".qo-row .qo-label")].map((node) => node.textContent),
+        tab: activeTabId === pageTab,
+        toasts: toasts().length,
+      };
+      closePalette();
+      await until(() => qoScrim.hidden);
+      return seen;
+    }, { root, deep });
+    // No file ends that way: one sentence, however often it is pressed, the disk's words on its
+    // hover. Pressed with the real pointer, as the person pressed it — a press is one read and one
+    // look, so five toasts were five presses, each saying the same failure again.
+    const goneAt = await page.evaluate(() => {
+      const gone = [...document.querySelectorAll("#worker-view .helper-turn.is-assistant .helper-link")]
+        .find((one) => one.textContent.trim() === "gone.rs");
+      gone?.scrollIntoView({ block: "center" });
+      const box = gone?.getBoundingClientRect();
+      window.__UNPRESSED__ = [window.__READS__.length, window.__LOOKS__.length];
+      return box ? { x: box.left + box.width / 2, y: box.top + box.height / 2 } : null;
+    });
+    const settleToasts = (presses) => page.evaluate(async (presses) => {
+      for (let beat = 0; beat < 30 && window.__LOOKS__.length < window.__UNPRESSED__[1] + presses; beat += 1) {
+        await window.__PAINTED__();
+      }
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      return [window.__READS__.length - window.__UNPRESSED__[0], window.__LOOKS__.length - window.__UNPRESSED__[1]];
+    }, presses);
+    let pressOnce = null;
+    let pressFive = null;
+    if (goneAt) {
+      await page.mouse.click(goneAt.x, goneAt.y);
+      pressOnce = await settleToasts(1);
+      for (let press = 2; press <= 5; press += 1) {
+        await page.mouse.click(goneAt.x, goneAt.y);
+        pressFive = await settleToasts(press);
+      }
+    }
+    seen.none = await page.evaluate(({ pressOnce, pressFive }) => {
+      const said = [...document.querySelectorAll(".toasts .toast")];
+      const none = {
+        pressOnce,
+        pressFive,
+        count: said.length,
+        words: said.map((node) => node.textContent),
+        want: t("file.linkUnfound", "이 파일을 체크아웃에서 찾지 못했어요: {{name}}", { name: "gone.rs" }),
+        tip: said[0]?.dataset.tip ?? "",
+        tab: activeTabId.startsWith("wire:"),
+      };
+      for (const node of said) node.remove();
+      return none;
+    }, { pressOnce, pressFive });
+    seen.doc = await page.evaluate(async ({ deep }) => {
+      const until = async (done) => {
+        for (let beat = 0; beat < 30 && !done(); beat += 1) await window.__PAINTED__();
+      };
+      const lineNow = () => {
+        const editor = window.__EDITOR__();
+        return editor ? editor.state.doc.lineAt(editor.state.selection.main.head).number : null;
+      };
+      // The document viewer's links are the same door: a page under docs/ naming the file by its name.
+      const doc = document.createElement("div");
+      doc.className = "md-page";
+      document.body.appendChild(doc);
+      const readsBefore = window.__READS__.length;
+      renderMarkdownPage(doc, "[터미널](terminal.rs#L7)", "docs");
+      doc.querySelector(".md-link")?.click();
+      await until(() => activeTabId === `file:${deep}` && lineNow() === 7);
+      const seenDoc = {
+        tab: activeTabId,
+        line: lineNow(),
+        firstRead: window.__READS__[readsBefore] ?? null,
+        toasts: document.querySelectorAll(".toasts .toast").length,
+      };
+      doc.remove();
+      return seenDoc;
+    }, { deep });
+    ok(
+      "t-83039: a file the answer names by its name alone opens the checkout's one file whose path ends that way, at the line it named, with nothing said — the look is asked on the press, never while the answer is drawn",
+      JSON.stringify(seen.drawn) === "[0,0]" &&
+        seen.one.tab === `file:${deep}` && seen.one.line === 12 &&
+        // One read at the link's own spot, which fails; every read after it is the file found (a file
+        // tab reads its file again when the stub's version answer differs — every open here does).
+        seen.one.reads[0] === `${root}/terminal.rs` && seen.one.reads.length >= 2 &&
+        seen.one.reads.slice(1).every((path) => path === deep) &&
+        JSON.stringify(seen.one.looks) === JSON.stringify(["terminal.rs"]) && seen.one.toasts === 0,
+      JSON.stringify(seen),
+    );
+    ok(
+      "t-83039: a path that stands where it points opens there, at its line, and looks for nothing",
+      seen.direct.tab === `file:${root}/crates/one/src/mod.rs` && seen.direct.line === 3 && seen.direct.looks === 0,
+      JSON.stringify(seen),
+    );
+    ok(
+      "t-83039: two files ending with the name stand in the file finder with the name typed in — a file whose name only holds the word is not one of them — and nothing opens or is said",
+      seen.two.finder && seen.two.query === "mod.rs" &&
+        JSON.stringify(seen.two.rows) === JSON.stringify(["crates/one/src/mod.rs", "crates/two/src/mod.rs"]) &&
+        seen.two.tab && seen.two.toasts === 0,
+      JSON.stringify(seen),
+    );
+    ok(
+      "t-83039: a name no file ends with is one sentence, once however often it is pressed, with the disk's words on its hover — each press is one read and one look",
+      JSON.stringify(seen.none.pressOnce) === "[1,1]" && JSON.stringify(seen.none.pressFive) === "[5,5]" &&
+        seen.none.count === 1 && seen.none.words[0] === seen.none.want &&
+        seen.none.tip.includes("No such file or directory (os error 2)") && seen.none.tab,
+      JSON.stringify(seen),
+    );
+    ok(
+      "t-83039: the document viewer's relative link takes the same road — measured from its page, then looked for by its name",
+      seen.doc.tab === `file:${deep}` && seen.doc.line === 7 && seen.doc.firstRead === "docs/terminal.rs" && seen.doc.toasts === 0,
+      JSON.stringify(seen),
+    );
+    ok("t-83039: the link lookup raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
 /* A3 — the keyboard. The extension's prompt keys (2.1.280 webview): a plain
  * Esc interrupts the turn from anywhere on the panel (`zU0` on body; a popup
  * takes it first, a permission card too); Shift+Tab steps the permission
@@ -5121,7 +5311,7 @@ async function inkShare(page, png, ink, plain) {
  * when it passes too — the numbers a receipt quotes. */
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const all = {
-    testConversationFont, testConversationFolds, testConversationPaths, testConversationKeys, testConversationStatus,
+    testConversationFont, testConversationFolds, testConversationPaths, testConversationLinkLookup, testConversationKeys, testConversationStatus,
     testConversationScroll, testConversationFoot, testConversationAgents, testConversationTodos, testConversationImages,
     testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps,
     testConversationCodeColours, testConversationStreamWork, testConversationTypingWork,
