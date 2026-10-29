@@ -427,6 +427,12 @@ fn settled_failure(manifest: &AgentOutput) -> String {
     results[0].error.clone().unwrap_or_default()
 }
 
+/// How much longer the call's own part takes on a loaded machine than on a
+/// quiet one: its three fixture processes (run-current, task-create,
+/// dispatch-show) took 3.6 s in all at load 15 on gate l87f, where a quiet run
+/// takes 0.8 s. The test adds it before the worker-start is even asked (t-84792).
+const LOADED_CALL: Duration = Duration::from_millis(1_200);
+
 /// Adversarial review A (Z7): the window opening a worker's pane held the
 /// parent's turn for the whole worker-start (8.6–9.8 s on 2026-10-27). The
 /// start runs in the background now, so the `Agent` call hands back its
@@ -444,7 +450,10 @@ fn an_agent_call_returns_before_a_slow_worker_start_answers() {
     let launch = input.launch.clone();
     let began = Instant::now();
     let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input,
-        move |job| spawn(&client, &launch, Some("exact-model".into()), job), None, None, None)
+        move |job| {
+            std::thread::sleep(LOADED_CALL);
+            spawn(&client, &launch, Some("exact-model".into()), job)
+        }, None, None, None)
         .unwrap_or_else(|failure| panic!("{failure}"));
     let took = began.elapsed();
     std::fs::write(root.path().join("release"), "go").unwrap();
