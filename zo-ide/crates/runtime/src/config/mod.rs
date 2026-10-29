@@ -841,6 +841,7 @@ impl ConfigLoader {
         // always safe. Written back over the merged arrays after the loop.
         let mut cumulative_deny: Vec<JsonValue> = Vec::new();
         let mut cumulative_ask: Vec<JsonValue> = Vec::new();
+        let [_, deny_key, ask_key, _] = RuntimePermissionRuleConfig::LISTS;
         // Provider registrations are global; accumulate them by name so a
         // project-scoped `providers` array adds to (and overrides by name) the
         // global registry instead of replacing it wholesale.
@@ -992,8 +993,8 @@ impl ConfigLoader {
             // Fold this scope's (post-strip) deny/ask into the cumulative unions
             // so the final policy is a superset of every scope's restrictions,
             // regardless of merge order.
-            collect_permission_list(&value, "deny", &mut cumulative_deny);
-            collect_permission_list(&value, "ask", &mut cumulative_ask);
+            collect_permission_list(&value, deny_key, &mut cumulative_deny);
+            collect_permission_list(&value, ask_key, &mut cumulative_ask);
             collect_permission_rule_sources(&value, &entry.path, &mut permission_rule_sources);
             collect_provider_entries(&value, &mut cumulative_providers);
             deep_merge_objects(&mut merged, &value);
@@ -3294,7 +3295,8 @@ impl RuntimePermissionRuleConfig {
     }
 
     /// The `permissions` keys a settings file writes rules under, in the
-    /// order [`Self::listed`] answers.
+    /// order [`Self::listed`] answers. The settings parser reads the keys
+    /// from here.
     pub const LISTS: [&'static str; 4] = ["allow", "deny", "ask", "rules"];
 
     /// Each list's rules beside its settings key: `allow`, `deny`, `ask`,

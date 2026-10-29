@@ -40,6 +40,24 @@ pub(crate) const TOOL_NAME_ALIASES: &[(&str, &str)] = &[
     ("task", "TaskCreate"),
 ];
 
+/// Alias keys that are zo's own shorthand rather than another agent's name for
+/// the same tool: Claude Code's `Task` starts a sub-agent (zo's `Agent`),
+/// while zo reads `task` as `TaskCreate`.
+const ZO_SHORTHAND_ALIASES: &[&str] = &["task"];
+
+/// zo's tool for `name` when the alias table maps it to one and the name means
+/// that tool elsewhere too (`Edit` is `edit_file`): a hint at the tool a
+/// permission rule written for another agent meant (t-81312). `None` for a
+/// name the table does not map and for zo's own shorthand.
+#[must_use]
+pub fn same_tool_alias(name: &str) -> Option<&'static str> {
+    let normalized = normalize_tool_name(name);
+    TOOL_NAME_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == normalized && !ZO_SHORTHAND_ALIASES.contains(alias))
+        .map(|(_, canonical)| *canonical)
+}
+
 /// Map any accepted tool alias to the canonical handler name used by the
 /// dispatcher. Returns the input unchanged when no alias matches, so
 /// already-canonical names (including `PascalCase` handlers like `TodoWrite`)

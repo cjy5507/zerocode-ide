@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::env;
-use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
@@ -105,9 +104,10 @@ pub(crate) fn queue_unknown_rule_warnings(
 /// One line for each configured permission rule whose tool name no tool zo
 /// knows answers to: a rule is matched against the name a tool is called by,
 /// case and `-`/`_` aside, so such a rule never applies. The line names the
-/// rule, its list and its settings file, and zo's tool when the alias table
-/// knows the name (`Edit` is `edit_file`). An MCP tool is not judged: its
-/// server registers it after start.
+/// rule, its list and its settings file, and zo's tool when the name means
+/// that tool elsewhere too (`Edit` is `edit_file`; Claude Code's `Task` is
+/// not zo's `TaskCreate`). An MCP tool is not judged: its server registers it
+/// after start.
 pub(crate) fn unknown_rule_warnings(
     feature_config: &runtime::RuntimeFeatureConfig,
     tool_registry: &GlobalToolRegistry,
@@ -138,16 +138,20 @@ pub(crate) fn unknown_rule_warnings(
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            let mut line = format!(
-                "permissions.{} rule '{}' in {place} names no zo tool, so it never applies",
-                named.list, named.rule
-            );
-            let alias = tools::canonical_tool_name(named.tool);
-            let alias_key = normalize_tool_name(&alias);
-            if alias_key != tool && known.contains(&alias_key) {
-                let _ = write!(line, " — zo's tool for {} is {alias}", named.tool);
-            }
-            Some(line)
+            let zo_tool = tools::same_tool_alias(named.tool)
+                .filter(|zo_tool| known.contains(&normalize_tool_name(zo_tool)));
+            // zo offers the model its own name, so a rule written for the
+            // other agent's name does not reach the tool it was meant for.
+            Some(match zo_tool {
+                Some(zo_tool) => format!(
+                    "permissions.{} rule '{}' in {place} names no zo tool; zo's tool for {} is {zo_tool}, and this rule does not reach it",
+                    named.list, named.rule, named.tool
+                ),
+                None => format!(
+                    "permissions.{} rule '{}' in {place} names no zo tool, so it never applies",
+                    named.list, named.rule
+                ),
+            })
         })
         .collect()
 }

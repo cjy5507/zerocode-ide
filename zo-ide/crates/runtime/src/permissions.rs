@@ -341,7 +341,7 @@ impl PermissionPolicy {
     #[must_use]
     pub fn required_mode_for_input(&self, tool_name: &str, input: &str) -> PermissionMode {
         let base = self.required_mode_for(tool_name);
-        if tool_name == "bash" && base == PermissionMode::DangerFullAccess {
+        if is_shell_tool(tool_name) && base == PermissionMode::DangerFullAccess {
             if let Some(command) = extract_bash_command(input) {
                 return crate::bash_validation::required_mode_for_command(&command);
             }
@@ -404,7 +404,7 @@ impl PermissionPolicy {
         context: &PermissionContext,
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
-        let verdict = (tool_name == "bash")
+        let verdict = is_shell_tool(tool_name)
             .then(|| extract_bash_command(input))
             .flatten()
             .and_then(|command| crate::kill_guard::judge(&command));
@@ -965,6 +965,13 @@ fn split_rule(trimmed: &str) -> (&str, Option<&str>) {
         }
     }
     (trimmed, None)
+}
+
+/// Whether `tool_name` is zo's shell tool in a spelling dispatch runs as it:
+/// `Bash` and `BASH` run `bash`, so the kill guard and the read-only
+/// classifier judge them as `bash` (t-81312).
+fn is_shell_tool(tool_name: &str) -> bool {
+    normalize_tool_name(tool_name) == crate::tool_guard::SHELL_TOOL
 }
 
 /// Lower-case a tool name and replace `-` with `_`, so `Bash`, `BASH` and
