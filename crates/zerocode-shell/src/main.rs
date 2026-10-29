@@ -414,10 +414,10 @@ use cmd::{
     upstream_status, use_system_claude_login, validate_branch_name, vault_sessions,
     verify_claude_accounts, verify_codex_accounts, watch_files, wire_answer, wire_history,
     wire_image, wire_interrupt, wire_log, wire_models, wire_send, wire_set_mode, wire_set_model,
-    wire_start, wire_stop, work_item_seed, worker_screen, workspace_cleanup_scan, workspace_space_cancel,
-    workspace_space_git, workspace_space_scan, worktree_committed_diff, worktree_evidence,
-    worktree_landing_stamp, worktree_last_agent, worktree_loss, worktree_prefs, worktree_stamp,
-    write_primary_selection, write_text_file,
+    wire_start, wire_stop, work_item_seed, worker_screen, workspace_cleanup_scan,
+    workspace_space_cancel, workspace_space_git, workspace_space_scan, worktree_committed_diff,
+    worktree_evidence, worktree_landing_stamp, worktree_last_agent, worktree_loss, worktree_prefs,
+    worktree_stamp, write_primary_selection, write_text_file,
 };
 use cmd::{adopt_legacy_judgment_key, select_coding_model, zo_model_list};
 use cmd::{
