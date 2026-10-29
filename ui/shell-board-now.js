@@ -544,8 +544,23 @@ function boardHoldForm(row, key, open, press, send) {
   writeTextContent(form.querySelector(".board-desk-reply-cancel"), t("board.desk.replyCancel", "취소"));
 }
 
-/* 검토 행의 제목(시안): 「… 보고가 왔습니다」, 넘김의 통과 조건이 모두 확인됐으면 그 말을 덧붙인다. */
+/* 코디네이터가 이 시도·출처의 검증을 거둔 넘김의 까닭(t-81913) — 원장이 읽은 말 그대로, 까닭 없이 거뒀으면
+ * 빈 글, 거두지 않았으면 null. 원장은 그 위의 맨 통과를 거절하므로 화면도 통과를 내밀지 않고, 새 검수 결과나
+ * 새 넘김만이 다시 통과시킨다. */
+function boardReviewWithdrawn(task) {
+  const why = task?.progress?.withdrawn;
+  return typeof why === "string" ? why : null;
+}
+
+/* 검토 행의 제목(시안): 「… 보고가 왔습니다」, 넘김의 통과 조건이 모두 확인됐으면 그 말을 덧붙인다.
+ * 검증을 거둔 넘김은 거둔 사실과 까닭이 제목이다. */
 function boardReviewWords(task) {
+  const withdrawn = boardReviewWithdrawn(task);
+  if (withdrawn !== null) {
+    return t("board.now.reviewWithdrawn", "{{task}} 검증이 철회됐습니다 — {{why}}", {
+      task: task.title, why: withdrawn || t("board.now.reviewWithdrawnUnsaid", "까닭은 적지 않았습니다"),
+    });
+  }
   const conditions = Array.isArray(task.hand_in?.conditions) ? task.hand_in.conditions : [];
   const met = conditions.length > 0 && conditions.every((one) => one.state === "checked");
   const came = t("board.now.reviewTitle", "{{task}} 보고가 왔습니다", { task: task.title });
@@ -560,16 +575,20 @@ function paintBoardReview(row, ask, now, view) {
   // What it handed in (the commit, the conditions) is the report's, behind 보고 읽기. The line
   // under it is the draft's: the goal, the task and its id, the model, how long ago it handed in.
   const handed = Number(task.times?.handed_ms) || 0;
+  // 거둔 검증은 통과 대신 다시 검수 길 하나다: 보고를 다시 읽고, 새 검수 결과나 새 넘김으로만 통과한다.
+  const withdrawn = boardReviewWithdrawn(task) !== null;
   paintBoardMeta(row.querySelector(".board-ask-meta"), boardMetaPieces([
     [task.parent_title], [task.title, { id: task.id }], [boardModelName(carrier)],
     [handed > 0 ? t("board.desk.mailAge", "{{time}} 전", { time: agoWord(handed, now) }) : ""],
     [deskNextStepWords(task)],
-  ], t("board.now.reviewNext", "통과시키면 다음 발행에 같이 실립니다")));
+  ], withdrawn ? t("board.now.reviewAgain", "새 검수 결과를 적거나 새로 넘겨야 다시 통과됩니다")
+    : t("board.now.reviewNext", "통과시키면 다음 발행에 같이 실립니다")));
   const acts = row.querySelector(".board-ask-acts");
   const press = boardPressNote(row, ask.key);
   const open = boardNowChoice.reports.has(ask.key);
-  const read = boardAskButton(acts, "read", false);
-  writeTextContent(read, open ? t("board.now.reportFold", "보고 접기") : t("board.now.reportRead", "보고 읽기"));
+  const read = boardAskButton(acts, "read", withdrawn);
+  writeTextContent(read, open ? t("board.now.reportFold", "보고 접기")
+    : withdrawn ? t("board.now.reviewRedo", "다시 검수") : t("board.now.reportRead", "보고 읽기"));
   writeAttribute(read, "aria-expanded", String(open));
   read.onclick = () => {
     if (boardNowChoice.reports.has(ask.key)) boardNowChoice.reports.delete(ask.key);
@@ -580,9 +599,9 @@ function paintBoardReview(row, ask, now, view) {
   const attempt = task.progress?.attempt ?? "";
   const source = task.progress?.source ?? "";
   writeTextContent(pass, t("board.now.reviewPass", "통과"));
-  writeHidden(pass, !boardSeatOf(task.run) || attempt === "" || source === "");
+  writeHidden(pass, withdrawn || !boardSeatOf(task.run) || attempt === "" || source === "");
   writeDisabled(pass, boardPressShut(press));
-  pass.onclick = () => void pressBoardAsk(view, ask.key, "desk_review_pass",
+  pass.onclick = withdrawn ? null : () => void pressBoardAsk(view, ask.key, "desk_review_pass",
     { run: task.run, task: task.id, attempt, source },
     (answer) => t("board.now.reviewSent", "통과를 적음 · 원장에 적히면 줄에서 빠져요 {{receipt}}",
       { receipt: boardReceipt(answer) }).trim());
