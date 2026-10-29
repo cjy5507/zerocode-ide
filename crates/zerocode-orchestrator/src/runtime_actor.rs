@@ -6057,10 +6057,13 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
-        if self
-            .ledger
-            .resume_settled(run, resume, outcome, now_ms)
-            .is_err()
+        // Asked by reference first: the window asks again on every beat for a
+        // settlement it has not seen land (t-81273).
+        if !self.ledger.resume_settle_due(run, resume)
+            || self
+                .ledger
+                .resume_settled(run, resume, outcome, now_ms)
+                .is_err()
         {
             return Ok(RuntimeReply::Settled {
                 moved: false,

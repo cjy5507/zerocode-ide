@@ -13477,6 +13477,21 @@ impl Ledger {
         self.deliver_receipt(run_id, resume_id)
     }
 
+    /// Whether [`Self::resume_settled`] would settle `resume_id`: its
+    /// receipt is in the run and still typing. The window asks again on
+    /// every beat for a settlement it has not seen land, so this is the
+    /// answer that costs no write (t-81273).
+    pub fn resume_settle_due(&self, run_id: &str, resume_id: &str) -> bool {
+        self.run(run_id)
+            .and_then(|run| {
+                run.messages
+                    .iter()
+                    .find(|held| held.id == resume_id && held.kind == MessageKind::Resumed)
+            })
+            .and_then(|row| serde_json::from_str::<serde_json::Value>(row.body.as_str()).ok())
+            .is_some_and(|body| body["status"] == RESUME_TYPING)
+    }
+
     /// The first sound from a summoned pane retires its readiness window.
     ///
     /// Any sound: a finished turn, an interrupted one — the agent was
