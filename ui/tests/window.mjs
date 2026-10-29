@@ -152,6 +152,7 @@ import { testConversationAgents, testConversationChipDoors, testConversationFold
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
 import { testConversationB, testConversationBTail } from "./conversation-b.mjs";
+import { testConversationFind, testConversationFindPane } from "./conversation-find.mjs";
 import { testConversationEarlier } from "./conversation-earlier.mjs";
 import { testConversationSwitch } from "./conversation-switch.mjs";
 import { testComposerHold } from "./composer-hold.mjs";
@@ -506,6 +507,9 @@ suite("conversation-redesign", ({ browser, origin, ok }) => testConversationRede
 suite("conversation-b", ({ browser, origin, ok }) => testConversationB(browser, origin, ok));
 /* 일하는 동안 발의 알약 아래 마지막 세 걸음, 답이 서면 다시 한 줄 (시안 C6, t-82196). */
 suite("conversation-b-tail", ({ browser, origin, ok }) => testConversationBTail(browser, origin, ok));
+/* 대화 안 찾기 ⌘F — 대화가 앞에 서면 대화에서, 알약 안 일치는 펼침, 400턴 한 프레임 (시안 C8, t-82196). */
+suite("conversation-find", ({ browser, origin, ok }) => testConversationFind(browser, origin, ok));
+suite("conversation-find-pane", ({ browser, origin, ok }) => testConversationFindPane(browser, origin, ok));
 suite("conversation-earlier", ({ browser, origin, ok }) => testConversationEarlier(browser, origin, ok));
 /* 대화를 바꿨다가 돌아오면 그 화면 그대로, 판의 「대화」는 전사부터(인계 중 보낸 글은 한 번만),
  * 늦은 첫 읽기는 늦게 한 줄 (t-54304 — Claude·Codex·Dots 역분석에서 가져온 1단계). */

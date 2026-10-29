@@ -3284,15 +3284,17 @@ function nearestRailTick(rail, y) {
   return best;
 }
 
-/* Go to `row`: it stands at the list's top, and the list stops following its
- * foot unless the row is the last one. With `focus`, an answer takes the
+/* Go to `row`: it stands at the list's top (or `lead` under it), and the list
+ * stops following its foot unless the row is the last one. With `focus`, an answer takes the
  * focus too, and with it the list's copy (`watchAnswerActions`). */
-function railJump(list, row, { focus = false } = {}) {
+function railJump(list, row, { focus = false, lead = 0 } = {}) {
   const view = list.getBoundingClientRect();
   const state = chatFollowState(list);
   state.intent = "up";
   state.at = Date.now();
-  list.scrollTop += row.getBoundingClientRect().top - view.top;
+  // `lead`: the room left above the row — a find's hit stands a third down
+  // the view, clear of the bar over its top (`showChatFindHit`).
+  list.scrollTop += row.getBoundingClientRect().top - view.top - lead;
   state.away = chatFootGap(list) >= CHAT_FOLLOW.slack;
   paintFootDoor(list);
   askTurnRail(list);
@@ -3479,4 +3481,272 @@ function paintChatStacks() {
   for (const stack of document.querySelectorAll(".chat-stack")) {
     if (stack.__run) paintChatStack(stack, stack.__run);
   }
+}
+
+/* ---- finding in a conversation (draft C8, t-82196) ---------------------------
+ *
+ * ⌘F with a conversation in front searches the conversation, not the
+ * terminal behind it. The bar is the file finder's by class (`.file-find`, as
+ * the terminal's is: `.term-find` floats it over the top corner), built the
+ * first time a page asks for it. The hits are counted in the turns the page
+ * holds — what the person said, the answers, each step's line — so a step
+ * folded in its pill and an answer shelved far from view count too, and
+ * stepping onto one opens its pill or dresses its row. The words are painted
+ * by the CSS Highlight API, which leaves the rows as they are, and only the
+ * rows that hold a hit are walked. A conversation is read from its foot, as a
+ * terminal is: the bar opens on the newest hit. */
+const CHAT_FIND_HIGHLIGHT = "chat-find-match";
+const CHAT_FIND_ACTIVE_HIGHLIGHT = "chat-find-active-match";
+
+/* The conversation's page in front of the window — a conversation's tab, or a
+ * pane turned to its conversation — when it stands drawn. */
+function chatFindPage() {
+  const tab = currentTab();
+  const term = tab?.kind === "term" ? activePaneOf(tab) : null;
+  const host = tab?.kind === "worker" ? groups.get(tab.pane)?.workerView
+    : term !== null && paneChatOn(term) ? paneChats.get(term)?.host : null;
+  return host && !host.hidden ? host.__helperPage ?? null : null;
+}
+
+/* What a turn says on the page, as the find reads it: the person's words and
+ * an answer as written, less the markdown that draws them — a link's address,
+ * a chip's backticks, bold, a heading's marks — and a step as its line says it
+ * (`pillStepWords`). A thought says its words only when it is opened, and is
+ * left out. */
+const CHAT_FIND_MARKUP = /!?\[([^\]\n]*)\]\([^)\n]*\)|`+|\*\*|^#{1,6}[ \t]+/gm;
+
+function chatFindWords(turn, run) {
+  if (turn.role === "user" || turn.role === "assistant") return turn.text.replace(CHAT_FIND_MARKUP, "$1");
+  return turn.role === "tool" ? pillStepWords(turn, run) : "";
+}
+
+/* Every hit of `query` in the page's turns, in order: the turn and which of
+ * its hits it is. At the bound the count says so (`FIND_MAX`, the file's). */
+function chatFindHits(run, query) {
+  const needle = query.toLowerCase();
+  const hits = [];
+  if (needle === "") return hits;
+  for (const turn of run.helper.turns) {
+    const words = chatFindWords(turn, run).toLowerCase();
+    for (let at = words.indexOf(needle), nth = 0; at !== -1 && hits.length < FIND_MAX; at = words.indexOf(needle, at + needle.length), nth += 1) {
+      hits.push({ turn, nth });
+    }
+  }
+  return hits;
+}
+
+/* The words a drawn row shows: an answer's or the person's prose, a step's
+ * line. */
+function chatFindWordsNode(row) {
+  return row?.querySelector(":scope > .helper-said") ?? row?.querySelector(":scope > .helper-step-line > .helper-step-what") ?? null;
+}
+
+/* The row `turn` stands in, built to show it — its pill or its row of steps
+ * opened to it, its body dressed if it was shelved far from view, the
+ * person's words let out of their clip — and the words in it. */
+function chatFindSpot(list, run, turn) {
+  let row = null;
+  for (const one of list.querySelectorAll(":scope > [data-turn]")) {
+    if (Number(one.dataset.turn) >= turn.seq) {
+      row = one;
+      break;
+    }
+  }
+  if (!row || !rowTurnsOf(row).includes(turn)) return null;
+  if (row.classList.contains("helper-group")) {
+    if (!row.__open) openActivityPill(row, true);
+    row = row.querySelector(`:scope > .helper-group-body > [data-turn="${turn.seq}"]`);
+  } else if (row.classList.contains("is-run")) {
+    if (!row.open) {
+      paintRunBody(row, run);
+      row.open = true;
+    }
+    row = row.querySelector(`:scope > .helper-run-body > [data-turn="${turn.seq}"]`);
+  } else if (row.__shelved) {
+    unshelveRow(row, run);
+  }
+  const words = chatFindWordsNode(row);
+  if (words?.classList.contains("is-clipped") && !words.classList.contains("is-open")) words.nextElementSibling?.click();
+  return words;
+}
+
+/* The hits in a drawn row's words, as Ranges. Read across the row's text
+ * nodes as one text — a step's line is its kind, a space and its target, three
+ * nodes, and 「명령 cargo」 runs over all of them; the preview's own walk
+ * (`docMatchRanges`) matches inside one node. */
+function chatFindRanges(root, query) {
+  const needle = query.toLowerCase();
+  if (needle === "") return [];
+  const nodes = [];
+  let text = "";
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walk.nextNode(); node !== null; node = walk.nextNode()) {
+    nodes.push({ node, from: text.length });
+    text += node.data;
+  }
+  const said = text.toLowerCase();
+  const ranges = [];
+  let first = 0;
+  for (let at = said.indexOf(needle); at !== -1; at = said.indexOf(needle, at + needle.length)) {
+    while (first + 1 < nodes.length && nodes[first + 1].from <= at) first += 1;
+    let last = first;
+    while (last + 1 < nodes.length && nodes[last + 1].from < at + needle.length) last += 1;
+    const range = document.createRange();
+    range.setStart(nodes[first].node, at - nodes[first].from);
+    range.setEnd(nodes[last].node, at + needle.length - nodes[last].from);
+    ranges.push(range);
+  }
+  return ranges;
+}
+
+/* Paint the hits the page has drawn — the turns that hold one, each walked
+ * once — and the one the walk stands on, which is returned. */
+function paintChatFind(list, query, hits, at) {
+  const api = mdviewHighlightApi();
+  const rows = new Map();
+  for (const row of list.querySelectorAll(".helper-turn[data-turn]:not(.is-run)")) rows.set(Number(row.dataset.turn), row);
+  const all = [];
+  let active = null;
+  let walked = null;
+  for (const hit of hits) {
+    if (hit.turn === walked) continue;
+    walked = hit.turn;
+    const row = rows.get(hit.turn.seq);
+    if (!row || row.__shelved) continue;
+    const words = chatFindWordsNode(row);
+    const ranges = words ? chatFindRanges(words, query) : [];
+    all.push(...ranges);
+    if (at && hit.turn === at.turn && ranges.length > 0) active = ranges[Math.min(at.nth, ranges.length - 1)];
+  }
+  if (api) {
+    if (all.length === 0) api.registry.delete(CHAT_FIND_HIGHLIGHT);
+    else api.registry.set(CHAT_FIND_HIGHLIGHT, api.make(all));
+    if (active === null) api.registry.delete(CHAT_FIND_ACTIVE_HIGHLIGHT);
+    else api.registry.set(CHAT_FIND_ACTIVE_HIGHLIGHT, api.make([active]));
+  }
+  return active;
+}
+
+/* The hit the walk stands on, brought into view when it is not in it. The
+ * rows the jump brings into view that stood shelved far from it are dressed
+ * at once, and the jump made again over them: the shelf would dress them a
+ * frame later, and a row dressed above the hit's line in the view pushes it
+ * out of the view (B1). */
+function showChatFindHit(list, range) {
+  const at = range.getBoundingClientRect();
+  const view = list.getBoundingClientRect();
+  if (at.top >= view.top && at.bottom <= view.bottom) return;
+  const words = range.startContainer.parentElement;
+  railJump(list, words, { lead: view.height / 3 });
+  let dressed = false;
+  for (const row of list.children) {
+    if (!row.__shelved) continue;
+    const box = row.getBoundingClientRect();
+    if (box.bottom > view.top && box.top < view.bottom) {
+      unshelveRow(row, list.__run);
+      dressed = true;
+    }
+  }
+  if (dressed) railJump(list, words, { lead: view.height / 3 });
+}
+
+/* Search again and step: 0 is a new query, which stands on the newest hit;
+ * ±1 walks the list and wraps. The hit the walk stood on is found again in
+ * the new list by its turn, so a turn that arrived meanwhile keeps the place. */
+function runChatFind(page, step) {
+  const find = page.find;
+  const list = page.turns;
+  const run = list.__run ?? page.run;
+  const query = find.field.value;
+  const hits = chatFindHits(run, query);
+  let at = find.at ? hits.findIndex((hit) => hit.turn === find.at.turn && hit.nth === find.at.nth) : -1;
+  if (hits.length === 0) at = -1;
+  else if (step === 0 || at < 0) at = hits.length - 1;
+  else at = (at + step + hits.length) % hits.length;
+  find.at = at >= 0 ? hits[at] : null;
+  writeTextContent(find.count, query === "" ? "" : hits.length === 0 ? t("file.findNone", "일치 없음") : t("file.findHits", "{{at}}/{{count}}", {
+    at: at + 1,
+    count: hits.length >= FIND_MAX ? `${FIND_MAX}+` : hits.length,
+  }));
+  // The row of the hit is built before the paint, so the paint walks it.
+  if (find.at) chatFindSpot(list, run, find.at.turn);
+  const active = paintChatFind(list, query, hits, find.at);
+  if (active) showChatFindHit(list, active);
+}
+
+/* The bar, built once for a page: the field, 「N/M」, ↑ ↓ and the close. Its
+ * keys are its own — an Escape here closes the bar, not the agent's turn
+ * (`interruptOnEscape`), and nothing reaches the window's key sink. */
+function chatFindBarNode(page) {
+  const bar = document.createElement("div");
+  bar.className = "file-find term-find chat-find";
+  bar.setAttribute("role", "search");
+  bar.dataset.keyboardOwner = "true";
+  bar.hidden = true;
+  const field = document.createElement("input");
+  field.type = "search";
+  field.className = "file-find-field";
+  field.spellcheck = false;
+  const count = document.createElement("span");
+  count.className = "file-find-count";
+  const step = (words, glyph, by) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "file-find-step";
+    button.textContent = glyph;
+    labelButton(button, words);
+    button.addEventListener("click", () => runChatFind(page, by));
+    return button;
+  };
+  const shut = document.createElement("button");
+  shut.type = "button";
+  shut.className = "file-find-close";
+  shut.textContent = "×";
+  labelButton(shut, t("file.findClose", "찾기 닫기"));
+  shut.addEventListener("click", () => closeChatFind(page));
+  const words = t("worker.find", "대화에서 찾기");
+  field.placeholder = words;
+  field.setAttribute("aria-label", words);
+  bar.append(field, count, step(t("file.findPrev", "이전 일치"), "↑", -1), step(t("file.findNext", "다음 일치"), "↓", 1), shut);
+  field.addEventListener("input", () => runChatFind(page, 0));
+  bar.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeChatFind(page);
+    } else if (event.key === "Enter" && event.target === field && !event.isComposing) {
+      event.preventDefault();
+      runChatFind(page, event.shiftKey ? -1 : 1);
+    }
+  });
+  return { bar, field, count, at: null };
+}
+
+/* ⌘F on a conversation. Words chosen on one line of it are what is looked for,
+ * as the file finder takes them. */
+function openChatFind(page) {
+  const find = (page.find ??= chatFindBarNode(page));
+  const body = page.turns.parentElement;
+  if (find.bar.parentElement !== body) body.appendChild(find.bar);
+  const chosen = document.getSelection();
+  const picked = chosen && page.turns.contains(chosen.anchorNode) ? String(chosen) : "";
+  if (picked !== "" && !picked.includes("\n")) find.field.value = picked;
+  find.bar.hidden = false;
+  find.field.focus();
+  find.field.select();
+  runChatFind(page, 0);
+}
+
+/* The bar goes and its paint with it; the words stay for the next ⌘F, and the
+ * keyboard goes back to the composer — or the list, on a page with none. */
+function closeChatFind(page) {
+  const find = page.find;
+  if (!find) return;
+  find.bar.hidden = true;
+  find.at = null;
+  const api = mdviewHighlightApi();
+  api?.registry.delete(CHAT_FIND_HIGHLIGHT);
+  api?.registry.delete(CHAT_FIND_ACTIVE_HIGHLIGHT);
+  const box = page.turns.closest(".worker-view")?.querySelector(".worker-composer-box");
+  (box ?? page.turns).focus({ preventScroll: true });
 }

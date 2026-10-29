@@ -18362,6 +18362,15 @@ button.helper-sib:hover {
   grid-row: 1;
 }
 
+/* The conversation's find bar (draft C8) floats over the list's own corner:
+ * the file finder's rows give `.file-find` the file view's second row, and an
+ * absolutely placed child of this grid would stand in that row — under the
+ * list, where focusing its field scrolled the whole page up to it. */
+.helper-body > .chat-find {
+  grid-column: 2;
+  grid-row: 1;
+}
+
 /* The turn rail (`turnRailNode`): a tick per row, 2px tall and 7px apart down
  * a column of its own on one hairline — the person's longer and in the
  * quiet ink, the row the rail stands at as long on the agent's accent, a
@@ -43135,11 +43144,15 @@ details.task-board-section > summary {
  * "두 번째 쌍은 두 판이 노랑의 뜻을 두고 어긋나게 만드는 중복"이라고 적어 두었고,
  * 이 판도 같은 뜻으로 노랗다. 글자색은 건드리지 않는다 — 울타리 안의 코드가
  * 검색 때문에 다른 토큰처럼 보이면 안 된다(`.hit-mark`와 같은 이유). */
-::highlight(mdview-search-match) {
+::highlight(mdview-search-match),
+::highlight(chat-find-match) {
   background-color: color-mix(in srgb, var(--markdown-search-match) 38%, transparent);
 }
 
-::highlight(mdview-search-active-match) {
+/* 대화에서 찾기(시안 C8, t-82196)도 같은 쌍이다 — 이름만 따로라 두 찾기가 서로의
+ * 칠을 걷지 않는다. */
+::highlight(mdview-search-active-match),
+::highlight(chat-find-active-match) {
   background-color: color-mix(in srgb, var(--markdown-search-match-active) 46%, transparent);
 }
 
