@@ -62,8 +62,21 @@ use crate::hooks::PaneHookReport;
 pub(crate) const COORDINATOR_ANSWER_WAIT_MS: i64 = 10 * 60 * 1000;
 
 /// What a coordinator may leave after a word of [`TO_PERSON`] — 「사람에게.」
-/// is the word too, never an answer typed into the picker.
-const SENTENCE_ENDS: &[char] = &['.', '。', '!', '?'];
+/// is the word too, never an answer typed into the picker; a full-width end
+/// is an end.
+const SENTENCE_ENDS: &[char] = &['.', '。', '．', '!', '！', '?', '？'];
+
+/// The quotes a coordinator may write a word of [`TO_PERSON`] in, opening and
+/// closing, as the letter shows it — 「사람에게」. One pair is taken off.
+const QUOTE_PAIRS: &[(char, char)] = &[
+    ('「', '」'),
+    ('『', '』'),
+    ('“', '”'),
+    ('‘', '’'),
+    ('"', '"'),
+    ('\'', '\''),
+    ('`', '`'),
+];
 
 /// How long a question read back after a restart waits, once its worker
 /// sits in a pane again, for the pane's screen to show it: a pane that has
@@ -299,10 +312,24 @@ pub(crate) fn letter(prompt: &AskPrompt, seat: &AskSeat, term: u32) -> (String, 
 }
 
 /// Whether the coordinator's `reply` is one of [`TO_PERSON`]'s words alone —
-/// spaces and a sentence's end around it, English in any case.
+/// spaces and a sentence's end around it, inside one pair of quotes or none,
+/// English in any case.
 fn hands_to_person(reply: &str) -> bool {
-    let word = reply.trim().trim_end_matches(SENTENCE_ENDS).trim_end();
+    let word = bare(reply);
+    let word = unquoted(word).map_or(word, bare);
     TO_PERSON.iter().any(|one| word.eq_ignore_ascii_case(one))
+}
+
+/// `words` without the spaces around it and the [`SENTENCE_ENDS`] after it.
+fn bare(words: &str) -> &str {
+    words.trim().trim_end_matches(SENTENCE_ENDS).trim_end()
+}
+
+/// `words` without the pair of [`QUOTE_PAIRS`] it opens and closes with.
+fn unquoted(words: &str) -> Option<&str> {
+    QUOTE_PAIRS
+        .iter()
+        .find_map(|(open, close)| words.strip_prefix(*open)?.strip_suffix(*close))
 }
 
 /// The coordinator's reply as the picks a card would have sent.
