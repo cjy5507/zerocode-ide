@@ -376,7 +376,9 @@ mod tests {
                 entry("b", "[합성-나]"),
             ],
         };
-        let names = |list: &[&str]| list.iter().map(|name| (*name).to_string()).collect();
+        let names = |list: &[&str]| -> Vec<String> {
+            list.iter().map(|name| (*name).to_string()).collect()
+        };
         let shown = offer(
             &book,
             &PageForm {
