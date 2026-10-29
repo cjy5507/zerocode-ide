@@ -14560,6 +14560,16 @@ function dressThoughtRow(row, turn) {
   writeTextContent(row.querySelector(":scope > .helper-step-line > .helper-step-res"), thoughtLabel(turn));
 }
 
+/* The row just above a new turn, if it is a thought, now knows how long that
+ * thought lasted — the row itself, or the last row of the open pill above
+ * (t-81786 P3-3): its body stood before the length was known. */
+function dressSettledThought(above) {
+  const row = above?.classList.contains("helper-group")
+    ? above.querySelector(":scope > .helper-group-body")?.lastElementChild
+    : above;
+  if (row?.classList.contains("is-thinking") && row.__turn?.thoughtMs !== undefined) dressThoughtRow(row, row.__turn);
+}
+
 function thoughtTurnNode(run, turn) {
   const row = thoughtRowNode("helper-turn is-thinking", run);
   row.dataset.turn = String(turn.seq);
@@ -15092,6 +15102,7 @@ function holdActivityTurn(list, run, turn, before, spoken) {
   group.__turn = turn;
   group.dataset.turn = String(turn.seq);
   if (group.__open) {
+    dressSettledThought(group);
     group.querySelector(":scope > .helper-group-body")?.appendChild(helperTurnRowNode(run, turn, spoken));
   }
   return group;
@@ -15223,10 +15234,7 @@ function syncHelperTurns(list, run) {
     // finished piece leaves in this same paint (`syncStreamingTurns` below).
     settlePaneLive(run, turn.role);
     // The thought before this turn now knows how long it lasted.
-    const before = row.previousElementSibling;
-    if (before?.classList.contains("is-thinking") && before.__turn?.thoughtMs !== undefined) {
-      dressThoughtRow(before, before.__turn);
-    }
+    dressSettledThought(row.previousElementSibling);
   }
   // A result that joined its call after the row stood, a word that closed
   // the calls before it, a run that ended: the rows still out are dressed

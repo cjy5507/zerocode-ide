@@ -56592,6 +56592,36 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       seen.thirdWords = wordsOf(pills()[2]);
       seen.wantThirdWords = t("worker.stepRun", "{{kind}} {{n}}개", { kind: t("worker.stepRead", "파일 읽기"), n: 1 });
 
+      // (d2) 펼쳐 둔 알약 안의 생각도 다음 일이 오면 걸린 시간을 단다 — 다음이
+      // 같은 알약에 드는 호출이든(2초), 알약 밖에 서는 답이든(3초).
+      const thirdNode = pills()[2];
+      capOf(thirdNode).click();
+      const stampedAt = Date.now() - 60_000;
+      const thoughtsIn = () => [...thirdNode.querySelectorAll(":scope > .helper-group-body > .is-thinking")]
+        .map((row) => row.querySelector(":scope > .helper-step-line > .helper-step-res").textContent);
+      holdHelperTurns(tab.worker.helper, [{ role: "thinking", text: "**확인**\n돌려 본다.", at_ms: stampedAt }]);
+      paintWorkerView(tab);
+      seen.openThoughtBare = thoughtsIn().join("|");
+      holdHelperTurns(tab.worker.helper, [
+        { role: "tool", text: "Bash · cargo test", tool: { call_id: "g", name: "Bash", kind: "bash", is_error: false }, at_ms: stampedAt + 2000 },
+      ]);
+      paintWorkerView(tab);
+      seen.openThoughtByCall = thoughtsIn().join("|");
+      holdHelperTurns(tab.worker.helper, [
+        { role: "tool_result", text: "ok", tool: { call_id: "g", is_error: false }, at_ms: stampedAt + 2500 },
+        { role: "thinking", text: "**정리**\n답한다.", at_ms: stampedAt + 3000 },
+      ]);
+      paintWorkerView(tab);
+      holdHelperTurns(tab.worker.helper, [{ role: "assistant", text: "통과했습니다.", at_ms: stampedAt + 6000 }]);
+      paintWorkerView(tab);
+      seen.openThoughtByAnswer = thoughtsIn().join("|");
+      seen.wantOpenThoughts = [
+        t("worker.thought", "생각"),
+        t("worker.thoughtFor", "생각 {{s}}초", { s: 2 }),
+        [t("worker.thoughtFor", "생각 {{s}}초", { s: 2 }), t("worker.thoughtFor", "생각 {{s}}초", { s: 3 })].join("|"),
+      ];
+      capOf(thirdNode).click();
+
       // (e) 상한을 넘겨 앞이 잘려도 빈 알약이 남지 않고, 알약의 말은 남은 구성원의 수다.
       const flood = [];
       for (let at = 0; at < 420; at += 1) {
@@ -56652,6 +56682,12 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       seen.afterAnswerPills === 3 && seen.thirdWords === seen.wantThirdWords &&
         seen.cappedTurns === 400 && seen.cappedHonest && seen.cappedWords === seen.wantCappedWords && seen.cappedRows === 0,
       JSON.stringify(seen),
+    );
+    ok(
+      "a thought in an open pill says how long it lasted once the next thing happens — a call that joins the pill or an answer that stands after it — as a thought on the timeline does (t-81786 P3-3)",
+      seen.openThoughtBare === seen.wantOpenThoughts[0] && seen.openThoughtByCall === seen.wantOpenThoughts[1] &&
+        seen.openThoughtByAnswer === seen.wantOpenThoughts[2],
+      JSON.stringify({ bare: seen.openThoughtBare, byCall: seen.openThoughtByCall, byAnswer: seen.openThoughtByAnswer, want: seen.wantOpenThoughts }),
     );
     ok(
       "the head's 「걸음 모두 펼치기」 writes the one global setting: on, every step stands on the timeline (settled steps of one kind folded into one line); off, the pills are back",
