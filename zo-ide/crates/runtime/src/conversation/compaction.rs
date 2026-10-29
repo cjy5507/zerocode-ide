@@ -1026,6 +1026,8 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// compaction-ladder tier sits, so "why did it compact?" is answerable
     /// from the REPL instead of from traces.
     pub fn context_breakdown_report(&self) -> String {
+        // The longest row name, and the one row that names a second window.
+        const COMPACTION_WINDOW: &str = "Compaction window";
         let window = self.context_window_for_guards();
         // The ladder's tiers come from the compaction window. When that is
         // under the model's window, the ladder is a share of it and a row
@@ -1039,7 +1041,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             |tokens: u64| super::format_kilo_tokens(usize::try_from(tokens).unwrap_or(usize::MAX));
         // One name column for every row: the longest name and two spaces. A
         // sub-row indents two more, so its values stay in the same column.
-        let name = "Compaction window".len() + 2;
+        let name = COMPACTION_WINDOW.len() + 2;
         let sub = name - 2;
 
         let system_prompt = estimate_system_prompt_tokens(&self.system_prompt);
@@ -1071,8 +1073,8 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         // "auto compact" as an unexplained policy.
         if let Some(compaction_window) = compaction_window {
             lines.push(format!(
-                "  {:<name$}{} tokens (the ladder is a % of this; In use is a % of the window)",
-                "Compaction window",
+                "  {:<name$}{} tokens (ladder % of this; In use % of Window)",
+                COMPACTION_WINDOW,
                 kilo(compaction_window)
             ));
         }

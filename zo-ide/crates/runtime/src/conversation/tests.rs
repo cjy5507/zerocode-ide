@@ -17494,6 +17494,44 @@ fn context_breakdown_report_measures_the_ladder_against_the_compaction_window() 
     }
 }
 
+/// `In use` stays a share of the model's window while the ladder moves to the
+/// compaction window (t-79938 review P3-4): a 1M session holding about 300k
+/// tokens reads as about 30% in use, not as a share of the smaller window.
+#[test]
+fn context_breakdown_report_keeps_in_use_on_the_model_window() {
+    let _env = crate::test_env_lock();
+    let (mut wide, compaction_window, _) = wide_context_report();
+    wide.session
+        .push_user_text("word ".repeat(240_000))
+        .expect("message");
+    let used = wide.effective_context_tokens();
+    assert_ne!(
+        used * 100 / wide.context_window,
+        used * 100 / compaction_window,
+        "the case needs the two windows to give different shares of {used}"
+    );
+    let report = wide.context_breakdown_report();
+    let line = report
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("In use"))
+        .unwrap_or_else(|| panic!("no `In use` row:\n{report}"));
+    assert!(
+        line.ends_with(&format!("({}%)", used * 100 / wide.context_window)),
+        "`In use` must be a % of the model's window: {line:?}\n{report}"
+    );
+}
+
+/// A session with no window of its own has no compaction window under it to
+/// name (t-79938 review P3-5): no "Compaction window 0 tokens" row.
+#[test]
+fn context_breakdown_report_names_no_compaction_window_for_a_session_without_one() {
+    let _env = crate::test_env_lock();
+    std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
+    let report = runtime_for_context_policy(None, 0).context_breakdown_report();
+    assert!(!report.contains("Compaction window"), "{report}");
+}
+
 /// P4: the summary-model override applies only within the session's provider
 /// family — a cross-provider value is ignored (the bound client cannot reach
 /// another provider's endpoint), and unset means no override.
