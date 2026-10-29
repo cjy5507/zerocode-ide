@@ -610,48 +610,91 @@ fn runtime_report_uses_the_single_core_provider_peer_projection() {
     assert!(!report.contains("WorkerPeerName::for_worker"));
 }
 
-#[test]
-fn a_ledger_image_cache_hits_until_its_revision_moves() {
-    let mut cache = super::LedgerCache::default();
-    let projection = super::Ledger::new().export();
+/// A window standing on a one-run ledger of its own, and that run's id: the
+/// cache tests below move the revision by writing to it.
+fn a_window_on_one_run() -> (
+    PrivateWindow,
+    zerocode_orchestrator::workflow_store::WorkflowStore,
+    String,
+) {
+    let mut ledger = super::Ledger::new();
+    let run = ledger.create_run("cache", 1);
+    let (window, store) = PrivateWindow::boot_seeded(ledger.export());
+    (window, store, run)
+}
 
-    let first = cache.ledger(7, &projection).expect("the first image");
-    let same = cache.ledger(7, &projection).expect("the cached image");
+/// The actor's image after one more write, on `run`: the next revision.
+fn the_image_after_a_write(run: &str, now_ms: i64) -> super::RuntimeImage {
+    let actor = &super::runtime().expect("this window's runtime").actor;
+    let (moved, _) = actor
+        .note_run_project(
+            run,
+            format!("/tmp/cache-{now_ms}"),
+            zerocode_core::orchestration::ProjectSource::Workers,
+            None,
+            now_ms,
+        )
+        .expect("one write");
+    assert!(moved, "the write moved nothing");
+    actor.view().expect("the image after the write")
+}
+
+#[test]
+fn a_ledger_image_cache_lends_the_images_own_ledger_until_its_revision_moves() {
+    let (_window, _store, run) = a_window_on_one_run();
+    let actor = &super::runtime().expect("this window's runtime").actor;
+    let mut cache = super::LedgerCache::default();
+
+    let image = actor.view().expect("the first image");
+    let first = cache.ledger(&image);
+    let same = cache.ledger(&actor.view().expect("the same revision"));
     assert!(
         std::sync::Arc::ptr_eq(&first, &same),
-        "the same revision was rebuilt instead of shared"
+        "one revision was lent as two ledgers"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&first, image.ledger()),
+        "the cache lent a ledger that is not the image's"
     );
 
-    let moved = cache.ledger(8, &projection).expect("the next image");
+    let moved = cache.ledger(&the_image_after_a_write(&run, 2));
     assert!(
         !std::sync::Arc::ptr_eq(&first, &moved),
-        "a new revision reused the old image"
+        "a new revision lent the old ledger"
     );
 }
 
 #[test]
 fn a_runtime_report_tree_is_cached_with_its_ledger_revision() {
+    let (_window, _store, run) = a_window_on_one_run();
+    let actor = &super::runtime().expect("this window's runtime").actor;
     let mut cache = super::LedgerCache::default();
-    let projection = super::Ledger::new().export();
-    let ledger = cache.ledger(11, &projection).expect("the report image");
+    let image = actor.view().expect("the report image");
+    let ledger = cache.ledger(&image);
 
-    let first = cache.report(11, &ledger);
-    let same = cache.report(11, &ledger);
+    let first = cache.report(image.revision(), &ledger);
+    let same = cache.report(image.revision(), &ledger);
     assert!(
         std::sync::Arc::ptr_eq(&first, &same),
         "the report tree was built again for the same revision"
     );
 
-    let moved = cache
-        .ledger(12, &projection)
-        .expect("the next report image");
-    let next = cache.report(12, &moved);
+    let next = the_image_after_a_write(&run, 2);
+    assert_ne!(
+        next.revision(),
+        image.revision(),
+        "the write did not move the revision"
+    );
+    let moved = cache.ledger(&next);
+    let moved = cache.report(next.revision(), &moved);
     assert!(
-        !std::sync::Arc::ptr_eq(&first, &next),
+        !std::sync::Arc::ptr_eq(&first, &moved),
         "a new revision reused the old report tree"
     );
 }
 
+/// What a read of the ledger cost the window before t-81273 — a rebuild out
+/// of the image's export — beside what it costs now: a lend.
 #[test]
 fn ledger_image_cache_reports_baseline_and_hit_timings() {
     const TASKS: usize = 256;
@@ -681,20 +724,26 @@ fn ledger_image_cache_reports_baseline_and_hit_timings() {
         baseline += started.elapsed();
     }
 
+    let (_window, _store) = PrivateWindow::boot_seeded(projection);
+    let image = super::runtime()
+        .expect("this window's runtime")
+        .actor
+        .view()
+        .expect("the timing image");
     let mut cache = super::LedgerCache::default();
     let started = std::time::Instant::now();
-    std::hint::black_box(cache.ledger(17, &projection).expect("the cache miss"));
+    std::hint::black_box(cache.ledger(&image));
     let miss = started.elapsed();
     let started = std::time::Instant::now();
     for _ in 0..SAMPLES {
-        std::hint::black_box(cache.ledger(17, &projection).expect("the cache hit"));
+        std::hint::black_box(cache.ledger(&image));
     }
     let hits = started.elapsed();
 
     eprintln!(
         concat!(
             "ledger image cache ({} tasks, {} samples): baseline rebuild avg={}us, ",
-            "first miss={}us, cached hit avg={}ns",
+            "first lend={}us, cached lend avg={}ns",
         ),
         TASKS,
         SAMPLES,
@@ -705,32 +754,38 @@ fn ledger_image_cache_reports_baseline_and_hit_timings() {
 }
 
 #[test]
-fn ledger_image_cache_serializes_one_rebuild_per_revision() {
+fn ledger_image_cache_lends_every_concurrent_reader_the_one_ledger() {
+    let (_window, _store) = PrivateWindow::boot();
+    let image = std::sync::Arc::new(
+        super::runtime()
+            .expect("this window's runtime")
+            .actor
+            .view()
+            .expect("the shared image"),
+    );
     let cache = std::sync::Arc::new(Mutex::new(super::LedgerCache::default()));
-    let projection = std::sync::Arc::new(super::Ledger::new().export());
     let mut workers = Vec::new();
     for _ in 0..8 {
         let cache = std::sync::Arc::clone(&cache);
-        let projection = std::sync::Arc::clone(&projection);
+        let image = std::sync::Arc::clone(&image);
         workers.push(std::thread::spawn(move || {
             cache
                 .lock()
                 .unwrap_or_else(|held| held.into_inner())
-                .ledger(13, &projection)
-                .expect("the concurrent image")
+                .ledger(&image)
         }));
     }
-    let images: Vec<_> = workers
+    let ledgers: Vec<_> = workers
         .into_iter()
         .map(|worker| worker.join().expect("the cache reader"))
         .collect();
-    // One rebuild, shared: a second rebuild would be a second allocation,
-    // and every reader holding the same pointer is the proof there was one.
+    // Nobody rebuilt or copied it: every reader holds the image's own
+    // pointer.
     assert!(
-        images
+        ledgers
             .iter()
-            .all(|image| std::sync::Arc::ptr_eq(image, &images[0])),
-        "concurrent readers did not share one image"
+            .all(|ledger| std::sync::Arc::ptr_eq(ledger, image.ledger())),
+        "concurrent readers were lent copies of the image's ledger"
     );
 }
 
@@ -29312,7 +29367,9 @@ fn measure_a_window_on_a_ledger_the_persons_size() {
     let start_reads = |what: &str| {
         let read = std::time::Instant::now();
         let rows = zerocode_orchestrator::ledger_store::read(
-            &store.connection().expect("the measured store"),
+            &store
+                .fault_connection_for_tests()
+                .expect("the measured store"),
             "main-ledger",
             zerocode_core::orchestration::PROJECTION_SCHEMA,
         )

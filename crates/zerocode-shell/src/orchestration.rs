@@ -12741,7 +12741,7 @@ fn carried(
                     .ledger()
                     .runs()
                     .iter()
-                    .find_map(|run| run.worker(worker))
+                    .find_map(|run| run.worker(&worker))
                     .map(|one| (one.team.clone(), one.pane.clone()))
             });
             let screen = host.capture(term).map(|tail| screen_tail(&tail, lines));
