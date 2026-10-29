@@ -3453,6 +3453,18 @@ function worktreeFinderShut() {
   return projectsRead && projects.length === 0;
 }
 
+/* What a finder says when its question failed: a sentence of the person's,
+ * with what the backend or the page said kept on the toast's hover. A git
+ * command's exit status, an exception's name or 「[object Object]」 was the
+ * whole toast, and none of them is a sentence anybody can act on (t-82495).
+ * One stands at a time: the finder asks again on every word typed, and a list
+ * that will not read would otherwise pile a toast per key. */
+let paletteFailureNote = null;
+function sayPaletteFailure(words, error) {
+  if (paletteFailureNote?.isConnected) return;
+  paletteFailureNote = toast(words, "halt", { tip: String(error?.message ?? error) });
+}
+
 const FINDERS = {
   file: {
     title: () => t("file.goto", "파일로 이동"),
@@ -3478,7 +3490,12 @@ const FINDERS = {
       tree: () => t("palette.groupTrees", "워크트리"),
     },
     find: async (query) => {
-      const worktrees = await invoke("list_worktrees");
+      // A list that will not read takes only its own group: the recent places
+      // and the doors are this window's, and answer without the backend.
+      const worktrees = await invoke("list_worktrees").catch((error) => {
+        sayPaletteFailure(t("palette.treesUnread", "워크스페이스 목록을 읽지 못해 최근과 이동만 보여 줍니다."), error);
+        return [];
+      });
       const needle = query.toLowerCase();
       const named = (text) => text.toLowerCase().includes(needle);
       // The agents nested inside each workspace stay searchable — the tree
@@ -3599,7 +3616,7 @@ async function runPaletteQuery() {
   try {
     found = await finder.find(query);
   } catch (error) {
-    showError(error);
+    sayPaletteFailure(t("palette.failed", "목록을 가져오지 못했습니다. 잠시 뒤 다시 열어 보세요."), error);
     return;
   }
   // The finder changed — or closed — while this was in flight; its rows
