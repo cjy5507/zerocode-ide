@@ -47,7 +47,9 @@ fn read_into(pid: u32, buffer: &mut Vec<u8>) -> Option<&[u8]> {
     use nix::libc;
 
     if buffer.is_empty() {
-        buffer.resize(args_max()?, 0);
+        // Zeroed pages from the allocator, not a megabyte written byte by
+        // byte: a judgment reads two or three environments, not hundreds.
+        *buffer = vec![0; args_max()?];
     }
     let mut name = [
         libc::CTL_KERN,

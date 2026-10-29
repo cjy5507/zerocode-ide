@@ -402,6 +402,20 @@ fn mark(window: u32, pane: &str) -> PaneMark {
 /// and a process in the other pane's tree that was started with the calling
 /// pane's mark.
 fn marked_table() -> ProcessTable {
+    loose_table()
+        .with_pane_mark(CALLER, mark(WINDOW, "term-1"))
+        .with_pane_mark(210, mark(WINDOW, "term-1"))
+        .with_pane_mark(CALLER_CHILD, mark(WINDOW, "term-1"))
+        .with_pane_mark(SET_LOOSE, mark(WINDOW, "term-1"))
+        .with_pane_mark(OTHER_PANE, mark(WINDOW, "term-2"))
+        .with_pane_mark(OTHER_AGENT, mark(WINDOW, "term-2"))
+        .with_pane_mark(SET_LOOSE_BY_THE_OTHER_PANE, mark(WINDOW, "term-2"))
+        .with_pane_mark(SET_LOOSE_IN_ANOTHER_WINDOW, mark(ANOTHER_WINDOW, "term-1"))
+        .with_pane_mark(LENT_TO_THE_OTHER_PANE, mark(WINDOW, "term-1"))
+}
+
+/// [`marked_table`]'s rows, told no pane.
+fn loose_table() -> ProcessTable {
     let mut rows = match table().rows {
         Ok(rows) => rows,
         Err(why) => panic!("the fixture table reads: {why}"),
@@ -428,15 +442,6 @@ fn marked_table() -> ProcessTable {
         ),
     ]);
     ProcessTable::new(rows)
-        .with_pane_mark(CALLER, mark(WINDOW, "term-1"))
-        .with_pane_mark(210, mark(WINDOW, "term-1"))
-        .with_pane_mark(CALLER_CHILD, mark(WINDOW, "term-1"))
-        .with_pane_mark(SET_LOOSE, mark(WINDOW, "term-1"))
-        .with_pane_mark(OTHER_PANE, mark(WINDOW, "term-2"))
-        .with_pane_mark(OTHER_AGENT, mark(WINDOW, "term-2"))
-        .with_pane_mark(SET_LOOSE_BY_THE_OTHER_PANE, mark(WINDOW, "term-2"))
-        .with_pane_mark(SET_LOOSE_IN_ANOTHER_WINDOW, mark(ANOTHER_WINDOW, "term-1"))
-        .with_pane_mark(LENT_TO_THE_OTHER_PANE, mark(WINDOW, "term-1"))
 }
 
 fn judged_marked(command: &str, table: &ProcessTable, caller: Option<u32>) -> KillVerdict {
@@ -563,34 +568,77 @@ fn a_mark_needs_both_the_window_and_the_pane() {
     }
 }
 
-/// The environments are read inside the table's wall: once it has passed,
-/// no more are read and the rows not reached name no pane.
+/// A judgment reads the environment of the caller and of a target outside
+/// every kept tree, once each — never of a row it does not ask after, so what
+/// it reads does not grow with the table. A mark the table was told is not
+/// read, and a table written out by hand is read for nothing.
 #[test]
-fn marks_are_read_only_while_the_wall_lasts() {
-    let asked = std::cell::Cell::new(0);
-    let every = |pid: u32| {
-        asked.set(asked.get() + 1);
-        Some(mark(WINDOW, &format!("term-{pid}")))
+fn only_the_caller_and_a_target_outside_every_kept_tree_are_read() {
+    let judged_reading = |command: &str, table: &ProcessTable| {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let verdict = judge_kill_reading(
+            &kill_calls(command),
+            table,
+            Some(CALLER),
+            &protected(),
+            |pid| {
+                asked.borrow_mut().push(pid);
+                let own = [CALLER, SET_LOOSE].contains(&pid);
+                Some(mark(WINDOW, if own { "term-1" } else { "term-2" }))
+            },
+        );
+        (verdict, asked.into_inner())
     };
-    let rows = match &table().rows {
-        Ok(rows) => rows.len(),
-        Err(why) => panic!("the fixture table reads: {why}"),
-    };
-    let passed = table().marked_within(Instant::now(), Duration::ZERO, every);
-    assert!(passed.marks.is_empty(), "{:?}", passed.marks);
-    assert_eq!(asked.get(), 0);
-    let lasting = table().marked_within(Instant::now(), Duration::MAX, every);
-    assert_eq!(lasting.marks.len(), rows);
-    assert_eq!(asked.get(), rows);
-    assert_eq!(lasting.marks.get(&CALLER), Some(&mark(WINDOW, "term-200")));
-    let unread =
-        ProcessTable::unreadable("no ps").marked_within(Instant::now(), Duration::MAX, every);
-    assert!(unread.marks.is_empty());
+    let host = loose_table().on_this_host();
+    for (command, verdict, read) in [
+        ("kill 600", KillVerdict::Allow, vec![CALLER, SET_LOOSE]),
+        (
+            "kill 600; kill -9 600",
+            KillVerdict::Allow,
+            vec![CALLER, SET_LOOSE],
+        ),
+        ("kill 220", KillVerdict::Allow, vec![]),
+        (
+            "pkill -f 'http.server 8000'",
+            KillVerdict::Allow,
+            vec![CALLER, SET_LOOSE],
+        ),
+    ] {
+        assert_eq!(
+            judged_reading(command, &host),
+            (verdict, read),
+            "{command:?}"
+        );
+    }
+    for command in ["kill 310", "kill 320", "kill 100"] {
+        let (verdict, asked) = judged_reading(command, &host);
+        assert!(
+            matches!(verdict, KillVerdict::Deny { .. }),
+            "{command:?}: {verdict:?}"
+        );
+        assert!(asked.is_empty(), "{command:?}: {asked:?}");
+    }
+    let (verdict, asked) = judged_reading("pkill -f 'http.server 800[012]'", &host);
+    assert!(matches!(verdict, KillVerdict::Ask { .. }), "{verdict:?}");
     assert_eq!(
-        asked.get(),
-        rows,
-        "a table that did not read asks of no row"
+        asked,
+        [
+            CALLER,
+            SET_LOOSE,
+            SET_LOOSE_BY_THE_OTHER_PANE,
+            SET_LOOSE_IN_ANOTHER_WINDOW
+        ]
     );
+    let told = loose_table()
+        .on_this_host()
+        .with_pane_mark(CALLER, mark(WINDOW, "term-1"));
+    assert_eq!(
+        judged_reading("kill 600", &told),
+        (KillVerdict::Allow, vec![SET_LOOSE])
+    );
+    let (verdict, asked) = judged_reading("kill 600", &loose_table());
+    assert!(matches!(verdict, KillVerdict::Ask { .. }), "{verdict:?}");
+    assert!(asked.is_empty(), "{asked:?}");
 }
 
 /* ---- the processes themselves (t-81714) -------------------------------------- */
@@ -667,10 +715,12 @@ fn a_started_process_is_judged_by_the_pane_its_environment_names() {
     let pids: Vec<u32> = probes.iter().map(std::process::Child::id).collect();
     let me = std::process::id();
     let rows = pids.iter().map(|&pid| row(pid, me, pid, "probe")).collect();
+    let table = ProcessTable::new(rows).on_this_host();
     let mut environs = environ::Environs::new();
-    let table = ProcessTable::new(rows).marked_within(Instant::now(), Duration::MAX, |pid| {
-        PaneMark::of_process(&mut environs, pid)
-    });
+    let named: Vec<Option<PaneMark>> = pids
+        .iter()
+        .map(|&pid| PaneMark::of_process(&mut environs, pid))
+        .collect();
     let verdicts: Vec<KillVerdict> = pids[1..]
         .iter()
         .map(|pid| {
@@ -687,7 +737,7 @@ fn a_started_process_is_judged_by_the_pane_its_environment_names() {
         let ended = probe.wait().expect("a probe ends when its input closes");
         assert!(ended.success(), "{ended}");
     }
-    assert_eq!(table.marks.get(&pids[0]), Some(&mark(4242, "term-1")));
+    assert_eq!(named[0], Some(mark(4242, "term-1")));
     assert_eq!(
         verdicts[0],
         KillVerdict::Allow,
@@ -698,8 +748,8 @@ fn a_started_process_is_judged_by_the_pane_its_environment_names() {
         "another pane's loose program: {:?}",
         verdicts[1]
     );
-    if let (Some(zsh), Some(verdict)) = (pids.get(3), verdicts.get(2)) {
-        match table.marks.get(zsh) {
+    if let Some(verdict) = verdicts.get(2) {
+        match &named[3] {
             None => assert!(matches!(verdict, KillVerdict::Ask { .. }), "{verdict:?}"),
             Some(named) => {
                 assert_eq!(named, &mark(4242, "term-1"));
