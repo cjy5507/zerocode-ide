@@ -15563,7 +15563,8 @@ await test("검수 F3: 판단 형식은 연결이 쓰던 그대로 — System On
   assertEqual(openApply, openCheck, "the apply wrote another reference than the one checked");
   // The everyday list names no format; 「고급」 changes one, and the same
   // model can then be applied in it.
-  assert(!(await pageA.locator('[data-model-role="judgment"]').innerText()).match(/OpenAI JSON|System One/), "the everyday list speaks a format");
+  const everyday = await pageA.locator('[data-model-role="judgment"]').innerText();
+  assert(!everyday.match(/OpenAI JSON|System One/), "the everyday list speaks a format", everyday);
   await pageA.evaluate(() => { document.getElementById("model-advanced").open = true; document.getElementById("model-advanced-format-fold").open = true; });
   const format = pageA.locator('#model-advanced [data-judgment-format="judge"]');
   assertEqual(await format.inputValue(), "openai_json", "「고급」 does not show the connection's format");
