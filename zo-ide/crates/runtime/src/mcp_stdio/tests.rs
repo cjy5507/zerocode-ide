@@ -3172,8 +3172,9 @@ fn reattach_after_failed_discovery_leaves_routes_untouched() {
 }
 
 /// How long a server waits at the tools/list barrier for the others before it
-/// answers with an error: the bound that ends a failing run, not a condition
-/// of a passing one (t-84793).
+/// answers with an error: the bound that ends a failing run (t-84793). A
+/// passing run's six first tools/list requests must come within it too, but
+/// the test build's initialize timeout (200 ms) holds them far closer.
 const LIST_BARRIER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[test]
