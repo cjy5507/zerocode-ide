@@ -1144,6 +1144,15 @@ fn verifies_on_nothing_new(result: &str) -> bool {
         && !new_review_keys().any(|key| map.get(key).is_some_and(says_something))
 }
 
+/// The key the board's 「통과」 marks its verification with (t-82501).
+pub const BOARD_PASS_KEY: &str = "passedOnBoard";
+
+/// The result the board's 「통과」 writes (t-82501).
+#[must_use]
+pub fn board_pass_result(_stored: &str, _now_ms: i64) -> String {
+    r#"{"verified":true}"#.to_string()
+}
+
 /// The key a coordinator marks work with no code to land under — the first of
 /// [`REVIEW_KEY_GROUPS`]' third group, and the one the ledger itself writes.
 const NOTHING_TO_LAND_KEY: &str = REVIEW_KEY_GROUPS[2][0];

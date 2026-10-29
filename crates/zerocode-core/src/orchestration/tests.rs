@@ -25711,6 +25711,9 @@ fn a_late_sound_never_retires_the_next_occupants_readiness() {
 mod assign;
 /// t-47835: where an attempt's time went (`tests/attempt_time.rs`).
 mod attempt_time;
+/// t-82501: the board's 「통과」 keeps the result it passes over, and a
+/// withdrawal still refuses it (`tests/board_pass.rs`).
+mod board_pass;
 /// t-19159: a closed state that is not failure, and the settle pass
 /// (`tests/closed.rs`).
 mod closed;
