@@ -1598,12 +1598,42 @@ mod tests {
         assert!(slave_flags & libc::FD_CLOEXEC != 0, "the slave leaks");
     }
 
+    /// The held-back hangup's own process: see
+    /// [`a_hangup_held_back_by_a_copy_of_the_master_is_waited_for`].
+    #[cfg(target_os = "macos")]
+    const HELD_BACK_ALONE: &str =
+        "pane_leftovers::tests::a_hangup_held_back_by_a_copy_of_the_master_alone";
+
     /// A copy of the master held by something else (a child a parallel
     /// test started in between) delays the hangup; the wait covers it. The
-    /// copy is dropped by the third probe, with no clock to race.
+    /// copy is dropped by the third probe, with no clock to race — in a
+    /// process of its own ([`HELD_BACK_ALONE`]), where no other test starts
+    /// a child. Beside them, a child started between `openpty` and the
+    /// close-on-exec flags [`raw_openpty`] sets after it kept the master for
+    /// its whole life, and the hangup came a probe late (2/30 beside
+    /// `artifact_runtime`, t-84451).
     #[cfg(target_os = "macos")]
     #[test]
     fn a_hangup_held_back_by_a_copy_of_the_master_is_waited_for() {
+        let alone = crate::proc::quiet_command(std::env::current_exe().expect("this test binary"))
+            .args(["--exact", HELD_BACK_ALONE, "--ignored", "--test-threads=1"])
+            .output()
+            .expect("the held-back hangup ran in a process of its own");
+        let said = String::from_utf8_lossy(&alone.stdout);
+        assert!(
+            alone.status.success() && said.contains("test result: ok. 1 passed"),
+            "the held-back hangup failed in its own process: {said}{}",
+            String::from_utf8_lossy(&alone.stderr)
+        );
+    }
+
+    /// The held-back hangup itself, started by
+    /// [`a_hangup_held_back_by_a_copy_of_the_master_is_waited_for`]; never
+    /// part of a normal run.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "the held-back hangup's own process, started by the test that waits for it"]
+    fn a_hangup_held_back_by_a_copy_of_the_master_alone() {
         let (master, slave) = open_pair(raw_openpty).expect("openpty");
         // SAFETY: duplicates the master opened above. The copy closes on
         // exec like the master: `dup` drops that, and a child a parallel test
