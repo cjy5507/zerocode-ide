@@ -1,6 +1,7 @@
 //! Tiny test-local Anthropic SSE scripts for responses the shared mock does
 //! not need to own (headings, tables, and the exact Bash+Read pair).
 
+use std::collections::BTreeSet;
 use std::io;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
@@ -103,8 +104,14 @@ enum Script {
     /// A real Workflow fan-out whose two children each run one slow Bash.
     /// `late` holds BETA's first request that long before the script takes
     /// it up — the spread two child spawns land with on a loaded machine
-    /// (t-82615); zero takes it up as it arrives.
-    WorkflowTwoHelpers { final_text: String, late: Duration },
+    /// (t-82615); zero takes it up as it arrives. `first_requests` holds the
+    /// helpers whose first request has come: no first answer leaves before
+    /// both have, so the two first tools start together whatever the spread.
+    WorkflowTwoHelpers {
+        final_text: String,
+        late: Duration,
+        first_requests: Arc<watch::Sender<BTreeSet<&'static str>>>,
+    },
     /// The host's own pre-analysis fan-out on a `Large` turn: the decomposition
     /// classifier answers two lanes, each lane answers one finding, and the
     /// main turn — which must carry both findings — gets `final_text`.
@@ -251,6 +258,22 @@ impl Script {
                 *late
             }
             _ => Duration::ZERO,
+        }
+    }
+
+    /// The helper whose first request `request` is, and the set its arrival
+    /// joins, for a script that answers no helper before every helper has
+    /// asked — `None` to answer `request` as soon as it is ready.
+    fn rendezvous(
+        &self,
+        request: &str,
+    ) -> Option<(&'static str, Arc<watch::Sender<BTreeSet<&'static str>>>)> {
+        match self {
+            Self::WorkflowTwoHelpers { first_requests, .. } => {
+                workflow_helper_first_request(request)
+                    .map(|helper| (helper, Arc::clone(first_requests)))
+            }
+            _ => None,
         }
     }
 
@@ -545,6 +568,7 @@ impl ScriptedAnthropicService {
         Self::spawn(Script::WorkflowTwoHelpers {
             final_text: final_text.into(),
             late,
+            first_requests: Arc::new(watch::channel(BTreeSet::new()).0),
         })
         .await
     }
@@ -675,15 +699,16 @@ async fn handle_connection(
 ) -> io::Result<()> {
     let (method, body) = read_http_request(&mut socket).await?;
     if method.eq_ignore_ascii_case("POST") {
-        let (request_index, response, (pieces, gap), refusal, hold) = {
+        let (request_index, response, (pieces, gap), refusal, hold, rendezvous) = {
             let mut captured = requests.lock().await;
             let request_index = captured.len();
             let response = script.response(request_index, &body);
             let pacing = script.pacing(request_index, &body);
             let refusal = script.refusal(&body);
             let hold = script.delay_before(request_index, &body);
+            let rendezvous = script.rendezvous(&body);
             captured.push(body);
-            (request_index, response, pacing, refusal, hold)
+            (request_index, response, pacing, refusal, hold, rendezvous)
         };
         if let Some(refusal) = refusal {
             socket.write_all(refusal.as_bytes()).await?;
@@ -702,6 +727,11 @@ async fn handle_connection(
         { let mut total = usage.lock().await; for (i, count) in emitted.iter().enumerate() { total[i] += count; } }
         if !hold.is_zero() {
             tokio::time::sleep(hold).await;
+        }
+        // After the lock: every connection runs on its own task, so a held
+        // answer never keeps the other helper's request from arriving.
+        if let Some((helper, first_requests)) = rendezvous {
+            meet_every_helper(helper, &first_requests).await;
         }
         let framed = http_response("text/event-stream", &response);
         if let Some(event_gap) = script.event_gap() {
@@ -1168,6 +1198,23 @@ const WORKFLOW_HELPERS: [(&str, &str); 2] = [
 /// The helper whose first request a late [`Script::WorkflowTwoHelpers`]
 /// holds back.
 const LATE_WORKFLOW_HELPER: &str = WORKFLOW_HELPERS[1].1;
+
+/// Half the test's 20 s waits: a helper that never asks still ends the test on its own assertion.
+const HELPER_RENDEZVOUS_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Count `helper`'s first request in, then wait until every helper's has
+/// come or [`HELPER_RENDEZVOUS_DEADLINE`] has passed.
+async fn meet_every_helper(
+    helper: &'static str,
+    first_requests: &watch::Sender<BTreeSet<&'static str>>,
+) {
+    let mut arrivals = first_requests.subscribe();
+    first_requests.send_modify(|arrived| {
+        arrived.insert(helper);
+    });
+    let everyone = arrivals.wait_for(|arrived| arrived.len() == WORKFLOW_HELPERS.len());
+    let _ = tokio::time::timeout(HELPER_RENDEZVOUS_DEADLINE, everyone).await;
+}
 
 /// The helper whose FIRST request `request` is — its prompt and no `bash` of
 /// its own yet — or `None` for the parent's requests and a helper's later ones.
