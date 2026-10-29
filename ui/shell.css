@@ -17360,6 +17360,18 @@ details[open] > .helper-cap::after {
   line-height: 1;
 }
 
+/* Why the queue waits, one line under its count (t-84670): the count's voice,
+ * cut at the box's width — the whole sentence is its tip. */
+.composer-queue-why {
+  overflow: hidden;
+  color: var(--ink-mist);
+  font-family: var(--font-ui);
+  font-size: var(--chat-pill-size);
+  line-height: 1;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .composer-queue-item {
   display: flex;
   align-items: center;

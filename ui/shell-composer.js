@@ -221,11 +221,39 @@ function composerWorking(run) {
     && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)));
 }
 
+/* How long a hold that is not the turn itself keeps the queue (t-84670): the
+ * conversation being handed to its wire, a question's card whose answer went,
+ * a message the queue sent whose turn was never seen to start. Each ends by
+ * itself when what it waits for happens; this bounds the one that does not
+ * (10-30, right after v1.1.105's restart: a person's Enter went into the
+ * queue under an idle head, again after ×, and nothing let it go). Longer
+ * than the backend's own bound for a hand-over (`wire_start`: two 10 s probes
+ * and the 8 s exit wait), so a hold that outlives it is stuck, not slow. */
+const COMPOSER_HOLD_MS = 60_000;
+
+/* Whether a hold that began at `since` has run past its bound. A hold with no
+ * stamp is not one this bound knows. */
+function composerHoldOver(since, now = Date.now()) {
+  return Number.isFinite(since) && now - since >= COMPOSER_HOLD_MS;
+}
+
 /* Whether words sent now wait for a hand-over: the pane's conversation is
  * being handed to its wire (t-54304). The wire's page sends them when it
- * stands (`carryPaneChat`); a refused hand-over leaves them to the pane. */
+ * stands (`carryPaneChat`); a refused hand-over leaves them to the pane, and
+ * one that neither stands nor is refused within its hold leaves them to the
+ * pane too (t-84670). */
 function composerHolding(run) {
-  return run.helper?.id === PANE_LOG_ID && paneChats.get(run.term)?.handing === true;
+  const held = run.helper?.id === PANE_LOG_ID ? paneChats.get(run.term) : null;
+  return held?.handing === true && !composerHoldOver(held.handingSince);
+}
+
+/* Whether a question standing as its card holds the queue: one waiting for its
+ * answer does (pasted now, the words would fall on the menu it shows,
+ * t-81786 P0), and one whose answer went does until the pane moves on — or,
+ * when no report ever says it did, until its hold runs out (t-84670). */
+function composerAskHolds(standing) {
+  if (!standing) return false;
+  return !standing.draft?.sending || !composerHoldOver(standing.draft.sentAt);
 }
 
 /* Whether words sent now wait in the queue rather than go — the submit's test
@@ -234,7 +262,59 @@ function composerHolding(run) {
  * the words after it wait as words sent mid-turn do. A card still waiting for
  * its answer takes the words as that answer, and is asked before this. */
 function composerQueues(run, asking) {
-  return composerWorking(run) || composerHolding(run) || Boolean(asking);
+  return composerWorking(run) || composerHolding(run) || composerAskHolds(asking);
+}
+
+/* The moment the earliest hold now keeping `run`'s queue runs out, or null
+ * when none that time ends holds it — the turn itself, a card waiting for its
+ * answer. */
+function composerHoldEnds(run, now = Date.now()) {
+  const held = run.helper?.id === PANE_LOG_ID ? paneChats.get(run.term) : null;
+  const standing = standingAskOf(run);
+  const ends = [
+    held?.handing === true ? held.handingSince : null,
+    standing?.draft?.sending ? standing.draft.sentAt : null,
+    run.queueArmed === false ? run.queueSentAt : null,
+  ].filter(Number.isFinite).map((since) => since + COMPOSER_HOLD_MS).filter((at) => at > now);
+  return ends.length ? Math.min(...ends) : null;
+}
+
+/* One timer per run for a queue held by something time ends: when that hold
+ * runs out the queue is asked again. Nothing else moves when a hold sticks —
+ * that is the case this is for (t-84670). */
+function armComposerRelease(run) {
+  if (!run.queue?.length) return;
+  const at = composerHoldEnds(run);
+  if (at === null || run.queueRelease?.at === at) return;
+  clearTimeout(run.queueRelease?.timer);
+  run.queueRelease = { at, timer: setTimeout(() => releaseComposerHold(run), at - Date.now() + 1) };
+}
+
+function releaseComposerHold(run) {
+  run.queueRelease = null;
+  syncWorkerComposers(run);
+  settleComposerQueue(run);
+}
+
+/* Why the queue is waiting, in one line under its count — the turn, a
+ * hand-over, a question, or the turn of what it sent last; a hold that time
+ * ends says by when at the latest. */
+function composerQueueWhy(run) {
+  const latest = { s: Math.round(COMPOSER_HOLD_MS / 1000) };
+  if (composerWorking(run)) return t("composer.queue.why.turn", "이 턴이 끝나면 하나씩 보냅니다");
+  if (composerHolding(run)) {
+    return t("composer.queue.why.handing", "대화를 실시간으로 잇는 중 — 이어지면, 늦어도 {{s}}초 뒤 보냅니다", latest);
+  }
+  const standing = standingAskOf(run);
+  if (composerAskHolds(standing)) {
+    return standing.draft?.sending
+      ? t("composer.queue.why.answered", "질문에 보낸 답이 닿기를 기다립니다 — 늦어도 {{s}}초 뒤 보냅니다", latest)
+      : t("composer.queue.why.asking", "위 질문에 답하면 보냅니다");
+  }
+  if (run.queueArmed === false && !composerHoldOver(run.queueSentAt)) {
+    return t("composer.queue.why.started", "앞서 보낸 글의 턴이 시작되기를 기다립니다 — 늦어도 {{s}}초 뒤 보냅니다", latest);
+  }
+  return t("composer.queue.why.going", "곧 보냅니다");
 }
 
 /* 글 하나가 실행에 닿는 길 — 선이면 한 요청, 판이면 붙여넣기·숨·Enter.
@@ -265,7 +345,10 @@ function composerQueueNode() {
   queue.hidden = true;
   const count = document.createElement("span");
   count.className = "composer-queue-count";
-  queue.appendChild(count);
+  const why = document.createElement("span");
+  why.className = "composer-queue-why";
+  why.setAttribute("role", "status");
+  queue.append(count, why);
   return queue;
 }
 
@@ -298,12 +381,20 @@ function paintComposerQueue(form, run) {
   if (!queue) return;
   const held = run.queue ?? [];
   writeHidden(queue, held.length === 0);
+  // What it waits for moves without the items moving: written on its own,
+  // guarded, so a quiet poll still writes nothing.
+  const why = queue.querySelector(".composer-queue-why");
+  if (why && held.length > 0) {
+    const words = composerQueueWhy(run);
+    writeTextContent(why, words);
+    writeAttribute(why, "data-tip", words);
+  }
   const sign = held.map(composerQueueWords).join("\u0000");
   if (queue.__queueSign === sign) return;
   queue.__queueSign = sign;
   const count = queue.querySelector(".composer-queue-count");
   writeTextContent(count, t("composer.queue.count", "대기 {{n}}", { n: held.length }));
-  queue.replaceChildren(count, ...held.map((message, at) => composerQueueItemNode(run, message, at)));
+  queue.replaceChildren(count, ...(why ? [why] : []), ...held.map((message, at) => composerQueueItemNode(run, message, at)));
 }
 
 /* 대기열의 첫 항목을 내보내는 문 — 상태가 움직이는 자리에서만 불린다.
@@ -311,21 +402,29 @@ function paintComposerQueue(form, run) {
  * 한 턴에 하나. 보낸 직후에는 훅도 선도 아직 「작업 중」이라 말하지 않아서,
  * 그 짧은 창에 이 문이 다시 불리면 대기열이 통째로 쏟아진다. 그래서 보낼
  * 때 빗장(`run.queueArmed`)을 내리고, 상태가 실제로 working으로 오른 것을
- * 본 뒤에만 다시 올린다 — 시계가 아니라 상태가 기준이다. */
+ * 본 뒤에만 다시 올린다 — 시계가 아니라 상태가 기준이다. 시계는 그 상태가
+ * 끝내 오지 않을 때만 쓴다: 턴 아닌 붙잡음은 `COMPOSER_HOLD_MS` 뒤 풀린다
+ * (`armComposerRelease`, t-84670). */
 function settleComposerQueue(run) {
   // Held for a hand-over under way: they go with the conversation (t-54304).
-  if (composerHolding(run)) return;
+  if (composerHolding(run)) {
+    armComposerRelease(run);
+    return;
+  }
   if (composerWorking(run)) {
     run.queueArmed = true;
     return;
   }
   // Nor while a question stands as its card: pasted now, the words would fall
   // on the menu it shows (t-81786 P0). They go once the card is gone.
-  if (standingAskOf(run)) return;
-  if (run.queueArmed === false) return;
+  if (composerAskHolds(standingAskOf(run)) || (run.queueArmed === false && !composerHoldOver(run.queueSentAt))) {
+    armComposerRelease(run);
+    return;
+  }
   if (!run.queue?.length || run.sending || run.sendUncertain) return;
   const message = run.queue.shift();
   run.queueArmed = false;
+  run.queueSentAt = Date.now();
   run.sending = true;
   syncWorkerComposers(run);
   let pasted = false;
@@ -337,6 +436,9 @@ function settleComposerQueue(run) {
     .finally(() => {
       run.sending = false;
       syncWorkerComposers(run);
+      // What still waits goes once the turn this one starts is seen — or, if
+      // it never is, once that hold runs out (t-84670).
+      armComposerRelease(run);
     });
 }
 

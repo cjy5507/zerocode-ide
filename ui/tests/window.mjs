@@ -154,6 +154,7 @@ import { testConversationRedesign } from "./conversation-redesign.mjs";
 import { testConversationB } from "./conversation-b.mjs";
 import { testConversationEarlier } from "./conversation-earlier.mjs";
 import { testConversationSwitch } from "./conversation-switch.mjs";
+import { testComposerHold } from "./composer-hold.mjs";
 import { testConversationDiagrams } from "./conversation-diagrams.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -505,6 +506,7 @@ suite("conversation-earlier", ({ browser, origin, ok }) => testConversationEarli
 /* 대화를 바꿨다가 돌아오면 그 화면 그대로, 판의 「대화」는 전사부터(인계 중 보낸 글은 한 번만),
  * 늦은 첫 읽기는 늦게 한 줄 (t-54304 — Claude·Codex·Dots 역분석에서 가져온 1단계). */
 suite("conversation-switch", ({ browser, origin, ok }) => testConversationSwitch(browser, origin, ok));
+suite("composer-hold", ({ browser, origin, ok }) => testComposerHold(browser, origin, ok));
 /* 대화의 mermaid 울타리 — 닫힌 뒤에 한 번만 그림으로 서고(스트림 30프레임에 요청 1번), 답의 턴은
  * 이미 받은 레이아웃으로 바로 그리고, 늦게 온 그림 앞에서 끝 따라가기와 읽던 자리가 그대로다 (t-58437). */
 suite("conversation-diagrams", ({ browser, origin, ok }) => testConversationDiagrams(browser, origin, ok));

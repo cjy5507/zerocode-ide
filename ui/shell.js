@@ -889,6 +889,9 @@ function submitAsk(card, draft) {
     other: (draft.other[i] ?? "").trim(),
   }));
   draft.sending = true;
+  // When the answer went: the composer's queue waits on this card at most
+  // `COMPOSER_HOLD_MS` from here (t-84670).
+  draft.sentAt = Date.now();
   repaintAsk(draft);
   const term = Number(card.pane.slice(card.pane.indexOf(":") + 1));
   const road = draft.answer
@@ -920,6 +923,7 @@ function decideApproval(card, draft, choice, message = null) {
   const term = Number(card.pane.slice(card.pane.indexOf(":") + 1));
   const decide = draft.answer ?? ((allow) => invoke("answer_approval", { term, allow }, { hand: handNow() }));
   draft.sending = true;
+  draft.sentAt = Date.now();
   draft.open = false;
   draft.refusal = "";
   decide(choice, message).then(() => draft.delivered?.(), (error) => refuseAsk(draft, error));
@@ -13466,13 +13470,25 @@ async function handPaneToWire(term) {
   }
   held.pendingWire = false;
   held.handing = true;
-  // The transcript view says the wire is taking over, and holds what is sent
-  // meanwhile (`composerHolding`, t-54304).
-  paintPaneChat(term);
+  // When it began: what is sent meanwhile is held at most `COMPOSER_HOLD_MS`
+  // from here, whatever the hand-over does (t-84670).
+  held.handingSince = Date.now();
   let tabId = null;
   try {
+    // The transcript view says the wire is taking over, and holds what is sent
+    // meanwhile (`composerHolding`, t-54304). Painted inside the `try`: a paint
+    // that threw left `handing` up for good, the queue with it.
+    paintPaneChat(term);
     const owner = tabOfTerm(term);
-    const history = await readPaneTranscript(term);
+    // The read before the wire is asked is the window's own, bounded by the
+    // hold it puts on the queue: one that has not answered by then hands
+    // nothing over — the wire is never asked, so no late wire takes the
+    // conversation from a pane the words have gone to (t-84670).
+    const history = await withinComposerHold(readPaneTranscript(term));
+    if (history === null) {
+      held.wireRefusal = t("worker.handOverStalled", "대화 기록 읽기가 {{s}}초 안에 끝나지 않았습니다", { s: Math.round(COMPOSER_HOLD_MS / 1000) });
+      return false;
+    }
     tabId = await openWirePage(row.id, owner?.worktree ?? activeWorktreePath, {
       resume: session,
       fromTerm: term,
@@ -13493,6 +13509,7 @@ async function handPaneToWire(term) {
     return tabId !== null;
   } finally {
     held.handing = false;
+    held.handingSince = null;
     // A wire that never stood leaves the pane its conversation: the view says
     // why, and what waited goes the pane's own way, once (t-54304).
     if (tabId === null) {
@@ -13500,6 +13517,14 @@ async function handPaneToWire(term) {
       settleComposerQueue(held.run);
     }
   }
+}
+
+/* What `promise` answers, or null when it has not answered within the hold a
+ * hand-over puts on the queue (`COMPOSER_HOLD_MS`, t-84670). */
+function withinComposerHold(promise) {
+  let timer = null;
+  const late = new Promise((done) => { timer = setTimeout(() => done(null), COMPOSER_HOLD_MS); });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 }
 
 /* What a pane's transcript view hands the wire's page that continues its
@@ -16315,7 +16340,12 @@ function workerComposerNode(run, owner = null) {
       // So do words sent while the pane hands its conversation to its wire:
       // the wire's page sends them (`carryPaneChat`), or the pane, refused
       // (t-54304).
-      if (composerQueues(run, asking)) queueComposerMessage(run, message);
+      // A hold that time ends (a hand-over, an answered card) is let go by
+      // its own clock when nothing else moves (`armComposerRelease`, t-84670).
+      if (composerQueues(run, asking)) {
+        queueComposerMessage(run, message);
+        armComposerRelease(run);
+      }
       // 아니면 그 자리에서 실행의 길로 — 선이면 한 요청, 판이면
       // 붙여넣기·숨·Enter. `pasted`는 Enter가 실패했을 때 글이 이미 부모의
       // 상자에 있다는 사실을 남긴다.
