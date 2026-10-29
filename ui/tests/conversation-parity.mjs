@@ -538,6 +538,62 @@ export async function testConversationKeys(browser, origin, ok) {
       await settle();
       seen.sent = JSON.stringify(calls("wire_send").map((args) => args.text));
 
+      // While the turn runs the send follows the box (t-83633, the extension's
+      // `busy && !canSendMessage` stops): words in the box make it the queue's
+      // door — a press queues them and stops nothing — an empty box makes it
+      // the stop again, a chip alone counts as words, and Esc still stops the
+      // turn from a box that holds words. A key that keeps the face writes
+      // nothing on the button.
+      log.status = "working";
+      await settle();
+      const form = face.querySelector(".worker-composer");
+      const run = form.__workerRun;
+      const send = form.querySelector(".worker-composer-send");
+      const faceOf = () => ({
+        stop: send.classList.contains("is-stop"),
+        name: send.getAttribute("aria-label"),
+        tip: send.dataset.tip ?? null,
+        mark: send.querySelector("use")?.getAttribute("href") ?? "",
+      });
+      const type = (text) => {
+        box.value = text;
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+      };
+      type("");
+      seen.queueEmpty = faceOf();
+      type("ㅇ");
+      seen.queueTyped = faceOf();
+      const keys = new MutationObserver(() => {});
+      keys.observe(send, { attributes: true, childList: true, subtree: true, characterData: true });
+      type("ㅇㅇ");
+      type("ㅇㅇ 다음");
+      seen.queueQuiet = keys.takeRecords().length;
+      keys.disconnect();
+      const pressedAt = { interrupts: calls("wire_interrupt").length, sends: calls("wire_send").length };
+      send.click();
+      await settle();
+      seen.queuePress = {
+        interrupts: calls("wire_interrupt").length - pressedAt.interrupts,
+        sends: calls("wire_send").length - pressedAt.sends,
+        queue: run.queue ?? [],
+        box: box.value,
+      };
+      seen.queueAfter = faceOf();
+      type("멈출 글");
+      const escAt = calls("wire_interrupt").length;
+      press(box, "Escape");
+      await settle();
+      seen.queueEsc = calls("wire_interrupt").length - escAt;
+      type("");
+      await composerAttachmentsOf(form).add(["/Users/dev/zerocode/README.md"]);
+      seen.queueChip = faceOf();
+      form.querySelector(".composer-attach-drop")?.click();
+      seen.queueChipGone = faceOf();
+      seen.queueNames = {
+        stop: t("worker.stop", "중지"),
+        queue: t("composer.queue.add", "대기열에 추가 — 멈추려면 Esc"),
+      };
+
       // A pane's conversation: Esc and the stop button press the key its CLI
       // names (Claude Code: "esc to interrupt"), not the terminal's ^C.
       const term = await openTermTab({ placement: "tab" });
@@ -592,6 +648,20 @@ export async function testConversationKeys(browser, origin, ok) {
         seen.upPastOldest === "첫째 부탁" && seen.down1 === "둘째 부탁" && seen.downToDraft === "쓰던 글" &&
         seen.ctrlJ === JSON.stringify("한\n 줄") && seen.sent === JSON.stringify(["한\n 줄"]),
       JSON.stringify(seen),
+    );
+    const { stop, queue } = seen.queueNames ?? {};
+    const stopFace = (one) => one?.stop === true && one.name === stop && one.tip === stop && one.mark === "#i-square";
+    const queueFace = (one) => one?.stop === false && one.name === queue && one.tip === queue && one.mark === "#i-arrow-up";
+    ok(
+      "t-83633: while the turn runs, words in the box turn the stop into 「대기열에 추가」 (an up arrow, its name said twice — tooltip and label — with Esc in it) and a press queues them: one held, nothing sent, nothing stopped, the box emptied and the stop back; a chip alone queues too; Esc from a box holding words stops the turn; and a key that keeps the face writes nothing on the button",
+      stopFace(seen.queueEmpty) && queueFace(seen.queueTyped) && seen.queueQuiet === 0 &&
+        seen.queuePress?.interrupts === 0 && seen.queuePress.sends === 0 &&
+        JSON.stringify(seen.queuePress.queue) === JSON.stringify(["ㅇㅇ 다음"]) && seen.queuePress.box === "" &&
+        stopFace(seen.queueAfter) && seen.queueEsc === 1 && queueFace(seen.queueChip) && stopFace(seen.queueChipGone),
+      JSON.stringify({
+        queueEmpty: seen.queueEmpty, queueTyped: seen.queueTyped, queueQuiet: seen.queueQuiet, queuePress: seen.queuePress,
+        queueAfter: seen.queueAfter, queueEsc: seen.queueEsc, queueChip: seen.queueChip, queueChipGone: seen.queueChipGone, names: seen.queueNames,
+      }),
     );
     ok("A3: the keys raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {

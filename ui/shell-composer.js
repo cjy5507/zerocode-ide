@@ -228,6 +228,15 @@ function composerHolding(run) {
   return run.helper?.id === PANE_LOG_ID && paneChats.get(run.term)?.handing === true;
 }
 
+/* Whether words sent now wait in the queue rather than go — the submit's test
+ * and the send's face (`paintComposerSend`) read this one answer. `asking` is
+ * the question standing as its card once its answer went (t-81786 r2 P2-1):
+ * the words after it wait as words sent mid-turn do. A card still waiting for
+ * its answer takes the words as that answer, and is asked before this. */
+function composerQueues(run, asking) {
+  return composerWorking(run) || composerHolding(run) || Boolean(asking);
+}
+
 /* 글 하나가 실행에 닿는 길 — 선이면 한 요청, 판이면 붙여넣기·숨·Enter.
  * 제출과 대기열이 **같은 이 문**을 지나므로, 대기열에서 나간 글은 사람이
  * 직접 친 글과 한 글자도 다르지 않게 도착한다. */
