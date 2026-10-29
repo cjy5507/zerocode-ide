@@ -2464,7 +2464,6 @@ impl Store {
         id: &str,
         version: Option<u32>,
     ) -> Result<DocumentText, String> {
-        use std::io::Read as _;
         let artifact = self
             .get(id)
             .ok_or_else(|| format!("그 아티팩트가 없습니다: {id}"))?;
@@ -2486,29 +2485,50 @@ impl Store {
                 .map(|kept| kept.path)
                 .ok_or_else(|| format!("그 버전은 더 이상 보관되지 않습니다: {id} 버전 {n}"))?,
         };
-        let cap = self.limits().preview_text_bytes_max;
         // A row outlives its file until the next scan; say so in words rather than
         // in the operating system's.
-        let meta = std::fs::metadata(&path).map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => format!("아티팩트 파일이 사라졌습니다: {id}"),
-            _ => error.to_string(),
-        })?;
-        if !meta.is_file() {
-            return Err(format!("일반 파일이 아닙니다: {id}"));
-        }
-        let mut held = Vec::new();
-        std::fs::File::open(&path)
-            .and_then(|file| file.take(cap).read_to_end(&mut held))
-            .map_err(|error| error.to_string())?;
-        if held.contains(&0) {
-            return Err(format!("바이너리 파일입니다: {id}"));
-        }
-        Ok(DocumentText {
-            text: text_of_whole_characters(held),
-            bytes: meta.len(),
-            truncated: meta.len() > cap,
+        bounded_text(&path, self.limits().preview_text_bytes_max).map_err(|refusal| match refusal {
+            TextRefusal::Gone => format!("아티팩트 파일이 사라졌습니다: {id}"),
+            TextRefusal::NotAFile => format!("일반 파일이 아닙니다: {id}"),
+            TextRefusal::Binary => format!("바이너리 파일입니다: {id}"),
+            TextRefusal::Unread(error) => error,
         })
     }
+}
+
+/// Why [`bounded_text`] read nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TextRefusal {
+    Gone,
+    NotAFile,
+    Binary,
+    Unread(String),
+}
+
+/// A regular file's text for a tab nobody can write — a gallery document's
+/// (t-16006) or a session's own scratch file (t-83039): its first `cap`
+/// bytes, cut on a whole character, with the file's own size beside them.
+pub(crate) fn bounded_text(path: &Path, cap: u64) -> Result<DocumentText, TextRefusal> {
+    use std::io::Read as _;
+    let meta = std::fs::metadata(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => TextRefusal::Gone,
+        _ => TextRefusal::Unread(error.to_string()),
+    })?;
+    if !meta.is_file() {
+        return Err(TextRefusal::NotAFile);
+    }
+    let mut held = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(cap).read_to_end(&mut held))
+        .map_err(|error| TextRefusal::Unread(error.to_string()))?;
+    if held.contains(&0) {
+        return Err(TextRefusal::Binary);
+    }
+    Ok(DocumentText {
+        text: text_of_whole_characters(held),
+        bytes: meta.len(),
+        truncated: meta.len() > cap,
+    })
 }
 
 /// What an evidence file says (t-36910): its steps counted and listed, its

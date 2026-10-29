@@ -85,6 +85,38 @@ pub(crate) async fn read_text_file(
     read_text_in_project(&root, &path, allow_missing.unwrap_or(false))
 }
 
+/// A file an agent session wrote in its own folder, for a tab nobody can
+/// write (t-83039): the answer named it, the person pressed it, and the
+/// project's door ([`read_text_file`]) refused it as outside the project —
+/// rightly, and that door stays as it is. This reads only inside the folder
+/// of a session the window holds in its session table, named from that
+/// session's own transcript, and only a regular text file within the
+/// gallery's text cap (`crate::session_scratch`). `None` is a path in no such
+/// folder, refused before it was opened; an error is a file in one that is no
+/// text the tab could show.
+#[tauri::command(async)]
+pub(crate) fn session_scratch_document(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Option<crate::artifact_runtime::DocumentText>, String> {
+    let _crumb = crate::crumbs::Command::enter("session_scratch_document");
+    let sessions: Vec<zerocode_core::ProviderSession> =
+        state.pane_sessions().values().cloned().collect();
+    let folders = crate::session_scratch::claude_temp_root()
+        .map(|temp| crate::session_scratch::session_folders(&temp, &sessions))
+        .unwrap_or_default();
+    let cap = crate::artifact_runtime::store()
+        .map_or_else(zerocode_core::artifact::Limits::default, |store| {
+            store.limits()
+        })
+        .preview_text_bytes_max;
+    match crate::session_scratch::read_scratch(&path, &folders, cap) {
+        Ok(text) => Ok(Some(text)),
+        Err(crate::session_scratch::ScratchRefusal::Outside) => Ok(None),
+        Err(crate::session_scratch::ScratchRefusal::Unreadable(why)) => Err(why),
+    }
+}
+
 /// The root a path the window hands over stands in: the project, or — when
 /// one is saved and the path lives there — the second brain's vault.
 ///

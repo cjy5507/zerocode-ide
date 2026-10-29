@@ -847,13 +847,13 @@ fn looked_up_by_the_kernel(_pid: u32) -> Lookup {
 }
 
 #[cfg(unix)]
-fn own_user() -> u32 {
+pub(crate) fn own_user() -> u32 {
     // SAFETY: `getuid` takes nothing and cannot fail.
     unsafe { libc::getuid() }
 }
 
 #[cfg(not(unix))]
-fn own_user() -> u32 {
+pub(crate) fn own_user() -> u32 {
     0
 }
 

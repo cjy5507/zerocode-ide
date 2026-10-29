@@ -191,6 +191,7 @@ mod scrcpy_video;
 mod script;
 mod seat_triage;
 mod secret_watch;
+mod session_scratch;
 mod settings;
 mod settings_runtime;
 mod settings_secrets;
@@ -363,7 +364,7 @@ use cmd::{
     second_brain_graph, second_brain_link, second_brain_open, second_brain_page,
     second_brain_paths, second_brain_relate, second_brain_seat_recalls, second_brain_setup,
     second_brain_status, select_claude_account, select_codex_account, select_model_connection,
-    send_prompt, session_info, set_active_worktree, set_agent_activity_display,
+    send_prompt, session_info, session_scratch_document, set_active_worktree, set_agent_activity_display,
     set_agent_pane_first_view, set_agent_permission_mode, set_agent_teams_mode,
     set_app_font_family, set_browser_default_profile, set_browser_default_zoom,
     set_browser_home_page, set_browser_open_tabs, set_browser_restore_tabs,
@@ -2945,6 +2946,7 @@ fn main() -> ExitCode {
             import_external_worktrees,
             suppress_external_worktree_inbox,
             read_text_file,
+            session_scratch_document,
             file_version,
             write_text_file,
             watch_files,
