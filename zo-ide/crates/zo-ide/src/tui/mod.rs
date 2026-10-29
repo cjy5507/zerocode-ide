@@ -85,6 +85,11 @@ pub mod strings;
 pub mod tables;
 #[cfg(test)]
 mod test_screen;
+// A test's pty pair, opened the way the e2e harness opens its own: one file
+// that both crates compile.
+#[cfg(all(test, unix))]
+#[path = "../../tests/e2e/pty_open.rs"]
+mod test_pty;
 pub mod thinking;
 pub mod tools;
 pub mod transcript;

@@ -258,8 +258,9 @@ mod tests {
     }
 
     /// 늦은 닫힘을 기다리는 상한 — 통과는 닫힘이 보이는 즉시이고, 이 상한은 실패에만
-    /// 쓴다. 닫힘이 늦는 것은 주 끝이 열린 동안 병렬 시험이 띄운 자식이 그 사본을
-    /// 물려받아(`openpty` 의 두 끝은 상속된다) 제가 끝날 때까지 쥘 때다(l81d).
+    /// 쓴다. 닫힘이 늦었던 것은 주 끝이 열린 동안 병렬 시험이 띄운 자식이 그 사본을
+    /// 물려받아 제가 끝날 때까지 쥐었을 때다(l81d). 시험 pty 의 두 끝은 이제 exec 에서
+    /// 닫히지만(t-78154) 상한은 그대로 둔다.
     #[cfg(unix)]
     const HANG_UP_BOUND: Duration = Duration::from_secs(60);
 
@@ -341,8 +342,7 @@ mod tests {
     fn open_pty() -> nix::pty::OpenptyResult {
         use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
 
-        let pty = nix::pty::openpty(None::<&nix::pty::Winsize>, None::<&nix::sys::termios::Termios>)
-            .expect("open a pty");
+        let pty = crate::tui::test_pty::open_pty(None).expect("open a pty");
         let mut raw = tcgetattr(&pty.slave).expect("the pty's modes");
         cfmakeraw(&mut raw);
         tcsetattr(&pty.slave, SetArg::TCSANOW, &raw).expect("raw mode");
