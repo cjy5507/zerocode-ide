@@ -10,8 +10,9 @@
 //! 주소 표 이름은 크롬 판마다 다르다(옛 `autofill_profiles`, 그 뒤의
 //! `local_addresses`·`contact_info`, 지금의 `addresses`) — 서 있는 표가 답이고,
 //! 스키마 버전(`meta` 표)은 로그 한 줄에만 간다. 결제 카드는 옮기지 않는다:
-//! 값의 종류로 비밀이라, 몇 건이 남았는지만 센다. 입력값 가운데 비밀로 보이는
-//! 것(카드 번호 꼴·토큰 꼴, 비밀번호를 이름으로 단 칸)도 같은 이유로 센다.
+//! 값의 종류로 비밀이라, 몇 건이 남았는지만 센다. 입력값 가운데 값의 종류가
+//! 비밀인 것(비밀번호·결제 카드·인증번호 칸의 값, 카드 번호 꼴, 토큰 꼴 낱말)도
+//! 같은 이유로 센다.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -392,15 +393,28 @@ fn read_legacy_addresses(
     Ok(())
 }
 
-/// 이 입력값은 비밀로 보이는가 — 칸 이름이 비밀번호·토큰을 말하거나, 결제
-/// 카드의 보안 코드를 말하거나, 값이 카드 번호·토큰 꼴이다.
+/// 칸 이름이 이 낱말을 품으면 그 입력값은 결제 카드나 일회용 인증번호의
+/// 것이다. 비밀번호·토큰을 말하는 낱말은 core의 표가 든다
+/// (`names_a_credential`).
+const SECRET_ENTRY_NAME_WORDS: [&str; 12] = [
+    "card", "cc-", "cc_num", "ccnum", "cvc", "cvv", "csc", "otp", "one-time", "onetime", "verif",
+    "인증",
+];
+
+/// 이 입력값은 비밀인가 — 값의 종류로 가른다. 칸 이름이 비밀번호·토큰·결제
+/// 카드·인증번호를 말하거나, 값이 카드 번호 꼴이거나, 값이 띄어 쓰지 않은 한
+/// ASCII 낱말로 토큰 꼴일 때다. 주소·메모처럼 띄어 쓴 글과 한글이 든 값은
+/// 길고 숫자와 글자가 섞여도 토큰이 아니다 — core의 「긴 혼합 낱말」 규칙은
+/// 한 낱말에만 건다.
 fn entry_is_secret(name: &str, value: &str) -> bool {
-    const CARD_CODE_WORDS: [&str; 3] = ["cvc", "cvv", "csc"];
-    zerocode_core::credential::names_a_credential(name)
-        || CARD_CODE_WORDS
+    use zerocode_core::credential;
+    let one_word = value.is_ascii() && !value.bytes().any(|byte| byte.is_ascii_whitespace());
+    credential::names_a_credential(name)
+        || SECRET_ENTRY_NAME_WORDS
             .iter()
-            .any(|word| zerocode_core::credential::contains_ascii_case(name, word))
-        || zerocode_core::credential::looks_like_a_credential(value)
+            .any(|word| credential::contains_ascii_case(name, word))
+        || credential::looks_like_a_payment_card(value)
+        || (one_word && credential::looks_like_a_credential(value))
 }
 
 fn read_entries(
@@ -796,6 +810,60 @@ mod tests {
         assert_eq!(names, ["nickname", "company"], "{names:?}");
         // 카드 두 장 + 비밀 입력값 셋(카드 번호 꼴, cvc, password).
         assert_eq!(read.held_back, 5);
+    }
+
+    /// 입력값의 비밀은 값의 종류로 가른다: 띄어 쓴 영문 주소와 건물 동이 든
+    /// 한글 주소는 길고 숫자와 글자가 섞여도 옮겨지고, 비밀번호·카드·인증번호
+    /// 칸의 값과 토큰 꼴 한 낱말은 남는다.
+    #[test]
+    fn an_entry_is_secret_by_its_kind_and_a_written_address_is_not() {
+        let written = [
+            ("address", "[합성] 1200 Example Parkway Building 43"),
+            ("addr2", "[합성-도로명] 123 A동 1203호"),
+            ("street", "[합성]테헤란로123A동"),
+            ("nickname", "[합성-별명]"),
+        ];
+        for (name, value) in written {
+            assert!(!entry_is_secret(name, value), "{name} was held back");
+        }
+        // 토큰 꼴 값은 시험이 실행 중에 짓는다 — 저장소에 글자로 서지 않게.
+        let vendor_shaped = format!("{}{}", "ghp_", "a1".repeat(18));
+        let opaque = "a1b2c3d4e5f6g7h8i9j0k1l2m3".to_string();
+        let secret = [
+            ("password", "[합성-비밀번호]".to_string()),
+            ("card_cvc", "[합성-보안코드]".to_string()),
+            ("cardNumber", "[합성-카드]".to_string()),
+            ("cc-exp", "[합성-만료]".to_string()),
+            ("otp", "[합성-코드]".to_string()),
+            ("sms_verification", "[합성-코드]".to_string()),
+            ("인증번호", "[합성-코드]".to_string()),
+            ("q", vendor_shaped),
+            ("q", opaque),
+        ];
+        for (name, value) in &secret {
+            assert!(entry_is_secret(name, value), "{name} was moved");
+        }
+
+        // 읽는 길 전체: 띄어 쓴 주소 줄 한 행은 입력값으로 옮겨지고 남는 수는
+        // 그대로다(카드 두 장 + cvc + password).
+        let (_yard, path) = web_data(WEB_DATA_FIXTURE);
+        rusqlite::Connection::open(&path)
+            .expect("open")
+            .execute(
+                "INSERT INTO autofill VALUES('address', ?1, ?1, 1, 50, 2)",
+                [written[0].1],
+            )
+            .expect("written address entry");
+        let read = read_chromium_web_data(&path).expect("reads");
+        assert!(
+            read.book
+                .entries
+                .iter()
+                .any(|entry| entry.name == "address" && entry.value == written[0].1),
+            "{:?}",
+            read.book.entries
+        );
+        assert_eq!(read.held_back, 4);
     }
 
     /// 옛 판의 Web Data: 주소 칸은 autofill_profiles에, 이름·이메일·전화는 곁표에.
