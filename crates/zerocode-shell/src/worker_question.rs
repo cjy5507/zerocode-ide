@@ -425,6 +425,10 @@ struct Asked {
     filed_ms: i64,
     passed: bool,
     raised: Option<Raised>,
+    /// The coordinator's answer is being typed into the picker: the person's
+    /// screen keeps the question off until the pane says it moved on, or
+    /// the answer door lets go without it saying so.
+    typed: bool,
 }
 
 /// A question a pane left before its coordinator answered — the pane asked
@@ -445,9 +449,10 @@ fn left() -> MutexGuard<'static, HashMap<String, Left>> {
 
 /// Keep what `term` asked of its coordinator after the window stops carrying
 /// it: only a question already in the ledger can still be answered, and one
-/// the coordinator gave to the person has had its word.
+/// whose answer was typed, or the coordinator gave to the person, has had
+/// its word.
 fn leave(term: u32, old: Asked) {
-    if old.raised == Some(Raised::CoordinatorHanded) {
+    if old.typed || old.raised == Some(Raised::CoordinatorHanded) {
         return;
     }
     if let Filing::Filed(question) = old.filed {
@@ -507,7 +512,7 @@ fn memory() -> MutexGuard<'static, Option<Memory>> {
 fn kept_of(held: &HashMap<u32, Asked>, waiting: &[Kept]) -> Vec<Kept> {
     let mut kept: Vec<Kept> = held
         .values()
-        .filter(|standing| !standing.passed)
+        .filter(|standing| !standing.passed && !standing.typed)
         .filter_map(|standing| match &standing.filed {
             Filing::Filed(question) => Some(Kept {
                 run: standing.seat.run.clone(),
@@ -579,6 +584,7 @@ fn taken_up(kept: Kept, seat: AskSeat, term: u32) -> Option<Asked> {
         filed_ms: kept.filed_ms,
         passed: false,
         raised: kept.raised,
+        typed: false,
     })
 }
 
@@ -609,8 +615,11 @@ pub(crate) fn heard(
     if let Some(prompt) = asking(report) {
         let sig = signature(prompt);
         let mut held = asked();
+        // An answer typed into it ended that question: the same words asked
+        // again are a new question.
         if let Some(standing) = held.get_mut(&term)
             && standing.signature == sig
+            && !standing.typed
         {
             standing.passed = false;
             return match standing.raised {
@@ -641,6 +650,7 @@ pub(crate) fn heard(
                 filed_ms: now_ms,
                 passed: false,
                 raised: None,
+                typed: false,
             },
         );
         return quiet(report);
@@ -658,7 +668,8 @@ pub(crate) fn heard(
             };
         }
         standing.passed = true;
-        if matches!(standing.filed, Filing::Unfiled) {
+        // Nothing to refuse: not in the ledger yet, or its answer just landed.
+        if matches!(standing.filed, Filing::Unfiled) || standing.typed {
             held.remove(&term);
         }
     }
@@ -735,6 +746,13 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
         match &standing.filed {
             Filing::Unfiled if standing.raised.is_some() => {}
             Filing::Unfiled => file(app, host, term, &standing, now_ms),
+            // Typed: until the pane says it moved on (`heard`), or the door
+            // lets go without it saying so.
+            Filing::Filed(_) if standing.typed => {
+                if !crate::cmd::terminal::answer_in_flight(term) {
+                    let_go_typed(term);
+                }
+            }
             Filing::Filed(question) => carry(app, term, &standing, question, now_ms),
         }
     }
@@ -1080,9 +1098,21 @@ fn settled(term: u32) {
     asked().remove(&term);
 }
 
-/// The coordinator's answer to `term`'s question is going into the picker.
+/// The coordinator's answer to `term`'s question is going into the picker:
+/// held off the person's screen while the walk types it (t-84470, r1 P3-3).
 fn typed(term: u32) {
-    settled(term);
+    if let Some(now) = asked().get_mut(&term) {
+        now.typed = true;
+    }
+}
+
+/// The answer door let go of `term` without the pane saying it moved on: the
+/// window is done with the question it typed.
+fn let_go_typed(term: u32) {
+    let mut held = asked();
+    if held.get(&term).is_some_and(|standing| standing.typed) {
+        held.remove(&term);
+    }
 }
 
 /// One letter from the ledger to the run's coordinator about `question`.
@@ -1458,6 +1488,7 @@ mod tests {
             filed_ms: NOW,
             passed: false,
             raised: None,
+            typed: false,
         }
     }
 

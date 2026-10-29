@@ -2486,6 +2486,15 @@ pub(crate) fn question_is_up(
         .is_some_and(|held| answer_door::question_is_up(&held, question))
 }
 
+/// Whether an answer is still being typed into `term` — a walk a card or a
+/// worker's coordinator started, and the settle after its last key
+/// (t-84470). Asked by taking the pane's answer lease and letting it go at
+/// once, so it is asked only of a pane whose question the window keeps off
+/// the person's screen: no card of theirs can be pressed meanwhile.
+pub(crate) fn answer_in_flight(term: TermId) -> bool {
+    answer_door::answer_lease(term).is_err()
+}
+
 /// Whether [`answer_ask`] refused because the pane's screen no longer shows
 /// the question — the refusal a caller outside the page tells apart
 /// (t-82296), asked here so the door's own words stay behind the answer
