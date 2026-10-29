@@ -2752,7 +2752,8 @@ function dressStreamingThought(row, piece) {
 }
 
 /* The words a streaming thought was saying are this turn: the row that will
- * stand for the turn is noted on the streaming row it replaces, so that what a
+ * stand for the turn — on a folded page the pill it went into — is noted on
+ * the streaming row it replaces, with the turn's number, so that what a
  * reader had of the streaming row can pass to it when that row goes. A turn
  * names the first thought not yet taken whose words it begins with, wherever
  * that row stands among the streaming ones. */
@@ -2761,7 +2762,7 @@ function noteThoughtSettled(list, turn, row) {
   for (const streaming of list.querySelectorAll(":scope > .is-streaming.is-thinking")) {
     const said = (streaming.__text ?? "").trim();
     if (streaming.__settled === undefined && said !== "" && words.startsWith(said)) {
-      streaming.__settled = row;
+      streaming.__settled = { row, seq: turn.seq };
       return;
     }
   }
@@ -2769,11 +2770,21 @@ function noteThoughtSettled(list, turn, row) {
 
 /* A streaming row goes. A thought that was being read — its line open, or the
  * keyboard on it — hands both to the row of the turn that stands in its place,
- * so it does not close under the reader; a thought nobody opened is just gone. */
+ * so it does not close under the reader; a thought nobody opened is just gone.
+ * In a pill the turn has a row only while the pill is open (t-81525 B2): a
+ * thought open in front of the reader opens the pill to it, and one that only
+ * held the keyboard, in a closed pill, hands it to the pill's head
+ * (t-81786 P3-5). */
 function removeStreamingRow(stale, run) {
-  const row = stale.__settled;
+  const held = stale.firstElementChild === document.activeElement;
+  let row = stale.__settled?.row;
+  if (row?.isConnected && row.classList.contains("helper-group")) {
+    const pill = row;
+    if (stale.open && !pill.__open) openActivityPill(pill, true);
+    row = pill.querySelector(`:scope > .helper-group-body > [data-turn="${stale.__settled.seq}"]`);
+    if (!row && held) landFocus(pill);
+  }
   if (row?.isConnected) {
-    const held = stale.firstElementChild === document.activeElement;
     if (stale.open && !row.open) {
       row.open = true;
       paintThoughtBody(row, run);

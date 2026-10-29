@@ -15206,7 +15206,9 @@ function syncHelperTurns(list, run) {
     // joins the pill right above it, or stands one — no row of its own until
     // the pill opens (B2).
     if (folded && isActivityTurn(turn)) {
-      pills.add(holdActivityTurn(list, run, turn, streaming ?? helperListTail(list), spoken));
+      const group = holdActivityTurn(list, run, turn, streaming ?? helperListTail(list), spoken);
+      pills.add(group);
+      if (turn.role === "thinking" && streaming) noteThoughtSettled(list, turn, group);
       cold -= 1;
       settlePaneLive(run, turn.role);
       continue;
