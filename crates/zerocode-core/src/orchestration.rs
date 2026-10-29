@@ -1135,17 +1135,22 @@ fn says_something(value: &serde_json::Value) -> bool {
 /// Whether a result verifies on nothing new: it says `verified` and names no new review it rests on
 /// ([`new_review_keys`]) — a bare `{"verified":true}`, or the same with landing keys beside it — or
 /// it is the board's 「통과」 ([`BOARD_PASS_KEY`]), whatever it carried over from the result it was
-/// written over: the board adds `verified` and its mark and nothing else, so a report or a tested
-/// head beside them is the old result's, not a new review (t-82501). What a standing withdrawal
-/// refuses (t-81913, [`ReviewFacts::withdrawn`]).
+/// written over: the board adds `verified` and its mark and takes the review keys away, so a
+/// report beside them is the old result's, not a new review (t-82501). A result that still bears
+/// the board's mark when a coordinator writes it again with a review key of its own — who
+/// reviewed, what it ran, the head it tested — names a new review all the same: the press never
+/// leaves those keys, so only a later hand wrote them. What a standing withdrawal refuses
+/// (t-81913, [`ReviewFacts::withdrawn`]).
 fn verifies_on_nothing_new(result: &str) -> bool {
     let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(result)
     else {
         return false;
     };
+    let pressed = map.contains_key(BOARD_PASS_KEY);
     ReviewFacts::from_result(result).verified
-        && (map.contains_key(BOARD_PASS_KEY)
-            || !new_review_keys().any(|key| map.get(key).is_some_and(says_something)))
+        && !new_review_keys()
+            .filter(|key| !pressed || *key != REVIEW_REPORT_KEY)
+            .any(|key| map.get(key).is_some_and(says_something))
 }
 
 /// The key the board's 「통과」 marks its verification with (t-82501): when the person pressed it, in
