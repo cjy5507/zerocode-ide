@@ -350,6 +350,9 @@ async function testWireStartStalls(browser, origin, ok) {
       const held = paneChats.get(window.__TERM__);
       const wire = window.__HOLD__.wires[0] ?? null;
       return {
+        term: window.__TERM__,
+        fromPane: wire?.fromPane ?? null,
+        snakeKeys: wire ? Object.keys(wire).filter((key) => key.includes("_")) : null,
         deadline: wire?.deadlineMs ?? null,
         want: typeof COMPOSER_HAND_OVER_DUE_MS === "number" && Number.isFinite(held?.handingSince)
           ? held.handingSince + COMPOSER_HAND_OVER_DUE_MS : null,
@@ -368,6 +371,11 @@ async function testWireStartStalls(browser, origin, ok) {
     ok(
       "the_wire_is_asked_with_a_deadline_inside_the_hold: the hand-over asks `wire_start` with `deadlineMs` — its start plus `COMPOSER_HAND_OVER_DUE_MS`, which leaves the pane's 8 s exit wait inside the 60 s hold — so a wire standing later is the backend's to stop",
       asked.deadline !== null && asked.deadline === asked.want && asked.hold === 60_000 && asked.due !== null && asked.due <= asked.hold - 8_000,
+      JSON.stringify(asked),
+    );
+    ok(
+      "the_wire_is_asked_for_the_pane_it_continues: the hand-over names its pane as `fromPane` — tauri's spelling of the backend's `from_pane` — so the backend types the pane's exit command and writes its receipt; no key goes in snake case, which tauri drops (10-30: `from_pane` arrived as nothing and no pane ever left)",
+      asked.fromPane === asked.term && Array.isArray(asked.snakeKeys) && asked.snakeKeys.length === 0,
       JSON.stringify(asked),
     );
   });

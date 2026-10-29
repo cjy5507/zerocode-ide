@@ -13344,7 +13344,7 @@ async function openHelperPage(row, sub) {
 async function openWirePage(agent, cwd, { resume = null, fromTerm = null, deadline = null, at = -1, history = [], historyFrom = 0, historyEnd = null, label = null, carry = null, refused = showError } = {}) {
   let started;
   try {
-    started = await invoke("wire_start", { agent, cwd, resume, from_pane: fromTerm, deadlineMs: deadline });
+    started = await invoke("wire_start", { agent, cwd, resume, fromPane: fromTerm, deadlineMs: deadline });
   } catch (error) {
     refused(error);
     return null;
