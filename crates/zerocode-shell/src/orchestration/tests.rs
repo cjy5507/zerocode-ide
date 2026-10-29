@@ -954,10 +954,12 @@ fn all_ledger_image_readers_use_the_revision_cache() {
         shipped.contains("\n#[cfg(test)]\npub(crate) mod tests;\n"),
         "the orchestration tests moved back inline — this pin reads the whole file as shipped code"
     );
+    // None at all since t-81273: the window reads the actor's own ledger,
+    // lent with every image, and a rebuild here is a second ledger held.
     assert_eq!(
         shipped.matches("Ledger::rebuild(").count(),
-        1,
-        "a reader rebuilt an image outside the shared cache"
+        0,
+        "the window rebuilt a ledger of its own instead of reading the actor's"
     );
     // Pin each reader's route, not the number of call sites: a reader can
     // legitimately recheck a later revision at an asynchronous boundary.
@@ -28973,6 +28975,62 @@ fn an_idle_beat_walks_the_ledger_once_per_generation_not_once_per_sweep() {
     assert!(
         std::ptr::eq(first.projection(), second.projection()),
         "two images of one revision were exported twice"
+    );
+}
+
+/// One write and the reads after it hold the ledger once (t-81273): the
+/// actor's own, lent to every reader. Counted rather than guessed — an export
+/// the actor keeps beside its ledger is two images of one revision sharing
+/// one projection, and a copy the window keeps is a rebuild its read made.
+/// Measured on the person's machine before this: three whole ledgers at rest
+/// (34,343 letters each), and the window's 801 MiB after half a day.
+#[test]
+fn a_write_and_the_reads_after_it_hold_the_ledger_once() {
+    let (_window, _store) =
+        PrivateWindow::boot_seeded(a_ledger_as_large_as_a_long_lived_machines());
+    let _beat = one_beat_at_a_time();
+    let held = super::runtime().expect("this window's runtime");
+    let run = super::ledger_image().expect("the window's ledger").runs()[0]
+        .id
+        .clone();
+    let (moved, _) = held
+        .actor
+        .note_run_project(
+            run,
+            "/tmp/one-write",
+            zerocode_core::orchestration::ProjectSource::Workers,
+            None,
+            1_000_000,
+        )
+        .expect("one write");
+    assert!(moved, "the write moved nothing");
+    let written = zerocode_core::orchestration::ledger_work();
+    let first = super::ledger_image().expect("a read after the write");
+    let second = super::ledger_image().expect("a second read");
+    let walked = zerocode_core::orchestration::ledger_work().since(written);
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "two reads of one revision held two ledgers"
+    );
+    drop((first, second));
+    let (one, other) = (
+        held.actor.view().expect("an image"),
+        held.actor.view().expect("an image"),
+    );
+    let export_kept = std::ptr::eq(one.projection(), other.projection());
+    let held_ledgers = 1 + u64::from(export_kept) + walked.rebuilds;
+    eprintln!(
+        "after one write: {held_ledgers} whole ledgers held (export kept beside the actor's: \
+         {export_kept}); the reads walked it {walked:?}"
+    );
+    assert_eq!(
+        (walked.rebuilds, walked.validations),
+        (0, 0),
+        "the reads after a write rebuilt the ledger"
+    );
+    assert_eq!(
+        held_ledgers, 1,
+        "the window held the ledger {held_ledgers} times after one write"
     );
 }
 
