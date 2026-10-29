@@ -526,6 +526,9 @@ impl WorkflowStore {
         let schema: i64 = transaction
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|_| WorkflowStoreError::Database)?;
+        // What each ledger's rows are, read while their witnesses are
+        // checked below, and held once the open commits (t-82988).
+        let mut written = Vec::new();
         /* Asked again, under the lock this time.
          *
          * The read above happens without a lock, because refusing a file this
@@ -633,7 +636,7 @@ impl WorkflowStore {
                 .map_err(|_| WorkflowStoreError::Database)?;
             crate::ledger_store::ensure_ledger_columns(&transaction)
                 .map_err(|_| WorkflowStoreError::Database)?;
-            crate::ledger_store::require_current_table_integrity(
+            written = crate::ledger_store::require_current_table_integrity(
                 &transaction,
                 zerocode_core::orchestration::PROJECTION_SCHEMA,
             )
@@ -651,6 +654,7 @@ impl WorkflowStore {
         transaction
             .commit()
             .map_err(|_| WorkflowStoreError::Database)?;
+        store.written.remember(written);
         tighten_store_files(&store.path)?;
         Ok(store)
     }

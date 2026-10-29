@@ -8343,7 +8343,10 @@ mod tests {
         );
         let connection = fixture.store.connection().expect("store connection");
         ledger_store::count_letter_rows(&connection);
-        for (at, name) in ["r-first-letter", "r-second-letter"].into_iter().enumerate() {
+        for (at, name) in ["r-first-letter", "r-second-letter"]
+            .into_iter()
+            .enumerate()
+        {
             let (sent, _) = actor
                 .plan(a_command(
                     &[
@@ -8375,11 +8378,11 @@ mod tests {
 
     /// A write that dies half-way leaves the ledger that was there, whole.
     ///
-    /// `ledger_store::write` moves the head, clears every row and re-inserts
-    /// them, on the caller's connection. Without a transaction around it each
-    /// statement commits alone, so a fault after the head and the clearing
-    /// leaves a head counting prose whose rows are gone — a store every read
-    /// from then on refuses as corrupt, across restarts. The fault here lands
+    /// `ledger_store::write` moves the head, then deletes and re-inserts the
+    /// rows that changed, on the caller's connection. Without a transaction
+    /// around it each statement commits alone, so a fault after the head and
+    /// the deleting leaves a head counting prose whose rows are gone — a store
+    /// every read from then on refuses as corrupt, across restarts. The fault here lands
     /// on the first row insert, where the real one did; the ledger the disk
     /// holds afterwards must be the one from before, and the runtime must be
     /// able to take the disk's word and answer again once the fault is gone.
