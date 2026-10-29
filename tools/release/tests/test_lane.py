@@ -61,6 +61,10 @@ PHASES = [
     "build-app", "swap-app", "build-zo", "swap-zo", "bundle-updater", "publish", "sweep",
 ]
 ZO_BUILD_TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+# The window's languages (ui/shell-i18n.js LOCALES, past `system`): the lane names its steps in each.
+LANGS = re.findall(r'\{ code: "(\w+)", name:', (REPO / "ui" / "shell-i18n.js").read_text(encoding="utf-8")
+                   .split("const LOCALES = [", 1)[1].split("];", 1)[0])
+LANGS = [code for code in LANGS if code != "system"]
 # The repository a release goes to is the one the app polls: the feed has to be
 # reachable without a token, so it is the public distribution repo and not the
 # private one this source lives in (design versioned-auto-update.md §2.2).
@@ -491,6 +495,14 @@ class Syntax(LaneCase):
         self.assertEqual(table["TARGET_CAP_GB"], "20")
         self.assertEqual(table["ZO_PROFILE"], "release")
         self.assertEqual(table["PHASES"].split(), PHASES)
+        # t-83513: the steps are named in the window's five languages, and a silent recipe's
+        # limits are table numbers like every other.
+        self.assertEqual(table["PHASE_LANGS"].split(), LANGS)
+        for key in ("QUIET_FACTOR", "QUIET_CAP_FACTOR", "QUIET_FLOOR_SECS", "QUIET_CAP_FLOOR_SECS", "QUIET_SAMPLES",
+                    "QUIET_POLL_SECS"):
+            self.assertGreater(int(table[key]), 0, key)
+        self.assertGreater(int(table["QUIET_CAP_FACTOR"]), int(table["QUIET_FACTOR"]), "ended later than said")
+        self.assertGreater(int(table["QUIET_CAP_FLOOR_SECS"]), int(table["QUIET_FLOOR_SECS"]), "ended later than said")
         self.assertEqual(table["TARGET_LANES"].split(), TARGET_LANES)
         self.assertTrue(int(table["POLL_SECS"]) > 0)
         self.assertTrue(int(table["THROTTLE_SECS"]) > 0)
@@ -2556,6 +2568,276 @@ class ReceiptOnGit(unittest.TestCase):
                 root = self.cover("root", sha)
                 self.assertEqual((root["rc"], root["only"]), ("1", ""), root)
                 self.assertIn(f"refused: CHANGELOG.md is not a plain file edited in place since {self.gated[:8]}", root["said"])
+
+
+def common_dir_of(repo):
+    """What git names as the folder every checkout of `repo` shares -- the lane's word for the
+    repository it releases (t-83513)."""
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+class SaysItself(LaneCase):
+    """t-83513: status.json says which repository the lane releases and which steps it runs,
+    with each step's name in the window's languages -- the board keeps no table of either."""
+
+    def test_status_names_the_repository_and_the_steps_with_their_words(self):
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        st = self.lane.status()
+        self.assertEqual(st["git_common_dir"], common_dir_of(REPO))
+        self.assertEqual([step["name"] for step in st["plan"]], PHASES)
+        for step in st["plan"]:
+            self.assertEqual(list(step["words"]), LANGS, step)
+            self.assertTrue(all(word.strip() for word in step["words"].values()), step)
+        words = {step["name"]: step["words"] for step in st["plan"]}
+        self.assertEqual(words["gate-zo"]["ko"], "zo 시험")
+        self.assertEqual(words["gate-root"]["en"], "Integration tests")
+        self.assertIsNone(st["stalled"])
+        plan = subprocess.run([BASH, posix(LANE), "--plan"], env=self.lane.env(), capture_output=True, text=True)
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        self.assertEqual(json.loads(plan.stdout), st["plan"], "--plan prints the list status.json carries")
+
+    def test_the_repository_is_the_one_the_lane_was_told(self):
+        self.lane.extra_env["RELEASE_GIT_COMMON_DIR"] = posix(self.lane.tmp / "elsewhere.git")
+        self.lane.enqueue(SHA_A)
+        self.assertEqual(self.lane.run().returncode, 0)
+        self.assertEqual(self.lane.status()["git_common_dir"], posix(self.lane.tmp / "elsewhere.git"))
+
+    def test_status_sh_names_a_stalled_recipe(self):
+        self.lane.enqueue(SHA_A)
+        self.assertEqual(self.lane.run().returncode, 0)
+        st = self.lane.status()
+        st["stalled"] = {"gate": "gate-zo", "recipe": "test", "quiet_since_ms": 1, "cap_secs": 2400}
+        (self.lane.home / "status.json").write_text(json.dumps(st, ensure_ascii=False, separators=(",", ":")))
+        self.assertIn("stalled=gate-zo/test", self.lane.status_line())
+
+
+class Quiet(LaneCase):
+    """t-83513: a gate's recipe that writes nothing past its usual time is said stalled, and past
+    a cap ended red -- on 10-29 a deadlocked test held v1.1.104's gate-zo 55 minutes in silence."""
+
+    FUNCTIONS = ('eval "$(grep -E \'^QUIET_[A-Z_]+=\' "$0" | sed \'s/[[:space:]]*#.*//\')"; '
+                 'eval "$(sed -n -e \'/^is_dry()/p\' -e \'/^stub()/,/^  local/p\' -e \'/^lane_verdict()/p\' '
+                 '-e \'/^recipe_usuals()/,/^}/p\' -e \'/^quiet_floor()/p\' -e \'/^quiet_cap_floor()/p\' '
+                 '-e \'/^quiet_limits()/,/^}/p\' "$0")"; '
+                 'RELEASE_DRY_RUN=0 OUT=$1; ')
+
+    def out(self):
+        out = self.lane.home / "out"
+        out.mkdir(parents=True, exist_ok=True)
+        return out
+
+    def past(self, sha8, verdict, recipes, gate="zo", mtime=None):
+        """One lane of the past: its log ending in `verdict`, and its gate log's closing lines."""
+        out = self.out()
+        lane = out / f"lane-{sha8}.log"
+        lane.write_text(f"10:00:00 == lane {sha8} start (dry=0)\n10:00:01 == gate-zo\n10:30:00 == {verdict}\n")
+        log = out / f"gate-{gate}-{sha8}.log"
+        log.write_text("".join(f"==> verify recipe {name}\n<== verify recipe {name} rc={rc} {secs}s\n"
+                               for name, rc, secs in recipes))
+        if mtime is not None:
+            os.utime(lane, (mtime, mtime))
+
+    def shell(self, script):
+        r = subprocess.run([BASH, "-c", self.FUNCTIONS + script, posix(LANE), posix(self.out())],
+                           env=self.lane.env(), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def test_a_recipes_usual_time_is_its_median_over_the_newest_green_lanes(self):
+        base = time.time() - 10_000
+        # Six green lanes, oldest first: the oldest is past QUIET_SAMPLES (five) and is not read.
+        for n, secs in enumerate([9000, 100, 300, 200, 500, 400]):
+            self.past(f"{n:08d}", "green", [("test", 0, secs), ("lint", 0, 10 * (n + 1))], mtime=base + n * 100)
+        # A newer red lane, a newer green lane whose gate was not owed (empty log), and a recipe
+        # that failed in a green lane (cleared by the flaky-test judge) are no samples.
+        self.past("aaaaaaaa", "red", [("test", 0, 7777)], mtime=base + 1_000)
+        self.past("bbbbbbbb", "green", [], mtime=base + 1_100)
+        self.past("cccccccc", "green", [("test", 1, 8888)], gate="root", mtime=base + 1_200)
+        usuals = dict(line.split() for line in self.shell("recipe_usuals zo").splitlines())
+        self.assertEqual(usuals, {"test": "300", "lint": "40"}, "the medians of 100 300 200 500 400 and 20…60")
+
+    def test_said_at_twice_its_usual_time_and_ended_at_three_times_each_over_its_floor(self):
+        limits = self.shell('printf "%s\\n" "$(quiet_limits test "test 300")" "$(quiet_limits test "test 450")" '
+                            '"$(quiet_limits test "test 955")" "$(quiet_limits lint "test 300")"').splitlines()
+        # 300: said at the floor (2 × 300 = 600) and ended at the cap's floor (3 × 300 = 900 under
+        # 1200); 450: said at 900, ended at 1350; 10-29's zo test (955): said at 32 min, ended at
+        # 48 -- under the 55 min it stood; a recipe with no green past is said at the floor and
+        # never ended.
+        self.assertEqual(limits, ["600 1200 300", "900 1350 450", "1910 2865 955", "600 0 0"])
+
+    def justdir(self, recipes):
+        work = self.lane.tmp / "justdir"
+        work.mkdir(exist_ok=True)
+        names = " ".join(name for name, _ in recipes)
+        (work / "justfile").write_text(f"verify: {names}\n\n" + "".join(
+            f"{name}:\n    {line}\n\n" for name, line in recipes))
+        return work
+
+    def test_a_silent_recipe_is_said_stalled_then_ended_red_and_the_gate_goes_on(self):
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        # A green past for `stuck` (0 s), so it has a cap: said at the floor (1 s), ended at the
+        # cap's floor (2 s).
+        self.past("11111111", "green", [("stuck", 0, 0)])
+        work = self.justdir([("quick", "echo quick"),
+                             ("stuck", "sh -c 'echo $$ > stuck.pid; exec sleep 30'"),
+                             ("after", "echo after > after.txt")])
+        self.lane.enqueue(SHA_A)
+        started = time.monotonic()
+        proc = self.lane.spawn(GATE_ZO_JUSTDIR=posix(work), QUIET_FLOOR_SECS=1, QUIET_CAP_FLOOR_SECS=2,
+                               QUIET_POLL_SECS=0.2)
+        try:
+            said = wait_until(lambda: (self.lane.home / "status.json").exists()
+                              and (self.lane.status().get("stalled") or {}).get("recipe") == "stuck", timeout=20)
+            stalled = self.lane.status().get("stalled")
+            out, _ = proc.communicate(timeout=30)
+        finally:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+        self.assertTrue(said, out)
+        self.assertEqual((stalled["gate"], stalled["recipe"], stalled["cap_secs"]), ("gate-zo", "stuck", 2), stalled)
+        self.assertIsInstance(stalled["quiet_since_ms"], int)
+        self.assertLess(time.monotonic() - started, 25, "the stuck recipe was ended, not waited out")
+        self.assertNotEqual(proc.returncode, 0, out)
+        st = self.lane.status()
+        self.assertEqual(st["outcome"], "red", st)
+        self.assertIn("zo:recipe:stuck", st["reason"])
+        self.assertIsNone(st["stalled"], "the gate's end takes the word back")
+        lane_log = (self.lane.home / "out" / f"lane-{SHA_A[:8]}.log").read_text()
+        self.assertRegex(lane_log, r"stalled: gate-zo stuck — \d+s without output; ended red at 2s")
+        self.assertIn("stalled: gate-zo stuck — ", lane_log)
+        self.assertIn("past its cap: ending it red", lane_log)
+        gate_log = (self.lane.home / "out" / f"gate-zo-{SHA_A[:8]}.log").read_text()
+        self.assertIn("error: recipe `stuck` was terminated: no output past the release lane's cap", gate_log)
+        self.assertIn("==> verify recipe after", gate_log, "the gate went on to the next recipe")
+        self.assertTrue((work / "after.txt").exists())
+        pid = int((work / "stuck.pid").read_text())
+        with self.assertRaises(ProcessLookupError, msg="the recipe's own process is gone"):
+            os.kill(pid, 0)
+        events = [line.split(" ", 1)[1] for line in self.lane.stub_lines()]
+        self.assertIn("stalled gate-zo stuck", events)
+        self.assertIn("quiet-end gate-zo stuck", events)
+        self.assertFalse(any(e.startswith("stalled gate-zo quick") for e in events), "a quick recipe is never said")
+
+    def test_output_that_comes_back_takes_the_word_back_and_ends_nothing(self):
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        # Said at 2 s, back at 3.6 s, ended at 6 s: 1.4 s and 2.4 s either side, for a loaded
+        # machine's late polls (the gate ran at load 20 on 10-29).
+        self.past("11111111", "green", [("pauses", 0, 0)])
+        work = self.justdir([("pauses", "echo a; sleep 3.6; echo b")])
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(GATE_ZO_JUSTDIR=posix(work), QUIET_FLOOR_SECS=2, QUIET_CAP_FLOOR_SECS=6, QUIET_POLL_SECS=0.2)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lane_log = (self.lane.home / "out" / f"lane-{SHA_A[:8]}.log").read_text()
+        self.assertIn("stalled: gate-zo pauses — ", lane_log)
+        self.assertIn("stalled: gate-zo pauses — output again", lane_log)
+        self.assertNotIn("ending it red", lane_log)
+        self.assertEqual(self.lane.status()["outcome"], "green")
+        self.assertIsNone(self.lane.status()["stalled"])
+
+    def test_a_recipe_ended_at_its_cap_stays_red_though_the_tests_it_named_pass_solo(self):
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        # 10-29's shape: `test` names a failure, then a later test binary deadlocks and the lane
+        # ends the recipe. The named failure passes solo; the tests after the stop never ran.
+        self.past("11111111", "green", [("test", 0, 0)])
+        work = self.justdir([("test", "printf 'failures:\\n    kill_guard::tests::a\\n\\ntest result: FAILED.\\n'; "
+                                      "sh -c 'exec sleep 30'")])
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(GATE_ZO_JUSTDIR=posix(work), QUIET_FLOOR_SECS=1, QUIET_CAP_FLOOR_SECS=2,
+                          QUIET_POLL_SECS=0.2, SOLO_RCS="0")
+        st = self.lane.status()
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(st["outcome"], "red", st)
+        self.assertIn("zo:recipe:test", st["reason"], "a recipe ended at its cap is red whole")
+        lane_log = (self.lane.home / "out" / f"lane-{SHA_A[:8]}.log").read_text()
+        # The lines the gate writes for the recipe it ended are no output come back.
+        self.assertEqual(lane_log.count("stalled: gate-zo test — "), 2, lane_log)   # said once, ended once
+        self.assertNotIn("output again", lane_log)
+        self.assertNotIn("push", [line.split(" ", 1)[1] for line in self.lane.stub_lines()],
+                         "nothing is pushed past a recipe the lane ended")
+
+
+class Stoppable(LaneCase):
+    """verify-every-recipe.sh --stoppable (t-83513): SIGUSR1 ends the running recipe's own process
+    tree as a red recipe and the run goes on; any other signal still ends the run."""
+
+    def test_usr1_ends_the_running_recipe_red_and_the_run_goes_on(self):
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        work = Path(self._tmp) / "justdir"
+        work.mkdir()
+        (work / "justfile").write_text(
+            "verify: first stuck last\n\n"
+            "first:\n    echo first >> ran.txt\n\n"
+            "stuck:\n    sh -c 'echo $$ > stuck.pid; exec sleep 30'\n\n"
+            "last:\n    echo last >> ran.txt\n"
+        )
+        log = work / "gate.log"
+        with log.open("w") as out:
+            proc = subprocess.Popen([BASH, posix(RELEASE / "verify-every-recipe.sh"), "--stoppable"], cwd=work,
+                                    stdout=out, stderr=subprocess.STDOUT)
+        try:
+            self.assertTrue(wait_until(lambda: (work / "stuck.pid").exists()), log.read_text())
+            proc.send_signal(signal.SIGUSR1)
+            rc = proc.wait(timeout=20)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        text = log.read_text()
+        self.assertEqual(rc, 1, text)
+        self.assertEqual((work / "ran.txt").read_text().split(), ["first", "last"])
+        self.assertIn("error: recipe `stuck` was terminated: no output past the release lane's cap", text)
+        self.assertIn("verify: red recipes: stuck", text)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int((work / "stuck.pid").read_text()), 0)
+        parse = ('eval "$(sed -n \'/^failed_tests()/,/^}/p\' "$0")"; failed_tests "$1"')
+        failed = subprocess.run([BASH, "-c", parse, posix(LANE), posix(log)],
+                                capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual(failed, ["recipe:stuck"], "the lane reads it as a red recipe of its own")
+
+    def test_a_recipe_ended_after_naming_failures_is_still_a_red_recipe_of_its_own(self):
+        # The names it gave are not all it holds: what ran after the stop never spoke, so no solo
+        # run of those names may clear it (10-29: seven kill_guard failures, then a deadlock).
+        log = Path(self._tmp) / "gate.log"
+        log.write_text("==> verify recipe test\n"
+                       "failures:\n    kill_guard::tests::real_run::a\n\ntest result: FAILED.\n"
+                       "<== verify recipe test rc=138 3300s\n"
+                       "error: recipe `test` was terminated: no output past the release lane's cap\n"
+                       "==> verify recipe window-browser-test\n"
+                       "SUITE  panes\nFAIL  opens a pane  — gone\n"
+                       "<== verify recipe window-browser-test rc=138 900s\n"
+                       "error: recipe `window-browser-test` was terminated: no output past the release lane's cap\n"
+                       "==> verify recipe lint\n"
+                       "failures:\n    lint::a\n\ntest result: FAILED.\n"
+                       "error: recipe `lint` failed on line 3 with exit code 101\n")
+        parse = ('eval "$(sed -n \'/^failed_tests()/,/^}/p\' "$0")"; failed_tests "$1"')
+        failed = subprocess.run([BASH, "-c", parse, posix(LANE), posix(log)],
+                                capture_output=True, text=True, check=True).stdout.splitlines()
+        self.assertEqual(sorted(failed), ["kill_guard::tests::real_run::a", "lint::a", "recipe:test",
+                                          "recipe:window-browser-test", "ui:window/panes:opens a pane"],
+                         "an ended recipe is red whole beside its names; a failed one with names is judged by them")
+
+    def test_any_other_signal_still_ends_the_run(self):
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        work = Path(self._tmp) / "justdir"
+        work.mkdir()
+        (work / "justfile").write_text(
+            "verify: first killed last\n\n"
+            "first:\n    echo first >> ran.txt\n\n"
+            "killed:\n    echo killed >> ran.txt; kill -TERM $$\n\n"
+            "last:\n    echo last >> ran.txt\n"
+        )
+        r = subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh"), "--stoppable"], cwd=work,
+                           capture_output=True, text=True, timeout=20)
+        self.assertGreaterEqual(r.returncode, 128, r.stdout + r.stderr)
+        self.assertEqual((work / "ran.txt").read_text().split(), ["first", "killed"])
+
 
 
 if __name__ == "__main__":

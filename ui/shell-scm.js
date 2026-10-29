@@ -390,8 +390,8 @@ el("toggle-aside").addEventListener("click", () => setPanelFolded("aside", !fold
 /* ---- 쌓인 일: what is piling up in the project on screen (2차 B, item 12) ----
  *
  * Facts this window already holds, read where they are kept and drawn in one
- * column before the source-control list: the release lane the status bar reads
- * (`releaseLane`), the checkouts git says are not in main (`worktree.landing`,
+ * column before the source-control list: the release lane the status bar reads,
+ * when it is this project's (`releaseLaneHere`, t-83513), the checkouts git says are not in main (`worktree.landing`,
  * the sidebar's own answer) and whether an agent window holds them, the branch
  * against its upstream (`upstreamState`, `scmEntries`) and its review's checks
  * (`checksReport`). The one thing asked is the last commits — `git_history`,
@@ -455,7 +455,8 @@ function paintStackedWork() {
   const panel = el("activity-pile");
   const project = projectOfWorktree(activeWorktreePath) ?? projects[0];
   const checkouts = unlandedCheckouts(project);
-  const lane = releaseLane && typeof releaseLane === "object" ? releaseLane : null;
+  const here = releaseLaneHere();
+  const lane = here && typeof here === "object" ? here : null;
   const branchHead = scmCompareContext?.head ?? "";
   if (pileHistoryHead !== branchHead) void askPileHistory(branchHead);
   const checks = checksReport?.checks ?? [];
@@ -488,7 +489,7 @@ function pileReleaseSection(lane) {
     const version = deskReleaseVersionWord(lane);
     // The verdict wears the board's own status dot (`.board-state[data-dot]`) beside its word.
     const state = deskElement("span", "board-state pile-release-state",
-      [t(verdict.key, verdict.word), lane.phase ? deskReleasePhaseWord(String(lane.phase)) : ""].filter(Boolean).join(" · "));
+      [t(verdict.key, verdict.word), lane.phase ? deskReleasePhaseWord(String(lane.phase), lane) : ""].filter(Boolean).join(" · "));
     state.dataset.dot = verdict.dot;
     row.append(deskElement("strong", "pile-release-title", `${t("board.now.lineRelease", "새 버전 발행")} ${version}`), state);
     rows.push(row);

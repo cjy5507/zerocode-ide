@@ -16,12 +16,20 @@
 # fails when the justfile's `verify` is not a plain list. `--only "<a> <b>"`
 # runs those of them alone, in the list's order: the release lane runs what a
 # coordinator's receipt left owed (t-47516). A name outside the list is refused.
+#
+# `--stoppable` is the release lane's (t-83513): each recipe runs as a child this
+# script waits for, and SIGUSR1 ends the one running — its own process tree, found
+# by parent id, TERM then KILL — as a red recipe, and the run goes on to the next.
+# The lane sends it when a recipe has written nothing past its cap (watch_gate in
+# lane.sh): on 10-29 a deadlocked zo test held v1.1.104's gate 55 min in silence.
+# Any other signal still ends the run, as below.
 set -u
-strict_win_check=1 list=0 only= only_given=0
+strict_win_check=1 list=0 only= only_given=0 stoppable=0
 while [ $# -gt 0 ]; do
   case $1 in
     --as-written) strict_win_check=0; shift ;;
     --list) list=1; shift ;;
+    --stoppable) stoppable=1; shift ;;
     --only) only=${2-}; only_given=1; shift 2 2>/dev/null || shift ;;
     *) echo "verify-every-recipe: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -42,6 +50,22 @@ if [ "$only_given" = 1 ]; then
     case " $(printf '%s ' $recipes)" in *" $recipe "*) ;; *) echo "verify-every-recipe: $recipe is not a verify recipe" >&2; exit 2 ;; esac
   done
 fi
+# A process and everything under it, found by parent id: the running recipe's own tree.
+tree_of() { local kid; printf '%s\n' "$1"; for kid in $(pgrep -P "$1" 2>/dev/null); do tree_of "$kid"; done; }
+child= stopped=
+# SIGUSR1 (--stoppable): the running recipe, ended — TERM to its tree, then KILL to
+# what is left after a grace. Between recipes there is nothing to end.
+stop_recipe() {
+  local pids
+  [ -n "$child" ] || return 0
+  stopped=$recipe
+  pids=$(tree_of "$child")
+  kill -TERM $pids 2>/dev/null
+  sleep 2
+  kill -KILL $pids 2>/dev/null
+  return 0
+}
+[ "$stoppable" = 0 ] || trap stop_recipe USR1
 rc=0
 red=
 for recipe in $recipes; do
@@ -50,10 +74,25 @@ for recipe in $recipes; do
   # a recipe that failed without naming a test is a red of its own.
   echo "==> verify recipe $recipe"
   started=$SECONDS
-  just "$recipe"; status=$?
+  if [ "$stoppable" = 1 ]; then
+    # A trapped signal ends `wait` at once, where a foreground child would hold
+    # it until the child exits; the child is waited for again until it is gone.
+    just "$recipe" & child=$!
+    while :; do wait "$child"; status=$?; kill -0 "$child" 2>/dev/null || break; done
+    child=
+  else
+    just "$recipe"; status=$?
+  fi
   # Which recipe the gate's time went to (t-4004: 674 → 1208 s, and no log
   # said where). The lane's parser keys on `==>` alone; this line is inert to it.
   echo "<== verify recipe $recipe rc=$status $(( SECONDS - started ))s"
+  if [ "$stopped" = "$recipe" ]; then
+    # just's own words for a recipe ended by a signal, so the lane's parser reads
+    # it as the red recipe it is (`recipe:<name>`, red for real beside any test it
+    # named: the tests after the stop never ran).
+    echo "error: recipe \`$recipe\` was terminated: no output past the release lane's cap"
+    stopped= status=1
+  fi
   # 128+N is a recipe (or just) ended by a signal: the lane tearing the gate
   # down children first. Starting the next recipe then would outlive the lane
   # in a scratch it is sweeping — stop with the signal's status instead.

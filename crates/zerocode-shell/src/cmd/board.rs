@@ -692,7 +692,8 @@ pub(crate) async fn schedule_timeline(
 
 /// One look at the schedule, as the command takes it on the blocking pool:
 /// the open repository's workspace folder by the window's workspace setting,
-/// then the build line under it and the lanes under `release`.
+/// then the build line under it and the lanes under `release` — those only
+/// while the lane releases the open repository (t-83513).
 ///
 /// The setting is the one this process last read or wrote
 /// (`remembered_settings`, t-67102). Read through the settings repository, a
@@ -748,6 +749,12 @@ fn schedule_look(
                 .map(|open| open.worktree_root().to_path_buf())
         },
     );
+    // The lanes are the open repository's only when the lane says it releases
+    // that repository (t-83513): another project's schedule draws none of them.
+    let release = release.and_then(|dir| {
+        repo.as_deref()
+            .and_then(|root| crate::update_runtime::lane_dir_for(dir, root))
+    });
     let roots = crate::schedule_timeline::Roots::of(workspaces.as_deref(), release);
     crate::schedule_timeline::read(
         &roots,
@@ -2836,6 +2843,58 @@ mod tests {
             Path::new(&folder).starts_with(workspaces.path()),
             "the build line is looked for at {folder}, not under the saved workspace folder {}",
             workspaces.path().display()
+        );
+    }
+
+    /// t-83513: the lanes are read only on a project of the repository the
+    /// lane says it releases. Two repositories with one folder name: the
+    /// lane's own reads its folder, the other's reads none — told by the shared
+    /// git folder, not by a name.
+    #[test]
+    fn a_look_reads_the_lanes_only_of_the_repository_they_release() {
+        let directory = tempfile::tempdir().expect("settings sandbox");
+        let repository = settings::SettingsRepository::new(directory.path());
+        load_settings_for_boot(&repository);
+        let parents = tempfile::tempdir().expect("two parents");
+        let open = |parent: &str| {
+            let root = parents.path().join(parent).join("zerocode");
+            std::fs::create_dir_all(&root).expect("a checkout folder");
+            Host::for_workspace(&root)
+                .vcs()
+                .text(&root, &["init", "-q"])
+                .expect("git init");
+            root
+        };
+        let ours = open("a");
+        let theirs = open("b");
+        let release = tempfile::tempdir().expect("the lane's folder");
+        std::fs::write(
+            release.path().join(crate::update_runtime::STATUS_FILE),
+            serde_json::json!({
+                "sha": "a".repeat(40), "phase": "gate-zo", "outcome": null,
+                "git_common_dir": ours.join(".git").to_string_lossy(),
+            })
+            .to_string(),
+        )
+        .expect("the lane's status");
+        let look = |root: &Path| {
+            schedule_look(
+                &repository,
+                Some(Orchestrator::open(root).expect("open repository")),
+                &crate::schedule_timeline::Ask::default(),
+                Some(release.path().to_path_buf()),
+                crate::now_epoch_ms(),
+            )
+        };
+        let here = look(&ours)
+            .line
+            .lanes_folder
+            .expect("the lane's own project reads its folder");
+        assert!(Path::new(&here).starts_with(release.path()), "{here}");
+        assert_eq!(
+            look(&theirs).line.lanes_folder,
+            None,
+            "another repository's schedule reads no lane"
         );
     }
 }

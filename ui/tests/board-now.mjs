@@ -25,6 +25,7 @@ import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.
 import { installBoardWaits } from "./board-waits.mjs";
 import { coordinatorDeskFixture } from "./coordinator-desk.mjs";
 import { installPerfHands, median } from "./coordinator-desk-perf.mjs";
+import { lanePlan } from "./lane-plan.mjs";
 
 const SHOTS = "output/playwright/board-now";
 
@@ -35,7 +36,7 @@ const SHOTS = "output/playwright/board-now";
  * 표에 서지 않는다). 데스크 픽스처가 세운 답 위에 덮는다(그 픽스처가 응답 손·보드 열기를 맡는다).
  * `extra`는 과업 수를 늘려 성능을 잰다. `lane`이 "green"이면 레인은 07:31 무렵 초록으로 끝났고
  * 빌드 줄은 비어 있다. A page function: no closure. */
-export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = false, extra = 0, ledger = true, lane = "running", withdrawn = null } = {}) {
+export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = false, extra = 0, ledger = true, lane = "running", withdrawn = null, plan = [], stageMinutes = 8, stalled = null } = {}) {
   const minute = 60_000;
   const run = "run-desk";
   const goal = (parent, parentTitle) => ({ parent, parent_title: parentTitle });
@@ -174,12 +175,12 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = 
     started_at: new Date(greenAt - 101 * minute).toISOString(), updated_at: new Date(greenAt).toISOString(),
     phases: [{ name: "gate-root", rc: 0, secs: 3168 }, { name: "gate-zo", rc: 0, secs: 1719 },
       { name: "build-app", rc: 0, secs: 1090 }, { name: "publish", rc: 0, secs: 42 }],
-    disk_free_gb: 20, outcome: "green", reason: "",
+    disk_free_gb: 20, outcome: "green", reason: "", plan, stalled: null,
   } : {
     sha, phase: "gate-zo", version: "1.1.84",
-    started_at: new Date(now - 41 * minute).toISOString(), updated_at: new Date(now - minute).toISOString(),
+    started_at: new Date(now - (33 + stageMinutes) * minute).toISOString(), updated_at: new Date(now - minute).toISOString(),
     phases: [{ name: "gate-root", rc: 0, secs: 720 }, { name: "build-app", rc: 0, secs: 1260 }],
-    disk_free_gb: 21, outcome: null, reason: "",
+    disk_free_gb: 21, outcome: null, reason: "", plan, stalled,
   };
   // The schedule's reading (t-67482): the running lane's steps ahead with their usual time, and the
   // build line behind it — 재선택·대기 고침's job waits its turn. A green lane leaves the line empty.
@@ -192,12 +193,12 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = 
       kind: null, gate: null, part: null, what: null, expected: { secs: 900, samples: 3 },
     }],
     lanes: lane === "green" ? [] : [{
-      sha: sha.slice(0, 8), version: "1.1.84", start_ms: now - 41 * minute, end_ms: null, verdict: null, reason: null,
+      sha: sha.slice(0, 8), version: "1.1.84", start_ms: now - (33 + stageMinutes) * minute, end_ms: null, verdict: null, reason: null,
       running: true,
       stages: [
-        { name: "gate-root", start_ms: now - 41 * minute, end_ms: now - 29 * minute, rc: 0, secs: 720 },
-        { name: "build-app", start_ms: now - 29 * minute, end_ms: now - 8 * minute, rc: 0, secs: 1260 },
-        { name: "gate-zo", start_ms: now - 8 * minute, end_ms: null, rc: null, secs: null },
+        { name: "gate-root", start_ms: now - (33 + stageMinutes) * minute, end_ms: now - (21 + stageMinutes) * minute, rc: 0, secs: 720 },
+        { name: "build-app", start_ms: now - (21 + stageMinutes) * minute, end_ms: now - stageMinutes * minute, rc: 0, secs: 1260 },
+        { name: "gate-zo", start_ms: now - stageMinutes * minute, end_ms: null, rc: null, secs: null },
       ],
       ahead: [{ name: "gate-zo", expected: { secs: 14 * 60, samples: 5 } }, { name: "publish", expected: { secs: 120, samples: 5 } }],
     }],
@@ -353,7 +354,8 @@ async function fullBoard(page) {
 /* The draft's scene, with the facts the desk reads on its slow beat asked at once: the lane's
  * status, the schedule's reading, the workers' checkouts and their models. */
 export async function draftScene(page, options = {}) {
-  await page.evaluate(draftBoardOverlay, options);
+  // The lane says its steps and their words itself (t-83513): the real lane's table, as its status.json carries it.
+  await page.evaluate(draftBoardOverlay, { plan: lanePlan(), ...options });
   await page.evaluate(async () => {
     await askReleaseStatus();
     refreshBoardSchedule({ fresh: true });
@@ -470,6 +472,34 @@ export async function testBoardNow(browser, origin, ok) {
       head.title === "답할 일 2개 — 나머지는 저절로 돕니다", JSON.stringify(head));
     ok("the second line names what ends next and when — the release, at the time its steps' medians add up to",
       /^다음으로 끝나는 일은 새 버전 발행, .+쯤입니다\.$/.test(head.sub), head.sub);
+
+    /* ---- 늦은 단계와 멈춘 레시피 (t-83513): 지난 시각 대신 「평소보다 늦음」, 레인이 적은 「멈춘 듯」 ---- */
+    const sentence = async (options) => {
+      await draftScene(page, options);
+      return page.evaluate(() => document.querySelector("#board-view .task-board-summary").textContent);
+    };
+    const late = await sentence({ stageMinutes: 30 });
+    ok("a step past its usual time says it is late and how long it has run, never a time that has gone by",
+      late === "새 버전 발행이 평소보다 늦음 · zo 시험 30분째", late);
+    /* 「21분」은 그리는 시계로 센다: 페이지 시계를 한 시각에 묶고 레인이 적은 시각을 그 시계에서
+     * 뺀다 — 그리기가 늦게 와도 같은 수다. */
+    const pinned = await page.evaluate(() => {
+      window.__TRUE_NOW__ = Date.now;
+      const at = Date.now();
+      Date.now = () => at;
+      return at;
+    });
+    let stalledSaid;
+    try {
+      stalledSaid = await sentence({ stageMinutes: 30,
+        stalled: { gate: "gate-zo", recipe: "test", quiet_since_ms: pinned - 21 * 60_000 - 5_000, cap_secs: 2400 } });
+    } finally {
+      await page.evaluate(() => { Date.now = window.__TRUE_NOW__; delete window.__TRUE_NOW__; });
+    }
+    ok("a recipe the lane says has written nothing for long is the sentence, in the lane's words",
+      stalledSaid === "새 버전 발행이 멈춘 듯합니다 — test 21분 출력 없음", stalledSaid);
+    const onTime = await sentence({ stageMinutes: 8 });
+    ok("a step within its usual time still names when the release ends", /^다음으로 끝나는 일은 새 버전 발행, .+쯤입니다\.$/.test(onTime), onTime);
 
     /* ---- 시안의 넷: 숫자 ≤ 8 · 묶음 3 · 글자 단계 4 · 영어 진단 0 ---- */
     const first = await page.evaluate(boardFirstScreen);

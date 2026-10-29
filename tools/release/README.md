@@ -252,6 +252,61 @@ misses (fail closed — an unrun check is never called passed); and each job pay
 the fingerprint (`timings.fingerprintMs` in the answer). The gain stays unknown
 until heads are gated again.
 
+## What status.json says of the lane itself (2026-10-29, t-83513)
+
+The board showed this lane on every project's 빌드 줄 card — another project's
+board said 「새 버전 발행」 for ZeroCode — and named its steps from a table of
+this lane's step names kept in the window. status.json now says both itself:
+
+- `git_common_dir` — the folder every checkout of the released repository
+  shares (`git rev-parse --path-format=absolute --git-common-dir` of
+  `RELEASE_REPO`; `RELEASE_GIT_COMMON_DIR` in the table). The window shows the
+  lane only on a project whose checkout shares that very folder, told by its
+  identity on disk (device and inode, `update_runtime::lane_releases`) — never
+  by a path's spelling or the repository's name. Another project's board shows
+  its own build line, or says in one sentence that it has none.
+- `plan` — the steps the lane runs, in order, each with its name in the
+  window's five languages: `[{"name":"gate-zo","words":{"ko":"zo 시험",…}},…]`.
+  `PHASE_WORDS` in the table is the one place (`name|ko|en|ja|zh|es` a line;
+  `PHASES` is its first column, `PHASE_LANGS` the languages), and
+  `lane.sh --plan` prints the list. The board draws any lane's steps from it
+  and keeps no table of its own, so a lane it never knew stands in its own
+  words; the schedule plans a running lane's steps ahead by it.
+
+## A recipe that writes nothing (2026-10-29, t-83513)
+
+On 10-29 v1.1.104's gate-zo stood 55 minutes in a deadlocked test, and neither
+its log nor the lane's got a line. While a gate runs the lane now looks at its
+log every `QUIET_POLL_SECS`: the recipe is the log's last `==> verify recipe`
+mark, its silence how long the log has not grown, and its usual time the
+median of what it took in the newest `QUIET_SAMPLES` lanes that ended green
+(their gate logs' `<== verify recipe <name> rc=0 <secs>s` lines).
+
+- Silent `QUIET_FACTOR` times its usual time, and at least `QUIET_FLOOR_SECS`:
+  the lane log says `stalled: <gate> <recipe> — <span> without output (usual
+  <span>); ended red at <span>`, status.json carries `stalled`
+  (`{"gate","recipe","quiet_since_ms","cap_secs"}`, the board's 「멈춘 듯」),
+  and `status.sh` ends its line with `stalled=<gate>/<recipe>`. Output that
+  comes back takes the word back (`— output again`); the lines the gate writes
+  for a recipe the lane ended are not output come back.
+- Silent `QUIET_CAP_FACTOR` times its usual time, and at least
+  `QUIET_CAP_FLOOR_SECS`: the lane sends the gate `SIGUSR1`. zo's `test`, usual
+  955 s over the green lanes of 10-29, is said at 32 min and ended at 48 — the
+  deadlock that day stood about 55 min. `verify-every-recipe.sh --stoppable`
+  (the lane's gate always runs with it) then ends that recipe's own process
+  tree — found by parent id, TERM and then KILL — writes just's own `recipe …
+  was terminated` line for it, so the flake judgment reads it as a red recipe
+  (`recipe:<name>`, red for real even beside the failures it named: the tests
+  after the stop never ran, so no solo pass of those names clears it), and goes
+  on to the next recipe. The lane signals only the gate process it started, by
+  the pid it holds; no process is found by name.
+- A recipe with no green past is said at the floor and never ended: nothing
+  says what is long for it.
+
+`tests/test_lane.py` `Quiet` pins the medians, the limits and both roads on the
+real gate script (`RELEASE_STUB_GATE_<LANE>_JUSTDIR` drives it over a justfile
+of the test's own); `Stoppable` pins the script alone.
+
 ## The warm targets
 
 Each gate and build keeps its own cargo target under

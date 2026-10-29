@@ -34843,6 +34843,7 @@ details.task-board-section > summary {
 .task-board-desk[hidden],
 .board-desk-block[hidden],
 .board-desk-release-reason[hidden],
+.board-desk-release-stalled[hidden],
 .board-desk-release-skips[hidden] {
   display: none;
 }
@@ -35554,6 +35555,7 @@ details.task-board-section > summary {
 }
 
 .board-desk-release-reason,
+.board-desk-release-stalled,
 .board-desk-release-skips {
   margin: var(--space-2) 0 0;
   color: var(--ink-label);
@@ -35564,6 +35566,11 @@ details.task-board-section > summary {
 
 .board-desk-release-reason {
   color: var(--signal-halt-ink);
+}
+
+/* 「멈춘 듯」(t-83513): 아직 빨강이 아닌 주의 — 말이 상태를 말하고, 색은 기다림의 잉크다. */
+.board-desk-release-stalled {
+  color: var(--signal-wait-ink);
 }
 
 .board-desk-release-skips {

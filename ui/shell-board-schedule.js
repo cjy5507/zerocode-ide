@@ -1653,6 +1653,13 @@ function boardScheduleZoomWord(id) {
     : id === "day" ? t("board.schedule.day", "하루") : t("board.schedule.zoomNow", "지금 앞뒤");
 }
 
+/* 빌드 줄이 없는 프로젝트의 한 문장 (t-83513) — 일정의 머리와 「지금」 탭의 빌드 줄 카드가 같은 말을
+ * 쓴다. 줄을 찾은 자리는 백엔드가 프로젝트의 워크스페이스 폴더 아래 한 곳(`LINE_FOLDER`)에서 찾은
+ * 그 폴더다. */
+function boardNoLineWords() {
+  return t("board.schedule.noLine", "이 프로젝트엔 빌드 줄이 없습니다");
+}
+
 /* 머리: 확대 셋과, 빌드 줄이 왜 서 있는지 한 줄. */
 function paintBoardScheduleHead(head, model) {
   const [zoom, note] = head.children;
@@ -1664,8 +1671,8 @@ function paintBoardScheduleHead(head, model) {
   }
   const line = boardScheduleAnswer?.line ?? {};
   const words = [
-    line.folder && line.found === false
-      ? t("board.schedule.noLine", "빌드 줄 폴더를 찾지 못함 · {{path}}", { path: line.folder }) : "",
+    line.found === false ? boardNoLineWords() : "",
+    line.found === false && line.folder ? line.folder : "",
     line.paused
       ? line.pause_note
         ? t("board.schedule.linePaused", "줄 멈춤 · {{note}}", { note: line.pause_note })

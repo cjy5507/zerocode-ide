@@ -170,9 +170,11 @@ mod tests {
             poll.contains("every: USAGE_AMBIENT_MS") && poll.contains("tick: askReleaseStatus"),
             "the lane's files are read on the status bar's own period, not watched:\n{poll}"
         );
+        // The lane's files are asked for the checkout on screen (t-83513): the
+        // answer says the lane only to a project of the repository it releases.
         assert!(
             block_after(window, "function askReleaseStatus(")
-                .contains("invoke(\"release_status\")")
+                .contains("invoke(\"release_status\", { worktree: asked })")
         );
         let toast = block_after(window, "function raiseUpdateToast(");
         for needle in [

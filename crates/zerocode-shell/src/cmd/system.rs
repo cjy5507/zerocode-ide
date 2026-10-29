@@ -26,8 +26,18 @@ pub(crate) fn build_stamp() -> update_runtime::BuildStamp {
 ///
 /// Off the main thread since t-6428: the census it answers with reads the
 /// process table.
+///
+/// The lane's `status.json` comes back only when that lane releases the
+/// repository of `worktree` — the checkout the asking window shows, or the
+/// active one when it names none (t-83513): another project's board has no
+/// release of this lane to show, and is told `null`, as for no lane. The
+/// notice over `installed.json` is this application's own and is answered
+/// whatever the project.
 #[tauri::command(async)]
-pub(crate) fn release_status(app: AppHandle) -> update_runtime::ReleaseStatus {
+pub(crate) fn release_status(
+    app: AppHandle,
+    worktree: Option<String>,
+) -> update_runtime::ReleaseStatus {
     let _crumb = crate::crumbs::Command::enter("release_status");
     let state = app.state::<AppState>();
     let running = update_runtime::build_stamp();
@@ -41,6 +51,8 @@ pub(crate) fn release_status(app: AppHandle) -> update_runtime::ReleaseStatus {
             busy: crate::orchestration::restart_census::Busy::default(),
         },
     };
+    let checkout = worktree.map_or_else(|| state.active_root(), PathBuf::from);
+    answer.status = update_runtime::lane_status_for(std::mem::take(&mut answer.status), &checkout);
     // And who a restart would cut (t-3058, t-6428): the one census every
     // road out of the window asks — workers mid-turn, background jobs under
     // workers at rest, workers nobody could read — so the notice says it
