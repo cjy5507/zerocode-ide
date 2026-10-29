@@ -2794,6 +2794,134 @@ fn automatic_failure_has_a_bounded_retry_and_never_stamps_success() {
     });
 }
 
+/// Overwrite a log's first line where it lies, keeping its length and the file
+/// itself: a reader that reads the line again loses it, one that resumes past
+/// it never looks.
+fn overwrite_first_line(log: &Path) {
+    use std::io::Write as _;
+    let text = fs::read_to_string(log).unwrap();
+    let first = text.find('\n').unwrap();
+    let mut file = fs::OpenOptions::new().write(true).open(log).unwrap();
+    file.write_all(&vec![b'#'; first]).unwrap();
+}
+
+#[test]
+fn a_pass_reads_only_the_lines_appended_since_the_last_one() {
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path();
+    let signatures = || {
+        JsonlLessonSource::at_cwd(cwd).observations().into_iter()
+            .map(|observation| observation.signature).collect::<Vec<_>>()
+    };
+    super::record_observation(cwd, &obs("first", "s1", true)).unwrap();
+    super::record_observation(cwd, &obs("second", "s1", true)).unwrap();
+    assert_eq!(signatures(), ["first", "second"]);
+
+    overwrite_first_line(&cwd.join(".zo").join("dream").join("s1.jsonl"));
+    super::record_observation(cwd, &obs("third", "s1", true)).unwrap();
+    assert_eq!(signatures(), ["first", "second", "third"]);
+}
+
+#[test]
+fn the_turn_trace_is_read_from_where_the_last_pass_stopped() {
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path();
+    let failed = |tool: &str| {
+        let mut record = crate::turn_trace::TurnRecord::terminal(
+            "s1", 0, crate::turn_trace::TurnOutcome::Completed, 0, None,
+        );
+        record.error_tools = vec![tool.to_string()];
+        crate::turn_trace::append(cwd, &record).unwrap();
+    };
+    let signatures = || {
+        super::TurnLogLessonSource::at_cwd(cwd).observations().into_iter()
+            .map(|observation| observation.signature).collect::<Vec<_>>()
+    };
+    failed("bash");
+    failed("grep");
+    assert_eq!(signatures(), ["recurring tool failure: bash", "recurring tool failure: grep"]);
+
+    let log = fs::read_dir(cwd.join(".zo").join("turns")).unwrap().flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "jsonl"))
+        .unwrap();
+    overwrite_first_line(&log);
+    failed("edit");
+    assert_eq!(
+        signatures(),
+        ["recurring tool failure: bash", "recurring tool failure: grep", "recurring tool failure: edit"]
+    );
+}
+
+#[test]
+fn a_resumed_read_sees_what_a_full_read_sees_through_rewrites_and_removals() {
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path();
+    let cursor = cwd.join(".zo").join("dream").join(".read-cursor.json");
+    let resumed_cursor = cwd.join("resumed-cursor.json");
+    let read = || {
+        JsonlLessonSource::at_cwd(cwd).observations().into_iter()
+            .map(|observation| format!("{}@{}", observation.signature, observation.session_id))
+            .collect::<Vec<_>>()
+    };
+    // Three sessions take turns, so the oldest log keeps coming back to the
+    // top of the order with items the window had let go, until their logs pass
+    // the line cap and are rewritten; then new sessions push the oldest logs
+    // past the file cap. Each resumed read goes on from the one before it and
+    // is held to a full read of the same logs.
+    for step in 0..24_usize {
+        let session = if step < 15 { step % 3 } else { step - 12 };
+        super::record_observation(cwd, &obs(&format!("lesson {step}"), &format!("s{session}"), true)).unwrap();
+        let resumed = read();
+        let kept = fs::rename(&cursor, &resumed_cursor).is_ok();
+        let full = read();
+        if kept {
+            fs::rename(&resumed_cursor, &cursor).unwrap();
+        }
+        assert_eq!(resumed, full, "step {step}");
+    }
+}
+
+#[test]
+fn the_read_cursor_keeps_no_more_than_the_newest_items_a_pass_reads() {
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path();
+    for step in 0..12_usize {
+        super::record_observation(cwd, &obs(&format!("lesson {step}"), &format!("s{}", step % 3), true)).unwrap();
+    }
+    assert_eq!(JsonlLessonSource::at_cwd(cwd).observations().len(), super::MAX_DREAM_OBSERVATIONS);
+
+    let cursor = cwd.join(".zo").join("dream").join(".read-cursor.json");
+    assert!(cursor.is_file(), "a pass keeps its read cursor beside the logs");
+    let cursor: serde_json::Value = serde_json::from_slice(&fs::read(cursor).unwrap()).unwrap();
+    let kept: usize = cursor["files"].as_array().unwrap().iter()
+        .map(|file| file["items"].as_array().unwrap().len())
+        .sum();
+    assert_eq!(kept, super::MAX_DREAM_OBSERVATIONS);
+}
+
+#[test]
+fn an_unfinished_last_line_counts_now_and_is_read_again_once_finished() {
+    use std::io::Write as _;
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path();
+    let dream = cwd.join(".zo").join("dream");
+    fs::create_dir_all(&dream).unwrap();
+    let line = |signature: &str| serde_json::to_string(&obs(signature, "s1", true)).unwrap();
+    let log = dream.join("s1.jsonl");
+    fs::write(&log, format!("{}\n{}", line("first"), line("second"))).unwrap();
+    let signatures = || {
+        JsonlLessonSource::at_cwd(cwd).observations().into_iter()
+            .map(|observation| observation.signature).collect::<Vec<_>>()
+    };
+    assert_eq!(signatures(), ["first", "second"]);
+
+    let mut file = fs::OpenOptions::new().append(true).open(&log).unwrap();
+    write!(file, "\n{}\n", line("third")).unwrap();
+    drop(file);
+    assert_eq!(signatures(), ["first", "second", "third"]);
+}
+
 #[test]
 fn an_automatic_pass_that_does_not_run_says_why() {
     let home = tempfile::tempdir().unwrap();
