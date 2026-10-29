@@ -650,8 +650,11 @@ fn probe(program: Option<&[&str]>, env: &[(&str, &str)]) -> std::process::Child 
 /// `python3` then, this test's own program here), started with the calling
 /// pane's mark and hanging outside the caller's tree, is read as the pane's
 /// own; one started with another pane's mark is asked. Apple's `/bin/zsh`
-/// with the pane's own mark is asked all the same on macOS, which leaves
-/// its own programs' environments out: the reach this has.
+/// with the pane's own mark is asked while its environment does not read —
+/// macOS leaves its own programs' out, the reach this has — and is the
+/// pane's own like any other where it does (as root, with the system's
+/// protection off, on a later macOS): the kernel's rule is what the test
+/// finds, not what it holds the kernel to.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_started_process_is_judged_by_the_pane_its_environment_names() {
@@ -684,13 +687,24 @@ fn a_started_process_is_judged_by_the_pane_its_environment_names() {
         let ended = probe.wait().expect("a probe ends when its input closes");
         assert!(ended.success(), "{ended}");
     }
-    for verdict in &verdicts[1..] {
-        assert!(matches!(verdict, KillVerdict::Ask { .. }), "{verdict:?}");
-    }
     assert_eq!(table.marks.get(&pids[0]), Some(&mark(4242, "term-1")));
     assert_eq!(
         verdicts[0],
         KillVerdict::Allow,
         "the pane's own loose program"
     );
+    assert!(
+        matches!(verdicts[1], KillVerdict::Ask { .. }),
+        "another pane's loose program: {:?}",
+        verdicts[1]
+    );
+    if let (Some(zsh), Some(verdict)) = (pids.get(3), verdicts.get(2)) {
+        match table.marks.get(zsh) {
+            None => assert!(matches!(verdict, KillVerdict::Ask { .. }), "{verdict:?}"),
+            Some(named) => {
+                assert_eq!(named, &mark(4242, "term-1"));
+                assert_eq!(verdict, &KillVerdict::Allow);
+            }
+        }
+    }
 }
