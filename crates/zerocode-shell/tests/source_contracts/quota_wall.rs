@@ -219,7 +219,10 @@ fn the_wall_witness_is_asked_beside_the_stall_probe_and_outside_the_team_table()
             "the wall's window lost `{needed}`:\n{window}"
         );
     }
-    let news = super::support::block_after(&core, "pub fn workers_quota_walled(");
+    // The write, and the notice it decides where its `quota_walls_due`
+    // question reads it too (t-81273).
+    let news = super::support::block_after(&core, "pub fn workers_quota_walled(").to_string()
+        + super::support::block_after(&core, "fn quota_wall_notice(");
     assert!(
         news.contains("MessageKind::QuotaWalled")
             && news.contains("worker.taken_over")

@@ -1753,6 +1753,11 @@ pub struct RuntimeImage {
     /// Whether the window has said its goodbye (t-9091) — not a row, so not
     /// in the projection: the ledger remembers it in-process.
     said_goodbye: bool,
+    /// How many times this runtime has copied its ledger so far, because a
+    /// write met a reader still holding it (t-81273). Not a fact of the
+    /// revision, so two images of one revision may differ here and are
+    /// still equal.
+    copies: u64,
 }
 
 impl std::fmt::Debug for RuntimeImage {
@@ -1780,6 +1785,7 @@ impl std::fmt::Debug for RuntimeImage {
             .field("repair_count", &self.repairs.len())
             .field("recoveries", &self.recoveries)
             .field("said_goodbye", &self.said_goodbye)
+            .field("copies", &self.copies)
             .finish()
     }
 }
@@ -1835,6 +1841,14 @@ impl RuntimeImage {
     #[must_use]
     pub const fn said_goodbye(&self) -> bool {
         self.said_goodbye
+    }
+
+    /// How many times this runtime had copied its ledger when this image was
+    /// taken: each a write that met a reader still holding the revision it
+    /// was lent (t-81273).
+    #[must_use]
+    pub const fn copies(&self) -> u64 {
+        self.copies
     }
 }
 
@@ -3546,16 +3560,31 @@ impl Drop for RuntimeState {
 /// export per revision (t-19506) and the window a rebuild beside it; now it
 /// costs a reference count, and a copy only for the write that meets a
 /// reader still reading.
-struct SharedLedger(Arc<Ledger>);
+///
+/// Those copies are counted here, per runtime: how often a write met a
+/// reader is the price of this design, and a count kept beside the ledger
+/// cannot be moved by another ledger in the same process (review P2-1).
+struct SharedLedger {
+    ledger: Arc<Ledger>,
+    copies: u64,
+}
 
 impl SharedLedger {
     fn new(ledger: Ledger) -> Self {
-        Self(Arc::new(ledger))
+        Self {
+            ledger: Arc::new(ledger),
+            copies: 0,
+        }
+    }
+
+    /// The disk's ledger in place of this one; the copies stay counted.
+    fn replace(&mut self, ledger: Ledger) {
+        self.ledger = Arc::new(ledger);
     }
 
     /// The ledger as it stands, for an image.
     fn lend(&self) -> Arc<Ledger> {
-        Arc::clone(&self.0)
+        Arc::clone(&self.ledger)
     }
 }
 
@@ -3563,13 +3592,18 @@ impl std::ops::Deref for SharedLedger {
     type Target = Ledger;
 
     fn deref(&self) -> &Ledger {
-        &self.0
+        &self.ledger
     }
 }
 
 impl std::ops::DerefMut for SharedLedger {
     fn deref_mut(&mut self) -> &mut Ledger {
-        Arc::make_mut(&mut self.0)
+        // Nobody hands out a weak reference, so a ledger this runtime cannot
+        // borrow mutably is one a reader holds, and `make_mut` copies it.
+        if Arc::get_mut(&mut self.ledger).is_none() {
+            self.copies += 1;
+        }
+        Arc::make_mut(&mut self.ledger)
     }
 }
 
@@ -3812,6 +3846,7 @@ impl RuntimeState {
                 .collect(),
             repairs: self.repairs.clone(),
             said_goodbye: self.ledger.said_goodbye(),
+            copies: self.ledger.copies,
         }
     }
 
@@ -6950,7 +6985,7 @@ impl RuntimeState {
             return Err(RuntimeError::AuthorityChanged);
         }
         let ledger = Ledger::rebuild(held.projection).map_err(RuntimeError::LedgerInvariant)?;
-        self.ledger = SharedLedger::new(ledger);
+        self.ledger.replace(ledger);
         /* Clearing this is a cost, not a correctness: a runtime that forgot to
          * would simply read the store again on every request and answer the
          * same way. Left as one line rather than defended by a test, because a

@@ -29106,26 +29106,22 @@ fn a_write_and_the_reads_after_it_hold_the_ledger_once() {
 }
 
 /// `beats` beats from `first`, a second apart; answers the revision they
-/// left and the whole-ledger walks they made.
-fn beats_and_their_walks(
-    host: &dyn Host,
-    first: i64,
-    beats: i64,
-) -> (u64, zerocode_core::orchestration::LedgerWork) {
-    let before = zerocode_core::orchestration::ledger_work();
+/// left and how many times this window's runtime copied its ledger for them
+/// — its own count, which no other test's ledger moves.
+fn beats_and_their_copies(host: &dyn Host, first: i64, beats: i64) -> (u64, u64) {
+    let image = || {
+        super::runtime()
+            .expect("this window's runtime")
+            .actor
+            .view()
+            .expect("the image")
+    };
+    let before = image().copies();
     for beat in 0..beats {
         tick(host, &[], first + beat * 1_000);
     }
-    let revision = super::runtime()
-        .expect("this window's runtime")
-        .actor
-        .view()
-        .expect("the image")
-        .revision();
-    (
-        revision,
-        zerocode_core::orchestration::ledger_work().since(before),
-    )
+    let after = image();
+    (after.revision(), after.copies() - before)
 }
 
 /// A window with a worker at work beats without copying the ledger
@@ -29150,16 +29146,16 @@ fn a_beat_beside_a_live_worker_copies_the_ledger_only_for_a_write_a_reader_holds
     let host = Counting::default();
     host.set_pane(WORKER_TERM, true);
     let began = clock();
-    let (settled, _) = beats_and_their_walks(&host, began, 1);
+    let (settled, _) = beats_and_their_copies(&host, began, 1);
 
-    let (idle, walked) = beats_and_their_walks(&host, began + 1_000, BEATS);
+    let (idle, copied) = beats_and_their_copies(&host, began + 1_000, BEATS);
     assert_eq!(
         idle, settled,
         "{BEATS} beats on a seen pane moved the ledger"
     );
     assert_eq!(
-        walked.clones, 0,
-        "{BEATS} beats beside a live worker copied the ledger {walked:?}"
+        copied, 0,
+        "{BEATS} beats beside a live worker copied the ledger"
     );
 
     let reader = super::runtime()
@@ -29167,29 +29163,29 @@ fn a_beat_beside_a_live_worker_copies_the_ledger_only_for_a_write_a_reader_holds
         .actor
         .view()
         .expect("a reader's image");
-    let (held, walked) = beats_and_their_walks(&host, began + 11_000, BEATS);
+    let (held, copied) = beats_and_their_copies(&host, began + 11_000, BEATS);
     drop(reader);
     assert_eq!(
         held, settled,
         "{BEATS} beats on a seen pane moved the ledger"
     );
     assert_eq!(
-        walked.clones, 0,
-        "{BEATS} beats that wrote nothing copied the ledger a reader held {walked:?}"
+        copied, 0,
+        "{BEATS} beats that wrote nothing copied the ledger a reader held"
     );
 
     // The pane goes for five beats and comes back: two writes, in place.
     host.set_pane(WORKER_TERM, false);
     let confirmations = i64::from(MISSING_PANE_CONFIRMATIONS);
-    let (missing, gone) = beats_and_their_walks(&host, began + 21_000, confirmations);
+    let (missing, gone) = beats_and_their_copies(&host, began + 21_000, confirmations);
     host.set_pane(WORKER_TERM, true);
-    let (seen, back) = beats_and_their_walks(&host, began + 21_000 + confirmations * 1_000, 1);
+    let (seen, back) = beats_and_their_copies(&host, began + 21_000 + confirmations * 1_000, 1);
     assert!(
         settled < missing && missing < seen,
         "the missing pane and its return were not two writes: {settled} -> {missing} -> {seen}"
     );
     assert_eq!(
-        (gone.clones, back.clones),
+        (gone, back),
         (0, 0),
         "a beat copied the ledger it was writing with no reader holding it"
     );
@@ -29207,21 +29203,21 @@ fn a_quiet_workers_beats_after_its_notice_copy_nothing() {
         &[CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION],
         stood.began + 9_000,
     );
-    let (told, _) = beats_and_their_walks(&stood.host, stood.began + 10_000, 1);
+    let (told, _) = beats_and_their_copies(&stood.host, stood.began + 10_000, 1);
     assert_eq!(
         stood.news("went_quiet", stood.began + 10_001).len(),
         1,
         "the stop was not a silence"
     );
 
-    let (idle, walked) = beats_and_their_walks(&stood.host, stood.began + 11_000, BEATS);
+    let (idle, copied) = beats_and_their_copies(&stood.host, stood.began + 11_000, BEATS);
     assert_eq!(
         idle, told,
         "{BEATS} beats on a told silence moved the ledger"
     );
     assert_eq!(
-        walked.clones, 0,
-        "{BEATS} beats on a told silence copied the ledger {walked:?}"
+        copied, 0,
+        "{BEATS} beats on a told silence copied the ledger"
     );
 
     let reader = super::runtime()
@@ -29229,15 +29225,15 @@ fn a_quiet_workers_beats_after_its_notice_copy_nothing() {
         .actor
         .view()
         .expect("a reader's image");
-    let (held, walked) = beats_and_their_walks(&stood.host, stood.began + 21_000, BEATS);
+    let (held, copied) = beats_and_their_copies(&stood.host, stood.began + 21_000, BEATS);
     drop(reader);
     assert_eq!(
         held, told,
         "{BEATS} beats on a told silence moved the ledger"
     );
     assert_eq!(
-        walked.clones, 0,
-        "{BEATS} beats that wrote nothing copied the ledger a reader held {walked:?}"
+        copied, 0,
+        "{BEATS} beats that wrote nothing copied the ledger a reader held"
     );
     assert_eq!(
         stood.news("went_quiet", stood.began + 31_001).len(),
