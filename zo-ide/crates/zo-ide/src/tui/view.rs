@@ -2605,6 +2605,43 @@ mod tests {
         assert!(line.contains("waiting for the model 16s"), "{line}");
     }
 
+    /// A retried request starts its own wait (t-71285, review P3-2): the
+    /// quiet stretch the last attempt named does not stand on the next one, so
+    /// a stream that reasoned before the retry is not said to reason after it,
+    /// and a wait counts from the new request.
+    #[test]
+    fn a_retried_request_does_not_keep_the_last_attempts_quiet_stretch() {
+        use crate::autonomy::limits::DEFAULT_STREAM_PHASE_AFTER_SECS;
+        use runtime::message_stream::types::StreamPhase;
+        for (quiet, said) in [
+            (StreamPhase::QuietReasoning { since_secs: 16 }, "model reasoning silently"),
+            (StreamPhase::QuietWaiting { since_secs: 16 }, "waiting for the model"),
+        ] {
+            let mut status = Status::working(Duration::from_secs(10));
+            status.note_stream_phase(StreamPhase::RequestSent { attempt: 1 });
+            status.elapsed = Duration::from_secs(30);
+            status.note_stream_phase(quiet);
+            let line = status.line(120).plain();
+            assert!(line.contains(said), "{line}");
+
+            status.note_stream_phase(StreamPhase::Retrying { attempt: 2, delay_secs: 1 });
+            status.elapsed = Duration::from_secs(31);
+            status.note_stream_phase(StreamPhase::RequestSent { attempt: 2 });
+            status.elapsed = Duration::from_secs(33);
+            let line = status.line(120).plain();
+            assert!(
+                !line.contains("reasoning silently") && !line.contains("waiting"),
+                "a request out 2 s is not yet a wait, and the last attempt's stretch is over: {line}"
+            );
+            status.elapsed = Duration::from_secs(31 + DEFAULT_STREAM_PHASE_AFTER_SECS);
+            let line = status.line(120).plain();
+            assert!(
+                line.contains(&format!("waiting for the model {DEFAULT_STREAM_PHASE_AFTER_SECS}s")),
+                "the wait counts from the new request: {line}"
+            );
+        }
+    }
+
     /// A model reasoning without visible output is a phrase on the status
     /// line — never a row in the transcript (2026-09-07: one turn left five
     /// `model reasoning silently` rows behind) — and content ends it.
