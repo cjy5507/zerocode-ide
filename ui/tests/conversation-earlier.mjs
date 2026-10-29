@@ -1,36 +1,46 @@
 /* A long conversation opens on its newest turns and reads up to its first
  * (t-82901). The person, 10-29: 「대화창이 마지막 부분만 보이는데… 안 보이니까
  * 너무 어색」 — a Codex pane whose view held the last chunk of its transcript,
- * two turns under 「↑ 이전 기록 · 끝부분만 보는 중」, and no way up.
+ * two turns under 「↑ 이전 기록 · 끝부분만 보는 중」, and no way up — and,
+ * 17:2x, 「열면 바로 그려지지 않음」: a first read of 40 turns kept the page
+ * empty while it read.
  *
  * The backend here is the transcript the reads stand for: synthetic lines at
  * a synthetic stride, each turn carrying the place its line begins at, read
- * back from a place by turns the way `transcript_log_back` reads them
- * (`TRANSCRIPT_SAID_TURNS` said turns or `TRANSCRIPT_BACK_ROWS` turns of any
- * kind). Read off the drawn page: the first paint's said turns, the way up as
- * a button, a press and a push up each asking the page's own door once with
- * `before`, the rows standing above with the reader's row where it stood and
- * nothing twice, a result that came before its call joining it, the way up
- * gone at the first turn, the page's hold bounded and the way back to the
- * newest turns — for a pane's page (both treatments), a wire's and a
+ * back from the end within the last chunk (`FIRST_REACH`) and from a place by
+ * turns (`PAGE_REACH`: `TRANSCRIPT_SAID_TURNS` said turns or
+ * `TRANSCRIPT_BACK_ROWS` turns of any kind) the way `transcript_log_back`
+ * reads them. Read off the drawn page: the newest chunk drawn before anything
+ * above it is answered, then one read up filling the said turns above it, the
+ * way up as a button, a press and a push up each asking the page's own door
+ * once with `before`, the rows standing above with the reader's row where it
+ * stood and nothing twice, a result that came before its call joining it,
+ * the way up gone at the first turn, the page's hold bounded and the way back
+ * to the newest turns — for a pane's page (both treatments), a wire's and a
  * helper's — and no read at all for scrolling in between. */
+import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium, createWindowServer, foldConversations, openWindowTestPage } from "./window-boot.mjs";
 
 /* What one read back gathers, as the backend's constants say it
- * (shell_runtime.rs). */
-export const BACK = Object.freeze({ said: 40, rows: 200 });
+ * (shell_runtime.rs): the said turns and the turns of any kind a read from a
+ * place stops at, and the chunk a first read from the end keeps within. */
+export const BACK = Object.freeze({ said: 40, rows: 200, chunk: 256 * 1024 });
 /* The synthetic file: blocks of a person's ask, a thought with an answer and
  * a call on one line, the call's result, and the answer — three said turns,
- * six turns (five rows once the result joins its call). */
+ * six turns (five rows once the result joins its call). Each line weighs 16
+ * KiB, so the last chunk holds a handful of turns, as the person's long
+ * sessions' did. */
 export const EARLIER_BLOCKS = 120;
-const STRIDE = 1000;
+const STRIDE = 16 * 1024;
 
 /* The transcript, page-side: `window.__TRANSCRIPT__` reads it as the backend
- * would — on from a cursor, back from the end, back from a place — and counts
- * every ask (`__ASKS__`). */
-function standTranscript({ blocks, back, stride, tailFrom = null }) {
+ * would — on from a cursor, back from the end within its last chunk, back
+ * from a place by turns — and counts every ask (`__ASKS__`). `holdAbove`
+ * holds every read from a place until `__LET_ABOVE__()`, so a test reads the
+ * page as it stands before anything above its newest turns is answered. */
+function standTranscript({ blocks, back, stride, tailFrom = null, holdAbove = false }) {
   const lines = [];
   const at0 = Date.parse("2026-10-29T04:00:00Z");
   for (let block = 0; block < blocks; block += 1) {
@@ -47,31 +57,40 @@ function standTranscript({ blocks, back, stride, tailFrom = null }) {
   const placed = lines.map((turns, at) => turns.map((turn, one) => ({ ...turn, line: at * stride, at_ms: at0 + at * 1000 + one })));
   const size = lines.length * stride;
   const said = (turn) => turn.role === "user" || turn.role === "assistant";
-  const backFrom = (end) => {
+  // Back from `end` a whole line at a time, until the said turns or the
+  // turns of any kind are met — and, from the file's end, only the lines that
+  // begin inside its last chunk.
+  const backFrom = (end, floor = -Infinity) => {
     let at = end / stride;
     const turns = [];
     let saidCount = 0;
-    while (at > 0 && saidCount < back.said && turns.length < back.rows) {
+    while (at > 0 && (at - 1) * stride > floor && saidCount < back.said && turns.length < back.rows) {
       at -= 1;
       turns.unshift(...placed[at]);
       saidCount += placed[at].filter(said).length;
     }
     return { found: true, skipped: false, turns, start: at * stride, next: end, more: false, folded: at > 0 };
   };
+  const tail = () => {
+    // A tail that opens on the result of a call above it, when asked.
+    if (tailFrom !== null) {
+      const turns = placed.slice(tailFrom).flat();
+      return { found: true, skipped: false, turns, start: tailFrom * stride, next: size, more: false, folded: true };
+    }
+    return backFrom(size, size - back.chunk);
+  };
+  let letAbove = null;
+  const above = holdAbove ? new Promise((done) => { letAbove = done; }) : null;
+  window.__LET_ABOVE__ = () => letAbove?.();
   window.__ASKS__ = [];
   window.__TRANSCRIPT__ = {
     size,
+    // What the first read answers, asked by no page.
+    tail,
     read(args) {
       window.__ASKS__.push({ after: args.after ?? null, before: args.before ?? null });
-      if (Number.isFinite(args.before)) return backFrom(args.before);
-      if (args.after === null || args.after === undefined) {
-        // A tail that opens on the result of a call above it, when asked.
-        if (tailFrom !== null) {
-          const turns = placed.slice(tailFrom).flat();
-          return { found: true, skipped: false, turns, start: tailFrom * stride, next: size, more: false, folded: true };
-        }
-        return backFrom(size);
-      }
+      if (Number.isFinite(args.before)) return above ? above.then(() => backFrom(args.before)) : backFrom(args.before);
+      if (args.after === null || args.after === undefined) return tail();
       if (args.after === 0) return { found: true, skipped: false, turns: placed.flat(), start: 0, next: size, more: false, folded: false };
       return { found: true, skipped: false, turns: [], start: args.after, next: size, more: false, folded: false };
     },
@@ -141,6 +160,20 @@ async function openLongPane(page, options = {}) {
   await settle(page);
 }
 
+/* Until no read from above is out for the page on screen. */
+async function reached(page) {
+  await page.waitForFunction(() => {
+    const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null);
+    return list.__run.helper.reaching !== true;
+  });
+}
+
+/* What the first read answers: its said turns and where they begin. */
+function tailOfTranscript() {
+  const tail = window.__TRANSCRIPT__.tail();
+  return { said: tail.turns.filter((turn) => turn.role === "user" || turn.role === "assistant").length, start: tail.start };
+}
+
 /* A press on the way up, and the paint that follows its read. */
 async function pressEarlier(page) {
   await page.evaluate(async () => {
@@ -150,24 +183,24 @@ async function pressEarlier(page) {
     // A page with no way up has nothing to press: the checks after say so.
     list.querySelector(":scope > .chat-earlier-door")?.click();
   });
-  await page.waitForFunction(() => {
-    const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null);
-    return list.__run.helper.reaching !== true;
-  });
+  await reached(page);
   await settle(page);
 }
 
-/* Long panes for the memory census (t-82901): `panes` terminal tabs, each
- * wearing its conversation on a transcript of `blocks` blocks whose result
- * lines weigh what this machine's long sessions' did (10-29: 847 turns in
- * 23.8 MiB, some 28 KiB a turn) — `resultBytes` a result line on disk, the
- * clipped detail the page is handed (16 Ki characters). The reads answer as
- * the page's backend does: the new one by turns, or — on a page with no way
- * up, the window before t-82901 — the last 256 KiB's whole lines, so the two
- * windows are measured each against its own backend. `toTop` presses the way
- * up until the first turn stands. */
-export async function standLongPaneChats(page, { panes = 1, blocks = 400, resultBytes = 60 * 1024, toTop = false, helper = false } = {}) {
-  return page.evaluate(async ({ panes, blocks, resultBytes, back, toTop, helper }) => {
+/* A long transcript, page-side (t-82901): `blocks` blocks whose result lines
+ * weigh what this machine's long sessions' did (10-29: 847 turns in 23.8 MiB,
+ * some 28 KiB a turn) — `resultBytes` a result line on disk, the clipped
+ * detail the page is handed (16 Ki characters). `window.__LONG__.read`
+ * answers as the page's backend does: the first read, from the end, with the
+ * last 256 KiB's whole lines — the window before t-82901 read the same — or,
+ * with `tail: "turns"`, back from the end by turns as the first read did
+ * from ecc719bcb until the page drew its newest chunk first; a read from a
+ * place by turns, which only a page with a way up asks; and on from a cursor a chunk at a time. With `ipc`, an answer goes as
+ * the backend's does — written out before anything is timed, parsed by the
+ * page when it arrives — `readMs` later, by kind (`tail`, `before`, `after`):
+ * the backend's own time for that read, measured apart (it is not the page's). */
+export async function standLongTranscript(page, { blocks = 400, resultBytes = 60 * 1024, tail = "chunk", ipc = false, readMs = {} } = {}) {
+  await page.evaluate(({ blocks, resultBytes, back, tail, ipc, readMs }) => {
     const CHUNK = 256 * 1024;
     const CLIPPED = 16 * 1024;
     const detail = "결과 줄 · fn main() { println!(\"hello\"); }\n".repeat(CLIPPED / 40).slice(0, CLIPPED);
@@ -209,13 +242,9 @@ export async function standLongPaneChats(page, { panes = 1, blocks = 400, result
       return answer(at, to);
     };
     const read = (args) => {
-      const byTurns = typeof readEarlierTurns === "function";
       if (Number.isFinite(args.before)) return backFrom(args.before);
-      if (args.after === null || args.after === undefined) {
-        if (byTurns) return backFrom(size);
-        // The last chunk's whole lines (the window before t-82901).
-        return answer(index(size - CHUNK), lines.length);
-      }
+      // The last chunk's whole lines.
+      if (args.after === null || args.after === undefined) return answer(index(size - CHUNK + 1), lines.length);
       if (args.after >= size) return answer(lines.length, lines.length);
       // On from a cursor: whole lines within a chunk.
       const from = index(args.after);
@@ -223,6 +252,40 @@ export async function standLongPaneChats(page, { panes = 1, blocks = 400, result
       while (to < lines.length && lines[to].at - lines[from].at < CHUNK) to += 1;
       return { ...answer(from, Math.max(to, from + 1)), more: to < lines.length };
     };
+    const kind = (args) => (Number.isFinite(args.before) ? "before" : args.after === null || args.after === undefined ? "tail" : "after");
+    const answerOf = (args) => (kind(args) === "tail" && tail === "turns" ? backFrom(size) : read(args));
+    const written = new Map();
+    const key = (args) => JSON.stringify([args.after ?? null, args.before ?? null]);
+    const text = (args) => {
+      if (!written.has(key(args))) written.set(key(args), JSON.stringify(answerOf(args)));
+      return written.get(key(args));
+    };
+    window.__LONG__ = {
+      size,
+      read(args) {
+        if (!ipc) return answerOf(args);
+        const sent = text(args);
+        return new Promise((done) => setTimeout(() => done(JSON.parse(sent)), readMs[kind(args)] ?? 0));
+      },
+      // The answers a page opening on the file asks, written out ahead.
+      warm() {
+        const first = answerOf({ after: null });
+        text({ after: null });
+        text({ after: first.next });
+        if (first.start > 0) text({ before: first.start });
+        return { start: first.start, rows: first.turns.length };
+      },
+    };
+  }, { blocks, resultBytes, back: BACK, tail, ipc, readMs });
+}
+
+/* Long panes for the memory census (t-82901): `panes` terminal tabs, each
+ * wearing its conversation on the long transcript (`standLongTranscript`).
+ * `toTop` presses the way up until the first turn stands. */
+export async function standLongPaneChats(page, { panes = 1, blocks = 400, resultBytes = 60 * 1024, toTop = false, helper = false } = {}) {
+  await standLongTranscript(page, { blocks, resultBytes });
+  return page.evaluate(async ({ panes, toTop, helper }) => {
+    const { size, read } = window.__LONG__;
     if (helper) {
       // A helper's page on the same file: read on from its first line to its
       // end, the page holding its bound of the newest turns — what a window
@@ -273,7 +336,134 @@ export async function standLongPaneChats(page, { panes = 1, blocks = 400, result
     const held = terms.map((term) => paneChats.get(term)?.run.helper.turns.length ?? 0);
     return { panes, transcriptMiB: Math.round((size / 1048576) * 10) / 10, heldTurns: held, presses,
       rowsDrawn: shown?.querySelectorAll(":scope > [data-turn]").length ?? 0 };
-  }, { panes, blocks, resultBytes, back: BACK, toTop, helper });
+  }, { panes, toTop, helper });
+}
+
+/* Press to first turn on a long pane (t-82901; the person, 10-29 17:2x:
+ * 「대화창이 최적화 안 된 것 같아, 열면 바로 그려지지 않음 — 터미널 전환
+ * 시」). A Codex pane standing on its terminal, the long transcript behind it
+ * (`standLongTranscript`, its answers parsed as they arrive and late by the
+ * backend's own time for each read), the head's 대화 switch pressed, and from
+ * the press:
+ *   frameMs      the first frame drawn after it
+ *   firstTurnMs  the first frame drawn with a row of the conversation in view
+ *   inViewAtFrame the rows in view in the first frame (0: it stood empty)
+ *   filledMs     the frame the page's rows last grew in, once its reads settle
+ *                (a read from above after the first paint, if the page asks one)
+ *   rows         the rows standing then
+ * once for the first open (`first`) and `OPEN.again` times terminal → 대화
+ * again (`again`, what the page already holds).
+ *
+ *   node ui/tests/conversation-earlier.mjs --open [--rounds 5] [--engine webkit] [--json out.json]
+ *        [--tail chunk|turns] [--tail-ms N] [--before-ms N] [--after-ms N]
+ *   WINDOW_CPU_THROTTLE=4 node ui/tests/conversation-earlier.mjs --open        cpu4x (Chromium)
+ * `ZEROCODE_WINDOW_UI=<a checkout's ui>` runs another window's page against the
+ * same transcript, its first read answered as its own backend's was. */
+export const OPEN = Object.freeze({ again: 3, patienceMs: 5000, settleFrames: 30, awayMs: 300 });
+
+export async function measureLongPaneOpen(page, { tail = "chunk", readMs = {} } = {}) {
+  await standLongTranscript(page, { tail, ipc: true, readMs });
+  return page.evaluate(async ({ again, patienceMs, settleFrames, awayMs }) => {
+    const warm = window.__LONG__.warm();
+    const term = await openTermTab({ placement: "tab" });
+    paneAgents.set(term, "codex");
+    hookStates.set(term, "idle");
+    // The person's pick, so nothing but the switch stands the conversation.
+    paneChatOf(term).chosen = true;
+    window.__ANSWER__.pane_log = (args) => window.__LONG__.read(args);
+    paintViewToggle();
+    await window.__PAINTED__();
+    // The next frame, once it is on screen: a task posted from its callback
+    // runs after it is drawn.
+    const drawn = () => new Promise((done) => requestAnimationFrame(() => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => done(performance.now());
+      channel.port2.postMessage(null);
+    }));
+    const shown = () => {
+      const list = paneChats.get(term)?.host?.querySelector(".helper-turns");
+      if (!list || !list.checkVisibility()) return { rows: 0, inView: 0 };
+      const box = list.getBoundingClientRect();
+      const rows = [...list.querySelectorAll(":scope > [data-turn]")];
+      const inView = rows.filter((row) => {
+        const at = row.getBoundingClientRect();
+        return at.height > 0 && at.bottom > box.top && at.top < box.bottom;
+      }).length;
+      return { rows: rows.length, inView };
+    };
+    const press = async () => {
+      const from = performance.now();
+      el("view-toggle-chat").click();
+      const frame = await drawn();
+      const atFrame = shown();
+      let turnAt = atFrame.inView > 0 ? frame : null;
+      while (turnAt === null && performance.now() - from < patienceMs) {
+        const at = await drawn();
+        if (shown().inView > 0) turnAt = at;
+      }
+      // Until the rows stop growing and no read is out.
+      let rows = shown().rows;
+      let grewAt = turnAt;
+      for (let still = 0; still < settleFrames && performance.now() - from < patienceMs;) {
+        const at = await drawn();
+        const now = shown().rows;
+        const out = paneChats.get(term).run.helper.reaching === true;
+        if (now !== rows) {
+          rows = now;
+          grewAt = at;
+          still = 0;
+        } else if (!out) {
+          still += 1;
+        }
+      }
+      return { frameMs: frame - from, firstTurnMs: turnAt === null ? null : turnAt - from, inViewAtFrame: atFrame.inView,
+        filledMs: grewAt === null ? null : grewAt - from, rows };
+    };
+    const first = await press();
+    const repeats = [];
+    for (let round = 0; round < again; round += 1) {
+      el("view-toggle-term").click();
+      await window.__PAINTED__();
+      await new Promise((done) => setTimeout(done, awayMs));
+      repeats.push(await press());
+    }
+    return { warm, first, again: repeats };
+  }, OPEN);
+}
+
+/* Rounds of the open, each on a fresh page; medians. */
+export async function measureLongPaneOpenRounds({ engine = "chromium", rounds = 5, tail = "chunk", readMs = {} } = {}) {
+  const { webkitType } = await import("./conversation-perf.mjs");
+  const { loadNote } = await import("./machine-load.mjs");
+  const { files, origin } = await createWindowServer();
+  const browser = await (engine === "webkit" ? webkitType() : chromium).launch({ headless: true });
+  const taken = [];
+  try {
+    for (let round = 0; round < rounds; round += 1) {
+      const { page, faults } = await openWindowTestPage(browser, origin);
+      try {
+        await page.setViewportSize({ width: 1440, height: 900 });
+        taken.push({ ...(await measureLongPaneOpen(page, { tail, readMs })), faults: faults.slice(0, 3) });
+      } finally {
+        await page.close();
+      }
+    }
+  } finally {
+    await browser.close();
+    files.close();
+  }
+  const median = (values) => {
+    const kept = values.filter((one) => typeof one === "number").sort((a, b) => a - b);
+    if (!kept.length) return null;
+    const mid = Math.floor(kept.length / 2);
+    return kept.length % 2 ? kept[mid] : (kept[mid - 1] + kept[mid]) / 2;
+  };
+  const sum = (hops) => Object.fromEntries(["frameMs", "firstTurnMs", "inViewAtFrame", "filledMs", "rows"].map((key) => [key, median(hops.map((hop) => hop[key]))]));
+  return {
+    engine, throttle: Number(process.env.WINDOW_CPU_THROTTLE ?? 0) || 1, rounds, tail, readMs, ui: process.env.ZEROCODE_WINDOW_UI ?? "this checkout",
+    load: loadNote(), first: sum(taken.map((one) => one.first)), again: sum(taken.flatMap((one) => one.again)),
+    faults: taken.flatMap((one) => one.faults).slice(0, 3), taken,
+  };
 }
 
 export async function testConversationEarlier(browser, origin, ok) {
@@ -281,13 +471,31 @@ export async function testConversationEarlier(browser, origin, ok) {
   {
     const { page, faults } = await openWindowTestPage(browser, origin);
     try {
-      await openLongPane(page);
+      await openLongPane(page, { holdAbove: true });
+      const tail = await page.evaluate(tailOfTranscript);
+      const first = await page.evaluate(readList);
+      // The reads that name no cursor: the first, and what it asks above it
+      // (the follow-up read on from its cursor is the poll's own).
+      const firstReads = await page.evaluate(() => window.__ASKS__.filter((ask) => ask.after === null));
+      ok(`a long pane's conversation stands on its newest turns — the last chunk's ${tail.said} said turns — before anything above them is answered`,
+        firstReads[0]?.before === null && tail.said > 0 && tail.said < BACK.said && first.said === tail.said &&
+          first.last === `답 ${EARLIER_BLOCKS - 1}` && first.twice === 0 && first.from === tail.start,
+        JSON.stringify({ firstReads, said: first.said, tail, last: first.last, from: first.from }));
+      ok("once they are drawn, the page asks its door once for what stands above them, back from where they begin",
+        firstReads.length === 2 && firstReads[1].before === tail.start,
+        JSON.stringify(firstReads));
+      await page.evaluate(() => window.__LET_ABOVE__());
+      await reached(page);
+      await settle(page);
       const opened = await page.evaluate(readList);
-      const asks = await page.evaluate(() => window.__ASKS__.slice());
-      ok(`a long pane's conversation opens on its newest ${BACK.said} said turns, read back by turns from the end — not the last chunk's two or three`,
-        asks[0]?.after === null && asks[0]?.before === null && opened.said === BACK.said && opened.last === `답 ${EARLIER_BLOCKS - 1}` &&
-          opened.twice === 0 && opened.from > 0,
-        JSON.stringify({ asks: asks.slice(0, 3), said: opened.said, first: opened.first, last: opened.last, from: opened.from }));
+      const foot = await page.evaluate(() => {
+        const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null);
+        return Math.round(list.scrollHeight - list.scrollTop - list.clientHeight);
+      });
+      ok(`the said turns above stand over them — ${BACK.said} more, in order, none twice — and the reader stays at the newest`,
+        opened.said === tail.said + BACK.said && opened.twice === 0 && opened.ordered && opened.last === first.last &&
+          opened.words.slice(BACK.said).join("|") === first.words.join("|") && opened.from < tail.start && foot <= 2,
+        JSON.stringify({ said: opened.said, first: opened.first, from: opened.from, foot }));
       ok("the way up is a button at the list's head, above every row, worded in the catalog's words",
         opened.door?.button === true && opened.door.first === true &&
           opened.door.words === (await page.evaluate(() => t("worker.earlierMore", "이전 기록 더 보기"))),
@@ -330,7 +538,7 @@ export async function testConversationEarlier(browser, origin, ok) {
         pressAsks.length === 1 && pressAsks[0].before === before && pressAsks[0].after === null,
         JSON.stringify({ before, pressAsks }));
       ok(`the turns read from above stand over the rows — ${BACK.said} more said turns, in order, none twice`,
-        pressed.said === 2 * BACK.said && pressed.twice === 0 && pressed.ordered && pressed.last === opened.last &&
+        pressed.said === opened.said + BACK.said && pressed.twice === 0 && pressed.ordered && pressed.last === opened.last &&
           pressed.words.slice(BACK.said).join("|") === opened.words.join("|") && pressed.from < before,
         JSON.stringify({ said: pressed.said, twice: pressed.twice, first: pressed.first, from: pressed.from }));
       ok("the row being read stays where it stood while the turns above it arrive",
@@ -353,7 +561,7 @@ export async function testConversationEarlier(browser, origin, ok) {
       await settle(page);
       const pushed = await page.evaluate(readList);
       ok("a push up at the list's top reads up as the press does — one read for the push's three wheel turns",
-        pushAsked === 1 && pushed.said === 3 * BACK.said && pushed.twice === 0,
+        pushAsked === 1 && pushed.said === opened.said + 2 * BACK.said && pushed.twice === 0,
         JSON.stringify({ pushAsked, said: pushed.said }));
 
       // Up to the first turn: the hold stays bounded, and its newest end goes.
@@ -378,12 +586,14 @@ export async function testConversationEarlier(browser, origin, ok) {
         list.parentElement.querySelector(":scope > .chat-foot-door")?.click();
       });
       await settle(page);
+      await reached(page);
+      await settle(page);
       const back = await page.evaluate(readList);
-      const backAsks = await page.evaluate((from) => window.__ASKS__.slice(from), backAsked);
-      ok("the foot's button goes back to the newest turns: one read back from the end, the newest said turns and the way up again",
-        backAsks.length === 1 && backAsks[0].after === null && backAsks[0].before === null && !back.cut &&
-          back.said === BACK.said && back.last === `답 ${EARLIER_BLOCKS - 1}` && back.door?.first === true && back.twice === 0,
-        JSON.stringify({ backAsks, cut: back.cut, said: back.said, last: back.last }));
+      const backReads = await page.evaluate((from) => window.__ASKS__.slice(from).filter((ask) => ask.after === null), backAsked);
+      ok("the foot's button goes back to the newest turns as the page first opened: one read back from the end, one above it, the same said turns and the way up again",
+        backReads.length === 2 && backReads[0].before === null && backReads[1].before === tail.start && !back.cut &&
+          back.said === opened.said && back.last === `답 ${EARLIER_BLOCKS - 1}` && back.door?.first === true && back.twice === 0,
+        JSON.stringify({ backReads, cut: back.cut, said: back.said, last: back.last }));
       ok("the long pane's page raised no errors", faults.length === 0, faults.join("\n"));
     } finally {
       await page.close();
@@ -396,8 +606,12 @@ export async function testConversationEarlier(browser, origin, ok) {
     try {
       await foldConversations(page);
       // The tail opens on block 100's result line: its call stands above.
-      await openLongPane(page, { tailFrom: 100 * 4 + 2 });
+      await openLongPane(page, { tailFrom: 100 * 4 + 2, holdAbove: true });
       const opened = await page.evaluate(readList);
+      await page.evaluate(() => window.__LET_ABOVE__());
+      await reached(page);
+      await settle(page);
+      const filled = await page.evaluate(readList);
       await pressEarlier(page);
       const pressed = await page.evaluate(readList);
       const pills = await page.evaluate(() => {
@@ -413,8 +627,9 @@ export async function testConversationEarlier(browser, origin, ok) {
         };
       });
       ok("folded, a tail that opened on a result shows it on its own until its call is read from above, and then the call holds it — no result left without its call, no pill beside a pill, every step in one pill once",
-        opened.orphans === 1 && pressed.orphans === 0 && pills.joined === "out 100" && !pills.adjacent && pills.once && pressed.twice === 0,
-        JSON.stringify({ opened: opened.orphans, pressed: pressed.orphans, pills }));
+        opened.orphans === 1 && filled.orphans === 0 && pressed.orphans === 0 && pills.joined === "out 100" && !pills.adjacent && pills.once &&
+          filled.twice === 0 && pressed.twice === 0,
+        JSON.stringify({ opened: opened.orphans, filled: filled.orphans, pressed: pressed.orphans, pills }));
       ok("the folded page raised no errors", faults.length === 0, faults.join("\n"));
     } finally {
       await page.close();
@@ -428,8 +643,7 @@ export async function testConversationEarlier(browser, origin, ok) {
       const seen = await page.evaluate(async ({ shape, source }) => {
         // eslint-disable-next-line no-new-func
         new Function("shape", `(${source})(shape)`)(shape);
-        const tail = window.__TRANSCRIPT__.read({ after: null });
-        window.__ASKS__.length = 0;
+        const tail = window.__TRANSCRIPT__.tail();
         window.__ANSWER__.wire_start = (args) => ({ id: 51, agent: args.agent, protocol: "claude-stream", version: "2.1.280", model: null, session: "s-1" });
         window.__ANSWER__.wire_log = () => ({
           found: true, skipped: false, next: 0, turns: [], status: "idle", asks: [], live: [], agent: "claude",
@@ -445,16 +659,26 @@ export async function testConversationEarlier(browser, origin, ok) {
         await pollHelperPages();
         await window.__PAINTED__();
         return { from: tail.start };
-      }, { shape: { blocks: EARLIER_BLOCKS, back: BACK, stride: STRIDE }, source: standTranscript.toString() });
+      }, { shape: { blocks: EARLIER_BLOCKS, back: BACK, stride: STRIDE, holdAbove: true }, source: standTranscript.toString() });
       await settle(page);
       const opened = await page.evaluate(readList);
+      const tail = await page.evaluate(tailOfTranscript);
+      const asked = await page.evaluate(() => window.__WIRE_ASKS__.slice());
+      await page.evaluate(() => window.__LET_ABOVE__());
+      await reached(page);
+      await settle(page);
+      const filled = await page.evaluate(readList);
       await pressEarlier(page);
       const pressed = await page.evaluate(readList);
       const asks = await page.evaluate(() => ({ wire: window.__WIRE_ASKS__.slice(), pane: window.__ASKS__.length }));
-      ok("a wire's page that continues a pane wears the way up, and reads up through its own door from where the pane's history began",
-        opened.door?.first === true && asks.wire.length === 1 && asks.wire[0].id === 51 && asks.wire[0].before === seen.from &&
-          pressed.said === 2 * BACK.said && pressed.twice === 0,
-        JSON.stringify({ door: opened.door, asks, said: pressed.said }));
+      ok("a wire's page that continues a pane stands on the pane's newest turns, then reads what stands above them through its own door, once, from where that history began",
+        opened.said === tail.said && asked.length === 1 && asked[0].id === 51 && asked[0].before === seen.from &&
+          filled.said === tail.said + BACK.said && filled.twice === 0,
+        JSON.stringify({ opened: opened.said, tail, asked, filled: filled.said }));
+      ok("the wire's page wears the way up, and a press reads up through its door from where the page holds",
+        filled.door?.first === true && asks.wire.length === 2 && asks.wire[1].before === filled.from &&
+          pressed.said === filled.said + BACK.said && pressed.twice === 0,
+        JSON.stringify({ door: filled.door, asks, said: pressed.said }));
       ok("the wire's page raised no errors", faults.length === 0, faults.join("\n"));
     } finally {
       await page.close();
@@ -498,7 +722,25 @@ export async function testConversationEarlier(browser, origin, ok) {
   }
 }
 
-if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href && process.argv.includes("--open")) {
+  const argv = process.argv.slice(2);
+  const option = (name, fallback) => {
+    const at = argv.indexOf(name);
+    return at >= 0 && at + 1 < argv.length ? argv[at + 1] : fallback;
+  };
+  const readMs = Object.fromEntries(["tail", "before", "after"].map((kind) => [kind, Number(option(`--${kind}-ms`, "0"))]));
+  const result = await measureLongPaneOpenRounds({ engine: option("--engine", "chromium"), rounds: Number(option("--rounds", "5")),
+    tail: option("--tail", "chunk"), readMs });
+  const ms = (value) => (value === null ? "—" : `${value.toFixed(1)} ms`);
+  console.log(`${result.engine} · cpu ×${result.throttle} · ${result.ui} · first read ${result.tail} · backend ms ${JSON.stringify(readMs)} · ${result.rounds} rounds (medians) · ${result.load}`);
+  for (const name of ["first", "again"]) {
+    const one = result[name];
+    console.log(`  ${name}: frame ${ms(one.frameMs)} · first turn ${ms(one.firstTurnMs)} (${one.inViewAtFrame} rows in view in the first frame) · filled ${ms(one.filledMs)} · ${one.rows} rows`);
+  }
+  if (result.faults.length) console.log(`  FAULTS ${result.faults.join(" | ")}`);
+  const out = option("--json", null);
+  if (out) writeFileSync(out, `${JSON.stringify(result, null, 2)}\n`);
+} else if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const { files, origin } = await createWindowServer();
   const browser = await chromium.launch({ headless: true });
   let failed = 0;

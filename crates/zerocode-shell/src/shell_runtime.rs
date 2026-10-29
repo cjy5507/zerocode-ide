@@ -2867,16 +2867,18 @@ const HELPER_ABOUT_LINE_CHARS: usize = 200;
 /// step a read back from a place takes at a time.
 ///
 /// A page polls while somebody is looking at it: its asks from a cursor are
-/// the tail since the last one, which is a few lines. Its FIRST ask is a read
-/// back by turns (t-82901), bounded by [`TRANSCRIPT_SAID_TURNS`],
-/// [`TRANSCRIPT_BACK_ROWS`] and [`TRANSCRIPT_BACK_BUDGET`] — a chunk was two
-/// or three turns of a long session, and the page could not go up.
+/// the tail since the last one, which is a few lines. Its FIRST ask reads
+/// back by turns within the last chunk, drawn at once, and its next reads up
+/// from there by turns (t-82901), bounded by [`TRANSCRIPT_SAID_TURNS`],
+/// [`TRANSCRIPT_BACK_ROWS`] and [`TRANSCRIPT_BACK_BUDGET`] — a chunk alone
+/// was two or three turns of a long session, and the page could not go up.
 pub(super) const SUBAGENT_LOG_CHUNK: u64 = 256 * 1024;
 
 /// How many turns a person reads — said by the person or by the agent — a
 /// read back from a place gathers before it stops (t-82901). A page opens on
-/// the newest of them, and 「이전 기록 더 보기」 brings as many again from
-/// above. The last chunk alone held 1 to 16 of them in this machine's six
+/// its last chunk's turns and reads this many more from above as soon as
+/// those are drawn, and 「이전 기록 더 보기」 brings as many again. The last
+/// chunk alone held 1 to 16 of them in this machine's six
 /// longest Claude Code transcripts and 2 to 11 in its longest Codex
 /// rollouts (10-29), because their lines carry whole tool outputs: the
 /// person saw two or three turns and could not go up.
@@ -2884,9 +2886,9 @@ pub(super) const TRANSCRIPT_SAID_TURNS: usize = 40;
 
 /// The most turns of any kind — a thought, a call, a result as well as what
 /// is said — one read back gathers: half of what a page holds
-/// (`HELPER_TURN_CAP`, 400 in ui/shell.js), so a page opens holding at most
-/// half its hold and one read from above fits beside it before the page lets
-/// anything go. The same transcripts needed 147 to 843 turns of every kind to
+/// (`HELPER_TURN_CAP`, 400 in ui/shell.js), so a page's opening — its last
+/// chunk's turns and the read from above that follows them — fits in its
+/// hold before the page lets anything go. The same transcripts needed 147 to 843 turns of every kind to
 /// reach 40 said ones.
 pub(super) const TRANSCRIPT_BACK_ROWS: usize = 200;
 

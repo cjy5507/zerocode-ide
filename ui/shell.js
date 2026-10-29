@@ -13328,10 +13328,10 @@ async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -
     truncated: false,
     cwd,
     // What stands above its first turn is the pane's transcript it continues,
-    // read up from where that history began (`historyFrom`, t-82901); a fresh
-    // session has nothing above it.
+    // read up from where that history began (`historyFrom`, t-82901) once the
+    // page is drawn (`fillAboveOnce`); a fresh session has nothing above it.
     helper: { id: WIRE_LOG_ID, next: 0, turns: [], seq: 0, skipped: false, found: true, from: historyFrom,
-      ...(Number.isFinite(historyEnd) && { historyEnd }) },
+      filling: true, ...(Number.isFinite(historyEnd) && { historyEnd }) },
     wireLog: {
       status: "idle",
       asks: [],
@@ -13351,6 +13351,7 @@ async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -
   carry?.(worker);
   openTab({ id: tabId, kind: "worker", worker });
   if (at >= 0) placeTabAt(tabId, at);
+  fillAboveOnce(worker);
   helperClock.sync();
   paintViewToggle();
   // The words that waited for the wire go down it now, a message a turn.
@@ -13368,11 +13369,11 @@ function placeTabAt(id, at) {
 }
 
 /* The transcript a pane has so far, read through the same door the page
- * polls — its newest turns read back by turns, then on to the file's end —
- * for the wire tab that continues the conversation to open with the words
- * already said: the turns, where they begin (`start`, what the tab reads up
- * from) and where they end (`end`). The tab's own hold bounds them
- * (`holdHelperTurns`). */
+ * polls — its newest chunk's turns read back from the end, then on to the
+ * file's end — for the wire tab that continues the conversation to open with
+ * the words already said: the turns, where they begin (`start`, what the tab
+ * reads up from once it is drawn) and where they end (`end`). The tab's own
+ * hold bounds them (`holdHelperTurns`). */
 async function readPaneTranscript(term) {
   const turns = [];
   let after = null;
@@ -14482,11 +14483,15 @@ async function pollHelperPages() {
   const replaced = after !== null && more.next < after;
   if (replaced) forgetHeldTurns(held);
   // Where the page holds its file from (t-82901): the first read — the
-  // newest turns, read back by turns — says where it began, and the page's
-  // 「이전 기록 더 보기」 reads up from there; a file read again from its start
-  // holds from its first line. A wire's page knows from the pane it continues
-  // (`openWirePage`).
-  if (held.from === null && held.id !== WIRE_LOG_ID) held.from = Number.isFinite(more.start) ? more.start : 0;
+  // newest chunk's turns, read back from the end — says where it began, the
+  // page reads up from there once they are drawn (`fillAboveOnce`), and its
+  // 「이전 기록 더 보기」 again from where that left it; a file read again from
+  // its start holds from its first line. A wire's page knows from the pane it
+  // continues (`openWirePage`).
+  if (held.from === null && held.id !== WIRE_LOG_ID) {
+    held.from = Number.isFinite(more.start) ? more.start : 0;
+    held.filling = after === null;
+  }
   const skippedNow = !held.skipped && more.skipped === true;
   held.skipped = held.skipped || skippedNow;
   // Retain the answer before advancing the cursor, even if the person changed
@@ -14508,6 +14513,9 @@ async function pollHelperPages() {
   const wireMoved = held.id === WIRE_LOG_ID ? holdWireState(tab.worker, more) : { state: false, live: false };
   const wireChanged = wireMoved.state || wireMoved.live;
   if (document.hidden || activeHelperPage() !== tab) return;
+  // The page on screen is drawn — by this answer's paint below, or already:
+  // what stands above its newest turns is read once that frame is up.
+  fillAboveOnce(tab.worker);
   // A pane's page shows its hooks as well as its file (`paneChatKey`): a read
   // that brought no new line repaints once when a hook moved since the paint.
   const hooksMoved = held.id === PANE_LOG_ID && held.hookKey !== paneChatKey(tab.worker.term);
@@ -14591,6 +14599,24 @@ async function readEarlierTurns(run) {
   else repaintRunDoors(run);
 }
 
+/* A page that opened on its newest turns — a pane's read back from its
+ * file's end, a helper's gone back to its newest, a wire's continuing the
+ * pane whose newest turns it carries — reads up once from where they begin,
+ * after the frame that draws them (t-82901). The first read takes the last
+ * chunk alone, so the conversation stands as soon as it did before it read
+ * by turns; the said turns above come in behind it (`readEarlierTurns`),
+ * standing over the rows with the reader's row where it was. The person,
+ * 10-29 17:2x: 「열면 바로 그려지지 않음」 — the page stood empty while a
+ * first read of 40 turns took up to 8 MiB. */
+function fillAboveOnce(run) {
+  const held = run.helper;
+  if (held.filling !== true) return;
+  held.filling = false;
+  if (!(held.from > 0)) return;
+  // Asked from a task after the frame: nothing in the frame waits on it.
+  requestAnimationFrame(() => setTimeout(() => void readEarlierTurns(run)));
+}
+
 /* The page's two doors worn again — the way up and the way to the newest. */
 function repaintRunDoors(run) {
   const list = listOfRun(run);
@@ -14608,6 +14634,9 @@ function backToNewest(run) {
   if (held?.cut !== true) return false;
   forgetHeldTurns(held);
   held.next = held.id === WIRE_LOG_ID ? 0 : null;
+  // Back at its newest, it opens as it first did: what stands above them
+  // follows once they are drawn (`fillAboveOnce`).
+  held.filling = true;
   void pollHelperPages();
   return true;
 }

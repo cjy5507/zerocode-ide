@@ -27078,42 +27078,48 @@ fn codex_block(at: usize, output: usize) -> String {
     )
 }
 
-/// A page opens on a long conversation's newest turns — counted by turns,
-/// not by the last chunk's bytes — and reads up from there to the first line
+/// A page opens on a long conversation's newest turns — the last chunk's
+/// whole lines first, which cost what the first read did before, then as many
+/// said turns again from above — and reads up from there to the first line
 /// with nothing twice and nothing between (t-82901: the person saw two or
-/// three turns of a long session and could not go up). Both vendors' files.
+/// three turns of a long session and could not go up, and a first read by
+/// turns kept the page empty while it took up to 8 MiB). Both vendors' files.
 #[test]
 fn a_page_opens_on_its_newest_turns_and_reads_up_to_the_first_without_a_gap_or_a_twice() {
-    use crate::cmd::terminal::{LogRead, transcript_log_at};
+    use crate::cmd::terminal::{FIRST_REACH, LogRead, transcript_log_at, transcript_log_back};
+    use crate::shell_runtime::LineTurn;
+    fn placed<'turn>(
+        turns: impl IntoIterator<Item = &'turn LineTurn>,
+    ) -> Vec<(u64, String, String)> {
+        turns
+            .into_iter()
+            .map(|one| (one.line, one.turn.role.clone(), one.turn.text.clone()))
+            .collect()
+    }
     let said = crate::shell_runtime::TRANSCRIPT_SAID_TURNS;
     let rows = crate::shell_runtime::TRANSCRIPT_BACK_ROWS;
+    let chunk = crate::shell_runtime::SUBAGENT_LOG_CHUNK;
     let temp = tempfile::tempdir().expect("a transcript folder");
     let blocks = 120;
     // Each block's tool output is a sixth of a chunk: the last chunk held a
     // handful of turns, as it did in the person's long sessions.
     let output = 40_000;
-    // (vendor, file, said turns a block, turns a block, the turns the tail
-    // holds: whole blocks back until the said turns are met, newest line
-    // first)
-    let cases: [(&str, String, usize, usize, usize); 2] = [
+    // (vendor, file, said turns a block, turns a block)
+    let cases: [(&str, String, usize, usize); 2] = [
         (
             "claude",
             (0..blocks).map(|at| claude_block(at, output)).collect(),
             3,
             5,
-            // 13 whole blocks say 39; the 14th block's answer is the 40th.
-            13 * 5 + 1,
         ),
         (
             "codex",
             (0..blocks).map(|at| codex_block(at, output)).collect(),
             2,
             4,
-            // 20 whole blocks say 40, the last of them its prompt.
-            20 * 4,
         ),
     ];
-    for (vendor, body, said_a_block, turns_a_block, tail_turns) in cases {
+    for (vendor, body, said_a_block, turns_a_block) in cases {
         let path = temp.path().join(format!("{vendor}.jsonl"));
         std::fs::write(&path, &body).expect("written");
         let size = body.len() as u64;
@@ -27130,56 +27136,95 @@ fn a_page_opens_on_its_newest_turns_and_reads_up_to_the_first_without_a_gap_or_a
             }
         }
         assert_eq!(whole.len(), blocks * turns_a_block, "{vendor}: every turn");
+        // The first read: the last chunk's whole lines, and one chunk taken
+        // from the file for them.
         let tail = transcript_log_at(&path, LogRead::Tail).expect("the tail");
-        assert!(
-            said_in(&tail.turns) >= said && tail.turns.len() <= rows,
-            "{vendor}"
-        );
         assert_eq!(
-            tail.turns.len(),
-            tail_turns,
-            "{vendor}: the tail is the newest turns until {said} are said"
+            placed(&tail.turns),
+            placed(whole.iter().filter(|one| one.line > size - chunk)),
+            "{vendor}: the first read holds the newest turns, the last chunk's whole lines"
+        );
+        let mut counted = CountedBytes {
+            bytes: std::io::Cursor::new(body.as_bytes().to_vec()),
+            read: 0,
+        };
+        transcript_log_back(
+            &mut counted,
+            size,
+            size,
+            FIRST_REACH,
+            zerocode_core::transcript::Detail::Clipped,
+        )
+        .expect("the tail, counted");
+        assert_eq!(
+            counted.read, chunk,
+            "{vendor}: the first read takes one chunk"
         );
         assert!(
-            (size - tail.start) > crate::shell_runtime::SUBAGENT_LOG_CHUNK,
-            "{vendor}: the tail reaches past the last chunk"
+            (1..said).contains(&said_in(&tail.turns)),
+            "{vendor}: the last chunk alone says fewer turns than a page opens on"
         );
         assert!(tail.folded && tail.next == size && !tail.more, "{vendor}");
-        assert_eq!(tail.start, tail.turns[0].line, "{vendor}: it begins at a line");
+        // It begins at the first line that begins inside the last chunk — a
+        // record no page draws, it may be (a rollout's token count), so a
+        // read from above ends where this one began.
+        let inside = size - chunk;
+        let first_line = inside
+            + body.as_bytes()[usize::try_from(inside).expect("a place in memory")..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .expect("a line end in the last chunk") as u64
+            + 1;
+        assert_eq!(
+            tail.start, first_line,
+            "{vendor}: it begins at the last chunk's first whole line"
+        );
         // Read up, a read at a time, from where the last one began.
+        let opened = said_in(&tail.turns);
         let mut held: Vec<_> = tail.turns;
         let mut from = tail.start;
         let mut reads = 0;
         while from > 0 {
             let above = transcript_log_at(&path, LogRead::Before(from)).expect("a read back");
             reads += 1;
-            assert!(above.start < from, "{vendor}: every read back makes its way up");
             assert!(
-                above.turns.iter().all(|one| one.line >= above.start && one.line < from),
+                above.start < from,
+                "{vendor}: every read back makes its way up"
+            );
+            assert!(
+                above
+                    .turns
+                    .iter()
+                    .all(|one| one.line >= above.start && one.line < from),
                 "{vendor}: a read back holds only the lines above where the page held from"
             );
             assert!(
                 above.start == 0 || said_in(&above.turns) >= said,
                 "{vendor}: a read back short of the file's start gathers its said turns"
             );
+            assert!(
+                said_in(above.turns.iter().filter(|one| one.line != above.start)) < said,
+                "{vendor}: and stops at the line that met them"
+            );
             assert!(above.turns.len() <= rows, "{vendor}");
             assert_eq!(above.folded, above.start > 0, "{vendor}");
             assert!(above.model.is_none() && above.usage.is_none(), "{vendor}");
+            if reads == 1 {
+                assert!(
+                    opened + said_in(&above.turns) >= said,
+                    "{vendor}: the first read and the one from above it open the page on \
+                     {said} said turns or more"
+                );
+            }
             from = above.start;
             let mut both = above.turns;
             both.append(&mut held);
             held = both;
             assert!(reads <= blocks, "{vendor}: the reads reach the first line");
         }
-        let lines = |turns: &[crate::shell_runtime::LineTurn]| {
-            turns
-                .iter()
-                .map(|one| (one.line, one.turn.role.clone(), one.turn.text.clone()))
-                .collect::<Vec<_>>()
-        };
         assert_eq!(
-            lines(&held),
-            lines(&whole),
+            placed(&held),
+            placed(&whole),
             "{vendor}: read up to the first line, the page holds every turn once, in order"
         );
         assert_eq!(
@@ -27190,11 +27235,79 @@ fn a_page_opens_on_its_newest_turns_and_reads_up_to_the_first_without_a_gap_or_a
     }
 }
 
+/// What a page's first read costs on a long transcript, beside the read it
+/// replaced (t-82901; the person, 10-29 17:2x: 「열면 바로 그려지지 않음」):
+/// the last chunk's whole lines — the first read now, the same bytes the
+/// first read took before t-82901 — a read back by turns from the end, the
+/// first read from ecc719bcb until the page drew its newest chunk first, and
+/// the read from above that follows the first now. Each is timed on its own
+/// file, opened, read, decoded and written out as the page is sent it, on a
+/// file shaped as this machine's long sessions (400 blocks, 60 KiB results).
+/// Run on purpose: `cargo test -p zerocode-shell --bin zerocode-shell --
+/// --ignored --nocapture a_first_read_costs`.
+#[test]
+#[ignore = "a measurement, run on purpose: -- --ignored --nocapture"]
+fn a_first_read_costs_what_it_did_before_the_page_read_by_turns() {
+    use crate::cmd::terminal::{LogRead, PAGE_REACH, transcript_log_at, transcript_log_back};
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    let path = temp.path().join("long.jsonl");
+    let body: String = (0..400).map(|at| claude_block(at, 60 * 1024)).collect();
+    std::fs::write(&path, &body).expect("written");
+    let size = body.len() as u64;
+    let rounds = 9;
+    let timed = |name: &str, read: &dyn Fn() -> crate::shell_runtime::SubagentLog| {
+        let mut took = Vec::new();
+        let mut sent = 0;
+        let mut turns = 0;
+        for _ in 0..rounds {
+            let started = std::time::Instant::now();
+            let log = read();
+            sent = serde_json::to_vec(&log).expect("written out").len();
+            took.push(started.elapsed().as_secs_f64() * 1000.0);
+            turns = log.turns.len();
+        }
+        took.sort_by(f64::total_cmp);
+        println!(
+            "{name}: {:.1} ms median ({:.1}–{:.1}), {turns} turns ({} said), {:.1} KiB sent",
+            took[rounds / 2],
+            took[0],
+            took[rounds - 1],
+            said_in(&read().turns),
+            sent as f64 / 1024.0
+        );
+    };
+    println!(
+        "a {:.1} MiB transcript, {rounds} rounds",
+        size as f64 / 1048576.0
+    );
+    timed("first read, the last chunk", &|| {
+        transcript_log_at(&path, LogRead::Tail).expect("the tail")
+    });
+    timed("first read by turns, as from ecc719bcb", &|| {
+        let mut file = std::fs::File::open(&path).expect("opened");
+        let size = file.metadata().expect("measured").len();
+        transcript_log_back(
+            &mut file,
+            size,
+            size,
+            PAGE_REACH,
+            zerocode_core::transcript::Detail::Clipped,
+        )
+        .expect("read back")
+    });
+    let start = transcript_log_at(&path, LogRead::Tail)
+        .expect("the tail")
+        .start;
+    timed("the read from above after the first", &|| {
+        transcript_log_at(&path, LogRead::Before(start)).expect("read back")
+    });
+}
+
 /// How many of a read's turns a person reads as said — by the person or by
 /// the agent.
-fn said_in(turns: &[crate::shell_runtime::LineTurn]) -> usize {
+fn said_in<'turn>(turns: impl IntoIterator<Item = &'turn crate::shell_runtime::LineTurn>) -> usize {
     turns
-        .iter()
+        .into_iter()
         .filter(|one| one.turn.role == "user" || one.turn.role == "assistant")
         .count()
 }
