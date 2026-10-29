@@ -11447,8 +11447,11 @@ function paintAutomationRuns() {
         state.textContent = t("auto.runMissedMany", "놓침 {{n}}회 — 그 시각에 창이 돌지 않음", {
           n: run.missed.count,
         });
-        const first = run.at_epoch_ms
-          - (run.scheduled_for_epoch_minutes - run.missed.first_epoch_minutes) * 60000;
+        // The first night's instant as the backend dated it (t-78091); a row
+        // written before it did counts back from its own date.
+        const first = Number.isFinite(run.missed.first_at_epoch_ms)
+          ? run.missed.first_at_epoch_ms
+          : run.at_epoch_ms - (run.scheduled_for_epoch_minutes - run.missed.first_epoch_minutes) * 60000;
         state.dataset.tip = t("auto.runMissedFirst", "처음 놓친 회차 {{at}}", { at: runClock(first) });
       } else {
         state.textContent = t("auto.runMissed", "놓침 — 그 시각에 창이 돌지 않음");

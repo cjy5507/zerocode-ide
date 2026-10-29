@@ -10046,7 +10046,27 @@ await test("a completed run shows the agent's result and opens its evidence fold
     runs: 1,
   };
   backend.automations = [job];
+  // t-78091: three nights missed, the first an hour away from where counting
+  // back from the row's own date in local minutes lands — the backend dated
+  // it across a daylight-saving change.
+  const missedFirstAt = 1_756_600_000_000 - 2 * 86_400_000 + 3_600_000;
   backend.automationRuns = [{
+    id: "1756600000000-missed-auto-qa",
+    automation_id: "auto-qa",
+    scheduled_for_epoch_minutes: 28_996_000,
+    at_epoch_ms: 1_756_600_000_000,
+    root: BOOT_BASE.project_root,
+    term: 0,
+    made_worktree: null,
+    skipped: null,
+    failure: null,
+    missed: { count: 3, first_epoch_minutes: 28_996_000 - 2 * 1440, first_at_epoch_ms: missedFirstAt },
+    ended_at_epoch_ms: null,
+    exit_code: null,
+    completed_at_epoch_ms: null,
+    result: null,
+    evidence_dir: null,
+  }, {
     id: "1756700000000-5",
     automation_id: "auto-qa",
     scheduled_for_epoch_minutes: 28_998_560,
@@ -10116,6 +10136,13 @@ await test("a completed run shows the agent's result and opens its evidence fold
     // the verdict: a run whose agent reported done is painted completed.
     const completed = pageA.locator("#auto-runs-list .auto-run-completed");
     assertEqual(await completed.count(), 2, "runs whose agents reported done were not painted as completed");
+    // The first missed night is the instant the backend dated (t-78091), not
+    // the row's date counted back in local minutes.
+    assertEqual(
+      await pageA.locator("#auto-runs-list .auto-run-missed").getAttribute("data-tip"),
+      await pageA.evaluate((at) => t("auto.runMissedFirst", "처음 놓친 회차 {{at}}", { at: runClock(at) }), missedFirstAt),
+      "the first missed night was counted back from the row instead of read",
+    );
     // Newest first: the proven run leads, the one that only said so follows.
     const state = completed.nth(0);
     const unproven = completed.nth(1);

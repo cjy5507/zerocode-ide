@@ -15248,6 +15248,93 @@ fn nightly_job(enabled: bool, last_run_at: Option<i64>) -> Automation {
     }
 }
 
+/// America/New_York in 2026, as `localtime_r` answers it there: EST (−5 h)
+/// until 2026-03-08 07:00 UTC, EDT (−4 h) until 2026-11-01 06:00 UTC, EST
+/// after.
+fn new_york_offset_secs(utc_secs: i64) -> i64 {
+    const SPRING_FORWARD: i64 = 1_772_953_200;
+    const FALL_BACK: i64 = 1_793_512_800;
+    if (SPRING_FORWARD..FALL_BACK).contains(&utc_secs) {
+        -4 * 3600
+    } else {
+        -5 * 3600
+    }
+}
+
+/// t-78091 (t-77713 F4): a gap that crossed a daylight-saving change is
+/// dated by each night's own offset. In New York a 01:30 job last missed on
+/// the spring-forward night, read at noon that day, and a 00:30 job last
+/// missed on the fall-back night, read at noon: the row is the last night's
+/// real instant and carries the first night's. Before, the row counted back
+/// from now in local minutes and was an hour off, and the page counted the
+/// first night back from the row the same way. A clock with no change
+/// (Seoul, +9 h) dates them as it always did.
+#[test]
+fn a_gap_across_a_daylight_saving_change_is_dated_by_each_nights_own_offset() {
+    let day = 24 * 60;
+    // Local minutes since the epoch, read as if UTC.
+    let local_at = |minutes: i64| LocalMinute {
+        epoch_minutes: minutes,
+    };
+    for (scene, time, ran, now, last_ms, first_ms) in [
+        (
+            // Ran 03-05 01:30; read 03-08 12:00 EDT. Last 03-08 01:30 EST.
+            "spring forward",
+            "01:30",
+            29_544_570,
+            29_549_520,
+            1_772_951_400_000,
+            1_772_778_600_000,
+        ),
+        (
+            // Ran 10-29 00:30; read 11-01 12:00 EST. Last 11-01 00:30 EDT.
+            "fall back",
+            "00:30",
+            29_887_230,
+            29_892_240,
+            1_793_507_400_000,
+            1_793_334_600_000,
+        ),
+    ] {
+        let config = tempfile::tempdir().expect("automation config");
+        let local = tempfile::tempdir().expect("automation history");
+        let mut job = nightly_job(true, Some(ran));
+        job.schedule.time = time.into();
+        write_automations(config.path(), std::slice::from_ref(&job)).expect("definition");
+        write_automation_runs(local.path(), &[]).expect("empty ledger");
+        let gap = remember_missed_runs(
+            config.path(),
+            local.path(),
+            &job.id,
+            local_at(now),
+            &new_york_offset_secs,
+        )
+        .expect("write")
+        .expect("three nights went by");
+        assert_eq!(
+            (gap.first.epoch_minutes, gap.last.epoch_minutes, gap.count),
+            (ran + day, ran + 3 * day, 3),
+            "{scene}"
+        );
+        let row = &stored_automation_runs(local.path())[0];
+        assert_eq!(row.at_epoch_ms, last_ms, "{scene}: the last night is an hour off");
+        assert_eq!(
+            row.missed.and_then(|missed| missed.first_at_epoch_ms),
+            Some(first_ms),
+            "{scene}: the first night is an hour off"
+        );
+    }
+
+    // Seoul: one offset all year, and the row is what it always was.
+    let seoul = |_: i64| 9 * 3600;
+    for minutes in [29_549_520, 29_892_240] {
+        assert_eq!(
+            utc_ms_of_local_minute(local_at(minutes), &seoul),
+            (minutes - 9 * 60) * 60_000
+        );
+    }
+}
+
 /// A gap the window slept through is one row, and it spends nothing.
 ///
 /// The tick only notices; this is the write. One row for the whole gap, with
@@ -15269,10 +15356,10 @@ fn a_gap_the_window_slept_through_is_one_row_that_spends_nothing() {
     let now = LocalMinute {
         epoch_minutes: ran + 3 * day + 9 * 60,
     };
-    // Twenty-five seconds into the minute: the row is dated on the minute.
-    let now_ms = now.epoch_minutes * 60_000 + 25_000;
+    // A clock on UTC: local minutes are UTC minutes.
+    let utc = |_: i64| 0;
 
-    let gap = remember_missed_runs(config.path(), local.path(), &job.id, now, now_ms)
+    let gap = remember_missed_runs(config.path(), local.path(), &job.id, now, &utc)
         .expect("write")
         .expect("three nights went by");
     assert_eq!(
@@ -15287,6 +15374,7 @@ fn a_gap_the_window_slept_through_is_one_row_that_spends_nothing() {
         Some(MissedRecord {
             count: 3,
             first_epoch_minutes: ran + day,
+            first_at_epoch_ms: Some((ran + day) * 60_000),
         })
     );
     assert_eq!(row.scheduled_for_epoch_minutes, Some(ran + 3 * day));
@@ -15305,7 +15393,7 @@ fn a_gap_the_window_slept_through_is_one_row_that_spends_nothing() {
     );
 
     assert!(
-        remember_missed_runs(config.path(), local.path(), &job.id, now, now_ms)
+        remember_missed_runs(config.path(), local.path(), &job.id, now, &utc)
             .expect("write")
             .is_none()
     );
@@ -15318,17 +15406,16 @@ fn a_gap_the_window_slept_through_is_one_row_that_spends_nothing() {
     let later = LocalMinute {
         epoch_minutes: now.epoch_minutes + 2 * day,
     };
-    let later_ms = later.epoch_minutes * 60_000;
     set_automation_enabled_in(config.path(), &job.id, false).expect("switch off");
     assert!(
-        remember_missed_runs(config.path(), local.path(), &job.id, later, later_ms)
+        remember_missed_runs(config.path(), local.path(), &job.id, later, &utc)
             .expect("write")
             .is_none(),
         "a job switched off was reported missed"
     );
     delete_automation_and_run_history(config.path(), local.path(), &job.id).expect("delete");
     assert!(
-        remember_missed_runs(config.path(), local.path(), &job.id, later, later_ms)
+        remember_missed_runs(config.path(), local.path(), &job.id, later, &utc)
             .expect("write")
             .is_none()
     );

@@ -172,28 +172,55 @@ pub(super) fn validate_diff_note(note: &DiffNote) -> Result<(), String> {
     Ok(())
 }
 
-/// The local clock's offset from UTC, in seconds — derived from the same
-/// `localtime_r` road as [`local_minute_now`], so there is still one local
-/// clock in this program. Offsets are whole minutes everywhere on earth.
+/// The local clock's offset from UTC at the UTC second `secs`, in seconds —
+/// derived from the same `localtime_r` road as [`local_minute_at`], so there
+/// is still one local clock in this program, and the rule in force at that
+/// instant, daylight saving included (t-78091). Offsets are whole minutes
+/// everywhere on earth.
+pub(super) fn local_offset_secs_at(secs: i64) -> i64 {
+    local_minute_at(secs).epoch_minutes * 60 - secs.div_euclid(60) * 60
+}
+
+/// The local clock's offset from UTC now, in seconds.
 pub(super) fn local_offset_secs() -> i64 {
-    let secs = std::time::SystemTime::now()
+    local_offset_secs_at(epoch_secs_now())
+}
+
+fn epoch_secs_now() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs() as i64);
-    local_minute_now().epoch_minutes * 60 - secs.div_euclid(60) * 60
+        .map_or(0, |since| since.as_secs() as i64)
 }
 
 /// The minute it is now, locally.
+pub(super) fn local_minute_now() -> LocalMinute {
+    local_minute_at(epoch_secs_now())
+}
+
+/// The instant a local minute stood for, in UTC milliseconds, under the
+/// offsets `offset_at` answers for a UTC second — in the product
+/// [`local_offset_secs_at`] (t-78091). The one place a past local minute
+/// becomes a date: the offset now is not the offset then, and a gap that
+/// crossed a daylight-saving change was an hour off counted back from now.
+/// Two looks, as `mktime` takes them — the offset at the minute read as UTC,
+/// then at the instant that gives — so each side of a change gets its own
+/// offset; a minute the clock skipped or showed twice is read with one of
+/// the two offsets around it.
+pub(super) fn utc_ms_of_local_minute(local: LocalMinute, offset_at: &dyn Fn(i64) -> i64) -> i64 {
+    let as_utc = local.epoch_minutes * 60;
+    let guess = as_utc - offset_at(as_utc);
+    (as_utc - offset_at(guess)) * 1000
+}
+
+/// The local minute the UTC second `secs` falls in.
 ///
 /// The offset comes from the platform rather than from a timezone crate: the
 /// only question asked is "which local minute is this", and `localtime_r` is
 /// the operating system's own answer to it — including whatever daylight-saving
-/// rule is in force today, which a bundled table would have to be kept current
-/// to match.
+/// rule was in force at that second, which a bundled table would have to be
+/// kept current to match.
 #[cfg(unix)]
-pub(super) fn local_minute_now() -> LocalMinute {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs() as i64);
+fn local_minute_at(secs: i64) -> LocalMinute {
     // `localtime_r` fills a struct the platform owns the layout of. The call is
     // unsafe because it writes through a raw pointer; it is sound here because
     // the buffer is exactly the struct being asked for and is read only after
@@ -212,10 +239,7 @@ pub(super) fn local_minute_now() -> LocalMinute {
 }
 
 #[cfg(windows)]
-pub(super) fn local_minute_now() -> LocalMinute {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs() as i64);
+fn local_minute_at(secs: i64) -> LocalMinute {
     #[repr(C)]
     struct Tm {
         tm_sec: i32,
@@ -256,10 +280,7 @@ pub(super) fn local_minute_now() -> LocalMinute {
 }
 
 #[cfg(all(not(unix), not(windows)))]
-pub(super) fn local_minute_now() -> LocalMinute {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs() as i64);
+fn local_minute_at(secs: i64) -> LocalMinute {
     LocalMinute {
         epoch_minutes: secs.div_euclid(60),
     }
@@ -1232,7 +1253,7 @@ pub(super) fn remember_missed_runs(
     local_data_root: &Path,
     automation_id: &str,
     now: LocalMinute,
-    now_epoch_ms: i64,
+    offset_at: &dyn Fn(i64) -> i64,
 ) -> Result<Option<MissedRuns>, String> {
     let _store = automation_store_domain();
     let Some(automation) = stored_automations(config_root)
@@ -1246,7 +1267,7 @@ pub(super) fn remember_missed_runs(
     let Some(gap) = automation.missed_past_grace(now, recorded) else {
         return Ok(None);
     };
-    let row = missed_run_row(&automation, gap, now, now_epoch_ms);
+    let row = missed_run_row(&automation, gap, offset_at);
     let forgotten = record_run(&mut history, row, RUNS_KEPT_PER_AUTOMATION);
     write_automation_runs(local_data_root, &history)?;
     forget_run_evidence(local_data_root, &forgotten);
@@ -1260,17 +1281,17 @@ pub(super) fn remember_missed_runs(
 }
 
 /// The history row for a gap, dated at its last night, the one a reader goes
-/// looking for. `term` is `FLOAT_TERM` for the reason a skip's is: no shell
+/// looking for — and carrying its first night's instant, so the page reads
+/// that too rather than counting back across a daylight-saving change
+/// (t-78091). `term` is `FLOAT_TERM` for the reason a skip's is: no shell
 /// was opened. The id names the job as well as the minute, because two jobs
 /// due at the same 19:00 miss it together.
 fn missed_run_row(
     automation: &Automation,
     gap: MissedRuns,
-    now: LocalMinute,
-    now_epoch_ms: i64,
+    offset_at: &dyn Fn(i64) -> i64,
 ) -> AutomationRun {
-    let minutes_back = now.epoch_minutes - gap.last.epoch_minutes;
-    let at_epoch_ms = (now_epoch_ms.div_euclid(60_000) - minutes_back) * 60_000;
+    let at_epoch_ms = utc_ms_of_local_minute(gap.last, offset_at);
     AutomationRun {
         id: format!("{at_epoch_ms}-missed-{}", automation.id),
         automation_id: automation.id.clone(),
@@ -1284,6 +1305,7 @@ fn missed_run_row(
         missed: Some(MissedRecord {
             count: gap.count,
             first_epoch_minutes: gap.first.epoch_minutes,
+            first_at_epoch_ms: Some(utc_ms_of_local_minute(gap.first, offset_at)),
         }),
         ended_at_epoch_ms: None,
         exit_code: None,
@@ -1310,7 +1332,7 @@ pub(super) fn tick_automations(app: &AppHandle, now: LocalMinute) {
                 state.local_data_root(),
                 &automation.id,
                 now,
-                now_epoch_ms(),
+                &local_offset_secs_at,
             ) {
                 Ok(Some(_)) => {
                     let _ = app.emit(
