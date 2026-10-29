@@ -29534,6 +29534,100 @@ fn measure_a_window_on_a_ledger_the_persons_size() {
         .expect("the measured sweep");
     eprintln!("measure: the sweep {swept:?}");
     start_reads("after the sweep");
+
+    /* How often a beat and a read walk the ledger whole (review P2-1): a
+     * worker at work, its pane seen on every beat, then the reads a
+     * coordinator sends — each with nobody else reading, and with a reader
+     * holding the revision it was handed, the way a board build or another
+     * pane's read overlaps them. The walks are printed whole, so the same
+     * lines read on a tree whose ledger has no copies to count. */
+    const BEATS: i64 = 30;
+    const READS: usize = 30;
+    const LEADER_TERM: u32 = 84_000;
+    const WORKER_TERM: u32 = 84_001;
+    let _reconcile = ReconcilePanesHere::begin();
+    let team = format!("team-measured-{LEADER_TERM}");
+    let _carrying = a_worker_carrying_work(&team, LEADER_TERM, WORKER_TERM);
+    let host = Counting::default();
+    host.set_pane(WORKER_TERM, true);
+    let began = clock();
+    tick(&host, &[], began);
+    for (round, reader) in [(1, false), (2, true)] {
+        let held_by_a_reader = reader.then(|| held.actor.view().expect("a reader's image"));
+        let whose = if reader {
+            "while a reader holds the ledger"
+        } else {
+            "alone"
+        };
+        let mut times = Vec::new();
+        let before = zerocode_core::orchestration::ledger_work();
+        for beat in 0..BEATS {
+            let one = std::time::Instant::now();
+            tick(&host, &[], began + (round * BEATS + beat) * 1_000);
+            times.push(millis(one));
+        }
+        let walked = zerocode_core::orchestration::ledger_work().since(before);
+        let (p50, p90) = middle(&mut times);
+        eprintln!(
+            "measure: {BEATS} beats beside a worker at work, {whose}: p50={p50:.2}ms \
+             p90={p90:.2}ms; walked {walked:?}"
+        );
+        for line in ["check --peek", "task-list", "run-show"] {
+            let mut times = Vec::new();
+            let before = zerocode_core::orchestration::ledger_work();
+            for _ in 0..READS {
+                let one = std::time::Instant::now();
+                let said = run(
+                    &host,
+                    Vec::new(),
+                    &team,
+                    zerocode_core::agent_teams::LEADER_PANE,
+                    TEST_CAPABILITY,
+                    &words(line),
+                    clock(),
+                );
+                assert_eq!(said.exit_code, 0, "`{line}`: {}", said.stderr);
+                times.push(millis(one));
+            }
+            let walked = zerocode_core::orchestration::ledger_work().since(before);
+            let (p50, p90) = middle(&mut times);
+            eprintln!(
+                "measure: {READS} `{line}` {whose}: p50={p50:.2}ms p90={p90:.2}ms; \
+                 walked {walked:?}"
+            );
+        }
+        drop(held_by_a_reader);
+    }
+}
+
+/// What one copy of a ledger the person's size costs (t-81273): the price a
+/// write pays when it meets a reader still holding the revision it was lent,
+/// and so the price of each `clones` the window measurement above counts.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "a measurement: prints one copy of a ledger the person's size"]
+fn measure_one_copy_of_a_ledger_the_persons_size() {
+    const COPIES: usize = 10;
+    let ledger = super::Ledger::rebuild(a_ledger_the_persons_size()).expect("the measured ledger");
+    let (before, _, _) = memory_now_mib();
+    let mut times = Vec::new();
+    for _ in 0..COPIES {
+        let copied = std::time::Instant::now();
+        let copy = ledger.clone();
+        times.push(copied.elapsed().as_secs_f64() * 1000.0);
+        drop(copy);
+    }
+    let held = ledger.clone();
+    let (after, _, _) = memory_now_mib();
+    drop(held);
+    times.sort_by(f64::total_cmp);
+    eprintln!(
+        "measure: one copy p50={:.1}ms p90={:.1}ms over {COPIES}; a copy held costs \
+         {} MiB of footprint",
+        times[COPIES / 2],
+        times[COPIES * 9 / 10],
+        after.saturating_sub(before)
+    );
 }
 
 /// t-21017: a pointer that cannot be typed is told on both sides, once per
