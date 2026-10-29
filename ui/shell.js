@@ -13418,6 +13418,11 @@ function standAskCard(host, panel) {
     card = document.createElement("section");
     card.className = "pane-chat-ask";
     card.setAttribute("aria-label", t("board.tasks.needsInput", "진행하려면 확인이 필요해요."));
+    // The composer hands the keyboard here when its words cannot answer the
+    // question (`answerAskFromComposer`); the keys pressed on the card are
+    // its own, not the terminal's behind the page (`rearmKeySink`).
+    card.tabIndex = -1;
+    card.dataset.keyboardOwner = "true";
   }
   card.replaceChildren(panel);
   // Inside the dock, above the composer — the extension's card stands in its
@@ -13444,6 +13449,7 @@ function paintWireAsk(host, run, force = false) {
   if (!ask) {
     card?.remove();
     run.askDraft = null;
+    run.askShape = null;
     return;
   }
   const sig = JSON.stringify(ask.id);
@@ -13477,6 +13483,11 @@ function paintWireAsk(host, run, force = false) {
     ? askPanelNode(run.askShape, run.askDraft)
     : approvalPanelNode(run.askShape, run.askDraft);
   standAskCard(host, panel);
+  // The box under the card says where its words go for this question — the
+  // page's composer was painted before the card took its shape (t-81786 r2
+  // P2-2: the first question read the box's own sentence, the next the one
+  // before it).
+  syncWorkerComposers(run);
 }
 
 /* A helper's open page learns that its helper finished from the roster, the
@@ -13701,6 +13712,11 @@ function paneHeadNode() {
   name.type = "button";
   name.className = "pane-head-name";
   name.dataset.tip = t("tree.menu.rename", "이름 바꾸기");
+  // Its name is the pane's, the words it shows; what a press does is said
+  // beside it, for a screen reader as the tooltip says it to a pointer, and
+  // Enter on it is its own (t-81786 P3-11).
+  name.setAttribute("aria-description", name.dataset.tip);
+  name.dataset.keyboardOwner = "true";
   name.addEventListener("click", () => {
     const tab = [...paneHeads].find(([, one]) => one === head)?.[0];
     const owner = tabs.find((one) => one.id === tab);
@@ -13774,8 +13790,11 @@ function placePaneHeadLine(tab, term) {
 }
 
 /* The one line that says which conversation this pane holds — the session its
- * agent named, the one a 「계속」 resumes. t-68069 writes here why a resume
- * picked it; until a hook names a session the line stands empty. */
+ * agent named, the one a 「계속」 resumes — short on the line, whole in its
+ * tooltip; until a hook names a session the line stands empty. In the
+ * conversation's head it stands aside, and the head's count says the session
+ * to a pointer, a keyboard and a screen reader (`paintChatTally`, t-81786
+ * P3-12). */
 function paintPaneHeadPick(head, term) {
   const pick = head.__line.querySelector(".pane-head-pick");
   const session = paneSessions.get(term)?.session?.id ?? "";
@@ -14043,9 +14062,58 @@ function paintPaneAsk(held, force = false) {
     force = true;
   }
   if (card && !force) return;
-  const shape = { pane: `term:${term}`, agent: ask.agent, approval: ask.approval, ask_prompt: ask.ask_prompt };
+  const shape = paneAskShape(term, ask);
   const panel = ask.ask_prompt ? askPanelNode(shape, held.askDraft) : approvalPanelNode(shape, held.askDraft);
   standAskCard(held.host, panel);
+  // The box under it says whether its words answer the card or wait — the
+  // card's answer going out moves that (t-81786 r2 P2-1).
+  syncWorkerComposers(held.run);
+}
+
+/* A pane's question in the card's shape — the card's, and the composer's
+ * under it (`standingAskOf`). */
+function paneAskShape(term, ask) {
+  return { pane: `term:${term}`, agent: ask.agent, approval: ask.approval, ask_prompt: ask.ask_prompt };
+}
+
+/* The question standing as a card over the conversation `run`'s composer
+ * speaks into — its shape, and the draft its card answers through once the
+ * card stands — or null. A pane's conversation keeps the draft on its page
+ * (`paintPaneAsk`), a wire's page on the run (`paintWireAsk`); a helper's
+ * page shows no card. */
+function standingAskOf(run) {
+  if (run.wire) return run.wireLog?.asks?.[0] && run.askShape ? { card: run.askShape, draft: run.askDraft } : null;
+  const ask = run.helper?.id === PANE_LOG_ID ? paneAsks.get(run.term) : undefined;
+  if (!ask) return null;
+  const draft = paneChats.get(run.term)?.askDraft;
+  return { card: paneAskShape(run.term, ask), draft: draft?.sig === ask.sig ? draft : null };
+}
+
+/* Words typed in the composer while a question stands as its card
+ * (t-81786 P0): pasted into the CLI's input line, they fell on the menu it
+ * was showing and were gone, the question still standing. A question that
+ * takes words takes them as its free answer, down the card's own road
+ * (`confirmAsk` — the next question, or the answers sent), and the box lets
+ * them go; a permission takes none, so they stay in the box, the person is
+ * told to answer the question first, and the keyboard goes to the card.
+ * Asked only before the card's answer went: words sent after it wait in the
+ * queue (the composer's submit, r2 P2-1). */
+function answerAskFromComposer(form, box, run, { card, draft }) {
+  const words = box.value.trim();
+  if (words === "") return;
+  if (card.ask_prompt && draft) {
+    // The card's own field and the box are two places for one answer: what
+    // the field already held stays, and the box's words follow it (r2 P3-3).
+    const held = (draft.other[draft.index] ?? "").trim();
+    draft.other[draft.index] = held ? `${held} ${words}` : words;
+    box.value = "";
+    run.draft = "";
+    form.__workerFit?.();
+    confirmAsk(card, draft);
+    return;
+  }
+  toast(t("worker.askAnswerFirst", "먼저 위 질문에 답하세요"));
+  form.closest(".worker-view")?.querySelector(".pane-chat-ask")?.focus();
 }
 
 function paintHelperSurface(tab) {
@@ -14564,6 +14632,16 @@ function dressThoughtRow(row, turn) {
   writeTextContent(row.querySelector(":scope > .helper-step-line > .helper-step-res"), thoughtLabel(turn));
 }
 
+/* The row just above a new turn, if it is a thought, now knows how long that
+ * thought lasted — the row itself, or the last row of the open pill above
+ * (t-81786 P3-3): its body stood before the length was known. */
+function dressSettledThought(above) {
+  const row = above?.classList.contains("helper-group")
+    ? above.querySelector(":scope > .helper-group-body")?.lastElementChild
+    : above;
+  if (row?.classList.contains("is-thinking") && row.__turn?.thoughtMs !== undefined) dressThoughtRow(row, row.__turn);
+}
+
 function thoughtTurnNode(run, turn) {
   const row = thoughtRowNode("helper-turn is-thinking", run);
   row.dataset.turn = String(turn.seq);
@@ -14861,16 +14939,6 @@ function dressLastAnswer(list, run, newest) {
   standAnswerActions(list, newest.row);
 }
 
-/* Only the person's newest words stand stuck at the list's top (t-81525 B4):
- * one sticky row a page, where every row of theirs was one — each a layer a
- * long conversation paid for. Moved when newer words arrive. */
-function dressLastPerson(list, newest) {
-  if (!newest || newest === list.__lastPerson) return;
-  list.__lastPerson?.classList.remove("is-latest");
-  newest.classList.add("is-latest");
-  list.__lastPerson = newest;
-}
-
 /* The list's fixed tail — the helpers at work (t-6323 A6), then the status
  * line the extension's panel keeps under the last row (`spinnerRow`) — that
  * every turn and streaming row stands before. `null` while the page has
@@ -15073,14 +15141,12 @@ function openActivityPill(group, open) {
 }
 
 /* 상한이 앞의 턴들을 지웠다: 알약은 남은 구성원만 든다. 펼쳐져 있었으면
- * 남은 것으로 다시 펼친다 — 사람이 연 것을 그 아래서 닫지 않는다. */
+ * 남은 것으로 다시 펼친다 — 사람이 연 것을 그 아래서 닫지 않는다. 부르는
+ * 쪽이 앞 구성원이 잘리는지를 먼저 본다(읽던 자리를 그 전에 잰다). */
 function trimActivityPill(group, first) {
-  const kept = group.__members.filter((turn) => turn.seq >= first);
-  if (kept.length === group.__members.length) return false;
-  group.__members = kept;
+  group.__members = group.__members.filter((turn) => turn.seq >= first);
   group.querySelector(":scope > .helper-group-body")?.remove();
   if (group.__open) openActivityPill(group, true);
-  return true;
 }
 
 /* 새로 선 활동 턴 하나를 알약에 들인다 — 바로 위의 행이 알약이면 거기에,
@@ -15096,6 +15162,7 @@ function holdActivityTurn(list, run, turn, before, spoken) {
   group.__turn = turn;
   group.dataset.turn = String(turn.seq);
   if (group.__open) {
+    dressSettledThought(group);
     group.querySelector(":scope > .helper-group-body")?.appendChild(helperTurnRowNode(run, turn, spoken));
   }
   return group;
@@ -15114,7 +15181,6 @@ function applyFoldedView(list, folded) {
     row.remove();
   }
   list.__lastAnswer = null;
-  list.__lastPerson = null;
 }
 
 /* 전사를 장부에 맞춘다 — 통째로 다시 세우지 않고.
@@ -15137,7 +15203,6 @@ function syncHelperTurns(list, run) {
   if (!held.length) {
     for (const row of list.querySelectorAll(":scope > [data-turn]")) row.remove();
     list.__lastAnswer = null;
-    list.__lastPerson = null;
     syncHelperTasks(list, run);
     syncStreamingTurns(list, run);
     syncHelperReport(list, run);
@@ -15165,7 +15230,14 @@ function syncHelperTurns(list, run) {
       continue;
     }
     if (Number(front.dataset.turn) >= first) {
-      if (front.classList.contains("helper-group") && trimActivityPill(front, first)) pills.add(front);
+      // A pill that loses its front members rebuilds an open body shorter:
+      // the reader's place is held as for a row that goes (t-81786 P3-4).
+      if (front.classList.contains("helper-group") && front.__members[0].seq < first) {
+        before ??= { height: list.scrollHeight, top: list.scrollTop };
+        trimActivityPill(front, first);
+        dropped = true;
+        pills.add(front);
+      }
       break;
     }
     before ??= { height: list.scrollHeight, top: list.scrollTop };
@@ -15194,7 +15266,9 @@ function syncHelperTurns(list, run) {
     // joins the pill right above it, or stands one — no row of its own until
     // the pill opens (B2).
     if (folded && isActivityTurn(turn)) {
-      pills.add(holdActivityTurn(list, run, turn, streaming ?? helperListTail(list), spoken));
+      const group = holdActivityTurn(list, run, turn, streaming ?? helperListTail(list), spoken);
+      pills.add(group);
+      if (turn.role === "thinking" && streaming) noteThoughtSettled(list, turn, group);
       cold -= 1;
       settlePaneLive(run, turn.role);
       continue;
@@ -15227,10 +15301,7 @@ function syncHelperTurns(list, run) {
     // finished piece leaves in this same paint (`syncStreamingTurns` below).
     settlePaneLive(run, turn.role);
     // The thought before this turn now knows how long it lasted.
-    const before = row.previousElementSibling;
-    if (before?.classList.contains("is-thinking") && before.__turn?.thoughtMs !== undefined) {
-      dressThoughtRow(before, before.__turn);
-    }
+    dressSettledThought(row.previousElementSibling);
   }
   // A result that joined its call after the row stood, a word that closed
   // the calls before it, a run that ended: the rows still out are dressed
@@ -15252,7 +15323,6 @@ function syncHelperTurns(list, run) {
   // them again a word at a time (09-16 → 09-20) only lagged behind it. The
   // wire's page streams the words themselves (`syncStreamingTurns`).
   dressLastAnswer(list, run, newest);
-  dressLastPerson(list, people.at(-1));
   askShelfAgain(list);
   syncHelperTasks(list, run);
   syncStreamingTurns(list, run);
@@ -15416,15 +15486,6 @@ function helperTurnsNode(run) {
   watchExplainTurns(list);
   // It keeps to its foot until the person leaves it (t-6323 A5).
   keepToFoot(list);
-  // A person's words stuck at the top (the extension's sticky header) are a
-  // door back to where they were said: a click scrolls the row home.
-  list.addEventListener("click", (event) => {
-    const row = event.target.closest?.(".helper-turn.is-user");
-    if (!row || !list.contains(row)) return;
-    if (Math.round(row.getBoundingClientRect().top) > Math.round(list.getBoundingClientRect().top)) return;
-    // Scroll the list, never the page: see `scrollHelperToBottom`.
-    list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top;
-  });
   syncHelperTurns(list, run);
   return list;
 }
@@ -15657,6 +15718,16 @@ function workerComposerNode(run, owner = null) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (run.sending || run.sendUncertain) return;
+    // A question standing as its card is answered there, not on the input
+    // line under the CLI's menu. Once its answer went, the card stands until
+    // the hook says the agent moved (t-81786 r2 P2-1 — after 「대신 지시하기」
+    // the refusing key is in and the box is where the instruction goes): the
+    // words wait in the queue as words sent mid-turn do.
+    const asking = standingAskOf(run);
+    if (asking && !asking.draft?.sending) {
+      answerAskFromComposer(form, box, run, asking);
+      return;
+    }
     const draft = box.value;
     run.draft = draft;
     const text = box.value.trim();
@@ -15677,7 +15748,7 @@ function workerComposerNode(run, owner = null) {
       // So do words sent while the pane hands its conversation to its wire:
       // the wire's page sends them (`carryPaneChat`), or the pane, refused
       // (t-54304).
-      if (composerWorking(run) || composerHolding(run)) queueComposerMessage(run, message);
+      if (composerWorking(run) || composerHolding(run) || asking) queueComposerMessage(run, message);
       // 아니면 그 자리에서 실행의 길로 — 선이면 한 요청, 판이면
       // 붙여넣기·숨·Enter. `pasted`는 Enter가 실패했을 때 글이 이미 부모의
       // 상자에 있다는 사실을 남긴다.
@@ -15741,9 +15812,17 @@ function paintWorkerComposerState(form, run, delivered = null) {
   // 기다리는 글들, 그리고 상자가 무엇을 하겠다고 말하는지: 실행 중이면
   // 「대기열에 추가」, 턴 사이면 제 본래의 말.
   paintComposerQueue(form, run);
-  const saying = working && !form.__composerOwn
-    ? t("composer.queue.placeholder", "다음 메시지 대기열에 추가…")
-    : form.__composerSay;
+  // Under a question's card the box says where its words go (t-81786 P0);
+  // once the card's answer went, they wait like any (r2 P2-1).
+  const standing = standingAskOf(run);
+  const asking = standing && !standing.draft?.sending ? standing : null;
+  const saying = asking
+    ? asking.card.ask_prompt
+      ? t("worker.askAnswerHere", "위 질문의 답으로 보냅니다")
+      : t("worker.askAnswerFirst", "먼저 위 질문에 답하세요")
+    : working && !form.__composerOwn
+      ? t("composer.queue.placeholder", "다음 메시지 대기열에 추가…")
+      : form.__composerSay;
   writeAttribute(box, "placeholder", saying);
   writeAttribute(box, "aria-label", saying);
 
@@ -15893,6 +15972,12 @@ function chatHeadNode(run) {
   const tally = document.createElement("span");
   tally.className = "chat-tally";
   tally.hidden = true;
+  // What it counts by family stands in its tooltip; a keyboard reaches it as
+  // a stop — a focused stop shows its tooltip — and its keys are its own,
+  // not the terminal's behind the page (t-81786 P3-10).
+  tally.tabIndex = 0;
+  tally.setAttribute("role", "note");
+  tally.dataset.keyboardOwner = "true";
   meta.append(model, chip, tally);
   // A pane's own conversation: where its tab head's line and switch stand while
   // it is the pane in front, so the two heads read as one (`placePaneHeadLine`).
@@ -15952,10 +16037,14 @@ function paintChatTally(strip, run) {
   const whole = document.createElement("span");
   whole.className = "chat-tally-total";
   whole.textContent = tallyTotalWords(total, partial);
-  strip.replaceChildren(whole, tallyFailedNode("chat-tally-failed", failed));
+  const lost = tallyFailedNode("chat-tally-failed", failed);
+  strip.replaceChildren(whole, lost);
   const tip = [...families].map(([family, count]) => `${STEP_FAMILY_WORDS[family]()} ${count}`);
   if (session) tip.push(t("paneHead.pick", "대화 {{session}}", { session }));
   strip.dataset.tip = tip.join(" · ");
+  // A screen reader hears the line and its tooltip as one name: the tooltip
+  // alone was a pointer's (t-81786 P3-10).
+  strip.setAttribute("aria-label", [whole.textContent, lost.textContent, ...tip].join(" · "));
 }
 
 /* The two ends of a tally, the helper's strip's and the head's alike: the

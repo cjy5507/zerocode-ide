@@ -14981,13 +14981,10 @@ details.worker-command {
   /* 앵커 보정은 스크립트가 한 벌로 한다(`syncHelperTurns`) — 브라우저의
    * 자동 앵커가 겹치면 한쪽이 거짓말이 된다. */
   overflow-anchor: none;
-  /* The person's words stick inside this list and nowhere else (the
-   * extension's `isolation: isolate` on its sticky mode). */
-  isolation: isolate;
 }
 
-/* The list opens with a spacer rather than padding, so the first sticky
- * header sticks at the very top (`stickyMode:before`). */
+/* The list opens with the extension's spacer (`stickyMode:before`) rather
+ * than padding. */
 .helper-turns::before {
   content: "";
   flex: none;
@@ -15008,39 +15005,17 @@ details.worker-command {
   overflow-wrap: break-word;
 }
 
-/* 사람의 말: 본문은 쓰인 줄바꿈을 지킨다. The row is the extension's sticky
- * header (`stickyHeader`, 2.1.278): it stays at the list's top while its own
- * turn scrolls under it, padded above and below, its last stretch fading to
- * the ground; the box with the words is its child (`.helper-said`). */
+/* 사람의 말: 본문은 쓰인 줄바꿈을 지킨다. The row flows with the turns —
+ * the person's call of 10-29 (t-81786 P3-17): their newest words stuck at
+ * the list's top covered the answer under them — padded above and below as
+ * the extension's header row is (`stickyHeader`, 2.1.278); the box with the
+ * words is its child (`.helper-said`), and a clipped box's door stands in
+ * the row's corner (`.helper-expand`). */
 .helper-turn.is-user {
+  position: relative;
   display: block;
   margin: var(--chat-bubble-gap) 0;
-  padding: var(--chat-sticky-pad-top) 0 var(--chat-sticky-pad-bottom);
-}
-
-/* Only the newest words stick (t-81525 B4, `dressLastPerson`): one sticky
- * row and one layer a page, not one for every time the person spoke. */
-.helper-turn.is-user.is-latest {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background-color: var(--chat-ground);
-}
-
-/* The extension's fade hangs under the row, past its pad (t-81525 r2): drawn
- * inside the pad, its 12px lay exactly over the pad under the bubble, and
- * with the bubble standing narrow on the right, the answer scrolling under it
- * showed through on the left. The row is the ground to its foot; the rows
- * scrolling under it fade in below. */
-.helper-turn.is-user.is-latest::after {
-  content: "";
-  position: absolute;
-  top: 100%;
-  right: 0;
-  left: 0;
-  height: var(--chat-sticky-fade);
-  background-image: linear-gradient(to bottom, var(--chat-ground), transparent);
-  pointer-events: none;
+  padding: var(--chat-person-pad-top) 0 var(--chat-person-pad-bottom);
 }
 
 .helper-turn.is-user:first-child {
@@ -15462,9 +15437,7 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
  * read down. The briefing wears the same bubble. */
 /* What the person said (t-22100, the approved conversation): their words on
  * the bubble's soft fill — no edge — rounded like the page's other flat
- * panels, as wide as the words and never past the measure, at the list's
- * left. The row is still the extension's sticky header, and a stuck box is a
- * door home (`helperTurnsNode`). */
+ * panels, as wide as the words and never past the measure. */
 .helper-turn.is-user > .helper-said {
   display: block;
   box-sizing: border-box;
@@ -15480,7 +15453,6 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   color: var(--chat-bubble-ink);
   font-size: var(--chat-prose-size);
   line-height: var(--chat-prose-leading);
-  cursor: pointer;
 }
 
 /* What the person said, taller than the extension's clip: 60px of its words
@@ -15504,7 +15476,7 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 }
 
 .helper-turn.is-user > .helper-said.is-clipped:not(.is-open) + .helper-expand {
-  bottom: calc(var(--chat-sticky-pad-bottom) + var(--space-1));
+  bottom: calc(var(--chat-person-pad-bottom) + var(--space-1));
 }
 
 .helper-who {
@@ -18209,9 +18181,10 @@ button.helper-sib:hover {
 }
 
 /* 이 페이지의 키보드 초점 — 플랫폼 계약의 잉크 외곽선. 입력 상자만 전역
- * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`). */
+ * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`).
+ * 입력칸이 키보드를 넘긴 질문 카드도 같은 고리를 두른다(t-81786 r2 P3-2). */
 .worker-view
-  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door):focus-visible {
+  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -18274,9 +18247,46 @@ button.helper-sib:hover {
   container-type: inline-size;
 }
 
+/* A wide page widens its column (t-81786 P3-16): at 1000, 1200, 1400 and
+ * 1700px it steps to the next `--reading-column-wide-*`, never past the last.
+ * The composer's measure and the fade under it read the column again here: a
+ * custom property is resolved where it is declared, so the root's
+ * `--chat-dock-max` stays the root's 760px. The page's own fade (`::after`)
+ * asks the page's width, as the page's children do. */
+.worker-view.is-chat-page > *,
+.worker-view.is-chat-page::after {
+  --chat-dock-max: var(--reading-column);
+}
+
 @container (min-width: 1000px) {
   .worker-view.is-chat-page > * {
     --chat-prose-leading: var(--chat-read-leading-wide);
+  }
+
+  .worker-view.is-chat-page > *,
+  .worker-view.is-chat-page::after {
+    --reading-column: var(--reading-column-wide-1);
+  }
+}
+
+@container (min-width: 1200px) {
+  .worker-view.is-chat-page > *,
+  .worker-view.is-chat-page::after {
+    --reading-column: var(--reading-column-wide-2);
+  }
+}
+
+@container (min-width: 1400px) {
+  .worker-view.is-chat-page > *,
+  .worker-view.is-chat-page::after {
+    --reading-column: var(--reading-column-wide-3);
+  }
+}
+
+@container (min-width: 1700px) {
+  .worker-view.is-chat-page > *,
+  .worker-view.is-chat-page::after {
+    --reading-column: var(--reading-column-wide-4);
   }
 }
 
@@ -53920,8 +53930,8 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   gap: var(--space-2);
 }
 
-/* The session stands in the tally's tooltip there (t-81525 C9): the head says
- * what was done, not the conversation's id. */
+/* The session stands in the tally's tooltip and name there (t-81525 C9,
+ * t-81786 P3-12): the head says what was done, not the conversation's id. */
 .chat-head-pane .pane-head-pick {
   display: none;
 }

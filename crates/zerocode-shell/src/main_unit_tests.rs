@@ -22007,9 +22007,8 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "list-pad-x",
         "list-pad-top",
         "list-pad-bottom",
-        "sticky-pad-top",
-        "sticky-pad-bottom",
-        "sticky-fade",
+        "person-pad-top",
+        "person-pad-bottom",
         "status-h",
         "status-in",
         // A step is one line (t-15682): the row, the column of its dot and its
@@ -22336,11 +22335,11 @@ fn the_conversation_wears_the_extensions_own_measures() {
         ("chat-dock-inset", rule("inputContainer", "bottom")),
         ("chat-dock-max", rule("inputContainer", "max-width")),
         (
-            "chat-sticky-pad-top",
+            "chat-person-pad-top",
             rule("message.stickyHeader", "padding-top"),
         ),
         (
-            "chat-sticky-pad-bottom",
+            "chat-person-pad-bottom",
             rule("message.stickyHeader", "padding-bottom"),
         ),
         ("chat-send-size", rule("sendButton", "width")),
@@ -22603,19 +22602,15 @@ fn the_conversation_wears_the_extensions_own_measures() {
         panel["version"].as_str().unwrap_or("?"),
         drifted.join("\n  ")
     );
-    // The focus ring's reach, the sticky header's fade and the spinner's
-    // fade-in are written inside longer values; each is read where it sits.
+    // The focus ring's reach and the spinner's fade-in are written inside
+    // longer values; each is read where it sits. The panel's sticky header
+    // fades at its foot; the window's person's row does not stick (the
+    // person's call of 10-29, t-81786 P3-17), so it has no fade to measure.
     let ring = rule("composer:focus-within", "box-shadow");
     assert!(
         ring.starts_with(&format!("0 0 0 {}", token("chat-focus-ring"))),
         "the focus ring is `{ring}`, the token {}",
         token("chat-focus-ring")
-    );
-    let sticky = rule("message.stickyHeader", "background-image");
-    assert!(
-        sticky.contains(&format!("calc(100% - {})", token("chat-sticky-fade"))),
-        "the sticky header fades over `{sticky}`, the token {}",
-        token("chat-sticky-fade")
     );
     let spinner = rule("spinnerRow", "animation");
     let seconds: f64 = spinner

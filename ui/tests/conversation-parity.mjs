@@ -6,7 +6,7 @@
  * fold is the height the row stood at — never the source's own spelling. */
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { chromium, createWindowServer, foldConversations, openWindowTestPage } from "./window-boot.mjs";
 import { FIXTURE_PNG, MIXED_STREAM_FENCES, conversationFixture, openFixtureConversation, streamingAnswer, webkitType } from "./conversation-perf.mjs";
 import { frameBudgetHolds } from "./machine-load.mjs";
 
@@ -754,7 +754,7 @@ export async function testConversationScroll(browser, origin, ok) {
     // The one way back to the foot is the person's button (사용자 요청 09-24),
     // and at the foot it is not shown.
     seen.footDoor = await page.evaluate(() => {
-      // `is-latest` marks the newest answer and words (t-81525 B3·B4), not a door.
+      // `is-latest` marks the newest answer (t-81525 B3), not a door.
       const doors = document.querySelector("#worker-view").querySelectorAll(".chat-foot-door, [class*='latest']:not(.is-latest), [class*='jump']");
       return { doors: doors.length, shown: doors[0]?.classList.contains("is-shown") ?? null };
     });
@@ -1202,6 +1202,14 @@ export async function testConversationTodos(browser, origin, ok) {
       const pills = [...face.querySelectorAll(".helper-turns > .helper-group")];
       seen.foldedRows = todoRows().length;
       seen.pills = pills.length;
+      // With the pills shut, the newest list is said over the composer — its
+      // count and its items — where the list no longer stands outside the
+      // fold (the old A7 `standLatestTodo`, gone with t-81525; t-81786 P3-13).
+      const stack = face.querySelector(".chat-stack");
+      seen.stackShown = stack ? !stack.hidden : false;
+      seen.stackCount = stack?.querySelector(".chat-stack-todo-count")?.textContent ?? "";
+      seen.wantStackCount = t("worker.stackTodos", "할 일 {{done}}/{{total}}", { done: 1, total: 3 });
+      seen.stackWords = stack?.querySelector(".chat-stack-todo-words")?.textContent ?? "";
       pills[0]?.querySelector(".helper-group-cap")?.click();
       await settle();
       seen.openedRows = todoRows().length;
@@ -1222,8 +1230,9 @@ export async function testConversationTodos(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A7: folded (t-81525 B1), the todo calls and the reads of one turn are one pill with no row of their own until it opens — then both lists stand — and with the whole timeline every list stands again",
-      seen?.foldedRows === 0 && seen.pills === 1 && seen.openedRows === 2 && seen.allBack,
+      "A7: folded (t-81525 B1), the todo calls and the reads of one turn are one pill with no row of their own until it opens — then both lists stand — and with the whole timeline every list stands again; while the pill is shut the state line over the composer says the newest list, its count and its items (t-81786 P3-13)",
+      seen?.foldedRows === 0 && seen.pills === 1 && seen.openedRows === 2 && seen.allBack &&
+        seen.stackShown && seen.stackCount === seen.wantStackCount && seen.stackWords === "할 일 1 · 할 일 2 · 할 일 3",
       JSON.stringify(seen),
     );
     ok("A7: the todo lists raised no page errors", faults.length === 0, faults.join("\n"));
@@ -1300,10 +1309,9 @@ export async function testConversationImages(browser, origin, ok) {
       // pressed, and only then is its picture in view.
       list.scrollTop = list.scrollHeight;
       await frames(4);
-      // At the foot: the tool's picture is in view, and so is the picture on
-      // the person's row that stands stuck at the list's top (the sticky
-      // header); the earlier person's row, stuck under it, is covered — in
-      // view by geometry only — and not asked for.
+      // At the foot: the tools' pictures are in view; the person's rows went
+      // up with their turn — nothing sticks to the list's top (t-81786
+      // P3-17) — and their pictures are not asked for.
       seen.askedAtFoot = [...window.__IMAGE_ASKS__].sort();
       const toolPill = face.querySelector(".helper-turn.is-tool .helper-image");
       const thumb = toolPill?.querySelector(".helper-image-thumb");
@@ -1372,8 +1380,8 @@ export async function testConversationImages(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A8: a picture is asked for only when its pill comes into view — a person's row stuck under a later person's sticky header is not in view — and only once; one that cannot be read keeps its name",
-      JSON.stringify(seen.askedAtFoot) === JSON.stringify(["wire:2", "wire:3", "wire:4"]) &&
+      "A8: a picture is asked for only when its pill comes into view — a person's row scrolled away above is not in view — and only once; one that cannot be read keeps its name",
+      JSON.stringify(seen.askedAtFoot) === JSON.stringify(["wire:2", "wire:4"]) &&
         JSON.stringify(seen.askedAtTop) === JSON.stringify(["wire:1", "wire:2", "wire:3", "wire:4"]) && seen.askedOnce === 4 &&
         seen.missingKeepsName,
       JSON.stringify(seen),
@@ -1843,6 +1851,7 @@ export async function testConversationSteps(browser, origin, ok) {
   await stepsByKind(browser, origin, ok);
   await stepsThoughtLine(browser, origin, ok);
   await stepsThoughtHandOver(browser, origin, ok);
+  await stepsThoughtHandOverFolded(browser, origin, ok);
   await stepsThoughtWrites(browser, origin, ok);
   await stepsSpaceOnALine(browser, origin, ok);
   await stepsSpaceBesideTheGraph(browser, origin, ok);
@@ -2691,6 +2700,96 @@ async function stepsThoughtHandOver(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok("C13: the thought's hand-over raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C13 on the folded page, the product's default (t-81786 P3-5). A thought's
+ * turn goes into a pill, where it has a row only while the pill is open: a
+ * thought being read opens the pill to its row — open, the whole thought in
+ * it, the keyboard on its line; a thought that only held the keyboard hands
+ * it to the pill's head, which stays closed; one nobody touched takes
+ * nothing. */
+async function stepsThoughtHandOverFolded(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await foldConversations(page);
+    await openConversation(page, stepsFixture(), { status: "working" });
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async ({ at }) => {
+      const { list, lineOf, shown, settle } = window.__STEPS__;
+      const streaming = () => list().querySelector(":scope > .is-streaming.is-thinking");
+      const pill = () => [...list().querySelectorAll(":scope > .helper-group")].at(-1);
+      const cap = () => pill()?.querySelector(":scope > .helper-group-cap") ?? null;
+      const newest = () => pill()?.__members.at(-1) ?? null;
+      const rowOf = (turn) => pill()?.querySelector(`:scope > .helper-group-body > [data-turn="${turn?.seq}"]`) ?? null;
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+      const stream = async (text) => {
+        window.__CONVERSATION__.live = [{ role: "thinking", text }];
+        await pollHelperPages();
+        await settle();
+      };
+      const close = async (text, when) => {
+        window.__CONVERSATION__.turns.push({ role: "thinking", text, at_ms: when });
+        window.__CONVERSATION__.live = [];
+        await pollHelperPages();
+        await settle();
+      };
+      const FIRST = "Every cell remounts on each scroll tick because its key is an index.";
+      const SECOND = "One more look at the cell before the edit.";
+      const THIRD = "The edit is small enough to make now.";
+      const seen = {};
+      await stream(FIRST);
+      const going = streaming();
+      lineOf(going).click();
+      await wait(60);
+      await settle();
+      lineOf(going).focus();
+      seen.read = { open: going.open === true, held: document.activeElement === lineOf(going) };
+      await close(FIRST, at);
+      const read = rowOf(newest());
+      seen.opened = {
+        thought: newest()?.role === "thinking",
+        gone: streaming() === null,
+        pillOpen: cap()?.getAttribute("aria-expanded") === "true",
+        open: read?.open === true,
+        words: read ? shown(read, FIRST) : false,
+        held: read ? document.activeElement === lineOf(read) : false,
+      };
+      // The person closes the pill (the case after this one is a closed pill).
+      if (cap()?.getAttribute("aria-expanded") === "true") cap().click();
+      await settle();
+      await stream(SECOND);
+      lineOf(streaming()).focus();
+      await close(SECOND, at + 3000);
+      seen.held = {
+        joined: newest()?.text === SECOND,
+        pillClosed: cap()?.getAttribute("aria-expanded") === "false",
+        onHead: document.activeElement === cap(),
+      };
+      document.activeElement.blur();
+      await stream(THIRD);
+      await close(THIRD, at + 6000);
+      seen.idle = {
+        joined: newest()?.text === THIRD,
+        pillClosed: cap()?.getAttribute("aria-expanded") === "false",
+        free: document.activeElement === document.body,
+      };
+      return seen;
+    }, { at: CLOCK + 200_000 });
+    ok(
+      "C13 folded: a thought being read when its words close into a pill opens the pill to its row — open, with the whole thought in it — and keeps the keyboard on its line (t-81786 P3-5)",
+      seen.read.open && seen.read.held && seen.opened.thought && seen.opened.gone && seen.opened.pillOpen &&
+        seen.opened.open && seen.opened.words && seen.opened.held,
+      JSON.stringify(seen),
+    );
+    ok(
+      "C13 folded: a thought that only held the keyboard hands it to the head of the closed pill it went into, and one nobody touched takes nothing (t-81786 P3-5)",
+      seen.held.joined && seen.held.pillClosed && seen.held.onHead && seen.idle.joined && seen.idle.pillClosed && seen.idle.free,
+      JSON.stringify(seen),
+    );
+    ok("C13 folded: the hand-over raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }
