@@ -2272,25 +2272,34 @@ mod tests {
         /// the composer — 07:09 on 2026-09-29, two restored workers.
         Booting,
         /// Booting, and it takes the Enter late: the receipt comes after the
-        /// window, when the Enter pressed again finds an empty composer.
+        /// window, when the Enter pressed again finds an empty composer — the
+        /// fake reports the words at that Enter.
         Late,
         /// Mid-turn: the words wait in its own queue and are taken, and
-        /// reported, when the turn ends.
+        /// reported, when the turn ends — the fake's next line, which the
+        /// restart sends once the window has called the delivery delivered.
         Busy,
     }
 
     /// A pane's program as a shell script on a cooked line: `read` returns a
     /// line at each Enter. It records each send in `$FAKE_SENT`, one line a
     /// send, and an empty Enter sends nothing — as Claude Code, Codex and zo
-    /// all do.
+    /// all do. A late or busy send is reported at its next line, not on a
+    /// clock: the `sleep` it once started took longer than the receipt's
+    /// patience to start on the efficiency cores (t-82959).
     #[cfg(unix)]
     const FAKE_AGENT: &str = r#"#!/bin/sh
 printf '\033[?2004h'
 printf '\342\235\257 \033[?25h'
 held=""
+late=""
 enters=0
 while IFS= read -r line; do
   enters=$((enters + 1))
+  if [ -n "$late" ]; then
+    printf '%s\n' "$late" >> "$FAKE_SENT"
+    late=""
+  fi
   words="$held$line"
   held=""
   case "$FAKE_TAKES" in
@@ -2298,7 +2307,7 @@ while IFS= read -r line; do
   esac
   [ -z "$words" ] && continue
   case "$FAKE_TAKES" in
-    late|busy) ( sleep "$FAKE_LATER"; printf '%s\n' "$words" >> "$FAKE_SENT" ) & ;;
+    late|busy) late="$words" ;;
     *) printf '%s\n' "$words" >> "$FAKE_SENT" ;;
   esac
   printf '\342\235\257 \033[?25h'
@@ -2310,12 +2319,24 @@ done
     /// continuation (at rest, beside a draft), the receipt fed back the way
     /// the hook road feeds it ([`crate::human_input::submitted`]), and what
     /// the program sent, in order.
+    ///
+    /// The deliveries are registered once the program has said its first
+    /// word, and every clock here starts then: the window types a restart's
+    /// words at a program long up (its fallback goes a receipt watch after
+    /// the wake), while a loaded machine took up to 4.6 s to start the fake
+    /// beside the suite, and past 6.5 s at load 28 — spending the readiness
+    /// deadline ([`zerocode_pty::ready::TIMEOUT`]) before the program spoke
+    /// (t-82959). And they run on the time the test could look ([`Looked`]),
+    /// not on the wall's.
     #[cfg(unix)]
     fn restart_at(term: TermId, takes: Takes, words: &[&str]) -> Restart {
         use std::os::unix::fs::PermissionsExt;
         const WINDOW: Duration = Duration::from_millis(300);
         const PATIENCE: Duration = Duration::from_millis(1_500);
         const DEADLINE: Duration = Duration::from_secs(10);
+        /// How long the fake may take to say its first word: spent in full
+        /// only by a failure.
+        const START_PATIENCE: Duration = Duration::from_secs(60);
 
         crate::human_input::forget_term(term);
         let root = tempfile::tempdir().expect("a fake agent's home");
@@ -2334,7 +2355,6 @@ done
         let env = vec![
             ("FAKE_TAKES".to_string(), mode.to_string()),
             ("FAKE_SENT".to_string(), sent.to_string_lossy().into_owned()),
-            ("FAKE_LATER".to_string(), format!("{}", later.as_secs_f64())),
         ];
         let mut pty = PtyLane::spawn(
             &program.to_string_lossy(),
@@ -2345,7 +2365,16 @@ done
             80,
         )
         .expect("spawn the fake agent");
-        let start = Instant::now();
+        let spawned = Instant::now();
+        while pty.pump().bytes == 0 {
+            assert!(
+                spawned.elapsed() < START_PATIENCE,
+                "{takes:?}: the fake agent never spoke"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut looked = Looked::new();
+        let start = looked.now;
         let mut bench = Bench::default();
         let mut first = words.iter();
         let delivery = |text: &str, now: Instant| {
@@ -2389,7 +2418,9 @@ done
         let mut heard = 0;
         let mut enters = 0;
         let mut settled_as = Vec::new();
+        let mut turn_over = false;
         loop {
+            let now = looked.tick();
             let pumped = pty.pump();
             let marker = bench.deliveries.get(&term).and_then(PromptDelivery::marker);
             let seen = {
@@ -2416,7 +2447,7 @@ done
                 ..line_facts_without_a_window(term)
             };
             if let Some(delivery) = bench.deliveries.get_mut(&term) {
-                let wrote = turn(term, delivery, seen, line, Instant::now(), |bytes| {
+                let wrote = turn(term, delivery, seen, line, now, |bytes| {
                     pty.write_input(bytes).is_ok()
                 });
                 enters += usize::from(wrote == Turned::Entered);
@@ -2428,20 +2459,22 @@ done
                         &mut bench.deliveries,
                         &mut bench.waiters,
                         &mut bench.queue,
-                        Instant::now(),
+                        now,
                     );
                 }
-            } else if heard >= words.len() || start.elapsed() > PATIENCE * 2 + later {
+            } else if takes == Takes::Busy && !turn_over {
+                // The turn ends: one empty line, the fake's next.
+                turn_over = pty.write_input(b"\r").is_ok();
+            } else if heard >= words.len() || now - start > PATIENCE * 2 + later {
                 break;
             }
             assert!(
-                start.elapsed() < DEADLINE,
+                now - start < DEADLINE,
                 "{takes:?}: the restart never settled"
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        // Long enough for a queued or late send to land, and for a second
-        // copy to show if one went.
+        // Long enough for a second copy to show if one went.
         std::thread::sleep(later * 2);
         pty.kill().expect("stop the fake agent");
         crate::human_input::forget_term(term);
@@ -2454,6 +2487,40 @@ done
             sent,
             enters,
             settled_as,
+        }
+    }
+
+    /// A restart's clock: the time its test could look (t-82959). A round
+    /// counts as long as it took, up to [`Self::ROUND`]; one a loaded machine
+    /// held the test back for longer — 11 s on the efficiency cores at load
+    /// 23 — counts as that, so no deadline of the restart is spent while
+    /// nobody could look, and each still runs out on a program that does not
+    /// answer.
+    #[cfg(unix)]
+    struct Looked {
+        /// When the last round began, on the wall.
+        at: Instant,
+        /// The restart's time at that round.
+        now: Instant,
+    }
+
+    #[cfg(unix)]
+    impl Looked {
+        /// The longest round that counts in full: above the 200 to 490 ms
+        /// a round takes on the efficiency cores beside the suite.
+        const ROUND: Duration = Duration::from_millis(500);
+
+        fn new() -> Self {
+            let now = Instant::now();
+            Self { at: now, now }
+        }
+
+        /// The restart's time at the round beginning now.
+        fn tick(&mut self) -> Instant {
+            let at = Instant::now();
+            self.now += at.saturating_duration_since(self.at).min(Self::ROUND);
+            self.at = at;
+            self.now
         }
     }
 
