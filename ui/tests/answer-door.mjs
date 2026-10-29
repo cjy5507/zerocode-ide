@@ -25,11 +25,11 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * that drifted into another language, or into a key nobody translated, fails
  * instead of agreeing with itself. */
 export const REFUSAL_WORDS = Object.freeze({
-  ko: "화면에서 이 질문을 찾지 못해 답을 보내지 않았어요 — 터미널을 확인해 주세요",
-  en: "That question is no longer on the pane's screen, so nothing was sent — check the terminal",
-  ja: "その質問は画面で見つからないため回答は送られませんでした — ターミナルを確認してください",
-  zh: "在屏幕上找不到该问题，未发送回答 — 请查看终端",
-  es: "Esa pregunta ya no está en la pantalla del panel, así que no se envió nada — revisa el terminal",
+  ko: "이 질문은 이미 지나갔습니다 — 답은 보내지 않았어요",
+  en: "This question has already passed — nothing was sent",
+  ja: "この質問はすでに過ぎました — 回答は送っていません",
+  zh: "这个问题已经过去了 — 回答未发送",
+  es: "Esta pregunta ya pasó — no se envió nada",
 });
 
 /* One attention card the way the board's grouping returns it. */

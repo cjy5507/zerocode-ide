@@ -189,7 +189,7 @@ export async function testYourTurn(browser, origin, ok) {
     ok(
       "⌘↵ allows a permission through answer_approval; a refusal is said beside it and keeps it counted, and the allow that lands counts it off",
       refused.sent?.term === 7 && refused.sent?.allow === true &&
-        refused.said.includes("화면에서 이 질문을 찾지 못해") && refused.count === "2" &&
+        refused.said.includes("이 질문은 이미 지나갔습니다") && refused.count === "2" &&
         refused.allowed?.term === 7 && refused.allowed?.allow === true && refused.countAfter === "1",
       JSON.stringify(refused),
     );

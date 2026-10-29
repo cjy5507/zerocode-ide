@@ -855,7 +855,7 @@ function confirmAsk(card, draft, fromKeyboard = false) {
 function answerRefusalWords(error) {
   const said = String(error);
   if (said.includes("question-changed")) {
-    return t("board.ask.changed", "화면에서 이 질문을 찾지 못해 답을 보내지 않았어요 — 터미널을 확인해 주세요");
+    return t("board.ask.changed", "이 질문은 이미 지나갔습니다 — 답은 보내지 않았어요");
   }
   if (said.includes("answer-in-flight")) {
     return t("board.ask.inFlight", "앞서 누른 답을 보내는 중이에요");
