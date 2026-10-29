@@ -2822,12 +2822,31 @@ fn read_timing_rows(layout: &Layout) -> Vec<serde_json::Value> {
 /// late for the person deciding whether the run is hung.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_workflow_first_tool_frame_shows_both_live_helpers() {
+    let service = ScriptedAnthropicService::workflow_two_helpers(WORKFLOW_TWO_HELPERS_DONE)
+        .await
+        .expect("start workflow script");
+    first_tool_frame_shows_both_live_helpers(service);
+}
+
+/// The same first frame when one helper's first request reaches the provider
+/// late, the spread two child spawns land with on a loaded machine (t-82615):
+/// the other helper's tool must not stand alone on the first frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_workflow_first_tool_frame_shows_both_live_helpers_when_one_helper_answers_late() {
+    // Far past a frame and the harness's 10 ms poll, so an unmatched answer
+    // always paints alone first; far under the 20 s waits below.
+    const LATE: Duration = Duration::from_millis(400);
+    let service =
+        ScriptedAnthropicService::workflow_two_helpers_one_late(WORKFLOW_TWO_HELPERS_DONE, LATE)
+            .await
+            .expect("start workflow script");
+    first_tool_frame_shows_both_live_helpers(service);
+}
+
+const WORKFLOW_TWO_HELPERS_DONE: &str = "### Workflow done\n\n- both helpers returned\n";
+
+fn first_tool_frame_shows_both_live_helpers(service: ScriptedAnthropicService) {
     let layout = Layout::new();
-    let service = ScriptedAnthropicService::workflow_two_helpers(
-        "### Workflow done\n\n- both helpers returned\n",
-    )
-    .await
-    .expect("start workflow script");
     // Both helpers must be live together, which is the cap the child reads:
     // cores minus two but at least four. Hand the child its own two, so the
     // run does not depend on the machine's core count.

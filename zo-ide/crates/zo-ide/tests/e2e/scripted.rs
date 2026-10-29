@@ -101,7 +101,10 @@ enum Script {
     /// is directly above a live spinner when the terminal grows.
     ContextTrimThenSlowTool,
     /// A real Workflow fan-out whose two children each run one slow Bash.
-    WorkflowTwoHelpers { final_text: String },
+    /// `late` holds BETA's first request that long before the script takes
+    /// it up — the spread two child spawns land with on a loaded machine
+    /// (t-82615); zero takes it up as it arrives.
+    WorkflowTwoHelpers { final_text: String, late: Duration },
     /// The host's own pre-analysis fan-out on a `Large` turn: the decomposition
     /// classifier answers two lanes, each lane answers one finding, and the
     /// main turn — which must carry both findings — gets `final_text`.
@@ -204,7 +207,7 @@ impl Script {
             Self::ContextTrimThenSlowTool => {
                 text_sse("msg_context_trim_slow_final", "### Done\n\n- settled\n")
             }
-            Self::WorkflowTwoHelpers { final_text } => {
+            Self::WorkflowTwoHelpers { final_text, .. } => {
                 workflow_two_helpers_response(request_index, request, final_text)
             }
             Self::HostPreludeTwoLanes { final_text } => host_prelude_response(request, final_text),
@@ -237,11 +240,16 @@ impl Script {
 
     /// How long the server sits on request `request_index` before answering
     /// it — the window a test needs the previous turn's last cell to stay
-    /// live on screen.
-    fn delay_before(&self, request_index: usize) -> Duration {
+    /// live on screen, or a helper's request that reaches it late.
+    fn delay_before(&self, request_index: usize, request: &str) -> Duration {
         match self {
             Self::WritesThenBash { hold, .. } if request_index == 1 => *hold,
             Self::ManyBash { hold, .. } if request_index >= 1 => *hold,
+            Self::WorkflowTwoHelpers { late, .. }
+                if workflow_helper_first_request(request) == Some(LATE_WORKFLOW_HELPER) =>
+            {
+                *late
+            }
             _ => Duration::ZERO,
         }
     }
@@ -524,8 +532,19 @@ impl ScriptedAnthropicService {
 
     /// Run a Workflow whose two child prompts are routed by marker.
     pub async fn workflow_two_helpers(final_text: impl Into<String>) -> io::Result<Self> {
+        Self::workflow_two_helpers_one_late(final_text, Duration::ZERO).await
+    }
+
+    /// [`Self::workflow_two_helpers`] with BETA's first request held `late`
+    /// before the script takes it up (t-82615).
+    #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+    pub async fn workflow_two_helpers_one_late(
+        final_text: impl Into<String>,
+        late: Duration,
+    ) -> io::Result<Self> {
         Self::spawn(Script::WorkflowTwoHelpers {
             final_text: final_text.into(),
+            late,
         })
         .await
     }
@@ -656,14 +675,15 @@ async fn handle_connection(
 ) -> io::Result<()> {
     let (method, body) = read_http_request(&mut socket).await?;
     if method.eq_ignore_ascii_case("POST") {
-        let (request_index, response, (pieces, gap), refusal) = {
+        let (request_index, response, (pieces, gap), refusal, hold) = {
             let mut captured = requests.lock().await;
             let request_index = captured.len();
             let response = script.response(request_index, &body);
             let pacing = script.pacing(request_index, &body);
             let refusal = script.refusal(&body);
+            let hold = script.delay_before(request_index, &body);
             captured.push(body);
-            (request_index, response, pacing, refusal)
+            (request_index, response, pacing, refusal, hold)
         };
         if let Some(refusal) = refusal {
             socket.write_all(refusal.as_bytes()).await?;
@@ -680,7 +700,6 @@ async fn handle_connection(
             }
         }
         { let mut total = usage.lock().await; for (i, count) in emitted.iter().enumerate() { total[i] += count; } }
-        let hold = script.delay_before(request_index);
         if !hold.is_zero() {
             tokio::time::sleep(hold).await;
         }
@@ -1139,14 +1158,34 @@ fn spawn_sse() -> String {
     })
 }
 
+/// The helpers a [`Script::WorkflowTwoHelpers`] fans out to: the marker each
+/// one's prompt carries and the id its tool and message are named by.
+const WORKFLOW_HELPERS: [(&str, &str); 2] = [
+    ("WORKFLOW_HELPER_ALPHA", "alpha"),
+    ("WORKFLOW_HELPER_BETA", "beta"),
+];
+
+/// The helper whose first request a late [`Script::WorkflowTwoHelpers`]
+/// holds back.
+const LATE_WORKFLOW_HELPER: &str = WORKFLOW_HELPERS[1].1;
+
+/// The helper whose FIRST request `request` is — its prompt and no `bash` of
+/// its own yet — or `None` for the parent's requests and a helper's later ones.
+fn workflow_helper_first_request(request: &str) -> Option<&'static str> {
+    if request_contains_tool(request, "Workflow") || request_contains_tool(request, "bash") {
+        return None;
+    }
+    WORKFLOW_HELPERS
+        .iter()
+        .find(|(marker, _)| request.contains(marker))
+        .map(|(_, id)| *id)
+}
+
 fn workflow_two_helpers_response(request_index: usize, request: &str, final_text: &str) -> String {
     if request_contains_tool(request, "Workflow") {
         return text_sse("msg_workflow_parent_final", final_text);
     }
-    for (marker, id) in [
-        ("WORKFLOW_HELPER_ALPHA", "alpha"),
-        ("WORKFLOW_HELPER_BETA", "beta"),
-    ] {
+    for (marker, id) in WORKFLOW_HELPERS {
         if request.contains(marker) {
             return if request_contains_tool(request, "bash") {
                 text_sse(
