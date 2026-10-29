@@ -247,6 +247,7 @@ mod view_census;
 mod window_runtime;
 mod wire_runtime;
 mod work_item_store;
+mod worker_question;
 mod worktree_evidence_runtime;
 mod worktree_landing;
 mod worktree_reclaim;

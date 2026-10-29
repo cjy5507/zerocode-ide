@@ -748,6 +748,7 @@ pub fn forget_term(term: u32) {
     crate::orchestration::forget_taken_term(term);
     crate::orchestration::forget_pane_attention(term);
     crate::orchestration::forget_detached_term(term);
+    crate::worker_question::forget(term);
     let mut held = teams();
     let mut retired = Vec::new();
     /* A leader's exit retires the LEADER's pane, not its children's (t-2512).

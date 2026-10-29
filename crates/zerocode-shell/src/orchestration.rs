@@ -1966,6 +1966,60 @@ pub(crate) fn tell_seat_of_term(term: u32, body: &str, receipt: &str, now_ms: i6
     }
 }
 
+/// The run side of the worker seated at `term`, for a question its CLI asks
+/// (t-82296): its run, its seat, the run's coordinator address and whether
+/// somebody sits there, whether the person has taken the pane, and the
+/// dispatch it is on. `None` where no run's live worker sits at `term` — a
+/// coordinator's own pane, or one a person opened.
+pub(crate) fn worker_ask_seat(term: u32) -> Option<crate::worker_question::AskSeat> {
+    with_ledger_seats(|ledger, seats| {
+        ledger.runs().iter().find_map(|run| {
+            let worker = run
+                .workers
+                .iter()
+                .filter(|worker| worker.state.is_live() && worker.state.may_occupy_pane())
+                .find(|worker| {
+                    seats
+                        .get(worker.team.as_str())
+                        .and_then(|panes| panes.get(worker.pane.as_str()))
+                        == Some(&term)
+                })?;
+            Some(crate::worker_question::AskSeat {
+                run: run.id.clone(),
+                worker: worker.id.clone(),
+                team: worker.team.clone(),
+                pane: worker.pane.clone(),
+                coordinator: run.address(),
+                coordinator_live: run.coordinator_live().is_some(),
+                taken: worker.taken_over,
+                dispatch: worker.dispatch.clone(),
+            })
+        })
+    })?
+}
+
+/// Where a question the window filed for a worker stands in `run`
+/// (t-82296): the coordinator's answer once one landed, closed when it can
+/// no longer be answered or is gone, waiting otherwise. A ledger this window
+/// cannot read is answered as waiting — the beat looks again.
+pub(crate) fn question_standing(run: &str, question: &str) -> crate::worker_question::Standing {
+    use crate::worker_question::Standing;
+    with_ledger_seats(|ledger, _| {
+        let Some(run) = ledger.run(run) else {
+            return Standing::Closed;
+        };
+        let Some(asked) = run.message(question) else {
+            return Standing::Closed;
+        };
+        match run.answer_to(asked) {
+            Some(answer) => Standing::Answered(answer.body.as_str().to_string()),
+            None if run.question_is_answerable(asked).is_err() => Standing::Closed,
+            None => Standing::Waiting,
+        }
+    })
+    .unwrap_or(Standing::Waiting)
+}
+
 /// The run and the address of the seat this window holds at `term`: a live
 /// worker's before a coordinator's, read as [`seated_live_workers`] and
 /// [`seated_coordinators`] read them.

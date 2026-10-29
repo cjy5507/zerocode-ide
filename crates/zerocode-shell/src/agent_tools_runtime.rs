@@ -2704,6 +2704,9 @@ pub(super) fn beat_standing_orders(app: &AppHandle) {
             );
         }
         orchestration::tick(&window, &overrides, now_ms);
+        // A worker's question its coordinator holds: filed, answered into
+        // the pane, refused as passed, or given to the person (t-82296).
+        crate::worker_question::sweep(&beating, &window, now_ms);
         // The way out, on the same beat (t-6428): a 「끝나면」 armed goes at
         // the first gap the census finds, and a question nobody answers
         // goes when its time is up.

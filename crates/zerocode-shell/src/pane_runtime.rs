@@ -1475,7 +1475,12 @@ pub(super) fn note_pane_state(
         // moment that state began, as a finished turn is heard at its end.
         None => orchestration::pane_turn_began(report.term, began_ms),
     }
-    let _ = app.emit("hook:agent", report.clone());
+    // A worker's own question goes to its coordinator, and the page is shown
+    // the pane at work rather than a question for the person (t-82296).
+    let _ = app.emit(
+        "hook:agent",
+        crate::worker_question::heard(report, epoch_ms_now()),
+    );
     if report.state == zerocode_core::hook::HookState::Done
         && let Some(cleanup) = app
             .state::<AppState>()
@@ -1559,6 +1564,10 @@ pub(super) fn ring_for_pane(app: &AppHandle, worktree: &str, report: &hooks::Pan
     // old conversation is exactly what Orca's `sessionBoundary` flag keeps
     // out of every completion-reactive consumer.
     if report.session_boundary {
+        return;
+    }
+    // A worker's question its coordinator holds rings nobody (t-82296).
+    if crate::worker_question::hidden(report.term) {
         return;
     }
     let Some(ring) = notify::ring_of(report.state) else {
