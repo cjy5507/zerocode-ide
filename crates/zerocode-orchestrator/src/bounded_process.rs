@@ -28,9 +28,7 @@ use std::process::{Child, Stdio};
 use std::process::{Command, ExitStatus};
 #[cfg(unix)]
 use std::thread;
-use std::time::Duration;
-#[cfg(unix)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(any(unix, windows))]
 const POLL: Duration = Duration::from_millis(10);
@@ -114,18 +112,32 @@ pub(crate) fn run(
     input: Option<&[u8]>,
     limits: ProcessLimits,
 ) -> Result<ProcessOutput, ProcessError> {
+    run_on(command, input, limits, &Instant::now)
+}
+
+/// [`run`] with its deadline read off `clock`, which [`run`] makes the
+/// monotonic clock for every authority effect. A test whose fixture must
+/// make something before the deadline is worth anything hands a clock that
+/// stands still until the fixture has: a loaded scheduler that starts the
+/// fixture late then cannot spend the whole budget first (t-77995).
+pub(crate) fn run_on(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    limits: ProcessLimits,
+    clock: &dyn Fn() -> Instant,
+) -> Result<ProcessOutput, ProcessError> {
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (command, input, limits);
+        let _ = (command, input, limits, clock);
         return Err(ProcessError::UnsupportedPlatform);
     }
     #[cfg(windows)]
     {
-        windows::run(command, input, limits)
+        windows::run(command, input, limits, clock)
     }
     #[cfg(unix)]
     {
-        let started = Instant::now();
+        let started = clock();
         let deadline = started.checked_add(limits.timeout).unwrap_or(started);
         command.stdin(if input.is_some() {
             Stdio::piped()
@@ -223,7 +235,7 @@ pub(crate) fn run(
                     stderr_truncated: stderr_capture.truncated,
                 });
             }
-            let now = Instant::now();
+            let now = clock();
             if now >= deadline {
                 if status.is_none() {
                     stop(&mut child);
@@ -519,8 +531,9 @@ mod windows {
         command: &mut Command,
         input: Option<&[u8]>,
         limits: ProcessLimits,
+        clock: &dyn Fn() -> Instant,
     ) -> Result<ProcessOutput, ProcessError> {
-        let started = Instant::now();
+        let started = clock();
         let deadline = started.checked_add(limits.timeout).unwrap_or(started);
         command.stdin(if input.is_some() {
             Stdio::piped()
@@ -570,7 +583,7 @@ mod windows {
         let mut status = None;
 
         loop {
-            let now = Instant::now();
+            let now = clock();
             if now >= deadline {
                 stop(&job, &mut child);
                 return Err(ProcessError::Timeout);
