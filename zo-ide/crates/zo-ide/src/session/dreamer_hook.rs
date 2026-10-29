@@ -168,11 +168,16 @@ fn unix_ms(at: std::time::SystemTime) -> u64 {
         .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// Move the idle clock by what the pass found: a pass that ran waits the full
+/// automatic interval, one the shared marker holds sleeps until it lets go,
+/// one with nothing to curate waits for this session's next turn, and one that
+/// failed or found another pass running looks again later each time.
 fn settle(attempt: &DreamAttempt, reply: &IdleReply, now: u64) {
     match reply {
         IdleReply::Ran { .. } => attempt.completed(now),
-        IdleReply::Failed => attempt.retry_later(now),
-        IdleReply::NotDue { .. } | IdleReply::NoEvidence | IdleReply::Disabled | IdleReply::Locked => {}
+        IdleReply::NotDue { until_ms } => attempt.not_due_until(*until_ms, now),
+        IdleReply::NoEvidence | IdleReply::Disabled => attempt.awaits_activity(),
+        IdleReply::Locked | IdleReply::Failed => attempt.retry_later(now),
     }
 }
 

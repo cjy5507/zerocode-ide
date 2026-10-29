@@ -8,15 +8,21 @@ pub(crate) struct IdleDreamer {
     enabled: bool,
     delay_ms: u64,
     idle_after: u64,
+    /// Moves on every turn, so a pass with nothing to curate can wait for the next one.
+    epoch: u64,
     next_attempt: Arc<AtomicU64>,
     running: Arc<AtomicBool>,
     failures: Arc<AtomicU32>,
+    /// The `epoch` a pass with nothing to curate parked the clock at.
+    parked: Arc<AtomicU64>,
 }
 
 pub(crate) struct DreamAttempt {
+    epoch: u64,
     next_attempt: Arc<AtomicU64>,
     running: Arc<AtomicBool>,
     failures: Arc<AtomicU32>,
+    parked: Arc<AtomicU64>,
 }
 
 impl IdleDreamer {
@@ -25,18 +31,21 @@ impl IdleDreamer {
             enabled,
             delay_ms: delay_ms.max(1),
             idle_after: now.saturating_add(delay_ms.max(1)),
+            epoch: 0,
             next_attempt: Arc::new(AtomicU64::new(0)),
             running: Arc::new(AtomicBool::new(false)),
             failures: Arc::new(AtomicU32::new(0)),
+            parked: Arc::new(AtomicU64::new(u64::MAX)),
         }
     }
 
     pub(crate) fn activity(&mut self, now: u64) {
         self.idle_after = now.saturating_add(self.delay_ms);
+        self.epoch = self.epoch.wrapping_add(1);
     }
 
     pub(crate) fn next_wakeup(&self, may_write: bool) -> Option<u64> {
-        (self.enabled && may_write).then(|| {
+        (self.enabled && may_write && self.parked.load(Ordering::Acquire) != self.epoch).then(|| {
             self.idle_after.max(self.next_attempt.load(Ordering::Acquire))
         })
     }
@@ -50,9 +59,11 @@ impl IdleDreamer {
         self.next_attempt.store(now.saturating_add(self.delay_ms), Ordering::Release);
         self.running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).ok()?;
         Some(DreamAttempt {
+            epoch: self.epoch,
             next_attempt: Arc::clone(&self.next_attempt),
             running: Arc::clone(&self.running),
             failures: Arc::clone(&self.failures),
+            parked: Arc::clone(&self.parked),
         })
     }
 }
@@ -60,9 +71,7 @@ impl IdleDreamer {
 impl DreamAttempt {
     pub(crate) fn completed(&self, now: u64) {
         self.failures.store(0, Ordering::Release);
-        let interval = runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL.as_millis();
-        let interval = u64::try_from(interval).unwrap_or(u64::MAX);
-        self.next_attempt.store(now.saturating_add(interval), Ordering::Release);
+        self.next_attempt.store(now.saturating_add(automatic_interval_ms()), Ordering::Release);
     }
 
     /// A pass that failed looks again later each time it fails in a row, on
@@ -74,9 +83,24 @@ impl DreamAttempt {
         self.next_attempt.fetch_max(now.saturating_add(wait), Ordering::AcqRel);
     }
 
-    pub(crate) fn not_due_until(&self, _until: u64, _now: u64) {}
+    /// Another pass's success, or the backoff after a failure, holds the shared
+    /// clock until `until`. Sleep until then, but never longer than one
+    /// automatic interval: a marker stamped in the future must not park the
+    /// clock for good.
+    pub(crate) fn not_due_until(&self, until: u64, now: u64) {
+        let until = until.min(now.saturating_add(automatic_interval_ms()));
+        self.next_attempt.fetch_max(until, Ordering::AcqRel);
+    }
 
-    pub(crate) fn awaits_activity(&self) {}
+    /// Nothing to curate: sleep until this session's next turn. Evidence
+    /// another session writes is that session's own idle pass to curate.
+    pub(crate) fn awaits_activity(&self) {
+        self.parked.store(self.epoch, Ordering::Release);
+    }
+}
+
+fn automatic_interval_ms() -> u64 {
+    u64::try_from(runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL.as_millis()).unwrap_or(u64::MAX)
 }
 
 impl Drop for DreamAttempt {

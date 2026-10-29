@@ -2834,10 +2834,11 @@ fn a_later_failure_uses_retry_backoff_instead_of_the_last_success_interval() {
     fs::write(dir.join(super::THROTTLE_MARKER), "100").unwrap();
     fs::write(dir.join(super::AUTO_DREAM_ERROR_FILE), "{\"tsMs\":101000}").unwrap();
     let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
-    assert!(!super::automatic_dream_due(dir, at(160), super::DEFAULT_AUTO_DREAM_INTERVAL));
-    assert!(super::automatic_dream_due(dir, at(161), super::DEFAULT_AUTO_DREAM_INTERVAL));
+    let interval = super::DEFAULT_AUTO_DREAM_INTERVAL;
+    assert_eq!(super::automatic_dream_not_due_until(dir, at(160), interval), Some(at(161)));
+    assert_eq!(super::automatic_dream_not_due_until(dir, at(161), interval), None);
     fs::write(dir.join(super::THROTTLE_MARKER), "162").unwrap();
-    assert!(!super::automatic_dream_due(dir, at(163), super::DEFAULT_AUTO_DREAM_INTERVAL));
+    assert_eq!(super::automatic_dream_not_due_until(dir, at(163), interval), Some(at(162) + interval));
 }
 
 #[test]
@@ -2845,18 +2846,21 @@ fn failures_in_a_row_wait_longer_each_time_up_to_an_hour() {
     let directory = tempfile::tempdir().unwrap();
     let dir = directory.path();
     let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    let interval = super::DEFAULT_AUTO_DREAM_INTERVAL;
     for (failures, wait) in [(1, 60), (2, 120), (3, 240), (6, 1_920), (7, 3_600), (40, 3_600)] {
         fs::write(
             dir.join(super::AUTO_DREAM_ERROR_FILE),
             format!("{{\"tsMs\":1000000,\"failures\":{failures}}}"),
         )
         .unwrap();
-        assert!(
-            !super::automatic_dream_due(dir, at(1_000 + wait - 1), super::DEFAULT_AUTO_DREAM_INTERVAL),
+        assert_eq!(
+            super::automatic_dream_not_due_until(dir, at(1_000 + wait - 1), interval),
+            Some(at(1_000 + wait)),
             "{failures} failures in a row must wait {wait} s"
         );
-        assert!(
-            super::automatic_dream_due(dir, at(1_000 + wait), super::DEFAULT_AUTO_DREAM_INTERVAL),
+        assert_eq!(
+            super::automatic_dream_not_due_until(dir, at(1_000 + wait), interval),
+            None,
             "{failures} failures in a row wait no more than {wait} s"
         );
     }

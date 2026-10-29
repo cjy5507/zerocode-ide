@@ -3723,45 +3723,38 @@ impl AutoDream {
     }
 }
 
+/// Fire an automatic dreaming pass if the throttle window has elapsed, updating
+/// the shared marker on success, and say why when it does not run. The lock
+/// spans the second throttle check, curation, local decay, and the success
+/// stamp, across processes and automatic triggers.
 pub fn try_auto_dream(
     cwd: &Path,
     min_interval: std::time::Duration,
     active_model: Option<&str>,
 ) -> Result<AutoDream, DreamError> {
-    Ok(maybe_auto_dream(cwd, min_interval, active_model)?.map_or(AutoDream::NoEvidence, AutoDream::Ran))
-}
-
-/// Fire an automatic dreaming pass if the throttle window has elapsed, updating
-/// the shared marker on success. Disabled, empty, throttled, and already-running
-/// work returns `Ok(None)`. The lock spans the second throttle check, curation,
-/// local decay, and the success stamp, across processes and automatic triggers.
-pub fn maybe_auto_dream(
-    cwd: &Path,
-    min_interval: std::time::Duration,
-    active_model: Option<&str>,
-) -> Result<Option<DreamReport>, DreamError> {
     if !automatic_dream_enabled(cwd) {
-        return Ok(None);
+        return Ok(AutoDream::Disabled);
     }
     let dir = dream_dir(cwd);
-    if !automatic_dream_due(&dir, SystemTime::now(), min_interval)
-        || !has_automatic_curation_evidence(cwd)
-    {
-        return Ok(None);
+    if let Some(until) = automatic_dream_not_due_until(&dir, SystemTime::now(), min_interval) {
+        return Ok(AutoDream::NotDueUntil(until));
+    }
+    if !has_automatic_curation_evidence(cwd) {
+        return Ok(AutoDream::NoEvidence);
     }
     let dir = ensure_repo_dream_dir_no_symlink(cwd)?;
     let Some(_lock) = crate::secure_fs::try_lock_owner_only(&dir, Path::new(AUTO_DREAM_LOCK_FILE))? else {
-        return Ok(None);
+        return Ok(AutoDream::Locked);
     };
     // Another process may have completed between the cheap gate and the lock.
-    if !automatic_dream_due(&dir, SystemTime::now(), min_interval) {
-        return Ok(None);
+    if let Some(until) = automatic_dream_not_due_until(&dir, SystemTime::now(), min_interval) {
+        return Ok(AutoDream::NotDueUntil(until));
     }
     let result = (|| {
         let report = dream_at_cwd(cwd, active_model)?;
         FsMemoryStore::local_at_cwd(cwd).decay_expired(now_secs())?;
         write_marker(&trace_base(cwd), &dir.join(THROTTLE_MARKER))?;
-        Ok(Some(report))
+        Ok(AutoDream::Ran(report))
     })();
     if let Err(error) = &result {
         // Failure has its own bounded retry clock, never a success timestamp.
@@ -3771,11 +3764,27 @@ pub fn maybe_auto_dream(
     result
 }
 
-fn automatic_dream_due(dir: &Path, now: SystemTime, min_interval: std::time::Duration) -> bool {
-    match unresolved_auto_dream_failure(dir) {
-        Some(failure) => should_auto_dream(Some(failure.at), now, auto_dream_retry_interval(failure.failures)),
-        None => should_auto_dream(last_auto_dream_success(dir), now, min_interval),
-    }
+/// [`try_auto_dream`] for a caller that wants only the report: disabled,
+/// empty, throttled, and already-running work returns `Ok(None)`.
+pub fn maybe_auto_dream(
+    cwd: &Path,
+    min_interval: std::time::Duration,
+    active_model: Option<&str>,
+) -> Result<Option<DreamReport>, DreamError> {
+    try_auto_dream(cwd, min_interval, active_model).map(AutoDream::into_report)
+}
+
+/// When the next automatic pass may start: `None` when it may start now.
+fn automatic_dream_not_due_until(
+    dir: &Path,
+    now: SystemTime,
+    min_interval: std::time::Duration,
+) -> Option<SystemTime> {
+    let (last, wait) = match unresolved_auto_dream_failure(dir) {
+        Some(failure) => (failure.at, auto_dream_retry_interval(failure.failures)),
+        None => (last_auto_dream_success(dir)?, min_interval),
+    };
+    (!should_auto_dream(Some(last), now, wait)).then(|| last.checked_add(wait).unwrap_or(last))
 }
 
 fn last_auto_dream_success(dir: &Path) -> Option<SystemTime> {
