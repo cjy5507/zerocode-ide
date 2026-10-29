@@ -2693,7 +2693,9 @@ impl<'a> ReplayedMail<'a> {
 /// · it is older than the retention policy;
 /// · it was handed over and acknowledged, and waits in no queue and no open
 ///   batch;
-/// · it stands in no thread and names no question;
+/// · it stands in no thread — neither inside one nor at its root, as a
+///   letter somebody answered, which a reply finds by id — and names no
+///   question;
 /// · the work it was about is over: its attempt ended and its task is final;
 /// · it is not the last thing its writer said in this run from that seat —
 ///   routing reads a pane's last word, and a chair's past seats are read off
@@ -2737,6 +2739,12 @@ fn fold_old_letters(
                 }
             }
         }
+        // The letters somebody answered: the roots of the threads.
+        let answered: HashSet<&str> = run
+            .messages
+            .iter()
+            .filter_map(|held| held.thread.as_deref())
+            .collect();
         // Each writer's last word from each seat it wrote from.
         let mut last_word: HashMap<(&str, Option<&str>), &str> = HashMap::new();
         for held in &run.messages {
@@ -2760,6 +2768,7 @@ fn fold_old_letters(
                     && held.from != LEDGER_ITSELF
                     && held.created_ms <= cutoff_ms
                     && held.thread.is_none()
+                    && !answered.contains(held.id.as_str())
                     && acknowledged.contains(held.id.as_str())
                     && !stays.contains(held.id.as_str())
                     && last_word.get(&(held.from.as_str(), held.author_seat.as_deref()))
