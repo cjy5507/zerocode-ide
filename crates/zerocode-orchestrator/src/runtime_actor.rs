@@ -4847,7 +4847,11 @@ impl RuntimeState {
             return Err(RuntimeError::RecoveryRequired);
         }
         let seat = format!("{team}/{pane}");
-        if !self.ledger.coordinator_returned(run, &seat, actor, now_ms) {
+        // Asked by reference first: the window hands every chair it sees
+        // taken over on every beat (t-81273).
+        if !self.ledger.chair_empty(run)
+            || !self.ledger.coordinator_returned(run, &seat, actor, now_ms)
+        {
             return Ok(RuntimeReply::Settled {
                 moved: false,
                 revision: self.revision,
@@ -5486,11 +5490,18 @@ impl RuntimeState {
         // disappear between the filesystem sweep and this request because the
         // successful hook that removed it is already queued; when both facts
         // share one beat, the real payload is the later and stronger word.
+        //
+        // Each fact is asked of the ledger by reference before it is written:
+        // this runs on every beat, and a write taken while a reader holds the
+        // ledger copies the whole of it (t-81273).
         let ledger = &mut self.ledger;
+        let mut retired = false;
         for (term, since_ms) in delivery_failures {
             self.panes.with_seat_of_term(*term, &mut |seat| {
-                if let Some((team, pane)) = seat {
-                    ledger.worker_hook_delivery_failed((team, pane), *since_ms);
+                if let Some(seat) = seat
+                    && ledger.hook_failure_due(seat)
+                {
+                    retired |= ledger.worker_hook_delivery_failed(seat, *since_ms);
                 }
             });
         }
@@ -5502,22 +5513,29 @@ impl RuntimeState {
         // one's window (t-6740 r3).
         for (term, heard_ms) in spoken {
             self.panes.with_seat_of_term(*term, &mut |seat| {
-                if let Some((team, pane)) = seat {
-                    ledger.worker_spoke((team, pane), *heard_ms);
+                if let Some(seat) = seat
+                    && ledger.sound_due(seat, *heard_ms)
+                {
+                    retired |= ledger.worker_spoke(seat, *heard_ms);
                 }
             });
         }
-        let told = self.ledger.workers_overdue(now_ms);
+        let told = if self.ledger.workers_overdue_due(now_ms) {
+            self.ledger.workers_overdue(now_ms)
+        } else {
+            0
+        };
         // `spoken` may have retired windows without telling anybody — that
         // is a write too, and one worth making durable so a restart does not
         // resurrect a window its worker already answered.
         //
-        // A beat that heard nothing and told nothing changed nothing, and
+        // A beat that retired nothing and told nothing changed nothing, and
         // this runs on EVERY beat: writing through here rewrote the whole
         // ledger and moved its revision once a second on an idle window
         // (t-19506), and every revision is a full export, rebuild and
-        // validation for each reader downstream.
-        if spoken.is_empty() && delivery_failures.is_empty() && told == 0 {
+        // validation for each reader downstream. A sound that retired no
+        // window is no write either (t-81273).
+        if !retired && told == 0 {
             return Ok(RuntimeReply::Settled {
                 moved: false,
                 revision: self.revision,
@@ -5546,6 +5564,12 @@ impl RuntimeState {
         }
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
+        }
+        if !self.ledger.quiet_news_due(stalled, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
         }
         let told = self.ledger.workers_stalled(stalled, now_ms)
             + self.ledger.receivers_told_stalled(stalled, now_ms);
@@ -5581,6 +5605,12 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
+        if !self.ledger.idle_news_due(idle, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
         let told = self.ledger.workers_idle(idle, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
@@ -5612,6 +5642,12 @@ impl RuntimeState {
         }
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
+        }
+        if !self.ledger.quota_walls_due(walled, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
         }
         let told = self.ledger.workers_quota_walled(walled, now_ms);
         if told == 0 {
@@ -5677,6 +5713,12 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
+        if !self.ledger.quota_lifts_due(lifted, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
         let told = self.ledger.workers_quota_lifted(lifted, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
@@ -5717,6 +5759,12 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
+        if !self.ledger.classifier_declines_due(declined, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
         let told = self.ledger.workers_classifier_declined(declined, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
@@ -5741,6 +5789,12 @@ impl RuntimeState {
         }
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
+        }
+        if !self.ledger.model_deviations_due(deviated, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
         }
         let told = self.ledger.workers_model_deviated(deviated, now_ms);
         if told == 0 {
@@ -5776,6 +5830,12 @@ impl RuntimeState {
         }
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
+        }
+        if !self.ledger.judged_news_due(judged, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
         }
         let told = self.ledger.stall_causes_judged(judged, now_ms)
             + self.ledger.receivers_told_judged(judged, now_ms);
@@ -6101,6 +6161,12 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
+        if !self.ledger.panes_missing_due(missing) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
         let told = self.ledger.panes_missing(missing, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
@@ -6131,6 +6197,12 @@ impl RuntimeState {
         }
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
+        }
+        if !self.ledger.panes_seen_due(workers) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
         }
         let cleared = self.ledger.panes_seen(workers);
         if cleared == 0 {

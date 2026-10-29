@@ -5418,6 +5418,34 @@ fn receivers_at(run: &Run, team: &str, pane: &str, fact_ms: i64) -> Vec<(String,
 /// The same for a worker named by id — the stall sweep and the endings
 /// know the worker, not the pane — under the same rule: a fact that began
 /// before the worker was summoned is not about it.
+/// A live worker whose readiness window has passed with no sound
+/// ([`Ledger::workers_overdue`]).
+fn past_its_readiness(worker: &Worker, now_ms: i64) -> bool {
+    worker.state.is_live() && worker.ready_by_ms.is_some_and(|by| by <= now_ms)
+}
+
+/// A worker with a window a sound retires ([`Ledger::worker_spoke`]).
+fn awaits_a_sound(worker: &Worker) -> bool {
+    worker.ready_by_ms.is_some() || worker.hook_unreachable_since_ms.is_some()
+}
+
+/// The worker in `seat` whose hook failure is not written down yet
+/// ([`Ledger::worker_hook_delivery_failed`]).
+fn hook_failure_is_news(worker: &Worker, (team, pane): (&str, &str)) -> bool {
+    worker.team == team
+        && worker.pane == pane
+        && worker.state.may_occupy_pane()
+        && worker.hook_unreachable_since_ms.is_none()
+}
+
+/// A live worker whose pane's absence is not reported yet
+/// ([`Ledger::panes_missing`]).
+fn pane_absence_is_news(worker: &Worker) -> bool {
+    worker.state.is_live()
+        && worker.state.may_occupy_pane()
+        && worker.pane_missing_since_ms.is_none()
+}
+
 fn receiver_of_worker(run: &Run, worker_id: &str, fact_ms: i64) -> Option<(String, ReceiverSeat)> {
     let worker = run
         .worker(worker_id)
@@ -5887,11 +5915,26 @@ impl Ledger {
         fact_ms: i64,
         now_ms: i64,
     ) -> usize {
+        self.receiver_drafts(run_id, receiver, news, fact_ms, now_ms)
+            .into_iter()
+            .filter(|draft| self.post(run_id, draft.clone(), now_ms).is_ok())
+            .count()
+    }
+
+    /// The lines [`Self::receivers_told`] owes, one per asker.
+    fn receiver_drafts(
+        &self,
+        run_id: &str,
+        receiver: &(String, ReceiverSeat),
+        news: &ReceiverNews,
+        fact_ms: i64,
+        now_ms: i64,
+    ) -> Vec<Draft> {
         let (address, seat) = receiver;
         let seat_json = seat.json();
-        let drafts: Vec<Draft> = {
+        {
             let Some(run) = self.run(run_id) else {
-                return 0;
+                return Vec::new();
             };
             open_questions_to(self, run, address, now_ms)
                 .into_iter()
@@ -5934,11 +5977,7 @@ impl Ledger {
                     }
                 })
                 .collect()
-        };
-        drafts
-            .into_iter()
-            .filter(|draft| self.post(run_id, draft.clone(), now_ms).is_ok())
-            .count()
+        }
     }
 
     /// The same, for whoever a `team/pane` seat is the receiver of, in every
@@ -5975,12 +6014,37 @@ impl Ledger {
         fact_ms: i64,
         now_ms: i64,
     ) -> usize {
-        let Some((run_id, receiver)) = self.runs.iter().find_map(|run| {
-            receiver_of_worker(run, worker_id, fact_ms).map(|receiver| (run.id.clone(), receiver))
-        }) else {
+        let Some((run_id, receiver)) = self.worker_as_receiver(worker_id, fact_ms) else {
             return 0;
         };
         self.receivers_told(&run_id, &receiver, news, fact_ms, now_ms)
+    }
+
+    /// Whether [`Self::receiver_worker_told`] would write a line.
+    fn receiver_worker_owed(
+        &self,
+        worker_id: &str,
+        news: &ReceiverNews,
+        fact_ms: i64,
+        now_ms: i64,
+    ) -> bool {
+        self.worker_as_receiver(worker_id, fact_ms)
+            .is_some_and(|(run_id, receiver)| {
+                !self
+                    .receiver_drafts(&run_id, &receiver, news, fact_ms, now_ms)
+                    .is_empty()
+            })
+    }
+
+    /// The run a worker named by id is a receiver in, and as what.
+    fn worker_as_receiver(
+        &self,
+        worker_id: &str,
+        fact_ms: i64,
+    ) -> Option<(String, (String, ReceiverSeat))> {
+        self.runs.iter().find_map(|run| {
+            receiver_of_worker(run, worker_id, fact_ms).map(|receiver| (run.id.clone(), receiver))
+        })
     }
 
     /// A turn ended in a seat, or the person cut it short: every asker
@@ -7760,14 +7824,20 @@ impl Ledger {
         actor: Option<&str>,
         now_ms: i64,
     ) -> bool {
-        let Some(run) = self.run(run_id) else {
-            return false;
-        };
-        if run.coordinator_live().is_some() {
+        if !self.chair_empty(run_id) {
             return false;
         }
         self.seat_coordinator(run_id, seat, actor, now_ms)
             .is_ok_and(|seated| seated.moved)
+    }
+
+    /// Whether `run_id`'s chair stands empty, so a coordinator coming back
+    /// would take it ([`Self::coordinator_returned`]). The window asks on
+    /// every beat for every chair it sees taken; this is the answer that
+    /// costs no write (t-81273).
+    pub fn chair_empty(&self, run_id: &str) -> bool {
+        self.run(run_id)
+            .is_some_and(|run| run.coordinator_live().is_none())
     }
 
     /// Every seat this team's leader held is vacated — the leader exited.
@@ -12206,47 +12276,7 @@ impl Ledger {
             if one.stalled_since_ms < 0 || one.cause.is_empty() {
                 continue;
             }
-            let Some((run_id, body, task, dispatch)) = self.runs.iter().find_map(|run| {
-                let worker = run.worker(&one.worker)?;
-                if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
-                    return None;
-                }
-                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
-                if !dispatch.is_open() {
-                    return None;
-                }
-                let already = run.messages.iter().any(|held| {
-                    held.kind == MessageKind::WentQuiet
-                        && held.dispatch.as_deref() == Some(dispatch.id.as_str())
-                        && serde_json::from_str::<serde_json::Value>(held.body.as_str()).is_ok_and(
-                            |body| {
-                                body["reason"] == STALL_JUDGED_REASON
-                                    && body["stalledSinceMs"] == one.stalled_since_ms
-                            },
-                        )
-                });
-                if already {
-                    return None;
-                }
-                Some((
-                    run.id.clone(),
-                    serde_json::json!({
-                        "workerId": worker.id,
-                        "agent": worker.agent,
-                        "pane": worker.pane,
-                        "taskId": dispatch.task,
-                        "dispatchId": dispatch.id,
-                        "reason": STALL_JUDGED_REASON,
-                        "stalledSinceMs": one.stalled_since_ms,
-                        "observedAtMs": now_ms,
-                        "cause": one.cause,
-                        "confidence": one.confidence,
-                        "notification": true,
-                    }),
-                    dispatch.task.clone(),
-                    dispatch.id.clone(),
-                ))
-            }) else {
+            let Some((run_id, body, task, dispatch)) = self.judged_notice(one, now_ms) else {
                 continue;
             };
             if self
@@ -12259,6 +12289,55 @@ impl Ledger {
         told
     }
 
+    /// The notice [`Self::stall_causes_judged`] owes `one`, when it owes one.
+    fn judged_notice(
+        &self,
+        one: &StallJudged,
+        now_ms: i64,
+    ) -> Option<(String, serde_json::Value, String, String)> {
+        self.runs.iter().find_map(|run| {
+            let worker = run.worker(&one.worker)?;
+            if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
+                return None;
+            }
+            let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+            if !dispatch.is_open() {
+                return None;
+            }
+            let already = run.messages.iter().any(|held| {
+                held.kind == MessageKind::WentQuiet
+                    && held.dispatch.as_deref() == Some(dispatch.id.as_str())
+                    && serde_json::from_str::<serde_json::Value>(held.body.as_str()).is_ok_and(
+                        |body| {
+                            body["reason"] == STALL_JUDGED_REASON
+                                && body["stalledSinceMs"] == one.stalled_since_ms
+                        },
+                    )
+            });
+            if already {
+                return None;
+            }
+            Some((
+                run.id.clone(),
+                serde_json::json!({
+                    "workerId": worker.id,
+                    "agent": worker.agent,
+                    "pane": worker.pane,
+                    "taskId": dispatch.task,
+                    "dispatchId": dispatch.id,
+                    "reason": STALL_JUDGED_REASON,
+                    "stalledSinceMs": one.stalled_since_ms,
+                    "observedAtMs": now_ms,
+                    "cause": one.cause,
+                    "confidence": one.confidence,
+                    "notification": true,
+                }),
+                dispatch.task.clone(),
+                dispatch.id.clone(),
+            ))
+        })
+    }
+
     pub fn workers_stalled(&mut self, stalled: &[(String, i64)], now_ms: i64) -> usize {
         if now_ms < 0 {
             return 0;
@@ -12268,55 +12347,9 @@ impl Ledger {
             if *stalled_since_ms < 0 {
                 continue;
             }
-            let Some((run_id, body, task, dispatch)) = self.runs.iter().find_map(|run| {
-                let worker = run.worker(worker_id)?;
-                if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
-                    return None;
-                }
-                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
-                if !dispatch.is_open() || awaiting_reply(run, &worker.id) {
-                    return None;
-                }
-                /* Once per episode (t-15313). This used to remind every five
-                 * minutes the silence lasted, and a silence the coordinator
-                 * ordered — "wait until the release" — then drew a notice every
-                 * five minutes for as long as it was obeyed: more than ten
-                 * about one worker between 14:10 and 14:50 on 2026-09-29,
-                 * with a real silence buried among them. The notice stands on
-                 * the desk while the silence goes on (`quiet_notice_stands`),
-                 * so a reminder repeats a fact the coordinator already holds;
-                 * the worker's own next word closes the episode, and the
-                 * silence after it is news again. */
-                let episode = quiet_episode(run, &worker.id, &dispatch.id);
-                if episode.is_some_and(|held| held.last_notified_ms.is_some()) {
-                    return None;
-                }
-                let started = episode.map_or(*stalled_since_ms, |held| held.first_turn_ms);
-                let turns = episode.map_or(0, |held| held.turns);
-                let suppressed =
-                    episode.map_or(0, |held| held.turns.saturating_sub(held.notified_through));
-                let last_turn = episode.map(|held| held.last_turn_ms);
-                Some((
-                    run.id.clone(),
-                    serde_json::json!({
-                        "workerId": worker.id,
-                        "agent": worker.agent,
-                        "pane": worker.pane,
-                        "taskId": dispatch.task,
-                        "dispatchId": dispatch.id,
-                        "reason": "stalled",
-                        "stalledSinceMs": stalled_since_ms,
-                        "observedAtMs": now_ms,
-                        "episodeStartedMs": started,
-                        "lastTurnEndedMs": last_turn,
-                        "quietTurns": turns,
-                        "suppressedTurns": suppressed,
-                        "notification": true,
-                    }),
-                    dispatch.task.clone(),
-                    dispatch.id.clone(),
-                ))
-            }) else {
+            let Some((run_id, body, task, dispatch)) =
+                self.stalled_notice(worker_id, stalled_since_ms, now_ms)
+            else {
                 continue;
             };
             if self
@@ -12327,6 +12360,158 @@ impl Ledger {
             }
         }
         notified
+    }
+
+    /// The notice [`Self::workers_stalled`] owes a worker quiet since
+    /// `stalled_since_ms`, when it owes one.
+    fn stalled_notice(
+        &self,
+        worker_id: &str,
+        stalled_since_ms: &i64,
+        now_ms: i64,
+    ) -> Option<(String, serde_json::Value, String, String)> {
+        self.runs.iter().find_map(|run| {
+            let worker = run.worker(worker_id)?;
+            if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
+                return None;
+            }
+            let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+            if !dispatch.is_open() || awaiting_reply(run, &worker.id) {
+                return None;
+            }
+            /* Once per episode (t-15313). This used to remind every five
+             * minutes the silence lasted, and a silence the coordinator
+             * ordered — "wait until the release" — then drew a notice every
+             * five minutes for as long as it was obeyed: more than ten
+             * about one worker between 14:10 and 14:50 on 2026-09-29,
+             * with a real silence buried among them. The notice stands on
+             * the desk while the silence goes on (`quiet_notice_stands`),
+             * so a reminder repeats a fact the coordinator already holds;
+             * the worker's own next word closes the episode, and the
+             * silence after it is news again. */
+            let episode = quiet_episode(run, &worker.id, &dispatch.id);
+            if episode.is_some_and(|held| held.last_notified_ms.is_some()) {
+                return None;
+            }
+            let started = episode.map_or(*stalled_since_ms, |held| held.first_turn_ms);
+            let turns = episode.map_or(0, |held| held.turns);
+            let suppressed =
+                episode.map_or(0, |held| held.turns.saturating_sub(held.notified_through));
+            let last_turn = episode.map(|held| held.last_turn_ms);
+            Some((
+                run.id.clone(),
+                serde_json::json!({
+                    "workerId": worker.id,
+                    "agent": worker.agent,
+                    "pane": worker.pane,
+                    "taskId": dispatch.task,
+                    "dispatchId": dispatch.id,
+                    "reason": "stalled",
+                    "stalledSinceMs": stalled_since_ms,
+                    "observedAtMs": now_ms,
+                    "episodeStartedMs": started,
+                    "lastTurnEndedMs": last_turn,
+                    "quietTurns": turns,
+                    "suppressedTurns": suppressed,
+                    "notification": true,
+                }),
+                dispatch.task.clone(),
+                dispatch.id.clone(),
+            ))
+        })
+    }
+
+    /// Whether the stall sweep's quiet workers are owed anything: a notice
+    /// ([`Self::workers_stalled`]) or an asker's line
+    /// ([`Self::receivers_told_stalled`]).
+    ///
+    /// The window hands every quiet worker over on every beat, and the
+    /// answer is almost always no. A runtime that lends its ledger to
+    /// readers copies the whole of it for a write while one still holds it
+    /// (t-81273), so it asks this first and takes the ledger to write only
+    /// on a yes. The `*_due` questions below are the same for the other
+    /// sweeps; each asks what its write decides, through the same function.
+    pub fn quiet_news_due(&self, stalled: &[(String, i64)], now_ms: i64) -> bool {
+        now_ms >= 0
+            && stalled
+                .iter()
+                .filter(|(_, since_ms)| *since_ms >= 0)
+                .any(|(worker, since_ms)| {
+                    self.stalled_notice(worker, since_ms, now_ms).is_some()
+                        || self.receiver_worker_owed(
+                            worker,
+                            &ReceiverNews::Stalled,
+                            *since_ms,
+                            now_ms,
+                        )
+                })
+    }
+
+    /// Whether [`Self::stall_causes_judged`] or
+    /// [`Self::receivers_told_judged`] would write a line.
+    pub fn judged_news_due(&self, judged: &[StallJudged], now_ms: i64) -> bool {
+        now_ms >= 0
+            && judged
+                .iter()
+                .filter(|one| one.stalled_since_ms >= 0 && !one.cause.is_empty())
+                .any(|one| {
+                    self.judged_notice(one, now_ms).is_some()
+                        || self.receiver_worker_owed(
+                            &one.worker,
+                            &ReceiverNews::Judged(one.cause.clone()),
+                            one.stalled_since_ms,
+                            now_ms,
+                        )
+                })
+    }
+
+    /// Whether [`Self::workers_idle`] would write a notice.
+    pub fn idle_news_due(&self, idle: &[IdleWorker], now_ms: i64) -> bool {
+        now_ms >= 0
+            && idle
+                .iter()
+                .any(|one| one.rested_ms >= 0 && self.idle_notice(one, now_ms).is_some())
+    }
+
+    /// Whether [`Self::workers_quota_walled`] would write a row or a line.
+    pub fn quota_walls_due(&self, walled: &[QuotaWallWitness], now_ms: i64) -> bool {
+        now_ms >= 0
+            && walled.iter().any(|witness| {
+                self.receiver_worker_owed(
+                    &witness.worker,
+                    &ReceiverNews::QuotaWalled,
+                    now_ms,
+                    now_ms,
+                ) || self.quota_wall_notice(witness, now_ms).is_some()
+            })
+    }
+
+    /// Whether [`Self::workers_quota_lifted`] would write a notice.
+    pub fn quota_lifts_due(&self, lifted: &[QuotaLift], now_ms: i64) -> bool {
+        now_ms >= 0
+            && lifted
+                .iter()
+                .any(|lift| lift.since_ms >= 0 && self.quota_lift_notice(lift, now_ms).is_some())
+    }
+
+    /// Whether [`Self::workers_classifier_declined`] would write a row.
+    pub fn classifier_declines_due(
+        &self,
+        declined: &[ClassifierDeclineWitness],
+        now_ms: i64,
+    ) -> bool {
+        now_ms >= 0
+            && declined
+                .iter()
+                .any(|witness| self.classifier_decline_notice(witness, now_ms).is_some())
+    }
+
+    /// Whether [`Self::workers_model_deviated`] would write a row.
+    pub fn model_deviations_due(&self, deviated: &[ModelDeviation], now_ms: i64) -> bool {
+        now_ms >= 0
+            && deviated
+                .iter()
+                .any(|deviation| self.model_deviation_notice(deviation, now_ms).is_some())
     }
 
     /// Tell each coordinator, once per quiet episode, about a worker at rest
@@ -12376,101 +12561,8 @@ impl Ledger {
             if one.rested_ms < 0 {
                 continue;
             }
-            let Some((run_id, body, subject, task, dispatch)) = self.runs.iter().find_map(|run| {
-                let worker = run.worker(&one.worker)?;
-                if !worker.state.is_live() || !worker.state.may_occupy_pane() {
-                    return None;
-                }
-                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
-                if !dispatch.is_open() {
-                    return None;
-                }
-                let address = worker_address(&worker.id);
-                let unread: Vec<&Message> = run
-                    .unread(&address)
-                    .into_iter()
-                    .filter_map(|id| run.message(id))
-                    .collect();
-                /* A pane the person took is theirs to wait in: nothing is
-                 * typed there, and with nothing unread there is nothing to
-                 * tell. Its unread mail IS news — the pointer's skip of a
-                 * taken pane left run-4275's w-14439 with six letters nobody
-                 * was told about (t-15313). */
-                if unread.is_empty()
-                    && (worker.taken_over
-                        || !one.waiting_on_mail
-                        || awaiting_reply(run, &worker.id))
-                {
-                    return None;
-                }
-                let since = unread
-                    .iter()
-                    .map(|message| message.created_ms)
-                    .min()
-                    .map_or(one.rested_ms, |oldest| oldest.max(one.rested_ms));
-                /* A clock that stepped back behind the rest fails toward the
-                 * notice, not toward silence: the grace is the pointer's
-                 * chance, and a subtraction that never reaches it would mute
-                 * the one notice this silence has for as long as the clock
-                 * takes to climb back. Once per episode bounds it to one. */
-                if now_ms >= since && now_ms - since < IDLE_NOTICE_GRACE_MS {
-                    return None;
-                }
-                let episode = quiet_episode(run, &worker.id, &dispatch.id);
-                if episode.is_some_and(|held| held.last_notified_ms.is_some()) {
-                    return None;
-                }
-                let unread_ids: Vec<&str> = unread.iter().map(|message| message.id.as_str()).collect();
-                let reason = match unread.is_empty() {
-                    false => IDLE_UNREAD_REASON,
-                    true => IDLE_WAITING_REASON,
-                };
-                let rested_s = now_ms.saturating_sub(one.rested_ms) / 1000;
-                let taken = match worker.taken_over {
-                    true => ", taken over by the person,",
-                    false => ",",
-                };
-                let subject = match unread.is_empty() {
-                    false => format!(
-                        "unread mail waiting: {} for {} ({}){taken} at rest {rested_s} s",
-                        named_ids(&unread_ids),
-                        worker.id,
-                        dispatch.task
-                    ),
-                    true => format!(
-                        "waiting on mail: {} ({}) sleeps in its own check --wait with nothing \
-                         unread, at rest {rested_s} s",
-                        worker.id, dispatch.task
-                    ),
-                };
-                let turns = episode.map_or(0, |held| held.turns);
-                Some((
-                    run.id.clone(),
-                    serde_json::json!({
-                        "reason": reason,
-                        "unreadMail": unread_ids,
-                        "workerId": worker.id,
-                        "agent": worker.agent,
-                        "pane": worker.pane,
-                        "taskId": dispatch.task,
-                        "dispatchId": dispatch.id,
-                        "idleSinceMs": one.rested_ms,
-                        "observedAtMs": now_ms,
-                        "waitingOnMail": one.waiting_on_mail,
-                        "takenOver": worker.taken_over,
-                        "lastStatus": last_status_json(run, &worker.id),
-                        "episodeStartedMs": episode.map_or(one.rested_ms, |held| held.first_turn_ms),
-                        "lastTurnEndedMs": episode.map(|held| held.last_turn_ms),
-                        "quietTurns": turns,
-                        "suppressedTurns": episode
-                            .map_or(0, |held| held.turns.saturating_sub(held.notified_through)),
-                        "notification": true,
-                    }),
-                    subject,
-                    dispatch.task.clone(),
-                    dispatch.id.clone(),
-                ))
-            }) else {
+            let Some((run_id, body, subject, task, dispatch)) = self.idle_notice(one, now_ms)
+            else {
                 continue;
             };
             if self
@@ -12488,6 +12580,107 @@ impl Ledger {
             }
         }
         told
+    }
+
+    /// The notice [`Self::workers_idle`] owes `one`, when it owes one.
+    fn idle_notice(
+        &self,
+        one: &IdleWorker,
+        now_ms: i64,
+    ) -> Option<(String, serde_json::Value, String, String, String)> {
+        self.runs.iter().find_map(|run| {
+            let worker = run.worker(&one.worker)?;
+            if !worker.state.is_live() || !worker.state.may_occupy_pane() {
+                return None;
+            }
+            let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+            if !dispatch.is_open() {
+                return None;
+            }
+            let address = worker_address(&worker.id);
+            let unread: Vec<&Message> = run
+                .unread(&address)
+                .into_iter()
+                .filter_map(|id| run.message(id))
+                .collect();
+            /* A pane the person took is theirs to wait in: nothing is
+             * typed there, and with nothing unread there is nothing to
+             * tell. Its unread mail IS news — the pointer's skip of a
+             * taken pane left run-4275's w-14439 with six letters nobody
+             * was told about (t-15313). */
+            if unread.is_empty()
+                && (worker.taken_over || !one.waiting_on_mail || awaiting_reply(run, &worker.id))
+            {
+                return None;
+            }
+            let since = unread
+                .iter()
+                .map(|message| message.created_ms)
+                .min()
+                .map_or(one.rested_ms, |oldest| oldest.max(one.rested_ms));
+            /* A clock that stepped back behind the rest fails toward the
+             * notice, not toward silence: the grace is the pointer's
+             * chance, and a subtraction that never reaches it would mute
+             * the one notice this silence has for as long as the clock
+             * takes to climb back. Once per episode bounds it to one. */
+            if now_ms >= since && now_ms - since < IDLE_NOTICE_GRACE_MS {
+                return None;
+            }
+            let episode = quiet_episode(run, &worker.id, &dispatch.id);
+            if episode.is_some_and(|held| held.last_notified_ms.is_some()) {
+                return None;
+            }
+            let unread_ids: Vec<&str> = unread.iter().map(|message| message.id.as_str()).collect();
+            let reason = match unread.is_empty() {
+                false => IDLE_UNREAD_REASON,
+                true => IDLE_WAITING_REASON,
+            };
+            let rested_s = now_ms.saturating_sub(one.rested_ms) / 1000;
+            let taken = match worker.taken_over {
+                true => ", taken over by the person,",
+                false => ",",
+            };
+            let subject = match unread.is_empty() {
+                false => format!(
+                    "unread mail waiting: {} for {} ({}){taken} at rest {rested_s} s",
+                    named_ids(&unread_ids),
+                    worker.id,
+                    dispatch.task
+                ),
+                true => format!(
+                    "waiting on mail: {} ({}) sleeps in its own check --wait with nothing \
+                     unread, at rest {rested_s} s",
+                    worker.id, dispatch.task
+                ),
+            };
+            let turns = episode.map_or(0, |held| held.turns);
+            Some((
+                run.id.clone(),
+                serde_json::json!({
+                    "reason": reason,
+                    "unreadMail": unread_ids,
+                    "workerId": worker.id,
+                    "agent": worker.agent,
+                    "pane": worker.pane,
+                    "taskId": dispatch.task,
+                    "dispatchId": dispatch.id,
+                    "idleSinceMs": one.rested_ms,
+                    "observedAtMs": now_ms,
+                    "waitingOnMail": one.waiting_on_mail,
+                    "takenOver": worker.taken_over,
+                    "lastStatus": last_status_json(run, &worker.id),
+                    "episodeStartedMs": episode.map_or(one.rested_ms, |held| held.first_turn_ms),
+                    "lastTurnEndedMs": episode.map(|held| held.last_turn_ms),
+                    "quietTurns": turns,
+                    "suppressedTurns": episode
+                        .map_or(0, |held| held.turns.saturating_sub(held.notified_through)),
+                    "notification": true,
+                }),
+                subject,
+                dispatch.task.clone(),
+                dispatch.id.clone(),
+            ))
+        })
     }
 
     /// Two witnesses to a worker's quota wall become news — once per wall,
@@ -12517,79 +12710,7 @@ impl Ledger {
                 now_ms,
                 now_ms,
             );
-            let Some((run_id, draft)) = self.runs.iter().find_map(|run| {
-                let worker = run.worker(&witness.worker)?;
-                if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
-                    return None;
-                }
-                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
-                if !dispatch.is_open() {
-                    return None;
-                }
-                if newest_wall(run, &dispatch.id).is_some_and(|wall| wall.stands(now_ms)) {
-                    return None;
-                }
-                // Which rung the worker's standing order is on (t-6427): the
-                // declared ladder, and whether the wait holds this wall.
-                let order = QuotaWallOrder::standing(run, worker);
-                let (stands_until, waitable) = wall_window(now_ms, witness.headroom.resets_at_ms);
-                let wait = order.wait.then(|| match &waitable {
-                    Ok(()) => serde_json::json!({ "standsUntilMs": stands_until }),
-                    Err(why) => serde_json::json!({ "skipped": why }),
-                });
-                let next = if order.wait && waitable.is_ok() {
-                    "nothing was settled: the attempt is open and the task is carried, and \
-                     the wait rung holds this wall until `wait.standsUntilMs` — its agent \
-                     may continue by itself after the reset (Claude Code does, about a \
-                     minute after it), and nothing is handed over before then. If it is \
-                     still stopped at the wall once the provider's number says the wall \
-                     lifted, a `went_quiet` notice with `reason: quota_lifted` says so; \
-                     after that its silence is ordinary news"
-                } else {
-                    "nothing was settled: the attempt is open and the task is carried. Hand \
-                     it over yourself (commit the WIP in its checkout, `worker-stop \
-                     --worker <id> --reason quota-wall`, then `worker-start --agent <alt> \
-                     --task <same> --retry-of <dispatchId> --inherit-checkout`), or arm \
-                     `handover-policy --on-quota-wall <alt>` and the beat walks that road \
-                     and leaves a `handover` receipt"
-                };
-                let told = serde_json::json!({
-                    "workerId": worker.id,
-                    "agent": worker.agent,
-                    "pane": worker.pane,
-                    "taskId": dispatch.task,
-                    "dispatchId": dispatch.id,
-                    "provider": witness.headroom.provider,
-                    "usedPercent": witness.headroom.used_percent,
-                    "window": witness.headroom.window.as_str(),
-                    "resetsAtMs": witness.headroom.resets_at_ms,
-                    "updatedAtMs": witness.headroom.updated_at_ms,
-                    "checkout": worker.checkout,
-                    "marker": {
-                        "source": witness.marker.source,
-                        "line": witness.marker.line,
-                    },
-                    "observedAtMs": now_ms,
-                    "ladder": order.ladder(),
-                    "wait": wait,
-                    "next": next,
-                });
-                Some((
-                    run.id.clone(),
-                    Draft {
-                        from: LEDGER_ITSELF.to_string(),
-                        to: run.address(),
-                        kind: MessageKind::QuotaWalled,
-                        body: told.to_string().into(),
-                        subject: Text::default(),
-                        priority: Priority::Normal,
-                        payload: Text::default(),
-                        thread: None,
-                        task: Some(dispatch.task.clone()),
-                        dispatch: Some(dispatch.id.clone()),
-                    },
-                ))
-            }) else {
+            let Some((run_id, draft)) = self.quota_wall_notice(witness, now_ms) else {
                 continue;
             };
             if self.post(&run_id, draft, now_ms).is_ok() {
@@ -12597,6 +12718,87 @@ impl Ledger {
             }
         }
         told
+    }
+
+    /// The row [`Self::workers_quota_walled`] owes `witness`, when it owes one.
+    fn quota_wall_notice(
+        &self,
+        witness: &QuotaWallWitness,
+        now_ms: i64,
+    ) -> Option<(String, Draft)> {
+        self.runs.iter().find_map(|run| {
+            let worker = run.worker(&witness.worker)?;
+            if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
+                return None;
+            }
+            let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+            if !dispatch.is_open() {
+                return None;
+            }
+            if newest_wall(run, &dispatch.id).is_some_and(|wall| wall.stands(now_ms)) {
+                return None;
+            }
+            // Which rung the worker's standing order is on (t-6427): the
+            // declared ladder, and whether the wait holds this wall.
+            let order = QuotaWallOrder::standing(run, worker);
+            let (stands_until, waitable) = wall_window(now_ms, witness.headroom.resets_at_ms);
+            let wait = order.wait.then(|| match &waitable {
+                Ok(()) => serde_json::json!({ "standsUntilMs": stands_until }),
+                Err(why) => serde_json::json!({ "skipped": why }),
+            });
+            let next = if order.wait && waitable.is_ok() {
+                "nothing was settled: the attempt is open and the task is carried, and \
+                 the wait rung holds this wall until `wait.standsUntilMs` — its agent \
+                 may continue by itself after the reset (Claude Code does, about a \
+                 minute after it), and nothing is handed over before then. If it is \
+                 still stopped at the wall once the provider's number says the wall \
+                 lifted, a `went_quiet` notice with `reason: quota_lifted` says so; \
+                 after that its silence is ordinary news"
+            } else {
+                "nothing was settled: the attempt is open and the task is carried. Hand \
+                 it over yourself (commit the WIP in its checkout, `worker-stop \
+                 --worker <id> --reason quota-wall`, then `worker-start --agent <alt> \
+                 --task <same> --retry-of <dispatchId> --inherit-checkout`), or arm \
+                 `handover-policy --on-quota-wall <alt>` and the beat walks that road \
+                 and leaves a `handover` receipt"
+            };
+            let told = serde_json::json!({
+                "workerId": worker.id,
+                "agent": worker.agent,
+                "pane": worker.pane,
+                "taskId": dispatch.task,
+                "dispatchId": dispatch.id,
+                "provider": witness.headroom.provider,
+                "usedPercent": witness.headroom.used_percent,
+                "window": witness.headroom.window.as_str(),
+                "resetsAtMs": witness.headroom.resets_at_ms,
+                "updatedAtMs": witness.headroom.updated_at_ms,
+                "checkout": worker.checkout,
+                "marker": {
+                    "source": witness.marker.source,
+                    "line": witness.marker.line,
+                },
+                "observedAtMs": now_ms,
+                "ladder": order.ladder(),
+                "wait": wait,
+                "next": next,
+            });
+            Some((
+                run.id.clone(),
+                Draft {
+                    from: LEDGER_ITSELF.to_string(),
+                    to: run.address(),
+                    kind: MessageKind::QuotaWalled,
+                    body: told.to_string().into(),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: None,
+                    task: Some(dispatch.task.clone()),
+                    dispatch: Some(dispatch.id.clone()),
+                },
+            ))
+        })
     }
 
     /// Workers whose provider's safety classifier declined their last
@@ -12625,101 +12827,7 @@ impl Ledger {
         }
         let mut told = 0;
         for witness in declined {
-            let Some((run_id, draft)) = self.runs.iter().find_map(|run| {
-                let worker = run.worker(&witness.worker)?;
-                if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
-                    return None;
-                }
-                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
-                if !dispatch.is_open() || decline_told(run, &dispatch.id, &witness.record.key) {
-                    return None;
-                }
-                let category = witness.record.category.as_deref();
-                let routed = decline_is_routed(category);
-                let declared = run
-                    .handover
-                    .as_ref()
-                    .and_then(|policy| policy.on_classifier_decline.as_ref());
-                // A decline the screen alone witnessed is told and walked
-                // nowhere, whatever the run declared (t-7153, P1-3): the
-                // record is the witness that ends a worker, and a screen
-                // can be quoted.
-                let stops = witness.record.may_stop();
-                let (rung, next) = match (stops, routed, declared) {
-                    (false, _, _) => (
-                        ClassifierDeclineRung::Notify,
-                        "nothing was settled, and nothing will be by itself: this decline was \
-                         read off the pane's SCREEN only — Claude Code's pause dialog, which \
-                         writes no record until a key answers it — and a screen is not a \
-                         witness that ends a worker. Read the pane (`worker-read`); if it \
-                         stands at the dialog, hand the task over yourself (`worker-stop \
-                         --worker <id> --reason classifier-decline`, then `worker-start \
-                         --agent <alt> --task <same> --retry-of <dispatchId> \
-                         --inherit-checkout`, on the rung you choose), or answer the dialog \
-                         by hand",
-                    ),
-                    (true, true, Some(_)) => (
-                        ClassifierDeclineRung::Handover,
-                        "nothing was settled: the run's `handover-policy \
-                         --on-classifier-decline` hands this task to a fresh worker in the \
-                         same checkout, and the beat leaves a `handover` receipt",
-                    ),
-                    (true, true, None) => (
-                        ClassifierDeclineRung::Notify,
-                        "nothing was settled: the attempt is open and the task is carried. \
-                         Its CLI could not continue the declined turn on a fallback model. \
-                         Hand it over yourself (`worker-stop --worker <id> --reason \
-                         classifier-decline`, then `worker-start --agent <alt> --task <same> \
-                         --retry-of <dispatchId> --inherit-checkout`), or arm `handover-policy \
-                         --on-classifier-decline <agent[:model[:effort]]>` and the beat walks \
-                         that road",
-                    ),
-                    (true, false, _) => (
-                        ClassifierDeclineRung::Notify,
-                        "nothing was settled: the provider routes this category nowhere, so \
-                         its answer stands — no worker is handed the declined request. Read \
-                         the task with the person; do not paste a picture of the declined \
-                         screen into a conversation, read its words",
-                    ),
-                };
-                let body = serde_json::json!({
-                    "workerId": worker.id,
-                    "agent": worker.agent,
-                    "model": worker.model,
-                    "pane": worker.pane,
-                    "taskId": dispatch.task,
-                    "dispatchId": dispatch.id,
-                    "checkout": worker.checkout,
-                    "category": category,
-                    "routed": routed,
-                    "screenOnly": !stops,
-                    "screen": witness.screen,
-                    "record": {
-                        "source": witness.record.source,
-                        "line": witness.record.line,
-                        "key": witness.record.key,
-                    },
-                    "observedAtMs": now_ms,
-                    "rung": rung.as_str(),
-                    "ladder": CLASSIFIER_DECLINE_LADDER.map(ClassifierDeclineRung::as_str),
-                    "next": next,
-                });
-                Some((
-                    run.id.clone(),
-                    Draft {
-                        from: LEDGER_ITSELF.to_string(),
-                        to: run.address(),
-                        kind: MessageKind::ClassifierDeclined,
-                        body: body.to_string().into(),
-                        subject: Text::default(),
-                        priority: Priority::Normal,
-                        payload: Text::default(),
-                        thread: None,
-                        task: Some(dispatch.task.clone()),
-                        dispatch: Some(dispatch.id.clone()),
-                    },
-                ))
-            }) else {
+            let Some((run_id, draft)) = self.classifier_decline_notice(witness, now_ms) else {
                 continue;
             };
             if self.post(&run_id, draft, now_ms).is_ok() {
@@ -12727,6 +12835,110 @@ impl Ledger {
             }
         }
         told
+    }
+
+    /// The row [`Self::workers_classifier_declined`] owes `witness`, when it owes
+    /// one.
+    fn classifier_decline_notice(
+        &self,
+        witness: &ClassifierDeclineWitness,
+        now_ms: i64,
+    ) -> Option<(String, Draft)> {
+        self.runs.iter().find_map(|run| {
+            let worker = run.worker(&witness.worker)?;
+            if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
+                return None;
+            }
+            let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+            if !dispatch.is_open() || decline_told(run, &dispatch.id, &witness.record.key) {
+                return None;
+            }
+            let category = witness.record.category.as_deref();
+            let routed = decline_is_routed(category);
+            let declared = run
+                .handover
+                .as_ref()
+                .and_then(|policy| policy.on_classifier_decline.as_ref());
+            // A decline the screen alone witnessed is told and walked
+            // nowhere, whatever the run declared (t-7153, P1-3): the
+            // record is the witness that ends a worker, and a screen
+            // can be quoted.
+            let stops = witness.record.may_stop();
+            let (rung, next) = match (stops, routed, declared) {
+                (false, _, _) => (
+                    ClassifierDeclineRung::Notify,
+                    "nothing was settled, and nothing will be by itself: this decline was \
+                     read off the pane's SCREEN only — Claude Code's pause dialog, which \
+                     writes no record until a key answers it — and a screen is not a \
+                     witness that ends a worker. Read the pane (`worker-read`); if it \
+                     stands at the dialog, hand the task over yourself (`worker-stop \
+                     --worker <id> --reason classifier-decline`, then `worker-start \
+                     --agent <alt> --task <same> --retry-of <dispatchId> \
+                     --inherit-checkout`, on the rung you choose), or answer the dialog \
+                     by hand",
+                ),
+                (true, true, Some(_)) => (
+                    ClassifierDeclineRung::Handover,
+                    "nothing was settled: the run's `handover-policy \
+                     --on-classifier-decline` hands this task to a fresh worker in the \
+                     same checkout, and the beat leaves a `handover` receipt",
+                ),
+                (true, true, None) => (
+                    ClassifierDeclineRung::Notify,
+                    "nothing was settled: the attempt is open and the task is carried. \
+                     Its CLI could not continue the declined turn on a fallback model. \
+                     Hand it over yourself (`worker-stop --worker <id> --reason \
+                     classifier-decline`, then `worker-start --agent <alt> --task <same> \
+                     --retry-of <dispatchId> --inherit-checkout`), or arm `handover-policy \
+                     --on-classifier-decline <agent[:model[:effort]]>` and the beat walks \
+                     that road",
+                ),
+                (true, false, _) => (
+                    ClassifierDeclineRung::Notify,
+                    "nothing was settled: the provider routes this category nowhere, so \
+                     its answer stands — no worker is handed the declined request. Read \
+                     the task with the person; do not paste a picture of the declined \
+                     screen into a conversation, read its words",
+                ),
+            };
+            let body = serde_json::json!({
+                "workerId": worker.id,
+                "agent": worker.agent,
+                "model": worker.model,
+                "pane": worker.pane,
+                "taskId": dispatch.task,
+                "dispatchId": dispatch.id,
+                "checkout": worker.checkout,
+                "category": category,
+                "routed": routed,
+                "screenOnly": !stops,
+                "screen": witness.screen,
+                "record": {
+                    "source": witness.record.source,
+                    "line": witness.record.line,
+                    "key": witness.record.key,
+                },
+                "observedAtMs": now_ms,
+                "rung": rung.as_str(),
+                "ladder": CLASSIFIER_DECLINE_LADDER.map(ClassifierDeclineRung::as_str),
+                "next": next,
+            });
+            Some((
+                run.id.clone(),
+                Draft {
+                    from: LEDGER_ITSELF.to_string(),
+                    to: run.address(),
+                    kind: MessageKind::ClassifierDeclined,
+                    body: body.to_string().into(),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: None,
+                    task: Some(dispatch.task.clone()),
+                    dispatch: Some(dispatch.id.clone()),
+                },
+            ))
+        })
     }
 
     /// Switches a worker's own CLI recorded — a classifier decline answered
@@ -12752,63 +12964,7 @@ impl Ledger {
         }
         let mut told = 0;
         for deviation in deviated {
-            let Some((run_id, draft)) = self.runs.iter().find_map(|run| {
-                let worker = run.worker(&deviation.worker)?;
-                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
-                if !deviation.is_bound_to(worker, dispatch)
-                    || run.messages.iter().any(|held| {
-                        held.kind == MessageKind::ModelDeviated
-                            && held.dispatch.as_deref() == Some(dispatch.id.as_str())
-                            && serde_json::from_str::<serde_json::Value>(held.body.as_str())
-                                .is_ok_and(|body| body["key"] == deviation.key.as_str())
-                    })
-                {
-                    return None;
-                }
-                let category = deviation.category.as_deref();
-                let summary = format!(
-                    "model binding left: {} → {} for {} — the provider's safety classifier \
-                     declined a request on {}, and the CLI continued on the category's route \
-                     instead of stopping",
-                    category.unwrap_or("an unnamed category"),
-                    deviation.to,
-                    deviation.lasts(),
-                    deviation.from,
-                );
-                let body = serde_json::json!({
-                    "workerId": worker.id,
-                    "agent": worker.agent,
-                    "taskId": dispatch.task,
-                    "dispatchId": dispatch.id,
-                    "boundModel": worker.model,
-                    "from": deviation.from,
-                    "to": deviation.to,
-                    "category": category,
-                    "scope": deviation.scope,
-                    "lasts": deviation.lasts(),
-                    "key": deviation.key,
-                    "source": deviation.source,
-                    "sinceMs": deviation.at_ms,
-                    "observedAtMs": now_ms,
-                    "rung": ClassifierDeclineRung::Fallback.as_str(),
-                    "summary": summary,
-                });
-                Some((
-                    run.id.clone(),
-                    Draft {
-                        from: LEDGER_ITSELF.to_string(),
-                        to: run.address(),
-                        kind: MessageKind::ModelDeviated,
-                        body: body.to_string().into(),
-                        subject: Text::default(),
-                        priority: Priority::Normal,
-                        payload: Text::default(),
-                        thread: None,
-                        task: Some(dispatch.task.clone()),
-                        dispatch: Some(dispatch.id.clone()),
-                    },
-                ))
-            }) else {
+            let Some((run_id, draft)) = self.model_deviation_notice(deviation, now_ms) else {
                 continue;
             };
             if self.post(&run_id, draft, now_ms).is_ok() {
@@ -12816,6 +12972,72 @@ impl Ledger {
             }
         }
         told
+    }
+
+    /// The row [`Self::workers_model_deviated`] owes `deviation`, when it owes
+    /// one.
+    fn model_deviation_notice(
+        &self,
+        deviation: &ModelDeviation,
+        now_ms: i64,
+    ) -> Option<(String, Draft)> {
+        self.runs.iter().find_map(|run| {
+            let worker = run.worker(&deviation.worker)?;
+            let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+            if !deviation.is_bound_to(worker, dispatch)
+                || run.messages.iter().any(|held| {
+                    held.kind == MessageKind::ModelDeviated
+                        && held.dispatch.as_deref() == Some(dispatch.id.as_str())
+                        && serde_json::from_str::<serde_json::Value>(held.body.as_str())
+                            .is_ok_and(|body| body["key"] == deviation.key.as_str())
+                })
+            {
+                return None;
+            }
+            let category = deviation.category.as_deref();
+            let summary = format!(
+                "model binding left: {} → {} for {} — the provider's safety classifier \
+                 declined a request on {}, and the CLI continued on the category's route \
+                 instead of stopping",
+                category.unwrap_or("an unnamed category"),
+                deviation.to,
+                deviation.lasts(),
+                deviation.from,
+            );
+            let body = serde_json::json!({
+                "workerId": worker.id,
+                "agent": worker.agent,
+                "taskId": dispatch.task,
+                "dispatchId": dispatch.id,
+                "boundModel": worker.model,
+                "from": deviation.from,
+                "to": deviation.to,
+                "category": category,
+                "scope": deviation.scope,
+                "lasts": deviation.lasts(),
+                "key": deviation.key,
+                "source": deviation.source,
+                "sinceMs": deviation.at_ms,
+                "observedAtMs": now_ms,
+                "rung": ClassifierDeclineRung::Fallback.as_str(),
+                "summary": summary,
+            });
+            Some((
+                run.id.clone(),
+                Draft {
+                    from: LEDGER_ITSELF.to_string(),
+                    to: run.address(),
+                    kind: MessageKind::ModelDeviated,
+                    body: body.to_string().into(),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: None,
+                    task: Some(dispatch.task.clone()),
+                    dispatch: Some(dispatch.id.clone()),
+                },
+            ))
+        })
     }
 
     /// A wall the wait rung held lifted while its worker stayed stopped at
@@ -12838,68 +13060,7 @@ impl Ledger {
             if lift.since_ms < 0 {
                 continue;
             }
-            let Some((run_id, body, task, dispatch)) = self.runs.iter().find_map(|run| {
-                let worker = run.worker(&lift.worker)?;
-                if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
-                    return None;
-                }
-                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
-                if !dispatch.is_open() || awaiting_reply(run, &worker.id) {
-                    return None;
-                }
-                let (wall, phase) = wall_phase(run, worker, &dispatch.id, now_ms)?;
-                if wall.wall != lift.wall || phase != WallPhase::Lifting {
-                    return None;
-                }
-                if !matches!(
-                    read_lift(
-                        &worker.id,
-                        &wall,
-                        lift.since_ms,
-                        Some(lift.marker.clone()),
-                        Some(&lift.headroom),
-                        now_ms,
-                    ),
-                    LiftReading::Lifted(_)
-                ) {
-                    return None;
-                }
-                Some((
-                    run.id.clone(),
-                    serde_json::json!({
-                        "workerId": worker.id,
-                        "agent": worker.agent,
-                        "pane": worker.pane,
-                        "taskId": dispatch.task,
-                        "dispatchId": dispatch.id,
-                        "reason": QUOTA_LIFTED_REASON,
-                        "rung": QuotaWallRung::Wait.as_str(),
-                        "wallId": wall.wall,
-                        "stalledSinceMs": lift.since_ms,
-                        "observedAtMs": now_ms,
-                        "resetsAtMs": wall.resets_at_ms,
-                        "gauge": {
-                            "provider": lift.headroom.provider,
-                            "usedPercent": lift.headroom.used_percent,
-                            "window": lift.headroom.window.as_str(),
-                            "updatedAtMs": lift.headroom.updated_at_ms,
-                            "resetsAtMs": lift.headroom.resets_at_ms,
-                        },
-                        "marker": {
-                            "source": lift.marker.source,
-                            "line": lift.marker.line,
-                        },
-                        "next": "the wall lifted — the provider's number, read after its \
-                                 reset, is under it — and the worker is still stopped at it: \
-                                 its own continuation did not come. Wake it with a line of \
-                                 mail (`send --to worker:<id>`, which the pointer types into \
-                                 its composer), or hand it over",
-                        "notification": true,
-                    }),
-                    dispatch.task.clone(),
-                    dispatch.id.clone(),
-                ))
-            }) else {
+            let Some((run_id, body, task, dispatch)) = self.quota_lift_notice(lift, now_ms) else {
                 continue;
             };
             if self
@@ -12910,6 +13071,76 @@ impl Ledger {
             }
         }
         told
+    }
+
+    /// The notice [`Self::workers_quota_lifted`] owes `lift`, when it owes one.
+    fn quota_lift_notice(
+        &self,
+        lift: &QuotaLift,
+        now_ms: i64,
+    ) -> Option<(String, serde_json::Value, String, String)> {
+        self.runs.iter().find_map(|run| {
+            let worker = run.worker(&lift.worker)?;
+            if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
+                return None;
+            }
+            let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+            if !dispatch.is_open() || awaiting_reply(run, &worker.id) {
+                return None;
+            }
+            let (wall, phase) = wall_phase(run, worker, &dispatch.id, now_ms)?;
+            if wall.wall != lift.wall || phase != WallPhase::Lifting {
+                return None;
+            }
+            if !matches!(
+                read_lift(
+                    &worker.id,
+                    &wall,
+                    lift.since_ms,
+                    Some(lift.marker.clone()),
+                    Some(&lift.headroom),
+                    now_ms,
+                ),
+                LiftReading::Lifted(_)
+            ) {
+                return None;
+            }
+            Some((
+                run.id.clone(),
+                serde_json::json!({
+                    "workerId": worker.id,
+                    "agent": worker.agent,
+                    "pane": worker.pane,
+                    "taskId": dispatch.task,
+                    "dispatchId": dispatch.id,
+                    "reason": QUOTA_LIFTED_REASON,
+                    "rung": QuotaWallRung::Wait.as_str(),
+                    "wallId": wall.wall,
+                    "stalledSinceMs": lift.since_ms,
+                    "observedAtMs": now_ms,
+                    "resetsAtMs": wall.resets_at_ms,
+                    "gauge": {
+                        "provider": lift.headroom.provider,
+                        "usedPercent": lift.headroom.used_percent,
+                        "window": lift.headroom.window.as_str(),
+                        "updatedAtMs": lift.headroom.updated_at_ms,
+                        "resetsAtMs": lift.headroom.resets_at_ms,
+                    },
+                    "marker": {
+                        "source": lift.marker.source,
+                        "line": lift.marker.line,
+                    },
+                    "next": "the wall lifted — the provider's number, read after its \
+                             reset, is under it — and the worker is still stopped at it: \
+                             its own continuation did not come. Wake it with a line of \
+                             mail (`send --to worker:<id>`, which the pointer types into \
+                             its composer), or hand it over",
+                    "notification": true,
+                }),
+                dispatch.task.clone(),
+                dispatch.id.clone(),
+            ))
+        })
     }
 
     /// Reserve one handover: the receipt row is written BEFORE the walk, so
@@ -13262,12 +13493,21 @@ impl Ledger {
         else {
             return false;
         };
-        if worker.ready_by_ms.is_none() && worker.hook_unreachable_since_ms.is_none() {
+        if !awaits_a_sound(worker) {
             return false;
         }
         worker.ready_by_ms = None;
         worker.hook_unreachable_since_ms = None;
         true
+    }
+
+    /// Whether [`Self::worker_spoke`] would retire anything.
+    pub fn sound_due(&self, seat: (&str, &str), heard_ms: i64) -> bool {
+        let (team, pane) = seat;
+        self.runs
+            .iter()
+            .find_map(|run| occupant_at(run, team, pane, heard_ms))
+            .is_some_and(awaits_a_sound)
     }
 
     /// The installed hook script could not deliver a payload for this pane.
@@ -13277,20 +13517,23 @@ impl Ledger {
     /// later observation of the same marker. A subsequent [`Self::worker_spoke`]
     /// is the only proof the channel recovered.
     pub fn worker_hook_delivery_failed(&mut self, seat: (&str, &str), since_ms: i64) -> bool {
-        let (team, pane) = seat;
         for run in &mut self.runs {
             for worker in &mut run.workers {
-                if worker.team == team
-                    && worker.pane == pane
-                    && worker.state.may_occupy_pane()
-                    && worker.hook_unreachable_since_ms.is_none()
-                {
+                if hook_failure_is_news(worker, seat) {
                     worker.hook_unreachable_since_ms = Some(since_ms);
                     return true;
                 }
             }
         }
         false
+    }
+
+    /// Whether [`Self::worker_hook_delivery_failed`] would mark anybody.
+    pub fn hook_failure_due(&self, seat: (&str, &str)) -> bool {
+        self.runs
+            .iter()
+            .flat_map(|run| &run.workers)
+            .any(|worker| hook_failure_is_news(worker, seat))
     }
 
     /// Reconcile live pane claims against host observations.
@@ -13317,10 +13560,7 @@ impl Ledger {
                 let run = &mut self.runs[run_at];
                 let address = run.address();
                 let worker = &mut run.workers[worker_at];
-                if !worker.state.is_live()
-                    || !worker.state.may_occupy_pane()
-                    || worker.pane_missing_since_ms.is_some()
-                {
+                if !pane_absence_is_news(worker) {
                     continue;
                 }
                 worker.pane_missing_since_ms = Some(*since_ms);
@@ -13364,6 +13604,16 @@ impl Ledger {
         reported
     }
 
+    /// Whether [`Self::panes_missing`] would report any of `missing`.
+    pub fn panes_missing_due(&self, missing: &[(String, i64)]) -> bool {
+        missing.iter().any(|(worker_id, since_ms)| {
+            *since_ms >= 0
+                && self.locate(worker_id).is_ok_and(|(run_at, worker_at)| {
+                    pane_absence_is_news(&self.runs[run_at].workers[worker_at])
+                })
+        })
+    }
+
     /// Clear missing-pane episodes for workers the host can see again.
     ///
     /// Level-triggered like [`Self::panes_missing`]: unknown workers and rows
@@ -13383,6 +13633,19 @@ impl Ledger {
             );
         }
         cleared
+    }
+
+    /// Whether [`Self::panes_seen`] would close any episode. Asked on every
+    /// beat for every live worker whose pane the window sees, and almost
+    /// always no (t-81273).
+    pub fn panes_seen_due(&self, workers: &[String]) -> bool {
+        workers.iter().any(|worker_id| {
+            self.locate(worker_id).is_ok_and(|(run_at, worker_at)| {
+                self.runs[run_at].workers[worker_at]
+                    .pane_missing_since_ms
+                    .is_some()
+            })
+        })
     }
 
     /// The person took a pane: real keys, typed by a hand, landed in it.
@@ -14550,8 +14813,7 @@ impl Ledger {
             .flat_map(|run| {
                 run.workers
                     .iter()
-                    .filter(|worker| worker.state.is_live())
-                    .filter(|worker| worker.ready_by_ms.is_some_and(|by| by <= now_ms))
+                    .filter(|worker| past_its_readiness(worker, now_ms))
                     .map(|worker| (run.id.clone(), worker.id.clone()))
             })
             .collect();
@@ -14598,6 +14860,14 @@ impl Ledger {
             let _ = self.post(&run_id, draft, now_ms);
         }
         counted
+    }
+
+    /// Whether [`Self::workers_overdue`] would report anybody.
+    pub fn workers_overdue_due(&self, now_ms: i64) -> bool {
+        self.runs
+            .iter()
+            .flat_map(|run| &run.workers)
+            .any(|worker| past_its_readiness(worker, now_ms))
     }
 
     /// Recheck the worker behind a resolved host seat before settling it.

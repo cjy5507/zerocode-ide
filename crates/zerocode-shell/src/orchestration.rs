@@ -462,6 +462,7 @@ fn reseat_sleeping_in_line(
         return 0;
     };
     drop(ledger);
+    drop(image);
     /* The coordinator is BACK, in this pane. A restart or a leader exit
      * vacated the run's seat; the window proving which leader pane returned
      * for which run is what fills it again — and only an empty chair is
@@ -520,6 +521,7 @@ fn reseat_sleeping_in_line(
         .collect();
     sleeping.sort_by_key(|(started, ..)| *started);
     drop(ledger);
+    drop(image);
     let installed = installed_agent_ids();
     let mut restored = 0;
     for (_, worker, agent, checkout, _taken_over) in sleeping {
@@ -6659,6 +6661,7 @@ fn expire_sleepers(host: &dyn Host, now_ms: i64) {
         .map(|worker| worker.id.clone())
         .collect();
     drop(ledger);
+    drop(image);
     for worker in overdue {
         if held.actor.sleeper_expired(&worker, now_ms).is_ok() {
             if let Some(root) = BLACKBOX.get() {
@@ -7241,6 +7244,10 @@ fn reconcile_pane_liveness(host: &dyn Host, now_ms: i64) {
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .observe(host, &ledger, &seats, now_ms);
+    // The reads go back before the writes: an image still held here would
+    // have the actor copy the whole ledger to clear a stamp (t-81273).
+    drop(ledger);
+    drop(image);
     let mut moved = false;
     for workers in observed.seen.chunks(zerocode_core::orchestration::MAX_LIST) {
         if let Ok((cleared, _)) = held.actor.panes_seen(workers.to_vec(), now_ms) {
@@ -7461,6 +7468,7 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
     // same image before anything below moves it (t-4538).
     stall_cause::label(host, &held.stalls, &ledger, now_ms);
     drop(ledger);
+    drop(image);
     let still_quiet: std::collections::HashSet<String> =
         stalled.iter().map(|one| one.dispatch.clone()).collect();
     /* The wall witness, asked of the quiet panes only and outside every
@@ -9669,6 +9677,10 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
             }
         }
     }
+    // Everything below writes, and the ledger read above goes back first:
+    // a chair taken again on every beat would otherwise copy it (t-81273).
+    // The project reading at the end reads it again, from the next image.
+    drop(rows);
     for delivery in notices {
         tell_notice_delivery(host, delivery, now_ms);
     }
@@ -9785,7 +9797,11 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
     /* The runs made before projects were recorded are read for one
      * (t-65286), with every lock above let go: the ledger is written through
      * the actor, and the team table is taken one lookup at a time. */
-    project_scope::infer_projects(host, &held, &rows, now_ms);
+    if let Ok(image) = held.actor.view() {
+        let rows = cached_ledger(&held, &image);
+        drop(image);
+        project_scope::infer_projects(host, &held, rows, now_ms);
+    }
 }
 
 /* ---- the handover walk (§2.3) ------------------------------------------ */
@@ -9917,6 +9933,7 @@ fn settle_handover_terminal(
         .model
         .clone();
     drop(rows);
+    drop(image);
     actor.worker_terminal_settled_fenced(decided.effect.clone(), None, now_ms, |commit| {
         match &plan.cause {
             zerocode_core::orchestration::HandoverCause::QuotaWall { .. } => host

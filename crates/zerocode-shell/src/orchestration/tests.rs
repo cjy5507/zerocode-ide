@@ -29153,7 +29153,10 @@ fn a_beat_beside_a_live_worker_copies_the_ledger_only_for_a_write_a_reader_holds
     let (settled, _) = beats_and_their_walks(&host, began, 1);
 
     let (idle, walked) = beats_and_their_walks(&host, began + 1_000, BEATS);
-    assert_eq!(idle, settled, "{BEATS} beats on a seen pane moved the ledger");
+    assert_eq!(
+        idle, settled,
+        "{BEATS} beats on a seen pane moved the ledger"
+    );
     assert_eq!(
         walked.clones, 0,
         "{BEATS} beats beside a live worker copied the ledger {walked:?}"
@@ -29166,7 +29169,10 @@ fn a_beat_beside_a_live_worker_copies_the_ledger_only_for_a_write_a_reader_holds
         .expect("a reader's image");
     let (held, walked) = beats_and_their_walks(&host, began + 11_000, BEATS);
     drop(reader);
-    assert_eq!(held, settled, "{BEATS} beats on a seen pane moved the ledger");
+    assert_eq!(
+        held, settled,
+        "{BEATS} beats on a seen pane moved the ledger"
+    );
     assert_eq!(
         walked.clones, 0,
         "{BEATS} beats that wrote nothing copied the ledger a reader held {walked:?}"
@@ -29177,8 +29183,7 @@ fn a_beat_beside_a_live_worker_copies_the_ledger_only_for_a_write_a_reader_holds
     let confirmations = i64::from(MISSING_PANE_CONFIRMATIONS);
     let (missing, gone) = beats_and_their_walks(&host, began + 21_000, confirmations);
     host.set_pane(WORKER_TERM, true);
-    let (seen, back) =
-        beats_and_their_walks(&host, began + 21_000 + confirmations * 1_000, 1);
+    let (seen, back) = beats_and_their_walks(&host, began + 21_000 + confirmations * 1_000, 1);
     assert!(
         settled < missing && missing < seen,
         "the missing pane and its return were not two writes: {settled} -> {missing} -> {seen}"
@@ -29210,7 +29215,10 @@ fn a_quiet_workers_beats_after_its_notice_copy_nothing() {
     );
 
     let (idle, walked) = beats_and_their_walks(&stood.host, stood.began + 11_000, BEATS);
-    assert_eq!(idle, told, "{BEATS} beats on a told silence moved the ledger");
+    assert_eq!(
+        idle, told,
+        "{BEATS} beats on a told silence moved the ledger"
+    );
     assert_eq!(
         walked.clones, 0,
         "{BEATS} beats on a told silence copied the ledger {walked:?}"
@@ -29223,7 +29231,10 @@ fn a_quiet_workers_beats_after_its_notice_copy_nothing() {
         .expect("a reader's image");
     let (held, walked) = beats_and_their_walks(&stood.host, stood.began + 21_000, BEATS);
     drop(reader);
-    assert_eq!(held, told, "{BEATS} beats on a told silence moved the ledger");
+    assert_eq!(
+        held, told,
+        "{BEATS} beats on a told silence moved the ledger"
+    );
     assert_eq!(
         walked.clones, 0,
         "{BEATS} beats that wrote nothing copied the ledger a reader held {walked:?}"

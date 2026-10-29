@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use zerocode_core::orchestration::project_scope::{label, refusal};
 use zerocode_core::orchestration::{Ledger, ProjectSource, Run, RunProject, Scope};
@@ -604,11 +604,14 @@ const INFERRED_PER_BEAT: usize = 8;
 /// first: the runs still at work are the ones whose mail is moving.
 ///
 /// Called with no lock held: the ledger is written through the actor, and the
-/// team table is taken one lookup at a time.
-pub(super) fn infer_projects(host: &dyn Host, held: &LiveRuntime, rows: &Ledger, now_ms: i64) {
+/// team table is taken one lookup at a time. Every reading is made before the
+/// first write and the ledger handed back between them, so a write meets no
+/// image of this window's to copy the ledger for (t-81273).
+pub(super) fn infer_projects(host: &dyn Host, held: &LiveRuntime, rows: Arc<Ledger>, now_ms: i64) {
     static TRIED: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
     let tried = TRIED.get_or_init(|| Mutex::new(HashMap::new()));
     let mut asked = 0;
+    let mut readings = Vec::new();
     for run in rows.runs().iter().rev() {
         if run.project.is_some() {
             continue;
@@ -631,7 +634,7 @@ pub(super) fn infer_projects(host: &dyn Host, held: &LiveRuntime, rows: &Ledger,
             continue;
         }
         if asked >= INFERRED_PER_BEAT {
-            return;
+            break;
         }
         asked += 1;
         tried
@@ -654,18 +657,21 @@ pub(super) fn infer_projects(host: &dyn Host, held: &LiveRuntime, rows: &Ledger,
             }
             continue;
         };
+        readings.push((run.id.clone(), root, source, seat));
+    }
+    drop(rows);
+    for (run, root, source, seat) in readings {
         let Ok((moved, _)) = held
             .actor
-            .note_run_project(&run.id, &root, source, seat, now_ms)
+            .note_run_project(&run, &root, source, seat, now_ms)
         else {
             continue;
         };
         rang(moved);
         if moved {
             note(&format!(
-                "{}'s project was read off {} as {}; the project boundary holds while \
+                "{run}'s project was read off {} as {}; the project boundary holds while \
                  its coordinator's confirmation is pending",
-                run.id,
                 match source {
                     ProjectSource::Workers => "its workers' checkouts",
                     _ => "its coordinator's pane",
