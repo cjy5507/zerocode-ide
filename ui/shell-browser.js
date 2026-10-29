@@ -6258,14 +6258,14 @@ function bookmarkShelfItems(tab, shelf, at) {
 function openAllBookmarks(tab, at) {
   const list = bookmarksOf(tab);
   const items = bookmarkShelfItems(tab, bookmarkShelf(list.filter((one) => one.root === "bar")), at);
-  for (const [root, key, words] of [
-    ["other", "browser.bookmarksOther", "기타 북마크"],
-    ["mobile", "browser.bookmarksMobile", "모바일 북마크"],
+  for (const [root, caption] of [
+    ["other", t("browser.bookmarksOther", "기타 북마크")],
+    ["mobile", t("browser.bookmarksMobile", "모바일 북마크")],
   ]) {
     const held = list.filter((one) => one.root === root);
     if (!held.length) continue;
     if (items.length) items.push({ separator: true });
-    items.push({ caption: t(key, words) });
+    items.push({ caption });
     items.push(...bookmarkShelfItems(tab, bookmarkShelf(held), at));
   }
   openSidebarMenu(at.left, at.bottom + 4, items);
