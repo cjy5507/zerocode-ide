@@ -3451,14 +3451,57 @@ function mdLink(label, href, line = undefined) {
  * look is the file finder's (`search_files`), asked only by a press whose open
  * failed — drawing a link asks the disk nothing. Only a link measured inside
  * the checkout that look walks is looked for: one from another checkout would
- * find a namesake here. An absolute path is where it says it is. */
+ * find a namesake here. An absolute path is where it says it is; one outside
+ * the checkout that the project's door refuses goes to `openOutsideDocLink`. */
 function openDocLink(base, path, line) {
   const opts = { preview: true, ...(line !== undefined && { line }) };
   const at = resolveDocPath(base, path);
+  if (path.startsWith("/")) {
+    if (artifactPathUnder(at, activeWorktreePath)) return openPath(at, opts);
+    return openPath(at, { ...opts, unread: (error) => void openOutsideDocLink(at, `${at}: ${error}`) });
+  }
   const tail = path.replace(/^(?:\.{1,2}\/)+/, "");
   const here = !base.startsWith("/") || artifactPathUnder(base, activeWorktreePath);
-  if (path.startsWith("/") || tail === "" || !here) return openPath(at, opts);
+  if (tail === "" || !here) return openPath(at, opts);
   return openPath(at, { ...opts, unread: (error) => void findDocLink(tail, opts, `${at}: ${error}`) });
+}
+
+/* A file outside the project the person pressed (t-83039): an agent's answer
+ * named a note it wrote in its own scratch folder. The project's door refused
+ * it, as it must. When the path lies in the folder of a session this window
+ * holds — the backend asks its session table, never the path's spelling — it
+ * is read for a tab nobody can write, its relative links inert, as a gallery
+ * document from another project is (t-16006). Any other path is not opened:
+ * one sentence says so, with the refusal on its hover. */
+async function openOutsideDocLink(path, refusal) {
+  let held;
+  try {
+    held = await invoke("session_scratch_document", { path });
+  } catch (error) {
+    sayDocLinkFailure(t("file.scratchUnread", "이 파일은 글로 열 수 없어요: {{name}}", { name: basename(path) }), `${path}: ${error}`);
+    return;
+  }
+  if (!held) {
+    sayDocLinkFailure(t("file.outsideProject", "프로젝트 밖 파일이라 여기서 열지 않아요"), refusal);
+    return;
+  }
+  openTab({
+    id: `scratch-doc:${path}`,
+    kind: "file",
+    path,
+    text: held.text,
+    draft: held.text,
+    mode: renderedAs(path),
+    readOnly: true,
+    preview: true,
+  });
+  markFirstRun("opened_file");
+}
+
+/* A link that did not open, said in one sentence with what the disk said on
+ * its hover — once however often the link is pressed. */
+function sayDocLinkFailure(words, refusal) {
+  if (!standingToast(words, "halt")) toast(words, "halt", { tip: refusal });
 }
 
 /* The checkout's files whose path ends with the link's: one opens at the line
@@ -3484,8 +3527,7 @@ async function findDocLink(tail, opts, refusal) {
     openPalette("file", { query: name, found });
     return;
   }
-  const words = t("file.linkUnfound", "이 파일을 체크아웃에서 찾지 못했어요: {{name}}", { name: tail });
-  if (!standingToast(words, "halt")) toast(words, "halt", { tip: refusal });
+  sayDocLinkFailure(t("file.linkUnfound", "이 파일을 체크아웃에서 찾지 못했어요: {{name}}", { name: tail }), refusal);
 }
 
 /* 그림. 바깥 그림은 이 창이 대신 받아오지 않는다 — 문서가 가리킨 곳으로 창이
