@@ -2582,6 +2582,29 @@ mod tests {
         );
     }
 
+    /// The two sides of a named wait's clock (t-71285), pinned on their own
+    /// since the commit that set them could not show them red first: after
+    /// the notice the clock goes on from the request, and a stretch that
+    /// comes after content — the request's wait already over — counts from
+    /// its own start.
+    #[test]
+    fn a_quiet_wait_counts_on_after_its_notice_and_after_content_from_its_own_start() {
+        use runtime::message_stream::types::StreamPhase;
+        let mut status = Status::working(Duration::from_secs(10));
+        status.note_stream_phase(StreamPhase::RequestSent { attempt: 1 });
+        status.elapsed = Duration::from_secs(30);
+        status.note_stream_phase(StreamPhase::QuietWaiting { since_secs: 15 });
+        status.elapsed = Duration::from_secs(45);
+        let line = status.line(120).plain();
+        assert!(line.contains("waiting for the model 35s"), "the clock stopped: {line}");
+
+        status.note_stream_content();
+        status.elapsed = Duration::from_secs(80);
+        status.note_stream_phase(StreamPhase::QuietWaiting { since_secs: 16 });
+        let line = status.line(120).plain();
+        assert!(line.contains("waiting for the model 16s"), "{line}");
+    }
+
     /// A model reasoning without visible output is a phrase on the status
     /// line — never a row in the transcript (2026-09-07: one turn left five
     /// `model reasoning silently` rows behind) — and content ends it.

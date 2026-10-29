@@ -1521,6 +1521,40 @@ mod activity_tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// A quiet stretch with no reasoning signal is a wait in a helper's
+    /// manifest too (t-71285): the phase says the notice's words, and the
+    /// stretch is not reasoning activity.
+    #[test]
+    fn a_quiet_wait_notice_is_a_wait_in_the_manifests_phase() {
+        let (dir, manifest) = test_manifest("quiet-wait");
+        write_agent_manifest(&manifest).expect("write manifest");
+        let path = std::path::Path::new(&manifest.manifest_file);
+        record_agent_stream_open(path, Some("xhigh"), Some(10_000));
+        record_agent_stream_notice(
+            path,
+            &core_types::StreamRetryNotice {
+                kind: core_types::StreamNoticeKind::QuietWaiting,
+                label: core_types::QuietStretch::Waiting.words().label,
+                attempt: 0,
+                max_attempts: 0,
+                delay: std::time::Duration::from_secs(20),
+                no_progress: None,
+            },
+        );
+
+        let waiting: AgentOutput = serde_json::from_str(
+            &std::fs::read_to_string(&manifest.manifest_file).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert_eq!(
+            waiting.current_phase.as_deref(),
+            Some("waiting for the model — stream alive · 20s+ without decoded output")
+        );
+        assert_eq!(waiting.activity.quiet_notice_count, 1);
+        assert!(waiting.activity.last_reasoning_at.is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn stale_run_generation_ignores_live_activity() {
         let (dir, mut manifest) = test_manifest("generation");
