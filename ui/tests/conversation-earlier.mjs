@@ -166,8 +166,8 @@ async function pressEarlier(page) {
  * up, the window before t-82901 — the last 256 KiB's whole lines, so the two
  * windows are measured each against its own backend. `toTop` presses the way
  * up until the first turn stands. */
-export async function standLongPaneChats(page, { panes = 1, blocks = 400, resultBytes = 60 * 1024, toTop = false } = {}) {
-  return page.evaluate(async ({ panes, blocks, resultBytes, back, toTop }) => {
+export async function standLongPaneChats(page, { panes = 1, blocks = 400, resultBytes = 60 * 1024, toTop = false, helper = false } = {}) {
+  return page.evaluate(async ({ panes, blocks, resultBytes, back, toTop, helper }) => {
     const CHUNK = 256 * 1024;
     const CLIPPED = 16 * 1024;
     const detail = "결과 줄 · fn main() { println!(\"hello\"); }\n".repeat(CLIPPED / 40).slice(0, CLIPPED);
@@ -223,6 +223,25 @@ export async function standLongPaneChats(page, { panes = 1, blocks = 400, result
       while (to < lines.length && lines[to].at - lines[from].at < CHUNK) to += 1;
       return { ...answer(from, Math.max(to, from + 1)), more: to < lines.length };
     };
+    if (helper) {
+      // A helper's page on the same file: read on from its first line to its
+      // end, the page holding its bound of the newest turns — what a window
+      // without a way up could already hold of such a file.
+      const term = await openTermTab({ placement: "tab" });
+      const owner = tabOfTerm(term);
+      paneAgents.set(term, "claude");
+      hookStates.set(term, "working");
+      window.__ANSWER__.subagent_log = (args) => read(args);
+      await openHelperPage({ term, tab: owner, worktree: owner.worktree, agent: "claude" }, { id: "long-helper", name: "긴 도우미", state: "running" });
+      for (let beat = 0; beat < 200 && activeHelperPage()?.worker.helper.next < size; beat += 1) {
+        await pollHelperPages();
+        await window.__PAINTED__();
+      }
+      const shown = [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null);
+      const page = tabs.find((tab) => tab.id === `helper:${term}:long-helper`);
+      return { panes: 0, transcriptMiB: Math.round((size / 1048576) * 10) / 10, heldTurns: [page?.worker.helper.turns.length ?? 0],
+        presses: 0, rowsDrawn: shown?.querySelectorAll(":scope > [data-turn]").length ?? 0 };
+    }
     const terms = [];
     for (let pane = 0; pane < panes; pane += 1) {
       const term = await openTermTab({ placement: "tab" });
@@ -254,7 +273,7 @@ export async function standLongPaneChats(page, { panes = 1, blocks = 400, result
     const held = terms.map((term) => paneChats.get(term)?.run.helper.turns.length ?? 0);
     return { panes, transcriptMiB: Math.round((size / 1048576) * 10) / 10, heldTurns: held, presses,
       rowsDrawn: shown?.querySelectorAll(":scope > [data-turn]").length ?? 0 };
-  }, { panes, blocks, resultBytes, back: BACK, toTop });
+  }, { panes, blocks, resultBytes, back: BACK, toTop, helper });
 }
 
 export async function testConversationEarlier(browser, origin, ok) {
