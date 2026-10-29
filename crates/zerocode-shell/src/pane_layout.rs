@@ -1734,7 +1734,7 @@ mod tests {
         let struck = one_wake_each(&mut layouts, |wake, term| {
             Some(live.get(&term) == Some(&wake.id.as_str()))
         });
-        assert_eq!(struck, vec![format!("zo {}", &ZO_COORDINATOR[..8])]);
+        assert_eq!(struck, vec!["zo 1792758210243-0".to_string()]);
         assert_eq!(
             named_in(&layouts, "/w/zerocode"),
             vec![
