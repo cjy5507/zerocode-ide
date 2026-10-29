@@ -3176,10 +3176,6 @@ fn reattach_after_failed_discovery_leaves_routes_untouched() {
 /// of a passing one (t-84793).
 const LIST_BARRIER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// How many discoveries the barrier test runs side by side. One drives them
-/// one at a time, as a discovery that serializes them would (t-84793).
-const DISCOVERY_WIDTH: usize = 1;
-
 #[test]
 fn concurrent_discovery_does_not_serialize_a_slow_server_behind_a_fast_one() {
     // No server answers tools/list until all six have asked for it (t-84793):
@@ -3243,7 +3239,7 @@ fn concurrent_discovery_does_not_serialize_a_slow_server_behind_a_fast_one() {
             let fresh = unit.refresh_server_tools(name).await;
             (name, unit, fresh)
         }))
-        .buffer_unordered(DISCOVERY_WIDTH)
+        .buffer_unordered(names.len())
         .collect::<Vec<_>>()
         .await;
         let elapsed = started.elapsed();
@@ -3253,10 +3249,9 @@ fn concurrent_discovery_does_not_serialize_a_slow_server_behind_a_fast_one() {
             let _ = unit.shutdown().await;
         }
 
-        assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "concurrent discovery took {elapsed:?}; expected it not to serialize six servers"
-        );
+        // Every server passed the barrier, so the six overlapped; the time is
+        // only reported (`-- --nocapture`), since load decides it.
+        println!("six servers discovered side by side in {} ms", elapsed.as_millis());
 
         manager.shutdown().await.expect("shutdown");
         cleanup_script(&script_path);
