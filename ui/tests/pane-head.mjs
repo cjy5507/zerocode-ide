@@ -86,13 +86,9 @@ export async function testPaneHead(browser, origin, ok) {
       const code = said?.querySelector("code");
       seen.codeFont = code ? getComputedStyle(code).fontFamily : "";
       seen.codeGround = code ? getComputedStyle(code).backgroundColor : "";
-      // The column's measure at the page's width (t-81786 P3-16): the base
-      // under 1000 px, then a step at 1000, 1200, 1400 and 1700 px.
-      const root = getComputedStyle(document.documentElement);
-      const measures = ["--reading-column", "--reading-column-wide-1", "--reading-column-wide-2", "--reading-column-wide-3", "--reading-column-wide-4"]
-        .map((name) => parseFloat(root.getPropertyValue(name)));
+      // The column's measure at the page's width (t-81786 P3-16).
       seen.pageWidth = Math.round(chat?.getBoundingClientRect().width ?? 0);
-      seen.measure = measures[[1000, 1200, 1400, 1700].filter((from) => seen.pageWidth >= from).length];
+      seen.measure = window.__READING_MEASURE__(chat?.getBoundingClientRect().width ?? 0);
       const dock = chat?.querySelector(".worker-composer");
       const dockBox = dock?.getBoundingClientRect();
       const turnBox = turn?.getBoundingClientRect();

@@ -36552,10 +36552,11 @@ const chatFace = await page.evaluate(async () => {
   seen.wantComposerRadius = stackOver ? `0px 0px ${corner} ${corner}` : corner;
   seen.stackRadius = stackOver ? getComputedStyle(stackOver).borderRadius : null;
   seen.wantStackRadius = stackOver ? `${corner} ${corner} 0px 0px` : null;
-  // The composer floats in the extension's dock, no wider than the token.
+  // The composer floats in the extension's dock, no wider than its page's
+  // column (t-81786 P3-16).
   const chatDock = composer?.closest(".chat-dock") ?? null;
   seen.dockMax = chatDock ? getComputedStyle(chatDock).maxWidth : "";
-  seen.wantDockMax = root.getPropertyValue("--chat-dock-max").trim();
+  seen.wantDockMax = `${window.__READING_MEASURE__(chatDock?.closest(".worker-view")?.getBoundingClientRect().width ?? 0)}px`;
   // The composer's focus edge is the agent's accent.
   box?.focus();
   await new Promise((done) => setTimeout(done, 450));
@@ -37361,11 +37362,12 @@ const paneDock = await page.evaluate(async () => {
   seen.listWidth = Math.round(listBox.width);
   seen.columnWidth = Math.round(proseBox.width);
   // The composer floats in the extension's dock: inset from the list's edges,
-  // no wider than the token, centered on the list's axis — the turn rail
-  // stands at its left (t-22100) — and the composer as wide as the dock.
+  // no wider than its page's column (t-81786 P3-16: 960 px on this 1200 px
+  // pane), centered on the list's axis — the turn rail stands at its left
+  // (t-22100) — and the composer as wide as the dock.
   const rootTokens = getComputedStyle(document.documentElement);
   const dockInset = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-inset"));
-  const dockMax = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-max"));
+  const dockMax = window.__READING_MEASURE__(face.getBoundingClientRect().width);
   const dockBox = face.querySelector(".chat-dock")?.getBoundingClientRect() ?? null;
   seen.dockWidth = dockBox ? Math.round(dockBox.width) : 0;
   seen.wantDockWidth = Math.round(Math.min(listBox.width - 2 * dockInset, dockMax));
@@ -37417,7 +37419,7 @@ const paneDock = await page.evaluate(async () => {
   return leave();
 });
 ok(
-  "the pane's own conversation floats its composer in the extension's centered dock — inset from the pane's edges, no wider than the token, the composer as wide as the dock, and inside the pane and on screen when it narrows — the measure a helper's page stood before it got a footer",
+  "the pane's own conversation floats its composer in the extension's centered dock — inset from the pane's edges, no wider than its page's column, the composer as wide as the dock, and inside the pane and on screen when it narrows — the measure a helper's page stood before it got a footer",
   paneDock.stands && paneDock.paneWidth === 1200 &&
     paneDock.dockWidth === paneDock.wantDockWidth && paneDock.dockWidth > 0 &&
     // No wider than the reading column it floats under (2차 B: the same 760 px axis).

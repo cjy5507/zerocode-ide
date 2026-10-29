@@ -93,13 +93,11 @@ function readPage() {
     };
   })();
   const dock = page.querySelector(".chat-dock");
-  const root = getComputedStyle(document.documentElement);
   return {
     pageWidth: Math.round(box(page).width),
-    // The column's measures as the token file states them: the base, then the
-    // wide page's steps (t-81786 P3-16).
-    measures: ["--reading-column", "--reading-column-wide-1", "--reading-column-wide-2", "--reading-column-wide-3", "--reading-column-wide-4"]
-      .map((name) => parseFloat(root.getPropertyValue(name))),
+    // The column's measure at this page's width, and the base one (t-81786 P3-16).
+    measure: window.__READING_MEASURE__(box(page).width),
+    baseMeasure: window.__READING_MEASURE__(0),
     dockMax: dock ? parseFloat(getComputedStyle(dock).maxWidth) : null,
     fadeMax: parseFloat(getComputedStyle(page, "::after").maxWidth),
     pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -191,26 +189,20 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
     // The steps are the PAGE's width, not the window's: the window's side
     // columns take their share first.
     const step = (one) => (one.pageWidth < 560 ? "narrow" : one.pageWidth >= 1000 ? "wide" : "middle");
-    // The column's measure at a page's width: the base under 1000 px, then a
-    // step at 1000, 1200, 1400 and 1700 px (t-81786 P3-16).
-    const measureOf = (one) => {
-      const reached = [1000, 1200, 1400, 1700].filter((from) => one.pageWidth >= from).length;
-      return one.measures[reached];
-    };
     ok("B: the reading steps with the page's own width — a step smaller under 560 px, more air between lines from 1000 px, the column never wider than its measure",
       B_WIDTHS.every((width) => {
         const one = dark(width);
         const want = step(one);
-        return one.columnWidth > 0 && one.columnWidth <= measureOf(one) &&
+        return one.columnWidth > 0 && one.columnWidth <= one.measure &&
           (want === "narrow" ? one.proseSize === 14 : one.proseSize === 16) &&
           (want === "wide" ? one.proseLeading === 1.6 : one.proseLeading === 1.5);
       }) && new Set(B_WIDTHS.map((width) => step(dark(width)))).size >= 2,
       JSON.stringify(B_WIDTHS.map((width) => [width, dark(width).pageWidth, dark(width).proseSize, dark(width).proseLeading, dark(width).columnWidth])));
     ok("B: a wide page widens its column to the step its width reached — 880, 960, 1040, then at most 1120 px — and the composer and the fade under it follow; under 1000 px the column stays at 760 px (t-81786 P3-16)",
-      all.every((one) => one.measures.every((value) => value > 0) && one.dockMax === measureOf(one) && one.fadeMax === measureOf(one) &&
-        (one.pageWidth >= 1000 ? Math.abs(one.columnWidth - measureOf(one)) <= 1 : one.columnWidth <= one.measures[0])) &&
-        new Set(B_WIDTHS.map((width) => measureOf(dark(width)))).size >= 3,
-      JSON.stringify(B_WIDTHS.map((width) => [width, dark(width).pageWidth, measureOf(dark(width)), dark(width).columnWidth, dark(width).dockMax, dark(width).fadeMax])));
+      all.every((one) => one.measure > 0 && one.dockMax === one.measure && one.fadeMax === one.measure &&
+        (one.pageWidth >= 1000 ? Math.abs(one.columnWidth - one.measure) <= 1 : one.columnWidth <= one.baseMeasure)) &&
+        new Set(B_WIDTHS.map((width) => dark(width).measure)).size >= 3,
+      JSON.stringify(B_WIDTHS.map((width) => [width, dark(width).pageWidth, dark(width).measure, dark(width).columnWidth, dark(width).dockMax, dark(width).fadeMax])));
     ok("B: the empty box's sentence stays on its one line at every width — the whole of it where it fits, its first half on a box too narrow for it, cut short rather than folded under the box",
       all.every((one) => one.say?.fits && one.say.oneLine) &&
         dark(390).say.words === dark(390).sayShort && dark(1440).say.words === dark(1440).sayWhole,

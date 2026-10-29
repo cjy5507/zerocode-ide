@@ -2362,6 +2362,16 @@ const installHarnessHands = async (surface) => {
     window.__PAINTED__ = () =>
       new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
 
+    /* 대화 페이지 폭에서 읽는 단의 폭(t-81786 P3-16): 1000 px 아래는 기본,
+     * 1000·1200·1400·1700 px에서 한 단계씩 — 값은 토큰 파일의 것을 읽는다.
+     * 단을 재는 시험이 모두 이 하나로 묻는다. */
+    window.__READING_MEASURE__ = (pageWidth) => {
+      const root = getComputedStyle(document.documentElement);
+      const steps = [["--reading-column", 0], ["--reading-column-wide-1", 1000], ["--reading-column-wide-2", 1200],
+        ["--reading-column-wide-3", 1400], ["--reading-column-wide-4", 1700]];
+      return parseFloat(root.getPropertyValue(steps.findLast(([, from]) => pageWidth >= from)[0]));
+    };
+
     /* 「값이 0」을 재기 전의 한 박자 (t-2412 규칙 3).
      *
      * 케이스는 서로의 상태를 물려받지 않는다: 앞 케이스가 남긴 프레임 예약과,
