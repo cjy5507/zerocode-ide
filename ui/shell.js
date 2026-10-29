@@ -1966,16 +1966,19 @@ function countTurnAnswered(key) {
 }
 
 /* What the window now knows of the questions the column lists for `pane`:
- * `passes` answers each question's signature with true (moved past), false
- * (asked again) or null (not this one). */
-function passTurns(pane, passes) {
+ * the pane stands on `standing` (null: on none), so every other question has
+ * passed and that one is asked again — or, with `gone`, only that question
+ * has passed and the others are as they were. */
+function passTurns(pane, { standing = null, gone = null } = {}) {
   let moved = false;
   for (const card of attentionCards) {
     const kind = yourTurnKind(card);
     if (card.pane !== pane || (kind !== "question" && kind !== "permission")) continue;
+    const sig = askSignature(card);
+    if (gone !== null && sig !== gone) continue;
     const key = yourTurnKey(card);
-    const passed = passes(askSignature(card));
-    if (passed === null || passed === yourTurnPassed.has(key)) continue;
+    const passed = gone !== null || sig !== standing;
+    if (passed === yourTurnPassed.has(key)) continue;
     if (passed) yourTurnPassed.add(key);
     else yourTurnPassed.delete(key);
     moved = true;
@@ -12555,8 +12558,8 @@ listen("hook:agent", (event) => {
   // asking has moved past every question the column lists for it, and one
   // asking a described question has moved past the others. A wait it only
   // signalled says nothing of which question is up.
-  if (!asking) passTurns(`term:${term}`, () => true);
-  else if (shaped) passTurns(`term:${term}`, (sig) => sig !== askNow);
+  if (!asking) passTurns(`term:${term}`);
+  else if (shaped) passTurns(`term:${term}`, { standing: askNow });
   // A card that says its question passed stands until the pane's state moves on.
   const askPage = paneChats.get(term);
   const passedEnds = askPage?.askPassed === true && hookStates.get(term) !== state;
@@ -14131,7 +14134,7 @@ function paintPaneAsk(held, force = false) {
 function letAskPass(held, draft) {
   const term = held.run.term;
   if (paneAsks.get(term)?.sig === draft.sig) paneAsks.delete(term);
-  passTurns(`term:${term}`, (sig) => (sig === draft.sig ? true : null));
+  passTurns(`term:${term}`, { gone: draft.sig });
   held.askPassed = true;
   const words = draft.other.map((one) => (one ?? "").trim()).filter(Boolean).join("\n");
   const box = held.host.querySelector(".worker-composer-box");
