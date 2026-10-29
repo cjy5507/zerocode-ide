@@ -57121,6 +57121,99 @@ suite("question-passed", async ({ browser, origin, ok }) => {
   }
 });
 
+/* 지나간 질문, 선(wire) 페이지(t-82287 r2, 검수 P2-1): 선 위의 세션이 질문을 띄웠다가 답을
+ * 받기 전에 제 기록에서 거두면, 카드의 기타 칸에 쓴 글이 카드와 함께 사라졌다. 판의 카드와
+ * 같은 길로 — 카드는 「이 질문은 이미 지나갔습니다」 한 줄이 되고, 쓴 글은 그 페이지의
+ * 입력칸으로 돌아오며, 선의 상태가 바뀌면 그 줄도 간다. 답을 보낸 질문이 기록에서 빠지는 것은
+ * 지나간 것이 아니다: 카드는 줄 없이 간다. */
+suite("question-passed-wire", async ({ browser, origin, ok }) => {
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(async () => {
+      window.__CALLS__ = [];
+      window.__LOG__ = {
+        found: true, skipped: false, next: 0, turns: [], status: "idle", asks: [], agent: "codex",
+        protocol: "app-server", model: "gpt-5.6-sol", models: [], mode: "on-request", modes: [], commands: [],
+        version: "0.154.0",
+      };
+      window.__ANSWER__.wire_start = (args) => ({ id: 11, agent: args.agent, protocol: "app-server", version: "0.154.0", model: "gpt-5.6-sol" });
+      window.__ANSWER__.wire_log = (args) => ({ ...window.__LOG__, turns: window.__LOG__.turns.slice(args.after), next: window.__LOG__.turns.length });
+      window.__ANSWER__.wire_send = (args) => { window.__CALLS__.push(["send", args]); return null; };
+      window.__ANSWER__.wire_answer = (args) => { window.__CALLS__.push(["answer", args]); return null; };
+      window.__ANSWER__.wire_models = () => [];
+      window.__ANSWER__.wire_stop = () => null;
+      window.__ASK__ = (id, question) => ({ id, kind: "question",
+        questions: [{ question, header: "단계", options: [{ label: "진행" }, { label: "멈춤" }] }] });
+      window.__STEP__ = async (moved) => {
+        window.__LOG__ = { ...window.__LOG__, ...moved };
+        await pollHelperPages();
+        await window.__PAINTED__();
+        await new Promise((done) => setTimeout(done, 60));
+      };
+      await openWirePage("codex", "/tmp/zerocode-window-test");
+      await window.__PAINTED__();
+      await window.__STEP__({
+        status: "asking",
+        turns: [{ role: "user", text: "가독성 묶음을 고쳐 줘." }, { role: "assistant", text: "cargo 시험을 돌립니다." }],
+        asks: [window.__ASK__(5, "cargo 시험 다음 단계로 넘어갈까요?")],
+      });
+    });
+    const read = () => page.evaluate(() => {
+      const face = document.querySelector("#worker-view");
+      const card = face.querySelector(".pane-chat-ask");
+      const box = face.querySelector(".worker-composer-box");
+      return {
+        card: card !== null,
+        panel: Boolean(card?.querySelector(".board-ask")),
+        passed: card?.querySelector(".pane-chat-ask-passed")?.textContent ?? "",
+        cardLabel: card?.getAttribute("aria-label") ?? "",
+        value: box.value,
+        focused: document.activeElement === box,
+        answers: window.__CALLS__.filter(([name]) => name === "answer").length,
+      };
+    });
+    const words = await page.evaluate(() => ({
+      working: t("board.ask.passedWorking", "이 질문은 이미 지나갔습니다 — 판은 이어서 일하는 중"),
+    }));
+
+    /* Words typed on the card's own field; the wire takes the question back. */
+    const asked = await read();
+    await page.locator("#worker-view .pane-chat-ask .board-ask-field").fill("멈추고 코디와 상의");
+    await page.evaluate(() => window.__STEP__({ status: "working", asks: [] }));
+    const passed = await read();
+    await page.evaluate(() => window.__STEP__({ status: "idle" }));
+    const ended = await read();
+    ok(
+      "a question the wire takes back before its answer went turns its card into 「이 질문은 이미 지나갔습니다」, gives the words typed on it back to the page's box with the keyboard, and the line goes once the wire's status moves on (t-82287 r2 P2-1)",
+      asked.card && asked.panel &&
+        passed.card && !passed.panel && passed.passed === words.working && passed.cardLabel === words.working &&
+        passed.value === "멈추고 코디와 상의" && passed.focused && passed.answers === 0 &&
+        !ended.card && ended.value === "멈추고 코디와 상의",
+      JSON.stringify({ asked, passed, ended, words }),
+    );
+
+    /* A question answered through its card leaves the log: no line, nothing given back. */
+    await page.evaluate(async () => {
+      const box = document.querySelector("#worker-view .worker-composer-box");
+      box.value = "";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      await window.__STEP__({ status: "asking", asks: [window.__ASK__(6, "둘째 질문")] });
+    });
+    await page.locator("#worker-view .pane-chat-ask .board-ask-field").fill("둘째는 진행");
+    await page.locator("#worker-view .pane-chat-ask .board-ask-send").click();
+    await page.evaluate(() => window.__STEP__({ status: "working", asks: [] }));
+    const answered = await read();
+    ok(
+      "a question answered through its card that leaves the wire's log takes its card with no 「지나갔습니다」 line and gives nothing back to the box (t-82287 r2 P2-1)",
+      answered.answers === 1 && !answered.card && answered.value === "",
+      JSON.stringify({ answered }),
+    );
+  } finally {
+    await page.close();
+  }
+});
+
 /* 단위 6(docs/design/agent-wire-sessions-20260915.md): 선(wire) 위의 세션 — 화면 없는
  * CLI(Codex app-server)를 창이 JSON-RPC로 몰고, 그 탭은 대화 그 자체다. 턴은
  * `wire_log`로 오고, 입력줄은 `wire_send`로 보내고, 물음은 선이 준 선택지를 단추로

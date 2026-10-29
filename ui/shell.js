@@ -13499,12 +13499,25 @@ function standAskCard(host, panel, label = t("board.tasks.needsInput", "진행�
 function paintWireAsk(host, run, force = false) {
   const ask = run.wireLog?.asks?.[0] ?? null;
   const card = host.querySelector(".pane-chat-ask");
+  const status = run.wireLog?.status ?? null;
   if (!ask) {
-    card?.remove();
+    // The wire took the question back before its answer went, with words
+    // typed for it (t-82287 r2): the pane's card's road (`letAskPass`) — the
+    // words go back to the box, and the card says the question passed while
+    // the wire stays in the status it passed in.
+    const draft = run.askDraft;
+    if (draft && !draft.sending && keepAskWords(host, run, draft)) run.askPassedIn = status;
     run.askDraft = null;
     run.askShape = null;
+    if (run.askPassedIn && run.askPassedIn === status) {
+      standAskPassed(host, run);
+    } else {
+      run.askPassedIn = null;
+      card?.remove();
+    }
     return;
   }
+  run.askPassedIn = null;
   const sig = JSON.stringify(ask.id);
   if (run.askDraft?.sig !== sig) {
     const shape = wireAskShape(run, ask);
@@ -14102,7 +14115,7 @@ function paintPaneAsk(held, force = false) {
   const card = held.host.querySelector(".pane-chat-ask");
   if (!ask) {
     held.askDraft = null;
-    if (held.askPassed) standAskPassed(held);
+    if (held.askPassed) standAskPassed(held.host, held.run);
     else card?.remove();
     return;
   }
@@ -14136,34 +14149,42 @@ function letAskPass(held, draft) {
   if (paneAsks.get(term)?.sig === draft.sig) paneAsks.delete(term);
   passTurns(`term:${term}`, { gone: draft.sig });
   held.askPassed = true;
-  const words = draft.other.map((one) => (one ?? "").trim()).filter(Boolean).join("\n");
-  const box = held.host.querySelector(".worker-composer-box");
-  if (words && box && !box.value.includes(words)) {
-    box.value = box.value.trim() ? `${box.value.trimEnd()}\n${words}` : words;
-    held.run.draft = box.value;
-    box.closest(".worker-composer")?.__workerFit?.();
-    // The person was answering here: the keyboard goes where the words are.
-    const focus = document.activeElement;
-    if (!focus || focus === document.body || held.host.contains(focus)) box.focus();
-  }
+  keepAskWords(held.host, held.run, draft);
   paintPaneAsk(held);
   syncWorkerComposers(held.run);
 }
 
-/* The card's one line once its question passed — the pane at work, or only
- * that nothing was sent. Written only when the words move, so a quiet
- * repaint writes nothing. */
-function standAskPassed(held) {
-  const words = isMidTurn(hookStates.get(held.run.term))
+/* The words typed on a question's card that passed, given back to the box of
+ * the page it stood on (`host`) — after what the box holds, and once. The
+ * pane's card and a wire's (`paintWireAsk`) both. Whether there were any. */
+function keepAskWords(host, run, draft) {
+  const words = draft.other.map((one) => (one ?? "").trim()).filter(Boolean).join("\n");
+  const box = host.querySelector(".worker-composer-box");
+  if (words && box && !box.value.includes(words)) {
+    box.value = box.value.trim() ? `${box.value.trimEnd()}\n${words}` : words;
+    run.draft = box.value;
+    box.closest(".worker-composer")?.__workerFit?.();
+    // The person was answering here: the keyboard goes where the words are.
+    const focus = document.activeElement;
+    if (!focus || focus === document.body || host.contains(focus)) box.focus();
+  }
+  return words !== "";
+}
+
+/* The card's one line once its question passed — the pane or the wire at
+ * work, or only that nothing was sent. Written only when the words move, so
+ * a quiet repaint writes nothing. */
+function standAskPassed(host, run) {
+  const words = isMidTurn(run.wire ? run.wireLog?.status : hookStates.get(run.term))
     ? t("board.ask.passedWorking", "이 질문은 이미 지나갔습니다 — 판은 이어서 일하는 중")
     : t("board.ask.changed", "이 질문은 이미 지나갔습니다 — 답은 보내지 않았어요");
-  const card = held.host.querySelector(".pane-chat-ask");
+  const card = host.querySelector(".pane-chat-ask");
   if (card?.querySelector(":scope > .pane-chat-ask-passed")?.textContent === words) return;
   const line = document.createElement("p");
   line.className = "pane-chat-ask-passed";
   line.setAttribute("role", "status");
   line.textContent = words;
-  standAskCard(held.host, line, words);
+  standAskCard(host, line, words);
 }
 
 /* A pane's question in the card's shape — the card's, and the composer's
