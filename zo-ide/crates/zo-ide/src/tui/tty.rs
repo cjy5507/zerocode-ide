@@ -154,25 +154,40 @@ mod tests {
     }
 
     /// A child spawned while a test's pty is open keeps no copy of its master,
-    /// so the user end hangs up the moment the test closes it — not when that
-    /// child exits. `Command::spawn` returns once the child has exec'd, so an
-    /// end marked close-on-exec is already gone from it (t-78154).
+    /// so the user end hangs up once the test closes it — not when that child
+    /// exits. `Command::spawn` returns once the child has exec'd, so an end
+    /// marked close-on-exec is already gone from it (t-78154).
     #[cfg(unix)]
     #[test]
     fn a_child_spawned_beside_an_open_pty_keeps_no_copy_of_its_master() {
         use std::os::fd::AsFd as _;
         use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
 
+        // A child another test thread forked holds even a close-on-exec copy
+        // until it execs, so the hang-up is waited for — and the wait must end
+        // well before this child would, or an inheritable master would pass.
+        const CHILD_LIFE: &str = "30";
+        const HANG_UP_WAIT: Duration = Duration::from_secs(5);
         let pty = crate::tui::test_pty::open_pty(None).expect("open a pty");
         let mut child = Command::new("/bin/sleep")
-            .arg("5")
+            .arg(CHILD_LIFE)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn a child");
         drop(pty.master);
-        let hung_up = super::hung_up_on(pty.slave.as_fd());
+        let until = Instant::now() + HANG_UP_WAIT;
+        let hung_up = loop {
+            if super::hung_up_on(pty.slave.as_fd()) {
+                break true;
+            }
+            if Instant::now() >= until {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
         let _ = child.kill();
         let _ = child.wait();
         assert!(hung_up, "a child spawned while the pty was open held its master");
@@ -228,12 +243,12 @@ mod tests {
     /// Races lost every time end after the last allowed try, with the raw `-6`.
     #[cfg(unix)]
     #[test]
-    fn a_pty_that_loses_every_race_fails_after_five_tries_with_the_raw_errno() {
-        use crate::tui::test_pty::{OpenFailed, EREDRIVEOPEN};
+    fn a_pty_that_loses_every_race_fails_after_the_last_try_with_the_raw_errno() {
+        use crate::tui::test_pty::{OpenFailed, EREDRIVEOPEN, TRIES};
 
         assert_eq!(
-            open_after(&[EREDRIVEOPEN; 6]),
-            (Err(OpenFailed { errno: EREDRIVEOPEN, tries: 5 }), 5)
+            open_after(&[EREDRIVEOPEN; TRIES + 1]),
+            (Err(OpenFailed { errno: EREDRIVEOPEN, tries: TRIES }), TRIES)
         );
     }
 

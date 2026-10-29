@@ -7,8 +7,10 @@
 //!   copy: a closed end then does not hang up until that child exits (l81d;
 //!   44 % of opens under constant spawning, still 14 % with `FD_CLOEXEC` set
 //!   right after `openpty`). `/dev/ptmx` and the user end open with
-//!   `O_CLOEXEC` instead, which leaves no instant for a child to take one. On
-//!   macOS too: rustix's `openpt` passes no `CLOEXEC` there, `open` does.
+//!   `O_CLOEXEC` instead, so the gap between `openpty` and `fcntl` is gone.
+//!   On macOS too: rustix's `openpt` passes no `CLOEXEC` there, `open` does.
+//!   A child another thread forked still holds a copy until it execs, so a
+//!   test that looks for a hang-up waits for it.
 //! - Opening `/dev/ptmx` can fail for a moment. macOS's `ptmx_clone` picks a
 //!   free number without a lock, and the loser of two parallel opens gets
 //!   [`EREDRIVEOPEN`] once the kernel's own ten tries are spent. That, `ENXIO`
@@ -32,8 +34,9 @@ pub(crate) const EREDRIVEOPEN: i32 = -6;
 /// The raw errnos a later try may not meet.
 const TRANSIENT: [i32; 3] = [EREDRIVEOPEN, Errno::NXIO.raw_os_error(), Errno::AGAIN.raw_os_error()];
 
-/// How many times a pair is asked for before its last failure is the answer.
-const TRIES: usize = 5;
+/// How many times a pair is asked for before its last failure is the answer —
+/// the window's own test ptys use the same (t-77996); about 2 s at worst.
+pub(crate) const TRIES: usize = 5;
 
 /// Why a pair did not open: the raw errno of the last try, and how many tries
 /// were made.
