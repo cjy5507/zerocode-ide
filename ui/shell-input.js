@@ -3345,6 +3345,7 @@ const qoTitle = el("qo-title");
 const qoInput = el("qo-input");
 const qoResults = el("qo-results");
 const qoEmpty = el("qo-empty");
+const qoNote = el("qo-note");
 const qoFoot = el("qo-foot");
 /* The quick finder waits just long enough to collapse a typing burst without
  * making a keyboard-driven palette feel detached from the field. */
@@ -3489,10 +3490,18 @@ const FINDERS = {
       go: () => t("palette.groupGo", "이동"),
       tree: () => t("palette.groupTrees", "워크트리"),
     },
-    find: async (query) => {
+    // The workspace group stands on the paths the catalog knows, and a window
+    // that has not read its catalog — still reading, or its read failed —
+    // knows none. The backend lists the folder it stands in there, which no
+    // project holds, and a click on that row was refused in a toast
+    // (t-82875). The group is left out then, and this line under the rows
+    // says why rather than letting it vanish without a word.
+    unlisted: () => !projectsRead,
+    note: () => t("palette.catalogUnread", "프로젝트 목록을 아직 읽지 못해 최근과 이동만 보여 줍니다."),
+    find: async (query, { unlisted }) => {
       // A list that will not read takes only its own group: the recent places
       // and the doors are this window's, and answer without the backend.
-      const worktrees = await invoke("list_worktrees").catch((error) => {
+      const worktrees = unlisted ? [] : await invoke("list_worktrees").catch((error) => {
         sayPaletteFailure(t("palette.treesUnread", "워크스페이스 목록을 읽지 못해 최근과 이동만 보여 줍니다."), error);
         return [];
       });
@@ -3521,9 +3530,10 @@ const FINDERS = {
       const trees = worktrees
         .filter(
           (worktree) =>
-            (worktree.branch ?? "").toLowerCase().includes(needle) ||
-            worktree.path.toLowerCase().includes(needle) ||
-            (laneWords.get(worktree.path) ?? "").includes(needle),
+            worktreeAt(worktree.path) && (
+              (worktree.branch ?? "").toLowerCase().includes(needle) ||
+              worktree.path.toLowerCase().includes(needle) ||
+              (laneWords.get(worktree.path) ?? "").includes(needle)),
         )
         .map((worktree) => ({ group: "tree", worktree }));
       return [...recent, ...go, ...trees];
@@ -3580,6 +3590,7 @@ function openPalette(mode) {
   qoResults.replaceChildren();
   // Opening is not an answer, so a fresh panel does not claim it found nothing.
   qoEmpty.hidden = true;
+  qoNote.hidden = true;
   paletteRows = [];
   showModal(qoScrim, { animated: true, opener });
   paintNavCurrent();
@@ -3612,9 +3623,12 @@ async function runPaletteQuery() {
     paletteRows = [];
     return;
   }
+  // Read once with the question: the rows it leaves out and the line that
+  // says so must answer the same reading.
+  const unlisted = finder.unlisted?.() ?? false;
   let found = [];
   try {
-    found = await finder.find(query);
+    found = await finder.find(query, { unlisted });
   } catch (error) {
     sayPaletteFailure(t("palette.failed", "목록을 가져오지 못했습니다. 잠시 뒤 다시 열어 보세요."), error);
     return;
@@ -3657,6 +3671,8 @@ async function runPaletteQuery() {
     qoResults.appendChild(node);
   });
   qoEmpty.hidden = paletteRows.length > 0;
+  qoNote.hidden = !unlisted;
+  say(qoNote, unlisted ? finder.note : null);
   announceSelectedRow();
 }
 

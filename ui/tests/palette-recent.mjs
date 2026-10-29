@@ -25,7 +25,18 @@ export async function testPaletteRecent(browser, origin, standBackend, ok) {
   await standBackend(page);
   await page.addInitScript((trees) => {
     const base = window.__TAURI__.core.invoke;
-    window.__TAURI__.core.invoke = (name, args) => (name === "list_worktrees" ? Promise.resolve(trees) : base(name, args));
+    // The backend's catalog and its list are one git listing, and the finder lists only the paths the
+    // catalog knows (t-82875): the project these worktrees belong to stands in the catalog beside the
+    // harness's own.
+    const acme = {
+      name: "acme-web", path: trees[0].path, slug: null, worktrees: trees.map((tree) => ({ ...tree, active: false })),
+      external: { visibility: "show", legacy: false, authoritative: true, shown: 0, hidden: [], prompt: false, inbox: [] },
+    };
+    window.__TAURI__.core.invoke = (name, args) => {
+      if (name === "list_worktrees") return Promise.resolve(trees);
+      if (name === "project_catalog") return Promise.resolve(base(name, args)).then((catalog) => [...(catalog ?? []), acme]);
+      return base(name, args);
+    };
   }, TREES);
   await page.goto(`${origin}/index.html`);
   await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);

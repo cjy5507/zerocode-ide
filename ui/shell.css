@@ -18940,7 +18940,9 @@ button.helper-sib:hover {
   padding: 0 var(--space-2) var(--space-1);
 }
 
-.qo-empty {
+/* The finder's quiet lines: nothing matched, and what it left out (t-82875). */
+.qo-empty,
+.qo-note {
   margin: 0;
   padding: var(--space-5) var(--space-4);
   text-align: center;
