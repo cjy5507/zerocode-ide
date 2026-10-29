@@ -59,6 +59,8 @@ impl DreamAttempt {
         let interval = u64::try_from(interval).unwrap_or(u64::MAX);
         self.next_attempt.store(now.saturating_add(interval), Ordering::Release);
     }
+
+    pub(crate) fn retry_later(&self, _now: u64) {}
 }
 
 impl Drop for DreamAttempt {
@@ -102,5 +104,28 @@ mod tests {
         clock.activity(70_000);
         assert_eq!(clock.next_wakeup(true), Some(61_000 + 6 * 60 * 60 * 1000));
         assert!(clock.begin(131_000, true).is_none());
+    }
+
+    #[test]
+    fn a_failing_pass_waits_longer_each_time_until_one_succeeds() {
+        let minute = 60_000;
+        let clock = IdleDreamer::new(true, 0, minute);
+        let mut now = minute;
+        for wait in [1, 2, 4, 8, 16, 32, 60, 60].map(|minutes| minutes * minute) {
+            let attempt = clock.begin(now, true).unwrap();
+            attempt.retry_later(now);
+            drop(attempt);
+            assert_eq!(clock.next_wakeup(true), Some(now + wait));
+            now += wait;
+        }
+
+        let attempt = clock.begin(now, true).unwrap();
+        attempt.completed(now);
+        drop(attempt);
+        now = clock.next_wakeup(true).unwrap();
+        let attempt = clock.begin(now, true).unwrap();
+        attempt.retry_later(now);
+        drop(attempt);
+        assert_eq!(clock.next_wakeup(true), Some(now + minute));
     }
 }

@@ -2807,6 +2807,53 @@ fn a_later_failure_uses_retry_backoff_instead_of_the_last_success_interval() {
     assert!(!super::automatic_dream_due(dir, at(163), super::DEFAULT_AUTO_DREAM_INTERVAL));
 }
 
+#[test]
+fn failures_in_a_row_wait_longer_each_time_up_to_an_hour() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    for (failures, wait) in [(1, 60), (2, 120), (3, 240), (6, 1_920), (7, 3_600), (40, 3_600)] {
+        fs::write(
+            dir.join(super::AUTO_DREAM_ERROR_FILE),
+            format!("{{\"tsMs\":1000000,\"failures\":{failures}}}"),
+        )
+        .unwrap();
+        assert!(
+            !super::automatic_dream_due(dir, at(1_000 + wait - 1), super::DEFAULT_AUTO_DREAM_INTERVAL),
+            "{failures} failures in a row must wait {wait} s"
+        );
+        assert!(
+            super::automatic_dream_due(dir, at(1_000 + wait), super::DEFAULT_AUTO_DREAM_INTERVAL),
+            "{failures} failures in a row wait no more than {wait} s"
+        );
+    }
+}
+
+#[test]
+fn each_failure_in_a_row_is_counted_and_a_success_starts_the_count_again() {
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path();
+    let error = DreamError::Io(std::io::Error::other("disk full"));
+    let recorded = || -> serde_json::Value {
+        let bytes = fs::read(super::dream_dir(cwd).join(super::AUTO_DREAM_ERROR_FILE)).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    };
+
+    super::record_auto_dream_failure(cwd, &error).unwrap();
+    assert_eq!(recorded()["failures"], 1);
+    super::record_auto_dream_failure(cwd, &error).unwrap();
+    assert_eq!(recorded()["failures"], 2);
+
+    let failed_secs = recorded()["tsMs"].as_u64().unwrap() / 1_000;
+    fs::write(
+        super::dream_dir(cwd).join(super::THROTTLE_MARKER),
+        (failed_secs + 1).to_string(),
+    )
+    .unwrap();
+    super::record_auto_dream_failure(cwd, &error).unwrap();
+    assert_eq!(recorded()["failures"], 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn automatic_decay_archives_only_the_local_store_it_promotes_into() {
