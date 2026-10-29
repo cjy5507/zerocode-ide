@@ -4390,6 +4390,20 @@ toastLayer.setAttribute("role", "status");
 toastLayer.setAttribute("aria-live", "polite");
 document.body.append(toastLayer);
 
+/* The drawers that dock their button row at the bottom-right inside a leaf —
+ * a Jev feature's, an artifact's detail — while one stands, the layer steps to
+ * the opposite edge as it does for a dialog (t-68117, shell.css). A dialog is
+ * the body's own child and the stylesheet follows it; a drawer stands deep
+ * beside the conversations, where a `:has()` would match again over the whole
+ * document at every `hidden` that changes anywhere (t-84136). So the paint
+ * that opens or closes one says it here, and so does every toast as it
+ * stands — a drawer whose page went with it no longer counts. */
+const DRAWERS_DOCKED = ".jev-drawer:not([hidden]), .artifacts-drawer .artifacts-detail:not([hidden])";
+
+function sayDrawersDocked() {
+  toastLayer.classList.toggle("is-beside-drawer", document.querySelector(DRAWERS_DOCKED) !== null);
+}
+
 /* Says one thing, then takes itself away.
  *
  * `kind` is the role the message plays — "halt" for a failure, absent for a
@@ -4426,6 +4440,7 @@ function toast(words, kind = "", { action = null, sticky = false, aux = "", tip 
   } else {
     speakWithAux(note, said, dim, "toast-aux");
   }
+  sayDrawersDocked();
   toastLayer.append(note);
   // Leaves the way the overlays do, through the same exit the stylesheet
   // already owns — one motion vocabulary rather than a second one for this

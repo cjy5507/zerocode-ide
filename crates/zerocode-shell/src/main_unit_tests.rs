@@ -27461,19 +27461,29 @@ fn a_read_back_keeps_its_budget_and_passes_over_a_line_too_long_to_take() {
     assert_eq!(roles, ["tool_result"], "the long line, whole");
     assert!(log.start == said("above").len() as u64 && log.folded && !log.skipped);
 
-    // A line past the cap is passed over and said; the lines around it are
-    // read, each once.
+    // A line past the cap, standing where the read begins: the read stops
+    // inside it and says so, having read no more than the cap and a step past
+    // the step that found its end; the next read takes the line above it,
+    // once (t-84136: at the product's ratio, budget under the cap).
     let longer = result(6_000);
-    let body = format!("{}{longer}{}", said("above"), said("below"));
-    let wide = BackReach { budget: 64 * 1_024, ..reach };
-    let (log, _) = back(&body, None, wide);
-    let words: Vec<&str> = log.turns.iter().map(|one| one.turn.text.as_str()).collect();
-    assert_eq!(words, ["above", "below"], "the long line is passed over");
-    assert!(log.skipped && log.start == 0);
+    let ended = format!("{}{longer}", said("above"));
+    let (log, read) = back(&ended, None, reach);
+    assert!(log.turns.is_empty() && log.skipped, "the long line is not taken, and said");
+    assert!(
+        log.start > said("above").len() as u64 && log.start < ended.len() as u64,
+        "it stops inside the long line: {}",
+        log.start
+    );
+    assert!(read <= reach.long_line + 2 * reach.step, "{read} bytes read");
+    let (next, read) = back(&ended, Some(log.start), reach);
+    let words: Vec<&str> = next.turns.iter().map(|one| one.turn.text.as_str()).collect();
+    assert_eq!(words, ["above"], "the next read passes the rest of it, to the line above");
+    assert!(next.start == 0 && !next.skipped && read <= reach.long_line + reach.step);
 
     // With the budget spent, a read stops under that line; the reads after
     // it pass it over — one says so and stops inside it, the next goes on
     // from there — and reach the line above it, once.
+    let body = format!("{}{longer}{}", said("above"), said("below"));
     let (first, _) = back(&body, None, reach);
     let words: Vec<&str> = first.turns.iter().map(|one| one.turn.text.as_str()).collect();
     assert_eq!(words, ["below"]);
@@ -27501,6 +27511,222 @@ fn a_read_back_keeps_its_budget_and_passes_over_a_line_too_long_to_take() {
     let body = format!("{}{}", said("whole"), said("half").trim_end());
     let (log, _) = back(&body, None, reach);
     assert!(log.turns.len() == 1 && log.next == said("whole").len() as u64 && log.more);
+}
+
+/// The file the long-transcript tests read from: a real file, counting every
+/// byte read from it.
+struct CountedFile {
+    file: std::fs::File,
+    read: u64,
+}
+
+impl std::io::Read for CountedFile {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let got = std::io::Read::read(&mut self.file, buffer)?;
+        self.read += got as u64;
+        Ok(got)
+    }
+}
+
+impl std::io::Seek for CountedFile {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        std::io::Seek::seek(&mut self.file, to)
+    }
+}
+
+/// One line a person pasted, `len` bytes of words after `words` — read whole
+/// when it fits the long-line cap, passed over when it does not.
+fn pasted_line(words: &str, len: usize) -> String {
+    format!(
+        "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{words} {}\"}}}}\n",
+        "x".repeat(len)
+    )
+}
+
+/// The middle of a sorted list of timings.
+fn median_ms(mut took: Vec<f64>) -> f64 {
+    took.sort_by(f64::total_cmp);
+    took[took.len() / 2]
+}
+
+/// A read standing inside a long line reads it a step at a time and joins the
+/// steps once (t-84136). It used to copy, and look through, all it held of
+/// the line again at every step: 128 steps over a line past the 32 MiB cap,
+/// some 2 GiB of copying for one read. Timed against one pass over the same
+/// bytes in the same steps — read, looked through for a line end, kept and
+/// joined — medians of five.
+#[test]
+fn a_read_inside_a_long_line_goes_through_it_once() {
+    use crate::cmd::terminal::{PAGE_REACH, transcript_log_back};
+    let cap = usize::try_from(PAGE_REACH.long_line).expect("the cap fits");
+    let body = format!("{}{}", pasted_line("above", 16), pasted_line("long", cap + 4 * 1024 * 1024));
+    let bytes = body.into_bytes();
+    let size = bytes.len() as u64;
+    let step = usize::try_from(PAGE_REACH.step).expect("a step fits");
+    let (mut read_ms, mut once_ms) = (Vec::new(), Vec::new());
+    for _ in 0..5 {
+        let mut file = CountedBytes {
+            bytes: std::io::Cursor::new(bytes.clone()),
+            read: 0,
+        };
+        let started = std::time::Instant::now();
+        let log = transcript_log_back(
+            &mut file,
+            size,
+            size,
+            PAGE_REACH,
+            zerocode_core::transcript::Detail::Clipped,
+        )
+        .expect("a read back");
+        read_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        assert!(log.skipped && log.turns.is_empty(), "the line past the cap is passed over");
+        assert!(
+            file.read <= PAGE_REACH.long_line + 2 * PAGE_REACH.step,
+            "{} bytes read",
+            file.read
+        );
+        let started = std::time::Instant::now();
+        let mut source = std::io::Cursor::new(&bytes);
+        let mut kept: Vec<Vec<u8>> = Vec::new();
+        let mut cursor = bytes.len();
+        while ((bytes.len() - cursor) as u64) < file.read {
+            let take = step.min(cursor);
+            cursor -= take;
+            let mut piece = vec![0u8; take];
+            std::io::Seek::seek(&mut source, std::io::SeekFrom::Start(cursor as u64)).expect("seek");
+            std::io::Read::read_exact(&mut source, &mut piece).expect("read");
+            std::hint::black_box(piece.contains(&b'\n'));
+            kept.push(piece);
+        }
+        std::hint::black_box(kept.concat());
+        once_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    let (read, once) = (median_ms(read_ms), median_ms(once_ms));
+    println!("inside a {:.1} MiB line: the read {read:.1} ms, one pass {once:.1} ms", size as f64 / 1048576.0);
+    assert!(
+        read <= 4.0 * once + 20.0,
+        "a read inside a long line took {read:.1} ms, one pass over its bytes {once:.1} ms"
+    );
+}
+
+/// A long transcript as this machine's grew (10-29: a pane's past 100 MiB,
+/// with long lines in it), synthetic — no transcript of the person's is read:
+/// some 108 MiB of blocks with 60 KiB results, and three lines a person
+/// pasted — 3 MiB and 12 MiB, read whole, and 40 MiB, past the cap. A page's
+/// first read and one 「이전 기록 더 보기」 read keep their budgets, and every
+/// read on up past the long lines keeps the cap and a step, makes its way up
+/// and takes nothing twice — in bytes and in time (t-84136).
+#[test]
+fn a_long_transcript_with_long_lines_is_read_within_its_bounds() {
+    use crate::cmd::terminal::{BackReach, FIRST_REACH, PAGE_REACH, transcript_log_back};
+    let mib = 1024 * 1024;
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    let path = temp.path().join("long.jsonl");
+    let mut body = String::new();
+    let mut at = 0;
+    let mut blocks = |body: &mut String, count: usize| {
+        for _ in 0..count {
+            body.push_str(&claude_block(at, 60 * 1024));
+            at += 1;
+        }
+    };
+    blocks(&mut body, 830);
+    let long40 = body.len() as u64;
+    body.push_str(&pasted_line("long-40", 40 * mib));
+    blocks(&mut body, 20);
+    body.push_str(&pasted_line("long-12", 12 * mib));
+    blocks(&mut body, 20);
+    body.push_str(&pasted_line("long-3", 3 * mib));
+    blocks(&mut body, 30);
+    std::fs::write(&path, &body).expect("written");
+    let size = body.len() as u64;
+    drop(body);
+    let read = |end: u64, reach: BackReach| {
+        let mut file = CountedFile {
+            file: std::fs::File::open(&path).expect("opened"),
+            read: 0,
+        };
+        let started = std::time::Instant::now();
+        let log = transcript_log_back(
+            &mut file,
+            size,
+            end,
+            reach,
+            zerocode_core::transcript::Detail::Clipped,
+        )
+        .expect("a read back");
+        (log, file.read, started.elapsed().as_secs_f64() * 1000.0)
+    };
+    let long = |log: &crate::shell_runtime::SubagentLog| {
+        log.turns.iter().any(|one| one.turn.text.starts_with("long-"))
+    };
+    // Bytes read, and the time it took against them: a read's time follows
+    // what it read, however long the file — the lines it took cost their
+    // reading as turns, a line it passed over only its reading (343159e4d took
+    // 3.5 s to pass over 32 MiB, copying what it held again at every step).
+    let in_time = |ms: f64, bytes: u64, taken: bool| {
+        let per_mib = if taken { 120.0 } else { 10.0 };
+        ms <= 250.0 + per_mib * bytes as f64 / mib as f64
+    };
+    println!("a {:.1} MiB transcript", size as f64 / mib as f64);
+
+    let (first, bytes, ms) = read(size, FIRST_REACH);
+    println!("first read: {:.2} MiB, {ms:.1} ms, {} turns", bytes as f64 / mib as f64, first.turns.len());
+    assert!(!first.turns.is_empty() && !long(&first) && !first.skipped);
+    assert!(bytes <= FIRST_REACH.budget + FIRST_REACH.step, "the first read took {bytes} bytes");
+    assert!(in_time(ms, bytes, true), "the first read took {ms:.1} ms for {bytes} bytes");
+
+    let (earlier, bytes, ms) = read(first.start, PAGE_REACH);
+    println!("one read earlier: {:.2} MiB, {ms:.1} ms, {} said turns", bytes as f64 / mib as f64, said_in(&earlier.turns));
+    assert!(earlier.start < first.start && said_in(&earlier.turns) == crate::shell_runtime::TRANSCRIPT_SAID_TURNS);
+    assert!(bytes <= PAGE_REACH.budget + PAGE_REACH.step, "one read earlier took {bytes} bytes");
+    assert!(in_time(ms, bytes, true), "one read earlier took {ms:.1} ms for {bytes} bytes");
+
+    // On up, past the three long lines, to the blocks above the longest.
+    let mut from = earlier.start;
+    let mut lines: Vec<u64> = earlier.turns.iter().map(|one| one.line).collect();
+    let (mut taken, mut passed, mut reads) = (Vec::new(), 0, 0);
+    let above_longest = long40 - (4 * mib) as u64;
+    while from > above_longest {
+        let (log, bytes, ms) = read(from, PAGE_REACH);
+        reads += 1;
+        println!(
+            "read up from {:.1} MiB: {:.2} MiB, {ms:.1} ms, {} turns{}{}",
+            from as f64 / mib as f64,
+            bytes as f64 / mib as f64,
+            log.turns.len(),
+            if long(&log) { ", a long line" } else { "" },
+            if log.skipped { ", passed over" } else { "" }
+        );
+        assert!(log.start < from, "a read back from {from} made no way up");
+        let bound = if long(&log) || log.skipped {
+            PAGE_REACH.budget.max(PAGE_REACH.long_line) + 2 * PAGE_REACH.step
+        } else {
+            PAGE_REACH.budget + PAGE_REACH.step
+        };
+        assert!(bytes <= bound, "a read back from {from} took {bytes} bytes, past {bound}");
+        assert!(
+            in_time(ms, bytes, !log.turns.is_empty()),
+            "a read back from {from} took {ms:.1} ms for {bytes} bytes"
+        );
+        taken.extend(log.turns.iter().filter(|one| one.turn.text.starts_with("long-")).map(|one| {
+            one.turn.text.split_whitespace().next().unwrap_or_default().to_string()
+        }));
+        passed += usize::from(log.skipped);
+        let mut here: Vec<u64> = log.turns.iter().map(|one| one.line).collect();
+        here.dedup();
+        assert!(
+            here.last().is_none_or(|last| lines.first().is_none_or(|first| last < first)),
+            "a read back from {from} took a line twice"
+        );
+        here.extend(lines);
+        lines = here;
+        from = log.start;
+        assert!(reads < 64, "the reads made no way up past the long lines");
+    }
+    assert_eq!(taken, ["long-3", "long-12"], "the long lines within the cap are read whole, each once");
+    assert_eq!(passed, 1, "the line past the cap is passed over by one read, and said");
+    assert!(from < long40, "the reads reach the blocks above the longest line");
 }
 
 /// A page's ask names a cursor or a place, never both; and a place past the

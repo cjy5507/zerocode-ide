@@ -39,7 +39,10 @@ const STRIDE = 16 * 1024;
  * would — on from a cursor, back from the end within its last chunk, back
  * from a place by turns — and counts every ask (`__ASKS__`). `holdAbove`
  * holds every read from a place until `__LET_ABOVE__()`, so a test reads the
- * page as it stands before anything above its newest turns is answered. */
+ * page as it stands before anything above its newest turns is answered;
+ * `__HOLD_ABOVE__()` holds the reads from then on the same way. A function
+ * in `__NEXT_ABOVE__` answers the next read from a place in its stead, once —
+ * a refusal it throws, or an answer that brings nothing to see. */
 function standTranscript({ blocks, back, stride, tailFrom = null, holdAbove = false }) {
   const lines = [];
   const at0 = Date.parse("2026-10-29T04:00:00Z");
@@ -80,16 +83,26 @@ function standTranscript({ blocks, back, stride, tailFrom = null, holdAbove = fa
     return backFrom(size, size - back.chunk);
   };
   let letAbove = null;
-  const above = holdAbove ? new Promise((done) => { letAbove = done; }) : null;
+  let above = holdAbove ? new Promise((done) => { letAbove = done; }) : null;
   window.__LET_ABOVE__ = () => letAbove?.();
+  window.__HOLD_ABOVE__ = () => {
+    above = new Promise((done) => { letAbove = done; });
+  };
+  window.__NEXT_ABOVE__ = null;
   window.__ASKS__ = [];
   window.__TRANSCRIPT__ = {
     size,
+    stride,
     // What the first read answers, asked by no page.
     tail,
     read(args) {
       window.__ASKS__.push({ after: args.after ?? null, before: args.before ?? null });
-      if (Number.isFinite(args.before)) return above ? above.then(() => backFrom(args.before)) : backFrom(args.before);
+      if (Number.isFinite(args.before)) {
+        const once = window.__NEXT_ABOVE__;
+        window.__NEXT_ABOVE__ = null;
+        const answer = () => (once ? once(args) : backFrom(args.before));
+        return above ? above.then(answer) : answer();
+      }
       if (args.after === null || args.after === undefined) return tail();
       if (args.after === 0) return { found: true, skipped: false, turns: placed.flat(), start: 0, next: size, more: false, folded: false };
       return { found: true, skipped: false, turns: [], start: args.after, next: size, more: false, folded: false };
@@ -431,6 +444,89 @@ export async function measureLongPaneOpen(page, { tail = "chunk", readMs = {} } 
   }, OPEN);
 }
 
+/* What a press back to a long pane's conversation restyles (t-84136): the
+ * elements Chromium recalculated a style for between the press on 대화 and the
+ * frame that draws it, by the ids its trace names them by — and of those, the
+ * ones standing in the conversation's rows that are not among the parts a page
+ * behind the front holds still. Those the stylesheet names (`.is-behind` …
+ * `animation-play-state: paused`, shell.css), read from it here, start again;
+ * nothing else in a row has a reason to. An element the page builds in that
+ * frame — a row's body the shelf builds as it comes within reach — is styled
+ * for the first time, not again: it is counted apart, and the rows themselves
+ * must be the ones that stood before the press. The press back that cost a
+ * long pane 46 ms at a 4x CPU restyled every span in the window and matched
+ * the whole document again, for `hidden`s that changed elsewhere. Chromium
+ * only: the trace is its own. */
+export async function restyledOnReturn(browser, page) {
+  await measureLongPaneOpen(page);
+  await page.evaluate(async (awayMs) => {
+    el("view-toggle-term").click();
+    await window.__PAINTED__();
+    await new Promise((done) => setTimeout(done, awayMs));
+    // The rows standing behind the screen, to tell after the press whether
+    // they came back or were built again.
+    const list = [...document.querySelectorAll(".pane-chat .helper-turns")][0];
+    window.__ROWS_BEFORE__ = list ? [...list.querySelectorAll(":scope > [data-turn]")] : [];
+  }, OPEN.awayMs);
+  await browser.startTracing(page, { categories: ["blink.user_timing", "devtools.timeline", "disabled-by-default-devtools.timeline.invalidationTracking"] });
+  const rows = await page.evaluate(async () => {
+    performance.mark("restyle-press");
+    el("view-toggle-chat").click();
+    await new Promise((done) => requestAnimationFrame(() => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = done;
+      channel.port2.postMessage(null);
+    }));
+    performance.mark("restyle-drawn");
+    const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility());
+    const now = list ? [...list.querySelectorAll(":scope > [data-turn]")] : [];
+    const before = window.__ROWS_BEFORE__;
+    return { count: now.length, kept: now.length === before.length && now.every((row, at) => row === before[at]) };
+  });
+  const trace = JSON.parse((await browser.stopTracing()).toString());
+  const events = trace.traceEvents ?? trace;
+  const at = (name) => events.find((one) => one.name === name && String(one.cat).includes("user_timing"))?.ts ?? null;
+  const [from, to] = [at("restyle-press"), at("restyle-drawn")];
+  // Each element styled in the press, and why: one the frame built is styled
+  // for the first time ("Node was inserted into tree"), not again.
+  const reasons = new Map();
+  for (const one of events) {
+    if (one.name !== "StyleRecalcInvalidationTracking" || from === null || to === null || one.ts < from || one.ts > to) continue;
+    const id = one.args?.data?.nodeId;
+    if (!Number.isFinite(id)) continue;
+    reasons.set(id, (reasons.get(id) ?? new Set()).add(String(one.args.data.reason ?? "")));
+  }
+  const built = (id) => [...reasons.get(id)].every((reason) => reason === "Node was inserted into tree");
+  const restyled = new Set([...reasons.keys()].filter((id) => !built(id)));
+  // The parts a page behind the front holds still, as the stylesheet names
+  // them: what each paused rule styles under `.is-behind`.
+  const held = await page.evaluate(() => [...document.styleSheets].flatMap((sheet) => [...sheet.cssRules])
+    .filter((rule) => rule.style?.animationPlayState === "paused" && rule.selectorText.includes(".is-behind "))
+    .flatMap((rule) => rule.selectorText.split(/,(?![^(]*\))/).map((one) => one.split(".is-behind ").at(-1).replace(/::(before|after)$/, "").trim()))
+    .join(", "));
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("DOM.enable");
+  const inRows = [];
+  for (const backendNodeId of restyled) {
+    const node = await cdp.send("DOM.resolveNode", { backendNodeId }).catch(() => null);
+    if (!node?.object?.objectId) continue;
+    const { result } = await cdp.send("Runtime.callFunctionOn", {
+      objectId: node.object.objectId,
+      returnByValue: true,
+      arguments: [{ value: held }],
+      functionDeclaration: `function (held) {
+        if (!(this instanceof Element) || !this.closest(".pane-chat .helper-turns > [data-turn]")) return null;
+        return { name: this.tagName.toLowerCase() + (this.className ? "." + String(this.className).split(" ").join(".") : ""), held: held !== "" && this.matches(held) };
+      }`,
+    });
+    if (result.value) inRows.push(result.value);
+  }
+  await cdp.detach();
+  const still = inRows.filter((one) => !one.held);
+  return { rows: rows.count, kept: rows.kept, held, built: reasons.size - restyled.size, restyled: restyled.size, inRows: inRows.length,
+    still: still.length, names: [...new Set(still.map((one) => one.name))].slice(0, 6) };
+}
+
 /* Rounds of the open, each on a fresh page; medians. */
 export async function measureLongPaneOpenRounds({ engine = "chromium", rounds = 5, tail = "chunk", readMs = {} } = {}) {
   const { webkitType } = await import("./conversation-perf.mjs");
@@ -716,6 +812,144 @@ export async function testConversationEarlier(browser, origin, ok) {
           block(pressed.first) < block(opened.first) && pressed.held <= cap && pressed.cut && pressed.twice === 0 && pressed.ordered,
         JSON.stringify({ from: opened.from, door: opened.door, asks, first: [opened.first, pressed.first], held: [opened.held, pressed.held] }));
       ok("the helper's page raised no errors", faults.length === 0, faults.join("\n"));
+    } finally {
+      await page.close();
+    }
+  }
+
+  // ---- a read from above that brings nothing to see says what it did (t-84136)
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      await openLongPane(page);
+      const door = () => page.evaluate(() => {
+        const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null);
+        return list.querySelector(":scope > .chat-earlier-door .chat-earlier-words")?.textContent ?? null;
+      });
+      const words = await page.evaluate(() => ({
+        more: t("worker.earlierMore", "이전 기록 더 보기"),
+        failed: t("worker.earlierFailed", "이전 기록을 읽지 못했습니다 — 다시 읽기"),
+        skipped: t("worker.earlierSkipped", "너무 긴 기록 한 줄을 건너뛰었습니다 — 이어서 보기"),
+        empty: t("worker.earlierEmpty", "그 구간엔 보여 줄 턴이 없었습니다 — 이어서 보기"),
+      }));
+      const press = async (next) => {
+        await page.evaluate((kind) => {
+          window.__NEXT_ABOVE__ = kind === null ? null : (args) => {
+            // A file replaced under the page, as the backend refuses it.
+            if (kind === "failed") throw new Error(`the transcript is shorter than the place ${args.before} the page reads back from — it was replaced`);
+            // One line passed over, too long to take — or records that draw no turn.
+            const start = args.before - window.__TRANSCRIPT__.stride;
+            return { found: true, skipped: kind === "skipped", turns: [], start, next: args.before, more: true, folded: start > 0 };
+          };
+        }, next);
+        const before = await page.evaluate(readList);
+        await pressEarlier(page);
+        return { before, after: await page.evaluate(readList), words: await door() };
+      };
+      const failed = await press("failed");
+      ok("a read from above the backend refuses leaves the page where it held and the way up says the read failed and that a press reads again",
+        failed.words === words.failed && failed.after.from === failed.before.from && failed.after.said === failed.before.said,
+        JSON.stringify({ words: failed.words, from: [failed.before.from, failed.after.from] }));
+      const again = await press(null);
+      ok("the press after it reads up as any press does, and the way up says what it does again",
+        again.words === words.more && again.after.said === again.before.said + BACK.said && again.after.from < again.before.from,
+        JSON.stringify({ words: again.words, said: [again.before.said, again.after.said] }));
+      const skipped = await press("skipped");
+      const marked = await page.evaluate(() => [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null).__run.helper.skipped);
+      ok("a read that passed over a line too long to show says so on the way up, the page reads on from above that line, and it counts among what the page skipped",
+        skipped.words === words.skipped && skipped.after.from < skipped.before.from && skipped.after.said === skipped.before.said && marked === true,
+        JSON.stringify({ words: skipped.words, from: [skipped.before.from, skipped.after.from], marked }));
+      // However narrow the page, those words stand on one line inside the
+      // way up, and its tip says them whole.
+      await page.setViewportSize({ width: 320, height: 800 });
+      await settle(page);
+      const narrow = await page.evaluate(() => {
+        const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null);
+        const door = list.querySelector(":scope > .chat-earlier-door");
+        const words = door.querySelector(".chat-earlier-words");
+        const [box, wordsBox, listBox] = [door, words, list].map((one) => one.getBoundingClientRect());
+        return { inside: box.left >= listBox.left - 1 && box.right <= listBox.right + 1 && wordsBox.right <= box.right + 1,
+          line: wordsBox.height <= box.height, tip: door.dataset.tip, words: words.textContent };
+      });
+      await page.setViewportSize({ width: 1280, height: 860 });
+      await settle(page);
+      ok("in a narrow page those words stand on one line inside the way up, and its tip says them whole",
+        narrow.inside && narrow.line && narrow.tip === words.skipped && narrow.words === words.skipped,
+        JSON.stringify(narrow));
+      const empty = await press("empty");
+      ok("a read through records that draw no turn says so on the way up, and the page reads on from above them",
+        empty.words === words.empty && empty.after.from < empty.before.from && empty.after.said === empty.before.said,
+        JSON.stringify({ words: empty.words, from: [empty.before.from, empty.after.from] }));
+      const onward = await press(null);
+      ok("and a press after that reads the turns above, worded as the way up again",
+        onward.words === words.more && onward.after.said === onward.before.said + BACK.said,
+        JSON.stringify({ words: onward.words, said: [onward.before.said, onward.after.said] }));
+      ok("the page that read nothing to see raised no errors", faults.length === 0, faults.join("\n"));
+    } finally {
+      await page.close();
+    }
+  }
+
+  // ---- a reader gone down to the newest turns while a read from above is out keeps them (t-84136)
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      await openLongPane(page);
+      const cap = await page.evaluate(() => HELPER_TURN_CAP);
+      // Up until one more read would pass the page's hold.
+      let step = 0;
+      for (let press = 0; press < 12; press += 1) {
+        const before = (await page.evaluate(readList)).held;
+        if (step > 0 && before + step > cap) break;
+        await pressEarlier(page);
+        step = (await page.evaluate(readList)).held - before;
+      }
+      const stood = await page.evaluate(async () => {
+        const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null);
+        window.__HOLD_ABOVE__();
+        list.scrollTop = 0;
+        await new Promise((done) => requestAnimationFrame(done));
+        list.querySelector(":scope > .chat-earlier-door").click();
+        // Down to the newest turns while the read is out.
+        list.scrollTop = list.scrollHeight;
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        return { top: list.scrollTop, gap: list.scrollHeight - list.scrollTop - list.clientHeight };
+      });
+      const before = await page.evaluate(readList);
+      await page.evaluate(() => window.__LET_ABOVE__());
+      await reached(page);
+      await settle(page);
+      const kept = await page.evaluate(readList);
+      const now = await page.evaluate(() => {
+        const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null);
+        return { top: list.scrollTop, gap: list.scrollHeight - list.scrollTop - list.clientHeight };
+      });
+      ok("a read from above that would push the newest turns out of the page's hold while its reader is among them is not held: the newest turns, the reader's place and where the page reads up from all stay",
+        step > 0 && before.held + step > cap && stood.gap <= 2 && kept.held === before.held && kept.last === `답 ${EARLIER_BLOCKS - 1}` &&
+          !kept.cut && kept.from === before.from && Math.abs(now.top - stood.top) <= 1 && now.gap <= 2,
+        JSON.stringify({ step, cap, held: [before.held, kept.held], last: kept.last, cut: kept.cut, from: [before.from, kept.from], stood, now }));
+      // From the top, the same read is held, and the newest end goes.
+      await pressEarlier(page);
+      const up = await page.evaluate(readList);
+      ok("pressed again from the top, the read is held, the newest turns far from the reader go and the foot's button says the way back",
+        up.from < kept.from && up.held <= cap && up.cut && up.foot?.shown === true,
+        JSON.stringify({ from: [kept.from, up.from], held: up.held, cut: up.cut, foot: up.foot }));
+      ok("the page whose reader went down raised no errors", faults.length === 0, faults.join("\n"));
+    } finally {
+      await page.close();
+    }
+  }
+
+  // ---- a press back to a long pane's conversation restyles none of its rows (t-84136)
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      const seen = await restyledOnReturn(browser, page);
+      ok(`turned back to from its terminal, a long pane's conversation of ${seen.rows} rows comes back as it stood, restyling none of them — only the parts held still behind it start again`,
+        seen.rows > BACK.said && seen.kept && seen.held !== "" && seen.still === 0,
+        JSON.stringify(seen));
+      ok("the press back raised no errors", faults.length === 0, faults.join("\n"));
     } finally {
       await page.close();
     }

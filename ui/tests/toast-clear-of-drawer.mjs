@@ -13,6 +13,16 @@ const SCENES = [
       for (const word of ['Cancel', 'Save']) { const b = document.createElement('button'); b.textContent = word; d.append(b); }
       document.body.append(d); return d`,
   },
+  {
+    // Where the window's drawers stand: deep in a leaf, beside the
+    // conversations, out of the body's own children (t-84136).
+    name: "a drawer docked inside the workbench",
+    open: `const d = document.createElement('aside'); d.className = 'jev-drawer'; d.id = 'scene-drawer-deep';
+      d.style.cssText = 'position:fixed;height:100vh;top:0;right:0;bottom:0;width:360px;z-index:40;display:flex;flex-direction:row;align-items:flex-end;justify-content:flex-end;gap:8px;padding:16px 16px 56px';
+      for (const word of ['Cancel', 'Save']) { const b = document.createElement('button'); b.textContent = word; d.append(b); }
+      const leaf = document.querySelector('#workbench .panes') ?? document.querySelector('#workbench');
+      leaf.append(d); return d`,
+  },
 ];
 
 const MEASURE = (scene) => `(async () => {

@@ -418,6 +418,15 @@ function chatEarlierDoorNode(list) {
   return door;
 }
 
+/* The way up's words: what it does, or — after a read that brought nothing
+ * to see — what that read did, and that a press reads on (t-84136). */
+function earlierSaidWords(said) {
+  if (said === "failed") return t("worker.earlierFailed", "이전 기록을 읽지 못했습니다 — 다시 읽기");
+  if (said === "skipped") return t("worker.earlierSkipped", "너무 긴 기록 한 줄을 건너뛰었습니다 — 이어서 보기");
+  if (said === "empty") return t("worker.earlierEmpty", "그 구간엔 보여 줄 턴이 없었습니다 — 이어서 보기");
+  return t("worker.earlierMore", "이전 기록 더 보기");
+}
+
 /* The way up worn as the page stands: stood at the list's head while
  * something stands above (`from` past the file's first line) and gone once
  * nothing does, saying so while its read is out — written only when it
@@ -440,10 +449,14 @@ function paintEarlierDoor(list) {
   }
   const reading = held.reaching === true;
   writeAttribute(door, "aria-busy", reading ? "true" : "false");
+  const said = reading ? null : held.earlierSaid ?? null;
   writeTextContent(door.querySelector(".chat-earlier-words"), reading
     ? t("worker.earlierReading", "이전 기록을 읽는 중…")
-    : t("worker.earlierMore", "이전 기록 더 보기"));
-  writeAttribute(door, "data-tip", t("worker.earlierMoreTip", "누르거나 맨 위에서 더 올리면 그 앞의 턴을 이어서 읽습니다"));
+    : earlierSaidWords(said));
+  // What a read did is a sentence a narrow pill may cut: its tip says it whole.
+  writeAttribute(door, "data-tip", said
+    ? earlierSaidWords(said)
+    : t("worker.earlierMoreTip", "누르거나 맨 위에서 더 올리면 그 앞의 턴을 이어서 읽습니다"));
 }
 
 /* Where the list stands the first time it has a box: on the row its reader
@@ -2061,7 +2074,7 @@ function askShelfAgain(list) {
  * (nothing said between them) fold into one row that opens to its members; a
  * step that failed is never folded, and one still out waits for its answer
  * before it may join. The folded page (t-81525 B1) holds a turn's steps in
- * one pill instead and builds them when it opens (`holdActivityTurn`). */
+ * one pill instead and builds them when it opens (`joinTurnBeside`). */
 
 /* A kind's words and the family the head counts it in (t-22100), keyed by the
  * words the core reduces a tool's name to (`hook::Tool::as_str`): a turn
