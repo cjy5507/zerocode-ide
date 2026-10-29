@@ -3442,10 +3442,11 @@ function mdLink(label, href, line = undefined) {
   return node;
 }
 
-/* A relative link, opened where it points — and when nothing can be read
- * there, looked for by its tail among the checkout's files (t-83039).
+/* A link's file, opened where it points — and only when nothing can be read
+ * there, looked for further (t-83039).
  *
- * An answer names a file the way a person does: 「terminal.rs」 for
+ * A relative link is looked for by its tail among the checkout's files. An
+ * answer names a file the way a person does: 「terminal.rs」 for
  * crates/zerocode-shell/src/cmd/terminal.rs. Measured from the checkout's top
  * that is no file, and the press handed the person the disk's own refusal. The
  * look is the file finder's (`search_files`), asked only by a press whose open
