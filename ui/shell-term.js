@@ -131,11 +131,14 @@ function capturePrimaryPasteDestination(target) {
     const start = target.selectionStart;
     const end = target.selectionEnd;
     if (typeof start !== "number" || typeof end !== "number") return null;
+    // The paste's hand, for the input event the text arrives with after the
+    // read (t-75676).
+    const hand = handNow();
     return (text) => {
       if (!target.isConnected || target.disabled || target.readOnly) return false;
       target.focus();
       target.setRangeText(text, start, end, "end");
-      dispatchPrimarySelectionInput(target, text);
+      asHand(hand, () => dispatchPrimarySelectionInput(target, text));
       return true;
     };
   }
@@ -623,15 +626,18 @@ function capturePasteDestination(field) {
     // email/number inputs have no selection to hold; they take the caret as it is.
   }
   const held = typeof start === "number" && typeof end === "number";
+  // The paste's hand, taken in its own event: the text lands after the read,
+  // and `execCommand`'s input event is trusted whoever asked (t-75676).
+  const hand = handNow();
   return (text) => {
     if (!field.isConnected || field.disabled || field.readOnly) return false;
     if (document.activeElement === field) {
       if (held) field.setSelectionRange(start, end);
-      if (document.execCommand("insertText", false, text)) return true;
+      if (asHand(hand, () => document.execCommand("insertText", false, text))) return true;
     }
     if (!held) return false;
     field.setRangeText(text, start, end, "end");
-    dispatchPrimarySelectionInput(field, text);
+    asHand(hand, () => dispatchPrimarySelectionInput(field, text));
     return true;
   };
 }

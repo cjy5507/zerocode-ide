@@ -703,8 +703,31 @@ export async function testSelfAct(browser, origin, ok) {
       fixture.insertAdjacentHTML("beforeend", `
         <label><input id="kind-check" type="checkbox" aria-label="Kind check"><span id="kind-check-words">Kind check words</span></label>
         <button id="kind-flip" type="button">Kind flip</button>
-        <button id="kind-move" type="button">Kind move</button>`);
+        <button id="kind-move" type="button">Kind move</button>
+        <button id="kind-label" type="button">Kind label</button>
+        <button id="kind-pick" type="button">Kind pick</button>
+        <select id="kind-select" aria-label="Kind select"><option value="a">a</option><option value="b">b</option></select>
+        <input id="kind-range" type="range" aria-label="Kind range" min="0" max="10" value="0">`);
       document.getElementById("kind-check").addEventListener("change", () => void invoke("jira_connect"));
+      for (const id of ["kind-select", "kind-range"]) {
+        document.getElementById(id).addEventListener("change", () => void invoke("board_columns_probe"));
+      }
+      // t-75676 ②: an agent's flow that, after an await, clicks the
+      // checkbox's label by the page's own click() — which forwards a click
+      // the browser marks trusted.
+      document.getElementById("kind-label").addEventListener("click", async () => {
+        await T.gate();
+        document.getElementById("kind-check-words").click();
+      });
+      // ③: one that picks in a select and a range by setting their value.
+      document.getElementById("kind-pick").addEventListener("click", async () => {
+        await T.gate();
+        for (const [id, value] of [["kind-select", "b"], ["kind-range", "7"]]) {
+          const control = document.getElementById(id);
+          control.value = value;
+          control.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      });
       // An agent's flow that, after an await, clicks a checkbox by the page's
       // own click() — and one that moves the focus.
       document.getElementById("kind-flip").addEventListener("click", async () => {
@@ -739,6 +762,12 @@ export async function testSelfAct(browser, origin, ok) {
     const personFlip = await take();
     await page.click("#kind-check-words");
     const labelFlip = await take();
+    const labelled = await press("Kind label");
+    await release();
+    const pageLabel = await take();
+    const picked = await press("Kind pick");
+    await release();
+    const pagePick = await take();
 
     // The cookie box, in its settings pane.
     await page.evaluate(() => {
@@ -768,6 +797,17 @@ export async function testSelfAct(browser, origin, ok) {
     await page.evaluate(() => asAgentPress(() => selfActFill(document.getElementById("opencode-cookie"), "auth=filled-by-agent")));
     await page.click("#opencode-workspace");
     const agentFilled = await take();
+    // t-75676 ①: the paste road's insertion, run from no person's event —
+    // the page's own text through execCommand into the box the person stands
+    // in; the person then leaves it.
+    await page.click(cookie);
+    await page.evaluate(async () => {
+      const put = capturePasteDestination(document.getElementById("opencode-cookie"));
+      await Promise.resolve();
+      put("auth=pasted-by-page");
+    });
+    await page.click("#opencode-workspace");
+    const pagePasted = await take();
 
     ok("the agent's flow presses were made", flipped === true && moved === true, JSON.stringify({ flipped, moved }));
     ok("a page's click() on a checkbox after an await names no person", hand(pageFlip, "jira_connect").join() === "none", JSON.stringify(pageFlip));
@@ -777,5 +817,9 @@ export async function testSelfAct(browser, origin, ok) {
     ok("the person's Enter in the cookie box saves as person", hand(entered, "set_opencode_cookie").join() === "person", JSON.stringify(entered));
     ok("an agent's flow moving the focus saves no person's cookie", hand(agentMoved, "set_opencode_cookie").join() === "none", JSON.stringify(agentMoved));
     ok("the person leaving a box an agent filled saves as the agent's", hand(agentFilled, "set_opencode_cookie").join() === "agent", JSON.stringify(agentFilled));
+    ok("the agent's label and pick presses were made", labelled === true && picked === true, JSON.stringify({ labelled, picked }));
+    ok("a page's click() on a checkbox's label after an await names no person (t-75676 ②)", hand(pageLabel, "jira_connect").join() === "none", JSON.stringify(pageLabel));
+    ok("a page's pick in a select and a range names no person (t-75676 ③)", hand(pagePick, "board_columns_probe").join() === "none,none", JSON.stringify(pagePick));
+    ok("text the page's own paste road inserts, from no person's event, saves no person's cookie (t-75676 ①)", hand(pagePasted, "set_opencode_cookie").join() === "none", JSON.stringify(pagePasted));
   });
 }
