@@ -15174,6 +15174,16 @@ details.worker-command {
   height: 1.1em;
 }
 
+/* Its words stand on one line in the pill's height, however narrow the page:
+ * what a read did can say more than the way up does (t-84136), and the
+ * sentence a narrow pill cuts is whole in its tip. */
+.chat-earlier-words {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .helper-turn {
   margin: 0;
   border: 0;

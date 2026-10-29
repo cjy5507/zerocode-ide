@@ -842,6 +842,23 @@ export async function testConversationEarlier(browser, origin, ok) {
       ok("a read that passed over a line too long to show says so on the way up, the page reads on from above that line, and it counts among what the page skipped",
         skipped.words === words.skipped && skipped.after.from < skipped.before.from && skipped.after.said === skipped.before.said && marked === true,
         JSON.stringify({ words: skipped.words, from: [skipped.before.from, skipped.after.from], marked }));
+      // However narrow the page, those words stand on one line inside the
+      // way up, and its tip says them whole.
+      await page.setViewportSize({ width: 320, height: 800 });
+      await settle(page);
+      const narrow = await page.evaluate(() => {
+        const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.offsetParent !== null);
+        const door = list.querySelector(":scope > .chat-earlier-door");
+        const words = door.querySelector(".chat-earlier-words");
+        const [box, wordsBox, listBox] = [door, words, list].map((one) => one.getBoundingClientRect());
+        return { inside: box.left >= listBox.left - 1 && box.right <= listBox.right + 1 && wordsBox.right <= box.right + 1,
+          line: wordsBox.height <= box.height, tip: door.dataset.tip, words: words.textContent };
+      });
+      await page.setViewportSize({ width: 1280, height: 860 });
+      await settle(page);
+      ok("in a narrow page those words stand on one line inside the way up, and its tip says them whole",
+        narrow.inside && narrow.line && narrow.tip === words.skipped && narrow.words === words.skipped,
+        JSON.stringify(narrow));
       const empty = await press("empty");
       ok("a read through records that draw no turn says so on the way up, and the page reads on from above them",
         empty.words === words.empty && empty.after.from < empty.before.from && empty.after.said === empty.before.said,

@@ -449,10 +449,14 @@ function paintEarlierDoor(list) {
   }
   const reading = held.reaching === true;
   writeAttribute(door, "aria-busy", reading ? "true" : "false");
+  const said = reading ? null : held.earlierSaid ?? null;
   writeTextContent(door.querySelector(".chat-earlier-words"), reading
     ? t("worker.earlierReading", "이전 기록을 읽는 중…")
-    : earlierSaidWords(held.earlierSaid));
-  writeAttribute(door, "data-tip", t("worker.earlierMoreTip", "누르거나 맨 위에서 더 올리면 그 앞의 턴을 이어서 읽습니다"));
+    : earlierSaidWords(said));
+  // What a read did is a sentence a narrow pill may cut: its tip says it whole.
+  writeAttribute(door, "data-tip", said
+    ? earlierSaidWords(said)
+    : t("worker.earlierMoreTip", "누르거나 맨 위에서 더 올리면 그 앞의 턴을 이어서 읽습니다"));
 }
 
 /* Where the list stands the first time it has a box: on the row its reader
