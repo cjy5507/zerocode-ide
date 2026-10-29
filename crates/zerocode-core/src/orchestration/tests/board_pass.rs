@@ -152,3 +152,66 @@ fn a_withdrawn_verification_still_refuses_the_boards_pass_whatever_it_carries_ov
     );
     assert_eq!(bench.ledger.export().tasks, before.tasks);
 }
+
+/// The board's mark rides along when a coordinator writes the result again,
+/// as a coordinator who keeps the whole result does (`task-update` replaces it
+/// whole). Over a withdrawal, that write names a review of its own — who
+/// reviewed and the head it tested, keys the press never leaves — so it is a
+/// new review and stands; the mark beside it does not make it a bare press
+/// (run-4275's review of t-82501, P3).
+#[test]
+fn a_new_review_written_over_the_boards_mark_still_lifts_a_withdrawal() {
+    let mut bench = Bench::new();
+    let (task, attempt) = handed_in(
+        &mut bench,
+        &serde_json::json!({ "ok": true, "head": "abc1234", "summary": "빈 상태 그림" }),
+    );
+    let pressed = press(&mut bench, &task, &attempt, "abc1234", 2_345);
+    assert_eq!(pressed.reply.exit_code, 0, "{:?}", pressed.reply);
+    let mut withdrawal = stored(&bench, &task);
+    let map = withdrawal.as_object_mut().expect("a result object");
+    map.insert("verified".into(), false.into());
+    map.insert(
+        "verificationWithdrawn".into(),
+        "the independent review found the dark-mode picture unreadable".into(),
+    );
+    let update = |bench: &mut Bench, result: &serde_json::Value| {
+        bench.at_argv(
+            agent_teams::LEADER_PANE,
+            [
+                "task-update",
+                "--task",
+                &task,
+                "--result",
+                &result.to_string(),
+                "--attempt",
+                &attempt,
+                "--source",
+                "abc1234",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        )
+    };
+    let withdrew = update(&mut bench, &withdrawal);
+    assert_eq!(withdrew.reply.exit_code, 0, "{:?}", withdrew.reply);
+    assert!(
+        stored(&bench, &task).get("passedOnBoard").is_some(),
+        "the mark rode along"
+    );
+
+    let mut again = stored(&bench, &task);
+    let map = again.as_object_mut().expect("a result object");
+    map.remove("verificationWithdrawn");
+    map.insert("verified".into(), true.into());
+    map.insert("reviewedBy".into(), "run-2025 coordinator".into());
+    map.insert("testedHead".into(), "abc1234".into());
+    let reviewed = update(&mut bench, &again);
+    assert_eq!(
+        reviewed.reply.exit_code, 0,
+        "a review that names who reviewed and the head it tested lifts the withdrawal \
+         though the board's mark rode along: {:?}",
+        reviewed.reply
+    );
+    assert_eq!(stored(&bench, &task)["reviewedBy"], "run-2025 coordinator");
+}
