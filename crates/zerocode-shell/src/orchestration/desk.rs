@@ -21,7 +21,7 @@ use zerocode_core::orchestration::task_cost::TaskCost;
 use zerocode_core::orchestration::{
     Closure, Delivery, Gate, GateStatus, LEDGER_ITSELF, Ledger, Message, MessageKind, NextStep,
     Run, SETTLE_QUIET_DAYS, Task, TaskStatus, WorkProgress, WorkStage, WorktreeRoom,
-    last_touched_ms, worktree_room,
+    board_pass_result, last_touched_ms, worktree_room,
 };
 use zerocode_core::plain_text::TextLint;
 
@@ -1254,10 +1254,10 @@ pub(crate) fn resolve_hold(
 /// review that names the attempt and the source the board drew. The ledger
 /// refuses the pass when either has moved since, which is what keeps a press
 /// from passing work that changed after the person read it — and when the
-/// coordinator withdrew its verification of that attempt and source, since a
-/// bare `{"verified":true}` names no new review (t-81913). A withdrawn row
-/// draws no pass at all; the ledger's refusal is what a press that slips
-/// through is answered with.
+/// coordinator withdrew its verification of that attempt and source, since
+/// the board's pass names no new review (t-81913). A withdrawn row draws no
+/// pass at all; the ledger's refusal is what a press that slips through is
+/// answered with.
 pub(crate) fn pass_review(
     run_id: &str,
     task: &str,
@@ -1272,27 +1272,47 @@ pub(crate) fn pass_review(
     if attempt.trim().is_empty() || source.trim().is_empty() {
         return Err("a pass names the attempt and the source it read".into());
     }
-    as_the_coordinator(
+    let argv = with_cached_run(run_id, |run| {
+        pass_argv(run, run_id, task, attempt, source, retry_request, now_ms)
+    })??;
+    as_the_coordinator(run_id, argv, now_ms)
+}
+
+/// The board's pass as a `task-update` line (t-82501): the result the task
+/// holds now with the pass added ([`board_pass_result`]) — `task-update`
+/// replaces a result whole, so a pass that sent its one key would take the
+/// worker's summary, tests and report with it. Read from the image the board
+/// drew from; a task that image does not hold is not written over blind.
+fn pass_argv(
+    run: Option<&Run>,
+    run_id: &str,
+    task: &str,
+    attempt: &str,
+    source: &str,
+    retry_request: &str,
+    now_ms: i64,
+) -> Result<Vec<String>, String> {
+    let held = run
+        .and_then(|run| run.task(task))
+        .ok_or_else(|| format!("the board holds no task {task} in {run_id}"))?;
+    let result = board_pass_result(held.result.as_str(), now_ms);
+    Ok([
+        "task-update",
+        "--run",
         run_id,
-        [
-            "task-update",
-            "--run",
-            run_id,
-            "--task",
-            task,
-            "--result",
-            r#"{"verified":true}"#,
-            "--attempt",
-            attempt,
-            "--source",
-            source,
-            "--retry-request",
-            retry_request,
-        ]
-        .map(str::to_string)
-        .to_vec(),
-        now_ms,
-    )
+        "--task",
+        task,
+        "--result",
+        &result,
+        "--attempt",
+        attempt,
+        "--source",
+        source,
+        "--retry-request",
+        retry_request,
+    ]
+    .map(str::to_string)
+    .to_vec())
 }
 
 /// The machine strip's one answer: what `df -g`, `uptime` and `simctl` told a
@@ -2801,6 +2821,89 @@ mod tests {
         let blind = pass_review("run-x", "t-1", "", "1234567", "ui-pass-1", 1)
             .expect_err("a pass without its attempt");
         assert!(blind.contains("attempt and the source"), "{blind}");
+    }
+
+    /// The board's pass is written over the result the task holds (t-82501):
+    /// the worker's summary, tests and report stand beside the verification
+    /// and the moment of the press, and a task the board's image does not
+    /// hold is not written over blind.
+    #[test]
+    fn the_boards_pass_sends_the_workers_result_with_its_verification_added() {
+        let mut ledger = Ledger::new();
+        let run_id = ledger.create_run("desk-pass", 1);
+        let task = ledger
+            .create_task(&run_id, "pass".into(), "pass".into(), vec![], None, 2)
+            .expect("a task");
+        let worker_said = serde_json::json!({
+            "ok": true,
+            "head": "abc1234",
+            "summary": "빈 장바구니에서도 가격 가드가 선다",
+            "tests": "price_guard 12 passed",
+            "reportPath": "/Users/dev/acme-web/reviews/t-2041/REPORT.md",
+        });
+        ledger
+            .update_task(
+                &run_id,
+                &task,
+                None,
+                Some(worker_said.to_string()),
+                ResultAuthor::Worker {
+                    worker: "w-2043".into(),
+                    dispatch: None,
+                },
+                3,
+            )
+            .expect("the worker's report");
+
+        let argv = pass_argv(
+            ledger.run(&run_id),
+            &run_id,
+            &task,
+            "dp-2043",
+            "abc1234",
+            "ui-pass-1",
+            1_234,
+        )
+        .expect("a pass of a task the board holds");
+        let named = |flag: &str| {
+            argv.iter()
+                .position(|word| word == flag)
+                .and_then(|at| argv.get(at + 1))
+                .cloned()
+                .unwrap_or_else(|| panic!("{flag} missing from {argv:?}"))
+        };
+        assert_eq!(argv[0], "task-update");
+        assert_eq!(
+            [named("--task"), named("--attempt"), named("--source")],
+            [task.clone(), "dp-2043".into(), "abc1234".into()]
+        );
+        assert_eq!(named("--retry-request"), "ui-pass-1");
+        let sent: serde_json::Value =
+            serde_json::from_str(&named("--result")).expect("the result is JSON");
+        for key in ["ok", "head", "summary", "tests", "reportPath"] {
+            assert_eq!(
+                sent[key], worker_said[key],
+                "the pass drops `{key}`: {sent}"
+            );
+        }
+        assert_eq!(sent["verified"], true, "{sent}");
+        assert_eq!(
+            sent[zerocode_core::orchestration::BOARD_PASS_KEY],
+            1_234,
+            "{sent}"
+        );
+
+        let unheld = pass_argv(
+            ledger.run(&run_id),
+            &run_id,
+            "t-404",
+            "dp-2043",
+            "abc1234",
+            "ui-pass-2",
+            1_235,
+        )
+        .expect_err("a task the board does not hold");
+        assert!(unheld.contains("t-404"), "{unheld}");
     }
 
     /// A run in play with one task in every stage, and a finished run nobody

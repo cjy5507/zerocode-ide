@@ -1133,24 +1133,44 @@ fn says_something(value: &serde_json::Value) -> bool {
 }
 
 /// Whether a result verifies on nothing new: it says `verified` and names no new review it rests on
-/// ([`new_review_keys`]) — the board's 「통과」, a bare `{"verified":true}`, or the same with landing
-/// keys beside it. What a standing withdrawal refuses (t-81913, [`ReviewFacts::withdrawn`]).
+/// ([`new_review_keys`]) — a bare `{"verified":true}`, or the same with landing keys beside it — or
+/// it is the board's 「통과」 ([`BOARD_PASS_KEY`]), whatever it carried over from the result it was
+/// written over: the board adds `verified` and its mark and nothing else, so a report or a tested
+/// head beside them is the old result's, not a new review (t-82501). What a standing withdrawal
+/// refuses (t-81913, [`ReviewFacts::withdrawn`]).
 fn verifies_on_nothing_new(result: &str) -> bool {
     let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(result)
     else {
         return false;
     };
     ReviewFacts::from_result(result).verified
-        && !new_review_keys().any(|key| map.get(key).is_some_and(says_something))
+        && (map.contains_key(BOARD_PASS_KEY)
+            || !new_review_keys().any(|key| map.get(key).is_some_and(says_something)))
 }
 
-/// The key the board's 「통과」 marks its verification with (t-82501).
+/// The key the board's 「통과」 marks its verification with (t-82501): when the person pressed it, in
+/// epoch milliseconds ([`board_pass_result`]).
 pub const BOARD_PASS_KEY: &str = "passedOnBoard";
 
-/// The result the board's 「통과」 writes (t-82501).
+/// The result the board's 「통과」 writes (t-82501): the task's result as it stands, with `verified`
+/// and [`BOARD_PASS_KEY`] added — `task-update` replaces a result whole, so this is that whole, and
+/// a worker's summary, tests and report outlive the pass. The keys a review is read from
+/// ([`review_keys`]) and a withdrawal's ([`VERIFICATION_WITHDRAWN_KEY`]) are not carried over: the
+/// press vouches for its own verification and for nothing the result said before, so a worker's
+/// `merged` or `testedHead` stays the worker's claim instead of becoming the coordinator's fact. A
+/// result that is not a JSON object carries nothing over.
 #[must_use]
-pub fn board_pass_result(_stored: &str, _now_ms: i64) -> String {
-    r#"{"verified":true}"#.to_string()
+pub fn board_pass_result(stored: &str, now_ms: i64) -> String {
+    let mut result = match serde_json::from_str::<serde_json::Value>(stored) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    for key in review_keys().chain(std::iter::once(VERIFICATION_WITHDRAWN_KEY)) {
+        result.remove(key);
+    }
+    result.insert(VERIFIED_KEY.into(), true.into());
+    result.insert(BOARD_PASS_KEY.into(), now_ms.into());
+    serde_json::Value::Object(result).to_string()
 }
 
 /// The key a coordinator marks work with no code to land under — the first of

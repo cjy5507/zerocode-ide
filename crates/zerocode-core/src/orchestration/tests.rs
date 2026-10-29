@@ -24327,8 +24327,9 @@ fn a_withdrawn_verification_is_not_covered_by_a_bare_pass_of_the_same_attempt_an
         "the board draws the work as waiting on a review that was withdrawn: {standing:?}"
     );
 
-    // The board's press, as `desk::pass_review` sends it — and the same bare
-    // verification with landing keys beside it, which names no review either.
+    // The board's press as `desk::pass_review` sent it before t-82501 — and
+    // the same bare verification with landing keys beside it, which names no
+    // review either. The press as it is sent now is `tests/board_pass.rs`'s.
     for bare in [r#"{"verified":true}"#, r#"{"verified":true,"merged":true}"#] {
         let before = bench.ledger.export();
         let pressed = bench.at_argv(
