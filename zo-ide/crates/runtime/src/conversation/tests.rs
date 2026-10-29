@@ -17431,6 +17431,69 @@ fn context_breakdown_report_lists_window_split_ladder_and_headroom() {
     );
 }
 
+/// A 1M session's `/context` report, beside the compaction window it is
+/// measured against — which must be under the model's window, or there is no
+/// compaction-window row to check.
+fn wide_context_report() -> (ConversationRuntime<NoopApiClient, StaticToolExecutor>, u64, String) {
+    std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
+    std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_WINDOW");
+    let wide = runtime_for_context_policy(Some("claude-opus-4-1[1m]"), 1_000_000);
+    let compaction_window = super::compaction::auto_compaction_window(wide.context_window);
+    assert!(
+        compaction_window < wide.context_window,
+        "the case needs a compaction window under the model's: {compaction_window}"
+    );
+    let report = wide.context_breakdown_report();
+    (wide, compaction_window, report)
+}
+
+/// The compaction-window row reads as a name, a gap and a value: the name is
+/// as long as the column it sat in, so it ran into its value (t-79938).
+#[test]
+fn context_breakdown_report_keeps_a_gap_after_the_compaction_window_name() {
+    let _env = crate::test_env_lock();
+    let (_, _, report) = wide_context_report();
+    let row = report
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("Compaction window"))
+        .unwrap_or_else(|| panic!("no compaction-window row:\n{report}"));
+    assert!(
+        row["Compaction window".len()..].starts_with(' '),
+        "the name runs into its value: {row:?}"
+    );
+}
+
+/// The ladder's percentages are of the window the compaction-window row names
+/// (t-79938): the tiers come from that window, and the row says so, so a
+/// percentage of the model's window reads low against it.
+#[test]
+fn context_breakdown_report_measures_the_ladder_against_the_compaction_window() {
+    let _env = crate::test_env_lock();
+    let (wide, compaction_window, report) = wide_context_report();
+    for (tier, threshold) in [
+        ("Microcompact", wide.microcompact_input_tokens_threshold()),
+        ("State distill", wide.state_distill_input_tokens_threshold()),
+        ("Warn", wide.precompaction_input_tokens_threshold()),
+        ("Auto compact", u64::from(wide.auto_compaction_input_tokens_threshold())),
+    ] {
+        let line = report
+            .lines()
+            .map(str::trim_start)
+            .find(|line| line.starts_with(tier))
+            .unwrap_or_else(|| panic!("no `{tier}` row:\n{report}"));
+        let shown = line
+            .rsplit_once('(')
+            .and_then(|(_, pct)| pct.strip_suffix("%)"))
+            .unwrap_or_else(|| panic!("no percentage on {line:?}"));
+        assert_eq!(
+            shown,
+            (threshold * 100 / compaction_window).to_string(),
+            "`{tier}` must be a % of the compaction window the report names:\n{report}"
+        );
+    }
+}
+
 /// P4: the summary-model override applies only within the session's provider
 /// family — a cross-provider value is ignored (the bound client cannot reach
 /// another provider's endpoint), and unset means no override.
