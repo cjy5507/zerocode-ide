@@ -463,6 +463,16 @@ fn a_job_the_pane_set_loose_is_its_own_to_end() {
             "{command:?}"
         );
     }
+    // A pattern that takes another pane's loose job too is asked about that
+    // one, not the pane's own.
+    let command = "pkill -f 'http.server 800[012]'";
+    match judged_marked(command, &table, Some(CALLER)) {
+        KillVerdict::Ask { reason } => assert!(
+            reason.contains(&format!("pid {SET_LOOSE_BY_THE_OTHER_PANE}")),
+            "{reason}"
+        ),
+        other => panic!("{command:?} should be asked of a person, was {other:?}"),
+    }
 }
 
 /// What the calling pane did not start stays asked — another pane's loose
@@ -476,10 +486,6 @@ fn a_loose_job_of_another_pane_or_window_or_none_is_still_asked() {
         ("kill 610", SET_LOOSE_BY_THE_OTHER_PANE),
         ("kill 620", SET_LOOSE_IN_ANOTHER_WINDOW),
         ("kill 500", DETACHED),
-        (
-            "pkill -f 'http.server 800[012]'",
-            SET_LOOSE_BY_THE_OTHER_PANE,
-        ),
     ] {
         match judged_marked(command, &table, Some(CALLER)) {
             KillVerdict::Ask { reason } => {
@@ -678,13 +684,13 @@ fn a_started_process_is_judged_by_the_pane_its_environment_names() {
         let ended = probe.wait().expect("a probe ends when its input closes");
         assert!(ended.success(), "{ended}");
     }
+    for verdict in &verdicts[1..] {
+        assert!(matches!(verdict, KillVerdict::Ask { .. }), "{verdict:?}");
+    }
     assert_eq!(table.marks.get(&pids[0]), Some(&mark(4242, "term-1")));
     assert_eq!(
         verdicts[0],
         KillVerdict::Allow,
         "the pane's own loose program"
     );
-    for verdict in &verdicts[1..] {
-        assert!(matches!(verdict, KillVerdict::Ask { .. }), "{verdict:?}");
-    }
 }

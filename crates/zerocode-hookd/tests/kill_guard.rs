@@ -235,17 +235,17 @@ async fn the_callers_own_child_is_allowed_and_a_pid_known_only_at_run_time_is_re
 #[tokio::test]
 async fn the_refusals_way_out_ends_a_job_the_pane_set_loose() {
     let window = FakeWindow::new(true);
-    let command = format!("kill {SET_LOOSE}");
-    let (_, body) = answer(Some(Arc::clone(&window)), AgentKind::Claude, &command).await;
-    assert!(body.is_empty(), "{}", String::from_utf8_lossy(&body));
     let command = format!("kill {SET_LOOSE_BY_THE_OTHER_PANE}");
-    let (_, body) = answer(Some(window), AgentKind::Claude, &command).await;
+    let (_, body) = answer(Some(Arc::clone(&window)), AgentKind::Claude, &command).await;
     let (word, reason) = decision(&body);
     assert_eq!(word, "deny");
     assert!(
         reason.contains(&format!("pid {SET_LOOSE_BY_THE_OTHER_PANE}")),
         "{reason}"
     );
+    let command = format!("kill {SET_LOOSE}");
+    let (_, body) = answer(Some(window), AgentKind::Claude, &command).await;
+    assert!(body.is_empty(), "{}", String::from_utf8_lossy(&body));
 }
 
 #[tokio::test]
