@@ -2660,9 +2660,6 @@
   --chat-ground: var(--surface-abyss);
   --chat-bubble: var(--surface-raised);
   --chat-bubble-ink: var(--ink-chalk);
-  /* An answer before the newest one (t-81525 B3): a step back from the
-   * newest, still the reading ink — 88% of it toward the secondary. */
-  --chat-said-earlier: color-mix(in srgb, var(--ink-chalk) 88%, var(--ink-mist));
   --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
   --chat-composer-bg: var(--surface-raised);
   --chat-composer-edge: var(--edge-glint);
@@ -2754,7 +2751,11 @@
   --agent-accent-codex: #10a37f;
   --agent-accent-zo: #8b7cf6;
   --agent-accent-antigravity: #4e8cf7;
-  --chat-chip-size: 0.92em;
+  /* An inline code chip, and the turn list's command in one (t-82195 C5):
+   * on the 16px prose it is the terminal's own 14px (`--term-font-size`) —
+   * 0.92em read 14.72px, larger than the chat panels drawn for draft C
+   * (0.85~0.9em) and than the code it quotes. */
+  --chat-chip-size: 0.875em;
   --chat-send-size: 26px;
   /* The extension's pills: 18px tall, .85em words, 8px sides, round. */
   --chat-pill-height: 18px;
@@ -3384,7 +3385,8 @@
    * variable 17.93, constant 6.11, operator 6.39, invalid 7.47. Comment is
    * again the floor and again on purpose — 4.83, which clears AA with less
    * room than the rest because a comment that competes with code is a comment
-   * drawn wrong.
+   * drawn wrong. An answer's code well (6% ink over the page) takes it to
+   * 4.1, so shell.css lifts it to `--ink-mist` there alone (t-82195 C11).
    *
    * The furniture above is mixed rather than fixed, so it follows this block
    * without being restated: the gutter inks re-mix from the light `--ink-*`.
@@ -3443,9 +3445,6 @@
   --chat-ground: var(--surface-abyss);
   --chat-bubble: var(--surface-raised);
   --chat-bubble-ink: var(--ink-chalk);
-  /* An answer before the newest one (t-81525 B3): a step back from the
-   * newest, still the reading ink — 88% of it toward the secondary. */
-  --chat-said-earlier: color-mix(in srgb, var(--ink-chalk) 88%, var(--ink-mist));
   --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 7%, transparent);
   --chat-composer-bg: var(--surface-deck);
   --chat-composer-edge: var(--edge-rule);
@@ -3455,7 +3454,10 @@
   --chat-send-ink: #faf9f5;
   --chat-send-stop-bg: var(--ink-figure);
   --chat-send-stop-ink: var(--surface-abyss);
-  --chat-link: var(--ai-accent);
+  /* On paper the accent alone read 4.22:1 on the page (t-82195 C11): a link
+   * leans 78% of the way the step's argument always did, 5.75:1, and the
+   * argument is the link's ink. */
+  --chat-link: color-mix(in srgb, var(--ai-accent) 78%, var(--ink-chalk));
   --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
   --chat-pill-hover-bg: color-mix(in srgb, var(--ink-chalk) 18%, transparent);
   --chat-meter-track: var(--edge-mark);
@@ -3468,7 +3470,7 @@
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 3%, transparent);
   --chat-code-bg: color-mix(in srgb, var(--ink-chalk) 6%, transparent);
-  --chat-arg-ink: color-mix(in srgb, var(--chat-link) 78%, var(--ink-chalk));
+  --chat-arg-ink: var(--chat-link);
   --chat-rail-tick: color-mix(in srgb, var(--ink-mist) 30%, transparent);
   --chat-accent: var(--ai-accent);
   --agent-accent-claude: #c8643a;

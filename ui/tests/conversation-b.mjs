@@ -1,5 +1,6 @@
 /* The conversation the person passed on 2026-10-29 (t-81525, draft B): the
- * answers read as bare prose in one column, the newest in the fullest ink; the
+ * answers read as bare prose in one column, every one in the full ink (draft
+ * C2 of 10-29 took back the newest-only step, t-82195); the
  * tool work between two answers is one pill; the person's words stand on the
  * right; a code block opens with its own band; the window's own note is a thin
  * line. Read off the laid-out page, on the folded page (the product's
@@ -23,16 +24,22 @@ const SHOT_WIDTHS = Object.freeze([390, 1440, 2000]);
 /* The mockup's turns with what draft B adds to them: a second answer before
  * the last (so one answer is not the newest), a fenced block named
  * `typescript` and one named nothing, a long unbroken path in a chip, and the
- * window's note to the agent. */
+ * window's note to the agent — and what draft C reads (t-82195): the answer
+ * before the last writes three levels of heading, a rule and a link, and the
+ * last one's typescript opens with a comment. */
 function draftTurns() {
   const turns = mockupTurns(Date.now() - 60_000);
   const last = turns.pop();
   const path = `/Users/dev/${"very-long-folder-name/".repeat(6)}file.ts`;
   turns.push(
-    { role: "assistant", text: `먼저 목록을 찾았습니다. 경로는 \`${path}\` 입니다.`, at_ms: last.at_ms - 900 },
+    {
+      role: "assistant",
+      text: `먼저 목록을 찾았습니다. 경로는 \`${path}\` 입니다.\n\n# 목록 화면\n\n## 폭 상수\n\n### 고칠 곳\n\n두 파일입니다.\n\n---\n\n나머지는 [문서](https://example.com/docs)에 있습니다.`,
+      at_ms: last.at_ms - 900,
+    },
     { role: "window", text: "The window restarted and cut your last turn short. Continue exactly where you left off.", at_ms: last.at_ms - 600 },
     { role: "user", text: "코드도 보여 줘.", at_ms: last.at_ms - 300 },
-    { ...last, text: `${last.text}\n\n\`\`\`typescript\nexport const width = (screen: { width: number }) => screen.width - 32;\n\`\`\`\n\n\`\`\`\nplain words in a fence with no language\n\`\`\`` },
+    { ...last, text: `${last.text}\n\n\`\`\`typescript\n// the screen less its two margins\nexport const width = (screen: { width: number }) => screen.width - 32;\n\`\`\`\n\n\`\`\`\nplain words in a fence with no language\n\`\`\`` },
   );
   return turns;
 }
@@ -51,13 +58,36 @@ function readPage() {
     const at = box(node);
     return at.left >= column.left - 1 && at.right <= column.right + 1;
   };
-  // A colour as linear-light luminance, from `rgb()` or `color(srgb …)`.
-  const channels = (value) => {
-    const srgb = /color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)/.exec(value);
-    if (srgb) return srgb.slice(1, 4).map(Number);
-    const rgb = /rgba?\(([\d.]+),? ([\d.]+),? ([\d.]+)/.exec(value);
-    return rgb ? rgb.slice(1, 4).map((one) => Number(one) / 255) : null;
+  // A colour's sRGB channels (0 to 1, as the screen clips them) and its
+  // alpha, from `rgb()`, `rgba()` or `color(srgb …)`.
+  const parsed = (value) => {
+    const srgb = /color\(srgb (-?[\d.]+) (-?[\d.]+) (-?[\d.]+)(?: \/ ([\d.]+))?/.exec(value);
+    if (srgb) {
+      return {
+        rgb: srgb.slice(1, 4).map((one) => Math.min(1, Math.max(0, Number(one)))),
+        alpha: srgb[4] === undefined ? 1 : Number(srgb[4]),
+      };
+    }
+    const rgb = /rgba?\(([\d.]+),? ([\d.]+),? ([\d.]+)(?:,? ([\d.]+))?/.exec(value);
+    return rgb ? { rgb: rgb.slice(1, 4).map((one) => Number(one) / 255), alpha: rgb[4] === undefined ? 1 : Number(rgb[4]) } : null;
   };
+  // Any other notation — the light accent is `oklch()` — the page itself
+  // turns into sRGB, through a probe that stands for one breath.
+  const paint = (value) => {
+    if (parsed(value)) return parsed(value);
+    const probe = page.appendChild(document.createElement("i"));
+    probe.style.color = `color-mix(in srgb, ${value} 100%, transparent)`;
+    const srgb = getComputedStyle(probe).color;
+    probe.remove();
+    return parsed(srgb);
+  };
+  const channels = (value) => paint(value).rgb;
+  // A see-through ground laid over the one under it, as the page paints it.
+  const over = (top, under) => {
+    const [a, b] = [paint(top), paint(under)];
+    return `color(srgb ${a.rgb.map((one, at) => one * a.alpha + b.rgb[at] * (1 - a.alpha)).join(" ")})`;
+  };
+  // A colour as linear-light luminance.
   const luminance = (value) => {
     const [r, g, b] = channels(value).map((one) => (one <= 0.04045 ? one / 12.92 : ((one + 0.055) / 1.055) ** 2.4));
     return 0.2126 * r + 0.7152 * g + 0.0722 * b;
@@ -68,6 +98,13 @@ function readPage() {
   };
   const ground = getComputedStyle(page).backgroundColor;
   const ink = (node) => (node ? contrast(getComputedStyle(node).color, ground) : null);
+  // A code comment against its block's ground (draft C11): the block's
+  // see-through well over the page.
+  const comment = (() => {
+    const span = list.querySelector(".helper-code pre > .chat-code-comment");
+    const well = span?.closest(".helper-code");
+    return span ? contrast(getComputedStyle(span).color, over(getComputedStyle(well).backgroundColor, ground)) : null;
+  })();
   const answers = [...list.querySelectorAll(":scope > .helper-turn.is-assistant")];
   const latest = answers.find((row) => row.classList.contains("is-latest"));
   const earlier = answers.find((row) => !row.classList.contains("is-latest"));
@@ -93,6 +130,8 @@ function readPage() {
     };
   })();
   const dock = page.querySelector(".chat-dock");
+  const root = getComputedStyle(document.documentElement);
+  const space = (step) => parseFloat(root.getPropertyValue(`--space-${step}`));
   return {
     pageWidth: Math.round(box(page).width),
     // The column's measure at this page's width, and the base one (t-81786 P3-16).
@@ -122,6 +161,49 @@ function readPage() {
     personRight: person ? Math.round(column.right - box(person).right) : null,
     personInside: person ? inside(person) : false,
     answerDots: answers.filter((row) => ["::before", "::after"].some((part) => getComputedStyle(row, part).content !== "none")).length,
+    // How the newest answer, the person's last words and a pill are smoothed
+    // (draft C1): the platform's way, as the terminal's are.
+    smoothing: [said, person, pills[0]?.querySelector(".helper-group-words")]
+      .map((node) => (node ? getComputedStyle(node).getPropertyValue("-webkit-font-smoothing") : null)),
+    // The headings an answer writes (draft C3), and the steps of air they
+    // should stand in: a section's above, a heading's own below.
+    heads: [...list.querySelectorAll(".helper-turn.is-assistant .helper-said .md-head")].map((head) => {
+      const style = getComputedStyle(head);
+      return {
+        level: head.localName,
+        size: parseFloat(style.fontSize),
+        weight: style.fontWeight,
+        above: parseFloat(style.marginTop),
+        below: parseFloat(style.marginBottom),
+      };
+    }),
+    headAir: { above: space(5), below: space(2) },
+    // An inline code chip's size (draft C5), beside the terminal's.
+    chip: (() => {
+      const code = list.querySelector(".helper-turn.is-assistant .helper-said :not(pre) > code");
+      return code ? parseFloat(getComputedStyle(code).fontSize) : null;
+    })(),
+    termSize: parseFloat(root.getPropertyValue("--term-font-size")),
+    // A rule an answer draws (draft C4), and the ink of the page's own
+    // divider, read off a probe that stands for one breath.
+    rule: (() => {
+      const hr = list.querySelector(".helper-turn.is-assistant .helper-said hr");
+      if (!hr) return null;
+      const style = getComputedStyle(hr);
+      const probe = page.appendChild(document.createElement("i"));
+      probe.style.color = "var(--chat-divider)";
+      const divider = getComputedStyle(probe).color;
+      probe.remove();
+      return {
+        top: [style.borderTopStyle, parseFloat(style.borderTopWidth), style.borderTopColor],
+        sides: [style.borderRightStyle, style.borderBottomStyle, style.borderLeftStyle],
+        divider,
+        width: parseFloat(root.getPropertyValue("--rule-width")),
+        above: parseFloat(style.marginTop),
+        below: parseFloat(style.marginBottom),
+        air: space(5),
+      };
+    })(),
     say,
     sayWhole: t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다"),
     sayShort: t("composer.placeholderShort", "다음 지시를 쓰세요"),
@@ -148,6 +230,8 @@ function readPage() {
       note: ink(note),
       code: ink(codes[0]?.querySelector(".helper-code-lang")),
       stack: ink(page.querySelector(".chat-stack")),
+      link: ink(list.querySelector(".helper-turn.is-assistant .helper-said .md-link")),
+      comment,
     },
   };
 }
@@ -167,6 +251,11 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
         await page.setViewportSize({ width, height: 900 });
         await page.evaluate(async () => {
           for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+          // The fences take their colours a slice at a time; a comment's is
+          // read below (draft C11).
+          const until = performance.now() + 3000;
+          const colouring = () => typeof codeColour !== "undefined" && (codeColour.queue.length > 0 || codeColour.job !== null || codeColour.asked);
+          while (colouring() && performance.now() < until) await window.__PAINTED__();
         });
         seen[`${theme}-${width}`] = await page.evaluate(readPage);
         if (shots && SHOT_WIDTHS.includes(width)) {
@@ -211,6 +300,25 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
       all.every((one) => one.sticky === 0 && one.personFlows && !["sticky", "fixed"].includes(one.personFlows.position) &&
         one.personFlows.ground === "rgba(0, 0, 0, 0)" && one.personFlows.fade === "none"),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.sticky, one.personFlows]]))));
+    ok("B: the answer, the person's words and a pill are drawn with the platform's smoothing, as the terminal is — not the chrome's thinner antialiasing (draft C1, t-82195)",
+      all.every((one) => one.smoothing.length === 3 && one.smoothing.every((value) => value === "auto")),
+      JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, one.smoothing]))));
+    ok("B: a heading in an answer stands at the prose's own size — 16 px on a 1440 px window — h1 and h2 at weight 700, h3 at 600, with a section's air above and a step under it; not the browser's 32 and 24 px (draft C3, t-82195)",
+      dark(1440).proseSize === 16 &&
+        all.every((one) => ["h1", "h2", "h3"].every((level) => one.heads.some((head) => head.level === level)) &&
+          one.heads.every((head) => head.size === one.proseSize &&
+            head.weight === (["h1", "h2"].includes(head.level) ? "700" : "600") &&
+            head.above === one.headAir.above && head.below === one.headAir.below)),
+      JSON.stringify(Object.fromEntries(["dark-390", "dark-1440", "light-2000"].map((key) => [key, [seen[key].proseSize, seen[key].heads, seen[key].headAir]]))));
+    ok("B: a rule in an answer is one solid line in the page's divider ink with a section's air above and under it — not the browser's two-tone inset box (draft C4, t-82195)",
+      all.every((one) => one.rule !== null && one.rule.top[0] === "solid" && one.rule.top[1] === one.rule.width &&
+        one.rule.top[2] === one.rule.divider && one.rule.sides.every((side) => side === "none") &&
+        one.rule.above === one.rule.air && one.rule.below === one.rule.air),
+      JSON.stringify(Object.fromEntries(["dark-1440", "light-1440"].map((key) => [key, seen[key].rule]))));
+    ok("B: an inline code chip reads at the terminal's own size — 14 px wherever the prose is 16 px, not 14.72 — and under the prose on a narrow page too (draft C5, t-82195)",
+      all.every((one) => one.chip !== null && one.chip < one.proseSize && (one.proseSize !== 16 || one.chip === one.termSize)) &&
+        dark(1440).chip === 14,
+      JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.proseSize, one.chip, one.termSize]]))));
     ok("B: an answer wears no dot and the tool work stands as pills with no step built",
       all.every((one) => one.answerDots === 0 && one.stepRows === 0),
       JSON.stringify(dark(1440)));
@@ -221,10 +329,30 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
       JSON.stringify(dark(1440).codeLanguages));
     for (const theme of ["dark", "light"]) {
       const read = seen[`${theme}-1440`].contrast;
-      ok(`B: every word reads at 4.5:1 or more in the ${theme} treatment — the newest answer, the ones before it, a pill, the window's note, a code band, the state line`,
-        Object.values(read).every((ratio) => ratio === null || ratio >= 4.5) && read.latest !== null && read.earlier !== null && read.pill !== null && read.note !== null,
+      ok(`B: every word reads at 4.5:1 or more in the ${theme} treatment — the newest answer, the ones before it, a pill, the window's note, a code band, the state line, a link and a code comment`,
+        Object.values(read).every((ratio) => ratio === null || ratio >= 4.5) && read.latest !== null && read.earlier !== null && read.pill !== null && read.note !== null &&
+          read.link !== null && read.comment !== null,
         JSON.stringify(read));
+      // t-81525 B3 stepped the answers before the newest back to 88% of the
+      // ink; the person passed draft C, which reads every answer the same
+      // (draft C2, t-82195).
+      ok(`B: an answer before the newest reads in the newest's own ink in the ${theme} treatment — no answer is dimmed (draft C2, t-82195)`,
+        B_WIDTHS.every((width) => {
+          const at = seen[`${theme}-${width}`].contrast;
+          return at.earlier !== null && at.earlier === at.latest;
+        }),
+        JSON.stringify(B_WIDTHS.map((width) => [width, seen[`${theme}-${width}`].contrast.latest, seen[`${theme}-${width}`].contrast.earlier])));
     }
+    // On paper the answer's link and a code comment stood under AA (4.22 and
+    // 4.09:1, measured for draft C); they take inks the window already has —
+    // the link the step argument's lean toward the words, the comment the
+    // secondary ink — and the dark treatment keeps its own (draft C11). The
+    // survey's 5.76 for the link was WebKit's painted pixels; Chromium's
+    // computed colour reads the same token at 5.75.
+    const light = seen["light-1440"].contrast;
+    ok("B: on paper an answer's link reads at 5.75:1 or more and a code comment at 7.27:1 or more on their grounds — both were under 4.5 (draft C11, t-82195)",
+      light.link !== null && light.link >= 5.75 && light.comment !== null && light.comment >= 7.27,
+      JSON.stringify({ light: [light.link, light.comment], dark: [seen["dark-1440"].contrast.link, seen["dark-1440"].contrast.comment] }));
     ok("B: the page raised no errors", faults.length === 0, faults.join("\n"));
     return seen;
   } finally {

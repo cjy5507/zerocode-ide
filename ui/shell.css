@@ -14617,6 +14617,12 @@ body.mod-held .term-link,
   /* The page's face is the platform's, as the panel wears VS Code's
    * (`--vscode-chat-font-family`); every rule below reads `--font-ui`. */
   --font-ui: var(--chat-font-ui);
+  /* And so is its smoothing, as the terminal's is (`.term`, t-82195 C1). The
+   * body antialiases chrome copy; a page that is nothing but words inherited
+   * it and read thinner than the terminal beside it — the stems the window
+   * measured at 0.76 coverage antialiased against 0.99 under `auto`
+   * (tools/terminal-fidelity, 2026-09-17). */
+  -webkit-font-smoothing: auto;
 }
 
 /* A conversation set aside keeps its own page standing in the leaf
@@ -15028,17 +15034,14 @@ details.worker-command {
 }
 
 /* An answer is bare prose in the reading column (t-81525 B3): no dot, no
- * rail, the row's pad above and below. The newest answer reads in the full
- * ink; the ones before it a step back (`--chat-said-earlier`), so the eye
- * lands on what was said last. */
+ * rail, the row's pad above and below. Every answer reads in the full ink —
+ * the ones before the newest are not stepped back (t-82195 C2, the person's
+ * draft C of 10-29: none of the seven chat panels read for it dims an
+ * earlier answer, and the terminal beside it is one ink). */
 .helper-turn.is-assistant {
   position: relative;
   /* The room under the words is the action row's (`.helper-actions`, C8). */
   padding: var(--chat-row-pad) 0 var(--chat-actions-h);
-}
-
-.helper-turn.is-assistant:not(.is-latest, .is-streaming) > .helper-said {
-  color: var(--chat-said-earlier);
 }
 
 /* The window's own note to the agent (t-81525 C3): a thin line across the
@@ -15108,6 +15111,29 @@ details.worker-command {
 
 .helper-turn.is-assistant .helper-said > :last-child {
   margin-bottom: 0;
+}
+
+/* A heading an answer writes steps by weight, not by size (t-82195 C3): the
+ * prose's own size — the narrow page's step with it — h1 and h2 bold, the
+ * rest semibold. With no rule of its own the conversation drew the browser's
+ * 2 and 1.5 times, the largest of the chat panels read for draft C. Its air
+ * is `.md-head`'s: a section above, a step under. */
+.is-chat-page .helper-said .md-head {
+  font-size: var(--chat-prose-size);
+  font-weight: 600;
+}
+
+.is-chat-page .helper-said :is(h1, h2).md-head {
+  font-weight: 700;
+}
+
+/* A rule an answer draws (t-82195 C4): one line in the page's divider ink
+ * with a section's air on each side, where the browser drew a two-tone inset
+ * box in a grey of its own. */
+.is-chat-page .helper-said hr {
+  margin: var(--space-5) 0;
+  border: 0;
+  border-top: var(--rule-width) solid var(--chat-divider);
 }
 
 /* A code block in an answer: the extension's well (`codeBlockWrapper pre`)
@@ -15197,6 +15223,14 @@ pre.md-block > .chat-code-attribute { color: var(--syntax-attribute); }
 pre.md-block > .chat-code-meta { color: var(--syntax-meta); }
 pre.md-block > .chat-code-link { color: var(--syntax-link); }
 pre.md-block > .chat-code-invalid { color: var(--syntax-invalid); }
+
+/* On paper the editor's comment, the ramp's floor at 4.83:1 on its white
+ * plane, reads 4.1:1 on an answer's well, under AA; no grey clears 4.5 there
+ * and stays under the other roles in the editor, so the well alone lifts it
+ * to the secondary ink, 7.29:1 (t-82195 C11). The editor keeps its floor. */
+:root[data-theme="light"] .is-chat-page .helper-said pre.md-block {
+  --syntax-comment: var(--ink-mist);
+}
 pre.md-block > .chat-code-inserted { color: var(--syntax-inserted); }
 pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 

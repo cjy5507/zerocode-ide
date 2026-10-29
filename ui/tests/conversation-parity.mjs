@@ -4636,19 +4636,64 @@ export async function testConversationCodeColours(browser, origin, ok) {
           }
           return null;
         };
+        // A colour's channels (0 to 255) and alpha, from `rgb()`, `rgba()` or
+        // `color(srgb …)` — a see-through well computes to the last.
+        const channels = (value) => {
+          const srgb = /color\(srgb (-?[\d.]+) (-?[\d.]+) (-?[\d.]+)(?: \/ ([\d.]+))?/.exec(value);
+          if (srgb) return [...srgb.slice(1, 4).map((one) => Math.min(1, Math.max(0, Number(one))) * 255), srgb[4] === undefined ? 1 : Number(srgb[4])];
+          const rgb = /rgba?\(([\d.]+),? ([\d.]+),? ([\d.]+)(?:,? ([\d.]+))?/.exec(value);
+          return [...rgb.slice(1, 4).map(Number), rgb[4] === undefined ? 1 : Number(rgb[4])];
+        };
+        // The ground under a node: its see-through layers laid down to the
+        // first solid one.
+        const ground = (node) => {
+          const layers = [];
+          for (let at = node; at; at = at.parentElement) {
+            const layer = channels(getComputedStyle(at).backgroundColor);
+            if (layer[3] > 0) layers.push(layer);
+            if (layer[3] === 1) break;
+          }
+          return layers.reduceRight((under, top) => [0, 1, 2].map((at) => top[at] * top[3] + under[at] * (1 - top[3])), [255, 255, 255]);
+        };
+        // A token as the page resolves it outside any answer.
+        const token = (name) => {
+          const probe = document.body.appendChild(document.createElement("i"));
+          probe.style.color = `var(${name})`;
+          const value = getComputedStyle(probe).color;
+          probe.remove();
+          return channels(value);
+        };
+        const luminance = (colour) => colour.slice(0, 3).map((value) => {
+          const unit = value / 255;
+          return unit <= 0.04045 ? unit / 12.92 : ((unit + 0.055) / 1.055) ** 2.4;
+        }).reduce((sum, unit, at) => sum + unit * [0.2126, 0.7152, 0.0722][at], 0);
+        const ratio = (ink, under) => {
+          const [high, low] = [luminance(ink), luminance(under)].sort((one, other) => other - one);
+          return Math.round(((high + 0.05) / (low + 0.05)) * 100) / 100;
+        };
         const root = getComputedStyle(document.documentElement);
+        // A comment reads its span's own ink: on paper an answer's well lifts
+        // the comment token (t-82195 C11), so the root's value is not the one
+        // drawn there.
+        const commentSpan = [...pre.querySelectorAll(".chat-code-comment")].find((span) => span.textContent.includes(comment));
+        const commentInk = getComputedStyle(commentSpan).color;
+        const roles = ["keyword", "string", "number", "comment", "function", "type", "variable", "constant", "operator", "invalid"];
         return {
           string: rect(string),
           comment: rect(comment),
           stringInk: root.getPropertyValue("--syntax-string").trim(),
-          commentInk: root.getPropertyValue("--syntax-comment").trim(),
+          commentInk,
           plainInk: getComputedStyle(pre).color,
+          well: ratio(channels(commentInk), ground(commentSpan)),
+          plane: Object.fromEntries(roles.map((role) => [role, ratio(token(`--syntax-${role}`), token("--editor-surface"))])),
         };
       }, { theme, string: PAINTED_STRING, comment: PAINTED_COMMENT });
       painted[theme] = {
         string: await inkShare(page, await page.screenshot({ clip: spot.string }), spot.stringInk, spot.plainInk),
         comment: await inkShare(page, await page.screenshot({ clip: spot.comment }), spot.commentInk, spot.plainInk),
         inks: [spot.stringInk, spot.commentInk, spot.plainInk],
+        well: spot.well,
+        plane: spot.plane,
       };
     }
     await page.evaluate(() => document.documentElement.removeAttribute("data-theme"));
@@ -4656,6 +4701,16 @@ export async function testConversationCodeColours(browser, origin, ok) {
       "P1: the engine paints them — a string's and a comment's pixels wear their role's token, in the dark theme and in the light one",
       ["dark", "light"].every((theme) => ["string", "comment"].every((role) => painted[theme][role].near >= 6 && painted[theme][role].near > painted[theme][role].plain)),
       JSON.stringify(painted),
+    );
+    // On paper the comment is lifted to the secondary ink in an answer's well
+    // and only there: the editor's own comment stays the ramp's floor, under
+    // every role it sits beside (t-82195 C11, review r1 P2-1).
+    const { well, plane } = painted.light;
+    const besides = Object.entries(plane).filter(([role]) => role !== "comment").map(([, at]) => at);
+    ok(
+      "P1: on paper an answer's code comment reads at 7.27:1 or more on its well, while the editor's comment stays the ramp's floor — 4.83:1 on its plane, under every other role (t-82195 C11)",
+      well >= 7.27 && plane.comment >= 4.83 && plane.comment < Math.min(...besides),
+      JSON.stringify({ well, plane }),
     );
 
     // While it streams: the fence being written stands plain; closed and
@@ -5024,8 +5079,9 @@ function streamingAnswerText() {
   return streamingAnswer({ fences: MIXED_STREAM_FENCES });
 }
 
-/* What share of a screenshot's pixels wear `ink` (a `#rrggbb` token) and how
- * many the plain ink (an `rgb()` computed colour) instead: each pixel is read
+/* What share of a screenshot's pixels wear `ink` (a `#rrggbb` token or an
+ * `rgb()` computed colour) and how many the plain ink (an `rgb()` computed
+ * colour) instead: each pixel is read
  * through a canvas on the page that took it, so both engines decode the same
  * way. Antialiased letters mix their ink with the ground, so a pixel counts
  * when it is within `INK_NEAR` of one of the two. */
@@ -5044,7 +5100,7 @@ async function inkShare(page, png, ink, plain) {
     const pixels = context.getImageData(0, 0, image.width, image.height).data;
     const hex = (value) => [1, 3, 5].map((at) => parseInt(value.slice(at, at + 2), 16));
     const rgb = (value) => (value.match(/\d+(\.\d+)?/g) ?? []).slice(0, 3).map(Number);
-    const want = hex(ink);
+    const want = ink.startsWith("#") ? hex(ink) : rgb(ink);
     const base = rgb(plain);
     const apart = (at, colour) => Math.hypot(pixels[at] - colour[0], pixels[at + 1] - colour[1], pixels[at + 2] - colour[2]);
     let inked = 0;
