@@ -1347,6 +1347,10 @@ export async function testJevDashboard(browser, origin, ok) {
     const drawer = await page.evaluate(async () => {
       const view = document.querySelector("#jev-view");
       const before = window.__COUNTS__.jev_summary;
+      // Which edge the toast layer stands on: a drawer docks its buttons at
+      // the bottom-right, and the layer steps aside while one stands (t-68117).
+      const toastSide = () => (document.querySelector(".toasts").getBoundingClientRect().left < innerWidth / 2 ? "left" : "right");
+      const closedSide = toastSide();
       const read = () => {
         const drawer = view.querySelector(".jev-drawer");
         const part = (name) => drawer.querySelector(`[data-jev-drawer-part="${name}"]`);
@@ -1371,6 +1375,7 @@ export async function testJevDashboard(browser, origin, ok) {
           expanded: view.querySelector(`[data-jev-dash-row="${drawer.querySelector(".jev-drawer-id").textContent}"] .jev-row-open`)
             ?.getAttribute("aria-expanded") ?? null,
           focus: document.activeElement?.className ?? "",
+          toasts: toastSide(),
         };
       };
       view.querySelector('[data-jev-dash-row="routing"] [data-jev-cell="latency"]').click();
@@ -1394,15 +1399,23 @@ export async function testJevDashboard(browser, origin, ok) {
       // the open row's own press closes it too.
       view.querySelector(".jev-drawer-close").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       await window.__PAINTED__();
-      const escaped = { hidden: view.querySelector(".jev-drawer").hidden, focus: document.activeElement?.closest("[data-jev-dash-row]")?.dataset.jevDashRow ?? null };
+      const escaped = { hidden: view.querySelector(".jev-drawer").hidden, focus: document.activeElement?.closest("[data-jev-dash-row]")?.dataset.jevDashRow ?? null,
+        toasts: toastSide() };
       view.querySelector('[data-jev-dash-row="summon"] .jev-row-open').click();
       await window.__PAINTED__();
       view.querySelector('[data-jev-dash-row="summon"] .jev-row-open').click();
       await window.__PAINTED__();
       const toggled = view.querySelector(".jev-drawer").hidden;
-      return { routing, summon, browser, pinned, escaped, toggled, asks: window.__COUNTS__.jev_summary - before };
+      return { routing, summon, browser, pinned, escaped, toggled, closedSide, toggledSide: toastSide(), asks: window.__COUNTS__.jev_summary - before };
     });
     const dr = drawer;
+    // The drawer stands deep in its tab, beside the conversations, where a
+    // `:has()` would be matched again over the whole window at every `hidden`
+    // that changed (t-84136): its own paint tells the layer.
+    ok("a feature's drawer steps the toasts to the left edge while it stands, and they come back as it closes",
+      dr.closedSide === "right" && dr.routing.toasts === "left" && dr.summon.toasts === "left" && dr.escaped.toasts === "right" &&
+        dr.toggledSide === "right",
+      JSON.stringify({ closed: dr.closedSide, routing: dr.routing.toasts, summon: dr.summon.toasts, escaped: dr.escaped.toasts, toggled: dr.toggledSide }));
     ok("a row opens its drawer on the feature's last judgments, and opening asks zo nothing",
       !dr.routing.hidden && dr.routing.id === "routing" && dr.routing.title === opened.cardNames[opened.cardSeats.indexOf("routing")]
         && dr.routing.decisions === 1 && dr.routing.first.includes("task: 68212a1194a4e327")

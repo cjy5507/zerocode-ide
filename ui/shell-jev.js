@@ -2480,7 +2480,10 @@ function paintJevWhy(part, held) {
  * counted) and the markup's words. */
 function paintJevDrawer(view, id, held) {
   const drawer = view.querySelector(".jev-drawer");
-  if (drawer.hidden !== (id === null)) drawer.hidden = id === null;
+  if (drawer.hidden !== (id === null)) {
+    drawer.hidden = id === null;
+    sayDrawersDocked();
+  }
   // Only the rows whose press opens or closes it change (t-9633 §3).
   for (const row of view.querySelectorAll("[data-jev-dash-row]")) {
     const open = row.dataset.jevDashRow === id;

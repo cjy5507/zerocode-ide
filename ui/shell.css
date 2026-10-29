@@ -375,8 +375,12 @@ kbd {
 
 /* The band tracks the column. Folding the sidebar takes the plane with it —
  * read across the shell with `:has`, because the fold state lives on the
- * workbench and the bar is its previous sibling. */
-body:has(#workbench.is-sidebar-folded) .titlebar {
+ * workbench and the bar is a sibling before it. The bar asks its siblings,
+ * not the body its descendants: a `:has()` that reaches into the whole
+ * document is matched again over every element whenever a `hidden` changes
+ * anywhere, and a long conversation's rows made a press back to it a frame
+ * longer per row (t-84136). */
+.titlebar:has(~ #workbench.is-sidebar-folded) {
   --titlebar-left-width: 0px;
 }
 
@@ -23291,15 +23295,19 @@ progress:indeterminate::-webkit-progress-bar {
     display: none;
   }
 
+  /* The words by a class, not by `span`: what a `:has()` rule styles joins
+   * one set the engine walks for every `:has()` that may have changed, and a
+   * tag name there restyled every span in the window — a long conversation's
+   * hundreds — at each `hidden` that changed (t-84136). */
   .statusbar:has(> .sb-usage-roster > .sb-claude:not([hidden]) ~ .sb-claude:not([hidden]))
-    :is(.sb-codex-route, .sb-scm-notices) > span {
+    :is(.sb-codex-route, .sb-scm-notices) > .sb-mark-words {
     display: none;
   }
 }
 
 @container statusbar (max-width: 900px) {
-  .sb-codex-route > span,
-  .sb-scm-notices > span {
+  .sb-codex-route > .sb-mark-words,
+  .sb-scm-notices > .sb-mark-words {
     display: none;
   }
 }
@@ -28237,15 +28245,17 @@ select {
 /* A surface that docks its button row at the bottom-right — an open drawer or
  * a dialog — keeps that corner: the layer steps to the opposite edge while any
  * of them stands (t-68117), so a save notice never covers Save/Close. The
- * layer follows the DOM, so a drawer opened or closed under a standing toast
- * moves it with no script. */
+ * dialogs are the body's own children, and the layer follows them with no
+ * script. The drawers stand deep in a leaf, beside the conversations: a
+ * `:has()` reaching them is matched again over the whole document whenever a
+ * `hidden` changes anywhere (t-84136), so the paints that open and close
+ * them say it to the layer (`sayDrawersDocked`, shell-status.js). */
 body:has(
-  .jev-drawer:not([hidden]),
-  .artifacts-drawer .artifacts-detail:not([hidden]),
-  .scrim:not([hidden]),
-  .jev-custom-scrim:not([hidden]),
-  .sftp-dialog-scrim:not([hidden])
-) .toasts {
+  > .scrim:not([hidden]),
+  > .jev-custom-scrim:not([hidden]),
+  > .sftp-dialog-scrim:not([hidden])
+) > .toasts,
+.toasts.is-beside-drawer {
   right: auto;
   left: var(--space-4);
   align-items: flex-start;

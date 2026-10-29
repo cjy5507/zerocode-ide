@@ -431,6 +431,72 @@ export async function measureLongPaneOpen(page, { tail = "chunk", readMs = {} } 
   }, OPEN);
 }
 
+/* What a press back to a long pane's conversation restyles (t-84136): the
+ * elements Chromium recalculated a style for between the press on 대화 and the
+ * frame that draws it, by the ids its trace names them by — and of those, the
+ * ones standing in the conversation's rows that are not among the parts a page
+ * behind the front holds still. Those the stylesheet names (`.is-behind` …
+ * `animation-play-state: paused`, shell.css), read from it here, start again;
+ * nothing else in a row has a reason to. The press back
+ * that cost a long pane 46 ms at a 4x CPU restyled every span in the window
+ * and matched the whole document again, for `hidden`s that changed elsewhere.
+ * Chromium only: the trace is its own. */
+export async function restyledOnReturn(browser, page) {
+  await measureLongPaneOpen(page);
+  await page.evaluate(async (awayMs) => {
+    el("view-toggle-term").click();
+    await window.__PAINTED__();
+    await new Promise((done) => setTimeout(done, awayMs));
+  }, OPEN.awayMs);
+  await browser.startTracing(page, { categories: ["blink.user_timing", "devtools.timeline", "disabled-by-default-devtools.timeline.invalidationTracking"] });
+  const rows = await page.evaluate(async () => {
+    performance.mark("restyle-press");
+    el("view-toggle-chat").click();
+    await new Promise((done) => requestAnimationFrame(() => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = done;
+      channel.port2.postMessage(null);
+    }));
+    performance.mark("restyle-drawn");
+    const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility());
+    return list?.querySelectorAll(":scope > [data-turn]").length ?? 0;
+  });
+  const trace = JSON.parse((await browser.stopTracing()).toString());
+  const events = trace.traceEvents ?? trace;
+  const at = (name) => events.find((one) => one.name === name && String(one.cat).includes("user_timing"))?.ts ?? null;
+  const [from, to] = [at("restyle-press"), at("restyle-drawn")];
+  const restyled = new Set(events
+    .filter((one) => one.name === "StyleRecalcInvalidationTracking" && from !== null && to !== null && one.ts >= from && one.ts <= to)
+    .map((one) => one.args?.data?.nodeId)
+    .filter(Number.isFinite));
+  // The parts a page behind the front holds still, as the stylesheet names
+  // them: what each paused rule styles under `.is-behind`.
+  const held = await page.evaluate(() => [...document.styleSheets].flatMap((sheet) => [...sheet.cssRules])
+    .filter((rule) => rule.style?.animationPlayState === "paused" && rule.selectorText.includes(".is-behind "))
+    .flatMap((rule) => rule.selectorText.split(/,(?![^(]*\))/).map((one) => one.split(".is-behind ").at(-1).replace(/::(before|after)$/, "").trim()))
+    .join(", "));
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("DOM.enable");
+  const inRows = [];
+  for (const backendNodeId of restyled) {
+    const node = await cdp.send("DOM.resolveNode", { backendNodeId }).catch(() => null);
+    if (!node?.object?.objectId) continue;
+    const { result } = await cdp.send("Runtime.callFunctionOn", {
+      objectId: node.object.objectId,
+      returnByValue: true,
+      arguments: [{ value: held }],
+      functionDeclaration: `function (held) {
+        if (!(this instanceof Element) || !this.closest(".pane-chat .helper-turns > [data-turn]")) return null;
+        return { name: this.tagName.toLowerCase() + (this.className ? "." + String(this.className).split(" ").join(".") : ""), held: held !== "" && this.matches(held) };
+      }`,
+    });
+    if (result.value) inRows.push(result.value);
+  }
+  await cdp.detach();
+  const still = inRows.filter((one) => !one.held);
+  return { rows, held, restyled: restyled.size, inRows: inRows.length, still: still.length, names: [...new Set(still.map((one) => one.name))].slice(0, 6) };
+}
+
 /* Rounds of the open, each on a fresh page; medians. */
 export async function measureLongPaneOpenRounds({ engine = "chromium", rounds = 5, tail = "chunk", readMs = {} } = {}) {
   const { webkitType } = await import("./conversation-perf.mjs");
@@ -716,6 +782,21 @@ export async function testConversationEarlier(browser, origin, ok) {
           block(pressed.first) < block(opened.first) && pressed.held <= cap && pressed.cut && pressed.twice === 0 && pressed.ordered,
         JSON.stringify({ from: opened.from, door: opened.door, asks, first: [opened.first, pressed.first], held: [opened.held, pressed.held] }));
       ok("the helper's page raised no errors", faults.length === 0, faults.join("\n"));
+    } finally {
+      await page.close();
+    }
+  }
+
+  // ---- a press back to a long pane's conversation restyles none of its rows (t-84136)
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      const seen = await restyledOnReturn(browser, page);
+      ok(`turned back to from its terminal, a long pane's conversation of ${seen.rows} rows is drawn restyling none of them — only the parts held still behind it start again`,
+        seen.rows > BACK.said && seen.held !== "" && seen.still === 0,
+        JSON.stringify(seen));
+      ok("the press back raised no errors", faults.length === 0, faults.join("\n"));
     } finally {
       await page.close();
     }

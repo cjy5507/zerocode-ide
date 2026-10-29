@@ -9049,7 +9049,10 @@ function paintArtifactDrawer(view) {
   const detail = drawer.querySelector(".artifacts-detail");
   const row = artifactSelectedId ? artifactRows.get(artifactSelectedId) : null;
   empty.hidden = Boolean(row);
-  detail.hidden = !row;
+  if (detail.hidden !== !row) {
+    detail.hidden = !row;
+    sayDrawersDocked();
+  }
   if (!row) {
     detail.dataset.artifactId = "";
     paintArtifactBundle(view);
