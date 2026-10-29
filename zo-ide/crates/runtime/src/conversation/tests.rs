@@ -17592,21 +17592,22 @@ fn context_breakdown_report_names_a_compaction_window_over_the_models() {
 /// A compaction window under the fallback window keeps Warn under Auto compact
 /// (t-82752 P3-2). The fallback stands in for a session with no window of its
 /// own; as a floor under every window it put the GPT ladder's Warn on a 50k
-/// compaction window at 74k, 148% of it and over its 42.5k Auto compact.
+/// compaction window at 74k, 148% of it and over its 42.5k Auto compact. It
+/// runs on half the fallback and on a local model's 32k window.
 #[test]
 fn a_compaction_window_under_the_fallback_keeps_warn_under_auto_compact() {
     use super::compaction::ContextPolicy;
     let _env = crate::test_env_lock();
     let _cleared = compaction_env_cleared();
-    let small = u64::from(FALLBACK_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD) / 2;
     let check = |runtime: &ConversationRuntime<NoopApiClient, StaticToolExecutor>,
                  model: Option<&str>,
+                 small: u64,
                  case: &str| {
         let warn = runtime.precompaction_input_tokens_threshold();
         let auto = u64::from(runtime.auto_compaction_input_tokens_threshold());
         assert!(
             warn < auto,
-            "{model:?}, {case}: Warn {warn} must sit under Auto compact {auto}"
+            "{model:?}, {case} of {small}: Warn {warn} must sit under Auto compact {auto}"
         );
         assert_eq!(
             warn,
@@ -17614,21 +17615,55 @@ fn a_compaction_window_under_the_fallback_keeps_warn_under_auto_compact() {
             "{model:?}, {case}: Warn must be the policy's share of the {small}-token window"
         );
     };
-    for model in [Some("claude-opus-4-1"), Some("gpt-5.5"), Some("gemini-2.5-pro"), None] {
-        {
-            let _window =
-                EnvVarGuard::set("CLAUDE_CODE_AUTO_COMPACT_WINDOW", small.to_string());
-            check(
-                &runtime_for_context_policy(model, 1_000_000),
-                model,
-                "operator's compaction window",
+    for small in [u64::from(FALLBACK_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD) / 2, 32_768] {
+        for model in [Some("claude-opus-4-1"), Some("gpt-5.5"), Some("gemini-2.5-pro"), None] {
+            {
+                let _window =
+                    EnvVarGuard::set("CLAUDE_CODE_AUTO_COMPACT_WINDOW", small.to_string());
+                check(
+                    &runtime_for_context_policy(model, 1_000_000),
+                    model,
+                    small,
+                    "operator's compaction window",
+                );
+            }
+            check(&runtime_for_context_policy(model, small), model, small, "declared window");
+            // A provider-stated ceiling or a `/model` switch lands on it later.
+            let mut runtime = runtime_for_context_policy(model, 1_000_000);
+            runtime.set_context_window(small);
+            check(&runtime, model, small, "switched window");
+        }
+    }
+}
+
+/// From the fallback window up, and for a session with no window, every tier
+/// keeps the value it had before t-82855: only a compaction window under the
+/// fallback moved. Built on the window, and switched onto it.
+#[test]
+fn the_ladder_keeps_its_values_from_the_fallback_window_up() {
+    let _env = crate::test_env_lock();
+    let _cleared = compaction_env_cleared();
+    for (model, window, [microcompact, state_distill, warn, auto]) in [
+        (None, 0, [0, 0, 77_000, 100_000]),
+        (None, 100_000, [68_000, 75_000, 77_000, 85_000]),
+        (Some("claude-sonnet-4-5"), 200_000, [128_000, 140_000, 150_000, 160_000]),
+        (Some("gpt-5.5"), 200_000, [136_000, 140_000, 148_000, 170_000]),
+        (Some("claude-opus-4-1[1m]"), 1_000_000, [416_000, 455_000, 487_500, 520_000]),
+    ] {
+        let mut switched = runtime_for_context_policy(model, 258_000);
+        switched.set_context_window(window);
+        for (runtime, case) in [(runtime_for_context_policy(model, window), "built"), (switched, "switched")] {
+            assert_eq!(
+                [
+                    runtime.microcompact_input_tokens_threshold(),
+                    runtime.state_distill_input_tokens_threshold(),
+                    runtime.precompaction_input_tokens_threshold(),
+                    u64::from(runtime.auto_compaction_input_tokens_threshold()),
+                ],
+                [microcompact, state_distill, warn, auto],
+                "{model:?} {case} on a {window}-token window"
             );
         }
-        check(&runtime_for_context_policy(model, small), model, "declared window");
-        // A provider-stated ceiling or a `/model` switch lands on it later.
-        let mut runtime = runtime_for_context_policy(model, 1_000_000);
-        runtime.set_context_window(small);
-        check(&runtime, model, "switched window");
     }
 }
 
