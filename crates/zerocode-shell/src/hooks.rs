@@ -3362,6 +3362,23 @@ mod tests {
         }
     }
 
+    /// The mark the kill guard tells for a pane is the one the pane's
+    /// environment carries (t-81714): a job the pane sets loose is matched
+    /// against the window's word for the pane, not the pane's own process's.
+    #[test]
+    fn a_panes_environment_names_the_mark_the_kill_witness_tells_for_it() {
+        bridge_for_tests();
+        for launch in [None, Some("launch-nonce")] {
+            let env = pty_env(&pane_key_of(7), launch, Path::new("/workspace"), None);
+            let named = zerocode_core::shell_rule::kill::PaneMark::from_env(|name| {
+                env.iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.clone())
+            });
+            assert_eq!(named, Some(crate::kill_witness::pane_mark(7)), "{launch:?}");
+        }
+    }
+
     #[test]
     fn a_plain_shell_clears_the_inherited_hook_secret_when_endpoint_exists() {
         bridge_for_tests();

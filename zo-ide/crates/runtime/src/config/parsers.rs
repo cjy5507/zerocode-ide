@@ -374,13 +374,14 @@ pub(super) fn parse_optional_permission_rules(
         return Ok(RuntimePermissionRuleConfig::default());
     };
 
-    let allow = optional_string_array(permissions, "allow", "merged settings.permissions")?
+    let [allow_key, deny_key, ask_key, rules_key] = RuntimePermissionRuleConfig::LISTS;
+    let allow = optional_string_array(permissions, allow_key, "merged settings.permissions")?
         .unwrap_or_default();
-    let deny = optional_string_array(permissions, "deny", "merged settings.permissions")?
+    let deny = optional_string_array(permissions, deny_key, "merged settings.permissions")?
         .unwrap_or_default();
-    let ask = optional_string_array(permissions, "ask", "merged settings.permissions")?
+    let ask = optional_string_array(permissions, ask_key, "merged settings.permissions")?
         .unwrap_or_default();
-    let rules = optional_string_array(permissions, "rules", "merged settings.permissions")?
+    let rules = optional_string_array(permissions, rules_key, "merged settings.permissions")?
         .unwrap_or_default();
 
     // The ordered `rules` form supersedes the category vectors entirely (last

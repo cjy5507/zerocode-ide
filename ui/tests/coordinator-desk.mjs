@@ -507,7 +507,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       letter("m-901").delivery === "배달 전" && letter("m-901").deliveryTip === "배달 전 · 코디네이터가 아직 안 읽음" &&
       letter("m-902")?.kind === "조용해짐" && letter("m-902").body === "판이 보이지 않음 · 알림 3통" &&
       letter("m-905")?.kind === "조용해짐" && letter("m-905").body === "한도가 풀린 뒤에도 멈춰 있음 · 알림 2통" &&
-      letter("m-903")?.kind === "한도 벽" && letter("m-903").body.startsWith("재설정까지") &&
+      letter("m-903")?.kind === "한도 도달" && letter("m-903").body.startsWith("재설정까지") &&
       letter("m-903").delivery === "받음 d-990" && letter("m-903").deliveryTip === "받음 · 묶음 d-990" &&
       letter("m-904")?.kind === "워커 끝남" && letter("m-904").body === "보고 전에 판이 끝났어요",
       JSON.stringify(mail.letters));
@@ -767,7 +767,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     await settleMail();
     const rosterOpen = await readWorkers();
     ok("each worker's health is one word from the ledger's facts, the wall with its reset",
-      /^한도 벽 · 재설정까지 4\d분$/.test(rosterOpen.rows["w-4"].health) && rosterOpen.rows["w-4"].cls === "is-walled" &&
+      /^한도 도달 · 재설정까지 4\d분$/.test(rosterOpen.rows["w-4"].health) && rosterOpen.rows["w-4"].cls === "is-walled" &&
       rosterOpen.rows["w-3"].health === "답 기다림" && rosterOpen.rows["w-5"].health === "잠듦" &&
       rosterOpen.rows["w-1"].health === "턴 중" && rosterOpen.rows["w-2"].health === "유휴" &&
       /^\d+분 전$/.test(rosterOpen.rows["w-1"].age ?? ""), JSON.stringify(rosterOpen.rows));
@@ -1183,7 +1183,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       row(unknownRows, "t-964").work === "" && row(unknownRows, "t-964").next === "" && row(unknownRows, "t-964").copy === "",
       JSON.stringify({ staleRows, unknownRows }));
     ok("a carried task names who carries it and the cause the ledger witnessed — a quota wall, a pane proven gone; one whose worker asks points at the mail to answer instead of a command; a failed one with no witness says its cause needs checking",
-      row(carriedRows, "t-4").owner.startsWith("담당 w-4 · ") && row(carriedRows, "t-4").owner.endsWith("막힘: 한도 벽") &&
+      row(carriedRows, "t-4").owner.startsWith("담당 w-4 · ") && row(carriedRows, "t-4").owner.endsWith("막힘: 한도 도달") &&
       row(carriedRows, "t-3").label === "「지금」의 당신 차례에서 질문에 답하세요" && row(carriedRows, "t-3").next === "" &&
       row(carriedRows, "t-3").copy === "" &&
       row(failedRows, "t-2").owner.startsWith("담당 w-2 · ") && row(failedRows, "t-2").owner.endsWith("막힘: 판 없음") &&
@@ -1396,7 +1396,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       costs.every((row) => row.tip.includes("시도별 기록된 세션의 합") && row.tip.includes("API 환산가(구독 사용자는 청구액 아님)") &&
         row.tip.includes("스탬프 좌석 4개") && row.tip.includes("토큰 미기록")), JSON.stringify(costs));
     ok("what is not known is said as — with its reason, never as a guess",
-      costs.some((row) => row.cost.includes("$— 사용량 원장 없는 에이전트")) && costs.some((row) => row.cost.includes("벽시계 —")) &&
+      costs.some((row) => row.cost.includes("$— 사용량 원장 없는 에이전트")) && costs.some((row) => row.cost.includes("걸린 시간 —")) &&
       !costs.some((row) => row.cost.includes("NaN") || row.cost.includes("undefined")), JSON.stringify(costs));
     /* ---- 글 점검 (t-32786): 끝난 행마다, 일꾼이 쓴 요약을 센 수 한 줄 — 거절 없이 ---- */
     const readWriting = () => page.evaluate(() =>

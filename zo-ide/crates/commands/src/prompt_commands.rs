@@ -1036,6 +1036,42 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// A `!` line answers to the person's deny rule as the model's bash
+    /// does, however the rule spells the tool: Claude Code's `Bash(rm:*)`
+    /// and a shouted `BASH(rm:*)` both keep `rm` from running (t-81312).
+    #[test]
+    fn a_deny_rule_naming_bash_in_any_case_stops_a_bang_line() {
+        let root = temp_dir("bang-rule-case");
+        fs::create_dir_all(&root).expect("base dir");
+        let victim = root.join("victim");
+        let line = format!("rm {}", victim.display());
+        let command = parse_prompt_command_file(
+            "remove".to_string(),
+            PathBuf::from("remove.md"),
+            &format!("---\nallowed-tools: Bash\n---\n!{line}\n"),
+        )
+        .expect("command parsed");
+
+        for deny in ["Bash(rm:*)", "BASH(rm:*)"] {
+            fs::write(&victim, "keep").expect("victim file");
+            let rules =
+                runtime::RuntimePermissionRuleConfig::new(Vec::new(), vec![deny.to_string()], Vec::new());
+            let gate = InlineShellGate {
+                read_only: false,
+                workspace: WorkspaceTrust::Trusted,
+                rules: Ok(&rules),
+            };
+            let rendered = command.render_prompt_as("", &root, gate);
+            assert!(victim.exists(), "deny {deny} let the `!` line remove the file");
+            assert_eq!(
+                rendered,
+                format!("[!{line}: not run — a deny rule in your permission settings forbids it]\n"),
+                "deny {deny}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// A repository's command file reads `@path` only inside the working
     /// folder: an absolute path, a `..` that climbs out, and a link inside
     /// that points out each leave one notice line. The same file in zo's

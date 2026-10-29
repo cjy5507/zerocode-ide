@@ -1126,11 +1126,10 @@ const ACTIONS = [
     // Orca's own binding for this, and the reason it is not ⌘⇧P: there is no
     // general command palette to compete with (measured, 1-d).
     chord: "mod+j",
-    // The same refusal `nav-tasks` draws, so the chord cannot reach a finder
-    // the row beside it says is closed. `el(...).disabled` is the one place
-    // that fact already lives — asked here rather than duplicated.
+    // The same refusal the sidebar's search asks, so the chord and the
+    // button open the finder in the same places.
     run: () => {
-      if (!el("nav-tasks").disabled) togglePalette("worktree");
+      if (!worktreeFinderShut()) togglePalette("worktree");
     },
   },
   {
@@ -3440,6 +3439,32 @@ const GO_PLACES = Object.freeze([
   { id: "settings", icon: "#i-gear", label: () => t("app.settings", "설정"), open: () => setSettingsOpen(true) },
 ]);
 
+/* Whether ⌘J and the sidebar's search have nowhere to go: the catalog was read
+ * and holds no project at all.
+ *
+ * Both used to ask the 작업 row's git-only refusal (`nav-tasks`), from when a
+ * folder project's finder had nothing in it. It has its folder, the recent
+ * places and the doors now, so a folder project opens it like any other
+ * (t-82495). What is left is the landing screen: the folder the backend stands
+ * in there is no project, and a row for it would be refused on the click. The
+ * same reading `paintStagePlaceholder` draws the landing by, so a window still
+ * reading its catalog, or one whose read failed, keeps the finder. */
+function worktreeFinderShut() {
+  return projectsRead && projects.length === 0;
+}
+
+/* What a finder says when its question failed: a sentence of the person's,
+ * with what the backend or the page said kept on the toast's hover. A git
+ * command's exit status, an exception's name or 「[object Object]」 was the
+ * whole toast, and none of them is a sentence anybody can act on (t-82495).
+ * One stands at a time: the finder asks again on every word typed, and a list
+ * that will not read would otherwise pile a toast per key. */
+let paletteFailureNote = null;
+function sayPaletteFailure(words, error) {
+  if (paletteFailureNote?.isConnected) return;
+  paletteFailureNote = toast(words, "halt", { tip: String(error?.message ?? error) });
+}
+
 const FINDERS = {
   file: {
     title: () => t("file.goto", "파일로 이동"),
@@ -3465,7 +3490,12 @@ const FINDERS = {
       tree: () => t("palette.groupTrees", "워크트리"),
     },
     find: async (query) => {
-      const worktrees = await invoke("list_worktrees");
+      // A list that will not read takes only its own group: the recent places
+      // and the doors are this window's, and answer without the backend.
+      const worktrees = await invoke("list_worktrees").catch((error) => {
+        sayPaletteFailure(t("palette.treesUnread", "워크스페이스 목록을 읽지 못해 최근과 이동만 보여 줍니다."), error);
+        return [];
+      });
       const needle = query.toLowerCase();
       const named = (text) => text.toLowerCase().includes(needle);
       // The agents nested inside each workspace stay searchable — the tree
@@ -3514,10 +3544,11 @@ const FINDERS = {
       return {
         group: "tree",
         label: worktree.branch ?? basename(worktree.path),
+        // A folder has no branch, so its label is already the folder's name.
         hint: worktree.is_main && !worktree.is_folder
           ? t("worktree.main", "기본")
-          : basename(worktree.path),
-        icon: "#i-branch",
+          : worktree.is_folder ? "" : basename(worktree.path),
+        icon: worktree.is_folder ? "#i-folder" : "#i-branch",
         lane: laneSlotOf(worktree.path),
         run: () => activateWorktree(worktree.path),
       };
@@ -3585,7 +3616,7 @@ async function runPaletteQuery() {
   try {
     found = await finder.find(query);
   } catch (error) {
-    showError(error);
+    sayPaletteFailure(t("palette.failed", "목록을 가져오지 못했습니다. 잠시 뒤 다시 열어 보세요."), error);
     return;
   }
   // The finder changed — or closed — while this was in flight; its rows

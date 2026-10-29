@@ -206,7 +206,7 @@ export async function testSidebarTaskFold({ browser, origin, ok, faults }) {
     ok(
       "a row says the stage its work stands at and, in one word, what holds it back — the ledger's late review, a quota wall — and nothing where nothing does",
       own?.stage === "넘김 끝 · 검토 대기" && own?.blocker === "검증 늦음" && own?.blockerShown === true &&
-        walled?.blocker === "한도 벽" && busy?.stage === "착지 대기" && busy?.blockerShown === false,
+        walled?.blocker === "한도 도달" && busy?.stage === "착지 대기" && busy?.blockerShown === false,
       JSON.stringify({ own, walled, busy }),
     );
 

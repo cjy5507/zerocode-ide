@@ -676,5 +676,79 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
     JSON.stringify(receipt),
   );
 
+  // ---- 9. 한도에 닿은 판은 쉬운 말로, 다섯 언어 모두 (t-81155) ------------
+  // 「벽에 선 판」·「walled panes」·「上限の壁」·「墙前窗格」·「en el muro」는
+  // 코드베이스 말이다. 계정 안내 두 줄, 제안, 상태 막대, 판의 계정 조각과 그 호버,
+  // 판만 옮긴 영수증을 다섯 언어로 읽고, 창의 사전 전체에서도 같은 말을 찾는다.
+  const plain = await page.evaluate(async ({ report }) => {
+    const WALL = /(?<!완)벽|\b(?:wall|walls|walled|muro|muros|pared|paredes)\b|[壁墙牆]/i;
+    const walled = (text) => WALL.test(String(text).replace(/\{\{\w+\}\}/g, ""));
+    const receipts = () => [...document.querySelectorAll(".toast[data-switch-receipt]")];
+    const saved = locale;
+    const seen = {};
+    for (const code of ["ko", "en", "ja", "zh", "es"]) {
+      setLocale(code, { refresh: false, persist: false });
+      window.__ACCOUNTS__ = { ...window.__ACCOUNTS__, active: "a-fixture" };
+      accountReport = window.__ACCOUNTS__;
+      window.__ACCOUNT_USAGE__ = { ...report, plan: { ...report.plan, token: `tok-plain-${code}` } };
+      showSettingsPane("provider-accounts");
+      await refreshClaudeAccountUsage(false);
+      const plan = accountUsageReport.plan;
+      const chip = paneAccountWords(4701);
+      for (const one of receipts()) one.remove();
+      window.__SWITCH_APPLIED__ = {
+        key: `switch-plain-${code}`, from: "a-fixture", to: "b-fixture", switched_default: false, default_ms: 0,
+        panes: [], census: { moved: 1, at_turn_end: 0, person: 0, left: 0 }, receipts: 1, total_ms: 10,
+      };
+      await applyAccountSwitch("ask", plan.token);
+      seen[code] = {
+        hint: document.getElementById("account-note").textContent,
+        autoHint: document.querySelector('[data-i18n="settings.accounts.autoSwitchHint"]')?.textContent ?? "",
+        proposal: document.getElementById("account-switch-said").textContent,
+        panesOnly: accountSwitchProposal({ ...plan, decision: { kind: "stay", why: "off" } }),
+        next: document.getElementById("sb-claude-next").textContent,
+        chip: chip?.words ?? "",
+        chipTip: chip?.tip ?? "",
+        moved: receipts().at(-1)?.querySelector(".toast-text")?.textContent ?? "",
+      };
+    }
+    delete window.__SWITCH_APPLIED__;
+    setLocale(saved, { refresh: false, persist: false });
+    const catalog = [];
+    for (const [code, words] of Object.entries(CATALOG)) {
+      for (const [key, value] of Object.entries(words)) {
+        if (walled(value)) catalog.push(`${code}:${key}: ${value}`);
+      }
+    }
+    const screen = Object.entries(seen).flatMap(([code, words]) =>
+      Object.entries(words).filter(([, said]) => walled(said)).map(([where, said]) => `${code}.${where}: ${said}`));
+    return { seen, screen, catalog };
+  }, {
+    report: (() => {
+      const walledPanes = plan("ask", switching, "tok-plain");
+      walledPanes.plan.panes = [{ term: 4701, worker: "w-1", account: "a-fixture", stance: "walled" }];
+      return walledPanes;
+    })(),
+  });
+  const limitWord = { ko: /한도/, en: /limit/i, ja: /上限/, zh: /上限/, es: /límite/i };
+  const said = (where) => Object.fromEntries(Object.entries(plain.seen).map(([code, words]) => [code, words[where]]));
+  ok(
+    "a pane at its limit is said in plain words in all five languages — the account hints, the proposal, the bar, the pane's chip and its hover, and the receipt that moved only panes say 한도/limit/上限/límite and never 벽/wall/壁/墙/muro (t-81155)",
+    plain.screen.length === 0 &&
+      Object.entries(limitWord).every(([code, word]) =>
+        ["hint", "autoHint", "proposal", "panesOnly", "next", "chip", "chipTip", "moved"]
+          .every((where) => plain.seen[code]?.[where]?.length > 0) &&
+        word.test(plain.seen[code].panesOnly) && word.test(plain.seen[code].chip) &&
+        word.test(plain.seen[code].moved) && word.test(plain.seen[code].next)) &&
+      // Each language is read in its own words, not the Korean source five times.
+      new Set(Object.values(said("panesOnly"))).size === 5 && new Set(Object.values(said("moved"))).size === 5,
+    JSON.stringify({ screen: plain.screen, seen: plain.seen }),
+  );
+  ok(
+    "no word in the window's five catalogs says 벽/wall/壁/墙/muro — key names and {{placeholders}} are not read (t-81155)",
+    plain.catalog.length === 0,
+    JSON.stringify(plain.catalog),
+  );
+
   await page.close();
 }

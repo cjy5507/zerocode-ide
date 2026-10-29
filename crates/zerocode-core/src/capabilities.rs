@@ -108,6 +108,8 @@ pub struct PickerKeys {
     pub raise: &'static str,
     /// Confirms for this session only.
     pub session_only: &'static str,
+    /// Closes the picker with nothing changed (`Esc to cancel` on its line).
+    pub cancel: &'static str,
     /// Words the picker prints while it is up. The keys are sent only after
     /// the screen shows them; a screen without them gets no key.
     pub legend: &'static str,
@@ -200,6 +202,15 @@ pub struct TurnMoves {
     /// row's `to` word is read off when a move goes up or down one rung. A
     /// CLI whose picker was not read has an empty ladder and gets no `to`.
     pub ladder: &'static [&'static str],
+    /// Whether moving the effort between two turns rewrites the
+    /// conversation's prompt cache, so the next turn pays to write the whole
+    /// conversation again — what a person is told before a press moves it.
+    /// Measured 2026-10-28 on `claude-opus-5-5` (Z11, run-11955): every one
+    /// of 45 effort switches at a turn boundary rewrote everything past the
+    /// system prompt and tools, on Anthropic's own rule that a changed
+    /// thinking setting voids the message cache. `false` is "not measured",
+    /// never "free".
+    pub rewrites_cache: bool,
 }
 
 impl TurnMoves {
@@ -208,6 +219,7 @@ impl TurnMoves {
         effort: None,
         model: None,
         ladder: &[],
+        rewrites_cache: false,
     };
 
     /// The word one rung above or below `current` on this ladder — `None`
@@ -239,6 +251,7 @@ pub const CLAUDE_EFFORT_PICKER: PickerKeys = PickerKeys {
     lower: "\x1b[D",
     raise: "\x1b[C",
     session_only: "s",
+    cancel: "\x1b",
     legend: "s for this session only",
 };
 

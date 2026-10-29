@@ -515,7 +515,9 @@ function paintInboxPreview(view, item, now) {
   // seat of the run, and only where this window holds that seat.
   const seated = item.seat === true && !isPopout;
   const canReply = item.what === "question" && seated;
-  const canPass = item.what === "handoff" && seated
+  // A hand-in whose verification the coordinator withdrew takes a new review, not a pass (t-81913).
+  const withdrawn = item.what === "handoff" && boardReviewWithdrawn(item.task) !== null;
+  const canPass = item.what === "handoff" && seated && !withdrawn
     && Boolean(item.task.progress?.attempt) && Boolean(item.task.progress?.source);
   const canAck = Boolean(item.letter) && item.what !== "question" && seated && inboxBatchKey(item) !== "";
   const draft = canReply ? inboxDraft(item.id) : null;
@@ -564,6 +566,7 @@ function paintInboxPreview(view, item, now) {
   else if (item.run && !seated && item.what !== "landing") {
     said = t("board.desk.noSeat", "이 창에 그 런의 코디네이터 자리가 없어 여기서는 답할 수 없어요");
   } else if (item.what === "question") said = t("inbox.note.question", "답하기 전까지 이 워커는 멈춰 있습니다.");
+  else if (withdrawn) said = t("inbox.note.handoffWithdrawn", "새 검수 결과를 적거나 새로 넘겨야 다시 통과됩니다.");
   else if (item.what === "handoff") said = t("inbox.note.handoff", "확인하면 검증 기록이 원장에 적힙니다.");
   else if (item.tab === "blocked") said = t("inbox.note.blocked", "허용·거절은 그 판에서만 누릅니다. 여기서는 판을 엽니다.");
   writeTextContent(note, said);
@@ -650,7 +653,7 @@ async function passInboxHandoff(item) {
   const key = `pass:${item.id}`;
   const held = inboxPressed(key);
   const { attempt, source } = item.task.progress ?? {};
-  if (held.sending || held.done || !attempt || !source) return;
+  if (held.sending || held.done || !attempt || !source || boardReviewWithdrawn(item.task) !== null) return;
   const args = { run: item.task.run, task: item.task.id, attempt, source };
   if (held.retry?.signature !== JSON.stringify(args)) {
     held.retry = { signature: JSON.stringify(args), id: `ui-inbox-pass-${crypto.randomUUID()}` };

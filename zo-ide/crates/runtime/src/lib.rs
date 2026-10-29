@@ -330,8 +330,9 @@ pub use oauth::{
     OpenAiOAuthTokens, PkceChallengeMethod, PkceCodePair,
 };
 pub use permissions::{
-    PermissionContext, PermissionMode, PermissionOutcome, PermissionOverride, PermissionPolicy,
-    PermissionPromptDecision, PermissionPrompter, PermissionRequest, TemporaryAllowGrant,
+    normalize_tool_name, rule_tool_names, PermissionContext, PermissionMode, PermissionOutcome,
+    PermissionOverride, PermissionPolicy, PermissionPromptDecision, PermissionPrompter,
+    PermissionRequest, RuleToolName, TemporaryAllowGrant,
 };
 pub use prompt::{
     discover_skills, load_system_prompt, load_system_prompt_for_main,

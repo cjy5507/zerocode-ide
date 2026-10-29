@@ -4089,7 +4089,7 @@
             </select>
           </label>
         </div>
-        <p class="settings-hint" data-i18n="settings.accounts.autoSwitchHint">계정마다 사용량을 따로 읽어, 고른 계정이 한도에 가까워지면 남은 몫이 가장 큰 계정으로 다음 소환을 보냅니다. 일하는 판은 제 로그인으로 계속하고, 한도 벽에 선 판만 같은 대화·같은 자리로 새 계정에서 이어집니다.</p>
+        <p class="settings-hint" data-i18n="settings.accounts.autoSwitchHint">계정마다 사용량을 따로 읽어, 고른 계정이 한도에 가까워지면 남은 몫이 가장 큰 계정으로 다음 소환을 보냅니다. 일하는 판은 제 로그인으로 계속하고, 한도에 닿은 판만 같은 대화·같은 자리로 새 계정에서 이어집니다.</p>
         <p class="settings-hint account-switch-note" id="account-switch-note" hidden>
           <span id="account-switch-said"></span>
           <button class="btn" id="account-switch-now" type="button" data-i18n="settings.accounts.switchNow">지금 바꾸기</button>
@@ -6024,6 +6024,34 @@
           띄어쓰기로 나눈 낱말 그대로 실행합니다 — 셸을 한 번 더 거치지 않습니다. 경로에
           띄어쓰기가 있으면 <code>"…"</code>로 묶으세요.
         </p>
+        </div>
+
+        <!-- What an agent's pane opens on (t-82038): its conversation or its
+             terminal. The words are the core's (`AgentPaneFirstView`); the
+             radios wear the update policy's look, as every radio choice in
+             these settings does. Read once for each pane when it opens
+             (`standPaneConversation`), so the open panes stay as they are. -->
+        <div class="settings-subhead">
+          <h3 class="settings-subhead-title" data-i18n="settings.terminal.firstViewTitle">에이전트 판 첫 화면</h3>
+          <p class="settings-subhead-desc" data-i18n="settings.terminal.firstViewHint">
+            에이전트가 도는 판을 열 때 무엇부터 보일지 고릅니다. 판 머리의 「대화 | 터미널」 전환은 언제든 그대로 됩니다.
+          </p>
+        </div>
+        <div class="settings-card">
+          <fieldset class="update-policy" id="agent-pane-first-view" role="radiogroup">
+            <legend class="settings-label" data-i18n="settings.terminal.firstView">처음 보이는 화면</legend>
+            <label class="update-policy-option">
+              <input type="radio" name="agent-pane-first-view" value="conversation" />
+              <span data-i18n="settings.terminal.firstViewConversation">대화 — 에이전트와 주고받은 글을 읽기 좋게</span>
+            </label>
+            <label class="update-policy-option">
+              <input type="radio" name="agent-pane-first-view" value="terminal" />
+              <span data-i18n="settings.terminal.firstViewTerminal">터미널 — 에이전트 프로그램의 화면 그대로</span>
+            </label>
+          </fieldset>
+          <p class="settings-hint" data-i18n="settings.terminal.firstViewNote">
+            이미 열린 판은 그대로 두고, 바꾼 뒤에 여는 판부터 따릅니다.
+          </p>
         </div>
 
         <div class="settings-subhead">

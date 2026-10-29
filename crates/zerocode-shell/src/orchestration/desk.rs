@@ -1253,7 +1253,11 @@ pub(crate) fn resolve_hold(
 /// `run_id`'s coordinator seat — the ledger's `task-update` with a verified
 /// review that names the attempt and the source the board drew. The ledger
 /// refuses the pass when either has moved since, which is what keeps a press
-/// from passing work that changed after the person read it.
+/// from passing work that changed after the person read it — and when the
+/// coordinator withdrew its verification of that attempt and source, since a
+/// bare `{"verified":true}` names no new review (t-81913). A withdrawn row
+/// draws no pass at all; the ledger's refusal is what a press that slips
+/// through is answered with.
 pub(crate) fn pass_review(
     run_id: &str,
     task: &str,
@@ -3188,6 +3192,7 @@ mod tests {
             source: None,
             merge_head: None,
             reviewed: None,
+            withdrawn: None,
             next: None,
         };
         for stage in STAGES {
@@ -3599,6 +3604,74 @@ mod tests {
         ] {
             assert!(finished(held, held.task(id).expect("a task")), "{id}");
         }
+    }
+
+    /// A verification the coordinator withdrew stands on the desk as a report that waits on a new
+    /// review (t-81913): the row keeps its 검토 stage and step, and its progress carries the
+    /// withdrawal's words, which the board draws in place of 「통과」 — the ledger refuses a bare
+    /// pass of that attempt and source.
+    #[test]
+    fn a_withdrawn_verification_waits_on_the_desk_with_its_words() {
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("withdrawn", 1);
+        let task = ledger
+            .create_task(&run, "x".into(), "withdrawn".into(), vec![], None, 10)
+            .expect("a task");
+        let started = ledger
+            .start_worker(&run, "claude", ("team-w", "%10"), Some(&task), 11)
+            .expect("a worker");
+        ledger
+            .post(
+                &run,
+                Draft {
+                    from: worker_address(&started.worker),
+                    to: ledger.run(&run).expect("the run").address(),
+                    kind: MessageKind::WorkerDone,
+                    body: Text::from(r#"{"ok":true,"head":"1111111"}"#.to_string()),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: None,
+                    task: Some(task.clone()),
+                    dispatch: started.dispatch.clone(),
+                },
+                12,
+            )
+            .expect("the report");
+        let attempt = started.dispatch.expect("an attempt");
+        let why = "the independent review found the price guard untested";
+        ledger
+            .update_task(
+                &run,
+                &task,
+                None,
+                Some(
+                    serde_json::json!({ "verified": false, "verificationWithdrawn": why })
+                        .to_string(),
+                ),
+                ResultAuthor::Coordinator {
+                    seat: "team-w/%1".to_string(),
+                    generation: Some(1),
+                    attempt: Some(attempt.clone()),
+                    source: Some("1111111".to_string()),
+                    completed_ms: None,
+                    verified_ms: None,
+                },
+                20,
+            )
+            .expect("the withdrawal");
+
+        let desk = desk_snapshot(&ledger, |_| None, no_cost);
+        let row = desk
+            .tasks
+            .iter()
+            .find(|one| one.id == task)
+            .expect("the row");
+        assert_eq!((row.stage, row.next_step), ("reported", NextStep::Review));
+        let sent = serde_json::to_value(row).expect("a row the window reads");
+        assert_eq!(sent["progress"]["withdrawn"], why, "{sent}");
+        assert_eq!(sent["progress"]["attempt"], attempt.as_str(), "{sent}");
+        assert_eq!(sent["progress"]["source"], "1111111", "{sent}");
     }
 
     /// A stage carries at most [`STAGE_ROWS`] rows and its count carries the

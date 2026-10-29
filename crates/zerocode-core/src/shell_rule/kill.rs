@@ -13,7 +13,9 @@
 //! caller read once, and the pids the window knows: the calling pane's own
 //! process ([`judge_kill`]'s `caller`) and every other process tree it must
 //! keep ([`ProtectedRoot`]). No program name is written down here: whose a
-//! process is, is read from the tree it hangs in.
+//! process is, is read from the tree it hangs in — or, for one the pane set
+//! loose and whose parent is gone, from the pane its environment names
+//! ([`PaneMark`], t-81714).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -21,6 +23,9 @@ use std::time::Duration;
 use super::SHELL_COMMANDS;
 use super::parse::WRAPPER_COMMANDS;
 use super::script::{self, Command, Script, Word};
+use crate::hook::PANE_KEY_ENV;
+
+mod environ;
 
 /// How many times an `sh -c` or `eval` string is read inside another before
 /// the rest is called unreadable. Chosen, not measured: the incident nested
@@ -130,16 +135,64 @@ impl ProcessRow {
     }
 }
 
+/// The pane a process was started in, as its environment names it: the
+/// window's pid ([`WINDOW_PID_ENV`]) and the pane's key ([`PANE_KEY_ENV`],
+/// `term-<n>`). A process keeps the environment it was started with when its
+/// parent goes away, so a job a pane set loose — moved under pid 1 when the
+/// tool's shell that started it ended — still names its pane. Both are read
+/// because two windows number their panes alike.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneMark {
+    pub window: u32,
+    pub pane: String,
+}
+
+impl PaneMark {
+    /// The mark `env` names; `None` unless it names both a window and a pane.
+    #[must_use]
+    pub fn from_env(env: impl Fn(&str) -> Option<String>) -> Option<Self> {
+        Some(Self {
+            window: window_pid(&env)?,
+            pane: env(PANE_KEY_ENV).filter(|key| !key.is_empty())?,
+        })
+    }
+
+    /// The mark `pid`'s environment names, read with `environs`.
+    fn of_process(environs: &mut environ::Environs, pid: u32) -> Option<Self> {
+        let environ = environs.of(pid)?;
+        Self::from_env(|name| environ.var(name))
+    }
+}
+
+/// The window's pid as `env` names it ([`WINDOW_PID_ENV`]); `None` for a
+/// value that is not a pid.
+fn window_pid(env: &impl Fn(&str) -> Option<String>) -> Option<u32> {
+    env(WINDOW_PID_ENV)
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|pid| *pid != 0)
+}
+
 /// The process table, read once for a judgment — or why it could not be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessTable {
     rows: Result<Vec<ProcessRow>, String>,
+    /// The pane a process was started in, where the table was told it
+    /// ([`Self::with_pane_mark`]).
+    marks: HashMap<u32, PaneMark>,
+    /// Whether the rows are this host's processes, read now
+    /// ([`Self::read`]): a process the table was not told the pane of may
+    /// then be asked its environment, when a judgment needs it.
+    on_this_host: bool,
 }
 
 impl ProcessTable {
     #[must_use]
     pub fn new(rows: Vec<ProcessRow>) -> Self {
-        Self { rows: Ok(rows) }
+        Self {
+            rows: Ok(rows),
+            marks: HashMap::new(),
+            on_this_host: false,
+        }
     }
 
     /// A table that could not be read, and why — every target that needs it
@@ -148,20 +201,41 @@ impl ProcessTable {
     pub fn unreadable(why: impl Into<String>) -> Self {
         Self {
             rows: Err(why.into()),
+            marks: HashMap::new(),
+            on_this_host: false,
         }
+    }
+
+    /// The table with `pid` known to have been started in `mark`'s pane —
+    /// the window's word for a pane it started, whatever the pane's own
+    /// process lets be read of its environment. A told mark is not read.
+    #[must_use]
+    pub fn with_pane_mark(mut self, pid: u32, mark: PaneMark) -> Self {
+        self.marks.insert(pid, mark);
+        self
     }
 
     /// The host's process table, read with `ps` and waited for at most
     /// `within`. A listing that does not start, finish in time or exit
     /// cleanly is unreadable — never an empty table, which would read as
     /// nothing to hit. The listing's own `ps` is left out, as `pgrep` leaves
-    /// itself out.
+    /// itself out. The pane a process was started in ([`PaneMark`]) is read
+    /// from its environment later, by [`judge_kill`], and only for the
+    /// processes it asks after: a process whose environment does not read
+    /// (another user's; an Apple program's on macOS; every process on a host
+    /// with no way to read one) names no pane.
     #[must_use]
     pub fn read(within: Duration) -> Self {
         match listing(within) {
-            Ok((text, sampler)) => Self::from_listing(&text, Some(sampler)),
+            Ok((text, sampler)) => Self::from_listing(&text, Some(sampler)).on_this_host(),
             Err(why) => Self::unreadable(why),
         }
+    }
+
+    /// The table, its rows this host's processes read now.
+    fn on_this_host(mut self) -> Self {
+        self.on_this_host = true;
+        self
     }
 
     /// A table from `ps -o pid=,ppid=,pgid=,command=` text, leaving `except`
@@ -323,10 +397,7 @@ impl ProtectedRoot {
         table: &ProcessTable,
         caller: u32,
     ) -> Vec<Self> {
-        let Some(window) = env(WINDOW_PID_ENV)
-            .and_then(|value| value.trim().parse::<u32>().ok())
-            .filter(|pid| *pid != 0)
-        else {
+        let Some(window) = window_pid(&env) else {
             return Vec::new();
         };
         let mut kept = vec![Self::window(window)];
@@ -380,9 +451,10 @@ pub fn kill_calls(command: &str) -> Vec<KillCall> {
 
 /// Judge `calls` for the pane whose own process is `caller` (`None` when
 /// the window does not know it): a target in the caller's own tree is its
-/// own business; one in a `protected` tree outside it is refused; one
-/// anywhere else, one known only at run time, or one the table could not be
-/// read for is asked of a person.
+/// own business, and so is one outside every tree that names the caller's
+/// pane ([`PaneMark`]) — a job the pane set loose; one in a `protected` tree
+/// outside the caller's is refused; one anywhere else, one known only at run
+/// time, or one the table could not be read for is asked of a person.
 #[must_use]
 pub fn judge_kill(
     calls: &[KillCall],
@@ -390,6 +462,25 @@ pub fn judge_kill(
     caller: Option<u32>,
     protected: &[ProtectedRoot],
 ) -> KillVerdict {
+    let mut environs = None;
+    judge_kill_reading(calls, table, caller, protected, |pid| {
+        PaneMark::of_process(environs.get_or_insert_with(environ::Environs::new), pid)
+    })
+}
+
+/// [`judge_kill`], a process's pane read with `read_mark` ([`Panes`]).
+fn judge_kill_reading(
+    calls: &[KillCall],
+    table: &ProcessTable,
+    caller: Option<u32>,
+    protected: &[ProtectedRoot],
+    read_mark: impl FnMut(u32) -> Option<PaneMark>,
+) -> KillVerdict {
+    let mut panes = Panes {
+        table,
+        read_mark,
+        read: HashMap::new(),
+    };
     let mut ask: Option<String> = None;
     let mut by_pid: Option<HashMap<u32, &ProcessRow>> = None;
     for call in calls {
@@ -431,6 +522,7 @@ pub fn judge_kill(
             for row in matched {
                 match place(row.pid, by_pid, caller, protected) {
                     Place::Own => {}
+                    Place::Outside if panes.share(caller, row.pid) => {}
                     Place::Kept(label) => {
                         return KillVerdict::Deny {
                             reason: format!(
@@ -454,6 +546,47 @@ pub fn judge_kill(
         }
     }
     ask.map_or(KillVerdict::Allow, |reason| KillVerdict::Ask { reason })
+}
+
+/// The pane each process a judgment asks after was started in (t-81714):
+/// told to the table, or — on a table read from this host — read from the
+/// process's environment when first asked, and once. Only the caller and a
+/// target outside every kept tree are asked, so what a judgment reads does
+/// not grow with the table.
+struct Panes<'t, R> {
+    table: &'t ProcessTable,
+    read_mark: R,
+    read: HashMap<u32, Option<PaneMark>>,
+}
+
+impl<R: FnMut(u32) -> Option<PaneMark>> Panes<'_, R> {
+    /// The pane `pid` was started in, told or read; `None` when neither.
+    fn of(&mut self, pid: u32) -> Option<PaneMark> {
+        if let Some(told) = self.table.marks.get(&pid) {
+            return Some(told.clone());
+        }
+        if !self.table.on_this_host {
+            return None;
+        }
+        let read_mark = &mut self.read_mark;
+        self.read
+            .entry(pid)
+            .or_insert_with(|| read_mark(pid))
+            .clone()
+    }
+
+    /// Whether `pid` names the pane `caller` names: a job the calling pane
+    /// set loose. Asked only of a process outside every tree the window
+    /// keeps. A pane cannot write its mark into a process it did not start —
+    /// a process's environment is what its parent handed it — so the mark
+    /// reaches only what the pane started, and what another pane started and
+    /// chose to hand it.
+    fn share(&mut self, caller: Option<u32>, pid: u32) -> bool {
+        let Some(own) = caller.and_then(|caller| self.of(caller)) else {
+            return false;
+        };
+        self.of(pid) == Some(own)
+    }
 }
 
 /* ---- reading the calls ------------------------------------------------------ */

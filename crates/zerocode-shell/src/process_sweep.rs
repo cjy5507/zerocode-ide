@@ -652,6 +652,7 @@ mod tests {
     fn guarded_roots() -> KillRoots {
         KillRoots {
             caller: Some(600),
+            caller_mark: None,
             protected: vec![
                 kill::ProtectedRoot {
                     pid: 500,

@@ -99,11 +99,14 @@ pub async fn run(
 /// closed — so a parked prompt must be decided by policy rather than waited
 /// on: left parked it held the turn forever (a headless `zo --plain` under
 /// `workspace-write` sat on a `bash` approval for six minutes in a benchmark
-/// while Claude Code and codex finished; 2026-09-02). A permission is granted
-/// once when the mode allows writes at all and refused under read-only — a
-/// call only a person may allow is refused whatever the mode; a question has
-/// no answer to give and is dismissed. Either way the turn goes
-/// on, and the note says what was decided in the person's absence.
+/// while Claude Code and codex finished; 2026-09-02). A permission prompt — a
+/// tool call's, or a question zo asks itself — is approved once when the mode
+/// allows writes at all: by the answer that allows it once, never by a lasting
+/// one, whose rule would outlive the run in the person's settings (t-81117).
+/// It is refused under read-only or when no answer allows it once, and a call
+/// only a person may allow is refused whatever the mode; a question from the
+/// model has no answer to give and is dismissed. Either way the turn goes on,
+/// and the note says what was decided in the person's absence.
 fn decide_unattended<W: Write>(
     prompt: PendingPrompt,
     mode: core_types::PermissionMode,
@@ -125,20 +128,41 @@ fn decide_unattended<W: Write>(
             note(renderer, &format!("unattended: {tool} denied (only a person may allow it)"));
             None
         }
+        // The default choices put the lasting allow on "y" (t-81117): answered
+        // by that key, a call's rule stayed for the rest of the run and was
+        // written into the person's `.zo/settings.local.json` at its end, and
+        // the ladder's switch went on for the session. So the answer is picked
+        // by what it decides, not by its key. A question names no tool; the
+        // note names it by its title.
         PendingPrompt::Permission(inner) => {
-            let tool = inner.tool_name.clone();
+            let subject = inner
+                .question
+                .as_ref()
+                .map_or_else(|| inner.tool_name.clone(), |asked| asked.title.clone());
             let writes = !matches!(mode, core_types::PermissionMode::ReadOnly);
-            let key = if writes { "y" } else { "n" };
-            let left = PendingPrompt::Permission(inner).answer(key);
+            let once = writes
+                && inner
+                    .choices
+                    .iter()
+                    .any(|choice| choice.decision == runtime::message_stream::PermissionDecision::AllowOnce);
+            if once {
+                let _ = inner
+                    .responder
+                    .send(runtime::message_stream::PermissionDecision::AllowOnce);
+            } else {
+                PendingPrompt::Permission(inner).dismiss();
+            }
             note(
                 renderer,
-                &if writes {
-                    format!("unattended: {tool} approved once ({})", permission_label(mode))
+                &if once {
+                    format!("unattended: {subject} approved once ({})", permission_label(mode))
+                } else if writes {
+                    format!("unattended: {subject} denied (no answer allows it once)")
                 } else {
-                    format!("unattended: {tool} denied (read-only)")
+                    format!("unattended: {subject} denied (read-only)")
                 },
             );
-            left
+            None
         }
         PendingPrompt::Question(inner) => {
             PendingPrompt::Question(inner).dismiss();
@@ -233,6 +257,9 @@ async fn run_frontend(
     // on — an alias that moved, a settings pin. Once each.
     for text in crate::runtime_support::drain_catalog_notices() {
         note(&mut renderer, &text);
+    }
+    for text in crate::runtime_support::drain_startup_warnings() {
+        let _ = renderer.push(system_note(SystemLevel::Warn, &text));
     }
     if !flags.json {
         // 배너는 사람에게 하는 인사다. JSON 계약에는 그 어휘가 없고, 넣으면
@@ -1508,6 +1535,125 @@ mod tests {
             ]
         );
         assert_eq!(last, "", "the shown lines reached the last answer");
+    }
+
+    /// Puts one parked permission prompt — a tool call's, or with `question` a
+    /// question zo asks itself — to [`super::decide_unattended`], and answers
+    /// with what its responder received (`None` when nothing was sent), whether
+    /// the prompt was settled, and the notes printed.
+    fn decide_unattended_on(
+        offered: &[(char, &str, runtime::message_stream::PermissionDecision)],
+        question: Option<runtime::permission::PromptQuestion>,
+        mode: core_types::PermissionMode,
+    ) -> (Option<runtime::message_stream::PermissionDecision>, bool, String) {
+        use runtime::message_stream::{BlockId, PermissionChoice, PermissionPrompt, ToolCallId};
+        let (responder, mut answered) = tokio::sync::oneshot::channel();
+        let prompt = PermissionPrompt {
+            id: BlockId(1),
+            tool_call_id: ToolCallId(String::new()),
+            // A question names no tool (t-17474).
+            tool_name: if question.is_some() { String::new() } else { "bash".to_string() },
+            reasoning: "decide in the person's absence".to_string(),
+            audit_hint: None,
+            risk_level: None,
+            choices: offered
+                .iter()
+                .map(|&(key, label, decision)| PermissionChoice {
+                    key,
+                    label: label.to_string(),
+                    decision,
+                })
+                .collect(),
+            question,
+            responder,
+        };
+        let mut written = Vec::new();
+        let left = {
+            let mut renderer = super::Renderer::new(&mut written, super::RenderOptions::default());
+            super::decide_unattended(super::PendingPrompt::Permission(prompt), mode, &mut renderer)
+        };
+        let settled = left.is_none();
+        drop(left);
+        (answered.try_recv().ok(), settled, String::from_utf8_lossy(&written).into_owned())
+    }
+
+    /// t-81117: nobody at the keyboard approves a tool call by the answer that
+    /// allows it this once, whatever key that answer carries — never by the
+    /// lasting allow, whose rule outlives the run and lands in the person's
+    /// settings. A prompt that offers no allow-once answer is refused, and
+    /// read-only refuses as before.
+    #[test]
+    fn an_unattended_approval_is_the_allow_once_answer_and_never_the_lasting_one() {
+        use runtime::message_stream::PermissionDecision::{AllowAlways, AllowOnce, Deny};
+        let offered = [('y', "Allow", AllowAlways), ('o', "Allow once", AllowOnce), ('n', "Deny", Deny)];
+        let write = core_types::PermissionMode::WorkspaceWrite;
+        let (decision, settled, said) = decide_unattended_on(&offered, None, write);
+        assert_eq!(decision, Some(AllowOnce), "{said}");
+        assert!(settled, "nobody is left to answer, so the prompt is settled");
+        assert!(said.contains("unattended: bash approved once"), "{said}");
+
+        let (decision, settled, said) =
+            decide_unattended_on(&[('y', "Allow", AllowAlways), ('n', "Deny", Deny)], None, write);
+        assert_eq!(decision, Some(Deny), "no answer allows it once: {said}");
+        assert!(settled);
+        assert!(said.contains("unattended: bash denied (no answer allows it once)"), "{said}");
+
+        let (decision, settled, said) =
+            decide_unattended_on(&offered, None, core_types::PermissionMode::ReadOnly);
+        assert_eq!(decision, Some(Deny), "{said}");
+        assert!(settled);
+        assert!(said.contains("unattended: bash denied (read-only)"), "{said}");
+    }
+
+    /// t-81117 (review P3-1): the refusal ladder's question to switch models
+    /// offers "from now on" on "y". Nobody at the keyboard answers it for this
+    /// turn alone, by its allow-once answer, and the note names the question
+    /// instead of an empty tool. Read-only refuses it as before.
+    #[test]
+    fn an_unattended_run_switches_models_for_this_turn_alone() {
+        use runtime::message_stream::PermissionDecision::{AllowAlways, AllowOnce, Deny};
+        let offered = [
+            ('y', "Switch, and from now on", AllowAlways),
+            ('o', "Switch for this turn", AllowOnce),
+            ('n', "Stay on the chosen model", Deny),
+        ];
+        let question = || {
+            Some(runtime::permission::PromptQuestion {
+                topic: "model_switch".to_string(),
+                title: "Switch models?".to_string(),
+            })
+        };
+        let (decision, settled, said) =
+            decide_unattended_on(&offered, question(), core_types::PermissionMode::WorkspaceWrite);
+        assert_eq!(decision, Some(AllowOnce), "{said}");
+        assert!(settled);
+        assert!(said.contains("unattended: Switch models? approved once"), "{said}");
+        assert!(!said.contains("unattended:  "), "the note names the question: {said}");
+
+        let (decision, settled, said) =
+            decide_unattended_on(&offered, question(), core_types::PermissionMode::ReadOnly);
+        assert_eq!(decision, Some(Deny), "{said}");
+        assert!(settled);
+        assert!(said.contains("unattended: Switch models? denied (read-only)"), "{said}");
+    }
+
+    /// t-81117 (review P3-1): the question about a declined request's images
+    /// has no "y" — "o" retries without them, "n" keeps them — so an answer by
+    /// that key settled nothing while the note said "approved once". Nobody at
+    /// the keyboard answers it by its allow-once answer.
+    #[test]
+    fn an_unattended_run_answers_the_images_question_by_its_allow_once_answer() {
+        use runtime::message_stream::PermissionDecision::{AllowOnce, Deny};
+        let offered = [('o', "Retry without them", AllowOnce), ('n', "Keep them", Deny)];
+        let question = Some(runtime::permission::PromptQuestion {
+            topic: "declined_images".to_string(),
+            title: "Retry without the images?".to_string(),
+        });
+        let (decision, settled, said) =
+            decide_unattended_on(&offered, question, core_types::PermissionMode::WorkspaceWrite);
+        assert_eq!(decision, Some(AllowOnce), "{said}");
+        assert!(settled, "the question was answered, not left parked");
+        assert!(said.contains("unattended: Retry without the images? approved once"), "{said}");
     }
 
     /// 파이프의 `/help` 목록과 파이프가 실제로 드는 명령은 같은 사실을 읽는다.

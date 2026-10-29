@@ -14617,6 +14617,12 @@ body.mod-held .term-link,
   /* The page's face is the platform's, as the panel wears VS Code's
    * (`--vscode-chat-font-family`); every rule below reads `--font-ui`. */
   --font-ui: var(--chat-font-ui);
+  /* And so is its smoothing, as the terminal's is (`.term`, t-82195 C1). The
+   * body antialiases chrome copy; a page that is nothing but words inherited
+   * it and read thinner than the terminal beside it — the stems the window
+   * measured at 0.76 coverage antialiased against 0.99 under `auto`
+   * (tools/terminal-fidelity, 2026-09-17). */
+  -webkit-font-smoothing: auto;
 }
 
 /* A conversation set aside keeps its own page standing in the leaf
@@ -14981,13 +14987,10 @@ details.worker-command {
   /* 앵커 보정은 스크립트가 한 벌로 한다(`syncHelperTurns`) — 브라우저의
    * 자동 앵커가 겹치면 한쪽이 거짓말이 된다. */
   overflow-anchor: none;
-  /* The person's words stick inside this list and nowhere else (the
-   * extension's `isolation: isolate` on its sticky mode). */
-  isolation: isolate;
 }
 
-/* The list opens with a spacer rather than padding, so the first sticky
- * header sticks at the very top (`stickyMode:before`). */
+/* The list opens with the extension's spacer (`stickyMode:before`) rather
+ * than padding. */
 .helper-turns::before {
   content: "";
   flex: none;
@@ -15008,39 +15011,17 @@ details.worker-command {
   overflow-wrap: break-word;
 }
 
-/* 사람의 말: 본문은 쓰인 줄바꿈을 지킨다. The row is the extension's sticky
- * header (`stickyHeader`, 2.1.278): it stays at the list's top while its own
- * turn scrolls under it, padded above and below, its last stretch fading to
- * the ground; the box with the words is its child (`.helper-said`). */
+/* 사람의 말: 본문은 쓰인 줄바꿈을 지킨다. The row flows with the turns —
+ * the person's call of 10-29 (t-81786 P3-17): their newest words stuck at
+ * the list's top covered the answer under them — padded above and below as
+ * the extension's header row is (`stickyHeader`, 2.1.278); the box with the
+ * words is its child (`.helper-said`), and a clipped box's door stands in
+ * the row's corner (`.helper-expand`). */
 .helper-turn.is-user {
+  position: relative;
   display: block;
   margin: var(--chat-bubble-gap) 0;
-  padding: var(--chat-sticky-pad-top) 0 var(--chat-sticky-pad-bottom);
-}
-
-/* Only the newest words stick (t-81525 B4, `dressLastPerson`): one sticky
- * row and one layer a page, not one for every time the person spoke. */
-.helper-turn.is-user.is-latest {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background-color: var(--chat-ground);
-}
-
-/* The extension's fade hangs under the row, past its pad (t-81525 r2): drawn
- * inside the pad, its 12px lay exactly over the pad under the bubble, and
- * with the bubble standing narrow on the right, the answer scrolling under it
- * showed through on the left. The row is the ground to its foot; the rows
- * scrolling under it fade in below. */
-.helper-turn.is-user.is-latest::after {
-  content: "";
-  position: absolute;
-  top: 100%;
-  right: 0;
-  left: 0;
-  height: var(--chat-sticky-fade);
-  background-image: linear-gradient(to bottom, var(--chat-ground), transparent);
-  pointer-events: none;
+  padding: var(--chat-person-pad-top) 0 var(--chat-person-pad-bottom);
 }
 
 .helper-turn.is-user:first-child {
@@ -15053,17 +15034,14 @@ details.worker-command {
 }
 
 /* An answer is bare prose in the reading column (t-81525 B3): no dot, no
- * rail, the row's pad above and below. The newest answer reads in the full
- * ink; the ones before it a step back (`--chat-said-earlier`), so the eye
- * lands on what was said last. */
+ * rail, the row's pad above and below. Every answer reads in the full ink —
+ * the ones before the newest are not stepped back (t-82195 C2, the person's
+ * draft C of 10-29: none of the seven chat panels read for it dims an
+ * earlier answer, and the terminal beside it is one ink). */
 .helper-turn.is-assistant {
   position: relative;
   /* The room under the words is the action row's (`.helper-actions`, C8). */
   padding: var(--chat-row-pad) 0 var(--chat-actions-h);
-}
-
-.helper-turn.is-assistant:not(.is-latest, .is-streaming) > .helper-said {
-  color: var(--chat-said-earlier);
 }
 
 /* The window's own note to the agent (t-81525 C3): a thin line across the
@@ -15133,6 +15111,29 @@ details.worker-command {
 
 .helper-turn.is-assistant .helper-said > :last-child {
   margin-bottom: 0;
+}
+
+/* A heading an answer writes steps by weight, not by size (t-82195 C3): the
+ * prose's own size — the narrow page's step with it — h1 and h2 bold, the
+ * rest semibold. With no rule of its own the conversation drew the browser's
+ * 2 and 1.5 times, the largest of the chat panels read for draft C. Its air
+ * is `.md-head`'s: a section above, a step under. */
+.is-chat-page .helper-said .md-head {
+  font-size: var(--chat-prose-size);
+  font-weight: 600;
+}
+
+.is-chat-page .helper-said :is(h1, h2).md-head {
+  font-weight: 700;
+}
+
+/* A rule an answer draws (t-82195 C4): one line in the page's divider ink
+ * with a section's air on each side, where the browser drew a two-tone inset
+ * box in a grey of its own. */
+.is-chat-page .helper-said hr {
+  margin: var(--space-5) 0;
+  border: 0;
+  border-top: var(--rule-width) solid var(--chat-divider);
 }
 
 /* A code block in an answer: the extension's well (`codeBlockWrapper pre`)
@@ -15222,6 +15223,14 @@ pre.md-block > .chat-code-attribute { color: var(--syntax-attribute); }
 pre.md-block > .chat-code-meta { color: var(--syntax-meta); }
 pre.md-block > .chat-code-link { color: var(--syntax-link); }
 pre.md-block > .chat-code-invalid { color: var(--syntax-invalid); }
+
+/* On paper the editor's comment, the ramp's floor at 4.83:1 on its white
+ * plane, reads 4.1:1 on an answer's well, under AA; no grey clears 4.5 there
+ * and stays under the other roles in the editor, so the well alone lifts it
+ * to the secondary ink, 7.29:1 (t-82195 C11). The editor keeps its floor. */
+:root[data-theme="light"] .is-chat-page .helper-said pre.md-block {
+  --syntax-comment: var(--ink-mist);
+}
 pre.md-block > .chat-code-inserted { color: var(--syntax-inserted); }
 pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 
@@ -15462,9 +15471,7 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
  * read down. The briefing wears the same bubble. */
 /* What the person said (t-22100, the approved conversation): their words on
  * the bubble's soft fill — no edge — rounded like the page's other flat
- * panels, as wide as the words and never past the measure, at the list's
- * left. The row is still the extension's sticky header, and a stuck box is a
- * door home (`helperTurnsNode`). */
+ * panels, as wide as the words and never past the measure. */
 .helper-turn.is-user > .helper-said {
   display: block;
   box-sizing: border-box;
@@ -15480,7 +15487,6 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   color: var(--chat-bubble-ink);
   font-size: var(--chat-prose-size);
   line-height: var(--chat-prose-leading);
-  cursor: pointer;
 }
 
 /* What the person said, taller than the extension's clip: 60px of its words
@@ -15504,7 +15510,7 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 }
 
 .helper-turn.is-user > .helper-said.is-clipped:not(.is-open) + .helper-expand {
-  bottom: calc(var(--chat-sticky-pad-bottom) + var(--space-1));
+  bottom: calc(var(--chat-person-pad-bottom) + var(--space-1));
 }
 
 .helper-who {
@@ -16994,6 +17000,15 @@ details[open] > .helper-cap::after {
   background: none;
 }
 
+/* A question the answer door found gone (t-82287): one quiet line where its
+ * card stood, in the notices' secondary ink, until the pane moves on. */
+.pane-chat-ask-passed {
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  color: var(--ink-mist);
+  font-size: var(--text-xs);
+}
+
 /* The plan a permission asks approval for, on the card (the extension's plan
  * review): the answer's own prose, in a well that scrolls on its own rather
  * than pushing the two answers off the page. */
@@ -17260,6 +17275,23 @@ details[open] > .helper-cap::after {
   cursor: pointer;
 }
 
+/* The effort chip: the word the pane's session runs at, beside the model it
+ * runs (t-81532). The word keeps its ink whatever a press can do — it is the
+ * fact; a road no typed key moves takes the chevron away instead, so the chip
+ * says "shown, not offered" by its shape and its tip, never by a colour. */
+.worker-composer-effort {
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.worker-composer-effort[hidden] {
+  display: none;
+}
+
+.worker-composer-effort.is-stuck .worker-composer-chevron {
+  visibility: hidden;
+}
+
 .worker-composer-mode:disabled {
   cursor: default;
 }
@@ -17353,11 +17385,22 @@ details[open] > .helper-cap::after {
   transition: background-color var(--motion-fast) var(--ease-standard);
 }
 
-.composer-menu-item:hover,
+.composer-menu-item:hover:not([aria-disabled="true"]),
 .composer-menu-item:focus-visible,
 .composer-slash-row:hover,
 .composer-slash-row.is-hot {
   background: color-mix(in srgb, var(--chat-accent) 14%, transparent);
+}
+
+/* A row that cannot act now (the effort menu's rungs between two turns it
+ * cannot reach): read in the secondary ink, and no hover that promises a
+ * press. The row the session stands on keeps its ink and its tick. */
+.composer-menu-item[aria-disabled="true"] {
+  cursor: default;
+}
+
+.composer-menu-item[aria-disabled="true"]:not([aria-current="true"]) {
+  color: var(--ink-mist);
 }
 
 .composer-menu-item[aria-current="true"] .composer-menu-name::before {
@@ -18181,9 +18224,10 @@ button.helper-sib:hover {
 }
 
 /* 이 페이지의 키보드 초점 — 플랫폼 계약의 잉크 외곽선. 입력 상자만 전역
- * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`). */
+ * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`).
+ * 입력칸이 키보드를 넘긴 질문 카드도 같은 고리를 두른다(t-81786 r2 P3-2). */
 .worker-view
-  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door):focus-visible {
+  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -18246,9 +18290,46 @@ button.helper-sib:hover {
   container-type: inline-size;
 }
 
+/* A wide page widens its column (t-81786 P3-16): at 1000, 1200, 1400 and
+ * 1700px it steps to the next `--reading-column-wide-*`, never past the last.
+ * The composer's measure and the fade under it read the column again here: a
+ * custom property is resolved where it is declared, so the root's
+ * `--chat-dock-max` stays the root's 760px. The page's own fade (`::after`)
+ * asks the page's width, as the page's children do. */
+.worker-view.is-chat-page > *,
+.worker-view.is-chat-page::after {
+  --chat-dock-max: var(--reading-column);
+}
+
 @container (min-width: 1000px) {
   .worker-view.is-chat-page > * {
     --chat-prose-leading: var(--chat-read-leading-wide);
+  }
+
+  .worker-view.is-chat-page > *,
+  .worker-view.is-chat-page::after {
+    --reading-column: var(--reading-column-wide-1);
+  }
+}
+
+@container (min-width: 1200px) {
+  .worker-view.is-chat-page > *,
+  .worker-view.is-chat-page::after {
+    --reading-column: var(--reading-column-wide-2);
+  }
+}
+
+@container (min-width: 1400px) {
+  .worker-view.is-chat-page > *,
+  .worker-view.is-chat-page::after {
+    --reading-column: var(--reading-column-wide-3);
+  }
+}
+
+@container (min-width: 1700px) {
+  .worker-view.is-chat-page > *,
+  .worker-view.is-chat-page::after {
+    --reading-column: var(--reading-column-wide-4);
   }
 }
 
@@ -53892,8 +53973,8 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   gap: var(--space-2);
 }
 
-/* The session stands in the tally's tooltip there (t-81525 C9): the head says
- * what was done, not the conversation's id. */
+/* The session stands in the tally's tooltip and name there (t-81525 C9,
+ * t-81786 P3-12): the head says what was done, not the conversation's id. */
 .chat-head-pane .pane-head-pick {
   display: none;
 }

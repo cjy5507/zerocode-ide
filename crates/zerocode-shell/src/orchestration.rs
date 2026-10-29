@@ -38,7 +38,7 @@ mod mail_triage;
 mod project_scope;
 pub(crate) mod restart_census;
 mod stall_cause;
-mod step_effort;
+pub(crate) mod step_effort;
 mod summon_assign;
 mod summon_choice;
 mod summon_difficulty;

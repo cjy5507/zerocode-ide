@@ -976,6 +976,15 @@ pub struct ReviewFacts {
     /// it was written against has moved ([`Run::review_of`]).
     #[serde(default)]
     pub waived: bool,
+    /// The coordinator took its verification of this attempt and source back
+    /// (t-81913): the words it gave why under the key `verificationWithdrawn`,
+    /// empty where it gave none. Believed only where the coordinator seat
+    /// wrote it and the result does not verify, and withheld like a review
+    /// once the attempt or the source has moved ([`Run::review_of`]) — while
+    /// it stands, `task-update` refuses a bare verification of that attempt
+    /// and source, one that names no new review it rests on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawn: Option<String>,
 }
 
 impl ReviewFacts {
@@ -1039,10 +1048,18 @@ impl ReviewFacts {
         let sha = |value: &serde_json::Value| value.as_str().and_then(commit_named);
         let [_, merged_keys, nothing_keys] = REVIEW_KEY_GROUPS;
         // Explicit decisions override older metadata left on the result.
-        let verified = map.get("verified").map_or_else(
+        let verified = map.get(VERIFIED_KEY).map_or_else(
             || map.get("reviewedBy").is_some_and(named),
             |value| value.as_bool() == Some(true),
         );
+        let withdrawn = map
+            .get(VERIFICATION_WITHDRAWN_KEY)
+            .filter(|value| !verified && says_something(value))
+            .map(|value| {
+                value
+                    .as_str()
+                    .map_or_else(String::new, |why| why.trim().to_string())
+            });
         let candidate_head = merged_keys
             .iter()
             .find_map(|key| map.get(*key).and_then(sha));
@@ -1063,6 +1080,7 @@ impl ReviewFacts {
             deployed,
             nothing_to_land,
             written,
+            withdrawn,
             ..Self::default()
         }
     }
@@ -1079,6 +1097,52 @@ const REVIEW_KEY_GROUPS: [&[&str]; 3] = [
 
 /// The key that says the work shipped.
 const DEPLOYED_KEY: &str = "deployed";
+
+/// The key a review's decision is written under — the first of [`REVIEW_KEY_GROUPS`]' first group.
+const VERIFIED_KEY: &str = REVIEW_KEY_GROUPS[0][0];
+
+/// The key a coordinator takes its own verification back under (t-81913): `verified: false` beside
+/// it, and the words why as its value ([`ReviewFacts::withdrawn`]).
+const VERIFICATION_WITHDRAWN_KEY: &str = "verificationWithdrawn";
+
+/// The key a verification names its review's report under — one of the words that say what a new
+/// review rests on ([`new_review_keys`]).
+const REVIEW_REPORT_KEY: &str = "report";
+
+/// The keys a verification names the new review it rests on under (t-81913): the first group of
+/// [`REVIEW_KEY_GROUPS`] beyond the decision itself — who reviewed it (`reviewedBy`), the
+/// coordinator's own run of the source (`testedHead`, `coordinatorTests`) — and the review's report.
+fn new_review_keys() -> impl Iterator<Item = &'static str> {
+    REVIEW_KEY_GROUPS[0]
+        .iter()
+        .copied()
+        .filter(|key| *key != VERIFIED_KEY)
+        .chain(std::iter::once(REVIEW_REPORT_KEY))
+}
+
+/// Whether a result's value says anything: not null, not `false`, not a blank or `"false"` string,
+/// not an empty list or map.
+fn says_something(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(false) => false,
+        serde_json::Value::String(text) => !text.trim().is_empty() && text.trim() != "false",
+        serde_json::Value::Array(items) => !items.is_empty(),
+        serde_json::Value::Object(map) => !map.is_empty(),
+        serde_json::Value::Bool(true) | serde_json::Value::Number(_) => true,
+    }
+}
+
+/// Whether a result verifies on nothing new: it says `verified` and names no new review it rests on
+/// ([`new_review_keys`]) — the board's 「통과」, a bare `{"verified":true}`, or the same with landing
+/// keys beside it. What a standing withdrawal refuses (t-81913, [`ReviewFacts::withdrawn`]).
+fn verifies_on_nothing_new(result: &str) -> bool {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(result)
+    else {
+        return false;
+    };
+    ReviewFacts::from_result(result).verified
+        && !new_review_keys().any(|key| map.get(key).is_some_and(says_something))
+}
 
 /// The key a coordinator marks work with no code to land under — the first of
 /// [`REVIEW_KEY_GROUPS`]' third group, and the one the ledger itself writes.
@@ -4051,6 +4115,7 @@ impl Run {
             verified_ms: None,
             written: false,
             waived: false,
+            withdrawn: None,
             superseded_by: attempt_moved
                 .then(|| newest_id.map(str::to_string))
                 .flatten(),
@@ -19672,7 +19737,10 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          <commit|report>] · correct the record, from the run's live coordinator seat; a \
          result carrying a review (verified, merged, deployed…) names the attempt and the \
          source it reviewed — task-list shows both — and is refused when either is missing \
-         or has moved; a verification of a review hand-in (reportKind review) carries \
+         or has moved; a bare verification over the coordinator's own withdrawal \
+         (verificationWithdrawn) of that attempt and source is refused — a result naming its \
+         new review (reviewedBy, coordinatorTests, testedHead, report) or a new hand-in \
+         verifies it again; a verification of a review hand-in (reportKind review) carries \
          nothingToLand, and the answer says why under nothingToLandBecause | --members \
          <t-1,t-2,…> --result <landing> · write a stack's landing \
          ({\"merged\":true,\"mergeHead\":…}, later {\"deployed\":true,\"release\":…}) on every \
@@ -22782,6 +22850,7 @@ fn plan_inner(
                 review: result
                     .as_deref()
                     .is_some_and(|said| ReviewFacts::from_result(said).written),
+                bare_verification: result.as_deref().is_some_and(verifies_on_nothing_new),
                 tested_head: result
                     .as_deref()
                     .and_then(|said| serde_json::from_str::<serde_json::Value>(said).ok())
@@ -25417,6 +25486,8 @@ struct Observed<'a> {
     source: Option<&'a str>,
     /// Whether the correction's result carries a review.
     review: bool,
+    /// Whether it verifies on nothing new ([`verifies_on_nothing_new`]).
+    bare_verification: bool,
     tested_head: Option<String>,
 }
 
@@ -25567,6 +25638,30 @@ fn correction_author(
     if observed.review && newest.is_some() && handed.is_none() {
         return Err(format!(
             "task-update cannot review {standing}: the attempt has not handed in a source yet"
+        ));
+    }
+    /* A withdrawn verification comes back with a new review or a new hand-in, never with a bare
+     * pass (t-81913). The board's 「통과」 names the attempt and the source it drew — the very ones
+     * the withdrawal was written against — so every check above lets it through, and t-78937's
+     * withdrawal was covered two minutes after it was written. The withdrawal stands only while
+     * its attempt and source are the newest ([`Run::review_of`]), so a new hand-in takes a pass. */
+    if observed.bare_verification
+        && let Some(why) = run
+            .task(task_id)
+            .and_then(|task| run.review_of(task).withdrawn)
+    {
+        let because = if why.is_empty() {
+            String::new()
+        } else {
+            format!(" ({why})")
+        };
+        let named: Vec<String> = new_review_keys().map(|key| format!("`{key}`")).collect();
+        return Err(format!(
+            "task-update refuses a bare verification here: {standing}, and the coordinator \
+             withdrew its verification of that attempt and source{because} — a withdrawn attempt \
+             is verified again only by a result that names its new review ({}) or by a new \
+             hand-in",
+            named.join(", ")
         ));
     }
     Ok(ResultAuthor::Coordinator {

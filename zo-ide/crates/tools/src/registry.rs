@@ -911,6 +911,27 @@ impl GlobalToolRegistry {
         Ok(builtin.chain(runtime).chain(plugin).collect())
     }
 
+    /// Every tool name this registry answers to — built in, plugin or
+    /// runtime — whether this session offers the tool or not: the names a
+    /// permission rule may name and still meet a call (t-81312).
+    #[must_use]
+    pub fn known_tool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = mvp_tool_specs()
+            .iter()
+            .chain(&crate::image_tools::tool_specs())
+            .map(|spec| spec.name.to_string())
+            .collect();
+        names.extend(self.plugin_tools.iter().map(|tool| tool.definition().name.clone()));
+        names.extend(
+            self.runtime_tools
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .map(|tool| tool.name.clone()),
+        );
+        names
+    }
+
     #[must_use]
     pub fn has_runtime_tool(&self, name: &str) -> bool {
         if self.is_tool_disabled(name) {

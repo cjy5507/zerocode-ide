@@ -47,6 +47,7 @@ pub mod conflict;
 pub mod continue_gate;
 pub mod credential;
 pub mod delegation;
+pub mod effort_chip;
 pub mod evidence_digest;
 pub mod explain;
 pub mod explain_desk;

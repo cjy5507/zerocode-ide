@@ -951,6 +951,31 @@ pub(crate) fn set_conversation_timeline_view(
     )
 }
 
+/// What an agent's pane opens on: its conversation or its terminal (t-82038).
+///
+/// A typed enum, so a word the window misspells is refused by deserialization
+/// instead of becoming a silent default. The window reads the answer once for
+/// each pane, when it is first seen running an agent; a pane the person turned
+/// with its head's switch stays where they turned it.
+#[tauri::command(async)]
+pub(crate) fn set_agent_pane_first_view(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    view: AgentPaneFirstView,
+) -> Result<SettingsSnapshot, String> {
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::AGENT_PANE_FIRST_VIEW],
+        move |settings| {
+            settings.agent_pane_first_view = view;
+            Ok(())
+        },
+    )
+}
+
 /// Change one editor/diff wrapping preference against the latest document.
 /// The tagged patch lets stale windows edit different controls without either
 /// replacing the sibling value it has not re-read yet.

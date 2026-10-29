@@ -144,6 +144,7 @@ pub(super) mod setting_key {
     pub const ARTIFACTS_AUTO_OPEN_BESIDE: &str = "artifacts_auto_open_beside";
     pub const DIFF_SIDE_BY_SIDE: &str = "diff_side_by_side";
     pub const CONVERSATION_TIMELINE_VIEW: &str = "conversation_timeline_view";
+    pub const AGENT_PANE_FIRST_VIEW: &str = "agent_pane_first_view";
     pub const PANEL_WIDTHS: &str = "panel_widths";
     pub const WORKTREE_PREFS: &str = "worktree_prefs";
     pub const NOTIFICATIONS: &str = "notifications";
@@ -992,6 +993,18 @@ pub(super) enum SourceControlCompareBase {
     #[default]
     RepositoryDefault,
     BranchUpstream,
+}
+
+/// What an agent's pane shows when it opens (t-82038): its conversation — the
+/// transcript view — or the agent's own terminal screen. The conversation is
+/// what a person who never chose gets; the switch on the pane's head moves any
+/// one pane either way, whatever this says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum AgentPaneFirstView {
+    #[default]
+    Conversation,
+    Terminal,
 }
 
 /// Where the setup command is shown while a newly-created workspace is
@@ -2462,6 +2475,12 @@ pub(super) struct SettingsDocument {
     /// (no field reads it — the document refuses no unknown key).
     #[serde(default)]
     pub(super) conversation_timeline_view: bool,
+    /// What an agent's pane opens on — its conversation or its terminal
+    /// (t-82038). The window reads it once for each pane, when the pane is
+    /// first seen running an agent, so a change applies to the panes opened
+    /// after it and leaves the open ones as they stand.
+    #[serde(default)]
+    pub(super) agent_pane_first_view: AgentPaneFirstView,
     #[serde(default)]
     pub(super) window_material: WindowMaterial,
     #[serde(default)]
@@ -2676,6 +2695,7 @@ impl Default for SettingsDocument {
             vault_session_limit: default_vault_session_limit(),
             diff_side_by_side: true,
             conversation_timeline_view: false,
+            agent_pane_first_view: AgentPaneFirstView::Conversation,
             window_material: WindowMaterial::default(),
             default_agent: zerocode_core::DefaultAgentPreference::Auto,
             agent_teams_mode: TeamsMode::default(),
