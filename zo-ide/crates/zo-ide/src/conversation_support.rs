@@ -213,8 +213,14 @@ mod unknown_rule_warning_tests {
     use super::unknown_rule_warnings;
 
     /// The warnings for the settings `home` and `project` hold, with
-    /// `disabled` tools turned off in the registry.
-    fn warnings_for(home: &str, project: Option<&str>, disabled: &[&str]) -> (Vec<String>, String, String) {
+    /// `disabled` tools turned off in the registry and `offered` added to it
+    /// as runtime tools.
+    fn warnings_for(
+        home: &str,
+        project: Option<&str>,
+        disabled: &[&str],
+        offered: &[&str],
+    ) -> (Vec<String>, String, String) {
         let root = tempfile::tempdir().expect("a scratch folder");
         let home_dir = root.path().join("home");
         let cwd = root.path().join("work");
@@ -231,6 +237,19 @@ mod unknown_rule_warning_tests {
         registry
             .context()
             .set_disabled_tools(disabled.iter().map(|tool| (*tool).to_string()).collect::<BTreeSet<_>>());
+        registry
+            .set_runtime_tools(
+                offered
+                    .iter()
+                    .map(|name| tools::RuntimeToolDefinition {
+                        name: (*name).to_string(),
+                        description: None,
+                        input_schema: serde_json::json!({"type": "object"}),
+                        required_permission: runtime::PermissionMode::WorkspaceWrite,
+                    })
+                    .collect(),
+            )
+            .expect("the runtime tools register");
         (
             unknown_rule_warnings(config.feature_config(), &registry),
             home_file.display().to_string(),
@@ -249,6 +268,9 @@ mod unknown_rule_warning_tests {
             r#"{"permissions": {"deny": ["Edti(x)", "WebSearch", "Task(x)", "Edit(*.env)"]}}"#,
             Some(r#"{"permissions": {"deny": ["Edti(x)"]}}"#),
             &["WebSearch"],
+            // zo keeps `TaskCreate` from the model today; were it offered, a
+            // rule written for Claude Code's `Task` must still not point at it.
+            &["TaskCreate"],
         );
         assert!(
             lines.contains(&format!(
@@ -262,7 +284,7 @@ mod unknown_rule_warning_tests {
         );
 
         let (ordered, ordered_home, _) =
-            warnings_for(r#"{"permissions": {"rules": ["Edti(x)=deny"]}}"#, None, &[]);
+            warnings_for(r#"{"permissions": {"rules": ["Edti(x)=deny"]}}"#, None, &[], &[]);
         assert_eq!(
             ordered,
             vec![format!(
