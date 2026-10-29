@@ -25751,6 +25751,10 @@ mod progress;
 /// t-65286: which project a run belongs to, and the run a verb answers in
 /// (`tests/project_scope.rs`).
 mod project_scope;
+/// t-83289: a question stays answered when the chairs move, a reply finds
+/// the asking run when the asking pane is gone, and either side's chair
+/// closes a question with `question-close` (`tests/question_close.rs`).
+mod question_close;
 /// t-59383 r2: a question nobody waits on any more — three days unanswered,
 /// or a day after the chair it was asked from emptied — is closed for every
 /// count (`tests/question_expiry.rs`).
