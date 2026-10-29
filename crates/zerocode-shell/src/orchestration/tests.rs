@@ -29099,6 +29099,244 @@ fn measure_the_idle_beat_on_a_large_ledger() {
     );
 }
 
+/// The person's ledger by its counts and sizes on 2026-10-29 (t-81273),
+/// built here and never read from anybody's disk: 76 runs, 2,156 tasks
+/// carrying 4.6 KB of words each, and 43,540 letters of 585 bytes — 17,545
+/// in one run, 10,666 in another — acknowledged in batches of fifty. One
+/// letter in twenty is two months old and none is its writer's last word,
+/// about the share of the person's mail that is old enough to fold.
+#[cfg(target_os = "macos")]
+const PERSONS_RUNS: usize = 76;
+#[cfg(target_os = "macos")]
+const PERSONS_TASKS: usize = 2_156;
+#[cfg(target_os = "macos")]
+const PERSONS_LONGEST_RUNS: [usize; 2] = [17_545, 10_666];
+#[cfg(target_os = "macos")]
+const PERSONS_OTHER_LETTERS: usize = 15_329;
+#[cfg(target_os = "macos")]
+const PERSONS_LETTER_BYTES: usize = 585;
+#[cfg(target_os = "macos")]
+const PERSONS_TASK_BYTES: usize = 4_600;
+#[cfg(target_os = "macos")]
+const PERSONS_WRITERS: usize = 4;
+#[cfg(target_os = "macos")]
+const PERSONS_BATCH: usize = 50;
+/// The clock the measurement writes and sweeps at.
+#[cfg(target_os = "macos")]
+const MEASURED_AT_MS: i64 = 2_000_000_000_000;
+#[cfg(target_os = "macos")]
+const A_DAY_MS: i64 = 86_400_000;
+
+#[cfg(target_os = "macos")]
+fn a_ledger_the_persons_size() -> zerocode_core::orchestration::LedgerProjectionV1 {
+    use zerocode_core::orchestration::{AckedRow, InboxRow, MessageKind, MessageRow, Text};
+    let mut ledger = super::Ledger::new();
+    let runs: Vec<String> = (0..PERSONS_RUNS)
+        .map(|at| ledger.create_run(&format!("measured run {at}"), 1))
+        .collect();
+    for task in 0..PERSONS_TASKS {
+        ledger
+            .create_task(
+                &runs[task % PERSONS_RUNS],
+                "s".repeat(PERSONS_TASK_BYTES),
+                format!("task {task}"),
+                Vec::new(),
+                None,
+                2,
+            )
+            .expect("a measured task");
+    }
+    let mut rows = ledger.export();
+    let mut next = rows.next_id;
+    let mut mint = |prefix: &str| {
+        next += 1;
+        format!("{prefix}{next}")
+    };
+    let others = PERSONS_RUNS - PERSONS_LONGEST_RUNS.len();
+    for (at, run) in runs.iter().enumerate() {
+        let letters = PERSONS_LONGEST_RUNS.get(at).copied().unwrap_or_else(|| {
+            let rank = at - PERSONS_LONGEST_RUNS.len();
+            PERSONS_OTHER_LETTERS / others + usize::from(rank < PERSONS_OTHER_LETTERS % others)
+        });
+        let address = format!("run:{run}");
+        let mut batch = Vec::new();
+        let mut seq = 0_u32;
+        for n in 0..letters {
+            let id = mint("m-");
+            let old = n % 20 == 0 && n + PERSONS_WRITERS < letters;
+            let age_days = if old { 60 } else { 1 };
+            rows.messages.push(MessageRow {
+                run: run.clone(),
+                id: id.clone(),
+                from: format!("worker:w-writer-{}", n % PERSONS_WRITERS),
+                to: address.clone(),
+                kind: MessageKind::Status,
+                body: Text::from("b".repeat(PERSONS_LETTER_BYTES)),
+                subject: Text::default(),
+                priority: Default::default(),
+                payload: Text::default(),
+                thread: None,
+                task: None,
+                dispatch: None,
+                author_seat: None,
+                created_ms: MEASURED_AT_MS - age_days * A_DAY_MS,
+            });
+            batch.push(id);
+            if batch.len() == PERSONS_BATCH || n + 1 == letters {
+                rows.acked.push(AckedRow {
+                    run: run.clone(),
+                    address: address.clone(),
+                    delivery: mint("d-"),
+                    messages: Some(std::mem::take(&mut batch)),
+                    seq,
+                    current: n + 1 == letters,
+                });
+                seq += 1;
+            }
+        }
+        rows.inboxes.push(InboxRow {
+            run: run.clone(),
+            address,
+            pending: Vec::new(),
+            open: None,
+        });
+    }
+    rows.next_id = next + 1;
+    rows
+}
+
+/// This process's memory as macOS counts it, in MiB: what it holds now (the
+/// footprint the Activity Monitor shows, and the resident pages) and the
+/// most it ever held.
+#[cfg(target_os = "macos")]
+fn memory_now_mib() -> (u64, u64, u64) {
+    const MIB: u64 = 1024 * 1024;
+    // SAFETY: zeroed is a valid rusage_info_v4, and proc_pid_rusage fills
+    // the struct of the flavour it is asked for, for this very process.
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    let read = unsafe {
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V4,
+            std::ptr::addr_of_mut!(info).cast(),
+        )
+    };
+    assert_eq!(read, 0, "this process's own usage could not be read");
+    (
+        info.ri_phys_footprint / MIB,
+        info.ri_resident_size / MIB,
+        info.ri_lifetime_max_phys_footprint / MIB,
+    )
+}
+
+/// What a window holds and spends on a ledger the person's size (t-81273):
+/// one boot, then writes each followed by the window's read and a board
+/// refresh, then a sweep and the rows the next start reads. Prints, never
+/// asserts — the same code measures the window before the change and after
+/// it. Run it under `taskpolicy -b` for the low-spec profile.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "a measurement: prints a window's memory and ledger times on a ledger the person's size"]
+fn measure_a_window_on_a_ledger_the_persons_size() {
+    const WRITES: usize = 30;
+    let millis = |at: std::time::Instant| at.elapsed().as_secs_f64() * 1000.0;
+    let seeded = a_ledger_the_persons_size();
+    let letters = seeded.messages.len();
+    let (footprint, resident, _) = memory_now_mib();
+    eprintln!("measure: built {letters} letters; footprint={footprint} resident={resident}");
+
+    let booted = std::time::Instant::now();
+    let (_window, store) = PrivateWindow::boot_seeded(seeded);
+    let boot_ms = millis(booted);
+    let _beat = one_beat_at_a_time();
+    let held = super::runtime().expect("this window's runtime");
+    let read = std::time::Instant::now();
+    let runs: Vec<String> = super::ledger_image()
+        .expect("the window's ledger")
+        .runs()
+        .iter()
+        .map(|run| run.id.clone())
+        .collect();
+    let first_read_ms = millis(read);
+    super::refresh_board_ledger();
+    let (footprint, resident, _) = memory_now_mib();
+    eprintln!(
+        "measure: booted in {boot_ms:.0}ms, first read {first_read_ms:.1}ms; \
+         footprint={footprint} resident={resident}"
+    );
+
+    let (mut writes, mut reads, mut boards) = (Vec::new(), Vec::new(), Vec::new());
+    let mut sampled_peak = 0;
+    for (at, run) in runs.iter().take(WRITES).enumerate() {
+        let wrote = std::time::Instant::now();
+        held.actor
+            .note_run_project(
+                run.clone(),
+                format!("/tmp/measured-{at}"),
+                zerocode_core::orchestration::ProjectSource::Workers,
+                None,
+                MEASURED_AT_MS + at as i64,
+            )
+            .expect("a measured write");
+        writes.push(millis(wrote));
+        let read = std::time::Instant::now();
+        let tasks: usize = super::ledger_image()
+            .expect("the window's ledger")
+            .runs()
+            .iter()
+            .map(|run| run.tasks.len())
+            .sum();
+        assert_eq!(tasks, PERSONS_TASKS);
+        reads.push(millis(read));
+        let board = std::time::Instant::now();
+        super::refresh_board_ledger();
+        boards.push(millis(board));
+        sampled_peak = sampled_peak.max(memory_now_mib().0);
+    }
+    let middle = |times: &mut Vec<f64>| {
+        times.sort_by(f64::total_cmp);
+        (times[times.len() / 2], times[times.len() * 9 / 10])
+    };
+    let (write_p50, write_p90) = middle(&mut writes);
+    let (read_p50, read_p90) = middle(&mut reads);
+    let (board_p50, board_p90) = middle(&mut boards);
+    let (footprint, resident, lifetime_peak) = memory_now_mib();
+    eprintln!(
+        "measure: {WRITES} writes p50={write_p50:.1}ms p90={write_p90:.1}ms; the window's read \
+         after each p50={read_p50:.2}ms p90={read_p90:.2}ms; board p50={board_p50:.1}ms \
+         p90={board_p90:.1}ms; footprint steady={footprint} sampled peak={sampled_peak} \
+         lifetime peak={lifetime_peak} resident={resident}"
+    );
+
+    let start_reads = |what: &str| {
+        let read = std::time::Instant::now();
+        let rows = zerocode_orchestrator::ledger_store::read(
+            &store.connection().expect("the measured store"),
+            "main-ledger",
+            zerocode_core::orchestration::PROJECTION_SCHEMA,
+        )
+        .expect("the measured store reads")
+        .expect("the measured ledger");
+        let letters = rows.projection.messages.len();
+        let read_ms = millis(read);
+        let rebuilt = std::time::Instant::now();
+        let ledger = super::Ledger::rebuild(rows.projection).expect("the measured ledger rebuilds");
+        let rebuild_ms = millis(rebuilt);
+        drop(ledger);
+        eprintln!(
+            "measure: {what}: a start reads {letters} letters in {read_ms:.0}ms and \
+             rebuilds them in {rebuild_ms:.0}ms"
+        );
+    };
+    start_reads("before the sweep");
+    let swept = held
+        .actor
+        .retention_sweep(MEASURED_AT_MS + A_DAY_MS)
+        .expect("the measured sweep");
+    eprintln!("measure: the sweep {swept:?}");
+    start_reads("after the sweep");
+}
+
 /// t-21017: a pointer that cannot be typed is told on both sides, once per
 /// waiting message — the person at the pane in the window's words, the
 /// sender in a letter from the ledger — and never with the message's body.
