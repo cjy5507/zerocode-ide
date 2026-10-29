@@ -7,7 +7,7 @@
 
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,9 +16,13 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
-use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 use nix::poll::{poll, PollFd, PollFlags};
-use nix::pty::{openpty, Winsize};
+use nix::pty::Winsize;
+
+// Every pty here opens through the helper the lib's own tests use: both ends
+// close-on-exec, a lost parallel open tried again (t-78154).
+#[path = "pty_open.rs"]
+mod pty_open;
 
 /// 120x40 mirrors the capture scripts. `ZO_E2E_ROWS` overrides it for the
 /// repaint measurement, which needs a screen the viewport can actually reach
@@ -95,6 +99,9 @@ fn terminal_command(binary: &Path, terminal: Terminal, slave_path: &Path) -> Com
 /// neither.
 #[cfg(target_os = "macos")]
 fn slave_device_path(slave: &File) -> io::Result<PathBuf> {
+    use nix::fcntl::{fcntl, FcntlArg};
+    use std::os::fd::AsRawFd as _;
+
     let mut path = PathBuf::new();
     fcntl(slave.as_raw_fd(), FcntlArg::F_GETPATH(&mut path))
         .map_err(|errno| io::Error::other(format!("F_GETPATH on the pty slave: {errno}")))?;
@@ -286,18 +293,14 @@ impl PtyRun {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        let pair = openpty(Some(&winsize), None::<&nix::sys::termios::Termios>)
-            .map_err(io::Error::from)?;
+        // Both ends close-on-exec, as the window's pty marks them
+        // (portable_pty's `cloexec`). An inheritable master the child kept a
+        // copy of left the terminal open after the test closed every copy it
+        // held — no hang-up, no EIO, none of what a pane closing under a
+        // program is.
+        let pair = pty_open::open_pty(Some(&winsize)).map_err(io::Error::from)?;
         let master = File::from(pair.master);
         let slave = File::from(pair.slave);
-        // Both ends close-on-exec, as the window's pty marks them
-        // (portable_pty's `cloexec`). `openpty` hands them over inheritable:
-        // the child kept a master of its own, and closing every copy the test
-        // held left the terminal open — no hang-up, no EIO, none of what a
-        // pane closing under a program is.
-        for end in [&master, &slave] {
-            fcntl(end.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(io::Error::from)?;
-        }
         let slave_path = slave_device_path(&slave)?;
 
         let mut command = terminal_command(&zo_binary(), terminal, &slave_path);
@@ -1253,7 +1256,7 @@ mod tests {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        let pair = nix::pty::openpty(Some(&size), None::<&nix::sys::termios::Termios>).unwrap();
+        let pair = super::pty_open::open_pty(Some(&size)).unwrap();
         let mut master = File::from(pair.master);
         let slave = File::from(pair.slave);
         let path = slave_device_path(&slave).unwrap();

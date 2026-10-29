@@ -133,9 +133,10 @@ mod tests {
 
     /// A pty whose other end is open has not hung up; once that end closes,
     /// the way the window closes a pane, it has — once every copy of it has
-    /// closed. A child a parallel test spawned while the end was open inherited
-    /// one (`openpty` hands both ends over inheritable) and holds it until the
-    /// child exits, so the hang-up is waited for, not looked at once (l81d).
+    /// closed. A child a parallel test spawned while the end was open used to
+    /// inherit one and hold it until it exited (l81d), so the hang-up is waited
+    /// for, not looked at once. The test's ends close on exec now (t-78154);
+    /// the wait stays, and only a failure reaches its bound.
     #[cfg(unix)]
     #[test]
     fn a_pty_has_hung_up_once_its_other_end_closes() {

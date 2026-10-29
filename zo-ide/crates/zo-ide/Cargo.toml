@@ -93,3 +93,8 @@ zerocode-harness = { path = "../../../crates/zerocode-harness" }
 # unchanged, and so is `poll`, which lets the reader let go of the master when
 # a test hangs the terminal up the way a window closes a pane.
 nix ={ version = "0.29", features = ["fs", "poll", "term", "signal"] }
+# A test's pty opens both ends with `O_CLOEXEC` through rustix's safe `open`,
+# `grantpt`, `unlockpt` and `ptsname` (`tests/e2e/pty_open.rs`): nix's
+# `ptsname` is `unsafe` on macOS, which `unsafe_code = "forbid"` rules out.
+# The same rustix the crate already links, with two more features for tests.
+rustix = { version = "1", default-features = false, features = ["std", "fs", "pty", "termios"] }
