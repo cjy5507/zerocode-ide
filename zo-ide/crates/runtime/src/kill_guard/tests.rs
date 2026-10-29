@@ -5,9 +5,9 @@
 
 use std::cell::Cell;
 
-use zerocode_core::shell_rule::kill::{KillVerdict, ProcessTable, WINDOW_PID_ENV};
+use zerocode_core::shell_rule::kill::{KillVerdict, ProcessTable, TABLE_READ_WALL, WINDOW_PID_ENV};
 
-use super::{judge, judge_with, summoned_worker};
+use super::{judge, judge_with, summoned_worker, table_read_time, TABLE_READ_TIME};
 
 /* ---- a table handed in ------------------------------------------------------ */
 
@@ -149,6 +149,15 @@ fn kill_guard_asks_when_the_table_does_not_read() {
         judge_with("pkill -f zo-step", ME, in_window, unread),
         Some(KillVerdict::Ask { .. })
     ));
+}
+
+/// The minute this crate's tests give `ps` never reaches zo: a build that is
+/// not a test gives it the guard's own time, past which a kill call is a
+/// question (t-81315, 4275 m-84899).
+#[test]
+fn kill_guard_gives_ps_the_guards_time_outside_a_test_build() {
+    assert_eq!(table_read_time(false), TABLE_READ_WALL, "zo's build");
+    assert_eq!(TABLE_READ_TIME, table_read_time(true), "this test build");
 }
 
 #[test]

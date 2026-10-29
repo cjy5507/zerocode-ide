@@ -31,17 +31,23 @@ use zerocode_core::shell_rule::kill::{
 /// the model after an escalation that changes nothing.
 const NOT_THE_MODE: &str = "Permission audit: the kill guard decides this in every permission mode, so a wider mode changes nothing; do not retry the identical call.";
 
-/// How long [`judge`] gives `ps` to list the processes: in zo, the guard's
-/// [`kill::TABLE_READ_WALL`], past which a kill call is a question.
-#[cfg(not(test))]
-const TABLE_READ_TIME: std::time::Duration = kill::TABLE_READ_WALL;
-/// How long [`judge`] gives `ps` in this crate's tests: a minute. They judge
-/// real processes, and their answer must not turn on how fast `ps` is under a
-/// release lane's load — it took up to 9.8 s at load 22, and a kill at the
-/// window ran (t-83535, t-81315). A table that does not read is judged with
-/// [`judge_with`].
-#[cfg(test)]
-const TABLE_READ_TIME: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long [`judge`] gives `ps` to list the processes, both values in one
+/// place so a test can hold zo's (t-81315). In zo, the guard's
+/// [`kill::TABLE_READ_WALL`], past which a kill call is a question. In this
+/// crate's tests, a minute: they judge real processes, and their answer must
+/// not turn on how fast `ps` is under a release lane's load — it took up to
+/// 9.8 s at load 22, and a kill at the window ran (t-83535). A table that
+/// does not read is judged with [`judge_with`].
+const fn table_read_time(test_build: bool) -> std::time::Duration {
+    if test_build {
+        std::time::Duration::from_secs(60)
+    } else {
+        kill::TABLE_READ_WALL
+    }
+}
+
+/// [`table_read_time`] for this build.
+const TABLE_READ_TIME: std::time::Duration = table_read_time(cfg!(test));
 
 /// The judgment for `command` run by this process; `None` when it makes no
 /// kill call, and then the process table is not read.
