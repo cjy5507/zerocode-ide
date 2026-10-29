@@ -114,6 +114,30 @@ fn tests_judging_a_release_at_once_draw_from_bands_that_do_not_meet() {
     );
 }
 
+/// A claim that finds no port says why when it was the lock files that could
+/// not be taken, not their holders (R10 P2, t-75669).
+#[test]
+fn a_claim_whose_locks_cannot_be_opened_says_the_os_words() {
+    let apart = tempfile::tempdir().expect("a lock folder of its own");
+    let dir = apart.path().join("file");
+    std::fs::write(&dir, "not a folder").expect("a file where the folder goes");
+    let cause = std::fs::create_dir_all(&dir)
+        .expect_err("a file is no folder")
+        .to_string();
+    let band = band_for(os_dynamic_start());
+    let band = band.start..band.start + 2;
+    let panic = std::panic::catch_unwind(|| QuietPort::claim_apart(&dir, &band, bind_loopback))
+        .err()
+        .expect("no port can be locked in a file");
+    let message = panic.downcast_ref::<String>().expect("a panic message");
+    assert!(
+        message.contains("2 of its lock files could not be taken"),
+        "{message}"
+    );
+    assert!(message.contains(&cause), "{message}");
+    assert!(message.contains(&dir.display().to_string()), "{message}");
+}
+
 #[test]
 fn a_port_stays_taken_until_its_holder_lets_go() {
     release_is_seen(|_| {});

@@ -312,7 +312,13 @@ mod slot_tests {
 
     impl Drop for LockDir {
         fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.0).expect("remove the test's slot lock folder");
+            // A test may have put a file where the folder goes.
+            let removed = if self.0.is_dir() {
+                std::fs::remove_dir_all(&self.0)
+            } else {
+                std::fs::remove_file(&self.0)
+            };
+            removed.expect("remove the test's slot lock folder");
         }
     }
 
@@ -366,6 +372,30 @@ mod slot_tests {
         let message = panic.downcast_ref::<String>().expect("a panic message");
         assert!(message.contains("timed out after 20ms"), "{message}");
         assert!(message.contains("all 8 bands"), "{message}");
+        assert!(message.contains(&dir.0.display().to_string()), "{message}");
+    }
+
+    /// A lock that cannot be opened is held by nobody: a claim that read it
+    /// as held waited its whole thirty seconds and then blamed holders, the
+    /// OS's own words lost (R10 P2, t-75669 — EMFILE when parallel tests had
+    /// spent the file handles). A file where the lock folder goes cannot be
+    /// locked in; a read-only folder does not stand in, since the durable
+    /// writes put its permissions back.
+    #[test]
+    fn a_lock_folder_that_cannot_be_opened_is_said_with_the_os_words_not_read_as_held() {
+        let dir = LockDir::new();
+        std::fs::write(&dir.0, "not a folder").expect("a file where the folder goes");
+        let cause = std::fs::create_dir_all(&dir.0)
+            .expect_err("a file is no folder")
+            .to_string();
+        let panic = std::panic::catch_unwind(|| {
+            apart_slot_in(&dir.0, None, Duration::from_millis(20), std::thread::sleep)
+        })
+        .err()
+        .expect("no slot can be taken in a file");
+        let message = panic.downcast_ref::<String>().expect("a panic message");
+        assert!(message.contains("8 could not be locked"), "{message}");
+        assert!(message.contains(&cause), "{message}");
         assert!(message.contains(&dir.0.display().to_string()), "{message}");
     }
 }
