@@ -4955,8 +4955,14 @@ fn answer(text: &str) -> SceneScript {
 /// The code rides both places a backend puts it: top level (SSE `error` events)
 /// and under `error` (the WebSocket error frame).
 fn server_error_connection() -> SceneScript {
+    server_error_connection_after(std::time::Duration::ZERO)
+}
+
+/// [`server_error_connection`], its failure frame arriving after `pause`: a
+/// connection as slow as the backend or the machine makes it.
+fn server_error_connection_after(pause: std::time::Duration) -> SceneScript {
     vec![(
-        std::time::Duration::ZERO,
+        pause,
         SceneBeat::Event(json!({
             "type": "error",
             "code": "server_error",
@@ -5279,9 +5285,15 @@ async fn quick_failures_then_silence_end_at_the_ceiling_websocket() {
 /// Scene R: seven server errors in a row, then silence: the shape of the
 /// reported turn. The eighth connection waits only the bundle's rest, and the
 /// final error names the seven server errors that came before it.
+///
+/// Each error comes a fifth of the ceiling after its connection opens, as
+/// slow as a Windows runner opens one (about 29 ms, t-76270): seven of them
+/// outlast the ceiling, and the scene still reaches the eighth.
 #[tokio::test]
 async fn seven_server_errors_then_silence_names_the_bundle_and_ends_at_the_ceiling() {
-    let mut scripts: Vec<SceneScript> = (0..7).map(|_| server_error_connection()).collect();
+    let slow = SCENE_CEILING / 5;
+    let mut scripts: Vec<SceneScript> =
+        (0..7).map(|_| server_error_connection_after(slow)).collect();
     scripts.push(silent_connection());
     scripts.push(answer("never reached"));
     let (text, error, connections, elapsed) = run_scene(SceneWire::Sse, scripts).await;
