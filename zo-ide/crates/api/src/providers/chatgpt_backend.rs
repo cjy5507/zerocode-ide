@@ -1671,6 +1671,10 @@ pub struct ChatGptBackendClient {
     /// [`MAX_RESTART_WALLCLOCK`]). A field so the scenario tests can scale it
     /// with the stall window, keeping production's ratio of ceiling to window.
     max_restart_wallclock: std::time::Duration,
+    /// How long a stream stays quiet before its one quiet-stretch notice (see
+    /// [`CHATGPT_QUIET_REASONING_NOTICE_AFTER`]). A field so the scenario tests
+    /// can reach the notice in milliseconds instead of seconds.
+    quiet_notice_after: std::time::Duration,
 }
 
 impl ChatGptBackendClient {
@@ -1690,6 +1694,7 @@ impl ChatGptBackendClient {
             transport: None,
             held: HeldSlot::default(),
             max_restart_wallclock: MAX_RESTART_WALLCLOCK,
+            quiet_notice_after: CHATGPT_QUIET_REASONING_NOTICE_AFTER,
         }
     }
 
@@ -2540,6 +2545,18 @@ impl AttemptHeard {
         }
     }
 
+    /// The notice a quiet stretch raises once it has lasted `quiet_for`.
+    fn quiet_notice(quiet_for: std::time::Duration) -> StreamRetryNotice {
+        StreamRetryNotice {
+            kind: core_types::StreamNoticeKind::QuietReasoning,
+            label: core_types::QUIET_REASONING_LABEL,
+            attempt: 0,
+            max_attempts: 0,
+            delay: quiet_for,
+            no_progress: None,
+        }
+    }
+
     /// The record in words, for the error: `response.created, then keep-alives
     /// only`.
     fn words(&self) -> String {
@@ -2576,6 +2593,19 @@ impl AttemptHeard {
         });
         format!("{events}; {} keep-alives{after}{last}", self.keep_alives)
     }
+}
+
+/// The notice a ChatGPT stream raises for a quiet stretch that has lasted
+/// `quiet_for` after an attempt heard `events` (t-71285): the one the stream
+/// sends, readable by a consumer's test without opening a stream.
+#[must_use]
+pub fn chatgpt_quiet_stretch_notice(
+    events: &[Value],
+    quiet_for: std::time::Duration,
+) -> StreamRetryNotice {
+    let mut heard = AttemptHeard::sent_at(std::time::Instant::now());
+    heard.hear(events);
+    AttemptHeard::quiet_notice(quiet_for)
 }
 
 /// An event's kind as an attempt's record keeps it: its `type`, and for an
@@ -2823,18 +2853,11 @@ impl ChatGptStream {
                             return Err(self.wrap_restart_exhaustion(error));
                         }
                         if !quiet_notified
-                            && since.elapsed() >= CHATGPT_QUIET_REASONING_NOTICE_AFTER
+                            && since.elapsed() >= self.client.quiet_notice_after
                         {
                             quiet_notified = true;
                             if let Some(notice) = &self.retry_notice {
-                                notice(StreamRetryNotice {
-                                    kind: core_types::StreamNoticeKind::QuietReasoning,
-                                    label: core_types::QUIET_REASONING_LABEL,
-                                    attempt: 0,
-                                    max_attempts: 0,
-                                    delay: since.elapsed(),
-                                    no_progress: None,
-                                });
+                                notice(AttemptHeard::quiet_notice(since.elapsed()));
                             }
                         }
                     }

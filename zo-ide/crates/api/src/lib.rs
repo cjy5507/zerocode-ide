@@ -69,7 +69,8 @@ pub use providers::anthropic::{
     resolve_claude_auth_fresh_detailed, resolve_claude_auth_fresh_explained,
 };
 pub use providers::chatgpt_backend::{
-    ORIGINATOR as CHATGPT_ORIGINATOR, USER_AGENT as CHATGPT_USER_AGENT,
+    chatgpt_quiet_stretch_notice, ORIGINATOR as CHATGPT_ORIGINATOR,
+    USER_AGENT as CHATGPT_USER_AGENT,
 };
 pub use providers::cli_sessions;
 pub use providers::cli_sessions::{
