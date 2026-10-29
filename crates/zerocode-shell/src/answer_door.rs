@@ -1136,6 +1136,97 @@ mod tests {
         assert_eq!(pane.typed(), vec!["/exit"]);
     }
 
+    /// How long a fake CLI on a real pty takes to leave after the keys the
+    /// hand-over types (`cmd::wire::hand_over_pane`): the exit command's first
+    /// key through this door, the rest after the line's step. The CLI reads
+    /// nothing for its first `deaf` seconds — a resumed Claude Code can draw
+    /// its screen and read no input for up to a minute — and then reads lines
+    /// until its exit command. `None` when it is still there after the
+    /// hand-over's wait (`HAND_OVER_EXIT_WAIT`); `then` says when it left,
+    /// looked for up to `after` more. A shell loop; no agent runs.
+    #[cfg(unix)]
+    fn fake_cli_leaves(deaf: u64, after: Duration) -> (Option<Duration>, Option<Duration>) {
+        use crate::cmd::wire::{HAND_OVER_EXIT_POLL, HAND_OVER_EXIT_WAIT};
+        let exit = zerocode_core::agent::agent_voice("claude")
+            .exit_command
+            .expect("claude has an exit command");
+        let script = format!(
+            "sleep {deaf}; while IFS= read -r line; do [ \"$line\" = '{exit}' ] && exit 0; done"
+        );
+        let lane =
+            zerocode_pty::PtyLane::spawn("/bin/sh", &["-c".into(), script], None, &[], 24, 80)
+                .expect("the fake CLI starts");
+        let held: HeldTerminal = Arc::new(Mutex::new(PtyHandle::new(lane)));
+        let (groups, step) = zerocode_core::ask::line_keys(exit);
+        let (first, rest) = groups.split_first().expect("a line has keys");
+        let key = |group| crate::cmd::terminal::key_group_bytes(group);
+        let started = Instant::now();
+        assert_eq!(
+            type_if_up(&held, &Expect::no_menu(), &key(first)).ok(),
+            Some(true),
+            "a resting screen takes the exit command"
+        );
+        for group in rest {
+            std::thread::sleep(step);
+            lock_pty(&held)
+                .write_input(&key(group))
+                .expect("the line's keys");
+        }
+        let left = |until: Duration| {
+            while started.elapsed() < until {
+                let mut pty = lock_pty(&held);
+                pty.pump();
+                if pty.try_wait().ok().flatten().is_some() {
+                    return Some(started.elapsed());
+                }
+                drop(pty);
+                std::thread::sleep(HAND_OVER_EXIT_POLL);
+            }
+            None
+        };
+        let within = left(HAND_OVER_EXIT_WAIT);
+        let then = within.or_else(|| left(HAND_OVER_EXIT_WAIT + after));
+        let _ = lock_pty(&held).kill();
+        (within, then)
+    }
+
+    /// The hand-over's exit line ends a CLI resting at its prompt at once,
+    /// and one that reads nothing for its first two seconds still within the
+    /// hand-over's wait: the pty keeps the keys until the CLI reads (t-84850,
+    /// the 「대화」 road's first turn on).
+    #[cfg(unix)]
+    #[test]
+    fn a_hand_overs_exit_line_ends_a_resting_cli_and_one_that_reads_late() {
+        let (resting, _) = fake_cli_leaves(0, Duration::ZERO);
+        let resting = resting.expect("a resting CLI kept its screen after its exit line");
+        assert!(
+            resting < Duration::from_secs(2),
+            "a resting CLI took {resting:?} to leave"
+        );
+        let (late, _) = fake_cli_leaves(2, Duration::ZERO);
+        let late = late.expect("a CLI reading 2 s late kept its screen past the hand-over's wait");
+        assert!(
+            late >= Duration::from_millis(1_900),
+            "a CLI that read nothing for 2 s left in {late:?}"
+        );
+        eprintln!("exit line: a resting CLI left in {resting:?}, one reading 2 s late in {late:?}");
+    }
+
+    /// What a CLI deaf for longer than the hand-over's wait does with the keys
+    /// typed into it: the window has refused by then and stopped the wire, and
+    /// the CLI still reads the line later. A shell loop leaves then — the
+    /// conversation on no screen and no wire; the measured Claude Code drops an
+    /// Enter written before its text shows and keeps `/exit` in its input line
+    /// (wiki: a resumed Claude reads no input for up to a minute).
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "measurement: cargo test -p zerocode-shell --bin zerocode-shell answer_door::tests::measure_a_cli_deaf_past_the_hand_overs_wait -- --ignored --nocapture"]
+    fn measure_a_cli_deaf_past_the_hand_overs_wait() {
+        let (within, then) = fake_cli_leaves(10, Duration::from_secs(5));
+        eprintln!("deaf 10 s: left within the wait {within:?}, left at {then:?}");
+        assert!(within.is_none() && then.is_some());
+    }
+
     /// A menu takes one row: the answer's single pick of a single-select
     /// question. Words only, several picks, a multi-select and an unanswered
     /// question are not a row.
