@@ -31,6 +31,18 @@ use zerocode_core::shell_rule::kill::{
 /// the model after an escalation that changes nothing.
 const NOT_THE_MODE: &str = "Permission audit: the kill guard decides this in every permission mode, so a wider mode changes nothing; do not retry the identical call.";
 
+/// How long [`judge`] gives `ps` to list the processes: in zo, the guard's
+/// [`kill::TABLE_READ_WALL`], past which a kill call is a question.
+#[cfg(not(test))]
+const TABLE_READ_TIME: std::time::Duration = kill::TABLE_READ_WALL;
+/// How long [`judge`] gives `ps` in this crate's tests: a minute. They judge
+/// real processes, and their answer must not turn on how fast `ps` is under a
+/// release lane's load — it took up to 9.8 s at load 22, and a kill at the
+/// window ran (t-83535, t-81315). A table that does not read is judged with
+/// [`judge_with`].
+#[cfg(test)]
+const TABLE_READ_TIME: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The judgment for `command` run by this process; `None` when it makes no
 /// kill call, and then the process table is not read.
 #[must_use]
@@ -39,7 +51,7 @@ pub fn judge(command: &str) -> Option<KillVerdict> {
         command,
         std::process::id(),
         |name| std::env::var(name).ok(),
-        || ProcessTable::read(kill::TABLE_READ_WALL),
+        || ProcessTable::read(TABLE_READ_TIME),
     )
 }
 
