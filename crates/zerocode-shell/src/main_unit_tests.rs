@@ -1166,6 +1166,37 @@ fn the_settings_view_marks_staged_and_default_profiles() {
     assert_eq!(wire["lastApply"]["applied"], 121);
     assert_eq!(wire["lastApply"]["refused"], 1);
     assert_eq!(wire["lastApply"]["atUnix"], 1_793_150_000);
+    assert!(
+        wire.get("imported").is_none(),
+        "a profile that never carried bookmarks says it did"
+    );
+
+    // 브라우저에서 북마크를 옮긴 프로필은 그 수를 「imported」로 싣는다 — 앞의
+    // 칸들은 그대로다(t-79331).
+    let carried = browser_profile_data::BookmarksRead {
+        bookmarks: vec![browser_profile_data::Bookmark {
+            title: "[합성-북마크]".to_string(),
+            url: "https://bookmark.example.com/".to_string(),
+            root: browser_profile_data::BookmarkRoot::Bar,
+            folder: None,
+        }],
+        ..browser_profile_data::BookmarksRead::default()
+    };
+    browser_profile_data::save_imported(
+        dir.path(),
+        &b,
+        &carried,
+        &browser_profile_data::WebDataRead::default(),
+        1_793_200_000,
+    )
+    .expect("carried");
+    let views = browser_profile_views(dir.path());
+    let view_b = views.iter().find(|view| view.id == b).expect("b is listed");
+    let wire = serde_json::to_value(view_b).expect("wire");
+    assert_eq!(wire["imported"]["bookmarks"], 1);
+    for kept in ["id", "name", "staged", "isDefault", "lastApply"] {
+        assert!(wire.get(kept).is_some(), "{kept} left the profile view");
+    }
 }
 
 /// 기본 프로필은 우리 mint가 지은, 실제로 있는 프로필만 될 수 있고,
@@ -1231,8 +1262,22 @@ fn deleting_a_profile_takes_its_staging_and_default_with_it() {
     )
     .expect("generation");
     choose_default_browser_profile(dir.path(), Some(&a)).expect("default");
+    browser_profile_data::save_imported(
+        dir.path(),
+        &a,
+        &browser_profile_data::BookmarksRead::default(),
+        &browser_profile_data::WebDataRead::default(),
+        1,
+    )
+    .expect("carried");
 
     remove_browser_profile(dir.path(), &a).expect("remove");
+    assert!(
+        !browser_profile_data::bookmarks_file(dir.path(), &a).exists()
+            && !browser_profile_data::address_book_file(dir.path(), &a).exists()
+            && !browser_profile_data::imported_file(dir.path(), &a).exists(),
+        "the carried bookmarks or addresses outlived the profile"
+    );
     assert!(
         !browser_cookie_import::generation_file(dir.path(), &a).exists(),
         "the staging's generation outlived the profile"

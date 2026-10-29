@@ -4,10 +4,11 @@
  * backend asks this page (`computer:self-act`) and the page answers by id
  * (`computer_self_answer`). Three requests:
  *
- *  - `look`: the visible controls, each with a role, a name, a value (never a
- *    secret field's, and of the text in a field only its length unless an
- *    agent's own fill put it there) and the facts the window already marks
- *    it with;
+ *  - `look`: the visible controls, each with a role, a name (of a control
+ *    that shows the person's own data, only the plain name the window wrote
+ *    for it), a value (never a secret field's, and of the text in a field
+ *    only its length unless an agent's own fill put it there) and the facts
+ *    the window already marks it with;
  *  - `facts`: one control's facts again, read now, right before a press;
  *  - `do`: press that control — click it, fill it, or scroll it — only when
  *    its facts are still the facts the backend judged.
@@ -51,6 +52,11 @@ const SELF_ACT_SECRET_HOLDERS = ".settings-pane, dialog, [role=dialog], .scrim";
 const SELF_ACT_TERMINAL = ".terminal";
 const SELF_ACT_PERSON_ONLY = "[data-person-only]";
 const SELF_ACT_SETTING = ".settings-pane";
+/* A control whose words are the person's own data — a saved address on a
+ * browser pane's fill strip (t-79331) — is named by its aria-label alone, the
+ * plain name the window wrote for it; the words it shows the person stay on
+ * the page. */
+const SELF_ACT_PRIVATE_WORDS = "[data-private-words]";
 
 const selfActLooks = new Map();
 let selfActNextLook = 0;
@@ -108,6 +114,7 @@ function selfActName(node) {
   const said = (text) => (text ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
   const aria = said(node.getAttribute("aria-label"));
   if (aria) return aria;
+  if (node.closest(SELF_ACT_PRIVATE_WORDS)) return "";
   const by = node.getAttribute("aria-labelledby");
   if (by) {
     const text = said(by.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? "").join(" "));

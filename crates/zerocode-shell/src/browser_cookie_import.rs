@@ -318,14 +318,10 @@ pub fn cookie_database_path(family: &str, profile: &str, home: &Path) -> Option<
             .into_iter()
             .find(|path| path.is_file()),
         _ => {
-            let def = CHROMIUM_BROWSERS.iter().find(|def| def.family == family)?;
-            if !is_safe_profile_directory(profile) {
-                return None;
-            }
             // Chromium은 프로필 바로 아래 또는 Network/ 아래에 둔다 —
             // 버전에 따라 갈리므로 서 있는 쪽이 답이다 (`chromium-cookie-
             // path.ts`).
-            let base = chromium_root(def, home)?.join(profile);
+            let base = chromium_profile_dir(family, profile, home)?;
             let network = base.join("Network/Cookies");
             if network.is_file() {
                 return Some(network);
@@ -334,6 +330,33 @@ pub fn cookie_database_path(family: &str, profile: &str, home: &Path) -> Option<
             flat.is_file().then_some(flat)
         }
     }
+}
+
+/// Chromium 표의 가족인가 — 북마크와 Web Data는 이 가족들만 같은 모양으로 둔다.
+pub fn is_chromium_family(family: &str) -> bool {
+    CHROMIUM_BROWSERS.iter().any(|def| def.family == family)
+}
+
+/// 한 Chromium 프로필의 폴더 — 쿠키·북마크·Web Data가 모두 여기 선다.
+/// 프로필 이름은 Local State에서 온 바깥 데이터라 담장을 먼저 지난다.
+pub fn chromium_profile_dir(family: &str, profile: &str, home: &Path) -> Option<PathBuf> {
+    let def = CHROMIUM_BROWSERS.iter().find(|def| def.family == family)?;
+    if !is_safe_profile_directory(profile) {
+        return None;
+    }
+    Some(chromium_root(def, home)?.join(profile))
+}
+
+/// 한 Chromium 프로필 폴더 안에 서 있는 파일(`Bookmarks`·`Web Data`). 없으면
+/// 없다.
+pub fn chromium_profile_file(
+    family: &str,
+    profile: &str,
+    home: &Path,
+    name: &str,
+) -> Option<PathBuf> {
+    let path = chromium_profile_dir(family, profile, home)?.join(name);
+    path.is_file().then_some(path)
 }
 
 #[cfg(unix)]
@@ -366,15 +389,22 @@ const SNAPSHOT_ATTEMPTS: usize = 5;
 
 /// 브라우저가 쥔 채로 움직이는 DB를, 본체와 -wal을 함께 복사하고 전후
 /// 상태가 같을 때만 사본으로 인정한다 — 다섯 번까지
-/// (`copyStableAttempt`, SNAPSHOT_ATTEMPTS=5).
+/// (`copyStableAttempt`, SNAPSHOT_ATTEMPTS=5). 사본은 원본과 같은 이름이라
+/// 쿠키와 Web Data가 한 사본 폴더에 함께 설 수 있다.
 pub fn snapshot_sqlite(source: &Path, temp_dir: &Path) -> Result<PathBuf, String> {
+    let name = source
+        .file_name()
+        .ok_or_else(|| "데이터베이스 파일 이름이 없습니다".to_string())?;
     std::fs::create_dir_all(temp_dir).map_err(|error| error.to_string())?;
-    let target = temp_dir.join("Cookies");
+    let target = temp_dir.join(name);
     for _ in 0..SNAPSHOT_ATTEMPTS {
         let before = file_state(source);
         let before_wal = file_state(&wal_of(source));
         if before.is_none() {
-            return Err("쿠키 데이터베이스가 없습니다".into());
+            return Err(format!(
+                "{} 데이터베이스가 없습니다",
+                name.to_string_lossy()
+            ));
         }
         let _ = std::fs::remove_file(&target);
         let _ = std::fs::remove_file(wal_of(&target));
@@ -389,7 +419,10 @@ pub fn snapshot_sqlite(source: &Path, temp_dir: &Path) -> Result<PathBuf, String
             return Ok(target);
         }
     }
-    Err("브라우저가 쿠키 파일을 계속 고쳐 써서 안정된 사본을 뜨지 못했습니다".into())
+    Err(format!(
+        "브라우저가 {} 파일을 계속 고쳐 써서 안정된 사본을 뜨지 못했습니다",
+        name.to_string_lossy()
+    ))
 }
 
 fn wal_of(path: &Path) -> PathBuf {
@@ -1413,6 +1446,37 @@ mod tests {
         let copy = snapshot_sqlite(&source, &copy_dir).expect("snapshot");
         assert_eq!(std::fs::read(&copy).expect("read"), b"sqlite-bytes");
         assert!(snapshot_sqlite(&yard.path().join("absent"), &copy_dir).is_err());
+        // 다른 DB는 제 이름으로 같은 사본 폴더에 선다 — 쿠키 사본을 덮지 않는다.
+        let web = yard.path().join("Web Data");
+        std::fs::write(&web, b"web-bytes").expect("write");
+        let web_copy = snapshot_sqlite(&web, &copy_dir).expect("snapshot");
+        assert_eq!(web_copy.file_name(), web.file_name());
+        assert_eq!(std::fs::read(&copy).expect("read"), b"sqlite-bytes");
+    }
+
+    /// 프로필 폴더의 파일은 프로필 이름의 담장을 지난 뒤에만 답한다.
+    #[test]
+    fn a_profile_file_stands_only_behind_the_fence() {
+        assert!(is_chromium_family("chrome") && is_chromium_family("edge"));
+        assert!(!is_chromium_family("firefox") && !is_chromium_family("safari"));
+        let home = tempfile::tempdir().expect("home");
+        assert!(chromium_profile_file("chrome", "Default", home.path(), "Bookmarks").is_none());
+        // 뿌리가 환경(LOCALAPPDATA·XDG_CONFIG_HOME)에서 오는 OS에서는 시험이
+        // 임시 홈 밖에 쓰지 않는다.
+        let Some(folder) = chromium_profile_dir("chrome", "Default", home.path())
+            .filter(|folder| folder.starts_with(home.path()))
+        else {
+            return;
+        };
+        std::fs::create_dir_all(&folder).expect("folder");
+        std::fs::write(folder.join("Bookmarks"), b"{}").expect("write");
+        assert_eq!(
+            chromium_profile_file("chrome", "Default", home.path(), "Bookmarks"),
+            Some(folder.join("Bookmarks"))
+        );
+        assert!(chromium_profile_dir("chrome", "..", home.path()).is_none());
+        assert!(chromium_profile_dir("firefox", "Default", home.path()).is_none());
+        assert!(chromium_profile_dir("netscape", "Default", home.path()).is_none());
     }
 
     /// Chromium 사본 읽기: 평문·구글·파티션·앱바운드가 각자의 칸으로 센다.

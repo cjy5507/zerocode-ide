@@ -1,0 +1,100 @@
+{
+   "checksum": "00000000000000000000000000000000",
+   "roots": {
+      "bookmark_bar": {
+         "children": [ {
+            "date_added": "13370000000000000",
+            "guid": "10000000-0000-4000-8000-000000000001",
+            "id": "5",
+            "name": "[합성-북마크-가]",
+            "type": "url",
+            "url": "https://bookmark-a.example.com/"
+         }, {
+            "children": [ {
+               "date_added": "13370000000000001",
+               "guid": "10000000-0000-4000-8000-000000000002",
+               "id": "7",
+               "name": "[합성-북마크-나]",
+               "type": "url",
+               "url": "https://bookmark-b.example.com/start"
+            }, {
+               "children": [ {
+                  "date_added": "13370000000000002",
+                  "guid": "10000000-0000-4000-8000-000000000003",
+                  "id": "9",
+                  "name": "[합성-북마크-다]",
+                  "type": "url",
+                  "url": "https://bookmark-c.example.com/deep"
+               } ],
+               "date_added": "13370000000000003",
+               "guid": "10000000-0000-4000-8000-000000000004",
+               "id": "8",
+               "name": "[합성-하위-폴더]",
+               "type": "folder"
+            }, {
+               "date_added": "13370000000000004",
+               "guid": "10000000-0000-4000-8000-000000000005",
+               "id": "10",
+               "name": "[합성-북마크-라]",
+               "type": "url",
+               "url": "http://bookmark-d.example.org/"
+            } ],
+            "date_added": "13370000000000005",
+            "guid": "10000000-0000-4000-8000-000000000006",
+            "id": "6",
+            "name": "[합성-폴더]",
+            "type": "folder"
+         }, {
+            "date_added": "13370000000000006",
+            "guid": "10000000-0000-4000-8000-000000000007",
+            "id": "11",
+            "name": "[합성-북마클릿]",
+            "type": "url",
+            "url": "javascript:void(0)"
+         } ],
+         "date_added": "13370000000000000",
+         "guid": "0bc5d13f-2cba-5d74-951f-3f233fe6c908",
+         "id": "1",
+         "name": "Bookmarks bar",
+         "type": "folder"
+      },
+      "other": {
+         "children": [ {
+            "date_added": "13370000000000007",
+            "guid": "10000000-0000-4000-8000-000000000008",
+            "id": "12",
+            "name": "[합성-북마크-마]",
+            "type": "url",
+            "url": "https://bookmark-e.example.net/"
+         }, {
+            "date_added": "13370000000000008",
+            "guid": "10000000-0000-4000-8000-000000000009",
+            "id": "13",
+            "name": "[합성-설정]",
+            "type": "url",
+            "url": "chrome://settings/"
+         } ],
+         "date_added": "13370000000000000",
+         "guid": "82b081ec-3dd3-529c-8475-ab6c344590dd",
+         "id": "2",
+         "name": "Other bookmarks",
+         "type": "folder"
+      },
+      "synced": {
+         "children": [ {
+            "date_added": "13370000000000009",
+            "guid": "10000000-0000-4000-8000-00000000000a",
+            "id": "14",
+            "name": "[합성-북마크-바]",
+            "type": "url",
+            "url": "https://bookmark-f.example.com/phone"
+         } ],
+         "date_added": "13370000000000000",
+         "guid": "4cf2e351-0e85-532b-bb37-df045d8f8d0f",
+         "id": "3",
+         "name": "Mobile bookmarks",
+         "type": "folder"
+      }
+   },
+   "version": 1
+}

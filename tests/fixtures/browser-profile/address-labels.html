@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>fixture shipping form (labels only)</title>
+<form id="search" action="/find"><input name="q" type="text" placeholder="검색"></form>
+<form id="ship" action="/order" method="post">
+  <label for="n">이름</label><input id="n" name="receiver">
+  <label for="p">휴대폰</label><input id="p" name="mobile">
+  <label for="z">우편번호</label><input id="z" name="zip">
+  <label for="a">주소</label><input id="a" name="addr1">
+  <label for="d">상세주소</label><input id="d" name="addr2">
+  <label for="e">이메일</label><input id="e" name="mail" type="email">
+  <label for="nick">별명</label><input id="nick" name="nickname">
+  <label for="memo">배송 메모</label><input id="memo" name="memo">
+  <label for="card">카드 번호</label><input id="card" name="cardno" autocomplete="cc-number">
+  <button type="submit">주문</button>
+</form>

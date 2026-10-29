@@ -366,6 +366,10 @@ pub(super) struct BrowserProfileView {
     /// 가져온 뒤면 없다 — 앞의 칸들은 그대로 두고 더하기만 한 칸이다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) last_apply: Option<browser_cookie_import::CookieApply>,
+    /// 쿠키와 함께 옮긴 북마크·주소·입력값의 수(t-79331). 브라우저에서 가져온
+    /// 적이 없으면 없다 — 이것도 더하기만 한 칸이다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) imported: Option<browser_profile_data::ImportedData>,
 }
 
 /// 저장된 프로필들에 파생 상태(스테이징·기본)를 입혀 창에 건넨다.
@@ -377,8 +381,10 @@ pub(super) fn browser_profile_views(config_root: &Path) -> Vec<BrowserProfileVie
             let staged = browser_cookie_import::staging_file(config_root, &held.id).exists();
             let is_default = default_id.as_deref() == Some(held.id.as_str());
             let last_apply = browser_cookie_import::last_apply(config_root, &held.id);
+            let imported = browser_profile_data::last_imported(config_root, &held.id);
             BrowserProfileView {
                 last_apply,
+                imported,
                 id: held.id,
                 name: held.name,
                 source: held.source,
@@ -407,6 +413,7 @@ pub(super) fn remove_browser_profile(config_root: &Path, id: &str) -> Result<(),
     let _ = std::fs::remove_file(browser_cookie_import::staging_file(config_root, id));
     let _ = std::fs::remove_file(browser_cookie_import::generation_file(config_root, id));
     browser_cookie_import::discard_last_apply(config_root, id);
+    browser_profile_data::discard(config_root, id);
     if load_default_browser_profile(config_root).as_deref() == Some(id) {
         let _ = save_default_browser_profile(config_root, None);
     }
@@ -449,6 +456,14 @@ pub(super) struct BrowserCookieImportSummary {
     pub(super) domains: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) warning: Option<BrowserCookieImportWarning>,
+    /// 같은 누름에 옮긴 북마크·주소·입력값의 수(t-79331). 브라우저에서 읽은
+    /// Chromium 가족만 싣고, 그 몫을 읽지 못했으면 없다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) profile_data: Option<browser_profile_data::ImportedData>,
+    /// 그 몫을 읽지 못했을 때 그 까닭의 종류(`locked`·`unreadable`·`unsaved`)
+    /// — 카드가 사람 말로 적는다. 값도 글자도 싣지 않는다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) profile_data_skipped: Option<browser_profile_data::ProfileDataSkipped>,
 }
 
 #[derive(Serialize)]
