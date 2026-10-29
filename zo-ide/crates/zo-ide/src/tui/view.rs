@@ -402,11 +402,19 @@ impl Status {
                 seconds_left: left,
             });
         }
-        if let Some((stretch, since)) = self.quiet_stretch {
-            let elapsed = self.elapsed.saturating_sub(since);
+        if let Some((stretch, quiet_since)) = self.quiet_stretch {
             return Some(match stretch {
-                core_types::QuietStretch::Reasoning => StatusActivity::ReasoningSilently { elapsed },
-                core_types::QuietStretch::Waiting => StatusActivity::Waiting { elapsed },
+                core_types::QuietStretch::Reasoning => StatusActivity::ReasoningSilently {
+                    elapsed: self.elapsed.saturating_sub(quiet_since),
+                },
+                // A wait counts from the request when it went out first, so
+                // the clock goes on when the stream says it is quiet instead
+                // of going back to the quiet's own start (t-71285).
+                core_types::QuietStretch::Waiting => StatusActivity::Waiting {
+                    elapsed: self.elapsed.saturating_sub(
+                        self.request_sent_at.map_or(quiet_since, |sent| sent.min(quiet_since)),
+                    ),
+                },
             });
         }
         let sent_at = self.request_sent_at?;
@@ -2552,6 +2560,26 @@ mod tests {
         let plain: Vec<String> = rows.iter().map(Line::plain).collect();
         assert!(!plain.iter().any(|row| row.contains("Working")), "rows were {plain:?}");
         assert_eq!(plain[1], "• the sea holds a patience");
+    }
+
+    /// A wait the stream names as quiet keeps the clock its request started
+    /// (t-71285): the line goes on counting, and does not go back to the quiet
+    /// stretch's own start.
+    #[test]
+    fn a_quiet_wait_counts_on_from_its_request() {
+        use runtime::message_stream::types::StreamPhase;
+        let mut status = Status::working(Duration::from_secs(10));
+        status.note_stream_phase(StreamPhase::RequestSent { attempt: 1 });
+        status.elapsed = Duration::from_secs(30);
+        let before = status.line(120).plain();
+        assert!(before.contains("waiting for the model 20s"), "{before}");
+        // The stream has been quiet 15 s of the request's 20 s.
+        status.note_stream_phase(StreamPhase::QuietWaiting { since_secs: 15 });
+        let after = status.line(120).plain();
+        assert!(
+            after.contains("waiting for the model 20s"),
+            "the clock went back: {before:?} then {after:?}"
+        );
     }
 
     /// A model reasoning without visible output is a phrase on the status
