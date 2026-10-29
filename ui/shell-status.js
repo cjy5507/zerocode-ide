@@ -4418,10 +4418,12 @@ function toast(words, kind = "", { action = null, sticky = false, aux = "", tip 
 
 /* The toast already saying these words, while it still stands. The same
  * failure said again is the same news: a link pressed five times over a file
- * that would not open stacked five toasts of one sentence (t-83039). */
+ * that would not open stacked five toasts of one sentence (t-83039). One
+ * already leaving does not stand — the press that comes as it fades is told. */
 function standingToast(words, kind = "") {
   const said = String(words ?? "").trim();
-  return [...toastLayer.children].find((note) => (note.dataset.kind ?? "") === kind && note.textContent === said) ?? null;
+  return [...toastLayer.children].find((note) => !note.classList.contains("is-closing") && !note.hidden &&
+    (note.dataset.kind ?? "") === kind && note.textContent === said) ?? null;
 }
 
 /* PR conditions. A condition is said once per occurrence: the first time the

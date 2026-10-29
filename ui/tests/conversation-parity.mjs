@@ -525,7 +525,9 @@ export async function testConversationLinkLookup(browser, origin, ok) {
     }
     seen.none = await page.evaluate(({ pressOnce, pressFive }) => {
       const said = [...document.querySelectorAll(".toasts .toast")];
-      const none = {
+      // The toast on its way out stands no more: the next press is told again.
+      said[0]?.classList.add("is-closing");
+      return {
         pressOnce,
         pressFive,
         count: said.length,
@@ -534,9 +536,17 @@ export async function testConversationLinkLookup(browser, origin, ok) {
         tip: said[0]?.dataset.tip ?? "",
         tab: activeTabId.startsWith("wire:"),
       };
-      for (const node of said) node.remove();
-      return none;
     }, { pressOnce, pressFive });
+    if (goneAt) {
+      await page.mouse.click(goneAt.x, goneAt.y);
+      await settleToasts(6);
+    }
+    seen.none.afterFade = await page.evaluate(() => {
+      const said = [...document.querySelectorAll(".toasts .toast")];
+      const standing = said.filter((node) => !node.classList.contains("is-closing")).length;
+      for (const node of said) node.remove();
+      return standing;
+    });
     seen.doc = await page.evaluate(async ({ deep }) => {
       const until = async (done) => {
         for (let beat = 0; beat < 30 && !done(); beat += 1) await window.__PAINTED__();
@@ -586,10 +596,11 @@ export async function testConversationLinkLookup(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "t-83039: a name no file ends with is one sentence, once however often it is pressed, with the disk's words on its hover — each press is one read and one look",
+      "t-83039: a name no file ends with is one sentence, once however often it is pressed, with the disk's words on its hover — each press is one read and one look, and a press as that toast fades is told again",
       JSON.stringify(seen.none.pressOnce) === "[1,1]" && JSON.stringify(seen.none.pressFive) === "[5,5]" &&
         seen.none.count === 1 && seen.none.words[0] === seen.none.want &&
-        seen.none.tip.includes("No such file or directory (os error 2)") && seen.none.tab,
+        seen.none.tip.includes("No such file or directory (os error 2)") && seen.none.tab &&
+        seen.none.afterFade === 1,
       JSON.stringify(seen),
     );
     ok(
