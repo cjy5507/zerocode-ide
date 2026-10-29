@@ -481,8 +481,21 @@ export async function testBoardNow(browser, origin, ok) {
     const late = await sentence({ stageMinutes: 30 });
     ok("a step past its usual time says it is late and how long it has run, never a time that has gone by",
       late === "새 버전 발행이 평소보다 늦음 · zo 시험 30분째", late);
-    const stalledSaid = await sentence({ stageMinutes: 30,
-      stalled: { gate: "gate-zo", recipe: "test", quiet_since_ms: Date.now() - 21 * 60_000 - 5_000, cap_secs: 2400 } });
+    /* 「21분」은 그리는 시계로 센다: 페이지 시계를 한 시각에 묶고 레인이 적은 시각을 그 시계에서
+     * 뺀다 — 그리기가 늦게 와도 같은 수다. */
+    const pinned = await page.evaluate(() => {
+      window.__TRUE_NOW__ = Date.now;
+      const at = Date.now();
+      Date.now = () => at;
+      return at;
+    });
+    let stalledSaid;
+    try {
+      stalledSaid = await sentence({ stageMinutes: 30,
+        stalled: { gate: "gate-zo", recipe: "test", quiet_since_ms: pinned - 21 * 60_000 - 5_000, cap_secs: 2400 } });
+    } finally {
+      await page.evaluate(() => { Date.now = window.__TRUE_NOW__; delete window.__TRUE_NOW__; });
+    }
     ok("a recipe the lane says has written nothing for long is the sentence, in the lane's words",
       stalledSaid === "새 버전 발행이 멈춘 듯합니다 — test 21분 출력 없음", stalledSaid);
     const onTime = await sentence({ stageMinutes: 8 });

@@ -287,14 +287,19 @@ median of what it took in the newest `QUIET_SAMPLES` lanes that ended green
   <span>); ended red at <span>`, status.json carries `stalled`
   (`{"gate","recipe","quiet_since_ms","cap_secs"}`, the board's 「멈춘 듯」),
   and `status.sh` ends its line with `stalled=<gate>/<recipe>`. Output that
-  comes back takes the word back (`— output again`).
-- Silent `QUIET_CAP_FACTOR` times that again: the lane sends the gate
-  `SIGUSR1`. `verify-every-recipe.sh --stoppable` (the lane's gate always runs
-  with it) then ends that recipe's own process tree — found by parent id, TERM
-  and then KILL — writes just's own `recipe … was terminated` line for it, so
-  the flake judgment reads it as a red recipe (`recipe:<name>`, red for real), and
-  goes on to the next recipe. The lane signals only the gate process it
-  started, by the pid it holds; no process is found by name.
+  comes back takes the word back (`— output again`); the lines the gate writes
+  for a recipe the lane ended are not output come back.
+- Silent `QUIET_CAP_FACTOR` times its usual time, and at least
+  `QUIET_CAP_FLOOR_SECS`: the lane sends the gate `SIGUSR1`. zo's `test`, usual
+  955 s over the green lanes of 10-29, is said at 32 min and ended at 48 — the
+  deadlock that day stood about 55 min. `verify-every-recipe.sh --stoppable`
+  (the lane's gate always runs with it) then ends that recipe's own process
+  tree — found by parent id, TERM and then KILL — writes just's own `recipe …
+  was terminated` line for it, so the flake judgment reads it as a red recipe
+  (`recipe:<name>`, red for real even beside the failures it named: the tests
+  after the stop never ran, so no solo pass of those names clears it), and goes
+  on to the next recipe. The lane signals only the gate process it started, by
+  the pid it holds; no process is found by name.
 - A recipe with no green past is said at the floor and never ended: nothing
   says what is long for it.
 

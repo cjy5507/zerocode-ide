@@ -1731,8 +1731,14 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("a step the lane gave no words stands under the lane's own name", JSON.stringify(unnamed) === JSON.stringify(["tag", "never-planned"]),
       JSON.stringify(unnamed));
     const stalled = await page.evaluate(async (minute) => {
+      /* 「21분」은 그리는 시계로 센다: 시계를 한 시각에 묶고 레인이 적은 시각을 그 시계에서 뺀다 —
+       * 그리기가 늦게 와도 같은 수다. */
+      const trueNow = Date.now;
+      const pinned = trueNow.call(Date);
+      Date.now = () => pinned;
+      try {
       window.__RELEASE__ = { ...window.__RELEASE__, phase: "gate-zo",
-        stalled: { gate: "gate-zo", recipe: "test", quiet_since_ms: Date.now() - 21 * minute - 5_000, cap_secs: 2400 } };
+        stalled: { gate: "gate-zo", recipe: "test", quiet_since_ms: pinned - 21 * minute - 5_000, cap_secs: 2400 } };
       await askReleaseStatus();
       paintCoordinatorDesk(document.querySelector("#board-view"));
       const line = document.querySelector('#board-view [data-desk-block="release"] .board-desk-release-stalled');
@@ -1750,6 +1756,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       const wait = getComputedStyle(probe).color;
       probe.remove();
       return { with_cap, no_cap, cleared: line?.hidden, wait };
+      } finally { Date.now = trueNow; }
     }, minute);
     ok("a recipe the lane says has written nothing for long stands on the card in its words, with the cap it will end red at",
       stalled.with_cap.text === "멈춘 듯: test 21분 출력 없음 · 40분 넘으면 빨강으로 끝냄" && stalled.with_cap.hidden === false
@@ -1759,6 +1766,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       const card = () => document.querySelector('#board-view [data-desk-block="release"]');
       const read = () => ({
         shown: !card().hidden, head: card().querySelector(".board-desk-head-word")?.textContent,
+        note: card().querySelector(".board-desk-head-note")?.hidden ? null : card().querySelector(".board-desk-head-note")?.textContent,
         release: card().querySelector(".board-desk-release") !== null,
         foot: card().querySelector(".board-line-foot")?.textContent,
       });
@@ -1794,6 +1802,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
         && elsewhere.line.shown && !elsewhere.line.release && elsewhere.line.foot === "다음 차례 — t-90001"
         && elsewhere.unknown === true,
       JSON.stringify(elsewhere));
+    ok("「한 번에 하나씩」 heads a card that has a line, never one that says it has none",
+      elsewhere.none.note === null && elsewhere.line.note === "한 번에 하나씩", JSON.stringify(elsewhere));
     const switched = await page.evaluate(async () => {
       window.__RELEASE__ = { sha: "0123456789abcdef0123456789abcdef01234567", phase: "lint", outcome: null, reason: "",
         started_at: new Date().toISOString(), updated_at: new Date().toISOString(), phases: [], plan: [] };

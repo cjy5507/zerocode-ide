@@ -69,8 +69,9 @@ PHASES=; while IFS='|' read -r phase_name _; do PHASES="${PHASES:+$PHASES }$phas
 # got a line, so nobody knew (t-83513). Its usual time is the median of what it took in the
 # newest QUIET_SAMPLES lanes that ended green (their gate logs' `<== verify recipe` lines).
 QUIET_FACTOR=2              # silent this many times its usual time (and at least QUIET_FLOOR_SECS): 「멈춘 듯」 in the lane log and status.json
-QUIET_CAP_FACTOR=2          # …and this many times that again: the recipe is ended red (its own processes, by parent id) and the gate goes on
+QUIET_CAP_FACTOR=3          # silent this many times its usual time (and at least QUIET_CAP_FLOOR_SECS): the recipe is ended red (its own processes, by parent id) and the gate goes on (10-29: zo's test, usual 955 s, said at 32 min, ended at 48)
 QUIET_FLOOR_SECS=600        # never said sooner — a quick recipe waiting on cargo's build lock is not stalled; a recipe with no green past is said at this and never ended
+QUIET_CAP_FLOOR_SECS=1200   # never ended sooner, however quick its usual time
 QUIET_SAMPLES=5             # the green lanes a recipe's usual time is the median of (the board's estimates read five too)
 QUIET_POLL_SECS=10          # how often the lane looks at a running gate's log
 TARGET_LANES="root-gate zo-gate root-release zo-release"
@@ -171,7 +172,7 @@ RECEIPTS=$RELEASE_HOME/receipts       # <sha>.json: the coordinator's gate recei
 
 if [ "${1:-}" = "--table" ]; then
   for k in DISK_FLOOR_GB TARGET_CAP_GB RECLAIM_BELOW_GB POLL_SECS THROTTLE_SECS ZO_PROFILE SOLO_RUNS CALM_LOAD CALM_WAIT_SECS \
-           CALM_POLL_SECS PHASES PHASE_LANGS QUIET_FACTOR QUIET_CAP_FACTOR QUIET_FLOOR_SECS QUIET_SAMPLES QUIET_POLL_SECS \
+           CALM_POLL_SECS PHASES PHASE_LANGS QUIET_FACTOR QUIET_CAP_FACTOR QUIET_FLOOR_SECS QUIET_CAP_FLOOR_SECS QUIET_SAMPLES QUIET_POLL_SECS \
            RELEASE_GIT_COMMON_DIR TARGET_LANES CARGO_INCREMENTAL TOOLS \
            LAUNCHD_LABEL LAUNCHD_PATH APP_NAME RELEASE_REPO RELEASE_HOME RELEASE_SCRATCH_ROOT RELEASE_APP_DIR \
            RELEASE_ZO_BIN RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED RECEIPTS RECEIPT_PY \
@@ -471,17 +472,20 @@ recipe_usuals() {
     | awk '$1 != r { if (r != "") print r, v[int(n / 2) + 1]; r = $1; n = 0 } { v[++n] = $2 } END { if (r != "") print r, v[int(n / 2) + 1] }'
 }
 quiet_floor() { if is_dry; then stub QUIET_FLOOR_SECS "$QUIET_FLOOR_SECS"; else printf '%s' "$QUIET_FLOOR_SECS"; fi; }
+quiet_cap_floor() { if is_dry; then stub QUIET_CAP_FLOOR_SECS "$QUIET_CAP_FLOOR_SECS"; else printf '%s' "$QUIET_CAP_FLOOR_SECS"; fi; }
 quiet_poll() { if is_dry; then stub QUIET_POLL_SECS "$QUIET_POLL_SECS"; else printf '%s' "$QUIET_POLL_SECS"; fi; }
 # quiet_limits RECIPE USUALS -> "<say> <cap> <usual>" seconds: said at QUIET_FACTOR times its usual
-# time and at least the floor, ended at QUIET_CAP_FACTOR times that; with no green past it is said
-# at the floor and never ended (cap and usual 0) — nothing says what is long for it.
+# time and at least the floor, ended at QUIET_CAP_FACTOR times it and at least the cap's floor; with
+# no green past it is said at the floor and never ended (cap and usual 0) — nothing says what is
+# long for it.
 quiet_limits() {
-  local usual say floor
-  floor=$(quiet_floor)
+  local usual say cap floor cap_floor
+  floor=$(quiet_floor); cap_floor=$(quiet_cap_floor)
   usual=$(printf '%s\n' "$2" | awk -v r="$1" '$1 == r { print $2; exit }')
   if [ -z "$usual" ]; then printf '%s 0 0' "$floor"; return 0; fi
   say=$(( usual * QUIET_FACTOR )); [ "$say" -ge "$floor" ] || say=$floor
-  printf '%s %s %s' "$say" $(( say * QUIET_CAP_FACTOR )) "$usual"
+  cap=$(( usual * QUIET_CAP_FACTOR )); [ "$cap" -ge "$cap_floor" ] || cap=$cap_floor
+  printf '%s %s %s' "$say" "$cap" "$usual"
 }
 span() { if [ "$1" -ge 60 ]; then printf '%dm' $(( $1 / 60 )); else printf '%ds' "$1"; fi; }
 # watch_gate PID LOG — runs beside the gate (inside run_gate, itself under heavy) until PID is gone.
@@ -495,7 +499,9 @@ watch_gate() {
     if [ "$grown" != "$size" ]; then
       size=$grown; at=$now
       mark=$(grep -a '^==> verify recipe ' "$log" 2>/dev/null | tail -1); mark=${mark#==> verify recipe }
-      if [ -n "$said" ]; then
+      # The lines the gate writes for a recipe the lane ended (`<==`, `was terminated`) are
+      # not its output come back.
+      if [ -n "$said" ] && { [ -z "$ended" ] || [ "$mark" != "$recipe" ]; }; then
         said=; STALLED=null; write_status
         [ "$mark" != "$recipe" ] || log "stalled: $PHASE $recipe — output again"
       fi
@@ -562,7 +568,10 @@ failed_tests() { # LOG -> sorted unique failure names, one a line, each read aga
                  # `ui:<harness>:<check>` in a harness without suites (t-9741) — or `harness:<harness>`
                  # when it named none (it died before its report); and `recipe:<name>` for any other
                  # recipe that failed without naming a test — its tests never spoke, so no solo run can
-                 # judge it (1.3.37: shell-test died compiling beside a named harness red)
+                 # judge it (1.3.37: shell-test died compiling beside a named harness red) — and for
+                 # every recipe ended by a signal (`was terminated`: the lane's cap, or just's words for
+                 # any signal), names or not: what would have run after the stop never spoke, so a solo
+                 # pass of the names it gave clears nothing (t-83513)
   awk '
     /^==> verify recipe / {
       named = 0; harness = ""; suite = ""; checks = ""
@@ -581,7 +590,8 @@ failed_tests() { # LOG -> sorted unique failure names, one a line, each read aga
     }
     /recipe `[^`]+` (failed|was terminated)/ {
       match($0, /recipe `[^`]+`/); r = substr($0, RSTART + 8, RLENGTH - 9)
-      if (r ~ /^[a-z]+-browser-test$/) {
+      if ($0 ~ /was terminated/) { printf "%s", checks; checks = ""; print "recipe:" r }
+      else if (r ~ /^[a-z]+-browser-test$/) {
         if (checks != "") printf "%s", checks
         else { sub(/-browser-test$/, "", r); print "harness:" r }
         checks = ""

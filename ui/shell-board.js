@@ -2827,7 +2827,10 @@ function paintDeskRelease(block, now) {
     head.append(deskElement("span", "board-desk-head-word"), deskElement("span", "board-desk-head-note"));
   }
   writeTextContent(head.firstElementChild, t("board.now.line", "빌드 줄"));
-  writeTextContent(head.lastElementChild, t("board.now.lineHint", "한 번에 하나씩"));
+  // 「한 번에 하나씩」 says how a line runs; a project with neither a lane nor a line has none to say it of.
+  const hint = status || queue.found === true ? t("board.now.lineHint", "한 번에 하나씩") : "";
+  writeTextContent(head.lastElementChild, hint);
+  writeHidden(head.lastElementChild, hint === "");
   const body = block.lastElementChild;
   if (!status) {
     paintDeskLineOnly(body, queue, now);

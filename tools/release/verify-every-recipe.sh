@@ -88,7 +88,8 @@ for recipe in $recipes; do
   echo "<== verify recipe $recipe rc=$status $(( SECONDS - started ))s"
   if [ "$stopped" = "$recipe" ]; then
     # just's own words for a recipe ended by a signal, so the lane's parser reads
-    # it as the red recipe it is (`recipe:<name>`, red for real: no test spoke).
+    # it as the red recipe it is (`recipe:<name>`, red for real beside any test it
+    # named: the tests after the stop never ran).
     echo "error: recipe \`$recipe\` was terminated: no output past the release lane's cap"
     stopped= status=1
   fi
