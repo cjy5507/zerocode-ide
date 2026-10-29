@@ -1,8 +1,11 @@
+use std::collections::BTreeSet;
 use std::env;
+use std::fmt::Write as _;
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 
 use runtime::{
-    PermissionMode, PermissionPolicy,
+    normalize_tool_name, PermissionMode, PermissionPolicy,
 };
 use tools::GlobalToolRegistry;
 
@@ -76,6 +79,77 @@ pub(crate) fn permission_policy(
                 policy.with_tool_requirement(name, required_permission)
             },
         ))
+}
+
+/// The rule warnings this process has queued, so a rebuilt runtime (a
+/// `/resume`, a model handoff) does not say one again.
+static WARNED_RULES: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Queue a start-up warning for each permission rule that names no tool zo
+/// has, and that this process has not warned of yet (t-81312).
+pub(crate) fn queue_unknown_rule_warnings(
+    feature_config: &runtime::RuntimeFeatureConfig,
+    tool_registry: &GlobalToolRegistry,
+) {
+    for line in unknown_rule_warnings(feature_config, tool_registry) {
+        let fresh = WARNED_RULES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(line.clone());
+        if fresh {
+            crate::runtime_support::push_startup_warning(line);
+        }
+    }
+}
+
+/// One line for each configured permission rule whose tool name no tool zo
+/// knows answers to: a rule is matched against the name a tool is called by,
+/// case and `-`/`_` aside, so such a rule never applies. The line names the
+/// rule, its list and its settings file, and zo's tool when the alias table
+/// knows the name (`Edit` is `edit_file`). An MCP tool is not judged: its
+/// server registers it after start.
+pub(crate) fn unknown_rule_warnings(
+    feature_config: &runtime::RuntimeFeatureConfig,
+    tool_registry: &GlobalToolRegistry,
+) -> Vec<String> {
+    let rules = runtime::rule_tool_names(feature_config.permission_rules());
+    if rules.is_empty() {
+        return Vec::new();
+    }
+    let known: BTreeSet<String> = tool_registry
+        .known_tool_names()
+        .iter()
+        .map(|name| normalize_tool_name(name))
+        .collect();
+    rules
+        .into_iter()
+        .filter_map(|named| {
+            let tool = normalize_tool_name(named.tool);
+            if tool.starts_with(runtime::tool_guard::MCP_TOOL_PREFIX) || known.contains(&tool) {
+                return None;
+            }
+            let files = feature_config.permission_rule_files(named.list, named.rule);
+            let place = if files.is_empty() {
+                "your settings".to_string()
+            } else {
+                files
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let mut line = format!(
+                "permissions.{} rule '{}' in {place} names no zo tool, so it never applies",
+                named.list, named.rule
+            );
+            let alias = tools::canonical_tool_name(named.tool);
+            let alias_key = normalize_tool_name(&alias);
+            if alias_key != tool && known.contains(&alias_key) {
+                let _ = write!(line, " — zo's tool for {} is {alias}", named.tool);
+            }
+            Some(line)
+        })
+        .collect()
 }
 
 // `convert_messages` and the cache-breakpoint marking live in the runtime

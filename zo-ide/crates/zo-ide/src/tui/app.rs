@@ -4855,6 +4855,11 @@ impl App {
             for text in crate::runtime_support::drain_catalog_notices() {
                 self.ui.note(SystemLevel::Info, &text);
             }
+            // A runtime rebuilt since (`/resume`, a model handoff) may have
+            // found a rule warning the boot did not.
+            for text in crate::runtime_support::drain_startup_warnings() {
+                self.ui.note(SystemLevel::Warn, &text);
+            }
             // A discovery refresh that landed since may change what the
             // footer says beside a Gemini over the Google login (t-71998).
             self.ui.refresh_login_note();
@@ -5217,6 +5222,11 @@ impl App {
         self.session_card();
         if self.session().resumed() {
             self.replay_history();
+        }
+        // What the runtime build found wrong in the settings — a permission
+        // rule that names no zo tool (t-81312) — is a startup warning.
+        for text in crate::runtime_support::drain_startup_warnings() {
+            self.ui.note(SystemLevel::Warn, &text);
         }
         // What was said until now was said at startup (codex
         // `StartupWarningsCell`); the viewer names the rest by their level.

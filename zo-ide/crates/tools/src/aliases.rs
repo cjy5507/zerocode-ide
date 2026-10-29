@@ -10,11 +10,10 @@ use runtime::PermissionMode;
 
 use crate::error::ToolError;
 
-/// Lower-case a tool name and replace `-` with `_` so matches are insensitive
-/// to `PascalCase` / `snake_case` / kebab-case spelling.
-pub(crate) fn normalize_tool_name(value: &str) -> String {
-    value.trim().replace('-', "_").to_ascii_lowercase()
-}
+// The one normalization dispatch and permission rules share: lower-case,
+// `-` as `_`. It lives in `runtime`, where rules are judged and which this
+// crate depends on.
+pub(crate) use runtime::normalize_tool_name;
 
 /// Canonical-name alias table for tool dispatch.
 ///

@@ -9686,9 +9686,16 @@ async fn e2e_a_rule_naming_no_zo_tool_is_warned_at_start_in_the_tui() {
     run.wait_for("'Edti(x)'", TEST_TIMEOUT);
     let capture = run.finish();
     let rows = history_text(&capture);
+    // The line wraps at the PTY's width; read it as words.
+    let words = rows.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        words.matches("'Edti(x)'").count(),
+        1,
+        "the TUI does not warn of Edti(x) exactly once at start:\n{rows}"
+    );
     assert!(
-        rows.contains("'Edti(x)'") && rows.contains("never applies"),
-        "the TUI does not warn of Edti(x) at start:\n{rows}"
+        words.contains("names no zo tool, so it never applies"),
+        "the TUI's warning does not say the rule never applies:\n{rows}"
     );
 }
 

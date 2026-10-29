@@ -234,6 +234,9 @@ async fn run_frontend(
     for text in crate::runtime_support::drain_catalog_notices() {
         note(&mut renderer, &text);
     }
+    for text in crate::runtime_support::drain_startup_warnings() {
+        let _ = renderer.push(system_note(SystemLevel::Warn, &text));
+    }
     if !flags.json {
         // 배너는 사람에게 하는 인사다. JSON 계약에는 그 어휘가 없고, 넣으면
         // 첫 줄부터 파싱이 깨진다.
