@@ -3523,6 +3523,8 @@ async function findDocLink(tail, opts, refusal) {
   const root = activeWorktreePath;
   const name = basename(tail);
   let hits = [];
+  // The finder's own cap (`hit_cap`, explorer_policy.json) bounds this look as it bounds the
+  // finder: a name more files hold than that can miss the one the link meant.
   try {
     hits = (await invoke("search_files", { query: name })) ?? [];
   } catch {
