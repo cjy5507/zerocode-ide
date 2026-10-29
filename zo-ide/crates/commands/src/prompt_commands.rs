@@ -660,6 +660,13 @@ impl InlineShell<'_> {
         }
         match policy.authorize(BASH_TOOL, &input, None) {
             runtime::PermissionOutcome::Allow => None,
+            // The kill guard's refusal says what it refused and what to do
+            // instead (t-82854); no ask rule need be in play.
+            runtime::PermissionOutcome::Deny { reason }
+                if runtime::kill_guard::is_refusal(&reason) =>
+            {
+                Some(format!("not run — {reason}"))
+            }
             runtime::PermissionOutcome::Deny { .. } => Some(
                 "not run — an ask rule in your permission settings wants your approval, and a command file cannot ask; run it yourself if you approve"
                     .to_string(),

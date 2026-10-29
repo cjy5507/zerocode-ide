@@ -151,13 +151,14 @@ impl PermissionEnforcer {
     ///
     /// The kill guard (t-80732) goes first, in every mode: a signal to the
     /// window is refused, and a signal that needs a person's yes is refused
-    /// too, since this layer has nobody to ask.
+    /// too, since this layer has nobody to ask — saying what the session may
+    /// still end itself (t-82854).
     #[must_use]
     pub fn check_bash(&self, command: &str) -> EnforcementResult {
         let mode = self.policy.active_mode();
         let refused = match crate::kill_guard::judge(command) {
             Some(KillVerdict::Deny { reason }) => Some(crate::kill_guard::refusal(&reason)),
-            Some(KillVerdict::Ask { reason }) => Some(crate::kill_guard::unanswered(&reason)),
+            Some(KillVerdict::Ask { reason }) => Some(crate::kill_guard::unaskable(&reason)),
             Some(KillVerdict::Allow) | None => None,
         };
         if let Some(reason) = refused {

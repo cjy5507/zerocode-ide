@@ -21,7 +21,9 @@
 //! a question is a refusal there too.
 
 use zerocode_core::agent_teams::{TEAM_LEADER_VAR, TEAM_PANE_VAR};
-use zerocode_core::shell_rule::kill::{self, KillCall, KillVerdict, ProcessTable, ProtectedRoot};
+use zerocode_core::shell_rule::kill::{
+    self, KillCall, KillVerdict, PaneMark, ProcessTable, ProtectedRoot, Refused,
+};
 
 /// Said after every refusal: the guard reads the processes, not the
 /// permission mode, so the mode advice a denial otherwise carries would send
@@ -92,22 +94,45 @@ pub fn unanswered(reason: &str) -> String {
     format!("refused, since no person said yes to it: {reason}. {NOT_THE_MODE}")
 }
 
-/// What a session that runs calls unasked can do instead of a kill that
-/// needs a person's yes — the ways out the window's hook gives a pane: a
-/// process this session started is its own to end by a pid it names, and one
-/// it did not start is not (t-82420).
-const WAY_OUT: &str = "Nobody was asked, since this session runs calls without asking. \
-To end what this session started, name it so it can be checked before it runs: \
-its pid as a number (`echo $!` or `pgrep -f <name>`, then `kill 4242`), \
-`kill $(pgrep -f <name>)`, or its job (`kill %1`, `kill $!` in the same command). \
-A process this session did not start is the person's to end, or the pane's that started it";
+/// Why a session that runs calls unasked put no question (t-82420).
+const NOBODY_ASKED: &str = "Nobody was asked, since this session runs calls without asking.";
+
+/// What this session may still end itself instead of a kill that needs a
+/// person's yes, in the words the window's hook gives a pane ([`kill::way_out`],
+/// t-82854). Whether a job it set loose is still its own turns on the pane
+/// mark it carries: zo is started with the window's pid and its pane's key in
+/// its environment, which is what the judgment reads of its own process.
+fn way_out() -> String {
+    kill::way_out(
+        Refused::Session,
+        PaneMark::from_env(|name| std::env::var(name).ok()).is_some(),
+    )
+}
 
 /// The refusal a [`KillVerdict::Ask`] becomes where the mode or the rules
 /// would run the call without asking anyone (t-82420): the question is not
 /// put, and the refusal says what to do instead.
 #[must_use]
 pub fn unasked(reason: &str) -> String {
-    format!("{} {WAY_OUT}.", unanswered(reason))
+    format!("{} {NOBODY_ASKED} {}", unanswered(reason), way_out())
+}
+
+/// The refusal a [`KillVerdict::Ask`] becomes where nobody can be asked at
+/// all, whatever the mode — a sub-agent's or a Workflow helper's bash
+/// ([`crate::permission_enforcer::PermissionEnforcer::check_bash`]): it says
+/// what to do instead, and not why nobody was asked, which that layer does
+/// not know (t-82854).
+#[must_use]
+pub fn unaskable(reason: &str) -> String {
+    format!("{} {}", unanswered(reason), way_out())
+}
+
+/// Whether `reason` is one of this guard's refusals, as a caller that shows
+/// a refusal in words of its own tells it apart: each one carries
+/// `NOT_THE_MODE`.
+#[must_use]
+pub fn is_refusal(reason: &str) -> bool {
+    reason.contains(NOT_THE_MODE)
 }
 
 #[cfg(test)]
