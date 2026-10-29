@@ -6050,13 +6050,14 @@ async function offerSavedAddresses(tab, url) {
   if (stillShowing(tab)) paintBrowserView(tab);
 }
 
-/* 사람이 누른 단추 하나를 시스템 손에게 맡기고, 채운 칸 수를 띠에 더한다. */
-async function fillFromBar(tab, kind, command, args, done) {
+/* 사람이 누른 단추 하나를 시스템 손에게 맡기고, 채운 칸 수를 띠에 더한다.
+ * ask는 누름과 같은 틱에 불린다 — 그 안의 handNow()가 이 누름의 손을 읽는다. */
+async function fillFromBar(tab, kind, ask, done) {
   const offer = tab.fillOffer;
   if (!offer) return;
   let report = null;
   try {
-    report = await invoke(command, { label: tab.label, ...args }, { hand: handNow() });
+    report = await ask();
   } catch (error) {
     showError(String(error));
   }
@@ -6070,13 +6071,17 @@ async function fillFromBar(tab, kind, command, args, done) {
 }
 
 function fillSavedAddress(tab, candidate) {
-  return fillFromBar(tab, "address", "browser_address_fill", { id: candidate.id }, (offer) => {
+  const ask = () =>
+    invoke("browser_address_fill", { label: tab.label, id: candidate.id }, { hand: handNow() });
+  return fillFromBar(tab, "address", ask, (offer) => {
     offer.addressDone = true;
   });
 }
 
 function fillSavedEntry(tab, entry) {
-  return fillFromBar(tab, "entry", "browser_entry_fill", { name: entry.name }, (offer) => {
+  const ask = () =>
+    invoke("browser_entry_fill", { label: tab.label, name: entry.name }, { hand: handNow() });
+  return fillFromBar(tab, "entry", ask, (offer) => {
     offer.entriesDone.push(entry.name);
   });
 }
