@@ -6038,6 +6038,28 @@ async function fillSavedAddress(tab, candidate) {
   if (stillShowing(tab)) paintBrowserView(tab);
 }
 
+let browserFillPickSeq = 0;
+
+/* 띠의 고르는 단추 하나. 글자와 풍선 말은 사람이 고를 때 읽는 이름·주소다.
+ * 접근성 이름은 몇 번째인지만 말한다 — self-act의 look이 이 이름을 에이전트에게
+ * 답하므로(data-private-words) 사람의 주소가 글자로 가지 않는다. 화면 낭독기는
+ * 그 글자를 설명으로 읽는다. */
+function fillBarPick(words, tip, name, run) {
+  const pick = document.createElement("button");
+  pick.type = "button";
+  pick.className = "browser-fillbar-act is-primary";
+  pick.dataset.privateWords = "";
+  const shown = document.createElement("span");
+  shown.id = `browser-fillbar-pick-${++browserFillPickSeq}`;
+  shown.textContent = words;
+  pick.appendChild(shown);
+  pick.dataset.tip = tip;
+  pick.setAttribute("aria-label", name);
+  pick.setAttribute("aria-describedby", shown.id);
+  pick.addEventListener("click", run);
+  return pick;
+}
+
 function paintBrowserFillBar(bar, tab) {
   const offer = tab.fillOffer;
   bar.hidden = !offer;
@@ -6056,17 +6078,14 @@ function paintBrowserFillBar(bar, tab) {
   acts.className = "browser-fillbar-acts";
   if (offer.state === "offer") {
     words.textContent = t("browser.fill.offer", "이 페이지에 채울 수 있는 저장된 주소");
-    for (const candidate of offer.candidates) {
-      const pick = document.createElement("button");
-      pick.type = "button";
-      pick.className = "browser-fillbar-act is-primary";
-      pick.textContent = candidate.label;
-      const said = t("browser.fill.pick", "{{label}} 채우기", { label: candidate.label });
-      pick.dataset.tip = said;
-      pick.setAttribute("aria-label", said);
-      pick.addEventListener("click", () => void fillSavedAddress(tab, candidate));
-      acts.appendChild(pick);
-    }
+    offer.candidates.forEach((candidate, at) => {
+      acts.appendChild(fillBarPick(
+        candidate.label,
+        t("browser.fill.pick", "{{label}} 채우기", { label: candidate.label }),
+        t("browser.fill.pickNth", "저장된 주소 {{n}} 채우기", { n: at + 1 }),
+        () => void fillSavedAddress(tab, candidate),
+      ));
+    });
   } else if (offer.state === "filled") {
     const entries = offer.report?.entries ?? 0;
     words.textContent = entries > 0
