@@ -2795,6 +2795,39 @@ fn automatic_failure_has_a_bounded_retry_and_never_stamps_success() {
 }
 
 #[test]
+fn an_automatic_pass_that_does_not_run_says_why() {
+    let home = tempfile::tempdir().unwrap();
+    let lock = crate::test_env_lock();
+    with_automatic_home(&lock, home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path();
+        let interval = std::time::Duration::from_secs(3600);
+        let pass = || super::try_auto_dream(cwd, interval, None).unwrap();
+        let got = pass();
+        assert!(matches!(got, super::AutoDream::NoEvidence), "{got:?}");
+
+        for session in ["s1", "s2"] {
+            super::record_observation(cwd, &obs("a reason to wait", session, true)).unwrap();
+        }
+        let dir = super::dream_dir(cwd);
+        let held = crate::secure_fs::try_lock_owner_only(&dir, Path::new(super::AUTO_DREAM_LOCK_FILE)).unwrap().unwrap();
+        let got = pass();
+        assert!(matches!(got, super::AutoDream::Locked), "{got:?}");
+        drop(held);
+
+        let stamped = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        fs::write(dir.join(super::THROTTLE_MARKER), stamped.to_string()).unwrap();
+        let until = std::time::UNIX_EPOCH + std::time::Duration::from_secs(stamped) + interval;
+        let got = pass();
+        assert!(matches!(got, super::AutoDream::NotDueUntil(at) if at == until), "{got:?}");
+
+        std::env::set_var("ZO_DREAM", "0");
+        let got = pass();
+        assert!(matches!(got, super::AutoDream::Disabled), "{got:?}");
+    });
+}
+
+#[test]
 fn a_later_failure_uses_retry_backoff_instead_of_the_last_success_interval() {
     let directory = tempfile::tempdir().unwrap();
     let dir = directory.path();

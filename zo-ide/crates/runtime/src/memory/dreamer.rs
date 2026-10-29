@@ -3696,6 +3696,41 @@ pub fn should_auto_dream(
     }
 }
 
+/// What one automatic trigger did. Only `Ran` curated; every other answer says
+/// why not, so a caller can wait for what would change it instead of asking
+/// again on a fixed clock.
+#[derive(Debug)]
+pub enum AutoDream {
+    Ran(DreamReport),
+    /// `ZO_DREAM=0` or `autoDreamEnabled: false` for this workspace.
+    Disabled,
+    /// The last pass, or the backoff after a failed one, holds the next until then.
+    NotDueUntil(SystemTime),
+    /// No producer has written any evidence yet.
+    NoEvidence,
+    /// Another pass holds the shared lock.
+    Locked,
+}
+
+impl AutoDream {
+    /// The report of a pass that ran.
+    #[must_use]
+    pub fn into_report(self) -> Option<DreamReport> {
+        match self {
+            Self::Ran(report) => Some(report),
+            Self::Disabled | Self::NotDueUntil(_) | Self::NoEvidence | Self::Locked => None,
+        }
+    }
+}
+
+pub fn try_auto_dream(
+    cwd: &Path,
+    min_interval: std::time::Duration,
+    active_model: Option<&str>,
+) -> Result<AutoDream, DreamError> {
+    Ok(maybe_auto_dream(cwd, min_interval, active_model)?.map_or(AutoDream::NoEvidence, AutoDream::Ran))
+}
+
 /// Fire an automatic dreaming pass if the throttle window has elapsed, updating
 /// the shared marker on success. Disabled, empty, throttled, and already-running
 /// work returns `Ok(None)`. The lock spans the second throttle check, curation,

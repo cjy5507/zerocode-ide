@@ -23,7 +23,9 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use runtime::memory::DreamReport;
+use runtime::memory::{AutoDream, DreamError, DreamReport};
+
+use crate::autonomy::dreaming::DreamAttempt;
 
 const SESSION_END_BUDGET: Duration = Duration::from_secs(2);
 const DREAM_ENV: &str = "ZO_DREAM";
@@ -109,26 +111,69 @@ pub(crate) fn run_on_session_end(
 /// Start an idle pass without borrowing the session or blocking its renderer.
 pub(crate) fn spawn_on_idle(
     cwd: &Path, session_id: &str, model: &str,
-    attempt: crate::autonomy::dreaming::DreamAttempt,
+    attempt: DreamAttempt,
 ) {
     let cwd = cwd.to_path_buf();
     let session_id = session_id.to_string();
     let model = model.to_string();
     let _ = thread::Builder::new().name("dreamer-idle".to_string()).spawn(move || {
-        match runtime::maybe_auto_dream(&cwd, runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL, Some(&model)) {
-            Ok(Some(report)) => {
-                crate::dream::record(&report);
-                promote_to_second_brain(&cwd, &session_id, &report);
-                attempt.completed(crate::autonomy::scheduler::now_unix_ms());
-                log_status(&session_id, &format!("idle {}", report.summary_line()));
+        let result = runtime::memory::try_auto_dream(
+            &cwd, runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL, Some(&model),
+        );
+        if let Ok(AutoDream::Ran(report)) = &result {
+            promote_to_second_brain(&cwd, &session_id, report);
+        }
+        let reply = IdleReply::of(&result);
+        settle(&attempt, &reply, crate::autonomy::scheduler::now_unix_ms());
+        match reply {
+            IdleReply::Ran { summary, promoted } => {
+                log_status(&session_id, &format!("idle {summary}"));
+                crate::dream::record_pass(summary, promoted);
             }
-            Err(_) => {
-                attempt.retry_later(crate::autonomy::scheduler::now_unix_ms());
-                log_status(&session_id, "idle_failed");
-            }
-            Ok(None) => {}
+            IdleReply::Failed => log_status(&session_id, "idle_failed"),
+            IdleReply::NotDue { .. } | IdleReply::NoEvidence | IdleReply::Disabled | IdleReply::Locked => {}
         }
     });
+}
+
+/// What an idle pass found, in the terms the idle clock and the status card read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IdleReply {
+    Ran { summary: String, promoted: Vec<String> },
+    NotDue { until_ms: u64 },
+    NoEvidence,
+    Disabled,
+    Locked,
+    Failed,
+}
+
+impl IdleReply {
+    fn of(result: &Result<AutoDream, DreamError>) -> Self {
+        match result {
+            Ok(AutoDream::Ran(report)) => Self::Ran {
+                summary: report.summary_line(),
+                promoted: crate::dream::promoted_slugs(report),
+            },
+            Ok(AutoDream::NotDueUntil(until)) => Self::NotDue { until_ms: unix_ms(*until) },
+            Ok(AutoDream::NoEvidence) => Self::NoEvidence,
+            Ok(AutoDream::Disabled) => Self::Disabled,
+            Ok(AutoDream::Locked) => Self::Locked,
+            Err(_) => Self::Failed,
+        }
+    }
+}
+
+fn unix_ms(at: std::time::SystemTime) -> u64 {
+    at.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn settle(attempt: &DreamAttempt, reply: &IdleReply, now: u64) {
+    match reply {
+        IdleReply::Ran { .. } => attempt.completed(now),
+        IdleReply::Failed => attempt.retry_later(now),
+        IdleReply::NotDue { .. } | IdleReply::NoEvidence | IdleReply::Disabled | IdleReply::Locked => {}
+    }
 }
 
 fn promote_to_second_brain(cwd: &Path, session_id: &str, report: &runtime::memory::DreamReport) {
@@ -270,5 +315,39 @@ mod tests {
         });
 
         fs::remove_dir_all(root).expect("test root should be removed");
+    }
+
+    #[test]
+    fn an_idle_pass_moves_the_clock_by_what_it_found() {
+        use super::{settle, IdleReply};
+        use crate::autonomy::dreaming::IdleDreamer;
+        let minute = 60_000;
+        let pass = |clock: &IdleDreamer, now: u64, reply: &IdleReply| {
+            let attempt = clock.begin(now, true).expect("the idle clock is due");
+            settle(&attempt, reply, now);
+        };
+
+        let held = IdleDreamer::new(true, 0, minute);
+        pass(&held, minute, &IdleReply::NotDue { until_ms: 300 * minute });
+        assert_eq!(held.next_wakeup(true), Some(300 * minute));
+
+        for reply in [IdleReply::NoEvidence, IdleReply::Disabled] {
+            let mut quiet = IdleDreamer::new(true, 0, minute);
+            pass(&quiet, minute, &reply);
+            assert_eq!(quiet.next_wakeup(true), None, "{reply:?}");
+            quiet.activity(9 * minute);
+            assert_eq!(quiet.next_wakeup(true), Some(10 * minute), "{reply:?}");
+        }
+
+        for reply in [IdleReply::Locked, IdleReply::Failed] {
+            let busy = IdleDreamer::new(true, 0, minute);
+            pass(&busy, minute, &reply);
+            pass(&busy, 2 * minute, &reply);
+            assert_eq!(busy.next_wakeup(true), Some(4 * minute), "{reply:?}");
+        }
+
+        let ran = IdleDreamer::new(true, 0, minute);
+        pass(&ran, minute, &IdleReply::Ran { summary: String::new(), promoted: Vec::new() });
+        assert_eq!(ran.next_wakeup(true), Some(minute + 6 * 60 * minute));
     }
 }

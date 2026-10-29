@@ -73,6 +73,10 @@ impl DreamAttempt {
         let wait = u64::try_from(wait).unwrap_or(u64::MAX);
         self.next_attempt.fetch_max(now.saturating_add(wait), Ordering::AcqRel);
     }
+
+    pub(crate) fn not_due_until(&self, _until: u64, _now: u64) {}
+
+    pub(crate) fn awaits_activity(&self) {}
 }
 
 impl Drop for DreamAttempt {
@@ -139,5 +143,41 @@ mod tests {
         attempt.retry_later(now);
         drop(attempt);
         assert_eq!(clock.next_wakeup(true), Some(now + minute));
+    }
+
+    #[test]
+    fn a_pass_the_shared_marker_holds_sleeps_until_it_lets_go_but_never_past_one_interval() {
+        let minute = 60_000;
+        let interval = 6 * 60 * minute;
+        let clock = IdleDreamer::new(true, 0, minute);
+        let attempt = clock.begin(minute, true).unwrap();
+        attempt.not_due_until(minute + interval - 5_000, minute);
+        drop(attempt);
+        assert_eq!(clock.next_wakeup(true), Some(minute + interval - 5_000));
+
+        let now = minute + interval - 5_000;
+        let attempt = clock.begin(now, true).unwrap();
+        attempt.not_due_until(u64::MAX, now);
+        drop(attempt);
+        assert_eq!(clock.next_wakeup(true), Some(now + interval));
+    }
+
+    #[test]
+    fn a_pass_with_nothing_to_curate_waits_for_the_next_turn_even_one_that_began_during_it() {
+        let minute = 60_000;
+        let mut clock = IdleDreamer::new(true, 0, minute);
+        let attempt = clock.begin(minute, true).unwrap();
+        attempt.awaits_activity();
+        drop(attempt);
+        assert_eq!(clock.next_wakeup(true), None);
+        assert!(clock.begin(100 * minute, true).is_none());
+        clock.activity(100 * minute);
+        assert_eq!(clock.next_wakeup(true), Some(101 * minute));
+
+        let attempt = clock.begin(101 * minute, true).unwrap();
+        clock.activity(101 * minute + 1);
+        attempt.awaits_activity();
+        drop(attempt);
+        assert_eq!(clock.next_wakeup(true), Some(102 * minute + 1));
     }
 }
