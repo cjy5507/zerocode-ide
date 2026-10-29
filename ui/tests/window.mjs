@@ -36323,7 +36323,7 @@ const thoughtRows = await page.evaluate(async () => {
 ok(
   "a thought is one closed line of the transcript — the window's label and its bold heading on the line, prose born on the first opening, never a paragraph and never the passport label — the call after it is its own row under its kind's word, and the composer's textarea wears no second ring when focused",
   JSON.stringify(thoughtRows.shape) === JSON.stringify([
-    "helper-turn is-user is-briefing is-latest", "helper-turn is-thinking", "helper-turn is-tool", "helper-turn is-assistant is-latest",
+    "helper-turn is-user is-briefing", "helper-turn is-thinking", "helper-turn is-tool", "helper-turn is-assistant is-latest",
   ]) &&
     thoughtRows.thoughtFolded &&
     thoughtRows.who !== "" && thoughtRows.who === thoughtRows.whoExpected &&
@@ -36383,11 +36383,11 @@ const chatFace = await page.evaluate(async () => {
   seen.toolNamed = [turns[3]?.getAttribute("aria-label"), t("worker.toolRow", "{{name}} 도구", { name: "Read" })];
   // The first user turn is the briefing box: the person's words on the soft
   // fill with no edge (t-22100, the approved conversation), on the left, in a
-  // row that sticks to the top while its answer scrolls under it, with every
+  // row that flows with its answer (t-81786 P3-17: nothing sticks), with every
   // other thing the person said, whole.
   const briefingSaid = turns[0]?.querySelector(":scope > .helper-said") ?? null;
   seen.briefingBubble = turns[0]?.tagName === "ARTICLE" &&
-    turns[0]?.classList.contains("is-briefing") && getComputedStyle(turns[0]).position === "sticky" &&
+    turns[0]?.classList.contains("is-briefing") && !["sticky", "fixed"].includes(getComputedStyle(turns[0]).position) &&
     briefingSaid !== null && getComputedStyle(briefingSaid).borderTopWidth === "0px" &&
     getComputedStyle(briefingSaid).backgroundColor !== "rgba(0, 0, 0, 0)" &&
     Math.abs(briefingSaid.getBoundingClientRect().left - turns[0].getBoundingClientRect().left) <= 2;
@@ -37606,17 +37606,16 @@ const flatTranscript = await page.evaluate(async () => {
   probe.remove();
   // 브리핑도 그 뒤 사람의 말도 같은 왼쪽 상자 — 라벨 없이, 테두리 없이 부드러운
   // 바탕 위에(t-22100), 이름은 aria-label이 말한다.
-  // The row is the extension's sticky header; the box with the words is
-  // its child (2.1.278 `stickyHeader` > `userMessage`, 09-21).
+  // The row holds the box with the words (2.1.278 `stickyHeader` >
+  // `userMessage`, 09-21), and it flows with the rows: no words of the
+  // person's stick (t-81786 P3-17, the person's call of 10-29).
   const brief = list.querySelector(".helper-turn.is-briefing");
   const briefStyle = getComputedStyle(brief);
   const briefBox = getComputedStyle(brief.querySelector(":scope > .helper-said"));
-  // A bubble on its soft fill; only the person's newest words stick (t-81525 B4).
-  const newestWords = list.querySelectorAll(".helper-turn.is-user.is-latest");
+  const people = [...list.querySelectorAll(".helper-turn.is-user")];
   seen.briefingBubble = briefBox.backgroundColor !== "rgba(0, 0, 0, 0)" &&
     brief.getBoundingClientRect().width <= list.clientWidth &&
-    newestWords.length === 1 && getComputedStyle(newestWords[0]).position === "sticky" &&
-    (brief === newestWords[0] || briefStyle.position !== "sticky");
+    people.length >= 2 && people.every((row) => !["sticky", "fixed"].includes(getComputedStyle(row).position));
   const person = list.querySelector(".helper-turn.is-user:not(.is-briefing)");
   const personStyle = getComputedStyle(person);
   const personBox = getComputedStyle(person.querySelector(":scope > .helper-said"));

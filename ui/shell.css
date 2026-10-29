@@ -14981,13 +14981,10 @@ details.worker-command {
   /* 앵커 보정은 스크립트가 한 벌로 한다(`syncHelperTurns`) — 브라우저의
    * 자동 앵커가 겹치면 한쪽이 거짓말이 된다. */
   overflow-anchor: none;
-  /* The person's words stick inside this list and nowhere else (the
-   * extension's `isolation: isolate` on its sticky mode). */
-  isolation: isolate;
 }
 
-/* The list opens with a spacer rather than padding, so the first sticky
- * header sticks at the very top (`stickyMode:before`). */
+/* The list opens with the extension's spacer (`stickyMode:before`) rather
+ * than padding. */
 .helper-turns::before {
   content: "";
   flex: none;
@@ -15008,39 +15005,17 @@ details.worker-command {
   overflow-wrap: break-word;
 }
 
-/* 사람의 말: 본문은 쓰인 줄바꿈을 지킨다. The row is the extension's sticky
- * header (`stickyHeader`, 2.1.278): it stays at the list's top while its own
- * turn scrolls under it, padded above and below, its last stretch fading to
- * the ground; the box with the words is its child (`.helper-said`). */
+/* 사람의 말: 본문은 쓰인 줄바꿈을 지킨다. The row flows with the turns —
+ * the person's call of 10-29 (t-81786 P3-17): their newest words stuck at
+ * the list's top covered the answer under them — padded above and below as
+ * the extension's header row is (`stickyHeader`, 2.1.278); the box with the
+ * words is its child (`.helper-said`), and a clipped box's door stands in
+ * the row's corner (`.helper-expand`). */
 .helper-turn.is-user {
+  position: relative;
   display: block;
   margin: var(--chat-bubble-gap) 0;
   padding: var(--chat-sticky-pad-top) 0 var(--chat-sticky-pad-bottom);
-}
-
-/* Only the newest words stick (t-81525 B4, `dressLastPerson`): one sticky
- * row and one layer a page, not one for every time the person spoke. */
-.helper-turn.is-user.is-latest {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background-color: var(--chat-ground);
-}
-
-/* The extension's fade hangs under the row, past its pad (t-81525 r2): drawn
- * inside the pad, its 12px lay exactly over the pad under the bubble, and
- * with the bubble standing narrow on the right, the answer scrolling under it
- * showed through on the left. The row is the ground to its foot; the rows
- * scrolling under it fade in below. */
-.helper-turn.is-user.is-latest::after {
-  content: "";
-  position: absolute;
-  top: 100%;
-  right: 0;
-  left: 0;
-  height: var(--chat-sticky-fade);
-  background-image: linear-gradient(to bottom, var(--chat-ground), transparent);
-  pointer-events: none;
 }
 
 .helper-turn.is-user:first-child {
@@ -15462,9 +15437,7 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
  * read down. The briefing wears the same bubble. */
 /* What the person said (t-22100, the approved conversation): their words on
  * the bubble's soft fill — no edge — rounded like the page's other flat
- * panels, as wide as the words and never past the measure, at the list's
- * left. The row is still the extension's sticky header, and a stuck box is a
- * door home (`helperTurnsNode`). */
+ * panels, as wide as the words and never past the measure. */
 .helper-turn.is-user > .helper-said {
   display: block;
   box-sizing: border-box;
@@ -15480,7 +15453,6 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   color: var(--chat-bubble-ink);
   font-size: var(--chat-prose-size);
   line-height: var(--chat-prose-leading);
-  cursor: pointer;
 }
 
 /* What the person said, taller than the extension's clip: 60px of its words

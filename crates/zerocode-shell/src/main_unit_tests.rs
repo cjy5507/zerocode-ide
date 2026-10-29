@@ -22603,19 +22603,15 @@ fn the_conversation_wears_the_extensions_own_measures() {
         panel["version"].as_str().unwrap_or("?"),
         drifted.join("\n  ")
     );
-    // The focus ring's reach, the sticky header's fade and the spinner's
-    // fade-in are written inside longer values; each is read where it sits.
+    // The focus ring's reach and the spinner's fade-in are written inside
+    // longer values; each is read where it sits. The panel's sticky header
+    // fades at its foot; the window's person's row does not stick (the
+    // person's call of 10-29, t-81786 P3-17), so it has no fade to measure.
     let ring = rule("composer:focus-within", "box-shadow");
     assert!(
         ring.starts_with(&format!("0 0 0 {}", token("chat-focus-ring"))),
         "the focus ring is `{ring}`, the token {}",
         token("chat-focus-ring")
-    );
-    let sticky = rule("message.stickyHeader", "background-image");
-    assert!(
-        sticky.contains(&format!("calc(100% - {})", token("chat-sticky-fade"))),
-        "the sticky header fades over `{sticky}`, the token {}",
-        token("chat-sticky-fade")
     );
     let spinner = rule("spinnerRow", "animation");
     let seconds: f64 = spinner

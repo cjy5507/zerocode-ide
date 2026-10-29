@@ -73,7 +73,7 @@ function readPage() {
   const earlier = answers.find((row) => !row.classList.contains("is-latest"));
   const said = latest?.querySelector(":scope > .helper-said");
   const style = said ? getComputedStyle(said) : null;
-  const person = list.querySelector(":scope > .helper-turn.is-user.is-latest > .helper-said");
+  const person = [...list.querySelectorAll(":scope > .helper-turn.is-user")].at(-1)?.querySelector(":scope > .helper-said") ?? null;
   const pills = [...list.querySelectorAll(":scope > .helper-group")];
   const codes = [...list.querySelectorAll(".helper-code")];
   const note = list.querySelector(":scope > .is-window-note .helper-window-note-words");
@@ -131,16 +131,16 @@ function readPage() {
     listElements: list.getElementsByTagName("*").length,
     stepRows: list.querySelectorAll(".helper-turn:is(.is-tool, .is-thinking)").length,
     sticky: [...list.querySelectorAll(":scope > .helper-turn")].filter((row) => getComputedStyle(row).position === "sticky").length,
-    // The sticky row is the ground to its foot, and its fade hangs below it:
-    // nothing scrolling under it shows beside the bubble.
-    stickyGround: (() => {
+    // The person's last words flow with the rows (t-81786 P3-17): no ground
+    // of their own over the rows, no fade hanging under them.
+    personFlows: (() => {
       const row = person?.parentElement;
       if (!row) return null;
       const style = getComputedStyle(row);
-      const fade = getComputedStyle(row, "::after");
       return {
-        opaque: style.backgroundImage === "none" && style.backgroundColor === ground,
-        fadeBelow: Math.abs(parseFloat(fade.top) - row.getBoundingClientRect().height) <= 1 && parseFloat(fade.height) > 0,
+        position: style.position,
+        ground: style.backgroundColor,
+        fade: getComputedStyle(row, "::after").content,
       };
     })(),
     contrast: {
@@ -215,11 +215,12 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
       all.every((one) => one.say?.fits && one.say.oneLine) &&
         dark(390).say.words === dark(390).sayShort && dark(1440).say.words === dark(1440).sayWhole,
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, one.say]))));
-    ok("B: the person's sticky words are the ground to their row's foot, their fade hanging below the row — no word scrolling under it shows beside the bubble",
-      all.every((one) => one.stickyGround?.opaque && one.stickyGround.fadeBelow),
-      JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, one.stickyGround]))));
-    ok("B: an answer wears no dot, the tool work stands as pills with no step built, and one row — the person's last words — sticks",
-      all.every((one) => one.answerDots === 0 && one.stepRows === 0 && one.sticky === 1),
+    ok("B: the person's last words flow with the rows — no row sticks to the list's top, none paints a ground over the rows or hangs a fade under them (t-81786 P3-17, the person's call of 10-29)",
+      all.every((one) => one.sticky === 0 && one.personFlows && !["sticky", "fixed"].includes(one.personFlows.position) &&
+        one.personFlows.ground === "rgba(0, 0, 0, 0)" && one.personFlows.fade === "none"),
+      JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.sticky, one.personFlows]]))));
+    ok("B: an answer wears no dot and the tool work stands as pills with no step built",
+      all.every((one) => one.answerDots === 0 && one.stepRows === 0),
       JSON.stringify(dark(1440)));
     ok("B: the rail's handle, standing on the window's note, says the note's line — not nothing, not its door",
       dark(1440).noteRail === dark(1440).noteWords, JSON.stringify([dark(1440).noteRail, dark(1440).noteWords]));

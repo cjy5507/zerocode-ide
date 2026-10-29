@@ -2807,7 +2807,6 @@
   --chat-dock-fade: 48px;
   --chat-sticky-pad-top: 14px;
   --chat-sticky-pad-bottom: 12px;
-  --chat-sticky-fade: 12px;
   --chat-status-h: 1.85em;
   --chat-status-in: 300ms;
   /* A step is one line (t-15682): a 30px row whose state dot stands centred in

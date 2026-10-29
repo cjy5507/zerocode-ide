@@ -754,7 +754,7 @@ export async function testConversationScroll(browser, origin, ok) {
     // The one way back to the foot is the person's button (사용자 요청 09-24),
     // and at the foot it is not shown.
     seen.footDoor = await page.evaluate(() => {
-      // `is-latest` marks the newest answer and words (t-81525 B3·B4), not a door.
+      // `is-latest` marks the newest answer (t-81525 B3), not a door.
       const doors = document.querySelector("#worker-view").querySelectorAll(".chat-foot-door, [class*='latest']:not(.is-latest), [class*='jump']");
       return { doors: doors.length, shown: doors[0]?.classList.contains("is-shown") ?? null };
     });
@@ -1300,10 +1300,9 @@ export async function testConversationImages(browser, origin, ok) {
       // pressed, and only then is its picture in view.
       list.scrollTop = list.scrollHeight;
       await frames(4);
-      // At the foot: the tool's picture is in view, and so is the picture on
-      // the person's row that stands stuck at the list's top (the sticky
-      // header); the earlier person's row, stuck under it, is covered — in
-      // view by geometry only — and not asked for.
+      // At the foot: the tools' pictures are in view; the person's rows went
+      // up with their turn — nothing sticks to the list's top (t-81786
+      // P3-17) — and their pictures are not asked for.
       seen.askedAtFoot = [...window.__IMAGE_ASKS__].sort();
       const toolPill = face.querySelector(".helper-turn.is-tool .helper-image");
       const thumb = toolPill?.querySelector(".helper-image-thumb");
@@ -1372,8 +1371,8 @@ export async function testConversationImages(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A8: a picture is asked for only when its pill comes into view — a person's row stuck under a later person's sticky header is not in view — and only once; one that cannot be read keeps its name",
-      JSON.stringify(seen.askedAtFoot) === JSON.stringify(["wire:2", "wire:3", "wire:4"]) &&
+      "A8: a picture is asked for only when its pill comes into view — a person's row scrolled away above is not in view — and only once; one that cannot be read keeps its name",
+      JSON.stringify(seen.askedAtFoot) === JSON.stringify(["wire:2", "wire:4"]) &&
         JSON.stringify(seen.askedAtTop) === JSON.stringify(["wire:1", "wire:2", "wire:3", "wire:4"]) && seen.askedOnce === 4 &&
         seen.missingKeepsName,
       JSON.stringify(seen),

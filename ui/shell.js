@@ -14913,16 +14913,6 @@ function dressLastAnswer(list, run, newest) {
   standAnswerActions(list, newest.row);
 }
 
-/* Only the person's newest words stand stuck at the list's top (t-81525 B4):
- * one sticky row a page, where every row of theirs was one — each a layer a
- * long conversation paid for. Moved when newer words arrive. */
-function dressLastPerson(list, newest) {
-  if (!newest || newest === list.__lastPerson) return;
-  list.__lastPerson?.classList.remove("is-latest");
-  newest.classList.add("is-latest");
-  list.__lastPerson = newest;
-}
-
 /* The list's fixed tail — the helpers at work (t-6323 A6), then the status
  * line the extension's panel keeps under the last row (`spinnerRow`) — that
  * every turn and streaming row stands before. `null` while the page has
@@ -15165,7 +15155,6 @@ function applyFoldedView(list, folded) {
     row.remove();
   }
   list.__lastAnswer = null;
-  list.__lastPerson = null;
 }
 
 /* 전사를 장부에 맞춘다 — 통째로 다시 세우지 않고.
@@ -15188,7 +15177,6 @@ function syncHelperTurns(list, run) {
   if (!held.length) {
     for (const row of list.querySelectorAll(":scope > [data-turn]")) row.remove();
     list.__lastAnswer = null;
-    list.__lastPerson = null;
     syncHelperTasks(list, run);
     syncStreamingTurns(list, run);
     syncHelperReport(list, run);
@@ -15309,7 +15297,6 @@ function syncHelperTurns(list, run) {
   // them again a word at a time (09-16 → 09-20) only lagged behind it. The
   // wire's page streams the words themselves (`syncStreamingTurns`).
   dressLastAnswer(list, run, newest);
-  dressLastPerson(list, people.at(-1));
   askShelfAgain(list);
   syncHelperTasks(list, run);
   syncStreamingTurns(list, run);
@@ -15473,15 +15460,6 @@ function helperTurnsNode(run) {
   watchExplainTurns(list);
   // It keeps to its foot until the person leaves it (t-6323 A5).
   keepToFoot(list);
-  // A person's words stuck at the top (the extension's sticky header) are a
-  // door back to where they were said: a click scrolls the row home.
-  list.addEventListener("click", (event) => {
-    const row = event.target.closest?.(".helper-turn.is-user");
-    if (!row || !list.contains(row)) return;
-    if (Math.round(row.getBoundingClientRect().top) > Math.round(list.getBoundingClientRect().top)) return;
-    // Scroll the list, never the page: see `scrollHelperToBottom`.
-    list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top;
-  });
   syncHelperTurns(list, run);
   return list;
 }

@@ -37,10 +37,7 @@ function expandDoorNode(target, build = null) {
   door.type = "button";
   door.className = "helper-expand";
   paintExpandDoor(door, false);
-  door.addEventListener("click", (event) => {
-    // A person's words stuck at the top are a door home themselves
-    // (`helperTurnsNode`); a press on THIS door is not that press.
-    event.stopPropagation();
+  door.addEventListener("click", () => {
     const open = !target.classList.contains("is-open");
     if (open && build) {
       build();
@@ -1167,56 +1164,11 @@ function imageWatch(list) {
   list.__imageWatch ??= new IntersectionObserver((entries, watch) => {
     for (const entry of entries) {
       if (!entry.isIntersecting) continue;
-      if (coveredByLaterHeader(entry.target)) {
-        holdCoveredPill(list, entry.target);
-        continue;
-      }
       watch.unobserve(entry.target);
       void fillImagePill(entry.target);
     }
   }, { root: list });
   return list.__imageWatch;
-}
-
-/* A person's row is the extension's sticky header: every one before the
- * header in view stays stuck at the list's top under it — in view by
- * geometry, which is all an IntersectionObserver judges, and covered by the
- * later one. A pill there is not in view until no later header covers it. */
-function coveredByLaterHeader(pill) {
-  const row = pill.closest(".helper-turn.is-user");
-  if (!row) return false;
-  let next = row.nextElementSibling;
-  while (next && !next.classList.contains("is-user")) next = next.nextElementSibling;
-  return next !== null && next.getBoundingClientRect().top <= row.getBoundingClientRect().top + 1;
-}
-
-/* A covered pill waits for the list to scroll it out from under the later
- * header — asked once a frame while the list moves, and only while some pill
- * waits. */
-function holdCoveredPill(list, pill) {
-  const held = (list.__coveredPills ??= new Set());
-  held.add(pill);
-  if (list.__coverWatch) return;
-  list.__coverWatch = true;
-  let frame = 0;
-  list.addEventListener("scroll", () => {
-    if (frame || held.size === 0) return;
-    frame = requestAnimationFrame(() => {
-      frame = 0;
-      const view = list.getBoundingClientRect();
-      for (const one of held) {
-        if (!one.isConnected) {
-          held.delete(one);
-          continue;
-        }
-        const box = one.getBoundingClientRect();
-        if (box.bottom < view.top || box.top > view.bottom || coveredByLaterHeader(one)) continue;
-        held.delete(one);
-        list.__imageWatch?.unobserve(one);
-        void fillImagePill(one);
-      }
-    });
-  }, { passive: true });
 }
 
 /* The picture whole, over the page. Esc is caught before anything else hears
@@ -3251,26 +3203,15 @@ function nearestRailTick(rail, y) {
   return best;
 }
 
-/* Go to `row`: it stands at the list's top — under the person's words of its
- * turn, which stick there — and the list stops following its foot unless the
- * row is the last one. With `focus`, an answer takes the focus too, and with
- * it the list's copy (`watchAnswerActions`). */
+/* Go to `row`: it stands at the list's top, and the list stops following its
+ * foot unless the row is the last one. With `focus`, an answer takes the
+ * focus too, and with it the list's copy (`watchAnswerActions`). */
 function railJump(list, row, { focus = false } = {}) {
   const view = list.getBoundingClientRect();
-  let header = null;
-  if (!row.classList.contains("is-user")) {
-    for (let at = row.previousElementSibling; at; at = at.previousElementSibling) {
-      if (at.classList.contains("is-user")) {
-        header = at;
-        break;
-      }
-    }
-  }
-  const cover = header ? header.getBoundingClientRect().height : 0;
   const state = chatFollowState(list);
   state.intent = "up";
   state.at = Date.now();
-  list.scrollTop += row.getBoundingClientRect().top - view.top - cover;
+  list.scrollTop += row.getBoundingClientRect().top - view.top;
   state.away = chatFootGap(list) >= CHAT_FOLLOW.slack;
   paintFootDoor(list);
   askTurnRail(list);
