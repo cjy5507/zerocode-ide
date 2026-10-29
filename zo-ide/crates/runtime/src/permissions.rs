@@ -397,7 +397,7 @@ impl PermissionPolicy {
         call: &crate::kill_guard::LetThrough,
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
-        let input = serde_json::json!({ "command": call.command }).to_string();
+        let input = serde_json::json!({ "command": call.command() }).to_string();
         self.authorize_by_mode_and_rules("bash", &input, &PermissionContext::default(), prompter)
     }
 

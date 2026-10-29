@@ -137,12 +137,20 @@ pub fn unasked(reason: &str) -> String {
 }
 
 /// A bash command the guard let through where nobody can be asked. Only
-/// [`judge_where_nobody_can_ask`] makes one, and the policy decides the rest
-/// from it without reading the processes again
-/// ([`crate::PermissionPolicy::authorize_let_through`], t-81315).
+/// [`judge_where_nobody_can_ask`] makes one — its field is this module's
+/// alone — and the policy decides the rest from it without reading the
+/// processes again ([`crate::PermissionPolicy::authorize_let_through`],
+/// t-81315).
 #[derive(Debug)]
 pub struct LetThrough {
-    pub(crate) command: String,
+    command: String,
+}
+
+impl LetThrough {
+    /// The command the guard let through.
+    pub(crate) fn command(&self) -> &str {
+        &self.command
+    }
 }
 
 /// The guard's answer for `command` where nobody can be asked at all,
