@@ -15113,6 +15113,20 @@ details.worker-command {
   margin-bottom: 0;
 }
 
+/* A heading an answer writes steps by weight, not by size (t-82195 C3): the
+ * prose's own size — the narrow page's step with it — h1 and h2 bold, the
+ * rest semibold. With no rule of its own the conversation drew the browser's
+ * 2 and 1.5 times, the largest of the chat panels read for draft C. Its air
+ * is `.md-head`'s: a section above, a step under. */
+.is-chat-page .helper-said .md-head {
+  font-size: var(--chat-prose-size);
+  font-weight: 600;
+}
+
+.is-chat-page .helper-said :is(h1, h2).md-head {
+  font-weight: 700;
+}
+
 /* A code block in an answer: the extension's well (`codeBlockWrapper pre`)
  * — the code ground, 4px corners, one step of padding. */
 .is-chat-page .helper-said pre {

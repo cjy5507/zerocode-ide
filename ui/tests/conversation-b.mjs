@@ -24,13 +24,18 @@ const SHOT_WIDTHS = Object.freeze([390, 1440, 2000]);
 /* The mockup's turns with what draft B adds to them: a second answer before
  * the last (so one answer is not the newest), a fenced block named
  * `typescript` and one named nothing, a long unbroken path in a chip, and the
- * window's note to the agent. */
+ * window's note to the agent — and what draft C reads (t-82195): the answer
+ * before the last writes three levels of heading. */
 function draftTurns() {
   const turns = mockupTurns(Date.now() - 60_000);
   const last = turns.pop();
   const path = `/Users/dev/${"very-long-folder-name/".repeat(6)}file.ts`;
   turns.push(
-    { role: "assistant", text: `먼저 목록을 찾았습니다. 경로는 \`${path}\` 입니다.`, at_ms: last.at_ms - 900 },
+    {
+      role: "assistant",
+      text: `먼저 목록을 찾았습니다. 경로는 \`${path}\` 입니다.\n\n# 목록 화면\n\n## 폭 상수\n\n### 고칠 곳\n\n두 파일입니다.`,
+      at_ms: last.at_ms - 900,
+    },
     { role: "window", text: "The window restarted and cut your last turn short. Continue exactly where you left off.", at_ms: last.at_ms - 600 },
     { role: "user", text: "코드도 보여 줘.", at_ms: last.at_ms - 300 },
     { ...last, text: `${last.text}\n\n\`\`\`typescript\nexport const width = (screen: { width: number }) => screen.width - 32;\n\`\`\`\n\n\`\`\`\nplain words in a fence with no language\n\`\`\`` },
@@ -94,6 +99,8 @@ function readPage() {
     };
   })();
   const dock = page.querySelector(".chat-dock");
+  const root = getComputedStyle(document.documentElement);
+  const space = (step) => parseFloat(root.getPropertyValue(`--space-${step}`));
   return {
     pageWidth: Math.round(box(page).width),
     // The column's measure at this page's width, and the base one (t-81786 P3-16).
@@ -127,6 +134,19 @@ function readPage() {
     // (draft C1): the platform's way, as the terminal's are.
     smoothing: [said, person, pills[0]?.querySelector(".helper-group-words")]
       .map((node) => (node ? getComputedStyle(node).getPropertyValue("-webkit-font-smoothing") : null)),
+    // The headings an answer writes (draft C3), and the steps of air they
+    // should stand in: a section's above, a heading's own below.
+    heads: [...list.querySelectorAll(".helper-turn.is-assistant .helper-said .md-head")].map((head) => {
+      const style = getComputedStyle(head);
+      return {
+        level: head.localName,
+        size: parseFloat(style.fontSize),
+        weight: style.fontWeight,
+        above: parseFloat(style.marginTop),
+        below: parseFloat(style.marginBottom),
+      };
+    }),
+    headAir: { above: space(5), below: space(2) },
     say,
     sayWhole: t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다"),
     sayShort: t("composer.placeholderShort", "다음 지시를 쓰세요"),
@@ -219,6 +239,13 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
     ok("B: the answer, the person's words and a pill are drawn with the platform's smoothing, as the terminal is — not the chrome's thinner antialiasing (draft C1, t-82195)",
       all.every((one) => one.smoothing.length === 3 && one.smoothing.every((value) => value === "auto")),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, one.smoothing]))));
+    ok("B: a heading in an answer stands at the prose's own size — 16 px on a 1440 px window — h1 and h2 at weight 700, h3 at 600, with a section's air above and a step under it; not the browser's 32 and 24 px (draft C3, t-82195)",
+      dark(1440).proseSize === 16 &&
+        all.every((one) => ["h1", "h2", "h3"].every((level) => one.heads.some((head) => head.level === level)) &&
+          one.heads.every((head) => head.size === one.proseSize &&
+            head.weight === (["h1", "h2"].includes(head.level) ? "700" : "600") &&
+            head.above === one.headAir.above && head.below === one.headAir.below)),
+      JSON.stringify(Object.fromEntries(["dark-390", "dark-1440", "light-2000"].map((key) => [key, [seen[key].proseSize, seen[key].heads, seen[key].headAir]]))));
     ok("B: an answer wears no dot and the tool work stands as pills with no step built",
       all.every((one) => one.answerDots === 0 && one.stepRows === 0),
       JSON.stringify(dark(1440)));
