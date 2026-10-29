@@ -747,7 +747,7 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
         crate::orchestration::read_questions(|ledger| {
             Facts::read(ledger, &waiting, &gone, &carried)
         })
-        .unwrap_or_default()
+        .unwrap_or_else(|| Facts::unread(&carried))
     };
     take_up(app, waiting, &facts, now_ms);
     for (question, was) in gone {
@@ -844,6 +844,16 @@ impl Facts {
             }
         }
         facts
+    }
+
+    /// The facts of a beat with no ledger to read: every letter waiting and
+    /// no live worker at any carried pane — so a question nobody can answer
+    /// by letter is given to the person, as when each was read alone.
+    fn unread(carried: &[(u32, Asked)]) -> Self {
+        Self {
+            seats: carried.iter().map(|(term, _)| (*term, None)).collect(),
+            ..Self::default()
+        }
     }
 
     fn note_standing(
@@ -2033,6 +2043,33 @@ mod tests {
             Met::Left(_)
         ));
         assert!(matches!(&again.filed, Filing::Filed(question) if question == "m-9"));
+    }
+
+    /// A beat that has no ledger to read gives a waiting question to the
+    /// person as the seat-by-seat reading did — never holds it unseen.
+    #[test]
+    fn a_beat_with_no_ledger_to_read_gives_a_waiting_question_to_the_person() {
+        let carried = vec![(7, filed(7, "m-5"))];
+        let facts = Facts::unread(&carried);
+        let seat_now = facts
+            .seats
+            .get(&7)
+            .cloned()
+            .expect("the carried pane is read for");
+        let standing = facts.standing("run-1", "m-5");
+        assert_eq!(standing, Standing::Waiting);
+        assert_eq!(
+            step(
+                &prompt(false),
+                &standing,
+                false,
+                seat_now.as_ref(),
+                false,
+                NOW,
+                NOW
+            ),
+            Step::Raise(Raised::CoordinatorGone)
+        );
     }
 
     /// t-84470 (r2 P3-2): the answer was typed and the window died before it
