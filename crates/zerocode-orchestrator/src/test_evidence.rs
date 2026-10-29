@@ -1611,6 +1611,16 @@ mod tests {
     /// not reach its marker inside two.
     const FAULT_DEADLINE: Duration = Duration::from_secs(5);
 
+    /// How far past its whole deadline a late fixture starts.
+    const LATE_START_MARGIN: Duration = Duration::from_millis(100);
+
+    /// A first line that holds a fixture back past `deadline` before it does
+    /// anything: the late start a loaded gate gives a fixture (l81e g2 at
+    /// load 19.7 on 12 cores, l87e g2 at 11–16; t-77995), made deterministic.
+    fn late_start(deadline: Duration) -> String {
+        format!("sleep {}", (deadline + LATE_START_MARGIN).as_secs_f64())
+    }
+
     fn private_dir(parent: &Path, name: &str) -> PathBuf {
         let path = parent.join(name);
         fs::create_dir(&path).expect("private directory");
@@ -2077,7 +2087,11 @@ mod tests {
         let script = executable(
             home.path(),
             "timeout",
-            &format!("sleep 30 &\necho $! > '{}'\nwait", marker.display()),
+            &format!(
+                "{}\nsleep 30 &\necho $! > '{}'\nwait",
+                late_start(FAULT_DEADLINE),
+                marker.display()
+            ),
         );
         let command = VerificationCommand::new(
             "timeout-v1",
@@ -2313,6 +2327,7 @@ mod tests {
         let python =
             resolve_host_executable(OsString::from("python3")).expect("absolute Python executable");
         let before_fds = open_fd_count();
+        let deadline = Duration::from_secs(2);
         let mut attempt = 0;
         let mut proven = 0;
         while proven < 3 {
@@ -2328,7 +2343,8 @@ mod tests {
                 home.path(),
                 &format!("daemonize-{attempt}"),
                 &format!(
-                    "touch '{}'\n'{}' -c 'import os,time; os.fork() and os._exit(0); os.setsid(); open(\"{}\", \"w\").write(str(os.getpid())); time.sleep(30)' &\nwhile [ ! -s '{}' ]; do sleep 0.01; done\nexit 0",
+                    "{}\ntouch '{}'\n'{}' -c 'import os,time; os.fork() and os._exit(0); os.setsid(); open(\"{}\", \"w\").write(str(os.getpid())); time.sleep(30)' &\nwhile [ ! -s '{}' ]; do sleep 0.01; done\nexit 0",
+                    late_start(deadline),
                     started_marker.display(),
                     python.display(),
                     marker.display(),
@@ -2339,7 +2355,7 @@ mod tests {
                 "daemon-v1",
                 script,
                 Vec::<OsString>::new(),
-                Duration::from_secs(2),
+                deadline,
             )
             .expect("daemon command");
             let root_name = format!("verification-daemon-{attempt}");
