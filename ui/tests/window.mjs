@@ -57411,29 +57411,28 @@ suite("worker-question-raised", async ({ browser, origin, ok }) => {
       JSON.stringify({ said, reasons }),
     );
 
-    /* A question given to the person goes with its pane, and its reason goes too (t-84343, 4275): a question a
-     * later pane at the same number asks, never a coordinator's, says nothing of one. */
+    /* A question given to the person goes with its pane, and its reason goes too (t-84343, 4275): a card a later
+     * pane at the same number draws — a question that was never a coordinator's — says nothing of one. The words
+     * are read off the one function every card at that pane opens with. */
     const exited = {};
     for (const why of ["coordinator-handed", "coordinator-silent"]) {
       exited[why] = await page.evaluate(async (why) => {
+        const pane = `term:${window.__TERM__}`;
         window.__TELL__("ask:raised", { term: window.__TERM__, why });
         window.__TELL__("hook:agent", { term: window.__TERM__, state: "waiting", agent: "claude", session: "s-raised",
           ask_prompt: window.__ASK__("어느 계정으로 로그인할까요?") });
         await window.__BEATS__();
+        const before = askRaisedWords(pane);
         window.__TELL__("term:exited", { term: window.__TERM__ });
         await window.__BEATS__();
-        await window.__LIST__("이 이름으로 할까요?");
-        await window.__BEATS__();
-        openYourTurnList();
-        await window.__BEATS__(1);
-        const listed = [...document.querySelectorAll("#your-turn-list .board-ask-raised")].map((line) => line.textContent);
-        closeYourTurnList({ restoreFocus: false });
-        return listed;
+        return { before, after: askRaisedWords(pane) };
       }, why);
     }
     ok(
-      "a question given to the person whose pane goes takes its reason with it — the next question at that pane number carries no 「코디가 …」 line (t-84343, 4275)",
-      Object.values(exited).every((listed) => listed.length === 0),
+      "a question given to the person whose pane goes takes its reason with it — a card the next pane at that number draws carries no 「코디가 …」 line (t-84343, 4275)",
+      exited["coordinator-handed"].before === reasons["coordinator-handed"] &&
+        exited["coordinator-silent"].before === words.silent &&
+        Object.values(exited).every(({ after }) => after === ""),
       JSON.stringify({ exited }),
     );
   } finally {
