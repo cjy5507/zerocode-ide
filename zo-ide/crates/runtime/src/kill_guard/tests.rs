@@ -1168,9 +1168,11 @@ mod real_run {
         }
     }
 
-    /// A hook that allows the call is no person's yes: a kill that needs one
-    /// is refused unasked in every mode, with what to do instead, and nobody
-    /// is asked (t-82721 P3-6a).
+    /// A hook that allows the call is no person's yes (t-82721 P3-6a): in no
+    /// mode does it run a kill that needs one. Where the mode would run the
+    /// call unasked, the kill is refused with what to do instead and nobody
+    /// is asked; where the mode would ask, the person is still asked, once;
+    /// read-only refuses it as it refuses any such call, asking nobody.
     #[test]
     fn kill_guard_a_hooks_allow_is_no_persons_yes() {
         let env = GuardEnv::hold();
@@ -1178,25 +1180,29 @@ mod real_run {
         env.window(window.pid());
         let hook = PermissionContext::new(Some(PermissionOverride::Allow), None);
         for mode in EVERY_MODE {
-            let mut person = Person::saying(true);
-            match PermissionPolicy::new(mode).authorize_with_context(
-                "bash",
-                &bash(UNKNOWN),
-                &hook,
-                Some(&mut person),
-            ) {
-                PermissionOutcome::Deny { reason } => {
+            let mut no = Person::saying(false);
+            let PermissionOutcome::Deny { reason } = PermissionPolicy::new(mode)
+                .authorize_with_context("bash", &bash(UNKNOWN), &hook, Some(&mut no))
+            else {
+                panic!("{mode:?}: a hook's allow ran a kill no person said yes to");
+            };
+            match mode {
+                PermissionMode::DangerFullAccess | PermissionMode::Allow => {
                     assert!(reason.contains("no person said yes"), "{mode:?}: {reason}");
                     assert!(reason.contains(SAME_COMMAND), "{mode:?}: {reason}");
+                    assert!(
+                        no.asked.is_empty(),
+                        "{mode:?}: nobody is asked where the mode runs the call unasked"
+                    );
                 }
-                PermissionOutcome::Allow => {
-                    panic!("{mode:?}: a hook's allow ran a kill no person said yes to")
+                PermissionMode::WorkspaceWrite | PermissionMode::Prompt => {
+                    assert_eq!(no.asked.len(), 1, "{mode:?}: the mode would ask, so the person is asked once");
+                    assert!(no.asked[0].person_only, "{mode:?}: only a person may answer it");
+                }
+                PermissionMode::ReadOnly => {
+                    assert!(no.asked.is_empty(), "{mode:?}: read-only runs no such call, so nobody is asked");
                 }
             }
-            assert!(
-                person.asked.is_empty(),
-                "{mode:?}: nobody is asked where a hook allows the call"
-            );
         }
     }
 
