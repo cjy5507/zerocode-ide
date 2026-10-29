@@ -26,7 +26,6 @@
 //! [`TurnRecord::from_summary`] are pure and unit-tested; only [`append`] and
 //! [`read_session`] touch the filesystem.
 
-use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -36,7 +35,7 @@ use core_types::paths::ZO_DIR_NAME;
 use serde::{Deserialize, Serialize};
 
 use crate::conversation::TurnSummary;
-use crate::jsonl_log::{jsonl_files_newest_first, jsonl_files_oldest_first, prune_jsonl_lines};
+use crate::jsonl_log::{jsonl_files_newest_first, prune_jsonl_lines, read_jsonl_resumed};
 use crate::session::ContentBlock;
 
 /// Directory under `.zo/` holding append-only per-session turn logs.
@@ -594,45 +593,20 @@ pub fn record_terminal(
 ///
 /// This is the bridge that lets the Dreamer mine the externalized turn trace
 /// (recurring tool failures) alongside the deep-gate green-accept producer, so
-/// curation no longer depends on a single signal source.
+/// curation no longer depends on a single signal source. Each log is read only
+/// past where the last call stopped ([`crate::jsonl_log::read_jsonl_resumed`]).
 #[must_use]
 pub fn read_all_digests(cwd: &Path) -> Vec<decision_core::dreamer::TurnDigest> {
     // Same root as the writer (`log_path`): the caller-resolved `trace_cwd`.
     let dir = crate::traces_base(cwd).join(ZO_DIR_NAME).join(TURNS_DIR);
-    let files = jsonl_files_oldest_first(&dir, MAX_TURN_LOG_FILES);
-    let mut digests = VecDeque::new();
-    for path in files {
-        let Ok(file) = File::open(&path) else {
-            continue;
-        };
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+    read_jsonl_resumed(&dir, MAX_TURN_LOG_FILES, MAX_TURN_DIGESTS, |line| {
+        serde_json::from_str::<TurnRecord>(line).ok().map(|record| {
+            decision_core::dreamer::TurnDigest {
+                session_id: record.session_id,
+                error_tools: record.error_tools,
             }
-            if let Ok(record) = serde_json::from_str::<TurnRecord>(line) {
-                push_capped(
-                    &mut digests,
-                    decision_core::dreamer::TurnDigest {
-                        session_id: record.session_id,
-                        error_tools: record.error_tools,
-                    },
-                    MAX_TURN_DIGESTS,
-                );
-            }
-        }
-    }
-    digests.into_iter().collect()
-}
-
-fn push_capped<T>(items: &mut VecDeque<T>, item: T, cap: usize) {
-    if cap == 0 {
-        return;
-    }
-    items.push_back(item);
-    while items.len() > cap {
-        items.pop_front();
-    }
+        })
+    })
 }
 
 fn prune_turn_log_files(cwd: &Path, keep_files: usize) -> std::io::Result<()> {

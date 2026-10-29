@@ -19,15 +19,15 @@
 //! curate them through the policy gate, then apply only the approved promotions
 //! and report the full audit trail ([`DreamReport`]).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use core_types::paths::ZO_DIR_NAME;
-use crate::jsonl_log::{
-    jsonl_files_newest_first, jsonl_files_oldest_first, prune_jsonl_lines, read_jsonl_lines,
-};
+use crate::jsonl_log::{jsonl_files_newest_first, prune_jsonl_lines, read_jsonl_resumed};
+#[cfg(not(unix))]
+use crate::jsonl_log::{jsonl_files_oldest_first, read_jsonl_lines};
 #[cfg(unix)]
 use crate::jsonl_log::{
     append_jsonl_line_retained_durable, jsonl_files_oldest_first_retained,
@@ -657,16 +657,6 @@ fn dream_dir(cwd: &Path) -> PathBuf {
 
 fn self_improve_candidates_dir(cwd: &Path) -> PathBuf {
     dream_dir(cwd).join(SELF_IMPROVE_CANDIDATES_DIR)
-}
-
-fn push_capped<T>(items: &mut VecDeque<T>, item: T, cap: usize) {
-    if cap == 0 {
-        return;
-    }
-    items.push_back(item);
-    while items.len() > cap {
-        items.pop_front();
-    }
 }
 
 fn dream_error_signature(_error: &DreamError) -> &'static str {
@@ -2245,6 +2235,8 @@ pub fn record_user_pattern_observation(
 /// Reads candidate observations from append-only JSONL logs under
 /// `.zo/dream/`. Each non-empty line is one JSON [`LessonObservation`];
 /// unparseable lines are skipped so a single corrupt write never blocks a run.
+/// Each log is read only past where the last pass stopped
+/// ([`crate::jsonl_log::read_jsonl_resumed`]).
 pub struct JsonlLessonSource {
     dir: PathBuf,
 }
@@ -2261,22 +2253,9 @@ impl JsonlLessonSource {
 
 impl LessonSource for JsonlLessonSource {
     fn observations(&self) -> Vec<LessonObservation> {
-        let mut out = VecDeque::new();
-        for path in jsonl_files_oldest_first(&self.dir, MAX_DREAM_JSONL_FILES) {
-            let Ok(lines) = read_jsonl_lines(&path) else {
-                continue;
-            };
-            for line in lines {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(obs) = serde_json::from_str::<LessonObservation>(line) {
-                    push_capped(&mut out, obs, MAX_DREAM_OBSERVATIONS);
-                }
-            }
-        }
-        out.into_iter().collect()
+        read_jsonl_resumed(&self.dir, MAX_DREAM_JSONL_FILES, MAX_DREAM_OBSERVATIONS, |line| {
+            serde_json::from_str::<LessonObservation>(line).ok()
+        })
     }
 }
 
@@ -2326,24 +2305,12 @@ impl UserPatternLessonSource {
 impl LessonSource for UserPatternLessonSource {
     fn observations(&self) -> Vec<LessonObservation> {
         let dir = user_pattern_dir(&self.cwd);
-        let mut out = VecDeque::new();
-        for path in jsonl_files_oldest_first(&dir, MAX_DREAM_JSONL_FILES) {
-            let Ok(lines) = read_jsonl_lines(&path) else {
-                continue;
-            };
-            for line in lines {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(record) = serde_json::from_str::<UserPatternRecord>(line) {
-                    if user_pattern_record_is_valid(&record) {
-                        push_capped(&mut out, record.observation, MAX_DREAM_OBSERVATIONS);
-                    }
-                }
-            }
-        }
-        out.into_iter().collect()
+        read_jsonl_resumed(&dir, MAX_DREAM_JSONL_FILES, MAX_DREAM_OBSERVATIONS, |line| {
+            serde_json::from_str::<UserPatternRecord>(line)
+                .ok()
+                .filter(user_pattern_record_is_valid)
+                .map(|record| record.observation)
+        })
     }
 }
 
@@ -2367,31 +2334,15 @@ impl LessonSource for AutomationLessonSource {
             .join(ZO_DIR_NAME)
             .join(DREAM_DIR)
             .join(AUTOMATION_DIR);
-        let mut digests = VecDeque::new();
-        for path in jsonl_files_oldest_first(&dir, MAX_DREAM_JSONL_FILES) {
-            let Ok(lines) = read_jsonl_lines(&path) else {
-                continue;
-            };
-            for line in lines {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(record) = serde_json::from_str::<AutomationEventRecord>(line) {
-                    push_capped(
-                        &mut digests,
-                        AutomationDigest {
-                            session_id: record.session_id,
-                            kind: record.kind,
-                            event: record.event,
-                            verified: record.verified,
-                        },
-                        MAX_AUTOMATION_DIGESTS,
-                    );
-                }
-            }
-        }
-        decision_core::dreamer::lessons_from_automation(&digests.into_iter().collect::<Vec<_>>())
+        let digests = read_jsonl_resumed(&dir, MAX_DREAM_JSONL_FILES, MAX_AUTOMATION_DIGESTS, |line| {
+            serde_json::from_str::<AutomationEventRecord>(line).ok().map(|record| AutomationDigest {
+                session_id: record.session_id,
+                kind: record.kind,
+                event: record.event,
+                verified: record.verified,
+            })
+        });
+        decision_core::dreamer::lessons_from_automation(&digests)
     }
 }
 
