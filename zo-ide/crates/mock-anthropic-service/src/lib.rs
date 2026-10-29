@@ -170,6 +170,15 @@ struct DenseStream {
     /// `pace_ms=`: how long the mock waits after each event of a streamed
     /// answer; 0 writes the whole stream at once.
     pace_ms: u64,
+    /// `refdef=`: how many sections, from the first, carry a line that reads
+    /// as a link reference definition (`` `args[1]:` ``) — the shape that
+    /// turns off zo's stream restarts for the rest of an answer.
+    refdef: usize,
+    /// `table_rows=`: the rows under each section's table head.
+    table_rows: usize,
+    /// `list_items=`: the items of a list with no blank line between them in
+    /// each section; 0 leaves the list out.
+    list_items: usize,
 }
 
 impl Default for DenseStream {
@@ -179,6 +188,9 @@ impl Default for DenseStream {
             chunk: 32,
             width: 480,
             pace_ms: 0,
+            refdef: 0,
+            table_rows: 2,
+            list_items: 0,
         }
     }
 }
@@ -186,20 +198,24 @@ impl Default for DenseStream {
 impl DenseStream {
     /// The shape the `key=value` words name, up to the first word that is not
     /// one. An unknown key, or a value that is not a whole number (above zero
-    /// for all but `pace_ms`), refuses the scenario rather than drawing some
-    /// other answer than the one asked for.
+    /// for all but `pace_ms`, `refdef` and `list_items`), refuses the scenario
+    /// rather than drawing some other answer than the one asked for.
     fn parse<'a>(words: impl Iterator<Item = &'a str>) -> Option<Self> {
         let mut shape = Self::default();
         for word in words {
             let Some((key, value)) = word.split_once('=') else {
                 break;
             };
-            let positive = || value.parse::<usize>().ok().filter(|number| *number > 0);
+            let whole = || value.parse::<usize>().ok();
+            let positive = || whole().filter(|number| *number > 0);
             match key {
                 "bytes" => shape.bytes = positive()?,
                 "chunk" => shape.chunk = positive()?,
                 "width" => shape.width = positive()?,
                 "pace_ms" => shape.pace_ms = value.parse().ok()?,
+                "refdef" => shape.refdef = whole()?,
+                "table_rows" => shape.table_rows = positive()?,
+                "list_items" => shape.list_items = whole()?,
                 _ => return None,
             }
         }
@@ -207,30 +223,49 @@ impl DenseStream {
     }
 
     /// The answer: numbered sections — a heading, a Korean paragraph, a fenced
-    /// code block, a table and one long line — until the text holds
-    /// [`Self::bytes`]. The same shape always gives the same text.
+    /// code block, a table, the list when one is asked for, and one long line
+    /// — until the text holds [`Self::bytes`]. The same shape always gives the
+    /// same text.
     fn answer(&self) -> String {
         use std::fmt::Write as _;
         let mut text = String::new();
-        let mut section = 0_u64;
+        let mut section = 0_usize;
         while text.len() < self.bytes {
             section += 1;
             write!(
                 text,
                 "## 구간 {section}\n\n\
                  이 구간은 긴 답을 그리는 비용을 재려고 가짜 공급자가 만든 글입니다. \
-                 코드 블록, 표, 긴 줄이 섞여 있습니다.\n\n\
-                 ```rust\n\
+                 코드 블록, 표, 긴 줄이 섞여 있습니다.\n\n"
+            )
+            .expect("section write should succeed");
+            if section <= self.refdef {
+                write!(text, "`args[{section}]:` 첫 인자를 읽는 자리입니다.\n\n")
+                    .expect("reference line write should succeed");
+            }
+            write!(
+                text,
+                "```rust\n\
                  fn section_{section}(values: &[u64]) -> u64 {{\n\
                  \x20   values.iter().map(|value| value.wrapping_mul({section})).sum()\n\
                  }}\n\
                  ```\n\n\
                  | 칸 | 값 | 설명 |\n\
-                 |---|---|---|\n\
-                 | 하나 | {section} | 한국어 칸 |\n\
-                 | two | {section:#x} | ASCII cell |\n\n"
+                 |---|---|---|\n"
             )
-            .expect("section write should succeed");
+            .expect("code and table head write should succeed");
+            for row in 1..=self.table_rows {
+                writeln!(text, "| 행 {row} | {section}.{row} | 한국어 칸 ASCII cell |")
+                    .expect("table row write should succeed");
+            }
+            text.push('\n');
+            if self.list_items > 0 {
+                for item in 1..=self.list_items {
+                    writeln!(text, "- 항목 {item}: 구간 {section}의 목록 줄")
+                        .expect("list item write should succeed");
+                }
+                text.push('\n');
+            }
             let line_start = text.len();
             while text.len() - line_start < self.width {
                 write!(text, "긴 줄 {section} long line ").expect("line write should succeed");
