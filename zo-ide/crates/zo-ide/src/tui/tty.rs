@@ -142,11 +142,7 @@ mod tests {
         use std::os::fd::AsFd as _;
         use std::time::{Duration, Instant};
 
-        let pty = nix::pty::openpty(
-            None::<&nix::pty::Winsize>,
-            None::<&nix::sys::termios::Termios>,
-        )
-        .expect("open a pty");
+        let pty = crate::tui::test_pty::open_pty(None).expect("open a pty");
         assert!(!super::hung_up_on(pty.slave.as_fd()), "a live pty has not hung up");
         drop(pty.master);
         let until = Instant::now() + Duration::from_secs(60);
@@ -154,5 +150,102 @@ mod tests {
             assert!(Instant::now() < until, "a pty whose other end closed has hung up");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// A child spawned while a test's pty is open keeps no copy of its master,
+    /// so the user end hangs up the moment the test closes it — not when that
+    /// child exits. `Command::spawn` returns once the child has exec'd, so an
+    /// end marked close-on-exec is already gone from it (t-78154).
+    #[cfg(unix)]
+    #[test]
+    fn a_child_spawned_beside_an_open_pty_keeps_no_copy_of_its_master() {
+        use std::os::fd::AsFd as _;
+        use std::process::{Command, Stdio};
+
+        let pty = crate::tui::test_pty::open_pty(None).expect("open a pty");
+        let mut child = Command::new("/bin/sleep")
+            .arg("5")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a child");
+        drop(pty.master);
+        let hung_up = super::hung_up_on(pty.slave.as_fd());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(hung_up, "a child spawned while the pty was open held its master");
+    }
+
+    /// Both ends of a test's pty close on exec from the moment they exist.
+    #[cfg(unix)]
+    #[test]
+    fn both_ends_of_a_test_pty_close_on_exec() {
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+        use std::os::fd::AsRawFd as _;
+
+        let pty = crate::tui::test_pty::open_pty(None).expect("open a pty");
+        for (name, end) in [("master", pty.master.as_raw_fd()), ("slave", pty.slave.as_raw_fd())] {
+            let flags = FdFlag::from_bits_truncate(fcntl(end, FcntlArg::F_GETFD).expect("the end's flags"));
+            assert!(flags.contains(FdFlag::FD_CLOEXEC), "the {name} end is inherited by every child");
+        }
+    }
+
+    /// What `open_with` makes of an opener that fails with `errnos` in turn and
+    /// opens after them, and how many times it asked.
+    #[cfg(unix)]
+    fn open_after(errnos: &[i32]) -> (Result<(), crate::tui::test_pty::OpenFailed>, usize) {
+        let mut asked = 0;
+        let opened = crate::tui::test_pty::open_with(|| {
+            asked += 1;
+            errnos.get(asked - 1).map_or(Ok(()), |&errno| Err(errno))
+        });
+        (opened, asked)
+    }
+
+    /// Two parallel opens of `/dev/ptmx` can pick the same number on macOS,
+    /// and the loser's `-6` is gone on the next try: a pair that opens on the
+    /// third try is a pair (t-78154).
+    #[cfg(unix)]
+    #[test]
+    fn a_pty_that_opens_after_two_lost_races_is_opened() {
+        use crate::tui::test_pty::EREDRIVEOPEN;
+
+        assert_eq!(open_after(&[EREDRIVEOPEN, EREDRIVEOPEN]), (Ok(()), 3));
+    }
+
+    /// An error no later try clears — out of descriptors — fails at once.
+    #[cfg(unix)]
+    #[test]
+    fn a_pty_out_of_descriptors_fails_without_another_try() {
+        use crate::tui::test_pty::OpenFailed;
+
+        let emfile = nix::errno::Errno::EMFILE as i32;
+        assert_eq!(open_after(&[emfile]), (Err(OpenFailed { errno: emfile, tries: 1 }), 1));
+    }
+
+    /// Races lost every time end after the last allowed try, with the raw `-6`.
+    #[cfg(unix)]
+    #[test]
+    fn a_pty_that_loses_every_race_fails_after_five_tries_with_the_raw_errno() {
+        use crate::tui::test_pty::{OpenFailed, EREDRIVEOPEN};
+
+        assert_eq!(
+            open_after(&[EREDRIVEOPEN; 6]),
+            (Err(OpenFailed { errno: EREDRIVEOPEN, tries: 5 }), 5)
+        );
+    }
+
+    /// A lasting error after lost races ends the tries where it comes.
+    #[cfg(unix)]
+    #[test]
+    fn a_lasting_error_after_lost_races_ends_the_tries_where_it_comes() {
+        use crate::tui::test_pty::{OpenFailed, EREDRIVEOPEN};
+
+        let emfile = nix::errno::Errno::EMFILE as i32;
+        assert_eq!(
+            open_after(&[EREDRIVEOPEN, EREDRIVEOPEN, emfile]),
+            (Err(OpenFailed { errno: emfile, tries: 3 }), 3)
+        );
     }
 }

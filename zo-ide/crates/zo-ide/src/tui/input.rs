@@ -341,8 +341,7 @@ mod tests {
     fn open_pty() -> nix::pty::OpenptyResult {
         use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
 
-        let pty = nix::pty::openpty(None::<&nix::pty::Winsize>, None::<&nix::sys::termios::Termios>)
-            .expect("open a pty");
+        let pty = crate::tui::test_pty::open_pty(None).expect("open a pty");
         let mut raw = tcgetattr(&pty.slave).expect("the pty's modes");
         cfmakeraw(&mut raw);
         tcsetattr(&pty.slave, SetArg::TCSANOW, &raw).expect("raw mode");
