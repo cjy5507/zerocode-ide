@@ -3450,21 +3450,26 @@ function mdLink(label, href, line = undefined) {
  * crates/zerocode-shell/src/cmd/terminal.rs. Measured from the checkout's top
  * that is no file, and the press handed the person the disk's own refusal. The
  * look is the file finder's (`search_files`), asked only by a press whose open
- * failed — drawing a link asks the disk nothing. Only a link measured inside
- * the checkout that look walks is looked for: one from another checkout would
- * find a namesake here. An absolute path is where it says it is; one outside
- * the checkout that the project's door refuses goes to `openOutsideDocLink`. */
+ * failed — drawing a link asks the disk nothing. Only a link that lands inside
+ * the checkout that look walks is looked for: one measured from another
+ * checkout would find a namesake here. An absolute path is where it says it
+ * is. Whatever lands outside the checkout and the vault — an absolute path, or
+ * a link measured from another checkout — goes to `openOutsideDocLink` when the
+ * project's door refuses it. Every other failure is one sentence, never the
+ * disk's own refusal, which stays on its hover. */
 function openDocLink(base, path, line) {
   const opts = { preview: true, ...(line !== undefined && { line }) };
   const at = resolveDocPath(base, path);
-  if (path.startsWith("/")) {
-    if (artifactPathUnder(at, activeWorktreePath)) return openPath(at, opts);
-    return openPath(at, { ...opts, unread: (error) => void openOutsideDocLink(at, `${at}: ${error}`) });
+  const refusal = (error) => `${at}: ${error}`;
+  const inCheckout = !at.startsWith("/") || artifactPathUnder(at, activeWorktreePath);
+  if (!inCheckout && !artifactPathUnder(at, secondBrainVault)) {
+    return openPath(at, { ...opts, unread: (error) => void openOutsideDocLink(at, refusal(error)) });
   }
-  const tail = path.replace(/^(?:\.{1,2}\/)+/, "");
-  const here = !base.startsWith("/") || artifactPathUnder(base, activeWorktreePath);
-  if (tail === "" || !here) return openPath(at, opts);
-  return openPath(at, { ...opts, unread: (error) => void findDocLink(tail, opts, `${at}: ${error}`) });
+  const tail = path.startsWith("/") ? "" : path.replace(/^(?:\.{1,2}\/)+/, "");
+  if (inCheckout && tail !== "") {
+    return openPath(at, { ...opts, unread: (error) => void findDocLink(tail, opts, refusal(error)) });
+  }
+  return openPath(at, { ...opts, unread: (error) => sayLinkUnfound(tail || basename(at), refusal(error)) });
 }
 
 /* A file outside the project the person pressed (t-83039): an agent's answer
@@ -3505,6 +3510,11 @@ function sayDocLinkFailure(words, refusal) {
   if (!standingToast(words, "halt")) toast(words, "halt", { tip: refusal });
 }
 
+/* A link whose file is not where it was looked for. */
+function sayLinkUnfound(name, refusal) {
+  sayDocLinkFailure(t("file.linkUnfound", "이 파일을 체크아웃에서 찾지 못했어요: {{name}}", { name }), refusal);
+}
+
 /* The checkout's files whose path ends with the link's: one opens at the line
  * the link named, several stand in the file finder with the name typed in, and
  * none is one sentence with what the disk said on its hover — said once
@@ -3528,7 +3538,7 @@ async function findDocLink(tail, opts, refusal) {
     openPalette("file", { query: name, found });
     return;
   }
-  sayDocLinkFailure(t("file.linkUnfound", "이 파일을 체크아웃에서 찾지 못했어요: {{name}}", { name: tail }), refusal);
+  sayLinkUnfound(tail, refusal);
 }
 
 /* 그림. 바깥 그림은 이 창이 대신 받아오지 않는다 — 문서가 가리킨 곳으로 창이
