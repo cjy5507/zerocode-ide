@@ -132,10 +132,12 @@ const paneNow = new Map();
  * question the hook only signalled is on the program's screen alone. */
 const paneAsks = new Map();
 /* Why a worker's question is the person's after all (t-82296): a worker's own
- * question goes to its run's coordinator, and comes here only when nobody sat
- * in that seat any more or nobody answered in ten minutes. Keyed by pane
- * (`term:<n>`), said by `ask:raised` ahead of the report that draws the card,
- * and gone with the question (`hook:agent`). */
+ * question goes to its run's coordinator, and comes here only when the
+ * coordinator gave it to the person (t-84343), nobody sat in that seat any
+ * more, nobody answered in ten minutes, the person took the pane, or the
+ * letter could not be sent or answered. Keyed by pane (`term:<n>`), said by
+ * `ask:raised` ahead of the report that draws the card, and gone with the
+ * question (`hook:agent`) or with the pane (`term:exited`). */
 const askRaised = new Map();
 const hookStamps = new Map();
 
@@ -930,6 +932,8 @@ function decideApproval(card, draft, choice, message = null) {
  * nothing for every other question. */
 function askRaisedWords(pane) {
   switch (askRaised.get(pane)) {
+    case "coordinator-handed":
+      return t("board.ask.raisedHanded", "코디가 사람 몫이라 올림");
     case "coordinator-silent":
       return t("board.ask.raisedSilent", "코디가 답하지 않아 올림");
     case "coordinator-gone":
@@ -18019,6 +18023,9 @@ listen("term:exited", (event) => {
   forgetCodexPtyFallback(term);
   forgetMailWaiting(term);
   forgetTakenOver(term);
+  // A worker's question given to the person goes with its pane, and so does
+  // why it was given: the next pane at this number asks its own (t-84343).
+  askRaised.delete(`term:${term}`);
   paneUsage.delete(term);
   paneEfforts.delete(term);
   orphanWorkersOf(term);

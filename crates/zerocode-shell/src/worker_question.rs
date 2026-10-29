@@ -16,10 +16,20 @@
 //! the same answer door a card's answer takes
 //! ([`crate::cmd::terminal::answer_ask`]) — no new verb, no new key road.
 //!
-//! The person is asked after all in three cases only: the run's coordinator
-//! seat is empty, the person has taken the pane, or the coordinator has not
-//! answered within [`COORDINATOR_ANSWER_WAIT_MS`]. A question given to the
-//! person while it waited says why on the card (`ask:raised`).
+//! A question that is the person's to answer — an account to pick, a secret
+//! value, a payment, a login, a pane the person works in — the coordinator
+//! does not answer: it replies with one of [`TO_PERSON`]'s words, and the
+//! window gives the question to the person at once and types nothing
+//! (t-84343). The worker's picker waits for the person; the window holds the
+//! question until the person answers, and lets it go quietly when the worker
+//! or its pane goes first.
+//!
+//! The person is asked after all in these cases only: the coordinator gave it
+//! to them, the run's coordinator seat is empty, the person has taken the
+//! pane, the coordinator has not answered within
+//! [`COORDINATOR_ANSWER_WAIT_MS`], the ledger would not file the letter, or
+//! it can no longer take an answer while the pane still asks. A question
+//! given to the person says why on the card (`ask:raised`).
 //!
 //! A question the pane moved past before the answer came is refused back to
 //! the coordinator as 「지나간 질문」 and leaves nothing on the person's
@@ -50,6 +60,10 @@ use crate::hooks::PaneHookReport;
 /// How long a coordinator is given to answer its worker's question before
 /// the person is asked instead.
 pub(crate) const COORDINATOR_ANSWER_WAIT_MS: i64 = 10 * 60 * 1000;
+
+/// What a coordinator may leave after a word of [`TO_PERSON`] — 「사람에게.」
+/// is the word too, never an answer typed into the picker.
+const SENTENCE_ENDS: &[char] = &['.', '。', '!', '?'];
 
 /// How long a question read back after a restart waits, once its worker
 /// sits in a pane again, for the pane's screen to show it: a pane that has
@@ -174,6 +188,18 @@ pub(crate) fn step(
         Standing::Closed if passed || raised => return Step::Forget,
         // The pane still asks what nobody can answer by letter any more.
         Standing::Closed => return Step::Raise(Raised::Unanswerable),
+        // The coordinator gave it to the person: given at once, then the
+        // person's until they answer — or until the worker or its pane goes,
+        // when it is let go with nobody told.
+        Standing::Answered(words) if hands_to_person(words) => {
+            return if passed || seat.is_none() {
+                Step::Forget
+            } else if raised {
+                Step::Wait
+            } else {
+                Step::Raise(Raised::CoordinatorHanded)
+            };
+        }
         Standing::Answered(_) if passed => return Step::RefusePassed,
         Standing::Answered(_) if raised || seat.is_some_and(|seat| seat.taken) => {
             return Step::RefuseHeld;
@@ -261,7 +287,22 @@ pub(crate) fn letter(prompt: &AskPrompt, seat: &AskSeat, term: u32) -> (String, 
         },
         COORDINATOR_ANSWER_WAIT_MS / 60_000,
     ));
+    body.push_str(&format!(
+        "\n사람 몫(계정 고르기·비밀 값·결제·로그인·사람이 쓰는 판)이면 답하지 말고 본문에 {} 한 마디만 써서 reply 하세요 — 바로 사람 화면에 올립니다.",
+        TO_PERSON
+            .iter()
+            .map(|word| format!("「{word}」"))
+            .collect::<Vec<_>>()
+            .join(" 또는 "),
+    ));
     (subject, body)
+}
+
+/// Whether the coordinator's `reply` is one of [`TO_PERSON`]'s words alone —
+/// spaces and a sentence's end around it, English in any case.
+fn hands_to_person(reply: &str) -> bool {
+    let word = reply.trim().trim_end_matches(SENTENCE_ENDS).trim_end();
+    TO_PERSON.iter().any(|one| word.eq_ignore_ascii_case(one))
 }
 
 /// The coordinator's reply as the picks a card would have sent.
@@ -345,6 +386,16 @@ pub(crate) fn held_letter(worker: &str, term: u32, question: &str) -> String {
     )
 }
 
+/// The window's one record of a question its coordinator gave to the person
+/// (t-84343): the letter, the pane and the coordinator's seat, on the log's
+/// own clock. The letter's thread holds the coordinator's word itself.
+fn handed_line(seat: &AskSeat, term: u32, question: &str) -> String {
+    format!(
+        "worker-question: 코디가 사람 몫으로 올림 — 질문 {question}, 워커 {}의 판 term-{term}, 코디 자리 {}",
+        seat.worker, seat.coordinator
+    )
+}
+
 /// The words the coordinator is told when its answer could not be typed.
 pub(crate) fn unanswered_letter(worker: &str, term: u32, question: &str, why: &str) -> String {
     format!("질문 {question}의 답을 워커 {worker}의 판(term-{term})에 넣지 못했습니다 — {why}")
@@ -393,8 +444,12 @@ fn left() -> MutexGuard<'static, HashMap<String, Left>> {
 }
 
 /// Keep what `term` asked of its coordinator after the window stops carrying
-/// it: only a question already in the ledger can still be answered.
+/// it: only a question already in the ledger can still be answered, and one
+/// the coordinator gave to the person has had its word.
 fn leave(term: u32, old: Asked) {
+    if old.raised == Some(Raised::CoordinatorHanded) {
+        return;
+    }
     if let Filing::Filed(question) = old.filed {
         left().insert(
             question,
@@ -654,6 +709,10 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
     for (question, was) in gone {
         match crate::orchestration::question_standing(&was.seat.run, &question) {
             Standing::Waiting => {}
+            // Given to the person: nobody to tell.
+            Standing::Answered(words) if hands_to_person(&words) => {
+                left().remove(&question);
+            }
             Standing::Answered(_) => {
                 tell(
                     &was.seat,
@@ -975,6 +1034,12 @@ fn carry(app: &AppHandle, term: u32, standing: &Asked, question: &str, now_ms: i
                     standing.worktree.as_deref(),
                     why,
                 );
+                if why == Raised::CoordinatorHanded {
+                    crate::system_runtime::note_window_event(
+                        app.state::<crate::AppState>().local_data_root(),
+                        &handed_line(seat, term, question),
+                    );
+                }
             }
         }
         Step::Answer(selections) => {
@@ -1584,6 +1649,13 @@ mod tests {
                 indices: Vec::new(),
                 other,
             }])
+        );
+        // The window's one record of it: the letter, the pane, the seat.
+        let line = handed_line(&live, 7, "m-5");
+        assert!(line.contains("코디가 사람 몫으로 올림"), "{line}");
+        assert!(
+            line.contains("m-5") && line.contains("term-7") && line.contains("run:run-1"),
+            "{line}"
         );
     }
 
