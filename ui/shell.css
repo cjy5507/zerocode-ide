@@ -25632,6 +25632,24 @@ progress:indeterminate::-webkit-progress-bar {
   gap: var(--space-2);
 }
 
+/* 답 없이 닫기 (t-83281): the one line of why and its button share a row; at any width the field
+   narrows and the button keeps its words. */
+.inbox-close {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.inbox-close-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.inbox-close-field {
+  flex: 1;
+  min-width: 0;
+}
+
 .inbox-note {
   margin: 0;
   color: var(--ink-mist);

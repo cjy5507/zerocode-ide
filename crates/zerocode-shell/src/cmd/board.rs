@@ -338,6 +338,31 @@ pub(crate) async fn desk_reply(
     .map_err(|error| error.to_string())?
 }
 
+/// Close, from the inbox, a question put to a run's coordinator without an
+/// answer (t-83281, `desk::close_question`) — as that seat, which this window
+/// must hold. The main window only, and only on the person's press.
+#[tauri::command]
+pub(crate) async fn desk_question_close(
+    webview: tauri::Webview,
+    run: String,
+    message: String,
+    reason: String,
+    retry_request: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::desk::close_question(
+            &run,
+            &message,
+            &reason,
+            &retry_request,
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// Acknowledge, from the task board, the batch a run's coordinator holds —
 /// the whole batch, as that seat (t-6588, `desk::acknowledge`).
 #[tauri::command]

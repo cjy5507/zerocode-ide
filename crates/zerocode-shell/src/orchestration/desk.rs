@@ -21,7 +21,7 @@ use zerocode_core::orchestration::task_cost::TaskCost;
 use zerocode_core::orchestration::{
     Closure, Delivery, Gate, GateStatus, LEDGER_ITSELF, Ledger, Message, MessageKind, NextStep,
     Run, SETTLE_QUIET_DAYS, Task, TaskStatus, WorkProgress, WorkStage, WorktreeRoom,
-    last_touched_ms, worktree_room,
+    board_pass_result, last_touched_ms, worktree_room,
 };
 use zerocode_core::plain_text::TextLint;
 
@@ -1161,6 +1161,43 @@ pub(crate) fn reply(
     )
 }
 
+/// Close a question put to `run_id`'s coordinator without an answer, as that
+/// seat (t-83281) — the ledger's `question-close`, whose rules stand whole:
+/// only the seat asked or the seat that asked closes it, the reason is the
+/// record it leaves, and a question closed already answers with the standing
+/// close (`already`) and writes nothing.
+pub(crate) fn close_question(
+    run_id: &str,
+    message: &str,
+    reason: &str,
+    retry_request: &str,
+    now_ms: i64,
+) -> Result<serde_json::Value, String> {
+    if retry_request.trim().is_empty() {
+        return Err("retryRequest is required".into());
+    }
+    if reason.trim().is_empty() {
+        return Err("a close without an answer needs its reason".into());
+    }
+    as_the_coordinator(
+        run_id,
+        [
+            "question-close",
+            "--run",
+            run_id,
+            "--message",
+            message,
+            "--reason",
+            reason,
+            "--retry-request",
+            retry_request,
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        now_ms,
+    )
+}
+
 /// Acknowledge the batch `run_id`'s coordinator holds — the ledger's unit is
 /// the batch, never one letter of it, and the desk says how many letters it
 /// holds before the press. `--peek`: nothing new is handed over, so every
@@ -1254,10 +1291,10 @@ pub(crate) fn resolve_hold(
 /// review that names the attempt and the source the board drew. The ledger
 /// refuses the pass when either has moved since, which is what keeps a press
 /// from passing work that changed after the person read it — and when the
-/// coordinator withdrew its verification of that attempt and source, since a
-/// bare `{"verified":true}` names no new review (t-81913). A withdrawn row
-/// draws no pass at all; the ledger's refusal is what a press that slips
-/// through is answered with.
+/// coordinator withdrew its verification of that attempt and source, since
+/// the board's pass names no new review (t-81913). A withdrawn row draws no
+/// pass at all; the ledger's refusal is what a press that slips through is
+/// answered with.
 pub(crate) fn pass_review(
     run_id: &str,
     task: &str,
@@ -1272,6 +1309,7 @@ pub(crate) fn pass_review(
     if attempt.trim().is_empty() || source.trim().is_empty() {
         return Err("a pass names the attempt and the source it read".into());
     }
+    let result = with_cached_run(run_id, |run| pass_result(run, run_id, task, now_ms))??;
     as_the_coordinator(
         run_id,
         [
@@ -1281,7 +1319,7 @@ pub(crate) fn pass_review(
             "--task",
             task,
             "--result",
-            r#"{"verified":true}"#,
+            &result,
             "--attempt",
             attempt,
             "--source",
@@ -1293,6 +1331,18 @@ pub(crate) fn pass_review(
         .to_vec(),
         now_ms,
     )
+}
+
+/// The result the board's pass sends (t-82501): the one the task holds now
+/// with the pass added ([`board_pass_result`]) — `task-update` replaces a
+/// result whole, so a pass that sent its one key would take the worker's
+/// summary, tests and report with it. Read from the image the board drew
+/// from; a task that image does not hold is not written over blind.
+fn pass_result(run: Option<&Run>, run_id: &str, task: &str, now_ms: i64) -> Result<String, String> {
+    let held = run
+        .and_then(|run| run.task(task))
+        .ok_or_else(|| format!("the board holds no task {task} in {run_id}"))?;
+    Ok(board_pass_result(held.result.as_str(), now_ms))
 }
 
 /// The machine strip's one answer: what `df -g`, `uptime` and `simctl` told a
@@ -2801,6 +2851,66 @@ mod tests {
         let blind = pass_review("run-x", "t-1", "", "1234567", "ui-pass-1", 1)
             .expect_err("a pass without its attempt");
         assert!(blind.contains("attempt and the source"), "{blind}");
+        // Nor a close without its reason, which is the record it leaves (t-83281).
+        let unreasoned = close_question("run-x", "m-1", "  ", "ui-close-1", 1)
+            .expect_err("a close without a reason");
+        assert!(unreasoned.contains("reason"), "{unreasoned}");
+        let unnamed = close_question("run-x", "m-1", "이미 끝난 일", " ", 1)
+            .expect_err("a close without a request name");
+        assert!(unnamed.contains("retryRequest"), "{unnamed}");
+    }
+
+    /// The board's pass is written over the result the task holds (t-82501):
+    /// the worker's summary, tests and report stand beside the verification
+    /// and the moment of the press, and a task the board's image does not
+    /// hold is not written over blind.
+    #[test]
+    fn the_boards_pass_sends_the_workers_result_with_its_verification_added() {
+        let mut ledger = Ledger::new();
+        let run_id = ledger.create_run("desk-pass", 1);
+        let task = ledger
+            .create_task(&run_id, "pass".into(), "pass".into(), vec![], None, 2)
+            .expect("a task");
+        let worker_said = serde_json::json!({
+            "ok": true,
+            "head": "abc1234",
+            "summary": "빈 장바구니에서도 가격 가드가 선다",
+            "tests": "price_guard 12 passed",
+            "reportPath": "/Users/dev/acme-web/reviews/t-2041/REPORT.md",
+        });
+        ledger
+            .update_task(
+                &run_id,
+                &task,
+                None,
+                Some(worker_said.to_string()),
+                ResultAuthor::Worker {
+                    worker: "w-2043".into(),
+                    dispatch: None,
+                },
+                3,
+            )
+            .expect("the worker's report");
+
+        let sent = pass_result(ledger.run(&run_id), &run_id, &task, 1_234)
+            .expect("a pass of a task the board holds");
+        let sent: serde_json::Value = serde_json::from_str(&sent).expect("the result is JSON");
+        for key in ["ok", "head", "summary", "tests", "reportPath"] {
+            assert_eq!(
+                sent[key], worker_said[key],
+                "the pass drops `{key}`: {sent}"
+            );
+        }
+        assert_eq!(sent["verified"], true, "{sent}");
+        assert_eq!(
+            sent[zerocode_core::orchestration::BOARD_PASS_KEY],
+            1_234,
+            "{sent}"
+        );
+
+        let unheld = pass_result(ledger.run(&run_id), &run_id, "t-404", 1_235)
+            .expect_err("a task the board does not hold");
+        assert!(unheld.contains("t-404"), "{unheld}");
     }
 
     /// A run in play with one task in every stage, and a finished run nobody

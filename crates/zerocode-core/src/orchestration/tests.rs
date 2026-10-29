@@ -24327,8 +24327,9 @@ fn a_withdrawn_verification_is_not_covered_by_a_bare_pass_of_the_same_attempt_an
         "the board draws the work as waiting on a review that was withdrawn: {standing:?}"
     );
 
-    // The board's press, as `desk::pass_review` sends it — and the same bare
-    // verification with landing keys beside it, which names no review either.
+    // The board's press as `desk::pass_review` sent it before t-82501 — and
+    // the same bare verification with landing keys beside it, which names no
+    // review either. The press as it is sent now is `tests/board_pass.rs`'s.
     for bare in [r#"{"verified":true}"#, r#"{"verified":true,"merged":true}"#] {
         let before = bench.ledger.export();
         let pressed = bench.at_argv(
@@ -25711,6 +25712,9 @@ fn a_late_sound_never_retires_the_next_occupants_readiness() {
 mod assign;
 /// t-47835: where an attempt's time went (`tests/attempt_time.rs`).
 mod attempt_time;
+/// t-82501: the board's 「통과」 keeps the result it passes over, and a
+/// withdrawal still refuses it (`tests/board_pass.rs`).
+mod board_pass;
 /// t-19159: a closed state that is not failure, and the settle pass
 /// (`tests/closed.rs`).
 mod closed;
