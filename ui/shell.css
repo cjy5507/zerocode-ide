@@ -15223,6 +15223,14 @@ pre.md-block > .chat-code-attribute { color: var(--syntax-attribute); }
 pre.md-block > .chat-code-meta { color: var(--syntax-meta); }
 pre.md-block > .chat-code-link { color: var(--syntax-link); }
 pre.md-block > .chat-code-invalid { color: var(--syntax-invalid); }
+
+/* On paper the editor's comment, the ramp's floor at 4.83:1 on its white
+ * plane, reads 4.1:1 on an answer's well, under AA; no grey clears 4.5 there
+ * and stays under the other roles in the editor, so the well alone lifts it
+ * to the secondary ink, 7.29:1 (t-82195 C11). The editor keeps its floor. */
+:root[data-theme="light"] .is-chat-page .helper-said pre.md-block {
+  --syntax-comment: var(--ink-mist);
+}
 pre.md-block > .chat-code-inserted { color: var(--syntax-inserted); }
 pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 

@@ -3379,12 +3379,11 @@
    *
    * Measured against `--editor-surface: #ffffff`, the plane these are drawn
    * on: keyword 5.70, string 6.06, number 5.41, function 6.45, type 5.47,
-   * variable 17.93, constant 6.11, operator 6.39, invalid 7.47. Comment was
-   * the floor on purpose — #6b7280, 4.83 here — until an answer's code well
-   * (the 6% ink over `#fafafa`) took it to 4.1, under AA. It is the
-   * secondary ink now (t-82195 C11, the person's draft C of 10-29): 8.59 on
-   * this plane, 7.29 in an answer's well — a step under the variable and
-   * over the operator, so on paper a comment reads before the punctuation.
+   * variable 17.93, constant 6.11, operator 6.39, invalid 7.47. Comment is
+   * again the floor and again on purpose — 4.83, which clears AA with less
+   * room than the rest because a comment that competes with code is a comment
+   * drawn wrong. An answer's code well (6% ink over the page) takes it to
+   * 4.1, so shell.css lifts it to `--ink-mist` there alone (t-82195 C11).
    *
    * The furniture above is mixed rather than fixed, so it follows this block
    * without being restated: the gutter inks re-mix from the light `--ink-*`.
@@ -3393,7 +3392,7 @@
   --syntax-keyword: #7c3aed;
   --syntax-string: #2f6f3f;
   --syntax-number: #9a5b12;
-  --syntax-comment: var(--ink-mist);
+  --syntax-comment: #6b7280;
   --syntax-function: #1d5fa8;
   --syntax-type: #0f766e;
   --syntax-variable: #171717;
