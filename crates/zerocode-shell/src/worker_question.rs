@@ -18,14 +18,14 @@
 //!
 //! The person is asked after all in three cases only: the run's coordinator
 //! seat is empty, the person has taken the pane, or the coordinator has not
-//! answered within [`COORDINATOR_ANSWER_WAIT_MS`]. The last two that arrive
-//! while the question waits say so on the card (`ask:raised`).
+//! answered within [`COORDINATOR_ANSWER_WAIT_MS`]. A question given to the
+//! person while it waited says why on the card (`ask:raised`).
 //!
 //! A question the pane moved past before the answer came is refused back to
 //! the coordinator as 「지나간 질문」 and leaves nothing on the person's
 //! screen: the moving past is the hook's word (a report that is no longer the
 //! asking), or the answer door's, which reads the screen and refuses with
-//! [`crate::answer_door::QUESTION_CHANGED`] — the judgement t-82287 made
+//! [`crate::cmd::terminal::QUESTION_CHANGED`] — the judgement t-82287 made
 //! for the person's own answers.
 //!
 //! A permission request is not routed: the automatic approval rules read it
@@ -313,14 +313,45 @@ struct Asked {
     /// The question as the hook reported it, to compare the next report to.
     signature: String,
     prompt: AskPrompt,
-    /// The asking report itself, sent to the page again when the person is
-    /// asked after all.
+    /// The asking report itself, noted again when the person is asked after
+    /// all, and the worktree it came from, for the bell.
     report: PaneHookReport,
+    worktree: Option<String>,
     seat: AskSeat,
     filed: Filing,
     filed_ms: i64,
     passed: bool,
     raised: Option<Raised>,
+}
+
+/// A question a pane left before its coordinator answered — the pane asked
+/// something else, or closed — kept by its message id so an answer that
+/// lands later is refused as 「지나간 질문」 rather than lost.
+#[derive(Debug, Clone)]
+struct Left {
+    seat: AskSeat,
+    term: u32,
+}
+
+fn left() -> MutexGuard<'static, HashMap<String, Left>> {
+    static LEFT: OnceLock<Mutex<HashMap<String, Left>>> = OnceLock::new();
+    LEFT.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+}
+
+/// Keep what `term` asked of its coordinator after the window stops carrying
+/// it: only a question already in the ledger can still be answered.
+fn leave(term: u32, old: Asked) {
+    if let Filing::Filed(question) = old.filed {
+        left().insert(
+            question,
+            Left {
+                seat: old.seat,
+                term,
+            },
+        );
+    }
 }
 
 fn asked() -> MutexGuard<'static, HashMap<u32, Asked>> {
@@ -349,7 +380,11 @@ fn asking(report: &PaneHookReport) -> Option<&AskPrompt> {
 /// — the pane is mid-turn, waiting on its coordinator's answer — with no
 /// question on it, so no card, no 「당신 차례」 row and no ring. Everything
 /// else is shown as reported.
-pub(crate) fn heard(report: &PaneHookReport, now_ms: i64) -> PaneHookReport {
+pub(crate) fn heard(
+    report: &PaneHookReport,
+    worktree: Option<&str>,
+    now_ms: i64,
+) -> PaneHookReport {
     let term = report.term;
     if let Some(prompt) = asking(report) {
         let sig = signature(prompt);
@@ -363,7 +398,9 @@ pub(crate) fn heard(report: &PaneHookReport, now_ms: i64) -> PaneHookReport {
                 None => quiet(report),
             };
         }
-        held.remove(&term);
+        if let Some(old) = held.remove(&term) {
+            leave(term, old);
+        }
         drop(held);
         let seat = crate::orchestration::worker_ask_seat(term);
         if route(seat.as_ref()) == Route::Person {
@@ -378,6 +415,7 @@ pub(crate) fn heard(report: &PaneHookReport, now_ms: i64) -> PaneHookReport {
                 signature: sig,
                 prompt: prompt.clone(),
                 report: report.clone(),
+                worktree: worktree.map(str::to_string),
                 seat,
                 filed: Filing::Unfiled,
                 filed_ms: now_ms,
@@ -426,21 +464,47 @@ pub(crate) fn hidden(term: u32) -> bool {
         .is_some_and(|standing| !standing.passed && standing.raised.is_none())
 }
 
-/// The pane is gone; whatever it asked goes with it.
+/// The pane is gone; whatever it asked goes with it, and an answer its
+/// coordinator gives later is refused as passed.
 pub(crate) fn forget(term: u32) {
-    asked().remove(&term);
+    let old = asked().remove(&term);
+    if let Some(old) = old {
+        leave(term, old);
+    }
 }
 
 /// One beat over every question the window carries for a worker: file what
 /// is not filed yet, type what the coordinator answered, refuse what the pane
 /// moved past, and give the person what nobody answers.
 pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
+    let gone: Vec<(String, Left)> = left()
+        .iter()
+        .map(|(question, was)| (question.clone(), was.clone()))
+        .collect();
+    for (question, was) in gone {
+        match crate::orchestration::question_standing(&was.seat.run, &question) {
+            Standing::Waiting => {}
+            Standing::Answered(_) => {
+                tell(
+                    &was.seat,
+                    &question,
+                    &passed_letter(&was.seat.worker, was.term, &question),
+                    now_ms,
+                );
+                left().remove(&question);
+            }
+            Standing::Closed => {
+                left().remove(&question);
+            }
+        }
+    }
     let terms: Vec<u32> = asked().keys().copied().collect();
     for term in terms {
         let Some(standing) = asked().get(&term).cloned() else {
             continue;
         };
         match &standing.filed {
+            Filing::Unfiled if standing.raised.is_some() => {}
             Filing::Unfiled => file(app, host, term, &standing, now_ms),
             Filing::Filed(question) => carry(app, term, &standing, question, now_ms),
         }
@@ -494,14 +558,14 @@ fn file(app: &AppHandle, host: &dyn Host, term: u32, standing: &Asked, now_ms: i
             now.filed = Filing::Filed(question);
             now.filed_ms = now_ms;
         }
-        None => {
-            let report = now.report.clone();
-            let passed = now.passed;
+        None if now.passed => {
             held.remove(&term);
+        }
+        None => {
+            now.raised = Some(Raised::Unsent);
+            let (report, worktree) = (now.report.clone(), now.worktree.clone());
             drop(held);
-            if !passed {
-                raise(app, term, &report, Raised::Unsent);
-            }
+            raise(app, term, &report, worktree.as_deref(), Raised::Unsent);
         }
     }
 }
@@ -522,7 +586,7 @@ fn carry(app: &AppHandle, term: u32, standing: &Asked, question: &str, now_ms: i
     let seat = &standing.seat;
     match next {
         Step::Wait => {}
-        Step::Forget => forget(term),
+        Step::Forget => settled(term),
         Step::RefusePassed => {
             tell(
                 seat,
@@ -530,13 +594,27 @@ fn carry(app: &AppHandle, term: u32, standing: &Asked, question: &str, now_ms: i
                 &passed_letter(&seat.worker, term, question),
                 now_ms,
             );
-            forget(term);
+            settled(term);
         }
         Step::Raise(why) => {
-            if let Some(now) = asked().get_mut(&term) {
-                now.raised = Some(why);
+            // Only a question the pane still asks: a hook that moved on in
+            // the meantime has the last word.
+            let still = match asked().get_mut(&term) {
+                Some(now) if !now.passed => {
+                    now.raised = Some(why);
+                    true
+                }
+                _ => false,
+            };
+            if still {
+                raise(
+                    app,
+                    term,
+                    &standing.report,
+                    standing.worktree.as_deref(),
+                    why,
+                );
             }
-            raise(app, term, &standing.report, why);
         }
         Step::Answer(selections) => {
             match crate::cmd::terminal::answer_ask(
@@ -546,16 +624,16 @@ fn carry(app: &AppHandle, term: u32, standing: &Asked, question: &str, now_ms: i
                 standing.prompt.clone(),
                 selections,
             ) {
-                Ok(()) => forget(term),
-                Err(why) if why == crate::answer_door::ANSWER_IN_FLIGHT => {}
-                Err(why) if why == crate::answer_door::QUESTION_CHANGED => {
+                Ok(()) => settled(term),
+                Err(why) if why == crate::cmd::terminal::ANSWER_IN_FLIGHT => {}
+                Err(why) if why == crate::cmd::terminal::QUESTION_CHANGED => {
                     tell(
                         seat,
                         question,
                         &passed_letter(&seat.worker, term, question),
                         now_ms,
                     );
-                    forget(term);
+                    settled(term);
                 }
                 Err(why) => {
                     tell(
@@ -564,11 +642,16 @@ fn carry(app: &AppHandle, term: u32, standing: &Asked, question: &str, now_ms: i
                         &unanswered_letter(&seat.worker, term, question, &why),
                         now_ms,
                     );
-                    forget(term);
+                    settled(term);
                 }
             }
         }
     }
+}
+
+/// The window is done with `term`'s question: answered, refused or closed.
+fn settled(term: u32) {
+    asked().remove(&term);
 }
 
 /// One letter from the ledger to the run's coordinator about `question`.
@@ -582,14 +665,18 @@ fn tell(seat: &AskSeat, question: &str, body: &str, now_ms: i64) {
     );
 }
 
-/// Give the person the question after all: why first, so the card that the
-/// report draws says it, then the asking report itself.
-fn raise(app: &AppHandle, term: u32, report: &PaneHookReport, why: Raised) {
+/// Give the person the question after all: why first, so the card says it,
+/// then the asking report noted again through the one road every report
+/// takes to the page, and the bell a question rings.
+fn raise(app: &AppHandle, term: u32, report: &PaneHookReport, worktree: Option<&str>, why: Raised) {
     let _ = app.emit(
         RAISED_EVENT,
         serde_json::json!({ "term": term, "why": why }),
     );
-    let _ = app.emit("hook:agent", report.clone());
+    crate::pane_runtime::note_pane_state(app, worktree, report);
+    if let Some(worktree) = worktree {
+        crate::pane_runtime::ring_for_pane(app, worktree, report);
+    }
 }
 
 #[cfg(test)]

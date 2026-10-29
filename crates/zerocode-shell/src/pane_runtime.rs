@@ -1477,10 +1477,8 @@ pub(super) fn note_pane_state(
     }
     // A worker's own question goes to its coordinator, and the page is shown
     // the pane at work rather than a question for the person (t-82296).
-    let _ = app.emit(
-        "hook:agent",
-        crate::worker_question::heard(report, epoch_ms_now()),
-    );
+    let shown = crate::worker_question::heard(report, worktree, epoch_ms_now());
+    let _ = app.emit("hook:agent", shown);
     if report.state == zerocode_core::hook::HookState::Done
         && let Some(cleanup) = app
             .state::<AppState>()

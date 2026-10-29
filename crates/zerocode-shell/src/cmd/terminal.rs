@@ -2108,7 +2108,8 @@ pub(crate) fn term_paste(
 ///
 /// The page is not its only caller: a worker's coordinator answering the
 /// question the worker's CLI asked (t-82296) walks the same door, under the
-/// same refusals ([`crate::worker_question`]).
+/// same refusals ([`crate::worker_question`]), and reads them by the words
+/// below.
 #[tauri::command(async)]
 pub(crate) fn answer_ask(
     app: AppHandle,
@@ -2172,6 +2173,11 @@ pub(crate) fn answer_ask(
     });
     Ok(())
 }
+
+/// The refusals [`answer_ask`] can come back with that a caller outside the
+/// page tells apart (t-82296): the question passed, or another answer is on
+/// its way.
+pub(crate) use crate::answer_door::{ANSWER_IN_FLIGHT, QUESTION_CHANGED};
 
 /// A card's choice on the numbered menu of a CLI whose TUI nobody measured:
 /// the row it picked, walked to and taken through the answer door.
