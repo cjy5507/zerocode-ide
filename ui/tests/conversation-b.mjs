@@ -25,7 +25,7 @@ const SHOT_WIDTHS = Object.freeze([390, 1440, 2000]);
  * the last (so one answer is not the newest), a fenced block named
  * `typescript` and one named nothing, a long unbroken path in a chip, and the
  * window's note to the agent — and what draft C reads (t-82195): the answer
- * before the last writes three levels of heading. */
+ * before the last writes three levels of heading and a rule. */
 function draftTurns() {
   const turns = mockupTurns(Date.now() - 60_000);
   const last = turns.pop();
@@ -33,7 +33,7 @@ function draftTurns() {
   turns.push(
     {
       role: "assistant",
-      text: `먼저 목록을 찾았습니다. 경로는 \`${path}\` 입니다.\n\n# 목록 화면\n\n## 폭 상수\n\n### 고칠 곳\n\n두 파일입니다.`,
+      text: `먼저 목록을 찾았습니다. 경로는 \`${path}\` 입니다.\n\n# 목록 화면\n\n## 폭 상수\n\n### 고칠 곳\n\n두 파일입니다.\n\n---\n\n나머지는 그대로입니다.`,
       at_ms: last.at_ms - 900,
     },
     { role: "window", text: "The window restarted and cut your last turn short. Continue exactly where you left off.", at_ms: last.at_ms - 600 },
@@ -147,6 +147,26 @@ function readPage() {
       };
     }),
     headAir: { above: space(5), below: space(2) },
+    // A rule an answer draws (draft C4), and the ink of the page's own
+    // divider, read off a probe that stands for one breath.
+    rule: (() => {
+      const hr = list.querySelector(".helper-turn.is-assistant .helper-said hr");
+      if (!hr) return null;
+      const style = getComputedStyle(hr);
+      const probe = page.appendChild(document.createElement("i"));
+      probe.style.color = "var(--chat-divider)";
+      const divider = getComputedStyle(probe).color;
+      probe.remove();
+      return {
+        top: [style.borderTopStyle, parseFloat(style.borderTopWidth), style.borderTopColor],
+        sides: [style.borderRightStyle, style.borderBottomStyle, style.borderLeftStyle],
+        divider,
+        width: parseFloat(root.getPropertyValue("--rule-width")),
+        above: parseFloat(style.marginTop),
+        below: parseFloat(style.marginBottom),
+        air: space(5),
+      };
+    })(),
     say,
     sayWhole: t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다"),
     sayShort: t("composer.placeholderShort", "다음 지시를 쓰세요"),
@@ -246,6 +266,11 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
             head.weight === (["h1", "h2"].includes(head.level) ? "700" : "600") &&
             head.above === one.headAir.above && head.below === one.headAir.below)),
       JSON.stringify(Object.fromEntries(["dark-390", "dark-1440", "light-2000"].map((key) => [key, [seen[key].proseSize, seen[key].heads, seen[key].headAir]]))));
+    ok("B: a rule in an answer is one solid line in the page's divider ink with a section's air above and under it — not the browser's two-tone inset box (draft C4, t-82195)",
+      all.every((one) => one.rule !== null && one.rule.top[0] === "solid" && one.rule.top[1] === one.rule.width &&
+        one.rule.top[2] === one.rule.divider && one.rule.sides.every((side) => side === "none") &&
+        one.rule.above === one.rule.air && one.rule.below === one.rule.air),
+      JSON.stringify(Object.fromEntries(["dark-1440", "light-1440"].map((key) => [key, seen[key].rule]))));
     ok("B: an answer wears no dot and the tool work stands as pills with no step built",
       all.every((one) => one.answerDots === 0 && one.stepRows === 0),
       JSON.stringify(dark(1440)));

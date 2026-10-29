@@ -15127,6 +15127,15 @@ details.worker-command {
   font-weight: 700;
 }
 
+/* A rule an answer draws (t-82195 C4): one line in the page's divider ink
+ * with a section's air on each side, where the browser drew a two-tone inset
+ * box in a grey of its own. */
+.is-chat-page .helper-said hr {
+  margin: var(--space-5) 0;
+  border: 0;
+  border-top: var(--rule-width) solid var(--chat-divider);
+}
+
 /* A code block in an answer: the extension's well (`codeBlockWrapper pre`)
  * — the code ground, 4px corners, one step of padding. */
 .is-chat-page .helper-said pre {
