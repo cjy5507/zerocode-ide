@@ -31954,6 +31954,99 @@ mod exit_capture {
         );
     }
 
+    /// t-77269, the codex review's P3 of t-76489 r7: the coordinator's pane
+    /// named no workspace, no leaf holds its shell, and the only record of
+    /// its conversation is a tab no pane stood for, in a workspace not in
+    /// front. The record keeps it — nobody here can place it — but the exit
+    /// stores that tab asleep, so the next window brings it back only when
+    /// that workspace is opened: the log says so, and the run's board is
+    /// told the conversation's id, once. Before, the record's name alone
+    /// answered `Named`, and neither a line nor a letter followed.
+    #[test]
+    fn a_coordinator_left_to_a_tab_no_pane_stood_for_is_said_not_to_come_back_on_its_own() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&other).expect("a checkout");
+        let other = other.to_string_lossy().into_owned();
+        let wake = pane_layout::WakeAgent {
+            agent: "claude".to_string(),
+            key: "session_id".to_string(),
+            id: ENDED.to_string(),
+            transcript_path: None,
+            interrupted: false,
+        };
+        let file = dir.path().join("pane-layouts.json");
+        let record = || pane_layout::TabLayout {
+            id: Some(4),
+            root: pane_layout::PaneNode::Leaf,
+            titles: HashMap::new(),
+            names: HashMap::new(),
+            agents: HashMap::from([(0, wake.clone())]),
+            running: HashMap::from([(0, "claude".to_string())]),
+            active: 0,
+            expanded: None,
+            pinned: false,
+            focused: false,
+            terms: HashMap::new(),
+            buffers: HashMap::new(),
+            owed: Vec::new(),
+            awake: false,
+        };
+        for sure in [true, false] {
+            pane_layout::rewrite(&file, |layouts| {
+                layouts.clear();
+                layouts.insert(other.clone(), vec![record()]);
+                true
+            })
+            .expect("the saved set");
+            let pane = pane_layout::LivePane {
+                term: 1,
+                worktree: String::new(),
+                wake: wake.clone(),
+                sure,
+            };
+            let exited = exit_write(
+                &file,
+                vec![pane.clone()],
+                &|_, _| Some(false),
+                &|term| term == 1,
+                &|term| (term == 1).then(|| "screen".to_string()),
+                &|| true,
+            );
+            assert_eq!(exited.written, Written::Done, "sure: {sure}");
+            assert_eq!(
+                exited.filed,
+                vec![pane_layout::Filed::Asleep],
+                "sure: {sure}: the record's name alone answered for the pane"
+            );
+            let stored = pane_layout::read(&file);
+            assert_eq!(
+                stored[&other][0].agents[&0], wake,
+                "sure: {sure}: the record was moved or dropped"
+            );
+            assert!(
+                pane_layout::standing_worktrees(&stored).is_empty(),
+                "sure: {sure}: the record's tab was stored standing"
+            );
+            let line = coordinator_filed_line(&pane, "run-4275", exited.filed[0], &exited.written)
+                .expect("a line for a coordinator the next window will not wake");
+            assert!(
+                line.contains("run:run-4275")
+                    && line.contains(&ENDED[..8])
+                    && line.contains("only when that tab's workspace is opened"),
+                "sure: {sure}: {line}"
+            );
+            let (body, receipt) =
+                coordinator_lost_letter(&pane, "run-4275", exited.filed[0], &exited.written)
+                    .expect("the run's letter");
+            assert!(
+                body.contains(ENDED) && body.contains("reopen it by its id"),
+                "sure: {sure}: {body}"
+            );
+            assert_eq!(receipt, format!("exit-asleep:run-4275:{ENDED}"));
+        }
+    }
+
     /// The exit reads through the bounded doors above, not around them.
     #[test]
     fn the_exit_capture_reads_through_its_bounded_doors() {

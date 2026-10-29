@@ -653,7 +653,8 @@ pub(crate) struct LivePane {
 /// naming it in the pane's workspace from a pane not `standing` now stands
 /// for this pane and keeps its place; else, for a pane that named no
 /// workspace, a tab this window never woke in another workspace keeps it,
-/// as before; else the pane is written as a tab of its own. The other
+/// as before, and is said to be all that does ([`Filed::Asleep`],
+/// t-77269); else the pane is written as a tab of its own. The other
 /// leaves naming it come back plain shells — one conversation, one wake.
 ///
 /// A tab this window never woke, in another workspace, is a record nobody
@@ -744,7 +745,7 @@ pub(crate) fn file_unheld(
             continue;
         }
         if !afar.is_empty() && !placed {
-            filed.push(Filed::Named);
+            filed.push(Filed::Asleep);
             continue;
         }
         if pane.worktree.is_empty() {
@@ -776,7 +777,7 @@ pub(crate) fn file_unheld(
 /// came back. For a pane that named no workspace, with no empty leaf of its
 /// own, a dead pane's leaf is tied to it — the leaf keeps its conversation
 /// and its place — and a record of no pane, which nothing here confirms,
-/// keeps it as before.
+/// keeps it as before ([`Filed::Asleep`], t-77269).
 fn add_unconfirmed(layouts: &mut Layouts, pane: LivePane, standing: impl Fn(u32) -> bool) -> Filed {
     let placed = !pane.worktree.is_empty();
     let naming: Vec<_> = leaves_naming(layouts, &pane.wake)
@@ -808,7 +809,7 @@ fn add_unconfirmed(layouts: &mut Layouts, pane: LivePane, standing: impl Fn(u32)
             return Filed::Relinked;
         }
         if !naming.is_empty() {
-            return Filed::Named;
+            return Filed::Asleep;
         }
         return Filed::Unplaced;
     }
@@ -900,13 +901,18 @@ fn strike(layouts: &mut Layouts, leaves: &[(String, usize, usize, Option<u32>)])
 /// What [`file_unheld`] did with one live pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Filed {
-    /// The leaf holding its shell already names its conversation, a tab
-    /// this window never woke in another workspace keeps it for a pane that
-    /// named no workspace, or it names none that could wake: nothing
-    /// written. For a pane the window could not tell of, also: a leaf of
-    /// its workspace names it from a pane still standing, or — for one that
-    /// named no workspace — a record of no pane does.
+    /// The leaf holding its shell already names its conversation, or it
+    /// names none that could wake: nothing written. For a pane the window
+    /// could not tell of, also: a leaf of its workspace names it from a pane
+    /// still standing.
     Named,
+    /// The pane named no workspace, no leaf holds its shell, and only
+    /// records of no pane name its conversation — a tab this window never
+    /// woke (t-77269). The records keep it as they are, for nobody here can
+    /// tell which folder it belongs in, but no screen ties them to the pane:
+    /// the exit stores their tab asleep, and the next window brings it back
+    /// only when that tab's workspace is opened. Nothing written, and said.
+    Asleep,
     /// The stored leaf holding its shell now names its conversation — for
     /// a pane the window could not tell of, only a leaf that named nothing.
     Renamed,
@@ -1626,7 +1632,7 @@ mod tests {
                 Filed::Named,
                 Filed::Tab(53),
                 Filed::Tab(1),
-                Filed::Named,
+                Filed::Asleep,
                 Filed::Named,
                 Filed::Tab(54),
             ],
@@ -1954,7 +1960,7 @@ mod tests {
         };
         let mut layouts = afar();
         let filed = file_unheld(&mut layouts, vec![unknown(8, "")], |_| true);
-        assert_eq!(filed, vec![Filed::Named]);
+        assert_eq!(filed, vec![Filed::Asleep]);
         assert_eq!(layouts, afar());
         let mut layouts = afar();
         let filed = file_unheld(&mut layouts, vec![unknown(8, &main)], |_| true);
@@ -2059,7 +2065,7 @@ mod tests {
         assert_eq!(standing_worktrees(&layouts), vec![main.clone()]);
         let mut layouts = Layouts::from([(main.clone(), vec![record(None)])]);
         let filed = file_unheld(&mut layouts, vec![unknown("")], standing);
-        assert_eq!(filed, vec![Filed::Named]);
+        assert_eq!(filed, vec![Filed::Asleep]);
         assert_eq!(layouts[&main], vec![record(None)]);
     }
 
@@ -2451,7 +2457,7 @@ mod tests {
             ..living(zo(ZO_COORDINATOR))
         };
         let filed = file_unheld(&mut layouts, vec![unplaced], standing);
-        assert_eq!(filed, vec![Filed::Named]);
+        assert_eq!(filed, vec![Filed::Asleep]);
         assert_eq!(layouts, before);
 
         // And two records of one zo conversation in two workspaces, no pane
