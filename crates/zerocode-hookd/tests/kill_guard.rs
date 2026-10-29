@@ -21,7 +21,10 @@ const SET_LOOSE_BY_THE_OTHER_PANE: u32 = 4343;
 
 /// A window (100) with the calling pane (200, its agent 210) and another
 /// pane (300) whose agent (310) the incident's pattern matches, and a job
-/// each pane set loose under pid 1, naming its pane in its environment.
+/// each pane set loose under pid 1, naming its pane in its environment. The
+/// calling pane's own process is a login shell whose environment does not
+/// read — macOS's `/bin/zsh` in a terminal pane the person started `claude`
+/// in by hand — so its mark is only the window's to tell.
 struct FakeWindow {
     tables: AtomicUsize,
     readable: bool,
@@ -45,6 +48,7 @@ impl KillWitness for FakeWindow {
         assert_eq!(pane_key, "term-1", "the guard asked about another pane");
         KillRoots {
             caller: Some(CALLER),
+            caller_mark: Some(pane("term-1")),
             protected: vec![
                 ProtectedRoot {
                     pid: 100,
@@ -87,7 +91,6 @@ impl KillWitness for FakeWindow {
                 "python3 -m http.server 8001",
             ),
         ])
-        .with_pane_mark(CALLER, pane("term-1"))
         .with_pane_mark(SET_LOOSE, pane("term-1"))
         .with_pane_mark(300, pane("term-2"))
         .with_pane_mark(SET_LOOSE_BY_THE_OTHER_PANE, pane("term-2"))
@@ -231,7 +234,9 @@ async fn the_callers_own_child_is_allowed_and_a_pid_known_only_at_run_time_is_re
 
 /// The refusal's way out works for a job the pane set loose (t-81714): its
 /// pid, learned with `echo $!`, ends it by number, as the refusal says —
-/// while another pane's loose job is refused all the same.
+/// while another pane's loose job is refused all the same. The calling
+/// pane's own shell names no pane ([`FakeWindow`]): the mark the job is
+/// matched against is the one the window says it gave the pane.
 #[tokio::test]
 async fn the_refusals_way_out_ends_a_job_the_pane_set_loose() {
     let window = FakeWindow::new(true);

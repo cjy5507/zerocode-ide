@@ -57,6 +57,7 @@ impl zerocode_hookd::KillWitness for PaneProcesses {
         let caller_term = crate::hooks::term_of_pane_key(pane_key);
         let mut roots = KillRoots {
             caller: None,
+            caller_mark: None,
             protected: vec![ProtectedRoot::window(std::process::id())],
         };
         let Some(app) = WINDOW.get() else {
