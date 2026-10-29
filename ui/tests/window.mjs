@@ -56936,6 +56936,291 @@ suite("composer-under-question", async ({ browser, origin, ok }) => {
   }
 });
 
+/* 지나간 질문(t-82287, 사람 10-29 10:5x 스크린샷): 워커 판이 질문을 띄웠다가 제쳐 두고
+ * 턴을 이었는데, 대화 보기의 질문 카드와 왼쪽 「당신 차례」 행이 그대로 남았다. 사람이 답을
+ * 고르고 글을 써 보내자 창이 판 화면에서 그 질문을 못 찾아 거절했고, 쓴 글은 사라졌다.
+ *
+ * 판의 훅이 질문을 지나갔다고 말하면(묻지 않는 상태, 또는 다른 질문) 카드와 그 질문의
+ * 「당신 차례」 행이 곧바로 간다 — 칸이 아직 그 질문을 늘어놓고 있어도. 훅이 놓쳐 카드가
+ * 남았으면 답 문(`answer_ask`)이 화면을 읽고 거절한다(`question-changed`): 카드는 「이
+ * 질문은 이미 지나갔습니다」 한 줄로 바뀌고, 사람이 쓴 글은 입력칸으로 돌아온다. 답이 가는
+ * 사이에 훅이 먼저 카드를 거둔 때도 글은 입력칸으로 돌아온다. */
+suite("question-passed", async ({ browser, origin, ok }) => {
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(async () => {
+      window.__SENT__ = [];
+      for (const name of ["term_paste", "term_key", "answer_approval"]) {
+        window.__ANSWER__[name] = (args) => {
+          window.__SENT__.push([name, args]);
+          return null;
+        };
+      }
+      window.__ANSWER__.answer_ask = (args) => {
+        window.__SENT__.push(["answer_ask", args]);
+        return null;
+      };
+      window.__TELL__ = (payload) => {
+        for (const handler of window.__LISTENERS__["hook:agent"] ?? []) handler({ payload });
+      };
+      window.__ASK__ = (question) => ({ questions: [{ question, header: "단계", multi_select: false,
+        options: [{ label: "진행", description: "다음 단계로" }, { label: "멈춤", description: "여기서 멈춤" }] }] });
+      // The attention column the backend groups, held as it was: a column that
+      // still lists a question the pane's own hook moved past.
+      window.__LIST__ = async (...questions) => {
+        window.__COLUMNS__ = [{ bucket: "attention", cards: questions.map((question) => ({
+          pane: `term:${window.__TERM__}`, agent: "claude", state: "needs-attention", heading: "가독성 묶음",
+          worktree: "main", project: "/p", task: "", ask: question, ask_prompt: window.__ASK__(question),
+          unseen: true, changed_at: Date.now(), at: Date.now() })) }];
+        await refreshBoardBadge();
+      };
+      window.__BEATS__ = async (count = 3) => {
+        for (let beat = 0; beat < count; beat += 1) await window.__PAINTED__();
+      };
+      const term = await openTermTab({ placement: "tab" });
+      window.__TERM__ = term;
+      const turns = [{ role: "user", text: "가독성 묶음을 고쳐 줘." }, { role: "assistant", text: "cargo 시험을 돌립니다." }];
+      window.__ANSWER__.pane_log = () => ({ found: true, next: turns.length, turns, skipped: false, more: false, folded: false });
+      window.__TELL__({ term, state: "working", agent: "claude", session: "s-passed" });
+      await setPaneChat(term, true);
+      await pollHelperPages();
+    });
+    const read = () => page.evaluate(() => {
+      const chat = document.querySelector(".pane-chat");
+      const card = chat.querySelector(".pane-chat-ask");
+      const box = chat.querySelector(".worker-composer-box");
+      return {
+        card: card !== null,
+        panel: Boolean(card?.querySelector(".board-ask")),
+        passed: card?.querySelector(".pane-chat-ask-passed")?.textContent ?? "",
+        cardLabel: card?.getAttribute("aria-label") ?? "",
+        value: box.value,
+        says: box.placeholder,
+        turns: document.getElementById("your-turn-count").textContent,
+        rows: [...document.querySelectorAll("#your-turn-group .your-turn-row")].length,
+        told: [...document.querySelectorAll(".toast")].map((note) => note.textContent.trim()),
+        answers: window.__SENT__.filter(([name]) => name === "answer_ask").length,
+      };
+    });
+    const words = await page.evaluate(() => ({
+      gone: t("board.ask.changed", "이 질문은 이미 지나갔습니다 — 답은 보내지 않았어요"),
+      working: t("board.ask.passedWorking", "이 질문은 이미 지나갔습니다 — 판은 이어서 일하는 중"),
+      plain: t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다"),
+    }));
+
+    /* ① The hook moves past the question: to work, and to another question. */
+    await page.evaluate(async () => {
+      await window.__LIST__("cargo 시험 다음 단계로 넘어갈까요?");
+      window.__TELL__({ term: window.__TERM__, state: "waiting", agent: "claude", session: "s-passed",
+        ask_prompt: window.__ASK__("cargo 시험 다음 단계로 넘어갈까요?") });
+      await window.__BEATS__();
+    });
+    const asked = await read();
+    await page.evaluate(async () => {
+      window.__TELL__({ term: window.__TERM__, state: "working", agent: "claude", session: "s-passed" });
+      await window.__BEATS__();
+      // The badge the state move asked for lands — on the column as it was.
+      await refreshBoardBadge();
+      await window.__BEATS__(2);
+    });
+    const worked = await read();
+    await page.evaluate(async () => {
+      window.__TELL__({ term: window.__TERM__, state: "waiting", agent: "claude", session: "s-passed",
+        ask_prompt: window.__ASK__("첫 질문") });
+      await window.__LIST__("첫 질문");
+      await window.__BEATS__();
+      window.__TELL__({ term: window.__TERM__, state: "waiting", agent: "claude", session: "s-passed",
+        ask_prompt: window.__ASK__("둘째 질문") });
+      await window.__BEATS__();
+      await refreshBoardBadge();
+      await window.__BEATS__(2);
+    });
+    const replaced = await read();
+    await page.evaluate(async () => {
+      await window.__LIST__("둘째 질문");
+      await window.__BEATS__(2);
+    });
+    const second = await read();
+    ok(
+      "a hook that moves past the question takes its card and its 「당신 차례」 row at once — to work, or to another question under the same state — while a column that still lists it is not believed; the next question stands as its own row (t-82287 ①)",
+      asked.card && asked.panel && asked.turns === "1" && asked.rows === 1 &&
+        !worked.card && worked.turns === "0" && worked.rows === 0 &&
+        replaced.card && replaced.turns === "0" && replaced.rows === 0 &&
+        second.turns === "1" && second.rows === 1,
+      JSON.stringify({ asked, worked, replaced, second }),
+    );
+
+    /* ② The hook missed it: the answer door finds the question gone. */
+    await page.evaluate(async () => {
+      window.__SENT__.length = 0;
+      for (const note of document.querySelectorAll(".toast")) note.remove();
+      window.__ANSWER__.answer_ask = (args) => {
+        window.__SENT__.push(["answer_ask", args]);
+        throw new Error("question-changed");
+      };
+      window.__TELL__({ term: window.__TERM__, state: "waiting", agent: "claude", session: "s-passed",
+        ask_prompt: window.__ASK__("cargo 시험 다음 단계로 넘어갈까요?") });
+      await window.__LIST__("cargo 시험 다음 단계로 넘어갈까요?");
+      await window.__BEATS__();
+    });
+    const box = page.locator(".pane-chat .worker-composer-box");
+    await box.click();
+    await page.keyboard.type("코디랑 상의해 주세요");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    const missed = await read();
+    await page.evaluate(async () => {
+      await refreshBoardBadge();
+      await window.__BEATS__(2);
+    });
+    const missedLater = await read();
+    ok(
+      "an answer the answer door refuses because the question is gone from the pane's screen turns the card into 「이 질문은 이미 지나갔습니다」 and gives the words back to the box — nothing thrown away, no 「터미널을 확인해 주세요」, and its row goes too (t-82287 ②③)",
+      missed.answers === 1 &&
+        missed.card && !missed.panel && missed.passed === words.gone && missed.cardLabel === words.gone &&
+        missed.value === "코디랑 상의해 주세요" && missed.says === words.plain &&
+        !missed.told.some((said) => said.includes("터미널")) &&
+        missedLater.turns === "0" && missedLater.rows === 0 && missedLater.value === "코디랑 상의해 주세요",
+      JSON.stringify({ missed, missedLater, words }),
+    );
+
+    /* The hook takes the card while the answer is on its way; the refusal lands after. */
+    await page.evaluate(async () => {
+      const box = document.querySelector(".pane-chat .worker-composer-box");
+      box.value = "";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      window.__ANSWER__.answer_ask = () => new Promise((unused, refuse) => {
+        window.__REFUSE__ = () => refuse(new Error("question-changed"));
+      });
+      window.__TELL__({ term: window.__TERM__, state: "waiting", agent: "claude", session: "s-passed",
+        ask_prompt: window.__ASK__("셋째 질문") });
+      await window.__BEATS__();
+      const card = document.querySelector(".pane-chat .pane-chat-ask");
+      card.querySelectorAll(".board-ask-option")[1].click();
+      await window.__BEATS__(1);
+      const field = document.querySelector(".pane-chat .pane-chat-ask .board-ask-field");
+      field.value = "멈추고 코디와 상의";
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      document.querySelector(".pane-chat .pane-chat-ask .board-ask-send").click();
+      await window.__BEATS__(1);
+      window.__TELL__({ term: window.__TERM__, state: "working", agent: "claude", session: "s-passed" });
+      await window.__BEATS__();
+      window.__REFUSE__();
+      await new Promise((done) => setTimeout(done, 50));
+      await window.__BEATS__();
+    });
+    const raced = await read();
+    await page.evaluate(async () => {
+      window.__TELL__({ term: window.__TERM__, state: "done", agent: "claude", session: "s-passed" });
+      await window.__BEATS__();
+    });
+    const ended = await read();
+    ok(
+      "an answer refused after the hook already took its card still gives the words back, and the card's line says the pane is working on until the turn ends (t-82287 ②)",
+      raced.card && raced.passed === words.working && raced.value === "멈추고 코디와 상의" &&
+        !raced.told.some((said) => said.includes("터미널")) &&
+        !ended.card && ended.value === "멈추고 코디와 상의",
+      JSON.stringify({ raced, ended, words }),
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+/* 지나간 질문, 선(wire) 페이지(t-82287 r2, 검수 P2-1): 선 위의 세션이 질문을 띄웠다가 답을
+ * 받기 전에 제 기록에서 거두면, 카드의 기타 칸에 쓴 글이 카드와 함께 사라졌다. 판의 카드와
+ * 같은 길로 — 카드는 「이 질문은 이미 지나갔습니다」 한 줄이 되고, 쓴 글은 그 페이지의
+ * 입력칸으로 돌아오며, 선의 상태가 바뀌면 그 줄도 간다. 답을 보낸 질문이 기록에서 빠지는 것은
+ * 지나간 것이 아니다: 카드는 줄 없이 간다. */
+suite("question-passed-wire", async ({ browser, origin, ok }) => {
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(async () => {
+      window.__CALLS__ = [];
+      window.__LOG__ = {
+        found: true, skipped: false, next: 0, turns: [], status: "idle", asks: [], agent: "codex",
+        protocol: "app-server", model: "gpt-5.6-sol", models: [], mode: "on-request", modes: [], commands: [],
+        version: "0.154.0",
+      };
+      window.__ANSWER__.wire_start = (args) => ({ id: 11, agent: args.agent, protocol: "app-server", version: "0.154.0", model: "gpt-5.6-sol" });
+      window.__ANSWER__.wire_log = (args) => ({ ...window.__LOG__, turns: window.__LOG__.turns.slice(args.after), next: window.__LOG__.turns.length });
+      window.__ANSWER__.wire_send = (args) => { window.__CALLS__.push(["send", args]); return null; };
+      window.__ANSWER__.wire_answer = (args) => { window.__CALLS__.push(["answer", args]); return null; };
+      window.__ANSWER__.wire_models = () => [];
+      window.__ANSWER__.wire_stop = () => null;
+      window.__ASK__ = (id, question) => ({ id, kind: "question",
+        questions: [{ question, header: "단계", options: [{ label: "진행" }, { label: "멈춤" }] }] });
+      window.__STEP__ = async (moved) => {
+        window.__LOG__ = { ...window.__LOG__, ...moved };
+        await pollHelperPages();
+        await window.__PAINTED__();
+        await new Promise((done) => setTimeout(done, 60));
+      };
+      await openWirePage("codex", "/tmp/zerocode-window-test");
+      await window.__PAINTED__();
+      await window.__STEP__({
+        status: "asking",
+        turns: [{ role: "user", text: "가독성 묶음을 고쳐 줘." }, { role: "assistant", text: "cargo 시험을 돌립니다." }],
+        asks: [window.__ASK__(5, "cargo 시험 다음 단계로 넘어갈까요?")],
+      });
+    });
+    const read = () => page.evaluate(() => {
+      const face = document.querySelector("#worker-view");
+      const card = face.querySelector(".pane-chat-ask");
+      const box = face.querySelector(".worker-composer-box");
+      return {
+        card: card !== null,
+        panel: Boolean(card?.querySelector(".board-ask")),
+        passed: card?.querySelector(".pane-chat-ask-passed")?.textContent ?? "",
+        cardLabel: card?.getAttribute("aria-label") ?? "",
+        value: box.value,
+        focused: document.activeElement === box,
+        answers: window.__CALLS__.filter(([name]) => name === "answer").length,
+      };
+    });
+    const words = await page.evaluate(() => ({
+      working: t("board.ask.passedWorking", "이 질문은 이미 지나갔습니다 — 판은 이어서 일하는 중"),
+    }));
+
+    /* Words typed on the card's own field; the wire takes the question back. */
+    const asked = await read();
+    await page.locator("#worker-view .pane-chat-ask .board-ask-field").fill("멈추고 코디와 상의");
+    await page.evaluate(() => window.__STEP__({ status: "working", asks: [] }));
+    const passed = await read();
+    await page.evaluate(() => window.__STEP__({ status: "idle" }));
+    const ended = await read();
+    ok(
+      "a question the wire takes back before its answer went turns its card into 「이 질문은 이미 지나갔습니다」, gives the words typed on it back to the page's box with the keyboard, and the line goes once the wire's status moves on (t-82287 r2 P2-1)",
+      asked.card && asked.panel &&
+        passed.card && !passed.panel && passed.passed === words.working && passed.cardLabel === words.working &&
+        passed.value === "멈추고 코디와 상의" && passed.focused && passed.answers === 0 &&
+        !ended.card && ended.value === "멈추고 코디와 상의",
+      JSON.stringify({ asked, passed, ended, words }),
+    );
+
+    /* A question answered through its card leaves the log: no line, nothing given back. */
+    await page.evaluate(async () => {
+      const box = document.querySelector("#worker-view .worker-composer-box");
+      box.value = "";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      await window.__STEP__({ status: "asking", asks: [window.__ASK__(6, "둘째 질문")] });
+    });
+    await page.locator("#worker-view .pane-chat-ask .board-ask-field").fill("둘째는 진행");
+    await page.locator("#worker-view .pane-chat-ask .board-ask-send").click();
+    await page.evaluate(() => window.__STEP__({ status: "working", asks: [] }));
+    const answered = await read();
+    ok(
+      "a question answered through its card that leaves the wire's log takes its card with no 「지나갔습니다」 line and gives nothing back to the box (t-82287 r2 P2-1)",
+      answered.answers === 1 && !answered.card && answered.value === "",
+      JSON.stringify({ answered }),
+    );
+  } finally {
+    await page.close();
+  }
+});
+
 /* 단위 6(docs/design/agent-wire-sessions-20260915.md): 선(wire) 위의 세션 — 화면 없는
  * CLI(Codex app-server)를 창이 JSON-RPC로 몰고, 그 탭은 대화 그 자체다. 턴은
  * `wire_log`로 오고, 입력줄은 `wire_send`로 보내고, 물음은 선이 준 선택지를 단추로

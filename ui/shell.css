@@ -17000,6 +17000,15 @@ details[open] > .helper-cap::after {
   background: none;
 }
 
+/* A question the answer door found gone (t-82287): one quiet line where its
+ * card stood, in the notices' secondary ink, until the pane moves on. */
+.pane-chat-ask-passed {
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  color: var(--ink-mist);
+  font-size: var(--text-xs);
+}
+
 /* The plan a permission asks approval for, on the card (the extension's plan
  * review): the answer's own prose, in a well that scrolls on its own rather
  * than pushing the two answers off the page. */

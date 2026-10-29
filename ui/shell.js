@@ -769,7 +769,7 @@ function askDraftFor(card) {
  * conversation view keeps one with its page — the same shape, so the panels
  * read either. `repaint` is the surface's own repaint (the board's when
  * unset); `instead` is the conversation's third road on a permission card. */
-function askDraftOf(card, sig, { repaint = null, instead = null, answer = null, base = "", delivered = null } = {}) {
+function askDraftOf(card, sig, { repaint = null, instead = null, answer = null, base = "", delivered = null, passed = null } = {}) {
   return {
     sig,
     index: 0,
@@ -787,6 +787,10 @@ function askDraftOf(card, sig, { repaint = null, instead = null, answer = null, 
     // event says so (the turn list counts it off at once), and the refusal's
     // words, which a surface that keeps the question in view says beside it.
     delivered,
+    // What a surface that can let a question go does when the answer door
+    // found it gone from the pane's screen (t-82287) — the board and the turn
+    // list say the refusal beside the question instead.
+    passed,
     refusal: "",
     // Where the card's prose measures its relative paths from — a plan names
     // the files it will touch, and those names are links off this checkout.
@@ -855,7 +859,7 @@ function confirmAsk(card, draft, fromKeyboard = false) {
 function answerRefusalWords(error) {
   const said = String(error);
   if (said.includes("question-changed")) {
-    return t("board.ask.changed", "화면에서 이 질문을 찾지 못해 답을 보내지 않았어요 — 터미널을 확인해 주세요");
+    return t("board.ask.changed", "이 질문은 이미 지나갔습니다 — 답은 보내지 않았어요");
   }
   if (said.includes("answer-in-flight")) {
     return t("board.ask.inFlight", "앞서 누른 답을 보내는 중이에요");
@@ -888,10 +892,17 @@ function submitAsk(card, draft) {
 }
 
 /* An answer that did not go in: the panel is usable again, and the person is
- * told why — in a toast, and beside the question for a surface that shows it. */
+ * told why — in a toast, and beside the question for a surface that shows it.
+ * A question the answer door found gone from the screen is let go by a surface
+ * that can (`draft.passed`, t-82287): there is nothing left to answer, and the
+ * words typed for it must not go with it. */
 function refuseAsk(draft, error) {
   draft.sending = false;
   draft.refusal = answerRefusalWords(error);
+  if (draft.passed && String(error).includes("question-changed")) {
+    draft.passed(draft);
+    return;
+  }
   showError(draft.refusal);
   repaintAsk(draft);
 }
@@ -1881,6 +1892,13 @@ const yourTurnLater = new Map();
  * pane on lands a beat after the keys, and a chip that waited for it would say
  * the answer went nowhere. Dropped once the column stops listing the turn. */
 const yourTurnAnswered = new Set();
+/* Turns whose pane the window saw move past them while the column still lists
+ * them (t-82287): its own hook said it is no longer asking, or asks something
+ * else, or the answer door read its screen and the question was not on it. A
+ * column a beat behind, or one that missed the move, is not believed for
+ * these. Dropped once the column stops listing the turn, and lifted by a hook
+ * that asks the very question again. */
+const yourTurnPassed = new Set();
 /* One draft per turn — the picks, the words typed, the refusal — kept across
  * repaints and dropped with the turn. */
 const yourTurnDrafts = new Map();
@@ -1917,7 +1935,7 @@ function yourTurnKindWord(kind) {
 function yourTurns(now = Date.now()) {
   return attentionCards.filter((card) => {
     const key = yourTurnKey(card);
-    return !yourTurnAnswered.has(key) && (yourTurnLater.get(key) ?? 0) <= now;
+    return !yourTurnAnswered.has(key) && !yourTurnPassed.has(key) && (yourTurnLater.get(key) ?? 0) <= now;
   });
 }
 
@@ -1926,6 +1944,7 @@ function yourTurns(now = Date.now()) {
 function forgetGoneTurns(now = Date.now()) {
   const listed = new Set(attentionCards.map(yourTurnKey));
   for (const key of yourTurnAnswered) if (!listed.has(key)) yourTurnAnswered.delete(key);
+  for (const key of yourTurnPassed) if (!listed.has(key)) yourTurnPassed.delete(key);
   for (const [key, until] of yourTurnLater) if (!listed.has(key) || until <= now) yourTurnLater.delete(key);
   for (const key of yourTurnDrafts.keys()) if (!listed.has(key)) yourTurnDrafts.delete(key);
 }
@@ -1944,6 +1963,27 @@ function countTurnAnswered(key) {
   yourTurnAnswered.add(key);
   yourTurnDrafts.delete(key);
   paintYourTurn();
+}
+
+/* What the window now knows of the questions the column lists for `pane`:
+ * the pane stands on `standing` (null: on none), so every other question has
+ * passed and that one is asked again — or, with `gone`, only that question
+ * has passed and the others are as they were. */
+function passTurns(pane, { standing = null, gone = null } = {}) {
+  let moved = false;
+  for (const card of attentionCards) {
+    const kind = yourTurnKind(card);
+    if (card.pane !== pane || (kind !== "question" && kind !== "permission")) continue;
+    const sig = askSignature(card);
+    if (gone !== null && sig !== gone) continue;
+    const key = yourTurnKey(card);
+    const passed = gone !== null || sig !== standing;
+    if (passed === yourTurnPassed.has(key)) continue;
+    if (passed) yourTurnPassed.add(key);
+    else yourTurnPassed.delete(key);
+    moved = true;
+  }
+  if (moved) paintYourTurn();
 }
 
 function putTurnAway(card) {
@@ -12513,10 +12553,21 @@ listen("hook:agent", (event) => {
   } else {
     paneAsks.delete(term);
   }
+  const askNow = paneAsks.get(term)?.sig ?? null;
+  // The 「당신 차례」 rows follow the same word at once (t-82287): a pane not
+  // asking has moved past every question the column lists for it, and one
+  // asking a described question has moved past the others. A wait it only
+  // signalled says nothing of which question is up.
+  if (!asking) passTurns(`term:${term}`);
+  else if (shaped) passTurns(`term:${term}`, { standing: askNow });
+  // A card that says its question passed stands until the pane's state moves on.
+  const askPage = paneChats.get(term);
+  const passedEnds = askPage?.askPassed === true && hookStates.get(term) !== state;
+  if (passedEnds) askPage.askPassed = false;
   if (agent && !(asking && !shaped)) standPaneConversation(term);
   if (paneChatOn(term)) {
     if (asking && !shaped) setPaneChat(term, false);
-    else if ((paneAsks.get(term)?.sig ?? null) !== askBefore) paintPaneChat(term);
+    else if (askNow !== askBefore || passedEnds) paintPaneChat(term);
     // The transcript this page reads was written before the hook fired — the
     // answer before Stop, the call before PreToolUse — so the page on this
     // pane reads it now, not on its next tick.
@@ -12571,6 +12622,10 @@ listen("hook:agent", (event) => {
       // arrived. Consume that origin once so all state-change consumers hear
       // the real push; later repeated tool events remain on the quiet path.
       scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
+    } else if (askNow !== askBefore) {
+      // Another question under the same state: the column the badge reads
+      // is asked again, as a state move asks it (t-82287).
+      scheduleAgentPaint(["cards", "badge", "board"]);
     } else if (clearedRestoreBirth || event.payload.prompt || event.payload.said || modelMoved) {
       scheduleAgentPaint(["cards", "board"]);
     }
@@ -13412,18 +13467,19 @@ function wireAskShape(run, ask) {
 
 /* The card a question stands in, under the transcript and above the composer
  * — the pane's conversation and a wire's page both stand theirs here. */
-function standAskCard(host, panel) {
+function standAskCard(host, panel, label = t("board.tasks.needsInput", "진행하려면 확인이 필요해요.")) {
   let card = host.querySelector(".pane-chat-ask");
   if (!card) {
     card = document.createElement("section");
     card.className = "pane-chat-ask";
-    card.setAttribute("aria-label", t("board.tasks.needsInput", "진행하려면 확인이 필요해요."));
     // The composer hands the keyboard here when its words cannot answer the
     // question (`answerAskFromComposer`); the keys pressed on the card are
     // its own, not the terminal's behind the page (`rearmKeySink`).
     card.tabIndex = -1;
     card.dataset.keyboardOwner = "true";
   }
+  // Its name is what it holds: a question waiting, or one that passed.
+  writeAttribute(card, "aria-label", label);
   card.replaceChildren(panel);
   // Inside the dock, above the composer — the extension's card stands in its
   // `inputContainer`; a page without a composer keeps it under the list.
@@ -13446,12 +13502,25 @@ function standAskCard(host, panel) {
 function paintWireAsk(host, run, force = false) {
   const ask = run.wireLog?.asks?.[0] ?? null;
   const card = host.querySelector(".pane-chat-ask");
+  const status = run.wireLog?.status ?? null;
   if (!ask) {
-    card?.remove();
+    // The wire took the question back before its answer went, with words
+    // typed for it (t-82287 r2): the pane's card's road (`letAskPass`) — the
+    // words go back to the box, and the card says the question passed while
+    // the wire stays in the status it passed in.
+    const draft = run.askDraft;
+    if (draft && !draft.sending && keepAskWords(host, run, draft)) run.askPassedIn = status;
     run.askDraft = null;
     run.askShape = null;
+    if (run.askPassedIn && run.askPassedIn === status) {
+      standAskPassed(host, run);
+    } else {
+      run.askPassedIn = null;
+      card?.remove();
+    }
     return;
   }
+  run.askPassedIn = null;
   const sig = JSON.stringify(ask.id);
   if (run.askDraft?.sig !== sig) {
     const shape = wireAskShape(run, ask);
@@ -14049,15 +14118,18 @@ function paintPaneAsk(held, force = false) {
   const ask = paneAsks.get(term);
   const card = held.host.querySelector(".pane-chat-ask");
   if (!ask) {
-    card?.remove();
     held.askDraft = null;
+    if (held.askPassed) standAskPassed(held.host, held.run);
+    else card?.remove();
     return;
   }
+  held.askPassed = false;
   if (held.askDraft?.sig !== ask.sig) {
     held.askDraft = askDraftOf(ask, ask.sig, {
       repaint: () => paintPaneAsk(held, true),
       base: helperBase(held.run),
       instead: () => held.host.querySelector(".worker-composer-box")?.focus(),
+      passed: (draft) => letAskPass(held, draft),
     });
     force = true;
   }
@@ -14068,6 +14140,55 @@ function paintPaneAsk(held, force = false) {
   // The box under it says whether its words answer the card or wait — the
   // card's answer going out moves that (t-81786 r2 P2-1).
   syncWorkerComposers(held.run);
+}
+
+/* The answer door read the pane's screen and the question this card answers
+ * was not on it (t-82287): the program moved past it — its hook missed saying
+ * so, or said so while the answer was on its way. The card says it in one line
+ * where it stood until the pane's state moves on (`hook:agent`), the
+ * question's 「당신 차례」 row goes, and the words typed for it go back to the
+ * box — an answer that went nowhere must not take them with it. */
+function letAskPass(held, draft) {
+  const term = held.run.term;
+  if (paneAsks.get(term)?.sig === draft.sig) paneAsks.delete(term);
+  passTurns(`term:${term}`, { gone: draft.sig });
+  held.askPassed = true;
+  keepAskWords(held.host, held.run, draft);
+  paintPaneAsk(held);
+  syncWorkerComposers(held.run);
+}
+
+/* The words typed on a question's card that passed, given back to the box of
+ * the page it stood on (`host`) — after what the box holds, and once. The
+ * pane's card and a wire's (`paintWireAsk`) both. Whether there were any. */
+function keepAskWords(host, run, draft) {
+  const words = draft.other.map((one) => (one ?? "").trim()).filter(Boolean).join("\n");
+  const box = host.querySelector(".worker-composer-box");
+  if (words && box && !box.value.includes(words)) {
+    box.value = box.value.trim() ? `${box.value.trimEnd()}\n${words}` : words;
+    run.draft = box.value;
+    box.closest(".worker-composer")?.__workerFit?.();
+    // The person was answering here: the keyboard goes where the words are.
+    const focus = document.activeElement;
+    if (!focus || focus === document.body || host.contains(focus)) box.focus();
+  }
+  return words !== "";
+}
+
+/* The card's one line once its question passed — the pane or the wire at
+ * work, or only that nothing was sent. Written only when the words move, so
+ * a quiet repaint writes nothing. */
+function standAskPassed(host, run) {
+  const words = isMidTurn(run.wire ? run.wireLog?.status : hookStates.get(run.term))
+    ? t("board.ask.passedWorking", "이 질문은 이미 지나갔습니다 — 판은 이어서 일하는 중")
+    : t("board.ask.changed", "이 질문은 이미 지나갔습니다 — 답은 보내지 않았어요");
+  const card = host.querySelector(".pane-chat-ask");
+  if (card?.querySelector(":scope > .pane-chat-ask-passed")?.textContent === words) return;
+  const line = document.createElement("p");
+  line.className = "pane-chat-ask-passed";
+  line.setAttribute("role", "status");
+  line.textContent = words;
+  standAskCard(host, line, words);
 }
 
 /* A pane's question in the card's shape — the card's, and the composer's
