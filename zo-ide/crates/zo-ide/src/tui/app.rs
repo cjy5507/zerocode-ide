@@ -7392,6 +7392,78 @@ mod tests {
         assert!(hook_events(&captured).is_empty(), "{:?}", hook_events(&captured));
     }
 
+    /// A quiet stream that showed no sign of reasoning — the response was
+    /// accepted and is in progress, nothing more — is a wait on the card the
+    /// window reads (t-71285, asked by 77627): `waiting`, which the window says
+    /// as one, not `reasoning silently`.
+    #[test]
+    fn a_quiet_stream_without_a_reasoning_signal_is_a_wait_on_the_card() {
+        use runtime::message_stream::types::StreamPhase;
+
+        let (mut ui, _captured) = hooked_ui();
+        let ids = BlockIdGen::default();
+        arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::RequestSent { attempt: 1 }));
+        let notice = api::chatgpt_quiet_stretch_notice(
+            &[
+                serde_json::json!({"type":"response.created","response":{"id":"resp_t71285"}}),
+                serde_json::json!({"type":"response.in_progress","response":{"id":"resp_t71285"}}),
+            ],
+            Duration::from_secs(16),
+        );
+        tick(&mut ui, 17);
+        for block in crate::session::runtime_bridge::stream_notice_blocks(&notice, &ids) {
+            arrive(&mut ui, block);
+        }
+        let card = published_card(&ui).expect("a named wait");
+        assert_eq!(card.verb, crate::tui::strings::ACTIVITY_WAITING, "{card:?}");
+    }
+
+    /// The verb on the card the window reads three seconds past a one-second
+    /// quiet bar, after the notice a quiet stretch raises once an attempt heard
+    /// `events`.
+    fn card_verb_past_the_quiet_bar(events: &[serde_json::Value]) -> String {
+        use runtime::message_stream::types::StreamPhase;
+
+        let (mut ui, _captured) = hooked_ui();
+        ui.status
+            .as_mut()
+            .expect("working status")
+            .set_quiet_after(Duration::from_secs(1));
+        let ids = BlockIdGen::default();
+        arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::RequestSent { attempt: 1 }));
+        let notice = api::chatgpt_quiet_stretch_notice(events, Duration::from_secs(16));
+        tick(&mut ui, 17);
+        for block in crate::session::runtime_bridge::stream_notice_blocks(&notice, &ids) {
+            arrive(&mut ui, block);
+        }
+        tick(&mut ui, 20);
+        published_card(&ui).expect("a fact on the card").verb
+    }
+
+    /// A quiet stretch the stream named keeps its name past the quiet bar
+    /// (t-71285, asked by 77627): the unnamed `quiet`, which the window says as
+    /// a bare "working", is for a wait nothing named. A wait with no reasoning
+    /// signal stays `waiting`.
+    #[test]
+    fn a_named_quiet_wait_stays_waiting_past_the_quiet_bar() {
+        let verb = card_verb_past_the_quiet_bar(&[
+            serde_json::json!({"type":"response.created","response":{"id":"resp_t71285"}}),
+            serde_json::json!({"type":"response.in_progress","response":{"id":"resp_t71285"}}),
+        ]);
+        assert_eq!(verb, crate::tui::strings::ACTIVITY_WAITING);
+    }
+
+    /// Inside an open reasoning item the named stretch stays `reasoning
+    /// silently` past the quiet bar.
+    #[test]
+    fn a_named_quiet_reasoning_stays_reasoning_past_the_quiet_bar() {
+        let verb = card_verb_past_the_quiet_bar(&[
+            serde_json::json!({"type":"response.created","response":{"id":"resp_t71285"}}),
+            serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_t71285"}}),
+        ]);
+        assert_eq!(verb, crate::tui::strings::ACTIVITY_REASONING_SILENTLY);
+    }
+
     fn working_line(ui: &super::Ui) -> String {
         ui.status.as_ref().expect("working status").line(120).plain()
     }
