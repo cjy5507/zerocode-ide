@@ -254,10 +254,16 @@ def main():
         out.append("")
     out += follow_section("사람 창 (읽기만)", os.path.join(data, "person", "memory", "samples.jsonl"),
                           os.path.join(data, "person", "idle", "idle.jsonl"), [2, 30, 60, 120])
-    table = os.path.join(data, "harness", "table.md")
-    if os.path.exists(table):
+    # harness/ served <data>/ui; harness-<name>/ served the release prep --ui <name> unpacked into <data>/<name>/ui.
+    for table in sorted(glob.glob(os.path.join(data, "harness*", "table.md"))):
+        folder = os.path.basename(os.path.dirname(table))
+        ref = os.path.join(data, "ui.ref" if folder == "harness" else os.path.join(folder[len("harness-"):], "ui.ref"))
+        served = ""
+        if os.path.exists(ref):
+            with open(ref) as held:
+                served = f" — UI {held.read().split()[0]}"
         with open(table) as held:
-            out += ["## 페이지 하네스 (profile.mjs report: 탐침 · 수 · 수준별 5회 중앙값)", "", held.read()]
+            out += [f"## 페이지 하네스{served} (profile.mjs report: 탐침 · 수 · 수준별 5회 중앙값)", "", held.read()]
     print("\n".join(out))
     return 0
 

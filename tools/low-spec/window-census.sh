@@ -5,9 +5,10 @@
 #   window-census.sh <stage> --data <folder> [options]
 #
 # Stages, in the order the plan takes them:
-#   prep      the shipped UI unpacked (--ref, default the newest v* tag) and the
-#             synthetic boot profile written by --test-binary (the zerocode-shell
-#             test executable; nothing is built here)
+#   prep      the shipped UI unpacked (--ref, default the newest v* tag) with the
+#             crate files the harness reads beside it (<ui>/../crates/...), and
+#             the synthetic boot profile written by --test-binary (the
+#             zerocode-shell test executable; nothing is built here)
 #   boot      the installed binary started from the profile in a home of its own,
 #             normal and low (taskpolicy -b), --boot-runs each; run 1 is the
 #             cutover boot and is kept apart
@@ -24,7 +25,10 @@
 #             and window.py for --follow-minutes in the background
 #
 # --levels normal,low,cpu4x and --scenes panes-10-normal,... pick part of a
-# stage, so the plan can run in two sittings.
+# stage, so the plan can run in two sittings. --ui <name> unpacks and serves a
+# second release's page for an after — prep --ref v1.1.105 --ui v1.1.105 puts it
+# in <data>/v1.1.105/ui with its own crate files, and the harness writes
+# <data>/harness-v1.1.105.
 #
 # What it never does: type into, signal or read the screen of the person's
 # window (the person stage reads counters and region sizes of its processes);
@@ -43,7 +47,7 @@ PROFILE_WORKTREES="/synthetic/one:/synthetic/two:/synthetic/three"
 stage="${1:-}"; shift || true
 data="" ref="" test_binary="" runs=5 boot_runs=6 settle_s=60 idle_s=45 max_load=6
 dense_cmd="" follow_minutes=120 probes_normal="" probes_low="" probes_cpu4x=""
-levels="" scenes="" start_timeout=90
+levels="" scenes="" start_timeout=90 ui_dir=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --data) data="$2"; shift 2 ;;
@@ -62,13 +66,18 @@ while [[ $# -gt 0 ]]; do
     --levels) levels="$2"; shift 2 ;;
     --scenes) scenes="$2"; shift 2 ;;
     --start-timeout) start_timeout="$2"; shift 2 ;;
+    --ui) ui_dir="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 [[ "$data" = /* ]] || { echo "--data <absolute folder> is required" >&2; exit 2; }
 mkdir -p "$data"
 profile="$data/profile"
-ui="$data/ui"
+ui="$data/ui" harness="$data/harness"
+[[ -z "$ui_dir" ]] || { ui="$data/$ui_dir/ui"; harness="$data/harness-$ui_dir"; }
+# What window-boot.mjs reads from <ui>/.. — outside ui/, so unpacked beside it, one set per release.
+HARNESS_READS=(crates/zerocode-shell/src/terminal_themes.json crates/zerocode-core/src/agent.rs
+  crates/zerocode-shell/src/explorer_policy.json)
 
 # The page probes each level can judge: memory is read on normal only (a
 # scheduling policy does not change what a scene holds), frame rows on normal
@@ -147,7 +156,8 @@ case "$stage" in
     ref="${ref:-$(git -C "$ROOT" describe --tags --abbrev=0 --match 'v*')}"
     rm -rf "$ui" "$profile"; mkdir -p "$ui" "$profile"
     git -C "$ROOT" archive "$ref" ui | tar -x -C "$ui" --strip-components 1
-    echo "$ref $(git -C "$ROOT" rev-parse "$ref^{commit}")" > "$data/ui.ref"
+    git -C "$ROOT" archive "$ref" "${HARNESS_READS[@]}" | tar -x -C "$(dirname "$ui")"
+    echo "$ref $(git -C "$ROOT" rev-parse "$ref^{commit}")" > "$ui.ref"
     # Nothing of the caller's environment: the profile names only what this run gives it.
     env -i HOME="$data" PATH=/usr/bin:/bin ZEROCODE_DISABLE_CREDENTIAL_STORE=1 \
       ZEROCODE_BOOT_PROFILE_DIR="$profile" ZEROCODE_BOOT_PROFILE_WORKTREES="$PROFILE_WORKTREES" \
@@ -199,20 +209,22 @@ case "$stage" in
     done
     ;;
   harness)
-    [[ -d "$ui" ]] || { echo "no UI snapshot: run the prep stage first" >&2; exit 2; }
+    for read in "${HARNESS_READS[@]}"; do
+      [[ -f "$(dirname "$ui")/$read" ]] || { echo "no UI snapshot at $ui: run the prep stage first" >&2; exit 2; }
+    done
     for level in normal low cpu4x; do
       wanted "$levels" "$level" || continue
       quiet_or_stop
       case "$level" in normal) probes="$probes_normal" ;; low) probes="$probes_low" ;; cpu4x) probes="$probes_cpu4x" ;; esac
-      conditions "$data/harness-$level.conditions.json"
+      conditions "$harness-$level.conditions.json"
       ZEROCODE_WINDOW_UI="$ui" node "$ROOT/tools/low-spec/profile.mjs" run --level "$level" --runs "$runs" \
-        --probe "$probes" --out "$data/harness/$level"
+        --probe "$probes" --out "$harness/$level"
     done
     done_levels=()
     for level in normal low cpu4x; do
-      if [[ -f "$data/harness/$level/runs.json" ]]; then done_levels+=("$data/harness/$level"); fi
+      if [[ -f "$harness/$level/runs.json" ]]; then done_levels+=("$harness/$level"); fi
     done
-    node "$ROOT/tools/low-spec/profile.mjs" report "${done_levels[@]}" > "$data/harness/table.md"
+    node "$ROOT/tools/low-spec/profile.mjs" report "${done_levels[@]}" > "$harness/table.md"
     ;;
   person)
     conditions "$data/person.conditions.json"
