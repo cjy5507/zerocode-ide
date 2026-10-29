@@ -13,7 +13,9 @@
 //! caller read once, and the pids the window knows: the calling pane's own
 //! process ([`judge_kill`]'s `caller`) and every other process tree it must
 //! keep ([`ProtectedRoot`]). No program name is written down here: whose a
-//! process is, is read from the tree it hangs in.
+//! process is, is read from the tree it hangs in — or, for one the pane set
+//! loose and whose parent is gone, from the pane its environment names
+//! ([`PaneMark`], t-81714).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -21,6 +23,7 @@ use std::time::Duration;
 use super::SHELL_COMMANDS;
 use super::parse::WRAPPER_COMMANDS;
 use super::script::{self, Command, Script, Word};
+use crate::hook::PANE_KEY_ENV;
 
 /// How many times an `sh -c` or `eval` string is read inside another before
 /// the rest is called unreadable. Chosen, not measured: the incident nested
@@ -130,16 +133,53 @@ impl ProcessRow {
     }
 }
 
+/// The pane a process was started in, as its environment names it: the
+/// window's pid ([`WINDOW_PID_ENV`]) and the pane's key ([`PANE_KEY_ENV`],
+/// `term-<n>`). A process keeps the environment it was started with when its
+/// parent goes away, so a job a pane set loose — moved under pid 1 when the
+/// tool's shell that started it ended — still names its pane. Both are read
+/// because two windows number their panes alike.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneMark {
+    pub window: u32,
+    pub pane: String,
+}
+
+impl PaneMark {
+    /// The mark `env` names; `None` unless it names both a window and a pane.
+    #[must_use]
+    pub fn from_env(env: impl Fn(&str) -> Option<String>) -> Option<Self> {
+        Some(Self {
+            window: window_pid(&env)?,
+            pane: env(PANE_KEY_ENV).filter(|key| !key.is_empty())?,
+        })
+    }
+}
+
+/// The window's pid as `env` names it ([`WINDOW_PID_ENV`]); `None` for a
+/// value that is not a pid.
+fn window_pid(env: &impl Fn(&str) -> Option<String>) -> Option<u32> {
+    env(WINDOW_PID_ENV)
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|pid| *pid != 0)
+}
+
 /// The process table, read once for a judgment — or why it could not be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessTable {
     rows: Result<Vec<ProcessRow>, String>,
+    /// The pane each process was started in, for the processes whose
+    /// environment read and named one.
+    marks: HashMap<u32, PaneMark>,
 }
 
 impl ProcessTable {
     #[must_use]
     pub fn new(rows: Vec<ProcessRow>) -> Self {
-        Self { rows: Ok(rows) }
+        Self {
+            rows: Ok(rows),
+            marks: HashMap::new(),
+        }
     }
 
     /// A table that could not be read, and why — every target that needs it
@@ -148,7 +188,16 @@ impl ProcessTable {
     pub fn unreadable(why: impl Into<String>) -> Self {
         Self {
             rows: Err(why.into()),
+            marks: HashMap::new(),
         }
+    }
+
+    /// The table with `pid` known to have been started in `mark`'s pane, as
+    /// [`Self::read`] learns it from the process's environment.
+    #[must_use]
+    pub fn with_pane_mark(mut self, pid: u32, mark: PaneMark) -> Self {
+        self.marks.insert(pid, mark);
+        self
     }
 
     /// The host's process table, read with `ps` and waited for at most
@@ -323,10 +372,7 @@ impl ProtectedRoot {
         table: &ProcessTable,
         caller: u32,
     ) -> Vec<Self> {
-        let Some(window) = env(WINDOW_PID_ENV)
-            .and_then(|value| value.trim().parse::<u32>().ok())
-            .filter(|pid| *pid != 0)
-        else {
+        let Some(window) = window_pid(&env) else {
             return Vec::new();
         };
         let mut kept = vec![Self::window(window)];

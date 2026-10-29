@@ -379,3 +379,180 @@ fn a_host_inside_a_pane_keeps_the_window_and_the_other_panes() {
         vec![ProtectedRoot::window(WINDOW)]
     );
 }
+
+/* ---- a job the pane set loose (t-81714) -------------------------------------- */
+
+const SET_LOOSE: u32 = 600;
+const SET_LOOSE_BY_THE_OTHER_PANE: u32 = 610;
+const SET_LOOSE_IN_ANOTHER_WINDOW: u32 = 620;
+const LENT_TO_THE_OTHER_PANE: u32 = 320;
+const ANOTHER_WINDOW: u32 = 900;
+
+fn mark(window: u32, pane: &str) -> PaneMark {
+    PaneMark {
+        window,
+        pane: pane.to_string(),
+    }
+}
+
+/// [`table`] as the window reads it on 10-29: every pane's process names its
+/// pane in its environment, and the calling pane's `… &` job, its tool's shell
+/// gone, hangs under pid 1 still naming the calling pane. Beside it, the
+/// other pane's loose job, one from a pane numbered alike in another window,
+/// and a process in the other pane's tree that was started with the calling
+/// pane's mark.
+fn marked_table() -> ProcessTable {
+    let mut rows = match table().rows {
+        Ok(rows) => rows,
+        Err(why) => panic!("the fixture table reads: {why}"),
+    };
+    rows.extend([
+        row(SET_LOOSE, 1, SET_LOOSE, "python3 -m http.server 8000"),
+        row(
+            SET_LOOSE_BY_THE_OTHER_PANE,
+            1,
+            SET_LOOSE_BY_THE_OTHER_PANE,
+            "python3 -m http.server 8001",
+        ),
+        row(
+            SET_LOOSE_IN_ANOTHER_WINDOW,
+            1,
+            SET_LOOSE_IN_ANOTHER_WINDOW,
+            "python3 -m http.server 8002",
+        ),
+        row(
+            LENT_TO_THE_OTHER_PANE,
+            OTHER_AGENT,
+            LENT_TO_THE_OTHER_PANE,
+            "python3 -m http.server 8003",
+        ),
+    ]);
+    ProcessTable::new(rows)
+        .with_pane_mark(CALLER, mark(WINDOW, "term-1"))
+        .with_pane_mark(210, mark(WINDOW, "term-1"))
+        .with_pane_mark(CALLER_CHILD, mark(WINDOW, "term-1"))
+        .with_pane_mark(SET_LOOSE, mark(WINDOW, "term-1"))
+        .with_pane_mark(OTHER_PANE, mark(WINDOW, "term-2"))
+        .with_pane_mark(OTHER_AGENT, mark(WINDOW, "term-2"))
+        .with_pane_mark(SET_LOOSE_BY_THE_OTHER_PANE, mark(WINDOW, "term-2"))
+        .with_pane_mark(SET_LOOSE_IN_ANOTHER_WINDOW, mark(ANOTHER_WINDOW, "term-1"))
+        .with_pane_mark(LENT_TO_THE_OTHER_PANE, mark(WINDOW, "term-1"))
+}
+
+fn judged_marked(command: &str, table: &ProcessTable, caller: Option<u32>) -> KillVerdict {
+    judge_kill(&kill_calls(command), table, caller, &protected())
+}
+
+/// The 10-29 06:3x measurement: a pane's `… &` job, moved under pid 1 when
+/// its tool's shell ended, was refused to the pane that started it — by
+/// number too, the way the refusal itself told it to (`echo $!`, then
+/// `kill 4242`). It names the calling pane, so it is the pane's own.
+#[test]
+fn a_job_the_pane_set_loose_is_its_own_to_end() {
+    let table = marked_table();
+    for command in [
+        "kill 600",
+        "kill -9 600",
+        "kill -- -600",
+        "pkill -f 'http.server 8000'",
+        "kill $(pgrep -f 'http.server 8000')",
+    ] {
+        assert_eq!(
+            judged_marked(command, &table, Some(CALLER)),
+            KillVerdict::Allow,
+            "{command:?}"
+        );
+    }
+}
+
+/// What the calling pane did not start stays asked — another pane's loose
+/// job, one from a pane of the same number in another window, one that names
+/// no pane — and what hangs in a kept tree stays refused whatever its
+/// environment says.
+#[test]
+fn a_loose_job_of_another_pane_or_window_or_none_is_still_asked() {
+    let table = marked_table();
+    for (command, pid) in [
+        ("kill 610", SET_LOOSE_BY_THE_OTHER_PANE),
+        ("kill 620", SET_LOOSE_IN_ANOTHER_WINDOW),
+        ("kill 500", DETACHED),
+        (
+            "pkill -f 'http.server 800[012]'",
+            SET_LOOSE_BY_THE_OTHER_PANE,
+        ),
+    ] {
+        match judged_marked(command, &table, Some(CALLER)) {
+            KillVerdict::Ask { reason } => {
+                assert!(
+                    reason.contains(&format!("pid {pid}")),
+                    "{command:?}: {reason}"
+                );
+            }
+            other => panic!("{command:?} should be asked of a person, was {other:?}"),
+        }
+    }
+    for command in [
+        "kill 320",
+        "kill 310",
+        "kill 100",
+        "pkill -f 'http.server 800'",
+    ] {
+        assert!(
+            matches!(
+                judged_marked(command, &table, Some(CALLER)),
+                KillVerdict::Deny { .. }
+            ),
+            "{command:?}"
+        );
+    }
+}
+
+/// The mark is the caller's own only when the caller's own process names it:
+/// a caller the window cannot place, or whose environment did not read, owns
+/// no loose job.
+#[test]
+fn a_caller_without_a_mark_owns_no_loose_job() {
+    let unmarked_caller = {
+        let mut table = marked_table();
+        table.marks.remove(&CALLER);
+        table
+    };
+    for (table, caller) in [(&unmarked_caller, Some(CALLER)), (&marked_table(), None)] {
+        assert!(
+            matches!(
+                judged_marked("kill 600", table, caller),
+                KillVerdict::Ask { .. }
+            ),
+            "{caller:?}"
+        );
+    }
+}
+
+/// A mark names a window and a pane, or nothing.
+#[test]
+fn a_mark_needs_both_the_window_and_the_pane() {
+    let env = |window: Option<&'static str>, pane: Option<&'static str>| {
+        move |name: &str| match name {
+            WINDOW_PID_ENV => window.map(str::to_string),
+            PANE_KEY_ENV => pane.map(str::to_string),
+            _ => None,
+        }
+    };
+    assert_eq!(
+        PaneMark::from_env(env(Some("100"), Some("term-1"))),
+        Some(mark(WINDOW, "term-1"))
+    );
+    for (window, pane) in [
+        (None, Some("term-1")),
+        (Some("100"), None),
+        (Some("100"), Some("")),
+        (Some("not-a-pid"), Some("term-1")),
+        (Some("0"), Some("term-1")),
+    ] {
+        assert_eq!(
+            PaneMark::from_env(env(window, pane)),
+            None,
+            "{window:?} {pane:?}"
+        );
+    }
+}

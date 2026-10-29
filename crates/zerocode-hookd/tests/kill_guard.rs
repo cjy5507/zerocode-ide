@@ -10,14 +10,18 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 use zerocode_core::AgentKind;
-use zerocode_core::shell_rule::kill::{ProcessRow, ProcessTable, ProtectedRoot};
+use zerocode_core::shell_rule::kill::{PaneMark, ProcessRow, ProcessTable, ProtectedRoot};
 use zerocode_hookd::{BridgeState, HOOK_TOKEN_HEADER, KillRoots, KillWitness, router};
 
 const TOKEN: &str = "test-token";
 const CALLER: u32 = 200;
+/// The pid the refusal's way out names: a job the calling pane set loose.
+const SET_LOOSE: u32 = 4242;
+const SET_LOOSE_BY_THE_OTHER_PANE: u32 = 4343;
 
 /// A window (100) with the calling pane (200, its agent 210) and another
-/// pane (300) whose agent (310) the incident's pattern matches.
+/// pane (300) whose agent (310) the incident's pattern matches, and a job
+/// each pane set loose under pid 1, naming its pane in its environment.
 struct FakeWindow {
     tables: AtomicUsize,
     readable: bool,
@@ -76,7 +80,25 @@ impl KillWitness for FakeWindow {
             row(210, CALLER, "claude"),
             row(300, 100, "-zsh"),
             row(310, 300, "zo zo-step run"),
+            row(SET_LOOSE, 1, "python3 -m http.server 8000"),
+            row(
+                SET_LOOSE_BY_THE_OTHER_PANE,
+                1,
+                "python3 -m http.server 8001",
+            ),
         ])
+        .with_pane_mark(CALLER, pane("term-1"))
+        .with_pane_mark(SET_LOOSE, pane("term-1"))
+        .with_pane_mark(300, pane("term-2"))
+        .with_pane_mark(SET_LOOSE_BY_THE_OTHER_PANE, pane("term-2"))
+    }
+}
+
+/// What a process of this window's pane `key` carries in its environment.
+fn pane(key: &str) -> PaneMark {
+    PaneMark {
+        window: 100,
+        pane: key.to_string(),
     }
 }
 
@@ -205,6 +227,25 @@ async fn the_callers_own_child_is_allowed_and_a_pid_known_only_at_run_time_is_re
     for way_out in ["kill 4242", "kill %1", "pgrep"] {
         assert!(reason.contains(way_out), "{way_out:?} in {reason}");
     }
+}
+
+/// The refusal's way out works for a job the pane set loose (t-81714): its
+/// pid, learned with `echo $!`, ends it by number, as the refusal says —
+/// while another pane's loose job is refused all the same.
+#[tokio::test]
+async fn the_refusals_way_out_ends_a_job_the_pane_set_loose() {
+    let window = FakeWindow::new(true);
+    let command = format!("kill {SET_LOOSE}");
+    let (_, body) = answer(Some(Arc::clone(&window)), AgentKind::Claude, &command).await;
+    assert!(body.is_empty(), "{}", String::from_utf8_lossy(&body));
+    let command = format!("kill {SET_LOOSE_BY_THE_OTHER_PANE}");
+    let (_, body) = answer(Some(window), AgentKind::Claude, &command).await;
+    let (word, reason) = decision(&body);
+    assert_eq!(word, "deny");
+    assert!(
+        reason.contains(&format!("pid {SET_LOOSE_BY_THE_OTHER_PANE}")),
+        "{reason}"
+    );
 }
 
 #[tokio::test]
