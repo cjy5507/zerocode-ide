@@ -15079,14 +15079,12 @@ function openActivityPill(group, open) {
 }
 
 /* 상한이 앞의 턴들을 지웠다: 알약은 남은 구성원만 든다. 펼쳐져 있었으면
- * 남은 것으로 다시 펼친다 — 사람이 연 것을 그 아래서 닫지 않는다. */
+ * 남은 것으로 다시 펼친다 — 사람이 연 것을 그 아래서 닫지 않는다. 부르는
+ * 쪽이 앞 구성원이 잘리는지를 먼저 본다(읽던 자리를 그 전에 잰다). */
 function trimActivityPill(group, first) {
-  const kept = group.__members.filter((turn) => turn.seq >= first);
-  if (kept.length === group.__members.length) return false;
-  group.__members = kept;
+  group.__members = group.__members.filter((turn) => turn.seq >= first);
   group.querySelector(":scope > .helper-group-body")?.remove();
   if (group.__open) openActivityPill(group, true);
-  return true;
 }
 
 /* 새로 선 활동 턴 하나를 알약에 들인다 — 바로 위의 행이 알약이면 거기에,
@@ -15172,7 +15170,14 @@ function syncHelperTurns(list, run) {
       continue;
     }
     if (Number(front.dataset.turn) >= first) {
-      if (front.classList.contains("helper-group") && trimActivityPill(front, first)) pills.add(front);
+      // A pill that loses its front members rebuilds an open body shorter:
+      // the reader's place is held as for a row that goes (t-81786 P3-4).
+      if (front.classList.contains("helper-group") && front.__members[0].seq < first) {
+        before ??= { height: list.scrollHeight, top: list.scrollTop };
+        trimActivityPill(front, first);
+        dropped = true;
+        pills.add(front);
+      }
       break;
     }
     before ??= { height: list.scrollHeight, top: list.scrollTop };

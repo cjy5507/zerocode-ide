@@ -56641,6 +56641,30 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       seen.wantCappedWords = t("worker.stepRun", "{{kind}} {{n}}개", { kind: t("worker.stepRead", "파일 읽기"), n: capped.at(-1).__members.length });
       seen.cappedRows = stepRows();
 
+      // (e2) 상한이 펼쳐 둔 알약의 앞 구성원을 잘라 몸을 다시 지어도, 그 안을
+      // 읽던 사람의 줄은 제자리에 남는다 — 앞의 행이 지워질 때와 같은 보정이다.
+      const floodPill = capped.at(-1);
+      capOf(floodPill).click();
+      const memberRow = (seq) => floodPill.querySelector(`:scope > .helper-group-body > [data-turn="${seq}"]`);
+      const readSeq = floodPill.__members[200].seq;
+      list.scrollTop += memberRow(readSeq).getBoundingClientRect().top - list.getBoundingClientRect().top - 100;
+      const readTop = memberRow(readSeq).getBoundingClientRect().top;
+      const seqsBefore = floodPill.__members.map((turn) => turn.seq);
+      const more = [];
+      for (let at = 0; at < 10; at += 1) {
+        more.push({ role: "tool", text: `Read · /repo/more-${at}.rs`,
+          tool: { call_id: `y${at}`, name: "Read", kind: "read", is_error: false } });
+        more.push({ role: "tool_result", text: "ok", tool: { call_id: `y${at}`, is_error: false } });
+      }
+      holdHelperTurns(tab.worker.helper, more);
+      paintWorkerView(tab);
+      seen.trimmedOpen = {
+        cut: seqsBefore.filter((seq) => seq < floodPill.__members[0].seq).length,
+        open: capOf(floodPill).getAttribute("aria-expanded") === "true",
+        moved: Math.round((memberRow(readSeq)?.getBoundingClientRect().top ?? NaN) - readTop),
+      };
+      capOf(floodPill).click();
+
       // (f) 토글을 켜면 걸음을 모두 펼친 타임라인이 그 자리에서 서고 — 끝난 같은 종류는
       // 한 줄로 접힌다 — 끄면 알약으로 돌아온다.
       button.click();
@@ -56688,6 +56712,11 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       seen.openThoughtBare === seen.wantOpenThoughts[0] && seen.openThoughtByCall === seen.wantOpenThoughts[1] &&
         seen.openThoughtByAnswer === seen.wantOpenThoughts[2],
       JSON.stringify({ bare: seen.openThoughtBare, byCall: seen.openThoughtByCall, byAnswer: seen.openThoughtByAnswer, want: seen.wantOpenThoughts }),
+    );
+    ok(
+      "the 400 cap cutting the front members of an open pill keeps it open and keeps the line the person was reading inside it where it stood (t-81786 P3-4)",
+      seen.trimmedOpen.cut === 10 && seen.trimmedOpen.open && seen.trimmedOpen.moved === 0,
+      JSON.stringify(seen.trimmedOpen),
     );
     ok(
       "the head's 「걸음 모두 펼치기」 writes the one global setting: on, every step stands on the timeline (settled steps of one kind folded into one line); off, the pills are back",
