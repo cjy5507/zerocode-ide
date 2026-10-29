@@ -31,9 +31,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use zerocode_core::orchestration::{
     AckedRow, AttachmentRow, Auto, BoundRow, CHECK_RENDERER, CheckV1, Closure, CoordinatorSeat,
-    Delivery, DispatchRow, GateRow, HandoverPolicy, InboxRow, LedgerProjectionV1, MessageRow,
-    Pinned, ResultAuthor, RunProject, RunRow, RunSummary, ServedAnswer, ServedRow, TaskRow, Text,
-    VerbTally, WorkerRow,
+    Delivery, DispatchRow, FoldedMail, GateRow, HandoverPolicy, InboxRow, LedgerProjectionV1,
+    MessageRow, Pinned, ResultAuthor, RunProject, RunRow, RunSummary, ServedAnswer, ServedRow,
+    TaskRow, Text, VerbTally, WorkerRow,
 };
 
 use crate::effect_journal::{EffectJournalError, from_sql_u64, to_sql_u64};
@@ -90,6 +90,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         coordinator TEXT,
         handover TEXT,
         project TEXT,
+        folded TEXT,
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, id),
         FOREIGN KEY (ledger_id) REFERENCES orchestration_ledger_heads(ledger_id)
@@ -508,6 +509,10 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
          * and written together — and NULL for every run written before
          * projects were recorded, which the window infers one for. */
         ("ledger_runs", "project", "TEXT"),
+        /* The letters a sweep folded out of a run still working (t-81273):
+         * one JSON document of counts and stamps like the summary, NULL for
+         * every run that never folded any. */
+        ("ledger_runs", "folded", "TEXT"),
         /* Whether a worker's checkout is its own tree (t-78914): a flag like
          * `taken_over`, and false for every row written before it — a
          * checkout nobody said was the worker's own is not counted as one. */
@@ -1545,8 +1550,8 @@ fn write_rows(
                 .execute(
                     "INSERT INTO ledger_runs (
                         ledger_id, ordinal, id, name, created_ms, summary, coordinator, handover,
-                        project
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        project, folded
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         ledger_id,
                         at,
@@ -1569,6 +1574,11 @@ fn write_rows(
                             .transpose()
                             .map_err(|_| EffectJournalError::Corrupt)?,
                         row.project
+                            .as_ref()
+                            .map(serde_json::to_string)
+                            .transpose()
+                            .map_err(|_| EffectJournalError::Corrupt)?,
+                        row.folded
                             .as_ref()
                             .map(serde_json::to_string)
                             .transpose()
@@ -2295,7 +2305,7 @@ fn read_repairable_from_head(
     let mut runs = Vec::new();
     each(
         connection,
-        "SELECT ordinal, id, name, created_ms, summary, coordinator, handover, project
+        "SELECT ordinal, id, name, created_ms, summary, coordinator, handover, project, folded
            FROM ledger_runs WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -2334,6 +2344,14 @@ fn read_repairable_from_head(
                 .map(|held| serde_json::from_str::<RunProject>(&held))
                 .transpose()
                 .map_err(|_| rusqlite::Error::ExecuteReturnedResults)?;
+            // A fold record that will not parse is a corrupt row for the
+            // summary's reason: read as `None` it would say this run never
+            // folded a letter, and the letters are gone either way.
+            let folded = row
+                .get::<_, Option<String>>(8)?
+                .map(|held| serde_json::from_str::<FoldedMail>(&held))
+                .transpose()
+                .map_err(|_| rusqlite::Error::ExecuteReturnedResults)?;
             runs.push(RunRow {
                 id: row.get(1)?,
                 name: Text::from(row.get::<_, String>(2)?),
@@ -2343,6 +2361,7 @@ fn read_repairable_from_head(
                 coordinator,
                 handover,
                 project,
+                folded,
             });
             Ok(())
         },
@@ -3024,6 +3043,7 @@ mod tests {
                     coordinator: None,
                     handover: None,
                     project: None,
+                    folded: None,
                 },
                 RunRow {
                     id: "run-1".to_string(),
@@ -3054,6 +3074,7 @@ mod tests {
                     coordinator: None,
                     handover: None,
                     project: None,
+                    folded: None,
                 },
             ],
             tasks: vec![TaskRow {
@@ -4014,6 +4035,7 @@ mod tests {
                  ALTER TABLE ledger_workers DROP COLUMN exit_unconfirmed;
                  ALTER TABLE ledger_runs DROP COLUMN project;
                  ALTER TABLE ledger_workers DROP COLUMN in_worktree;
+                 ALTER TABLE ledger_runs DROP COLUMN folded;
                  UPDATE orchestration_ledger_heads SET bytes_held = {};",
                 bytes_held(&expected)
             ))

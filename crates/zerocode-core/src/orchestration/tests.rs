@@ -20467,6 +20467,7 @@ fn a_ledger_with_one_inbox() -> LedgerProjectionV1 {
             summary: None,
             coordinator: None,
             project: None,
+            folded: None,
         }],
         tasks: Vec::new(),
         dispatches: Vec::new(),
@@ -22252,6 +22253,7 @@ fn a_large_healthy_ledger_still_loads() {
             summary: None,
             coordinator: None,
             project: None,
+            folded: None,
         }],
         tasks: Vec::new(),
         dispatches: Vec::new(),
@@ -22350,6 +22352,7 @@ fn a_ledger_with_many_runs_and_many_receipts_still_loads() {
             summary: None,
             coordinator: None,
             project: None,
+            folded: None,
         });
         let mut carried = Vec::with_capacity(3);
         for _ in 0..3 {
@@ -23089,6 +23092,51 @@ fn a_fold_leaves_the_letters_a_live_receipt_still_replays() {
         "the same retry name answered different bytes after the fold"
     );
     Ledger::rebuild(bench.ledger.export()).expect("the ledger opens after the fold");
+}
+
+/// The fold keeps a clock of its own (t-81273): at the first sweep a window
+/// makes, then once a day — never on a write, never with every hourly sweep
+/// — and what it took is counted, in the sweep and on the run, across a
+/// restart.
+#[test]
+fn a_fold_runs_once_a_day_and_counts_what_it_took_on_the_run() {
+    let mut bench = Bench::new();
+    let chatty = a_chatty_run_still_working(&mut bench, 0, "early-look");
+    let now = long_after(&bench);
+    let swept = bench.ledger.sweep_retention(now);
+    let words: u64 = (0..CHATTER)
+        .map(|said| format!("progress-{said}").len() as u64)
+        .sum();
+    assert_eq!(
+        (swept.letters_folded, swept.letter_bytes_folded),
+        (CHATTER, words)
+    );
+    assert!(swept.moved(), "a fold that took letters spent no write");
+    assert_eq!(swept.as_json()["lettersFolded"], CHATTER);
+
+    let record = bench
+        .ledger
+        .run(&chatty.run)
+        .and_then(|run| run.folded.clone())
+        .expect("the run counts what was folded");
+    assert_eq!(record.letters as usize, CHATTER);
+    assert_eq!(record.bytes, words);
+    assert_eq!(record.folded_ms, now);
+    assert!(record.oldest_ms <= record.newest_ms);
+    assert!(record.newest_ms < now - i64::from(RETENTION_DEFAULT_DAYS) * DAY_MS);
+    let reopened = Ledger::rebuild(bench.ledger.export()).expect("a folded ledger opens");
+    assert_eq!(
+        reopened.run(&chatty.run).and_then(|run| run.folded.clone()),
+        Some(record),
+        "the count did not survive the disk"
+    );
+
+    // An hour on, the sweep is due again and the fold is not; a day on, it is.
+    assert!(bench.ledger.sweep_due(now + SWEEP_INTERVAL_MS));
+    assert!(!bench.ledger.fold_due(now + SWEEP_INTERVAL_MS));
+    assert!(bench.ledger.fold_due(now + DAY_MS));
+    // A window opening on the folded ledger folds at its first sweep.
+    assert!(reopened.fold_due(now + 1));
 }
 
 /// Every roster row names its work by the TITLE somebody wrote, with the

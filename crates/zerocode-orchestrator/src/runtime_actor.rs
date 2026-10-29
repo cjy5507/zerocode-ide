@@ -10944,6 +10944,7 @@ mod tests {
             coordinator: None,
             handover: None,
             project: None,
+            folded: None,
         });
         projection.messages.push(MessageRow {
             run: "run-1".to_string(),

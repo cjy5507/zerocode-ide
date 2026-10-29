@@ -2276,6 +2276,29 @@ pub struct RunSummary {
     pub sweeps: u32,
 }
 
+/// What is left of the letters a sweep folded out of a run still working
+/// (t-81273).
+///
+/// Retention compacts a FINISHED run; one a coordinator keeps open for months
+/// kept every letter it ever carried, and the window read all of them at
+/// every start (17,545 in the person's longest run, 2026-10-29). A sweep now
+/// folds the few no judgment of the ledger reads back, and this is what
+/// stands in their place: counts and stamps, nothing anybody wrote, the same
+/// size however many letters it replaced.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FoldedMail {
+    /// How many letters were folded, over every fold of this run.
+    pub letters: u32,
+    /// The bytes their words carried — body, subject and payload.
+    pub bytes: u64,
+    /// The oldest and the newest letter folded.
+    pub oldest_ms: i64,
+    pub newest_ms: i64,
+    /// When the last fold that took something ran.
+    pub folded_ms: i64,
+}
+
 /// What one sweep did, counted out.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Sweep {
@@ -2293,6 +2316,10 @@ pub struct Sweep {
     /// Runs the sweep looked at and left alone because something in them was
     /// still live, depended on, open, gated or unacknowledged.
     pub runs_spared: usize,
+    /// Letters folded out of runs still working, and the bytes their words
+    /// carried ([`FoldedMail`], t-81273).
+    pub letters_folded: usize,
+    pub letter_bytes_folded: u64,
 }
 
 impl Sweep {
@@ -2300,7 +2327,10 @@ impl Sweep {
     /// to spend a write.
     #[must_use]
     pub const fn moved(&self) -> bool {
-        self.runs > 0 || self.receipts_expired > 0 || self.tombstones_dropped > 0
+        self.runs > 0
+            || self.receipts_expired > 0
+            || self.tombstones_dropped > 0
+            || self.letters_folded > 0
     }
 
     /// This sweep as the answer a verb prints.
@@ -2316,6 +2346,8 @@ impl Sweep {
             "receiptsExpired": self.receipts_expired,
             "tombstonesDropped": self.tombstones_dropped,
             "runsSpared": self.runs_spared,
+            "lettersFolded": self.letters_folded,
+            "letterBytesFolded": self.letter_bytes_folded,
         })
     }
 }
@@ -2526,6 +2558,198 @@ fn compact(run: &mut Run, now_ms: i64) {
     run.summary = Some(summary);
 }
 
+/// Every question this ledger holds, by id: a letter that names one by its
+/// id may be the letter that answers it ([`answered_by_letters`]), in its own
+/// run or across runs, so a fold keeps it.
+fn question_ids(runs: &[Run]) -> std::collections::HashSet<String> {
+    runs.iter()
+        .flat_map(|run| &run.messages)
+        .filter(|held| held.kind == MessageKind::Question && held.thread.is_none())
+        .map(|held| held.id.clone())
+        .collect()
+}
+
+/// Whether `text` names one of `questions` as a word of its own, the way
+/// [`names_message`] reads it — found by the ids the text holds rather than
+/// by asking after every question in turn.
+fn names_a_question(text: &str, questions: &std::collections::HashSet<String>) -> bool {
+    text.match_indices("m-").any(|(at, _)| {
+        let digits = text[at + 2..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        let id = &text[at..at + 2 + digits];
+        digits > 0 && questions.contains(id) && names_message(text, id)
+    })
+}
+
+/// What a receipt that can still be replayed reads back, and so what a fold
+/// must leave where it is: the batches the receipts name, and the letters in
+/// them. A `check` is replayed by rendering those very rows again, and
+/// [`Ledger::validate_loaded`] refuses a receipt whose batch record no longer
+/// agrees with it.
+struct ReplayedMail<'a> {
+    batches: std::collections::HashSet<(&'a str, &'a str, &'a str)>,
+    letters: std::collections::HashSet<(&'a str, &'a str)>,
+}
+
+impl<'a> ReplayedMail<'a> {
+    fn of(served: &'a [Served]) -> Self {
+        let mut held = Self {
+            batches: std::collections::HashSet::new(),
+            letters: std::collections::HashSet::new(),
+        };
+        for receipt in served.iter().filter(|receipt| !receipt.is_tombstone()) {
+            let ServedAnswer::Check(about) = &receipt.answer else {
+                continue;
+            };
+            if let Some(delivery) = about.delivery.as_deref() {
+                held.batches
+                    .insert((about.run.as_str(), about.address.as_str(), delivery));
+            }
+            for id in &about.messages {
+                held.letters.insert((about.run.as_str(), id.as_str()));
+            }
+        }
+        held
+    }
+}
+
+/// Fold out of a run still working the old letters nothing in the ledger
+/// reads back (t-81273), and answer how many went and the bytes their words
+/// carried.
+///
+/// Most of what this ledger judges is judged OUT of old mail — whether a
+/// question was answered, how often a handover walked, whether a notice was
+/// already sent, how a batch landed, where a pane can still be written to —
+/// so a letter folds only when every one of these holds:
+///
+/// · it is an agent's own `status` letter. The ledger's observations never
+///   fold (`went_quiet` is one of them), and neither does any other kind;
+/// · it is older than the retention policy;
+/// · it was handed over and acknowledged, and waits in no queue and no open
+///   batch;
+/// · it stands in no thread and names no question;
+/// · the work it was about is over: its attempt ended and its task is final;
+/// · it is not the last thing its writer said in this run from that seat —
+///   routing reads a pane's last word, and a chair's past seats are read off
+///   the letters signed from them ([`chair_seats`]);
+/// · no receipt that can still be replayed names it, or the batch it went in.
+///
+/// An acknowledged batch then loses exactly the letters folded, and is left
+/// claiming nothing — the shape a legacy acknowledgement already has — only
+/// when every letter in it folded; its id stays spent either way. What went
+/// is counted on the run ([`FoldedMail`]).
+fn fold_old_letters(
+    run: &mut Run,
+    cutoff_ms: i64,
+    questions: &std::collections::HashSet<String>,
+    replayed: &ReplayedMail<'_>,
+    now_ms: i64,
+) -> (usize, u64) {
+    use std::collections::{HashMap, HashSet};
+
+    let folded: HashSet<String> = {
+        let mut stays: HashSet<&str> = HashSet::new();
+        let mut acknowledged: HashSet<&str> = HashSet::new();
+        for (address, inbox) in &run.inboxes {
+            stays.extend(inbox.pending.iter().map(String::as_str));
+            if let Some(open) = &inbox.open {
+                stays.extend(open.messages.iter().map(String::as_str));
+            }
+            for spent in inbox.acked.iter().chain(&inbox.acked_history) {
+                let Some(went) = spent.messages.as_deref() else {
+                    continue;
+                };
+                // A batch a receipt can replay keeps every letter in it.
+                if replayed
+                    .batches
+                    .contains(&(run.id.as_str(), address.as_str(), spent.delivery.as_str()))
+                {
+                    stays.extend(went.iter().map(String::as_str));
+                } else {
+                    acknowledged.extend(went.iter().map(String::as_str));
+                }
+            }
+        }
+        // Each writer's last word from each seat it wrote from.
+        let mut last_word: HashMap<(&str, Option<&str>), &str> = HashMap::new();
+        for held in &run.messages {
+            last_word.insert(
+                (held.from.as_str(), held.author_seat.as_deref()),
+                held.id.as_str(),
+            );
+        }
+        let task_final = |id: &str| run.task(id).is_some_and(|task| task.status.is_final());
+        let over = |held: &Message| {
+            held.dispatch.as_deref().is_none_or(|id| {
+                run.dispatch(id).is_some_and(|attempt| {
+                    attempt.ended_ms.is_some() && task_final(attempt.task.as_str())
+                })
+            }) && held.task.as_deref().is_none_or(&task_final)
+        };
+        run.messages
+            .iter()
+            .filter(|&held| {
+                held.kind == MessageKind::Status
+                    && held.from != LEDGER_ITSELF
+                    && held.created_ms <= cutoff_ms
+                    && held.thread.is_none()
+                    && acknowledged.contains(held.id.as_str())
+                    && !stays.contains(held.id.as_str())
+                    && last_word.get(&(held.from.as_str(), held.author_seat.as_deref()))
+                        != Some(&held.id.as_str())
+                    && !replayed
+                        .letters
+                        .contains(&(run.id.as_str(), held.id.as_str()))
+                    && over(held)
+                    && !names_a_question(held.body.as_str(), questions)
+            })
+            .map(|held| held.id.clone())
+            .collect()
+    };
+    if folded.is_empty() {
+        return (0, 0);
+    }
+
+    let mut bytes = 0_u64;
+    let (mut oldest_ms, mut newest_ms) = (i64::MAX, i64::MIN);
+    run.messages.retain(|held| {
+        if !folded.contains(&held.id) {
+            return true;
+        }
+        bytes += (held.body.len() + held.subject.len() + held.payload.len()) as u64;
+        oldest_ms = oldest_ms.min(held.created_ms);
+        newest_ms = newest_ms.max(held.created_ms);
+        false
+    });
+    for (_, inbox) in &mut run.inboxes {
+        for spent in inbox.acked.iter_mut().chain(&mut inbox.acked_history) {
+            let Some(went) = spent.messages.as_mut() else {
+                continue;
+            };
+            went.retain(|id| !folded.contains(id));
+            if went.is_empty() {
+                spent.messages = None;
+            }
+        }
+    }
+    let letters = u32::try_from(folded.len()).unwrap_or(u32::MAX);
+    let record = run.folded.get_or_insert(FoldedMail {
+        letters: 0,
+        bytes: 0,
+        oldest_ms,
+        newest_ms,
+        folded_ms: now_ms,
+    });
+    record.letters = record.letters.saturating_add(letters);
+    record.bytes = record.bytes.saturating_add(bytes);
+    record.oldest_ms = record.oldest_ms.min(oldest_ms);
+    record.newest_ms = record.newest_ms.max(newest_ms);
+    record.folded_ms = now_ms;
+    (folded.len(), bytes)
+}
+
 /// A namespace and a home inbox. It never schedules and never places.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2600,6 +2824,12 @@ pub struct Run {
     /// back with none, and the window infers one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<RunProject>,
+    /// The letters a sweep folded out of this run while it was still working
+    /// (t-81273, [`FoldedMail`]). `default`, so every run written before
+    /// folding existed reads back as one that never folded any — which is
+    /// what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folded: Option<FoldedMail>,
 }
 
 /// Who coordinates a run, and since when.
@@ -6055,6 +6285,12 @@ pub struct Ledger {
     /// before this existed reads back as never swept, which is true.
     #[serde(default)]
     swept_at_ms: i64,
+    /// When this process last folded old letters out of the runs still
+    /// working ([`FoldedMail`], t-81273). In-process like the goodbye: zero
+    /// at every start, so a window folds at the first sweep it makes and then
+    /// once a day — never on a write, and never with every hourly sweep.
+    #[serde(skip)]
+    folded_at_ms: i64,
     /// How often each verb was asked, by UTC day (t-6742) — see
     /// [`VerbTally`]. Counted by the runtime that carries every verb, not
     /// by [`plan`], so a plan stays the pure decision it is; kept here so
@@ -6086,6 +6322,7 @@ impl Clone for Ledger {
             asking: self.asking.clone(),
             retention_days: self.retention_days,
             swept_at_ms: self.swept_at_ms,
+            folded_at_ms: self.folded_at_ms,
             verb_tallies: self.verb_tallies.clone(),
         }
     }
@@ -6108,6 +6345,7 @@ impl Default for Ledger {
             asking: Vec::new(),
             retention_days: RETENTION_DEFAULT_DAYS,
             swept_at_ms: 0,
+            folded_at_ms: 0,
             verb_tallies: Vec::new(),
         }
     }
@@ -7266,6 +7504,7 @@ impl Ledger {
             summary: None,
             coordinator: None,
             project: None,
+            folded: None,
         });
         id
     }
@@ -11054,6 +11293,12 @@ impl Ledger {
         now_ms >= self.swept_at_ms.saturating_add(SWEEP_INTERVAL_MS)
     }
 
+    /// Whether a sweep should fold old letters again ([`FoldedMail`],
+    /// t-81273): at the first sweep a window makes, then once a day.
+    const fn fold_due(&self, now_ms: i64) -> bool {
+        self.folded_at_ms == 0 || now_ms >= self.folded_at_ms.saturating_add(DAY_MS)
+    }
+
     /// Give up what a finished run no longer has to cost, and nothing else.
     ///
     /// **What this never does**, because each of these was a way to turn a
@@ -11187,6 +11432,24 @@ impl Ledger {
                 true
             });
             swept.tombstones_dropped = standing - TOMBSTONE_MAX;
+        }
+
+        /* And the letters of the runs still working, on their own day-long
+         * clock — after the receipts above, so a receipt the policy has just
+         * expired no longer holds its batch's letters here. */
+        if self.fold_due(now_ms) {
+            let questions = question_ids(&self.runs);
+            let replayed = ReplayedMail::of(&self.served);
+            for run in &mut self.runs {
+                if compacted.contains(&run.id) {
+                    continue;
+                }
+                let (letters, bytes) =
+                    fold_old_letters(run, cutoff_ms, &questions, &replayed, now_ms);
+                swept.letters_folded += letters;
+                swept.letter_bytes_folded += bytes;
+            }
+            self.folded_at_ms = self.folded_at_ms.max(now_ms);
         }
 
         // Never backwards: a clock that stepped back must not make a window
@@ -13844,6 +14107,7 @@ impl Ledger {
             summary: None,
             coordinator: None,
             project: None,
+            folded: None,
         });
         id
     }
@@ -25979,6 +26243,10 @@ pub struct RunRow {
     /// store written before projects were recorded, read back as none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<RunProject>,
+    /// The letters folded out of the run while it worked (t-81273), on the
+    /// same posture: absent from every store written before folding existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folded: Option<FoldedMail>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -26371,6 +26639,7 @@ impl Ledger {
                 summary: run.summary.clone(),
                 coordinator: run.coordinator.clone(),
                 project: run.project.clone(),
+                folded: run.folded.clone(),
             });
             for task in &run.tasks {
                 projected.tasks.push(TaskRow {
@@ -26551,6 +26820,7 @@ impl Ledger {
             asking: Vec::new(),
             retention_days: projected.retention_days,
             swept_at_ms: projected.swept_at_ms,
+            folded_at_ms: 0,
             verb_tallies: projected.verb_tallies,
         };
 
@@ -26571,6 +26841,7 @@ impl Ledger {
                 summary: row.summary,
                 coordinator: row.coordinator,
                 project: row.project,
+                folded: row.folded,
             });
         }
 
