@@ -1605,8 +1605,10 @@ mod tests {
     #[test]
     fn a_hangup_held_back_by_a_copy_of_the_master_is_waited_for() {
         let (master, slave) = open_pair(raw_openpty).expect("openpty");
-        // SAFETY: duplicates the master opened above.
-        let copy = unsafe { libc::dup(master) };
+        // SAFETY: duplicates the master opened above. The copy closes on
+        // exec like the master: `dup` drops that, and a child a parallel test
+        // started then held a copy this test never closes (t-84259).
+        let copy = unsafe { libc::fcntl(master, libc::F_DUPFD_CLOEXEC, 0) };
         assert!(copy >= 0, "dup: {}", std::io::Error::last_os_error());
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
         // SAFETY: `fstat` fills the struct for an open descriptor.

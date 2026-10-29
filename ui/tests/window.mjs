@@ -57194,6 +57194,7 @@ suite("question-passed-wire", async ({ browser, origin, ok }) => {
       const face = document.querySelector("#worker-view");
       const card = face.querySelector(".pane-chat-ask");
       const box = face.querySelector(".worker-composer-box");
+      const send = face.querySelector(".worker-composer-send");
       return {
         card: card !== null,
         panel: Boolean(card?.querySelector(".board-ask")),
@@ -57202,10 +57203,16 @@ suite("question-passed-wire", async ({ browser, origin, ok }) => {
         value: box.value,
         focused: document.activeElement === box,
         answers: window.__CALLS__.filter(([name]) => name === "answer").length,
+        send: {
+          stop: send.classList.contains("is-stop"),
+          name: send.getAttribute("aria-label"),
+          mark: send.querySelector("use")?.getAttribute("href") ?? "",
+        },
       };
     });
     const words = await page.evaluate(() => ({
       working: t("board.ask.passedWorking", "이 질문은 이미 지나갔습니다 — 판은 이어서 일하는 중"),
+      queue: t("composer.queue.add", "대기열에 추가 — 멈추려면 Esc"),
     }));
 
     /* Words typed on the card's own field; the wire takes the question back. */
@@ -57222,6 +57229,15 @@ suite("question-passed-wire", async ({ browser, origin, ok }) => {
         passed.value === "멈추고 코디와 상의" && passed.focused && passed.answers === 0 &&
         !ended.card && ended.value === "멈추고 코디와 상의",
       JSON.stringify({ asked, passed, ended, words }),
+    );
+    // The poll paints the box's button before the card hands its words back
+    // (t-84182 P2): the button follows the words, so a press queues them
+    // rather than stopping the turn the wire went on with.
+    ok(
+      "the words a question the wire took back gives to the box turn its button into 「대기열에 추가」 while the wire works, not the stop that would end the turn (t-84182 P2)",
+      asked.send.stop && passed.value !== "" &&
+        !passed.send.stop && passed.send.name === words.queue && passed.send.mark === "#i-arrow-up",
+      JSON.stringify({ asked: asked.send, passed: passed.send, value: passed.value, words }),
     );
 
     /* A question answered through its card leaves the log: no line, nothing given back. */

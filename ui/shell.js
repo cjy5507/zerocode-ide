@@ -14289,7 +14289,11 @@ function keepAskWords(host, run, draft) {
   if (words && box && !box.value.includes(words)) {
     box.value = box.value.trim() ? `${box.value.trimEnd()}\n${words}` : words;
     run.draft = box.value;
-    box.closest(".worker-composer")?.__workerFit?.();
+    const form = box.closest(".worker-composer");
+    form?.__workerFit?.();
+    // The send follows the words now in the box: a wire's poll painted it
+    // before the card handed them back (t-84182 P2).
+    if (form) paintComposerSend(form, run);
     // The person was answering here: the keyboard goes where the words are.
     const focus = document.activeElement;
     if (!focus || focus === document.body || host.contains(focus)) box.focus();
