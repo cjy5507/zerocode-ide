@@ -1160,7 +1160,7 @@ pub const BOARD_PASS_KEY: &str = "passedOnBoard";
 /// The result the board's 「통과」 writes (t-82501): the task's result as it stands, with `verified`
 /// and [`BOARD_PASS_KEY`] added — `task-update` replaces a result whole, so this is that whole, and
 /// a worker's summary, tests and report outlive the pass. The keys a review is read from
-/// ([`review_keys`]) and a withdrawal's ([`VERIFICATION_WITHDRAWN_KEY`]) are not carried over: the
+/// (`review_keys`) and a withdrawal's (`VERIFICATION_WITHDRAWN_KEY`) are not carried over: the
 /// press vouches for its own verification and for nothing the result said before, so a worker's
 /// `merged` or `testedHead` stays the worker's claim instead of becoming the coordinator's fact. A
 /// result that is not a JSON object carries nothing over.
