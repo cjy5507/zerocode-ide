@@ -59,7 +59,7 @@ pub struct Bookmark {
 }
 
 /// Bookmarks를 읽은 결과. 웹 주소가 아닌 북마크(`javascript:`·`chrome://`)는
-/// 판이 열 수 없어 옮기지 않고 세고, 상한([`BOOKMARKS_KEPT`])을 넘은 것은
+/// 판이 열 수 없어 옮기지 않고 세고, 상한(`BOOKMARKS_KEPT`)을 넘은 것은
 /// 따로 센다.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct BookmarksRead {
