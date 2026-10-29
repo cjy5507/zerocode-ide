@@ -17530,6 +17530,16 @@ details[open] > .helper-cap::after {
   transition: stroke-dasharray var(--motion-fast) var(--ease-standard);
 }
 
+/* 창 크기를 모르는 읽기(시안 C9, t-82196): 고리는 점선으로 비어 선다 — 몫을
+ * 그릴 분모가 없다는 것을 모양으로, 「창 모름」을 말로 말한다. */
+.worker-composer-context.is-window-unknown .is-track {
+  stroke-dasharray: var(--chat-meter-dash) var(--chat-meter-dash);
+}
+
+.worker-composer-context.is-window-unknown .is-fill {
+  display: none;
+}
+
 /* The agent chip's mark — the same glyph the head wears, in the accent. */
 .worker-composer-mark {
   color: var(--chat-accent);

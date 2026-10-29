@@ -58257,7 +58257,9 @@ suite("context-meter", async ({ browser, origin, ok }) => {
       seen.chipShown = chip ? !chip.hidden : false;
       seen.words = chip?.querySelector(".worker-composer-pill-words")?.textContent;
       seen.ring = chip?.querySelector(".worker-composer-meter .is-fill")?.getAttribute("stroke-dasharray");
-      seen.ringShown = chip?.querySelector(".worker-composer-meter")?.hidden === false;
+      // An SVG has no `hidden` of its own: whether the ring stands is what the
+      // page draws.
+      seen.ringShown = chip ? getComputedStyle(chip.querySelector(".worker-composer-meter")).display !== "none" : false;
       seen.tip = chip?.dataset.tip;
       seen.wantTip = t("composer.context.tip", "컨텍스트 {{tokens}} / {{window}} — 눌러서 압축 ({{command}})",
         { tokens: (34000).toLocaleString(), window: (100000).toLocaleString(), command: "/compact" });
@@ -58301,7 +58303,7 @@ suite("context-meter", async ({ browser, origin, ok }) => {
         usage: { tokens: 24000, window: 0 },
       });
       const term = await openTermTab({ placement: "tab" });
-      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-meter", resumable: false });
+      tell("hook:agent", { term, state: "idle", agent: "claude", session: { id: "s-meter" }, resumable: false });
       await window.__PAINTED__();
       el("view-toggle-chat").click();
       await settle(200);
@@ -58309,11 +58311,27 @@ suite("context-meter", async ({ browser, origin, ok }) => {
       const paneChip = chat?.querySelector(".worker-composer-context");
       seen.paneShown = paneChip ? !paneChip.hidden : false;
       seen.paneWords = paneChip?.querySelector(".worker-composer-pill-words")?.textContent;
-      seen.wantPaneWords = usageCtxWord({ tokens: 24000, window: 0 });
-      seen.paneRingHidden = paneChip?.querySelector(".worker-composer-meter")?.hidden === true;
+      // A window nobody gave (draft C9, t-82196): the count shortened and
+      // 「창 모름」, a dashed ring with nothing filled in it, the exact count in
+      // the tip — no share of an invented whole anywhere.
+      seen.wantPaneWords = t("composer.context.noWindow", "{{tokens}} · 창 모름", { tokens: tokenShort(24000) });
+      const paneMeter = paneChip?.querySelector(".worker-composer-meter");
+      seen.paneRing = paneMeter ? {
+        shown: getComputedStyle(paneMeter).display !== "none",
+        dashed: getComputedStyle(paneMeter.querySelector(".is-track")).strokeDasharray !== "none",
+        filled: getComputedStyle(paneMeter.querySelector(".is-fill")).display !== "none",
+      } : null;
       seen.paneTip = paneChip?.dataset.tip;
       seen.wantPaneTip = t("composer.context.tip", "컨텍스트 {{tokens}} / {{window}} — 눌러서 압축 ({{command}})",
-        { tokens: (24000).toLocaleString(), window: t("composer.context.unknownWindow", "?"), command: "/compact" });
+        { tokens: (24000).toLocaleString(), window: t("composer.context.unknownWindow", "창 크기 모름"), command: "/compact" });
+      // zo's usage frame names no window; its session's status does (ZO
+      // m-85258): the chip takes the window from there and wears its share.
+      tell("session:frame", { session: "s-meter", frame: { type: "session_status", context_window: 96000 } });
+      await settle();
+      seen.paneWindowed = [paneChip?.querySelector(".worker-composer-pill-words")?.textContent,
+        paneChip?.classList.contains("is-window-unknown"), paneChip?.dataset.tip];
+      seen.wantPaneWindowed = ["25%", false, t("composer.context.tip", "컨텍스트 {{tokens}} / {{window}} — 눌러서 압축 ({{command}})",
+        { tokens: (24000).toLocaleString(), window: (96000).toLocaleString(), command: "/compact" })];
       const paneBefore = calls.length;
       paneChip?.click();
       await settle(800);
@@ -58345,9 +58363,10 @@ suite("context-meter", async ({ browser, origin, ok }) => {
       JSON.stringify(seen),
     );
     ok(
-      "a pane whose only source is its transcript says the count in the status bar's own words with no ring over a window nobody gave, compacts down its own road, and is forgotten with the shell",
-      seen.paneShown && seen.paneWords === seen.wantPaneWords && seen.paneRingHidden &&
+      "a pane whose only source is its transcript says its count shortened and 「창 모름」 over a dashed, empty ring — the exact count in its tip, no share of a window nobody gave (draft C9) — takes the window its session's status names when one comes, compacts down its own road, and is forgotten with the shell",
+      seen.paneShown && seen.paneWords === seen.wantPaneWords && seen.paneRing?.shown && seen.paneRing.dashed && !seen.paneRing.filled &&
         seen.paneTip === seen.wantPaneTip &&
+        JSON.stringify(seen.paneWindowed) === JSON.stringify(seen.wantPaneWindowed) &&
         seen.paneCompacted === seen.wantPaneCompacted &&
         seen.heldBeforeExit && seen.forgotten,
       JSON.stringify(seen),

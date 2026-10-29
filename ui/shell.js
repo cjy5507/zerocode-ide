@@ -3535,12 +3535,28 @@ listen("pane:autonomy", (event) => {
 function rememberSessionUsage(session, frame) {
   const tokens = Number(frame?.ctx_tokens ?? 0);
   const window = Number(frame?.context_window ?? 0);
+  // zo's usage frame names no window yet; its session_status does
+  // (`rememberSessionWindow`) — a count keeps the window it was given until
+  // a frame names another (draft C9, t-82196).
+  const held = session ? sessionUsage.get(session) : null;
   const reading = {
     tokens: Number.isFinite(tokens) && tokens > 0 ? tokens : 0,
-    window: Number.isFinite(window) && window > 0 ? window : 0,
+    window: Number.isFinite(window) && window > 0 ? window : held?.window ?? 0,
   };
   if (session) sessionUsage.set(session, reading);
   return reading;
+}
+
+/* The window a session's status names (zo's `session_status`), kept beside
+ * its last count. Says whether it moved, so a status that says it again
+ * repaints nothing. */
+function rememberSessionWindow(session, frame) {
+  const window = Number(frame?.context_window ?? 0);
+  if (!session || !Number.isFinite(window) || window <= 0) return false;
+  const held = sessionUsage.get(session);
+  if (held?.window === window) return false;
+  sessionUsage.set(session, { tokens: held?.tokens ?? 0, window });
+  return true;
 }
 
 function usageCtxWord(reading) {
@@ -18938,6 +18954,10 @@ function laneSignal(session, frame) {
     // zo's status card carries what its working row says (`activity`); the
     // frame leaves it out while the pane is idle.
     notePaneNow(session, frame.activity && typeof frame.activity === "object" ? frame.activity : null);
+    // And the window its model holds: the composer's chip draws its share.
+    if (rememberSessionWindow(session, frame)) {
+      for (const term of paneTermsBySession(session)) paintComposerChipsFor(term);
+    }
   } else if (frame.type === "usage") {
     /* 상태바와 보드는 같은 손으로 읽는다 (t-2374). 두 번째 파서를 지으면
      * 「상태바는 24,489인데 카드는 비었다」가 언제든 생긴다 — 그리고 그것은

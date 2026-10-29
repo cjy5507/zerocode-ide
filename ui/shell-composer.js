@@ -187,10 +187,14 @@ function composerRoad(run, spec = null) {
     interrupt: () => invoke("term_key", { term: run.term, press: interruptPress(spec) }),
     // 판에게는 출처가 둘이다. 제 전사가 말한 것이 먼저고(모든 CLI가
     // 남긴다), 그것이 없으면 zo 채널이 세션에 대해 말한 것. 셋째는 없다 —
-    // 훅은 토큰을 나르지 않는다.
-    usage: () => paneUsage.get(run.term)
-      ?? sessionUsage.get(paneSessions.get(run.term)?.session?.id)
-      ?? null,
+    // 훅은 토큰을 나르지 않는다. 전사가 창 크기를 말하지 않으면 채널이 말한
+    // 창 크기를 함께 쓴다(시안 C9 — zo의 session_status가 싣는다).
+    usage: () => {
+      const said = paneUsage.get(run.term);
+      const session = sessionUsage.get(paneSessions.get(run.term)?.session?.id);
+      if (said && said.window === 0 && session?.window > 0) return { ...said, window: session.window };
+      return said ?? session ?? null;
+    },
   };
 }
 
@@ -1224,11 +1228,12 @@ function composerCompactCommand(run, spec) {
   return (run.wireLog?.commands ?? []).some((row) => row.name === command) ? command : null;
 }
 
-/* 창 크기를 말로 — 모르면 「?」. 지어낸 분모는 툴팁에서도 쓰지 않는다. */
+/* 창 크기를 말로 — 모르면 「창 크기 모름」(시안 C9). 지어낸 분모는 툴팁에서도
+ * 쓰지 않는다. */
 function composerContextWindowWords(reading) {
   return reading.window > 0
     ? reading.window.toLocaleString()
-    : t("composer.context.unknownWindow", "?");
+    : t("composer.context.unknownWindow", "창 크기 모름");
 }
 
 function composerContextChip(run, spec) {
@@ -1239,7 +1244,7 @@ function composerContextChip(run, spec) {
   chip.append(composerMeterNode(), pillWordsNode(""));
   labelButton(chip, t("composer.context.tipPlain", "컨텍스트 {{tokens}} / {{window}}", {
     tokens: "0",
-    window: t("composer.context.unknownWindow", "?"),
+    window: t("composer.context.unknownWindow", "창 크기 모름"),
   }));
   chip.addEventListener("click", () => {
     const command = composerCompactCommand(run, spec);
@@ -1251,26 +1256,27 @@ function composerContextChip(run, spec) {
 }
 
 /* 읽은 값이 있을 때만 선다. 창을 아는 읽기는 고리와 백분율, 모르는 읽기는
- * 상태바와 **같은 낱말**(`usageCtxWord`)과 고리 없음 — 어휘를 두 벌 만들지
- * 않는다. 쓰기는 전부 값이 바뀔 때만(조용한 폴은 mutation 0). */
+ * 줄인 수와 「창 모름」, 빈 점선 고리(시안 C9, t-82196) — 차지 않은 고리가
+ * 「아직 모른다」를 말하고, 지어낸 분모의 몫은 어디에도 그리지 않는다. 정확한
+ * 수는 툴팁에 있다. 쓰기는 전부 값이 바뀔 때만(조용한 폴은 mutation 0). */
 function paintComposerContextChip(chip, run, spec) {
   const reading = composerRoad(run, spec).usage();
   const shown = Boolean(reading) && reading.tokens > 0;
   writeHidden(chip, !shown);
   if (!shown) return;
-  const ratio = reading.window > 0 ? Math.min(1, reading.tokens / reading.window) : 0;
-  const meter = chip.querySelector(".worker-composer-meter");
-  writeHidden(meter, reading.window <= 0);
-  if (reading.window > 0) {
-    writeAttribute(
-      meter.querySelector(".is-fill"),
-      "stroke-dasharray",
-      `${(ratio * METER_CIRCUMFERENCE).toFixed(1)} ${METER_CIRCUMFERENCE}`,
-    );
-  }
+  const known = reading.window > 0;
+  const ratio = known ? Math.min(1, reading.tokens / reading.window) : 0;
+  writeClass(chip, "is-window-unknown", !known);
+  writeAttribute(
+    chip.querySelector(".worker-composer-meter .is-fill"),
+    "stroke-dasharray",
+    `${(ratio * METER_CIRCUMFERENCE).toFixed(1)} ${METER_CIRCUMFERENCE}`,
+  );
   writeTextContent(
     chip.querySelector(".worker-composer-pill-words"),
-    reading.window > 0 ? `${Math.round(ratio * 100)}%` : usageCtxWord(reading),
+    known
+      ? `${Math.round(ratio * 100)}%`
+      : t("composer.context.noWindow", "{{tokens}} · 창 모름", { tokens: tokenShort(reading.tokens) }),
   );
   const command = composerCompactCommand(run, spec);
   const words = { tokens: reading.tokens.toLocaleString(), window: composerContextWindowWords(reading) };
