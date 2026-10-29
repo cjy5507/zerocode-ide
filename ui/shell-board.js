@@ -2597,9 +2597,10 @@ function paintDeskTotals(block) {
 /* ---- 릴리즈 레인 ----------------------------------------------------------
  *
  * `tools/release/status.sh`가 읽던 그 파일(레인의 `status.json`, 상태 바의
- * `releaseLane`): sha·버전·단계·경과·판정, 그리고 건너뛴 단계의 사유. 판정은
- * 레인이 적은 `outcome` 그대로 — 끝나지 않은 레인은 진행 중이고, 여기서 초록을
- * 지어내지 않는다. */
+ * `releaseLane`을 이 프로젝트의 것만 — `releaseLaneHere`): sha·버전·단계·경과·판정, 그리고
+ * 건너뛴 단계의 사유. 판정은 레인이 적은 `outcome` 그대로 — 끝나지 않은 레인은 진행 중이고,
+ * 여기서 초록을 지어내지 않는다. 레인은 지금 프로젝트의 저장소를 낸다고 말하는 것만 선다
+ * (t-83513): 다른 프로젝트의 판에는 그 프로젝트의 빌드 줄만, 줄이 없으면 없다는 한 문장만. */
 
 /* 시안 B의 카드 (t-70028): 첫 줄은 「새 버전 발행 v1.1.84 … ● 도는 중」, 둘째 줄은 커밋과
  * 차례(「네 단계 중 셋째」), 그 아래 단계 목록 — 끝난 단계·도는 단계·남은 단계(「대기」). 남은
@@ -2641,31 +2642,40 @@ const DESK_RELEASE_STEPS = Object.freeze({
   running: { icon: null },
 });
 
-/* 레인 단계의 우리말 이름 — 레인(tools/release/lane.sh의 `PHASES`)이 적는 이름마다 하나. 이 표가
- * 모르는 단계는 레인이 적은 이름 그대로 서고, 원문 로그는 언제나 레인의 이름이다. */
-const DESK_RELEASE_PHASES = Object.freeze({
-  archive: { key: "board.now.phaseArchive", word: "소스 묶기" },
-  "gate-root": { key: "board.now.phaseGateRoot", word: "결합 시험" },
-  "gate-zo": { key: "board.now.phaseGateZo", word: "zo 시험" },
-  flakes: { key: "board.now.phaseFlakes", word: "흔들린 시험 다시" },
-  push: { key: "board.now.phasePush", word: "올리기" },
-  "build-app": { key: "board.now.phaseBuildApp", word: "앱 빌드" },
-  "swap-app": { key: "board.now.phaseSwapApp", word: "앱 바꿔 넣기" },
-  "build-zo": { key: "board.now.phaseBuildZo", word: "zo 빌드" },
-  "swap-zo": { key: "board.now.phaseSwapZo", word: "zo 바꿔 넣기" },
-  "bundle-updater": { key: "board.now.phaseBundle", word: "업데이트 묶기" },
-  publish: { key: "board.now.phasePublish", word: "발행" },
-  sweep: { key: "board.now.phaseSweep", word: "정리" },
-});
-
 /* A release lane's name: its version, or its commit when it has none yet. */
 function deskReleaseVersionWord(lane) {
   return lane.version ? `v${lane.version}` : String(lane.sha).slice(0, SHORT_COMMIT_LENGTH);
 }
 
-function deskReleasePhaseWord(name) {
-  const known = DESK_RELEASE_PHASES[name];
-  return known ? t(known.key, known.word) : String(name);
+/* 레인 단계의 이름 — 레인이 제 `status.json`에 적은 말 그대로(`plan`, t-83513): 단계마다 창의 말마다
+ * 한 이름. 창은 어느 레인의 단계 이름도 표로 들고 있지 않다 — 레인이 이 창의 말로 적지 않았으면
+ * 원문 말(한국어), 그것도 없으면 레인이 처음 적은 말, 이름을 하나도 적지 않은 단계는 레인이 쓰는
+ * 이름 그대로 선다. 원문 로그는 언제나 레인의 이름이다. */
+function deskReleasePhaseWord(name, lane = releaseLaneHere()) {
+  const step = (Array.isArray(lane?.plan) ? lane.plan : []).find((one) => one?.name === name);
+  const words = step?.words && typeof step.words === "object" ? step.words : {};
+  const tongue = locale === "system" ? systemLocale : locale;
+  const said = [words[tongue], words.ko, ...Object.values(words)].find((word) => typeof word === "string" && word !== "");
+  return said ?? String(name);
+}
+
+/* 「멈춘 듯」 — 레인이 `status.json`에 적은 그대로(`stalled`, t-83513): 게이트의 한 레시피가 평소보다
+ * 오래 아무것도 쓰지 않았다. 얼마나 조용했는지는 레인이 적은 그 시각부터 지금까지이고, 레인이 그
+ * 레시피를 빨강으로 끝낼 상한이 있으면 그것도 말한다. */
+function deskStalledVars(stalled, now) {
+  const since = Number(stalled.quiet_since_ms);
+  return {
+    recipe: String(stalled.recipe ?? ""),
+    time: deskSpanWords(Number.isFinite(since) ? Math.max(0, now - since) : 0),
+    cap: Number(stalled.cap_secs) > 0 ? deskSpanWords(Number(stalled.cap_secs) * 1000) : "",
+  };
+}
+
+function deskStalledWords(stalled, now) {
+  const vars = deskStalledVars(stalled, now);
+  return vars.cap
+    ? t("board.desk.releaseStalledCap", "멈춘 듯: {{recipe}} {{time}} 출력 없음 · {{cap}} 넘으면 빨강으로 끝냄", vars)
+    : t("board.desk.releaseStalled", "멈춘 듯: {{recipe}} {{time}} 출력 없음", vars);
 }
 
 /* 「네 단계 중 셋째」 — 시안은 차례를 숫자 대신 우리말 셈으로 적는다. 셈말은 말마다 번역 목록이
@@ -2718,7 +2728,7 @@ function dressDeskStepMark(item, state) {
 }
 
 /* 단계별 시간 — 펼친 사람에게만 짓는다: 접힌 기록은 그 표와 원문을 들고 다니지 않는다. */
-function paintDeskReleaseTimes(log, steps, phases, now) {
+function paintDeskReleaseTimes(log, steps, phases, lane, now) {
   if (!log.open) {
     for (const node of log.querySelectorAll(":scope > :not(summary)")) node.remove();
     return;
@@ -2738,7 +2748,7 @@ function paintDeskReleaseTimes(log, steps, phases, now) {
       row.append(deskElement("td", ""), deskElement("td", "board-desk-release-step-time"));
     }
     writeAttribute(row, "data-phase", step.name);
-    writeTextContent(row.firstElementChild, deskReleasePhaseWord(step.name));
+    writeTextContent(row.firstElementChild, deskReleasePhaseWord(step.name, lane));
     writeTextContent(row.lastElementChild, deskReleaseTime(step, now));
     return row;
   }));
@@ -2792,9 +2802,26 @@ function deskLineJobWords(job) {
   return task?.title ?? (id ? `t-${id[1]}` : boardScheduleJobLabel(job.name));
 }
 
+/* 이 프로젝트의 발행 레인이 없을 때의 몸 (t-83513): 줄이 있으면 그 줄의 다음 차례(발 하나), 없으면
+ * 그렇다는 한 문장(`boardNoLineWords`, 일정의 머리와 같은 말). */
+function paintDeskLineOnly(body, line, now) {
+  let foot = body.firstElementChild;
+  if (body.childElementCount !== 1 || !foot.classList.contains("board-line-foot")) {
+    foot = deskElement("p", "board-line-foot");
+    body.replaceChildren(foot);
+  }
+  const words = line.found === true ? deskLineFoot(now) : boardNoLineWords();
+  writeTextContent(foot, words);
+  writeHidden(foot, words === "");
+}
+
 function paintDeskRelease(block, now) {
-  const status = releaseLane;
-  if (!status || typeof status !== "object" || !status.sha) return false;
+  const here = releaseLaneHere();
+  const status = here && typeof here === "object" && here.sha ? here : null;
+  // A project with no lane of its own still has its build line, or says it has none — once the
+  // schedule has answered for it; before that nothing is known, and the block folds.
+  const queue = boardScheduleAnswer?.line ?? null;
+  if (!status && !queue) return false;
   const head = block.firstElementChild;
   if (!head.firstElementChild) {
     head.append(deskElement("span", "board-desk-head-word"), deskElement("span", "board-desk-head-note"));
@@ -2802,6 +2829,10 @@ function paintDeskRelease(block, now) {
   writeTextContent(head.firstElementChild, t("board.now.line", "빌드 줄"));
   writeTextContent(head.lastElementChild, t("board.now.lineHint", "한 번에 하나씩"));
   const body = block.lastElementChild;
+  if (!status) {
+    paintDeskLineOnly(body, queue, now);
+    return true;
+  }
   let card = body.querySelector(":scope > .board-desk-release");
   if (!card) {
     card = deskElement("div", "board-desk-release");
@@ -2810,7 +2841,7 @@ function paintDeskRelease(block, now) {
       deskElement("span", "board-desk-release-status"));
     const meta = deskElement("p", "board-desk-release-meta");
     meta.append(deskElement("code", "board-desk-release-sha"), deskElement("span", "board-desk-release-took"));
-    card.append(line, meta, deskElement("ol", "board-desk-release-phases"),
+    card.append(line, meta, deskElement("ol", "board-desk-release-phases"), deskElement("p", "board-desk-release-stalled"),
       deskElement("p", "board-desk-release-reason"), deskElement("ul", "board-desk-release-skips"));
     const log = deskElement("details", "board-desk-release-log");
     const summary = deskElement("summary", "board-raw-head");
@@ -2863,12 +2894,17 @@ function paintDeskRelease(block, now) {
     writeAttribute(item, "data-phase", step.name);
     writeClassName(item, `board-desk-release-phase is-${step.state}`);
     dressDeskStepMark(item, step.state);
-    writeTextContent(item.children[1], deskReleasePhaseWord(step.name));
+    writeTextContent(item.children[1], deskReleasePhaseWord(step.name, status));
     writeTextContent(item.children[2], step.state === "running"
       ? runningWord(step.from, now) ?? t("board.desk.releaseJustStarted", "방금 시작")
       : t(DESK_RELEASE_STEPS[step.state].key, DESK_RELEASE_STEPS[step.state].word));
     return item;
   }));
+  // The lane's own word that a gate's recipe has written nothing for long (t-83513).
+  const stalled = !folded && status.stalled && typeof status.stalled === "object" ? status.stalled : null;
+  const stall = card.querySelector(".board-desk-release-stalled");
+  writeTextContent(stall, stalled ? deskStalledWords(stalled, now) : "");
+  writeHidden(stall, !stalled);
   const reason = card.querySelector(".board-desk-release-reason");
   writeHidden(reason, verdict !== "red" || !status.reason);
   writeTextContent(reason, verdict === "red" ? String(status.reason || "") : "");
@@ -2880,11 +2916,11 @@ function paintDeskRelease(block, now) {
     const item = heldSkips.get(phase.name) ?? deskElement("li", "");
     writeAttribute(item, "data-phase", phase.name);
     writeTextContent(item, t("board.desk.skipReason", "{{name}}: {{reason}}",
-      { name: deskReleasePhaseWord(phase.name), reason: String(phase.skipped) }));
+      { name: deskReleasePhaseWord(phase.name, status), reason: String(phase.skipped) }));
     return item;
   }));
   writeTrailingText(log.firstElementChild, t("board.now.lineLog", "단계별 시간 · 원문 로그"));
-  paintDeskReleaseTimes(log, steps, phases, now);
+  paintDeskReleaseTimes(log, steps, phases, status, now);
   writeHidden(log, steps.length === 0);
   const next = deskLineFoot(now);
   writeTextContent(foot, next);

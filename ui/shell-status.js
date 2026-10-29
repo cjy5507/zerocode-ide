@@ -3672,14 +3672,18 @@ let releaseNotice = null;
  * the app notice says so beside its button. Nothing busy says nothing. */
 let releaseBusy = null;
 /* The lane's own `status.json` as that same answer carried it — sha, version,
- * phase, outcome — for the task board's release card (t-6588,
- * `paintDeskRelease`). Kept here because this is the one reader of the file;
- * the card only draws what was read. `null` is "no lane here" or "unread". */
+ * phase, outcome, its steps and their words — for the task board's release card
+ * (t-6588, `paintDeskRelease`). Kept here because this is the one reader of the
+ * file; the card only draws what was read. `null` is "no lane here" or "unread".
+ * The backend answers it only for a project of the repository the lane says it
+ * releases (t-83513), so it is held with the checkout it was asked for. */
 let releaseLane = null;
-/* The lane as last drawn, spelled out: the board's 빌드 줄 card and the sentence
- * above it read `releaseLane` (t-67607), so a lane that moved repaints the desk
- * once and the same lane, polled again, repaints nothing. */
-let releaseLaneSaid = "null";
+let releaseLaneFor;
+let releaseLaneAsking = false;
+/* The lane as last drawn, spelled out with the checkout it was asked for: the board's
+ * 빌드 줄 card and the sentence above it read `releaseLane` (t-67607), so a lane that
+ * moved repaints the desk once and the same lane, polled again, repaints nothing. */
+let releaseLaneSaid = "";
 const noticedBuilds = new Set();
 let updateToast = null;
 let updateToastKey = null;
@@ -3831,11 +3835,14 @@ function raiseUpdateToast() {
   if (updateToast) updateToast.dataset.notice = "update";
 }
 
-function absorbReleaseStatus(answer) {
+function absorbReleaseStatus(answer, asked = activeWorktreePath) {
   releaseNotice = answer?.notice ?? null;
   releaseBusy = answer?.busy ?? null;
+  releaseLaneFor = asked;
   releaseLane = answer?.status && typeof answer.status === "object" ? answer.status : null;
-  const laneSaid = JSON.stringify(releaseLane);
+  // The checkout rides in the spelling: the same lane read again for the checkout now on screen
+  // repaints the card that drew no lane while it was asked.
+  const laneSaid = JSON.stringify([asked, releaseLane]);
   if (laneSaid !== releaseLaneSaid) {
     releaseLaneSaid = laneSaid;
     scheduleDeskPaint();
@@ -3860,9 +3867,21 @@ function absorbReleaseStatus(answer) {
  * files are its own, and a window that cannot read them has nothing to
  * say. Not settled and not on focus — a release is a minutes-scale event. */
 function askReleaseStatus() {
-  return invoke("release_status")
-    .then(absorbReleaseStatus)
-    .catch(() => {});
+  const asked = activeWorktreePath;
+  releaseLaneAsking = true;
+  return invoke("release_status", { worktree: asked })
+    .then((answer) => absorbReleaseStatus(answer, asked))
+    .catch(() => {})
+    .finally(() => { releaseLaneAsking = false; });
+}
+
+/* The lane as the project on screen may show it (t-83513): the answer asked for
+ * this checkout, or nothing — a lane read for the checkout before a switch says
+ * nothing of this one, and is asked again for it. */
+function releaseLaneHere() {
+  if (releaseLaneFor === activeWorktreePath) return releaseLane;
+  if (!releaseLaneAsking) void askReleaseStatus();
+  return null;
 }
 
 const releaseAmbient = idlePoller({

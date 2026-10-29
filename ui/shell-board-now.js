@@ -10,7 +10,7 @@
  * 일과 겨루지 않게.
  *
  * 그리는 사실은 데스크가 이미 읽은 한 벌뿐이다(`deskLedger`·`deskAgents`·
- * `releaseLane`, shell-board.js). 여기는 그 사실에 붙는 낱말과 차례를 정한다 —
+ * `releaseLaneHere()`, shell-board.js). 여기는 그 사실에 붙는 낱말과 차례를 정한다 —
  * 원장의 영어 문장은 행에 서지 않는다: 게이트는 종류(`gate.kind`)마다 우리말 한
  * 줄이고, 원문은 「원문 보기」 안에 있다.
  *
@@ -1306,18 +1306,35 @@ function paintDeskLeft(block, now, view) {
  * 카드의 발이 말하는 수와 같은 하나(`deskOwed`, 백엔드의 수)다 — 두 곳에서 세면 두
  * 답이 된다. 다음에 끝날 일은 끝날 시각을 아는 것 가운데 가장 이른 것이다: 과업의 시각,
  * 그리고 도는 발행 레인의 예상 끝(일정의 셈, `boardScheduleLaneEnd` — 남은 단계가 다 지난
- * 소요를 가질 때만). */
+ * 소요를 가질 때만).
+ *
+ * 도는 단계가 평소(지난 초록 레인들의 가운데 값)를 넘었으면 레인의 끝은 아무도 모른다(t-83513):
+ * 지난 시각이나 지금에 밀려 가는 시각 대신 「평소보다 늦음 · N분째」를 말하고, 레인이 그 단계의
+ * 레시피가 오래 아무것도 쓰지 않았다고 적었으면(`stalled`) 그 말을 한다 — 사람이 지켜보는 것은
+ * 그 레인이라 과업의 시각보다 앞에 선다. */
 function boardNextWords(rows, now) {
   let next = null;
   for (const row of rows) {
     const eta = deskTaskEta(row.task, now);
     if (eta !== null && (!next || eta < next.eta)) next = { eta, title: row.task.title };
   }
-  const lane = releaseLane;
+  const lane = releaseLaneHere();
   const running = lane && typeof lane === "object" && lane.sha && deskReleaseVerdict(lane) === "running";
+  if (running && lane.stalled && typeof lane.stalled === "object") {
+    return t("board.now.nextStalled", "새 버전 발행이 멈춘 듯합니다 — {{recipe}} {{time}} 출력 없음",
+      deskStalledVars(lane.stalled, now));
+  }
   const ahead = running ? deskReleaseAhead(lane) : null;
   if (ahead) {
-    const { end, known } = boardScheduleLaneEnd(ahead, now);
+    const { end, lateMs, known } = boardScheduleLaneEnd(ahead, now);
+    const stage = ahead.stages?.[ahead.stages.length - 1];
+    // Late only against a usual time the past gave: a step with no green run before has no usual.
+    if (lateMs > 0 && Number(ahead.ahead[0]?.expected?.samples) > 0) {
+      return t("board.now.nextLate", "새 버전 발행이 평소보다 늦음 · {{phase}} {{time}}", {
+        phase: deskReleasePhaseWord(String(stage?.name ?? lane.phase ?? ""), lane),
+        time: runningWord(Number(stage?.start_ms), now) ?? t("board.desk.releaseJustStarted", "방금 시작"),
+      });
+    }
     if (known && end > now && (!next || end < next.eta)) next = { eta: end, title: t("board.now.lineRelease", "새 버전 발행") };
   }
   if (next) {
@@ -1327,7 +1344,7 @@ function boardNextWords(rows, now) {
   if (running) {
     return t("board.now.nextLane", "빌드 줄에서 {{version}} 발행이 {{phase}} 단계를 돌고 있습니다.",
       { version: deskReleaseVersionWord(lane),
-        phase: deskReleasePhaseWord(String(lane.phase || "")) });
+        phase: deskReleasePhaseWord(String(lane.phase || ""), lane) });
   }
   const live = rows.filter((row) => row.state === "run").length;
   return live > 0

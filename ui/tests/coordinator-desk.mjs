@@ -17,10 +17,11 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
 import { installBoardWaits } from "./board-waits.mjs";
+import { lanePlan } from "./lane-plan.mjs";
 
 /* The fixture, run inside the page. Self-contained: a page function carries
  * no closure. `now` is passed so a before/after pair draws the same clocks. */
-export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, folded = 0, gates = false, now = Date.now() } = {}) {
+export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, folded = 0, gates = false, now = Date.now(), plan = [] } = {}) {
   const minute = 60_000;
   const run = "run-desk";
   const checkout = (n) => `/repos/zerocode/workspaces/t-${n}`;
@@ -251,8 +252,14 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
       { name: "push", rc: 0, secs: 2 },
     ],
     disk_free_gb: 21, outcome: null, reason: "", version: "1.1.20",
+    // The steps the lane says it runs, each with its words (t-83513) — the real lane's table, read by
+    // the suite (`lanePlan`), so the card draws what the lane writes and no name of the window's own.
+    plan, git_common_dir: "/repos/zerocode/.git", stalled: null,
   };
-  window.__ANSWER__.release_status = () => ({ status: window.__RELEASE__, installed: null, notice: null, workers });
+  // The lane is answered for the checkout the window names (t-83513); the asks are kept to read that.
+  window.__RELEASE_ASKED__ = [];
+  window.__ANSWER__.release_status = (args) => (window.__RELEASE_ASKED__.push(args?.worktree ?? null),
+    { status: window.__RELEASE__, installed: null, notice: null, workers });
   paneModels.set(201, "claude-opus-5-5");
   agentBoardMode = "tasks";
   taskBoardFilter = "all";
@@ -323,7 +330,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       };
       requestAnimationFrame(watch);
     });
-    await page.evaluate(coordinatorDeskFixture);
+    await page.evaluate(coordinatorDeskFixture, { plan: lanePlan() });
     await page.waitForFunction(() => window.__FIRST_SEEN__ !== null);
     const firstFrame = await page.evaluate(async () => {
       await window.__BOARD_SETTLED__();
@@ -1698,6 +1705,117 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       red.reason === "gate-zo rc=101" && JSON.stringify(red.phases) === JSON.stringify([["앱 빌드", "실패"]]) &&
       JSON.stringify(red.failed) === JSON.stringify(["앱 빌드", "실패"]) && red.log.includes("build-app rc=101 288s") &&
       red.took.includes("걸림") && gone, JSON.stringify({ red, gone }));
+
+    /* ---- 레인은 제 말로, 이 프로젝트의 것만 (t-83513) ----
+     * 단계 이름은 레인이 적은 `plan`의 말이다: 창이 모르는 레인도 제 말로 서고, 이름을 적지 않은 단계는
+     * 레인이 쓰는 이름 그대로다. 게이트의 한 레시피가 오래 아무것도 안 쓰면 레인이 적은 「멈춘 듯」이
+     * 카드에 선다. 백엔드가 다른 저장소의 레인을 null로 답한 프로젝트에는 그 프로젝트의 줄만 — 줄이
+     * 없으면 없다는 한 문장만 — 선다. 레인은 그것을 물은 체크아웃과 함께 쥐고, 체크아웃이 바뀌면 다시 묻는다. */
+    const minute = 60_000;
+    await page.evaluate(async () => {
+      window.__RELEASE__ = {
+        sha: "0123456789abcdef0123456789abcdef01234567", phase: "ship", outcome: null, reason: "", version: "2.0.0",
+        started_at: new Date(Date.now() - 600_000).toISOString(), updated_at: new Date().toISOString(),
+        phases: [{ name: "lint", rc: 0, secs: 5 }],
+        plan: [{ name: "lint", words: { ko: "검사", en: "Lint" } }, { name: "ship", words: { en: "Ship" } }, { name: "tag" }],
+        stalled: null,
+      };
+      await askReleaseStatus();
+    });
+    const foreign = await readRelease();
+    ok("a lane the window never knew draws its steps in its own words: the window's language, else the first it wrote",
+      JSON.stringify(foreign.phases) === JSON.stringify([["검사", "끝"], ["Ship", foreign.runningFor]])
+        && foreign.running === "Ship" && foreign.log?.includes("lint rc=0 5s"),
+      JSON.stringify(foreign));
+    const unnamed = await page.evaluate(() => [deskReleasePhaseWord("tag"), deskReleasePhaseWord("never-planned")]);
+    ok("a step the lane gave no words stands under the lane's own name", JSON.stringify(unnamed) === JSON.stringify(["tag", "never-planned"]),
+      JSON.stringify(unnamed));
+    const stalled = await page.evaluate(async (minute) => {
+      window.__RELEASE__ = { ...window.__RELEASE__, phase: "gate-zo",
+        stalled: { gate: "gate-zo", recipe: "test", quiet_since_ms: Date.now() - 21 * minute - 5_000, cap_secs: 2400 } };
+      await askReleaseStatus();
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+      const line = document.querySelector('#board-view [data-desk-block="release"] .board-desk-release-stalled');
+      const with_cap = { text: line?.textContent, hidden: line?.hidden, ink: line ? getComputedStyle(line).color : null };
+      window.__RELEASE__ = { ...window.__RELEASE__, stalled: { ...window.__RELEASE__.stalled, cap_secs: 0 } };
+      await askReleaseStatus();
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+      const no_cap = line?.textContent;
+      window.__RELEASE__ = { ...window.__RELEASE__, stalled: null };
+      await askReleaseStatus();
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+      const probe = document.createElement("span");
+      probe.style.color = "var(--signal-wait-ink)";
+      document.body.append(probe);
+      const wait = getComputedStyle(probe).color;
+      probe.remove();
+      return { with_cap, no_cap, cleared: line?.hidden, wait };
+    }, minute);
+    ok("a recipe the lane says has written nothing for long stands on the card in its words, with the cap it will end red at",
+      stalled.with_cap.text === "멈춘 듯: test 21분 출력 없음 · 40분 넘으면 빨강으로 끝냄" && stalled.with_cap.hidden === false
+        && stalled.with_cap.ink === stalled.wait && stalled.no_cap === "멈춘 듯: test 21분 출력 없음" && stalled.cleared === true,
+      JSON.stringify(stalled));
+    const elsewhere = await page.evaluate(async () => {
+      const card = () => document.querySelector('#board-view [data-desk-block="release"]');
+      const read = () => ({
+        shown: !card().hidden, head: card().querySelector(".board-desk-head-word")?.textContent,
+        release: card().querySelector(".board-desk-release") !== null,
+        foot: card().querySelector(".board-line-foot")?.textContent,
+      });
+      const answer = (line, jobs = []) => {
+        window.__ANSWER__.schedule_timeline = () => ({ revision: (boardScheduleAnswer?.revision ?? 0) + 1, unchanged: false,
+          read_ms: Date.now(), line, jobs, lanes: [] });
+      };
+      // The backend answers another repository's lane as null (update_runtime::lane_status_for).
+      window.__RELEASE__ = null;
+      await askReleaseStatus();
+      answer({ found: false, folder: "/work/other/build-line/build-queue", runner_lanes: [] });
+      refreshBoardSchedule({ fresh: true });
+      await window.__UNTIL__(() => !boardScheduleAsking, "the schedule of a project with no line");
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+      const none = read();
+      answer({ found: true, folder: "/work/other/build-line/build-queue", runner_lanes: [1] }, [{
+        name: "1792543750-w1-t-90001-red", who: "w1", state: "waiting", class: "plain", lane: null, cap_secs: 1800,
+        queued_ms: Date.now() - 60_000, start_ms: null, end_ms: null, secs: null, rc: null, kind: null, gate: null, part: null,
+        what: null, expected: null,
+      }]);
+      refreshBoardSchedule({ fresh: true });
+      await window.__UNTIL__(() => !boardScheduleAsking, "the schedule of a project with a line");
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+      const line = read();
+      delete window.__ANSWER__.schedule_timeline;
+      boardScheduleAnswer = null;
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+      return { none, line, unknown: card().hidden };
+    });
+    ok("a project of another repository shows no release: only its own build line, or one sentence that it has none",
+      elsewhere.none.shown && elsewhere.none.head === "빌드 줄" && !elsewhere.none.release
+        && elsewhere.none.foot === "이 프로젝트엔 빌드 줄이 없습니다"
+        && elsewhere.line.shown && !elsewhere.line.release && elsewhere.line.foot === "다음 차례 — t-90001"
+        && elsewhere.unknown === true,
+      JSON.stringify(elsewhere));
+    const switched = await page.evaluate(async () => {
+      window.__RELEASE__ = { sha: "0123456789abcdef0123456789abcdef01234567", phase: "lint", outcome: null, reason: "",
+        started_at: new Date().toISOString(), updated_at: new Date().toISOString(), phases: [], plan: [] };
+      const held = activeWorktreePath;
+      activeWorktreePath = "/repos/zerocode/workspaces/t-1";
+      await askReleaseStatus();
+      const here = releaseLaneHere()?.sha ?? null;
+      window.__RELEASE_ASKED__ = [];
+      activeWorktreePath = "/repos/other";
+      const before = releaseLaneHere();
+      await window.__UNTIL__(() => !releaseLaneAsking, "the lane asked again for the new checkout");
+      const asked = [...window.__RELEASE_ASKED__];
+      const after = releaseLaneHere()?.sha ?? null;
+      activeWorktreePath = held;
+      window.__RELEASE__ = null;
+      await askReleaseStatus();
+      return { here, before, asked, after };
+    });
+    ok("the lane is held with the checkout it was asked for: after a switch it is no lane until asked again for the new one",
+      switched.here === "0123456789abcdef0123456789abcdef01234567" && switched.before === null
+        && JSON.stringify(switched.asked) === JSON.stringify(["/repos/other"]) && switched.after === switched.here,
+      JSON.stringify(switched));
 
     /* ---- 계속 판정 (t-26583): 워커 줄 밑의 판정 한 줄과 그 근거 ------------------
      *

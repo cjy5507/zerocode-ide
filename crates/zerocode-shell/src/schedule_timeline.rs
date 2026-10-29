@@ -1785,6 +1785,9 @@ struct LaneStatus {
     outcome: Option<String>,
     version: Option<String>,
     phase: Option<String>,
+    /// The steps the lane says it runs, in order (`plan`, t-83513) — none from
+    /// a lane that does not say them.
+    plan: Vec<String>,
 }
 
 fn lane_status(path: &Path) -> Option<LaneStatus> {
@@ -1796,11 +1799,24 @@ fn lane_status(path: &Path) -> Option<LaneStatus> {
             .filter(|said| !said.is_empty())
             .map(str::to_string)
     };
+    let plan = value
+        .get("plan")
+        .and_then(serde_json::Value::as_array)
+        .map(|steps| {
+            steps
+                .iter()
+                .filter_map(|step| step.get("name")?.as_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     Some(LaneStatus {
         sha: word("sha")?,
         outcome: word("outcome"),
         version: word("version"),
         phase: word("phase"),
+        plan,
     })
 }
 
@@ -2043,8 +2059,10 @@ fn newest_lane_logs(folder: &Path) -> Vec<(PathBuf, FileStamp)> {
 
 /// Every run, oldest first: its stages, its verdict, and — for the one
 /// `status.json` says runs — the stages ahead of it with what each is
-/// expected to take. A word is a stage when some run ended a stage of that
-/// name (`<name> rc=`); a `== <word>` no stage ever ended with is a verdict.
+/// expected to take: the steps that file says the lane runs, or with none
+/// said, the steps of the last full green. A word is a stage when some run
+/// ended a stage of that name (`<name> rc=`), or the lane says it runs it; a
+/// `== <word>` no stage ever ended with is a verdict.
 fn lane_view(parsed: &[&ParsedRun], status: Option<&LaneStatus>) -> Vec<LaneRun> {
     let stage_names: HashSet<&str> = parsed
         .iter()
@@ -2053,6 +2071,11 @@ fn lane_view(parsed: &[&ParsedRun], status: Option<&LaneStatus>) -> Vec<LaneRun>
             LaneMark::End { name, .. } => Some(name.as_str()),
             _ => None,
         })
+        .chain(
+            status
+                .iter()
+                .flat_map(|said| said.plan.iter().map(String::as_str)),
+        )
         .collect();
     let mut order: Vec<&ParsedRun> = parsed.to_vec();
     order.sort_by_key(|run| run.start_ms);
@@ -2104,7 +2127,12 @@ fn lane_view(parsed: &[&ParsedRun], status: Option<&LaneStatus>) -> Vec<LaneRun>
         }
     }
     let past = stage_past(&runs);
-    let plan = lane_plan(&runs);
+    // The steps ahead of the running lane are the ones it says it runs
+    // (t-83513); a lane that says none is planned by the last full green.
+    let plan = status
+        .map(|said| said.plan.clone())
+        .filter(|said| !said.is_empty())
+        .unwrap_or_else(|| lane_plan(&runs));
     for run in &mut runs {
         run.result = result_of(run);
     }

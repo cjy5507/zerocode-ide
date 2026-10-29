@@ -193,29 +193,168 @@ fn the_type_ladder_is_held_by_its_values() {
     }
 }
 
-/// Every step the release lane runs is named in the person's language on the
-/// 빌드 줄 card (t-70028, the draft's 「결합 시험 · 빌드 · zo 시험 · 발행」): the
-/// lane's own list (`PHASES`, tools/release/lane.sh) against the card's table
-/// of names. A step the table does not know stands under the lane's name.
+/// Every step the release lane runs is named by the lane itself (t-83513): its
+/// table (`PHASE_WORDS`, tools/release/lane.sh) gives each step a name in every
+/// language the window speaks (`LOCALES`, ui/shell-i18n.js), and status.json
+/// carries the list (`plan`). The window keeps no table of a lane's steps — a
+/// lane it never knew stands in its own words — and so no catalog key for one.
 #[test]
-fn every_release_step_has_its_name_on_the_build_line_card() {
+fn every_release_step_is_named_by_the_lane_itself() {
     let lane = include_str!("../../../../tools/release/lane.sh");
-    let phases = lane
+    let langs: Vec<&str> = lane
         .lines()
-        .find_map(|line| line.strip_prefix("PHASES=\""))
+        .find_map(|line| line.strip_prefix("PHASE_LANGS=\""))
         .and_then(|rest| rest.split('"').next())
-        .expect("tools/release/lane.sh no longer names its PHASES");
-    let window = window_source();
-    let table = block_after(window, "const DESK_RELEASE_PHASES = Object.freeze({");
-    for phase in phases.split_whitespace() {
-        let entry = if phase.contains('-') {
-            format!("\"{phase}\": {{ key: \"board.now.phase")
-        } else {
-            format!("  {phase}: {{ key: \"board.now.phase")
-        };
+        .expect("tools/release/lane.sh no longer names its PHASE_LANGS")
+        .split_whitespace()
+        .collect();
+    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let locales: Vec<&str> = i18n
+        .split_once("const LOCALES = [")
+        .and_then(|(_, rest)| rest.split_once("];"))
+        .map(|(list, _)| list)
+        .expect("ui/shell-i18n.js no longer lists its LOCALES")
+        .split("{ code: \"")
+        .skip(1)
+        .filter_map(|tail| tail.split('"').next())
+        .filter(|code| *code != "system")
+        .collect();
+    assert_eq!(
+        langs, locales,
+        "the lane names its steps in other languages than the window speaks"
+    );
+    let table = lane
+        .split_once("PHASE_WORDS='")
+        .and_then(|(_, rest)| rest.split_once('\''))
+        .map(|(table, _)| table)
+        .expect("tools/release/lane.sh no longer carries its PHASE_WORDS");
+    let steps: Vec<Vec<&str>> = table
+        .lines()
+        .map(|line| line.split('|').collect())
+        .collect();
+    assert!(
+        steps.len() >= 10,
+        "the lane's table lost its steps: {table}"
+    );
+    for step in &steps {
+        assert_eq!(
+            step.len(),
+            langs.len() + 1,
+            "the lane's `{}` step is not named once in each of {langs:?}",
+            step[0]
+        );
         assert!(
-            table.contains(&entry),
-            "the lane's `{phase}` step has no name on the build line card:\n{table}"
+            step.iter()
+                .all(|word| !word.trim().is_empty() && !word.contains(['"', '\\'])),
+            "a word of the lane's `{}` step is empty or needs escaping: {step:?}",
+            step[0]
+        );
+    }
+    assert!(
+        lane.contains("\"plan\":%s") && lane.contains("\"$PLAN_JSON\""),
+        "status.json no longer carries the lane's steps"
+    );
+    let window = window_source();
+    assert!(
+        !window.contains("DESK_RELEASE_PHASES") && !window.contains("board.now.phase"),
+        "the window keeps a table of a lane's step names again"
+    );
+    assert!(
+        !i18n.contains("\"board.now.phase"),
+        "a catalog still names a lane's step"
+    );
+    let word = block_after(window, "function deskReleasePhaseWord(");
+    assert!(
+        word.contains("lane?.plan") && word.contains("String(name)"),
+        "a step's name is not read off the lane's own plan:\n{word}"
+    );
+}
+
+/// The board shows a release lane only on a project of the repository the lane
+/// says it releases (t-83513): the lane writes the folder every checkout of its
+/// repository shares (`git_common_dir`), the window holds the two folders to
+/// one identity on disk — never a path's spelling or a repository's name — and
+/// both the status bar's answer and the schedule's lanes go through it.
+#[test]
+fn a_lane_stands_only_on_the_repository_it_releases() {
+    let lane = include_str!("../../../../tools/release/lane.sh");
+    assert!(
+        lane.contains("rev-parse --path-format=absolute --git-common-dir")
+            && lane.contains("\"git_common_dir\":\"%s\""),
+        "the lane no longer says which repository it releases"
+    );
+    let runtime = shell_source("update_runtime.rs");
+    let releases = block_after(&runtime, "pub(crate) fn lane_releases(");
+    assert!(
+        releases.contains("git_dir::project_root(") && releases.contains("same_directory("),
+        "the lane's repository is not told by the shared folder's identity:\n{releases}"
+    );
+    for spelled in [
+        "\"zerocode",
+        "file_name",
+        "to_string_lossy",
+        "== named",
+        "starts_with",
+    ] {
+        assert!(
+            !releases.contains(spelled),
+            "the lane's repository is told by a spelling (`{spelled}`):\n{releases}"
+        );
+    }
+    let same = block_after(&runtime, "fn same_directory(");
+    assert!(
+        same.contains(".dev()") && same.contains(".ino()"),
+        "one folder is not told by its device and inode:\n{same}"
+    );
+    let system = shell_source("cmd/system.rs");
+    assert!(
+        block_after(&system, "pub(crate) fn release_status(").contains("lane_status_for("),
+        "the status bar's lane is answered for every project"
+    );
+    let board = shell_source("cmd/board.rs");
+    assert!(
+        block_after(&board, "fn schedule_look(").contains("lane_dir_for("),
+        "the schedule reads the lanes on every project"
+    );
+    let window = window_source();
+    assert!(
+        block_after(window, "function askReleaseStatus(")
+            .contains("invoke(\"release_status\", { worktree: asked })"),
+        "the window does not say which checkout it asks the lane for"
+    );
+    for (door, reader) in [
+        ("function paintDeskRelease(", "releaseLaneHere()"),
+        ("function boardNextWords(", "releaseLaneHere()"),
+        ("function paintStackedWork(", "releaseLaneHere()"),
+    ] {
+        assert!(
+            block_after(window, door).contains(reader),
+            "`{door}` draws a lane read for another checkout"
+        );
+    }
+}
+
+/// The sentences the build line card and the line above it gained (t-83513)
+/// are in the four catalogs beside the Korean one where they are used.
+#[test]
+fn the_build_lines_new_sentences_are_in_the_four_catalogs() {
+    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let window = window_source();
+    for key in [
+        "board.schedule.noLine",
+        "board.now.nextLate",
+        "board.now.nextStalled",
+        "board.desk.releaseStalled",
+        "board.desk.releaseStalledCap",
+    ] {
+        assert!(
+            window.contains(&format!("t(\"{key}\", \"")),
+            "`{key}` is not asked for with its Korean words"
+        );
+        assert_eq!(
+            i18n.matches(&format!("\"{key}\":")).count(),
+            4,
+            "`{key}` is not in exactly the four catalogs (en, ja, zh, es)"
         );
     }
 }

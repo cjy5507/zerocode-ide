@@ -1,5 +1,5 @@
 #!/bin/bash
-# tools/release/lane.sh [<sha> ...] | --table
+# tools/release/lane.sh [<sha> ...] | --table | --plan
 #
 # The release lane, off the window (docs/design/release-lane-off-the-window.md).
 # launchd starts it whenever the queue directory is not empty; it takes the
@@ -46,7 +46,33 @@ CALM_LOAD=12                # a gate starts once the 1-minute load average is at
                             # against 649–1342 s, and six pty e2e timed out that pass solo
 CALM_WAIT_SECS=900          # …waiting at most this long; a machine still loud after that runs and says so
 CALM_POLL_SECS=30           # how often the wait looks at the load
-PHASES="archive gate-root gate-zo flakes push build-app swap-app build-zo swap-zo bundle-updater publish sweep"
+# The steps the lane runs, in order, one a line — `name|` then what the step is called in each
+# language of PHASE_LANGS (the window's, ui/shell-i18n.js LOCALES). status.json carries the list
+# as `plan`, so a board draws this lane's steps — and any other lane's — in the lane's own words
+# and keeps no table of them (t-83513). PHASES is its first column.
+PHASE_LANGS="ko en ja zh es"
+PHASE_WORDS='archive|소스 묶기|Pack the source|ソースをまとめる|打包源码|Empaquetar el código
+gate-root|결합 시험|Integration tests|結合テスト|集成测试|Pruebas de integración
+gate-zo|zo 시험|zo tests|zo のテスト|zo 测试|Pruebas de zo
+flakes|흔들린 시험 다시|Rerun flaky tests|不安定なテストの再実行|重跑不稳定的测试|Repetir pruebas inestables
+push|올리기|Push|プッシュ|推送|Subir
+build-app|앱 빌드|Build the app|アプリのビルド|构建应用|Compilar la app
+swap-app|앱 바꿔 넣기|Swap in the app|アプリの入れ替え|替换应用|Cambiar la app
+build-zo|zo 빌드|Build zo|zo のビルド|构建 zo|Compilar zo
+swap-zo|zo 바꿔 넣기|Swap in zo|zo の入れ替え|替换 zo|Cambiar zo
+bundle-updater|업데이트 묶기|Bundle the updater|アップデーターの梱包|打包更新器|Empaquetar el actualizador
+publish|발행|Publish|公開|发布|Publicar
+sweep|정리|Clean up|後片付け|清理|Limpiar'
+PHASES=; while IFS='|' read -r phase_name _; do PHASES="${PHASES:+$PHASES }$phase_name"; done <<< "$PHASE_WORDS"
+# A recipe of a gate that writes no line for long is said stalled, and past a cap ended red: on
+# 10-29 v1.1.104's gate-zo stood 55 min in a deadlocked test, and neither its log nor the lane's
+# got a line, so nobody knew (t-83513). Its usual time is the median of what it took in the
+# newest QUIET_SAMPLES lanes that ended green (their gate logs' `<== verify recipe` lines).
+QUIET_FACTOR=2              # silent this many times its usual time (and at least QUIET_FLOOR_SECS): 「멈춘 듯」 in the lane log and status.json
+QUIET_CAP_FACTOR=2          # …and this many times that again: the recipe is ended red (its own processes, by parent id) and the gate goes on
+QUIET_FLOOR_SECS=600        # never said sooner — a quick recipe waiting on cargo's build lock is not stalled; a recipe with no green past is said at this and never ended
+QUIET_SAMPLES=5             # the green lanes a recipe's usual time is the median of (the board's estimates read five too)
+QUIET_POLL_SECS=10          # how often the lane looks at a running gate's log
 TARGET_LANES="root-gate zo-gate root-release zo-release"
 export CARGO_INCREMENTAL=0  # every cargo the lane runs, gates and solo judgments alike (their fingerprints must agree): a
                             # gate rebuilds the workspace crates every run (a new version, a new scratch), and the cache
@@ -84,6 +110,11 @@ APP_SIBLING_BINS='zerocode-mirror zerocode-pick'   # helper executables beside t
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 RELEASE_REPO=${RELEASE_REPO:-$(cd "$SELF_DIR/../.." && pwd)}
+# The repository this lane releases, as git names the folder every checkout of it shares
+# (`--git-common-dir`). status.json says it, and a board shows the lane only on a project whose
+# checkout shares that very folder — the window tells it by the folder's identity on disk, never
+# by how a path is spelled or what the repository is called (t-83513).
+RELEASE_GIT_COMMON_DIR=${RELEASE_GIT_COMMON_DIR:-$(git -C "$RELEASE_REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)}
 # The repository a release goes TO — which is not the one this source lives
 # in. The feed has to be reachable without a token, so it is served from the
 # public distribution repo while the source stays private (design
@@ -140,7 +171,8 @@ RECEIPTS=$RELEASE_HOME/receipts       # <sha>.json: the coordinator's gate recei
 
 if [ "${1:-}" = "--table" ]; then
   for k in DISK_FLOOR_GB TARGET_CAP_GB RECLAIM_BELOW_GB POLL_SECS THROTTLE_SECS ZO_PROFILE SOLO_RUNS CALM_LOAD CALM_WAIT_SECS \
-           CALM_POLL_SECS PHASES TARGET_LANES CARGO_INCREMENTAL TOOLS \
+           CALM_POLL_SECS PHASES PHASE_LANGS QUIET_FACTOR QUIET_CAP_FACTOR QUIET_FLOOR_SECS QUIET_SAMPLES QUIET_POLL_SECS \
+           RELEASE_GIT_COMMON_DIR TARGET_LANES CARGO_INCREMENTAL TOOLS \
            LAUNCHD_LABEL LAUNCHD_PATH APP_NAME RELEASE_REPO RELEASE_HOME RELEASE_SCRATCH_ROOT RELEASE_APP_DIR \
            RELEASE_ZO_BIN RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED RECEIPTS RECEIPT_PY \
            RELEASE_BUILD_LINE RELEASE_COORD_RUN RELEASE_NOTES NOTES_READERS UI_SUITE_CHOOSER \
@@ -150,6 +182,26 @@ if [ "${1:-}" = "--table" ]; then
   done
   exit 0
 fi
+
+# plan_json — PHASE_WORDS as status.json's `plan`: [{"name":…,"words":{"<lang>":…}}, …] in
+# PHASE_LANGS' order, built once (no process per word). The words are the table's own, with
+# no quote or backslash in them; those two are escaped anyway.
+plan_json() {
+  local line cells lang word i steps= words
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    IFS='|' read -r -a cells <<< "$line"
+    words=; i=1
+    for lang in $PHASE_LANGS; do
+      word=${cells[$i]:-}; word=${word//\\/\\\\}; word=${word//\"/\\\"}
+      words="${words:+$words,}\"$lang\":\"$word\""; i=$(( i + 1 ))
+    done
+    steps="${steps:+$steps,}{\"name\":\"${cells[0]}\",\"words\":{$words}}"
+  done <<< "$PHASE_WORDS"
+  printf '[%s]' "$steps"
+}
+PLAN_JSON=$(plan_json)
+if [ "${1:-}" = "--plan" ]; then printf '%s\n' "$PLAN_JSON"; exit 0; fi
 
 # ------------------------------------------------------------------ helpers --
 is_dry() { [ "$RELEASE_DRY_RUN" = "1" ]; }
@@ -181,6 +233,7 @@ SHA=; SHA8=; SCRATCH=; LOG=; QUEUE_FILE=; STARTED_AT=; PHASE=; PHASE_T0=0
 PHASES_JSON=; DISK_FREE_GB=0; OUTCOME=null; REASON=; SWEPT=1; LOCK_HELD=0
 VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=   # SKIP: why the phase being ended did nothing; WHY: a step's red in words
 ONLY=; RECEIPT=   # a gate's recipes a coordinator's receipt left owed, and what that receipt did (receipt_cover)
+STALLED=null      # status.json's `stalled` while a gate's recipe writes nothing past its say time (watch_gate), else null
 
 measure_disk() {
   if is_dry; then
@@ -229,9 +282,9 @@ wait_for_calm() {
 write_status() {
   local outcome=$OUTCOME
   [ "$outcome" != null ] && outcome="\"$outcome\""
-  printf '{"sha":"%s","phase":"%s","started_at":"%s","updated_at":"%s","phases":[%s],"disk_free_gb":%s,"outcome":%s,"reason":"%s","version":"%s","updater_pubkey":"%s"}\n' \
+  printf '{"sha":"%s","phase":"%s","started_at":"%s","updated_at":"%s","phases":[%s],"disk_free_gb":%s,"outcome":%s,"reason":"%s","version":"%s","updater_pubkey":"%s","git_common_dir":"%s","plan":%s,"stalled":%s}\n' \
     "$SHA" "$PHASE" "$STARTED_AT" "$(now_iso)" "$PHASES_JSON" "$DISK_FREE_GB" "$outcome" "$(json_str "$REASON")" \
-    "$(json_str "$VERSION")" "$(json_str "$UPDATER_PUBKEY")" \
+    "$(json_str "$VERSION")" "$(json_str "$UPDATER_PUBKEY")" "$(json_str "$RELEASE_GIT_COMMON_DIR")" "$PLAN_JSON" "$STALLED" \
     > "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
 }
 phase_begin() { PHASE=$1; PHASE_T0=$(now_s); write_status; log "== $PHASE"; }
@@ -389,13 +442,98 @@ do_archive() {
     && ln -s "$RELEASE_NODE_MODULES" "$SCRATCH/node_modules"
 }
 
+# ---------------------------------------------------------------- the watch --
+# A gate's recipe that writes nothing for long (t-83513). While a gate runs the lane looks at its
+# log every QUIET_POLL_SECS: the recipe is the log's last `==> verify recipe` mark, and its silence
+# is how long the log has not grown. Silent past its say time, the lane log says `stalled: <gate>
+# <recipe> — <span> without output` and status.json carries `stalled` (the board's 「멈춘 듯」);
+# past its cap the lane sends the gate SIGUSR1, and verify-every-recipe.sh --stoppable ends that
+# recipe's own processes red and goes on to the next recipe. The lane signals only the gate it
+# started, by the pid it holds; nothing is found by name. Output that comes back takes the word back.
+
+# lane_verdict LANE_LOG -> the outcome its newest run ended with (`HH:MM:SS == <outcome>`), or nothing
+lane_verdict() { sed -nE 's/^[0-9:]+ == (green|red|refused|superseded)( .*)?$/\1/p' "$1" 2>/dev/null | tail -1; }
+# recipe_usuals GATE(root|zo) -> "<recipe> <secs>" a line: the median a recipe took in the gate logs
+# of the newest QUIET_SAMPLES lanes that ended green (a gate not owed left its log empty and is
+# passed over); the upper middle of an even count, as the board's medians take it.
+recipe_usuals() {
+  local gate=$1 f sha8 n=0 logs=()
+  for f in $(ls -t "$OUT"/lane-*.log 2>/dev/null); do
+    [ "$(lane_verdict "$f")" = green ] || continue
+    sha8=${f##*/lane-}; sha8=${sha8%.log}
+    [ -s "$OUT/gate-$gate-$sha8.log" ] || continue
+    logs+=("$OUT/gate-$gate-$sha8.log"); n=$(( n + 1 ))
+    [ "$n" -lt "$QUIET_SAMPLES" ] || break
+  done
+  [ "$n" -gt 0 ] || return 0
+  awk '$1 == "<==" && $2 == "verify" && $3 == "recipe" && $5 == "rc=0" && $6 ~ /^[0-9]+s$/ { print $4, $6 + 0 }' "${logs[@]}" \
+    | sort -k1,1 -k2,2n \
+    | awk '$1 != r { if (r != "") print r, v[int(n / 2) + 1]; r = $1; n = 0 } { v[++n] = $2 } END { if (r != "") print r, v[int(n / 2) + 1] }'
+}
+quiet_floor() { if is_dry; then stub QUIET_FLOOR_SECS "$QUIET_FLOOR_SECS"; else printf '%s' "$QUIET_FLOOR_SECS"; fi; }
+quiet_poll() { if is_dry; then stub QUIET_POLL_SECS "$QUIET_POLL_SECS"; else printf '%s' "$QUIET_POLL_SECS"; fi; }
+# quiet_limits RECIPE USUALS -> "<say> <cap> <usual>" seconds: said at QUIET_FACTOR times its usual
+# time and at least the floor, ended at QUIET_CAP_FACTOR times that; with no green past it is said
+# at the floor and never ended (cap and usual 0) — nothing says what is long for it.
+quiet_limits() {
+  local usual say floor
+  floor=$(quiet_floor)
+  usual=$(printf '%s\n' "$2" | awk -v r="$1" '$1 == r { print $2; exit }')
+  if [ -z "$usual" ]; then printf '%s 0 0' "$floor"; return 0; fi
+  say=$(( usual * QUIET_FACTOR )); [ "$say" -ge "$floor" ] || say=$floor
+  printf '%s %s %s' "$say" $(( say * QUIET_CAP_FACTOR )) "$usual"
+}
+span() { if [ "$1" -ge 60 ]; then printf '%dm' $(( $1 / 60 )); else printf '%ds' "$1"; fi; }
+# watch_gate PID LOG — runs beside the gate (inside run_gate, itself under heavy) until PID is gone.
+# Its status.json writes carry the phase's own state as the lane had it when the gate began.
+watch_gate() {
+  local pid=$1 log=$2 poll usuals size=-1 grown mark recipe= at now quiet say=0 cap=0 usual=0 said= ended= limits
+  poll=$(quiet_poll); usuals=$(recipe_usuals "${PHASE#gate-}"); at=$(now_s)
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep "$poll"
+    now=$(now_s); grown=$(( $(wc -c < "$log" 2>/dev/null) + 0 ))
+    if [ "$grown" != "$size" ]; then
+      size=$grown; at=$now
+      mark=$(grep -a '^==> verify recipe ' "$log" 2>/dev/null | tail -1); mark=${mark#==> verify recipe }
+      if [ -n "$said" ]; then
+        said=; STALLED=null; write_status
+        [ "$mark" != "$recipe" ] || log "stalled: $PHASE $recipe — output again"
+      fi
+      if [ "$mark" != "$recipe" ]; then
+        recipe=$mark; ended=
+        limits=$(quiet_limits "$recipe" "$usuals"); read -r say cap usual <<< "$limits"
+      fi
+      continue
+    fi
+    [ -n "$recipe" ] || continue
+    quiet=$(( now - at ))
+    if [ -z "$said" ] && [ "$quiet" -ge "$say" ]; then
+      said=1
+      STALLED="{\"gate\":\"$PHASE\",\"recipe\":\"$(json_str "$recipe")\",\"quiet_since_ms\":$(( at * 1000 )),\"cap_secs\":$cap}"
+      write_status
+      stub_log "stalled $PHASE $recipe"
+      log "stalled: $PHASE $recipe — $(span "$quiet") without output$([ "$usual" -gt 0 ] && printf ' (usual %s)' "$(span "$usual")")$([ "$cap" -gt 0 ] && printf '; ended red at %s' "$(span "$cap")")"
+    fi
+    if [ -z "$ended" ] && [ "$cap" -gt 0 ] && [ "$quiet" -ge "$cap" ]; then
+      ended=1
+      stub_log "quiet-end $PHASE $recipe"
+      log "stalled: $PHASE $recipe — $(span "$quiet") without output, past its cap: ending it red"
+      kill -USR1 "$pid" 2>/dev/null
+    fi
+  done
+}
+
 # gate LANE — runs in the background; writes "rc secs" to $WORK/gate-LANE.result.
-# Every recipe of the gate, or ONLY those a coordinator's receipt left owed.
+# Every recipe of the gate, or ONLY those a coordinator's receipt left owed, each one watched
+# for silence while it runs (watch_gate). A dry run steered by RELEASE_STUB_GATE_<LANE>_JUSTDIR
+# drives the real gate script over that folder's justfile instead of the stub, so the watch's
+# cases run the very road a lane takes.
 gate_dir() { case $1 in root) printf . ;; zo) printf zo-ide ;; esac; }   # the gate's justfile, in the scratch
 run_gate() {
-  local lane=$1 t0 rc log="$OUT/gate-$1-$SHA8.log" target
+  local lane=$1 t0 rc log="$OUT/gate-$1-$SHA8.log" target dir pid
   target=$(target_dir "$lane-gate"); t0=$(now_s)
-  if is_dry; then
+  dir=$(stub "GATE_$(upper "$lane")_JUSTDIR")
+  if is_dry && [ -z "$dir" ]; then
     stub_log "gate $lane target=$target incremental=${CARGO_INCREMENTAL-unset}${ONLY:+ only=$ONLY}"
     sleep "$(stub "GATE_$(upper "$lane")_SLEEP" 0)"
     rc=$(stub "GATE_$(upper "$lane")_RC" 0)
@@ -405,7 +543,13 @@ run_gate() {
       local u; u=$(stub "GATE_$(upper "$lane")_UNNAMED" ""); [ -z "$u" ] || { echo "==> verify recipe $u"; echo "error: recipe \`$u\` failed on line 43 with exit code 101"; }
     } > "$log"
   else
-    ( cd "$SCRATCH/$(gate_dir "$lane")" && CARGO_TARGET_DIR=$target "$SELF_DIR/verify-every-recipe.sh" ${ONLY:+--only "$ONLY"} ) > "$log" 2>&1; rc=$?
+    if is_dry; then stub_log "gate $lane target=$target incremental=${CARGO_INCREMENTAL-unset} justdir${ONLY:+ only=$ONLY}"
+    else dir="$SCRATCH/$(gate_dir "$lane")"; fi
+    # exec: the pid the lane holds is the gate script's own, the one process it ever signals.
+    ( cd "$dir" && CARGO_TARGET_DIR=$target exec "$SELF_DIR/verify-every-recipe.sh" --stoppable ${ONLY:+--only "$ONLY"} ) > "$log" 2>&1 &
+    pid=$!
+    watch_gate "$pid" "$log"
+    wait "$pid"; rc=$?
   fi
   echo "$rc $(( $(now_s) - t0 ))" > "$WORK/gate-$lane.result"
   stub_log "gate $lane done rc=$rc"
@@ -1189,7 +1333,7 @@ run_sha() { # SHA [QUEUE_FILE]
   SHA=$1; SHA8=$(printf '%s' "$1" | cut -c1-8); QUEUE_FILE=${2:-}
   SCRATCH=$RELEASE_SCRATCH_ROOT/gate-$SHA8; LOG=$OUT/lane-$SHA8.log
   STARTED_AT=$(now_iso); PHASES_JSON=; OUTCOME=null; REASON=; SWEPT=0
-  VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=; ONLY=; RECEIPT=
+  VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=; ONLY=; RECEIPT=; STALLED=null
   rm -rf "$WORK"; mkdir -p "$WORK"
   log "== lane $SHA8 start (dry=$RELEASE_DRY_RUN)"
   [ -d "$SCRATCH" ] && log "stale scratch $SCRATCH — swept on the way out"

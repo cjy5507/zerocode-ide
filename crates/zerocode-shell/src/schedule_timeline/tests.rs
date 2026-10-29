@@ -1646,6 +1646,99 @@ fn a_full_green_older_than_the_newest_eight_logs_still_plans_the_stages_ahead() 
     );
 }
 
+/// t-83513: the steps ahead of a running lane are the ones its status.json
+/// says it runs (`plan`), each with the median of its past where it has one —
+/// not the steps of an older green, which a lane that changed its steps would
+/// still carry. A planned step a run began and never ended is a stage of that
+/// run, not its verdict.
+#[test]
+fn a_running_lanes_steps_ahead_are_the_ones_its_status_says_it_runs() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let release = scratch.path().join("release");
+    let out = release.join("out");
+    std::fs::create_dir_all(&out).expect("the lanes' folder");
+    let write_log = |sha: &str, text: &str, at_ms: i64| {
+        let path = out.join(format!("lane-{sha}.log"));
+        std::fs::write(&path, text).expect("a lane log");
+        stamp_at(&path, at_ms);
+    };
+    // An older green of the lane's old steps, and a red that stopped inside a
+    // step no run ever ended.
+    write_log(
+        "aaaaaaa0",
+        "08:00:00 == lane aaaaaaa0 start (dry=0)\n08:00:00 == archive\n08:00:10 archive rc=0 10s free=20G\n\
+         08:00:10 == gate\n08:10:10 gate rc=0 600s free=20G\n08:10:10 == push\n08:10:20 push rc=0 10s free=20G\n08:10:20 == green\n",
+        kst(21, 8, 11, 0),
+    );
+    write_log(
+        "bbbbbbb0",
+        "08:30:00 == lane bbbbbbb0 start (dry=0)\n08:30:00 == archive\n08:30:10 archive rc=0 10s free=20G\n\
+         08:30:10 == build\n08:40:00 build was cut\n08:40:00 == red (build)\n",
+        kst(21, 8, 41, 0),
+    );
+    write_log(
+        "ccccccc0",
+        "09:30:00 == lane ccccccc0 start (dry=0)\n09:30:00 == archive\n09:30:10 archive rc=0 10s free=20G\n09:30:10 == gate\n",
+        kst(21, 9, 40, 0),
+    );
+    let status = |plan: &str| {
+        std::fs::write(
+            release.join("status.json"),
+            format!(
+                "{{\"sha\": \"ccccccc0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"phase\": \"gate\", \"outcome\": null{plan}}}"
+            ),
+        )
+        .expect("the status");
+    };
+    status(
+        ", \"plan\": [{\"name\": \"archive\", \"words\": {\"ko\": \"묶기\"}}, {\"name\": \"gate\"}, \
+         {\"name\": \"build\"}, {\"name\": \"publish\", \"words\": {}}]",
+    );
+    let roots = Roots {
+        line: None,
+        release: Some(release.clone()),
+    };
+    let timeline = Book::default().read(&roots, &Ask::default(), kst(21, 9, 50, 0), KST);
+    let running = lane(&timeline, "ccccccc0");
+    assert!(running.running && running.ahead_planned, "{running:?}");
+    assert_eq!(
+        running
+            .ahead
+            .iter()
+            .map(|stage| (
+                stage.name.as_str(),
+                stage.expected.secs,
+                stage.expected.samples
+            ))
+            .collect::<Vec<_>>(),
+        [("gate", 600, 1), ("build", 0, 0), ("publish", 0, 0)],
+        "the steps the lane says it runs, with the past each has"
+    );
+    let cut = lane(&timeline, "bbbbbbb0");
+    assert_eq!(
+        (
+            cut.stages
+                .iter()
+                .map(|stage| stage.name.as_str())
+                .collect::<Vec<_>>(),
+            cut.verdict.as_deref(),
+        ),
+        (vec!["archive", "build"], Some("red")),
+        "a planned step a run never ended is that run's stage, not its verdict"
+    );
+    // A lane that says no steps is planned, as before, by the last full green.
+    status("");
+    let unsaid = Book::default().read(&roots, &Ask::default(), kst(21, 9, 50, 0), KST);
+    assert_eq!(
+        lane(&unsaid, "ccccccc0")
+            .ahead
+            .iter()
+            .map(|stage| stage.name.as_str())
+            .collect::<Vec<_>>(),
+        ["gate", "push"]
+    );
+}
+
 /// ⑥ The caps are the runner's own numbers, read off the runner's script in
 /// the queue folder — not copies of them. Without such a script: the runner's
 /// last known numbers.
