@@ -851,9 +851,11 @@ impl Facts {
 
 /// Take up what the last window wrote down as each worker sits in a pane
 /// again: a question the screen still shows is carried on, given back to the
-/// person if it was theirs; one the ledger closed is dropped, and one the
-/// pane no longer shows is left, so a late answer is refused as passed —
-/// nothing of either reaches the person's screen.
+/// person if it was theirs; one the ledger closed, or answered while the
+/// screen no longer shows it, is dropped, and one the pane no longer shows is
+/// left, so a late answer is refused as passed — nothing of any reaches the
+/// person's screen. A pane asking again before this beat meets the written
+/// letter ([`meet`]).
 fn take_up(app: &AppHandle, waiting: Vec<Kept>, facts: &Facts, now_ms: i64) {
     let mut later = Vec::new();
     for mut kept in waiting {
@@ -976,9 +978,14 @@ fn taking_up(
         return TakeUp::Carry;
     }
     if waited_ms < TAKE_UP_GRACE_MS {
-        TakeUp::Later
-    } else {
-        TakeUp::Leave
+        return TakeUp::Later;
+    }
+    match standing {
+        // Answered and gone from the screen: the answer most likely went in
+        // just before the last window died, before it could write that down
+        // (t-84470, r2 P3-2) — nobody is told 「지나간 질문」.
+        Standing::Answered(_) => TakeUp::Drop,
+        _ => TakeUp::Leave,
     }
 }
 
