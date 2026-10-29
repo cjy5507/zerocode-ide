@@ -395,7 +395,11 @@ impl PermissionPolicy {
     /// any escalation the mode would have asked about, so a person is asked
     /// once; a call the mode or the rules refuse outright is refused unasked,
     /// and so is every such question in a pane the ledger summoned as a
-    /// worker, which nobody watches.
+    /// worker, which nobody watches. Where the mode or the rules would run the
+    /// call without asking — full access, an allow rule — the question is
+    /// refused unasked too, with what to do instead, as the window's hook
+    /// answers it (t-82420): nobody is expected at a question there, and one
+    /// left unanswered stalls the turn.
     #[must_use]
     pub fn authorize_with_context(
         &self,
@@ -430,7 +434,10 @@ impl PermissionPolicy {
                     PermissionOutcome::Deny { reason } if !would_ask.asked => {
                         PermissionOutcome::Deny { reason }
                     }
-                    _ => Self::prompt_or_deny(
+                    PermissionOutcome::Allow => PermissionOutcome::Deny {
+                        reason: crate::kill_guard::unasked(&reason),
+                    },
+                    PermissionOutcome::Deny { .. } => Self::prompt_or_deny(
                         tool_name,
                         input,
                         ModeAudit {

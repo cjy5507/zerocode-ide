@@ -11,7 +11,9 @@
 //!
 //! Three places ask, and each does what it can with the answer:
 //! [`crate::PermissionPolicy`] puts a question to a person when one can be
-//! asked; [`crate::permission_enforcer::PermissionEnforcer::check_bash`] has
+//! asked and the mode or the rules would have asked about the call anyway,
+//! and refuses it where they would run the call unasked (t-82420);
+//! [`crate::permission_enforcer::PermissionEnforcer::check_bash`] has
 //! nobody to ask, so a question is a refusal there; and the bash chokepoint
 //! ([`crate::execute_bash`]) refuses the window in every mode and on every
 //! path, a question having been the permission layer's to ask — save in a
@@ -88,6 +90,24 @@ pub fn refusal(reason: &str) -> String {
 #[must_use]
 pub fn unanswered(reason: &str) -> String {
     format!("refused, since no person said yes to it: {reason}. {NOT_THE_MODE}")
+}
+
+/// What a session that runs calls unasked can do instead of a kill that
+/// needs a person's yes — the ways out the window's hook gives a pane: a
+/// process this session started is its own to end by a pid it names, and one
+/// it did not start is not (t-82420).
+const WAY_OUT: &str = "Nobody was asked, since this session runs calls without asking. \
+To end what this session started, name it so it can be checked before it runs: \
+its pid as a number (`echo $!` or `pgrep -f <name>`, then `kill 4242`), \
+`kill $(pgrep -f <name>)`, or its job (`kill %1`, `kill $!` in the same command). \
+A process this session did not start is the person's to end, or the pane's that started it";
+
+/// The refusal a [`KillVerdict::Ask`] becomes where the mode or the rules
+/// would run the call without asking anyone (t-82420): the question is not
+/// put, and the refusal says what to do instead.
+#[must_use]
+pub fn unasked(reason: &str) -> String {
+    format!("{} {WAY_OUT}.", unanswered(reason))
 }
 
 #[cfg(test)]
