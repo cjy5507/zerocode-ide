@@ -270,6 +270,8 @@ fn the_persons_controls_carry_the_person_only_mark() {
     for part in [
         "reply.dataset.personOnly = \"\"",
         "actions.dataset.personOnly = \"\"",
+        // A question closed without an answer (t-83281).
+        "close.dataset.personOnly = \"\"",
         // A row opens its letter and a read leaves the ledger's ack (t-74825).
         "list.dataset.personOnly = \"\"",
     ] {

@@ -22758,7 +22758,7 @@ mod tests {
     }
 
     /// The words the inbox page asks the catalog for.
-    const INBOX_KEYS: [&str; 30] = [
+    const INBOX_KEYS: [&str; 37] = [
         "inbox.title",
         "inbox.tabs.label",
         "inbox.tab.all",
@@ -22789,6 +22789,13 @@ mod tests {
         "inbox.note.question",
         "inbox.note.handoff",
         "inbox.note.blocked",
+        "inbox.close.label",
+        "inbox.close.placeholder",
+        "inbox.close.send",
+        "inbox.close.sending",
+        "inbox.close.needsReason",
+        "inbox.closed",
+        "inbox.note.closed",
     ];
 
     /// The inbox reads one snapshot (t-67483): its letters and its numbers are
@@ -22817,6 +22824,7 @@ mod tests {
         }
         for door in [
             "invoke(\"desk_reply\"",
+            "invoke(\"desk_question_close\"",
             "invoke(\"desk_ack\"",
             "invoke(\"desk_review_pass\"",
         ] {

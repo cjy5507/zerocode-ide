@@ -7,7 +7,8 @@
  *
  * 이 화면은 편지를 고르지도 세지도 않는다. 목록과 수는 Rust의 한 읽기(`board_inbox`:
  * 원장의 데스크 + 판의 상태, `orchestration::inbox`)이고, 탭의 수와 사이드바의 수는 그
- * `counts` 그대로다. 답은 상황판과 같은 원장 길(`desk_reply`), 통과는 `desk_review_pass`,
+ * `counts` 그대로다. 답은 상황판과 같은 원장 길(`desk_reply`), 답 없이 닫기는 원장의
+ * `question-close`(`desk_question_close`, t-83281), 통과는 `desk_review_pass`,
  * 알림의 확인은 `desk_ack`(원장은 묶음 하나를 통째로 확인한다)로만 간다. 막힘에서는
  * 허용·거절을 누르지 않는다 — 권한은 그 판의 화면을 보고 눌러야 안전하다(질문 3).
  *
@@ -59,9 +60,11 @@ let inboxRefreshTimer = 0;
 const inboxChoice = { tab: "all", unreadOnly: false, selected: null };
 /* The letters opened (`id`s) — unread is the absence of the id. */
 const inboxRead = new Set();
-/* Written answers (per letter) and pressed passes and acks (per key): the draft and the
- * retry name of a send that was not answered, so pressing again replays one receipt. */
+/* Written answers and reasons to close without one (per letter), and pressed passes and acks
+ * (per key): the draft and the retry name of a send that was not answered, so pressing again
+ * replays one receipt. */
 const inboxDrafts = new Map();
+const inboxCloses = new Map();
 const inboxPresses = new Map();
 const inboxViewsWired = new WeakSet();
 /* A view's row nodes by letter id: kept and re-ordered, never rebuilt. */
@@ -118,7 +121,9 @@ async function refreshInbox() {
       moved = true;
     }
   }
-  for (const id of inboxDrafts.keys()) if (!standing.has(id)) inboxDrafts.delete(id);
+  for (const drafts of [inboxDrafts, inboxCloses]) {
+    for (const id of drafts.keys()) if (!standing.has(id)) drafts.delete(id);
+  }
   const deliveries = new Set(next.items.map((item) => inboxBatchKey(item)).filter(Boolean));
   for (const key of inboxPresses.keys()) {
     if (key.startsWith("ack:") ? !deliveries.has(key.slice(4)) : !standing.has(key.slice(key.indexOf(":") + 1))) {
@@ -270,12 +275,22 @@ function buildInboxView() {
   const actions = inboxNode("div", "inbox-actions",
     inboxButton("reply", "btn btn--primary"), inboxButton("pass", "btn btn--primary"),
     inboxButton("ack", "btn btn--primary"), inboxButton("open-pane"), inboxButton("open-board"));
+  // A question nobody will answer closes without an answer, on one line of why (t-83281).
+  const reason = inboxNode("input", "settings-input inbox-close-field");
+  reason.type = "text";
+  reason.setAttribute("aria-label", t("inbox.close.label", "닫는 까닭"));
+  reason.placeholder = t("inbox.close.placeholder", "답 없이 닫는 까닭을 한 줄로 적습니다");
+  reason.dataset.i18nAria = "inbox.close.label";
+  reason.dataset.i18nPlaceholder = "inbox.close.placeholder";
+  const close = inboxNode("div", "inbox-close",
+    inboxNode("div", "inbox-close-row", reason, inboxButton("close")), inboxNode("p", "inbox-error"));
   // The answer and its buttons are the person's, as on the desk they repeat (t-73906): an agent pressing in the
-  // window reads the letters but sends, passes and acknowledges nothing.
+  // window reads the letters but sends, closes, passes and acknowledges nothing.
   reply.dataset.personOnly = "";
   actions.dataset.personOnly = "";
+  close.dataset.personOnly = "";
   const detail = inboxNode("div", "inbox-detail", kind, inboxNode("h2", "inbox-pv-title"), facts,
-    inboxNode("p", "inbox-pv-body"), reply, actions, inboxNode("p", "inbox-note"));
+    inboxNode("p", "inbox-pv-body"), reply, actions, close, inboxNode("p", "inbox-note"));
   const preview = inboxNode("article", "inbox-preview", inboxWord(INBOX_LABELS.pick, "p", "inbox-empty"), detail);
   preview.setAttribute("aria-live", "polite");
 
@@ -324,12 +339,28 @@ function wireInboxView(host) {
       sendInboxReply(inboxSelectedItem());
     }
   });
+  const reason = preview.querySelector(".inbox-close-field");
+  reason.addEventListener("input", () => {
+    const closing = inboxDraft(inboxChoice.selected, inboxCloses);
+    if (!closing) return;
+    closing.text = reason.value;
+    if (closing.error) {
+      closing.error = "";
+      paintInboxViews();
+    }
+  });
+  reason.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.isComposing) return;
+    event.preventDefault();
+    void closeInboxQuestion(inboxSelectedItem());
+  });
   preview.addEventListener("click", (event) => {
     const button = event.target.closest("[data-inbox-act]");
     const item = button && inboxSelectedItem();
     if (!item) return;
     const act = button.dataset.inboxAct;
     if (act === "reply") void sendInboxReply(item);
+    else if (act === "close") void closeInboxQuestion(item);
     else if (act === "pass") void passInboxHandoff(item);
     else if (act === "ack") void ackInboxBatch(item, true);
     else if (act === "open-pane") openInboxPane(item);
@@ -343,14 +374,22 @@ function inboxSelectedItem() {
   return inboxSnapshot.items.find((item) => item.id === inboxChoice.selected) ?? null;
 }
 
-function inboxDraft(id) {
+/* The words written for a letter — an answer in `inboxDrafts`, a reason to close in `inboxCloses` —
+ * and the state of their one send. */
+function inboxDraft(id, drafts = inboxDrafts) {
   if (id === null) return null;
-  let draft = inboxDrafts.get(id);
+  let draft = drafts.get(id);
   if (!draft) {
     draft = { text: "", sending: false, sent: false, error: "", retry: null };
-    inboxDrafts.set(id, draft);
+    drafts.set(id, draft);
   }
   return draft;
+}
+
+/* The reason a question was closed with from this page, once the ledger took the close. */
+function inboxClosedWith(item) {
+  const closing = item.what === "question" ? inboxCloses.get(item.id) : null;
+  return closing?.sent ? closing.text.trim() : null;
 }
 
 /* The ledger's batch a letter rides in, the unit an ack names: `run/delivery`. */
@@ -360,6 +399,8 @@ function inboxBatchKey(item) {
 
 function inboxTitle(item) {
   const letter = item.letter;
+  const closedWith = inboxClosedWith(item);
+  if (closedWith !== null) return t("inbox.closed", "닫힘 · {{reason}}", { reason: closedWith });
   if (item.what === "question") return String(letter.body ?? "").split("\n")[0];
   if (item.what === "handoff") return boardReviewWords(item.task);
   if (item.what === "landing") return t("inbox.landing", "착지 대기 — 검증을 마친 일 {{count}}건", { count: item.landing });
@@ -432,7 +473,7 @@ function paintInboxRow(li, item, selected, now, minute) {
   const dot = row.firstElementChild;
   writeAttribute(dot, "aria-label", unread ? t("inbox.unread", "안 읽음") : t("inbox.read", "읽음"));
   // The words change with the letter, the minute and the language, not with a click.
-  const signature = `${item.at_ms}|${item.letter?.notices ?? ""}|${unread}|${minute}|${document.documentElement.lang}`;
+  const signature = `${item.at_ms}|${item.letter?.notices ?? ""}|${unread}|${inboxClosedWith(item) ?? ""}|${minute}|${document.documentElement.lang}`;
   if (row.dataset.signature === signature) return;
   row.dataset.signature = signature;
   const kind = INBOX_KINDS[item.tab];
@@ -514,13 +555,17 @@ function paintInboxPreview(view, item, now) {
   // What each kind may do from here. Everything goes through the ledger's own doors, as the
   // seat of the run, and only where this window holds that seat.
   const seated = item.seat === true && !isPopout;
-  const canReply = item.what === "question" && seated;
+  const closedWith = inboxClosedWith(item);
+  const canReply = item.what === "question" && seated && closedWith === null;
   // A hand-in whose verification the coordinator withdrew takes a new review, not a pass (t-81913).
   const withdrawn = item.what === "handoff" && boardReviewWithdrawn(item.task) !== null;
   const canPass = item.what === "handoff" && seated && !withdrawn
     && Boolean(item.task.progress?.attempt) && Boolean(item.task.progress?.source);
   const canAck = Boolean(item.letter) && item.what !== "question" && seated && inboxBatchKey(item) !== "";
   const draft = canReply ? inboxDraft(item.id) : null;
+  // A question being answered, or answered, is not closed beside it.
+  const canClose = canReply && !draft.sending && !draft.sent;
+  const closing = canClose ? inboxDraft(item.id, inboxCloses) : null;
   const pass = inboxPressed(`pass:${item.id}`);
   const ack = inboxPressed(`ack:${inboxBatchKey(item)}`);
 
@@ -529,16 +574,29 @@ function paintInboxPreview(view, item, now) {
   const field = reply.querySelector(".inbox-reply-field");
   if (canReply) {
     if (field.value !== draft.text && document.activeElement !== field) field.value = draft.text;
-    writeDisabled(field, draft.sending);
+    writeDisabled(field, draft.sending || Boolean(closing?.sending));
   }
   const error = reply.querySelector(".inbox-error");
   writeTextContent(error, draft?.error ?? "");
   writeHidden(error, !draft?.error);
 
   const act = (name) => detail.querySelector(`[data-inbox-act="${name}"]`);
+  const close = detail.querySelector(".inbox-close");
+  writeHidden(close, !canClose);
+  const reason = close.querySelector(".inbox-close-field");
+  if (canClose) {
+    if (reason.value !== closing.text && document.activeElement !== reason) reason.value = closing.text;
+    writeDisabled(reason, closing.sending);
+  }
+  const closeError = close.querySelector(".inbox-error");
+  writeTextContent(closeError, closing?.error ?? "");
+  writeHidden(closeError, !closing?.error);
+  const closeButton = act("close");
+  writeDisabled(closeButton, Boolean(closing?.sending));
+  writeTextContent(closeButton, closing?.sending ? t("inbox.close.sending", "닫는 중…") : t("inbox.close.send", "답 없이 닫기"));
   const replyButton = act("reply");
   writeHidden(replyButton, !canReply || draft.sent);
-  writeDisabled(replyButton, Boolean(draft?.sending));
+  writeDisabled(replyButton, Boolean(draft?.sending || closing?.sending));
   writeTextContent(replyButton, draft?.sending ? t("board.desk.replySending", "보내는 중…") : t("board.desk.replySend", "답 보내기"));
   const passButton = act("pass");
   writeHidden(passButton, !canPass || pass.done);
@@ -559,6 +617,7 @@ function paintInboxPreview(view, item, now) {
   const note = detail.querySelector(".inbox-note");
   let said = "";
   if (draft?.sent) said = t("board.desk.replySent", "답을 보냄 · 원장에 적히면 목록에서 빠져요");
+  else if (closedWith !== null) said = t("inbox.note.closed", "답 없이 닫음 · 원장에 적히면 목록에서 빠져요");
   else if (pass.done) said = pass.said;
   else if (pass.error) said = pass.error;
   else if (ack.done) said = t("board.desk.ackSent", "묶음을 확인함 · 원장에 적히면 목록에서 빠져요");
@@ -645,6 +704,38 @@ async function sendInboxReply(item) {
     draft.error = String(error);
   } finally {
     draft.sending = false;
+    paintInboxViews();
+  }
+}
+
+/* Close a question without an answer, as the run's seat — the ledger's `question-close`, on the
+ * person's one line of why. A question the ledger already holds closed (answered, or closed from the
+ * other side) answers `already` and reads the same: closed, with the words given here. */
+async function closeInboxQuestion(item) {
+  const closing = item?.what === "question" ? inboxDraft(item.id, inboxCloses) : null;
+  if (!closing || closing.sending || closing.sent || item.seat !== true || isPopout) return;
+  const reason = closing.text.trim();
+  if (reason === "") {
+    closing.error = t("inbox.close.needsReason", "닫는 까닭을 한 줄 적어야 닫힙니다.");
+    paintInboxViews();
+    return;
+  }
+  const signature = JSON.stringify([item.run, item.letter.id, reason]);
+  if (closing.retry?.signature !== signature) closing.retry = { signature, id: `ui-inbox-close-${crypto.randomUUID()}` };
+  closing.sending = true;
+  closing.error = "";
+  inboxRead.add(item.id);
+  paintInboxViews();
+  try {
+    await invoke("desk_question_close", { run: item.run, message: item.letter.id, reason, retryRequest: closing.retry.id }, { hand: handNow() });
+    closing.sent = true;
+    closing.retry = null;
+    void refreshInbox();
+  } catch (error) {
+    // The name stays: pressing again replays the one receipt rather than closing twice.
+    closing.error = String(error);
+  } finally {
+    closing.sending = false;
     paintInboxViews();
   }
 }

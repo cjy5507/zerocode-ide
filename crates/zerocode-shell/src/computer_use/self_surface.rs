@@ -75,6 +75,8 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "land_batch_restack",
     // A letter acknowledged on the person's behalf; the desk and the inbox's marks are the first wall (t-74825).
     "desk_ack",
+    // A question closed without an answer on the person's behalf: the inbox's mark is the first wall (t-83281).
+    "desk_question_close",
     "merge_and_remove_worktree",
     "github_merge_pr",
     "gitlab_merge_mr",

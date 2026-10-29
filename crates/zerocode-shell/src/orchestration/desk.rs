@@ -1161,6 +1161,43 @@ pub(crate) fn reply(
     )
 }
 
+/// Close a question put to `run_id`'s coordinator without an answer, as that
+/// seat (t-83281) — the ledger's `question-close`, whose rules stand whole:
+/// only the seat asked or the seat that asked closes it, the reason is the
+/// record it leaves, and a question closed already answers with the standing
+/// close (`already`) and writes nothing.
+pub(crate) fn close_question(
+    run_id: &str,
+    message: &str,
+    reason: &str,
+    retry_request: &str,
+    now_ms: i64,
+) -> Result<serde_json::Value, String> {
+    if retry_request.trim().is_empty() {
+        return Err("retryRequest is required".into());
+    }
+    if reason.trim().is_empty() {
+        return Err("a close without an answer needs its reason".into());
+    }
+    as_the_coordinator(
+        run_id,
+        [
+            "question-close",
+            "--run",
+            run_id,
+            "--message",
+            message,
+            "--reason",
+            reason,
+            "--retry-request",
+            retry_request,
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        now_ms,
+    )
+}
+
 /// Acknowledge the batch `run_id`'s coordinator holds — the ledger's unit is
 /// the batch, never one letter of it, and the desk says how many letters it
 /// holds before the press. `--peek`: nothing new is handed over, so every
@@ -2821,6 +2858,13 @@ mod tests {
         let blind = pass_review("run-x", "t-1", "", "1234567", "ui-pass-1", 1)
             .expect_err("a pass without its attempt");
         assert!(blind.contains("attempt and the source"), "{blind}");
+        // Nor a close without its reason, which is the record it leaves (t-83281).
+        let unreasoned = close_question("run-x", "m-1", "  ", "ui-close-1", 1)
+            .expect_err("a close without a reason");
+        assert!(unreasoned.contains("reason"), "{unreasoned}");
+        let unnamed = close_question("run-x", "m-1", "이미 끝난 일", " ", 1)
+            .expect_err("a close without a request name");
+        assert!(unnamed.contains("retryRequest"), "{unnamed}");
     }
 
     /// The board's pass is written over the result the task holds (t-82501):
