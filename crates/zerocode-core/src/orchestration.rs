@@ -6063,6 +6063,34 @@ pub struct Ledger {
     verb_tallies: Vec<VerbTally>,
 }
 
+impl Clone for Ledger {
+    /// A whole copy, for the runtime's copy-on-write image (t-81273).
+    ///
+    /// The runtime shares its ledger with every reader it hands one to, and
+    /// copies it only when it must write while a reader still holds the
+    /// revision it was given. Hand-written so the copy is counted beside the
+    /// other whole-ledger walks ([`ledger_work`]); the in-process fields come
+    /// along, because the copy REPLACES the ledger it was taken from.
+    fn clone(&self) -> Self {
+        LEDGER_WORK
+            .clones
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self {
+            runs: self.runs.clone(),
+            bound: self.bound.clone(),
+            served: self.served.clone(),
+            next_id: self.next_id,
+            binding_revisions: self.binding_revisions.clone(),
+            next_binding_revision: self.next_binding_revision,
+            said_goodbye: self.said_goodbye,
+            asking: self.asking.clone(),
+            retention_days: self.retention_days,
+            swept_at_ms: self.swept_at_ms,
+            verb_tallies: self.verb_tallies.clone(),
+        }
+    }
+}
+
 impl Default for Ledger {
     /// Hand-written, and the reason is one field: `retention_days` derives to
     /// zero, and a zero retention is not "the default policy" — it is "compact
@@ -6099,7 +6127,7 @@ impl Default for Ledger {
 ///
 /// Forgotten when the name's receipt is filed ([`Ledger::remember`]), which
 /// is the moment the replay road takes over.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Asking {
     caller: String,
     request: String,
@@ -25490,9 +25518,29 @@ pub const PROJECTION_SCHEMA: u32 = 5;
 /// prose, so the redaction lives in ONE place and a new wide field gets it by
 /// choosing the type instead of by somebody remembering. Follows the shape
 /// already set by [`DurableRetryIdentity`]'s `Debug`.
-#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct Text(String);
+///
+/// The words sit behind an `Arc` (t-81273): prose is most of what a ledger
+/// weighs — 41 of its 55 MB on the person's machine, 2026-10-29 — and a copy
+/// of the ledger (the runtime's export for a write, a copy-on-write image)
+/// then shares them instead of copying every letter. Nothing edits a `Text`
+/// in place; a new value replaces the old one, so sharing changes no answer.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Text(std::sync::Arc<str>);
+
+/// The one empty `Text` every empty field shares: most letters carry no
+/// subject and no payload, and an `Arc<str>` of nothing is still an
+/// allocation each.
+fn no_text() -> std::sync::Arc<str> {
+    static EMPTY: std::sync::LazyLock<std::sync::Arc<str>> =
+        std::sync::LazyLock::new(|| std::sync::Arc::from(""));
+    std::sync::Arc::clone(&EMPTY)
+}
+
+impl Default for Text {
+    fn default() -> Self {
+        Self(no_text())
+    }
+}
 
 impl Text {
     pub fn as_str(&self) -> &str {
@@ -25500,7 +25548,7 @@ impl Text {
     }
 
     pub fn into_string(self) -> String {
-        self.0
+        self.0.to_string()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -25510,13 +25558,33 @@ impl Text {
 
 impl From<String> for Text {
     fn from(held: String) -> Self {
-        Self(held)
+        if held.is_empty() {
+            return Self::default();
+        }
+        Self(std::sync::Arc::from(held))
     }
 }
 
 impl From<&str> for Text {
     fn from(held: &str) -> Self {
-        Self(held.to_string())
+        if held.is_empty() {
+            return Self::default();
+        }
+        Self(std::sync::Arc::from(held))
+    }
+}
+
+/* The disk shape is a bare string, as `#[serde(transparent)]` over a `String`
+ * wrote it: the `Arc` is how the words are held, not what they are. */
+impl serde::Serialize for Text {
+    fn serialize<S: serde::Serializer>(&self, into: S) -> Result<S::Ok, S::Error> {
+        into.serialize_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Text {
+    fn deserialize<D: serde::Deserializer<'de>>(from: D) -> Result<Self, D::Error> {
+        <String as serde::Deserialize>::deserialize(from).map(Self::from)
     }
 }
 
@@ -25533,13 +25601,13 @@ impl std::ops::Deref for Text {
 
 impl PartialEq<&str> for Text {
     fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
+        &*self.0 == *other
     }
 }
 
 impl PartialEq<Text> for &str {
     fn eq(&self, other: &Text) -> bool {
-        *self == other.0
+        *self == &*other.0
     }
 }
 
@@ -25553,17 +25621,20 @@ impl std::fmt::Debug for Text {
     }
 }
 
-/// How many times this process walked a whole ledger — the three walks whose
+/// How many times this process walked a whole ledger — the walks whose
 /// price is the size of the ledger, not of the change (t-19506).
 ///
-/// Three relaxed counters beside the walks themselves, so a test or a bench
-/// can say how many each beat of the window causes. Reading them moves
-/// nothing and a walk pays one uncontended atomic add.
+/// Relaxed counters beside the walks themselves, so a test or a bench can
+/// say how many each beat of the window causes. Reading them moves nothing
+/// and a walk pays one uncontended atomic add. `clones` is the copy the
+/// runtime's copy-on-write image makes when it writes while a reader still
+/// holds the revision it was handed (t-81273).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LedgerWork {
     pub exports: u64,
     pub rebuilds: u64,
     pub validations: u64,
+    pub clones: u64,
 }
 
 impl LedgerWork {
@@ -25573,6 +25644,7 @@ impl LedgerWork {
             exports: self.exports - earlier.exports,
             rebuilds: self.rebuilds - earlier.rebuilds,
             validations: self.validations - earlier.validations,
+            clones: self.clones - earlier.clones,
         }
     }
 }
@@ -25581,12 +25653,14 @@ struct LedgerWorkCounters {
     exports: std::sync::atomic::AtomicU64,
     rebuilds: std::sync::atomic::AtomicU64,
     validations: std::sync::atomic::AtomicU64,
+    clones: std::sync::atomic::AtomicU64,
 }
 
 static LEDGER_WORK: LedgerWorkCounters = LedgerWorkCounters {
     exports: std::sync::atomic::AtomicU64::new(0),
     rebuilds: std::sync::atomic::AtomicU64::new(0),
     validations: std::sync::atomic::AtomicU64::new(0),
+    clones: std::sync::atomic::AtomicU64::new(0),
 };
 
 /// The whole-ledger walks this process has made so far.
@@ -25596,6 +25670,7 @@ pub fn ledger_work() -> LedgerWork {
         exports: LEDGER_WORK.exports.load(Relaxed),
         rebuilds: LEDGER_WORK.rebuilds.load(Relaxed),
         validations: LEDGER_WORK.validations.load(Relaxed),
+        clones: LEDGER_WORK.clones.load(Relaxed),
     }
 }
 
@@ -26262,7 +26337,7 @@ impl Ledger {
                 .bound
                 .iter()
                 .map(|(caller, run)| BoundRow {
-                    caller: Text(caller.clone()),
+                    caller: Text::from(caller.as_str()),
                     run: run.clone(),
                 })
                 .collect(),
@@ -26270,10 +26345,10 @@ impl Ledger {
                 .served
                 .iter()
                 .map(|held| ServedRow {
-                    caller: held.caller.clone().map(Text),
-                    request: Text(held.request.clone()),
+                    caller: held.caller.as_deref().map(Text::from),
+                    request: Text::from(held.request.as_str()),
                     answer: held.answer.clone(),
-                    fingerprint: held.fingerprint.clone().map(Text),
+                    fingerprint: held.fingerprint.as_deref().map(Text::from),
                     verb: held.verb.clone(),
                     filed_ms: held.filed_ms,
                     expired: held.expired,
@@ -26289,7 +26364,7 @@ impl Ledger {
         for run in &self.runs {
             projected.runs.push(RunRow {
                 id: run.id.clone(),
-                name: Text(run.name.clone()),
+                name: Text::from(run.name.as_str()),
                 created_ms: run.created_ms,
                 auto: run.auto.clone(),
                 handover: run.handover.clone(),
@@ -26349,7 +26424,7 @@ impl Ledger {
                     checkout: worker.checkout.clone(),
                     in_worktree: worker.in_worktree,
                     quiet_at: worker.quiet_at,
-                    archive: worker.archive.clone().map(Text),
+                    archive: worker.archive.as_deref().map(Text::from),
                     adopted_by: worker.adopted_by,
                     on_quota_wall: worker.on_quota_wall.clone(),
                     quota_wait: worker.quota_wait,

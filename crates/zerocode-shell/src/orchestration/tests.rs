@@ -870,7 +870,7 @@ fn board_snapshot_reuses_the_revision_cache_and_publishes_complete_answers() {
     let (_window, _store) = PrivateWindow::boot();
     let held = super::runtime().unwrap();
     let image = held.actor.view().unwrap();
-    let ledger = super::cached_ledger(&held, &image).unwrap();
+    let ledger = super::cached_ledger(&held, &image);
     let before = super::board_ledger_snapshot();
     super::refresh_board_ledger();
     let after = super::board_ledger_snapshot();
@@ -878,7 +878,7 @@ fn board_snapshot_reuses_the_revision_cache_and_publishes_complete_answers() {
     assert_eq!(before.agents, after.agents);
     assert!(std::sync::Arc::ptr_eq(
         &ledger,
-        &super::cached_ledger(&held, &image).unwrap()
+        &super::cached_ledger(&held, &image)
     ));
     assert!(std::sync::Arc::ptr_eq(
         &after,
@@ -3224,7 +3224,7 @@ impl Walled {
     fn plan(&self) -> zerocode_core::orchestration::HandoverPlan {
         let held = super::runtime().expect("the runtime");
         let image = held.actor.view().expect("the image");
-        let rows = super::cached_ledger(&held, &image).expect("the rows");
+        let rows = super::cached_ledger(&held, &image);
         rows.runs()
             .iter()
             .find_map(|run| zerocode_core::orchestration::next_handover(run, self.began + 20_000))
@@ -19088,7 +19088,7 @@ fn an_orphaned_checkout_is_reserved_without_spawning_a_replacement() {
     assert_eq!(orphan.state, WorkerState::Orphaned);
     assert_eq!(orphan.checkout.as_deref(), Some(CHECKOUT));
     let image = held.actor.view().expect("the orphan image");
-    let rebuilt = super::cached_ledger(&held, &image).expect("the orphan ledger rebuilds");
+    let rebuilt = super::cached_ledger(&held, &image);
     assert!(
         rebuilt
             .runs()
@@ -28962,19 +28962,24 @@ fn an_idle_beat_walks_the_ledger_once_per_generation_not_once_per_sweep() {
         revision()
     );
     assert_eq!(
-        (walked.exports, walked.rebuilds, walked.validations),
-        (0, 0, 0),
+        (
+            walked.exports,
+            walked.rebuilds,
+            walked.validations,
+            walked.clones
+        ),
+        (0, 0, 0, 0),
         "{BEATS} idle beats on an unchanged ledger walked it again"
     );
-    // And two readers of one generation hold the one projection, not two.
+    // And two readers of one generation hold the one ledger, not two.
     let actor = &super::runtime().expect("this window's runtime").actor;
     let (first, second) = (
         actor.view().expect("an image"),
         actor.view().expect("an image"),
     );
     assert!(
-        std::ptr::eq(first.projection(), second.projection()),
-        "two images of one revision were exported twice"
+        std::sync::Arc::ptr_eq(first.ledger(), second.ledger()),
+        "two images of one revision held two ledgers"
     );
 }
 
@@ -29031,6 +29036,16 @@ fn a_write_and_the_reads_after_it_hold_the_ledger_once() {
     assert_eq!(
         held_ledgers, 1,
         "the window held the ledger {held_ledgers} times after one write"
+    );
+    // And what the reads were lent is the actor's own ledger, copied by
+    // nobody (t-81273).
+    assert_eq!(walked.clones, 0, "a read copied the ledger");
+    assert!(
+        std::sync::Arc::ptr_eq(
+            one.ledger(),
+            &super::ledger_image().expect("a third read")
+        ),
+        "the window read a ledger that is not the actor's"
     );
 }
 

@@ -54,9 +54,8 @@ use zerocode_core::agent::{Injected, agent_spec, prompt_injection};
 use zerocode_core::agent_teams::{Effect, capture_reply};
 use zerocode_core::launch::{LaunchOverride, join_command_line, launch_plan};
 use zerocode_core::orchestration::{
-    CONVERSATION_FILE_GONE, Decided, Launcher, Ledger, LedgerProjectionV1, NO_SESSION_RECORDED,
-    RESEAT_GRACE_MS, RESUME_UNSUPPORTED, RebuildError, RestCause, Restarted, VERBS, WAIT_SECONDS,
-    Worker, WorkerState,
+    CONVERSATION_FILE_GONE, Decided, Launcher, Ledger, NO_SESSION_RECORDED, RESEAT_GRACE_MS,
+    RESUME_UNSUPPORTED, RestCause, Restarted, VERBS, WAIT_SECONDS, Worker, WorkerState,
 };
 use zerocode_orchestrator::effect_journal::{
     BeginEffect, EffectPermit, EffectRequest, EffectSettlement, HostEffectFailure, HostEffectKind,
@@ -98,45 +97,40 @@ use crate::seat_triage::Triage;
 /// planning thread and never the other way around.
 type LiveOverrides = Arc<Mutex<Vec<(String, LaunchOverride)>>>;
 
-/// The one cached image for a runtime revision.
+/// What the window keeps for one runtime revision: the report built from it.
+///
+/// Never the ledger itself (t-81273). The actor lends its own ledger with
+/// every image, and a cache holding that `Arc` would make every write the
+/// actor makes a copy-on-write copy of the whole ledger — the reader it
+/// would be protecting is the cache itself.
 struct CachedLedger {
     revision: u64,
-    ledger: Result<Arc<Ledger>, RebuildError>,
     report: Option<Arc<serde_json::Value>>,
 }
 
-/// Rebuilding an image is shared by every read path in this window. The cache
-/// lives beside the actor rather than globally: a test or a restarted window
-/// can have the same revision number while holding a different authority.
+/// The per-revision readings shared by every read path in this window. The
+/// cache lives beside the actor rather than globally: a test or a restarted
+/// window can have the same revision number while holding a different
+/// authority.
 #[derive(Default)]
 struct LedgerCache {
     current: Option<CachedLedger>,
 }
 
 impl LedgerCache {
-    fn ledger(
-        &mut self,
-        revision: u64,
-        projection: &LedgerProjectionV1,
-    ) -> Result<Arc<Ledger>, RebuildError> {
-        if let Some(current) = self
+    /// The ledger an image carries — the actor's own, lent and not rebuilt
+    /// (t-81273). The window used to rebuild a ledger of its own out of the
+    /// image's export on every revision, and held it beside the actor's
+    /// ledger and the export: three whole ledgers at rest for one ledger's
+    /// worth of facts (34,343 letters on the person's machine, 2026-10-29).
+    fn ledger(&mut self, image: &RuntimeImage) -> Arc<Ledger> {
+        let ledger = Arc::clone(image.ledger());
+        let revision = image.revision();
+        if self
             .current
             .as_ref()
-            .filter(|current| current.revision == revision)
+            .is_none_or(|current| current.revision != revision)
         {
-            return current.ledger.clone();
-        }
-
-        // The old revision's image and report go before the new one is built
-        // (t-80604): held across the rebuild, the window carried the ledger
-        // four times at once — the actor's own, its projection, the copy
-        // being rebuilt and the stale image — a peak of one whole ledger
-        // (34,343 letters on the person's machine) more than it ever reads.
-        // A reader still holding the old `Arc` keeps it alive; the cache
-        // does not.
-        self.current = None;
-        let ledger = Ledger::rebuild(projection.clone()).map(Arc::new);
-        if let Ok(ledger) = &ledger {
             let workers = ledger
                 .runs()
                 .iter()
@@ -149,12 +143,11 @@ impl LedgerCache {
                 .map(|run| run.dispatches.len())
                 .sum::<usize>();
             crate::crash::note_ledger(revision, workers as u64, dispatches as u64);
+            self.current = Some(CachedLedger {
+                revision,
+                report: None,
+            });
         }
-        self.current = Some(CachedLedger {
-            revision,
-            ledger: ledger.clone(),
-            report: None,
-        });
         ledger
     }
 
@@ -304,13 +297,16 @@ fn runtime() -> Option<LiveRuntime> {
 
 /// Read one runtime image through the cache belonging to the same runtime.
 /// `runtime()` has already cloned the handle and released its cell lock before
-/// callers reach here, so this lock serializes only the short cache lookup or
-/// the one rebuild for a new revision.
-fn cached_ledger(held: &LiveRuntime, image: &RuntimeImage) -> Result<Arc<Ledger>, RebuildError> {
+/// callers reach here, so this lock serializes only the short cache lookup.
+///
+/// The ledger handed back is the actor's own at the image's revision. Hold it
+/// for the reading and no longer: an actor that writes while a reader still
+/// holds its ledger copies the whole of it first (t-81273).
+fn cached_ledger(held: &LiveRuntime, image: &RuntimeImage) -> Arc<Ledger> {
     held.cache
         .lock()
         .unwrap_or_else(|held| held.into_inner())
-        .ledger(image.revision(), image.projection())
+        .ledger(image)
 }
 
 /// Reuse the report tree that was built for the cached ledger revision.
@@ -338,7 +334,7 @@ pub(crate) struct SeatAssignment {
 pub(crate) fn seat_assignment(team: &str, pane: &str) -> Option<SeatAssignment> {
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    let ledger = cached_ledger(&held, &image).ok()?;
+    let ledger = cached_ledger(&held, &image);
     for run in ledger.runs() {
         if let Some(worker) = run.worker_in_pane(team, pane)
             && let Some(dispatch_id) = worker.dispatch.as_deref()
@@ -362,7 +358,7 @@ pub(crate) fn seat_assignment(team: &str, pane: &str) -> Option<SeatAssignment> 
 pub(crate) fn bound_run(team: &str, pane: &str, actor: Option<&str>) -> Option<String> {
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    let ledger = cached_ledger(&held, &image).ok()?;
+    let ledger = cached_ledger(&held, &image);
     actor
         .and_then(|actor| ledger.bound_run(actor))
         .or_else(|| ledger.bound_run(&format!("{team}/{pane}")))
@@ -456,10 +452,7 @@ fn reseat_sleeping_in_line(
     if image.said_goodbye() {
         return 0;
     }
-    let ledger = match cached_ledger(&held, &image) {
-        Ok(ledger) => ledger,
-        Err(_) => return 0,
-    };
+    let ledger = cached_ledger(&held, &image);
     let seat = format!("{team}/{pane}");
     let Some(run_id) = actor
         .and_then(|actor| ledger.bound_run(actor))
@@ -490,10 +483,7 @@ fn reseat_sleeping_in_line(
         Ok(image) => image,
         Err(_) => return 0,
     };
-    let ledger = match cached_ledger(&held, &image) {
-        Ok(ledger) => ledger,
-        Err(_) => return 0,
-    };
+    let ledger = cached_ledger(&held, &image);
     // A binding identifies the run; only its live seat may restore or end
     // its sleepers. A refused return must not reach either transition.
     let Some(run) = ledger
@@ -643,7 +633,7 @@ pub(crate) struct ReseatHold {
 pub(crate) fn reseat_admission(host: &dyn Host, worker: &str) -> Option<ReseatHold> {
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    let ledger = cached_ledger(&held, &image).ok()?;
+    let ledger = cached_ledger(&held, &image);
     let row = ledger.runs().iter().find_map(|run| run.worker(worker))?;
     let (agent, session, sleeping, persons) = (
         row.agent.clone(),
@@ -943,7 +933,7 @@ pub(crate) fn coordinator_awaiting(
     let actor = zerocode_core::orchestration::receipt_actor(agent, session.key, &session.id);
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    let ledger = cached_ledger(&held, &image).ok()?;
+    let ledger = cached_ledger(&held, &image);
     // The project the conversation comes back in (t-65286): a run whose
     // project was stated elsewhere is not this pane's to be told about.
     let project = project_scope::folder_root(folder);
@@ -995,9 +985,7 @@ pub(crate) fn coordinator_awaiting(
 pub(crate) fn seed_reseated_session(host: &dyn Host, worker: &str, term: u32) {
     let Some(held) = runtime() else { return };
     let Ok(image) = held.actor.view() else { return };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return;
-    };
+    let ledger = cached_ledger(&held, &image);
     let session = ledger
         .runs()
         .iter()
@@ -1017,9 +1005,7 @@ pub(crate) fn worker_taken_over_now(worker: &str) -> bool {
     let Ok(image) = held.actor.view() else {
         return true;
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return true;
-    };
+    let ledger = cached_ledger(&held, &image);
     ledger
         .runs()
         .iter()
@@ -1037,8 +1023,7 @@ pub(crate) fn sleeper_launch_tuning(worker: &str) -> Result<Vec<String>, String>
         .actor
         .view()
         .map_err(|_| "the orchestration ledger could not be read".to_string())?;
-    let ledger = cached_ledger(&held, &image)
-        .map_err(|_| "the orchestration ledger could not be read".to_string())?;
+    let ledger = cached_ledger(&held, &image);
     ledger.sleeper_resume_tuning(worker, &current_release)
 }
 
@@ -1047,7 +1032,7 @@ pub(crate) fn sleeper_launch_tuning(worker: &str) -> Result<Vec<String>, String>
 pub(crate) fn sleeper_launch_model(worker: &str) -> Option<String> {
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    let ledger = cached_ledger(&held, &image).ok()?;
+    let ledger = cached_ledger(&held, &image);
     ledger.sleeper_resume_model(worker, &current_release)
 }
 
@@ -1112,9 +1097,7 @@ pub(crate) fn coordinates_a_run(agent: &str, session: &zerocode_core::ProviderSe
     let Ok(image) = held.actor.view() else {
         return false;
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return false;
-    };
+    let ledger = cached_ledger(&held, &image);
     seats(&ledger, &actor)
 }
 
@@ -1204,9 +1187,9 @@ pub(crate) fn forget_switch_mark(worker: &str) {
 /// The ledger the holds are read from (t-7538, astra R3-1): `Ok(None)` is a
 /// window with no durable ledger at all — nothing on its disk can hold a
 /// conversation — and `Err` is one that has a ledger it cannot read now: a
-/// boot that stood down beside it, or a runtime whose image or projection
-/// did not answer. The two are never the same answer: a hold nobody could
-/// read is not a hold that is not there.
+/// boot that stood down beside it, or a runtime whose image did not answer.
+/// The two are never the same answer: a hold nobody could read is not a hold
+/// that is not there.
 fn holds_ledger() -> Result<Option<(LiveRuntime, Arc<Ledger>)>, String> {
     let Some(held) = runtime() else {
         return ledger_left_unread().map_or(Ok(None), Err);
@@ -1215,8 +1198,7 @@ fn holds_ledger() -> Result<Option<(LiveRuntime, Arc<Ledger>)>, String> {
         .actor
         .view()
         .map_err(|why| format!("the ledger did not answer ({why})"))?;
-    let ledger = cached_ledger(&held, &image)
-        .map_err(|why| format!("the ledger's rows could not be read ({why})"))?;
+    let ledger = cached_ledger(&held, &image);
     Ok(Some((held, ledger)))
 }
 
@@ -1341,9 +1323,7 @@ fn claude_worker_seats(
     let Ok(image) = held.actor.view() else {
         return Vec::new();
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return Vec::new();
-    };
+    let ledger = cached_ledger(&held, &image);
     let teams = crate::agent_teams::teams();
     let seats = index_team_seats(&teams);
     drop(teams);
@@ -1503,7 +1483,7 @@ pub(crate) fn rest_worker_for_switch(
             .actor
             .view()
             .map_err(|why| format!("원장을 읽지 못했습니다: {why:?}"))?;
-        let ledger = cached_ledger(&held, &image).map_err(|why| format!("{why:?}"))?;
+        let ledger = cached_ledger(&held, &image);
         // The ledger's own words for a refusal, before the fence is asked.
         ledger.may_rest_for_account_switch(rest, now_ms)?;
         let row = ledger
@@ -1622,7 +1602,7 @@ pub(crate) fn switch_move_ready(
         .actor
         .view()
         .map_err(|why| format!("원장을 읽지 못했습니다: {why:?}"))?;
-    let ledger = cached_ledger(&held, &image).map_err(|why| format!("{why:?}"))?;
+    let ledger = cached_ledger(&held, &image);
     ledger.may_rest_for_account_switch(rest, now_ms)?;
     let (run, row) = ledger
         .runs()
@@ -1729,7 +1709,7 @@ pub(crate) struct WorkerNow {
 pub(crate) fn worker_now(worker_id: &str) -> Option<WorkerNow> {
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    let ledger = cached_ledger(&held, &image).ok()?;
+    let ledger = cached_ledger(&held, &image);
     let teams = crate::agent_teams::teams();
     let seats = index_team_seats(&teams);
     drop(teams);
@@ -1800,7 +1780,7 @@ pub(crate) fn last_agent_in_checkout(checkout: &str) -> Option<LastAgentInChecko
     let wanted = checkout.trim_end_matches('/');
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    let ledger = cached_ledger(&held, &image).ok()?;
+    let ledger = cached_ledger(&held, &image);
     let teams = crate::agent_teams::teams();
     let seats = index_team_seats(&teams);
     drop(teams);
@@ -2008,9 +1988,7 @@ pub(crate) fn watched_checkouts() -> Vec<String> {
     let Ok(image) = held.actor.view() else {
         return Vec::new();
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return Vec::new();
-    };
+    let ledger = cached_ledger(&held, &image);
     drop(image);
     let paths: std::collections::BTreeSet<&str> = ledger
         .runs()
@@ -2064,9 +2042,7 @@ fn land_batches_of(run: &str) -> Vec<zerocode_core::orchestration::land_batch::B
     let Ok(image) = held.actor.view() else {
         return Vec::new();
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return Vec::new();
-    };
+    let ledger = cached_ledger(&held, &image);
     ledger
         .run(run)
         .map(zerocode_core::orchestration::land_batch::batches)
@@ -2085,7 +2061,7 @@ pub(crate) fn press_land_batch(
 ) -> Result<serde_json::Value, String> {
     let held = runtime().ok_or(NO_RUNTIME)?;
     let image = held.actor.view().map_err(|why| why.to_string())?;
-    let ledger = cached_ledger(&held, &image).map_err(|why| why.to_string())?;
+    let ledger = cached_ledger(&held, &image);
     let ask = zerocode_core::orchestration::land_batch::press(&ledger, run, batch, asked, by)?;
     let batches = ledger
         .run(run)
@@ -2128,9 +2104,7 @@ pub(crate) fn settle_land_batches_at_start(now_ms: i64) {
     let Ok(image) = held.actor.view() else {
         return;
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return;
-    };
+    let ledger = cached_ledger(&held, &image);
     let runs: Vec<(
         String,
         Vec<zerocode_core::orchestration::land_batch::BatchState>,
@@ -2174,9 +2148,7 @@ pub(crate) fn settled_checkouts() -> Vec<SettledCheckout> {
     let Ok(image) = held.actor.view() else {
         return Vec::new();
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return Vec::new();
-    };
+    let ledger = cached_ledger(&held, &image);
     drop(image);
     let mut answered: Vec<SettledCheckout> = settled_workers(&ledger)
         .into_iter()
@@ -2274,9 +2246,7 @@ pub(crate) fn handed_in_heads() -> Vec<HandedIn> {
     let Ok(image) = held.actor.view() else {
         return Vec::new();
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return Vec::new();
-    };
+    let ledger = cached_ledger(&held, &image);
     drop(image);
     let mut answered: Vec<HandedIn> = ledger
         .runs()
@@ -2324,9 +2294,7 @@ pub(crate) fn checkout_is_summoned(checkout: &str) -> bool {
     let Ok(image) = held.actor.view() else {
         return true;
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return true;
-    };
+    let ledger = cached_ledger(&held, &image);
     drop(image);
     let wanted = Path::new(checkout.trim_end_matches('/'));
     ledger
@@ -2519,7 +2487,7 @@ pub(crate) struct LedgerPaneState {
 fn with_ledger_seats<T>(read: impl FnOnce(&Ledger, &TeamSeatIndex) -> T) -> Option<T> {
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    let ledger = cached_ledger(&held, &image).ok()?;
+    let ledger = cached_ledger(&held, &image);
     let teams = crate::agent_teams::teams();
     let seats = index_team_seats(&teams);
     drop(teams);
@@ -3453,7 +3421,7 @@ fn ledger_states_for_seats(
 pub(crate) fn runtime_report() -> Result<Arc<serde_json::Value>, String> {
     let held = runtime().ok_or_else(|| "orchestration runtime is unavailable".to_string())?;
     let image = held.actor.view().map_err(|error| error.to_string())?;
-    let ledger = cached_ledger(&held, &image).map_err(|error| error.to_string())?;
+    let ledger = cached_ledger(&held, &image);
     /* Shared, not copied: the tree is built once per revision, and an
      * `Arc<Value>` serializes exactly as the `Value` would, so the command
      * boundary hands the same allocation out until the revision moves. */
@@ -3539,7 +3507,7 @@ pub(crate) fn authority_store_path() -> Option<std::path::PathBuf> {
 pub(crate) fn ledger_image() -> Option<Arc<Ledger>> {
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    cached_ledger(&held, &image).ok()
+    Some(cached_ledger(&held, &image))
 }
 
 fn note_ledger_unwritten(what: &str) {
@@ -5689,7 +5657,7 @@ fn tell_unpointed(
 fn message_sender(run: &str, message: &str) -> Option<String> {
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    let rows = cached_ledger(&held, &image).ok()?;
+    let rows = cached_ledger(&held, &image);
     rows.run(run)?
         .message(message)
         .map(|mail| mail.from.clone())
@@ -6355,9 +6323,7 @@ fn sleeping_workers() -> std::collections::HashSet<String> {
     let Ok(image) = held.actor.view() else {
         return std::collections::HashSet::new();
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return std::collections::HashSet::new();
-    };
+    let ledger = cached_ledger(&held, &image);
     ledger
         .runs()
         .iter()
@@ -6373,7 +6339,7 @@ fn sleeping_workers() -> std::collections::HashSet<String> {
 pub(crate) fn sleeper_record(worker: &str) -> Option<zerocode_core::ProviderSession> {
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    let ledger = cached_ledger(&held, &image).ok()?;
+    let ledger = cached_ledger(&held, &image);
     ledger
         .runs()
         .iter()
@@ -6390,7 +6356,7 @@ pub(crate) fn sleeper_awaiting(checkout: &str, agent: &str, session_id: &str) ->
     }
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    let ledger = cached_ledger(&held, &image).ok()?;
+    let ledger = cached_ledger(&held, &image);
     ledger
         .sleeper_awaiting(checkout, agent, session_id)
         .map(|worker| worker.id.clone())
@@ -6681,9 +6647,7 @@ fn expire_sleepers(host: &dyn Host, now_ms: i64) {
     if image.said_goodbye() {
         return;
     }
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return;
-    };
+    let ledger = cached_ledger(&held, &image);
     let overdue: Vec<String> = ledger
         .runs()
         .iter()
@@ -7268,9 +7232,7 @@ fn reconcile_pane_liveness(host: &dyn Host, now_ms: i64) {
     let Ok(image) = held.actor.view() else {
         return;
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return;
-    };
+    let ledger = cached_ledger(&held, &image);
     let teams = crate::agent_teams::teams();
     let seats = index_team_seats(&teams);
     drop(teams);
@@ -7368,9 +7330,7 @@ fn notify_idle_workers(now_ms: i64) {
     let Ok(image) = held.actor.view() else {
         return;
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return;
-    };
+    let ledger = cached_ledger(&held, &image);
     let teams = crate::agent_teams::teams();
     let seats = index_team_seats(&teams);
     drop(teams);
@@ -7439,9 +7399,7 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
     let Ok(image) = held.actor.view() else {
         return;
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return;
-    };
+    let ledger = cached_ledger(&held, &image);
     let teams = crate::agent_teams::teams();
     let seats = index_team_seats(&teams);
     drop(teams);
@@ -8259,7 +8217,7 @@ fn resume_stalled_workers(
         // A fresh image per candidate: the reservation just above it moved
         // the revision, and the plan must read that row.
         let planned = actor.view().ok().and_then(|image| {
-            let rows = cached_ledger(&held, &image).ok()?;
+            let rows = cached_ledger(&held, &image);
             let run = rows.run(&one.run)?;
             Some(resume_plan(run, &one.worker, &marker, now_ms))
         });
@@ -8428,15 +8386,11 @@ fn resume_settlement_recorded(
         return false;
     };
     image
-        .projection()
-        .messages
-        .iter()
-        .filter(|message| {
-            message.run == run
-                && message.id == receipt
-                && message.kind == zerocode_core::orchestration::MessageKind::Resumed
-        })
-        .any(|message| {
+        .ledger()
+        .run(run)
+        .and_then(|run| run.message(receipt))
+        .filter(|message| message.kind == zerocode_core::orchestration::MessageKind::Resumed)
+        .is_some_and(|message| {
             let Ok(body) = serde_json::from_str::<serde_json::Value>(message.body.as_str()) else {
                 return false;
             };
@@ -8801,9 +8755,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
     let Ok(image) = held.actor.view() else {
         return;
     };
-    let Ok(rows) = cached_ledger(&held, &image) else {
-        return;
-    };
+    let rows = cached_ledger(&held, &image);
     drop(image);
     // The turn facts, copied out so no pointer types under a lock.
     let turns: std::collections::HashMap<u32, PaneTurn> = pane_turns()
@@ -9864,7 +9816,7 @@ fn current_handover_wall(
 ) -> Option<HandoverWall> {
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    let rows = cached_ledger(&held, &image).ok()?;
+    let rows = cached_ledger(&held, &image);
     let run = rows.run(&plan.run)?;
     if !zerocode_core::orchestration::handover_order_current(run, plan, false) {
         return None;
@@ -9927,7 +9879,7 @@ fn current_handover_wall(
     // and prove both host and ledger identities after the probes return.
     quiet()?;
     let image = held.actor.view().ok()?;
-    let rows = cached_ledger(&held, &image).ok()?;
+    let rows = cached_ledger(&held, &image);
     if !zerocode_core::orchestration::handover_order_current(rows.run(&plan.run)?, plan, false) {
         return None;
     }
@@ -9957,7 +9909,7 @@ fn settle_handover_terminal(
 ) -> Result<(WorkerState, u64), RuntimeError> {
     let held = runtime().ok_or(RuntimeError::Closed)?;
     let image = actor.view()?;
-    let rows = cached_ledger(&held, &image).map_err(|_| RuntimeError::AuthorityRejected)?;
+    let rows = cached_ledger(&held, &image);
     let model = rows
         .run(&plan.run)
         .and_then(|run| run.worker(&plan.worker))
@@ -10038,9 +9990,7 @@ fn handover_order_still_current(
     let Some(held) = runtime() else {
         return false;
     };
-    let Ok(rows) = cached_ledger(&held, &image) else {
-        return false;
-    };
+    let rows = cached_ledger(&held, &image);
     if !rows
         .run(&plan.run)
         .is_some_and(|run| zerocode_core::orchestration::handover_order_current(run, plan, stopped))
@@ -10175,9 +10125,7 @@ fn walk_handovers(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_m
     let Ok(image) = held.actor.view() else {
         return Walked::Nothing;
     };
-    let Ok(rows) = cached_ledger(&held, &image) else {
-        return Walked::Nothing;
-    };
+    let rows = cached_ledger(&held, &image);
     let mut candidates = Vec::new();
     for run in rows.runs() {
         let _ = zerocode_core::orchestration::next_handover_witnessed(run, now_ms, |plan| {
@@ -10345,10 +10293,11 @@ pub(crate) fn walk_handover(
     if stopped.exit_code != 0 {
         if actor.view().ok().is_some_and(|image| {
             image
-                .projection()
-                .dispatches
+                .ledger()
+                .runs()
                 .iter()
-                .any(|dispatch| dispatch.id == plan.dispatch && dispatch.ended_ms.is_none())
+                .filter_map(|run| run.dispatch(&plan.dispatch))
+                .any(|dispatch| dispatch.ended_ms.is_none())
         }) {
             return revoked(stop);
         }
@@ -10524,8 +10473,7 @@ fn stop_worker_for_gate(
         .actor
         .view()
         .map_err(|_| "the ledger could not be read".to_string())?;
-    let rows =
-        cached_ledger(&held, &image).map_err(|_| "the ledger could not be rebuilt".to_string())?;
+    let rows = cached_ledger(&held, &image);
     let (_, team, pane, capability) = rows
         .run(stop.run)
         .and_then(presentable_seat)
@@ -10648,11 +10596,7 @@ pub(crate) fn file_task_through_seat(
             "the ledger could not be read".to_string(),
         ));
     };
-    let Ok(rows) = cached_ledger(&held, &image) else {
-        return Err(SeatFiling::Waiting(
-            "the ledger could not be rebuilt".to_string(),
-        ));
-    };
+    let rows = cached_ledger(&held, &image);
     // The newest seated coordinator whose leader pane this window can sign
     // for.
     let mut seat: Option<(i64, String, String, String)> = None;
@@ -10706,7 +10650,7 @@ pub(crate) fn open_task_titled(needle: &str) -> Option<String> {
     }
     let held = runtime()?;
     let image = held.actor.view().ok()?;
-    let ledger = cached_ledger(&held, &image).ok()?;
+    let ledger = cached_ledger(&held, &image);
     open_task_titled_in(&ledger, needle)
 }
 
@@ -10748,9 +10692,7 @@ fn beat(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_ms: i64) ->
     let Ok(image) = actor.view() else {
         return 0;
     };
-    let Ok(rows) = cached_ledger(&held, &image) else {
-        return 0;
-    };
+    let rows = cached_ledger(&held, &image);
     let planned: Vec<zerocode_core::orchestration::Dispatchable> = rows
         .runs()
         .iter()
@@ -11109,7 +11051,7 @@ fn read_commits(
             .or_else(|| bound_run(team, pane, caller))?;
         let held = runtime()?;
         let image = held.actor.view().ok()?;
-        let ledger = cached_ledger(&held, &image).ok()?;
+        let ledger = cached_ledger(&held, &image);
         Some(backfill_commits(ledger.run(&run_id)?))
     };
     Ok(named().map(|commits| {
@@ -11521,7 +11463,7 @@ fn delegate_outcome_now(
     dispatch: &str,
 ) -> Option<zerocode_core::orchestration::delegate::Outcome> {
     let image = held.actor.view().ok()?;
-    let rows = cached_ledger(held, &image).ok()?;
+    let rows = cached_ledger(held, &image);
     rows.runs()
         .iter()
         .find(|run| run.dispatch(dispatch).is_some())
@@ -12796,10 +12738,10 @@ fn carried(
             // incarnation before acting on it.
             let seat = actor.view().ok().and_then(|image| {
                 image
-                    .projection()
-                    .workers
+                    .ledger()
+                    .runs()
                     .iter()
-                    .find(|one| one.id == worker)
+                    .find_map(|run| run.worker(worker))
                     .map(|one| (one.team.clone(), one.pane.clone()))
             });
             let screen = host.capture(term).map(|tail| screen_tail(&tail, lines));
@@ -13797,10 +13739,10 @@ fn federated_worker_seat(
         .view()
         .map_err(|why| format!("the ledger could not be read ({why})"))?;
     let team = image
-        .projection()
-        .workers
+        .ledger()
+        .runs()
         .iter()
-        .find(|row| row.id == worker)
+        .find_map(|run| run.worker(worker))
         .map(|row| row.team.clone())
         .ok_or_else(|| format!("no ledger row names worker {worker}"))?;
     leader_seat_of(&team)

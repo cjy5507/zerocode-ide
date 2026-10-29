@@ -28,7 +28,7 @@ pub(crate) fn status(host: &dyn Host, run_id: &str) -> Result<serde_json::Value,
     }
     let held = runtime().ok_or("orchestration runtime unavailable")?;
     let image = held.actor.view().map_err(|error| format!("{error:?}"))?;
-    let ledger = cached_ledger(&held, &image).map_err(|error| format!("{error:?}"))?;
+    let ledger = cached_ledger(&held, &image);
     let run = ledger.run(run_id).ok_or("unknown run")?;
     let receipts: Vec<_> = run
         .messages()
@@ -126,7 +126,7 @@ pub(crate) fn recent_runs(limit: Option<usize>) -> Result<serde_json::Value, Str
     }
     let held = runtime().ok_or("orchestration runtime unavailable")?;
     let image = held.actor.view().map_err(|error| format!("{error:?}"))?;
-    let ledger = cached_ledger(&held, &image).map_err(|error| format!("{error:?}"))?;
+    let ledger = cached_ledger(&held, &image);
     Ok(core::recent_runs(&ledger, limit))
 }
 
@@ -179,7 +179,7 @@ pub(crate) fn set_policy(
     }
     let held = runtime().ok_or("orchestration runtime unavailable")?;
     let image = held.actor.view().map_err(|error| format!("{error:?}"))?;
-    let ledger = cached_ledger(&held, &image).map_err(|error| format!("{error:?}"))?;
+    let ledger = cached_ledger(&held, &image);
     let seat = ledger
         .run(run_id)
         .and_then(|run| run.coordinator.as_ref())
@@ -272,9 +272,7 @@ pub(super) fn walk(host: &dyn Host, now_ms: i64) -> bool {
     let Ok(image) = held.actor.view() else {
         return false;
     };
-    let Ok(ledger) = cached_ledger(&held, &image) else {
-        return false;
-    };
+    let ledger = cached_ledger(&held, &image);
     let candidates: Vec<_> = ledger
         .runs()
         .iter()

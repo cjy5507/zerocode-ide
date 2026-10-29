@@ -243,20 +243,14 @@ pub(super) fn place_federation_run(
     now_ms: i64,
 ) -> Result<(), String> {
     let image = held.actor.view().map_err(|_| unidentified("attach", run))?;
-    let rows = image.projection();
-    let current = rows
-        .runs
-        .iter()
-        .find(|row| row.id == run)
+    let current = image
+        .ledger()
+        .run(run)
         .ok_or_else(|| unidentified("attach", run))?;
     if current.project.is_some() {
         return Ok(());
     }
-    let workers: Vec<_> = rows
-        .workers
-        .iter()
-        .filter(|worker| worker.run == run)
-        .collect();
+    let workers = &current.workers;
     let (root, source, seat) = if workers.is_empty() {
         let term = crate::agent_teams::teams()
             .get(team)
@@ -281,6 +275,9 @@ pub(super) fn place_federation_run(
         }
         (root, ProjectSource::Workers, None)
     };
+    // The ledger goes back before the write: an image still held here would
+    // have the actor copy the whole ledger to write past it (t-81273).
+    drop(image);
     let (moved, _) = held
         .actor
         .note_run_project(run, root, source, seat, now_ms)
