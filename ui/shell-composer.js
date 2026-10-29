@@ -310,6 +310,9 @@ function settleComposerQueue(run) {
     run.queueArmed = true;
     return;
   }
+  // Nor while a question stands as its card: pasted now, the words would fall
+  // on the menu it shows (t-81786 P0). They go once the card is gone.
+  if (standingAskOf(run)) return;
   if (run.queueArmed === false) return;
   if (!run.queue?.length || run.sending || run.sendUncertain) return;
   const message = run.queue.shift();
