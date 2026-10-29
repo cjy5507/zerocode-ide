@@ -210,6 +210,8 @@ fn kill_guard_a_summoned_worker_pane_has_nobody_to_ask() {
 /// Every run here starts a real `sleep` and reads the real `ps`: unix only.
 #[cfg(unix)]
 mod real_run {
+    use std::io::Read as _;
+    use std::os::fd::{AsRawFd as _, OwnedFd};
     use std::process::{Child, Command, Stdio};
 
     use zerocode_core::agent_teams::{TEAM_LEADER_VAR, TEAM_PANE_VAR};
@@ -350,6 +352,94 @@ mod real_run {
                 }
             }
         }
+    }
+
+    /// How long the read end of a pipe is given to see its end once its last
+    /// write end here is closed.
+    const SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Set in a copy of this test binary that runs one test of this module
+    /// alone ([`run_alone`]).
+    const ALONE_ENV: &str = "ZO_KILL_GUARD_TEST_ALONE";
+
+    /// This test binary, started to run only `test` of this module.
+    fn this_binary_running(test: &str) -> Command {
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_crate, path)| path);
+        let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+        command
+            .arg(format!("{module}::{test}"))
+            .args(["--exact", "--nocapture", "--test-threads=1"]);
+        command
+    }
+
+    /// Runs `test` alone in a copy of this binary, where no other test's child
+    /// can take along a descriptor it leaves open, and asserts it passed.
+    fn run_alone(test: &str) {
+        let output = this_binary_running(test)
+            .env(ALONE_ENV, "1")
+            .stdin(Stdio::null())
+            .output()
+            .expect("the test runs alone");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(" 1 passed;"),
+            "{test}, run alone:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Which of `ends` still has a writer [`SETTLE`] after the call. Each is
+    /// the read end of a pipe whose write ends here are closed, named for what
+    /// started while it was open.
+    fn still_written(ends: Vec<(&'static str, OwnedFd)>) -> Vec<&'static str> {
+        use nix::fcntl::{fcntl, FcntlArg, OFlag};
+        let mut open: Vec<(&str, std::fs::File)> = ends
+            .into_iter()
+            .map(|(name, end)| {
+                fcntl(end.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
+                    .expect("the read end stops blocking");
+                (name, std::fs::File::from(end))
+            })
+            .collect();
+        let since = std::time::Instant::now();
+        loop {
+            open.retain_mut(|(_, end)| !matches!(end.read(&mut [0; 1]), Ok(0)));
+            if open.is_empty() || since.elapsed() >= SETTLE {
+                return open.into_iter().map(|(name, _)| name).collect();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// A bait and an orphan take along no descriptor but the three they are
+    /// given (t-83535). On macOS std makes a pipe with `pipe()` and only then
+    /// marks it close-on-exec, so a child another thread starts in between
+    /// takes its write end along. On 10-29 a bait took one from a
+    /// `git_snapshot` test's `git`: that test waited for the pipe's end
+    /// holding the env lock, the bait's test waited for the lock, and the
+    /// release lane stood for 55 minutes. Here a pipe is left open without
+    /// close-on-exec on purpose while each starts; once its write end here
+    /// closes, its read end ends. Run alone, so no other test's child can
+    /// take them along.
+    #[test]
+    fn kill_guard_bait_and_orphan_take_no_pipe_along() {
+        if std::env::var_os(ALONE_ENV).is_none() {
+            run_alone("kill_guard_bait_and_orphan_take_no_pipe_along");
+            return;
+        }
+        let (bait_end, write) = nix::unistd::pipe().expect("a pipe a child takes along");
+        let _bait = Bait::start(50);
+        drop(write);
+        let (orphan_end, write) = nix::unistd::pipe().expect("a pipe a child takes along");
+        let _orphan = Orphan::start(51);
+        drop(write);
+        let held = still_written(vec![("the bait", bait_end), ("the orphan", orphan_end)]);
+        assert!(
+            held.is_empty(),
+            "{held:?} took along the write end of a pipe nobody gave them"
+        );
     }
 
     fn run(command: &str) -> std::io::Result<crate::BashCommandOutput> {
