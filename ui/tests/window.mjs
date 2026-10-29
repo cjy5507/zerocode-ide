@@ -151,7 +151,7 @@ import { testLandBatch } from "./land-batch.mjs";
 import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationLinkLookup, testConversationOutsideLinks, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
-import { testConversationB } from "./conversation-b.mjs";
+import { testConversationB, testConversationBTail } from "./conversation-b.mjs";
 import { testConversationEarlier } from "./conversation-earlier.mjs";
 import { testConversationSwitch } from "./conversation-switch.mjs";
 import { testComposerHold } from "./composer-hold.mjs";
@@ -502,6 +502,8 @@ suite("conversation-redesign", ({ browser, origin, ok }) => testConversationRede
 /* 사람이 고른 대화 시안 B (2026-10-29, t-81525) — 접힌 페이지를 네 폭과 두 테마에서: 옆으로
  * 밀림 0, 폭을 따르는 읽기, 알약·말풍선·코드 띠, 대비 4.5:1. */
 suite("conversation-b", ({ browser, origin, ok }) => testConversationB(browser, origin, ok));
+/* 일하는 동안 발의 알약 아래 마지막 세 걸음, 답이 서면 다시 한 줄 (시안 C6, t-82196). */
+suite("conversation-b-tail", ({ browser, origin, ok }) => testConversationBTail(browser, origin, ok));
 suite("conversation-earlier", ({ browser, origin, ok }) => testConversationEarlier(browser, origin, ok));
 /* 대화를 바꿨다가 돌아오면 그 화면 그대로, 판의 「대화」는 전사부터(인계 중 보낸 글은 한 번만),
  * 늦은 첫 읽기는 늦게 한 줄 (t-54304 — Claude·Codex·Dots 역분석에서 가져온 1단계). */

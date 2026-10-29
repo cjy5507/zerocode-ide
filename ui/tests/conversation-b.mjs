@@ -360,11 +360,161 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
   }
 }
 
+/* What the pills of the page wear under their line, read in the page: each
+ * pill's tail — the rows that stand, what they say, the state they wear — and
+ * how many elements the tail built. */
+function readPillTails() {
+  const list = document.querySelector("#worker-view .helper-turns");
+  const pills = [...list.querySelectorAll(":scope > .helper-group")];
+  let last = list.lastElementChild;
+  while (last && last.dataset.turn === undefined) last = last.previousElementSibling;
+  return {
+    pills: pills.length,
+    lastIsPill: last?.classList.contains("helper-group") ?? false,
+    tailNodes: list.querySelectorAll(".helper-group-tail").length,
+    tails: pills.map((pill) => {
+      const tail = pill.querySelector(":scope > .helper-group-tail");
+      if (!tail) return null;
+      const rows = [...tail.children].filter((row) => getComputedStyle(row).display !== "none");
+      return {
+        last: pill === last,
+        shown: getComputedStyle(tail).display !== "none",
+        hidden: tail.getAttribute("aria-hidden"),
+        elements: tail.getElementsByTagName("*").length + 1,
+        rows: rows.map((row) => ({
+          state: ["is-live", "is-done", "is-failed"].find((name) => row.classList.contains(name)) ?? null,
+          mark: row.children[0]?.textContent ?? "",
+          what: row.children[1]?.textContent ?? "",
+          when: row.children[2]?.textContent ?? "",
+          mono: getComputedStyle(row.children[1]).fontFamily.includes("Mono"),
+          size: parseFloat(getComputedStyle(row.children[1]).fontSize),
+        })),
+        live: pill.querySelector(".helper-group-live")?.textContent ?? "",
+      };
+    }),
+    words: {
+      live: t("worker.stepLive", "진행 중"),
+      took: t("worker.elapsedShort", "{{s}}초", { s: "1.8" }),
+      shell: t("worker.stepShell", "명령"),
+    },
+  };
+}
+
+/* Draft C6 (t-82196, the person's answer to question 2): while the agent
+ * works and its pill is the last thing on the page, the pill's last three
+ * steps stand under it a line each — the step in the terminal's own mono,
+ * how long it took, the one still out 「진행 중」 — and when the answer
+ * stands, the pill is one line again. A pill that is not the last, a page
+ * whose agent stopped, and an opened pill wear no tail. */
+export async function testConversationBTail(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await foldConversations(page);
+    const start = Date.now() - 120_000;
+    const turns = mockupTurns(start);
+    const answer = turns.pop();
+    const at = answer.at_ms;
+    // The person asks again; the agent runs two commands and a third is out.
+    turns.push(
+      answer,
+      { role: "user", text: "테스트도 돌려 줘", at_ms: at + 1800 },
+      { role: "tool", text: "Bash · rg -n phoneChanged src", at_ms: at + 3600, tool: { call_id: "t1", name: "Bash", kind: "bash", input: "rg -n phoneChanged src", is_error: false } },
+      { role: "tool_result", text: "src/a.ts:1:phoneChanged", at_ms: at + 5400, tool: { call_id: "t1", name: "", input: "", is_error: false } },
+      { role: "tool", text: "Bash · npm run build", at_ms: at + 7200, tool: { call_id: "t2", name: "Bash", kind: "bash", input: "npm run build", is_error: false } },
+      { role: "tool_result", text: "built", at_ms: at + 9000, tool: { call_id: "t2", name: "", input: "", is_error: false } },
+      { role: "tool", text: "Bash · npm test", at_ms: at + 10_800, tool: { call_id: "t3", name: "Bash", kind: "bash", input: "npm test", is_error: false } },
+    );
+    await openConversation(page, turns, { status: "working" });
+    const working = await page.evaluate(readPillTails);
+    const tail = working.tails.at(-1);
+    ok("C6: while the agent works, the pill at the foot shows its last three steps under it — the two that came back with how long each took, the one out 「진행 중」",
+      working.lastIsPill && tail !== null && tail.last && tail.shown && tail.rows.length === 3 &&
+        tail.rows.map((row) => row.state).join() === "is-done,is-done,is-live" &&
+        tail.rows[0].what === `${working.words.shell} rg -n phoneChanged src` && tail.rows[2].what === `${working.words.shell} npm test` &&
+        tail.rows[0].when === working.words.took && tail.rows[1].when === working.words.took && tail.rows[2].when === working.words.live &&
+        new Set(tail.rows.map((row) => row.mark)).size === 2,
+      JSON.stringify(working));
+    ok("C6: a step in the tail reads in the terminal's mono at 13 px, and the tail is for the eye — the pill's own steps are what a screen reader opens",
+      tail !== null && tail.rows.every((row) => row.mono && row.size === 13) && tail.hidden === "true",
+      JSON.stringify(tail));
+    ok("C6: the tail builds 13 elements at most — itself and three rows of four — and only the last pill wears one",
+      tail !== null && tail.elements <= 13 && working.tails.slice(0, -1).every((one) => one === null),
+      JSON.stringify(working.tails.map((one) => one?.elements ?? null)));
+    // An opened pill shows its steps whole: the tail steps aside.
+    const opened = await page.evaluate(async () => {
+      const pill = [...document.querySelectorAll("#worker-view .helper-turns > .helper-group")].at(-1);
+      pill.querySelector(".helper-group-cap").click();
+      await window.__PAINTED__();
+      const tail = pill.querySelector(":scope > .helper-group-tail");
+      const shown = tail ? getComputedStyle(tail).display !== "none" : false;
+      pill.querySelector(".helper-group-cap").click();
+      await window.__PAINTED__();
+      return shown;
+    });
+    ok("C6: an opened pill shows its steps in its body and its tail steps aside", opened === false, String(opened));
+    // More steps: the tail keeps the newest three.
+    const four = await page.evaluate(async (at) => {
+      const held = window.__CONVERSATION__;
+      held.turns.push(
+        { role: "tool_result", text: "ok", at_ms: at + 12_600, tool: { call_id: "t3", name: "", input: "", is_error: false } },
+        { role: "tool", text: "Bash · npm run lint", at_ms: at + 14_400, tool: { call_id: "t4", name: "Bash", kind: "bash", input: "npm run lint", is_error: false } },
+      );
+      await pollHelperPages();
+      await window.__PAINTED__();
+    }, at).then(() => page.evaluate(readPillTails));
+    const kept = four.tails.at(-1);
+    ok("C6: a fourth step pushes the oldest out — the tail keeps the newest three, the newest out",
+      kept != null && kept.rows.length === 3 && kept.rows[0].what === `${four.words.shell} npm run build` &&
+        kept.rows[2].what === `${four.words.shell} npm run lint` && kept.rows[2].state === "is-live",
+      JSON.stringify(kept));
+    // The answer stands: the pill is one line again.
+    const answered = await page.evaluate(async (at) => {
+      const held = window.__CONVERSATION__;
+      held.turns.push(
+        { role: "tool_result", text: "clean", at_ms: at + 16_200, tool: { call_id: "t4", name: "", input: "", is_error: false } },
+        { role: "assistant", text: "테스트가 모두 통과했습니다.", at_ms: at + 18_000 },
+      );
+      await pollHelperPages();
+      await window.__PAINTED__();
+    }, at).then(() => page.evaluate(readPillTails));
+    ok("C6: once the answer stands under the pill, the pill is one line again — no tail anywhere on the page",
+      answered.pills >= 2 && answered.tails.every((one) => one === null) && answered.tailNodes === 0,
+      JSON.stringify(answered));
+    // The agent works again and then stops with a call out: no tail on a page whose agent is not working.
+    const stopped = await page.evaluate(async (at) => {
+      const held = window.__CONVERSATION__;
+      held.turns.push(
+        { role: "user", text: "한 번 더", at_ms: at + 19_800 },
+        { role: "tool", text: "Bash · npm test", at_ms: at + 21_600, tool: { call_id: "t5", name: "Bash", kind: "bash", input: "npm test", is_error: false } },
+      );
+      await pollHelperPages();
+      await window.__PAINTED__();
+      const during = document.querySelectorAll("#worker-view .helper-group-tail").length;
+      held.status = "idle";
+      await pollHelperPages();
+      await window.__PAINTED__();
+      return { during, after: document.querySelectorAll("#worker-view .helper-group-tail").length };
+    }, at);
+    ok("C6: the tail stands only while the agent works — it goes when the agent stops, even with a call left out",
+      stopped.during === 1 && stopped.after === 0, JSON.stringify(stopped));
+    ok("C6: the page raised no errors", faults.length === 0, faults.join("\n"));
+    return { working, four, answered, stopped };
+  } finally {
+    await page.close();
+  }
+}
+
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const { files, origin } = await createWindowServer();
   const browser = await chromium.launch({ headless: true });
   let failed = 0;
   try {
+    const report = (name, pass, details = "") => {
+      console.log(`${pass ? "PASS" : "FAIL"} ${name}${!pass ? `\n  ${details}` : ""}`);
+      if (!pass) failed++;
+    };
+    const tails = await testConversationBTail(browser, origin, report);
+    if (process.argv.includes("--json")) console.log(JSON.stringify(tails));
     const seen = await testConversationB(browser, origin, (name, pass, details = "") => {
       console.log(`${pass ? "PASS" : "FAIL"} ${name}${!pass ? `\n  ${details}` : ""}`);
       if (!pass) failed++;

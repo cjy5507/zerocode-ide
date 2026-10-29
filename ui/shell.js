@@ -15539,16 +15539,87 @@ function paintActivityPill(group, run, spoken) {
   writeTextContent(cap.querySelector(".helper-group-words"), [head, took, lost].filter(Boolean).join(" · "));
   const now = cap.querySelector(".helper-group-live");
   writeHidden(now, live === null);
-  if (live) {
-    const kind = stepKindOf(live, run);
-    const words = toolWords(live);
-    writeTextContent(now, `${stepLook(kind).word()} ${stepTitleWords(kind, words.arg, words.whole)}`);
-  }
+  if (live) writeTextContent(now, pillStepWords(live, run));
   // 점은 알약의 상태다: 하나라도 나가 있으면 액센트, 아니면 실패가 있으면
   // 멈춤의 잉크, 아니면 초록 — 실패는 말로도 선다(색만으로 말하지 않는다).
   writeClass(group, "is-live", live !== null);
   writeClass(group, "is-failed", live === null && failed > 0);
   writeClass(group, "is-done", live === null && failed === 0);
+}
+
+/* 알약의 한 줄이 걸음을 말하는 법 — 종류의 말, 그리고 돌린 것이나 만진 것.
+ * 머리의 나가 있는 호출과 꼬리의 행이 같은 말을 쓴다. */
+function pillStepWords(turn, run) {
+  const kind = stepKindOf(turn, run);
+  const words = toolWords(turn);
+  return `${stepLook(kind).word()} ${stepTitleWords(kind, words.arg, words.whole)}`;
+}
+
+/* 알약의 꼬리(시안 C6, t-82196 — 사람의 질문 2 답): 에이전트가 일하는 동안
+ * 알약이 페이지의 마지막 턴이면, 그 마지막 세 걸음이 알약 아래 한 줄씩 선다 —
+ * 걸음이 선 모양의 표(✓ 돌아옴, ● 나가 있음, ✕ 실패 — 색만이 아니라 모양),
+ * 터미널의 고정폭으로 쓴 걸음, 걸린 시간이나 「진행 중」. VS Code의 compact
+ * 진행 표시다. 답이 서거나 에이전트가 멈추거나 알약을 펼치면(몸이 걸음을 다
+ * 보인다) 다시 한 줄이다. 세 행과 함께 한 번 짓고, 말이 바뀐 칸만 쓴다. 눈을
+ * 위한 것이다 — 화면 읽기에게는 펼친 알약이 있고, 목록은 다시 쓸 때마다 읽어
+ * 주는 log다. */
+const PILL_TAIL_STEPS = 3;
+const PILL_TAIL_MARKS = Object.freeze({ live: "●", done: "✓", failed: "✕" });
+
+function pillTailNode() {
+  const tail = document.createElement("div");
+  tail.className = "helper-group-tail";
+  tail.setAttribute("aria-hidden", "true");
+  for (let at = 0; at < PILL_TAIL_STEPS; at += 1) {
+    const row = document.createElement("div");
+    row.className = "helper-group-tail-row";
+    for (const part of ["mark", "what", "when"]) {
+      const span = document.createElement("span");
+      span.className = `helper-group-tail-${part}`;
+      row.appendChild(span);
+    }
+    tail.appendChild(row);
+  }
+  return tail;
+}
+
+function paintPillTail(group, run, spoken) {
+  const steps = [];
+  for (let at = group.__members.length - 1; at >= 0 && steps.length < PILL_TAIL_STEPS; at -= 1) {
+    const state = activityState(group.__members[at], run, spoken);
+    if (state !== "thought") steps.unshift({ turn: group.__members[at], state });
+  }
+  let tail = group.querySelector(":scope > .helper-group-tail");
+  if (steps.length === 0) {
+    tail?.remove();
+    return;
+  }
+  if (!tail) {
+    tail = pillTailNode();
+    group.firstElementChild.after(tail);
+  }
+  for (let at = 0; at < PILL_TAIL_STEPS; at += 1) {
+    const row = tail.children[at];
+    const step = steps[at];
+    writeHidden(row, !step);
+    if (!step) continue;
+    for (const state of ["live", "done", "failed"]) writeClass(row, `is-${state}`, step.state === state);
+    const [mark, what, when] = row.children;
+    writeTextContent(mark, PILL_TAIL_MARKS[step.state]);
+    writeTextContent(what, pillStepWords(step.turn, run));
+    writeTextContent(when, step.state === "live" ? t("worker.stepLive", "진행 중") : stepTook(step.turn, step.turn));
+  }
+}
+
+/* 꼬리를 입는 알약 — 일하는 동안의 페이지 마지막 턴 하나. 그림마다 한 번 읽고,
+ * 전에 입었던 알약은 내려놓는다. */
+function standPillTail(list, run, spoken) {
+  let last = list.lastElementChild;
+  while (last && last.dataset.turn === undefined) last = last.previousElementSibling;
+  const owner = run.status === "running" && last?.classList.contains("helper-group") ? last : null;
+  if (list.__tailed && list.__tailed !== owner) list.__tailed.querySelector(":scope > .helper-group-tail")?.remove();
+  list.__tailed = owner;
+  if (owner) paintPillTail(owner, run, spoken);
 }
 
 /* 알약을 펼치거나 접는다 — 사람의 한 동작에만. 펼치면 구성원의 행을 그때
@@ -15666,6 +15737,7 @@ function syncHelperTurns(list, run) {
     for (const row of list.querySelectorAll(":scope > [data-turn]")) row.remove();
     run.helper.gone?.clear();
     list.__lastAnswer = null;
+    list.__tailed = null;
     syncHelperTasks(list, run);
     syncStreamingTurns(list, run);
     syncHelperReport(list, run);
@@ -15794,6 +15866,8 @@ function syncHelperTurns(list, run) {
   }
   for (const group of list.querySelectorAll(":scope > .helper-group")) if (group.__waiting) pills.add(group);
   for (const group of pills) paintActivityPill(group, run, spoken);
+  // The pill at the foot shows its last steps while the agent works (C6).
+  standPillTail(list, run, spoken);
   // A turn that arrived stands whole, the moment it arrived — the terminal
   // already showed these words as they were said, and a page that released
   // them again a word at a time (09-16 → 09-20) only lagged behind it. The
