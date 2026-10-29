@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use tauri::Manager as _;
-use zerocode_core::shell_rule::kill::{ProcessTable, ProtectedRoot};
+use zerocode_core::shell_rule::kill::{PaneMark, ProcessTable, ProtectedRoot};
 use zerocode_hookd::KillRoots;
 use zerocode_lane::PtyTransport as _;
 
@@ -39,6 +39,16 @@ const TABLE_WALL: Duration = zerocode_hookd::KILL_GUARD_WALL.saturating_sub(ROOT
 /// gone.
 fn pane_patience(spent: Duration) -> Duration {
     ROOTS_WALL.saturating_sub(spent).min(PANE_PATIENCE)
+}
+
+/// The mark this window wrote into pane `term`'s environment when it started
+/// it ([`crate::hooks::pty_env`]): what a job the pane sets loose names
+/// (t-81714), whatever the pane's own process lets be read of its own.
+pub(crate) fn pane_mark(term: u32) -> PaneMark {
+    PaneMark {
+        window: std::process::id(),
+        pane: crate::hooks::pane_key_of(term),
+    }
 }
 
 static WINDOW: OnceLock<tauri::AppHandle> = OnceLock::new();
@@ -72,6 +82,7 @@ impl zerocode_hookd::KillWitness for PaneProcesses {
             };
             if caller_term == Some(term) {
                 roots.caller = Some(pid);
+                roots.caller_mark = Some(pane_mark(term));
             } else {
                 roots.protected.push(ProtectedRoot {
                     pid,

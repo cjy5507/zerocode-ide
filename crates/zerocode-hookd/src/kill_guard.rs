@@ -77,7 +77,12 @@ pub(crate) async fn reply(
     let judging = tokio::task::spawn_blocking(move || {
         let roots = witness.roots(&pane_key);
         let table = if calls.iter().any(KillCall::needs_table) {
-            witness.table()
+            match (roots.caller, roots.caller_mark) {
+                // The window's word for the pane it started the caller in:
+                // the caller's own environment may not read (t-81714).
+                (Some(caller), Some(mark)) => witness.table().with_pane_mark(caller, mark),
+                _ => witness.table(),
+            }
         } else {
             ProcessTable::new(Vec::new())
         };
