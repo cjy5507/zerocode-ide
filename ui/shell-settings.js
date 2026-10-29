@@ -327,6 +327,12 @@ function applyAgentSettingsSnapshot(snapshot) {
     conversationTimelineView = snapshot.conversation_timeline_view === true;
     repaintTimelineView();
   }
+  // 에이전트 판의 첫 화면(t-82038): 판이 처음 에이전트로 보일 때 한 번 읽으므로,
+  // 스냅샷이 바꾸는 것은 그 뒤에 여는 판들이다.
+  if (hasSetting(snapshot, "agent_pane_first_view")) {
+    agentPaneFirstView = normalizeAgentPaneFirstView(snapshot.agent_pane_first_view);
+    paintAgentPaneFirstView();
+  }
 }
 
 function applyNavigationSettingsSnapshot(snapshot) {
@@ -8442,6 +8448,42 @@ el("setup-script-launch-mode").addEventListener("click", (event) => {
   if (!button || !event.currentTarget.contains(button)) return;
   setSetupScriptLaunchMode(button.dataset.setupLaunchMode);
 });
+
+/* ---- what an agent's pane opens on (t-82038) ----
+ *
+ * 「나는 터미널이 편한데」: a pane running an agent opens on its conversation —
+ * the transcript view — or on the agent's own terminal screen, as the person
+ * chooses here (`agent_pane_first_view`). The two words are the core's
+ * (`AgentPaneFirstView`) and the radios' values. `standPaneConversation` reads
+ * the choice once for each pane, when it is first seen running an agent, so a
+ * change here applies to the panes opened after it; the switch on a pane's
+ * head still turns any one pane either way. */
+const AGENT_PANE_FIRST_VIEWS = Object.freeze({ conversation: "conversation", terminal: "terminal" });
+let agentPaneFirstView = AGENT_PANE_FIRST_VIEWS.conversation;
+
+function agentPaneFirstViewRadios() {
+  return [...el("agent-pane-first-view").querySelectorAll('input[type="radio"]')];
+}
+
+function normalizeAgentPaneFirstView(view) {
+  return Object.values(AGENT_PANE_FIRST_VIEWS).includes(view) ? view : AGENT_PANE_FIRST_VIEWS.conversation;
+}
+
+function paintAgentPaneFirstView() {
+  for (const radio of agentPaneFirstViewRadios()) radio.checked = radio.value === agentPaneFirstView;
+}
+
+function setAgentPaneFirstView(view) {
+  agentPaneFirstView = normalizeAgentPaneFirstView(view);
+  paintAgentPaneFirstView();
+  void commitSetting("agent_pane_first_view", "set_agent_pane_first_view", { view: agentPaneFirstView });
+}
+
+for (const radio of agentPaneFirstViewRadios()) {
+  radio.addEventListener("change", (event) => {
+    if (event.currentTarget.checked) setAgentPaneFirstView(event.currentTarget.value);
+  });
+}
 
 function macOptionAsAltLabel(mode) {
   if (mode === "true") return t("settings.terminal.optionAsAltBoth", "양쪽");

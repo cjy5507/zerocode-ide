@@ -13684,10 +13684,15 @@ el("view-toggle-chat").addEventListener("click", () => {
 
 /* 2차 B (item 9): an agent's pane reads as its conversation — the transcript
  * view, not handed to a wire — until the person picks a side with the switch,
- * which is then theirs for the pane's life. */
+ * which is then theirs for the pane's life. Which side it opens on is the
+ * person's too (`agent_pane_first_view`, t-82038): read once, the first time
+ * the pane is seen running an agent, and kept with the pane — a change in
+ * settings applies to the panes opened after it. A pane opened on its terminal
+ * stays there until the switch says otherwise. */
 function standPaneConversation(term) {
-  const held = paneChats.get(term);
-  if (held?.on || held?.chosen) return;
+  const held = paneChatOf(term);
+  held.firstView ??= agentPaneFirstView;
+  if (held.on || held.chosen || held.firstView === AGENT_PANE_FIRST_VIEWS.terminal) return;
   void setPaneChat(term, true, { wire: false });
 }
 
