@@ -275,7 +275,7 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
     const read = await page.evaluate((workers) => Object.fromEntries(workers.map((one) => [one.worker, window.__READ_WORKER__(one.worker)])),
       TEAM_WORKERS);
     const words = await page.evaluate((now) => ({
-      walled: t("board.desk.healthWalled", "한도 벽"),
+      walled: t("board.desk.healthWalled", "한도 도달"),
       asking: t("board.desk.healthAsking", "답 기다림"),
       commit2: t("sidebar.team.step.commitCount", "커밋 {{count}}", { count: 2 }),
       read: t("sidebar.team.step.read", "읽기"),

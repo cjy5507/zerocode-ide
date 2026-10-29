@@ -18186,6 +18186,128 @@ fn the_conversation_timeline_view_is_one_remembered_bit() {
     );
 }
 
+/// What an agent's pane opens on is the person's choice (t-82038, 「나는
+/// 터미널이 편한데」): its conversation, as everyone who never chose gets it,
+/// or its terminal. The choice is one word in the shared document — saved by
+/// its own command, kept through a restart, read as the conversation from a
+/// file written before the key existed — and the window applies the
+/// authoritative snapshot, reading it when a pane first runs an agent.
+#[test]
+fn the_agent_pane_first_view_is_one_remembered_choice() {
+    let backend = shipped_backend();
+    let (shipped, _) = backend.split_once("#[cfg(test)]").unwrap_or((backend, ""));
+    assert!(
+        shipped.contains("            set_agent_pane_first_view,"),
+        "the choice is not on the command list, so saving it fails at runtime"
+    );
+    assert!(
+        block_after(shipped, "impl Default for SettingsDocument {")
+            .contains("agent_pane_first_view: AgentPaneFirstView::Conversation,"),
+        "a machine that has never been asked no longer opens a pane on its conversation"
+    );
+    // The two words on the wire are the radios' values; any other is refused
+    // rather than read as a default.
+    assert_eq!(
+        serde_json::to_value(AgentPaneFirstView::default()).expect("serialize"),
+        serde_json::json!("conversation")
+    );
+    assert_eq!(
+        serde_json::to_value(AgentPaneFirstView::Terminal).expect("serialize"),
+        serde_json::json!("terminal")
+    );
+    assert!(
+        serde_json::from_value::<AgentPaneFirstView>(serde_json::json!("screen")).is_err(),
+        "a word the window does not offer was taken"
+    );
+    let markup = include_str!("../../../ui/index.html");
+    let (_, radios) = markup
+        .split_once("id=\"agent-pane-first-view\"")
+        .expect("the settings offer no first-view choice");
+    let (radios, _) = radios
+        .split_once("</fieldset>")
+        .expect("the choice is one fieldset");
+    let values: Vec<&str> = radios
+        .split("value=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split_once('"').map(|(value, _)| value))
+        .collect();
+    assert_eq!(
+        values,
+        ["conversation", "terminal"],
+        "the settings radios no longer offer exactly the two words the core takes"
+    );
+
+    let directory = tempfile::tempdir().expect("settings sandbox");
+    let repository = settings::SettingsRepository::new(directory.path());
+    repository
+        .write_json(SETTINGS_DOCUMENT_FILE, &SettingsDocument::default())
+        .expect("initial settings");
+    assert_eq!(
+        load_settings(&repository)
+            .expect("fresh settings")
+            .document
+            .agent_pane_first_view,
+        AgentPaneFirstView::Conversation
+    );
+    mutate_settings(&repository, |settings| {
+        settings.agent_pane_first_view = AgentPaneFirstView::Terminal;
+        Ok(())
+    })
+    .expect("save the terminal");
+    drop(repository);
+
+    let restarted = settings::SettingsRepository::new(directory.path());
+    let boot = load_settings(&restarted).expect("next boot settings");
+    assert_eq!(
+        boot.document.agent_pane_first_view,
+        AgentPaneFirstView::Terminal,
+        "the terminal choice did not survive a restart"
+    );
+    assert_eq!(
+        serde_json::to_value(&boot).expect("snapshot as json")["agent_pane_first_view"],
+        serde_json::json!("terminal"),
+        "the snapshot the window boots from does not carry the choice"
+    );
+
+    // A document from before the key reads as the conversation.
+    let older = tempfile::tempdir().expect("older settings sandbox");
+    let repository = settings::SettingsRepository::new(older.path());
+    let mut document = serde_json::to_value(SettingsDocument::default()).expect("settings as json");
+    document
+        .as_object_mut()
+        .expect("settings are an object")
+        .remove("agent_pane_first_view");
+    repository
+        .write_json(SETTINGS_DOCUMENT_FILE, &document)
+        .expect("older settings");
+    assert_eq!(
+        load_settings(&repository)
+            .expect("older settings read")
+            .document
+            .agent_pane_first_view,
+        AgentPaneFirstView::Conversation,
+        "a file from before the choice opens panes on their terminal"
+    );
+
+    assert_canonical_setting_round_trip(
+        backend,
+        window_source(),
+        "set_agent_pane_first_view",
+        "setting_key::AGENT_PANE_FIRST_VIEW",
+        "settings.agent_pane_first_view = view;",
+        "function setAgentPaneFirstView(view) {",
+        "agent_pane_first_view",
+        "agentPaneFirstView = normalizeAgentPaneFirstView(snapshot.agent_pane_first_view);",
+    );
+    // The pane reads the choice where it decides to stand its conversation,
+    // and the person's own pick of a side still comes first.
+    let stand = block_after(window_source(), "function standPaneConversation(term) {");
+    assert!(
+        stand.contains("agentPaneFirstView") && stand.contains("held.chosen"),
+        "a pane no longer opens on the side the settings name:\n{stand}"
+    );
+}
+
 #[test]
 fn non_default_settings_are_the_next_boot_snapshot() {
     let directory = tempfile::tempdir().expect("settings sandbox");
@@ -22052,9 +22174,8 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "list-pad-x",
         "list-pad-top",
         "list-pad-bottom",
-        "sticky-pad-top",
-        "sticky-pad-bottom",
-        "sticky-fade",
+        "person-pad-top",
+        "person-pad-bottom",
         "status-h",
         "status-in",
         // A step is one line (t-15682): the row, the column of its dot and its
@@ -22381,11 +22502,11 @@ fn the_conversation_wears_the_extensions_own_measures() {
         ("chat-dock-inset", rule("inputContainer", "bottom")),
         ("chat-dock-max", rule("inputContainer", "max-width")),
         (
-            "chat-sticky-pad-top",
+            "chat-person-pad-top",
             rule("message.stickyHeader", "padding-top"),
         ),
         (
-            "chat-sticky-pad-bottom",
+            "chat-person-pad-bottom",
             rule("message.stickyHeader", "padding-bottom"),
         ),
         ("chat-send-size", rule("sendButton", "width")),
@@ -22648,19 +22769,15 @@ fn the_conversation_wears_the_extensions_own_measures() {
         panel["version"].as_str().unwrap_or("?"),
         drifted.join("\n  ")
     );
-    // The focus ring's reach, the sticky header's fade and the spinner's
-    // fade-in are written inside longer values; each is read where it sits.
+    // The focus ring's reach and the spinner's fade-in are written inside
+    // longer values; each is read where it sits. The panel's sticky header
+    // fades at its foot; the window's person's row does not stick (the
+    // person's call of 10-29, t-81786 P3-17), so it has no fade to measure.
     let ring = rule("composer:focus-within", "box-shadow");
     assert!(
         ring.starts_with(&format!("0 0 0 {}", token("chat-focus-ring"))),
         "the focus ring is `{ring}`, the token {}",
         token("chat-focus-ring")
-    );
-    let sticky = rule("message.stickyHeader", "background-image");
-    assert!(
-        sticky.contains(&format!("calc(100% - {})", token("chat-sticky-fade"))),
-        "the sticky header fades over `{sticky}`, the token {}",
-        token("chat-sticky-fade")
     );
     let spinner = rule("spinnerRow", "animation");
     let seconds: f64 = spinner

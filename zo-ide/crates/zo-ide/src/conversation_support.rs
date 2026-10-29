@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 
 use runtime::{
-    PermissionMode, PermissionPolicy,
+    normalize_tool_name, PermissionMode, PermissionPolicy,
 };
 use tools::GlobalToolRegistry;
 
@@ -78,6 +80,82 @@ pub(crate) fn permission_policy(
         ))
 }
 
+/// The rule warnings this process has queued, so a rebuilt runtime (a
+/// `/resume`, a model handoff) does not say one again.
+static WARNED_RULES: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Queue a start-up warning for each permission rule that names no tool zo
+/// has, and that this process has not warned of yet (t-81312).
+pub(crate) fn queue_unknown_rule_warnings(
+    feature_config: &runtime::RuntimeFeatureConfig,
+    tool_registry: &GlobalToolRegistry,
+) {
+    for line in unknown_rule_warnings(feature_config, tool_registry) {
+        let fresh = WARNED_RULES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(line.clone());
+        if fresh {
+            crate::runtime_support::push_startup_warning(line);
+        }
+    }
+}
+
+/// One line for each configured permission rule whose tool name no tool zo
+/// knows answers to: a rule is matched against the name a tool is called by,
+/// case and `-`/`_` aside, so such a rule never applies. The line names the
+/// rule, its list and its settings file, and zo's tool when the name means
+/// that tool elsewhere too (`Edit` is `edit_file`; Claude Code's `Task` is
+/// not zo's `TaskCreate`). An MCP tool is not judged: its server registers it
+/// after start.
+pub(crate) fn unknown_rule_warnings(
+    feature_config: &runtime::RuntimeFeatureConfig,
+    tool_registry: &GlobalToolRegistry,
+) -> Vec<String> {
+    let rules = runtime::rule_tool_names(feature_config.permission_rules());
+    if rules.is_empty() {
+        return Vec::new();
+    }
+    let known: BTreeSet<String> = tool_registry
+        .known_tool_names()
+        .iter()
+        .map(|name| normalize_tool_name(name))
+        .collect();
+    rules
+        .into_iter()
+        .filter_map(|named| {
+            let tool = normalize_tool_name(named.tool);
+            if tool.starts_with(runtime::tool_guard::MCP_TOOL_PREFIX) || known.contains(&tool) {
+                return None;
+            }
+            let files = feature_config.permission_rule_files(named.list, named.rule);
+            let place = if files.is_empty() {
+                "your settings".to_string()
+            } else {
+                files
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let zo_tool = tools::same_tool_alias(named.tool)
+                .filter(|zo_tool| known.contains(&normalize_tool_name(zo_tool)));
+            // zo offers the model its own name, so a rule written for the
+            // other agent's name does not reach the tool it was meant for.
+            Some(match zo_tool {
+                Some(zo_tool) => format!(
+                    "permissions.{} rule '{}' in {place} names no zo tool; zo's tool for {} is {zo_tool}, and this rule does not reach it",
+                    named.list, named.rule, named.tool
+                ),
+                None => format!(
+                    "permissions.{} rule '{}' in {place} names no zo tool, so it never applies",
+                    named.list, named.rule
+                ),
+            })
+        })
+        .collect()
+}
+
 // `convert_messages` and the cache-breakpoint marking live in the runtime
 // crate (the single source of truth, beside the
 // `context_compression::wire_tool_output` they depend on) so the sub-agent
@@ -131,4 +209,106 @@ mod system_prompt_tests {
     }
 }
 
+#[cfg(test)]
+mod unknown_rule_warning_tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+
+    use super::unknown_rule_warnings;
+
+    /// The warnings for the settings `home` and `project` hold, with
+    /// `disabled` tools turned off in the registry and `offered` added to it
+    /// as runtime tools.
+    fn warnings_for(
+        home: &str,
+        project: Option<&str>,
+        disabled: &[&str],
+        offered: &[&str],
+    ) -> (Vec<String>, String, String) {
+        let root = tempfile::tempdir().expect("a scratch folder");
+        let home_dir = root.path().join("home");
+        let cwd = root.path().join("work");
+        fs::create_dir_all(&home_dir).expect("home");
+        fs::create_dir_all(cwd.join(".zo")).expect(".zo");
+        let home_file = home_dir.join("settings.json");
+        let project_file = cwd.join(".zo").join("settings.json");
+        fs::write(&home_file, home).expect("home settings");
+        if let Some(project) = project {
+            fs::write(&project_file, project).expect("project settings");
+        }
+        let config = runtime::ConfigLoader::new(&cwd, &home_dir).load().expect("settings load");
+        let registry = tools::GlobalToolRegistry::builtin();
+        registry
+            .context()
+            .set_disabled_tools(disabled.iter().map(|tool| (*tool).to_string()).collect::<BTreeSet<_>>());
+        registry
+            .set_runtime_tools(
+                offered
+                    .iter()
+                    .map(|name| tools::RuntimeToolDefinition {
+                        name: (*name).to_string(),
+                        description: None,
+                        input_schema: serde_json::json!({"type": "object"}),
+                        required_permission: runtime::PermissionMode::WorkspaceWrite,
+                    })
+                    .collect(),
+            )
+            .expect("the runtime tools register");
+        (
+            unknown_rule_warnings(config.feature_config(), &registry),
+            home_file.display().to_string(),
+            project_file.display().to_string(),
+        )
+    }
+
+    /// One line per rule no tool answers to (t-81312). The same rule in two
+    /// files names both, comma-separated; a rule in the ordered `rules` list
+    /// is warned of too; a tool that is only turned off is still zo's. The
+    /// alias hint gives zo's tool and says the rule does not reach it — and
+    /// Claude Code's `Task`, a sub-agent, gets no hint at zo's `TaskCreate`.
+    #[test]
+    fn unknown_rule_warnings_name_the_rule_its_files_and_zos_tool_only_where_it_is_the_same_tool() {
+        let (lines, home, project) = warnings_for(
+            r#"{"permissions": {"deny": ["Edti(x)", "WebSearch", "Task(x)", "Edit(*.env)"]}}"#,
+            Some(r#"{"permissions": {"deny": ["Edti(x)"]}}"#),
+            &["WebSearch"],
+            // zo keeps `TaskCreate` from the model today; were it offered, a
+            // rule written for Claude Code's `Task` must still not point at it.
+            &["TaskCreate"],
+        );
+        assert!(
+            lines.contains(&format!(
+                "permissions.deny rule 'Edti(x)' in {home}, {project} names no zo tool, so it never applies"
+            )),
+            "the rule in two files: {lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("'WebSearch'")),
+            "a turned-off tool is warned of as unknown: {lines:#?}"
+        );
+
+        let (ordered, ordered_home, _) =
+            warnings_for(r#"{"permissions": {"rules": ["Edti(x)=deny"]}}"#, None, &[], &[]);
+        assert_eq!(
+            ordered,
+            vec![format!(
+                "permissions.rules rule 'Edti(x)=deny' in {ordered_home} names no zo tool, so it never applies"
+            )]
+        );
+
+        assert!(
+            lines.contains(&format!(
+                "permissions.deny rule 'Task(x)' in {home} names no zo tool, so it never applies"
+            )),
+            "Claude Code's Task is pointed at zo's TaskCreate: {lines:#?}"
+        );
+        assert!(
+            lines.contains(&format!(
+                "permissions.deny rule 'Edit(*.env)' in {home} names no zo tool; zo's tool for Edit is edit_file, and this rule does not reach it"
+            )),
+            "the alias hint: {lines:#?}"
+        );
+        assert_eq!(lines.len(), 3, "{lines:#?}");
+    }
+}
 

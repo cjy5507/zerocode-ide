@@ -56,7 +56,7 @@ export async function testPaneConversation(browser, origin, ok) {
 
     await page.waitForSelector(".helper-turn.is-user");
 
-    // ------------------------------------------------- the person's sticky row
+    // ------------------------------------------------- the person's row
     const placed = await page.evaluate(() => {
       const list = document.querySelector(".helper-turns");
       const user = document.querySelector(".helper-turn.is-user");
@@ -67,8 +67,7 @@ export async function testPaneConversation(browser, origin, ok) {
       const answerBox = answer.getBoundingClientRect();
       const gutter = parseFloat(getComputedStyle(list).paddingLeft);
       return {
-        sticky: getComputedStyle(user).position,
-        stickyTop: getComputedStyle(user).top,
+        position: getComputedStyle(user).position,
         boxLeftGap: Math.round(userBox.left - listBox.left),
         boxRightGap: Math.round(listBox.right - userBox.right),
         gutter: Math.round(gutter),
@@ -76,8 +75,8 @@ export async function testPaneConversation(browser, origin, ok) {
         answerLeftGap: Math.round(answerBox.left - listBox.left),
       };
     });
-    ok("what the person said last is the one sticky row — it sticks at the list's top — and their words stand on the right, under the hand that typed them, while the answer reads from the column's left (t-81525 B4)",
-      placed.sticky === "sticky" && placed.stickyTop === "0px" &&
+    ok("what the person said flows with the rows — nothing sticks to the list's top (t-81786 P3-17) — and their words stand on the right, under the hand that typed them, while the answer reads from the column's left (t-81525 B4)",
+      !["sticky", "fixed"].includes(placed.position) &&
       placed.boxRightGap === placed.gutter && placed.boxLeftGap >= placed.gutter &&
       placed.answerLeftGap <= placed.boxLeftGap,
       JSON.stringify(placed));
@@ -358,23 +357,23 @@ export async function testPaneConversation(browser, origin, ok) {
           docLeft: root.scrollLeft,
           listAtBottom: Math.abs(list.scrollTop + list.clientHeight - list.scrollHeight) <= 2,
         };
-        // A person's row stuck at the top, clicked, comes home in the list.
-        const users = [...list.querySelectorAll(".helper-turn.is-user")];
-        const stuck = users.find((row) =>
-          Math.round(row.getBoundingClientRect().top) <= Math.round(list.getBoundingClientRect().top));
-        stuck?.click();
+        // A person's row is no door: nothing sticks to the top to come home
+        // from (t-81786 P3-17), so a press on one moves nothing.
+        const above = [...list.querySelectorAll(".helper-turn.is-user")].at(-3);
+        if (above) list.scrollTop += above.getBoundingClientRect().top - list.getBoundingClientRect().top + 10;
         await frame();
-        const home = stuck
-          ? Math.round(stuck.getBoundingClientRect().top) - Math.round(list.getBoundingClientRect().top)
-          : null;
-        return { before, ...followed, home, docTopAfterClick: root.scrollTop, docLeftAfterClick: root.scrollLeft };
+        const listTop = list.scrollTop;
+        above?.click();
+        await frame();
+        const moved = above ? Math.round(list.scrollTop - listTop) : null;
+        return { before, ...followed, moved, docTopAfterClick: root.scrollTop, docLeftAfterClick: root.scrollLeft };
       } finally {
         spacer.remove();
       }
     });
-    ok("only the list scrolls — the tail is followed and a person's row is clicked home without the document moving, on a page stood taller and wider than its viewport",
+    ok("only the list scrolls — the tail is followed without the document moving, on a page stood taller and wider than its viewport, and a press on a person's row moves nothing",
       pageScroll.docTop === 0 && pageScroll.docLeft === 0 && pageScroll.listAtBottom &&
-      pageScroll.home === 0 && pageScroll.docTopAfterClick === 0 && pageScroll.docLeftAfterClick === 0,
+      pageScroll.moved === 0 && pageScroll.docTopAfterClick === 0 && pageScroll.docLeftAfterClick === 0,
       JSON.stringify(pageScroll));
     ok("the conversation page itself does not overflow its viewport",
       pageScroll.before.overflowY === 0 && pageScroll.before.overflowX === 0,

@@ -3007,10 +3007,10 @@ el("addproj-create-go").addEventListener("click", () => void runAddProjectCreate
  * opens the finder that is that palette's twin here. The in-place tree filter
  * this replaces was our own invention — narrowing lives in the finder, which
  * searches branch names and paths and lists before a key is pressed. The
- * refusal mirrors the ⌘J chord's own: `nav-tasks`'s disabled flag is the one
- * place "there is nothing to browse" already lives. */
+ * refusal is the ⌘J chord's own (`worktreeFinderShut`), so a folder project
+ * opens it from either door (t-82495). */
 el("sidebar-search").addEventListener("click", () => {
-  if (el("nav-tasks").disabled) return;
+  if (worktreeFinderShut()) return;
   togglePalette("worktree");
 });
 

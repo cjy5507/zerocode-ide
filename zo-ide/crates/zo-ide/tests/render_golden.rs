@@ -679,6 +679,10 @@ fn a_non_bash_call_borrows_the_exec_grammar() {
 // 파킹
 // ============================================================================
 
+/// The parked line names the keys the prompt's own choices carry (t-81117):
+/// it said "[y]once [a]always [n]deny" whatever was offered, while the
+/// default choices put the lasting allow on "y" and offer no "a", so a person
+/// who typed "y" for once left a rule in their settings.
 #[test]
 fn a_permission_prompt_is_parked_not_answered() {
     let (responder, receiver) = tokio::sync::oneshot::channel();
@@ -693,11 +697,23 @@ fn a_permission_prompt_is_parked_not_answered() {
             reasoning: "run ls".to_string(),
             audit_hint: None,
             risk_level: None,
-            choices: vec![PermissionChoice {
-                key: 'y',
-                label: "Allow once".to_string(),
-                decision: PermissionDecision::AllowOnce,
-            }],
+            choices: vec![
+                PermissionChoice {
+                    key: 'y',
+                    label: "Allow".to_string(),
+                    decision: PermissionDecision::AllowAlways,
+                },
+                PermissionChoice {
+                    key: 'o',
+                    label: "Allow once".to_string(),
+                    decision: PermissionDecision::AllowOnce,
+                },
+                PermissionChoice {
+                    key: 'n',
+                    label: "Deny".to_string(),
+                    decision: PermissionDecision::Deny,
+                },
+            ],
             question: None,
             responder,
         }))
@@ -705,7 +721,7 @@ fn a_permission_prompt_is_parked_not_answered() {
     let rendered = String::from_utf8(buffer).expect("UTF-8");
     assert_eq!(
         rendered,
-        "\u{1b}[1m⏸ bash\u{1b}[0m — [y]once [a]always [n]deny\n"
+        "\u{1b}[1m⏸ bash\u{1b}[0m — [y] Allow  [o] Allow once  [n] Deny\n"
     );
     let Some(PendingPrompt::Permission(prompt)) = parked else {
         panic!("권한 프롬프트는 파킹되어 돌아와야 한다");

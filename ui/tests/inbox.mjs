@@ -36,12 +36,12 @@ export function inboxFixture(now = Date.now()) {
     id: `${run}/${id}`, run, seat, at_ms: now - ago * MINUTE, project: run === "run-a" ? "acme-web" : "acme-api",
     letter: letter(now, { run, id, created_ms: now - ago * MINUTE, body, ...extra }),
   });
-  const hand = (id, title, ago, attempt) => item("handoff", "handoff", {
+  const hand = (id, title, ago, attempt, withdrawn = null) => item("handoff", "handoff", {
     id: `handoff:run-a/${id}`, at_ms: now - ago * MINUTE,
     task: {
       run: "run-a", id, title, stage: "reported", parent: null, parent_title: null, gate: null, blocked_by: [], closed: null,
       created_ms: now - ago * MINUTE, cost: null, writing: null, left: null,
-      progress: { stage: "report_only", attempt, source: "a1b2c3d" },
+      progress: { stage: "report_only", attempt, source: "a1b2c3d", ...(withdrawn === null ? {} : { withdrawn }) },
       times: { started_ms: now - 60 * MINUTE, handed_ms: now - ago * MINUTE },
       hand_in: { conditions: [{ number: 1, text: "시험 12개가 통과함", state: "checked" }], decisions: "오류 문구를 한 줄로", blocked: "", next: "" },
     },
@@ -55,7 +55,8 @@ export function inboxFixture(now = Date.now()) {
     q("m-q2", "run-a", true, 11, "느린 쿼리 두 개 중 어느 쪽을 먼저 고칠까요?", { delivery_id: "d-q2" }),
     q("m-q3", "run-b", false, 38, "알림 끄기 버튼을 설정 맨 위로 옮겨도 되나요?"),
     hand("t-2033", "로그인 오류 문구", 7, "dp-2033"),
-    hand("t-2025", "홈 화면 빈 상태", 26, "dp-2025"),
+    // The coordinator took back its verification of this one (t-81913).
+    hand("t-2025", "홈 화면 빈 상태", 26, "dp-2025", "빈 상태 그림이 어두운 화면에서 안 보임"),
     item("blocked", "pane_blocked", {
       id: "pane:term:5@1", run: null, project: "wt-c", at_ms: now - 2 * MINUTE, seat: false,
       pane: { pane: "term:5", agent: "claude", worktree: "/Users/dev/acme-api/wt-c", waiting: "blocked", since_ms: now - 2 * MINUTE },
@@ -228,6 +229,31 @@ export async function testInbox(browser, origin, standBackend, ok) {
     passed.length === 1 && passed[0].args.run === "run-a" && passed[0].args.task === "t-2033"
       && passed[0].args.attempt === "dp-2033" && passed[0].args.source === "a1b2c3d",
     JSON.stringify(passed),
+  );
+
+  // A hand-in whose verification the coordinator withdrew takes no pass here: the page says it
+  // was withdrawn and why, and that a new review or a new hand-in is what passes it (t-81913).
+  const withdrawn = await page.evaluate(() => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    window.__INBOX__.calls.length = 0;
+    view.querySelector('.inbox-tab[data-inbox-tab="handoff"]').click();
+    view.querySelector('.inbox-row[data-id="handoff:run-a/t-2025"]').click();
+    const pass = view.querySelector('[data-inbox-act="pass"]');
+    const shown = pass.checkVisibility();
+    pass.click();
+    return {
+      title: view.querySelector(".inbox-pv-title").textContent,
+      note: view.querySelector(".inbox-preview .inbox-note")?.textContent ?? "",
+      shown,
+      sent: window.__INBOX__.calls.filter((call) => call.name === "desk_review_pass").length,
+    };
+  });
+  ok(
+    "a withdrawn hand-in shows the withdrawal and why in place of 확인, and a press sends nothing",
+    !withdrawn.shown && withdrawn.sent === 0
+      && withdrawn.title === "홈 화면 빈 상태 검증이 철회됐습니다 — 빈 상태 그림이 어두운 화면에서 안 보임"
+      && withdrawn.note === "새 검수 결과를 적거나 새로 넘겨야 다시 통과됩니다.",
+    JSON.stringify(withdrawn),
   );
 
   // A question of a run this window holds no seat of cannot be answered here, and says so.

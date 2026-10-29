@@ -2247,6 +2247,7 @@ fn record_merged(
             attempt: attempt.as_deref(),
             source: Some(landed.head.as_str()),
             review: true,
+            bare_verification: verifies_on_nothing_new(&result),
             tested_head: None,
         };
         let author = correction_author(

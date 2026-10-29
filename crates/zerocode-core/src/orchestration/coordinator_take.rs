@@ -1017,6 +1017,7 @@ fn apply_one(
         seat,
         now_ms,
     )?;
+    let result = backfilled_result(original, proven, base, now_ms);
     let author = correction_author(
         ledger,
         &team.leader_pane,
@@ -1027,16 +1028,10 @@ fn apply_one(
             attempt: Some(&taken.dispatch),
             source: Some(&proven.commit),
             review: true,
+            bare_verification: verifies_on_nothing_new(&result),
             tested_head: None,
         },
     )?;
-    ledger.update_task(
-        run_id,
-        task_id,
-        None,
-        Some(backfilled_result(original, proven, base, now_ms)),
-        author,
-        now_ms,
-    )?;
+    ledger.update_task(run_id, task_id, None, Some(result), author, now_ms)?;
     Ok(taken.dispatch)
 }

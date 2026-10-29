@@ -327,6 +327,12 @@ function applyAgentSettingsSnapshot(snapshot) {
     conversationTimelineView = snapshot.conversation_timeline_view === true;
     repaintTimelineView();
   }
+  // 에이전트 판의 첫 화면(t-82038): 판이 처음 에이전트로 보일 때 한 번 읽으므로,
+  // 스냅샷이 바꾸는 것은 그 뒤에 여는 판들이다.
+  if (hasSetting(snapshot, "agent_pane_first_view")) {
+    agentPaneFirstView = normalizeAgentPaneFirstView(snapshot.agent_pane_first_view);
+    paintAgentPaneFirstView();
+  }
 }
 
 function applyNavigationSettingsSnapshot(snapshot) {
@@ -4296,7 +4302,7 @@ function accountNote(rows) {
   if (rows.length === 0) {
     return t("settings.accounts.none", "추가된 계정이 없습니다. 지금까지 쓰던 로그인이 그대로 쓰입니다.");
   }
-  return t("settings.accounts.hint", "고른 계정의 자격 증명으로 새 claude가 실행됩니다 — 즉시 적용됩니다. 이미 떠 있는 판은 제 로그인으로 계속하고, 한도 벽에 선 판만 같은 대화로 새 계정에서 이어집니다.");
+  return t("settings.accounts.hint", "고른 계정의 자격 증명으로 새 claude가 실행됩니다 — 즉시 적용됩니다. 이미 떠 있는 판은 제 로그인으로 계속하고, 한도에 닿은 판만 같은 대화로 새 계정에서 이어집니다.");
 }
 
 /* One account: who it is, and the two things that can be done to it.
@@ -4780,8 +4786,8 @@ const PANE_STANCE_WORDS = Object.freeze({
     tip: { key: "usage.panePersonTip", word: "사람이 쓰는 판이라 옮기지 않습니다 — 새 계정으로 쓰려면 판을 새로 여세요" },
   },
   walled: {
-    said: { key: "usage.paneWalled", word: "한도 벽" },
-    tip: { key: "usage.paneWalledTip", word: "한도 벽에 섰습니다 — 여유 있는 계정이 있으면 옮기고, 리셋이 가까우면 기다립니다" },
+    said: { key: "usage.paneWalled", word: "한도 도달" },
+    tip: { key: "usage.paneWalledTip", word: "사용 한도에 닿아 멈췄습니다 — 여유 있는 계정이 있으면 옮기고, 리셋이 가까우면 기다립니다" },
   },
   left: {
     said: { key: "usage.paneLeft", word: "옛 계정에 남음" },
@@ -4956,10 +4962,10 @@ function accountSwitchProposal(plan) {
           to: accountBadge(to),
           why: switchReasonWords(decision.reason),
         })
-      : t("settings.accounts.switchAskPanes", "벽에 선 판을 {{to}}(으)로 옮길까요?", { to: accountBadge(to) }),
+      : t("settings.accounts.switchAskPanes", "한도에 닿은 판을 {{to}}(으)로 옮길까요?", { to: accountBadge(to) }),
   ];
   if (moves.length > 0) {
-    parts.push(t("settings.accounts.switchPanes", "벽에 선 판 {{count}}개는 같은 대화로 이어집니다", { count: moves.length }));
+    parts.push(t("settings.accounts.switchPanes", "한도에 닿은 판 {{count}}개는 같은 대화로 이어집니다", { count: moves.length }));
   }
   // The workers on the account the default leaves follow it (t-46106): the
   // yes is for them too, so the proposal says so before it is given.
@@ -5007,7 +5013,7 @@ function offerAccountSwitch() {
 
 function switchReasonWords(reason) {
   if (!reason) return "";
-  if (reason === "walled") return t("settings.accounts.reasonWalled", "판이 한도 벽에 섰습니다");
+  if (reason === "walled") return t("settings.accounts.reasonWalled", "판이 사용 한도에 닿았습니다");
   return t("settings.accounts.reasonNearLimit", "{{window}} {{used}}% 사용", {
     window: reason.near_limit?.window ?? "",
     used: reason.near_limit?.used_percent ?? "",
@@ -5054,7 +5060,7 @@ function paintClaudeNext() {
       minutes: Math.max(1, Math.ceil((plan.cooldown_until_ms - Date.now()) / 60000)),
     }));
   }
-  if (moves.length > 0) parts.push(t("usage.nextWalled", "벽 판 {{count}}", { count: moves.length }));
+  if (moves.length > 0) parts.push(t("usage.nextWalled", "한도에 닿은 판 {{count}}", { count: moves.length }));
   // Panes still on another account than the default (t-46106): the ones a
   // switch moves at their turn's end, the person's, and the ones left.
   const away = (plan.panes ?? []).filter((pane) => pane.account && pane.account !== plan.active).length;
@@ -5149,7 +5155,7 @@ async function applyAccountSwitch(by, token) {
   saySwitchCensus(
     applied?.switched_default
       ? t("settings.accounts.switched", "계정을 {{to}}(으)로 바꿨습니다", { to: accountBadge(applied?.to ?? "") })
-      : t("settings.accounts.switchedPanes", "벽에 선 판을 {{to}}(으)로 옮겼습니다", { to: accountBadge(applied?.to ?? "") }),
+      : t("settings.accounts.switchedPanes", "한도에 닿은 판을 {{to}}(으)로 옮겼습니다", { to: accountBadge(applied?.to ?? "") }),
     applied?.census ?? null,
   );
 }
@@ -8442,6 +8448,42 @@ el("setup-script-launch-mode").addEventListener("click", (event) => {
   if (!button || !event.currentTarget.contains(button)) return;
   setSetupScriptLaunchMode(button.dataset.setupLaunchMode);
 });
+
+/* ---- what an agent's pane opens on (t-82038) ----
+ *
+ * 「나는 터미널이 편한데」: a pane running an agent opens on its conversation —
+ * the transcript view — or on the agent's own terminal screen, as the person
+ * chooses here (`agent_pane_first_view`). The two words are the core's
+ * (`AgentPaneFirstView`) and the radios' values. `standPaneConversation` reads
+ * the choice once for each pane, when it is first seen running an agent, so a
+ * change here applies to the panes opened after it; the switch on a pane's
+ * head still turns any one pane either way. */
+const AGENT_PANE_FIRST_VIEWS = Object.freeze({ conversation: "conversation", terminal: "terminal" });
+let agentPaneFirstView = AGENT_PANE_FIRST_VIEWS.conversation;
+
+function agentPaneFirstViewRadios() {
+  return [...el("agent-pane-first-view").querySelectorAll('input[type="radio"]')];
+}
+
+function normalizeAgentPaneFirstView(view) {
+  return Object.values(AGENT_PANE_FIRST_VIEWS).includes(view) ? view : AGENT_PANE_FIRST_VIEWS.conversation;
+}
+
+function paintAgentPaneFirstView() {
+  for (const radio of agentPaneFirstViewRadios()) radio.checked = radio.value === agentPaneFirstView;
+}
+
+function setAgentPaneFirstView(view) {
+  agentPaneFirstView = normalizeAgentPaneFirstView(view);
+  paintAgentPaneFirstView();
+  void commitSetting("agent_pane_first_view", "set_agent_pane_first_view", { view: agentPaneFirstView });
+}
+
+for (const radio of agentPaneFirstViewRadios()) {
+  radio.addEventListener("change", (event) => {
+    if (event.currentTarget.checked) setAgentPaneFirstView(event.currentTarget.value);
+  });
+}
 
 function macOptionAsAltLabel(mode) {
   if (mode === "true") return t("settings.terminal.optionAsAltBoth", "양쪽");

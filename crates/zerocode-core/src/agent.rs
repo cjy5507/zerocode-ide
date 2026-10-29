@@ -615,6 +615,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 effort: Some(MoveRoad::Shown("/model")),
                 model: Some(MoveRoad::Line("/model")),
                 ladder: ZO_EFFORT_LADDER,
+                rewrites_cache: false,
             },
             ..Harness::PLAIN
         },
@@ -695,6 +696,9 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 effort: Some(MoveRoad::Picker(CLAUDE_EFFORT_PICKER)),
                 model: Some(MoveRoad::Line("/model")),
                 ladder: CLAUDE_EFFORT_LADDER,
+                // The picker sends the next request at another thinking
+                // setting, which Anthropic's cache keys on (Z11, 2026-10-28).
+                rewrites_cache: true,
             },
             // Measured 2026-09-30 on 2.1.285 (t-18353), `claude --resume` on
             // a transcript whose last turn was cut, in a pty behind this
@@ -804,6 +808,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 effort: Some(MoveRoad::Relaunch),
                 model: Some(MoveRoad::Shown("/model")),
                 ladder: CODEX_EFFORT_LADDER,
+                rewrites_cache: false,
             },
             one_shot: Some(OneShotRoad::CodexExec),
             ..Harness::PLAIN
@@ -1088,6 +1093,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 effort: Some(MoveRoad::Relaunch),
                 model: Some(MoveRoad::Shown("/model")),
                 ladder: &[],
+                rewrites_cache: false,
             },
             ..Harness::PLAIN
         },

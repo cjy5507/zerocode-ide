@@ -379,3 +379,382 @@ fn a_host_inside_a_pane_keeps_the_window_and_the_other_panes() {
         vec![ProtectedRoot::window(WINDOW)]
     );
 }
+
+/* ---- a job the pane set loose (t-81714) -------------------------------------- */
+
+const SET_LOOSE: u32 = 600;
+const SET_LOOSE_BY_THE_OTHER_PANE: u32 = 610;
+const SET_LOOSE_IN_ANOTHER_WINDOW: u32 = 620;
+const LENT_TO_THE_OTHER_PANE: u32 = 320;
+const ANOTHER_WINDOW: u32 = 900;
+
+fn mark(window: u32, pane: &str) -> PaneMark {
+    PaneMark {
+        window,
+        pane: pane.to_string(),
+    }
+}
+
+/// [`table`] as the window reads it on 10-29: every pane's process names its
+/// pane in its environment, and the calling pane's `… &` job, its tool's shell
+/// gone, hangs under pid 1 still naming the calling pane. Beside it, the
+/// other pane's loose job, one from a pane numbered alike in another window,
+/// and a process in the other pane's tree that was started with the calling
+/// pane's mark.
+fn marked_table() -> ProcessTable {
+    loose_table()
+        .with_pane_mark(CALLER, mark(WINDOW, "term-1"))
+        .with_pane_mark(210, mark(WINDOW, "term-1"))
+        .with_pane_mark(CALLER_CHILD, mark(WINDOW, "term-1"))
+        .with_pane_mark(SET_LOOSE, mark(WINDOW, "term-1"))
+        .with_pane_mark(OTHER_PANE, mark(WINDOW, "term-2"))
+        .with_pane_mark(OTHER_AGENT, mark(WINDOW, "term-2"))
+        .with_pane_mark(SET_LOOSE_BY_THE_OTHER_PANE, mark(WINDOW, "term-2"))
+        .with_pane_mark(SET_LOOSE_IN_ANOTHER_WINDOW, mark(ANOTHER_WINDOW, "term-1"))
+        .with_pane_mark(LENT_TO_THE_OTHER_PANE, mark(WINDOW, "term-1"))
+}
+
+/// [`marked_table`]'s rows, told no pane.
+fn loose_table() -> ProcessTable {
+    let mut rows = match table().rows {
+        Ok(rows) => rows,
+        Err(why) => panic!("the fixture table reads: {why}"),
+    };
+    rows.extend([
+        row(SET_LOOSE, 1, SET_LOOSE, "python3 -m http.server 8000"),
+        row(
+            SET_LOOSE_BY_THE_OTHER_PANE,
+            1,
+            SET_LOOSE_BY_THE_OTHER_PANE,
+            "python3 -m http.server 8001",
+        ),
+        row(
+            SET_LOOSE_IN_ANOTHER_WINDOW,
+            1,
+            SET_LOOSE_IN_ANOTHER_WINDOW,
+            "python3 -m http.server 8002",
+        ),
+        row(
+            LENT_TO_THE_OTHER_PANE,
+            OTHER_AGENT,
+            LENT_TO_THE_OTHER_PANE,
+            "python3 -m http.server 8003",
+        ),
+    ]);
+    ProcessTable::new(rows)
+}
+
+fn judged_marked(command: &str, table: &ProcessTable, caller: Option<u32>) -> KillVerdict {
+    judge_kill(&kill_calls(command), table, caller, &protected())
+}
+
+/// The 10-29 06:3x measurement: a pane's `… &` job, moved under pid 1 when
+/// its tool's shell ended, was refused to the pane that started it — by
+/// number too, the way the refusal itself told it to (`echo $!`, then
+/// `kill 4242`). It names the calling pane, so it is the pane's own.
+#[test]
+fn a_job_the_pane_set_loose_is_its_own_to_end() {
+    let table = marked_table();
+    for command in [
+        "kill 600",
+        "kill -9 600",
+        "kill -- -600",
+        "pkill -f 'http.server 8000'",
+        "kill $(pgrep -f 'http.server 8000')",
+    ] {
+        assert_eq!(
+            judged_marked(command, &table, Some(CALLER)),
+            KillVerdict::Allow,
+            "{command:?}"
+        );
+    }
+    // A pattern that takes another pane's loose job too is asked about that
+    // one, not the pane's own.
+    let command = "pkill -f 'http.server 800[012]'";
+    match judged_marked(command, &table, Some(CALLER)) {
+        KillVerdict::Ask { reason } => assert!(
+            reason.contains(&format!("pid {SET_LOOSE_BY_THE_OTHER_PANE}")),
+            "{reason}"
+        ),
+        other => panic!("{command:?} should be asked of a person, was {other:?}"),
+    }
+}
+
+/// What the calling pane did not start stays asked — another pane's loose
+/// job, one from a pane of the same number in another window, one that names
+/// no pane — and what hangs in a kept tree stays refused whatever its
+/// environment says.
+#[test]
+fn a_loose_job_of_another_pane_or_window_or_none_is_still_asked() {
+    let table = marked_table();
+    for (command, pid) in [
+        ("kill 610", SET_LOOSE_BY_THE_OTHER_PANE),
+        ("kill 620", SET_LOOSE_IN_ANOTHER_WINDOW),
+        ("kill 500", DETACHED),
+    ] {
+        match judged_marked(command, &table, Some(CALLER)) {
+            KillVerdict::Ask { reason } => {
+                assert!(
+                    reason.contains(&format!("pid {pid}")),
+                    "{command:?}: {reason}"
+                );
+            }
+            other => panic!("{command:?} should be asked of a person, was {other:?}"),
+        }
+    }
+    for command in [
+        "kill 320",
+        "kill 310",
+        "kill 100",
+        "pkill -f 'http.server 800'",
+    ] {
+        assert!(
+            matches!(
+                judged_marked(command, &table, Some(CALLER)),
+                KillVerdict::Deny { .. }
+            ),
+            "{command:?}"
+        );
+    }
+}
+
+/// The mark is the caller's own only when the caller's own process names it:
+/// a caller the window cannot place, or whose environment did not read, owns
+/// no loose job.
+#[test]
+fn a_caller_without_a_mark_owns_no_loose_job() {
+    let unmarked_caller = {
+        let mut table = marked_table();
+        table.marks.remove(&CALLER);
+        table
+    };
+    for (table, caller) in [(&unmarked_caller, Some(CALLER)), (&marked_table(), None)] {
+        assert!(
+            matches!(
+                judged_marked("kill 600", table, caller),
+                KillVerdict::Ask { .. }
+            ),
+            "{caller:?}"
+        );
+    }
+}
+
+/// A mark names a window and a pane, or nothing.
+#[test]
+fn a_mark_needs_both_the_window_and_the_pane() {
+    let env = |window: Option<&'static str>, pane: Option<&'static str>| {
+        move |name: &str| match name {
+            WINDOW_PID_ENV => window.map(str::to_string),
+            PANE_KEY_ENV => pane.map(str::to_string),
+            _ => None,
+        }
+    };
+    assert_eq!(
+        PaneMark::from_env(env(Some("100"), Some("term-1"))),
+        Some(mark(WINDOW, "term-1"))
+    );
+    for (window, pane) in [
+        (None, Some("term-1")),
+        (Some("100"), None),
+        (Some("100"), Some("")),
+        (Some("not-a-pid"), Some("term-1")),
+        (Some("0"), Some("term-1")),
+    ] {
+        assert_eq!(
+            PaneMark::from_env(env(window, pane)),
+            None,
+            "{window:?} {pane:?}"
+        );
+    }
+}
+
+/// A judgment reads the environment of the caller and of a target outside
+/// every kept tree, once each — never of a row it does not ask after, so what
+/// it reads does not grow with the table. A mark the table was told is not
+/// read, and a table written out by hand is read for nothing.
+#[test]
+fn only_the_caller_and_a_target_outside_every_kept_tree_are_read() {
+    let judged_reading = |command: &str, table: &ProcessTable| {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let verdict = judge_kill_reading(
+            &kill_calls(command),
+            table,
+            Some(CALLER),
+            &protected(),
+            |pid| {
+                asked.borrow_mut().push(pid);
+                let own = [CALLER, SET_LOOSE].contains(&pid);
+                Some(mark(WINDOW, if own { "term-1" } else { "term-2" }))
+            },
+        );
+        (verdict, asked.into_inner())
+    };
+    let host = loose_table().on_this_host();
+    for (command, verdict, read) in [
+        ("kill 600", KillVerdict::Allow, vec![CALLER, SET_LOOSE]),
+        (
+            "kill 600; kill -9 600",
+            KillVerdict::Allow,
+            vec![CALLER, SET_LOOSE],
+        ),
+        ("kill 220", KillVerdict::Allow, vec![]),
+        (
+            "pkill -f 'http.server 8000'",
+            KillVerdict::Allow,
+            vec![CALLER, SET_LOOSE],
+        ),
+    ] {
+        assert_eq!(
+            judged_reading(command, &host),
+            (verdict, read),
+            "{command:?}"
+        );
+    }
+    for command in ["kill 310", "kill 320", "kill 100"] {
+        let (verdict, asked) = judged_reading(command, &host);
+        assert!(
+            matches!(verdict, KillVerdict::Deny { .. }),
+            "{command:?}: {verdict:?}"
+        );
+        assert!(asked.is_empty(), "{command:?}: {asked:?}");
+    }
+    let (verdict, asked) = judged_reading("pkill -f 'http.server 800[012]'", &host);
+    assert!(matches!(verdict, KillVerdict::Ask { .. }), "{verdict:?}");
+    assert_eq!(
+        asked,
+        [
+            CALLER,
+            SET_LOOSE,
+            SET_LOOSE_BY_THE_OTHER_PANE,
+            SET_LOOSE_IN_ANOTHER_WINDOW
+        ]
+    );
+    let told = loose_table()
+        .on_this_host()
+        .with_pane_mark(CALLER, mark(WINDOW, "term-1"));
+    assert_eq!(
+        judged_reading("kill 600", &told),
+        (KillVerdict::Allow, vec![SET_LOOSE])
+    );
+    let (verdict, asked) = judged_reading("kill 600", &loose_table());
+    assert!(matches!(verdict, KillVerdict::Ask { .. }), "{verdict:?}");
+    assert!(asked.is_empty(), "{asked:?}");
+}
+
+/* ---- the processes themselves (t-81714) -------------------------------------- */
+
+/// What a probe is started with besides its pane's mark.
+const PROBE: &str = "ZEROCODE_KILL_PROBE";
+
+/// A probe: started by the test below with [`PROBE`] in its environment, it
+/// waits for its input to close, so it is surely there while it is read.
+/// Run without it, it returns at once.
+#[test]
+fn a_probe_waits_for_its_input() {
+    use std::io::Read as _;
+
+    if std::env::var_os(PROBE).is_some() {
+        let _ = std::io::stdin().read_to_end(&mut Vec::new());
+    }
+}
+
+/// A process started with `env` that waits for its input to close: `program`
+/// reading it, or this test's own program as [`a_probe_waits_for_its_input`].
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn probe(program: Option<&[&str]>, env: &[(&str, &str)]) -> std::process::Child {
+    use std::process::{Command, Stdio};
+
+    let mut command = match program {
+        Some([program, args @ ..]) => {
+            let mut command = Command::new(program);
+            command.args(args);
+            command
+        }
+        _ => {
+            let module = module_path!()
+                .split_once("::")
+                .map_or(module_path!(), |(_, path)| path);
+            let mut command = Command::new(std::env::current_exe().expect("this test's program"));
+            command.args([
+                "--exact",
+                &format!("{module}::a_probe_waits_for_its_input"),
+                "--test-threads=1",
+            ]);
+            command
+        }
+    };
+    command
+        .env(PROBE, "1")
+        .envs(env.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the probe starts")
+}
+
+/// 10-29's two shapes, on processes this test starts and never signals —
+/// each ends when its input closes. A program that is not Apple's (homebrew's
+/// `python3` then, this test's own program here), started with the calling
+/// pane's mark and hanging outside the caller's tree, is read as the pane's
+/// own; one started with another pane's mark is asked. Apple's `/bin/zsh`
+/// with the pane's own mark is asked while its environment does not read —
+/// macOS leaves its own programs' out, the reach this has — and is the
+/// pane's own like any other where it does (as root, with the system's
+/// protection off, on a later macOS): the kernel's rule is what the test
+/// finds, not what it holds the kernel to.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_started_process_is_judged_by_the_pane_its_environment_names() {
+    let own = [(WINDOW_PID_ENV, "4242"), (PANE_KEY_ENV, "term-1")];
+    let other = [(WINDOW_PID_ENV, "4242"), (PANE_KEY_ENV, "term-2")];
+    let mut probes = vec![probe(None, &own), probe(None, &own), probe(None, &other)];
+    if cfg!(target_os = "macos") {
+        probes.push(probe(Some(&["/bin/zsh", "-c", "read -r line || :"]), &own));
+    }
+    let pids: Vec<u32> = probes.iter().map(std::process::Child::id).collect();
+    let me = std::process::id();
+    let rows = pids.iter().map(|&pid| row(pid, me, pid, "probe")).collect();
+    let table = ProcessTable::new(rows).on_this_host();
+    let mut environs = environ::Environs::new();
+    let named: Vec<Option<PaneMark>> = pids
+        .iter()
+        .map(|&pid| PaneMark::of_process(&mut environs, pid))
+        .collect();
+    let verdicts: Vec<KillVerdict> = pids[1..]
+        .iter()
+        .map(|pid| {
+            judge_kill(
+                &kill_calls(&format!("kill {pid}")),
+                &table,
+                Some(pids[0]),
+                &[],
+            )
+        })
+        .collect();
+    for mut probe in probes {
+        drop(probe.stdin.take());
+        let ended = probe.wait().expect("a probe ends when its input closes");
+        assert!(ended.success(), "{ended}");
+    }
+    assert_eq!(named[0], Some(mark(4242, "term-1")));
+    assert_eq!(
+        verdicts[0],
+        KillVerdict::Allow,
+        "the pane's own loose program"
+    );
+    assert!(
+        matches!(verdicts[1], KillVerdict::Ask { .. }),
+        "another pane's loose program: {:?}",
+        verdicts[1]
+    );
+    if let Some(verdict) = verdicts.get(2) {
+        match &named[3] {
+            None => assert!(matches!(verdict, KillVerdict::Ask { .. }), "{verdict:?}"),
+            Some(named) => {
+                assert_eq!(named, &mark(4242, "term-1"));
+                assert_eq!(verdict, &KillVerdict::Allow);
+            }
+        }
+    }
+}

@@ -15,7 +15,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "1.1.103"
+version = "1.1.104"
 edition = "2021"
 license = "MIT"
 publish = false

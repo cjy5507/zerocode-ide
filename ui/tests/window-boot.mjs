@@ -147,6 +147,10 @@ const BOOT = {
   // `the_conversation_timeline_view_is_one_remembered_bit` — is read by the
   // scenes that turn it on (`foldConversations`, t-81525 B1).
   conversation_timeline_view: true,
+  // The backend's default (`AgentPaneFirstView::Conversation`, t-82038): an
+  // agent's pane opens on its conversation, as every scene that reads one
+  // expects.
+  agent_pane_first_view: "conversation",
   terminal_prefs: {
     font_size: 14,
     font_family: "",
@@ -2361,6 +2365,16 @@ const installHarnessHands = async (surface) => {
      * 것은 예약이 이번 프레임의 콜백 뒤에 걸렸을 수도 있기 때문이다. */
     window.__PAINTED__ = () =>
       new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+
+    /* 대화 페이지 폭에서 읽는 단의 폭(t-81786 P3-16): 1000 px 아래는 기본,
+     * 1000·1200·1400·1700 px에서 한 단계씩 — 값은 토큰 파일의 것을 읽는다.
+     * 단을 재는 시험이 모두 이 하나로 묻는다. */
+    window.__READING_MEASURE__ = (pageWidth) => {
+      const root = getComputedStyle(document.documentElement);
+      const steps = [["--reading-column", 0], ["--reading-column-wide-1", 1000], ["--reading-column-wide-2", 1200],
+        ["--reading-column-wide-3", 1400], ["--reading-column-wide-4", 1700]];
+      return parseFloat(root.getPropertyValue(steps.findLast(([, from]) => pageWidth >= from)[0]));
+    };
 
     /* 「값이 0」을 재기 전의 한 박자 (t-2412 규칙 3).
      *

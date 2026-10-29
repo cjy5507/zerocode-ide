@@ -213,6 +213,7 @@ mod real_run {
     use std::process::{Child, Command, Stdio};
 
     use zerocode_core::agent_teams::{TEAM_LEADER_VAR, TEAM_PANE_VAR};
+    use zerocode_core::hook::PANE_KEY_ENV;
     use zerocode_core::shell_rule::kill::WINDOW_PID_ENV;
 
     use crate::permission_enforcer::{EnforcementResult, PermissionEnforcer};
@@ -255,6 +256,48 @@ mod real_run {
         fn drop(&mut self) {
             let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+    }
+
+    /// A `sleep` this test set loose: a shell started it in the background
+    /// and exited, so it hangs under pid 1, outside this process's tree — a
+    /// process zo started that is no longer its child. It carries no pane
+    /// key, so no pane can claim it as its own job. Ended when dropped.
+    struct Orphan {
+        pid: u32,
+        marker: String,
+    }
+
+    impl Orphan {
+        fn start(n: u32) -> Self {
+            let marker = format!("86400.{}{n}", std::process::id());
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(format!("sleep {marker} </dev/null >/dev/null 2>&1 & echo $!"))
+                .env_remove(PANE_KEY_ENV)
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .expect("the orphan starts");
+            let pid = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse()
+                .expect("the shell names the orphan's pid");
+            Self { pid, marker }
+        }
+
+        fn alive(&self) -> bool {
+            Command::new("kill")
+                .args(["-0", &self.pid.to_string()])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        }
+    }
+
+    impl Drop for Orphan {
+        fn drop(&mut self) {
+            let _ = Command::new("kill").arg(self.pid.to_string()).status();
         }
     }
 
@@ -501,12 +544,9 @@ mod real_run {
         let bait = Bait::start(6);
         let _window = GuardEnv::window(bait.pid());
         let unknown = bash("kill \"$TARGET\"");
-        for mode in [
-            PermissionMode::WorkspaceWrite,
-            PermissionMode::DangerFullAccess,
-            PermissionMode::Prompt,
-            PermissionMode::Allow,
-        ] {
+        // The modes that would ask about this call anyway. Where the mode
+        // runs it unasked, the question is refused instead (t-82420, below).
+        for mode in [PermissionMode::WorkspaceWrite, PermissionMode::Prompt] {
             let policy = PermissionPolicy::new(mode);
             // `zo -p` and every run with nobody at the keyboard: no prompter.
             match policy.authorize("bash", &unknown, None) {
@@ -539,6 +579,130 @@ mod real_run {
             PermissionOutcome::Deny { .. }
         ));
         assert!(person.asked.is_empty());
+    }
+
+    /// Dispatch runs a call to `Bash` or `BASH` as `bash`, so the guard judges
+    /// it as `bash` (t-81312): a signal to the window is refused unasked, and
+    /// a kill that needs a person's yes is refused with nobody to ask. A
+    /// `Bash` call used to skip the guard and run.
+    #[test]
+    fn kill_guard_authorize_judges_a_call_to_bash_whatever_its_spelling() {
+        // 0: no other bait's marker is a prefix of this one, nor this of theirs.
+        let bait = Bait::start(0);
+        let _window = GuardEnv::window(bait.pid());
+        let aimed = bash(&format!("pkill -f {}", bait.marker));
+        let unknown = bash("kill \"$TARGET\"");
+        let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess);
+        for tool in ["Bash", "BASH"] {
+            let mut person = Person::saying(true);
+            match policy.authorize(tool, &aimed, Some(&mut person)) {
+                PermissionOutcome::Deny { reason } => {
+                    assert!(reason.contains(&bait.pid().to_string()), "{tool}: {reason}");
+                }
+                PermissionOutcome::Allow => panic!("{tool}: the guard let `pkill` at the window through"),
+            }
+            assert!(person.asked.is_empty(), "{tool}: a refusal is not a question");
+            match policy.authorize(tool, &unknown, None) {
+                PermissionOutcome::Deny { reason } => assert!(reason.contains("yes"), "{tool}: {reason}"),
+                PermissionOutcome::Allow => panic!("{tool}: an unasked kill ran with nobody to ask"),
+            }
+        }
+    }
+
+    /// Where the mode or a rule would run the call without asking — full
+    /// access, the allow mode, an allow rule for it — a kill that needs a
+    /// person's yes is refused unasked, as the window's hook refuses it
+    /// (t-82420): a question there is one nobody expects, and an unanswered
+    /// one stalls the turn. The refusal says what to do instead. The targets
+    /// are a process this test set loose, by its pid and by a pid read at run
+    /// time.
+    #[test]
+    fn kill_guard_authorize_refuses_unasked_where_the_mode_or_a_rule_would_run_the_call() {
+        let window = Bait::start(40);
+        let orphan = Orphan::start(41);
+        let pid_file = std::env::temp_dir().join(format!("{}.pid", orphan.marker));
+        std::fs::write(&pid_file, orphan.pid.to_string()).expect("the pid file is written");
+        let _window = GuardEnv::window(window.pid());
+        let kill_rule = crate::RuntimePermissionRuleConfig::new(
+            vec!["bash(kill:*)".to_string()],
+            Vec::new(),
+            Vec::new(),
+        );
+        let unasked = [
+            ("danger-full-access", PermissionPolicy::new(PermissionMode::DangerFullAccess)),
+            ("allow", PermissionPolicy::new(PermissionMode::Allow)),
+            (
+                "workspace-write with an allow rule",
+                PermissionPolicy::new(PermissionMode::WorkspaceWrite).with_permission_rules(&kill_rule),
+            ),
+        ];
+        for command in [format!("kill {}", orphan.pid), format!("kill $(cat {})", pid_file.display())] {
+            for (what, policy) in &unasked {
+                let mut person = Person::saying(true);
+                match policy.authorize("bash", &bash(&command), Some(&mut person)) {
+                    PermissionOutcome::Deny { reason } => {
+                        assert!(reason.contains("no person said yes"), "{what}, `{command}`: {reason}");
+                        assert!(
+                            reason.contains("its pid as a number"),
+                            "{what}, `{command}`: the refusal says what to do instead: {reason}"
+                        );
+                    }
+                    PermissionOutcome::Allow => panic!("{what}: `{command}` was allowed"),
+                }
+                assert!(
+                    person.asked.is_empty(),
+                    "{what}, `{command}`: nobody is asked where the mode runs the call unasked"
+                );
+            }
+        }
+        assert!(orphan.alive(), "nothing ran, so the orphan lives");
+        let _ = std::fs::remove_file(&pid_file);
+    }
+
+    /// What t-82420 keeps: where the mode would ask anyway the kill is still
+    /// put to a person, once and for this call; a signal to the window is
+    /// refused in every mode; and zo's own child is zo's to end.
+    #[test]
+    fn kill_guard_authorize_still_asks_where_the_mode_would_and_keeps_its_deny_and_allow() {
+        let window = Bait::start(43);
+        let own = Bait::start(44);
+        let orphan = Orphan::start(45);
+        let _window = GuardEnv::window(window.pid());
+
+        let loose = bash(&format!("kill {}", orphan.pid));
+        let mut yes = Person::saying(true);
+        assert_eq!(
+            PermissionPolicy::new(PermissionMode::Prompt).authorize("bash", &loose, Some(&mut yes)),
+            PermissionOutcome::Allow,
+            "the person said yes"
+        );
+        assert_eq!(yes.asked.len(), 1, "one question");
+        assert!(yes.asked[0].person_only, "only a person may answer it");
+
+        let aimed = bash(&format!("kill {}", window.pid()));
+        for mode in EVERY_MODE {
+            let mut person = Person::saying(true);
+            match PermissionPolicy::new(mode).authorize("bash", &aimed, Some(&mut person)) {
+                PermissionOutcome::Deny { reason } => {
+                    assert!(reason.contains(&window.pid().to_string()), "{mode:?}: {reason}");
+                }
+                PermissionOutcome::Allow => panic!("{mode:?} let a signal to the window through"),
+            }
+            assert!(person.asked.is_empty(), "{mode:?}: a refusal is not a question");
+        }
+
+        let mut person = Person::saying(false);
+        assert_eq!(
+            PermissionPolicy::new(PermissionMode::DangerFullAccess).authorize(
+                "bash",
+                &bash(&format!("kill {}", own.pid())),
+                Some(&mut person)
+            ),
+            PermissionOutcome::Allow,
+            "zo's own child is zo's to end"
+        );
+        assert!(person.asked.is_empty(), "nobody is asked about zo's own child");
+        assert!(orphan.alive(), "nothing ran, so the orphan lives");
     }
 
     #[test]

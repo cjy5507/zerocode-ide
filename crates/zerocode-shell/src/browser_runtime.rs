@@ -74,10 +74,16 @@ pub(super) fn browsable_target(parsed: &tauri::Url) -> bool {
 /// same script — a pane it opened would attach to a window it cannot see,
 /// and a pane it closed would be somebody else's.
 pub(super) fn from_the_main_webview(webview: &tauri::Webview) -> Result<(), String> {
+    only_the_main_webview(webview, "브라우저 판은 메인 창만 조종합니다")
+}
+
+/// [`from_the_main_webview`], refused in the words of the command that
+/// asked — a command that is not the browser's says what it is.
+pub(super) fn only_the_main_webview(webview: &tauri::Webview, refused: &str) -> Result<(), String> {
     if webview.label() == "main" {
         Ok(())
     } else {
-        Err("브라우저 판은 메인 창만 조종합니다".to_string())
+        Err(refused.to_string())
     }
 }
 

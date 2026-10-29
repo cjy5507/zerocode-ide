@@ -220,7 +220,7 @@ pub(crate) fn refusal_said(refusal: &Refusal) -> String {
     let minutes = zerocode_core::orchestration::minutes_up;
     match refusal {
         Refusal::Resting { until_ms } => format!(
-            "한도 벽에 막혀 쉬는 중입니다 — 약 {}분 뒤에 다시 시도합니다",
+            "사용 한도에 닿아 쉬는 중입니다 — 약 {}분 뒤에 다시 시도합니다",
             minutes(until_ms.saturating_sub(now_ms))
         ),
         Refusal::Running => "같은 일이 이미 돌고 있습니다".to_string(),

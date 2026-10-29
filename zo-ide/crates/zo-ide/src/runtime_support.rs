@@ -450,6 +450,7 @@ pub(crate) fn build_runtime_with_plugin_state(
     let permission_started = std::time::Instant::now();
     let policy = permission_policy(permission_mode, &feature_config, &tool_registry)
         .map_err(|error| format!("startup stage permission-policy: {error:?}"))?;
+    crate::conversation_support::queue_unknown_rule_warnings(&feature_config, &tool_registry);
     log_boot_stage("permission-policy", permission_started);
     // Derive context_window and model-family context policy from the actual
     // selected model so compaction thresholds match the real model limits (not
@@ -1498,29 +1499,57 @@ fn apply_model_wire_env() {
     connect_model_catalog();
 }
 
+/// Lines for a person, queued because the layer that learns them runs before
+/// any renderer exists; the front-end drains them at its first opportunity.
+/// A line already waiting is not queued twice.
+struct NoticeQueue(std::sync::Mutex<Vec<String>>);
+
+impl NoticeQueue {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(Vec::new()))
+    }
+
+    fn push(&self, text: String) {
+        let mut notices = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !notices.contains(&text) {
+            notices.push(text);
+        }
+    }
+
+    fn drain(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+
 /// Notices the catalog layer wants a person to see once — a family alias that
-/// moved, moves a `notify` policy withheld, a settings migration. Queued here
-/// because the layer runs before any renderer exists; the front-end drains it
-/// at its first opportunity ([`drain_catalog_notices`]).
-static CATALOG_NOTICES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// moved, moves a `notify` policy withheld, a settings migration
+/// ([`drain_catalog_notices`]).
+static CATALOG_NOTICES: NoticeQueue = NoticeQueue::new();
+
+/// Warnings the runtime build found in the person's settings — a permission
+/// rule that names no zo tool (t-81312). Said at the warning level, before
+/// the boot ends ([`drain_startup_warnings`]).
+static STARTUP_WARNINGS: NoticeQueue = NoticeQueue::new();
 
 pub fn push_catalog_notice(text: impl Into<String>) {
-    let text = text.into();
-    let mut notices = CATALOG_NOTICES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !notices.contains(&text) {
-        notices.push(text);
-    }
+    CATALOG_NOTICES.push(text.into());
 }
 
 #[must_use]
 pub fn drain_catalog_notices() -> Vec<String> {
-    std::mem::take(
-        &mut *CATALOG_NOTICES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    )
+    CATALOG_NOTICES.drain()
+}
+
+pub fn push_startup_warning(text: impl Into<String>) {
+    STARTUP_WARNINGS.push(text.into());
+}
+
+#[must_use]
+pub fn drain_startup_warnings() -> Vec<String> {
+    STARTUP_WARNINGS.drain()
 }
 
 /// The alias moves announced on the previous publish ([`alias_moves_key`]),
