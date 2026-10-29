@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>fixture checkout (autocomplete marks)</title>
+<form id="checkout" action="/checkout" method="post">
+  <input name="f1" autocomplete="shipping given-name" placeholder="First">
+  <input name="f2" autocomplete="shipping family-name" placeholder="Last">
+  <input name="f3" autocomplete="shipping address-line1">
+  <input name="f4" autocomplete="shipping address-line2">
+  <input name="f5" autocomplete="shipping address-level2">
+  <input name="f6" autocomplete="shipping postal-code">
+  <select name="f7" autocomplete="shipping country">
+    <option value="">--</option>
+    <option value="US">United States</option>
+    <option value="KR">Korea</option>
+  </select>
+  <input name="f8" autocomplete="tel-national">
+  <input name="f9" autocomplete="email" value="[합성-이미-쓴-값]">
+  <textarea name="f10" autocomplete="street-address" hidden></textarea>
+  <input name="pw" type="password" autocomplete="new-password">
+  <input name="otp" autocomplete="one-time-code">
+  <button type="submit">Pay</button>
+</form>
