@@ -224,3 +224,67 @@ async fn dense_stream_refuses_a_shape_it_cannot_honour() {
         assert!(refused.head.is_empty(), "{prompt}: {}", refused.head);
     }
 }
+
+/// Lines outside code fences that read as a link reference definition: a `[`
+/// and, after it, `]:` — the shape that turns off zo's stream restarts for the
+/// rest of an answer.
+fn reference_lines(text: &str) -> usize {
+    let mut fenced = false;
+    let mut count = 0;
+    for line in text.lines() {
+        if line.starts_with("```") {
+            fenced = !fenced;
+        } else if !fenced
+            && line
+                .find('[')
+                .is_some_and(|open| line[open..].contains("]:"))
+        {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// The longest run of consecutive lines that `keep` accepts.
+fn longest_run(text: &str, keep: impl Fn(&str) -> bool) -> usize {
+    let (mut longest, mut run) = (0, 0);
+    for line in text.lines() {
+        run = if keep(line) { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    longest
+}
+
+/// The three shapes that take zo's drawing off its linear road — a line that
+/// reads as a link reference definition, a long table, a long list with no
+/// blank line between its items — come only when a scene asks for them
+/// (`refdef=`, `table_rows=`, `list_items=`). With none named: no such line,
+/// tables of two rows under their head, no list.
+#[tokio::test]
+async fn dense_stream_draws_the_slow_shapes_only_when_asked() {
+    let service = MockAnthropicService::spawn().await.expect("start the mock");
+    let is_row = |line: &str| line.starts_with('|');
+    let is_item = |line: &str| line.starts_with("- ");
+
+    let plain = stream(&service, "PARITY_SCENARIO:dense_stream bytes=8192")
+        .await
+        .text();
+    assert_eq!(reference_lines(&plain), 0);
+    assert_eq!(longest_run(&plain, is_row), 2 + 2, "head, rule, two rows");
+    assert_eq!(longest_run(&plain, is_item), 0);
+
+    let asked = stream(
+        &service,
+        "PARITY_SCENARIO:dense_stream bytes=8192 refdef=1 table_rows=300 list_items=500",
+    )
+    .await
+    .text();
+    assert!(asked.len() >= 8192, "{} bytes", asked.len());
+    assert_eq!(reference_lines(&asked), 1);
+    assert_eq!(longest_run(&asked, is_row), 2 + 300);
+    assert_eq!(longest_run(&asked, is_item), 500);
+    assert_dense(&asked, 480);
+
+    let refused = stream(&service, "PARITY_SCENARIO:dense_stream table_rows=0").await;
+    assert!(refused.head.is_empty(), "{}", refused.head);
+}
