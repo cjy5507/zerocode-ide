@@ -934,6 +934,8 @@ function askRaisedWords(pane) {
       return t("board.ask.raisedSilent", "코디가 답하지 않아 올림");
     case "coordinator-gone":
       return t("board.ask.raisedGone", "코디 자리가 비어 올림");
+    case "unanswerable":
+      return t("board.ask.raisedClosed", "코디가 더는 답할 수 없어 올림");
     default:
       return "";
   }

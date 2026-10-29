@@ -148,7 +148,8 @@ pub(crate) enum Step {
     RefuseHeld,
     /// Put the question on the person's screen, saying why.
     Raise(Raised),
-    /// Forget the question: there is nobody left to answer it or to tell.
+    /// Forget the question: the pane moved past it or the person holds it,
+    /// and there is nobody left to answer it or to tell.
     Forget,
 }
 
@@ -169,7 +170,10 @@ pub(crate) fn step(
     now_ms: i64,
 ) -> Step {
     match standing {
-        Standing::Closed => return Step::Forget,
+        // Moved past, or the person holds it already: nothing to give.
+        Standing::Closed if passed || raised => return Step::Forget,
+        // The pane still asks what nobody can answer by letter any more.
+        Standing::Closed => return Step::Raise(Raised::Unanswerable),
         Standing::Answered(_) if passed => return Step::RefusePassed,
         Standing::Answered(_) if raised || seat.is_some_and(|seat| seat.taken) => {
             return Step::RefuseHeld;
@@ -1251,6 +1255,8 @@ mod tests {
             ),
             Step::RefuseHeld
         );
+        // A letter nobody can answer while the pane still asks is the
+        // person's (t-84470, r1 P3-1) — it was forgotten here before.
         assert_eq!(
             step(
                 &asked,
@@ -1261,7 +1267,7 @@ mod tests {
                 NOW,
                 NOW
             ),
-            Step::Forget
+            Step::Raise(Raised::Unanswerable)
         );
     }
 
