@@ -11019,14 +11019,39 @@ mod tests {
             block_after_css(styles, ".nav-row:disabled:hover,").contains("background: none"),
             "a row that cannot be pressed still lights up under the pointer"
         );
-        // ⌘J is the second way to this same finder, and a chord does not read
-        // a `disabled` attribute on its own — the row's refusal has to be
-        // asked again where the chord decides whether to act.
+    }
+
+    /// The worktree finder opens wherever the window stands on a project.
+    ///
+    /// ⌘J and the sidebar's search used to ask the 작업 row's git-only refusal,
+    /// from when a folder project's finder had nothing in it. It has the folder,
+    /// the recent places and the doors now, and the person pressed the search
+    /// in a folder project and got nothing (t-82495, 10-29 11:4x). Both doors
+    /// ask one refusal, which shuts only where there is no project at all —
+    /// the landing screen, whose folder is no project.
+    #[test]
+    fn the_worktree_finder_opens_wherever_a_project_stands() {
+        let window = window_source();
+        let shut = block_after(window, "function worktreeFinderShut() {");
+        assert!(
+            shut.contains("projectsRead && projects.length === 0") && !shut.contains("nav-tasks"),
+            "the finder's refusal is not \"no project\", or is the 작업 row's \
+             git-only one again:\n{shut}"
+        );
+        // A chord does not read a `disabled` attribute on its own, so the
+        // refusal is asked where the chord decides whether to act.
         let jump = block_after(window, "id: \"worktree.jump\",");
         assert!(
-            jump.contains("el(\"nav-tasks\").disabled"),
-            "the chord opens the worktree finder even where the row beside \
-             it says there is nothing to browse:\n{jump}"
+            jump.contains("worktreeFinderShut()") && !jump.contains("el(\"nav-tasks\").disabled"),
+            "⌘J does not ask the finder's own refusal, or still asks the 작업 \
+             row's, which keeps a folder project out:\n{jump}"
+        );
+        let search = block_after(window, "el(\"sidebar-search\").addEventListener(\"click\"");
+        assert!(
+            search.contains("worktreeFinderShut()")
+                && !search.contains("el(\"nav-tasks\").disabled"),
+            "the sidebar's search does not ask the finder's own refusal, or \
+             still asks the 작업 row's, which keeps a folder project out:\n{search}"
         );
     }
 
@@ -13688,9 +13713,9 @@ mod tests {
         let search = block_after(window, "el(\"sidebar-search\").addEventListener(\"click\"");
         assert!(
             search.contains("togglePalette(\"worktree\")")
-                && search.contains("el(\"nav-tasks\").disabled"),
+                && search.contains("worktreeFinderShut()"),
             "the sidebar search is not the finder's door, or forgot the \
-             nothing-to-browse refusal the chord already draws:\n{search}"
+             no-project refusal the chord already draws:\n{search}"
         );
         let options = block_after(window, "el(\"project-collapse\").addEventListener");
         assert!(
