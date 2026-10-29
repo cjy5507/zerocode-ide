@@ -135,6 +135,9 @@ function typeValueSlots() {
  * `GeneratorRoad`, held to the markup's radios by the Rust contract
  * `the_generator_road_rides_the_settings_document_and_the_card_says_whose_login`. */
 const GENERATOR_ROADS = Object.freeze(["auto", "claude_login", "codex_login", "api_key", "off"]);
+/* The two words `AgentPaneFirstView` takes (t-82038), held to the markup's
+ * radios by the Rust contract `the_agent_pane_first_view_is_one_remembered_choice`. */
+const AGENT_PANE_FIRST_VIEWS = Object.freeze(["conversation", "terminal"]);
 const GENERATOR_LOGINS = Object.freeze([
   { road: "claude_login", row: TYPE_VALUE_TABLE.claudeLogin },
   { road: "codex_login", row: TYPE_VALUE_TABLE.codexLogin },
@@ -409,6 +412,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "artifacts_auto_open_beside": true,
   "diff_side_by_side": true,
   "conversation_timeline_view": false,
+  "agent_pane_first_view": "conversation",
   "window_material": { "terminal_opacity": 1.0, "blur": false },
   "default_agent": { "kind": "auto" },
   "agent_teams_mode": "panes",
@@ -831,7 +835,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_terminal_opacity",
   "set_window_blur", "set_agent_teams_mode", "set_claude_autoswitch_mode", "set_harness_settings", "set_default_agent",
   "set_shortcut_visibility", "set_task_source_visibility", "set_keybinding",
-  "set_diff_side_by_side", "set_conversation_timeline_view", "set_confirm_close_pinned",
+  "set_diff_side_by_side", "set_conversation_timeline_view", "set_agent_pane_first_view", "set_confirm_close_pinned",
   "set_computer_live_reflex", "set_computer_generator_road", "set_computer_input_policy", "set_computer_share_required",
   "set_skip_close_terminal_with_running_process_confirm", "set_ctrl_tab_order_mode",
   "patch_workspace_creation_prefs",
@@ -1456,6 +1460,12 @@ class StatefulBackend {
       case "set_conversation_timeline_view":
         this.settings.conversation_timeline_view = args.on === true;
         keys = ["conversation_timeline_view"];
+        break;
+      case "set_agent_pane_first_view":
+        // serde's refusal of a word `AgentPaneFirstView` does not name.
+        if (!AGENT_PANE_FIRST_VIEWS.includes(args.view)) throw `unknown variant \`${args.view}\``;
+        this.settings.agent_pane_first_view = args.view;
+        keys = ["agent_pane_first_view"];
         break;
       case "set_computer_live_reflex":
         this.settings.computer_live_reflex = args.on === true;
@@ -4112,6 +4122,7 @@ const controlValue = async (page, kind) => page.evaluate((name) => {
       "[data-setup-launch-mode][aria-pressed='true']",
     )?.dataset.setupLaunchMode,
     terminal_shortcut_policy: () => document.getElementById("terminal-shortcut-policy")?.value,
+    agent_pane_first_view: () => document.querySelector("#agent-pane-first-view input:checked")?.value,
     tab_order: () => document.getElementById("ctrl-tab-order-mode")?.value,
     workspace_directory: () => document.getElementById("workspace-directory")?.value,
     nest_workspaces: () => document.getElementById("nest-workspaces")?.checked,
@@ -4236,6 +4247,7 @@ const chooseControl = async (page, kind, value) => {
       "#terminal-shortcut-policy",
       value,
     );
+    case "agent_pane_first_view": return page.check(`#agent-pane-first-view input[value="${value}"]`);
     case "tab_order": return page.selectOption("#ctrl-tab-order-mode", value);
     case "workspace_directory":
       await page.fill("#workspace-directory", value);
@@ -5069,6 +5081,56 @@ await test("Setup Script Location owns Orca's three choices and survives a canon
     "split-horizontal",
     "Setup Script Location did not survive a canonical refetch",
   );
+});
+
+// What an agent's pane opens on (t-82038, 「나는 터미널이 편한데」): two
+// radios in the terminal pane, the conversation for a person who never chose,
+// the core's two words on the wire, the value on screen before the answer and
+// the canonical document after a reopen; a refused write is put back by the
+// refetch the shared writer makes.
+await test("Agent Pane First View offers 대화 and 터미널 and survives a canonical reopen", async () => {
+  await openSettings(pageA, "terminal");
+  const offered = await pageA.locator("#agent-pane-first-view input[type=radio]").evaluateAll((radios) =>
+    radios.map((radio) => ({ value: radio.value, checked: radio.checked })));
+  assertEqual(
+    offered,
+    [{ value: "conversation", checked: true }, { value: "terminal", checked: false }],
+    "Agent Pane First View did not open on the conversation",
+  );
+  const call = await gestureAndWait(
+    pageA,
+    "A",
+    "set_agent_pane_first_view",
+    () => pageA.check('#agent-pane-first-view input[value="terminal"]'),
+  );
+  assertEqual(call.args, { view: "terminal" }, "the terminal choice sent a different wire value");
+  await reopenSettings(pageA, "A", "terminal");
+  assertEqual(
+    await controlValue(pageA, "agent_pane_first_view"),
+    "terminal",
+    "Agent Pane First View did not survive a canonical refetch",
+  );
+  assertEqual(await pageA.evaluate(() => agentPaneFirstView), "terminal", "the next pane would not open on its terminal");
+  // A refused write never stands: the radio and the next pane's side go back
+  // to what the document says, through the refetch the shared writer makes.
+  backend.rejectOnce("set_agent_pane_first_view");
+  const refusedAt = backend.calls.length;
+  await pageA.check('#agent-pane-first-view input[value="conversation"]');
+  await backend.waitForCall("A", "set_agent_pane_first_view", refusedAt);
+  await backend.waitForCall("A", "settings_snapshot", refusedAt);
+  await pageA.waitForFunction(() =>
+    document.querySelector("#agent-pane-first-view input:checked")?.value === "terminal", null, { timeout: UI_TIMEOUT });
+  await waitForSettingsIdle(pageA);
+  assertEqual(backend.settings.agent_pane_first_view, "terminal", "a refused write changed the setting");
+  assertEqual(await pageA.evaluate(() => agentPaneFirstView), "terminal", "a refused write decides the next pane");
+  // Back to everyone's default, so the persistence matrix makes its own write.
+  await gestureAndWait(
+    pageA,
+    "A",
+    "set_agent_pane_first_view",
+    () => pageA.check('#agent-pane-first-view input[value="conversation"]'),
+  );
+  assertEqual(backend.settings.agent_pane_first_view, "conversation", "the conversation choice was not stored");
 });
 
 await test("Manage Sessions lists, refreshes, and deliberately ends the native terminal pool", async () => {
@@ -10813,6 +10875,7 @@ await test("non-default writes become canonical state before the second window b
     ["teams", "set_agent_teams_mode", "off", "orchestration"],
     ["claude_autoswitch", "set_claude_autoswitch_mode", "auto", "provider-accounts"],
     ["setup_script_launch_mode", "set_setup_script_launch_mode", "split-horizontal", "terminal"],
+    ["agent_pane_first_view", "set_agent_pane_first_view", "terminal", "terminal"],
     ["terminal_shortcut_policy", "set_terminal_shortcut_policy", "terminal-first", "shortcuts"],
     ["workspace_directory", "patch_workspace_creation_prefs", "/tmp/zerocode-workspaces", "general"],
     ["nest_workspaces", "patch_workspace_creation_prefs", false, "general"],
@@ -11036,6 +11099,11 @@ await test("non-default writes become canonical state before the second window b
     "split-horizontal",
     "Setup Script Location did not persist independently",
   );
+  assertEqual(
+    backend.settings.agent_pane_first_view,
+    "terminal",
+    "the agent pane's first view did not persist independently",
+  );
   return `revision ${backend.settings.revision}`;
 });
 
@@ -11189,6 +11257,9 @@ await test("the second boot paints every non-default before opening settings", a
     setupScriptLaunchMode: document.querySelector(
       "[data-setup-launch-mode][aria-pressed='true']",
     )?.dataset.setupLaunchMode,
+    // What the next agent pane opens on is the boot's word before any pane opens.
+    agentPaneFirstView,
+    agentPaneFirstViewChecked: document.querySelector("#agent-pane-first-view input:checked")?.value,
     workspaceDirectory: document.getElementById("workspace-directory")?.value,
     nestWorkspaces: document.getElementById("nest-workspaces")?.checked,
     githubHidden: document.getElementById("task-tab-github")?.hidden,
@@ -11279,6 +11350,8 @@ await test("the second boot paints every non-default before opening settings", a
     glass: "on",
     teams: "off",
     setupScriptLaunchMode: "split-horizontal",
+    agentPaneFirstView: "terminal",
+    agentPaneFirstViewChecked: "terminal",
     workspaceDirectory: "/tmp/zerocode-workspaces",
     nestWorkspaces: false,
     githubHidden: true,

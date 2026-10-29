@@ -147,6 +147,10 @@ const BOOT = {
   // `the_conversation_timeline_view_is_one_remembered_bit` — is read by the
   // scenes that turn it on (`foldConversations`, t-81525 B1).
   conversation_timeline_view: true,
+  // The backend's default (`AgentPaneFirstView::Conversation`, t-82038): an
+  // agent's pane opens on its conversation, as every scene that reads one
+  // expects.
+  agent_pane_first_view: "conversation",
   terminal_prefs: {
     font_size: 14,
     font_family: "",
