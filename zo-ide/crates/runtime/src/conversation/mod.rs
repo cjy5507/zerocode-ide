@@ -42,7 +42,9 @@ pub use api::{
     AssistantEvent, AsyncApiClient, PromptCacheEvent, ProviderStateBlob,
     DEFAULT_STREAMING_CHANNEL_CAPACITY,
 };
-use compaction::{auto_compaction_threshold_from_env_or_policy, ContextPolicy};
+use compaction::{
+    auto_compaction_threshold_from_env_or_policy, precompaction_threshold_from_policy, ContextPolicy,
+};
 pub use compaction::{
     auto_compaction_tail_budget, auto_compaction_threshold_for_model, auto_compaction_threshold_from_env, MICROCOMPACT_MIN_OUTPUT_BYTES,
     count_progress_tool_results, final_assistant_text, AutoCompactionEvent, BudgetExhausted,
@@ -1880,9 +1882,9 @@ where
                 compaction::auto_compaction_window(context_window),
                 context_policy,
             ),
-            precompaction_input_tokens_threshold: context_policy.precompaction_threshold(
-                compaction::auto_compaction_window(context_window)
-                    .max(u64::from(FALLBACK_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD)),
+            precompaction_input_tokens_threshold: precompaction_threshold_from_policy(
+                compaction::auto_compaction_window(context_window),
+                context_policy,
             ),
             context_policy,
             full_compaction_override_percent,

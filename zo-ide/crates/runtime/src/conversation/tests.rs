@@ -13163,11 +13163,8 @@ fn a_not_worth_it_batch_at_the_precompaction_tier_yields_to_full_compaction() {
         PermissionPolicy::new(PermissionMode::DangerFullAccess),
         vec!["system".to_string()],
     );
-    // 100k is the smallest window whose ladder is not distorted by the
-    // `FALLBACK_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD` floor that
-    // `set_context_window` applies to the precompaction tier — below it the
-    // precompaction threshold would sit ABOVE the full-compaction one and the
-    // band under test would not exist.
+    // A 100k window puts the eleven results inside the band under test, the
+    // default ladder's [77k, 85k).
     runtime.set_context_window(100_000);
 
     let context_tokens = runtime.estimated_request_context_tokens();
@@ -17388,7 +17385,7 @@ fn the_sync_overflow_guard_accepts_a_retained_result_and_keeps_disk_and_memory_e
 #[test]
 fn context_breakdown_report_lists_window_split_ladder_and_headroom() {
     let _env = crate::test_env_lock();
-    std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
+    let _cleared = compaction_env_cleared();
     let mut runtime = compaction_test_runtime();
     runtime
         .session
@@ -17441,10 +17438,8 @@ fn context_breakdown_report_lists_window_split_ladder_and_headroom() {
 
 /// A 1M session's `/context` report, beside the compaction window it is
 /// measured against — which must be under the model's window, or there is no
-/// compaction-window row to check.
+/// compaction-window row to check. Callers hold `compaction_env_cleared()`.
 fn wide_context_report() -> (ConversationRuntime<NoopApiClient, StaticToolExecutor>, u64, String) {
-    std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
-    std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_WINDOW");
     let wide = runtime_for_context_policy(Some("claude-opus-4-1[1m]"), 1_000_000);
     let compaction_window = super::compaction::auto_compaction_window(wide.context_window);
     assert!(
@@ -17460,6 +17455,7 @@ fn wide_context_report() -> (ConversationRuntime<NoopApiClient, StaticToolExecut
 #[test]
 fn context_breakdown_report_keeps_a_gap_after_the_compaction_window_name() {
     let _env = crate::test_env_lock();
+    let _cleared = compaction_env_cleared();
     let (_, _, report) = wide_context_report();
     let row = report
         .lines()
@@ -17513,6 +17509,7 @@ fn ladder_percentages_of(
 #[test]
 fn context_breakdown_report_measures_the_ladder_against_the_compaction_window() {
     let _env = crate::test_env_lock();
+    let _cleared = compaction_env_cleared();
     let (wide, compaction_window, report) = wide_context_report();
     ladder_percentages_of(&wide, compaction_window, &report);
 }
@@ -17523,6 +17520,7 @@ fn context_breakdown_report_measures_the_ladder_against_the_compaction_window() 
 #[test]
 fn context_breakdown_report_keeps_in_use_on_the_model_window() {
     let _env = crate::test_env_lock();
+    let _cleared = compaction_env_cleared();
     let (mut wide, compaction_window, _) = wide_context_report();
     wide.session
         .push_user_text("word ".repeat(240_000))
@@ -17550,7 +17548,7 @@ fn context_breakdown_report_keeps_in_use_on_the_model_window() {
 #[test]
 fn context_breakdown_report_names_no_compaction_window_for_a_session_without_one() {
     let _env = crate::test_env_lock();
-    std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
+    let _cleared = compaction_env_cleared();
     let report = runtime_for_context_policy(None, 0).context_breakdown_report();
     assert!(!report.contains("Compaction window"), "{report}");
 }

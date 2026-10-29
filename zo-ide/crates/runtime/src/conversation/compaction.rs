@@ -524,6 +524,32 @@ pub(super) fn auto_compaction_threshold_from_env_or_policy(
     )
 }
 
+/// The warn (precompaction) tier on `compaction_window`: the policy's share of
+/// it, and of the fallback window only for a session with no window at all.
+///
+/// The fallback used to be a floor under every window, so a compaction window
+/// under it — an operator's `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, a model declared
+/// small, a provider-stated ceiling — put the tier over full compaction: 75k
+/// against a 40k full tier on a 50k Claude window, where the preflight
+/// compaction it arms could never come first (t-82855). The constructor and
+/// `set_context_window` both read it from here.
+pub(super) fn precompaction_threshold_from_policy(
+    compaction_window: u64,
+    policy: ContextPolicy,
+) -> u64 {
+    policy.precompaction_threshold(window_or_fallback(compaction_window))
+}
+
+/// `window`, or the fallback window for a session that has none of its own
+/// (an unknown model window reads 0).
+fn window_or_fallback(window: u64) -> u64 {
+    if window == 0 {
+        u64::from(FALLBACK_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD)
+    } else {
+        window
+    }
+}
+
 /// The absolute input-token count at which full auto-compaction fires for
 /// `model` on `context_window` — the same env-or-policy resolution the
 /// conversation loop enforces. Exposed so the HUD context gauge can measure
@@ -1030,10 +1056,10 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         const COMPACTION_WINDOW: &str = "Compaction window";
         let window = self.context_window_for_guards();
         // The ladder's tiers come from the compaction window. When that is
-        // under the model's window, the ladder is a share of it and a row
-        // below names it; `In use` stays a share of the model's window.
+        // not the model's window, the ladder is a share of it and a row below
+        // names it; `In use` stays a share of the model's window.
         let compaction_window = Some(auto_compaction_window(self.context_window))
-            .filter(|compaction| (1..window).contains(compaction));
+            .filter(|&compaction| compaction > 0 && compaction != window);
         let ladder_window = compaction_window.unwrap_or(window);
         let used = self.effective_context_tokens();
         let pct = |tokens: u64, of: u64| tokens.saturating_mul(100) / of;
@@ -1068,9 +1094,11 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             let reserve = crate::memory::recall::recall_section_reserve_tokens();
             lines.push(format!("    {:<sub$}{}", "Recall reserve", kilo(reserve)));
         }
-        // Name the compaction window whenever it is under the model's, or the
-        // ladder's percentages read as shares of the window above and its
-        // "auto compact" as an unexplained policy.
+        // Name the compaction window whenever it differs from the model's —
+        // under it by the cap, or either side of it by an operator's
+        // `CLAUDE_CODE_AUTO_COMPACT_WINDOW` — or the ladder's percentages read
+        // as shares of the window above: 320% for a 1M compaction window on a
+        // 200k model.
         if let Some(compaction_window) = compaction_window {
             lines.push(format!(
                 "  {:<name$}{} tokens (ladder % of this; In use % of Window)",
@@ -1146,11 +1174,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     }
 
     fn context_window_for_guards(&self) -> u64 {
-        if self.context_window == 0 {
-            u64::from(FALLBACK_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD)
-        } else {
-            self.context_window
-        }
+        window_or_fallback(self.context_window)
     }
 
     pub(super) fn request_reaches_hard_context_ceiling(&self, context_tokens: u64) -> bool {
