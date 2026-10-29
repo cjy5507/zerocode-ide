@@ -56898,6 +56898,8 @@ suite("composer-under-question", async ({ browser, origin, ok }) => {
       for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
     });
     const second = await read();
+    // The card's own field already holds the answer's start (t-81786 r2 P3-3).
+    await page.locator(".pane-chat .pane-chat-ask .board-ask-field").fill("이름은");
     await box.click();
     await page.keyboard.type("C로");
     await page.keyboard.press("Enter");
@@ -56907,8 +56909,8 @@ suite("composer-under-question", async ({ browser, origin, ok }) => {
     await page.waitForTimeout(300);
     const meanwhile = await read();
     ok(
-      "Enter while a question's answer is on its way queues the words and says nothing about answering first (t-81786 r2 P3-1)",
-      second.card && JSON.stringify(meanwhile.sent) === JSON.stringify([["answer_ask", [{ indices: [], other: "C로" }]]]) &&
+      "the box's words follow what the card's own field already held, and Enter while that answer is on its way queues the words and says nothing about answering first (t-81786 r2 P3-1, P3-3)",
+      second.card && JSON.stringify(meanwhile.sent) === JSON.stringify([["answer_ask", [{ indices: [], other: "이름은 C로" }]]]) &&
         JSON.stringify(meanwhile.queue) === JSON.stringify(["끝나면 알려 줘"]) && meanwhile.value === "" &&
         firstToasts(meanwhile) <= firstToasts(second) && meanwhile.says === words.plain,
       JSON.stringify({ second, meanwhile, words }),

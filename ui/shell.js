@@ -14098,7 +14098,10 @@ function answerAskFromComposer(form, box, run, { card, draft }) {
   const words = box.value.trim();
   if (words === "") return;
   if (card.ask_prompt && draft) {
-    draft.other[draft.index] = words;
+    // The card's own field and the box are two places for one answer: what
+    // the field already held stays, and the box's words follow it (r2 P3-3).
+    const held = (draft.other[draft.index] ?? "").trim();
+    draft.other[draft.index] = held ? `${held} ${words}` : words;
     box.value = "";
     run.draft = "";
     form.__workerFit?.();
