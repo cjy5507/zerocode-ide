@@ -26187,14 +26187,16 @@ fn a_worker_transcript_walks_the_conversation_views_reader_for_every_provider() 
     for (agent, file, lines) in fixtures {
         let path = temp.path().join(file);
         std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("written");
-        let view = crate::cmd::terminal::transcript_log_at(&path, None).expect("the view's read");
+        let view = crate::cmd::terminal::transcript_log_at(
+            &path,
+            crate::cmd::terminal::LogRead::Tail,
+        )
+        .expect("the view's read");
         let (walked, scan) =
             crate::cmd::terminal::transcript_turns_back(&path, &ask(Window::LastTurns(20)))
                 .expect("the walk");
-        assert_eq!(
-            walked, view.turns,
-            "{agent}: the walk read what the view reads"
-        );
+        let viewed: Vec<_> = view.turns.into_iter().map(|one| one.turn).collect();
+        assert_eq!(walked, viewed, "{agent}: the walk read what the view reads");
         assert!(!scan.cut_above && !scan.skipped, "{agent}: {scan:?}");
         assert_eq!(
             (scan.covered_from, scan.covered_to, scan.read_bytes),
@@ -26488,11 +26490,23 @@ fn a_long_transcript_line_cannot_spend_outside_the_commands_read_budget() {
     let (turns, scan) = answer.expect("answered");
     assert_eq!(read, budget);
     assert!(turns.is_empty() && scan.skipped, "{scan:?}");
-    let view = crate::cmd::terminal::transcript_log_at(&path, None).expect("the view's read");
+    let view =
+        crate::cmd::terminal::transcript_log_at(&path, crate::cmd::terminal::LogRead::Tail)
+            .expect("the view's read");
+    // The newest turn is the screenshot line's, read whole, and the prompts
+    // above it are read back by turns (t-82901): the page opens on as many
+    // said turns as it gathers, the long line among them.
+    let shot = view.turns.last().expect("the screenshot line's turn");
+    assert!(
+        shot.turn.role == "tool_result" && shot.line == prompts(100).len() as u64,
+        "the page no longer reads its screenshot line whole: {} at {}",
+        shot.turn.role,
+        shot.line
+    );
     assert_eq!(
         view.turns.len(),
-        1,
-        "the page no longer reads its screenshot line whole"
+        1 + crate::shell_runtime::TRANSCRIPT_SAID_TURNS,
+        "the screenshot line, and the said turns above it"
     );
 
     // A line with no end yet, longer than both reads: inside the budget, not
@@ -26863,6 +26877,7 @@ fn a_transcript_read_retries_inside_the_one_budget_its_call_was_given() {
 /// chunk a poll — and the reads, followed to the end, cover every line.
 #[test]
 fn a_transcript_log_says_whether_the_file_goes_on() {
+    use crate::cmd::terminal::{LogRead, transcript_log_at};
     let temp = tempfile::tempdir().expect("a transcript folder");
     let path = temp.path().join("long.jsonl");
     let line = format!(
@@ -26877,38 +26892,44 @@ fn a_transcript_log_says_whether_the_file_goes_on() {
         "the fixture spans chunks"
     );
 
-    let first = crate::cmd::terminal::transcript_log_at(&path, Some(0)).expect("read");
+    let first = transcript_log_at(&path, LogRead::After(0)).expect("read");
     assert!(first.more, "the first chunk of a long file says it goes on");
     assert!(!first.folded, "a read from the start folds nothing");
     assert!(first.next > 0 && first.next < size);
 
-    // No cursor is the tail: the last chunk, whole lines only, and the turns
-    // above it declared folded — a view opened hours into a session shows the
-    // end at once instead of streaming the whole past in.
-    let tail = crate::cmd::terminal::transcript_log_at(&path, None).expect("read");
+    // No cursor is the tail: the newest turns, read back by turns, whole
+    // lines only, and the turns above them declared folded — a view opened
+    // hours into a session shows the end at once instead of streaming the
+    // whole past in (t-82901: by turns, not by the last chunk's bytes).
+    let tail = transcript_log_at(&path, LogRead::Tail).expect("read");
     assert!(
         tail.folded && !tail.more,
         "the tail read folds what stands above it and ends at the end"
     );
     assert_eq!(tail.next, size);
-    assert!(
-        !tail.turns.is_empty() && tail.turns.len() < lines,
-        "the tail is the last chunk's lines, not the file: {}",
-        tail.turns.len()
-    );
-    // Every line is the same length, so the last chunk holds exactly the
-    // whole lines that fit in it (a partial first line is skipped).
+    // Every line is one said turn of one length, so the tail is exactly the
+    // last [`TRANSCRIPT_SAID_TURNS`] lines, and it begins where the first of
+    // them does.
+    let said = crate::shell_runtime::TRANSCRIPT_SAID_TURNS;
     assert_eq!(
-        tail.turns.len() as u64,
-        crate::shell_runtime::SUBAGENT_LOG_CHUNK / (line.len() as u64),
-        "the tail starts at the first whole line inside the last chunk"
+        tail.turns.len(),
+        said,
+        "the tail is the newest said turns, not the file"
+    );
+    assert_eq!(tail.start, size - (said * line.len()) as u64);
+    assert!(
+        tail.turns
+            .iter()
+            .enumerate()
+            .all(|(at, one)| one.line == tail.start + (at * line.len()) as u64),
+        "each turn says where its line begins"
     );
 
     let mut after = 0;
     let mut turns = 0;
     let mut reads = 0;
     loop {
-        let read = crate::cmd::terminal::transcript_log_at(&path, Some(after)).expect("read");
+        let read = transcript_log_at(&path, LogRead::After(after)).expect("read");
         turns += read.turns.len();
         reads += 1;
         assert!(read.next > after, "every chunk moves the cursor");
@@ -26925,14 +26946,14 @@ fn a_transcript_log_says_whether_the_file_goes_on() {
     );
 
     std::fs::write(&path, line.repeat(3)).expect("rewritten short");
-    let short = crate::cmd::terminal::transcript_log_at(&path, Some(0)).expect("read");
+    let short = transcript_log_at(&path, LogRead::After(0)).expect("read");
     assert!(
         !short.more && short.turns.len() == 3,
         "a short file is read whole"
     );
-    let short_tail = crate::cmd::terminal::transcript_log_at(&path, None).expect("read");
+    let short_tail = transcript_log_at(&path, LogRead::Tail).expect("read");
     assert!(
-        !short_tail.folded && short_tail.turns.len() == 3,
+        !short_tail.folded && short_tail.turns.len() == 3 && short_tail.start == 0,
         "a short file's tail is the whole file, nothing folded"
     );
 }
@@ -26943,6 +26964,7 @@ fn a_transcript_log_says_whether_the_file_goes_on() {
 /// it go on.
 #[test]
 fn a_line_carrying_an_image_is_read_whole_with_its_payload_set_aside() {
+    use crate::cmd::terminal::{LogRead, transcript_log_at};
     let temp = tempfile::tempdir().expect("a transcript folder");
     let path = temp.path().join("shot.jsonl");
     let payload = "iVBORw0KGgo".repeat(40_000);
@@ -26959,8 +26981,8 @@ fn a_line_carrying_an_image_is_read_whole_with_its_payload_set_aside() {
     let mut after = 0;
     let mut turns = Vec::new();
     for _ in 0..8 {
-        let read = crate::cmd::terminal::transcript_log_at(&path, Some(after)).expect("read");
-        turns.extend(read.turns);
+        let read = transcript_log_at(&path, LogRead::After(after)).expect("read");
+        turns.extend(read.turns.into_iter().map(|one| one.turn));
         after = read.next;
         if !read.more {
             break;
@@ -26986,18 +27008,360 @@ fn a_line_carrying_an_image_is_read_whole_with_its_payload_set_aside() {
         crate::cmd::terminal::payload_at(&path, "0:12").is_err(),
         "a place that is not base64 hands back nothing"
     );
-    // The tail opens on a long last line whole.
+    // The tail opens on a long last line whole, and a read back hands back
+    // the same place for its image.
     std::fs::write(&path, format!("{said}{shot}")).expect("rewritten");
-    let tail = crate::cmd::terminal::transcript_log_at(&path, None).expect("read");
-    assert!(
-        tail.turns.iter().any(|turn| !turn.images.is_empty()),
-        "the tail's long line is read"
+    let tail = transcript_log_at(&path, LogRead::Tail).expect("read");
+    let image = tail
+        .turns
+        .iter()
+        .find_map(|one| one.turn.images.first())
+        .expect("the tail's long line is read");
+    assert_eq!(
+        crate::cmd::terminal::payload_at(&path, &image.at).expect("the payload"),
+        payload,
+        "a read back sets the payload aside at its place in the file"
     );
     // Not yet ended: nothing yet, and the cursor waits at its start.
     std::fs::write(&path, format!("{said}{}", shot.trim_end())).expect("rewritten");
     let waiting =
-        crate::cmd::terminal::transcript_log_at(&path, Some(said.len() as u64)).expect("read");
+        transcript_log_at(&path, LogRead::After(said.len() as u64)).expect("read");
     assert!(waiting.turns.is_empty() && waiting.next == said.len() as u64);
+    // The tail of that file: the said line, and the line still being written
+    // waited for at its start.
+    let tail = transcript_log_at(&path, LogRead::Tail).expect("read");
+    assert!(
+        tail.turns.len() == 1 && tail.next == said.len() as u64 && tail.more && tail.start == 0,
+        "the tail does not take a line still being written"
+    );
+}
+
+/// One block of a Claude Code conversation (t-82901): the person asks, the
+/// agent says a line and calls a tool on one record, the tool's result comes
+/// back with `output` bytes in it, and the agent answers — three said turns,
+/// five turns in all.
+fn claude_block(at: usize, output: usize) -> String {
+    format!(
+        concat!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"prompt {at}\"}}}}\n",
+            "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[",
+            "{{\"type\":\"text\",\"text\":\"looking {at}\"}},",
+            "{{\"type\":\"tool_use\",\"id\":\"call-{at}\",\"name\":\"Bash\",\"input\":{{\"command\":\"ls {at}\"}}}}]}}}}\n",
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":[",
+            "{{\"type\":\"tool_result\",\"tool_use_id\":\"call-{at}\",\"content\":\"{out}\"}}]}}}}\n",
+            "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[",
+            "{{\"type\":\"text\",\"text\":\"done {at}\"}}]}}}}\n",
+        ),
+        at = at,
+        out = "o".repeat(output),
+    )
+}
+
+/// The same block as a Codex rollout writes it: the person asks, a call, its
+/// output, a record no page draws, and the answer — two said turns, four
+/// turns in all.
+fn codex_block(at: usize, output: usize) -> String {
+    format!(
+        concat!(
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",",
+            "\"content\":[{{\"type\":\"input_text\",\"text\":\"prompt {at}\"}}]}}}}\n",
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"custom_tool_call\",\"id\":\"record-{at}\",",
+            "\"call_id\":\"call-{at}\",\"name\":\"functions.exec\",\"input\":\"ls {at}\"}}}}\n",
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"custom_tool_call_output\",\"id\":\"out-{at}\",",
+            "\"call_id\":\"call-{at}\",\"output\":\"{out}\"}}}}\n",
+            "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\"}}}}\n",
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",",
+            "\"content\":[{{\"type\":\"output_text\",\"text\":\"done {at}\"}}]}}}}\n",
+        ),
+        at = at,
+        out = "o".repeat(output),
+    )
+}
+
+/// A page opens on a long conversation's newest turns — counted by turns,
+/// not by the last chunk's bytes — and reads up from there to the first line
+/// with nothing twice and nothing between (t-82901: the person saw two or
+/// three turns of a long session and could not go up). Both vendors' files.
+#[test]
+fn a_page_opens_on_its_newest_turns_and_reads_up_to_the_first_without_a_gap_or_a_twice() {
+    use crate::cmd::terminal::{LogRead, transcript_log_at};
+    let said = crate::shell_runtime::TRANSCRIPT_SAID_TURNS;
+    let rows = crate::shell_runtime::TRANSCRIPT_BACK_ROWS;
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    let blocks = 120;
+    // Each block's tool output is a sixth of a chunk: the last chunk held a
+    // handful of turns, as it did in the person's long sessions.
+    let output = 40_000;
+    // (vendor, file, said turns a block, turns a block, the turns the tail
+    // holds: whole blocks back until the said turns are met, newest line
+    // first)
+    let cases: [(&str, String, usize, usize, usize); 2] = [
+        (
+            "claude",
+            (0..blocks).map(|at| claude_block(at, output)).collect(),
+            3,
+            5,
+            // 13 whole blocks say 39; the 14th block's answer is the 40th.
+            13 * 5 + 1,
+        ),
+        (
+            "codex",
+            (0..blocks).map(|at| codex_block(at, output)).collect(),
+            2,
+            4,
+            // 20 whole blocks say 40, the last of them its prompt.
+            20 * 4,
+        ),
+    ];
+    for (vendor, body, said_a_block, turns_a_block, tail_turns) in cases {
+        let path = temp.path().join(format!("{vendor}.jsonl"));
+        std::fs::write(&path, &body).expect("written");
+        let size = body.len() as u64;
+        // Every line, read on from the start: what the reads back must add
+        // up to.
+        let mut whole = Vec::new();
+        let mut after = 0;
+        loop {
+            let read = transcript_log_at(&path, LogRead::After(after)).expect("read");
+            whole.extend(read.turns);
+            after = read.next;
+            if !read.more {
+                break;
+            }
+        }
+        assert_eq!(whole.len(), blocks * turns_a_block, "{vendor}: every turn");
+        let tail = transcript_log_at(&path, LogRead::Tail).expect("the tail");
+        assert!(
+            said_in(&tail.turns) >= said && tail.turns.len() <= rows,
+            "{vendor}"
+        );
+        assert_eq!(
+            tail.turns.len(),
+            tail_turns,
+            "{vendor}: the tail is the newest turns until {said} are said"
+        );
+        assert!(
+            (size - tail.start) > crate::shell_runtime::SUBAGENT_LOG_CHUNK,
+            "{vendor}: the tail reaches past the last chunk"
+        );
+        assert!(tail.folded && tail.next == size && !tail.more, "{vendor}");
+        assert_eq!(tail.start, tail.turns[0].line, "{vendor}: it begins at a line");
+        // Read up, a read at a time, from where the last one began.
+        let mut held: Vec<_> = tail.turns;
+        let mut from = tail.start;
+        let mut reads = 0;
+        while from > 0 {
+            let above = transcript_log_at(&path, LogRead::Before(from)).expect("a read back");
+            reads += 1;
+            assert!(above.start < from, "{vendor}: every read back makes its way up");
+            assert!(
+                above.turns.iter().all(|one| one.line >= above.start && one.line < from),
+                "{vendor}: a read back holds only the lines above where the page held from"
+            );
+            assert!(
+                above.start == 0 || said_in(&above.turns) >= said,
+                "{vendor}: a read back short of the file's start gathers its said turns"
+            );
+            assert!(above.turns.len() <= rows, "{vendor}");
+            assert_eq!(above.folded, above.start > 0, "{vendor}");
+            assert!(above.model.is_none() && above.usage.is_none(), "{vendor}");
+            from = above.start;
+            let mut both = above.turns;
+            both.append(&mut held);
+            held = both;
+            assert!(reads <= blocks, "{vendor}: the reads reach the first line");
+        }
+        let lines = |turns: &[crate::shell_runtime::LineTurn]| {
+            turns
+                .iter()
+                .map(|one| (one.line, one.turn.role.clone(), one.turn.text.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(&held),
+            lines(&whole),
+            "{vendor}: read up to the first line, the page holds every turn once, in order"
+        );
+        assert_eq!(
+            held.iter().filter(|one| one.turn.role == "user").count(),
+            blocks,
+            "{vendor}: {said_a_block} said a block, every prompt once"
+        );
+    }
+}
+
+/// How many of a read's turns a person reads as said — by the person or by
+/// the agent.
+fn said_in(turns: &[crate::shell_runtime::LineTurn]) -> usize {
+    turns
+        .iter()
+        .filter(|one| one.turn.role == "user" || one.turn.role == "assistant")
+        .count()
+}
+
+/// A read back of a conversation that says nothing — calls and results only
+/// — stops at [`TRANSCRIPT_BACK_ROWS`] turns rather than walking the whole
+/// file for said turns it will not find.
+#[test]
+fn a_read_back_of_calls_alone_stops_at_its_row_bound() {
+    use crate::cmd::terminal::{LogRead, transcript_log_at};
+    let rows = crate::shell_runtime::TRANSCRIPT_BACK_ROWS;
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    let path = temp.path().join("calls.jsonl");
+    let line = |at: usize| {
+        format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"tool_use\",\"id\":\"call-{at:05}\",\"name\":\"Bash\",\"input\":{{\"command\":\"ls {at:05}\"}}}}]}}}}\n"
+        )
+    };
+    let count = 3 * rows;
+    let body: String = (0..count).map(line).collect();
+    std::fs::write(&path, &body).expect("written");
+    let tail = transcript_log_at(&path, LogRead::Tail).expect("the tail");
+    assert_eq!(tail.turns.len(), rows, "no said turn, so the row bound stops it");
+    assert_eq!(tail.start, ((count - rows) * line(0).len()) as u64);
+    assert!(tail.turns.iter().all(|one| one.turn.role == "tool"));
+}
+
+/// The file the reach tests read from, counting every byte read from it.
+struct CountedBytes {
+    bytes: std::io::Cursor<Vec<u8>>,
+    read: u64,
+}
+
+impl std::io::Read for CountedBytes {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let got = std::io::Read::read(&mut self.bytes, buffer)?;
+        self.read += got as u64;
+        Ok(got)
+    }
+}
+
+impl std::io::Seek for CountedBytes {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        std::io::Seek::seek(&mut self.bytes, to)
+    }
+}
+
+/// A read back takes no step past its budget once it has taken a line, reads
+/// a line it stands inside whole up to the long-line cap, and passes over a
+/// longer one — saying so, and leaving its next read a place above where it
+/// stopped — so every read back makes its way up to the first line (t-82901).
+#[test]
+fn a_read_back_keeps_its_budget_and_passes_over_a_line_too_long_to_take() {
+    use crate::cmd::terminal::{BackReach, transcript_log_back};
+    let said = |words: &str| {
+        format!("{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{words}\"}}}}\n")
+    };
+    let result = |len: usize| {
+        format!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"c\",\"content\":\"{}\"}}]}}}}\n",
+            "r".repeat(len)
+        )
+    };
+    let reach = BackReach {
+        step: 64,
+        said: 1_000,
+        rows: 1_000,
+        budget: 1_024,
+        long_line: 4_096,
+    };
+    let back = |body: &str, end: Option<u64>, reach: BackReach| {
+        let mut file = CountedBytes {
+            bytes: std::io::Cursor::new(body.as_bytes().to_vec()),
+            read: 0,
+        };
+        let size = body.len() as u64;
+        let log = transcript_log_back(
+            &mut file,
+            size,
+            end.unwrap_or(size),
+            reach,
+            zerocode_core::transcript::Detail::Clipped,
+        )
+        .expect("a read back");
+        (log, file.read)
+    };
+
+    // The budget: lines of a step's size, no said bound met — it stops at
+    // the first step past its budget, and every turn it took is whole.
+    let body: String = (0..64).map(|at| said(&format!("line {at:03} {}", "w".repeat(16)))).collect();
+    let (log, read) = back(&body, None, reach);
+    assert!(read >= reach.budget && read < reach.budget + reach.step, "{read} bytes read");
+    assert!(!log.turns.is_empty() && log.start > 0 && !log.skipped);
+    assert!(
+        body.len() as u64 - log.start <= read,
+        "it took only lines it read whole"
+    );
+
+    // A line it stands inside with none taken is read whole past the budget,
+    // up to the long-line cap; the line above waits for the next read.
+    let long = result(3_000);
+    let body = format!("{}{long}", said("above"));
+    let (log, read) = back(&body, None, reach);
+    assert!(read > reach.budget, "the long line is read whole: {read} bytes");
+    let roles: Vec<&str> = log.turns.iter().map(|one| one.turn.role.as_str()).collect();
+    assert_eq!(roles, ["tool_result"], "the long line, whole");
+    assert!(log.start == said("above").len() as u64 && log.folded && !log.skipped);
+
+    // A line past the cap is passed over and said; the lines around it are
+    // read, each once.
+    let longer = result(6_000);
+    let body = format!("{}{longer}{}", said("above"), said("below"));
+    let wide = BackReach { budget: 64 * 1_024, ..reach };
+    let (log, _) = back(&body, None, wide);
+    let words: Vec<&str> = log.turns.iter().map(|one| one.turn.text.as_str()).collect();
+    assert_eq!(words, ["above", "below"], "the long line is passed over");
+    assert!(log.skipped && log.start == 0);
+
+    // With the budget spent, a read stops under that line; the reads after
+    // it pass it over — one says so and stops inside it, the next goes on
+    // from there — and reach the line above it, once.
+    let (first, _) = back(&body, None, reach);
+    let words: Vec<&str> = first.turns.iter().map(|one| one.turn.text.as_str()).collect();
+    assert_eq!(words, ["below"]);
+    assert_eq!(first.start, (said("above").len() + longer.len()) as u64);
+    let mut from = first.start;
+    let mut above = Vec::new();
+    let mut passed = false;
+    for _ in 0..64 {
+        if from == 0 {
+            break;
+        }
+        let (log, read) = back(&body, Some(from), reach);
+        assert!(log.start < from, "a read back from {from} made no way up");
+        assert!(read <= reach.long_line + reach.step, "{read} bytes read");
+        passed |= log.skipped;
+        above.extend(log.turns.into_iter().map(|one| one.turn.text));
+        from = log.start;
+    }
+    assert_eq!(from, 0, "the reads reach the first line");
+    assert!(passed, "a read said it passed over the long line");
+    assert_eq!(above, ["above"], "the line above the long one, once");
+
+    // A line still being written at the end is not taken: the answer waits
+    // at its start.
+    let body = format!("{}{}", said("whole"), said("half").trim_end());
+    let (log, _) = back(&body, None, reach);
+    assert!(log.turns.len() == 1 && log.next == said("whole").len() as u64 && log.more);
+}
+
+/// A page's ask names a cursor or a place, never both; and a place past the
+/// file's end — the file was replaced under the page — is refused rather
+/// than read as another conversation's turns.
+#[test]
+fn a_read_names_a_cursor_or_a_place_and_a_replaced_file_is_refused() {
+    use crate::cmd::terminal::{LogRead, transcript_log_at};
+    assert_eq!(LogRead::asked(None, None), Ok(LogRead::Tail));
+    assert_eq!(LogRead::asked(Some(7), None), Ok(LogRead::After(7)));
+    assert_eq!(LogRead::asked(None, Some(7)), Ok(LogRead::Before(7)));
+    assert!(LogRead::asked(Some(7), Some(9)).is_err());
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    let path = temp.path().join("short.jsonl");
+    std::fs::write(&path, claude_block(0, 8)).expect("written");
+    let size = std::fs::metadata(&path).expect("size").len();
+    assert!(transcript_log_at(&path, LogRead::Before(size + 1)).is_err());
+    let all = transcript_log_at(&path, LogRead::Before(size)).expect("read back");
+    assert!(all.turns.len() == 5 && all.start == 0 && !all.folded);
 }
 
 /// A pane's 「대화」 hands its conversation to a wire only when the screen

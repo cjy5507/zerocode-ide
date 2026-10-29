@@ -329,6 +329,29 @@ pub(crate) fn wire_log(
     wire_runtime::log_of(&session, after)
 }
 
+/// What stands above a session's page (t-82901): the turns of the transcript
+/// of the pane this session continues whose lines end at `before` — the
+/// page's 「이전 기록 더 보기」, read back down the pane door's own road and
+/// marked as it marks them. The window names a session, never a path; a
+/// session that continues no pane has nothing above its first turn.
+#[tauri::command(async)]
+pub(crate) fn wire_history(
+    state: State<'_, AppState>,
+    id: wire_runtime::WireId,
+    before: u64,
+) -> Result<SubagentLog, String> {
+    let session = state.shell_runtime().wires.get(id)?;
+    let Some(path) = wire_runtime::history_of(&session) else {
+        return Ok(SubagentLog::not_found(before));
+    };
+    let mut log = crate::cmd::terminal::transcript_log_at(
+        &path,
+        crate::cmd::terminal::LogRead::Before(before),
+    )?;
+    restart_nudge_runtime::mark_window_notes(log.turns.iter_mut().map(|one| &mut one.turn));
+    Ok(log)
+}
+
 /// One picture of a session's page, by its place — a key the wire kept a
 /// tool's picture under (`wire:<n>`), or a place in the transcript of the
 /// pane the session continues, read through the pane door's own check (base64

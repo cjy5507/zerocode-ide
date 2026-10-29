@@ -2693,6 +2693,12 @@ pub(crate) fn remember_history(session: &WireSession, path: std::path::PathBuf) 
     }
 }
 
+/// The transcript of the pane this session continues, if it continues one:
+/// where the turns above its page's first stand (t-82901).
+pub(crate) fn history_of(session: &WireSession) -> Option<std::path::PathBuf> {
+    session.state.lock().ok()?.history.clone()
+}
+
 /// The window log's line for a pane handing its conversation to a wire —
 /// the receipt (how long the screen took to leave) or the refusal (why it
 /// kept it), beside the resume line's vocabulary (`term N …`).

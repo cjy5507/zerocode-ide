@@ -37230,8 +37230,11 @@ mod tests {
         // Both doors read down one road: the helper's file and the pane's own
         // transcript (`pane_log`, the terminal's conversation view) go through
         // `transcript_log_at`, and the pane door names a pane, never a path.
+        // What each asks — on from a cursor, back from a place, or neither — is
+        // read by one rule (t-82901).
         assert!(
-            reading.contains("transcript_log_at(&path, after)"),
+            reading.contains("let read = LogRead::asked(after, before)?;")
+                && reading.contains("transcript_log_at(&path, read)"),
             "the helper page reads its file down a road of its own:\n{reading}"
         );
         // What the vendor wrote beside that file about the helper is found from the
@@ -37253,21 +37256,66 @@ mod tests {
         assert!(
             !pane.contains("path: String")
                 && pane.contains("pane_transcript::pane_transcript(&state, term)")
-                && pane.contains("transcript_log_at(&path, after)"),
+                && pane.contains("let read = LogRead::asked(after, before)?;")
+                && pane.contains("transcript_log_at(&path, read)"),
             "the pane's conversation door names a file, or reads it down another road:\n{pane}"
         );
-        // `transcript_log_at` is the page's chunk of the one windowed reader,
-        // clipped for its cells and with its long-line road; and
-        // `worker-transcript` reads down that same reader (t-6742) — never a
-        // walk of its own over the file — with the texts whole for its
-        // masks, and no road past its own budget.
+        // A session's page reads what stands above it — the transcript of the
+        // pane it continues — down the same road, naming a session, never a
+        // path (t-82901).
+        let history = block_after(include_str!("../../src/cmd/wire.rs"), "fn wire_history(");
+        assert!(
+            !history.contains("path: String")
+                && history.contains("wire_runtime::history_of(&session)")
+                && history.contains("crate::cmd::terminal::transcript_log_at(")
+                && history.contains("crate::cmd::terminal::LogRead::Before(before)"),
+            "a session's page reads what stands above it down a road of its own:\n{history}"
+        );
+        // `transcript_log_at` is the page's chunk of the one windowed reader
+        // from a cursor, clipped for its cells and with its long-line road;
+        // with no cursor, or from a place, it reads back by turns within the
+        // page's reach (t-82901: the last chunk was two or three turns of a
+        // long session). `worker-transcript` reads down the windowed reader
+        // (t-6742) — never a walk of its own over the file — with the texts
+        // whole for its masks, and no road past its own budget.
         let door = block_after(shipped, "fn transcript_log_at(");
         assert!(
             door.contains("transcript_log_window(")
                 && door.contains("SUBAGENT_LOG_CHUNK,")
                 && door.contains("Some(LONG_LINE_CAP),")
-                && door.contains("zerocode_core::transcript::Detail::Clipped"),
-            "the page's read no longer goes down the windowed reader:\n{door}"
+                && door.contains("zerocode_core::transcript::Detail::Clipped")
+                && door.contains(
+                    "LogRead::Tail => transcript_log_back(&mut file, size, size, PAGE_REACH, detail),"
+                )
+                && door.contains("LogRead::Before(before) if before > size =>")
+                && door.contains(
+                    "LogRead::Before(before) => transcript_log_back(&mut file, size, before, PAGE_REACH, detail),"
+                ),
+            "the page's read no longer goes down the windowed reader, or opens on a chunk's bytes:\n{door}"
+        );
+        let reach = block_after(shipped, "const PAGE_REACH: BackReach = BackReach {");
+        assert!(
+            reach.contains("step: SUBAGENT_LOG_CHUNK,")
+                && reach.contains("said: TRANSCRIPT_SAID_TURNS,")
+                && reach.contains("rows: TRANSCRIPT_BACK_ROWS,")
+                && reach.contains("budget: TRANSCRIPT_BACK_BUDGET,")
+                && reach.contains("long_line: LONG_LINE_CAP,"),
+            "the page's read back reaches by numbers of its own:\n{reach}"
+        );
+        // The read back is handed its file and never opens one; it decodes a
+        // line at a time down the same helpers the windowed reader takes, and
+        // only a read from the file's end names a model and a context.
+        let back = block_after(shipped, "fn transcript_log_back<");
+        assert!(
+            back.contains("let newest = end == size;")
+                && back.contains("line_text(&below[first + span.start..first + span.end], at)")
+                && back.contains("line_turns(&text, at, detail)")
+                && back.contains("if newest {")
+                && back.contains("if said >= reach.said || rows >= reach.rows {")
+                && back.contains("if spent >= reach.budget && !inside {")
+                && !back.contains("File::open")
+                && !back.contains("metadata("),
+            "the read back decodes a line its own way, or reads past its reach:\n{back}"
         );
         // The verb opens its file ONCE and takes its size from that open
         // file; every read of the call is made on it (t-6742 R3).
@@ -37314,10 +37362,14 @@ mod tests {
         // place in the file (t-6323 A8), and a line past the read is read
         // whole instead of dropped — on the road that names a cap for it.
         // The reader is handed its file and never opens one.
+        let lines = block_after(shipped, "fn lines_log(");
+        let text = block_after(shipped, "fn line_text(");
         assert!(
             reading.contains("zerocode_core::transcript::complete_transcript_chunk(")
-                && reading.contains("zerocode_core::transcript::elide_payloads(chunk.bytes, base)")
-                && reading.contains("String::from_utf8_lossy(&bytes)")
+                && reading.contains("lines_log(chunk.bytes, base, detail)")
+                && lines.contains("line_text(&bytes[span], at)")
+                && text.contains("zerocode_core::transcript::elide_payloads(line, at)")
+                && text.contains("String::from_utf8_lossy(&bytes)")
                 && reading.contains("u64::try_from(chunk.consumed)")
                 && reading.contains("&& let Some(cap) = long_lines")
                 && reading.contains(
@@ -37351,10 +37403,12 @@ mod tests {
         );
 
         // What a line MEANS is core's, not this file's: one owner for the
-        // shape of a transcript.
+        // shape of a transcript, a line at a time for every read.
+        let turns = block_after(shipped, "fn line_turns(");
         assert!(
-            reading.contains("zerocode_core::transcript::turns_in_with(&text, detail)"),
-            "the shell grew its own reader of a transcript line:\n{reading}"
+            turns.contains("zerocode_core::transcript::turns_in_with(text, detail)")
+                && lines.contains("line_turns(&text, at, detail)"),
+            "the shell grew its own reader of a transcript line:\n{turns}"
         );
     }
 
