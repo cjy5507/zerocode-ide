@@ -13702,6 +13702,11 @@ function paneHeadNode() {
   name.type = "button";
   name.className = "pane-head-name";
   name.dataset.tip = t("tree.menu.rename", "이름 바꾸기");
+  // Its name is the pane's, the words it shows; what a press does is said
+  // beside it, for a screen reader as the tooltip says it to a pointer, and
+  // Enter on it is its own (t-81786 P3-11).
+  name.setAttribute("aria-description", name.dataset.tip);
+  name.dataset.keyboardOwner = "true";
   name.addEventListener("click", () => {
     const tab = [...paneHeads].find(([, one]) => one === head)?.[0];
     const owner = tabs.find((one) => one.id === tab);
