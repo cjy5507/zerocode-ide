@@ -712,13 +712,28 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
         .state::<crate::AppState>()
         .local_data_root()
         .join(crate::app_paths::artifact_file::WORKER_QUESTIONS);
-    take_up(app, &path, now_ms);
+    let waiting = std::mem::take(&mut memory().get_or_insert_with(|| read_kept(&path)).waiting);
     let gone: Vec<(String, Left)> = left()
         .iter()
         .map(|(question, was)| (question.clone(), was.clone()))
         .collect();
+    let carried: Vec<(u32, Asked)> = asked()
+        .iter()
+        .filter(|(_, standing)| matches!(standing.filed, Filing::Filed(_)) && !standing.typed)
+        .map(|(term, standing)| (*term, standing.clone()))
+        .collect();
+    // The beat's one reading of the ledger — none while nothing waits on it.
+    let facts = if waiting.is_empty() && gone.is_empty() && carried.is_empty() {
+        Facts::default()
+    } else {
+        crate::orchestration::read_questions(|ledger| {
+            Facts::read(ledger, &waiting, &gone, &carried)
+        })
+        .unwrap_or_default()
+    };
+    take_up(app, waiting, &facts, now_ms);
     for (question, was) in gone {
-        match crate::orchestration::question_standing(&was.seat.run, &question) {
+        match facts.standing(&was.seat.run, &question) {
             Standing::Waiting => {}
             // Given to the person: nobody to tell.
             Standing::Answered(words) if hands_to_person(&words) => {
@@ -753,10 +768,85 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
                     let_go_typed(term);
                 }
             }
-            Filing::Filed(question) => carry(app, term, &standing, question, now_ms),
+            Filing::Filed(question) => {
+                // Read for at the beat's start: a question taken up since is
+                // carried from the next beat.
+                let Some(seat_now) = facts.seats.get(&term).cloned() else {
+                    continue;
+                };
+                let ledger = facts.standing(&standing.seat.run, question);
+                carry(app, term, &standing, question, seat_now, &ledger, now_ms);
+            }
         }
     }
     write_down(app, &path);
+}
+
+/// What one beat reads of the ledger for every question the window carries
+/// for a worker, in one reading ([`crate::orchestration::read_questions`]):
+/// the written-down ones waiting to be taken up, the ones a pane left, and
+/// the ones in the ledger it carries (t-84470, r1 P3-6).
+#[derive(Default)]
+struct Facts {
+    /// Where each letter stands, by run and message id.
+    standings: HashMap<(String, String), Standing>,
+    /// The worker's seat now at each pane a carried question asks at —
+    /// `None` where no live worker sits there.
+    seats: HashMap<u32, Option<AskSeat>>,
+    /// The pane each written-down worker sits at, and its seat there, by run
+    /// and worker.
+    seated: HashMap<(String, String), (u32, AskSeat)>,
+}
+
+impl Facts {
+    fn read(
+        ledger: &crate::orchestration::QuestionLedger<'_>,
+        waiting: &[Kept],
+        gone: &[(String, Left)],
+        carried: &[(u32, Asked)],
+    ) -> Self {
+        let mut facts = Self::default();
+        for kept in waiting {
+            facts.note_standing(ledger, &kept.run, &kept.question);
+            if let Some(term) = ledger.seated_term(&kept.run, &kept.worker)
+                && let Some(seat) = ledger.ask_seat(term)
+            {
+                facts
+                    .seated
+                    .insert((kept.run.clone(), kept.worker.clone()), (term, seat));
+            }
+        }
+        for (question, was) in gone {
+            facts.note_standing(ledger, &was.seat.run, question);
+        }
+        for (term, standing) in carried {
+            if let Filing::Filed(question) = &standing.filed {
+                facts.note_standing(ledger, &standing.seat.run, question);
+                facts.seats.insert(*term, ledger.ask_seat(*term));
+            }
+        }
+        facts
+    }
+
+    fn note_standing(
+        &mut self,
+        ledger: &crate::orchestration::QuestionLedger<'_>,
+        run: &str,
+        question: &str,
+    ) {
+        self.standings
+            .entry((run.to_string(), question.to_string()))
+            .or_insert_with(|| ledger.standing(run, question));
+    }
+
+    /// Where `question` of `run` stands — waiting when this beat could not
+    /// read the ledger, so the next beat looks again.
+    fn standing(&self, run: &str, question: &str) -> Standing {
+        self.standings
+            .get(&(run.to_string(), question.to_string()))
+            .cloned()
+            .unwrap_or(Standing::Waiting)
+    }
 }
 
 /// Take up what the last window wrote down as each worker sits in a pane
@@ -764,13 +854,14 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
 /// person if it was theirs; one the ledger closed is dropped, and one the
 /// pane no longer shows is left, so a late answer is refused as passed —
 /// nothing of either reaches the person's screen.
-fn take_up(app: &AppHandle, path: &Path, now_ms: i64) {
-    let waiting = std::mem::take(&mut memory().get_or_insert_with(|| read_kept(path)).waiting);
+fn take_up(app: &AppHandle, waiting: Vec<Kept>, facts: &Facts, now_ms: i64) {
     let mut later = Vec::new();
     for mut kept in waiting {
-        let standing = crate::orchestration::question_standing(&kept.run, &kept.question);
-        let seated = crate::orchestration::worker_term(&kept.run, &kept.worker)
-            .and_then(|term| crate::orchestration::worker_ask_seat(term).map(|seat| (term, seat)));
+        let standing = facts.standing(&kept.run, &kept.question);
+        let seated = facts
+            .seated
+            .get(&(kept.run.clone(), kept.worker.clone()))
+            .cloned();
         let waited_ms = seated.as_ref().map_or(0, |_| {
             now_ms.saturating_sub(*kept.seated_ms.get_or_insert(now_ms))
         });
@@ -988,13 +1079,20 @@ fn file(app: &AppHandle, host: &dyn Host, term: u32, standing: &Asked, now_ms: i
     }
 }
 
-/// One beat for a question in the ledger.
-fn carry(app: &AppHandle, term: u32, standing: &Asked, question: &str, now_ms: i64) {
-    let seat_now = crate::orchestration::worker_ask_seat(term);
-    let ledger = crate::orchestration::question_standing(&standing.seat.run, question);
+/// One beat for a question in the ledger: `seat_now` and `ledger` are what
+/// the beat's one reading found at its pane and of its letter.
+fn carry(
+    app: &AppHandle,
+    term: u32,
+    standing: &Asked,
+    question: &str,
+    seat_now: Option<AskSeat>,
+    ledger: &Standing,
+    now_ms: i64,
+) {
     let next = step(
         &standing.prompt,
-        &ledger,
+        ledger,
         standing.passed,
         seat_now.as_ref(),
         standing.raised.is_some(),
