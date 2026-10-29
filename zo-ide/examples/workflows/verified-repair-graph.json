@@ -1,0 +1,23 @@
+{
+  "name": "verified-repair-graph",
+  "description": "Inspect, repair if needed, verify, then distill repeated verified checks into memory.",
+  "mode": "graph",
+  "budget": { "max_agents": 3, "max_output_tokens": 12000 },
+  "phases": [
+    {
+      "id": "repair",
+      "prompt": "Fix the task: {input}. The preceding check returned: {item}. Inspect its failure, make the smallest correct change, and do not declare success without verification."
+    }
+  ],
+  "graph": {
+    "entry": "verify",
+    "max_steps": 9,
+    "nodes": [
+      { "kind": "check", "id": "verify", "command": "cargo test", "on_pass": "learn", "on_fail": "fix" },
+      { "kind": "agent", "id": "fix", "phase": "repair", "next": "verify", "on_error": "failed" },
+      { "kind": "dream", "id": "learn", "next": "done" },
+      { "kind": "end", "id": "done", "status": "completed" },
+      { "kind": "end", "id": "failed", "status": "failed" }
+    ]
+  }
+}

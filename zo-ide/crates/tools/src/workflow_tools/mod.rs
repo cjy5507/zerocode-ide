@@ -16,6 +16,10 @@ mod cache;
 // descendant of `workflow_tools` — so both need to be nameable from outside.
 pub(crate) mod engine;
 mod event_store;
+mod graph_store;
+mod graph_host;
+#[cfg(test)]
+mod graph_integration_tests;
 mod inspector;
 mod library;
 mod presets;
@@ -50,15 +54,16 @@ use crate::{ToolError, ToolSpec};
 use engine::{AgentBackend, RunOptions};
 use spec::{ApplyPolicy, Isolation, NormalizedWorkflow, PhaseSource, WorkflowMode, WorkflowSpec};
 
-const WORKFLOW_DESCRIPTION: &str = "Run a declarative, multi-phase agent workflow and return a structured report. \
+const WORKFLOW_DESCRIPTION: &str = "Run a declarative agent workflow and return a structured report. \
+Mode graph adds agent/check/branch/dream/end nodes with conditional edges, bounded cycles, durable checkpoints and cumulative budgets. Provide graph:{entry,max_steps,nodes}; agent nodes reference phases, check nodes use command/on_pass/on_fail, branch nodes use source/pointer/equals/on_match/on_miss, dream nodes lead to a completed end. A single agent receives the previous node output as {item}. A completed agent is not verification: use an explicit check before dreaming. Use runId for a new logical graph run or resumeFromRunId for the same spec/input; uncertain in-flight work is blocked for reconciliation, never silently retried. \
 Generalizes SpawnMultiAgent from a single flat fan-out into multi-phase fan-out → reduce → synthesize, with the intermediate results held in the engine rather than your context. \
-Input is either the spec directly, {\"spec\": <spec>, \"input\": <any>} where `input` is the workflow argument (substituted as {input}), or {\"preset\":\"cross_model_verified\", \"input\": <task>, \"coding_model\": <model>, \"review_model\": <different-model>, \"design_model\"?: <model>, \"repair_model\"?: <second-coding-model>, \"design\"?: true, \"verify_command\"?: <cmd>, \"max_rounds\"?: 3} for the built-in cross-model verification loop (`ZO_AGENT_MODEL` must be unset); add \"resumeFromRunId\" (a prior run's id) alongside `spec` or `preset` to replay completed phases from cache after editing the request. \
-Spec: {name, description?, mode?, phases:[...], budget?, synthesize?, isolation?, apply?}. \
+Input is either the spec directly, {\"spec\": <spec>, \"input\": <any>} where `input` is the workflow argument (substituted as {input}), or {\"preset\":\"cross_model_verified\", \"input\": <task>, \"coding_model\": <model>, \"review_model\": <different-model>, \"design_model\"?: <model>, \"repair_model\"?: <second-coding-model>, \"design\"?: true, \"verify_command\"?: <cmd>, \"max_rounds\"?: 3} for the built-in cross-model verification loop (`ZO_AGENT_MODEL` must be unset); add \"resumeFromRunId\" (a prior run's id) alongside `spec` or `preset` to resume the same request (legacy phases/pipeline also allow edited requests). \
+Spec: {name, description?, mode?, phases:[...], graph?, budget?, synthesize?, isolation?, apply?}. \
 A phase is {id, prompt, fanout? | over?, subagent_type?, model?, schema?}: omit both `fanout` and `over` for one agent; `model` pins that phase's agents to an explicit model while `subagent_type` still selects the agent harness/role; `fanout` is a string array (one agent per item — the value \"$input\" expands an array input); `over`:\"<earlier-phase-id>\" runs one agent per completed result of that phase. \
-Prompt tokens: {item}, {index}, {input}. An optional `schema` (JSON schema) makes each agent reply JSON, extracted into `structured` (one retry on failure, raw preserved otherwise). \
+Prompt tokens: {item}, {index}, {input}. An optional `schema` (JSON schema) makes each agent reply JSON, extracted into `structured` (one retry on failure outside graph mode, raw preserved otherwise). \
 `budget`:{max_agents} caps total agents; `synthesize`:{prompt} runs a final agent over all results ({all}). \
-A phase may set `repeat`:{max_rounds, until} to re-run itself with prior rounds' results substituted as {seen}: `until` is \"fixed\" (always max_rounds), \"no_new\" (stop once a round adds no new `dedup_by` result — loop-until-dry), or {\"command_green\":{\"command\":\"cargo test\"}} (stop once that shell command exits 0, else run max_rounds — the implement→test→repeat-until-green loop; the command runs in the working tree). \
-`mode` is \"phases\" (default) or \"pipeline\": phases run sequentially behind a barrier (items within a phase run in parallel); pipeline streams each first-phase item through all later phases as an independent chain (stage k receives that item's stage k-1 result as {item}, no cross-item barrier). \
+Outside graph mode, a phase may set `repeat`:{max_rounds, until} to re-run itself with prior rounds' results substituted as {seen}: `until` is \"fixed\" (always max_rounds), \"no_new\" (stop once a round adds no new `dedup_by` result — loop-until-dry), or {\"command_green\":{\"command\":\"cargo test\"}} (stop once that shell command exits 0, else run max_rounds — the implement→test→repeat-until-green loop; the command runs in the working tree). \
+`mode` is \"phases\" (default), \"pipeline\", or \"graph\": phases run sequentially behind a barrier (items within a phase run in parallel); pipeline streams each first-phase item through all later phases as an independent chain (stage k receives that item's stage k-1 result as {item}, no cross-item barrier). \
 `isolation` is \"none\" (default) or \"worktree\" (each agent runs in its own git worktree so parallel editors never clobber each other); with \"worktree\" set `apply`:\"sequential\" to merge every agent's diff back into the working tree (git apply --3way, in spawn order) — the default \"none\" discards the isolated changes (read/analysis fan-out). \
 For an implementation request big enough to warrant a workflow at all (multiple files or subsystems — one file or one module is direct solo work, not a workflow), build an efficient implement→verify pipeline: the `implement` agent starts with the required file inspection and local planning, actually edits files (use isolation \"worktree\"+apply \"sequential\" only when several edit in parallel; otherwise the default \"none\" edits the working tree directly), then a `verify` phase with `repeat`:{until:{command_green:{command:\"<your test command>\"}}} — produce real changes and prove they pass, never an analysis-only summary. Tell the verifier to run the requested comprehensive suite once when it passes; repeat the identical suite only after a fix or an inconclusive/unstable result. For one dependent implementation lane, do not add a standalone analysis phase; reserve one for an artifact consumed by multiple implementers. Do not set `synthesize` for a single implement→verify chain because the structured report already returns both results; synthesize only when merging multiple independent or competing outputs. \
 Use this for multi-stage work; use SpawnMultiAgent for a single flat fan-out. \
@@ -153,16 +158,44 @@ fn workflow_spec_properties() -> Value {
     json!({
         "name": { "type": "string", "minLength": 1, "description": "Short workflow name." },
         "description": { "type": "string" },
-        "mode": { "type": "string", "enum": ["phases", "pipeline"],
-            "description": "phases (default, barrier between phases) or pipeline (per-item streaming through stages)." },
-        "phases": { "type": "array", "minItems": 1, "items": workflow_phase_schema(),
+        "mode": { "type": "string", "enum": ["phases", "pipeline", "graph"],
+            "description": "phases (barriers), pipeline (streamed stages), or graph (bounded conditional control flow with durable checkpoints)." },
+        "phases": { "type": "array", "items": workflow_phase_schema(),
             "description": "Ordered phases; each phase needs an `id` and a `prompt`." },
+        "graph": graph_schema(),
         "budget": { "type": "object",
             "description": "{max_agents?, max_output_tokens?} caps (each > 0 when present)." },
         "synthesize": { "type": "object",
             "description": "{prompt} runs a final agent over all results ({all})." },
         "isolation": { "type": "string", "enum": ["none", "worktree"] },
         "apply": { "type": "string", "enum": ["none", "sequential"] }
+    })
+}
+
+fn graph_schema() -> Value {
+    let node = |kind: &str, fields: Value, required: &[&str]| {
+        let mut properties = fields.as_object().expect("object schema").clone();
+        properties.insert("id".into(), json!({"type":"string","minLength":1}));
+        properties.insert("kind".into(), json!({"const":kind}));
+        let required: Vec<_> = ["id", "kind"].into_iter().chain(required.iter().copied()).collect();
+        json!({"type":"object","additionalProperties":false,"properties":properties,"required":required})
+    };
+    let text = json!({"type":"string","minLength":1});
+    json!({
+        "type":"object", "additionalProperties":false,
+        "description":"Required for mode graph. Agent nodes reuse phases; a single agent receives the previous node output as {item}. Checks route by actual exit code; branches compare a JSON pointer in the latest named node output. Cycles stop at max_steps. Dream requires fresh passing checks and must lead directly to a completed end. Resume preserves budgets and refuses changed spec/input or uncertain in-flight work.",
+        "required":["entry","max_steps","nodes"],
+        "properties":{
+            "entry":text,
+            "max_steps":{"type":"integer","minimum":1,"maximum":10000},
+            "nodes":{"type":"array","minItems":1,"maxItems":256,"items":{"oneOf":[
+                node("agent",json!({"phase":text,"next":text,"on_error":text}), &["phase","next"]),
+                node("check",json!({"command":text,"on_pass":text,"on_fail":text}), &["command","on_pass","on_fail"]),
+                node("branch",json!({"source":text,"pointer":{"type":"string"},"equals":{},"on_match":text,"on_miss":text}), &["source","pointer","equals","on_match","on_miss"]),
+                node("dream",json!({"next":text}), &["next"]),
+                node("end",json!({"status":{"enum":["completed","failed"]}}), &["status"])
+            ]}}
+        }
     })
 }
 
@@ -216,6 +249,7 @@ fn insert_workflow_top_properties(top_properties: &mut Value, spec_properties: &
     let Some(map) = top_properties.as_object_mut() else {
         return;
     };
+    map.insert("runId".to_string(), json!({"type":"string","description":"Graph mode only, alongside a spec or library envelope (not inside a bare spec): an explicit new logical run id (letters, digits, - and _, max 128). Omit for an idempotent spec+input run. Reusing a run id resumes it; never change the spec/input of a resumed graph."}));
     map.insert(
         "spec".to_string(),
         json!({
@@ -240,7 +274,7 @@ fn insert_workflow_top_properties(top_properties: &mut Value, spec_properties: &
         "resumeFromRunId".to_string(),
         json!({
             "type": "string",
-            "description": "Resume a prior run's phase cache even though the spec/input changed (edited-spec resume): unchanged completed phases replay instantly, the rest run live. Only honored alongside `spec` or `preset`."
+            "description": "Alongside spec, preset, or library only. Graph resumes require identical spec/input and never repeat an uncertain in-flight node. Legacy phases/pipeline may reuse unchanged completed phase prefixes after editing spec/input."
         }),
     );
     insert_preset_properties(map);
@@ -348,16 +382,41 @@ pub(crate) fn run_workflow(
     // replays completed phases from `.zo/workflows/<run_id>.json` instead of
     // re-spawning them. A missing store dir disables caching (no error).
     let prepared = prepare_workflow_input(input)?;
-    let run_id = resolve_run_id(input, &prepared.spec_value, &prepared.workflow_input);
-    let file_cache = cache::FileCache::resolve(run_id.clone());
-    let semantic_cache = cache::FileSemanticCache::resolve(parent_model);
+    let validated = WorkflowSpec::from_value(&prepared.spec_value)?.validate()?;
+    if validated.mode == WorkflowMode::Graph {
+        graph_host::validate_execution_scope(&validated, parent_permission_mode,
+            crate::misc_tools::agent_tools::ledger::available())?;
+    }
+    let run_id = if validated.mode == WorkflowMode::Graph {
+        graph_host::run_id(input, &prepared.spec_value, &prepared.workflow_input)?
+    } else {
+        resolve_run_id(input, &prepared.spec_value, &prepared.workflow_input)
+    };
+    let graph_store = (validated.mode == WorkflowMode::Graph)
+        .then(|| graph_store::FileGraphStore::resolve(&run_id))
+        .transpose().map_err(ToolError::Execution)?;
+    let graph_fingerprint = if graph_store.is_some() {
+        graph_host::fingerprint(&prepared.spec_value, &prepared.workflow_input)?
+    } else { String::new() };
+    let dream = |checks: &[String], session: &str| {
+        graph_host::dream(checks, session, parent_model, parent_permission_mode)
+    };
+    let file_cache = (validated.mode != WorkflowMode::Graph)
+        .then(|| cache::FileCache::resolve(run_id.clone())).flatten();
+    let semantic_cache = (validated.mode != WorkflowMode::Graph)
+        .then(|| cache::FileSemanticCache::resolve(parent_model)).flatten();
     // Worktree isolation: build a real git provider only when the spec asks for
     // it and git is available. A failure here leaves the provider unset; the
     // engine then records an honest "ran without isolation" note. The guard
     // outlives `run` (declared before `opts`, borrowed by it).
-    let worktree_provider = spec_requests_worktree(&prepared.spec_value)
-        .then(worktree::GitWorktreeProvider::new)
-        .and_then(Result::ok);
+    let wants_worktree = if validated.mode == WorkflowMode::Graph {
+        validated.isolation == Isolation::Worktree
+    } else { spec_requests_worktree(&prepared.spec_value) };
+    let worktree_provider = wants_worktree.then(worktree::GitWorktreeProvider::new)
+        .and_then(Result::ok)
+        .map(|provider| if validated.mode == WorkflowMode::Graph {
+            provider.with_current_workspace()
+        } else { provider });
     // Live-progress sink: stamps `.zo/workflows/_active.progress.json` at each
     // topology boundary for the TUI to poll into a workflow tree. Declared before
     // `opts` so it outlives the borrow; a non-project cwd disables writes (no error).
@@ -366,13 +425,16 @@ pub(crate) fn run_workflow(
     // in parallel with the snapshot, so the run timeline is replayable/auditable
     // (`progress::read_event_log`). Tee'd through the engine's single sink seam so
     // the engine signature is unchanged. Both sinks outlive the `opts` borrow.
-    let events = progress::EventLogSink::new(run_id);
+    let events = progress::EventLogSink::new(run_id.clone());
     let tee = progress::TeeProgressSink::new(vec![&progress, &events]);
     // Verification-command runner for `repeat.until = "command_green"`: runs the
     // command in the main working tree. Declared before `opts` so it outlives
     // the borrow; harmless (never invoked) unless a phase declares command_green.
     let check = |command: &str| {
         run_check_command(command, parent_permission_mode, permission_enforcer)
+    };
+    let graph_check = |command: &str| {
+        run_check_receipt(command, parent_permission_mode, permission_enforcer)
     };
     // Wire foreground cancellation (BUG-D6): clear any stale signal from a prior
     // run, then point the engine's cancel seam at the process-global flag the TUI
@@ -390,6 +452,13 @@ pub(crate) fn run_workflow(
         opts = opts.with_worktree(provider);
     }
     opts = opts.with_progress(&tee).with_check(&check);
+    if let Some(store) = &graph_store {
+        opts.graph = Some(engine::graph::GraphRunOptions {
+            check: Some(&graph_check),
+            store, fingerprint: &graph_fingerprint,
+            session_id: parent_session_id.unwrap_or_default(), dream: Some(&dream),
+        });
+    }
     let mut backend = LiveBackend {
         parent_model: parent_model.map(str::to_string),
         parent_model_pinned,
@@ -406,7 +475,12 @@ pub(crate) fn run_workflow(
         parent_permission_mode,
         attempts: std::collections::HashMap::new(),
     };
-    run_prepared_workflow_with_backend(&prepared, &mut backend, &opts)
+    let report = engine::run(&validated, &prepared.workflow_input, &mut backend, &opts);
+    let mut value = serde_json::to_value(report).map_err(|error| ToolError::Execution(error.to_string()))?;
+    if let Some(graph) = value.get_mut("graph").and_then(Value::as_object_mut) {
+        graph.insert("run_id".to_string(), json!(run_id));
+    }
+    crate::to_pretty_json(value)
 }
 
 /// Cheap pre-parse peek: does the raw spec request `isolation:"worktree"`? Used
@@ -445,6 +519,16 @@ fn run_check_command(
     parent_permission_mode: Option<PermissionMode>,
     permission_enforcer: Option<&PermissionEnforcer>,
 ) -> i32 {
+    run_check_receipt(command, parent_permission_mode, permission_enforcer).exit_code
+}
+
+fn run_check_receipt(
+    command: &str,
+    parent_permission_mode: Option<PermissionMode>,
+    permission_enforcer: Option<&PermissionEnforcer>,
+) -> engine::graph::CheckResult {
+    use engine::graph::CheckResult;
+    let unavailable = || CheckResult { exit_code: engine::CHECK_INFRA_ERROR, ..CheckResult::default() };
     let mode = match parent_permission_mode {
         Some(
             mode @ (PermissionMode::ReadOnly
@@ -465,26 +549,32 @@ fn run_check_command(
         enforcer.check_bash(command),
         EnforcementResult::Denied { .. }
     ) {
-        return engine::CHECK_INFRA_ERROR;
+        return unavailable();
     }
 
     let input_value = json!({ "command": command });
     let Ok(input_json) = serde_json::to_string(&input_value) else {
-        return engine::CHECK_INFRA_ERROR;
+        return unavailable();
     };
     if matches!(
         enforcer.check("bash", &input_json),
         EnforcementResult::Denied { .. }
     ) {
-        return engine::CHECK_INFRA_ERROR;
+        return unavailable();
     }
 
     let Ok(input) = serde_json::from_value::<runtime::BashCommandInput>(input_value) else {
-        return engine::CHECK_INFRA_ERROR;
+        return unavailable();
     };
     match runtime::execute_bash(input) {
-        Ok(output) => interpret_check_exit(output.return_code_interpretation.as_deref()),
-        Err(_) => engine::CHECK_INFRA_ERROR,
+        Ok(output) => CheckResult {
+            exit_code: if output.interrupted || output.background_task_id.is_some() {
+                engine::CHECK_INFRA_ERROR
+            } else { interpret_check_exit(output.return_code_interpretation.as_deref()) },
+            stdout: output.stdout.chars().take(8192).collect(),
+            stderr: output.stderr.chars().take(8192).collect(),
+        },
+        Err(_) => unavailable(),
     }
 }
 
@@ -500,6 +590,7 @@ fn run_workflow_with_backend(
     run_prepared_workflow_with_backend(&prepared, backend, opts)
 }
 
+#[cfg(test)]
 fn run_prepared_workflow_with_backend(
     prepared: &PreparedWorkflowInput,
     backend: &mut dyn AgentBackend,
@@ -538,6 +629,7 @@ pub(super) fn workflow_preview(workflow: &NormalizedWorkflow) -> Value {
         "description": &workflow.description,
         "mode": workflow_mode_label(workflow.mode),
         "phase_count": workflow.phases.len(),
+        "graph": workflow.graph,
         "max_agents": workflow.max_agents,
         "max_output_tokens": workflow.max_output_tokens,
         "max_cost_usd": workflow.max_cost_usd,
@@ -570,6 +662,7 @@ pub(super) fn workflow_mode_label(mode: WorkflowMode) -> &'static str {
     match mode {
         WorkflowMode::Phases => "phases",
         WorkflowMode::Pipeline => "pipeline",
+        WorkflowMode::Graph => "graph",
     }
 }
 
@@ -1250,6 +1343,7 @@ mod tests {
 
     fn fast_opts() -> RunOptions<'static> {
         RunOptions {
+            graph: None,
             phase_timeout: Duration::from_millis(50),
             cancel: None,
             cache: None,
@@ -2111,6 +2205,7 @@ mod tests {
         let path = dir.join("e2e.events.jsonl");
         let sink = progress::EventLogSink::with_path("e2e-run".to_string(), Some(path.clone()));
         let opts = RunOptions {
+            graph: None,
             phase_timeout: Duration::from_millis(50),
             cancel: None,
             cache: None,

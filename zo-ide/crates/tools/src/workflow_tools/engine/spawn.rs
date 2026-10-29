@@ -1449,7 +1449,9 @@ pub(super) fn spawn_and_collect(
     } else {
         spawn_batched(phase, units, backend, opts, state, iso, window)
     };
-    if !refill || items.iter().all(|item| !backend.worker_is_live(&item.agent_id)) {
+    if opts.graph.is_none()
+        && (!refill || items.iter().all(|item| !backend.worker_is_live(&item.agent_id)))
+    {
         timeout_retry_pass(phase, input_text, &mut items, backend, opts, state, iso);
         if let Some(schema) = phase.schema.as_ref() {
             schema_retry_pass(phase, input_text, schema, &mut items, backend, opts, state);
@@ -1500,6 +1502,13 @@ pub(super) fn spawn_batched(
                     None
                 }
             });
+            if opts.graph.is_some() && iso.is_some() && cwd.is_none() {
+                spawned.push(Spawned {
+                    index: unit.index, item: unit.item,
+                    outcome: Err("graph refused to run without its requested worktree".to_string()),
+                });
+                continue;
+            }
             let input = phase_agent_input(
                 phase,
                 unit.index,

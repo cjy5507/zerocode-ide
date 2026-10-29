@@ -52,6 +52,7 @@ use super::worktree::WorktreeProvider;
 // verdict recorder and structured-verdict classifier the workflow engine's
 // repair loop already uses — one parser/recorder pair, two callers.
 pub(crate) mod attribution;
+pub(crate) mod graph;
 pub(crate) mod items;
 mod prompts;
 mod rolling;
@@ -207,6 +208,7 @@ pub(super) const CHECK_INFRA_ERROR: i32 = -1;
 
 /// Run-time knobs threaded into [`run`].
 pub(crate) struct RunOptions<'a> {
+    pub graph: Option<graph::GraphRunOptions<'a>>,
     /// How long each phase barrier waits before marking stragglers
     /// `still_running`.
     pub phase_timeout: Duration,
@@ -242,6 +244,7 @@ impl<'a> RunOptions<'a> {
     /// cache, and no worktree isolation.
     pub(crate) fn production() -> Self {
         Self {
+            graph: None,
             phase_timeout: phase_timeout_from_env(),
             cancel: None,
             cache: None,
@@ -334,6 +337,8 @@ impl Default for RunOptions<'_> {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct WorkflowReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph: Option<Value>,
     pub name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
@@ -744,14 +749,13 @@ pub(crate) fn run(
     // any agent spawns; the matching `Finished` follows once the report is
     // assembled. Both are no-ops when no sink is attached.
     if let Some(sink) = opts.progress {
-        let skeleton: Vec<PhaseSkeleton> = workflow
-            .phases
-            .iter()
-            .map(|phase| PhaseSkeleton {
-                id: phase.id.clone(),
-                kind: phase_kind(&phase.source),
-            })
-            .collect();
+        let skeleton: Vec<PhaseSkeleton> = workflow.graph.as_ref().map_or_else(|| {
+            workflow.phases.iter().map(|phase| PhaseSkeleton {
+                id: phase.id.clone(), kind: phase_kind(&phase.source),
+            }).collect()
+        }, |graph| graph.nodes.iter().map(|node| PhaseSkeleton {
+            id: node.id().to_string(), kind: graph::node_kind(node),
+        }).collect());
         sink.emit(ProgressEvent::Started {
             name: &workflow.name,
             description: &workflow.description,
@@ -762,6 +766,7 @@ pub(crate) fn run(
     let report = match workflow.mode {
         WorkflowMode::Phases => run_phases(workflow, input, backend, opts),
         WorkflowMode::Pipeline => run_pipeline(workflow, input, backend, opts),
+        WorkflowMode::Graph => graph::run(workflow, input, backend, opts),
     };
     if let Some(sink) = opts.progress {
         sink.emit(ProgressEvent::Finished {
@@ -784,6 +789,7 @@ fn workflow_mode_str(mode: WorkflowMode) -> &'static str {
     match mode {
         WorkflowMode::Phases => "phases",
         WorkflowMode::Pipeline => "pipeline",
+        WorkflowMode::Graph => "graph",
     }
 }
 
@@ -1180,6 +1186,7 @@ fn run_pipeline(
 
 /// Shared tail for both modes: run the optional synthesis agent, append honest
 /// outcome notes, decide the run status, and assemble the report.
+#[expect(clippy::too_many_lines, reason = "assemble the legacy workflow report and its evidence together")]
 fn finalize(
     workflow: &NormalizedWorkflow,
     reports: Vec<PhaseReport>,
@@ -1291,6 +1298,7 @@ fn finalize(
         ));
     }
     WorkflowReport {
+        graph: None,
         name: workflow.name.clone(),
         description: workflow.description.clone(),
         status: status.to_string(),
