@@ -2096,6 +2096,101 @@ mod tests {
         );
     }
 
+    /// A rule names its tool the way the person wrote it — Claude Code's
+    /// `Bash(rm:*)`, a shouted `BASH(rm:*)`, a kebab `edit-file(...)` — and
+    /// zo registers and calls the same tools as `bash` and `edit_file`. The
+    /// rule holds whatever the case or the `-`/`_` spelling, as dispatch
+    /// already reads a tool name (t-81312): in every list, the ordered form
+    /// too, and on the enforcement layer's deny check.
+    #[test]
+    fn a_rule_holds_whatever_case_or_separator_it_names_its_tool_in() {
+        let rm = r#"{"command":"rm -rf x"}"#;
+        for deny in ["Bash(rm:*)", "BASH(rm:*)"] {
+            let rules =
+                RuntimePermissionRuleConfig::new(Vec::new(), vec![deny.to_string()], Vec::new());
+            let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+                .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+                .with_permission_rules(&rules);
+            assert!(
+                matches!(
+                    policy.authorize("bash", rm, None),
+                    PermissionOutcome::Deny { ref reason } if reason.contains(deny)
+                ),
+                "deny {deny} let bash run `rm -rf x`"
+            );
+            assert!(
+                policy.deny_reason("bash", rm).is_some(),
+                "the enforcement layer's deny check missed {deny}"
+            );
+            assert_eq!(
+                policy.authorize("bash", r#"{"command":"ls"}"#, None),
+                PermissionOutcome::Allow,
+                "deny {deny} stopped a command it does not name"
+            );
+        }
+
+        let ordered = RuntimePermissionRuleConfig::new(Vec::new(), Vec::new(), Vec::new())
+            .with_rules(vec!["Bash(rm:*)=deny".to_string()]);
+        let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+            .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+            .with_permission_rules(&ordered);
+        assert!(
+            matches!(policy.authorize("bash", rm, None), PermissionOutcome::Deny { .. }),
+            "the ordered rule Bash(rm:*)=deny let bash run `rm -rf x`"
+        );
+
+        let ask = RuntimePermissionRuleConfig::new(
+            Vec::new(),
+            vec!["edit-file(*.env)".to_string()],
+            vec!["Bash(git push:*)".to_string()],
+        );
+        let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+            .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+            .with_tool_requirement("edit_file", PermissionMode::WorkspaceWrite)
+            .with_permission_rules(&ask);
+        let mut prompter = RecordingPrompter {
+            seen: Vec::new(),
+            allow: false,
+        };
+        assert!(matches!(
+            policy.authorize("bash", r#"{"command":"git push origin"}"#, Some(&mut prompter)),
+            PermissionOutcome::Deny { .. }
+        ));
+        assert_eq!(prompter.seen.len(), 1, "ask Bash(git push:*) did not ask before bash ran");
+        assert!(
+            matches!(
+                policy.authorize("edit_file", r#"{"file_path":".env"}"#, None),
+                PermissionOutcome::Deny { ref reason } if reason.contains("edit-file(*.env)")
+            ),
+            "deny edit-file(*.env) let edit_file write .env"
+        );
+    }
+
+    /// The allow side of the same rule: `Bash(git:*)` — the form every one
+    /// of a person's Claude Code allow lines takes — lets `bash` run
+    /// `git status` without a prompt, where a session would otherwise ask.
+    #[test]
+    fn an_allow_rule_naming_bash_as_claude_code_does_allows_the_call() {
+        let rules =
+            RuntimePermissionRuleConfig::new(vec!["Bash(git:*)".to_string()], Vec::new(), Vec::new());
+        let policy = PermissionPolicy::new(PermissionMode::Prompt)
+            .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+            .with_permission_rules(&rules);
+
+        assert_eq!(
+            policy.authorize("bash", r#"{"command":"git status"}"#, None),
+            PermissionOutcome::Allow,
+            "allow Bash(git:*) did not let bash run `git status`"
+        );
+        assert!(
+            matches!(
+                policy.authorize("bash", r#"{"command":"npm test"}"#, None),
+                PermissionOutcome::Deny { .. }
+            ),
+            "allow Bash(git:*) let bash run a command it does not name"
+        );
+    }
+
     #[test]
     fn decision_rule_spec_parsing_reports_actionable_errors() {
         use super::{PermissionRuleSpecError, parse_decision_rule, validate_decision_rule_spec};
