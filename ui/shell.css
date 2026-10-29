@@ -10564,6 +10564,69 @@ body.is-dragging-pane {
   color: var(--ink-chalk);
 }
 
+/* The bookmarks strip — Chrome's bookmarks bar under the toolbar, one row of
+ * the bar's own order: a bookmark is its words, a first-level folder wears
+ * the folder glyph and opens its bookmarks as a menu, and the trailing
+ * 「모든 북마크」 reaches what the row had no room for. Pane-pushing like the
+ * strips above it. */
+.browser-bookmarks {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: var(--surface-deck);
+}
+
+.browser-bookmarks-row {
+  display: flex;
+  flex: 1;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.browser-bookmark {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  /* Chrome cuts a long title on the bar too; at 12em a dozen bookmarks
+   * stand on one row of an ordinary pane. */
+  max-width: 12em;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  padding: 2px var(--space-2);
+  font: inherit;
+  font-size: var(--text-xs);
+  color: var(--ink-chalk);
+  cursor: pointer;
+}
+
+.browser-bookmark .icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ink-mist);
+}
+
+.browser-bookmark-words {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-bookmark:hover {
+  background: var(--row-hover);
+}
+
+.browser-bookmark:focus-visible {
+  outline: 2px solid var(--ink-chalk);
+  outline-offset: -2px;
+}
+
 /* Orca's DiffLineCounts (SourceControl-xYgEJ0Pk.js:512811): `shrink-0
  * tabular-nums text-[10px]`, +N in the added ink and -N in the deleted —
  * the same two tokens the diff views already speak. */
@@ -27614,6 +27677,7 @@ select {
 .prc-field,
 .browser-suggest-row,
 .browser-dl-act,
+.browser-bookmark,
 .browser-markup-tool,
 .browser-markup-width,
 .browser-markup-size,

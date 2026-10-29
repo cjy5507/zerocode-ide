@@ -83,6 +83,7 @@ mod browser_diagnose;
 mod browser_guest_runtime;
 mod browser_native_nav;
 mod browser_nav_state;
+mod browser_profile_data;
 mod browser_read;
 mod browser_runtime;
 mod browser_user_agent;
@@ -273,8 +274,8 @@ use cmd::{
     answer_secret, antigravity_usage, api_router_keys_kept, api_router_presets,
     api_router_providers, apply_ghostty_import, apply_ui_zoom, archive_trust_standing,
     automation_born_worktrees, board_columns, board_desk, board_inbox, board_settle,
-    board_snapshot, boot_after_restart, boot_report, browse_dir, browse_places, browser_click,
-    browser_console, browser_devtools, browser_diagnose, browser_eval, browser_find,
+    board_snapshot, boot_after_restart, boot_report, browse_dir, browse_places, browser_bookmarks,
+    browser_click, browser_console, browser_devtools, browser_diagnose, browser_eval, browser_find,
     browser_find_clear, browser_grab_arm, browser_grab_disarm, browser_grab_take, browser_history,
     browser_menu_take, browser_navigate, browser_network, browser_place, browser_profiles,
     browser_read, browser_reload, browser_scroll, browser_snapshot, browser_stop, browser_type,
@@ -3006,6 +3007,7 @@ fn main() -> ExitCode {
             set_browser_workspace_mode,
             cmd::browser_workspace::end_browser_workspace_regrant,
             browser_profiles,
+            browser_bookmarks,
             create_browser_profile,
             delete_browser_profile,
             set_browser_default_profile,

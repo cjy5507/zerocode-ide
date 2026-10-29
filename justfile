@@ -151,6 +151,7 @@ window-runner-test:
 # 전체 renderer interaction 계약도 CI와 로컬에서 같은 명령으로 검증된다.
 window-browser-test:
     node ui/tests/window.mjs
+    node ui/tests/browser-profile-data.mjs
 
 # Guest error/network observation must also run in a fresh protocol session.
 browser-observation-test:

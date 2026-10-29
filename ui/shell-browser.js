@@ -121,8 +121,13 @@ function browserSuggestTopAction(needle) {
  * offers the most recent visits with no search row; otherwise the top
  * action leads at most seven ranked history rows, unless its url
  * duplicates one of them, in which case the history row keeps the spot —
- * it gives Enter the same target while showing real page metadata. */
-function browserSuggestions(value) {
+ * it gives Enter the same target while showing real page metadata.
+ *
+ * The tab's profile's imported bookmarks (t-79331 ④) rank beside the visits
+ * on the same law: a bookmark has no visits and no last visit, so only a url
+ * that starts with the query lifts one, and a bookmark the history already
+ * holds stays one history row that wears the bookmark's mark. */
+function browserSuggestions(value, bookmarks = []) {
   if (new TextEncoder().encode(value).length > BROWSER_SUGGEST_QUERY_MAX_BYTES) return [];
   const needle = value.trim();
   if (needle === "" || needle === "about:blank" || needle.startsWith("data:")) {
@@ -132,12 +137,27 @@ function browserSuggestions(value) {
       .map(([url, entry]) => ({ kind: "visit", url, title: entry.title }));
   }
   const said = needle.toLowerCase();
-  const history = [...browserVisits.entries()]
-    .map(([url, entry]) => ({ url, title: entry.title, score: scoreBrowserSuggestion(url, entry, said) }))
+  const marked = new Set(bookmarks.map((one) => one.url));
+  const visited = [...browserVisits.entries()]
+    .map(([url, entry]) => ({
+      kind: marked.has(url) ? "bookmark" : "visit",
+      url,
+      title: entry.title,
+      score: scoreBrowserSuggestion(url, entry, said),
+    }));
+  const unvisited = bookmarks
+    .filter((one) => !browserVisits.has(one.url))
+    .map((one) => ({
+      kind: "bookmark",
+      url: one.url,
+      title: one.title,
+      score: scoreBrowserSuggestion(one.url, { title: one.title, count: 0, at: 0 }, said),
+    }));
+  const history = [...visited, ...unvisited]
     .filter((one) => one.score >= 0)
     .sort((left, right) => right.score - left.score)
     .slice(0, BROWSER_SUGGEST_MAX_ROWS - 1)
-    .map((one) => ({ kind: "visit", url: one.url, title: one.title }));
+    .map(({ kind, url, title }) => ({ kind, url, title }));
   const top = browserSuggestTopAction(needle);
   if (top === null || history.some((one) => one.url === top.url)) return history;
   return [top, ...history];
@@ -1719,6 +1739,15 @@ function buildBrowserView() {
   const suggest = document.createElement("div");
   suggest.className = "browser-suggest";
   suggest.hidden = true;
+  // 북마크 줄(t-79331 ④): 크롬의 즐겨찾기 바처럼 도구줄 밑에 서고, 같은
+  // 네이티브-판 이유로 판을 밀어내는 형제다. 가져온 북마크가 있는 프로필의
+  // 판에서만 선다.
+  const bookmarks = document.createElement("div");
+  bookmarks.className = "browser-bookmarks";
+  bookmarks.hidden = true;
+  bookmarks.setAttribute("role", "toolbar");
+  bookmarks.dataset.i18nAria = "browser.bookmarks";
+  bookmarks.setAttribute("aria-label", t("browser.bookmarks", "북마크"));
   // 다운로드 행(B02 ③): Orca의 알림 행처럼 툴바 밑에 서고, 같은 네이티브-판
   // 이유로 판을 밀어내는 형제다. 진행률은 없다 — tauri의 다운로드 훅은
   // 바이트 흐름을 주지 않는다(기록된 이탈).
@@ -1753,7 +1782,7 @@ function buildBrowserView() {
   closeNote.className = "browser-agent-close-note";
   closeNote.hidden = true;
   closeNote.setAttribute("role", "status");
-  host.append(bar, buildBrowserWorkspaceBar(), closeNote, artifactStripNode(), artifactHintNode(), suggest, dlbar, notes, grabbar, findbar, body);
+  host.append(bar, buildBrowserWorkspaceBar(), closeNote, artifactStripNode(), artifactHintNode(), suggest, bookmarks, dlbar, notes, grabbar, findbar, body);
   return host;
 }
 
@@ -2046,7 +2075,7 @@ function wireBrowserHost(host) {
     // The whole law — empty bar → recents, top action, seven ranked rows,
     // duplicate top dropped — lives in browserSuggestions; this hand only
     // renders what it says.
-    const rows = browserSuggestions(address.value);
+    const rows = browserSuggestions(address.value, bookmarksOf(tab));
     if (rows.length === 0) {
       closeSuggest();
       return;
@@ -2060,18 +2089,22 @@ function wireBrowserHost(host) {
       const row = document.createElement("button");
       row.type = "button";
       row.className = "browser-suggest-row";
-      row.innerHTML = icon(one.kind === "search" ? "search" : "globe");
+      row.innerHTML = icon(one.kind === "search" ? "search" : one.kind === "bookmark" ? "bookmark" : "globe");
+      if (one.kind === "bookmark") {
+        row.dataset.kind = "bookmark";
+        row.setAttribute("aria-label", t("browser.suggest.bookmark", "북마크: {{title}}", { title: one.title || one.url }));
+      }
       // Only the search row carries no url — its preview is the typed words.
       if (one.kind !== "search") row.dataset.url = one.url;
       const words = document.createElement("span");
       words.className = "browser-suggest-words";
-      words.textContent = one.kind === "visit" ? (one.title || one.url) : one.title;
+      words.textContent = one.kind === "visit" || one.kind === "bookmark" ? (one.title || one.url) : one.title;
       row.appendChild(words);
       // The subtitle speaks Orca's: the engine's words on the search row,
       // the url under a titled visit, nothing under a normalized address
       // (subtitle '', browser-address-bar-suggestions.ts:97-116).
       const sub = one.kind === "search" ? one.subtitle
-        : one.kind === "visit" && one.title ? one.url : "";
+        : (one.kind === "visit" || one.kind === "bookmark") && one.title ? one.url : "";
       if (sub) {
         const where = document.createElement("span");
         where.className = "browser-suggest-url";
@@ -4902,6 +4935,7 @@ function paintBrowserView(tab) {
       );
     }
   }
+  paintBrowserBookmarks(host.querySelector(".browser-bookmarks"), tab);
   // 찾기 스트립: tab.finding이 세우고 눕힌다 — grab 배너와 같은 형제라
   // 서면 판이 스스로 내려앉는다.
   const dlbar = host.querySelector(".browser-dlbar");
@@ -5848,6 +5882,8 @@ async function runCookieImport(family, profile, target, box) {
   // 그 프로필의 "마지막으로 가져온 곳"이 방금 달라졌다. 목록은 한 곳에서만
   // 그려지므로 설정 페이지가 열려 있든 아니든 여기서 따라 그린다.
   browserImportingId = null;
+  // 같은 누름에 옮긴 북마크가 그 프로필의 판에 바로 선다 — 다시 열 필요가 없다.
+  if (summary?.profileData) void loadBrowserBookmarks(target);
   await refreshBrowserProfiles();
   paintBrowserProfiles();
   showCookieImportSummary(target, summary, box);
@@ -5890,6 +5926,12 @@ function showCookieImportSummary(target, summary, box) {
       domains: summary.domains?.length ?? 0,
     }),
   );
+  // 같은 누름에 옮긴 프로필 자료(t-79331) — 브라우저에서 읽었을 때만 선다.
+  if (summary.profileData) {
+    line(t("browser.importProfileData", "북마크 {{bookmarks}}개 가져옴", {
+      bookmarks: summary.profileData.bookmarks,
+    }));
+  }
   // 숨기지 않는 세 가지 — Orca도 요약에 같은 셋을 신는다
   // (browser-workspace-types.ts:139-160).
   if (summary.googleCookiesSkipped > 0) {
@@ -5937,6 +5979,149 @@ function showCookieImportSummary(target, summary, box) {
 }
 
 dismissable(cookieImportPop, closeCookieImportPop, ".browser-menu", ".browser-profile-import");
+
+/* ---- 북마크 (t-79331 ④) ---------------------------------------------------
+ *
+ * 프로필마다 가져온 크롬 북마크. 시스템 손의 저장소에서 오고, 그 프로필의 판을
+ * 처음 그릴 때 한 번 묻는다; 가져오기가 끝나면 그 프로필 것만 다시 묻는다.
+ * 북마크 줄은 즐겨찾기 바를 크롬 순서대로 세우고, 폴더는 한 단계만 —
+ * 폴더 단추가 그 안의 북마크를 메뉴로 편다. 줄 끝의 「모든 북마크」가 줄에
+ * 다 서지 못한 것과 기타·모바일 북마크까지 잇는다. */
+
+const browserBookmarks = new Map();
+let browserBookmarksRevision = 0;
+
+function bookmarksOf(tab) {
+  if (!tab?.profile) return [];
+  const held = browserBookmarks.get(tab.profile);
+  if (held === undefined) {
+    void loadBrowserBookmarks(tab.profile);
+    return [];
+  }
+  return held;
+}
+
+async function loadBrowserBookmarks(profile) {
+  // 묻는 동안 빈 목록이 선다 — 그 사이의 그리기가 같은 질문을 또 하지 않게.
+  if (!browserBookmarks.has(profile)) browserBookmarks.set(profile, []);
+  let found = [];
+  try {
+    found = (await invoke("browser_bookmarks", { profile })) ?? [];
+  } catch {
+    // 북마크가 없는 것은 실패가 아니다 — 판은 줄 없이 평소처럼 쓰인다.
+    found = [];
+  }
+  browserBookmarks.set(profile, Array.isArray(found) ? found : []);
+  browserBookmarksRevision += 1;
+  for (const one of tabs) {
+    if (one.kind === "browser" && one.profile === profile && stillShowing(one)) paintBrowserView(one);
+  }
+}
+
+/* 한 뿌리의 북마크를 크롬이 보여 주는 순서의 줄로: 폴더 밖 북마크는 그대로,
+ * 첫 단계 폴더는 처음 선 자리에 한 번. */
+function bookmarkShelf(list) {
+  const shelf = [];
+  const folders = new Map();
+  for (const one of list) {
+    if (!one.folder) {
+      shelf.push({ link: one });
+      continue;
+    }
+    let folder = folders.get(one.folder);
+    if (!folder) {
+      folder = { folder: one.folder, links: [] };
+      folders.set(one.folder, folder);
+      shelf.push(folder);
+    }
+    folder.links.push(one);
+  }
+  return shelf;
+}
+
+function bookmarkWords(one) {
+  return one.title || one.url;
+}
+
+/* 한 폴더의 북마크를 메뉴로 — 폴더 단추와 「모든 북마크」가 같은 손을 쓴다. */
+function openBookmarkFolder(tab, links, at) {
+  openSidebarMenu(at.left, at.bottom + 4, links.map((one) => ({
+    label: bookmarkWords(one),
+    run: () => submitBrowserAddress(tab, one.url),
+  })));
+}
+
+/* 한 뿌리의 줄을 메뉴 행으로: 북마크는 여는 행, 폴더는 그 폴더를 펴는 행. */
+function bookmarkShelfItems(tab, shelf, at) {
+  return shelf.map((slot) => slot.link
+    ? { label: bookmarkWords(slot.link), run: () => submitBrowserAddress(tab, slot.link.url) }
+    : { label: `${slot.folder} ›`, run: () => openBookmarkFolder(tab, slot.links, at) });
+}
+
+function openAllBookmarks(tab, at) {
+  const list = bookmarksOf(tab);
+  const items = bookmarkShelfItems(tab, bookmarkShelf(list.filter((one) => one.root === "bar")), at);
+  for (const [root, key, words] of [
+    ["other", "browser.bookmarksOther", "기타 북마크"],
+    ["mobile", "browser.bookmarksMobile", "모바일 북마크"],
+  ]) {
+    const held = list.filter((one) => one.root === root);
+    if (!held.length) continue;
+    if (items.length) items.push({ separator: true });
+    items.push({ caption: t(key, words) });
+    items.push(...bookmarkShelfItems(tab, bookmarkShelf(held), at));
+  }
+  openSidebarMenu(at.left, at.bottom + 4, items);
+}
+
+function paintBrowserBookmarks(strip, tab) {
+  const list = bookmarksOf(tab);
+  strip.hidden = list.length === 0;
+  if (strip.hidden) {
+    strip.replaceChildren();
+    delete strip.dataset.key;
+    return;
+  }
+  // 같은 목록이면 다시 짓지 않는다 — 판 그리기마다 단추를 지우고 세우지 않게.
+  const key = `${tab.label}|${tab.profile}|${browserBookmarksRevision}`;
+  if (strip.dataset.key === key) return;
+  strip.dataset.key = key;
+  const row = document.createElement("div");
+  row.className = "browser-bookmarks-row";
+  for (const slot of bookmarkShelf(list.filter((one) => one.root === "bar"))) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "browser-bookmark";
+    const words = document.createElement("span");
+    words.className = "browser-bookmark-words";
+    if (slot.link) {
+      words.textContent = bookmarkWords(slot.link);
+      button.dataset.tip = slot.link.url;
+      button.addEventListener("click", () => submitBrowserAddress(tab, slot.link.url));
+    } else {
+      button.classList.add("is-folder");
+      button.innerHTML = icon("folder");
+      words.textContent = slot.folder;
+      button.setAttribute("aria-haspopup", "menu");
+      button.addEventListener("click", (event) => {
+        openBookmarkFolder(tab, slot.links, event.currentTarget.getBoundingClientRect());
+      });
+    }
+    button.appendChild(words);
+    row.appendChild(button);
+  }
+  const all = document.createElement("button");
+  all.type = "button";
+  all.className = "browser-bookmark browser-bookmarks-all";
+  all.innerHTML = icon("bookmark");
+  all.setAttribute("aria-haspopup", "menu");
+  all.dataset.i18nTitle = "browser.bookmarksAll";
+  all.dataset.i18nAria = "browser.bookmarksAll";
+  all.dataset.tip = t("browser.bookmarksAll", "모든 북마크");
+  all.setAttribute("aria-label", t("browser.bookmarksAll", "모든 북마크"));
+  all.addEventListener("click", (event) => openAllBookmarks(tab, event.currentTarget.getBoundingClientRect()));
+  strip.replaceChildren(row, all);
+}
 
 /* Tell the backend where every browser pane is and whether it may be seen —
  * the ONE place that answer is computed. The native view floats above the

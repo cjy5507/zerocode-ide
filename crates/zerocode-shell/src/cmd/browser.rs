@@ -1337,6 +1337,24 @@ pub(crate) fn set_browser_default_profile(
     choose_default_browser_profile(state.config_root(), id.as_deref())
 }
 
+/// 한 프로필로 가져온 북마크(t-79331 ④) — 그 프로필 판의 북마크 줄과 주소줄
+/// 제안이 읽는다. 가져온 적이 없으면 빈 목록이다.
+#[tauri::command(async)]
+pub(crate) fn browser_bookmarks(
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    profile: String,
+) -> Result<Vec<browser_profile_data::Bookmark>, String> {
+    from_the_main_webview(&webview)?;
+    if browser_profile_store(&profile).is_none() {
+        return Err("프로필 id가 아닙니다".into());
+    }
+    Ok(browser_profile_data::load_bookmarks(
+        state.config_root(),
+        &profile,
+    ))
+}
+
 /// 이 기계에 설치된 소스 브라우저들 — 가져오기 메뉴의 재료 (지시서 C2,
 /// Orca `detectInstalledBrowsers`).
 #[tauri::command(async)]
@@ -1365,6 +1383,7 @@ pub(crate) async fn import_browser_cookies(
         return Err("프로필 id가 아닙니다".into());
     }
     let config_root = state.config_root().to_path_buf();
+    let local_data_root = state.local_data_root().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or_else(|| "홈 디렉터리가 없습니다".to_string())?;
         let source_profile = profile.as_deref().unwrap_or("Default");
@@ -1408,9 +1427,37 @@ pub(crate) async fn import_browser_cookies(
         domains.sort();
         domains.dedup();
         browser_cookie_import::save_staged_cookies(&config_root, &target, &outcome.cookies)?;
+        // 같은 누름에 그 프로필의 북마크도 옮긴다(t-79331) — Chromium 가족만.
+        // 쿠키는 이미 앉았으니, 여기서 실패해도 가져오기는 실패가 아니다:
+        // 그 몫이 카드에서 빠지고 이유는 창 로그 한 줄에 간다.
+        let profile_data = if browser_cookie_import::is_chromium_family(&family) {
+            let carried =
+                browser_profile_data::read_chromium_profile_data(&family, source_profile, &home)
+                    .and_then(|read| {
+                        browser_profile_data::save_imported(
+                            &config_root,
+                            &target,
+                            &read,
+                            browser_cookie_import::now_unix(),
+                        )
+                    });
+            match carried {
+                Ok(counts) => Some(counts),
+                Err(error) => {
+                    note_window_event(
+                        &local_data_root,
+                        &format!("browser profile data import skipped: {error}"),
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         remember_cookie_source(&config_root, &target, &family, profile);
         let undecryptable = outcome.app_bound + outcome.decrypt_failed;
         Ok(BrowserCookieImportSummary {
+            profile_data,
             total_cookies: outcome.total,
             imported_cookies: outcome.cookies.len(),
             skipped_cookies: outcome.total - outcome.cookies.len(),
@@ -1465,6 +1512,8 @@ pub(crate) async fn import_cookie_file(
         browser_cookie_import::save_staged_cookies(&config_root, &target, &outcome.cookies)?;
         remember_file_cookie_source(&config_root, &target);
         Ok::<_, String>(BrowserCookieImportSummary {
+            // cookies.txt는 쿠키뿐이다 — 북마크·주소는 브라우저에서 가져올 때만.
+            profile_data: None,
             total_cookies: outcome.total,
             imported_cookies: outcome.cookies.len(),
             skipped_cookies: outcome.total - outcome.cookies.len(),
