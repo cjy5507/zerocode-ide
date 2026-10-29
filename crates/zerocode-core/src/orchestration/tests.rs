@@ -20467,6 +20467,7 @@ fn a_ledger_with_one_inbox() -> LedgerProjectionV1 {
             summary: None,
             coordinator: None,
             project: None,
+            folded: None,
         }],
         tasks: Vec::new(),
         dispatches: Vec::new(),
@@ -22252,6 +22253,7 @@ fn a_large_healthy_ledger_still_loads() {
             summary: None,
             coordinator: None,
             project: None,
+            folded: None,
         }],
         tasks: Vec::new(),
         dispatches: Vec::new(),
@@ -22350,6 +22352,7 @@ fn a_ledger_with_many_runs_and_many_receipts_still_loads() {
             summary: None,
             coordinator: None,
             project: None,
+            folded: None,
         });
         let mut carried = Vec::with_capacity(3);
         for _ in 0..3 {
@@ -22941,6 +22944,267 @@ fn a_sweep_is_due_on_the_hour_and_not_before() {
     assert!(bench.ledger.sweep_due(at + SWEEP_INTERVAL_MS));
     // A clock that stepped back does not make every beat a sweep.
     assert!(!bench.ledger.sweep_due(at - SWEEP_INTERVAL_MS));
+}
+
+/// A worker that talked a lot about one task, in a run that stays open: its
+/// chatter, a question with its answer, two letters nobody has read yet and
+/// its report — the chatter and the question read and acknowledged in one
+/// batch, the attempt over, and work still open in the run (t-81273).
+struct ChattyRun {
+    run: String,
+    question: String,
+    late: Vec<String>,
+    look: Decided,
+    /// The letter of the chatter the coordinator answered, when it did.
+    answered: Option<String>,
+}
+
+const CHATTER: usize = 12;
+
+/// [`ChattyRun`], its batch looked at `look_at` under `look` — the name
+/// the coordinator's `check` was filed under.
+fn a_chatty_run_still_working(bench: &mut Bench, look_at: i64, look: &str) -> ChattyRun {
+    a_chatty_run_answered(bench, look_at, look, None)
+}
+
+/// [`a_chatty_run_still_working`], with the coordinator's reply to the
+/// `answer`th letter of the chatter beside its answer to the question.
+fn a_chatty_run_answered(
+    bench: &mut Bench,
+    look_at: i64,
+    look: &str,
+    answer: Option<usize>,
+) -> ChattyRun {
+    let run = bench.json("run-create --name standing")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    let made = bench.json("task-create --spec chatter --title chatter");
+    let task = made["taskId"].as_str().expect("a task id").to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let chatter: Vec<String> = (0..CHATTER)
+        .map(|said| {
+            bench.json_at(&pane, &format!("send --type status --body progress-{said}"))["messageId"]
+                .as_str()
+                .expect("a letter of the chatter")
+                .to_string()
+        })
+        .collect();
+    let asked = bench.json_at(&pane, "send --type question --body which-way");
+    let question = asked["messageId"]
+        .as_str()
+        .expect("a question id")
+        .to_string();
+    bench.clock = bench.clock.max(look_at);
+    let looked = bench.run(&format!("check --retry-request {look}"));
+    assert_eq!(looked.reply.exit_code, 0, "{}", looked.reply.stderr);
+    let batch: serde_json::Value =
+        serde_json::from_str(&looked.reply.stdout).expect("the look's answer");
+    let delivery = batch["deliveryId"].as_str().expect("a batch").to_string();
+    bench.json(&format!(
+        "check --ack {delivery} --retry-request {look}-ack"
+    ));
+    bench.json(&format!("reply --to-message {question} --body this-way"));
+    let answered = answer.map(|said| {
+        bench.json(&format!(
+            "reply --to-message {} --body noted",
+            chatter[said]
+        ));
+        chatter[said].clone()
+    });
+    let late = (0..2)
+        .map(|said| {
+            bench.json_at(&pane, &format!("send --type status --body late-{said}"))["messageId"]
+                .as_str()
+                .expect("a late letter")
+                .to_string()
+        })
+        .collect();
+    bench.json_at(&pane, "send --type worker_done --body {\"ok\":true}");
+    let at = bench.ledger.locate(&worker).expect("the worker");
+    bench.ledger.runs[at.0].workers[at.1].state = WorkerState::Released;
+    bench.json("task-create --spec still-open --title still-open");
+    ChattyRun {
+        run,
+        question,
+        late,
+        look: looked,
+        answered,
+    }
+}
+
+/// The letters a window opening on this ledger reads for `run`.
+fn letters_read_at_start(ledger: &Ledger, run: &str) -> Vec<String> {
+    ledger
+        .export()
+        .messages
+        .into_iter()
+        .filter(|row| row.run == run)
+        .map(|row| row.id)
+        .collect()
+}
+
+/// A run a coordinator keeps open keeps every letter it ever carried, and
+/// the window read all of them at every start — 17,545 in the person's
+/// longest run on 2026-10-29 (t-81273). A sweep folds the old ones nothing
+/// reads back: an agent's chatter about work that is over, read and
+/// acknowledged long ago. The next window reads fewer letters and still
+/// opens, and what the ledger does read back stays.
+#[test]
+fn a_sweep_folds_a_working_runs_old_read_chatter_so_the_next_start_reads_less() {
+    let mut bench = Bench::new();
+    let chatty = a_chatty_run_still_working(&mut bench, 0, "early-look");
+    let before = letters_read_at_start(&bench.ledger, &chatty.run);
+
+    bench.ledger.sweep_retention(long_after(&bench));
+    let after = letters_read_at_start(&bench.ledger, &chatty.run);
+    eprintln!(
+        "a start reads {} letters of the working run, {} before the sweep",
+        after.len(),
+        before.len()
+    );
+    assert_eq!(
+        before.len() - after.len(),
+        CHATTER,
+        "the sweep did not fold exactly the old, read chatter"
+    );
+
+    // What the next window reads opens: no acknowledgement still claims a
+    // letter that went, and nothing else was given up for it.
+    let reopened = Ledger::rebuild(bench.ledger.export()).expect("a folded ledger opens");
+    let kept = reopened.run(&chatty.run).expect("the run");
+    assert!(
+        kept.message(&chatty.question).is_some(),
+        "a question went with the chatter"
+    );
+    for late in &chatty.late {
+        assert!(kept.message(late).is_some(), "an unread letter was folded");
+    }
+    let kinds = |kind: MessageKind| {
+        kept.messages()
+            .iter()
+            .filter(|held| held.kind == kind)
+            .count()
+    };
+    assert_eq!(kinds(MessageKind::WorkerDone), 1, "the report was folded");
+    assert!(
+        kept.messages()
+            .iter()
+            .any(|held| held.thread.as_deref() == Some(chatty.question.as_str())),
+        "the answer to the question was folded"
+    );
+}
+
+/// A status letter somebody answered is the root of a thread: a reply to it
+/// finds it by id, and the thread's depth is counted back through it (review
+/// P2-2, t-81273). The answer stands in the thread and never folds; the
+/// letter it answers stays with it, and a reply to it after the fold still
+/// finds it.
+#[test]
+fn a_fold_leaves_a_letter_somebody_answered() {
+    let mut bench = Bench::new();
+    let chatty = a_chatty_run_answered(&mut bench, 0, "early-look", Some(3));
+    let answered = chatty.answered.expect("the coordinator answered a letter");
+
+    let swept = bench.ledger.sweep_retention(long_after(&bench));
+    assert_eq!(
+        swept.letters_folded,
+        CHATTER - 1,
+        "the fold did not leave exactly the answered letter"
+    );
+    let kept = bench.ledger.run(&chatty.run).expect("the run");
+    assert!(
+        kept.message(&answered).is_some(),
+        "a letter somebody answered was folded"
+    );
+    assert!(
+        kept.messages()
+            .iter()
+            .filter_map(|held| held.thread.as_deref())
+            .all(|root| kept.message(root).is_some()),
+        "an answer was left threaded on a letter that went"
+    );
+    // The worker is gone by now, so a second reply is refused — but for
+    // that, not for a letter the ledger lost.
+    let again = bench.run(&format!("reply --to-message {answered} --body again"));
+    assert!(
+        !again.reply.stderr.contains("unknown message"),
+        "a reply to an answered letter lost it to the fold: {}",
+        again.reply.stderr
+    );
+    Ledger::rebuild(bench.ledger.export()).expect("the ledger opens after the fold");
+}
+
+/// A `check` receipt is replayed by rendering its batch's rows again, and a
+/// ledger whose receipt names letters it no longer holds does not open
+/// (t-81273). So a fold leaves every letter a receipt that can still be
+/// replayed names, however old: the same retry gets the same answer, and the
+/// ledger opens.
+#[test]
+fn a_fold_leaves_the_letters_a_live_receipt_still_replays() {
+    let mut bench = Bench::new();
+    // The letters are old; the look that took them is young.
+    let look_at = long_after(&bench);
+    let chatty = a_chatty_run_still_working(&mut bench, look_at, "late-look");
+    let before = letters_read_at_start(&bench.ledger, &chatty.run);
+
+    bench.ledger.sweep_retention(bench.clock + DAY_MS);
+    assert_eq!(
+        letters_read_at_start(&bench.ledger, &chatty.run),
+        before,
+        "a fold took letters a live receipt still replays"
+    );
+    let again = bench.run("check --retry-request late-look");
+    assert_eq!(
+        again.reply.stdout, chatty.look.reply.stdout,
+        "the same retry name answered different bytes after the fold"
+    );
+    Ledger::rebuild(bench.ledger.export()).expect("the ledger opens after the fold");
+}
+
+/// The fold keeps a clock of its own (t-81273): at the first sweep a window
+/// makes, then once a day — never on a write, never with every hourly sweep
+/// — and what it took is counted, in the sweep and on the run, across a
+/// restart.
+#[test]
+fn a_fold_runs_once_a_day_and_counts_what_it_took_on_the_run() {
+    let mut bench = Bench::new();
+    let chatty = a_chatty_run_still_working(&mut bench, 0, "early-look");
+    let now = long_after(&bench);
+    let swept = bench.ledger.sweep_retention(now);
+    let words: u64 = (0..CHATTER)
+        .map(|said| format!("progress-{said}").len() as u64)
+        .sum();
+    assert_eq!(
+        (swept.letters_folded, swept.letter_bytes_folded),
+        (CHATTER, words)
+    );
+    assert!(swept.moved(), "a fold that took letters spent no write");
+    assert_eq!(swept.as_json()["lettersFolded"], CHATTER);
+
+    let record = bench
+        .ledger
+        .run(&chatty.run)
+        .and_then(|run| run.folded.clone())
+        .expect("the run counts what was folded");
+    assert_eq!(record.letters as usize, CHATTER);
+    assert_eq!(record.bytes, words);
+    assert_eq!(record.folded_ms, now);
+    assert!(record.oldest_ms <= record.newest_ms);
+    assert!(record.newest_ms < now - i64::from(RETENTION_DEFAULT_DAYS) * DAY_MS);
+    let reopened = Ledger::rebuild(bench.ledger.export()).expect("a folded ledger opens");
+    assert_eq!(
+        reopened.run(&chatty.run).and_then(|run| run.folded.clone()),
+        Some(record),
+        "the count did not survive the disk"
+    );
+
+    // An hour on, the sweep is due again and the fold is not; a day on, it is.
+    assert!(bench.ledger.sweep_due(now + SWEEP_INTERVAL_MS));
+    assert!(!bench.ledger.fold_due(now + SWEEP_INTERVAL_MS));
+    assert!(bench.ledger.fold_due(now + DAY_MS));
+    // A window opening on the folded ledger folds at its first sweep.
+    assert!(reopened.fold_due(now + 1));
 }
 
 /// Every roster row names its work by the TITLE somebody wrote, with the

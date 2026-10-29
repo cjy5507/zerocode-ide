@@ -13,7 +13,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -1733,36 +1733,77 @@ impl RuntimeRecovery {
 
 /// Cloneable read image. Debug exposes sizes and states, never bytes, digests,
 /// operation ids, host bindings, or the private authority path.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// The ledger inside is the actor's own, shared rather than copied
+/// (t-81273). An image used to carry an export of the rows, and the window
+/// rebuilt a ledger of its own out of that export on every revision: three
+/// whole ledgers held at rest — the actor's, the export, the window's — for
+/// one ledger's worth of facts. The actor writes copy-on-write, so a reader
+/// keeps exactly the revision it was handed.
+#[derive(Clone)]
 pub struct RuntimeImage {
     revision: u64,
-    projection: Arc<LedgerProjectionV1>,
+    ledger: Arc<Ledger>,
+    /// The same rows as tables, exported the first time somebody asks for
+    /// them and shared by every clone of this image. A reader that only
+    /// walks the ledger never pays for an export.
+    projection: Arc<OnceLock<LedgerProjectionV1>>,
     recoveries: Vec<RuntimeRecovery>,
     repairs: Vec<String>,
     /// Whether the window has said its goodbye (t-9091) — not a row, so not
     /// in the projection: the ledger remembers it in-process.
     said_goodbye: bool,
+    /// How many times this runtime has copied its ledger so far, because a
+    /// write met a reader still holding it (t-81273). Not a fact of the
+    /// revision, so two images of one revision may differ here and are
+    /// still equal.
+    copies: u64,
 }
 
 impl std::fmt::Debug for RuntimeImage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         /* Counts and states. What the rows SAY — a name somebody typed, an
          * agent's report, an address — never appears here. */
+        let runs = self.ledger.runs();
         formatter
             .debug_struct("RuntimeImage")
             .field("revision", &self.revision)
-            .field("runs", &self.projection.runs.len())
-            .field("tasks", &self.projection.tasks.len())
-            .field("workers", &self.projection.workers.len())
-            .field("messages", &self.projection.messages.len())
-            .field("receipts", &self.projection.served.len())
+            .field("ledger", &*self.ledger)
+            .field(
+                "tasks",
+                &runs.iter().map(|run| run.tasks.len()).sum::<usize>(),
+            )
+            .field(
+                "workers",
+                &runs.iter().map(|run| run.workers.len()).sum::<usize>(),
+            )
+            .field(
+                "messages",
+                &runs.iter().map(|run| run.messages().len()).sum::<usize>(),
+            )
             .field("recovery_count", &self.recoveries.len())
             .field("repair_count", &self.repairs.len())
             .field("recoveries", &self.recoveries)
             .field("said_goodbye", &self.said_goodbye)
+            .field("copies", &self.copies)
             .finish()
     }
 }
+
+/// Two images are equal when they say the same: the same revision, the same
+/// rows and the same standing recoveries. One ledger shared is equal without
+/// a walk; two copies are compared by their rows.
+impl PartialEq for RuntimeImage {
+    fn eq(&self, other: &Self) -> bool {
+        self.revision == other.revision
+            && self.recoveries == other.recoveries
+            && self.repairs == other.repairs
+            && self.said_goodbye == other.said_goodbye
+            && (Arc::ptr_eq(&self.ledger, &other.ledger) || self.projection() == other.projection())
+    }
+}
+
+impl Eq for RuntimeImage {}
 
 impl RuntimeImage {
     /// Which revision these rows are.
@@ -1771,10 +1812,17 @@ impl RuntimeImage {
         self.revision
     }
 
-    /// The rows themselves, to look at.
+    /// The ledger at this revision — the actor's own, not a copy of it.
+    #[must_use]
+    pub fn ledger(&self) -> &Arc<Ledger> {
+        &self.ledger
+    }
+
+    /// The rows themselves, as tables, to look at. Exported on the first ask
+    /// and kept with the image; [`Self::ledger`] is the same facts for free.
     #[must_use]
     pub fn projection(&self) -> &LedgerProjectionV1 {
-        &self.projection
+        self.projection.get_or_init(|| self.ledger.export())
     }
 
     #[must_use]
@@ -1793,6 +1841,14 @@ impl RuntimeImage {
     #[must_use]
     pub const fn said_goodbye(&self) -> bool {
         self.said_goodbye
+    }
+
+    /// How many times this runtime had copied its ledger when this image was
+    /// taken: each a write that met a reader still holding the revision it
+    /// was lent (t-81273).
+    #[must_use]
+    pub const fn copies(&self) -> u64 {
+        self.copies
     }
 }
 
@@ -3495,6 +3551,62 @@ impl Drop for RuntimeState {
     }
 }
 
+/// The actor's ledger, held once and lent to every reader (t-81273).
+///
+/// Reading is a plain deref. Writing goes through [`Arc::make_mut`]: a ledger
+/// no image holds any more is written in place, and one an image still holds
+/// is copied once first, so the reader keeps exactly the revision it was
+/// handed and the actor writes on its own copy. An image used to cost an
+/// export per revision (t-19506) and the window a rebuild beside it; now it
+/// costs a reference count, and a copy only for the write that meets a
+/// reader still reading.
+///
+/// Those copies are counted here, per runtime: how often a write met a
+/// reader is the price of this design, and a count kept beside the ledger
+/// cannot be moved by another ledger in the same process (review P2-1).
+struct SharedLedger {
+    ledger: Arc<Ledger>,
+    copies: u64,
+}
+
+impl SharedLedger {
+    fn new(ledger: Ledger) -> Self {
+        Self {
+            ledger: Arc::new(ledger),
+            copies: 0,
+        }
+    }
+
+    /// The disk's ledger in place of this one; the copies stay counted.
+    fn replace(&mut self, ledger: Ledger) {
+        self.ledger = Arc::new(ledger);
+    }
+
+    /// The ledger as it stands, for an image.
+    fn lend(&self) -> Arc<Ledger> {
+        Arc::clone(&self.ledger)
+    }
+}
+
+impl std::ops::Deref for SharedLedger {
+    type Target = Ledger;
+
+    fn deref(&self) -> &Ledger {
+        &self.ledger
+    }
+}
+
+impl std::ops::DerefMut for SharedLedger {
+    fn deref_mut(&mut self) -> &mut Ledger {
+        // Nobody hands out a weak reference, so a ledger this runtime cannot
+        // borrow mutably is one a reader holds, and `make_mut` copies it.
+        if Arc::get_mut(&mut self.ledger).is_none() {
+            self.copies += 1;
+        }
+        Arc::make_mut(&mut self.ledger)
+    }
+}
+
 struct RuntimeState {
     gate_jobs: gate_session::Jobs,
     journal: EffectJournal,
@@ -3509,7 +3621,10 @@ struct RuntimeState {
     /// the actor kept answering for panes the host had already replaced.
     /// One table, one lock, and this handle is how the actor stands under
     /// it.
-    ledger: Ledger,
+    ///
+    /// Shared with every image it hands out, and written copy-on-write
+    /// ([`SharedLedger`], t-81273).
+    ledger: SharedLedger,
     panes: Box<dyn PaneTable>,
     launcher: Box<dyn Launcher + Send>,
     revision: u64,
@@ -3544,16 +3659,6 @@ struct RuntimeState {
     poison: Option<RuntimeError>,
     recovery_permits: Vec<EffectPermit>,
     repairs: Vec<String>,
-    /// The projection of the ledger as it stood at one revision, shared by
-    /// every [`RuntimeImage`] handed out for that revision (t-19506).
-    ///
-    /// An export walks every row, and the window asks for an image dozens of
-    /// times per beat, so an idle window used to export its whole ledger
-    /// dozens of times a second for a ledger that had not moved. A revision
-    /// is the generation: readers here and in the shell already treat the
-    /// same revision as the same ledger. Cleared wherever the memory changes
-    /// without a revision — a verb's tally, a rewind from the disk.
-    projection: Option<(u64, Arc<LedgerProjectionV1>)>,
     /// This process's attachment to the store, held for the actor's life
     /// (t-37679): the actor opens connections per request and closed them
     /// all before the next, so every request rebuilt the WAL index and
@@ -3709,13 +3814,12 @@ impl RuntimeState {
             lease,
             store,
             ledger_id,
-            ledger,
+            ledger: SharedLedger::new(ledger),
             panes,
             launcher,
             revision,
             stamp: disk_stamp,
             walking: None,
-            projection: None,
             poison: None,
             recovery_permits,
             repairs,
@@ -3729,16 +3833,12 @@ impl RuntimeState {
         self.stamp = self.stamp.max(now_ms);
         self.stamp
     }
-    /// The whole ledger, as a reader may see it.
-    ///
-    /// Built only when somebody asks for it. An image costs a walk of every
-    /// row, so handing one back with every decision would make the price of a
-    /// verb the size of the ledger.
-    fn image(&mut self) -> RuntimeImage {
-        let projection = self.projection_at_revision();
+    /// The whole ledger, as a reader may see it: the actor's own, lent.
+    fn image(&self) -> RuntimeImage {
         RuntimeImage {
             revision: self.revision,
-            projection,
+            ledger: self.ledger.lend(),
+            projection: Arc::default(),
             recoveries: self
                 .recovery_permits
                 .iter()
@@ -3746,19 +3846,8 @@ impl RuntimeState {
                 .collect(),
             repairs: self.repairs.clone(),
             said_goodbye: self.ledger.said_goodbye(),
+            copies: self.ledger.copies,
         }
-    }
-
-    /// The one projection for the current revision, exported on first ask.
-    fn projection_at_revision(&mut self) -> Arc<LedgerProjectionV1> {
-        if let Some((revision, held)) = &self.projection
-            && *revision == self.revision
-        {
-            return Arc::clone(held);
-        }
-        let held = Arc::new(self.ledger.export());
-        self.projection = Some((self.revision, Arc::clone(&held)));
-        held
     }
 
     fn verify_authority(&self) -> Result<(), RuntimeError> {
@@ -4793,7 +4882,11 @@ impl RuntimeState {
             return Err(RuntimeError::RecoveryRequired);
         }
         let seat = format!("{team}/{pane}");
-        if !self.ledger.coordinator_returned(run, &seat, actor, now_ms) {
+        // Asked by reference first: the window hands every chair it sees
+        // taken over on every beat (t-81273).
+        if !self.ledger.chair_empty(run)
+            || !self.ledger.coordinator_returned(run, &seat, actor, now_ms)
+        {
             return Ok(RuntimeReply::Settled {
                 moved: false,
                 revision: self.revision,
@@ -5432,11 +5525,18 @@ impl RuntimeState {
         // disappear between the filesystem sweep and this request because the
         // successful hook that removed it is already queued; when both facts
         // share one beat, the real payload is the later and stronger word.
+        //
+        // Each fact is asked of the ledger by reference before it is written:
+        // this runs on every beat, and a write taken while a reader holds the
+        // ledger copies the whole of it (t-81273).
         let ledger = &mut self.ledger;
+        let mut retired = false;
         for (term, since_ms) in delivery_failures {
             self.panes.with_seat_of_term(*term, &mut |seat| {
-                if let Some((team, pane)) = seat {
-                    ledger.worker_hook_delivery_failed((team, pane), *since_ms);
+                if let Some(seat) = seat
+                    && ledger.hook_failure_due(seat)
+                {
+                    retired |= ledger.worker_hook_delivery_failed(seat, *since_ms);
                 }
             });
         }
@@ -5448,22 +5548,29 @@ impl RuntimeState {
         // one's window (t-6740 r3).
         for (term, heard_ms) in spoken {
             self.panes.with_seat_of_term(*term, &mut |seat| {
-                if let Some((team, pane)) = seat {
-                    ledger.worker_spoke((team, pane), *heard_ms);
+                if let Some(seat) = seat
+                    && ledger.sound_due(seat, *heard_ms)
+                {
+                    retired |= ledger.worker_spoke(seat, *heard_ms);
                 }
             });
         }
-        let told = self.ledger.workers_overdue(now_ms);
+        let told = if self.ledger.workers_overdue_due(now_ms) {
+            self.ledger.workers_overdue(now_ms)
+        } else {
+            0
+        };
         // `spoken` may have retired windows without telling anybody — that
         // is a write too, and one worth making durable so a restart does not
         // resurrect a window its worker already answered.
         //
-        // A beat that heard nothing and told nothing changed nothing, and
+        // A beat that retired nothing and told nothing changed nothing, and
         // this runs on EVERY beat: writing through here rewrote the whole
         // ledger and moved its revision once a second on an idle window
         // (t-19506), and every revision is a full export, rebuild and
-        // validation for each reader downstream.
-        if spoken.is_empty() && delivery_failures.is_empty() && told == 0 {
+        // validation for each reader downstream. A sound that retired no
+        // window is no write either (t-81273).
+        if !retired && told == 0 {
             return Ok(RuntimeReply::Settled {
                 moved: false,
                 revision: self.revision,
@@ -5492,6 +5599,12 @@ impl RuntimeState {
         }
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
+        }
+        if !self.ledger.quiet_news_due(stalled, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
         }
         let told = self.ledger.workers_stalled(stalled, now_ms)
             + self.ledger.receivers_told_stalled(stalled, now_ms);
@@ -5527,6 +5640,12 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
+        if !self.ledger.idle_news_due(idle, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
         let told = self.ledger.workers_idle(idle, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
@@ -5558,6 +5677,12 @@ impl RuntimeState {
         }
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
+        }
+        if !self.ledger.quota_walls_due(walled, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
         }
         let told = self.ledger.workers_quota_walled(walled, now_ms);
         if told == 0 {
@@ -5623,6 +5748,12 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
+        if !self.ledger.quota_lifts_due(lifted, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
         let told = self.ledger.workers_quota_lifted(lifted, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
@@ -5663,6 +5794,12 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
+        if !self.ledger.classifier_declines_due(declined, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
         let told = self.ledger.workers_classifier_declined(declined, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
@@ -5687,6 +5824,12 @@ impl RuntimeState {
         }
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
+        }
+        if !self.ledger.model_deviations_due(deviated, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
         }
         let told = self.ledger.workers_model_deviated(deviated, now_ms);
         if told == 0 {
@@ -5722,6 +5865,12 @@ impl RuntimeState {
         }
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
+        }
+        if !self.ledger.judged_news_due(judged, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
         }
         let told = self.ledger.stall_causes_judged(judged, now_ms)
             + self.ledger.receivers_told_judged(judged, now_ms);
@@ -5908,10 +6057,13 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
-        if self
-            .ledger
-            .resume_settled(run, resume, outcome, now_ms)
-            .is_err()
+        // Asked by reference first: the window asks again on every beat for a
+        // settlement it has not seen land (t-81273).
+        if !self.ledger.resume_settle_due(run, resume)
+            || self
+                .ledger
+                .resume_settled(run, resume, outcome, now_ms)
+                .is_err()
         {
             return Ok(RuntimeReply::Settled {
                 moved: false,
@@ -6047,6 +6199,12 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
+        if !self.ledger.panes_missing_due(missing) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
         let told = self.ledger.panes_missing(missing, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
@@ -6077,6 +6235,12 @@ impl RuntimeState {
         }
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
+        }
+        if !self.ledger.panes_seen_due(workers) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
         }
         let cleared = self.ledger.panes_seen(workers);
         if cleared == 0 {
@@ -6192,7 +6356,7 @@ impl RuntimeState {
             .checked_add(1)
             .ok_or(RuntimeError::RevisionMismatch)?;
         let at_ms = self.stamped(now_ms);
-        let written_rows = Arc::new(self.ledger.export());
+        let written_rows = self.ledger.export();
         let withdrawal = Withdrawal {
             operation_id: operation_id.to_string(),
             failure: HostEffectFailure::Unavailable,
@@ -6206,7 +6370,6 @@ impl RuntimeState {
         {
             Ok(()) => {
                 self.revision = next;
-                self.projection = Some((next, written_rows));
                 Ok(RuntimeReply::Settled {
                     moved: true,
                     revision: next,
@@ -6675,8 +6838,6 @@ impl RuntimeState {
          * the reads counted since — a bounded loss the tally's doc states. */
         if let Some(verb) = command.argv().first() {
             ledger.note_verb(verb, decided.reply.exit_code != 0, command.now_ms());
-            // The tally moved the memory and not the revision.
-            self.projection = None;
         }
         if let Effect::WorkerTerminal {
             seat,
@@ -6743,9 +6904,9 @@ impl RuntimeState {
             .checked_add(1)
             .ok_or(RuntimeError::RevisionMismatch)?;
         let at_ms = self.stamped(now_ms);
-        // The walk this write must make anyway is the next revision's
-        // projection: the next reader is handed it instead of a second walk.
-        let written_rows = Arc::new(self.ledger.export());
+        // The write's own rows, gone with it: a reader is lent the ledger,
+        // never handed this export (t-81273).
+        let written_rows = self.ledger.export();
         /* One transaction, or nothing. `ledger_store::write` moves the head,
          * clears every row and re-inserts the whole ledger, and it does so on
          * whatever connection it is handed — the promise that a ledger is
@@ -6780,7 +6941,6 @@ impl RuntimeState {
         match written {
             Ok(()) => {
                 self.revision = next;
-                self.projection = Some((next, written_rows));
                 Ok(next)
             }
             Err(why) => {
@@ -6828,8 +6988,7 @@ impl RuntimeState {
             return Err(RuntimeError::AuthorityChanged);
         }
         let ledger = Ledger::rebuild(held.projection).map_err(RuntimeError::LedgerInvariant)?;
-        self.ledger = ledger;
-        self.projection = None;
+        self.ledger.replace(ledger);
         /* Clearing this is a cost, not a correctness: a runtime that forgot to
          * would simply read the store again on every request and answer the
          * same way. Left as one line rather than defended by a test, because a
@@ -10900,6 +11059,7 @@ mod tests {
             coordinator: None,
             handover: None,
             project: None,
+            folded: None,
         });
         projection.messages.push(MessageRow {
             run: "run-1".to_string(),

@@ -264,7 +264,7 @@ fn reservation_refused(held: &LiveRuntime, plan: &ResumePlan, now_ms: i64) -> Pr
         .view()
         .ok()
         .and_then(|image| {
-            let rows = cached_ledger(held, &image).ok()?;
+            let rows = cached_ledger(held, &image);
             let run = rows.run(&plan.run)?;
             resume_plan(run, &plan.worker, &plan.marker, now_ms)
                 .err()
@@ -302,7 +302,7 @@ pub(crate) fn retry(
     let held = runtime().ok_or(WindowRefusal::NoRuntime)?;
     let plan = {
         let image = held.actor.view().map_err(unread)?;
-        let rows = cached_ledger(&held, &image).map_err(unread)?;
+        let rows = cached_ledger(&held, &image);
         let walled = rows.run(run_id).ok_or_else(|| WallRefusal::UnknownRun {
             run: run_id.to_string(),
         })?;
@@ -382,7 +382,7 @@ pub(crate) fn retry_failed_turn(
     let held = runtime().ok_or(WindowRefusal::NoRuntime)?;
     let plan = {
         let image = held.actor.view().map_err(unread)?;
-        let rows = cached_ledger(&held, &image).map_err(unread)?;
+        let rows = cached_ledger(&held, &image);
         let failed = rows.run(run_id).ok_or_else(|| WallRefusal::UnknownRun {
             run: run_id.to_string(),
         })?;
@@ -462,7 +462,7 @@ pub(crate) fn hand_over(
     let held = runtime().ok_or(WindowRefusal::NoRuntime)?;
     let (plan, capability) = {
         let image = held.actor.view().map_err(unread)?;
-        let rows = cached_ledger(&held, &image).map_err(unread)?;
+        let rows = cached_ledger(&held, &image);
         let walled = rows.run(run_id).ok_or_else(|| WallRefusal::UnknownRun {
             run: run_id.to_string(),
         })?;

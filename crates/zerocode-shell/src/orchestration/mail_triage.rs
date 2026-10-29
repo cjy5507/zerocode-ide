@@ -224,9 +224,7 @@ pub(super) fn sweep(host: &dyn Host, now_ms: i64) {
         book.revision = Some(image.revision());
         book.load(&path);
     }
-    let Ok(ledger) = super::cached_ledger(&held, &image) else {
-        return;
-    };
+    let ledger = super::cached_ledger(&held, &image);
     let teams = crate::agent_teams::teams();
     let seats = super::index_team_seats(&teams);
     drop(teams);

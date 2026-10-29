@@ -198,9 +198,7 @@ pub(super) fn sweep(host: &dyn Host, now_ms: i64) {
     let Ok(image) = held.actor.view() else {
         return;
     };
-    let Ok(ledger) = super::cached_ledger(&held, &image) else {
-        return;
-    };
+    let ledger = super::cached_ledger(&held, &image);
     let teams = crate::agent_teams::teams();
     let seats = super::index_team_seats(&teams);
     drop(teams);
@@ -876,7 +874,7 @@ fn seat_types(host: &dyn Host) -> bool {
 /// effort is the word a session that has run no turn yet stands on.
 fn worker_in(held: &super::LiveRuntime, term: u32) -> Option<WorkerPane> {
     let image = held.actor.view().ok()?;
-    let ledger = super::cached_ledger(held, &image).ok()?;
+    let ledger = super::cached_ledger(held, &image);
     let seats = super::index_team_seats(&crate::agent_teams::teams());
     worker_panes(&ledger, &seats)
         .into_iter()

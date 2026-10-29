@@ -1105,7 +1105,7 @@ fn as_the_coordinator(
 fn with_cached_run<T>(run_id: &str, read: impl FnOnce(Option<&Run>) -> T) -> Result<T, String> {
     let held = super::runtime().ok_or("orchestration runtime unavailable")?;
     let image = held.actor.view().map_err(|error| format!("{error:?}"))?;
-    let ledger = super::cached_ledger(&held, &image).map_err(|error| format!("{error:?}"))?;
+    let ledger = super::cached_ledger(&held, &image);
     Ok(read(ledger.run(run_id)))
 }
 

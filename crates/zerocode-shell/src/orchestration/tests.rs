@@ -610,48 +610,91 @@ fn runtime_report_uses_the_single_core_provider_peer_projection() {
     assert!(!report.contains("WorkerPeerName::for_worker"));
 }
 
-#[test]
-fn a_ledger_image_cache_hits_until_its_revision_moves() {
-    let mut cache = super::LedgerCache::default();
-    let projection = super::Ledger::new().export();
+/// A window standing on a one-run ledger of its own, and that run's id: the
+/// cache tests below move the revision by writing to it.
+fn a_window_on_one_run() -> (
+    PrivateWindow,
+    zerocode_orchestrator::workflow_store::WorkflowStore,
+    String,
+) {
+    let mut ledger = super::Ledger::new();
+    let run = ledger.create_run("cache", 1);
+    let (window, store) = PrivateWindow::boot_seeded(ledger.export());
+    (window, store, run)
+}
 
-    let first = cache.ledger(7, &projection).expect("the first image");
-    let same = cache.ledger(7, &projection).expect("the cached image");
+/// The actor's image after one more write, on `run`: the next revision.
+fn the_image_after_a_write(run: &str, now_ms: i64) -> super::RuntimeImage {
+    let actor = &super::runtime().expect("this window's runtime").actor;
+    let (moved, _) = actor
+        .note_run_project(
+            run,
+            format!("/tmp/cache-{now_ms}"),
+            zerocode_core::orchestration::ProjectSource::Workers,
+            None,
+            now_ms,
+        )
+        .expect("one write");
+    assert!(moved, "the write moved nothing");
+    actor.view().expect("the image after the write")
+}
+
+#[test]
+fn a_ledger_image_cache_lends_the_images_own_ledger_until_its_revision_moves() {
+    let (_window, _store, run) = a_window_on_one_run();
+    let actor = &super::runtime().expect("this window's runtime").actor;
+    let mut cache = super::LedgerCache::default();
+
+    let image = actor.view().expect("the first image");
+    let first = cache.ledger(&image);
+    let same = cache.ledger(&actor.view().expect("the same revision"));
     assert!(
         std::sync::Arc::ptr_eq(&first, &same),
-        "the same revision was rebuilt instead of shared"
+        "one revision was lent as two ledgers"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&first, image.ledger()),
+        "the cache lent a ledger that is not the image's"
     );
 
-    let moved = cache.ledger(8, &projection).expect("the next image");
+    let moved = cache.ledger(&the_image_after_a_write(&run, 2));
     assert!(
         !std::sync::Arc::ptr_eq(&first, &moved),
-        "a new revision reused the old image"
+        "a new revision lent the old ledger"
     );
 }
 
 #[test]
 fn a_runtime_report_tree_is_cached_with_its_ledger_revision() {
+    let (_window, _store, run) = a_window_on_one_run();
+    let actor = &super::runtime().expect("this window's runtime").actor;
     let mut cache = super::LedgerCache::default();
-    let projection = super::Ledger::new().export();
-    let ledger = cache.ledger(11, &projection).expect("the report image");
+    let image = actor.view().expect("the report image");
+    let ledger = cache.ledger(&image);
 
-    let first = cache.report(11, &ledger);
-    let same = cache.report(11, &ledger);
+    let first = cache.report(image.revision(), &ledger);
+    let same = cache.report(image.revision(), &ledger);
     assert!(
         std::sync::Arc::ptr_eq(&first, &same),
         "the report tree was built again for the same revision"
     );
 
-    let moved = cache
-        .ledger(12, &projection)
-        .expect("the next report image");
-    let next = cache.report(12, &moved);
+    let next = the_image_after_a_write(&run, 2);
+    assert_ne!(
+        next.revision(),
+        image.revision(),
+        "the write did not move the revision"
+    );
+    let moved = cache.ledger(&next);
+    let moved = cache.report(next.revision(), &moved);
     assert!(
-        !std::sync::Arc::ptr_eq(&first, &next),
+        !std::sync::Arc::ptr_eq(&first, &moved),
         "a new revision reused the old report tree"
     );
 }
 
+/// What a read of the ledger cost the window before t-81273 — a rebuild out
+/// of the image's export — beside what it costs now: a lend.
 #[test]
 fn ledger_image_cache_reports_baseline_and_hit_timings() {
     const TASKS: usize = 256;
@@ -681,20 +724,26 @@ fn ledger_image_cache_reports_baseline_and_hit_timings() {
         baseline += started.elapsed();
     }
 
+    let (_window, _store) = PrivateWindow::boot_seeded(projection);
+    let image = super::runtime()
+        .expect("this window's runtime")
+        .actor
+        .view()
+        .expect("the timing image");
     let mut cache = super::LedgerCache::default();
     let started = std::time::Instant::now();
-    std::hint::black_box(cache.ledger(17, &projection).expect("the cache miss"));
+    std::hint::black_box(cache.ledger(&image));
     let miss = started.elapsed();
     let started = std::time::Instant::now();
     for _ in 0..SAMPLES {
-        std::hint::black_box(cache.ledger(17, &projection).expect("the cache hit"));
+        std::hint::black_box(cache.ledger(&image));
     }
     let hits = started.elapsed();
 
     eprintln!(
         concat!(
             "ledger image cache ({} tasks, {} samples): baseline rebuild avg={}us, ",
-            "first miss={}us, cached hit avg={}ns",
+            "first lend={}us, cached lend avg={}ns",
         ),
         TASKS,
         SAMPLES,
@@ -705,32 +754,38 @@ fn ledger_image_cache_reports_baseline_and_hit_timings() {
 }
 
 #[test]
-fn ledger_image_cache_serializes_one_rebuild_per_revision() {
+fn ledger_image_cache_lends_every_concurrent_reader_the_one_ledger() {
+    let (_window, _store) = PrivateWindow::boot();
+    let image = std::sync::Arc::new(
+        super::runtime()
+            .expect("this window's runtime")
+            .actor
+            .view()
+            .expect("the shared image"),
+    );
     let cache = std::sync::Arc::new(Mutex::new(super::LedgerCache::default()));
-    let projection = std::sync::Arc::new(super::Ledger::new().export());
     let mut workers = Vec::new();
     for _ in 0..8 {
         let cache = std::sync::Arc::clone(&cache);
-        let projection = std::sync::Arc::clone(&projection);
+        let image = std::sync::Arc::clone(&image);
         workers.push(std::thread::spawn(move || {
             cache
                 .lock()
                 .unwrap_or_else(|held| held.into_inner())
-                .ledger(13, &projection)
-                .expect("the concurrent image")
+                .ledger(&image)
         }));
     }
-    let images: Vec<_> = workers
+    let ledgers: Vec<_> = workers
         .into_iter()
         .map(|worker| worker.join().expect("the cache reader"))
         .collect();
-    // One rebuild, shared: a second rebuild would be a second allocation,
-    // and every reader holding the same pointer is the proof there was one.
+    // Nobody rebuilt or copied it: every reader holds the image's own
+    // pointer.
     assert!(
-        images
+        ledgers
             .iter()
-            .all(|image| std::sync::Arc::ptr_eq(image, &images[0])),
-        "concurrent readers did not share one image"
+            .all(|ledger| std::sync::Arc::ptr_eq(ledger, image.ledger())),
+        "concurrent readers were lent copies of the image's ledger"
     );
 }
 
@@ -870,7 +925,7 @@ fn board_snapshot_reuses_the_revision_cache_and_publishes_complete_answers() {
     let (_window, _store) = PrivateWindow::boot();
     let held = super::runtime().unwrap();
     let image = held.actor.view().unwrap();
-    let ledger = super::cached_ledger(&held, &image).unwrap();
+    let ledger = super::cached_ledger(&held, &image);
     let before = super::board_ledger_snapshot();
     super::refresh_board_ledger();
     let after = super::board_ledger_snapshot();
@@ -878,7 +933,7 @@ fn board_snapshot_reuses_the_revision_cache_and_publishes_complete_answers() {
     assert_eq!(before.agents, after.agents);
     assert!(std::sync::Arc::ptr_eq(
         &ledger,
-        &super::cached_ledger(&held, &image).unwrap()
+        &super::cached_ledger(&held, &image)
     ));
     assert!(std::sync::Arc::ptr_eq(
         &after,
@@ -954,10 +1009,12 @@ fn all_ledger_image_readers_use_the_revision_cache() {
         shipped.contains("\n#[cfg(test)]\npub(crate) mod tests;\n"),
         "the orchestration tests moved back inline — this pin reads the whole file as shipped code"
     );
+    // None at all since t-81273: the window reads the actor's own ledger,
+    // lent with every image, and a rebuild here is a second ledger held.
     assert_eq!(
         shipped.matches("Ledger::rebuild(").count(),
-        1,
-        "a reader rebuilt an image outside the shared cache"
+        0,
+        "the window rebuilt a ledger of its own instead of reading the actor's"
     );
     // Pin each reader's route, not the number of call sites: a reader can
     // legitimately recheck a later revision at an asynchronous boundary.
@@ -3314,7 +3371,7 @@ impl Walled {
     fn plan(&self) -> zerocode_core::orchestration::HandoverPlan {
         let held = super::runtime().expect("the runtime");
         let image = held.actor.view().expect("the image");
-        let rows = super::cached_ledger(&held, &image).expect("the rows");
+        let rows = super::cached_ledger(&held, &image);
         rows.runs()
             .iter()
             .find_map(|run| zerocode_core::orchestration::next_handover(run, self.began + 20_000))
@@ -19178,7 +19235,7 @@ fn an_orphaned_checkout_is_reserved_without_spawning_a_replacement() {
     assert_eq!(orphan.state, WorkerState::Orphaned);
     assert_eq!(orphan.checkout.as_deref(), Some(CHECKOUT));
     let image = held.actor.view().expect("the orphan image");
-    let rebuilt = super::cached_ledger(&held, &image).expect("the orphan ledger rebuilds");
+    let rebuilt = super::cached_ledger(&held, &image);
     assert!(
         rebuilt
             .runs()
@@ -29056,19 +29113,224 @@ fn an_idle_beat_walks_the_ledger_once_per_generation_not_once_per_sweep() {
         revision()
     );
     assert_eq!(
-        (walked.exports, walked.rebuilds, walked.validations),
-        (0, 0, 0),
+        (
+            walked.exports,
+            walked.rebuilds,
+            walked.validations,
+            walked.clones
+        ),
+        (0, 0, 0, 0),
         "{BEATS} idle beats on an unchanged ledger walked it again"
     );
-    // And two readers of one generation hold the one projection, not two.
+    // And two readers of one generation hold the one ledger, not two.
     let actor = &super::runtime().expect("this window's runtime").actor;
     let (first, second) = (
         actor.view().expect("an image"),
         actor.view().expect("an image"),
     );
     assert!(
-        std::ptr::eq(first.projection(), second.projection()),
-        "two images of one revision were exported twice"
+        std::sync::Arc::ptr_eq(first.ledger(), second.ledger()),
+        "two images of one revision held two ledgers"
+    );
+}
+
+/// One write and the reads after it hold the ledger once (t-81273): the
+/// actor's own, lent to every reader. Counted rather than guessed — an export
+/// the actor keeps beside its ledger is two images of one revision sharing
+/// one projection, and a copy the window keeps is a rebuild its read made.
+/// Measured on the person's machine before this: three whole ledgers at rest
+/// (34,343 letters each), and the window's 801 MiB after half a day.
+#[test]
+fn a_write_and_the_reads_after_it_hold_the_ledger_once() {
+    let (_window, _store) =
+        PrivateWindow::boot_seeded(a_ledger_as_large_as_a_long_lived_machines());
+    let _beat = one_beat_at_a_time();
+    let held = super::runtime().expect("this window's runtime");
+    let run = super::ledger_image().expect("the window's ledger").runs()[0]
+        .id
+        .clone();
+    let (moved, _) = held
+        .actor
+        .note_run_project(
+            run,
+            "/tmp/one-write",
+            zerocode_core::orchestration::ProjectSource::Workers,
+            None,
+            1_000_000,
+        )
+        .expect("one write");
+    assert!(moved, "the write moved nothing");
+    let written = zerocode_core::orchestration::ledger_work();
+    let first = super::ledger_image().expect("a read after the write");
+    let second = super::ledger_image().expect("a second read");
+    let walked = zerocode_core::orchestration::ledger_work().since(written);
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "two reads of one revision held two ledgers"
+    );
+    drop((first, second));
+    let (one, other) = (
+        held.actor.view().expect("an image"),
+        held.actor.view().expect("an image"),
+    );
+    let export_kept = std::ptr::eq(one.projection(), other.projection());
+    let held_ledgers = 1 + u64::from(export_kept) + walked.rebuilds;
+    eprintln!(
+        "after one write: {held_ledgers} whole ledgers held (export kept beside the actor's: \
+         {export_kept}); the reads walked it {walked:?}"
+    );
+    assert_eq!(
+        (walked.rebuilds, walked.validations),
+        (0, 0),
+        "the reads after a write rebuilt the ledger"
+    );
+    assert_eq!(
+        held_ledgers, 1,
+        "the window held the ledger {held_ledgers} times after one write"
+    );
+    // And what the reads were lent is the actor's own ledger, copied by
+    // nobody (t-81273).
+    assert_eq!(walked.clones, 0, "a read copied the ledger");
+    assert!(
+        std::sync::Arc::ptr_eq(one.ledger(), &super::ledger_image().expect("a third read")),
+        "the window read a ledger that is not the actor's"
+    );
+}
+
+/// `beats` beats from `first`, a second apart; answers the revision they
+/// left and how many times this window's runtime copied its ledger for them
+/// — its own count, which no other test's ledger moves.
+fn beats_and_their_copies(host: &dyn Host, first: i64, beats: i64) -> (u64, u64) {
+    let image = || {
+        super::runtime()
+            .expect("this window's runtime")
+            .actor
+            .view()
+            .expect("the image")
+    };
+    let before = image().copies();
+    for beat in 0..beats {
+        tick(host, &[], first + beat * 1_000);
+    }
+    let after = image();
+    (after.revision(), after.copies() - before)
+}
+
+/// A window with a worker at work beats without copying the ledger
+/// (t-81273 r2). Every beat sees the worker's pane and tells the actor so;
+/// the beat used to tell it while still holding the image it had read, and
+/// the actor took its ledger to write before finding nothing to clear — one
+/// whole copy a second for as long as one worker lived. Now the beat lets
+/// its reads go before it asks, and the actor asks itself whether anything
+/// would move before it takes the ledger: a beat that changes nothing copies
+/// nothing, even while a reader elsewhere holds the revision it was handed,
+/// and a beat that does change something writes in place.
+#[test]
+fn a_beat_beside_a_live_worker_copies_the_ledger_only_for_a_write_a_reader_holds() {
+    const LEADER_TERM: u32 = 83_100;
+    const WORKER_TERM: u32 = 83_101;
+    const BEATS: i64 = 10;
+    let (_window, _store) = PrivateWindow::boot();
+    let _beat = one_beat_at_a_time();
+    let _reconcile = ReconcilePanesHere::begin();
+    let team = format!("team-cow-beat-{LEADER_TERM}");
+    let _carrying = a_worker_carrying_work(&team, LEADER_TERM, WORKER_TERM);
+    let host = Counting::default();
+    host.set_pane(WORKER_TERM, true);
+    let began = clock();
+    let (settled, _) = beats_and_their_copies(&host, began, 1);
+
+    let (idle, copied) = beats_and_their_copies(&host, began + 1_000, BEATS);
+    assert_eq!(
+        idle, settled,
+        "{BEATS} beats on a seen pane moved the ledger"
+    );
+    assert_eq!(
+        copied, 0,
+        "{BEATS} beats beside a live worker copied the ledger"
+    );
+
+    let reader = super::runtime()
+        .expect("this window's runtime")
+        .actor
+        .view()
+        .expect("a reader's image");
+    let (held, copied) = beats_and_their_copies(&host, began + 11_000, BEATS);
+    drop(reader);
+    assert_eq!(
+        held, settled,
+        "{BEATS} beats on a seen pane moved the ledger"
+    );
+    assert_eq!(
+        copied, 0,
+        "{BEATS} beats that wrote nothing copied the ledger a reader held"
+    );
+
+    // The pane goes for five beats and comes back: two writes, in place.
+    host.set_pane(WORKER_TERM, false);
+    let confirmations = i64::from(MISSING_PANE_CONFIRMATIONS);
+    let (missing, gone) = beats_and_their_copies(&host, began + 21_000, confirmations);
+    host.set_pane(WORKER_TERM, true);
+    let (seen, back) = beats_and_their_copies(&host, began + 21_000 + confirmations * 1_000, 1);
+    assert!(
+        settled < missing && missing < seen,
+        "the missing pane and its return were not two writes: {settled} -> {missing} -> {seen}"
+    );
+    assert_eq!(
+        (gone, back),
+        (0, 0),
+        "a beat copied the ledger it was writing with no reader holding it"
+    );
+}
+
+/// The same for a worker gone quiet (t-81273 r2): the stall sweep tells the
+/// actor its quiet workers every beat, and only the first is news. The
+/// beats after it change nothing and copy nothing, whoever holds an image.
+#[test]
+fn a_quiet_workers_beats_after_its_notice_copy_nothing() {
+    use crate::quota_wall::tests::{CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION};
+    const BEATS: i64 = 10;
+    let stood = StoppedWorker::stand(96_700, "", Vec::new());
+    stood.stops_on(
+        &[CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION],
+        stood.began + 9_000,
+    );
+    let (told, _) = beats_and_their_copies(&stood.host, stood.began + 10_000, 1);
+    assert_eq!(
+        stood.news("went_quiet", stood.began + 10_001).len(),
+        1,
+        "the stop was not a silence"
+    );
+
+    let (idle, copied) = beats_and_their_copies(&stood.host, stood.began + 11_000, BEATS);
+    assert_eq!(
+        idle, told,
+        "{BEATS} beats on a told silence moved the ledger"
+    );
+    assert_eq!(
+        copied, 0,
+        "{BEATS} beats on a told silence copied the ledger"
+    );
+
+    let reader = super::runtime()
+        .expect("this window's runtime")
+        .actor
+        .view()
+        .expect("a reader's image");
+    let (held, copied) = beats_and_their_copies(&stood.host, stood.began + 21_000, BEATS);
+    drop(reader);
+    assert_eq!(
+        held, told,
+        "{BEATS} beats on a told silence moved the ledger"
+    );
+    assert_eq!(
+        copied, 0,
+        "{BEATS} beats that wrote nothing copied the ledger a reader held"
+    );
+    assert_eq!(
+        stood.news("went_quiet", stood.began + 31_001).len(),
+        1,
+        "one silence was told twice"
     );
 }
 
@@ -29119,6 +29381,340 @@ fn measure_the_idle_beat_on_a_large_ledger() {
         wall.as_millis(),
         BEATS_PER_MINUTE,
         cpu_used / 1000,
+    );
+}
+
+/// The person's ledger by its counts and sizes on 2026-10-29 (t-81273),
+/// built here and never read from anybody's disk: 76 runs, 2,156 tasks
+/// carrying 4.6 KB of words each, and 43,540 letters of 585 bytes — 17,545
+/// in one run, 10,666 in another — acknowledged in batches of fifty. One
+/// letter in twenty is two months old and none is its writer's last word,
+/// about the share of the person's mail that is old enough to fold.
+#[cfg(target_os = "macos")]
+const PERSONS_RUNS: usize = 76;
+#[cfg(target_os = "macos")]
+const PERSONS_TASKS: usize = 2_156;
+#[cfg(target_os = "macos")]
+const PERSONS_LONGEST_RUNS: [usize; 2] = [17_545, 10_666];
+#[cfg(target_os = "macos")]
+const PERSONS_OTHER_LETTERS: usize = 15_329;
+#[cfg(target_os = "macos")]
+const PERSONS_LETTER_BYTES: usize = 585;
+#[cfg(target_os = "macos")]
+const PERSONS_TASK_BYTES: usize = 4_600;
+#[cfg(target_os = "macos")]
+const PERSONS_WRITERS: usize = 4;
+#[cfg(target_os = "macos")]
+const PERSONS_BATCH: usize = 50;
+/// The clock the measurement writes and sweeps at.
+#[cfg(target_os = "macos")]
+const MEASURED_AT_MS: i64 = 2_000_000_000_000;
+#[cfg(target_os = "macos")]
+const A_DAY_MS: i64 = 86_400_000;
+
+#[cfg(target_os = "macos")]
+fn a_ledger_the_persons_size() -> zerocode_core::orchestration::LedgerProjectionV1 {
+    use zerocode_core::orchestration::{AckedRow, InboxRow, MessageKind, MessageRow, Text};
+    let mut ledger = super::Ledger::new();
+    let runs: Vec<String> = (0..PERSONS_RUNS)
+        .map(|at| ledger.create_run(&format!("measured run {at}"), 1))
+        .collect();
+    for task in 0..PERSONS_TASKS {
+        ledger
+            .create_task(
+                &runs[task % PERSONS_RUNS],
+                "s".repeat(PERSONS_TASK_BYTES),
+                format!("task {task}"),
+                Vec::new(),
+                None,
+                2,
+            )
+            .expect("a measured task");
+    }
+    let mut rows = ledger.export();
+    let mut next = rows.next_id;
+    let mut mint = |prefix: &str| {
+        next += 1;
+        format!("{prefix}{next}")
+    };
+    let others = PERSONS_RUNS - PERSONS_LONGEST_RUNS.len();
+    for (at, run) in runs.iter().enumerate() {
+        let letters = PERSONS_LONGEST_RUNS.get(at).copied().unwrap_or_else(|| {
+            let rank = at - PERSONS_LONGEST_RUNS.len();
+            PERSONS_OTHER_LETTERS / others + usize::from(rank < PERSONS_OTHER_LETTERS % others)
+        });
+        let address = format!("run:{run}");
+        let mut batch = Vec::new();
+        let mut seq = 0_u32;
+        for n in 0..letters {
+            let id = mint("m-");
+            let old = n % 20 == 0 && n + PERSONS_WRITERS < letters;
+            let age_days = if old { 60 } else { 1 };
+            rows.messages.push(MessageRow {
+                run: run.clone(),
+                id: id.clone(),
+                from: format!("worker:w-writer-{}", n % PERSONS_WRITERS),
+                to: address.clone(),
+                kind: MessageKind::Status,
+                body: Text::from("b".repeat(PERSONS_LETTER_BYTES)),
+                subject: Text::default(),
+                priority: Default::default(),
+                payload: Text::default(),
+                thread: None,
+                task: None,
+                dispatch: None,
+                author_seat: None,
+                created_ms: MEASURED_AT_MS - age_days * A_DAY_MS,
+            });
+            batch.push(id);
+            if batch.len() == PERSONS_BATCH || n + 1 == letters {
+                rows.acked.push(AckedRow {
+                    run: run.clone(),
+                    address: address.clone(),
+                    delivery: mint("d-"),
+                    messages: Some(std::mem::take(&mut batch)),
+                    seq,
+                    current: n + 1 == letters,
+                });
+                seq += 1;
+            }
+        }
+        rows.inboxes.push(InboxRow {
+            run: run.clone(),
+            address,
+            pending: Vec::new(),
+            open: None,
+        });
+    }
+    rows.next_id = next + 1;
+    rows
+}
+
+/// This process's memory as macOS counts it, in MiB: what it holds now (the
+/// footprint the Activity Monitor shows, and the resident pages) and the
+/// most it ever held.
+#[cfg(target_os = "macos")]
+fn memory_now_mib() -> (u64, u64, u64) {
+    const MIB: u64 = 1024 * 1024;
+    // SAFETY: zeroed is a valid rusage_info_v4, and proc_pid_rusage fills
+    // the struct of the flavour it is asked for, for this very process.
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    let read = unsafe {
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V4,
+            std::ptr::addr_of_mut!(info).cast(),
+        )
+    };
+    assert_eq!(read, 0, "this process's own usage could not be read");
+    (
+        info.ri_phys_footprint / MIB,
+        info.ri_resident_size / MIB,
+        info.ri_lifetime_max_phys_footprint / MIB,
+    )
+}
+
+/// What a window holds and spends on a ledger the person's size (t-81273):
+/// one boot, then writes each followed by the window's read and a board
+/// refresh, then a sweep and the rows the next start reads. Prints, never
+/// asserts — the same code measures the window before the change and after
+/// it. Run it under `taskpolicy -b` for the low-spec profile.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "a measurement: prints a window's memory and ledger times on a ledger the person's size"]
+fn measure_a_window_on_a_ledger_the_persons_size() {
+    const WRITES: usize = 30;
+    let millis = |at: std::time::Instant| at.elapsed().as_secs_f64() * 1000.0;
+    let seeded = a_ledger_the_persons_size();
+    let letters = seeded.messages.len();
+    let (footprint, resident, _) = memory_now_mib();
+    eprintln!("measure: built {letters} letters; footprint={footprint} resident={resident}");
+
+    let booted = std::time::Instant::now();
+    let (_window, store) = PrivateWindow::boot_seeded(seeded);
+    let boot_ms = millis(booted);
+    let _beat = one_beat_at_a_time();
+    let held = super::runtime().expect("this window's runtime");
+    let read = std::time::Instant::now();
+    let runs: Vec<String> = super::ledger_image()
+        .expect("the window's ledger")
+        .runs()
+        .iter()
+        .map(|run| run.id.clone())
+        .collect();
+    let first_read_ms = millis(read);
+    super::refresh_board_ledger();
+    let (footprint, resident, _) = memory_now_mib();
+    eprintln!(
+        "measure: booted in {boot_ms:.0}ms, first read {first_read_ms:.1}ms; \
+         footprint={footprint} resident={resident}"
+    );
+
+    let (mut writes, mut reads, mut boards) = (Vec::new(), Vec::new(), Vec::new());
+    let mut sampled_peak = 0;
+    for (at, run) in runs.iter().take(WRITES).enumerate() {
+        let wrote = std::time::Instant::now();
+        held.actor
+            .note_run_project(
+                run.clone(),
+                format!("/tmp/measured-{at}"),
+                zerocode_core::orchestration::ProjectSource::Workers,
+                None,
+                MEASURED_AT_MS + at as i64,
+            )
+            .expect("a measured write");
+        writes.push(millis(wrote));
+        let read = std::time::Instant::now();
+        let tasks: usize = super::ledger_image()
+            .expect("the window's ledger")
+            .runs()
+            .iter()
+            .map(|run| run.tasks.len())
+            .sum();
+        assert_eq!(tasks, PERSONS_TASKS);
+        reads.push(millis(read));
+        let board = std::time::Instant::now();
+        super::refresh_board_ledger();
+        boards.push(millis(board));
+        sampled_peak = sampled_peak.max(memory_now_mib().0);
+    }
+    let middle = |times: &mut Vec<f64>| {
+        times.sort_by(f64::total_cmp);
+        (times[times.len() / 2], times[times.len() * 9 / 10])
+    };
+    let (write_p50, write_p90) = middle(&mut writes);
+    let (read_p50, read_p90) = middle(&mut reads);
+    let (board_p50, board_p90) = middle(&mut boards);
+    let (footprint, resident, lifetime_peak) = memory_now_mib();
+    eprintln!(
+        "measure: {WRITES} writes p50={write_p50:.1}ms p90={write_p90:.1}ms; the window's read \
+         after each p50={read_p50:.2}ms p90={read_p90:.2}ms; board p50={board_p50:.1}ms \
+         p90={board_p90:.1}ms; footprint steady={footprint} sampled peak={sampled_peak} \
+         lifetime peak={lifetime_peak} resident={resident}"
+    );
+
+    let start_reads = |what: &str| {
+        let read = std::time::Instant::now();
+        let rows = zerocode_orchestrator::ledger_store::read(
+            &store
+                .fault_connection_for_tests()
+                .expect("the measured store"),
+            "main-ledger",
+            zerocode_core::orchestration::PROJECTION_SCHEMA,
+        )
+        .expect("the measured store reads")
+        .expect("the measured ledger");
+        let letters = rows.projection.messages.len();
+        let read_ms = millis(read);
+        let rebuilt = std::time::Instant::now();
+        let ledger = super::Ledger::rebuild(rows.projection).expect("the measured ledger rebuilds");
+        let rebuild_ms = millis(rebuilt);
+        drop(ledger);
+        eprintln!(
+            "measure: {what}: a start reads {letters} letters in {read_ms:.0}ms and \
+             rebuilds them in {rebuild_ms:.0}ms"
+        );
+    };
+    start_reads("before the sweep");
+    let swept = held
+        .actor
+        .retention_sweep(MEASURED_AT_MS + A_DAY_MS)
+        .expect("the measured sweep");
+    eprintln!("measure: the sweep {swept:?}");
+    start_reads("after the sweep");
+
+    /* How often a beat and a read walk the ledger whole (review P2-1): a
+     * worker at work, its pane seen on every beat, then the reads a
+     * coordinator sends — each with nobody else reading, and with a reader
+     * holding the revision it was handed, the way a board build or another
+     * pane's read overlaps them. The walks are printed whole, so the same
+     * lines read on a tree whose ledger has no copies to count. */
+    const BEATS: i64 = 30;
+    const READS: usize = 30;
+    const LEADER_TERM: u32 = 84_000;
+    const WORKER_TERM: u32 = 84_001;
+    let _reconcile = ReconcilePanesHere::begin();
+    let team = format!("team-measured-{LEADER_TERM}");
+    let _carrying = a_worker_carrying_work(&team, LEADER_TERM, WORKER_TERM);
+    let host = Counting::default();
+    host.set_pane(WORKER_TERM, true);
+    let began = clock();
+    tick(&host, &[], began);
+    for (round, reader) in [(1, false), (2, true)] {
+        let held_by_a_reader = reader.then(|| held.actor.view().expect("a reader's image"));
+        let whose = if reader {
+            "while a reader holds the ledger"
+        } else {
+            "alone"
+        };
+        let mut times = Vec::new();
+        let before = zerocode_core::orchestration::ledger_work();
+        for beat in 0..BEATS {
+            let one = std::time::Instant::now();
+            tick(&host, &[], began + (round * BEATS + beat) * 1_000);
+            times.push(millis(one));
+        }
+        let walked = zerocode_core::orchestration::ledger_work().since(before);
+        let (p50, p90) = middle(&mut times);
+        eprintln!(
+            "measure: {BEATS} beats beside a worker at work, {whose}: p50={p50:.2}ms \
+             p90={p90:.2}ms; walked {walked:?}"
+        );
+        for line in ["check --peek", "task-list", "run-show"] {
+            let mut times = Vec::new();
+            let before = zerocode_core::orchestration::ledger_work();
+            for _ in 0..READS {
+                let one = std::time::Instant::now();
+                let said = run(
+                    &host,
+                    Vec::new(),
+                    &team,
+                    zerocode_core::agent_teams::LEADER_PANE,
+                    TEST_CAPABILITY,
+                    &words(line),
+                    clock(),
+                );
+                assert_eq!(said.exit_code, 0, "`{line}`: {}", said.stderr);
+                times.push(millis(one));
+            }
+            let walked = zerocode_core::orchestration::ledger_work().since(before);
+            let (p50, p90) = middle(&mut times);
+            eprintln!(
+                "measure: {READS} `{line}` {whose}: p50={p50:.2}ms p90={p90:.2}ms; \
+                 walked {walked:?}"
+            );
+        }
+        drop(held_by_a_reader);
+    }
+}
+
+/// What one copy of a ledger the person's size costs (t-81273): the price a
+/// write pays when it meets a reader still holding the revision it was lent,
+/// and so the price of each `clones` the window measurement above counts.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "a measurement: prints one copy of a ledger the person's size"]
+fn measure_one_copy_of_a_ledger_the_persons_size() {
+    const COPIES: usize = 10;
+    let ledger = super::Ledger::rebuild(a_ledger_the_persons_size()).expect("the measured ledger");
+    let (before, _, _) = memory_now_mib();
+    let mut times = Vec::new();
+    for _ in 0..COPIES {
+        let copied = std::time::Instant::now();
+        let copy = ledger.clone();
+        times.push(copied.elapsed().as_secs_f64() * 1000.0);
+        drop(copy);
+    }
+    let held = ledger.clone();
+    let (after, _, _) = memory_now_mib();
+    drop(held);
+    times.sort_by(f64::total_cmp);
+    eprintln!(
+        "measure: one copy p50={:.1}ms p90={:.1}ms over {COPIES}; a copy held costs \
+         {} MiB of footprint",
+        times[COPIES / 2],
+        times[COPIES * 9 / 10],
+        after.saturating_sub(before)
     );
 }
 
