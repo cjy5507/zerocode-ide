@@ -50,6 +50,8 @@ const JSON_OUT = (script, ...more) => ({ cmd: ["node", `ui/tests/${script}`, "--
 const MEMORY_SCENES = "empty,panes-1,panes-5,panes-10,conversation,knowledge,sidebar,layers,layers-chat";
 /** The still scenes the idle probes sit in: nothing open, ten panes, the team sidebar, everything opened once. */
 const IDLE_SCENES = "empty,panes-10,sidebar,layers";
+/** Everything opened once and left behind the panes, then each surface left out or the graph opened as the universe. */
+const HIDDEN_SCENES = "layers,layers-no-orbit,layers-no-knowledge,layers-universe";
 
 /** The probes, each one run `--runs` times. `calibrate` first: it is the ruler. */
 export const PROBES = {
@@ -77,6 +79,10 @@ export const PROBES = {
   // --open; the person's 「대화창이 열 때 바로 안 그려짐」 10-29). Its first read is the last 256 KiB chunk, as both
   // v1.1.104's backend and v1.1.105's answer it, so one probe gives the page's before and after.
   "pane-open": JSON_OUT("conversation-earlier.mjs", "--open", "--tail", "chunk"),
+  // What the board and the graph keep once opened and left behind the panes, the graph as a flat map and as the 3D
+  // universe — each scene's difference from `layers` is one candidate's share (t-82914, M1 review k and r2 P3-7).
+  "memory-hidden": JSON_OUT("memory-census.mjs", "--scenarios", HIDDEN_SCENES),
+  "idle-hidden": JSON_OUT("memory-census.mjs", "--scenarios", HIDDEN_SCENES, "--idle-s", "60"),
 };
 
 const sh = (cmd, args) => spawnSync(cmd, args, { encoding: "utf8" }).stdout ?? "";

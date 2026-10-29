@@ -32,7 +32,8 @@
  *                  `layers-chat`은 `layers-panes`에 400턴 대화 하나를 열었다가 판으로 돌아와 그 페이지를 뒤에
  *                  세운 장면(`.is-behind`, 창은 많아야 두 장을 세워 둔다 — `CHAT_PARK`). `layers-chat-gone`은 같은
  *                  장면에서 뒤에 선 페이지를 창이 메모리를 돌려줄 때처럼 문서에서 뺀 것(`sweepBehind({ tight })`) —
- *                  둘의 차이가 뒤에 선 페이지의 몫이다.
+ *                  둘의 차이가 뒤에 선 페이지의 몫이다. `layers-universe`는 지식 그래프를 입체 우주(3D)로 연
+ *                  같은 장면 — `layers`(평면 지도)와의 차이가 판 뒤에 숨은 우주의 몫이다(t-82914, M1 r2 P3-7).
  *                  WebContent와 GPU 프로세스를 함께 읽고, 그래픽 표면(`(graphics)` 범주)을 따로 센다.
  *
  * 두 릴리즈의 `ui/`를 같은 하네스로 비교하려면 `ZEROCODE_WINDOW_UI=<다른 트리의 ui>`로 띄운다(window-boot.mjs).
@@ -72,7 +73,7 @@ import { standLongPaneChats } from "./conversation-earlier.mjs";
 
 export const SCENARIOS = Object.freeze([
   "empty", "panes-1", "panes-10", "panes-30", "scrollback", "conversation", "gallery", "knowledge", "sidebar",
-  "layers", "layers-no-orbit", "layers-no-knowledge", "layers-panes", "layers-chat", "layers-chat-gone",
+  "layers", "layers-no-orbit", "layers-no-knowledge", "layers-panes", "layers-chat", "layers-chat-gone", "layers-universe",
   "chat-long", "chat-long-3", "chat-long-top", "chat-long-held",
 ]);
 /* 읽기를 많이 하고 놓은 것이 많은 장면 — 할당기가 놓은 페이지를 돌려준 뒤 잰다. */
@@ -459,7 +460,7 @@ async function openGallery(page, pictures) {
 /* 숨긴 것 장면: 판 `LAYER_PANES`개를 탭으로 열고, 궤도 보드와 지식 그래프를 한 번씩 연 뒤 마지막
  * 판으로 돌아온다 — 사람이 보드와 그래프를 들여다보고 일하던 판으로 돌아온 창. 보드와 그래프는
  * 닫히지 않고 숨는다. 돌아온 뒤에 무엇이 보이는지 적는다: 숨김이 장면의 전제다. */
-async function standLayers(page, { orbit, knowledge, chat, chatGone }) {
+async function standLayers(page, { orbit, knowledge, chat, chatGone, dimension }) {
   const detail = await openPanes(page, LAYER_PANES);
   if (chat) await openFixtureConversation(page, conversationFixture());
   if (orbit) {
@@ -468,7 +469,7 @@ async function standLayers(page, { orbit, knowledge, chat, chatGone }) {
       orbitBloom: window.__ORBIT__?.()?.bloom ?? null })));
   }
   if (knowledge) {
-    Object.assign(detail, await openKnowledge(page));
+    Object.assign(detail, await openKnowledge(page, { dimension }));
     detail.knowledgePainter = await page.evaluate(() => {
       const view = document.querySelector(".knowledge-view:not([hidden])");
       return view === null ? null : knowledgePainters.get(view)?.id ?? (knowledgeUniverses.has(view) ? "universe" : null);
@@ -490,18 +491,21 @@ async function standLayers(page, { orbit, knowledge, chat, chatGone }) {
   }, Boolean(chatGone)) };
 }
 
-async function openKnowledge(page) {
-  await page.evaluate((pages) => {
+/* The graph as the person last left it: the flat map (`2d`) or the universe (`3d`), which stands once it is mounted. */
+async function openKnowledge(page, { dimension = "2d" } = {}) {
+  await page.evaluate(({ pages, dimension }) => {
     secondBrainVault = "/universe";
     window.__VAULT__ = window.__universeVaultSpec__(pages);
-    noteKnowledgeExploreLines({ "/universe": JSON.stringify({ mode: "global", dimension: "2d" }) });
+    noteKnowledgeExploreLines({ "/universe": JSON.stringify({ mode: "global", dimension }) });
     document.getElementById("nav-knowledge").click();
-  }, KNOWLEDGE_PAGES);
-  await page.waitForFunction((pages) => {
+  }, { pages: KNOWLEDGE_PAGES, dimension });
+  await page.waitForFunction(({ pages, dimension }) => {
     const view = document.querySelector(".knowledge-view:not([hidden])");
-    const layout = view === null ? undefined : knowledgeLayouts.get(view);
+    if (view === null) return false;
+    if (dimension === "3d") return knowledgeUniverses.has(view) && view.classList.contains("is-universe");
+    const layout = knowledgeLayouts.get(view);
     return layout !== undefined && layout.count >= pages && layout.left === 0;
-  }, KNOWLEDGE_PAGES, { timeout: SCENARIO_PATIENCE_MS, polling: 250 });
+  }, { pages: KNOWLEDGE_PAGES, dimension }, { timeout: SCENARIO_PATIENCE_MS, polling: 250 });
   return page.evaluate(() => ({ nodes: document.querySelectorAll(".knowledge-view:not([hidden]) *").length }));
 }
 
@@ -553,7 +557,7 @@ async function measureScenario({ engine, name, origin, pictures, folder, idleS =
         const chat = name.startsWith("layers-chat");
         return standLayers(page, { orbit: !["layers-no-orbit", "layers-panes"].includes(name) && !chat,
           knowledge: !["layers-no-knowledge", "layers-panes"].includes(name) && !chat,
-          chat, chatGone: name === "layers-chat-gone" });
+          chat, chatGone: name === "layers-chat-gone", dimension: name === "layers-universe" ? "3d" : "2d" });
       }
       if (name !== "empty") throw new Error(`no scenario named ${name}`);
       return {};
