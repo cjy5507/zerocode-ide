@@ -415,7 +415,10 @@ pub(crate) const PAGE_REACH: BackReach = BackReach {
 /// as soon as it did then. The page reads up from where they begin with
 /// [`PAGE_REACH`] once they are drawn: a first read by turns took up to
 /// [`TRANSCRIPT_BACK_BUDGET`] and the page stood empty while it was read
-/// (the person, 10-29 17:2x: 「열면 바로 그려지지 않음」).
+/// (the person, 10-29 17:2x: 「열면 바로 그려지지 않음」). The budget holds for
+/// whole lines: a last line still being written, or one longer than a step,
+/// is read to its start first — up to the long-line cap, as the read before
+/// t-82901 read it (`long_line_log`).
 pub(crate) const FIRST_REACH: BackReach = BackReach {
     budget: SUBAGENT_LOG_CHUNK,
     ..PAGE_REACH
