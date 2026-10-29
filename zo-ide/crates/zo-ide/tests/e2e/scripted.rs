@@ -1200,7 +1200,7 @@ const WORKFLOW_HELPERS: [(&str, &str); 2] = [
 const LATE_WORKFLOW_HELPER: &str = WORKFLOW_HELPERS[1].1;
 
 /// Half the test's 20 s waits: a helper that never asks still ends the test on its own assertion.
-const HELPER_RENDEZVOUS_DEADLINE: Duration = Duration::from_secs(10);
+pub const HELPER_RENDEZVOUS_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Count `helper`'s first request in, then wait until every helper's has
 /// come or [`HELPER_RENDEZVOUS_DEADLINE`] has passed.
