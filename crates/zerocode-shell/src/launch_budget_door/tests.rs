@@ -251,11 +251,14 @@ fn a_ceiling_a_person_just_set_applies_to_the_next_launch() {
 fn every_refusal_says_itself_in_a_sentence_with_its_numbers() {
     let now = crate::now_epoch_ms();
     let said = |refusal: Refusal| refusal_said(&refusal);
+    let resting = said(Refusal::Resting {
+        until_ms: now + 20 * MINUTE,
+    });
+    assert!(resting.contains("쉬는 중"));
+    // The plain word (t-81155): a limit is 한도, never the codebase's 「벽」.
     assert!(
-        said(Refusal::Resting {
-            until_ms: now + 20 * MINUTE
-        })
-        .contains("쉬는 중")
+        resting.contains("한도") && !resting.contains('벽'),
+        "{resting}"
     );
     assert!(said(Refusal::Running).contains("이미 돌고"));
     assert!(said(Refusal::Fresh { age_ms: 4 * MINUTE }).contains("4분"));
