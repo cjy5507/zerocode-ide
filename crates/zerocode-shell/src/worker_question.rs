@@ -941,7 +941,7 @@ fn take_up(app: &AppHandle, waiting: Vec<Kept>, facts: &Facts, now_ms: i64) {
                     Met::Adopted(None) | Met::Dropped => {}
                     Met::Left(old) => {
                         drop(held);
-                        leave(term, old);
+                        leave(term, *old);
                     }
                 }
             }
@@ -1026,7 +1026,7 @@ enum Met {
     Adopted(Option<Raised>),
     /// The pane asks something else: the written-down letter is left, so a
     /// late answer to it is refused as passed.
-    Left(Asked),
+    Left(Box<Asked>),
     /// The written-down report asks nothing.
     Dropped,
 }
@@ -1041,7 +1041,7 @@ fn meet(held: &mut Asked, kept: Kept, seat: AskSeat, term: u32) -> Met {
         return Met::Dropped;
     };
     if back.signature != held.signature || !matches!(held.filed, Filing::Unfiled) {
-        return Met::Left(back);
+        return Met::Left(Box::new(back));
     }
     let given = if held.raised.is_none() {
         back.raised
