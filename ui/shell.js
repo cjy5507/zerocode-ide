@@ -15936,6 +15936,12 @@ function chatHeadNode(run) {
   const tally = document.createElement("span");
   tally.className = "chat-tally";
   tally.hidden = true;
+  // What it counts by family stands in its tooltip; a keyboard reaches it as
+  // a stop — a focused stop shows its tooltip — and its keys are its own,
+  // not the terminal's behind the page (t-81786 P3-10).
+  tally.tabIndex = 0;
+  tally.setAttribute("role", "note");
+  tally.dataset.keyboardOwner = "true";
   meta.append(model, chip, tally);
   // A pane's own conversation: where its tab head's line and switch stand while
   // it is the pane in front, so the two heads read as one (`placePaneHeadLine`).
@@ -15995,10 +16001,14 @@ function paintChatTally(strip, run) {
   const whole = document.createElement("span");
   whole.className = "chat-tally-total";
   whole.textContent = tallyTotalWords(total, partial);
-  strip.replaceChildren(whole, tallyFailedNode("chat-tally-failed", failed));
+  const lost = tallyFailedNode("chat-tally-failed", failed);
+  strip.replaceChildren(whole, lost);
   const tip = [...families].map(([family, count]) => `${STEP_FAMILY_WORDS[family]()} ${count}`);
   if (session) tip.push(t("paneHead.pick", "대화 {{session}}", { session }));
   strip.dataset.tip = tip.join(" · ");
+  // A screen reader hears the line and its tooltip as one name: the tooltip
+  // alone was a pointer's (t-81786 P3-10).
+  strip.setAttribute("aria-label", [whole.textContent, lost.textContent, ...tip].join(" · "));
 }
 
 /* The two ends of a tally, the helper's strip's and the head's alike: the

@@ -223,3 +223,79 @@ export async function testPaneHead(browser, origin, ok) {
     );
   } finally { await page.close(); }
 }
+
+/* What the head says to a person with no pointer (t-81786 P3-10, P3-11,
+ * P3-12). The conversation's count of what it did is a stop the keyboard
+ * reaches — a focused stop shows its tooltip — and the family counts and
+ * the session its tooltip holds are its name for a screen reader too. In
+ * the conversation's head the pane head's session line stands aside
+ * (t-81525 C14), so the count is where the session is said. The head's
+ * name button says it renames. */
+export async function testPaneHeadReach(browser, origin, ok) {
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const seen = await page.evaluate(async () => {
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const settle = () => new Promise((done) => setTimeout(done, 80));
+      const turns = [
+        { role: "user", text: "읽고 돌려 줘" },
+        { role: "tool", text: "Read · a.rs", tool: { call_id: "r1", name: "Read", kind: "read", input: "a.rs", is_error: false } },
+        { role: "tool_result", text: "fn a() {}", tool: { call_id: "r1", is_error: false } },
+        { role: "tool", text: "Bash · cargo test", tool: { call_id: "b1", name: "Bash", kind: "bash", input: "cargo test", is_error: false } },
+        { role: "tool_result", text: "failed", tool: { call_id: "b1", is_error: true } },
+        { role: "assistant", text: "한 번 실패했습니다." },
+      ];
+      window.__ANSWER__.pane_log = (args) => ({ found: true, next: turns.length, turns: turns.slice(args.after ?? 0) });
+      const term = await openTermTab({ placement: "tab" });
+      const session = "s-reach-0123456789";
+      tell("hook:agent", { term, state: "idle", agent: "claude", session: { id: session }, resumable: true });
+      await window.__PAINTED__();
+      await settle();
+      await pollHelperPages();
+      await window.__PAINTED__();
+      const chat = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat`);
+      const tally = chat?.querySelector(".chat-head .chat-tally");
+      const pick = chat?.querySelector(".chat-head .pane-head-pick");
+      const seen = {
+        pickAside: pick ? getComputedStyle(pick).display === "none" : null,
+        shown: Boolean(tally) && !tally.hidden,
+        tip: tally?.dataset.tip ?? "",
+        name: tally?.getAttribute("aria-label") ?? "",
+        role: tally?.getAttribute("role") ?? null,
+        tabStop: tally?.tabIndex === 0,
+        owner: tally?.dataset.keyboardOwner === "true",
+        line: [".chat-tally-total", ".chat-tally-failed"].map((part) => tally?.querySelector(part)?.textContent ?? "").join(" · "),
+        session: t("paneHead.pick", "대화 {{session}}", { session }),
+      };
+      tally?.focus();
+      seen.focused = document.activeElement === tally;
+      const button = document.querySelector(".pane-head .pane-head-name");
+      seen.nameButton = {
+        words: button?.textContent ?? "",
+        description: button?.getAttribute("aria-description") ?? null,
+        owner: button?.dataset.keyboardOwner ?? null,
+      };
+      seen.rename = t("tree.menu.rename", "이름 바꾸기");
+      return seen;
+    });
+    ok(
+      "the conversation's count of what it did is a stop the keyboard reaches, named for a screen reader by its line and every family count its tooltip holds — not only a pointer's tooltip (t-81786 P3-10)",
+      seen.shown && seen.tabStop && seen.owner && seen.focused && seen.role === "note" &&
+        seen.tip.split(" · ").length >= 3 && seen.name === `${seen.line} · ${seen.tip}`,
+      JSON.stringify(seen),
+    );
+    ok(
+      "the pane head's name button says what a press does — it renames — to a screen reader, beside the name it shows, and takes its own keys (t-81786 P3-11)",
+      seen.nameButton.words !== "" && seen.nameButton.description === seen.rename && seen.nameButton.owner === "true",
+      JSON.stringify(seen.nameButton),
+    );
+    ok(
+      "in the conversation's head the session line stands aside and the count says the session instead — in its tooltip and in its name (t-81786 P3-12)",
+      seen.pickAside === true && seen.tip.includes(seen.session) && seen.name.includes(seen.session),
+      JSON.stringify({ pickAside: seen.pickAside, tip: seen.tip, name: seen.name, session: seen.session }),
+    );
+  } finally { await page.close(); }
+}

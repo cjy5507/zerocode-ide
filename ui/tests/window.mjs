@@ -115,7 +115,7 @@ import { testPermissionCard } from "./permission-card.mjs";
 import { testAnswerDoor } from "./answer-door.mjs";
 import { testYourTurn } from "./your-turn.mjs";
 import { testPassTwoBFit } from "./pass2-b-fit.mjs";
-import { testPaneHead } from "./pane-head.mjs";
+import { testPaneHead, testPaneHeadReach } from "./pane-head.mjs";
 import { testStackedWork } from "./stacked-work.mjs";
 import { testSelfAct } from "./self-act.mjs";
 import { testComputerShare } from "./computer-share.mjs";
@@ -302,6 +302,7 @@ suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin
 suite("answer-door", ({ browser, origin, ok }) => testAnswerDoor(browser, origin, ok));
 suite("your-turn", ({ browser, origin, ok }) => testYourTurn(browser, origin, ok));
 suite("pane-head", ({ browser, origin, ok }) => testPaneHead(browser, origin, ok));
+suite("pane-head-reach", ({ browser, origin, ok }) => testPaneHeadReach(browser, origin, ok));
 suite("stacked-work", ({ browser, origin, ok }) => testStackedWork(browser, origin, ok));
 /* IDE design pass 2 B at five widths, in dark and light. */
 suite("pass2-b-fit", ({ browser, origin, ok }) => testPassTwoBFit(browser, origin, ok));
