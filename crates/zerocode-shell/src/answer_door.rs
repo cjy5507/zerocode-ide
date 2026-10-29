@@ -159,6 +159,13 @@ fn shows(pty: &PtyHandle, expect: &Expect<'_>) -> bool {
     }
 }
 
+/// Whether the pane's screen still shows `question`, read and nothing typed
+/// — what a worker's question the window wrote down before a restart is held
+/// to before it is carried again (t-82296).
+pub(super) fn question_is_up(held: &HeldTerminal, question: &AskQuestion) -> bool {
+    shows(&lock_pty(held), &Expect::question(question))
+}
+
 /// Type `bytes` into the pane if — and only if — the screen shows what
 /// `expect` says, read and written in one hold of the pane's lock.
 ///

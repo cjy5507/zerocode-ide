@@ -57261,6 +57261,130 @@ suite("question-passed-wire", async ({ browser, origin, ok }) => {
   }
 });
 
+/* 워커의 질문은 코디에게(t-82296, 사람 10-29 10:5x 「버그」·15:0x 「질문이 자동으로 처리가 안돼」):
+ * 원장이 소환한 워커 판의 AskUserQuestion은 그 런의 코디 편지함으로 가고, 창의 백엔드는 그 판을
+ * 「일하는 중」으로 보여 준다 — 카드도 「당신 차례」 행도 없다. 사람에게 오는 것은 코디 자리가 비었거나
+ * 코디가 10분 안에 답하지 않았을 때뿐이고, 그때 백엔드가 `ask:raised`로 까닭을 먼저 말한 뒤 묻는
+ * 보고를 다시 보낸다. 카드(대화 보기와 「당신 차례」 목록)는 그 까닭을 첫 줄로 말하고, 판이 질문을
+ * 지나가면 까닭도 카드와 함께 간다. 보통 질문에는 그런 줄이 없다. */
+suite("worker-question-raised", async ({ browser, origin, ok }) => {
+  const { page } = await openWindowTestPage(browser, origin);
+  // `WORKER_QUESTION_SHOTS=<folder>` keeps the screens the report shows.
+  const shots = process.env.WORKER_QUESTION_SHOTS;
+  const shoot = async (name) => {
+    if (shots) await page.screenshot({ path: `${shots}/${name}.png` });
+  };
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(async () => {
+      window.__TELL__ = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      window.__ASK__ = (question) => ({ questions: [{ question, header: "단계", multi_select: false,
+        options: [{ label: "진행", description: "다음 단계로" }, { label: "멈춤", description: "여기서 멈춤" }] }] });
+      window.__LIST__ = async (...questions) => {
+        window.__COLUMNS__ = [{ bucket: "attention", cards: questions.map((question) => ({
+          pane: `term:${window.__TERM__}`, agent: "claude", state: "needs-attention", heading: "가독성 묶음",
+          worktree: "main", project: "/p", task: "", ask: question, ask_prompt: window.__ASK__(question),
+          unseen: true, changed_at: Date.now(), at: Date.now() })) }];
+        await refreshBoardBadge();
+      };
+      window.__BEATS__ = async (count = 3) => {
+        for (let beat = 0; beat < count; beat += 1) await window.__PAINTED__();
+      };
+      const term = await openTermTab({ placement: "tab" });
+      window.__TERM__ = term;
+      const turns = [{ role: "user", text: "가독성 묶음을 고쳐 줘." }, { role: "assistant", text: "cargo 시험을 돌립니다." }];
+      window.__ANSWER__.pane_log = () => ({ found: true, next: turns.length, turns, skipped: false, more: false, folded: false });
+      window.__TELL__("hook:agent", { term, state: "working", agent: "claude", session: "s-raised" });
+      await setPaneChat(term, true);
+      await pollHelperPages();
+    });
+    const read = () => page.evaluate(() => {
+      const card = document.querySelector(".pane-chat .pane-chat-ask");
+      return {
+        card: card !== null,
+        why: card?.querySelector(".board-ask-raised")?.textContent ?? "",
+        whyFirst: card?.querySelector(".board-ask")?.firstElementChild?.className ?? "",
+        turns: document.getElementById("your-turn-count").textContent,
+        listed: [...document.querySelectorAll("#your-turn-list .board-ask-raised")].map((line) => line.textContent),
+      };
+    });
+    const words = await page.evaluate(() => ({
+      silent: t("board.ask.raisedSilent", "코디가 답하지 않아 올림"),
+      gone: t("board.ask.raisedGone", "코디 자리가 비어 올림"),
+    }));
+
+    /* The coordinator held the question: the backend showed the pane at work. */
+    await page.evaluate(async () => {
+      window.__COLUMNS__ = [];
+      await refreshBoardBadge();
+      window.__TELL__("hook:agent", { term: window.__TERM__, state: "working", agent: "claude", session: "s-raised" });
+      await window.__BEATS__();
+    });
+    const held = await read();
+    await shoot("after-1-coordinator-holds-it");
+
+    /* Ten minutes without an answer: why first, then the asking report. */
+    await page.evaluate(async () => {
+      window.__TELL__("ask:raised", { term: window.__TERM__, why: "coordinator-silent" });
+      window.__TELL__("hook:agent", { term: window.__TERM__, state: "waiting", agent: "claude", session: "s-raised",
+        ask_prompt: window.__ASK__("cargo 시험 다음 단계로 넘어갈까요?") });
+      await window.__LIST__("cargo 시험 다음 단계로 넘어갈까요?");
+      await window.__BEATS__();
+      openYourTurnList();
+      await window.__BEATS__(1);
+    });
+    const raised = await read();
+    await shoot("after-2-raised-after-ten-minutes");
+    await page.evaluate(async () => {
+      closeYourTurnList({ restoreFocus: false });
+      window.__TELL__("hook:agent", { term: window.__TERM__, state: "working", agent: "claude", session: "s-raised" });
+      window.__COLUMNS__ = [];
+      await refreshBoardBadge();
+      await window.__BEATS__();
+    });
+    const moved = await read();
+    ok(
+      "a worker's question its coordinator holds draws no card and no 「당신 차례」; given to the person after ten minutes, the card and the list say 「코디가 답하지 않아 올림」 first, and the line goes with the question (t-82296 ③)",
+      !held.card && held.turns === "0" &&
+        raised.card && raised.why === words.silent && raised.whyFirst === "board-ask-raised" && raised.turns === "1" &&
+        JSON.stringify(raised.listed) === JSON.stringify([words.silent]) &&
+        !moved.card && moved.why === "" && moved.turns === "0",
+      JSON.stringify({ held, raised, moved, words }),
+    );
+
+    /* The seat emptied while it waited; and a person's own question says nothing of a coordinator. */
+    await page.evaluate(async () => {
+      window.__TELL__("ask:raised", { term: window.__TERM__, why: "coordinator-gone" });
+      window.__TELL__("hook:agent", { term: window.__TERM__, state: "waiting", agent: "claude", session: "s-raised",
+        ask_prompt: window.__ASK__("보고서는 어디에 둘까요?") });
+      await window.__BEATS__();
+    });
+    const gone = await read();
+    await page.evaluate(async () => {
+      window.__TELL__("hook:agent", { term: window.__TERM__, state: "working", agent: "claude", session: "s-raised" });
+      await window.__BEATS__();
+      window.__TELL__("hook:agent", { term: window.__TERM__, state: "waiting", agent: "claude", session: "s-raised",
+        ask_prompt: window.__ASK__("어느 이름으로 할까요?") });
+      await window.__BEATS__();
+    });
+    const plain = await read();
+    await page.evaluate(async () => {
+      await window.__LIST__("어느 이름으로 할까요?");
+      await window.__BEATS__();
+    });
+    await shoot("before-1-every-question-was-the-persons");
+    ok(
+      "a question raised because the coordinator's seat emptied says so, and a question that was never a coordinator's carries no such line (t-82296 ③)",
+      gone.card && gone.why === words.gone && plain.card && plain.why === "",
+      JSON.stringify({ gone, plain, words }),
+    );
+  } finally {
+    await page.close();
+  }
+});
+
 /* 단위 6(docs/design/agent-wire-sessions-20260915.md): 선(wire) 위의 세션 — 화면 없는
  * CLI(Codex app-server)를 창이 JSON-RPC로 몰고, 그 탭은 대화 그 자체다. 턴은
  * `wire_log`로 오고, 입력줄은 `wire_send`로 보내고, 물음은 선이 준 선택지를 단추로

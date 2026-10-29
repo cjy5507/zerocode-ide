@@ -256,6 +256,13 @@ pub(crate) fn pane_agents(state: State<'_, AppState>) -> Vec<PaneAgent> {
                 listed.at = ended_ms;
                 listed.state_started_at = ended_ms;
             }
+            // A worker's question its coordinator holds is not the person's
+            // turn: the card shows the pane at work, asking nothing (t-82296).
+            if crate::worker_question::hidden(*term) {
+                listed.state = "working".to_string();
+                listed.ask = None;
+                listed.ask_prompt = None;
+            }
             listed
         })
         .collect();

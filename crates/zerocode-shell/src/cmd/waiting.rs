@@ -70,6 +70,9 @@ pub(crate) fn pane_waits(state: &AppState) -> Vec<WaitingRow> {
     let looks: Vec<(TermId, Look, i64)> = state
         .pane_states()
         .iter()
+        // A worker's question its coordinator holds waits on the coordinator,
+        // not on the person (t-82296).
+        .filter(|(term, _)| !crate::worker_question::hidden(**term))
         .map(|(term, held)| {
             let look = Look {
                 state: held.state,

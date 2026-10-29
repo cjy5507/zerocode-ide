@@ -2403,16 +2403,21 @@ pub(crate) fn term_paste(
 /// Refused outright when nothing was answered — `hasAskAnswer` is the send
 /// button's rule and this side holds it too, because an empty walk would
 /// still press Enter at whatever the TUI is showing.
+///
+/// The page is not its only caller: a worker's coordinator answering the
+/// question the worker's CLI asked (t-82296) walks the same door, under the
+/// same refusals ([`crate::worker_question`]), and reads them by the words
+/// below.
 #[tauri::command(async)]
 pub(crate) fn answer_ask(
     app: AppHandle,
-    state: State<'_, AppState>,
     term: TermId,
     agent: String,
     prompt: zerocode_core::ask::AskPrompt,
     selections: Vec<zerocode_core::ask::AskSelection>,
 ) -> Result<(), String> {
     use zerocode_core::ask;
+    let state = app.state::<AppState>();
     if !ask::has_answer(&prompt, &selections) {
         return Err("고른 답이 없습니다".to_string());
     }
@@ -2466,6 +2471,25 @@ pub(crate) fn answer_ask(
     });
     Ok(())
 }
+
+/// Whether `term`'s screen still shows `question` — asked of a worker's
+/// question the window wrote down before a restart, before it is carried
+/// again (t-82296). A pane the window does not hold shows nothing.
+pub(crate) fn question_is_up(
+    app: &AppHandle,
+    term: TermId,
+    question: &zerocode_core::ask::AskQuestion,
+) -> bool {
+    app.state::<AppState>()
+        .terminals()
+        .handle(term)
+        .is_some_and(|held| answer_door::question_is_up(&held, question))
+}
+
+/// The refusals [`answer_ask`] can come back with that a caller outside the
+/// page tells apart (t-82296): the question passed, or another answer is on
+/// its way.
+pub(crate) use crate::answer_door::{ANSWER_IN_FLIGHT, QUESTION_CHANGED};
 
 /// A card's choice on the numbered menu of a CLI whose TUI nobody measured:
 /// the row it picked, walked to and taken through the answer door.

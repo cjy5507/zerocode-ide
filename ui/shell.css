@@ -39181,6 +39181,13 @@ details.task-board-section > summary {
   content: " ✓";
 }
 
+/* Why a worker's question is the person's after all (t-82296): one quiet
+ * line over the question, on tokens only. */
+.board-ask-raised {
+  color: var(--ink-mist);
+  font-size: var(--text-xs);
+}
+
 .board-ask-question {
   overflow: hidden;
   padding: 2px 0;
