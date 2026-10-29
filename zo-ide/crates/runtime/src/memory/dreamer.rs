@@ -619,9 +619,12 @@ pub fn record_automation_event(
 /// Best-effort observability for automatic Dreamer failures.
 pub fn record_auto_dream_failure(cwd: &Path, error: &DreamError) -> Result<(), DreamError> {
     let dir = ensure_repo_dream_dir_no_symlink(cwd)?;
+    let failures = unresolved_auto_dream_failure(&dir)
+        .map_or(1, |failure| failure.failures.saturating_add(1));
     let payload = serde_json::json!({
         "tsMs": now_ms(),
         "error": dream_error_signature(error),
+        "failures": failures,
     });
     let bytes = serde_json::to_vec_pretty(&payload)
         .map_err(|e| DreamError::Io(std::io::Error::other(e)))?;
@@ -3650,6 +3653,19 @@ const THROTTLE_MARKER: &str = ".last_auto_dream";
 const COMPACTION_THROTTLE_MARKER: &str = ".last_compaction_dream";
 const AUTO_DREAM_LOCK_FILE: &str = ".automatic_dream.lock";
 const AUTO_DREAM_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+const AUTO_DREAM_MAX_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// How long automatic curation waits after the `failures`-th failed pass in a
+/// row: a minute, doubling with each failure, never more than an hour. A store
+/// that keeps failing is looked at hourly instead of every minute, and a pass
+/// that succeeds starts the count again.
+#[must_use]
+pub fn auto_dream_retry_interval(failures: u32) -> std::time::Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    AUTO_DREAM_RETRY_INTERVAL
+        .saturating_mul(1 << doublings)
+        .min(AUTO_DREAM_MAX_RETRY_INTERVAL)
+}
 
 /// Whether automatic curation is enabled for this workspace. Explicit
 /// [`dream_at_cwd`] calls remain independent of the automatic scheduling switch.
@@ -3721,22 +3737,40 @@ pub fn maybe_auto_dream(
 }
 
 fn automatic_dream_due(dir: &Path, now: SystemTime, min_interval: std::time::Duration) -> bool {
-    let succeeded = [THROTTLE_MARKER, COMPACTION_THROTTLE_MARKER]
-        .into_iter().filter_map(|name| read_marker(&dir.join(name))).max();
-    let failed = read_auto_dream_failure_time(dir)
-        .filter(|failed| succeeded.is_none_or(|success| *failed > success));
-    if failed.is_some() {
-        return should_auto_dream(failed, now, AUTO_DREAM_RETRY_INTERVAL);
+    match unresolved_auto_dream_failure(dir) {
+        Some(failure) => should_auto_dream(Some(failure.at), now, auto_dream_retry_interval(failure.failures)),
+        None => should_auto_dream(last_auto_dream_success(dir), now, min_interval),
     }
-    should_auto_dream(succeeded, now, min_interval)
 }
 
-fn read_auto_dream_failure_time(dir: &Path) -> Option<SystemTime> {
+fn last_auto_dream_success(dir: &Path) -> Option<SystemTime> {
+    [THROTTLE_MARKER, COMPACTION_THROTTLE_MARKER]
+        .into_iter().filter_map(|name| read_marker(&dir.join(name))).max()
+}
+
+/// The last failed automatic pass, and how many failed in a row up to it.
+struct AutoDreamFailure {
+    at: SystemTime,
+    failures: u32,
+}
+
+/// The last failure, unless a pass has succeeded since.
+fn unresolved_auto_dream_failure(dir: &Path) -> Option<AutoDreamFailure> {
+    let succeeded = last_auto_dream_success(dir);
+    read_auto_dream_failure(dir).filter(|failure| succeeded.is_none_or(|success| failure.at > success))
+}
+
+fn read_auto_dream_failure(dir: &Path) -> Option<AutoDreamFailure> {
     let text = crate::secure_fs::read_regular_file_absolute_no_follow_bounded(
         &dir.join(AUTO_DREAM_ERROR_FILE), 1_024,
     ).ok()??;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(value.get("tsMs")?.as_u64()?))
+    let at = std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::from_millis(value.get("tsMs")?.as_u64()?))?;
+    // A file written before failures were counted stands for one failure.
+    let failures = value.get("failures").and_then(serde_json::Value::as_u64)
+        .map_or(1, |count| u32::try_from(count).unwrap_or(u32::MAX));
+    Some(AutoDreamFailure { at, failures: failures.max(1) })
 }
 
 /// Schedule curation after a successful conversation compaction without ever

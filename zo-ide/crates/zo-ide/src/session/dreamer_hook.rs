@@ -122,7 +122,10 @@ pub(crate) fn spawn_on_idle(
                 attempt.completed(crate::autonomy::scheduler::now_unix_ms());
                 log_status(&session_id, &format!("idle {}", report.summary_line()));
             }
-            Err(_) => log_status(&session_id, "idle_failed"),
+            Err(_) => {
+                attempt.retry_later(crate::autonomy::scheduler::now_unix_ms());
+                log_status(&session_id, "idle_failed");
+            }
             Ok(None) => {}
         }
     });

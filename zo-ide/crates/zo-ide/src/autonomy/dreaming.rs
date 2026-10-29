@@ -1,6 +1,6 @@
 //! Memory curation on the existing session idle clock; no model turn or daemon.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 
@@ -10,11 +10,13 @@ pub(crate) struct IdleDreamer {
     idle_after: u64,
     next_attempt: Arc<AtomicU64>,
     running: Arc<AtomicBool>,
+    failures: Arc<AtomicU32>,
 }
 
 pub(crate) struct DreamAttempt {
     next_attempt: Arc<AtomicU64>,
     running: Arc<AtomicBool>,
+    failures: Arc<AtomicU32>,
 }
 
 impl IdleDreamer {
@@ -25,6 +27,7 @@ impl IdleDreamer {
             idle_after: now.saturating_add(delay_ms.max(1)),
             next_attempt: Arc::new(AtomicU64::new(0)),
             running: Arc::new(AtomicBool::new(false)),
+            failures: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -49,18 +52,27 @@ impl IdleDreamer {
         Some(DreamAttempt {
             next_attempt: Arc::clone(&self.next_attempt),
             running: Arc::clone(&self.running),
+            failures: Arc::clone(&self.failures),
         })
     }
 }
 
 impl DreamAttempt {
     pub(crate) fn completed(&self, now: u64) {
+        self.failures.store(0, Ordering::Release);
         let interval = runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL.as_millis();
         let interval = u64::try_from(interval).unwrap_or(u64::MAX);
         self.next_attempt.store(now.saturating_add(interval), Ordering::Release);
     }
 
-    pub(crate) fn retry_later(&self, _now: u64) {}
+    /// A pass that failed looks again later each time it fails in a row, on
+    /// the runtime's own retry steps, and never sooner than the idle delay.
+    pub(crate) fn retry_later(&self, now: u64) {
+        let failures = self.failures.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+        let wait = runtime::memory::auto_dream_retry_interval(failures).as_millis();
+        let wait = u64::try_from(wait).unwrap_or(u64::MAX);
+        self.next_attempt.fetch_max(now.saturating_add(wait), Ordering::AcqRel);
+    }
 }
 
 impl Drop for DreamAttempt {
