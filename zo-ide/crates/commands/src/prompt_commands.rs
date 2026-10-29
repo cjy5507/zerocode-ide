@@ -1072,6 +1072,34 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// A `!` line the kill guard refuses says why in the guard's own words —
+    /// a signal no person said yes to — not that an ask rule wants approval
+    /// (t-82721 P3-3). The pid is known only when the line would run, so
+    /// nothing is aimed at.
+    #[test]
+    fn a_bang_line_the_kill_guard_refuses_says_why_in_the_guards_words() {
+        let root = temp_dir("bang-kill");
+        fs::create_dir_all(&root).expect("base dir");
+        let line = "kill \"$TARGET\"";
+        let command = parse_prompt_command_file(
+            "stop".to_string(),
+            PathBuf::from("stop.md"),
+            &format!("---\nallowed-tools: Bash\n---\n!{line}\n"),
+        )
+        .expect("command parsed");
+        let rules = runtime::RuntimePermissionRuleConfig::new(Vec::new(), Vec::new(), Vec::new());
+        let gate = InlineShellGate {
+            read_only: false,
+            workspace: WorkspaceTrust::Trusted,
+            rules: Ok(&rules),
+        };
+        let rendered = command.render_prompt_as("", &root, gate);
+        let refused = format!("[!{line}: not run — refused, since no person said yes to it");
+        assert!(rendered.starts_with(&refused), "{rendered}");
+        assert!(!rendered.contains("an ask rule"), "{rendered}");
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// A repository's command file reads `@path` only inside the working
     /// folder: an absolute path, a `..` that climbs out, and a link inside
     /// that points out each leave one notice line. The same file in zo's
