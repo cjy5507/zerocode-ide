@@ -153,6 +153,7 @@ import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
 import { testConversationB, testConversationBTail } from "./conversation-b.mjs";
 import { testConversationFind, testConversationFindPane } from "./conversation-find.mjs";
+import { testPaneRewind } from "./pane-conversation.mjs";
 import { testConversationEarlier } from "./conversation-earlier.mjs";
 import { testConversationSwitch } from "./conversation-switch.mjs";
 import { testComposerHold } from "./composer-hold.mjs";
@@ -510,6 +511,8 @@ suite("conversation-b-tail", ({ browser, origin, ok }) => testConversationBTail(
 /* 대화 안 찾기 ⌘F — 대화가 앞에 서면 대화에서, 알약 안 일치는 펼침, 400턴 한 프레임 (시안 C8, t-82196). */
 suite("conversation-find", ({ browser, origin, ok }) => testConversationFind(browser, origin, ok));
 suite("conversation-find-pane", ({ browser, origin, ok }) => testConversationFindPane(browser, origin, ok));
+/* 사람 말에서 고쳐 보내기 — 되감기 명령을 아는 CLI의 판에만, 누르면 판을 터미널로 돌리고 /rewind (시안 C10, t-82196). */
+suite("pane-rewind", ({ browser, origin, ok }) => testPaneRewind(browser, origin, ok));
 suite("conversation-earlier", ({ browser, origin, ok }) => testConversationEarlier(browser, origin, ok));
 /* 대화를 바꿨다가 돌아오면 그 화면 그대로, 판의 「대화」는 전사부터(인계 중 보낸 글은 한 번만),
  * 늦은 첫 읽기는 늦게 한 줄 (t-54304 — Claude·Codex·Dots 역분석에서 가져온 1단계). */

@@ -517,11 +517,113 @@ export async function testPaneConversation(browser, origin, ok) {
   }
 }
 
+/* Draft C10 (t-82196, the person's answer to question 3): on a pane whose
+ * CLI names its way back to an earlier message — Claude Code's `/rewind` —
+ * the person's words wear 「여기서 고쳐 보내기」: one door in the list, under
+ * the newest words and carried to the ones a hand reaches, seen while a hand
+ * is on them. A press turns the pane to its terminal and types the CLI's
+ * command there, as a chip's command, not the person's words. A CLI that
+ * names no such command, and a wire's page, wear no door. */
+export async function testPaneRewind(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const turns = [
+      { role: "user", text: "로그인 순서를 알려 줘" },
+      { role: "assistant", text: "잠금 확인이 먼저입니다." },
+      { role: "user", text: "테스트도 돌려 줘" },
+      { role: "assistant", text: "모두 통과했습니다." },
+    ];
+    const seen = await page.evaluate(async (turns) => {
+      const settle = async (ms = 0) => {
+        await window.__PAINTED__();
+        if (ms) await new Promise((done) => setTimeout(done, ms));
+        await window.__PAINTED__();
+      };
+      const sent = [];
+      window.__ANSWER__.term_paste = (args) => (sent.push(["paste", args.term, args.text, args.road ?? null]), null);
+      window.__ANSWER__.term_key = (args) => (sent.push(["key", args.term, args.press.key]), null);
+      window.__ANSWER__.pane_log = (args) => ({ found: true, next: turns.length, turns: args.after == null ? turns : turns.slice(args.after),
+        skipped: false, more: false, folded: false, model: "claude-opus-5" });
+      const open = async (agent) => {
+        const term = await openTermTab({ placement: "tab" });
+        paneAgents.set(term, agent);
+        hookStates.set(term, "idle");
+        await setPaneChat(term, true, { wire: false });
+        await pollHelperPages();
+        await settle(60);
+        return term;
+      };
+      const term = await open("claude");
+      const list = document.querySelector(`.pane-chat[data-term="${term}"] .helper-turns`);
+      const people = [...list.querySelectorAll(":scope > .helper-turn.is-user")];
+      const doors = () => [...list.querySelectorAll(".helper-rewind")];
+      const seen = {
+        doors: doors().length,
+        onNewest: doors()[0]?.parentElement === people.at(-1),
+        words: doors()[0]?.textContent ?? "",
+        wantWords: t("worker.rewindHere", "여기서 고쳐 보내기"),
+        tip: doors()[0]?.dataset.tip ?? "",
+        wantTip: t("worker.rewindTip", "터미널에서 되감기를 엽니다 — 돌아갈 말을 거기서 고릅니다"),
+        restOpacity: doors()[0] ? getComputedStyle(doors()[0]).opacity : null,
+      };
+      // A hand on the first words carries the door there, the list's one.
+      const height = list.scrollHeight;
+      people[0].querySelector(".helper-said").dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+      await settle();
+      seen.carried = doors().length === 1 && doors()[0].parentElement === people[0];
+      seen.sameHeight = list.scrollHeight === height;
+      doors()[0].focus();
+      await settle(400);
+      seen.focusOpacity = getComputedStyle(doors()[0]).opacity;
+      seen.chatBefore = paneChatOn(term);
+      doors()[0].click();
+      await settle(800);
+      seen.chatAfter = paneChatOn(term);
+      seen.sent = JSON.stringify(sent);
+      seen.wantSent = JSON.stringify([["paste", term, "/rewind", "rewind"], ["key", term, "Enter"]]);
+      // zo names no way back: its pane wears no door.
+      const zo = await open("zo");
+      seen.zoDoors = document.querySelectorAll(`.pane-chat[data-term="${zo}"] .helper-rewind`).length;
+      seen.zoPeople = document.querySelectorAll(`.pane-chat[data-term="${zo}"] .helper-turn.is-user`).length;
+      return seen;
+    }, turns);
+    ok("C10: a Claude Code pane's conversation stands one 「여기서 고쳐 보내기」 under the person's newest words, hidden until a hand is on them, with what it does on its hover",
+      seen.doors === 1 && seen.onNewest && seen.words === seen.wantWords && seen.tip === seen.wantTip && seen.restOpacity === "0",
+      JSON.stringify(seen));
+    ok("C10: a hand on earlier words carries the one door there without moving a line, and the keyboard's focus shows it",
+      seen.carried && seen.sameHeight && seen.focusOpacity === "1", JSON.stringify(seen));
+    ok("C10: a press turns the pane to its terminal and types Claude Code's /rewind there as a chip's command — not as the person's words",
+      seen.chatBefore && !seen.chatAfter && seen.sent === seen.wantSent, JSON.stringify(seen));
+    ok("C10: a pane whose CLI names no way back (zo) wears no door", seen.zoPeople > 0 && seen.zoDoors === 0, JSON.stringify(seen));
+    // A wire's page has no screen of its own to open the picker on.
+    const wire = await page.evaluate(async (turns) => {
+      window.__ANSWER__.wire_start = (args) => ({ id: 51, agent: args.agent, protocol: "claude-stream", version: "2.1.280", model: null, session: "s-rewind" });
+      window.__ANSWER__.wire_log = () => ({ found: true, skipped: false, next: 0, turns: [], status: "idle", asks: [], live: [], agent: "claude",
+        protocol: "claude-stream", models: [], modes: [], commands: [], version: "2.1.280", tasks: [] });
+      window.__ANSWER__.wire_stop = () => null;
+      await openWirePage("claude", "/tmp/zerocode-window-test", { history: turns });
+      await pollHelperPages();
+      await window.__PAINTED__();
+      const page = document.querySelector("#worker-view");
+      return { people: page.querySelectorAll(".helper-turn.is-user").length, doors: page.querySelectorAll(".helper-rewind").length };
+    }, turns);
+    ok("C10: a wire's page — a conversation with no screen of its own — wears no door", wire.people > 0 && wire.doors === 0, JSON.stringify(wire));
+    ok("C10: the way back raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const { files, origin } = await createWindowServer();
   const browser = await chromium.launch({ headless: true });
   let failed = 0;
   try {
+    const report = (name, pass, details = "") => {
+      console.log(`${pass ? "PASS" : "FAIL"} ${name}${!pass ? `\n  ${details}` : ""}`);
+      if (!pass) failed++;
+    };
+    await testPaneRewind(browser, origin, report);
     await testPaneConversation(browser, origin, (name, pass, details = "") => {
       console.log(`${pass ? "PASS" : "FAIL"} ${name}${!pass ? `\n  ${details}` : ""}`);
       if (!pass) failed++;

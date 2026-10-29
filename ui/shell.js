@@ -15319,12 +15319,52 @@ function standAnswerActions(list, row) {
 }
 
 /* The pointer and the focus carry the action row to the answer they reach —
+ * and the way back (`standRewindDoor`) to the person's words they reach —
  * listened for on the list, once, before the explain button looks for it
  * (`watchExplainTurns`). */
 function watchAnswerActions(list) {
-  const stand = (event) => standAnswerActions(list, event.target.closest?.(".helper-turn.is-assistant"));
+  const stand = (event) => {
+    standAnswerActions(list, event.target.closest?.(".helper-turn.is-assistant"));
+    standRewindDoor(list, event.target.closest?.(".helper-turn.is-user"));
+  };
   list.addEventListener("pointerover", stand);
   list.addEventListener("focusin", stand);
+}
+
+/* 「여기서 고쳐 보내기」(시안 C10, t-82196 — 사람의 질문 3 답): 목록에 하나, 사람의
+ * 말 가운데 손이 닿은 것 — 없으면 가장 새것 — 아래에 선다. 누르면 판을 터미널로
+ * 돌리고 CLI 자신의 되감기 고르개를 연다(`rewindPane`). 그 명령을 이름하지 않은
+ * CLI의 대화에는 서지 않는다. */
+function rewindDoorNode(list) {
+  const door = document.createElement("button");
+  door.type = "button";
+  door.className = "helper-rewind";
+  // Enter and Space, while it has focus, are its own (`rearmKeySink`).
+  door.dataset.keyboardOwner = "true";
+  door.textContent = t("worker.rewindHere", "여기서 고쳐 보내기");
+  door.dataset.tip = t("worker.rewindTip", "터미널에서 되감기를 엽니다 — 돌아갈 말을 거기서 고릅니다");
+  door.addEventListener("click", () => {
+    const run = list.__run;
+    const command = run ? composerRewindCommand(run, agentSpecOf(run)) : null;
+    if (command) void rewindPane(run, command).catch((error) => showError(error));
+  });
+  return door;
+}
+
+function standRewindDoor(list, row) {
+  if (!row || row.__turn?.role !== "user" || !list.contains(row)) return;
+  const run = list.__run;
+  if (!run || !composerRewindCommand(run, agentSpecOf(run))) {
+    list.__rewind?.remove();
+    return;
+  }
+  const door = (list.__rewind ??= rewindDoorNode(list));
+  if (door.parentElement !== row) row.appendChild(door);
+}
+
+/* The catalog's row for the agent a run speaks for. */
+function agentSpecOf(run) {
+  return installedAgents().find((row) => row.id === run.agent) ?? null;
 }
 
 /* The last thing the agent SAID on this page, or "" — what the copy under an
@@ -15923,6 +15963,9 @@ function syncHelperTurns(list, run) {
   // height yet, and a read in this task would lay the page out once more than
   // its frame does (t-55369).
   if (people.length) requestAnimationFrame(() => clipPersonRows(people.filter((row) => row.isConnected)));
+  // The way back stands under the newest words until a hand reaches others —
+  // never pulled from under the keyboard's focus (C10).
+  if (people.length && document.activeElement !== list.__rewind) standRewindDoor(list, people.at(-1));
   if (follow && !reported) scrollHelperToBottom(list);
   // Whether anything stands above, and whether the newest turns are held.
   paintEarlierDoor(list);

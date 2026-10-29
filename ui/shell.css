@@ -15215,6 +15215,40 @@ details.worker-command {
   margin-top: 0;
 }
 
+/* 「여기서 고쳐 보내기」(시안 C10, t-82196): 목록에 하나, 손이 닿은 사람의 말 아래
+ * 오른쪽 — 말풍선 밑의 여백(행의 아래 여백과 행 사이) 안에 서므로 옮겨 다녀도
+ * 줄을 밀지 않고, 그 말에 포인터나 초점이 있을 때만 보인다. */
+.helper-rewind {
+  position: absolute;
+  right: 0;
+  bottom: calc(-1 * var(--chat-bubble-gap));
+  height: var(--chat-actions-h);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  line-height: var(--chat-actions-h);
+  white-space: nowrap;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-turn.is-user:hover > .helper-rewind,
+.helper-turn.is-user:focus-within > .helper-rewind {
+  opacity: 1;
+}
+
+.helper-rewind:hover {
+  color: var(--ink-chalk);
+}
+
 .helper-said {
   min-width: 0;
   white-space: pre-wrap;
@@ -18527,7 +18561,7 @@ button.helper-sib:hover {
  * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`).
  * 입력칸이 키보드를 넘긴 질문 카드도 같은 고리를 두른다(t-81786 r2 P3-2). */
 .worker-view
-  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask):focus-visible {
+  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-rewind, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -18551,6 +18585,7 @@ button.helper-sib:hover {
   button.worker-where.is-door,
   .helper-preview-door,
   .helper-copy,
+  .helper-rewind,
   .helper-expand,
   .composer-menu-item,
   .composer-slash-row,

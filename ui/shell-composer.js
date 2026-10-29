@@ -1228,6 +1228,24 @@ function composerCompactCommand(run, spec) {
   return (run.wireLog?.commands ?? []).some((row) => row.name === command) ? command : null;
 }
 
+/* 이 실행에서 사람의 말을 고쳐 다시 보낼 수 있는가(시안 C10, t-82196) — 카탈로그가
+ * 그 CLI의 되감기 명령을 알고(Claude Code의 `/rewind`), 대화가 판의 것일 때의
+ * 그 명령, 아니면 `null`. 명령은 CLI 자신의 고르개를 판의 화면에 연다: 선(wire)의
+ * 페이지와 헬퍼의 페이지에는 그 화면이 없다. */
+function composerRewindCommand(run, spec) {
+  const command = spec?.rewind_command ?? null;
+  if (!command || run.wire || run.term === undefined || isHelperPage(run)) return null;
+  return command;
+}
+
+/* 고쳐 보내기를 눌렀다: 대화를 입은 판은 터미널로 돌아가고(`showPaneScreen`), 명령은
+ * 모델·권한 칩의 명령처럼 판의 길로 간다 — 사람의 말로 세지 않는다(`road`,
+ * t-57712). 어느 말로 돌아갈지는 CLI의 고르개에서 사람이 고른다. */
+async function rewindPane(run, command) {
+  showPaneScreen(run.term);
+  await deliverToPane(run.term, command, null, "rewind");
+}
+
 /* 창 크기를 말로 — 모르면 「창 크기 모름」(시안 C9). 지어낸 분모는 툴팁에서도
  * 쓰지 않는다. */
 function composerContextWindowWords(reading) {

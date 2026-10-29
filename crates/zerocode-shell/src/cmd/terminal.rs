@@ -2091,6 +2091,9 @@ pub(crate) fn term_key(
 pub(crate) enum ChipRoad {
     Model,
     Permission,
+    /// The CLI's own way back to an earlier message, opened from the
+    /// person's words in the conversation (draft C10, t-82196).
+    Rewind,
 }
 
 /// The person's own sentence for a takeover (t-69526): their words went into
@@ -2128,6 +2131,7 @@ fn note_chip(local_data_root: &Path, term: TermId, road: ChipRoad) {
     let fact = match road {
         ChipRoad::Model => "the person changed the model",
         ChipRoad::Permission => "the person changed the permission mode",
+        ChipRoad::Rewind => "the person opened the way back to an earlier message",
     };
     note_window_event(
         local_data_root,
