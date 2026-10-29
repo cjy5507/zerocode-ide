@@ -1771,17 +1771,14 @@ mod tests {
         let live = seat(true, false);
         // Spaces around it, English in any case, and a sentence's end after
         // it — 「사람에게.」 is the word too, never an answer typed in.
-        let spoken = TO_PERSON
-            .iter()
-            .map(|word| (*word).to_string())
-            .chain([
-                format!(" {}\n", TO_PERSON[0]),
-                TO_PERSON[1].to_uppercase(),
-                format!("{}.", TO_PERSON[0]),
-                format!("{}。", TO_PERSON[0]),
-                format!("{}!!", TO_PERSON[1]),
-                format!("{} ?", TO_PERSON[0]),
-            ]);
+        let spoken = TO_PERSON.iter().map(|word| (*word).to_string()).chain([
+            format!(" {}\n", TO_PERSON[0]),
+            TO_PERSON[1].to_uppercase(),
+            format!("{}.", TO_PERSON[0]),
+            format!("{}。", TO_PERSON[0]),
+            format!("{}!!", TO_PERSON[1]),
+            format!("{} ?", TO_PERSON[0]),
+        ]);
         for word in spoken {
             let handed = Standing::Answered(word.clone());
             // At once, and nothing is typed into the picker.
@@ -2058,10 +2055,7 @@ mod tests {
             taking_up(&answered, true, false, || false, TAKE_UP_GRACE_MS - 1),
             TakeUp::Later
         );
-        assert_eq!(
-            taking_up(&answered, true, false, || true, 0),
-            TakeUp::Carry
-        );
+        assert_eq!(taking_up(&answered, true, false, || true, 0), TakeUp::Carry);
         assert_eq!(
             taking_up(&Standing::Waiting, false, false, || true, 0),
             TakeUp::Later

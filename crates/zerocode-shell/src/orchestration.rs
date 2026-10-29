@@ -1995,9 +1995,10 @@ impl QuestionLedger<'_> {
     /// ([`seated_term`]): only the worker in that pane now.
     pub(crate) fn seated_term(&self, run: &str, worker: &str) -> Option<u32> {
         let run = self.ledger.run(run)?;
-        let worker = run.workers.iter().find(|one| {
-            one.id == worker && one.state.is_live() && one.state.may_occupy_pane()
-        })?;
+        let worker = run
+            .workers
+            .iter()
+            .find(|one| one.id == worker && one.state.is_live() && one.state.may_occupy_pane())?;
         seated_term(run, worker, self.seats)
     }
 
