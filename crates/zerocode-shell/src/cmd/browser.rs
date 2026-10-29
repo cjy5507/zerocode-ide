@@ -1337,6 +1337,134 @@ pub(crate) fn set_browser_default_profile(
     choose_default_browser_profile(state.config_root(), id.as_deref())
 }
 
+/// 한 프로필로 가져온 북마크(t-79331 ④) — 그 프로필 판의 북마크 줄과 주소줄
+/// 제안이 읽는다. 가져온 적이 없으면 빈 목록이다.
+#[tauri::command(async)]
+pub(crate) fn browser_bookmarks(
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    profile: String,
+) -> Result<Vec<browser_profile_data::Bookmark>, String> {
+    from_the_main_webview(&webview)?;
+    if browser_profile_store(&profile).is_none() {
+        return Err("프로필 id가 아닙니다".into());
+    }
+    Ok(browser_profile_data::load_bookmarks(
+        state.config_root(),
+        &profile,
+    ))
+}
+
+/// 이 판의 프로필로 가져온 주소와 입력값. 프로필이 없거나 가져온 적이 없으면
+/// 비어 있다.
+fn pane_address_book(state: &AppState, label: &str) -> browser_profile_data::AddressBook {
+    let profile = state
+        .browser_records()
+        .get(label)
+        .and_then(|record| record.profile.clone());
+    profile.map_or_else(browser_profile_data::AddressBook::default, |profile| {
+        browser_profile_data::load_address_book(state.config_root(), &profile)
+    })
+}
+
+async fn detect_page_form(pane: &BrowserPane) -> Result<browser_form_fill::PageForm, String> {
+    let answer = page_json(
+        pane,
+        browser_form_fill::detect_script(),
+        BROWSER_CALLBACK_DEADLINE,
+    )
+    .await?;
+    serde_json::from_value(answer).map_err(|_| PAGE_ANSWER_UNREADABLE.to_string())
+}
+
+/// 지금 이 판의 폼에 내밀 저장된 주소와 입력값(t-79331 ③) — 고를 때 읽는
+/// 한 줄과 채울 수 있는 칸 수만 간다. 가져온 주소가 없는 판은 페이지를
+/// 평가하지 않는다: 대부분의 페이지가 이 답에서 끝난다. 탐지는 한 번의
+/// 평가이고 칸의 값은 읽지 않는다.
+#[tauri::command]
+pub(crate) async fn browser_address_candidates(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    label: String,
+) -> Result<browser_form_fill::FillOffer, String> {
+    from_the_main_webview(&webview)?;
+    let pane = browser_pane_of(&app, &state, &label)?;
+    let book = pane_address_book(&state, &label);
+    if book.addresses.is_empty() {
+        return Ok(browser_form_fill::FillOffer::default());
+    }
+    let form = detect_page_form(&pane).await?;
+    Ok(browser_form_fill::offer(&book, &form))
+}
+
+/// 고른 주소를 판의 폼의 주소 칸에 쓴다. 사람이 띠에서 고른 일이라
+/// 에이전트의 문이 아니다(`self_surface`). 값은 이 호출 안에서 저장소에서
+/// 나와 렌더러로만 가고, 돌려주는 것은 몇 칸에 들어갔는지뿐이다. 고른 주소가
+/// 지금 페이지에 내밀어질 것이 아니면 쓰지 않는다. 종류를 모르는 칸은
+/// 건드리지 않는다 — 입력값은 [`browser_entry_fill`]로 따로 고른다.
+#[tauri::command]
+pub(crate) async fn browser_address_fill(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    label: String,
+    id: String,
+) -> Result<browser_form_fill::FillReport, String> {
+    from_the_main_webview(&webview)?;
+    let pane = browser_pane_of(&app, &state, &label)?;
+    let book = pane_address_book(&state, &label);
+    let form = detect_page_form(&pane).await?;
+    if !browser_form_fill::offer(&book, &form)
+        .addresses
+        .iter()
+        .any(|candidate| candidate.id == id)
+    {
+        return Err("이 페이지에 쓸 수 없는 주소입니다".to_string());
+    }
+    let address = book
+        .addresses
+        .iter()
+        .find(|address| address.id == id)
+        .ok_or_else(|| "저장된 주소를 읽을 수 없습니다".to_string())?;
+    let script = browser_form_fill::fill_script(
+        &browser_form_fill::fill_values(address, &form.kinds),
+        &std::collections::BTreeMap::new(),
+    );
+    let answer = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+    Ok(browser_form_fill::fill_report(&answer))
+}
+
+/// 사람이 띠에서 고른 입력값 하나를 그 이름의 빈 칸에만 쓴다(t-79331 ③).
+/// 주소처럼 사람 전용이고, 값은 저장소에서 렌더러로만 가며, 돌려주는 것은
+/// 칸 수뿐이다. 그 이름이 지금 페이지에 내밀어질 것이 아니면 쓰지 않는다.
+#[tauri::command]
+pub(crate) async fn browser_entry_fill(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    label: String,
+    name: String,
+) -> Result<browser_form_fill::FillReport, String> {
+    from_the_main_webview(&webview)?;
+    let pane = browser_pane_of(&app, &state, &label)?;
+    let book = pane_address_book(&state, &label);
+    let form = detect_page_form(&pane).await?;
+    if !browser_form_fill::offer(&book, &form)
+        .entries
+        .iter()
+        .any(|entry| entry.name == name)
+    {
+        return Err("이 페이지에 쓸 수 없는 입력값입니다".to_string());
+    }
+    let script = browser_form_fill::fill_script(
+        &std::collections::BTreeMap::new(),
+        &browser_form_fill::entry_values(&book, std::slice::from_ref(&name)),
+    );
+    let answer = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+    Ok(browser_form_fill::fill_report(&answer))
+}
+
 /// 이 기계에 설치된 소스 브라우저들 — 가져오기 메뉴의 재료 (지시서 C2,
 /// Orca `detectInstalledBrowsers`).
 #[tauri::command(async)]
@@ -1365,11 +1493,12 @@ pub(crate) async fn import_browser_cookies(
         return Err("프로필 id가 아닙니다".into());
     }
     let config_root = state.config_root().to_path_buf();
+    let local_data_root = state.local_data_root().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or_else(|| "홈 디렉터리가 없습니다".to_string())?;
         let source_profile = profile.as_deref().unwrap_or("Default");
         let scratch =
-            std::env::temp_dir().join(format!("zerocode-cookie-import-{}", std::process::id()));
+            std::env::temp_dir().join(format!("zerocode-profile-import-{}", std::process::id()));
         let outcome = match family.as_str() {
             "safari" => {
                 let path = browser_cookie_import::cookie_database_path("safari", "", &home)
@@ -1408,9 +1537,53 @@ pub(crate) async fn import_browser_cookies(
         domains.sort();
         domains.dedup();
         browser_cookie_import::save_staged_cookies(&config_root, &target, &outcome.cookies)?;
+        // 같은 누름에 그 프로필의 북마크도 옮긴다(t-79331) — Chromium 가족만.
+        // 쿠키는 이미 앉았으니, 여기서 실패해도 가져오기는 실패가 아니다:
+        // 카드는 그 몫을 읽지 못한 까닭의 종류로 사람 말을 적고, 자세한
+        // 글자는 창 로그 한 줄에 간다.
+        let (profile_data, profile_data_skipped) =
+            if browser_cookie_import::is_chromium_family(&family) {
+                let carried = browser_profile_data::read_chromium_profile_data(
+                    &family,
+                    source_profile,
+                    &home,
+                    &scratch,
+                )
+                .and_then(|(bookmarks, web_data)| {
+                    note_window_event(
+                        &local_data_root,
+                        &browser_profile_data::import_log_line(&bookmarks, &web_data),
+                    );
+                    browser_profile_data::save_imported(
+                        &config_root,
+                        &target,
+                        &bookmarks,
+                        &web_data,
+                        browser_cookie_import::now_unix(),
+                    )
+                    .map_err(|detail| browser_profile_data::ProfileDataError {
+                        kind: browser_profile_data::ProfileDataSkipped::Unsaved,
+                        detail,
+                    })
+                });
+                match carried {
+                    Ok(counts) => (Some(counts), None),
+                    Err(error) => {
+                        note_window_event(
+                            &local_data_root,
+                            &format!("browser profile data import skipped: {error}"),
+                        );
+                        (None, Some(error.kind))
+                    }
+                }
+            } else {
+                (None, None)
+            };
         remember_cookie_source(&config_root, &target, &family, profile);
         let undecryptable = outcome.app_bound + outcome.decrypt_failed;
         Ok(BrowserCookieImportSummary {
+            profile_data,
+            profile_data_skipped,
             total_cookies: outcome.total,
             imported_cookies: outcome.cookies.len(),
             skipped_cookies: outcome.total - outcome.cookies.len(),
@@ -1465,6 +1638,9 @@ pub(crate) async fn import_cookie_file(
         browser_cookie_import::save_staged_cookies(&config_root, &target, &outcome.cookies)?;
         remember_file_cookie_source(&config_root, &target);
         Ok::<_, String>(BrowserCookieImportSummary {
+            // cookies.txt는 쿠키뿐이다 — 북마크·주소는 브라우저에서 가져올 때만.
+            profile_data: None,
+            profile_data_skipped: None,
             total_cookies: outcome.total,
             imported_cookies: outcome.cookies.len(),
             skipped_cookies: outcome.total - outcome.cookies.len(),

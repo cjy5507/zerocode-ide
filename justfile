@@ -151,10 +151,12 @@ window-runner-test:
 # 전체 renderer interaction 계약도 CI와 로컬에서 같은 명령으로 검증된다.
 window-browser-test:
     node ui/tests/window.mjs
+    node ui/tests/browser-profile-data.mjs
 
 # Guest error/network observation must also run in a fresh protocol session.
 browser-observation-test:
     node ui/tests/browser-ring.mjs
+    node ui/tests/browser-form-fill.mjs
 
 # The browser door's page scripts (zcSelect, click, wait) against a page with
 # hidden twins of its controls: the element a selector names is the first one
