@@ -1,5 +1,6 @@
 /* The conversation the person passed on 2026-10-29 (t-81525, draft B): the
- * answers read as bare prose in one column, the newest in the fullest ink; the
+ * answers read as bare prose in one column, every one in the full ink (draft
+ * C2 of 10-29 took back the newest-only step, t-82195); the
  * tool work between two answers is one pill; the person's words stand on the
  * right; a code block opens with its own band; the window's own note is a thin
  * line. Read off the laid-out page, on the folded page (the product's
@@ -231,6 +232,15 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
       ok(`B: every word reads at 4.5:1 or more in the ${theme} treatment — the newest answer, the ones before it, a pill, the window's note, a code band, the state line`,
         Object.values(read).every((ratio) => ratio === null || ratio >= 4.5) && read.latest !== null && read.earlier !== null && read.pill !== null && read.note !== null,
         JSON.stringify(read));
+      // t-81525 B3 stepped the answers before the newest back to 88% of the
+      // ink; the person passed draft C, which reads every answer the same
+      // (draft C2, t-82195).
+      ok(`B: an answer before the newest reads in the newest's own ink in the ${theme} treatment — no answer is dimmed (draft C2, t-82195)`,
+        B_WIDTHS.every((width) => {
+          const at = seen[`${theme}-${width}`].contrast;
+          return at.earlier !== null && at.earlier === at.latest;
+        }),
+        JSON.stringify(B_WIDTHS.map((width) => [width, seen[`${theme}-${width}`].contrast.latest, seen[`${theme}-${width}`].contrast.earlier])));
     }
     ok("B: the page raised no errors", faults.length === 0, faults.join("\n"));
     return seen;

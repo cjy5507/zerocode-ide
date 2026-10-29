@@ -15034,17 +15034,14 @@ details.worker-command {
 }
 
 /* An answer is bare prose in the reading column (t-81525 B3): no dot, no
- * rail, the row's pad above and below. The newest answer reads in the full
- * ink; the ones before it a step back (`--chat-said-earlier`), so the eye
- * lands on what was said last. */
+ * rail, the row's pad above and below. Every answer reads in the full ink —
+ * the ones before the newest are not stepped back (t-82195 C2, the person's
+ * draft C of 10-29: none of the seven chat panels read for it dims an
+ * earlier answer, and the terminal beside it is one ink). */
 .helper-turn.is-assistant {
   position: relative;
   /* The room under the words is the action row's (`.helper-actions`, C8). */
   padding: var(--chat-row-pad) 0 var(--chat-actions-h);
-}
-
-.helper-turn.is-assistant:not(.is-latest, .is-streaming) > .helper-said {
-  color: var(--chat-said-earlier);
 }
 
 /* The window's own note to the agent (t-81525 C3): a thin line across the
