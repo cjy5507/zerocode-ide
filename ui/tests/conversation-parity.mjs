@@ -1202,6 +1202,14 @@ export async function testConversationTodos(browser, origin, ok) {
       const pills = [...face.querySelectorAll(".helper-turns > .helper-group")];
       seen.foldedRows = todoRows().length;
       seen.pills = pills.length;
+      // With the pills shut, the newest list is said over the composer — its
+      // count and its items — where the list no longer stands outside the
+      // fold (the old A7 `standLatestTodo`, gone with t-81525; t-81786 P3-13).
+      const stack = face.querySelector(".chat-stack");
+      seen.stackShown = stack ? !stack.hidden : false;
+      seen.stackCount = stack?.querySelector(".chat-stack-todo-count")?.textContent ?? "";
+      seen.wantStackCount = t("worker.stackTodos", "할 일 {{done}}/{{total}}", { done: 1, total: 3 });
+      seen.stackWords = stack?.querySelector(".chat-stack-todo-words")?.textContent ?? "";
       pills[0]?.querySelector(".helper-group-cap")?.click();
       await settle();
       seen.openedRows = todoRows().length;
@@ -1222,8 +1230,9 @@ export async function testConversationTodos(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A7: folded (t-81525 B1), the todo calls and the reads of one turn are one pill with no row of their own until it opens — then both lists stand — and with the whole timeline every list stands again",
-      seen?.foldedRows === 0 && seen.pills === 1 && seen.openedRows === 2 && seen.allBack,
+      "A7: folded (t-81525 B1), the todo calls and the reads of one turn are one pill with no row of their own until it opens — then both lists stand — and with the whole timeline every list stands again; while the pill is shut the state line over the composer says the newest list, its count and its items (t-81786 P3-13)",
+      seen?.foldedRows === 0 && seen.pills === 1 && seen.openedRows === 2 && seen.allBack &&
+        seen.stackShown && seen.stackCount === seen.wantStackCount && seen.stackWords === "할 일 1 · 할 일 2 · 할 일 3",
       JSON.stringify(seen),
     );
     ok("A7: the todo lists raised no page errors", faults.length === 0, faults.join("\n"));
