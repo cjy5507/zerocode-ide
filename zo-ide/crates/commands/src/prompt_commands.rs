@@ -658,10 +658,16 @@ impl InlineShell<'_> {
         if policy.deny_reason(BASH_TOOL, &input).is_some() {
             return Some("not run — a deny rule in your permission settings forbids it".to_string());
         }
+        // A command file asks nobody, whatever the mode or the rules: the kill
+        // guard's refusal says what it refused and what to do instead, as a
+        // sub-agent's bash says it (t-82854).
+        if let Some(refused) = runtime::kill_guard::refusal_where_nobody_can_ask(command) {
+            return Some(format!("not run — {refused}"));
+        }
         match policy.authorize(BASH_TOOL, &input, None) {
             runtime::PermissionOutcome::Allow => None,
-            // The kill guard's refusal says what it refused and what to do
-            // instead (t-82854); no ask rule need be in play.
+            // The policy reads the processes again; a refusal of its own
+            // from the guard still says why in the guard's words.
             runtime::PermissionOutcome::Deny { reason }
                 if runtime::kill_guard::is_refusal(&reason) =>
             {

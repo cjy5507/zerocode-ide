@@ -9,12 +9,13 @@
 //! from the pane's environment, the window it runs in as kept
 //! ([`ProtectedRoot::from_window_env`]).
 //!
-//! Three places ask, and each does what it can with the answer:
+//! Each place that asks does what it can with the answer:
 //! [`crate::PermissionPolicy`] puts a question to a person when one can be
 //! asked and the mode or the rules would have asked about the call anyway,
 //! and refuses it where they would run the call unasked (t-82420);
-//! [`crate::permission_enforcer::PermissionEnforcer::check_bash`] has
-//! nobody to ask, so a question is a refusal there; and the bash chokepoint
+//! [`crate::permission_enforcer::PermissionEnforcer::check_bash`] and a
+//! command file's `!` line have nobody to ask, so a question is a refusal
+//! there ([`refusal_where_nobody_can_ask`]); and the bash chokepoint
 //! ([`crate::execute_bash`]) refuses the window in every mode and on every
 //! path, a question having been the permission layer's to ask — save in a
 //! pane the ledger summoned as a worker, where no path can have asked it, so
@@ -117,14 +118,19 @@ pub fn unasked(reason: &str) -> String {
     format!("{} {NOBODY_ASKED} {}", unanswered(reason), way_out())
 }
 
-/// The refusal a [`KillVerdict::Ask`] becomes where nobody can be asked at
-/// all, whatever the mode — a sub-agent's or a Workflow helper's bash
-/// ([`crate::permission_enforcer::PermissionEnforcer::check_bash`]): it says
-/// what to do instead, and not why nobody was asked, which that layer does
-/// not know (t-82854).
+/// The refusal `command` meets where nobody can be asked at all, whatever
+/// the mode or the rules — a sub-agent's or a Workflow helper's bash
+/// ([`crate::permission_enforcer::PermissionEnforcer::check_bash`]) and a
+/// command file's `!` line: a [`KillVerdict::Deny`] is refused, and a
+/// [`KillVerdict::Ask`] is refused with what to do instead, not with why
+/// nobody was asked (t-82854). `None` when the guard lets `command` run.
 #[must_use]
-pub fn unaskable(reason: &str) -> String {
-    format!("{} {}", unanswered(reason), way_out())
+pub fn refusal_where_nobody_can_ask(command: &str) -> Option<String> {
+    match judge(command)? {
+        KillVerdict::Deny { reason } => Some(refusal(&reason)),
+        KillVerdict::Ask { reason } => Some(format!("{} {}", unanswered(&reason), way_out())),
+        KillVerdict::Allow => None,
+    }
 }
 
 /// Whether `reason` is one of this guard's refusals, as a caller that shows

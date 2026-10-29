@@ -3,7 +3,6 @@
 
 use crate::permissions::{PermissionMode, PermissionOutcome, PermissionPolicy};
 use serde::{Deserialize, Serialize};
-use zerocode_core::shell_rule::kill::KillVerdict;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome")]
@@ -156,12 +155,7 @@ impl PermissionEnforcer {
     #[must_use]
     pub fn check_bash(&self, command: &str) -> EnforcementResult {
         let mode = self.policy.active_mode();
-        let refused = match crate::kill_guard::judge(command) {
-            Some(KillVerdict::Deny { reason }) => Some(crate::kill_guard::refusal(&reason)),
-            Some(KillVerdict::Ask { reason }) => Some(crate::kill_guard::unaskable(&reason)),
-            Some(KillVerdict::Allow) | None => None,
-        };
-        if let Some(reason) = refused {
+        if let Some(reason) = crate::kill_guard::refusal_where_nobody_can_ask(command) {
             return EnforcementResult::Denied {
                 tool: "bash".to_owned(),
                 active_mode: mode.as_str().to_owned(),
