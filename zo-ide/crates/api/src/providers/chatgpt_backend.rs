@@ -2512,6 +2512,9 @@ struct AttemptHeard {
     keep_alives: u32,
     /// When the last of those keep-alives came.
     last_keep_alive: Option<std::time::Instant>,
+    /// The output indexes of the reasoning items open now: the model said it
+    /// began to think there and has not closed the item (t-71285).
+    open_reasoning: std::collections::BTreeSet<u64>,
 }
 
 impl AttemptHeard {
@@ -2521,6 +2524,7 @@ impl AttemptHeard {
             events: Vec::new(),
             keep_alives: 0,
             last_keep_alive: None,
+            open_reasoning: std::collections::BTreeSet::new(),
         }
     }
 
@@ -2535,6 +2539,7 @@ impl AttemptHeard {
         for value in batch.iter().filter(|value| is_response_level_event(value)) {
             self.keep_alives = 0;
             self.last_keep_alive = None;
+            self.hear_reasoning(value);
             if self.events.len() >= HEARD_KINDS_KEPT {
                 continue;
             }
@@ -2545,11 +2550,47 @@ impl AttemptHeard {
         }
     }
 
-    /// The notice a quiet stretch raises once it has lasted `quiet_for`.
-    fn quiet_notice(quiet_for: std::time::Duration) -> StreamRetryNotice {
+    /// A reasoning item opens at its `output_item.added`, and its summary and
+    /// text events say it is open; it closes at its `output_item.done`.
+    fn hear_reasoning(&mut self, value: &Value) {
+        let Some(index) = value.get("output_index").and_then(Value::as_u64) else {
+            return;
+        };
+        match value.get("type").and_then(Value::as_str).unwrap_or_default() {
+            "response.output_item.added"
+                if value.pointer("/item/type").and_then(Value::as_str) == Some("reasoning") =>
+            {
+                self.open_reasoning.insert(index);
+            }
+            "response.reasoning_summary_part.added"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_text.delta" => {
+                self.open_reasoning.insert(index);
+            }
+            "response.output_item.done" => {
+                self.open_reasoning.remove(&index);
+            }
+            _ => {}
+        }
+    }
+
+    /// What the quiet stretch the attempt is in is: reasoning while a reasoning
+    /// item is open, a wait otherwise.
+    fn quiet_stretch(&self) -> core_types::QuietStretch {
+        if self.open_reasoning.is_empty() {
+            core_types::QuietStretch::Waiting
+        } else {
+            core_types::QuietStretch::Reasoning
+        }
+    }
+
+    /// The notice a quiet stretch raises once it has lasted `quiet_for`: it
+    /// says reasoning only inside an open reasoning item, a wait otherwise.
+    fn quiet_notice(&self, quiet_for: std::time::Duration) -> StreamRetryNotice {
+        let stretch = self.quiet_stretch();
         StreamRetryNotice {
-            kind: core_types::StreamNoticeKind::QuietReasoning,
-            label: core_types::QUIET_REASONING_LABEL,
+            kind: stretch.notice_kind(),
+            label: stretch.words().label,
             attempt: 0,
             max_attempts: 0,
             delay: quiet_for,
@@ -2605,7 +2646,7 @@ pub fn chatgpt_quiet_stretch_notice(
 ) -> StreamRetryNotice {
     let mut heard = AttemptHeard::sent_at(std::time::Instant::now());
     heard.hear(events);
-    AttemptHeard::quiet_notice(quiet_for)
+    heard.quiet_notice(quiet_for)
 }
 
 /// An event's kind as an attempt's record keeps it: its `type`, and for an
@@ -2758,12 +2799,13 @@ impl ChatGptStream {
     pub async fn next_event(&mut self) -> Result<Option<StreamEvent>, ApiError> {
         let idle_timeout = stream_idle_timeout();
         let mut quiet_chunks = 0usize;
-        // Quiet-reasoning heartbeat: the connection is delivering keep-alive
+        // Quiet-stretch heartbeat: the connection is delivering keep-alive
         // chunks (so the idle timeout never fires) but the model has emitted
         // no event yet — deep reasoning on a large context can stay silent
         // for minutes, and without a signal the live UI reads "no output Nm"
         // as a hang. Fired once per quiet stretch, through the same sink the
-        // reconnect notices ride.
+        // reconnect notices ride; it says reasoning only inside an open
+        // reasoning item, and a wait otherwise (t-71285).
         let mut quiet_since: Option<std::time::Instant> = None;
         let mut quiet_notified = false;
         loop {
@@ -2857,7 +2899,7 @@ impl ChatGptStream {
                         {
                             quiet_notified = true;
                             if let Some(notice) = &self.retry_notice {
-                                notice(AttemptHeard::quiet_notice(since.elapsed()));
+                                notice(self.heard.quiet_notice(since.elapsed()));
                             }
                         }
                     }

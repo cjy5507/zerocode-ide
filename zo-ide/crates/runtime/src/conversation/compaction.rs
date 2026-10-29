@@ -2766,7 +2766,15 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 } else if matches!(block, RenderBlock::StreamPhase(_) | RenderBlock::System { .. }) {
                     // How the request stands — a retry, a quiet stretch — and
                     // the provider's notices about it (a reconnect, a wait for
-                    // a login) are the person's to see, as a turn's are.
+                    // a login) are the person's to see, as a turn's are. A
+                    // quiet stretch is the compaction's wait, not the model
+                    // reasoning: the turn stopped to compact (t-71285).
+                    let block = match block {
+                        RenderBlock::StreamPhase(StreamPhase::QuietReasoning { since_secs }) => {
+                            RenderBlock::StreamPhase(StreamPhase::QuietWaiting { since_secs })
+                        }
+                        block => block,
+                    };
                     if let Some(tx) = &progress_tx {
                         let _ = tx.send(block).await;
                     }

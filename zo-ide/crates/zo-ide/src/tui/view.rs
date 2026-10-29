@@ -75,10 +75,11 @@ pub struct Status {
     /// retry being waited out (attempt, elapsed at which it fires).
     request_sent_at: Option<Duration>,
     retry: Option<(u32, Duration)>,
-    /// The turn-elapsed at which the model went quiet mid-stream (set by a
-    /// `QuietReasoning` phase, cleared by content), so the phrase keeps a
-    /// clock of its own.
-    quiet_reasoning_since: Option<Duration>,
+    /// The turn-elapsed at which the model went quiet mid-stream, and whether
+    /// that quiet is reasoning or a wait (set by a `QuietReasoning` or
+    /// `QuietWaiting` phase, cleared by content), so the phrase keeps a clock
+    /// of its own (t-71285).
+    quiet_stretch: Option<(core_types::QuietStretch, Duration)>,
     /// The compaction the turn stopped for, from its start phase to its end
     /// phase (t-68694) — or the `/compact` the row stands for.
     compaction: Option<CompactionStanding>,
@@ -221,7 +222,7 @@ impl Status {
             interrupt_binding: "esc".to_string(),
             interruptible: true,
             request_sent_at: None,
-            quiet_reasoning_since: None,
+            quiet_stretch: None,
             compaction: None,
             retry: None,
             active_tools: Vec::new(),
@@ -266,11 +267,10 @@ impl Status {
                 self.retry = Some((attempt, self.elapsed + Duration::from_secs(delay_secs)));
             }
             StreamPhase::QuietReasoning { since_secs } => {
-                // The stream that says it is reasoning is live: a reconnect
-                // it went through is over (t-69472).
-                self.retry = None;
-                self.quiet_reasoning_since =
-                    Some(self.elapsed.saturating_sub(Duration::from_secs(since_secs)));
+                self.note_quiet_stretch(core_types::QuietStretch::Reasoning, since_secs);
+            }
+            StreamPhase::QuietWaiting { since_secs } => {
+                self.note_quiet_stretch(core_types::QuietStretch::Waiting, since_secs);
             }
             StreamPhase::Compacting => {
                 // The compaction is the newer fact than any word before it,
@@ -301,7 +301,17 @@ impl Status {
     fn clear_wait(&mut self) {
         self.request_sent_at = None;
         self.retry = None;
-        self.quiet_reasoning_since = None;
+        self.quiet_stretch = None;
+    }
+
+    /// A stream that says it is quiet is live: a reconnect it went through is
+    /// over (t-69472), and its quiet has a clock of its own.
+    fn note_quiet_stretch(&mut self, stretch: core_types::QuietStretch, since_secs: u64) {
+        self.retry = None;
+        self.quiet_stretch = Some((
+            stretch,
+            self.elapsed.saturating_sub(Duration::from_secs(since_secs)),
+        ));
     }
 
     /// The compaction's summary has streamed `streamed_chars` so far: its
@@ -392,9 +402,11 @@ impl Status {
                 seconds_left: left,
             });
         }
-        if let Some(since) = self.quiet_reasoning_since {
-            return Some(StatusActivity::ReasoningSilently {
-                elapsed: self.elapsed.saturating_sub(since),
+        if let Some((stretch, since)) = self.quiet_stretch {
+            let elapsed = self.elapsed.saturating_sub(since);
+            return Some(match stretch {
+                core_types::QuietStretch::Reasoning => StatusActivity::ReasoningSilently { elapsed },
+                core_types::QuietStretch::Waiting => StatusActivity::Waiting { elapsed },
             });
         }
         let sent_at = self.request_sent_at?;
@@ -415,6 +427,11 @@ impl Status {
                     .map(|phase| phase.line())
                     .or_else(|| compaction.streamed_chars.map(strings::compaction_progress)),
             });
+        }
+        // A quiet stretch the stream named keeps its name past the quiet bar:
+        // the unnamed `quiet` is for a wait nothing named (t-71285).
+        if let Some(named) = self.quiet_stretch.and_then(|_| self.phase_activity()) {
+            return Some(named);
         }
         self.quiet_activity()
             .or_else(|| self.current_tool_activity())

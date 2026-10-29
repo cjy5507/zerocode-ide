@@ -1087,13 +1087,17 @@ pub(super) fn record_agent_stream_notice(
         let now = epoch_seconds_now_u64();
         manifest.activity.last_transport_at = Some(now);
         match notice.kind {
-            core_types::StreamNoticeKind::QuietReasoning => {
+            // The label is core's word for the stretch (`QuietStretch::words`):
+            // reasoning only inside an open reasoning item, a wait otherwise.
+            core_types::StreamNoticeKind::QuietReasoning
+            | core_types::StreamNoticeKind::QuietWaiting => {
                 manifest.activity.quiet_stream_since_at =
                     Some(now.saturating_sub(notice.delay.as_secs()));
                 manifest.activity.quiet_notice_count =
                     manifest.activity.quiet_notice_count.saturating_add(1);
                 manifest.current_phase = Some(format!(
-                    "reasoning stream alive · {}s+ without decoded output",
+                    "{} · {}s+ without decoded output",
+                    notice.label,
                     notice.delay.as_secs()
                 ));
             }

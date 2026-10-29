@@ -617,6 +617,11 @@ fn stream_notice_block(
                 since_secs: notice.delay.as_secs(),
             },
         ),
+        core_types::StreamNoticeKind::QuietWaiting => RenderBlock::StreamPhase(
+            runtime::message_stream::types::StreamPhase::QuietWaiting {
+                since_secs: notice.delay.as_secs(),
+            },
+        ),
         core_types::StreamNoticeKind::Reconnect => {
             let (level, text) = stream_notice_row(notice);
             RenderBlock::System {
@@ -655,7 +660,7 @@ pub(crate) fn stream_notice_blocks(
 
 fn stream_notice_row(notice: &core_types::StreamRetryNotice) -> (SystemLevel, String) {
     match notice.kind {
-        core_types::StreamNoticeKind::QuietReasoning => (
+        core_types::StreamNoticeKind::QuietReasoning | core_types::StreamNoticeKind::QuietWaiting => (
             SystemLevel::Info,
             format!(
                 "{} ({}s+ without visible output)",
