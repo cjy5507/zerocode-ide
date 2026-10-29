@@ -6409,7 +6409,11 @@ fn streaming_permission_prompt_expiry_denies_and_lets_the_turn_finish() {
                     AssistantEvent::ToolUse {
                         id: "tool-escalates".to_string(),
                         name: "Bash".to_string(),
-                        input: r#"{"command":"cat secret"}"#.to_string(),
+                        // A write the classifier cannot prove read-only, so
+                        // workspace-write must ask. `cat` is read-only, and
+                        // since `Bash` is judged as `bash` (t-81312) it runs
+                        // unasked.
+                        input: r#"{"command":"rm secret"}"#.to_string(),
                     },
                     AssistantEvent::MessageStop,
                 ])
@@ -6524,7 +6528,11 @@ fn streaming_denied_tool_result_is_not_blocked_by_parallel_safe_precompute() {
                     AssistantEvent::ToolUse {
                         id: "tool-denied".to_string(),
                         name: "Bash".to_string(),
-                        input: r#"{"command":"cat secret"}"#.to_string(),
+                        // A write the classifier cannot prove read-only, so
+                        // workspace-write must ask. `cat` is read-only, and
+                        // since `Bash` is judged as `bash` (t-81312) it runs
+                        // unasked.
+                        input: r#"{"command":"rm secret"}"#.to_string(),
                     },
                     AssistantEvent::ToolUse {
                         id: "tool-read-a".to_string(),
