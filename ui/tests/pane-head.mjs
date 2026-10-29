@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { openWindowTestPage } from "./window-boot.mjs";
 
 /* The centre pane, as the passed draft p-6893560125c34552 reads it (IDE design
@@ -292,6 +293,171 @@ export async function testPaneHeadReach(browser, origin, ok) {
       "in the conversation's head the session line stands aside and the count says the session instead — in its tooltip and in its name (t-81786 P3-12)",
       seen.pickAside === true && seen.tip.includes(seen.session) && seen.name.includes(seen.session),
       JSON.stringify({ pickAside: seen.pickAside, tip: seen.tip, name: seen.name, session: seen.session }),
+    );
+  } finally { await page.close(); }
+}
+
+/* What an agent's pane opens on is the person's (t-82038, 「나는 터미널이 편한데」):
+ * the settings' terminal pane offers 대화 and 터미널 as two radios, and a pane
+ * opened after the choice opens on that side. The choice is read once for each
+ * pane, when it first runs an agent: a pane opened before a change keeps its
+ * side, and the head's switch still turns any pane either way and keeps it
+ * there. The authoritative snapshot repaints the radios and decides the next
+ * pane.
+ *
+ *   WINDOW_SUITES=pane-first-view node ui/tests/window.mjs */
+export async function testPaneFirstView(browser, origin, ok, outputDir) {
+  const { page } = await openWindowTestPage(browser, origin);
+  const shot = (name) => page.screenshot({ path: join(outputDir, `pane-first-view-${name}.png`) });
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate((transcript) => {
+      window.__TELL__ = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      window.__ANSWER__.pane_log = (args) => ({ found: true, next: transcript.length, turns: transcript.slice(args.after ?? 0) });
+      window.__FIRST_VIEW_CALLS__ = [];
+      window.__ANSWER__.set_agent_pane_first_view = (args) => { window.__FIRST_VIEW_CALLS__.push(args); return null; };
+      window.__WIRES__ = [];
+      window.__ANSWER__.wire_start = (args) => { window.__WIRES__.push(args); return null; };
+      window.__OPEN_AGENT_PANE__ = async (session) => {
+        const term = await openTermTab({ placement: "tab" });
+        await window.__PAINTED__();
+        window.__TELL__("hook:agent", { term, state: "working", agent: "claude", session: { id: session }, resumable: true, model: "claude-fable-5-1" });
+        await window.__PAINTED__();
+        await new Promise((done) => setTimeout(done, 80));
+        return term;
+      };
+      window.__AGAIN__ = async (term, session, state = "idle") => {
+        window.__TELL__("hook:agent", { term, state, agent: "claude", session: { id: session }, resumable: true });
+        await window.__PAINTED__();
+        await new Promise((done) => setTimeout(done, 80));
+      };
+    }, TRANSCRIPT);
+    const radios = () => page.evaluate(() => {
+      const group = el("agent-pane-first-view");
+      const all = [...group.querySelectorAll('input[type="radio"]')];
+      return {
+        shown: group.checkVisibility(),
+        role: group.getAttribute("role"),
+        look: group.className,
+        legend: group.querySelector("legend")?.textContent.trim() ?? "",
+        values: all.map((radio) => radio.value),
+        names: all.map((radio) => radio.closest("label")?.textContent.trim() ?? ""),
+        checked: all.find((radio) => radio.checked)?.value ?? null,
+      };
+    });
+    // A pane opened while the choice still says 대화 — everyone's default.
+    const before = await page.evaluate(async () => {
+      const term = await window.__OPEN_AGENT_PANE__("s-first-0001");
+      return { term, chat: paneChatOn(term), view: agentPaneFirstView };
+    });
+    // The settings' terminal pane offers the two sides, 대화 checked.
+    await page.evaluate(async () => {
+      setSettingsOpen(true);
+      showSettingsPane("terminal");
+      await window.__PAINTED__();
+    });
+    const offered = await radios();
+    // Like its neighbouring radios: the update policy's fieldset and option look.
+    const look = await page.evaluate(() => {
+      const option = el("agent-pane-first-view").querySelector("label");
+      const neighbour = el("update-policy").querySelector("label");
+      const box = (node) => getComputedStyle(node);
+      return {
+        option: option.className,
+        same: ["display", "gap", "fontSize", "color", "alignItems"].every((key) => box(option)[key] === box(neighbour)[key]),
+      };
+    });
+    await page.locator('#agent-pane-first-view input[value="terminal"]').check();
+    const chosen = await radios();
+    await page.locator('#agent-pane-first-view').scrollIntoViewIfNeeded();
+    // The radios ease between their two looks; the picture is taken at rest.
+    await page.waitForTimeout(400);
+    await shot("settings");
+    const sent = await page.evaluate(() => window.__FIRST_VIEW_CALLS__.slice());
+    // Panes opened after the choice open on their terminal and stay there
+    // through the agent's next reports; the pane opened before keeps its
+    // conversation.
+    const after = await page.evaluate(async (first) => {
+      setSettingsOpen(false);
+      await window.__PAINTED__();
+      const term = await window.__OPEN_AGENT_PANE__("s-first-0002");
+      const seen = {
+        term,
+        chat: paneChatOn(term),
+        termPressed: el("view-toggle-term").getAttribute("aria-pressed"),
+        chatPressed: el("view-toggle-chat").getAttribute("aria-pressed"),
+        toggleShown: !el("view-toggle").hidden,
+      };
+      await window.__AGAIN__(term, "s-first-0002", "idle");
+      await window.__AGAIN__(term, "s-first-0002", "working");
+      seen.keptTerminal = !paneChatOn(term);
+      await window.__AGAIN__(first, "s-first-0001", "working");
+      seen.beforeKept = paneChatOn(first);
+      return seen;
+    }, before.term);
+    await page.evaluate(() => window.__PAINTED__());
+    await shot("pane");
+    // The head's switch turns the terminal pane to its conversation, and the
+    // person's pick survives the next report.
+    const turned = await page.evaluate(async (term) => {
+      el("view-toggle-chat").click();
+      await window.__PAINTED__();
+      await window.__AGAIN__(term, "s-first-0002", "idle");
+      return { chat: paneChatOn(term), chatPressed: el("view-toggle-chat").getAttribute("aria-pressed") };
+    }, after.term);
+    // One more pane on its terminal, left alone; then the authoritative snapshot
+    // says 대화 again: the radios follow it, the next pane opens on its
+    // conversation, and the pane left alone stays on its terminal.
+    const back = await page.evaluate(async () => {
+      const alone = await window.__OPEN_AGENT_PANE__("s-first-0003");
+      const aloneAtFirst = paneChatOn(alone);
+      applySettingsSnapshot({ revision: settingsRevision + 1, agent_pane_first_view: "conversation" });
+      await window.__PAINTED__();
+      const checked = [...el("agent-pane-first-view").querySelectorAll("input")].find((radio) => radio.checked)?.value ?? null;
+      const next = await window.__OPEN_AGENT_PANE__("s-first-0004");
+      await window.__AGAIN__(alone, "s-first-0003", "working");
+      // A word the core does not take reads as the conversation.
+      applySettingsSnapshot({ revision: settingsRevision + 1, agent_pane_first_view: "screen" });
+      return {
+        aloneAtFirst,
+        checked,
+        view: agentPaneFirstView,
+        nextChat: paneChatOn(next),
+        aloneKept: !paneChatOn(alone),
+        unknownRead: agentPaneFirstView,
+      };
+    });
+    const wires = await page.evaluate(() => window.__WIRES__.length);
+    ok(
+      "the settings' terminal pane offers an agent pane's first view as two radios, 대화 and 터미널, 대화 checked for a person who never chose, in its neighbouring radios' look",
+      offered.shown && offered.role === "radiogroup" && offered.look === "update-policy" && offered.legend !== "" &&
+        offered.values.join(",") === "conversation,terminal" && offered.names.every((name) => name !== "") &&
+        offered.checked === "conversation" && look.option === "update-policy-option" && look.same,
+      JSON.stringify({ offered, look }),
+    );
+    ok(
+      "choosing 터미널 checks it at once and sends the one setting write, with the core's word",
+      chosen.checked === "terminal" && sent.length === 1 && sent[0].view === "terminal",
+      JSON.stringify({ chosen, sent }),
+    );
+    ok(
+      "a pane opened after 터미널 is chosen opens on its terminal and stays there through its agent's next reports; the pane opened before keeps its conversation",
+      before.chat && before.view === "conversation" && !after.chat && after.termPressed === "true" &&
+        after.chatPressed === "false" && after.toggleShown && after.keptTerminal && after.beforeKept,
+      JSON.stringify({ before, after }),
+    );
+    ok(
+      "the head's 대화 switch still turns a pane opened on its terminal to its conversation, and the pick survives the next report",
+      turned.chat && turned.chatPressed === "true",
+      JSON.stringify(turned),
+    );
+    ok(
+      "the authoritative snapshot repaints the radios and decides the next pane; a pane already open keeps the side it opened on, and an unknown word reads as 대화",
+      !back.aloneAtFirst && back.checked === "conversation" && back.view === "conversation" && back.nextChat &&
+        back.aloneKept && back.unknownRead === "conversation",
+      JSON.stringify({ ...back, wires }),
     );
   } finally { await page.close(); }
 }
