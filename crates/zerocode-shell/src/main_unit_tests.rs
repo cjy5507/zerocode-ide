@@ -32684,3 +32684,39 @@ fn a_hand_over_past_the_windows_deadline_leaves_the_pane_alone() {
     assert!(hand_over_overdue(Some(1_000), 1_000));
     assert!(hand_over_overdue(Some(1_000), 61_000));
 }
+
+/// A person's own pane hands its conversation to its wire; the panes the
+/// ledger drives through their screens stay panes — a worker's seat, and a
+/// run's coordinator seat as the ledger holds it now (t-84850: once the
+/// hand-over really ended a pane's CLI, a 「대화」 on a coordinator's pane
+/// would have ended the coordinator).
+#[test]
+fn only_a_pane_the_ledger_does_not_drive_hands_its_conversation_to_a_wire() {
+    use crate::cmd::wire::{COORDINATOR_PANE_STAYS, WORKER_PANE_STAYS, pane_the_ledger_drives};
+    use crate::orchestration::restart_census::KeyedPane;
+    let coordinator_at = |term| KeyedPane {
+        key: "run-1@/work".to_string(),
+        term,
+    };
+    // A person's own Claude Code, beside a worker and a coordinator.
+    assert_eq!(
+        pane_the_ledger_drives(7, [3], || vec![coordinator_at(2)]),
+        None
+    );
+    // A worker's seat, refused before the ledger is asked.
+    assert_eq!(
+        pane_the_ledger_drives(3, [3], || unreachable!("a worker's seat asks no ledger")),
+        Some(WORKER_PANE_STAYS)
+    );
+    // A run's coordinator seat.
+    assert_eq!(
+        pane_the_ledger_drives(2, [3], || vec![coordinator_at(2)]),
+        Some(COORDINATOR_PANE_STAYS)
+    );
+    // The seat moved to another pane (a restart): the pane that held it
+    // before is nobody's seat now.
+    assert_eq!(
+        pane_the_ledger_drives(2, [3], || vec![coordinator_at(9)]),
+        None
+    );
+}

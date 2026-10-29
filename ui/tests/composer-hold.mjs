@@ -141,6 +141,7 @@ export async function testComposerHold(browser, origin, ok) {
   await testHandOverReadStalls(browser, origin, ok);
   await testHandOverReadAnswersLate(browser, origin, ok);
   await testWireStartStalls(browser, origin, ok);
+  await testCoordinatorSeatRefused(browser, origin, ok);
   await testAnsweredCardHolds(browser, origin, ok);
   await testSentTurnHolds(browser, origin, ok);
 }
@@ -377,6 +378,34 @@ async function testWireStartStalls(browser, origin, ok) {
       "the_wire_is_asked_for_the_pane_it_continues: the hand-over names its pane as `fromPane` — tauri's spelling of the backend's `from_pane` — so the backend types the pane's exit command and writes its receipt; no key goes in snake case, which tauri drops (10-30: `from_pane` arrived as nothing and no pane ever left)",
       asked.fromPane === asked.term && Array.isArray(asked.snakeKeys) && asked.snakeKeys.length === 0,
       JSON.stringify(asked),
+    );
+  });
+}
+
+/* The pane is a run's coordinator seat, and the backend refuses its
+ * hand-over at once (t-84850): the ledger brings that run's mail to its
+ * screen, and the hand-over now really ends a pane's CLI. Nothing holds the
+ * words — no 60 s, no line saying the conversation is being continued live —
+ * and the page says why in the backend's words. */
+async function testCoordinatorSeatRefused(browser, origin, ok) {
+  await scene(browser, origin, ok, "coordinator seat refused", async (page) => {
+    const reason = "a coordinator's pane stays a pane: the ledger brings its run's mail to that screen";
+    await page.evaluate(async (reason) => {
+      window.__ANSWER__.wire_start = (args) => {
+        window.__HOLD__.wires.push(args);
+        throw new Error(reason);
+      };
+      el("view-toggle-chat").click();
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    }, reason);
+    await enter(page, "곧바로");
+    await untilKeys(page, 1);
+    const seen = await page.evaluate(LOOK);
+    ok(
+      "a_coordinators_pane_keeps_its_conversation_and_the_words_go_straight_to_it: the hand-over asked for a coordinator's pane is refused at once — Enter sends the words to the pane straight (paste, then Enter), nothing waits in the queue and no line says the conversation is being continued, and the page says why in the backend's words",
+      seen.wires === 1 && JSON.stringify(seen.sent) === JSON.stringify(["paste:곧바로", ENTER]) && seen.queue.length === 0 &&
+        (seen.why ?? "") === "" && typeof seen.refused === "string" && seen.refused.includes(reason),
+      JSON.stringify(seen),
     );
   });
 }

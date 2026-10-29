@@ -120,10 +120,39 @@ pub(crate) fn wire_start(
     })
 }
 
+/// Why a pane's conversation is never handed to a wire: the pane is one the
+/// ledger drives through its screen. A worker's seat; and a run's
+/// coordinator seat (t-84850) — the ledger brings that run's mail to its
+/// screen, and a coordinator whose CLI left would leave its run without the
+/// seat the ledger knows it by. The coordinators' seats are asked only when
+/// the pane is no worker's, and read from the ledger as they stand now
+/// (`orchestration::seated_coordinators`), never from a seat the window
+/// remembered: a restart moves them. `None` for a person's own pane.
+pub(crate) fn pane_the_ledger_drives(
+    term: TermId,
+    workers: impl IntoIterator<Item = TermId>,
+    coordinators: impl FnOnce() -> Vec<crate::orchestration::restart_census::KeyedPane>,
+) -> Option<&'static str> {
+    if workers.into_iter().any(|seat| seat == term) {
+        return Some(WORKER_PANE_STAYS);
+    }
+    coordinators()
+        .iter()
+        .any(|seated| seated.term == term)
+        .then_some(COORDINATOR_PANE_STAYS)
+}
+
+/// The refusals [`pane_the_ledger_drives`] gives, in the hand-over's log line
+/// and on the pane's page.
+pub(crate) const WORKER_PANE_STAYS: &str =
+    "a worker's pane stays a pane: the ledger drives it through its screen";
+pub(crate) const COORDINATOR_PANE_STAYS: &str =
+    "a coordinator's pane stays a pane: the ledger brings its run's mail to that screen";
+
 /// Everything between the ask and a wire that stands: the pane's own gates
-/// (a worker's seat, an exit command), the catalog, the PATH, the account's
-/// door, and the child's handshake. One `Err` for every reason, so the
-/// caller can log it once.
+/// (a worker's or a coordinator's seat, an exit command), the catalog, the
+/// PATH, the account's door, and the child's handshake. One `Err` for every
+/// reason, so the caller can log it once.
 fn stand_wire(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -133,10 +162,11 @@ fn stand_wire(
     from_pane: Option<TermId>,
 ) -> Result<Arc<wire_runtime::WireSession>, String> {
     if let Some(term) = from_pane {
-        if state.workers().values().any(|(seat, _)| *seat == term) {
-            return Err(
-                "a worker's pane stays a pane: the ledger drives it through its screen".into(),
-            );
+        let workers: Vec<TermId> = state.workers().values().map(|(seat, _)| *seat).collect();
+        if let Some(reason) =
+            pane_the_ledger_drives(term, workers, crate::orchestration::seated_coordinators)
+        {
+            return Err(reason.into());
         }
         if zerocode_core::agent::agent_voice(agent)
             .exit_command
