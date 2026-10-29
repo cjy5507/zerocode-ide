@@ -22955,6 +22955,8 @@ struct ChattyRun {
     question: String,
     late: Vec<String>,
     look: Decided,
+    /// The letter of the chatter the coordinator answered, when it did.
+    answered: Option<String>,
 }
 
 const CHATTER: usize = 12;
@@ -22962,6 +22964,17 @@ const CHATTER: usize = 12;
 /// [`ChattyRun`], its batch looked at `look_at` under `look` — the name
 /// the coordinator's `check` was filed under.
 fn a_chatty_run_still_working(bench: &mut Bench, look_at: i64, look: &str) -> ChattyRun {
+    a_chatty_run_answered(bench, look_at, look, None)
+}
+
+/// [`a_chatty_run_still_working`], with the coordinator's reply to the
+/// `answer`th letter of the chatter beside its answer to the question.
+fn a_chatty_run_answered(
+    bench: &mut Bench,
+    look_at: i64,
+    look: &str,
+    answer: Option<usize>,
+) -> ChattyRun {
     let run = bench.json("run-create --name standing")["runId"]
         .as_str()
         .expect("a run id")
@@ -22969,9 +22982,14 @@ fn a_chatty_run_still_working(bench: &mut Bench, look_at: i64, look: &str) -> Ch
     let made = bench.json("task-create --spec chatter --title chatter");
     let task = made["taskId"].as_str().expect("a task id").to_string();
     let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
-    for said in 0..CHATTER {
-        bench.json_at(&pane, &format!("send --type status --body progress-{said}"));
-    }
+    let chatter: Vec<String> = (0..CHATTER)
+        .map(|said| {
+            bench.json_at(&pane, &format!("send --type status --body progress-{said}"))["messageId"]
+                .as_str()
+                .expect("a letter of the chatter")
+                .to_string()
+        })
+        .collect();
     let asked = bench.json_at(&pane, "send --type question --body which-way");
     let question = asked["messageId"]
         .as_str()
@@ -22987,6 +23005,13 @@ fn a_chatty_run_still_working(bench: &mut Bench, look_at: i64, look: &str) -> Ch
         "check --ack {delivery} --retry-request {look}-ack"
     ));
     bench.json(&format!("reply --to-message {question} --body this-way"));
+    let answered = answer.map(|said| {
+        bench.json(&format!(
+            "reply --to-message {} --body noted",
+            chatter[said]
+        ));
+        chatter[said].clone()
+    });
     let late = (0..2)
         .map(|said| {
             bench.json_at(&pane, &format!("send --type status --body late-{said}"))["messageId"]
@@ -23004,6 +23029,7 @@ fn a_chatty_run_still_working(bench: &mut Bench, look_at: i64, look: &str) -> Ch
         question,
         late,
         look: looked,
+        answered,
     }
 }
 
@@ -23067,6 +23093,46 @@ fn a_sweep_folds_a_working_runs_old_read_chatter_so_the_next_start_reads_less() 
             .any(|held| held.thread.as_deref() == Some(chatty.question.as_str())),
         "the answer to the question was folded"
     );
+}
+
+/// A status letter somebody answered is the root of a thread: a reply to it
+/// finds it by id, and the thread's depth is counted back through it (review
+/// P2-2, t-81273). The answer stands in the thread and never folds; the
+/// letter it answers stays with it, and a reply to it after the fold still
+/// finds it.
+#[test]
+fn a_fold_leaves_a_letter_somebody_answered() {
+    let mut bench = Bench::new();
+    let chatty = a_chatty_run_answered(&mut bench, 0, "early-look", Some(3));
+    let answered = chatty.answered.expect("the coordinator answered a letter");
+
+    let swept = bench.ledger.sweep_retention(long_after(&bench));
+    assert_eq!(
+        swept.letters_folded,
+        CHATTER - 1,
+        "the fold did not leave exactly the answered letter"
+    );
+    let kept = bench.ledger.run(&chatty.run).expect("the run");
+    assert!(
+        kept.message(&answered).is_some(),
+        "a letter somebody answered was folded"
+    );
+    assert!(
+        kept.messages()
+            .iter()
+            .filter_map(|held| held.thread.as_deref())
+            .all(|root| kept.message(root).is_some()),
+        "an answer was left threaded on a letter that went"
+    );
+    // The worker is gone by now, so a second reply is refused — but for
+    // that, not for a letter the ledger lost.
+    let again = bench.run(&format!("reply --to-message {answered} --body again"));
+    assert!(
+        !again.reply.stderr.contains("unknown message"),
+        "a reply to an answered letter lost it to the fold: {}",
+        again.reply.stderr
+    );
+    Ledger::rebuild(bench.ledger.export()).expect("the ledger opens after the fold");
 }
 
 /// A `check` receipt is replayed by rendering its batch's rows again, and a
