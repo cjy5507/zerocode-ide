@@ -13,7 +13,10 @@
 //! ready task and `Inbox::pending` is a queue — a store that handed the rows
 //! back in whatever order the pages happened to sit in would be handing back a
 //! DIFFERENT ledger that holds the same facts. Every row carries an `ordinal`
-//! and every read is `ORDER BY ordinal`, children included.
+//! and every read is `ORDER BY ordinal`, children included. An ordinal orders
+//! and does not count: a run's rows sit above its place among the runs
+//! (`Layout::ByRun`, t-82988), so a letter added to one run moves no row of
+//! another, and a write puts down only the rows that changed.
 //!
 //! **The database is the earlier net, not the authority.** Shapes it can know
 //! — a count that cannot be negative, a boolean that is not 0 or 1, a child
@@ -32,8 +35,8 @@ use sha2::{Digest, Sha256};
 use zerocode_core::orchestration::{
     AckedRow, AttachmentRow, Auto, BoundRow, CHECK_RENDERER, CheckV1, Closure, CoordinatorSeat,
     Delivery, DispatchRow, FoldedMail, GateRow, HandoverPolicy, InboxRow, LedgerProjectionV1,
-    MessageRow, Pinned, ResultAuthor, RunProject, RunRow, RunSummary, ServedAnswer, ServedRow,
-    TaskRow, Text, VerbTally, WorkerRow,
+    MarkedExport, MessageRow, Pinned, ResultAuthor, RunProject, RunRow, RunShare, RunSummary,
+    ServedAnswer, ServedRow, Share, TaskRow, Text, VerbTally, WorkerRow,
 };
 
 use crate::effect_journal::{EffectJournalError, from_sql_u64, to_sql_u64};
@@ -41,16 +44,24 @@ use crate::effect_journal::{EffectJournalError, from_sql_u64, to_sql_u64};
 const LEDGER_TABLE_COUNT: usize = 18;
 const TABLE_DIGEST_BYTES: usize = 32;
 
-/// The format written before digest rows carried an explicit generation.
+/// The format written before digest rows carried an explicit generation:
+/// each table hashed as one JSON document. No longer written, still read —
+/// a witness of this generation is checked before it is replaced.
 const TABLE_DIGEST_FORMAT_GENERATION_V1: u32 = 1;
 
-/// The exact serializer and manual row encodings consumed by `table_digests`.
+/// A digest per row, of the row's JSON with its children; per run, of its
+/// rows'; per table, of its runs' (t-82988). A write digests the rows that
+/// moved, where generation one serialized every table a write touched — the
+/// whole 44 MB ledger on the person's machine, for one letter.
+const TABLE_DIGEST_FORMAT_GENERATION_V2: u32 = 2;
+
+/// The exact serializer and manual row encodings the table digests consume.
 ///
 /// Bump this when that byte format deliberately changes. The canonical
 /// populated-fixture test pins the generation and fingerprint together, so a
 /// Serde rename or field-shape change cannot silently turn valid persisted
 /// metadata into corruption.
-const TABLE_DIGEST_FORMAT_GENERATION: u32 = TABLE_DIGEST_FORMAT_GENERATION_V1;
+const TABLE_DIGEST_FORMAT_GENERATION: u32 = TABLE_DIGEST_FORMAT_GENERATION_V2;
 
 /// Every table a v5 ledger lives in.
 ///
@@ -584,6 +595,131 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
     Ok(())
 }
 
+/// What ledger writes cost, counted where the work is done (t-82988).
+///
+/// Rows and bytes serialized for the table digests, rows the tables took,
+/// and the time each part held the write — kept twice: for the whole process
+/// ([`write_work`], which a measurement run alone reads) and for the thread
+/// that wrote ([`write_work_here`], which a test reads while other tests
+/// write beside it).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteWork {
+    pub writes: u64,
+    pub rows_digested: u64,
+    pub bytes_digested: u64,
+    pub rows_written: u64,
+    pub digest_ns: u64,
+    pub rows_ns: u64,
+}
+
+impl WriteWork {
+    const ZERO: Self = Self {
+        writes: 0,
+        rows_digested: 0,
+        bytes_digested: 0,
+        rows_written: 0,
+        digest_ns: 0,
+        rows_ns: 0,
+    };
+
+    /// What was counted after `earlier` was read.
+    #[must_use]
+    pub const fn since(self, earlier: Self) -> Self {
+        Self {
+            writes: self.writes.saturating_sub(earlier.writes),
+            rows_digested: self.rows_digested.saturating_sub(earlier.rows_digested),
+            bytes_digested: self.bytes_digested.saturating_sub(earlier.bytes_digested),
+            rows_written: self.rows_written.saturating_sub(earlier.rows_written),
+            digest_ns: self.digest_ns.saturating_sub(earlier.digest_ns),
+            rows_ns: self.rows_ns.saturating_sub(earlier.rows_ns),
+        }
+    }
+
+    /// Both counts together.
+    #[must_use]
+    pub const fn plus(self, more: Self) -> Self {
+        Self {
+            writes: self.writes.saturating_add(more.writes),
+            rows_digested: self.rows_digested.saturating_add(more.rows_digested),
+            bytes_digested: self.bytes_digested.saturating_add(more.bytes_digested),
+            rows_written: self.rows_written.saturating_add(more.rows_written),
+            digest_ns: self.digest_ns.saturating_add(more.digest_ns),
+            rows_ns: self.rows_ns.saturating_add(more.rows_ns),
+        }
+    }
+}
+
+static PROCESS_WORK: std::sync::Mutex<WriteWork> = std::sync::Mutex::new(WriteWork::ZERO);
+
+thread_local! {
+    static THREAD_WORK: std::cell::Cell<WriteWork> = const { std::cell::Cell::new(WriteWork::ZERO) };
+}
+
+fn count_work(more: WriteWork) {
+    THREAD_WORK.with(|held| held.set(held.get().plus(more)));
+    if let Ok(mut held) = PROCESS_WORK.lock() {
+        *held = held.plus(more);
+    }
+}
+
+/// Everything this process's ledger writes have cost so far.
+#[must_use]
+pub fn write_work() -> WriteWork {
+    PROCESS_WORK
+        .lock()
+        .map_or_else(|_| WriteWork::default(), |held| *held)
+}
+
+/// What the ledger writes made on this thread have cost so far.
+#[must_use]
+pub fn write_work_here() -> WriteWork {
+    THREAD_WORK.with(std::cell::Cell::get)
+}
+
+fn nanos_since(at: std::time::Instant) -> u64 {
+    u64::try_from(at.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// The rows one write puts down: a bare projection, or an export that says
+/// how each run's rows last changed ([`MarkedExport`], t-82988).
+#[derive(Clone, Copy)]
+pub enum LedgerRows<'a> {
+    Bare(&'a LedgerProjectionV1),
+    Marked(&'a MarkedExport),
+}
+
+impl<'a> LedgerRows<'a> {
+    #[must_use]
+    pub const fn projection(self) -> &'a LedgerProjectionV1 {
+        match self {
+            Self::Bare(projection) => projection,
+            Self::Marked(export) => export.projection(),
+        }
+    }
+
+    fn marks(self) -> Option<Marks<'a>> {
+        match self {
+            Self::Bare(_) => None,
+            Self::Marked(export) => Some(Marks {
+                runs: export.runs(),
+                served: export.served(),
+            }),
+        }
+    }
+}
+
+impl<'a> From<&'a LedgerProjectionV1> for LedgerRows<'a> {
+    fn from(projection: &'a LedgerProjectionV1) -> Self {
+        Self::Bare(projection)
+    }
+}
+
+impl<'a> From<&'a MarkedExport> for LedgerRows<'a> {
+    fn from(export: &'a MarkedExport) -> Self {
+        Self::Marked(export)
+    }
+}
+
 /// A ledger as it was found, and which revision it was.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Held {
@@ -801,6 +937,8 @@ struct StoredTableDigest {
 enum StoredTableDigestRoot {
     Missing,
     Stale,
+    /// A root of generation one, checked with that generation's digests.
+    Previous(TableDigest),
     Current(TableDigest),
 }
 
@@ -818,23 +956,25 @@ impl StoredTableDigestRoot {
         };
         let format_generation =
             u32::try_from(format_generation).map_err(|_| EffectJournalError::Corrupt)?;
-        if format_generation != TABLE_DIGEST_FORMAT_GENERATION {
-            return Ok(Self::Stale);
+        let witness = |digest: Option<Vec<u8>>| -> Result<TableDigest, EffectJournalError> {
+            digest
+                .ok_or(EffectJournalError::Corrupt)?
+                .try_into()
+                .map_err(|_| EffectJournalError::Corrupt)
+        };
+        match format_generation {
+            TABLE_DIGEST_FORMAT_GENERATION => Ok(Self::Current(witness(digest)?)),
+            TABLE_DIGEST_FORMAT_GENERATION_V1 => Ok(Self::Previous(witness(digest)?)),
+            _ => Ok(Self::Stale),
         }
-        let digest = digest
-            .ok_or(EffectJournalError::Corrupt)?
-            .try_into()
-            .map_err(|_| EffectJournalError::Corrupt)?;
-        Ok(Self::Current(digest))
     }
 }
 
 /// The semantic tables whose rows make up a projection.
 ///
 /// The digest rows are metadata, not another part of the projection. Keeping
-/// this list typed makes the selective clear/write paths share one set of
-/// names and prevents a new table from silently being hashed but never
-/// rewritten (or the other way around).
+/// this list typed makes the digest and write paths share one set of names,
+/// and [`Family`] says which table's rows hang off which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LedgerTable {
     Runs,
@@ -877,45 +1017,6 @@ impl LedgerTable {
         Self::ServedMessages,
         Self::Acked,
         Self::AckedMessages,
-    ];
-
-    /// Children are cleared before their parent, and are rewritten when a
-    /// parent changes so a parent replacement cannot cascade away an
-    /// otherwise unchanged child list.
-    const CLEAR_ORDER: [Self; LEDGER_TABLE_COUNT] = [
-        Self::AckedMessages,
-        Self::Acked,
-        Self::ServedMessages,
-        Self::Served,
-        Self::Bound,
-        Self::InboxOpenMessages,
-        Self::InboxPending,
-        Self::Inboxes,
-        Self::Messages,
-        Self::Workers,
-        Self::Dispatches,
-        Self::TaskDeps,
-        Self::Tasks,
-        Self::GateOptions,
-        Self::Gates,
-        Self::Attachments,
-        Self::RunAutos,
-        Self::Runs,
-    ];
-
-    /// Tables reconciled row by row, in place, rather than cleared and
-    /// rewritten. A parent updated in place fires no cascade, so its children
-    /// need no `PARENT_CHILD` entry — the one exemption the DDL pin below
-    /// reads from here instead of guessing.
-    const RECONCILED_IN_PLACE: [Self; 1] = [Self::Served];
-
-    const PARENT_CHILD: [(Self, Self); 6] = [
-        (Self::Runs, Self::RunAutos),
-        (Self::Tasks, Self::TaskDeps),
-        (Self::Gates, Self::GateOptions),
-        (Self::Inboxes, Self::InboxPending),
-        (Self::Inboxes, Self::InboxOpenMessages),
-        (Self::Acked, Self::AckedMessages),
     ];
 
     const fn index(self) -> usize {
@@ -967,12 +1068,9 @@ impl LedgerTable {
     fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|table| table.name() == name)
     }
-
-    fn reconciled_in_place(self) -> bool {
-        Self::RECONCILED_IN_PLACE.contains(&self)
-    }
 }
 
+/// Generation one's digest of one table: its rows as one JSON document.
 fn table_digest(value: &impl serde::Serialize) -> Result<TableDigest, EffectJournalError> {
     let encoded = serde_json::to_vec(value).map_err(|_| EffectJournalError::Corrupt)?;
     Ok(Sha256::digest(encoded).into())
@@ -999,6 +1097,8 @@ fn hash_optional_i64(hasher: &mut Sha256, value: Option<i64>) {
     }
 }
 
+/// One receipt's columns, digested by hand — generation one's receipt
+/// digest, and what `ledger_served_digests` still holds for each receipt.
 fn served_row_digest(row: &ServedRow) -> TableDigest {
     let (
         caller,
@@ -1083,26 +1183,53 @@ fn stored_table_digests(
     Ok(stored)
 }
 
+/// Generation one's digests of a projection, made once and only when a
+/// witness of that generation is there to be checked.
+struct FirstGeneration<'a> {
+    projection: &'a LedgerProjectionV1,
+    digests: Option<[TableDigest; LedgerTable::ALL.len()]>,
+}
+
+impl FirstGeneration<'_> {
+    fn digests(&mut self) -> Result<[TableDigest; LedgerTable::ALL.len()], EffectJournalError> {
+        if let Some(digests) = self.digests {
+            return Ok(digests);
+        }
+        let digests = table_digests_v1(self.projection)?;
+        self.digests = Some(digests);
+        Ok(digests)
+    }
+}
+
 /// Refuse rows that disagree with a digest from their successful write.
 ///
 /// A missing digest remains the additive-upgrade boundary: stores from before
 /// selective writes, and stores that predate a newly introduced table, have no
-/// digest to compare until their next write seeds one. A digest from another
-/// format generation is stale metadata rather than evidence about the current
-/// serializer; it is removed only after every current-generation witness for
-/// this ledger has passed, then the next write reseeds it.
+/// digest to compare until their next write seeds one. A digest of generation
+/// one is still evidence: it is checked with generation one's own serializer
+/// before it goes (t-82988), so the store a person upgrades is read against
+/// what its last write said. A digest from a generation this window does not
+/// know is stale metadata rather than evidence. Both are removed only after
+/// every witness for this ledger has passed, and the next write reseeds them.
 fn require_table_integrity(
     connection: &Connection,
     ledger_id: &str,
-    expected: &[TableDigest; LedgerTable::ALL.len()],
+    expected: &[TableDigest; FAMILY_COUNT],
+    first_generation: &mut FirstGeneration<'_>,
 ) -> Result<(), EffectJournalError> {
     let stored = stored_table_digests(connection, ledger_id)?;
     for table in LedgerTable::ALL {
-        let index = table.index();
-        if stored[index].is_some_and(|stored| {
-            stored.format_generation == TABLE_DIGEST_FORMAT_GENERATION
-                && stored.digest != expected[index]
-        }) {
+        let Some(stored) = stored[table.index()] else {
+            continue;
+        };
+        let witnessed = match stored.format_generation {
+            TABLE_DIGEST_FORMAT_GENERATION => {
+                Family::owning(table).map(|family| expected[family.index()])
+            }
+            TABLE_DIGEST_FORMAT_GENERATION_V1 => Some(first_generation.digests()?[table.index()]),
+            _ => None,
+        };
+        if witnessed.is_some_and(|digest| digest != stored.digest) {
             return Err(EffectJournalError::Corrupt);
         }
     }
@@ -1143,9 +1270,11 @@ fn require_ledger_tables(connection: &Connection) -> Result<(), EffectJournalErr
     }
 }
 
-/// Hash each table independently, so a mutation to one small table does not
-/// force the large receipt table through the write path.
-fn table_digests(
+/// Generation one's digests: each table hashed as one JSON document.
+///
+/// No longer written. Kept, byte for byte, to check the witnesses a store
+/// written before generation two still holds (t-82988).
+fn table_digests_v1(
     projection: &LedgerProjectionV1,
 ) -> Result<[TableDigest; LedgerTable::ALL.len()], EffectJournalError> {
     let run_autos = projection
@@ -1210,72 +1339,665 @@ fn table_digests(
     ])
 }
 
-/// Find the table slices that differ from the last successful write.
+/// A table that owns rows, with the tables that hang rows off it (t-82988).
 ///
-/// Missing metadata means the database predates selective writes, so the
-/// first write after an upgrade conservatively rewrites every table and seeds
-/// all digests. Parent changes also select their children: SQLite's foreign
-/// key cascade would otherwise remove a child that looked unchanged.
-fn changed_tables(
-    connection: &Connection,
-    ledger_id: &str,
-    expected: &[TableDigest; LedgerTable::ALL.len()],
-) -> Result<[bool; LedgerTable::ALL.len()], EffectJournalError> {
-    require_ledger_tables(connection)?;
-    let stored = stored_table_digests(connection, ledger_id)?;
-    let mut changed = [false; LedgerTable::ALL.len()];
-    for table in LedgerTable::ALL {
-        let index = table.index();
-        changed[index] = stored[index].is_none_or(|stored| {
-            stored.format_generation != TABLE_DIGEST_FORMAT_GENERATION
-                || stored.digest != expected[index]
-        });
-    }
-    for (parent, child) in LedgerTable::PARENT_CHILD {
-        if changed[parent.index()] {
-            changed[child.index()] = true;
-        }
-    }
-    Ok(changed)
+/// Generation two digests, compares and writes a family a row at a time. A
+/// row's digest is its JSON, children included, so a child table keeps no
+/// digest of its own — its parent's covers it — and rewriting a row rewrites
+/// its children with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Runs,
+    Tasks,
+    Gates,
+    Attachments,
+    Dispatches,
+    Workers,
+    Messages,
+    Inboxes,
+    Bound,
+    Served,
+    Acked,
 }
 
-fn store_table_digests(
+const FAMILY_COUNT: usize = 11;
+
+/// Statements one write keeps prepared: an insert and a range delete for
+/// every table and for the receipts' digests, and the upsert of a table's
+/// digest — one row at a time, so each is prepared once per write.
+const WRITE_STATEMENTS: usize = 2 * (LEDGER_TABLE_COUNT + 2);
+
+impl Family {
+    /// In the order the head's root digests them.
+    const ALL: [Self; FAMILY_COUNT] = [
+        Self::Runs,
+        Self::Tasks,
+        Self::Gates,
+        Self::Attachments,
+        Self::Dispatches,
+        Self::Workers,
+        Self::Messages,
+        Self::Inboxes,
+        Self::Bound,
+        Self::Served,
+        Self::Acked,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Runs => 0,
+            Self::Tasks => 1,
+            Self::Gates => 2,
+            Self::Attachments => 3,
+            Self::Dispatches => 4,
+            Self::Workers => 5,
+            Self::Messages => 6,
+            Self::Inboxes => 7,
+            Self::Bound => 8,
+            Self::Served => 9,
+            Self::Acked => 10,
+        }
+    }
+
+    /// The table the family's own rows sit in.
+    const fn table(self) -> LedgerTable {
+        match self {
+            Self::Runs => LedgerTable::Runs,
+            Self::Tasks => LedgerTable::Tasks,
+            Self::Gates => LedgerTable::Gates,
+            Self::Attachments => LedgerTable::Attachments,
+            Self::Dispatches => LedgerTable::Dispatches,
+            Self::Workers => LedgerTable::Workers,
+            Self::Messages => LedgerTable::Messages,
+            Self::Inboxes => LedgerTable::Inboxes,
+            Self::Bound => LedgerTable::Bound,
+            Self::Served => LedgerTable::Served,
+            Self::Acked => LedgerTable::Acked,
+        }
+    }
+
+    /// Each child table, with the column naming its parent's ordinal.
+    const fn children(self) -> &'static [(LedgerTable, &'static str)] {
+        match self {
+            Self::Runs => &[(LedgerTable::RunAutos, "run_ordinal")],
+            Self::Tasks => &[(LedgerTable::TaskDeps, "task_ordinal")],
+            Self::Gates => &[(LedgerTable::GateOptions, "gate_ordinal")],
+            Self::Inboxes => &[
+                (LedgerTable::InboxPending, "inbox_ordinal"),
+                (LedgerTable::InboxOpenMessages, "inbox_ordinal"),
+            ],
+            Self::Served => &[(LedgerTable::ServedMessages, "served_ordinal")],
+            Self::Acked => &[(LedgerTable::AckedMessages, "acked_ordinal")],
+            Self::Attachments | Self::Dispatches | Self::Workers | Self::Messages | Self::Bound => {
+                &[]
+            }
+        }
+    }
+
+    /// Whether the family's rows belong to runs, one run's after another's.
+    const fn by_run(self) -> bool {
+        !matches!(self, Self::Runs | Self::Bound | Self::Served)
+    }
+
+    /// The family whose own rows sit in `table`.
+    fn owning(table: LedgerTable) -> Option<Self> {
+        Self::ALL.into_iter().find(|family| family.table() == table)
+    }
+
+    fn rows(self, projection: &LedgerProjectionV1) -> usize {
+        match self {
+            Self::Runs => projection.runs.len(),
+            Self::Tasks => projection.tasks.len(),
+            Self::Gates => projection.gates.len(),
+            Self::Attachments => projection.attachments.len(),
+            Self::Dispatches => projection.dispatches.len(),
+            Self::Workers => projection.workers.len(),
+            Self::Messages => projection.messages.len(),
+            Self::Inboxes => projection.inboxes.len(),
+            Self::Bound => projection.bound.len(),
+            Self::Served => projection.served.len(),
+            Self::Acked => projection.acked.len(),
+        }
+    }
+
+    /// The run a row belongs to, for a family whose rows belong to runs.
+    fn run_of(self, projection: &LedgerProjectionV1, at: usize) -> Option<&str> {
+        match self {
+            Self::Tasks => Some(projection.tasks[at].run.as_str()),
+            Self::Gates => Some(projection.gates[at].run.as_str()),
+            Self::Attachments => Some(projection.attachments[at].run.as_str()),
+            Self::Dispatches => Some(projection.dispatches[at].run.as_str()),
+            Self::Workers => Some(projection.workers[at].run.as_str()),
+            Self::Messages => Some(projection.messages[at].run.as_str()),
+            Self::Inboxes => Some(projection.inboxes[at].run.as_str()),
+            Self::Acked => Some(projection.acked[at].run.as_str()),
+            Self::Runs | Self::Bound | Self::Served => None,
+        }
+    }
+
+    /// One run's share of this family in a marked export.
+    const fn share(self, run: &RunShare) -> Option<Share> {
+        match self {
+            Self::Tasks => Some(run.tasks),
+            Self::Gates => Some(run.gates),
+            Self::Attachments => Some(run.attachments),
+            Self::Dispatches => Some(run.dispatches),
+            Self::Workers => Some(run.workers),
+            Self::Messages => Some(run.messages),
+            Self::Inboxes => Some(run.inboxes),
+            Self::Acked => Some(run.acked),
+            Self::Runs | Self::Bound | Self::Served => None,
+        }
+    }
+
+    /// The SHA-256 of one row's JSON, children included, and the bytes it
+    /// took.
+    fn row_digest(
+        self,
+        projection: &LedgerProjectionV1,
+        at: usize,
+    ) -> Result<(TableDigest, u64), EffectJournalError> {
+        let encoded = match self {
+            Self::Runs => serde_json::to_vec(&projection.runs[at]),
+            Self::Tasks => serde_json::to_vec(&projection.tasks[at]),
+            Self::Gates => serde_json::to_vec(&projection.gates[at]),
+            Self::Attachments => serde_json::to_vec(&projection.attachments[at]),
+            Self::Dispatches => serde_json::to_vec(&projection.dispatches[at]),
+            Self::Workers => serde_json::to_vec(&projection.workers[at]),
+            Self::Messages => serde_json::to_vec(&projection.messages[at]),
+            Self::Inboxes => serde_json::to_vec(&projection.inboxes[at]),
+            Self::Bound => serde_json::to_vec(&projection.bound[at]),
+            Self::Served => serde_json::to_vec(&projection.served[at]),
+            Self::Acked => serde_json::to_vec(&projection.acked[at]),
+        }
+        .map_err(|_| EffectJournalError::Corrupt)?;
+        Ok((Sha256::digest(&encoded).into(), encoded.len() as u64))
+    }
+}
+
+/// Where a family's rows sit on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// A row's ordinal is its place in the table: a family no run owns,
+    /// rows not grouped run by run, and every table generation one wrote.
+    Dense,
+    /// A row's ordinal is its run's place in the runs, shifted above the
+    /// row's place among its run's rows (t-82988). A letter added to a run
+    /// moves no row of any run after it, where a dense ordinal moved them
+    /// all.
+    ByRun,
+}
+
+/// The bits of a [`Layout::ByRun`] ordinal that number a row within its run.
+const RUN_ROW_BITS: u32 = 32;
+
+impl Layout {
+    /// The ordinal of the first row of segment `at`.
+    fn base(self, at: usize) -> Result<i64, EffectJournalError> {
+        match self {
+            Self::Dense => Ok(0),
+            Self::ByRun => ordinal(at)?
+                .checked_mul(1 << RUN_ROW_BITS)
+                .ok_or(EffectJournalError::Corrupt),
+        }
+    }
+}
+
+/// A run's share of an export that marks them, or the receipts' share.
+#[derive(Clone, Copy)]
+struct Marks<'a> {
+    runs: &'a [RunShare],
+    served: Share,
+}
+
+/// One segment of a family in a projection: where its rows start, how many
+/// there are, and the stamp of the list they came from — zero when no
+/// marked export said.
+#[derive(Clone, Copy)]
+struct Span {
+    start: usize,
+    rows: usize,
+    edit: u64,
+}
+
+/// One run's rows of one family as digests — or a whole family's, laid out
+/// densely.
+struct Segment {
+    /// Where the rows start in the projection the digests were made of.
+    start: usize,
+    rows: Vec<TableDigest>,
+    /// The digest state over `rows`, so rows appended later are fed alone.
+    state: Sha256,
+    edit: u64,
+}
+
+impl Segment {
+    fn digest(&self) -> TableDigest {
+        self.state.clone().finalize().into()
+    }
+}
+
+/// One family as a write lays it down: where its rows go, and their
+/// digests.
+struct Laid {
+    layout: Layout,
+    /// One per run for [`Layout::ByRun`] — a run with no rows has an empty
+    /// one — and one for [`Layout::Dense`].
+    segments: Vec<Segment>,
+    digest: TableDigest,
+}
+
+/// One family as the last write left it.
+struct Kept {
+    /// Whether its rows sit on disk exactly where `laid` puts them. False
+    /// for rows a writer of generation one laid out densely: the first
+    /// change to such a family rewrites it whole.
+    placed: bool,
+    laid: Laid,
+}
+
+/// What the last write of one ledger left in a store (t-82988).
+///
+/// Kept by the store's handle ([`WrittenLedgers`]) and trusted only while the
+/// head still says what that write left it saying — the same revision and the
+/// same root. A write whose transaction did not commit, or a writer that went
+/// around this memory, moves one of the two, and the next write starts again
+/// from the digests stored beside the rows.
+pub(crate) struct Written {
+    revision: u64,
+    root: Option<TableDigest>,
+    families: Vec<Kept>,
+}
+
+impl Written {
+    fn describes(&self, head: &HeadNow) -> bool {
+        self.revision == head.revision
+            && match (self.root, head.root) {
+                (Some(kept), Some(StoredTableDigestRoot::Current(stored))) => kept == stored,
+                (None, Some(StoredTableDigestRoot::Missing)) => true,
+                _ => false,
+            }
+    }
+}
+
+/// Sizes and revision only: the digests are this process's bookkeeping.
+impl std::fmt::Debug for Written {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Written")
+            .field("revision", &self.revision)
+            .field(
+                "rows",
+                &self
+                    .families
+                    .iter()
+                    .map(|kept| {
+                        kept.laid
+                            .segments
+                            .iter()
+                            .map(|segment| segment.rows.len())
+                            .sum::<usize>()
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// What each ledger's last write left in one store, shared by every handle
+/// to that store ([`crate::workflow_store::WorkflowStore`]).
+#[derive(Debug, Clone, Default)]
+pub struct WrittenLedgers(
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Written>>>,
+);
+
+impl WrittenLedgers {
+    /// Hold what an open found, ledger by ledger.
+    pub(crate) fn remember(&self, found: Vec<(String, Written)>) {
+        let mut held = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.extend(found);
+    }
+}
+
+/// The head as a write finds it.
+struct HeadNow {
+    revision: u64,
+    updated_at_ms: i64,
+    /// `None` when the stored root cannot be read; such a head is never one
+    /// a memory describes.
+    root: Option<StoredTableDigestRoot>,
+}
+
+fn head_now(
     connection: &Connection,
     ledger_id: &str,
-    changed: &[bool; LedgerTable::ALL.len()],
-    digests: &[TableDigest; LedgerTable::ALL.len()],
-) -> Result<(), EffectJournalError> {
-    for table in LedgerTable::ALL {
-        let index = table.index();
-        if !changed[index] {
-            continue;
+) -> Result<Option<HeadNow>, EffectJournalError> {
+    connection
+        .query_row(
+            "SELECT revision, updated_at_ms, table_digest_format_generation, table_digest_root
+               FROM orchestration_ledger_heads WHERE ledger_id = ?1",
+            [ledger_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| EffectJournalError::Database)?
+        .map(|(revision, updated_at_ms, generation, root)| {
+            Ok(HeadNow {
+                revision: from_sql_u64(revision)?,
+                updated_at_ms,
+                root: StoredTableDigestRoot::from_sql(generation, root).ok(),
+            })
+        })
+        .transpose()
+}
+
+/// Where each segment of a family sits in a projection, and which layout
+/// puts them on disk.
+///
+/// A marked export says it outright: its runs' shares are its segments, in
+/// the order of its runs. Anything else is read off the rows — grouped run
+/// by run in the order of the runs, or laid out densely.
+fn spans(
+    family: Family,
+    projection: &LedgerProjectionV1,
+    marks: Option<Marks<'_>>,
+) -> (Layout, Vec<Span>) {
+    let rows = family.rows(projection);
+    let whole = |edit: u64| {
+        vec![Span {
+            start: 0,
+            rows,
+            edit,
+        }]
+    };
+    if family.by_run() {
+        if let Some(marks) = marks.filter(|marks| marks.runs.len() == projection.runs.len()) {
+            let mut start = 0;
+            let mut spans = Vec::with_capacity(marks.runs.len());
+            for run in marks.runs {
+                let share = family.share(run).unwrap_or_default();
+                spans.push(Span {
+                    start,
+                    rows: share.rows,
+                    edit: share.edit,
+                });
+                start += share.rows;
+            }
+            if start == rows && spans.iter().all(|span| fits_a_run(span.rows)) {
+                return (Layout::ByRun, spans);
+            }
         }
-        connection
-            .execute(
-                "INSERT INTO ledger_table_digests (
-                    ledger_id, table_name, format_generation, digest
-                 ) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (ledger_id, table_name) DO UPDATE SET
-                    format_generation = excluded.format_generation,
-                    digest = excluded.digest",
-                params![
-                    ledger_id,
-                    table.name(),
-                    i64::from(TABLE_DIGEST_FORMAT_GENERATION),
-                    digests[index].as_slice()
-                ],
-            )
-            .map_err(|_| EffectJournalError::Database)?;
+        return match grouped(family, projection) {
+            Some(spans) => (Layout::ByRun, spans),
+            None => (Layout::Dense, whole(0)),
+        };
     }
-    Ok(())
+    let edit = match (family, marks) {
+        (Family::Served, Some(marks)) => marks.served.edit,
+        _ => 0,
+    };
+    (Layout::Dense, whole(edit))
+}
+
+const fn fits_a_run(rows: usize) -> bool {
+    (rows as u64) < (1 << RUN_ROW_BITS)
+}
+
+/// A family's rows split by run, when they lie run by run in the order of
+/// the runs with each run's rows together; `None` when they do not.
+fn grouped(family: Family, projection: &LedgerProjectionV1) -> Option<Vec<Span>> {
+    let mut counts = vec![0_usize; projection.runs.len()];
+    let mut place = 0;
+    for at in 0..family.rows(projection) {
+        let run = family.run_of(projection, at)?;
+        while projection.runs.get(place)?.id != run {
+            place += 1;
+        }
+        counts[place] += 1;
+    }
+    let mut start = 0;
+    let mut spans = Vec::with_capacity(counts.len());
+    for rows in counts {
+        if !fits_a_run(rows) {
+            return None;
+        }
+        spans.push(Span {
+            start,
+            rows,
+            edit: 0,
+        });
+        start += rows;
+    }
+    Some(spans)
+}
+
+/// Lay one family out for a write, digesting only the rows the kept
+/// memory cannot vouch for.
+fn lay_out(
+    family: Family,
+    projection: &LedgerProjectionV1,
+    marks: Option<Marks<'_>>,
+    kept: Option<&Kept>,
+    work: &mut WriteWork,
+) -> Result<Laid, EffectJournalError> {
+    let (layout, spans) = spans(family, projection, marks);
+    let kept = kept.filter(|kept| kept.laid.layout == layout);
+    let mut segments = Vec::with_capacity(spans.len());
+    for (at, span) in spans.into_iter().enumerate() {
+        let before = kept.and_then(|kept| kept.laid.segments.get(at));
+        segments.push(segment(family, projection, span, before, work)?);
+    }
+    let digest = digest_rows(
+        &segments
+            .iter()
+            .filter(|segment| !segment.rows.is_empty())
+            .map(Segment::digest)
+            .collect::<Vec<_>>(),
+    );
+    Ok(Laid {
+        layout,
+        segments,
+        digest,
+    })
+}
+
+/// One segment's digests: the rows the memory holds when the list they
+/// came from has only been appended to since, and the rest digested now.
+///
+/// The last row the memory holds is digested again when rows were appended
+/// after it, as a witness that the list is the one the memory saw — a stamp
+/// kept by a copy whose rows went another way would fail it.
+fn segment(
+    family: Family,
+    projection: &LedgerProjectionV1,
+    span: Span,
+    before: Option<&Segment>,
+    work: &mut WriteWork,
+) -> Result<Segment, EffectJournalError> {
+    let mut digest_row = |at: usize| {
+        let (row, bytes) = family.row_digest(projection, at)?;
+        work.rows_digested += 1;
+        work.bytes_digested += bytes;
+        Ok::<_, EffectJournalError>(row)
+    };
+    let appended_to = before.filter(|before| {
+        span.edit != 0 && before.edit == span.edit && span.rows >= before.rows.len()
+    });
+    let kept = match appended_to {
+        Some(before) if span.rows > before.rows.len() && !before.rows.is_empty() => {
+            let last = digest_row(span.start + before.rows.len() - 1)?;
+            (before.rows.last() == Some(&last)).then_some(before)
+        }
+        other => other,
+    };
+    let (mut rows, mut state) = match kept {
+        Some(before) => (before.rows.clone(), before.state.clone()),
+        None => (Vec::with_capacity(span.rows), Sha256::new()),
+    };
+    rows.reserve(span.rows - rows.len());
+    for at in span.start + rows.len()..span.start + span.rows {
+        let row = digest_row(at)?;
+        state.update(row);
+        rows.push(row);
+    }
+    Ok(Segment {
+        start: span.start,
+        rows,
+        state,
+        edit: span.edit,
+    })
+}
+
+/// Bring one family's rows on disk to `laid`: row by row where the kept
+/// memory knows what is there, whole where it does not and the stored
+/// digest says the family moved. Answers whether the rows now sit where
+/// `laid` puts them, and how many rows were written.
+fn reconcile(
+    connection: &Connection,
+    ledger_id: &str,
+    projection: &LedgerProjectionV1,
+    family: Family,
+    laid: &Laid,
+    kept: Option<&Kept>,
+    stored: Option<StoredTableDigest>,
+) -> Result<(bool, u64), EffectJournalError> {
+    let mut written = 0;
+    if let Some(kept) = kept.filter(|kept| kept.placed && kept.laid.layout == laid.layout) {
+        /* Every row that leaves goes before any row arrives: a row a fold
+         * moved up a place still holds its old place until then, and its id
+         * is unique in the table. Neighbouring places leave as one range. */
+        let mut leaving: Vec<(i64, i64)> = Vec::new();
+        let mut arriving: Vec<(usize, i64)> = Vec::new();
+        let mut leave = |from: i64, to: i64| match leaving.last_mut() {
+            Some((_, end)) if *end == from => *end = to,
+            _ => leaving.push((from, to)),
+        };
+        for at in 0..kept.laid.segments.len().max(laid.segments.len()) {
+            let before = kept
+                .laid
+                .segments
+                .get(at)
+                .map_or(&[][..], |segment| segment.rows.as_slice());
+            let (after, start) = laid.segments.get(at).map_or((&[][..], 0), |segment| {
+                (segment.rows.as_slice(), segment.start)
+            });
+            let base = laid.layout.base(at)?;
+            let shared = before.len().min(after.len());
+            for row in 0..shared {
+                if before[row] != after[row] {
+                    let place = base + ordinal(row)?;
+                    leave(place, place + 1);
+                    arriving.push((start + row, place));
+                }
+            }
+            if before.len() > shared {
+                leave(base + ordinal(shared)?, base + ordinal(before.len())?);
+            }
+            for row in shared..after.len() {
+                arriving.push((start + row, base + ordinal(row)?));
+            }
+        }
+        for (from, to) in leaving {
+            delete_rows(connection, ledger_id, family, from, to)?;
+        }
+        for (at, place) in arriving {
+            written += insert_row(connection, ledger_id, projection, family, at, place)?;
+        }
+        return Ok((true, written));
+    }
+    let unchanged = stored.is_some_and(|stored| {
+        stored.format_generation == TABLE_DIGEST_FORMAT_GENERATION && stored.digest == laid.digest
+    });
+    if unchanged {
+        /* The rows are the rows this write holds, but nobody here saw them
+         * written: read where they sit, so the family's next change is a
+         * row and not a rewrite. */
+        return Ok((placed(connection, ledger_id, family, laid)?, 0));
+    }
+    delete_rows(connection, ledger_id, family, 0, i64::MAX)?;
+    for (at, segment) in laid.segments.iter().enumerate() {
+        let base = laid.layout.base(at)?;
+        for row in 0..segment.rows.len() {
+            written += insert_row(
+                connection,
+                ledger_id,
+                projection,
+                family,
+                segment.start + row,
+                base + ordinal(row)?,
+            )?;
+        }
+    }
+    Ok((true, written))
+}
+
+/// Run one prepared statement, keeping it for the next row.
+fn put(
+    connection: &Connection,
+    sql: &str,
+    values: impl rusqlite::Params,
+) -> Result<(), EffectJournalError> {
+    connection
+        .prepare_cached(sql)
+        .and_then(|mut statement| statement.execute(values))
+        .map(drop)
+        .map_err(|_| EffectJournalError::Database)
+}
+
+/// Remove a family's rows whose ordinals lie in `from..to`, their children
+/// first.
+fn delete_rows(
+    connection: &Connection,
+    ledger_id: &str,
+    family: Family,
+    from: i64,
+    to: i64,
+) -> Result<(), EffectJournalError> {
+    for (child, parent) in family.children() {
+        put(
+            connection,
+            &format!(
+                "DELETE FROM {} WHERE ledger_id = ?1 AND {parent} >= ?2 AND {parent} < ?3",
+                child.name()
+            ),
+            params![ledger_id, from, to],
+        )?;
+    }
+    if family == Family::Served {
+        put(
+            connection,
+            "DELETE FROM ledger_served_digests
+              WHERE ledger_id = ?1 AND ordinal >= ?2 AND ordinal < ?3",
+            params![ledger_id, from, to],
+        )?;
+    }
+    put(
+        connection,
+        &format!(
+            "DELETE FROM {} WHERE ledger_id = ?1 AND ordinal >= ?2 AND ordinal < ?3",
+            family.table().name()
+        ),
+        params![ledger_id, from, to],
+    )
 }
 
 /// Write a ledger into the tables, replacing whatever was there.
 ///
 /// The head is moved with the same compare-and-set schema four used — the
-/// revision the caller expects, or nothing happens — and changed rows are
-/// reconciled inside the caller's transaction, so a ledger is never half of
-/// two.
+/// revision the caller expects, or nothing happens — and the families whose
+/// stored digests moved are rewritten inside the caller's transaction, so a
+/// ledger is never half of two. With no memory of what is on disk, a family
+/// that moved is rewritten whole; [`write_remembered`] writes its rows.
 pub fn write(
     connection: &Connection,
     ledger_id: &str,
@@ -1284,24 +2006,94 @@ pub fn write(
     projection: &LedgerProjectionV1,
     at_ms: i64,
 ) -> Result<(), EffectJournalError> {
+    write_with(
+        connection,
+        ledger_id,
+        expected_revision,
+        next_revision,
+        LedgerRows::Bare(projection),
+        None,
+        at_ms,
+    )
+    .map(drop)
+}
+
+/// Write a ledger through the store's memory of what it last wrote
+/// (t-82988): a family's rows are compared row by row with what the memory
+/// says the disk holds, and only the rows that differ are written. A marked
+/// export lets the comparison skip every run whose rows have not moved since,
+/// so one letter is one row digested and one row written.
+pub fn write_remembered(
+    connection: &Connection,
+    written: &WrittenLedgers,
+    ledger_id: &str,
+    expected_revision: u64,
+    next_revision: u64,
+    rows: LedgerRows<'_>,
+    at_ms: i64,
+) -> Result<(), EffectJournalError> {
+    let mut held = written
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Taken out, and put back only by a write that succeeded: a write that
+    // failed half-way leaves no memory to trust.
+    let kept = held.remove(ledger_id);
+    let now = write_with(
+        connection,
+        ledger_id,
+        expected_revision,
+        next_revision,
+        rows,
+        kept,
+        at_ms,
+    )?;
+    held.insert(ledger_id.to_string(), now);
+    Ok(())
+}
+
+fn write_with(
+    connection: &Connection,
+    ledger_id: &str,
+    expected_revision: u64,
+    next_revision: u64,
+    rows: LedgerRows<'_>,
+    kept: Option<Written>,
+    at_ms: i64,
+) -> Result<Written, EffectJournalError> {
     if at_ms < 0 {
         return Err(EffectJournalError::InvalidInput { field: "now_ms" });
     }
+    let projection = rows.projection();
     let held_bytes = to_sql_u64(bytes_held(projection))?;
-    let current: Option<(i64, i64)> = connection
-        .query_row(
-            "SELECT revision, updated_at_ms FROM orchestration_ledger_heads
-              WHERE ledger_id = ?1",
-            [ledger_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(|_| EffectJournalError::Database)?;
-    if current.is_some_and(|(_, updated_at_ms)| at_ms < updated_at_ms) {
+    let current = head_now(connection, ledger_id)?;
+    if current
+        .as_ref()
+        .is_some_and(|head| at_ms < head.updated_at_ms)
+    {
         return Err(EffectJournalError::TimestampRegression);
     }
-    let digests = table_digests(projection)?;
-    let digest_root = digest_rows(&digests);
+    let kept = kept.filter(|kept| current.as_ref().is_some_and(|head| kept.describes(head)));
+    let marks = rows.marks();
+    let mut work = WriteWork {
+        writes: 1,
+        ..WriteWork::ZERO
+    };
+    let digesting = std::time::Instant::now();
+    let laid = Family::ALL
+        .into_iter()
+        .map(|family| {
+            lay_out(
+                family,
+                projection,
+                marks,
+                kept.as_ref().map(|kept| &kept.families[family.index()]),
+                &mut work,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let digest_root = digest_rows(&laid.iter().map(|laid| laid.digest).collect::<Vec<_>>());
+    work.digest_ns = nanos_since(digesting);
     match current {
         Some(_) => {
             let changed = connection
@@ -1358,37 +2150,54 @@ pub fn write(
         None => return Err(EffectJournalError::RevisionMismatch),
     }
 
-    let changed = changed_tables(connection, ledger_id, &digests)?;
-    clear_rows(connection, ledger_id, &changed)?;
-    write_rows(connection, ledger_id, projection, &changed)?;
-    store_table_digests(connection, ledger_id, &changed, &digests)
-}
-
-/// Everything belonging to one ledger, in the order the children must go
-/// before their parents.
-fn clear_rows(
-    connection: &Connection,
-    ledger_id: &str,
-    changed: &[bool; LedgerTable::ALL.len()],
-) -> Result<(), EffectJournalError> {
-    for table in LedgerTable::CLEAR_ORDER {
-        if !changed[table.index()] {
-            continue;
+    require_ledger_tables(connection)?;
+    connection.set_prepared_statement_cache_capacity(WRITE_STATEMENTS);
+    let stored = stored_table_digests(connection, ledger_id)?;
+    let writing = std::time::Instant::now();
+    let mut families = Vec::with_capacity(FAMILY_COUNT);
+    for (family, laid) in Family::ALL.into_iter().zip(laid) {
+        let table = family.table();
+        let before = stored[table.index()];
+        let (placed, rows_written) = reconcile(
+            connection,
+            ledger_id,
+            projection,
+            family,
+            &laid,
+            kept.as_ref().map(|kept| &kept.families[family.index()]),
+            before,
+        )?;
+        work.rows_written += rows_written;
+        let witness = StoredTableDigest {
+            format_generation: TABLE_DIGEST_FORMAT_GENERATION,
+            digest: laid.digest,
+        };
+        if before != Some(witness) {
+            put(
+                connection,
+                "INSERT INTO ledger_table_digests (
+                    ledger_id, table_name, format_generation, digest
+                 ) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (ledger_id, table_name) DO UPDATE SET
+                    format_generation = excluded.format_generation,
+                    digest = excluded.digest",
+                params![
+                    ledger_id,
+                    table.name(),
+                    i64::from(TABLE_DIGEST_FORMAT_GENERATION),
+                    laid.digest.as_slice()
+                ],
+            )?;
         }
-        /* Receipts are the one large append-heavy table. Their rows are
-         * reconciled by ordinal below, so deleting the whole table here would
-         * throw away the increment this path is meant to preserve. */
-        if table.reconciled_in_place() {
-            continue;
-        }
-        connection
-            .execute(
-                &format!("DELETE FROM {} WHERE ledger_id = ?1", table.name()),
-                [ledger_id],
-            )
-            .map_err(|_| EffectJournalError::Database)?;
+        families.push(Kept { placed, laid });
     }
-    Ok(())
+    work.rows_ns = nanos_since(writing);
+    count_work(work);
+    Ok(Written {
+        revision: next_revision,
+        root: Some(digest_root),
+        families,
+    })
 }
 
 /// An index as a column value, refusing a ledger too long to number.
@@ -1438,66 +2247,348 @@ fn served_values(row: &ServedRow) -> ServedValues<'_> {
     )
 }
 
-/// Reconcile receipts by ordinal instead of deleting and re-inserting the
-fn write_served_rows(
+/// A JSON document column, NULL when the value is absent.
+fn document<T: serde::Serialize>(value: Option<&T>) -> Result<Option<String>, EffectJournalError> {
+    value
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| EffectJournalError::Corrupt)
+}
+
+/// One child list under the parent at `parent`, each entry at its place.
+fn insert_children(
+    connection: &Connection,
+    sql: &str,
+    ledger_id: &str,
+    parent: i64,
+    entries: &[String],
+) -> Result<u64, EffectJournalError> {
+    for (which, entry) in entries.iter().enumerate() {
+        put(
+            connection,
+            sql,
+            params![ledger_id, parent, ordinal(which)?, entry],
+        )?;
+    }
+    Ok(entries.len() as u64)
+}
+
+/// Insert row `at` of a family's table at `place`, with every child row it
+/// holds. Answers how many rows went in.
+fn insert_row(
     connection: &Connection,
     ledger_id: &str,
-    rows: &[ServedRow],
-) -> Result<(), EffectJournalError> {
-    let expected = served_row_digests(rows);
-    let mut existing = Vec::new();
-    each(
-        connection,
-        "SELECT ordinal, digest FROM ledger_served_digests
-           WHERE ledger_id = ?1 ORDER BY ordinal",
-        ledger_id,
-        |row| {
-            existing.push((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?));
-            Ok(())
-        },
-    )?;
-    for (at, row) in rows.iter().enumerate() {
-        let ordinal = ordinal(at)?;
-        if existing.get(at).is_some_and(|(held, digest)| {
-            *held == ordinal && digest.as_slice() == expected[at].as_slice()
-        }) {
-            continue;
+    projection: &LedgerProjectionV1,
+    family: Family,
+    at: usize,
+    place: i64,
+) -> Result<u64, EffectJournalError> {
+    match family {
+        Family::Runs => {
+            let row = &projection.runs[at];
+            put(
+                connection,
+                "INSERT INTO ledger_runs (
+                    ledger_id, ordinal, id, name, created_ms, summary, coordinator, handover,
+                    project, folded
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    ledger_id,
+                    place,
+                    row.id,
+                    row.name.as_str(),
+                    row.created_ms,
+                    document(row.summary.as_ref())?,
+                    document(row.coordinator.as_ref())?,
+                    document(row.handover.as_ref())?,
+                    document(row.project.as_ref())?,
+                    document(row.folded.as_ref())?,
+                ],
+            )?;
+            let Some(auto) = &row.auto else {
+                return Ok(1);
+            };
+            put(
+                connection,
+                "INSERT INTO ledger_run_autos (
+                    ledger_id, run_ordinal, max, agent, team, pane, armed_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    ledger_id,
+                    place,
+                    i64::from(auto.max),
+                    auto.agent,
+                    auto.team,
+                    auto.pane,
+                    auto.armed_ms
+                ],
+            )?;
+            Ok(2)
         }
-        let (
-            caller,
-            request,
-            fingerprint,
-            renderer,
-            inline,
-            check_run,
-            check_address,
-            check_delivery,
-            filed_ms,
-            expired,
-            verb,
-        ) = served_values(row);
-        connection
-            .execute(
+        Family::Tasks => {
+            let row = &projection.tasks[at];
+            put(
+                connection,
+                "INSERT INTO ledger_tasks (
+                    ledger_id, ordinal, run, id, spec, title, parent, status,
+                    result, failures, created_ms, result_author, closed
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    ledger_id,
+                    place,
+                    row.run,
+                    row.id,
+                    row.spec.as_str(),
+                    row.title.as_str(),
+                    row.parent,
+                    word(&row.status)?,
+                    row.result.as_str(),
+                    i64::from(row.failures),
+                    row.created_ms,
+                    document(row.result_author.as_ref())?,
+                    document(row.closed.as_ref())?,
+                ],
+            )?;
+            Ok(1 + insert_children(
+                connection,
+                "INSERT INTO ledger_task_deps (ledger_id, task_ordinal, ordinal, dep)
+                 VALUES (?1, ?2, ?3, ?4)",
+                ledger_id,
+                place,
+                &row.deps,
+            )?)
+        }
+        Family::Gates => {
+            let row = &projection.gates[at];
+            put(
+                connection,
+                "INSERT INTO ledger_gates (
+                    ledger_id, ordinal, run, id, task, question, status,
+                    resolution, created_ms, resolved_ms, held_for
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    ledger_id,
+                    place,
+                    row.run,
+                    row.id,
+                    row.task,
+                    row.question.as_str(),
+                    word(&row.status)?,
+                    row.resolution.as_str(),
+                    row.created_ms,
+                    row.resolved_ms,
+                    row.held_for,
+                ],
+            )?;
+            for (which, choice) in row.options.iter().enumerate() {
+                put(
+                    connection,
+                    "INSERT INTO ledger_gate_options (ledger_id, gate_ordinal, ordinal, choice)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![ledger_id, place, ordinal(which)?, choice.as_str()],
+                )?;
+            }
+            Ok(1 + row.options.len() as u64)
+        }
+        Family::Attachments => {
+            let row = &projection.attachments[at];
+            put(
+                connection,
+                "INSERT INTO ledger_attachments (
+                    ledger_id, ordinal, run, dispatch, home, worker, state,
+                    to_home, acked_seq, imported_seq, created_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    ledger_id,
+                    place,
+                    row.run,
+                    row.dispatch,
+                    row.home,
+                    row.worker,
+                    word(&row.state)?,
+                    serde_json::to_string(&row.to_home).map_err(|_| EffectJournalError::Corrupt)?,
+                    row.acked_seq,
+                    row.imported_seq,
+                    row.created_ms,
+                ],
+            )?;
+            Ok(1)
+        }
+        Family::Dispatches => {
+            let row = &projection.dispatches[at];
+            put(
+                connection,
+                "INSERT INTO ledger_dispatches (
+                    ledger_id, ordinal, run, id, task, worker, started_ms,
+                    ended_ms, succeeded, retry_of, remote, source, session_history
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    ledger_id,
+                    place,
+                    row.run,
+                    row.id,
+                    row.task,
+                    row.worker,
+                    row.started_ms,
+                    row.ended_ms,
+                    row.succeeded,
+                    row.retry_of,
+                    document(row.remote.as_ref())?,
+                    row.source,
+                    document(row.session_history.as_ref())?,
+                ],
+            )?;
+            Ok(1)
+        }
+        Family::Workers => {
+            let row = &projection.workers[at];
+            put(
+                connection,
+                "INSERT INTO ledger_workers (
+                    ledger_id, ordinal, run, id, team, agent, pane, state,
+                    started_ms, dispatch, model, effort, session, ready_by_ms,
+                    hook_unreachable_since_ms, pane_missing_since_ms,
+                    taken_over, checkout, quiet_at, archive, started_by, adopted_by,
+                    on_quota_wall, quota_wait, exit_unconfirmed, in_worktree
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+                params![
+                    ledger_id,
+                    place,
+                    row.run,
+                    row.id,
+                    row.team,
+                    row.agent,
+                    row.pane,
+                    word(&row.state)?,
+                    row.started_ms,
+                    row.dispatch,
+                    row.model,
+                    row.effort,
+                    document(row.session.as_ref())?,
+                    row.ready_by_ms,
+                    row.hook_unreachable_since_ms,
+                    row.pane_missing_since_ms,
+                    row.taken_over,
+                    row.checkout,
+                    row.quiet_at,
+                    row.archive.as_ref().map(Text::as_str),
+                    row.started_by,
+                    row.adopted_by.map(i64::from),
+                    document(row.on_quota_wall.as_ref())?,
+                    row.quota_wait,
+                    document(row.exit_unconfirmed.as_ref())?,
+                    row.in_worktree,
+                ],
+            )?;
+            Ok(1)
+        }
+        Family::Messages => {
+            let row = &projection.messages[at];
+            put(
+                connection,
+                "INSERT INTO ledger_messages (
+                    ledger_id, ordinal, run, id, sender, recipient, kind, body,
+                    subject, priority, payload, thread, task, dispatch,
+                    author_seat, created_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                           ?15, ?16)",
+                params![
+                    ledger_id,
+                    place,
+                    row.run,
+                    row.id,
+                    row.from,
+                    row.to,
+                    word(&row.kind)?,
+                    row.body.as_str(),
+                    row.subject.as_str(),
+                    word(&row.priority)?,
+                    row.payload.as_str(),
+                    row.thread,
+                    row.task,
+                    row.dispatch,
+                    row.author_seat,
+                    row.created_ms,
+                ],
+            )?;
+            Ok(1)
+        }
+        Family::Inboxes => {
+            let row = &projection.inboxes[at];
+            put(
+                connection,
+                "INSERT INTO ledger_inboxes (
+                    ledger_id, ordinal, run, address, open_delivery,
+                    open_holder, open_opened_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    ledger_id,
+                    place,
+                    row.run,
+                    row.address,
+                    row.open.as_ref().map(|open| open.id.as_str()),
+                    row.open.as_ref().and_then(|open| open.holder.as_deref()),
+                    row.open.as_ref().and_then(|open| open.opened_ms)
+                ],
+            )?;
+            let pending = insert_children(
+                connection,
+                "INSERT INTO ledger_inbox_pending (
+                    ledger_id, inbox_ordinal, ordinal, message
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                ledger_id,
+                place,
+                &row.pending,
+            )?;
+            let leased = match &row.open {
+                Some(open) => insert_children(
+                    connection,
+                    "INSERT INTO ledger_inbox_open_messages (
+                        ledger_id, inbox_ordinal, ordinal, message
+                     ) VALUES (?1, ?2, ?3, ?4)",
+                    ledger_id,
+                    place,
+                    &open.messages,
+                )?,
+                None => 0,
+            };
+            Ok(1 + pending + leased)
+        }
+        Family::Bound => {
+            let row = &projection.bound[at];
+            put(
+                connection,
+                "INSERT INTO ledger_bound (ledger_id, ordinal, caller, run)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![ledger_id, place, row.caller.as_str(), row.run],
+            )?;
+            Ok(1)
+        }
+        Family::Served => {
+            let row = &projection.served[at];
+            let (
+                caller,
+                request,
+                fingerprint,
+                renderer,
+                inline,
+                check_run,
+                check_address,
+                check_delivery,
+                filed_ms,
+                expired,
+                verb,
+            ) = served_values(row);
+            put(
+                connection,
                 "INSERT INTO ledger_served (
                     ledger_id, ordinal, caller, request, fingerprint, renderer,
                     inline, check_run, check_address, check_delivery, filed_ms,
                     expired, verb
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-                 ON CONFLICT (ledger_id, ordinal) DO UPDATE SET
-                    caller = excluded.caller,
-                    request = excluded.request,
-                    fingerprint = excluded.fingerprint,
-                    renderer = excluded.renderer,
-                    inline = excluded.inline,
-                    check_run = excluded.check_run,
-                    check_address = excluded.check_address,
-                    check_delivery = excluded.check_delivery,
-                    filed_ms = excluded.filed_ms,
-                    expired = excluded.expired,
-                    verb = excluded.verb",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     ledger_id,
-                    ordinal,
+                    place,
                     caller,
                     request,
                     fingerprint,
@@ -1510,457 +2601,92 @@ fn write_served_rows(
                     expired,
                     verb,
                 ],
-            )
-            .map_err(|_| EffectJournalError::Database)?;
-        connection
-            .execute(
+            )?;
+            /* The receipt's own column digest, as generation one kept it:
+             * a window from before generation two reconciles receipts by
+             * it, so it stays true for every receipt written here. */
+            put(
+                connection,
                 "INSERT INTO ledger_served_digests (ledger_id, ordinal, digest)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT (ledger_id, ordinal) DO UPDATE SET digest = excluded.digest",
-                params![ledger_id, ordinal, expected[at].as_slice()],
-            )
-            .map_err(|_| EffectJournalError::Database)?;
+                 VALUES (?1, ?2, ?3)",
+                params![ledger_id, place, served_row_digest(row).as_slice()],
+            )?;
+            let answered = match &row.answer {
+                ServedAnswer::Inline(_) => 0,
+                ServedAnswer::Check(about) => insert_children(
+                    connection,
+                    "INSERT INTO ledger_served_messages (
+                        ledger_id, served_ordinal, ordinal, message
+                     ) VALUES (?1, ?2, ?3, ?4)",
+                    ledger_id,
+                    place,
+                    &about.messages,
+                )?,
+            };
+            Ok(1 + answered)
+        }
+        Family::Acked => {
+            let row = &projection.acked[at];
+            put(
+                connection,
+                "INSERT INTO ledger_acked (
+                    ledger_id, ordinal, run, address, delivery, holds_messages,
+                    seq, current
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    ledger_id,
+                    place,
+                    row.run,
+                    row.address,
+                    row.delivery,
+                    row.messages.is_some(),
+                    i64::from(row.seq),
+                    row.current,
+                ],
+            )?;
+            Ok(1 + insert_children(
+                connection,
+                "INSERT INTO ledger_acked_messages (
+                    ledger_id, acked_ordinal, ordinal, message
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                ledger_id,
+                place,
+                row.messages.as_deref().unwrap_or_default(),
+            )?)
+        }
     }
-
-    connection
-        .execute(
-            "DELETE FROM ledger_served WHERE ledger_id = ?1 AND ordinal >= ?2",
-            params![ledger_id, ordinal(rows.len())?],
-        )
-        .map_err(|_| EffectJournalError::Database)?;
-    connection
-        .execute(
-            "DELETE FROM ledger_served_digests WHERE ledger_id = ?1 AND ordinal >= ?2",
-            params![ledger_id, ordinal(rows.len())?],
-        )
-        .map_err(|_| EffectJournalError::Database)?;
-    Ok(())
 }
 
-fn write_rows(
+/// Whether a family's rows sit on disk where `laid` puts them, ordinal for
+/// ordinal — asked of rows this window did not see written: as a store
+/// opens, and by a write with no memory of them.
+fn placed(
     connection: &Connection,
     ledger_id: &str,
-    projection: &LedgerProjectionV1,
-    changed: &[bool; LedgerTable::ALL.len()],
-) -> Result<(), EffectJournalError> {
-    for (at, row) in projection.runs.iter().enumerate() {
-        let at = ordinal(at)?;
-        if changed[LedgerTable::Runs.index()] {
-            connection
-                .execute(
-                    "INSERT INTO ledger_runs (
-                        ledger_id, ordinal, id, name, created_ms, summary, coordinator, handover,
-                        project, folded
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    params![
-                        ledger_id,
-                        at,
-                        row.id,
-                        row.name.as_str(),
-                        row.created_ms,
-                        row.summary
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|_| EffectJournalError::Corrupt)?,
-                        row.coordinator
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|_| EffectJournalError::Corrupt)?,
-                        row.handover
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|_| EffectJournalError::Corrupt)?,
-                        row.project
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|_| EffectJournalError::Corrupt)?,
-                        row.folded
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|_| EffectJournalError::Corrupt)?,
-                    ],
-                )
-                .map_err(|_| EffectJournalError::Database)?;
-        }
-        if changed[LedgerTable::RunAutos.index()]
-            && let Some(auto) = &row.auto
-        {
-            connection
-                .execute(
-                    "INSERT INTO ledger_run_autos (
-                        ledger_id, run_ordinal, max, agent, team, pane, armed_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        ledger_id,
-                        at,
-                        i64::from(auto.max),
-                        auto.agent,
-                        auto.team,
-                        auto.pane,
-                        auto.armed_ms
-                    ],
-                )
-                .map_err(|_| EffectJournalError::Database)?;
+    family: Family,
+    laid: &Laid,
+) -> Result<bool, EffectJournalError> {
+    let mut expected = Vec::new();
+    for (at, segment) in laid.segments.iter().enumerate() {
+        let base = laid.layout.base(at)?;
+        for row in 0..segment.rows.len() {
+            expected.push(base + ordinal(row)?);
         }
     }
-    for (at, row) in projection.tasks.iter().enumerate() {
-        let at = ordinal(at)?;
-        if changed[LedgerTable::Tasks.index()] {
-            connection
-                .execute(
-                    "INSERT INTO ledger_tasks (
-                        ledger_id, ordinal, run, id, spec, title, parent, status,
-                        result, failures, created_ms, result_author, closed
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                    params![
-                        ledger_id,
-                        at,
-                        row.run,
-                        row.id,
-                        row.spec.as_str(),
-                        row.title.as_str(),
-                        row.parent,
-                        word(&row.status)?,
-                        row.result.as_str(),
-                        i64::from(row.failures),
-                        row.created_ms,
-                        row.result_author
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|_| EffectJournalError::Corrupt)?,
-                        row.closed
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|_| EffectJournalError::Corrupt)?,
-                    ],
-                )
-                .map_err(|_| EffectJournalError::Database)?;
-        }
-        if changed[LedgerTable::TaskDeps.index()] {
-            for (which, dep) in row.deps.iter().enumerate() {
-                connection
-                    .execute(
-                        "INSERT INTO ledger_task_deps (ledger_id, task_ordinal, ordinal, dep)
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params![ledger_id, at, ordinal(which)?, dep],
-                    )
-                    .map_err(|_| EffectJournalError::Database)?;
-            }
-        }
-    }
-    for (at, row) in projection.gates.iter().enumerate() {
-        let at = ordinal(at)?;
-        if changed[LedgerTable::Gates.index()] {
-            connection
-                .execute(
-                    "INSERT INTO ledger_gates (
-                        ledger_id, ordinal, run, id, task, question, status,
-                        resolution, created_ms, resolved_ms, held_for
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![
-                        ledger_id,
-                        at,
-                        row.run,
-                        row.id,
-                        row.task,
-                        row.question.as_str(),
-                        word(&row.status)?,
-                        row.resolution.as_str(),
-                        row.created_ms,
-                        row.resolved_ms,
-                        row.held_for,
-                    ],
-                )
-                .map_err(|_| EffectJournalError::Database)?;
-        }
-        if changed[LedgerTable::GateOptions.index()] {
-            for (which, choice) in row.options.iter().enumerate() {
-                connection
-                    .execute(
-                        "INSERT INTO ledger_gate_options (ledger_id, gate_ordinal, ordinal, choice)
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params![ledger_id, at, ordinal(which)?, choice.as_str()],
-                    )
-                    .map_err(|_| EffectJournalError::Database)?;
-            }
-        }
-    }
-    if changed[LedgerTable::Attachments.index()] {
-        for (at, row) in projection.attachments.iter().enumerate() {
-            connection
-                .execute(
-                    "INSERT INTO ledger_attachments (
-                        ledger_id, ordinal, run, dispatch, home, worker, state,
-                        to_home, acked_seq, imported_seq, created_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![
-                        ledger_id,
-                        ordinal(at)?,
-                        row.run,
-                        row.dispatch,
-                        row.home,
-                        row.worker,
-                        word(&row.state)?,
-                        serde_json::to_string(&row.to_home)
-                            .map_err(|_| EffectJournalError::Corrupt)?,
-                        row.acked_seq,
-                        row.imported_seq,
-                        row.created_ms,
-                    ],
-                )
-                .map_err(|_| EffectJournalError::Database)?;
-        }
-    }
-    if changed[LedgerTable::Dispatches.index()] {
-        for (at, row) in projection.dispatches.iter().enumerate() {
-            connection
-                .execute(
-                    "INSERT INTO ledger_dispatches (
-                        ledger_id, ordinal, run, id, task, worker, started_ms,
-                        ended_ms, succeeded, retry_of, remote, source, session_history
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                    params![
-                        ledger_id,
-                        ordinal(at)?,
-                        row.run,
-                        row.id,
-                        row.task,
-                        row.worker,
-                        row.started_ms,
-                        row.ended_ms,
-                        row.succeeded,
-                        row.retry_of,
-                        row.remote
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|_| EffectJournalError::Corrupt)?,
-                        row.source,
-                        row.session_history
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|_| EffectJournalError::Corrupt)?,
-                    ],
-                )
-                .map_err(|_| EffectJournalError::Database)?;
-        }
-    }
-    if changed[LedgerTable::Workers.index()] {
-        for (at, row) in projection.workers.iter().enumerate() {
-            connection
-                .execute(
-                    "INSERT INTO ledger_workers (
-                        ledger_id, ordinal, run, id, team, agent, pane, state,
-                        started_ms, dispatch, model, effort, session, ready_by_ms,
-                        hook_unreachable_since_ms, pane_missing_since_ms,
-                        taken_over, checkout, quiet_at, archive, started_by, adopted_by,
-                        on_quota_wall, quota_wait, exit_unconfirmed, in_worktree
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
-                    params![
-                        ledger_id,
-                        ordinal(at)?,
-                        row.run,
-                        row.id,
-                        row.team,
-                        row.agent,
-                        row.pane,
-                        word(&row.state)?,
-                        row.started_ms,
-                        row.dispatch,
-                        row.model,
-                        row.effort,
-                        row.session
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|_| EffectJournalError::Corrupt)?,
-                        row.ready_by_ms,
-                        row.hook_unreachable_since_ms,
-                        row.pane_missing_since_ms,
-                        row.taken_over,
-                        row.checkout,
-                        row.quiet_at,
-                        row.archive.as_ref().map(Text::as_str),
-                        row.started_by,
-                        row.adopted_by.map(i64::from),
-                        row.on_quota_wall
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|_| EffectJournalError::Corrupt)?,
-                        row.quota_wait,
-                        row.exit_unconfirmed
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|_| EffectJournalError::Corrupt)?,
-                        row.in_worktree,
-                    ],
-                )
-                .map_err(|_| EffectJournalError::Database)?;
-        }
-    }
-    if changed[LedgerTable::Messages.index()] {
-        for (at, row) in projection.messages.iter().enumerate() {
-            connection
-                .execute(
-                    "INSERT INTO ledger_messages (
-                        ledger_id, ordinal, run, id, sender, recipient, kind, body,
-                        subject, priority, payload, thread, task, dispatch,
-                        author_seat, created_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                               ?15, ?16)",
-                    params![
-                        ledger_id,
-                        ordinal(at)?,
-                        row.run,
-                        row.id,
-                        row.from,
-                        row.to,
-                        word(&row.kind)?,
-                        row.body.as_str(),
-                        row.subject.as_str(),
-                        word(&row.priority)?,
-                        row.payload.as_str(),
-                        row.thread,
-                        row.task,
-                        row.dispatch,
-                        row.author_seat,
-                        row.created_ms,
-                    ],
-                )
-                .map_err(|_| EffectJournalError::Database)?;
-        }
-    }
-    for (at, row) in projection.inboxes.iter().enumerate() {
-        let at = ordinal(at)?;
-        if changed[LedgerTable::Inboxes.index()] {
-            connection
-                .execute(
-                    "INSERT INTO ledger_inboxes (
-                        ledger_id, ordinal, run, address, open_delivery,
-                        open_holder, open_opened_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        ledger_id,
-                        at,
-                        row.run,
-                        row.address,
-                        row.open.as_ref().map(|open| open.id.as_str()),
-                        row.open.as_ref().and_then(|open| open.holder.as_deref()),
-                        row.open.as_ref().and_then(|open| open.opened_ms)
-                    ],
-                )
-                .map_err(|_| EffectJournalError::Database)?;
-        }
-        if changed[LedgerTable::InboxPending.index()] {
-            for (which, message) in row.pending.iter().enumerate() {
-                connection
-                    .execute(
-                        "INSERT INTO ledger_inbox_pending (
-                            ledger_id, inbox_ordinal, ordinal, message
-                         ) VALUES (?1, ?2, ?3, ?4)",
-                        params![ledger_id, at, ordinal(which)?, message],
-                    )
-                    .map_err(|_| EffectJournalError::Database)?;
-            }
-        }
-        if changed[LedgerTable::InboxOpenMessages.index()]
-            && let Some(open) = &row.open
-        {
-            for (which, message) in open.messages.iter().enumerate() {
-                connection
-                    .execute(
-                        "INSERT INTO ledger_inbox_open_messages (
-                            ledger_id, inbox_ordinal, ordinal, message
-                         ) VALUES (?1, ?2, ?3, ?4)",
-                        params![ledger_id, at, ordinal(which)?, message],
-                    )
-                    .map_err(|_| EffectJournalError::Database)?;
-            }
-        }
-    }
-    if changed[LedgerTable::Bound.index()] {
-        for (at, row) in projection.bound.iter().enumerate() {
-            connection
-                .execute(
-                    "INSERT INTO ledger_bound (ledger_id, ordinal, caller, run)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![ledger_id, ordinal(at)?, row.caller.as_str(), row.run],
-                )
-                .map_err(|_| EffectJournalError::Database)?;
-        }
-    }
-    if changed[LedgerTable::Served.index()] {
-        write_served_rows(connection, ledger_id, &projection.served)?;
-    }
-    if changed[LedgerTable::ServedMessages.index()] {
-        for (at, row) in projection.served.iter().enumerate() {
-            let about = match &row.answer {
-                ServedAnswer::Inline(_) => None,
-                ServedAnswer::Check(about) => Some(about),
-            };
-            let at = ordinal(at)?;
-            for (which, message) in about
-                .iter()
-                .flat_map(|about| about.messages.iter())
-                .enumerate()
-            {
-                connection
-                    .execute(
-                        "INSERT INTO ledger_served_messages (
-                            ledger_id, served_ordinal, ordinal, message
-                         ) VALUES (?1, ?2, ?3, ?4)",
-                        params![ledger_id, at, ordinal(which)?, message],
-                    )
-                    .map_err(|_| EffectJournalError::Database)?;
-            }
-        }
-    }
-    for (at, row) in projection.acked.iter().enumerate() {
-        let at = ordinal(at)?;
-        if changed[LedgerTable::Acked.index()] {
-            connection
-                .execute(
-                    "INSERT INTO ledger_acked (
-                        ledger_id, ordinal, run, address, delivery, holds_messages,
-                        seq, current
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        ledger_id,
-                        at,
-                        row.run,
-                        row.address,
-                        row.delivery,
-                        row.messages.is_some(),
-                        i64::from(row.seq),
-                        row.current,
-                    ],
-                )
-                .map_err(|_| EffectJournalError::Database)?;
-        }
-        if changed[LedgerTable::AckedMessages.index()] {
-            for (which, message) in row.messages.iter().flatten().enumerate() {
-                connection
-                    .execute(
-                        "INSERT INTO ledger_acked_messages (
-                            ledger_id, acked_ordinal, ordinal, message
-                         ) VALUES (?1, ?2, ?3, ?4)",
-                        params![ledger_id, at, ordinal(which)?, message],
-                    )
-                    .map_err(|_| EffectJournalError::Database)?;
-            }
-        }
-    }
-    Ok(())
+    let mut found = Vec::with_capacity(expected.len());
+    each(
+        connection,
+        &format!(
+            "SELECT ordinal FROM {} WHERE ledger_id = ?1 ORDER BY ordinal",
+            family.table().name()
+        ),
+        ledger_id,
+        |row| {
+            found.push(row.get::<_, i64>(0)?);
+            Ok(())
+        },
+    )?;
+    Ok(found == expected)
 }
 
 /// The word serde writes an enum as, which is the word the column holds.
@@ -2096,7 +2822,9 @@ pub fn read(
     Ok(held)
 }
 
-/// Verify every ledger head once while a current-schema store opens.
+/// Verify every ledger head once while a current-schema store opens, and
+/// answer what each ledger's rows are — the memory its first write starts
+/// from ([`WrittenLedgers`], t-82988).
 ///
 /// Current-schema open calls this after replaying additive DDL. The repairable
 /// reader deliberately leaves its byte-count decision to runtime boot, but its
@@ -2104,11 +2832,12 @@ pub fn read(
 /// digest) from a populated table that disappeared (stored digest mismatch),
 /// and the independent head root preserves that witness if the digest table
 /// itself disappeared. Keeping this scan at open avoids reserializing the full
-/// projection on every runtime read.
+/// projection on every runtime read — and the row digests it makes here are
+/// the ones a write would otherwise make again.
 pub(crate) fn require_current_table_integrity(
     connection: &Connection,
     schema: u32,
-) -> Result<(), EffectJournalError> {
+) -> Result<Vec<(String, Written)>, EffectJournalError> {
     let mut statement = connection
         .prepare(
             "SELECT ledger_id, table_digest_format_generation, table_digest_root
@@ -2126,18 +2855,41 @@ pub(crate) fn require_current_table_integrity(
         .map_err(|_| EffectJournalError::Database)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| EffectJournalError::Database)?;
+    let mut found = Vec::with_capacity(ledger_heads.len());
     for (ledger_id, root_generation, stored_root) in ledger_heads {
         let stored_root = StoredTableDigestRoot::from_sql(root_generation, stored_root)?;
         let held = read_existing_repairable(connection, &ledger_id, schema)?;
-        let expected = table_digests(&held.projection)?;
+        // An open is not a write: what it digests is not counted as one.
+        let mut work = WriteWork::ZERO;
+        let laid = Family::ALL
+            .into_iter()
+            .map(|family| lay_out(family, &held.projection, None, None, &mut work))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut expected = [[0; TABLE_DIGEST_BYTES]; FAMILY_COUNT];
+        for (digest, laid) in expected.iter_mut().zip(&laid) {
+            *digest = laid.digest;
+        }
         let expected_root = digest_rows(&expected);
-        if matches!(stored_root, StoredTableDigestRoot::Current(root) if root != expected_root) {
+        let mut first_generation = FirstGeneration {
+            projection: &held.projection,
+            digests: None,
+        };
+        let refused = match stored_root {
+            StoredTableDigestRoot::Current(root) => root != expected_root,
+            StoredTableDigestRoot::Previous(root) => {
+                root != digest_rows(&first_generation.digests()?)
+            }
+            StoredTableDigestRoot::Missing | StoredTableDigestRoot::Stale => false,
+        };
+        if refused {
             return Err(EffectJournalError::Corrupt);
         }
-        require_table_integrity(connection, &ledger_id, &expected)?;
+        require_table_integrity(connection, &ledger_id, &expected, &mut first_generation)?;
 
+        /* A root of generation one has just been checked, so it is replaced
+         * the way a missing one is seeded: with the root of the rows read. */
         let replacement: Option<(Option<i64>, Option<&[u8]>)> = match stored_root {
-            StoredTableDigestRoot::Missing => Some((
+            StoredTableDigestRoot::Missing | StoredTableDigestRoot::Previous(_) => Some((
                 Some(i64::from(TABLE_DIGEST_FORMAT_GENERATION)),
                 Some(expected_root.as_slice()),
             )),
@@ -2157,8 +2909,23 @@ pub(crate) fn require_current_table_integrity(
                 return Err(EffectJournalError::Database);
             }
         }
+        let mut families = Vec::with_capacity(FAMILY_COUNT);
+        for (family, laid) in Family::ALL.into_iter().zip(laid) {
+            families.push(Kept {
+                placed: placed(connection, &ledger_id, family, &laid)?,
+                laid,
+            });
+        }
+        found.push((
+            ledger_id,
+            Written {
+                revision: held.revision,
+                root: (stored_root != StoredTableDigestRoot::Stale).then_some(expected_root),
+                families,
+            },
+        ));
     }
-    Ok(())
+    Ok(found)
 }
 
 /// Read rows even when only the head's derived byte count is stale.
@@ -2958,6 +3725,136 @@ fn each(
     Ok(())
 }
 
+/// A ledger whose first run holds `letters` letters to its coordinator,
+/// every one read and acknowledged in batches of fifty, and whose second run
+/// holds none — a long-lived run beside a fresh one (t-82988).
+#[cfg(test)]
+pub(crate) fn a_ledger_with_mail(letters: usize) -> zerocode_core::orchestration::Ledger {
+    use zerocode_core::orchestration::{Ledger, MessageKind};
+    const BATCH: usize = 50;
+    let mut ledger = Ledger::new();
+    let busy = ledger.create_run("busy", 1);
+    ledger.create_run("quiet", 1);
+    let mut rows = ledger.export();
+    let address = format!("run:{busy}");
+    let mut next = rows.next_id;
+    let mut mint = |prefix: &str| {
+        next += 1;
+        format!("{prefix}{next}")
+    };
+    let mut batch = Vec::new();
+    let mut seq = 0;
+    for at in 0..letters {
+        let id = mint("m-");
+        rows.messages.push(MessageRow {
+            run: busy.clone(),
+            id: id.clone(),
+            from: "worker:w-writer".to_string(),
+            to: address.clone(),
+            kind: MessageKind::Status,
+            body: Text::from(format!("{at:0>500}")),
+            subject: Text::default(),
+            priority: Default::default(),
+            payload: Text::default(),
+            thread: None,
+            task: None,
+            dispatch: None,
+            author_seat: None,
+            created_ms: 2,
+        });
+        batch.push(id);
+        if batch.len() == BATCH || at + 1 == letters {
+            rows.acked.push(AckedRow {
+                run: busy.clone(),
+                address: address.clone(),
+                delivery: mint("d-"),
+                messages: Some(std::mem::take(&mut batch)),
+                seq,
+                current: at + 1 == letters,
+            });
+            seq += 1;
+        }
+    }
+    rows.inboxes.push(InboxRow {
+        run: busy,
+        address,
+        pending: Vec::new(),
+        open: None,
+    });
+    rows.next_id = next + 1;
+    Ledger::rebuild(rows).expect("a ledger with mail")
+}
+
+/// One more status letter from the writer to the first run of
+/// [`a_ledger_with_mail`].
+#[cfg(test)]
+pub(crate) fn one_more_letter(ledger: &mut zerocode_core::orchestration::Ledger, now_ms: i64) {
+    a_letter_to(ledger, 0, now_ms);
+}
+
+/// A status letter from the writer to the run at `run_at`.
+#[cfg(test)]
+pub(crate) fn a_letter_to(
+    ledger: &mut zerocode_core::orchestration::Ledger,
+    run_at: usize,
+    now_ms: i64,
+) {
+    use zerocode_core::orchestration::{Draft, MessageKind};
+    let run = ledger.runs()[run_at].id.clone();
+    ledger
+        .post(
+            &run,
+            Draft {
+                from: "worker:w-writer".to_string(),
+                to: format!("run:{run}"),
+                kind: MessageKind::Status,
+                body: Text::from("one more"),
+                subject: Text::default(),
+                priority: Default::default(),
+                payload: Text::default(),
+                thread: None,
+                task: None,
+                dispatch: None,
+            },
+            now_ms,
+        )
+        .expect("a letter");
+}
+
+/// Count every statement that touches a row of the letters' table, by kind,
+/// from here on (t-82988).
+#[cfg(test)]
+pub(crate) fn count_letter_rows(connection: &Connection) {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS letter_rows_touched (op TEXT NOT NULL);
+             CREATE TRIGGER IF NOT EXISTS letter_inserted AFTER INSERT ON ledger_messages
+                BEGIN INSERT INTO letter_rows_touched VALUES ('insert'); END;
+             CREATE TRIGGER IF NOT EXISTS letter_updated AFTER UPDATE ON ledger_messages
+                BEGIN INSERT INTO letter_rows_touched VALUES ('update'); END;
+             CREATE TRIGGER IF NOT EXISTS letter_deleted AFTER DELETE ON ledger_messages
+                BEGIN INSERT INTO letter_rows_touched VALUES ('delete'); END;
+             DELETE FROM letter_rows_touched;",
+        )
+        .expect("count the letters' rows");
+}
+
+/// The letters' rows inserted, updated and deleted since
+/// [`count_letter_rows`].
+#[cfg(test)]
+pub(crate) fn letter_rows_touched(connection: &Connection) -> (i64, i64, i64) {
+    connection
+        .query_row(
+            "SELECT COUNT(CASE WHEN op = 'insert' THEN 1 END),
+                    COUNT(CASE WHEN op = 'update' THEN 1 END),
+                    COUNT(CASE WHEN op = 'delete' THEN 1 END)
+               FROM letter_rows_touched",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("the letters' rows touched")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2974,9 +3871,8 @@ mod tests {
         connection
     }
 
-    /// A current on-disk store carrying every child-table shape in the
-    /// load-bearing fixture.
-    fn a_populated_current_store() -> (
+    /// A current on-disk store with no ledger in it yet.
+    fn a_current_store() -> (
         tempfile::TempDir,
         std::path::PathBuf,
         crate::workflow_store::WorkflowStore,
@@ -2991,6 +3887,17 @@ mod tests {
         }
         let path = root.path().join("workflow.sqlite");
         let store = crate::workflow_store::WorkflowStore::open(&path).expect("current store");
+        (root, path, store)
+    }
+
+    /// A current on-disk store carrying every child-table shape in the
+    /// load-bearing fixture.
+    fn a_populated_current_store() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        crate::workflow_store::WorkflowStore,
+    ) {
+        let (root, path, store) = a_current_store();
         let projection = a_ledger_where_order_is_load_bearing();
         write(
             &store.connection().expect("ledger connection"),
@@ -3002,6 +3909,50 @@ mod tests {
         )
         .expect("populated ledger");
         (root, path, store)
+    }
+
+    /// Leave a populated store's witnesses as a writer of generation one
+    /// left them: one digest per table, each the table's JSON, and the root
+    /// over all eighteen (t-82988).
+    fn as_generation_one_wrote_it(
+        connection: &Connection,
+        ledger_id: &str,
+        projection: &LedgerProjectionV1,
+    ) {
+        let first = table_digests_v1(projection).expect("generation one's digests");
+        connection
+            .execute(
+                "DELETE FROM ledger_table_digests WHERE ledger_id = ?1",
+                [ledger_id],
+            )
+            .expect("clear the current witnesses");
+        for table in LedgerTable::ALL {
+            connection
+                .execute(
+                    "INSERT INTO ledger_table_digests (
+                        ledger_id, table_name, format_generation, digest
+                     ) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        ledger_id,
+                        table.name(),
+                        i64::from(TABLE_DIGEST_FORMAT_GENERATION_V1),
+                        first[table.index()].as_slice()
+                    ],
+                )
+                .expect("a generation-one witness");
+        }
+        connection
+            .execute(
+                "UPDATE orchestration_ledger_heads
+                    SET table_digest_format_generation = ?1, table_digest_root = ?2
+                  WHERE ledger_id = ?3",
+                params![
+                    i64::from(TABLE_DIGEST_FORMAT_GENERATION_V1),
+                    digest_rows(&first).as_slice(),
+                    ledger_id
+                ],
+            )
+            .expect("a generation-one root");
     }
 
     /// A ledger whose every list is longer than one and in an order that is
@@ -3539,26 +4490,57 @@ mod tests {
         assert_eq!(held.projection.gates[1].held_for, None);
     }
 
+    /// The root generation two digests a projection to, as a write and an
+    /// open both make it.
+    fn generation_two_root(projection: &LedgerProjectionV1) -> TableDigest {
+        let mut work = WriteWork::ZERO;
+        let digests = Family::ALL
+            .into_iter()
+            .map(|family| {
+                lay_out(family, projection, None, None, &mut work)
+                    .expect("a family laid out")
+                    .digest
+            })
+            .collect::<Vec<_>>();
+        digest_rows(&digests)
+    }
+
     /// This fingerprint is the persisted table-digest format contract. A
     /// deliberate serializer or manual-row encoding change must bump the
     /// generation and refresh both halves of this expectation together.
     ///
-    ///
-    /// Unchanged by t-2512 on purpose: the coordinator seat and the adoption
-    /// generation arrived as `skip_serializing_if` columns, so a store written
-    /// before them digests byte-for-byte as it did, and this pin is the proof.
+    /// Generation one's half is unchanged by t-2512 on purpose: the
+    /// coordinator seat and the adoption generation arrived as
+    /// `skip_serializing_if` columns, so a store written before them digests
+    /// byte-for-byte as it did. It is pinned still (t-82988), because an
+    /// open checks a store's generation-one witnesses with it before it
+    /// replaces them.
     #[test]
     fn canonical_populated_fixture_pins_table_digest_format_generation() {
         let projection = a_ledger_where_order_is_load_bearing();
-        let digests = table_digests(&projection).expect("canonical table digests");
+        let first = table_digests_v1(&projection).expect("generation one's table digests");
 
         assert_eq!(
-            (TABLE_DIGEST_FORMAT_GENERATION, digest_rows(&digests)),
+            (TABLE_DIGEST_FORMAT_GENERATION_V1, digest_rows(&first)),
             (
                 1,
                 [
                     254, 174, 178, 207, 0, 10, 223, 93, 246, 117, 52, 102, 200, 237, 234, 184, 161,
                     174, 107, 20, 180, 226, 124, 125, 128, 205, 200, 27, 118, 189, 38, 23,
+                ],
+            ),
+            "generation one's digest bytes changed, and stores it wrote would read as corrupt"
+        );
+        assert_eq!(
+            (
+                TABLE_DIGEST_FORMAT_GENERATION,
+                generation_two_root(&projection)
+            ),
+            (
+                2,
+                [
+                    30, 50, 21, 159, 207, 255, 96, 49, 178, 56, 78, 195, 176, 185, 219, 194, 125,
+                    222, 89, 253, 176, 11, 60, 253, 42, 226, 142, 219, 120, 215, 30, 9,
                 ],
             ),
             "table-digest bytes changed without an explicit format decision"
@@ -3673,9 +4655,10 @@ mod tests {
     #[test]
     fn unversioned_digest_rows_and_head_are_adopted_as_generation_one() {
         let (_root, path, store) = a_populated_current_store();
-        store
-            .connection()
-            .expect("age the digest metadata")
+        let projection = a_ledger_where_order_is_load_bearing();
+        let connection = store.connection().expect("age the digest metadata");
+        as_generation_one_wrote_it(&connection, "main-ledger", &projection);
+        connection
             .execute_batch(
                 "ALTER TABLE ledger_table_digests DROP COLUMN format_generation;
                  ALTER TABLE orchestration_ledger_heads DROP COLUMN table_digest_root;
@@ -3683,20 +4666,23 @@ mod tests {
                     DROP COLUMN table_digest_format_generation;",
             )
             .expect("the unversioned digest shape");
+        drop(connection);
         drop(store);
 
+        /* Adopted as generation one, checked against generation one's own
+         * digests of the rows, then replaced (t-82988): no witness of an
+         * older generation stays, and the root is the current one. */
         let reopened = crate::workflow_store::WorkflowStore::open(&path)
             .expect("generation-one metadata remains evidence");
-        let adopted: (i64, i64, i64) = reopened
+        let adopted: i64 = reopened
             .connection()
             .expect("inspect adopted metadata")
             .query_row(
-                "SELECT COUNT(*), MIN(format_generation), MAX(format_generation)
-                   FROM ledger_table_digests WHERE ledger_id = 'main-ledger'",
+                "SELECT COUNT(*) FROM ledger_table_digests WHERE ledger_id = 'main-ledger'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| row.get(0),
             )
-            .expect("adopted digest generations");
+            .expect("adopted digest rows");
         let adopted_root: (i64, Vec<u8>) = reopened
             .connection()
             .expect("inspect adopted root")
@@ -3707,20 +4693,14 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("adopted aggregate root");
-        let projection = a_ledger_where_order_is_load_bearing();
-        let expected_root = digest_rows(&table_digests(&projection).expect("expected digests"));
 
         assert_eq!(
             (adopted, adopted_root),
             (
-                (
-                    i64::try_from(LedgerTable::ALL.len()).expect("table count fits SQLite"),
-                    i64::from(TABLE_DIGEST_FORMAT_GENERATION_V1),
-                    i64::from(TABLE_DIGEST_FORMAT_GENERATION_V1),
-                ),
+                0,
                 (
                     i64::from(TABLE_DIGEST_FORMAT_GENERATION),
-                    expected_root.to_vec(),
+                    generation_two_root(&projection).to_vec(),
                 ),
             )
         );
@@ -3729,9 +4709,13 @@ mod tests {
     #[test]
     fn unversioned_digest_evidence_still_refuses_a_dropped_child() {
         let (_root, path, store) = a_populated_current_store();
-        store
-            .connection()
-            .expect("damage the unversioned store")
+        let connection = store.connection().expect("damage the unversioned store");
+        as_generation_one_wrote_it(
+            &connection,
+            "main-ledger",
+            &a_ledger_where_order_is_load_bearing(),
+        );
+        connection
             .execute_batch(
                 "ALTER TABLE ledger_table_digests DROP COLUMN format_generation;
                  ALTER TABLE orchestration_ledger_heads DROP COLUMN table_digest_root;
@@ -3740,6 +4724,7 @@ mod tests {
                  DROP TABLE ledger_task_deps;",
             )
             .expect("remove a populated child after the old writer's digest");
+        drop(connection);
         drop(store);
 
         let reopened = crate::workflow_store::WorkflowStore::open(&path);
@@ -3786,11 +4771,12 @@ mod tests {
                    JOIN ledger_table_digests AS digests
                      ON digests.ledger_id = heads.ledger_id
                   WHERE heads.ledger_id = 'second-ledger' AND digests.table_name = ?1",
-                [LedgerTable::TaskDeps.name()],
+                [LedgerTable::Tasks.name()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("second ledger metadata");
-        let older_generation = TABLE_DIGEST_FORMAT_GENERATION
+        // A generation this window does not know: stale, never evidence.
+        let older_generation = TABLE_DIGEST_FORMAT_GENERATION_V1
             .checked_sub(1)
             .expect("generation one has an older sentinel");
         connection
@@ -3838,7 +4824,7 @@ mod tests {
                    JOIN ledger_table_digests AS digests
                      ON digests.ledger_id = heads.ledger_id
                   WHERE heads.ledger_id = 'second-ledger' AND digests.table_name = ?1",
-                [LedgerTable::TaskDeps.name()],
+                [LedgerTable::Tasks.name()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("other ledger metadata remains");
@@ -3865,8 +4851,7 @@ mod tests {
                 },
             )
             .expect("reseeded metadata");
-        let expected_root =
-            digest_rows(&table_digests(&first).expect("expected current digests")).to_vec();
+        let expected_root = generation_two_root(&first).to_vec();
 
         assert_eq!(
             (stale_count, stale_root, second_metadata_after, reseeded,),
@@ -3875,7 +4860,7 @@ mod tests {
                 (None, None),
                 second_metadata_before,
                 (
-                    i64::try_from(LedgerTable::ALL.len()).expect("table count fits SQLite"),
+                    i64::try_from(FAMILY_COUNT).expect("family count fits SQLite"),
                     i64::from(TABLE_DIGEST_FORMAT_GENERATION),
                     i64::from(TABLE_DIGEST_FORMAT_GENERATION),
                     i64::from(TABLE_DIGEST_FORMAT_GENERATION),
@@ -3888,7 +4873,8 @@ mod tests {
     #[test]
     fn stale_generation_does_not_hide_a_same_generation_mismatch() {
         let (_root, path, store) = a_populated_current_store();
-        let older_generation = TABLE_DIGEST_FORMAT_GENERATION
+        // A generation this window does not know: stale, never evidence.
+        let older_generation = TABLE_DIGEST_FORMAT_GENERATION_V1
             .checked_sub(1)
             .expect("generation one has an older sentinel");
         store
@@ -3906,7 +4892,7 @@ mod tests {
             .execute(
                 "UPDATE ledger_table_digests SET format_generation = ?1
                   WHERE ledger_id = 'main-ledger' AND table_name = ?2",
-                params![i64::from(older_generation), LedgerTable::TaskDeps.name()],
+                params![i64::from(older_generation), LedgerTable::Tasks.name()],
             )
             .expect("age one table witness");
         connection
@@ -4243,18 +5229,17 @@ mod tests {
         assert_eq!(held.revision, 2);
     }
 
-    /// The table list, its clear order and its parent/child pairs are three
-    /// spellings of one fact the DDL already states in its foreign keys.
+    /// The table list and the families are two spellings of one fact the DDL
+    /// already states in its foreign keys.
     ///
     /// Derived here from `LEDGER_TABLES_SQL` rather than repeated: a table
     /// added to the schema without a place in `ALL` would be written but never
-    /// digested; a `REFERENCES` added without its pair in `PARENT_CHILD` would
-    /// let a parent rewrite cascade away an unchanged child; a child listed
-    /// after its parent in `CLEAR_ORDER` would be cleared by the cascade first
-    /// and then again by hand. The digest tables are metadata, and a parent
-    /// reconciled in place (`RECONCILED_IN_PLACE`) fires no cascade, so those
-    /// two are the only foreign keys the pairs may leave out. One test, so
-    /// the four cannot drift apart.
+    /// digested; a `REFERENCES` added without its child in a [`Family`] would
+    /// leave a child no row rewrite clears first and no digest covers. The
+    /// digest tables are metadata, so theirs are the only foreign keys the
+    /// families may leave out. Every table is a family's own or one family's
+    /// child, never both and never twice. One test, so these cannot drift
+    /// apart.
     #[test]
     fn the_typed_table_list_is_the_ddl_read_back() {
         use std::collections::BTreeSet;
@@ -4278,8 +5263,6 @@ mod tests {
                 if parent.starts_with("ledger_")
                     && let Some(child) = child.as_ref()
                     && !child.ends_with("_digests")
-                    && !LedgerTable::from_name(&parent)
-                        .is_some_and(LedgerTable::reconciled_in_place)
                 {
                     pairs.insert((parent, child.clone()));
                 }
@@ -4293,26 +5276,38 @@ mod tests {
             listed, tables,
             "`ALL` and the DDL disagree on the projection tables"
         );
-        let typed: BTreeSet<(String, String)> = LedgerTable::PARENT_CHILD
+        let typed: BTreeSet<(String, String)> = Family::ALL
             .into_iter()
-            .map(|(parent, child)| (parent.name().to_string(), child.name().to_string()))
+            .flat_map(|family| {
+                family.children().iter().map(move |(child, _)| {
+                    (family.table().name().to_string(), child.name().to_string())
+                })
+            })
             .collect();
         assert_eq!(
             typed, pairs,
-            "`PARENT_CHILD` and the DDL's foreign keys disagree"
+            "the families' children and the DDL's foreign keys disagree"
         );
-        let clear_at = |wanted: LedgerTable| {
-            LedgerTable::CLEAR_ORDER
-                .iter()
-                .position(|table| *table == wanted)
-                .expect("every table has a place in the clear order")
-        };
-        for (parent, child) in LedgerTable::PARENT_CHILD {
+        let mut held = Family::ALL
+            .into_iter()
+            .flat_map(|family| {
+                std::iter::once(family.table())
+                    .chain(family.children().iter().map(|(child, _)| *child))
+            })
+            .map(|table| table.name().to_string())
+            .collect::<Vec<_>>();
+        held.sort();
+        let mut every: Vec<String> = tables.into_iter().collect();
+        every.sort();
+        assert_eq!(
+            held, every,
+            "a table no family holds, or one two families hold"
+        );
+        for (child, parent) in Family::ALL.into_iter().flat_map(|family| family.children()) {
             assert!(
-                clear_at(child) < clear_at(parent),
-                "{} is cleared after its parent {}",
-                child.name(),
-                parent.name()
+                LEDGER_TABLES_SQL.contains(&format!("{parent} INTEGER NOT NULL")),
+                "{} names its parent by a column the DDL does not hold",
+                child.name()
             );
         }
         for (at, table) in LedgerTable::ALL.into_iter().enumerate() {
@@ -4324,18 +5319,25 @@ mod tests {
             );
             assert_eq!(LedgerTable::from_name(table.name()), Some(table));
         }
+        for (at, family) in Family::ALL.into_iter().enumerate() {
+            assert_eq!(family.index(), at, "{family:?} indexes away from its place");
+            assert_eq!(Family::owning(family.table()), Some(family));
+        }
     }
 
-    /// A receipt-only mutation does not rewrite an unrelated parent table.
+    /// A receipt-only mutation does not rewrite an unrelated parent table,
+    /// nor the receipts already there.
     ///
-    /// The trigger makes the negative assertion executable: the old
+    /// The triggers make the negative assertion executable: the old
     /// clear-and-reinsert path would delete the run before it reached the
-    /// changed receipt, while the selective path leaves the run in place.
+    /// changed receipt, and a write with no memory of the receipts would
+    /// rewrite them all; the write through the store's memory adds one.
     #[test]
     fn a_changed_receipt_does_not_rewrite_unchanged_tables() {
         let store = a_store();
+        let written = WrittenLedgers::default();
         let first = a_ledger_where_order_is_load_bearing();
-        write(&store, "one", 0, 1, &first, 10).expect("it writes");
+        write_remembered(&store, &written, "one", 0, 1, (&first).into(), 10).expect("it writes");
         store
             .execute_batch(
                 "CREATE TRIGGER reject_unchanged_run_delete
@@ -4347,6 +5349,9 @@ mod tests {
             .execute_batch(
                 "CREATE TRIGGER reject_unchanged_receipt_update
                     BEFORE UPDATE ON ledger_served
+                    BEGIN SELECT RAISE(ABORT, 'unchanged receipt rewrite'); END;
+                 CREATE TRIGGER reject_unchanged_receipt_delete
+                    BEFORE DELETE ON ledger_served
                     BEGIN SELECT RAISE(ABORT, 'unchanged receipt rewrite'); END;",
             )
             .expect("the receipt guard");
@@ -4361,12 +5366,16 @@ mod tests {
             filed_ms: Some(13),
             expired: false,
         });
-        write(&store, "one", 1, 2, &second, 14).expect("only the receipt changed");
+        write_remembered(&store, &written, "one", 1, 2, (&second).into(), 14)
+            .expect("only the receipt changed");
         store
             .execute_batch("DROP TRIGGER reject_unchanged_run_delete;")
             .expect("remove the guard");
         store
-            .execute_batch("DROP TRIGGER reject_unchanged_receipt_update;")
+            .execute_batch(
+                "DROP TRIGGER reject_unchanged_receipt_update;
+                 DROP TRIGGER reject_unchanged_receipt_delete;",
+            )
             .expect("remove the receipt guard");
 
         let held = read(&store, "one", second.schema)
@@ -4374,6 +5383,314 @@ mod tests {
             .expect("it is there");
         assert_eq!(held.projection, second);
         assert_eq!(held.revision, 2);
+    }
+
+    /// One letter's write adds its one row to the letters' table, touches no
+    /// other letter, and digests only what moved (t-82988).
+    ///
+    /// Before it a letter's write deleted and re-inserted every letter the
+    /// ledger held — 43,540 on the person's machine — and serialized the
+    /// whole ledger, 44 MB, for its table digests.
+    #[test]
+    fn one_letter_adds_one_row_and_digests_only_what_moved() {
+        const LETTERS: usize = 2_000;
+        const LETTER_BYTES: usize = 500;
+        let store = a_store();
+        let written = WrittenLedgers::default();
+        let mut ledger = a_ledger_with_mail(LETTERS);
+        write_remembered(
+            &store,
+            &written,
+            "one",
+            0,
+            1,
+            (&ledger.export_marked()).into(),
+            10,
+        )
+        .expect("the ledger's first write");
+        count_letter_rows(&store);
+
+        one_more_letter(&mut ledger, 11);
+        let export = ledger.export_marked();
+        let before = write_work_here();
+        write_remembered(&store, &written, "one", 1, 2, (&export).into(), 11)
+            .expect("the letter's write");
+        let spent = write_work_here().since(before);
+
+        assert_eq!(
+            letter_rows_touched(&store),
+            (1, 0, 0),
+            "(inserted, updated, deleted) letters for one new letter"
+        );
+        assert!(
+            spent.rows_digested < (LETTERS / 10) as u64
+                && spent.bytes_digested < (LETTERS * LETTER_BYTES / 10) as u64,
+            "one letter's write digested {spent:?} of a ledger of {LETTERS} letters"
+        );
+        let held = read(&store, "one", export.projection().schema)
+            .expect("it reads")
+            .expect("it is there");
+        assert_eq!(held.projection, *export.projection());
+    }
+
+    /// Each receipt's own digest, by the receipt's ordinal.
+    type ReceiptDigests = Vec<(i64, Vec<u8>)>;
+
+    /// The store as the next open finds it: the rows read back, the root
+    /// the head holds, and each receipt's own digest beside it.
+    fn what_the_store_holds(
+        connection: &Connection,
+        ledger_id: &str,
+    ) -> (LedgerProjectionV1, Vec<u8>, ReceiptDigests) {
+        let held = read(
+            connection,
+            ledger_id,
+            zerocode_core::orchestration::PROJECTION_SCHEMA,
+        )
+        .expect("it reads")
+        .expect("it is there");
+        let root: Vec<u8> = connection
+            .query_row(
+                "SELECT table_digest_root FROM orchestration_ledger_heads WHERE ledger_id = ?1",
+                [ledger_id],
+                |row| row.get(0),
+            )
+            .expect("the root");
+        let mut receipts = Vec::new();
+        each(
+            connection,
+            "SELECT ordinal, digest FROM ledger_served_digests WHERE ledger_id = ?1
+              ORDER BY ordinal",
+            ledger_id,
+            |row| {
+                receipts.push((row.get(0)?, row.get(1)?));
+                Ok(())
+            },
+        )
+        .expect("the receipts' digests");
+        (held.projection, root, receipts)
+    }
+
+    /// Whatever a ledger does between writes — letters to one run and to
+    /// another, a sweep that folds or compacts, mail reset whole — a write
+    /// through the store's memory leaves the rows a write with no memory
+    /// would, under the root a full digest makes, with each receipt's own
+    /// digest true, and a store the next open checks and reads (t-82988).
+    #[test]
+    fn a_remembered_write_leaves_what_a_whole_write_would() {
+        use zerocode_core::orchestration::ResetScope;
+        let (_root, path, store) = a_current_store();
+        let connection = store.connection().expect("ledger connection");
+        let mut ledger = a_ledger_with_mail(300);
+        let mut revision = 0;
+        let mut now_ms = 10;
+        let mut check = |ledger: &zerocode_core::orchestration::Ledger, step: &str| {
+            let export = ledger.export_marked();
+            write_remembered(
+                &connection,
+                store.written(),
+                "main-ledger",
+                revision,
+                revision + 1,
+                (&export).into(),
+                now_ms,
+            )
+            .unwrap_or_else(|why| panic!("{step}: the write was refused: {why:?}"));
+            revision += 1;
+            now_ms += 1;
+            let (rows, root, receipts) = what_the_store_holds(&connection, "main-ledger");
+            assert_eq!(rows, *export.projection(), "{step}: the rows");
+            assert_eq!(
+                root,
+                generation_two_root(export.projection()).to_vec(),
+                "{step}: the root"
+            );
+            let receipts_digests: ReceiptDigests = served_row_digests(&rows.served)
+                .into_iter()
+                .enumerate()
+                .map(|(at, digest)| (ordinal(at).expect("an ordinal"), digest.to_vec()))
+                .collect();
+            assert_eq!(receipts, receipts_digests, "{step}: the receipts' digests");
+        };
+        check(&ledger, "the first write");
+        for at in 0..3 {
+            a_letter_to(&mut ledger, 1, 20 + at);
+            one_more_letter(&mut ledger, 20 + at);
+        }
+        check(&ledger, "letters to both runs");
+        check(&ledger, "nothing moved");
+        let before = ledger.export().messages.len();
+        let swept = ledger.sweep_retention(i64::from(u32::MAX) * 1_000);
+        assert!(
+            ledger.export().messages.len() < before,
+            "the sweep took no letter: {swept:?}"
+        );
+        check(&ledger, "a sweep");
+        a_letter_to(&mut ledger, 1, 40);
+        check(&ledger, "a letter after the sweep");
+        ledger.reset(ResetScope::Messages);
+        check(&ledger, "mail reset whole");
+        one_more_letter(&mut ledger, 50);
+        check(&ledger, "a letter after the reset");
+        drop(connection);
+        drop(store);
+
+        let reopened = crate::workflow_store::WorkflowStore::open(&path)
+            .expect("the next open checks every witness the writes left");
+        let held = read(
+            &reopened.connection().expect("read the reopened ledger"),
+            "main-ledger",
+            zerocode_core::orchestration::PROJECTION_SCHEMA,
+        )
+        .expect("it reads")
+        .expect("it is there");
+        assert_eq!(held.projection, ledger.export());
+    }
+
+    /// Letters folded out of a run that is still working (the sweep's
+    /// `fold_old_letters`) move the run's later letters up: every letter that
+    /// leaves its place goes before any letter takes one, so a letter moved
+    /// up never meets its own old row under `UNIQUE (ledger_id, run, id)`
+    /// (t-82988; the window measurement's sweep found it).
+    #[test]
+    fn letters_folded_out_of_a_working_run_move_up_row_by_row() {
+        let store = a_store();
+        let written = WrittenLedgers::default();
+        let mut ledger = a_ledger_with_mail(120);
+        let busy = ledger.runs()[0].id.clone();
+        ledger
+            .create_task(
+                &busy,
+                "s".to_string(),
+                "still working".to_string(),
+                Vec::new(),
+                None,
+                3,
+            )
+            .expect("a working task");
+        let first = ledger.export_marked();
+        write_remembered(&store, &written, "one", 0, 1, (&first).into(), 10)
+            .expect("the first write");
+
+        // The writer's last word stays and moves up to the run's first place.
+        let swept = ledger.sweep_retention(i64::from(u32::MAX) * 1_000);
+        assert!(
+            swept.letters_folded > 0 && swept.runs == 0,
+            "the sweep folded no letter out of a working run: {swept:?}"
+        );
+        let folded = ledger.export_marked();
+        assert_eq!(
+            folded.projection().messages[0].id,
+            first.projection().messages[119].id,
+            "the last word did not move up"
+        );
+        write_remembered(&store, &written, "one", 1, 2, (&folded).into(), 11)
+            .expect("the folded write");
+        let (rows, root, _) = what_the_store_holds(&store, "one");
+        assert_eq!(rows, *folded.projection());
+        assert_eq!(root, generation_two_root(folded.projection()).to_vec());
+    }
+
+    /// A memory whose write the transaction rolled back is not trusted: the
+    /// head never moved to the revision it describes, and the next write
+    /// starts again from the digests stored beside the rows (t-82988).
+    #[test]
+    fn a_memory_of_a_write_that_rolled_back_is_not_trusted() {
+        let mut store = a_store();
+        let written = WrittenLedgers::default();
+        let mut ledger = a_ledger_with_mail(60);
+        let export = ledger.export_marked();
+        write_remembered(&store, &written, "one", 0, 1, (&export).into(), 10)
+            .expect("the first write");
+
+        one_more_letter(&mut ledger, 11);
+        let lost = ledger.export_marked();
+        let transaction = store.transaction().expect("a transaction");
+        write_remembered(&transaction, &written, "one", 1, 2, (&lost).into(), 11)
+            .expect("it writes inside");
+        transaction.rollback().expect("and is rolled back");
+
+        a_letter_to(&mut ledger, 1, 12);
+        let kept = ledger.export_marked();
+        write_remembered(&store, &written, "one", 1, 2, (&kept).into(), 12)
+            .expect("the write after the rollback");
+        let (rows, root, _) = what_the_store_holds(&store, "one");
+        assert_eq!(rows, *kept.projection());
+        assert_eq!(root, generation_two_root(kept.projection()).to_vec());
+    }
+
+    /// A store generation one wrote — dense ordinals, a JSON digest per
+    /// table — opens with its witnesses checked, reads back the ledger it
+    /// holds, and the first write that moves a family lays that family out
+    /// by run; from then on a letter is one row (t-82988).
+    #[test]
+    fn a_store_generation_one_wrote_opens_checked_and_moves_to_rows() {
+        const LETTERS: usize = 120;
+        let (_root, path, store) = a_current_store();
+        let connection = store.connection().expect("ledger connection");
+        let mut ledger = a_ledger_with_mail(LETTERS);
+        for at in 0..3 {
+            a_letter_to(&mut ledger, 1, 3 + at);
+        }
+        let projection = ledger.export();
+        write(&connection, "main-ledger", 0, 1, &projection, 10).expect("the ledger");
+        /* Generation one numbered every letter by its place in the table: the
+         * second run's letters follow the first run's. */
+        connection
+            .execute(
+                "UPDATE ledger_messages SET ordinal = ordinal - ?1 + ?2
+                  WHERE ledger_id = 'main-ledger' AND ordinal >= ?1",
+                params![1_i64 << RUN_ROW_BITS, ordinal(LETTERS).expect("an ordinal")],
+            )
+            .expect("dense letters");
+        as_generation_one_wrote_it(&connection, "main-ledger", &projection);
+        drop(connection);
+        drop(store);
+
+        let reopened = crate::workflow_store::WorkflowStore::open(&path)
+            .expect("generation one's witnesses are checked and pass");
+        let connection = reopened.connection().expect("reopened connection");
+        let (rows, root, _) = what_the_store_holds(&connection, "main-ledger");
+        assert_eq!(rows, projection);
+        assert_eq!(root, generation_two_root(&projection).to_vec());
+
+        a_letter_to(&mut ledger, 1, 20);
+        let moved = ledger.export_marked();
+        write_remembered(
+            &connection,
+            reopened.written(),
+            "main-ledger",
+            1,
+            2,
+            (&moved).into(),
+            20,
+        )
+        .expect("the first write after the upgrade");
+        let (rows, _, _) = what_the_store_holds(&connection, "main-ledger");
+        assert_eq!(rows, *moved.projection());
+        let second_run_starts: i64 = connection
+            .query_row(
+                "SELECT MIN(ordinal) FROM ledger_messages
+                  WHERE ledger_id = 'main-ledger' AND run = ?1",
+                [&moved.projection().runs[1].id],
+                |row| row.get(0),
+            )
+            .expect("the second run's first letter");
+        assert_eq!(second_run_starts, 1 << RUN_ROW_BITS, "laid out by run");
+
+        count_letter_rows(&connection);
+        a_letter_to(&mut ledger, 0, 21);
+        write_remembered(
+            &connection,
+            reopened.written(),
+            "main-ledger",
+            2,
+            3,
+            (&ledger.export_marked()).into(),
+            21,
+        )
+        .expect("a letter after the move");
+        assert_eq!(letter_rows_touched(&connection), (1, 0, 0));
     }
 
     /// The revision a writer expects is the revision it gets, or nothing.
@@ -4526,16 +5843,18 @@ mod tests {
     /// A selective write that fails after touching its changed table leaves
     /// the previous projection whole when the caller rolls its transaction
     /// back. This is the same contract as the runtime's Immediate boundary,
-    /// exercised on the new row-level receipt path itself.
+    /// exercised on the row-level path itself: the changed receipt's old row
+    /// is already deleted when its new row is refused (t-82988).
     #[test]
     fn a_selective_write_that_fails_leaves_the_previous_ledger_whole() {
         let mut store = a_store();
+        let written = WrittenLedgers::default();
         let first = a_ledger_where_order_is_load_bearing();
-        write(&store, "one", 0, 1, &first, 10).expect("it writes");
+        write_remembered(&store, &written, "one", 0, 1, (&first).into(), 10).expect("it writes");
         store
             .execute_batch(
-                "CREATE TRIGGER fail_served_update
-                    AFTER UPDATE OF request ON ledger_served
+                "CREATE TRIGGER fail_served_insert
+                    AFTER INSERT ON ledger_served
                     BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END;",
             )
             .expect("the receipt fault");
@@ -4544,12 +5863,12 @@ mod tests {
         second.served[0].request = Text::from("changed request");
         let transaction = store.transaction().expect("a transaction");
         assert!(matches!(
-            write(&transaction, "one", 1, 2, &second, 11),
+            write_remembered(&transaction, &written, "one", 1, 2, (&second).into(), 11),
             Err(EffectJournalError::Database)
         ));
         transaction.rollback().expect("the failed write rolls back");
         store
-            .execute_batch("DROP TRIGGER fail_served_update;")
+            .execute_batch("DROP TRIGGER fail_served_insert;")
             .expect("remove the receipt fault");
 
         let held = read(&store, "one", first.schema)

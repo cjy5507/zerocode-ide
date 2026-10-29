@@ -3699,7 +3699,7 @@ fn rebuild_stored_ledger(
     }
 
     journal
-        .advance_ledger(lease, held.revision, &ledger.export(), now_ms)
+        .advance_ledger(lease, held.revision, &ledger.export_marked(), now_ms)
         .map_err(runtime_error)?;
     let revision = held
         .revision
@@ -6356,7 +6356,7 @@ impl RuntimeState {
             .checked_add(1)
             .ok_or(RuntimeError::RevisionMismatch)?;
         let at_ms = self.stamped(now_ms);
-        let written_rows = self.ledger.export();
+        let written_rows = self.ledger.export_marked();
         let withdrawal = Withdrawal {
             operation_id: operation_id.to_string(),
             failure: HostEffectFailure::Unavailable,
@@ -6399,7 +6399,7 @@ impl RuntimeState {
             .prepare(
                 &self.lease,
                 self.revision,
-                &self.ledger.export(),
+                &self.ledger.export_marked(),
                 request,
                 at_ms,
             )
@@ -6485,7 +6485,7 @@ impl RuntimeState {
             &self.lease,
             permit,
             self.revision,
-            &self.ledger.export(),
+            &self.ledger.export_marked(),
             settlement,
         ) {
             let (permit, why) = *refused;
@@ -6905,17 +6905,18 @@ impl RuntimeState {
             .ok_or(RuntimeError::RevisionMismatch)?;
         let at_ms = self.stamped(now_ms);
         // The write's own rows, gone with it: a reader is lent the ledger,
-        // never handed this export (t-81273).
-        let written_rows = self.ledger.export();
-        /* One transaction, or nothing. `ledger_store::write` moves the head,
-         * clears every row and re-inserts the whole ledger, and it does so on
-         * whatever connection it is handed — the promise that a ledger is
-         * never half of two is the CALLER's transaction. Written without one,
-         * each statement committed on its own, and a write that died in the
-         * middle (measured 2026-08-27: the head at revision 132408 counting
-         * 448,542 bytes over rows that stopped twelve workers in) left a store
-         * every later read refused as corrupt — first as `NotDurable` until
-         * the window was restarted, then as "the authority store is corrupt"
+        // never handed this export (t-81273). Marked, so the store writes only
+        // the runs' rows that moved since it last wrote (t-82988).
+        let written_rows = self.ledger.export_marked();
+        /* One transaction, or nothing. `ledger_store::write` moves the head
+         * and the rows that changed, and it does so on whatever connection
+         * it is handed — the promise that a ledger is never half of two is
+         * the CALLER's transaction. Written without one, each statement
+         * committed on its own, and a write that died in the middle
+         * (measured 2026-08-27: the head at revision 132408 counting 448,542
+         * bytes over rows that stopped twelve workers in) left a store every
+         * later read refused as corrupt — first as `NotDurable` until the
+         * window was restarted, then as "the authority store is corrupt"
          * once it was. */
         let written = self
             .store
@@ -6925,12 +6926,13 @@ impl RuntimeState {
                 let transaction = connection
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(|_| RuntimeError::StoreUnavailable)?;
-                ledger_store::write(
+                ledger_store::write_remembered(
                     &transaction,
+                    self.store.written(),
                     &self.ledger_id,
                     self.revision,
                     next,
-                    &written_rows,
+                    (&written_rows).into(),
                     at_ms,
                 )
                 .map_err(runtime_error)?;
@@ -8321,13 +8323,66 @@ mod tests {
         );
     }
 
+    /// A letter sent through the runtime adds its one row and touches no other
+    /// letter (t-82988): the runtime writes an export that says how each run's
+    /// rows last changed, through the store's memory of what it last wrote.
+    /// The first letter after the seeded boot and the one after it, both.
+    #[test]
+    fn a_letter_sent_through_the_runtime_adds_its_one_row() {
+        const LETTERS: usize = 1_000;
+        let fixture = Fixture::new();
+        let seeded = ledger_store::a_ledger_with_mail(LETTERS);
+        let busy = seeded.runs()[0].id.clone();
+        let actor = start(
+            &fixture,
+            RuntimeBoot::Cutover {
+                legacy: Some(Box::new((seeded.export(), digest(7)))),
+                now_ms: 10,
+            },
+            2,
+        );
+        let connection = fixture.store.connection().expect("store connection");
+        ledger_store::count_letter_rows(&connection);
+        for (at, name) in ["r-first-letter", "r-second-letter"]
+            .into_iter()
+            .enumerate()
+        {
+            let (sent, _) = actor
+                .plan(a_command(
+                    &[
+                        "send",
+                        "--run",
+                        &busy,
+                        "--to",
+                        &format!("run:{busy}"),
+                        "--type",
+                        "status",
+                        "--body",
+                        "one more",
+                        "--retry-request",
+                        name,
+                    ],
+                    20 + at as i64,
+                ))
+                .expect("the letter");
+            assert_eq!(sent.reply.exit_code, 0, "{}", sent.reply.stderr);
+        }
+        assert_eq!(
+            ledger_store::letter_rows_touched(&connection),
+            (2, 0, 0),
+            "(inserted, updated, deleted) letters for two new letters"
+        );
+        drop(connection);
+        actor.shutdown().expect("release owner");
+    }
+
     /// A write that dies half-way leaves the ledger that was there, whole.
     ///
-    /// `ledger_store::write` moves the head, clears every row and re-inserts
-    /// them, on the caller's connection. Without a transaction around it each
-    /// statement commits alone, so a fault after the head and the clearing
-    /// leaves a head counting prose whose rows are gone — a store every read
-    /// from then on refuses as corrupt, across restarts. The fault here lands
+    /// `ledger_store::write` moves the head, then deletes and re-inserts the
+    /// rows that changed, on the caller's connection. Without a transaction
+    /// around it each statement commits alone, so a fault after the head and
+    /// the deleting leaves a head counting prose whose rows are gone — a store
+    /// every read from then on refuses as corrupt, across restarts. The fault here lands
     /// on the first row insert, where the real one did; the ledger the disk
     /// holds afterwards must be the one from before, and the runtime must be
     /// able to take the disk's word and answer again once the fault is gone.

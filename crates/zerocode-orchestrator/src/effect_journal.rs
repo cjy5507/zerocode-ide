@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use zerocode_core::orchestration::{LedgerProjectionV1, PROJECTION_SCHEMA};
 
 use crate::authority_lock::{OwnerLock, OwnerLockError, stable_path_bytes};
+use crate::ledger_store::LedgerRows;
 use crate::workflow_store::WorkflowStore;
 
 const DIGEST_HEX_BYTES: usize = 64;
@@ -483,7 +484,15 @@ impl EffectJournal {
                 .map_err(|_| EffectJournalError::Database)?;
             return Ok(ImportResult::AlreadyImported);
         }
-        crate::ledger_store::write(&transaction, &lease.ledger_id, 0, 0, initial, now_ms)?;
+        crate::ledger_store::write_remembered(
+            &transaction,
+            self.store.written(),
+            &lease.ledger_id,
+            0,
+            0,
+            initial.into(),
+            now_ms,
+        )?;
         crate::ledger_store::stamp_legacy_digest(&transaction, &lease.ledger_id, legacy_digest)?;
         transaction
             .commit()
@@ -530,7 +539,15 @@ impl EffectJournal {
         if has_effect {
             return Err(EffectJournalError::InitializationConflict);
         }
-        crate::ledger_store::write(&transaction, &lease.ledger_id, 0, 0, initial, now_ms)?;
+        crate::ledger_store::write_remembered(
+            &transaction,
+            self.store.written(),
+            &lease.ledger_id,
+            0,
+            0,
+            initial.into(),
+            now_ms,
+        )?;
         transaction
             .commit()
             .map_err(|_| EffectJournalError::Database)?;
@@ -543,11 +560,11 @@ impl EffectJournal {
     /// while any prepared or ambiguous effect exists for the same ledger, so a
     /// plain mutation cannot race ahead of an effect that still needs provider
     /// observation.
-    pub fn advance_ledger(
+    pub fn advance_ledger<'a>(
         &self,
         lease: &AuthorityLease,
         expected_revision: u64,
-        next: &LedgerProjectionV1,
+        next: impl Into<LedgerRows<'a>>,
         now_ms: i64,
     ) -> Result<(), EffectJournalError> {
         if now_ms < 0 {
@@ -567,12 +584,13 @@ impl EffectJournal {
         if has_in_flight_effect(&transaction, &lease.ledger_id)? {
             return Err(EffectJournalError::EffectInFlight);
         }
-        crate::ledger_store::write(
+        crate::ledger_store::write_remembered(
             &transaction,
+            self.store.written(),
             &lease.ledger_id,
             expected_revision,
             next_revision,
-            next,
+            next.into(),
             now_ms,
         )?;
         transaction
@@ -585,11 +603,11 @@ impl EffectJournal {
     /// names it. Existing `Prepared`/`Unknown` attempts are reconciled, an
     /// `Applied` one is replayed, and `NotStarted` can advance to a new attempt
     /// only after its durable tombstone and explicit backoff allow it.
-    pub fn prepare(
+    pub fn prepare<'a>(
         &self,
         lease: &AuthorityLease,
         expected_revision: u64,
-        prepared: &LedgerProjectionV1,
+        prepared: impl Into<LedgerRows<'a>>,
         request: &EffectRequest,
         now_ms: i64,
     ) -> Result<BeginEffect, EffectJournalError> {
@@ -659,12 +677,13 @@ impl EffectJournal {
         let prepared_revision = expected_revision
             .checked_add(1)
             .ok_or(EffectJournalError::RevisionMismatch)?;
-        crate::ledger_store::write(
+        crate::ledger_store::write_remembered(
             &transaction,
+            self.store.written(),
             &request.ledger_id,
             expected_revision,
             prepared_revision,
-            prepared,
+            prepared.into(),
             now_ms,
         )?;
         let operation_id = operation_id(
@@ -717,16 +736,23 @@ impl EffectJournal {
     /// handed back there is still exactly as good as the one handed in.
     ///
     /// [`SplitLease::finish`]: ../../zerocode_shell/durable_split/struct.SplitLease.html
-    pub fn mark_unknown(
+    pub fn mark_unknown<'a>(
         &self,
         lease: &AuthorityLease,
         mut permit: EffectPermit,
         expected_revision: u64,
-        unknown: &LedgerProjectionV1,
+        unknown: impl Into<LedgerRows<'a>>,
         failure: HostEffectFailure,
         at_ms: i64,
     ) -> Result<EffectPermit, Box<(EffectPermit, EffectJournalError)>> {
-        match self.mark_unknown_held(lease, &permit, expected_revision, unknown, failure, at_ms) {
+        match self.mark_unknown_held(
+            lease,
+            &permit,
+            expected_revision,
+            unknown.into(),
+            failure,
+            at_ms,
+        ) {
             Ok(next) => {
                 permit.spend();
                 Ok(next)
@@ -740,7 +766,7 @@ impl EffectJournal {
         lease: &AuthorityLease,
         permit: &EffectPermit,
         expected_revision: u64,
-        unknown: &LedgerProjectionV1,
+        unknown: LedgerRows<'_>,
         failure: HostEffectFailure,
         at_ms: i64,
     ) -> Result<EffectPermit, EffectJournalError> {
@@ -753,8 +779,9 @@ impl EffectJournal {
             .map_err(|_| EffectJournalError::Database)?;
         require_authority(&transaction, self, lease)?;
         require_permit(&transaction, lease, permit)?;
-        crate::ledger_store::write(
+        crate::ledger_store::write_remembered(
             &transaction,
+            self.store.written(),
             &permit.ledger_id,
             expected_revision,
             expected_revision
@@ -800,15 +827,15 @@ impl EffectJournal {
     /// handed back there is still exactly as good as the one handed in.
     ///
     /// [`SplitLease::finish`]: ../../zerocode_shell/durable_split/struct.SplitLease.html
-    pub fn settle(
+    pub fn settle<'a>(
         &self,
         lease: &AuthorityLease,
         mut permit: EffectPermit,
         expected_revision: u64,
-        settled: &LedgerProjectionV1,
+        settled: impl Into<LedgerRows<'a>>,
         outcome: EffectSettlement,
     ) -> Result<SettledEffect, Box<(EffectPermit, EffectJournalError)>> {
-        match self.settle_held(lease, &permit, expected_revision, settled, outcome) {
+        match self.settle_held(lease, &permit, expected_revision, settled.into(), outcome) {
             Ok(answer) => {
                 permit.spend();
                 Ok(answer)
@@ -822,7 +849,7 @@ impl EffectJournal {
         lease: &AuthorityLease,
         permit: &EffectPermit,
         expected_revision: u64,
-        settled: &LedgerProjectionV1,
+        settled: LedgerRows<'_>,
         outcome: EffectSettlement,
     ) -> Result<SettledEffect, EffectJournalError> {
         if !matches!(
@@ -839,8 +866,9 @@ impl EffectJournal {
             .map_err(|_| EffectJournalError::Database)?;
         require_authority(&transaction, self, lease)?;
         require_permit(&transaction, lease, permit)?;
-        crate::ledger_store::write(
+        crate::ledger_store::write_remembered(
             &transaction,
+            self.store.written(),
             &permit.ledger_id,
             expected_revision,
             expected_revision
@@ -931,11 +959,11 @@ impl EffectJournal {
     /// failed once. Only an `Applied` split moves, in the ledger revision the
     /// seat's return is written at, so the rows and the journal agree or
     /// neither moves.
-    pub fn withdraw_applied(
+    pub fn withdraw_applied<'a>(
         &self,
         lease: &AuthorityLease,
         expected_revision: u64,
-        withdrawn: &LedgerProjectionV1,
+        withdrawn: impl Into<LedgerRows<'a>>,
         withdrawal: &Withdrawal,
     ) -> Result<(), EffectJournalError> {
         if !valid_digest(&withdrawal.tombstone_digest) {
@@ -957,14 +985,15 @@ impl EffectJournal {
         {
             return Err(EffectJournalError::InvalidTransition);
         }
-        crate::ledger_store::write(
+        crate::ledger_store::write_remembered(
             &transaction,
+            self.store.written(),
             &row.ledger_id,
             expected_revision,
             expected_revision
                 .checked_add(1)
                 .ok_or(EffectJournalError::RevisionMismatch)?,
-            withdrawn,
+            withdrawn.into(),
             withdrawal.at_ms,
         )?;
         let changed = transaction

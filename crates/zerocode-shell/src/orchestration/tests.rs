@@ -10038,6 +10038,18 @@ fn an_agent_carrying_work(
     leader_term: u32,
     term: u32,
 ) -> (String, String, String) {
+    an_agent_carrying_work_in(agent, team, leader_term, term, "run-create --name carrying")
+}
+
+/// The same, in the run `opening` binds the leader to: `run-create` for a
+/// new run, `run-use <id>` for one the ledger already holds.
+fn an_agent_carrying_work_in(
+    agent: &str,
+    team: &str,
+    leader_term: u32,
+    term: u32,
+    opening: &str,
+) -> (String, String, String) {
     seat_a_team(team, leader_term);
     let host = Splitting::onto(term);
     let seat = zerocode_core::agent_teams::LEADER_PANE;
@@ -10047,7 +10059,7 @@ fn an_agent_carrying_work(
         team,
         seat,
         TEST_CAPABILITY,
-        &words("run-create --name carrying"),
+        &words(opening),
         clock(),
     );
     assert_eq!(opened.exit_code, 0, "{}", opened.stderr);
@@ -29439,6 +29451,9 @@ const PERSONS_LONGEST_RUNS: [usize; 2] = [17_545, 10_666];
 #[cfg(target_os = "macos")]
 const PERSONS_OTHER_LETTERS: usize = 15_329;
 #[cfg(target_os = "macos")]
+const PERSONS_LETTERS: usize =
+    PERSONS_LONGEST_RUNS[0] + PERSONS_LONGEST_RUNS[1] + PERSONS_OTHER_LETTERS;
+#[cfg(target_os = "macos")]
 const PERSONS_LETTER_BYTES: usize = 585;
 #[cfg(target_os = "macos")]
 const PERSONS_TASK_BYTES: usize = 4_600;
@@ -29454,7 +29469,16 @@ const A_DAY_MS: i64 = 86_400_000;
 
 #[cfg(target_os = "macos")]
 fn a_ledger_the_persons_size() -> zerocode_core::orchestration::LedgerProjectionV1 {
+    a_ledger_of_letters(PERSONS_LETTERS)
+}
+
+/// The person's ledger with its letters scaled to `total` (t-82988): the
+/// same runs, tasks and writers, and each run's share of the mail kept — the
+/// first run the longest, as the person's longest is.
+#[cfg(target_os = "macos")]
+fn a_ledger_of_letters(total: usize) -> zerocode_core::orchestration::LedgerProjectionV1 {
     use zerocode_core::orchestration::{AckedRow, InboxRow, MessageKind, MessageRow, Text};
+    let scaled = |persons: usize| persons * total / PERSONS_LETTERS;
     let mut ledger = super::Ledger::new();
     let runs: Vec<String> = (0..PERSONS_RUNS)
         .map(|at| ledger.create_run(&format!("measured run {at}"), 1))
@@ -29478,11 +29502,15 @@ fn a_ledger_the_persons_size() -> zerocode_core::orchestration::LedgerProjection
         format!("{prefix}{next}")
     };
     let others = PERSONS_RUNS - PERSONS_LONGEST_RUNS.len();
+    let other_letters = scaled(PERSONS_OTHER_LETTERS);
     for (at, run) in runs.iter().enumerate() {
-        let letters = PERSONS_LONGEST_RUNS.get(at).copied().unwrap_or_else(|| {
-            let rank = at - PERSONS_LONGEST_RUNS.len();
-            PERSONS_OTHER_LETTERS / others + usize::from(rank < PERSONS_OTHER_LETTERS % others)
-        });
+        let letters = PERSONS_LONGEST_RUNS
+            .get(at)
+            .map(|&longest| scaled(longest))
+            .unwrap_or_else(|| {
+                let rank = at - PERSONS_LONGEST_RUNS.len();
+                other_letters / others + usize::from(rank < other_letters % others)
+            });
         let address = format!("run:{run}");
         let mut batch = Vec::new();
         let mut seq = 0_u32;
@@ -29756,6 +29784,299 @@ fn measure_one_copy_of_a_ledger_the_persons_size() {
         times[COPIES * 9 / 10],
         after.saturating_sub(before)
     );
+}
+
+/// This process's CPU time so far, in milliseconds, and the bytes it has
+/// written to disk — what one letter's write is charged in (t-82988).
+#[cfg(target_os = "macos")]
+fn cpu_ms_and_disk_bytes_now() -> (f64, u64) {
+    // SAFETY: zeroed is a valid rusage, and getrusage fills it for this
+    // very process.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    let read = unsafe { libc::getrusage(libc::RUSAGE_SELF, std::ptr::addr_of_mut!(usage)) };
+    assert_eq!(read, 0, "this process's own CPU time could not be read");
+    let millis =
+        |spent: libc::timeval| spent.tv_sec as f64 * 1000.0 + spent.tv_usec as f64 / 1000.0;
+    // SAFETY: as in `memory_now_mib`.
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    let read = unsafe {
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V4,
+            std::ptr::addr_of_mut!(info).cast(),
+        )
+    };
+    assert_eq!(read, 0, "this process's own usage could not be read");
+    (
+        millis(usage.ru_utime) + millis(usage.ru_stime),
+        info.ri_diskio_byteswritten,
+    )
+}
+
+/// What one letter costs to write (t-82988): a worker's status letter to
+/// its coordinator, sent into the run holding the most mail of a ledger the
+/// person's shape with 1,000, 10,000 and 43,540 letters. Prints each send's
+/// wall time, the CPU it took and the bytes it wrote, and how long the
+/// store's write spent on digests and on rows. Prints, never asserts: the
+/// same lines read on the tree before the change and after it. Run it under
+/// `taskpolicy -b` for the low-spec profile.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "a measurement: prints what one letter costs to write on ledgers of three sizes"]
+fn measure_one_letter_written_on_ledgers_of_three_sizes() {
+    const SENDS: usize = 30;
+    const LEADER_TERM: u32 = 82_988;
+    const WORKER_TERM: u32 = 82_989;
+    for total in [1_000, 10_000, PERSONS_LETTERS] {
+        let team = format!("team-letters-{total}");
+        let (seeded, busiest) = a_ledger_of_letters_its_busiest_run_led_by(total, &team);
+        let (_window, _store) = PrivateWindow::boot_seeded(seeded);
+        let _beat = one_beat_at_a_time();
+        let (_run, _worker, pane) = an_agent_carrying_work_in(
+            "claude",
+            &team,
+            LEADER_TERM,
+            WORKER_TERM,
+            &format!("run-use {busiest}"),
+        );
+        let held = crate::agent_teams::current_pane_capability(&team, &pane)
+            .expect("the worker's capability");
+        let (mut walls, mut cpus, mut disks, mut digests, mut rows) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut spent = zerocode_orchestrator::ledger_store::WriteWork::default();
+        for at in 0..SENDS {
+            let work = zerocode_orchestrator::ledger_store::write_work();
+            let (cpu, disk) = cpu_ms_and_disk_bytes_now();
+            let sent = std::time::Instant::now();
+            let said = run(
+                &Nowhere,
+                Vec::new(),
+                &team,
+                &pane,
+                &held,
+                &words(&format!(
+                    "send --type status --body measured-letter-{at} \
+                     --retry-request measured-{total}-{at}"
+                )),
+                clock(),
+            );
+            walls.push(sent.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(said.exit_code, 0, "{}", said.stderr);
+            let (cpu_after, disk_after) = cpu_ms_and_disk_bytes_now();
+            let one = zerocode_orchestrator::ledger_store::write_work().since(work);
+            cpus.push(cpu_after - cpu);
+            disks.push(disk_after.saturating_sub(disk) as f64 / 1024.0);
+            digests.push(one.digest_ns as f64 / 1e6);
+            rows.push(one.rows_ns as f64 / 1e6);
+            spent = spent.plus(one);
+        }
+        let (wall_p50, wall_p90) = middle_of(walls);
+        let (cpu_p50, cpu_p90) = middle_of(cpus);
+        let (disk_p50, disk_p90) = middle_of(disks);
+        let (digest_p50, digest_p90) = middle_of(digests);
+        let (rows_p50, rows_p90) = middle_of(rows);
+        let (footprint, resident, _) = memory_now_mib();
+        let per_send = |held: u64| held / SENDS as u64;
+        eprintln!(
+            "measure: {total} letters, {SENDS} sends: wall p50={wall_p50:.1}ms \
+             p90={wall_p90:.1}ms; cpu p50={cpu_p50:.1}ms p90={cpu_p90:.1}ms; disk written \
+             p50={disk_p50:.0}KiB p90={disk_p90:.0}KiB; store digests p50={digest_p50:.1}ms \
+             p90={digest_p90:.1}ms; store rows p50={rows_p50:.1}ms p90={rows_p90:.1}ms; per \
+             send {} writes, {} rows digested, {} bytes digested, {} rows written; \
+             footprint={footprint} resident={resident}",
+            per_send(spent.writes),
+            per_send(spent.rows_digested),
+            per_send(spent.bytes_digested),
+            per_send(spent.rows_written),
+        );
+    }
+}
+
+/// A ledger of `total` letters whose busiest run `team`'s leader already
+/// coordinates, and that run's id. The seeded runs have no project and no
+/// coordinator; the chair is what lets the leader's `run-use` bind the run.
+#[cfg(target_os = "macos")]
+fn a_ledger_of_letters_its_busiest_run_led_by(
+    total: usize,
+    team: &str,
+) -> (zerocode_core::orchestration::LedgerProjectionV1, String) {
+    let mut seeded =
+        super::Ledger::rebuild(a_ledger_of_letters(total)).expect("the measured ledger");
+    let busiest = seeded.runs()[0].id.clone();
+    seeded
+        .seat_coordinator(
+            &busiest,
+            &format!("{team}/{}", zerocode_core::agent_teams::LEADER_PANE),
+            None,
+            clock(),
+        )
+        .expect("the leader's seat");
+    (seeded.export(), busiest)
+}
+
+/// The p50 and p90 of a list of times, in the order they were taken.
+#[cfg(target_os = "macos")]
+fn middle_of(mut times: Vec<f64>) -> (f64, f64) {
+    times.sort_by(f64::total_cmp);
+    (times[times.len() / 2], times[times.len() * 9 / 10])
+}
+
+/// What a coordinator's verbs cost on a ledger the person's size (t-82924):
+/// each read verb's time and answer size, a letter opened by `check` and
+/// spent by `check --ack`, how long a `check --wait` sleeps past the letter
+/// that wakes it, and the store's files as the window boots and after.
+/// Prints, never asserts. Run it under `taskpolicy -b` for the low-spec
+/// profile.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "a measurement: prints a coordinator's verbs on a ledger the person's size"]
+fn measure_verbs_on_a_ledger_the_persons_size() {
+    const ROUNDS: usize = 30;
+    const WAKES: usize = 10;
+    const LEADER_TERM: u32 = 82_924;
+    const WORKER_TERM: u32 = 82_925;
+    const WAIT_MS: u64 = 10_000;
+    let team = format!("team-verbs-{LEADER_TERM}");
+    let (seeded, busiest) = a_ledger_of_letters_its_busiest_run_led_by(PERSONS_LETTERS, &team);
+    let (window, _store) = PrivateWindow::boot_seeded(seeded);
+    let authority = window._root.path().join("authority");
+    let files = |when: &str| {
+        let kib = |name: &str| {
+            std::fs::metadata(authority.join(name)).map_or(0, |held| held.len() / 1024)
+        };
+        eprintln!(
+            "measure: {when}: store {} KiB, its WAL {} KiB",
+            kib("authority.sqlite"),
+            kib("authority.sqlite-wal")
+        );
+    };
+    files("booted");
+    let _beat = one_beat_at_a_time();
+    let _wait = one_wait_at_a_time();
+    let seat = zerocode_core::agent_teams::LEADER_PANE;
+    let (_run, _worker, pane) = an_agent_carrying_work_in(
+        "claude",
+        &team,
+        LEADER_TERM,
+        WORKER_TERM,
+        &format!("run-use {busiest}"),
+    );
+    let held =
+        crate::agent_teams::current_pane_capability(&team, &pane).expect("the worker's capability");
+    let leader = |line: &str| {
+        run(
+            &Nowhere,
+            Vec::new(),
+            &team,
+            seat,
+            TEST_CAPABILITY,
+            &words(line),
+            clock(),
+        )
+    };
+    let letter = |at: usize| {
+        let sent = run(
+            &Nowhere,
+            Vec::new(),
+            &team,
+            &pane,
+            &held,
+            &words(&format!(
+                "send --type status --body measured-verb-{at} --retry-request verbs-{at}"
+            )),
+            clock(),
+        );
+        assert_eq!(sent.exit_code, 0, "{}", sent.stderr);
+    };
+    let delivery_of = |said: &zerocode_hookd::TeamAnswer| {
+        let opened: serde_json::Value =
+            serde_json::from_str(&said.stdout).expect("a check answers JSON");
+        opened["deliveryId"]
+            .as_str()
+            .expect("a delivery opened")
+            .to_string()
+    };
+
+    for line in [
+        "check --peek",
+        "task-list",
+        "task-list --open",
+        "worker-list",
+        "inbox --limit 40",
+    ] {
+        let (mut times, mut sizes) = (Vec::new(), Vec::new());
+        for _ in 0..ROUNDS {
+            let asked = std::time::Instant::now();
+            let said = leader(line);
+            times.push(asked.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(said.exit_code, 0, "`{line}`: {}", said.stderr);
+            sizes.push(said.stdout.len() as f64 / 1024.0);
+        }
+        let (p50, p90) = middle_of(times);
+        let (bytes, _) = middle_of(sizes);
+        eprintln!(
+            "measure: {ROUNDS} `{line}`, nothing waiting: p50={p50:.2}ms p90={p90:.2}ms; \
+             answer {bytes:.1} KiB"
+        );
+    }
+
+    let (mut opens, mut acks) = (Vec::new(), Vec::new());
+    for at in 0..ROUNDS {
+        letter(at);
+        let opened = std::time::Instant::now();
+        let said = leader("check");
+        opens.push(opened.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(said.exit_code, 0, "{}", said.stderr);
+        let delivery = delivery_of(&said);
+        let acked = std::time::Instant::now();
+        let spent = leader(&format!("check --ack {delivery}"));
+        acks.push(acked.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(spent.exit_code, 0, "{}", spent.stderr);
+    }
+    let (open_p50, open_p90) = middle_of(opens);
+    let (ack_p50, ack_p90) = middle_of(acks);
+    eprintln!(
+        "measure: {ROUNDS} letters: `check` opening one p50={open_p50:.2}ms \
+         p90={open_p90:.2}ms; `check --ack` spending it p50={ack_p50:.2}ms p90={ack_p90:.2}ms"
+    );
+
+    let mut wakes = Vec::new();
+    for at in 0..WAKES {
+        let before = WAITS_BEGUN.load(std::sync::atomic::Ordering::SeqCst);
+        let (came_back, answered) = std::sync::mpsc::channel();
+        let waiting = {
+            let team = team.clone();
+            std::thread::spawn(move || {
+                let said = run(
+                    &Nowhere,
+                    Vec::new(),
+                    &team,
+                    seat,
+                    TEST_CAPABILITY,
+                    &words(&format!("check --wait --timeout-ms {WAIT_MS}")),
+                    clock(),
+                );
+                let _ = came_back.send((said, std::time::Instant::now()));
+            })
+        };
+        until_a_wait_has_begun(before);
+        letter(ROUNDS + at);
+        let posted = std::time::Instant::now();
+        let (said, woke) = answered
+            .recv_timeout(std::time::Duration::from_millis(2 * WAIT_MS))
+            .expect("the waiter came back");
+        waiting.join().expect("the waiter");
+        assert_eq!(said.exit_code, 0, "{}", said.stderr);
+        wakes.push(woke.saturating_duration_since(posted).as_secs_f64() * 1000.0);
+        let spent = leader(&format!("check --ack {}", delivery_of(&said)));
+        assert_eq!(spent.exit_code, 0, "{}", spent.stderr);
+    }
+    let (wake_p50, wake_p90) = middle_of(wakes);
+    eprintln!(
+        "measure: {WAKES} waits: a `check --wait` came back p50={wake_p50:.2}ms \
+         p90={wake_p90:.2}ms after the letter that woke it was posted"
+    );
+    files("after the verbs");
 }
 
 /// t-21017: a pointer that cannot be typed is told on both sides, once per

@@ -140,7 +140,10 @@ async fn answer(
     answer_to(window, pre_tool_use(agent, command)).await
 }
 
-async fn answer_to(window: Option<Arc<FakeWindow>>, knock: Request<Body>) -> (StatusCode, Vec<u8>) {
+async fn answer_to<W: KillWitness + 'static>(
+    window: Option<Arc<W>>,
+    knock: Request<Body>,
+) -> (StatusCode, Vec<u8>) {
     let (state, mut events, _teams, _browser) = BridgeState::new(TOKEN, "browser");
     let state = match window {
         Some(window) => state.with_kill_witness(window),
@@ -324,4 +327,84 @@ async fn an_unmeasured_provider_is_answered_as_before() {
     let unguarded = answer(None, AgentKind::Cursor, "pkill -f zo-step").await;
     assert_eq!(guarded, unguarded);
     assert_eq!(window.tables_read(), 0);
+}
+
+/// The window's witness on this machine's own process table, read now
+/// within the guard's wall: the calling pane is this test's process.
+struct ThisMachine;
+
+impl KillWitness for ThisMachine {
+    fn roots(&self, _pane_key: &str) -> KillRoots {
+        KillRoots {
+            caller: Some(std::process::id()),
+            caller_mark: Some(pane("term-1")),
+            protected: Vec::new(),
+        }
+    }
+
+    fn table(&self) -> ProcessTable {
+        ProcessTable::read(zerocode_hookd::KILL_GUARD_WALL)
+    }
+}
+
+/// What a hook's reply costs beside the kill guard (t-82924; t-81714
+/// measured a judgment at 40~48 ms): a `kill` of this process's own child,
+/// judged on this machine's table read now, and a command without a kill,
+/// with the guard installed and without — 30 replies each through the
+/// bridge's router, p50/p90, and how many were refused: a judgment the
+/// guard's wall cut short is refused, though the kill is the pane's own.
+/// Nothing is signalled: the hook judges a command it never runs, and the
+/// child ends when its input closes. Prints, never asserts a time; run it
+/// under `taskpolicy -b` for the low-spec profile.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "a measurement: prints what the kill guard adds to a hook's reply"]
+async fn measure_a_hooks_reply_beside_the_kill_guard() {
+    const ROUNDS: usize = 30;
+    let mut child = std::process::Command::new("/bin/cat")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("a child of this process");
+    let kill = format!("kill {}", child.id());
+    let processes = ProcessTable::read(zerocode_hookd::KILL_GUARD_WALL)
+        .tree_of(1)
+        .len();
+    eprintln!("measure: this machine runs {processes} processes under launchd");
+    let witness = Arc::new(ThisMachine);
+    for (what, guarded, command) in [
+        (
+            "a kill of the pane's own child, judged",
+            true,
+            kill.as_str(),
+        ),
+        (
+            "a command without a kill, the guard installed",
+            true,
+            "ls -la",
+        ),
+        ("a command without a kill, no guard", false, "ls -la"),
+    ] {
+        let (mut times, mut refused) = (Vec::with_capacity(ROUNDS), 0);
+        for _ in 0..ROUNDS {
+            let knock = pre_tool_use(AgentKind::Claude, command);
+            let asked = std::time::Instant::now();
+            let (status, body) = answer_to(guarded.then(|| Arc::clone(&witness)), knock).await;
+            times.push(asked.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(status, StatusCode::ACCEPTED);
+            if String::from_utf8_lossy(&body).contains("\"deny\"") {
+                refused += 1;
+            }
+        }
+        times.sort_by(f64::total_cmp);
+        eprintln!(
+            "measure: {ROUNDS} replies, {what}: p50={:.2}ms p90={:.2}ms; refused {refused} \
+             (the wall is {} ms)",
+            times[ROUNDS / 2],
+            times[ROUNDS * 9 / 10],
+            zerocode_hookd::KILL_GUARD_WALL.as_millis()
+        );
+    }
+    drop(child.stdin.take());
+    child.wait().expect("the child ends when its input closes");
 }

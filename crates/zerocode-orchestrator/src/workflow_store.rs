@@ -258,6 +258,9 @@ pub struct WorkflowStore {
     path: PathBuf,
     /// How long each connection waits out another writer's lock.
     busy: Duration,
+    /// What each ledger's last write left here, shared by every clone of this
+    /// handle — the runtime's and its journal's alike (t-82988).
+    written: crate::ledger_store::WrittenLedgers,
 }
 
 /// One idle connection kept open so this process stays attached to the
@@ -488,7 +491,11 @@ impl WorkflowStore {
         prepare_store_path(path.as_ref())?;
         let path =
             fs::canonicalize(path.as_ref()).map_err(|_| WorkflowStoreError::UnsafeStorePath)?;
-        let store = Self { path, busy };
+        let store = Self {
+            path,
+            busy,
+            written: crate::ledger_store::WrittenLedgers::default(),
+        };
         let mut connection = store.connection()?;
         /* Read the version BEFORE anything can write, because a file this
          * window will not touch has to leave here untouched.
@@ -519,6 +526,9 @@ impl WorkflowStore {
         let schema: i64 = transaction
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|_| WorkflowStoreError::Database)?;
+        // What each ledger's rows are, read while their witnesses are
+        // checked below, and held once the open commits (t-82988).
+        let mut written = Vec::new();
         /* Asked again, under the lock this time.
          *
          * The read above happens without a lock, because refusing a file this
@@ -626,7 +636,7 @@ impl WorkflowStore {
                 .map_err(|_| WorkflowStoreError::Database)?;
             crate::ledger_store::ensure_ledger_columns(&transaction)
                 .map_err(|_| WorkflowStoreError::Database)?;
-            crate::ledger_store::require_current_table_integrity(
+            written = crate::ledger_store::require_current_table_integrity(
                 &transaction,
                 zerocode_core::orchestration::PROJECTION_SCHEMA,
             )
@@ -644,6 +654,7 @@ impl WorkflowStore {
         transaction
             .commit()
             .map_err(|_| WorkflowStoreError::Database)?;
+        store.written.remember(written);
         tighten_store_files(&store.path)?;
         Ok(store)
     }
@@ -1272,6 +1283,12 @@ impl WorkflowStore {
     #[doc(hidden)]
     pub fn fault_connection_for_tests(&self) -> Result<Connection, WorkflowStoreError> {
         self.connection()
+    }
+
+    /// What each ledger's last write through this store left in it — the
+    /// memory [`crate::ledger_store::write_remembered`] writes against.
+    pub(crate) const fn written(&self) -> &crate::ledger_store::WrittenLedgers {
+        &self.written
     }
 
     /// Keep this process attached to the store until the hold is dropped

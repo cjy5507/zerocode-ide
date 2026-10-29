@@ -4,7 +4,8 @@
 //! stick, and changing one should be a deliberate change to the result being
 //! reported. The write is wrapped in the same immediate transaction the
 //! runtime uses, so the number includes the durability boundary without
-//! measuring fixture setup.
+//! measuring fixture setup — and goes through the store's memory of what it
+//! last wrote, as the runtime's does (t-82988).
 
 use std::hint::black_box;
 
@@ -15,7 +16,9 @@ use zerocode_core::orchestration::{
     ServedRow, TaskRow, Text, WorkerRow,
 };
 use zerocode_core::orchestration::{TaskStatus, WorkerState};
-use zerocode_orchestrator::ledger_store::{LEDGER_TABLES_SQL, read, write};
+use zerocode_orchestrator::ledger_store::{
+    LEDGER_TABLES_SQL, WrittenLedgers, read, write, write_remembered,
+};
 
 const TASK_COUNT: usize = 50;
 const DISPATCH_COUNT: usize = 100;
@@ -149,7 +152,17 @@ fn a_write_of_a_busy_ledger(criterion: &mut Criterion) {
     let mut changed_projection = projection.clone();
     changed_projection.served[0].request = Text::from("a changed request");
     let mut connection = a_store();
-    seed(&connection, &projection);
+    let written = WrittenLedgers::default();
+    write_remembered(
+        &connection,
+        &written,
+        LEDGER_ID,
+        0,
+        1,
+        (&projection).into(),
+        1,
+    )
+    .expect("seed ledger");
     let mut revision = 1_u64;
 
     criterion.bench_function(
@@ -159,8 +172,9 @@ fn a_write_of_a_busy_ledger(criterion: &mut Criterion) {
                 let transaction = connection
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .expect("begin immediate transaction");
-                write(
+                write_remembered(
                     &transaction,
+                    &written,
                     LEDGER_ID,
                     revision,
                     revision + 1,
@@ -168,7 +182,8 @@ fn a_write_of_a_busy_ledger(criterion: &mut Criterion) {
                         &projection
                     } else {
                         &changed_projection
-                    }),
+                    })
+                    .into(),
                     2,
                 )
                 .expect("write ledger");
