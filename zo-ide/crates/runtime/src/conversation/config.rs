@@ -1335,8 +1335,10 @@ where
         // and carrying the outgoing session's set would collapse an entry to a
         // pointer aimed at a body that is not in this context.
         self.recalled_memory_slugs = super::recalled_slugs_from_session(&session);
-        // The stretches name messages of the outgoing transcript.
+        // The stretches name messages of the outgoing transcript, and so does
+        // the floor its last compaction left.
         self.dropped_thinking_spans.clear();
+        self.post_compaction_context_tokens = None;
         self.session = session;
     }
 

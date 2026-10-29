@@ -1023,6 +1023,12 @@ pub struct ConversationRuntime<C, T> {
     /// [`REPETITION_CLEAR_MAX_FULL_COMPACTIONS_PER_TURN`], letting the guard
     /// finally accumulate across cycles and trip. Reset at turn start.
     full_compactions_this_turn: usize,
+    /// The preflight figure right after the last full compaction, on the
+    /// estimate the next preflight starts from. At or over Warn, compacting
+    /// at Warn again lands on the same floor, so the Warn arm waits for Auto
+    /// compact (`last_compaction_stayed_over_warn`). Every full compaction
+    /// rewrites it; a replaced session drops it.
+    post_compaction_context_tokens: Option<u64>,
     /// Cross-turn tally of identical (normalized) tool-call fingerprints. Unlike
     /// [`Self::tool_fingerprint_counts`] this is SESSION-scoped: it is NOT
     /// cleared at turn start, so a no-progress re-read loop that spans turn
@@ -1930,6 +1936,7 @@ where
             dropped_thinking_spans: Vec::new(),
             context_estimate_ratio: None,
             full_compactions_this_turn: 0,
+            post_compaction_context_tokens: None,
             cross_turn_tool_fingerprints: HashMap::new(),
             cross_turn_tool_repetition_pending_hard_stop_fps: HashSet::new(),
             cross_turn_tool_repetition_hard_stop_fps: HashSet::new(),

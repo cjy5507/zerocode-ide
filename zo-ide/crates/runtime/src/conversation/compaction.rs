@@ -1251,7 +1251,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 self.state_distill_deferred_precompaction = true;
                 return None;
             }
-            if context_tokens >= self.precompaction_input_tokens_threshold {
+            if context_tokens >= self.precompaction_input_tokens_threshold
+                && !self.last_compaction_stayed_over_warn()
+            {
                 return self.compaction_config_if_possible();
             }
             return None;
@@ -1266,6 +1268,20 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             return self.compaction_config_if_possible();
         }
         None
+    }
+
+    /// Whether the last full compaction left the context at or over Warn.
+    ///
+    /// Compacting at Warn again would land on the same floor — system prompt,
+    /// summary and kept tail — and summarize every turn for nothing: on a 32k
+    /// window Warn and Auto compact sit a few thousand tokens apart (t-82855,
+    /// review t-83940 P3-1). So only the Warn arm waits for Auto compact; Auto
+    /// compact, the hard ceiling and the microcompact-thrash escape fire as
+    /// before. Compared with the Warn of now, so a window switch needs no
+    /// reset, and a compaction that gets under Warn re-arms it.
+    fn last_compaction_stayed_over_warn(&self) -> bool {
+        self.post_compaction_context_tokens
+            .is_some_and(|floor| floor >= self.precompaction_input_tokens_threshold)
     }
 
     pub(super) fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
@@ -2157,6 +2173,10 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             &head_transitions,
         ));
         self.transient_reminders = new_prompt;
+        // With the reminders above in place, on the figure the next preflight
+        // compares with Warn: no answer is on record since the compaction, so
+        // that is the request estimate.
+        self.post_compaction_context_tokens = Some(self.preflight_context_tokens());
         true
     }
 
