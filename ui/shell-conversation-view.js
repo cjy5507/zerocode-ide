@@ -356,9 +356,17 @@ function chatOffFoot(list) {
 }
 
 /* The foot's button worn as the list stands: one class, and no write when
- * it already says so. */
+ * it already says so. A page that let its newest turns go to hold the ones
+ * read from above (`cut`, t-82901) wears it wherever the list stands, named
+ * for where it goes — back to the newest turns (`backToNewest`). */
 function paintFootDoor(list) {
-  list.__door?.classList.toggle("is-shown", chatOffFoot(list));
+  const door = list.__door;
+  if (!door) return;
+  const cut = list.__run?.helper?.cut === true;
+  door.classList.toggle("is-shown", cut || chatOffFoot(list));
+  if (door.__cut === cut) return;
+  door.__cut = cut;
+  labelButton(door, cut ? t("worker.toNewest", "최근 기록으로") : t("worker.toFoot", "맨 아래로"));
 }
 
 /* The way back to the foot (t-6824): a round button centred on the reading
@@ -375,6 +383,8 @@ function chatFootDoorNode(list) {
   door.dataset.keyboardOwner = "true";
   door.append(iconNode("arrow-down"));
   door.addEventListener("click", () => {
+    // A page that let its newest turns go reads them again first.
+    backToNewest(list.__run);
     returnToFoot(list);
     // Pressed from the keyboard, the button hides under the focus: the keys
     // go on to the list it brought home. A pointer's press leaves the focus
@@ -382,8 +392,58 @@ function chatFootDoorNode(list) {
     if (document.activeElement === door) list.focus({ preventScroll: true });
   });
   list.__door = door;
+  door.__cut = false;
   paintFootDoor(list);
   return door;
+}
+
+/* The way up (t-82901): a pill centred on the reading column at the head of
+ * the list — its first child, above every row, so it covers none and is met
+ * where the rows run out — standing only while something stands above the
+ * first turn the page holds: 「이전 기록 더 보기」. A press reads it up and
+ * stands it under the pill, over the rows, the row being read kept where it
+ * stood (`readEarlierTurns`); a push up at the list's top asks the same
+ * (`keepToFoot`). A page that holds its conversation's first turn has none.
+ * Its words are its name; the tooltip says the push it answers too. */
+function chatEarlierDoorNode(list) {
+  const door = document.createElement("button");
+  door.type = "button";
+  door.className = "chat-earlier-door";
+  // Enter and Space, while it has focus, are its own (`rearmKeySink`).
+  door.dataset.keyboardOwner = "true";
+  const words = document.createElement("span");
+  words.className = "chat-earlier-words";
+  door.append(iconNode("arrow-up"), words);
+  door.addEventListener("click", () => void readEarlierTurns(list.__run));
+  return door;
+}
+
+/* The way up worn as the page stands: stood at the list's head while
+ * something stands above (`from` past the file's first line) and gone once
+ * nothing does, saying so while its read is out — written only when it
+ * moves. The keyboard it held goes to the list it stood in. */
+function paintEarlierDoor(list) {
+  const held = list.__run?.helper;
+  let door = list.__earlier ?? null;
+  if (!(held?.from > 0)) {
+    if (!door) return;
+    const focused = door.contains(document.activeElement);
+    door.remove();
+    list.__earlier = null;
+    if (focused) list.focus({ preventScroll: true });
+    return;
+  }
+  if (!door) {
+    door = chatEarlierDoorNode(list);
+    list.prepend(door);
+    list.__earlier = door;
+  }
+  const reading = held.reaching === true;
+  writeAttribute(door, "aria-busy", reading ? "true" : "false");
+  writeTextContent(door.querySelector(".chat-earlier-words"), reading
+    ? t("worker.earlierReading", "이전 기록을 읽는 중…")
+    : t("worker.earlierMore", "이전 기록 더 보기"));
+  writeAttribute(door, "data-tip", t("worker.earlierMoreTip", "누르거나 맨 위에서 더 올리면 그 앞의 턴을 이어서 읽습니다"));
 }
 
 /* Where the list stands the first time it has a box: on the row its reader
@@ -779,6 +839,9 @@ function innerScrolls(list, target, up) {
 function keepToFoot(list) {
   const state = chatFollowState(list);
   const leave = () => {
+    // A push up at the top reads what stands above (t-82901): once a read,
+    // whatever the push's repeat — never on a scroll alone.
+    if (list.scrollTop < CHAT_FOLLOW.slack) void readEarlierTurns(list.__run);
     if (list.scrollTop <= 0) return;
     state.away = true;
     state.intent = "up";
@@ -787,7 +850,12 @@ function keepToFoot(list) {
   const toward = () => {
     state.intent = "down";
     state.at = Date.now();
-    if (chatFootGap(list) < CHAT_FOLLOW.slack) state.away = false;
+    if (chatFootGap(list) < CHAT_FOLLOW.slack) {
+      state.away = false;
+      // A push down at the foot of a page that let its newest turns go goes
+      // back to them, as its foot's button does.
+      if (backToNewest(list.__run)) returnToFoot(list);
+    }
   };
   const go = (up, target) => {
     if (innerScrolls(list, target, up)) return;
@@ -2879,9 +2947,9 @@ function helperTally(run) {
     if (turn.outputError === true) failed += 1;
   }
   // The page holds the helper's last turns only (`HELPER_TURN_CAP`): once the
-  // first it holds is not the file's first, the strip counts the recent steps,
-  // and the head's whole count (the roster's) is a bigger number.
-  const partial = run.helper.turns.length > 0 && run.helper.turns[0].seq > 0;
+  // first it holds is not the conversation's first, the strip counts the
+  // recent steps, and the head's whole count (the roster's) is a bigger number.
+  const partial = run.helper.turns.length > 0 && openingTurnOf(run.helper) === null;
   return { total, failed, kinds, partial };
 }
 

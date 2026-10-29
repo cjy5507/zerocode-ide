@@ -39113,7 +39113,6 @@ fn a_pane_conversations_notices_are_keyed_by_what_they_say_and_speak_four_locale
         "worker.handingOver",
         "worker.readingTranscript",
         "worker.wireRefused",
-        "worker.historyFolded",
     ] {
         assert!(
             paint.contains(&format!("t(\"{key}\", ")),
@@ -39125,6 +39124,130 @@ fn a_pane_conversations_notices_are_keyed_by_what_they_say_and_speak_four_locale
             "`{key}` is missing from one of the en/ja/zh/es catalogs"
         );
     }
+    // What stands above a long conversation's newest turns is no line saying
+    // the rest is elsewhere: it is the page's own way up (t-82901).
+    assert!(
+        !paint.contains("worker.historyFolded") && !i18n.contains("\"worker.historyFolded"),
+        "the pane's page says its earlier turns are elsewhere again"
+    );
+}
+
+/// Every conversation's page — a pane's, a helper's, a wire's — reads up
+/// past the first turn it holds down one road (t-82901: the person saw two
+/// or three turns of a long session and could not go up). The way up is a
+/// button at the list's head, worded in five languages, that the page's
+/// paint shows while something stands above; a press, or a person's push up
+/// at the list's top, asks the page's own door with `before` — never the
+/// poll, and never a scroll alone. What comes stands over the rows with the
+/// reader's row kept where it stood, and the page's hold stays bounded:
+/// past it, the end farther from the reader goes.
+#[test]
+fn every_conversation_page_reads_up_past_its_first_turn_down_one_road() {
+    let shell = include_str!("../../../../ui/shell.js");
+    let view = include_str!("../../../../ui/shell-conversation-view.js");
+    let css = include_str!("../../../../ui/shell.css");
+    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let door = block_after(view, "function chatEarlierDoorNode(list) {");
+    assert!(
+        door.contains("document.createElement(\"button\")")
+            && door.contains("door.type = \"button\";")
+            && door.contains(
+                "door.addEventListener(\"click\", () => void readEarlierTurns(list.__run));"
+            ),
+        "the way up is not a button that reads up:\n{door}"
+    );
+    // It stands at the list's head while something stands above, and only
+    // then — a page that holds its first turn has none, and every paint asks.
+    let worn = block_after(view, "function paintEarlierDoor(list) {");
+    let sync = block_after(shell, "function syncHelperTurns(list, run) {");
+    assert!(
+        worn.contains("if (!(held?.from > 0)) {")
+            && worn.contains("door.remove();")
+            && worn.contains("door = chatEarlierDoorNode(list);")
+            && worn.contains("list.prepend(door);")
+            && sync.matches("paintEarlierDoor(list);").count() >= 2,
+        "the way up stands whether or not anything stands above:\n{worn}"
+    );
+    for key in [
+        "worker.earlierMore",
+        "worker.earlierMoreTip",
+        "worker.earlierReading",
+        "worker.toNewest",
+    ] {
+        assert!(
+            view.contains(&format!("t(\"{key}\", ")),
+            "`{key}` is not read from the catalog"
+        );
+        assert_eq!(
+            i18n.matches(&format!("\"{key}\":")).count(),
+            4,
+            "`{key}` is missing from one of the en/ja/zh/es catalogs"
+        );
+    }
+    // The read: one at a time, the page's own door by name with `before`.
+    let read = block_after(shell, "async function readEarlierTurns(run) {");
+    assert!(
+        read.contains("if (!held || held.reaching || !(held.from > 0)) return;")
+            && read.contains("invoke(\"pane_log\", { term: run.term, before })")
+            && read.contains("invoke(\"wire_history\", { id: run.wire, before })")
+            && read.contains("invoke(\"subagent_log\", { term: run.term, id: held.id, before })")
+            && read.contains("holdEarlierTurns(held, above.turns ?? [], above.start);"),
+        "a page reads up down a road of its own:\n{read}"
+    );
+    let poll = block_after(shell, "async function pollHelperPages() {");
+    assert!(
+        poll.contains("await invoke(\"pane_log\", { term: tab.worker.term, after })")
+            && !poll.contains("wire_history")
+            && !poll.contains("readEarlierTurns"),
+        "the poll reads up past the first turn:\n{poll}"
+    );
+    // Asked by a push up at the top, never by a scroll alone.
+    let hand = block_after(view, "function keepToFoot(list) {");
+    let leave = hand
+        .split("const leave = () => {")
+        .nth(1)
+        .and_then(|rest| rest.split("};").next())
+        .unwrap_or("");
+    let scrolled = hand
+        .split("list.addEventListener(\"scroll\", () => {")
+        .nth(1)
+        .and_then(|rest| rest.split("});").next())
+        .unwrap_or("");
+    assert!(
+        leave
+            .contains("if (list.scrollTop < CHAT_FOLLOW.slack) void readEarlierTurns(list.__run);")
+            && !scrolled.contains("readEarlierTurns"),
+        "the way up is asked by a scroll no one pushed:\n{leave}\n{scrolled}"
+    );
+    // What comes stands over the rows, the reader's row kept.
+    assert!(
+        sync.contains("const stood = { height: list.scrollHeight, top: list.scrollTop };")
+            && sync.contains("standEarlierRows(list, run, earlier, folded, spoken, pills);")
+            && sync.contains(
+                "if (!follow) list.scrollTop = stood.top + (list.scrollHeight - stood.height);"
+            )
+            && sync.contains("const drawn = last ? Number(last.dataset.turn) : -Infinity;"),
+        "turns read from above do not stand over the rows, or move the reader:\n{sync}"
+    );
+    // The hold stays bounded: past it the end farther from the reader goes.
+    let cap = block_after(shell, "function holdEarlierTurns(held, turns, start) {");
+    assert!(
+        cap.contains("letNewestGo(held);") && shell.contains("const HELPER_TURN_CAP = 400;"),
+        "turns read from above are held past the page's bound:\n{cap}"
+    );
+    let backend = include_str!("../../src/shell_runtime.rs");
+    assert!(
+        backend.contains("pub(super) const TRANSCRIPT_BACK_ROWS: usize = 200;"),
+        "the first read no longer holds at most half the page's hold"
+    );
+    // Its look is the tokens' and its state change is eased.
+    let pill = block_after_css(css, ".chat-earlier-door {");
+    assert!(
+        pill.contains("var(--motion-fast) var(--ease-standard)")
+            && pill.contains("background: var(--chat-tool-bg);")
+            && pill.contains("align-self: center;"),
+        "the way up wears values of its own:\n{pill}"
+    );
 }
 
 #[test]
