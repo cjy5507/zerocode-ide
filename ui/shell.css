@@ -14997,6 +14997,56 @@ details.worker-command {
   height: var(--chat-list-pad-top);
 }
 
+/* The way up (`chatEarlierDoorNode`, t-82901): the list's head, centred on
+ * its column, above every row — the quiet ink on the tool well that the
+ * old 「이전 기록」 line wore, a press now: the agent's accent on its edge under
+ * the pointer or the keyboard, as the foot's button wears it. It stands only
+ * while something stands above the page's first turn. */
+.chat-earlier-door {
+  flex: none;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: min(var(--reading-column), 100%);
+  height: var(--control-height-sm);
+  margin: 0 0 var(--space-3);
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--chat-tool-bg);
+  color: var(--ink-mist);
+  font: inherit;
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard);
+}
+
+.chat-earlier-door:hover,
+.chat-earlier-door:focus-visible {
+  border-color: var(--chat-accent);
+  color: var(--ink-chalk);
+}
+
+.chat-earlier-door:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 var(--chat-focus-ring) color-mix(in srgb, var(--chat-accent) 12%, transparent);
+}
+
+/* Its read is out: the words say so, and the pointer says it is under way. */
+.chat-earlier-door[aria-busy="true"] {
+  cursor: progress;
+}
+
+.chat-earlier-door > .icon {
+  flex: none;
+  width: 1.1em;
+  height: 1.1em;
+}
+
 .helper-turn {
   margin: 0;
   border: 0;

@@ -13055,13 +13055,44 @@ function workerStatusWords(run) {
  * 않을 답을 위해 초당 한 번 디스크를 건드리는 일이다. */
 const HELPER_POLL_MS = 1000;
 /* 페이지가 들고 있는 턴의 상한. 한 시간짜리 헬퍼의 전사를 통째로 DOM에 세우면
- * 그 페이지가 창을 무겁게 만든다 — 사람이 읽는 것은 언제나 끝이다. */
+ * 그 페이지가 창을 무겁게 만든다 — 사람이 읽는 것은 언제나 끝이다. 위로 더 읽어
+ * 올린 기록(「이전 기록 더 보기」, t-82901)도 이 안에 든다: 넘치면 화면에서 먼
+ * 쪽이 간다(`letOldestGo`·`letNewestGo`). 첫 읽기는 많아야 그 절반이다
+ * (`TRANSCRIPT_BACK_ROWS`, shell_runtime.rs). */
 const HELPER_TURN_CAP = 400;
+
+/* 한 결과를 그 호출의 행에 들인다 — 새로 온 결과(`holdHelperTurns`)든, 위로 읽어
+ * 올린 호출의 결과가 이미 들고 있던 행이었든(`holdEarlierTurns`). `result`는 행의
+ * 모양이다: 말, 도구, 시각, 그 시각이 창의 것인지, 그림. */
+function foldResultInto(call, result) {
+  call.output = result.text;
+  call.outputError = result.tool?.is_error === true;
+  // What the CLI recorded of a page it fetched — its HTTP status and
+  // size, beside the words (`tool.facts`, t-22100).
+  if (result.tool?.facts) call.outputFacts = result.tool.facts;
+  call.outputAt = result.at;
+  // A length is said only between two times the file itself gave (`stepTook`).
+  call.outputFromClock = result.fromClock;
+  // What the result handed back beside its words: pictures (A8).
+  if (result.images?.length > 0) call.outputImages = result.images;
+  // An edit the result describes and the call did not (ACP hands the
+  // diff over on the update) dresses the call's row.
+  if (result.tool?.edits?.length > 0 && !(call.tool?.edits?.length > 0)) {
+    call.tool = { ...(call.tool ?? {}), edits: result.tool.edits };
+  }
+}
+
+/* 아직 결과를 받지 못한 호출 — 그 결과가 들어갈 행. */
+function callAwaiting(rows, callId) {
+  return rows.findLast((one) => one.role === "tool" && one.tool?.call_id === callId && one.output === undefined);
+}
 
 /* 새 턴이 장부에 앉는 유일한 문. DOM 행의 열쇠가 될 seq를 여기서 찍고,
  * 상한을 넘친 만큼만 앞에서 지운다 — 자르는 쪽과 그리는 쪽이 같은 장부를
  * 읽으므로, 화면의 행과 데이터의 턴은 언제나 같은 구간이다
- * (`syncHelperTurns`가 그 열쇠로 지우고 잇는다). */
+ * (`syncHelperTurns`가 그 열쇠로 지우고 잇는다). 백엔드가 턴마다 그 줄이 파일의
+ * 어디서 시작하는지(`line`) 말하면 행이 그것을 든다(t-82901): 앞에서 지운 뒤에도
+ * 페이지는 어디부터 위로 다시 읽을지 안다. */
 function holdHelperTurns(held, turns) {
   const now = Date.now();
   for (const turn of turns) {
@@ -13080,24 +13111,9 @@ function holdHelperTurns(held, turns) {
       held.lastStampMs = stamp;
     }
     if (turn.role === "tool_result" && turn.tool?.call_id) {
-      const call = held.turns.findLast((one) => one.role === "tool" &&
-        one.tool?.call_id === turn.tool.call_id && one.output === undefined);
+      const call = callAwaiting(held.turns, turn.tool.call_id);
       if (call) {
-        call.output = turn.text;
-        call.outputError = turn.tool.is_error === true;
-        // What the CLI recorded of a page it fetched — its HTTP status and
-        // size, beside the words (`tool.facts`, t-22100).
-        if (turn.tool.facts) call.outputFacts = turn.tool.facts;
-        call.outputAt = stamp ?? now;
-        // A length is said only between two times the file itself gave (`stepTook`).
-        call.outputFromClock = stamp === null;
-        // What the result handed back beside its words: pictures (A8).
-        if (turn.images?.length > 0) call.outputImages = turn.images;
-        // An edit the result describes and the call did not (ACP hands the
-        // diff over on the update) dresses the call's row.
-        if (turn.tool.edits?.length > 0 && !(call.tool?.edits?.length > 0)) {
-          call.tool = { ...(call.tool ?? {}), edits: turn.tool.edits };
-        }
+        foldResultInto(call, { text: turn.text, tool: turn.tool, at: stamp ?? now, fromClock: stamp === null, images: turn.images });
         held.seq += 1;
         continue;
       }
@@ -13114,12 +13130,99 @@ function holdHelperTurns(held, turns) {
       if (lasted > 0) last.thoughtMs = lasted;
     }
     held.turns.push({ role: turn.role, text: turn.text, tool: turn.tool ?? null,
-      seq: held.seq, at: stamp ?? now, fromClock, ...(turn.images?.length > 0 && { images: turn.images }) });
+      seq: held.seq, at: stamp ?? now, fromClock, ...(Number.isFinite(turn.line) && { line: turn.line }),
+      ...(turn.images?.length > 0 && { images: turn.images }) });
     held.seq += 1;
   }
-  if (held.turns.length > HELPER_TURN_CAP) {
-    held.turns.splice(0, held.turns.length - HELPER_TURN_CAP);
+  if (held.turns.length > HELPER_TURN_CAP) letOldestGo(held, held.turns.length - HELPER_TURN_CAP);
+}
+
+/* 앞에서 `over`개를 지운다 — 마지막으로 지운 행의 줄에 남은 행까지 함께(한 줄이
+ * 생각·답·호출을 함께 말한다). 남은 첫 행이 제 줄을 알면 페이지는 거기부터 위로
+ * 다시 읽고(`from`), 모르면(선의 턴은 파일에 없다) 다시 읽을 수 없는 것을
+ * 놓았다고 적는다(`lost`) — 머리띠의 셈이 「최근」이라 말하는 근거다. */
+function letOldestGo(held, over) {
+  const lineOf = (turn) => (Number.isFinite(turn?.line) ? turn.line : null);
+  let cut = over;
+  const last = lineOf(held.turns[cut - 1]);
+  if (last !== null) while (cut < held.turns.length - 1 && lineOf(held.turns[cut]) === last) cut += 1;
+  const gone = held.turns.splice(0, cut);
+  const first = lineOf(held.turns[0]);
+  if (first !== null) held.from = first;
+  else if (Number.isFinite(held.historyEnd) && gone.some((turn) => lineOf(turn) !== null)) held.from = held.historyEnd;
+  if (gone.some((turn) => lineOf(turn) === null)) held.lost = true;
+}
+
+/* 위로 읽어 올린 턴들을 장부의 앞에 들인다(t-82901, 「이전 기록 더 보기」).
+ * 새 턴의 문(`holdHelperTurns`)을 빈 장부에 한 번 지나게 해 결과를 제 호출에
+ * 합치고 생각의 길이를 재게 한 뒤, 지금 첫 행보다 작은 열쇠를 차례로 붙인다 —
+ * 그리는 쪽(`syncHelperTurns`)은 그 열쇠로 위에 세운다. 경계 아래에 제 호출 없이
+ * 서 있던 결과는 이제 위로 온 호출의 것이 되어 행을 떠난다(`gone`). `start`는
+ * 그 읽기가 시작한 줄이다: 페이지는 이제 거기부터 위로 읽는다. 상한을 넘치면
+ * 가장 새 쪽 — 위를 읽는 사람에게서 먼 쪽 — 이 간다(`letNewestGo`). */
+function holdEarlierTurns(held, turns, start) {
+  const batch = { turns: [], seq: 0, from: start };
+  holdHelperTurns(batch, turns);
+  const low = held.low ?? 0;
+  const count = batch.turns.length;
+  batch.turns.forEach((turn, at) => {
+    turn.seq = low - count + at;
+  });
+  held.low = low - count;
+  held.gone ??= new Set();
+  for (const result of held.turns.filter((turn) => turn.role === "tool_result" && turn.tool?.call_id)) {
+    const call = callAwaiting(batch.turns, result.tool.call_id);
+    if (!call) continue;
+    foldResultInto(call, result);
+    held.gone.add(result.seq);
   }
+  const kept = held.turns.filter((turn) => !held.gone.has(turn.seq));
+  held.turns.splice(0, held.turns.length, ...batch.turns, ...kept);
+  held.from = batch.from;
+  held.above = true;
+  held.lost = held.lost === true || batch.lost === true;
+  // The file's own clock runs from its first stamped line now.
+  if (batch.firstStampMs !== undefined) {
+    if (held.firstStampMs !== undefined && batch.lastStampMs > held.firstStampMs) held.clockBroken = true;
+    held.firstStampMs = batch.firstStampMs;
+    held.lastStampMs ??= batch.lastStampMs;
+  }
+  if (batch.clockBroken) held.clockBroken = true;
+  letNewestGo(held);
+}
+
+/* 상한을 넘친 만큼 가장 새 행들을 놓는다 — 위를 읽는 사람에게서 먼 쪽. 놓은
+ * 페이지는 새 턴을 더 들지 않는다(`cut`): 커서는 계속 따라가고, 아래의 문
+ * 「최근 기록으로」가 끝에서 다시 연다(`backToNewest`). */
+function letNewestGo(held) {
+  if (held.turns.length <= HELPER_TURN_CAP) return;
+  held.turns.length = HELPER_TURN_CAP;
+  held.cut = true;
+}
+
+/* 페이지가 든 턴을 모두 놓는다 — 파일이 그 아래서 바뀌었거나, 가장 새 턴으로
+ * 돌아간다(`backToNewest`). 다음 읽기가 다시 채운다: 판과 헬퍼는 끝에서 턴 단위로
+ * 거슬러 읽어 그 읽기가 시작한 줄부터(`from: null`), 선은 제 처음부터 — 그 위에
+ * 이어받은 판의 전사가 있으면 그 끝부터 위로 읽는다. 열쇠는 이어서 간다: 그림이
+ * 아직 거두지 않은 행과 올 행이 열쇠를 나누지 않는다. */
+function forgetHeldTurns(held) {
+  held.turns.length = 0;
+  held.skipped = false;
+  held.firstStampMs = undefined;
+  held.lastStampMs = undefined;
+  held.clockBroken = false;
+  held.cut = false;
+  held.lost = false;
+  held.above = false;
+  held.gone?.clear();
+  held.from = held.id === WIRE_LOG_ID ? held.historyEnd ?? 0 : null;
+  held.epoch = (held.epoch ?? 0) + 1;
+}
+
+/* 페이지가 대화의 첫 턴을 들고 있으면 그 턴: 파일의 첫 줄까지 읽었고(`from` 0)
+ * 그 뒤로 다시 읽을 수 없는 것을 놓지 않았다. 브리핑 카드와 머리띠의 셈이 읽는다. */
+function openingTurnOf(held) {
+  return held.from === 0 && held.lost !== true ? held.turns[0] ?? null : null;
 }
 
 /* What the vendor wrote beside a helper's transcript to say what the helper is
@@ -13159,7 +13262,9 @@ async function openHelperPage(row, sub) {
     void focusAgentPane(row.worktree, row.tab?.id ?? null, row.term, row.agent);
     return;
   }
-  const helper = { id: sub.id, next: first.next ?? 0, turns: [], seq: 0, skipped: first.skipped === true };
+  // Read from its first line (its brief, and a finished helper's report at
+  // the top), so it holds from there until the page lets its oldest go.
+  const helper = { id: sub.id, next: first.next ?? 0, turns: [], seq: 0, skipped: first.skipped === true, from: 0 };
   holdHelperTurns(helper, first.turns ?? []);
   holdHelperAbout(helper, first.about);
   openTab({
@@ -13198,7 +13303,7 @@ async function openHelperPage(row, sub) {
  * exit, and the new tab stands where the pane's tab stood (`at`) carrying the
  * turns already said (`history`), so the swap reads as the same conversation
  * changing renderer, not as a new page. */
-async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -1, history = [], label = null, carry = null, refused = showError } = {}) {
+async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -1, history = [], historyFrom = 0, historyEnd = null, label = null, carry = null, refused = showError } = {}) {
   let started;
   try {
     started = await invoke("wire_start", { agent, cwd, resume, from_pane: fromTerm });
@@ -13222,7 +13327,11 @@ async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -
     output: null,
     truncated: false,
     cwd,
-    helper: { id: WIRE_LOG_ID, next: 0, turns: [], seq: 0, skipped: false, found: true },
+    // What stands above its first turn is the pane's transcript it continues,
+    // read up from where that history began (`historyFrom`, t-82901) once the
+    // page is drawn (`fillAboveOnce`); a fresh session has nothing above it.
+    helper: { id: WIRE_LOG_ID, next: 0, turns: [], seq: 0, skipped: false, found: true, from: historyFrom,
+      filling: true, ...(Number.isFinite(historyEnd) && { historyEnd }) },
     wireLog: {
       status: "idle",
       asks: [],
@@ -13242,6 +13351,7 @@ async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -
   carry?.(worker);
   openTab({ id: tabId, kind: "worker", worker });
   if (at >= 0) placeTabAt(tabId, at);
+  fillAboveOnce(worker);
   helperClock.sync();
   paintViewToggle();
   // The words that waited for the wire go down it now, a message a turn.
@@ -13258,12 +13368,17 @@ function placeTabAt(id, at) {
   renderTabs();
 }
 
-/* The whole transcript a pane has so far, read through the same door the
- * page polls — chunk by chunk until the file's end — for the wire tab that
- * continues the conversation to open with the words already said. */
+/* The transcript a pane has so far, read through the same door the page
+ * polls — its newest chunk's turns read back from the end, then on to the
+ * file's end — for the wire tab that continues the conversation to open with
+ * the words already said: the turns, where they begin (`start`, what the tab
+ * reads up from once it is drawn) and where they end (`end`). The tab's own
+ * hold bounds them (`holdHelperTurns`). */
 async function readPaneTranscript(term) {
   const turns = [];
   let after = null;
+  let start = 0;
+  let end = null;
   for (let reads = 0; reads < 64; reads += 1) {
     let more = null;
     try {
@@ -13272,12 +13387,15 @@ async function readPaneTranscript(term) {
       break;
     }
     // Nothing past the cursor: the file is read to its end.
-    if (!more?.found || !(after === null || more.next > after) || !more.turns?.length) break;
+    if (!more?.found || !(after === null || more.next > after)) break;
+    if (after === null && Number.isFinite(more.start)) start = more.start;
+    end = more.next;
+    if (!more.turns?.length) break;
     turns.push(...more.turns);
     if (more.more === false) break;
     after = more.next;
   }
-  return turns.slice(-HELPER_TURN_CAP);
+  return { turns, start, end };
 }
 
 /* The wire an agent's pane can hand its conversation to: the catalog row
@@ -13321,7 +13439,9 @@ async function handPaneToWire(term) {
       resume: session,
       fromTerm: term,
       at: owner ? tabs.indexOf(owner) : -1,
-      history,
+      history: history.turns,
+      historyFrom: history.start,
+      historyEnd: history.end,
       label: owner ? tabLabel(owner) : null,
       carry: (run) => carryPaneChat(held, run),
       // The refusal stays on the page (`paintPaneChat`), not only in a toast
@@ -13626,12 +13746,14 @@ function paneChatOf(term) {
     endedAt: null,
     output: null,
     truncated: false,
-    /* `next: null` is the TAIL: the first read starts at the transcript's last
-     * chunk, not its first byte — a pane hours into a session has tens of
-     * megabytes behind it, and a view that read them all painted the whole
-     * past as if it were arriving now (09-16: 66 MB, minutes of old turns
-     * scrolling in). What stands above the tail is said to be folded. */
-    helper: { id: PANE_LOG_ID, next: null, turns: [], seq: 0, skipped: false, found: null, folded: false },
+    /* `next: null` is the TAIL: the first read is the transcript's newest
+     * turns, read back from its end by turns (t-82901), not its first byte — a
+     * pane hours into a session has tens of megabytes behind it, and a view
+     * that read them all painted the whole past as if it were arriving now
+     * (09-16: 66 MB, minutes of old turns scrolling in). `from: null` until
+     * that read says where it began; what stands above is read up from there
+     * (「이전 기록 더 보기」). */
+    helper: { id: PANE_LOG_ID, next: null, turns: [], seq: 0, skipped: false, found: null, from: null },
   };
   held = {
     on: false,
@@ -14049,15 +14171,10 @@ function paintPaneChat(term) {
     run.helper.found === null,
     t("worker.readingTranscript", "대화를 읽는 중…"),
   ));
-  // The page holds the end of a long transcript: a small pill over the list
-  // says so, and its tooltip says where the rest is (t-81525 C5).
-  noticeOnPaneChat(
-    held,
-    "worker.historyFolded",
-    run.helper.folded === true,
-    t("worker.historyFolded", "↑ 이전 기록 · 끝부분만 보는 중"),
-    t("worker.historyFoldedTip", "긴 기록의 끝부분만 보입니다 — 이전 턴은 판의 화면과 세션 기록에 있습니다."),
-  );
+  // What stands above the newest turns is the page's own way up now, a pill
+  // at the head of the list every conversation's page wears
+  // (`chatEarlierDoorNode`, t-82901) — no longer a line saying the rest is
+  // elsewhere.
 }
 
 /* One line said where the turns would be, keyed by what it says: each notice
@@ -14305,6 +14422,9 @@ async function pollHelperPages() {
   }
   held.polling = true;
   const after = held.next;
+  // A page that let everything go while the read was out (`forgetHeldTurns`)
+  // asks again from its new place; what this read brings is not for it.
+  const epoch = held.epoch;
   let more = null;
   try {
     // Asked HERE, by name: a helper's file under the pane, or the pane's own
@@ -14327,6 +14447,7 @@ async function pollHelperPages() {
       queueMicrotask(() => void pollHelperPages());
     }
   }
+  if (held.epoch !== epoch) return;
   if (!more?.found) {
     // Said once on the page, then left alone: the poll keeps asking, because
     // the agent may name its transcript on a later report.
@@ -14360,21 +14481,31 @@ async function pollHelperPages() {
     paintStatusModel();
   }
   const replaced = after !== null && more.next < after;
-  if (replaced) {
-    held.turns.length = 0;
-    held.skipped = false;
-    held.firstStampMs = undefined;
-    held.lastStampMs = undefined;
-    held.clockBroken = false;
+  if (replaced) forgetHeldTurns(held);
+  // Where the page holds its file from (t-82901): the first read — the
+  // newest chunk's turns, read back from the end — says where it began, the
+  // page reads up from there once they are drawn (`fillAboveOnce`), and its
+  // 「이전 기록 더 보기」 again from where that left it; a file read again from
+  // its start holds from its first line. A wire's page knows from the pane it
+  // continues (`openWirePage`).
+  if (held.from === null && held.id !== WIRE_LOG_ID) {
+    held.from = Number.isFinite(more.start) ? more.start : 0;
+    held.filling = after === null;
   }
-  // The first read of a pane's transcript began at its tail: the turns above
-  // are not carried, and the page says so once (`paintPaneChat`).
-  if (more.folded === true) held.folded = true;
   const skippedNow = !held.skipped && more.skipped === true;
   held.skipped = held.skipped || skippedNow;
   // Retain the answer before advancing the cursor, even if the person changed
   // tabs while the read was in flight. Visibility governs paint, not delivery.
-  if (more.turns?.length) holdHelperTurns(held, more.turns);
+  // A page that let its newest turns go to hold the ones above (`cut`) holds
+  // no new one until it is back at its newest; one whose reader is up among
+  // turns read from above lets its newest go rather than what they read.
+  if (more.turns?.length && !held.cut) {
+    if (held.above && held.turns.length + more.turns.length > HELPER_TURN_CAP && readerAway(tab.worker)) {
+      held.cut = true;
+    } else {
+      holdHelperTurns(held, more.turns);
+    }
+  }
   held.next = more?.next ?? held.next;
   // A wire's log carries the session's state beside its turns — status, the
   // open question, model, mode, commands. It lives on the run (the page and
@@ -14382,6 +14513,9 @@ async function pollHelperPages() {
   const wireMoved = held.id === WIRE_LOG_ID ? holdWireState(tab.worker, more) : { state: false, live: false };
   const wireChanged = wireMoved.state || wireMoved.live;
   if (document.hidden || activeHelperPage() !== tab) return;
+  // The page on screen is drawn — by this answer's paint below, or already:
+  // what stands above its newest turns is read once that frame is up.
+  fillAboveOnce(tab.worker);
   // A pane's page shows its hooks as well as its file (`paneChatKey`): a read
   // that brought no new line repaints once when a hook moved since the paint.
   const hooksMoved = held.id === PANE_LOG_ID && held.hookKey !== paneChatKey(tab.worker.term);
@@ -14415,6 +14549,96 @@ async function pollHelperPages() {
       }, 160);
     }
   }
+}
+
+/* The conversation list a run's page stands in, if one stands. */
+function listOfRun(run) {
+  for (const list of document.querySelectorAll(".helper-turns")) if (list.__run === run) return list;
+  return null;
+}
+
+/* Whether the person reading a run's page has left its foot. */
+function readerAway(run) {
+  const list = listOfRun(run);
+  return list !== null && chatAway(list);
+}
+
+/* What stands above the first turn a page holds, read up and stood over it
+ * (t-82901, 「이전 기록 더 보기」): the page's own door with `before` — the
+ * pane's transcript, the helper's file, or the transcript of the pane a
+ * wire's session continues (`wire_history`) — one read at a time, and only
+ * while something stands above (`from` past the file's first line). Asked by
+ * the pill's press or the reader's push at the list's top, never by the poll
+ * or by a scroll that is no one's push. */
+async function readEarlierTurns(run) {
+  const held = run?.helper;
+  if (!held || held.reaching || !(held.from > 0)) return;
+  const before = held.from;
+  const epoch = held.epoch;
+  held.reaching = true;
+  repaintRunDoors(run);
+  let above = null;
+  try {
+    above = held.id === PANE_LOG_ID
+      ? await invoke("pane_log", { term: run.term, before })
+      : held.id === WIRE_LOG_ID
+        ? await invoke("wire_history", { id: run.wire, before })
+        : await invoke("subagent_log", { term: run.term, id: held.id, before });
+  } catch {
+    above = null;
+  } finally {
+    held.reaching = false;
+  }
+  // A page that went back to its newest turns, or whose file was replaced,
+  // while the read was out holds from elsewhere: what came is not above it.
+  if (above?.found && held.epoch === epoch && held.from === before && Number.isFinite(above.start) && above.start < before) {
+    holdEarlierTurns(held, above.turns ?? [], above.start);
+  }
+  const page = activeHelperPage();
+  if (page?.worker === run && !document.hidden) paintHelperSurface(page);
+  else repaintRunDoors(run);
+}
+
+/* A page that opened on its newest turns — a pane's read back from its
+ * file's end, a helper's gone back to its newest, a wire's continuing the
+ * pane whose newest turns it carries — reads up once from where they begin,
+ * after the frame that draws them (t-82901). The first read takes the last
+ * chunk alone, so the conversation stands as soon as it did before it read
+ * by turns; the said turns above come in behind it (`readEarlierTurns`),
+ * standing over the rows with the reader's row where it was. The person,
+ * 10-29 17:2x: 「열면 바로 그려지지 않음」 — the page stood empty while a
+ * first read of 40 turns took up to 8 MiB. */
+function fillAboveOnce(run) {
+  const held = run.helper;
+  if (held.filling !== true) return;
+  held.filling = false;
+  if (!(held.from > 0)) return;
+  // Asked from a task after the frame: nothing in the frame waits on it.
+  requestAnimationFrame(() => setTimeout(() => void readEarlierTurns(run)));
+}
+
+/* The page's two doors worn again — the way up and the way to the newest. */
+function repaintRunDoors(run) {
+  const list = listOfRun(run);
+  if (!list) return;
+  paintEarlierDoor(list);
+  paintFootDoor(list);
+}
+
+/* A page that let its newest turns go (`cut`) goes back to them (t-82901):
+ * everything it holds goes, and its next read — a pane's or a helper's newest
+ * turns read back from the end, a wire's own turns from its first — holds
+ * again from there. Whether it went. */
+function backToNewest(run) {
+  const held = run?.helper;
+  if (held?.cut !== true) return false;
+  forgetHeldTurns(held);
+  held.next = held.id === WIRE_LOG_ID ? 0 : null;
+  // Back at its newest, it opens as it first did: what stands above them
+  // follows once they are drawn (`fillAboveOnce`).
+  held.filling = true;
+  void pollHelperPages();
+  return true;
 }
 
 /* 어느 체크아웃의 무대에 앉힐지 — 그 체크아웃의 나무가 아는 자리 하나.
@@ -14589,7 +14813,7 @@ function helperTurnRowNode(run, turn, spoken, cold = false) {
   if (turn.role === "thinking") return thoughtTurnNode(run, turn);
   if (turn.role === "window") return windowNoteNode(turn);
   if (turn.role === "tool" || turn.role === "tool_result") return stepRowNode(run, turn, spoken, cold);
-  const briefing = turn.role === "user" && turn.seq === 0;
+  const briefing = turn.role === "user" && turn === openingTurnOf(run.helper);
   const row = document.createElement("article");
   const said = document.createElement("div");
   said.className = "helper-said";
@@ -15158,7 +15382,7 @@ function isActivityTurn(turn) {
 
 /* 마지막으로 말해진 것(사람이든 에이전트든)의 번호 — 그 뒤의 호출은 아직 나가 있다. */
 function spokenSeq(run) {
-  return run.helper.turns.findLast((turn) => turn.role === "user" || turn.role === "assistant")?.seq ?? -1;
+  return run.helper.turns.findLast((turn) => turn.role === "user" || turn.role === "assistant")?.seq ?? -Infinity;
 }
 
 /* 한 턴이 알약의 셈에서 서는 칸 — 도구 행이 쓰는 규칙(`dressToolTurn`)과 같다. */
@@ -15328,10 +15552,13 @@ function syncHelperTurns(list, run) {
   applyFoldedView(list, folded);
   if (!held.length) {
     for (const row of list.querySelectorAll(":scope > [data-turn]")) row.remove();
+    run.helper.gone?.clear();
     list.__lastAnswer = null;
     syncHelperTasks(list, run);
     syncStreamingTurns(list, run);
     syncHelperReport(list, run);
+    paintEarlierDoor(list);
+    paintFootDoorCut(list, run);
     askTurnRail(list);
     return;
   }
@@ -15351,7 +15578,7 @@ function syncHelperTurns(list, run) {
   while (front) {
     const next = front.nextElementSibling;
     if (front.dataset.turn === undefined) {
-      if (!front.classList.contains("helper-report")) break;
+      if (!front.classList.contains("helper-report") && front !== list.__earlier) break;
       front = next;
       continue;
     }
@@ -15375,11 +15602,28 @@ function syncHelperTurns(list, run) {
   if (dropped && !follow) {
     list.scrollTop = Math.max(0, before.top - (before.height - list.scrollHeight));
   }
+  // The rows the page let go from its newest end (`letNewestGo`) leave first —
+  // under a reader up above, so nothing they read moves. Then the results
+  // that joined a call read from above (`gone`) leave, and what was read from
+  // above stands over the first row (t-82901): the list moves down by what
+  // changed above the reader, so the row they read stays where it stood.
+  dropNewestRows(list, run, held.at(-1).seq, pills);
+  const earlier = earlierThanDrawn(list, held);
+  if (earlier.length || run.helper.gone?.size) {
+    const stood = { height: list.scrollHeight, top: list.scrollTop };
+    dropGoneRows(list, run, pills);
+    standEarlierRows(list, run, earlier, folded, spoken, pills);
+    // The way up goes in the same move once the first turn stands.
+    paintEarlierDoor(list);
+    if (!follow) list.scrollTop = stood.top + (list.scrollHeight - stood.height);
+  }
   // The last turn drawn: the streaming rows under it carry no turn number,
-  // and a new turn goes above them — it is what they were becoming.
+  // and a new turn goes above them — it is what they were becoming. A turn
+  // read from above holds a key below every one drawn before it, so none is
+  // drawn here twice — and a list with none drawn draws them all.
   let last = list.lastElementChild;
   while (last && last.dataset.turn === undefined) last = last.previousElementSibling;
-  const drawn = last ? Number(last.dataset.turn) : -1;
+  const drawn = last ? Number(last.dataset.turn) : -Infinity;
   const streaming = list.querySelector(":scope > .is-streaming");
   let newest = null;
   const people = [];
@@ -15461,8 +15705,157 @@ function syncHelperTurns(list, run) {
   // its frame does (t-55369).
   if (people.length) requestAnimationFrame(() => clipPersonRows(people.filter((row) => row.isConnected)));
   if (follow && !reported) scrollHelperToBottom(list);
+  // Whether anything stands above, and whether the newest turns are held.
+  paintEarlierDoor(list);
+  paintFootDoorCut(list, run);
   // The rows changed: the rail is asked on the next frame (t-22100).
   askTurnRail(list);
+}
+
+/* The foot's button worn again when the page let its newest turns go or
+ * holds them again (`cut`) — and only then: wearing it reads where the list
+ * stands, which a paint must not ask before its first frame (t-55369). */
+function paintFootDoorCut(list, run) {
+  if (list.__door && list.__door.__cut !== (run.helper.cut === true)) paintFootDoor(list);
+}
+
+/* A row's turns: a pill's or a run of steps' members, or the row's own. */
+function rowTurnsOf(row) {
+  return row.__members ?? (row.__turn ? [row.__turn] : []);
+}
+
+/* The first row a turn stands in. */
+function firstTurnRow(list) {
+  let row = list.firstElementChild;
+  while (row && row.dataset.turn === undefined) row = row.nextElementSibling;
+  return row;
+}
+
+/* The turns the page holds above every one drawn — read from above
+ * (`holdEarlierTurns`) since the list was last painted. None while nothing is
+ * drawn: the list then draws all it holds in order. */
+function earlierThanDrawn(list, held) {
+  const front = firstTurnRow(list);
+  if (!front) return [];
+  const low = rowTurnsOf(front)[0]?.seq ?? Number(front.dataset.turn);
+  const earlier = [];
+  for (const turn of held) {
+    if (turn.seq >= low) break;
+    earlier.push(turn);
+  }
+  return earlier;
+}
+
+/* A row that holds turns keeps those `keep` says — a pill or a run of steps
+ * with its members rebuilt where one was open, its key its last member's —
+ * and goes when it keeps none. The row that stands, or null. */
+function keepRowTurns(list, run, row, keep, pills) {
+  const turns = rowTurnsOf(row);
+  const kept = turns.filter(keep);
+  if (kept.length === turns.length) return row;
+  if (kept.length === 0 || !row.__members) {
+    forgetShelf(list, row);
+    if (list.__lastAnswer === row) list.__lastAnswer = null;
+    row.remove();
+    pills.delete(row);
+    return null;
+  }
+  row.__members = kept;
+  row.__turn = kept.at(-1);
+  row.dataset.turn = String(row.__turn.seq);
+  if (row.classList.contains("helper-group")) {
+    row.querySelector(":scope > .helper-group-body")?.remove();
+    if (row.__open) openActivityPill(row, true);
+    pills.add(row);
+  } else {
+    row.querySelector(":scope > .helper-run-body")?.remove();
+    dressRunLine(row);
+    if (row.open) paintRunBody(row, run);
+  }
+  return row;
+}
+
+/* The rows past `newest`, the last turn the page holds, leave from the end:
+ * the page let them go to hold what was read from above (`letNewestGo`). */
+function dropNewestRows(list, run, newest, pills) {
+  let row = list.lastElementChild;
+  while (row) {
+    const above = row.previousElementSibling;
+    if (row.dataset.turn !== undefined) {
+      // A row's key is its last turn's.
+      if (Number(row.dataset.turn) > newest) {
+        keepRowTurns(list, run, row, (turn) => turn.seq <= newest, pills);
+      } else {
+        break;
+      }
+    }
+    row = above;
+  }
+}
+
+/* The rows of results that joined a call read from above leave — the call's
+ * row says them now (`holdEarlierTurns`). They stood at the first rows. */
+function dropGoneRows(list, run, pills) {
+  const gone = run.helper.gone;
+  if (!gone?.size) return;
+  for (const row of [...list.querySelectorAll(":scope > [data-turn]")]) {
+    if (!rowTurnsOf(row).some((turn) => gone.has(turn.seq))) continue;
+    keepRowTurns(list, run, row, (turn) => !gone.has(turn.seq), pills);
+  }
+  gone.clear();
+}
+
+/* What was read from above stands over the first row, newest first, as the
+ * list draws a turn arriving at its foot: activity into the pill under it or
+ * a pill of its own, a settled step into the run of its kind under it, any
+ * other turn a row of its own — built cold but for the ones nearest the
+ * reader, the shelf building the rest as they come within reach (B1). */
+function standEarlierRows(list, run, earlier, folded, spoken, pills) {
+  let front = firstTurnRow(list);
+  if (!front || !earlier.length) return;
+  let warm = CHAT_SHELF.warm;
+  const people = [];
+  for (let at = earlier.length - 1; at >= 0; at -= 1) {
+    const turn = earlier[at];
+    if (folded && isActivityTurn(turn)) {
+      if (front.classList.contains("helper-group")) {
+        front.__members.unshift(turn);
+        front.querySelector(":scope > .helper-group-body")?.remove();
+        if (front.__open) openActivityPill(front, true);
+      } else {
+        const group = activityPillNode();
+        group.__members.push(turn);
+        group.__turn = turn;
+        group.dataset.turn = String(turn.seq);
+        list.insertBefore(group, front);
+        front = group;
+      }
+      pills.add(front);
+      continue;
+    }
+    if (!folded && stepJoins(front, turn, stepKindOf(turn, run))) {
+      if (front.classList.contains("is-run")) {
+        front.__members.unshift(turn);
+        front.querySelector(":scope > .helper-run-body")?.remove();
+        dressRunLine(front);
+        if (front.open) paintRunBody(front, run);
+      } else {
+        const row = runRowNode(run, [turn, front.__turn]);
+        forgetShelf(list, front);
+        front.replaceWith(row);
+        front = row;
+      }
+      continue;
+    }
+    const row = helperTurnRowNode(run, turn, spoken, warm <= 0);
+    warm -= 1;
+    list.insertBefore(row, front);
+    front = row;
+    if (row.querySelector(":scope > .helper-images")) watchImagePills(list, row);
+    watchShelf(list, row);
+    if (turn.role === "user") people.push(row);
+  }
+  if (people.length) requestAnimationFrame(() => clipPersonRows(people.filter((row) => row.isConnected)));
 }
 
 /* The words the agent is saying right now, under the last turn — the rows
@@ -16146,7 +16539,7 @@ function paintChatTally(strip, run) {
   // page stands in its parent's pane and names no session of the parent's.
   const session = run.wire ? run.session ?? ""
     : run.helper?.id === PANE_LOG_ID ? paneSessions.get(run.term)?.session?.id ?? "" : "";
-  const said = `${run.helper.seq}|${session}|${locale}`;
+  const said = `${run.helper.seq}|${run.helper.low ?? 0}|${session}|${locale}`;
   if (strip.__said === said) return;
   strip.__said = said;
   const { total, failed, kinds, partial } = helperTally(run);
@@ -16261,7 +16654,7 @@ const HELPER_CONDITION_MARKERS = [
  * to leave. */
 function helperBriefOf(run) {
   if (run.brief === undefined) {
-    const opening = run.helper.turns.find((turn) => turn.seq === 0);
+    const opening = openingTurnOf(run.helper);
     if (opening) run.brief = opening.role === "user" ? (opening.text ?? "") : "";
   }
   return run.brief ?? "";
@@ -16574,7 +16967,8 @@ function helperPageTallyNode() {
 }
 
 function paintHelperPageTally(strip, run) {
-  const sig = `${run.helper.seq}|${locale}`;
+  // Turns read from above change what it counts without a new key at the foot.
+  const sig = `${run.helper.seq}|${run.helper.low ?? 0}|${locale}`;
   if (strip.__sig === sig) return;
   strip.__sig = sig;
   const { total, failed, kinds, partial } = helperTally(run);

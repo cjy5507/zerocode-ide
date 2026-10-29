@@ -37230,8 +37230,11 @@ mod tests {
         // Both doors read down one road: the helper's file and the pane's own
         // transcript (`pane_log`, the terminal's conversation view) go through
         // `transcript_log_at`, and the pane door names a pane, never a path.
+        // What each asks — on from a cursor, back from a place, or neither — is
+        // read by one rule (t-82901).
         assert!(
-            reading.contains("transcript_log_at(&path, after)"),
+            reading.contains("let read = LogRead::asked(after, before)?;")
+                && reading.contains("transcript_log_at(&path, read)"),
             "the helper page reads its file down a road of its own:\n{reading}"
         );
         // What the vendor wrote beside that file about the helper is found from the
@@ -37253,21 +37256,75 @@ mod tests {
         assert!(
             !pane.contains("path: String")
                 && pane.contains("pane_transcript::pane_transcript(&state, term)")
-                && pane.contains("transcript_log_at(&path, after)"),
+                && pane.contains("let read = LogRead::asked(after, before)?;")
+                && pane.contains("transcript_log_at(&path, read)"),
             "the pane's conversation door names a file, or reads it down another road:\n{pane}"
         );
-        // `transcript_log_at` is the page's chunk of the one windowed reader,
-        // clipped for its cells and with its long-line road; and
-        // `worker-transcript` reads down that same reader (t-6742) — never a
-        // walk of its own over the file — with the texts whole for its
-        // masks, and no road past its own budget.
+        // A session's page reads what stands above it — the transcript of the
+        // pane it continues — down the same road, naming a session, never a
+        // path (t-82901).
+        let history = block_after(include_str!("../../src/cmd/wire.rs"), "fn wire_history(");
+        assert!(
+            !history.contains("path: String")
+                && history.contains("wire_runtime::history_of(&session)")
+                && history.contains("crate::cmd::terminal::transcript_log_at(")
+                && history.contains("crate::cmd::terminal::LogRead::Before(before)"),
+            "a session's page reads what stands above it down a road of its own:\n{history}"
+        );
+        // `transcript_log_at` is the page's chunk of the one windowed reader
+        // from a cursor, clipped for its cells and with its long-line road;
+        // with no cursor it reads back by turns within the last chunk, and
+        // from a place by turns within the page's reach (t-82901: the last
+        // chunk alone was two or three turns of a long session, and a first
+        // read by turns kept the page empty while it read up to 8 MiB).
+        // `worker-transcript` reads down the windowed reader
+        // (t-6742) — never a walk of its own over the file — with the texts
+        // whole for its masks, and no road past its own budget.
         let door = block_after(shipped, "fn transcript_log_at(");
         assert!(
             door.contains("transcript_log_window(")
                 && door.contains("SUBAGENT_LOG_CHUNK,")
                 && door.contains("Some(LONG_LINE_CAP),")
-                && door.contains("zerocode_core::transcript::Detail::Clipped"),
-            "the page's read no longer goes down the windowed reader:\n{door}"
+                && door.contains("zerocode_core::transcript::Detail::Clipped")
+                && door.contains(
+                    "LogRead::Tail => transcript_log_back(&mut file, size, size, FIRST_REACH, detail),"
+                )
+                && door.contains("LogRead::Before(before) if before > size =>")
+                && door.contains(
+                    "LogRead::Before(before) => transcript_log_back(&mut file, size, before, PAGE_REACH, detail),"
+                ),
+            "the page's read no longer goes down the windowed reader, or opens on a chunk's bytes:\n{door}"
+        );
+        let reach = block_after(shipped, "const PAGE_REACH: BackReach = BackReach {");
+        assert!(
+            reach.contains("step: SUBAGENT_LOG_CHUNK,")
+                && reach.contains("said: TRANSCRIPT_SAID_TURNS,")
+                && reach.contains("rows: TRANSCRIPT_BACK_ROWS,")
+                && reach.contains("budget: TRANSCRIPT_BACK_BUDGET,")
+                && reach.contains("long_line: LONG_LINE_CAP,"),
+            "the page's read back reaches by numbers of its own:\n{reach}"
+        );
+        // The first read is the same reach held to one step: the newest
+        // chunk's whole lines, drawn before anything is read from above.
+        let first = block_after(shipped, "const FIRST_REACH: BackReach = BackReach {");
+        assert!(
+            first.contains("budget: SUBAGENT_LOG_CHUNK,") && first.contains("..PAGE_REACH"),
+            "the page's first read reaches past its newest chunk, or by numbers of its own:\n{first}"
+        );
+        // The read back is handed its file and never opens one; it decodes a
+        // line at a time down the same helpers the windowed reader takes, and
+        // only a read from the file's end names a model and a context.
+        let back = block_after(shipped, "fn transcript_log_back<");
+        assert!(
+            back.contains("let newest = end == size;")
+                && back.contains("line_text(&below[first + span.start..first + span.end], at)")
+                && back.contains("line_turns(&text, at, detail)")
+                && back.contains("if newest {")
+                && back.contains("if said >= reach.said || rows >= reach.rows {")
+                && back.contains("if spent >= reach.budget && !inside {")
+                && !back.contains("File::open")
+                && !back.contains("metadata("),
+            "the read back decodes a line its own way, or reads past its reach:\n{back}"
         );
         // The verb opens its file ONCE and takes its size from that open
         // file; every read of the call is made on it (t-6742 R3).
@@ -37314,10 +37371,14 @@ mod tests {
         // place in the file (t-6323 A8), and a line past the read is read
         // whole instead of dropped — on the road that names a cap for it.
         // The reader is handed its file and never opens one.
+        let lines = block_after(shipped, "fn lines_log(");
+        let text = block_after(shipped, "fn line_text(");
         assert!(
             reading.contains("zerocode_core::transcript::complete_transcript_chunk(")
-                && reading.contains("zerocode_core::transcript::elide_payloads(chunk.bytes, base)")
-                && reading.contains("String::from_utf8_lossy(&bytes)")
+                && reading.contains("lines_log(chunk.bytes, base, detail)")
+                && lines.contains("line_text(&bytes[span], at)")
+                && text.contains("zerocode_core::transcript::elide_payloads(line, at)")
+                && text.contains("String::from_utf8_lossy(&bytes)")
                 && reading.contains("u64::try_from(chunk.consumed)")
                 && reading.contains("&& let Some(cap) = long_lines")
                 && reading.contains(
@@ -37351,10 +37412,12 @@ mod tests {
         );
 
         // What a line MEANS is core's, not this file's: one owner for the
-        // shape of a transcript.
+        // shape of a transcript, a line at a time for every read.
+        let turns = block_after(shipped, "fn line_turns(");
         assert!(
-            reading.contains("zerocode_core::transcript::turns_in_with(&text, detail)"),
-            "the shell grew its own reader of a transcript line:\n{reading}"
+            turns.contains("zerocode_core::transcript::turns_in_with(text, detail)")
+                && lines.contains("line_turns(&text, at, detail)"),
+            "the shell grew its own reader of a transcript line:\n{turns}"
         );
     }
 
@@ -39059,7 +39122,6 @@ fn a_pane_conversations_notices_are_keyed_by_what_they_say_and_speak_four_locale
         "worker.handingOver",
         "worker.readingTranscript",
         "worker.wireRefused",
-        "worker.historyFolded",
     ] {
         assert!(
             paint.contains(&format!("t(\"{key}\", ")),
@@ -39071,6 +39133,168 @@ fn a_pane_conversations_notices_are_keyed_by_what_they_say_and_speak_four_locale
             "`{key}` is missing from one of the en/ja/zh/es catalogs"
         );
     }
+    // What stands above a long conversation's newest turns is no line saying
+    // the rest is elsewhere: it is the page's own way up (t-82901).
+    assert!(
+        !paint.contains("worker.historyFolded") && !i18n.contains("\"worker.historyFolded"),
+        "the pane's page says its earlier turns are elsewhere again"
+    );
+}
+
+/// Every conversation's page — a pane's, a helper's, a wire's — reads up
+/// past the first turn it holds down one road (t-82901: the person saw two
+/// or three turns of a long session and could not go up). The way up is a
+/// button at the list's head, worded in five languages, that the page's
+/// paint shows while something stands above; a press, or a person's push up
+/// at the list's top, asks the page's own door with `before` — never the
+/// poll, and never a scroll alone — and so does a page once its newest turns
+/// are drawn, one read after that frame (17:2x: 「열면 바로 그려지지 않음」, the
+/// page empty while a first read by turns took up to 8 MiB). What comes stands
+/// over the rows with the reader's row kept where it stood, and the page's
+/// hold stays bounded: past it, the end farther from the reader goes.
+#[test]
+fn every_conversation_page_reads_up_past_its_first_turn_down_one_road() {
+    let shell = include_str!("../../../../ui/shell.js");
+    let view = include_str!("../../../../ui/shell-conversation-view.js");
+    let css = include_str!("../../../../ui/shell.css");
+    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let door = support::block_after(view, "function chatEarlierDoorNode(list) {");
+    assert!(
+        door.contains("document.createElement(\"button\")")
+            && door.contains("door.type = \"button\";")
+            && door.contains(
+                "door.addEventListener(\"click\", () => void readEarlierTurns(list.__run));"
+            ),
+        "the way up is not a button that reads up:\n{door}"
+    );
+    // It stands at the list's head while something stands above, and only
+    // then — a page that holds its first turn has none, and every paint asks.
+    let worn = support::block_after(view, "function paintEarlierDoor(list) {");
+    let sync = support::block_after(shell, "function syncHelperTurns(list, run) {");
+    assert!(
+        worn.contains("if (!(held?.from > 0)) {")
+            && worn.contains("door.remove();")
+            && worn.contains("door = chatEarlierDoorNode(list);")
+            && worn.contains("list.prepend(door);")
+            && sync.matches("paintEarlierDoor(list);").count() >= 2,
+        "the way up stands whether or not anything stands above:\n{worn}"
+    );
+    for key in [
+        "worker.earlierMore",
+        "worker.earlierMoreTip",
+        "worker.earlierReading",
+        "worker.toNewest",
+    ] {
+        assert!(
+            view.contains(&format!("t(\"{key}\", ")),
+            "`{key}` is not read from the catalog"
+        );
+        assert_eq!(
+            i18n.matches(&format!("\"{key}\":")).count(),
+            4,
+            "`{key}` is missing from one of the en/ja/zh/es catalogs"
+        );
+    }
+    // The read: one at a time, the page's own door by name with `before`.
+    let read = support::block_after(shell, "async function readEarlierTurns(run) {");
+    assert!(
+        read.contains("if (!held || held.reaching || !(held.from > 0)) return;")
+            && read.contains("invoke(\"pane_log\", { term: run.term, before })")
+            && read.contains("invoke(\"wire_history\", { id: run.wire, before })")
+            && read.contains("invoke(\"subagent_log\", { term: run.term, id: held.id, before })")
+            && read.contains("holdEarlierTurns(held, above.turns ?? [], above.start);"),
+        "a page reads up down a road of its own:\n{read}"
+    );
+    let poll = support::block_after(shell, "async function pollHelperPages() {");
+    assert!(
+        poll.contains("await invoke(\"pane_log\", { term: tab.worker.term, after })")
+            && !poll.contains("wire_history")
+            && !poll.contains("readEarlierTurns"),
+        "the poll reads up past the first turn:\n{poll}"
+    );
+    // A page that opened on its newest turns — a read back from the end, the
+    // way back to its newest, a wire carrying a pane's — reads up once from
+    // where they begin, from a task after the frame that draws them, down the
+    // same road; and only a page on screen does.
+    let fill = support::block_after(shell, "function fillAboveOnce(run) {");
+    assert!(
+        fill.contains("if (held.filling !== true) return;")
+            && fill.contains("held.filling = false;")
+            && fill.contains(
+                "requestAnimationFrame(() => setTimeout(() => void readEarlierTurns(run)));"
+            )
+            && !fill.contains("invoke("),
+        "a page reads above its newest turns before they are drawn, more than once, or by a road of its own:\n{fill}"
+    );
+    let shown = poll
+        .split("if (document.hidden || activeHelperPage() !== tab) return;")
+        .nth(1)
+        .unwrap_or("");
+    assert!(
+        poll.contains("held.filling = after === null;")
+            && shown.contains("fillAboveOnce(tab.worker);")
+            && !poll
+                .split("if (document.hidden || activeHelperPage() !== tab) return;")
+                .next()
+                .unwrap_or("")
+                .contains("fillAboveOnce("),
+        "a page opened on its newest turns does not read above them once they are drawn:\n{poll}"
+    );
+    let wire = support::block_after(shell, "async function openWirePage(");
+    let back = support::block_after(shell, "function backToNewest(run) {");
+    assert!(
+        wire.contains("filling: true,")
+            && wire.contains("fillAboveOnce(worker);")
+            && back.contains("held.filling = true;"),
+        "a wire's page or the way back to the newest turns opens without what stands above:\n{wire}\n{back}"
+    );
+    // Asked by a push up at the top, never by a scroll alone.
+    let hand = support::block_after(view, "function keepToFoot(list) {");
+    let leave = hand
+        .split("const leave = () => {")
+        .nth(1)
+        .and_then(|rest| rest.split("};").next())
+        .unwrap_or("");
+    let scrolled = hand
+        .split("list.addEventListener(\"scroll\", () => {")
+        .nth(1)
+        .and_then(|rest| rest.split("});").next())
+        .unwrap_or("");
+    assert!(
+        leave
+            .contains("if (list.scrollTop < CHAT_FOLLOW.slack) void readEarlierTurns(list.__run);")
+            && !scrolled.contains("readEarlierTurns"),
+        "the way up is asked by a scroll no one pushed:\n{leave}\n{scrolled}"
+    );
+    // What comes stands over the rows, the reader's row kept.
+    assert!(
+        sync.contains("const stood = { height: list.scrollHeight, top: list.scrollTop };")
+            && sync.contains("standEarlierRows(list, run, earlier, folded, spoken, pills);")
+            && sync.contains(
+                "if (!follow) list.scrollTop = stood.top + (list.scrollHeight - stood.height);"
+            )
+            && sync.contains("const drawn = last ? Number(last.dataset.turn) : -Infinity;"),
+        "turns read from above do not stand over the rows, or move the reader:\n{sync}"
+    );
+    // The hold stays bounded: past it the end farther from the reader goes.
+    let cap = support::block_after(shell, "function holdEarlierTurns(held, turns, start) {");
+    assert!(
+        cap.contains("letNewestGo(held);") && shell.contains("const HELPER_TURN_CAP = 400;"),
+        "turns read from above are held past the page's bound:\n{cap}"
+    );
+    let backend = include_str!("../../src/shell_runtime.rs");
+    assert!(
+        backend.contains("pub(super) const TRANSCRIPT_BACK_ROWS: usize = 200;"),
+        "the first read no longer holds at most half the page's hold"
+    );
+    // Its look is the tokens' and its state change is eased.
+    let pill = support::block_after_css(css, ".chat-earlier-door {");
+    assert!(
+        pill.contains("var(--motion-fast) var(--ease-standard)")
+            && pill.contains("background: var(--chat-tool-bg);")
+            && pill.contains("align-self: center;"),
+        "the way up wears values of its own:\n{pill}"
+    );
 }
 
 #[test]

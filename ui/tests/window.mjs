@@ -152,6 +152,7 @@ import { testConversationAgents, testConversationFolds, testConversationFont, te
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
 import { testConversationB } from "./conversation-b.mjs";
+import { testConversationEarlier } from "./conversation-earlier.mjs";
 import { testConversationSwitch } from "./conversation-switch.mjs";
 import { testConversationDiagrams } from "./conversation-diagrams.mjs";
 import { createRequire } from "node:module";
@@ -494,6 +495,7 @@ suite("conversation-redesign", ({ browser, origin, ok }) => testConversationRede
 /* 사람이 고른 대화 시안 B (2026-10-29, t-81525) — 접힌 페이지를 네 폭과 두 테마에서: 옆으로
  * 밀림 0, 폭을 따르는 읽기, 알약·말풍선·코드 띠, 대비 4.5:1. */
 suite("conversation-b", ({ browser, origin, ok }) => testConversationB(browser, origin, ok));
+suite("conversation-earlier", ({ browser, origin, ok }) => testConversationEarlier(browser, origin, ok));
 /* 대화를 바꿨다가 돌아오면 그 화면 그대로, 판의 「대화」는 전사부터(인계 중 보낸 글은 한 번만),
  * 늦은 첫 읽기는 늦게 한 줄 (t-54304 — Claude·Codex·Dots 역분석에서 가져온 1단계). */
 suite("conversation-switch", ({ browser, origin, ok }) => testConversationSwitch(browser, origin, ok));
@@ -56354,7 +56356,7 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       // not one chunk a beat — and the head counts THIS turn from the state
       // change's stamp, not the pane's age.
       const chunks = [
-        { found: true, next: 1, more: true, folded: true, skipped: false, turns: [{ role: "user", text: "first" }] },
+        { found: true, next: 1, more: true, folded: true, start: 1, skipped: false, turns: [{ role: "user", text: "first", line: 1 }] },
         { found: true, next: 2, more: true, skipped: false, turns: [{ role: "assistant", text: "second" }] },
         { found: true, next: 3, more: false, skipped: false, turns: [{ role: "assistant", text: "third" }] },
       ];
@@ -56381,25 +56383,38 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       await settle(150);
       const longChat = document.querySelector(`.pane-slot[data-term="${long}"] .pane-chat`);
       seen.caughtUp = longChat?.querySelectorAll(".helper-turn").length === 3 && reads >= 3;
-      // The first read asked for the tail (no cursor), and a folded answer
-      // says so on the page in the catalog's words.
-      const foldedNotice = longChat?.querySelector('.pane-chat-notice[data-says="worker.historyFolded"]');
-      seen.openedAtTail = firstAfter === null &&
-        foldedNotice?.textContent === t("worker.historyFolded", "↑ 이전 기록 · 끝부분만 보는 중") &&
-        foldedNotice?.dataset.tip === t("worker.historyFoldedTip", "긴 기록의 끝부분만 보입니다 — 이전 턴은 판의 화면과 세션 기록에 있습니다.");
-      seen.foldedAbove = noticeAboveBody(longChat, "worker.historyFolded");
+      // The first read asked for the tail (no cursor), and an answer with
+      // turns above it wears the way up at the list's head — a button in the
+      // catalog's words, centred on the list, above every row (t-82901) —
+      // where the line saying the rest was elsewhere stood.
+      const earlierDoor = longChat?.querySelector(".helper-turns > .chat-earlier-door");
+      const firstRow = longChat?.querySelector(".helper-turns > [data-turn]");
+      seen.openedAtTail = firstAfter === null && earlierDoor?.tagName === "BUTTON" && earlierDoor.hidden === false &&
+        earlierDoor.textContent === t("worker.earlierMore", "이전 기록 더 보기") &&
+        earlierDoor.dataset.tip === t("worker.earlierMoreTip", "누르거나 맨 위에서 더 올리면 그 앞의 턴을 이어서 읽습니다") &&
+        longChat.querySelector('.pane-chat-notice[data-says="worker.historyFolded"]') === null;
+      seen.foldedAbove = (() => {
+        const list = longChat?.querySelector(".helper-turns")?.getBoundingClientRect();
+        const door = earlierDoor?.getBoundingClientRect();
+        const row = firstRow?.getBoundingClientRect();
+        return Boolean(list && door && row) && Math.abs((door.left + door.right) / 2 - (list.left + list.right) / 2) <= 1 &&
+          door.bottom <= row.top + 0.5 && earlierDoor.nextElementSibling === firstRow;
+      })();
       // Two notices at once, as in the person's photo (a hand-over waiting
-      // beside the folded history): both stand above the body, one under the
+      // beside another line): both stand above the body, one under the
       // other, each as wide as the list.
       noticeOnPaneChat(paneChats.get(long), "worker.handoverPending", true,
         t("worker.handoverPending", "이 턴이 끝나면 대화가 실시간으로 이어집니다 — 그때부터 답이 낱말 단위로 흐릅니다."));
+      noticeOnPaneChat(paneChats.get(long), "worker.wireRefused", true,
+        t("worker.wireRefused", "실시간 대화로 넘기지 못했습니다: {{reason}} — 전사 뷰로 봅니다(답은 턴이 닫힐 때 한 번에). 「대화」를 다시 누르면 다시 시도합니다.", { reason: "시험" }));
       const pairBox = (key) => longChat?.querySelector(`.pane-chat-notice[data-says="${key}"]`)?.getBoundingClientRect();
-      const folded = pairBox("worker.historyFolded");
+      const refused = pairBox("worker.wireRefused");
       const pending = pairBox("worker.handoverPending");
-      seen.pairAbove = noticeAboveBody(longChat, "worker.historyFolded") &&
+      seen.pairAbove = noticeAboveBody(longChat, "worker.wireRefused") &&
         noticeAboveBody(longChat, "worker.handoverPending") &&
-        Boolean(folded && pending) && (pending.top >= folded.bottom - 0.5 || folded.top >= pending.bottom - 0.5);
+        Boolean(refused && pending) && (pending.top >= refused.bottom - 0.5 || refused.top >= pending.bottom - 0.5);
       noticeOnPaneChat(paneChats.get(long), "worker.handoverPending", false);
+      noticeOnPaneChat(paneChats.get(long), "worker.wireRefused", false);
       seen.turnClock = paneChats.get(long)?.run.startedAt === hookStamps.get(long) &&
         Date.now() - paneChats.get(long).run.startedAt < bornAgo / 2;
       // The permission mode's reach colours the send and the spinner's mark
@@ -56457,7 +56472,7 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       JSON.stringify(seen),
     );
     ok(
-      "a conversation's notice (no transcript named, history folded, two at once) is a line above the conversation's body as wide as its list, never a cell of the body's rail | list grid",
+      "a conversation's notice (no transcript named, two at once) is a line above the conversation's body as wide as its list, never a cell of the body's rail | list grid — and the way up past a long transcript's newest turns is a button at the list's head, centred on it, above every row",
       seen.noticeAbove && seen.foldedAbove && seen.pairAbove,
       JSON.stringify({ noticeAbove: seen.noticeAbove, foldedAbove: seen.foldedAbove, pairAbove: seen.pairAbove }),
     );

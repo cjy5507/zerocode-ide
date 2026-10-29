@@ -1219,9 +1219,11 @@ pub(super) fn forgotten(state: &AppState, term: TermId) {
 /// window's words to the agent, so the page draws them as a window note, not
 /// as something the person said (t-81525 C3, read by `pane_log`). Display only: the file keeps
 /// every byte.
-pub(crate) fn mark_window_notes(turns: &mut [zerocode_core::transcript::TranscriptTurn]) {
+pub(crate) fn mark_window_notes<'turn>(
+    turns: impl IntoIterator<Item = &'turn mut zerocode_core::transcript::TranscriptTurn>,
+) {
     let nudges = [RESTART_NUDGE, COORDINATOR_NUDGE, CUT_COMMANDS_NUDGE];
-    for turn in turns.iter_mut().filter(|turn| turn.role == "user") {
+    for turn in turns.into_iter().filter(|turn| turn.role == "user") {
         if nudges.iter().any(|nudge| turn.text.starts_with(nudge)) {
             turn.role = "window".into();
         }

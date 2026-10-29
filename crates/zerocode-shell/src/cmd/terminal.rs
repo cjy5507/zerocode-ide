@@ -181,34 +181,26 @@ pub(crate) fn ssh_agent_seated(
 /// other half of the truth: the VENDOR keeps the helper's own transcript on
 /// disk, so the conversation exists even though no terminal ever showed it.
 ///
-/// Complete lines only, and never more than [`SUBAGENT_LOG_CHUNK`] at once:
-/// the file is being appended to while it is read, and half a line is not yet
-/// a fact.
+/// Complete lines only, and never more than [`SUBAGENT_LOG_CHUNK`] at once
+/// from a cursor: the file is being appended to while it is read, and half a
+/// line is not yet a fact. `before` reads back from a place instead — the
+/// page's 「이전 기록 더 보기」 ([`LogRead`]).
 #[tauri::command(async)]
 pub(crate) fn subagent_log(
     state: State<'_, AppState>,
     term: TermId,
     id: String,
     after: Option<u64>,
+    before: Option<u64>,
 ) -> Result<SubagentLog, String> {
     if !is_subagent_id(&id) {
         return Err("helper id가 아닙니다".to_string());
     }
-    let missing = || SubagentLog {
-        model: None,
-        turns: Vec::new(),
-        next: after.unwrap_or_default(),
-        found: false,
-        skipped: false,
-        more: false,
-        folded: false,
-        usage: None,
-        about: None,
-    };
+    let read = LogRead::asked(after, before)?;
     let Some(path) = helper_transcript_path(&state, term, &id) else {
-        return Ok(missing());
+        return Ok(SubagentLog::not_found(after.unwrap_or_default()));
     };
-    let mut log = transcript_log_at(&path, after)?;
+    let mut log = transcript_log_at(&path, read)?;
     // What the vendor wrote beside the file about what this helper is: the
     // window keeps it from whichever ask first brings it.
     log.about = helper_about(&path);
@@ -298,22 +290,14 @@ pub(crate) fn pane_log(
     state: State<'_, AppState>,
     term: TermId,
     after: Option<u64>,
+    before: Option<u64>,
 ) -> Result<SubagentLog, String> {
+    let read = LogRead::asked(after, before)?;
     let Ok(path) = crate::pane_transcript::pane_transcript(&state, term) else {
-        return Ok(SubagentLog {
-            turns: Vec::new(),
-            model: None,
-            next: after.unwrap_or_default(),
-            found: false,
-            skipped: false,
-            more: false,
-            folded: false,
-            usage: None,
-            about: None,
-        });
+        return Ok(SubagentLog::not_found(after.unwrap_or_default()));
     };
-    let mut log = transcript_log_at(&path, after)?;
-    restart_nudge_runtime::mark_window_notes(&mut log.turns);
+    let mut log = transcript_log_at(&path, read)?;
+    restart_nudge_runtime::mark_window_notes(log.turns.iter_mut().map(|one| &mut one.turn));
     Ok(log)
 }
 
@@ -365,6 +349,77 @@ pub(crate) async fn pane_effort_press(
 /// A longer one is skipped, as every long line was before.
 const LONG_LINE_CAP: u64 = 32 * 1024 * 1024;
 
+/// Which stretch of a transcript a page asks for (t-82901).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LogRead {
+    /// From this byte on: a page following its file as it grows.
+    After(u64),
+    /// The newest turns, read back from the file's end: a page opening on a
+    /// conversation.
+    Tail,
+    /// The turns whose lines end at this byte, read back from it: a page
+    /// reaching above the first turn it holds (「이전 기록 더 보기」).
+    Before(u64),
+}
+
+impl LogRead {
+    /// What a page's ask names: a cursor to read on from, a place to read
+    /// back from, or neither — never both.
+    pub(crate) fn asked(after: Option<u64>, before: Option<u64>) -> Result<Self, String> {
+        match (after, before) {
+            (Some(_), Some(_)) => {
+                Err("a read goes on from a cursor or back from a place, not both".to_string())
+            }
+            (Some(after), None) => Ok(Self::After(after)),
+            (None, Some(before)) => Ok(Self::Before(before)),
+            (None, None) => Ok(Self::Tail),
+        }
+    }
+}
+
+/// How far one read back reaches, and what it gathers before it stops
+/// ([`transcript_log_back`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BackReach {
+    /// The bytes one step back reads.
+    pub(crate) step: u64,
+    /// It stops once this many turns a person reads are gathered.
+    pub(crate) said: usize,
+    /// It stops once this many turns of any kind are gathered.
+    pub(crate) rows: usize,
+    /// It takes no further step once this many bytes are read — but a line it
+    /// stands inside with no line taken yet is read whole, up to `long_line`,
+    /// so every read makes its way up.
+    pub(crate) budget: u64,
+    /// The longest line it takes whole: a longer one is passed over, and the
+    /// answer says so (`skipped`).
+    pub(crate) long_line: u64,
+}
+
+/// The page's reach: a step of [`SUBAGENT_LOG_CHUNK`], as the read from a
+/// cursor takes, until [`TRANSCRIPT_SAID_TURNS`] said turns or
+/// [`TRANSCRIPT_BACK_ROWS`] turns of any kind are gathered or
+/// [`TRANSCRIPT_BACK_BUDGET`] is read.
+pub(crate) const PAGE_REACH: BackReach = BackReach {
+    step: SUBAGENT_LOG_CHUNK,
+    said: TRANSCRIPT_SAID_TURNS,
+    rows: TRANSCRIPT_BACK_ROWS,
+    budget: TRANSCRIPT_BACK_BUDGET,
+    long_line: LONG_LINE_CAP,
+};
+
+/// A page's first read, from the file's end: the page's reach held to one
+/// step — the newest [`SUBAGENT_LOG_CHUNK`]'s whole lines, what the first
+/// read cost before t-82901 — so a conversation stands on its newest turns
+/// as soon as it did then. The page reads up from where they begin with
+/// [`PAGE_REACH`] once they are drawn: a first read by turns took up to
+/// [`TRANSCRIPT_BACK_BUDGET`] and the page stood empty while it was read
+/// (the person, 10-29 17:2x: 「열면 바로 그려지지 않음」).
+pub(crate) const FIRST_REACH: BackReach = BackReach {
+    budget: SUBAGENT_LOG_CHUNK,
+    ..PAGE_REACH
+};
+
 /// One window of a transcript as the one reader read it: the page's answer,
 /// and the stretch of the file it came out of. What the reading cost is
 /// counted where every read passes, not added up here — see [`Metered`].
@@ -378,9 +433,77 @@ struct WindowRead {
     ended: bool,
 }
 
+/// Where each whole line in `bytes` stands — every one ending at its line
+/// end; what follows the last line end is not a line yet.
+fn line_spans(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
+    let mut spans = Vec::new();
+    let mut begins = 0;
+    for (at, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            spans.push(begins..at + 1);
+            begins = at + 1;
+        }
+    }
+    spans
+}
+
+/// One whole line of a transcript, which begins at `at` in its file, as the
+/// words core's reader reads: its payloads set aside, each leaving its place
+/// in the file (t-6323 A8).
+fn line_text(line: &[u8], at: u64) -> String {
+    let bytes = zerocode_core::transcript::elide_payloads(line, at);
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The turns one line's words say, each with the place its line begins at
+/// (t-82901). What a line MEANS is core's: one owner for the shape of a
+/// transcript.
+fn line_turns(text: &str, at: u64, detail: zerocode_core::transcript::Detail) -> Vec<LineTurn> {
+    zerocode_core::transcript::turns_in_with(text, detail)
+        .into_iter()
+        .map(|turn| LineTurn { line: at, turn })
+        .collect()
+}
+
+/// Whether a person reads `turn` as something said — by the person or by
+/// the agent — rather than a thought, a call or what a call brought back.
+fn said_turn(turn: &zerocode_core::transcript::TranscriptTurn) -> bool {
+    turn.role == "user" || turn.role == "assistant"
+}
+
+/// The whole lines in `bytes`, which begin at `base` in the file, as turns —
+/// and the model and the context the newest of them name.
+fn lines_log(
+    bytes: &[u8],
+    base: u64,
+    detail: zerocode_core::transcript::Detail,
+) -> (
+    Vec<LineTurn>,
+    Option<String>,
+    Option<zerocode_core::transcript::TranscriptUsage>,
+) {
+    let mut turns = Vec::new();
+    let mut texts = Vec::new();
+    for span in line_spans(bytes) {
+        let at = base + span.start as u64;
+        let text = line_text(&bytes[span], at);
+        turns.extend(line_turns(&text, at, detail));
+        texts.push(text);
+    }
+    let model = texts
+        .iter()
+        .rev()
+        .find_map(|text| zerocode_core::transcript::model_in(text));
+    let usage = texts
+        .iter()
+        .rev()
+        .find_map(|text| zerocode_core::transcript::usage_in(text));
+    (turns, model, usage)
+}
+
 /// The one line a read found no end inside, read whole with its payloads set
-/// aside. It begins at `from`, or — for a read that opened inside it, the
-/// tail's — after the line end before `from`. `None` when it runs past
+/// aside. It begins at `from`, or — for a read that opened inside it — after
+/// the line end before `from`. `None` when it runs past
 /// `cap` (the caller skips it); an answer with nothing new, and
 /// the cursor left at the line's start, when it has no end yet — it is still
 /// being written. The conversation view's road only: `worker-transcript`
@@ -432,6 +555,7 @@ fn long_line_log<F: std::io::Read + std::io::Seek>(
                     skipped: false,
                     more: false,
                     folded: folded || start > 0,
+                    start,
                     usage: None,
                     about: None,
                 },
@@ -448,19 +572,19 @@ fn long_line_log<F: std::io::Read + std::io::Seek>(
             return Ok(None);
         }
     }
-    let bytes = zerocode_core::transcript::elide_payloads(&line, start);
-    let text = String::from_utf8_lossy(&bytes);
+    let (turns, model, usage) = lines_log(&line, start, detail);
     let next = start + line.len() as u64;
     Ok(Some(WindowRead {
         log: SubagentLog {
-            turns: zerocode_core::transcript::turns_in_with(&text, detail),
-            model: zerocode_core::transcript::model_in(&text),
+            turns,
+            model,
             next,
             found: true,
             skipped: false,
             more: next < size,
             folded: folded || start > 0,
-            usage: zerocode_core::transcript::usage_in(&text),
+            start,
+            usage,
             about: None,
         },
         lines: start..next,
@@ -468,33 +592,204 @@ fn long_line_log<F: std::io::Read + std::io::Seek>(
     }))
 }
 
-/// One transcript's turns from `after` on — complete lines only, never more
-/// than [`SUBAGENT_LOG_CHUNK`] at once, decoded by core's reader. The one
-/// road both doors take (a helper's file, a pane's own), so the two pages
-/// cannot learn to read the same file differently. No cursor (`None`) asks
-/// for the TAIL: the last chunk, from the first whole line inside it, and
-/// `folded` says whether anything stood above it.
+/// One transcript's turns, as the page asks for them ([`LogRead`]) — complete
+/// lines only, decoded by core's reader, each turn with where its line begins.
+/// The one road both doors take (a helper's file, a pane's own), so the two
+/// pages cannot learn to read the same file differently. From a cursor, never
+/// more than [`SUBAGENT_LOG_CHUNK`] at once; with none, back by turns within
+/// the last chunk ([`FIRST_REACH`]), and from a place, back by turns
+/// ([`transcript_log_back`], [`PAGE_REACH`]): a page opens on the newest
+/// turns, `folded` says whether anything stood above them, and `start` is
+/// where a read of what stood above ends.
 pub(crate) fn transcript_log_at(
     path: impl AsRef<std::path::Path>,
-    after: Option<u64>,
+    read: LogRead,
 ) -> Result<SubagentLog, String> {
     let mut file = std::fs::File::open(path.as_ref()).map_err(|error| error.to_string())?;
     let size = file.metadata().map_err(|error| error.to_string())?.len();
-    transcript_log_window(
-        &mut file,
-        size,
-        after,
-        SUBAGENT_LOG_CHUNK,
-        Some(LONG_LINE_CAP),
-        zerocode_core::transcript::Detail::Clipped,
-    )
-    .map(|window| window.log)
+    let detail = zerocode_core::transcript::Detail::Clipped;
+    match read {
+        LogRead::After(after) => transcript_log_window(
+            &mut file,
+            size,
+            Some(after),
+            SUBAGENT_LOG_CHUNK,
+            Some(LONG_LINE_CAP),
+            detail,
+        )
+        .map(|window| window.log),
+        LogRead::Tail => transcript_log_back(&mut file, size, size, FIRST_REACH, detail),
+        // Shorter than the place the page holds from: the file was replaced
+        // under it, and what stands above that place now is another
+        // conversation's. The page's next read on from its cursor says so.
+        LogRead::Before(before) if before > size => {
+            return Err(format!(
+                "the transcript is {size} bytes, shorter than the place {before} the page \
+                 reads back from — it was replaced"
+            ));
+        }
+        LogRead::Before(before) => transcript_log_back(&mut file, size, before, PAGE_REACH, detail),
+    }
     .map_err(|error| error.to_string())
 }
 
-/// The same read with the window, the long-line road and the detail a
-/// caller names: at most `window` bytes from `after`, or the last `window`
-/// bytes before `size`; complete lines only, decoded by core's reader.
+/// The `step` bytes below `cursor` — fewer at the file's start — and the
+/// cursor moved down past them.
+fn read_below<F: std::io::Read + std::io::Seek>(
+    file: &mut F,
+    cursor: &mut u64,
+    step: u64,
+) -> std::io::Result<Vec<u8>> {
+    let take = step.min(*cursor);
+    *cursor -= take;
+    file.seek(std::io::SeekFrom::Start(*cursor))?;
+    let mut bytes = vec![0u8; usize::try_from(take).unwrap_or_default()];
+    file.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// The turns whose lines end at or before `end`, read back from it a step at
+/// a time until `reach` is met (t-82901): newest line first, a line whole or
+/// not at all, so the answer begins where a line does (`start`) and a read of
+/// what stands above it ends there — nothing twice, nothing between. Before
+/// it, a page's first read was its last [`SUBAGENT_LOG_CHUNK`] and nothing
+/// more: two or three turns of a long session, and no way up.
+///
+/// What follows the last line end at or before `end` is not a turn yet: at
+/// the file's end, a line still being written — `next` waits at its start, as
+/// a read on from a cursor does — and read back from inside a line longer
+/// than the long-line cap, the part of it the last read left. Such a line is
+/// passed over and said (`skipped`), its start the next read's place; a read
+/// stopped by its budget inside one says so with that place too, so every
+/// read makes its way up. `file` is read here and never opened, and `size` is
+/// what its opener measured: every byte this reads lies below `end`, which
+/// lies within it. Only a read from the file's end names a model and a
+/// context — older lines say nothing of the conversation now.
+pub(crate) fn transcript_log_back<F: std::io::Read + std::io::Seek>(
+    file: &mut F,
+    size: u64,
+    end: u64,
+    reach: BackReach,
+    detail: zerocode_core::transcript::Detail,
+) -> std::io::Result<SubagentLog> {
+    let newest = end == size;
+    let mut cursor = end;
+    let mut spent = 0;
+    // The bytes read below where the whole lines end, from `cursor` on.
+    let mut below = Vec::new();
+    let mut stop = None;
+    while cursor > 0 && end - cursor < reach.long_line {
+        let mut bytes = read_below(file, &mut cursor, reach.step)?;
+        spent += bytes.len() as u64;
+        if let Some(at) = bytes.iter().rposition(|byte| *byte == b'\n') {
+            stop = Some(cursor + at as u64 + 1);
+            bytes.truncate(at + 1);
+            below = bytes;
+            break;
+        }
+    }
+    let (stop, mut skipped) = match stop {
+        Some(stop) => (stop, false),
+        // The file's first line, still being written: nothing whole yet.
+        None if cursor == 0 => (0, false),
+        // No line end within the long-line cap: one line too long to take.
+        // The next read looks on from where this one stopped.
+        None => (cursor, true),
+    };
+    let mut start = stop;
+    // Each line's turns, newest line first.
+    let mut lines: Vec<Vec<LineTurn>> = Vec::new();
+    let (mut said, mut rows) = (0, 0);
+    let (mut model, mut usage) = (None, None);
+    // Inside a line too long to take, looking for where it begins.
+    let mut passing = false;
+    // Nothing whole below `end`: nothing to take.
+    if stop > 0 {
+        'back: loop {
+            // `below` is the stretch from `cursor` to `start`: whole lines, after
+            // a piece of one that began above `cursor` — unless it began at the
+            // file's first byte.
+            let first = if cursor == 0 {
+                0
+            } else {
+                below
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(below.len(), |at| at + 1)
+            };
+            for span in line_spans(&below[first..]).into_iter().rev() {
+                let at = cursor + (first + span.start) as u64;
+                let text = line_text(&below[first + span.start..first + span.end], at);
+                if newest {
+                    model = model.or_else(|| zerocode_core::transcript::model_in(&text));
+                    usage = usage.or_else(|| zerocode_core::transcript::usage_in(&text));
+                }
+                let turns = line_turns(&text, at, detail);
+                said += turns.iter().filter(|one| said_turn(&one.turn)).count();
+                rows += turns.len();
+                lines.push(turns);
+                start = at;
+                if said >= reach.said || rows >= reach.rows {
+                    break 'back;
+                }
+            }
+            below.truncate(first);
+            if cursor == 0 {
+                break;
+            }
+            if below.len() as u64 > reach.long_line {
+                // Longer than the cap: passed over, and said.
+                skipped = true;
+                passing = true;
+                below.clear();
+            }
+            // A line this read stands inside, none taken yet, is read whole.
+            let inside = start == stop && !below.is_empty();
+            if spent >= reach.budget && !inside {
+                if passing {
+                    // Its start not found within the budget: the next read looks
+                    // on from here.
+                    start = cursor;
+                }
+                break;
+            }
+            let mut bytes = read_below(file, &mut cursor, reach.step)?;
+            spent += bytes.len() as u64;
+            if passing {
+                match bytes.iter().rposition(|byte| *byte == b'\n') {
+                    Some(at) => {
+                        passing = false;
+                        start = cursor + at as u64 + 1;
+                        bytes.truncate(at + 1);
+                        below = bytes;
+                    }
+                    None if cursor == 0 => start = 0,
+                    None => {}
+                }
+                continue;
+            }
+            bytes.extend_from_slice(&below);
+            below = bytes;
+        }
+    }
+    Ok(SubagentLog {
+        skipped,
+        turns: lines.into_iter().rev().flatten().collect(),
+        model,
+        next: stop,
+        found: true,
+        more: stop < size,
+        folded: start > 0,
+        start,
+        usage,
+        about: None,
+    })
+}
+
+/// The read from a cursor with the window, the long-line road and the
+/// detail a caller names: at most `window` bytes from `after`, or the last
+/// `window` bytes before `size`; complete lines only, decoded by core's
+/// reader.
 ///
 /// `file` is read here and never opened, and `size` is what its opener
 /// measured when it opened it: every byte this reads lies below `size`, so
@@ -548,22 +843,23 @@ fn transcript_log_window<F: std::io::Read + std::io::Seek>(
     {
         return Ok(long);
     }
-    // The payloads step aside, leaving where they stand in the file.
+    // The payloads step aside, leaving where they stand in the file, a line
+    // at a time — each turn keeps where its line begins (t-82901).
     let base = from + u64::try_from(chunk.start).unwrap_or_default();
-    let bytes = zerocode_core::transcript::elide_payloads(chunk.bytes, base);
-    let text = String::from_utf8_lossy(&bytes);
+    let (turns, model, usage) = lines_log(chunk.bytes, base, detail);
     let next = from + u64::try_from(chunk.consumed).unwrap_or_default();
     let whole = u64::try_from(chunk.bytes.len()).unwrap_or_default();
     Ok(WindowRead {
         log: SubagentLog {
-            turns: zerocode_core::transcript::turns_in_with(&text, detail),
-            model: zerocode_core::transcript::model_in(&text),
+            turns,
+            model,
             next,
             found: true,
             skipped: chunk.skipped,
             more: next < size,
             folded,
-            usage: zerocode_core::transcript::usage_in(&text),
+            start: base,
+            usage,
             about: None,
         },
         lines: base..base + whole,
@@ -765,8 +1061,10 @@ fn transcript_turns_in<F: std::io::Read + std::io::Seek>(
             skipped: got.lines.is_empty() && got.ended,
         };
         let wider = tail_window_within(TRANSCRIPT_WIDEST, size, file.left());
-        if size <= window || wider <= window || ask.satisfied_by(&got.log.turns) {
-            return Ok((got.log.turns, scan));
+        // The verb answers turns; where their lines begin is the page's.
+        let turns: Vec<_> = got.log.turns.into_iter().map(|one| one.turn).collect();
+        if size <= window || wider <= window || ask.satisfied_by(&turns) {
+            return Ok((turns, scan));
         }
         window = wider;
     }

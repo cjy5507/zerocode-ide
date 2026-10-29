@@ -13,6 +13,14 @@
  *   panes-1/10/30  터미널 판 N개, 판마다 60×220 한 화면(빌드 로그 모양의 프레임)
  *   scrollback     판 하나에 5,000줄을 흘린 뒤 히스토리 한가운데를 보는 화면
  *   conversation   400턴 대화(conversation-perf의 픽스처) — 재기만 한다
+ *   chat-long      긴 전사(400블록, 결과 줄 60 KiB — 이 기계의 긴 세션의 무게) 판 하나의 대화 보기를 연 화면
+ *                  (t-82901). 읽기는 각 창의 백엔드대로 답한다: 위로 읽는 길이 있는 창엔 턴 단위, 없는 창엔
+ *                  마지막 256 KiB(`standLongPaneChats`) — 전/후가 저마다의 백엔드로 재진다
+ *   chat-long-3    같은 판 셋을 차례로 연 화면(앞의 둘은 뒤에 선다)
+ *   chat-long-top  판 하나를 「이전 기록 더 보기」로 첫 턴까지 읽어 올린 화면 — 붙잡는 턴의 상한이 서는지
+ *   chat-long-held 같은 전사를 처음부터 끝까지 읽어 상한(400행)만큼 든 헬퍼 페이지 — 위로 읽는 길이 없던 창도
+ *                  이미 들 수 있던 상태, `chat-long-top`의 기준. 이 둘은 읽기를 많이 하고 놓은 것이 많아 할당기가
+ *                  페이지를 돌려주는 박자(`LAYER_SETTLE_MS`)를 기다린 뒤 잰다
  *   gallery        스크린숏 증거 카드 360장을 끝까지 내려 본 갤러리(그림은 사람의 카탈로그에서
  *                  잰 크기 분포: 1280×720·3460×2464·640×480·925×601, 압축 크기 중앙값 약 271 KiB)
  *   knowledge      합성 볼트 1,500쪽의 지식 그래프(평면 지도)
@@ -48,11 +56,15 @@ import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
 import { seedUniverseVault } from "./knowledge-universe-fixture.mjs";
 import { standTeamScene } from "./sidebar-team.mjs";
 import { openOrbit } from "./board-orbit.mjs";
+import { standLongPaneChats } from "./conversation-earlier.mjs";
 
 export const SCENARIOS = Object.freeze([
   "empty", "panes-1", "panes-10", "panes-30", "scrollback", "conversation", "gallery", "knowledge", "sidebar",
   "layers", "layers-no-orbit", "layers-no-knowledge", "layers-panes", "layers-chat", "layers-chat-gone",
+  "chat-long", "chat-long-3", "chat-long-top", "chat-long-held",
 ]);
+/* 읽기를 많이 하고 놓은 것이 많은 장면 — 할당기가 놓은 페이지를 돌려준 뒤 잰다. */
+const CHURNING = new Set(["chat-long-top", "chat-long-held"]);
 /* 숨긴 것 장면의 판 수 — 사람 창의 판(8~10)에 맞춘다. 일곱은 숨은 탭이다. */
 const LAYER_PANES = 8;
 /* 사람의 창(레티나)과 같은 기기 픽셀 — 그래픽 표면의 크기는 이 배율의 제곱으로 간다. */
@@ -409,6 +421,10 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
       if (name.startsWith("panes-")) return openPanes(page, Number(name.slice("panes-".length)));
       if (name === "scrollback") return scrollHistory(page);
       if (name === "conversation") return (await openFixtureConversation(page, conversationFixture())) ?? {};
+      if (name === "chat-long") return standLongPaneChats(page);
+      if (name === "chat-long-3") return standLongPaneChats(page, { panes: 3 });
+      if (name === "chat-long-top") return standLongPaneChats(page, { toTop: true });
+      if (name === "chat-long-held") return standLongPaneChats(page, { helper: true });
       if (name === "gallery") return openGallery(page, pictures);
       if (name === "knowledge") return openKnowledge(page);
       if (name === "sidebar") return standTeamScene(page).then(() => page.evaluate(() => window.__ROWS__()));
@@ -422,7 +438,7 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
       return {};
     };
     const detail = await within(SCENARIO_PATIENCE_MS, stand(), name);
-    await page.waitForTimeout(layers ? LAYER_SETTLE_MS : SETTLE_MS);
+    await page.waitForTimeout(layers || CHURNING.has(name) ? LAYER_SETTLE_MS : SETTLE_MS);
     const row = { engine, scenario: name, ...detail };
     if (cdp) {
       await cdp.send("HeapProfiler.collectGarbage");
