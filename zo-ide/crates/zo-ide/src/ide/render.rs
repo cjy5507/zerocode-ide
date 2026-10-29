@@ -462,16 +462,15 @@ impl<W: Write> Renderer<W> {
                 self.usage_total = Some(cumulative.total_tokens_u64());
             }
             RenderBlock::PermissionPrompt(prompt) => {
-                match &prompt.question {
-                    // A question zo puts to the person names no tool and does
-                    // not answer to the permission vocabulary (t-17474): its
-                    // title, and the keys its own choices are answered by.
-                    Some(question) => {
-                        let keys = question_choice_keys(&prompt.choices);
-                        self.parked_line(&sanitize_inline(&question.title), &keys);
-                    }
-                    None => self.parked_line(&sanitize_inline(&prompt.tool_name), PERMISSION_KEYS),
-                }
+                // A question zo puts to the person names no tool (t-17474): it
+                // is parked by its title. Either way the line names the keys
+                // the prompt's own choices are answered by (t-81117).
+                let subject = prompt
+                    .question
+                    .as_ref()
+                    .map_or(prompt.tool_name.as_str(), |question| question.title.as_str());
+                let keys = choice_keys(&prompt.choices);
+                self.parked_line(&sanitize_inline(subject), &keys);
                 return Some(PendingPrompt::Permission(prompt));
             }
             RenderBlock::UserQuestionPrompt(prompt) => {
@@ -1004,10 +1003,6 @@ impl<W: Write> Renderer<W> {
 // 순수 헬퍼
 // ============================================================================
 
-/// 권한 프롬프트의 키 목록. 어휘는 zo TUI 의 `key_to_permission_decision` 과
-/// 같다.
-const PERMISSION_KEYS: &str = "[y]once [a]always [n]deny";
-
 /// JSON 로드가 권한 프롬프트 하나에 내는 줄. 도구 프롬프트는 이름만 싣고,
 /// zo 가 스스로 던지는 질문은 이벤트 채널의 프레임과 같은 세 키(`kind`·`topic`·
 /// `title`)를 더한다(t-17474).
@@ -1024,10 +1019,12 @@ fn permission_request_line(prompt: &runtime::message_stream::PermissionPrompt) -
     line
 }
 
-/// 사람에게 던지는 질문(도구가 아닌 것)의 키 목록 — 그 질문의 선택지가 실제로
-/// 받는 글자와 라벨이다. 어휘는 [`crate::ide::prompt::parse_permission_answer`]
-/// 가 맞추는 `choice.key` 와 같다(t-17474).
-fn question_choice_keys(choices: &[runtime::message_stream::PermissionChoice]) -> String {
+/// 권한 프롬프트(도구 호출이든 사람에게 던지는 질문이든)의 키 목록 — 그
+/// 프롬프트의 선택지가 실제로 받는 글자와 라벨이다. 어휘는
+/// [`crate::ide::prompt::parse_permission_answer`] 가 맞추는 `choice.key` 와
+/// 같다(t-17474). 고정 안내를 두지 않는다: 기본 선택지의 `y` 는 지속
+/// 허락이다(t-81117).
+fn choice_keys(choices: &[runtime::message_stream::PermissionChoice]) -> String {
     choices
         .iter()
         .map(|choice| format!("[{}] {}", choice.key, sanitize_inline(&choice.label)))
