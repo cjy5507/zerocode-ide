@@ -34,7 +34,7 @@
 #![allow(dead_code)]
 
 use std::collections::hash_map::RandomState;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::hash::BuildHasher;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -52,6 +52,20 @@ const BAND_SPAN: u16 = 4_096;
 const LOWEST_PORT: u16 = 1_024;
 /// The folder under the temp dir that holds the lock files.
 const LOCK_DIR: &str = "zerocode-test-ports";
+
+/// A lock file that could not be opened or locked at all — which says nothing
+/// about a holder — with the OS's words.
+#[derive(Debug)]
+pub struct LockFailure {
+    path: PathBuf,
+    error: io::Error,
+}
+
+impl std::fmt::Display for LockFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.path.display(), self.error)
+    }
+}
 
 /// A port a test may count on until the value is dropped.
 pub struct QuietPort {
@@ -152,22 +166,41 @@ fn apart_slot_in(
     let slots = (region.end - region.start) / APART_SLOT_SPAN;
     let waiting = Instant::now();
     loop {
+        let mut failures = Vec::new();
         for slot in 0..slots {
-            if let Some(lock) = lock_port(dir, slot) {
-                let start = region.start + slot * APART_SLOT_SPAN;
-                return ApartSlot {
-                    band: start..start + APART_SLOT_SPAN,
-                    _lock: lock,
-                };
+            match lock_port(dir, slot) {
+                Ok(Some(lock)) => {
+                    let start = region.start + slot * APART_SLOT_SPAN;
+                    return ApartSlot {
+                        band: start..start + APART_SLOT_SPAN,
+                        _lock: lock,
+                    };
+                }
+                Ok(None) => {}
+                Err(failure) => failures.push(failure),
             }
         }
         let remaining = timeout.saturating_sub(waiting.elapsed());
         assert!(
             !remaining.is_zero(),
-            "timed out after {timeout:?}: all {slots} bands of {region:?} are held by tests judging a release; slot locks: {}",
+            "timed out after {timeout:?}: {}; slot locks: {}",
+            untaken_bands(slots, &region, &failures),
             dir.display()
         );
         pause(SLOT_RETRY_INTERVAL.min(remaining));
+    }
+}
+
+/// Why a scan took none of the `slots` bands of `region`: every one held, or
+/// how many of them could not be locked at all and what the first said.
+fn untaken_bands(slots: u16, region: &Range<u16>, failures: &[LockFailure]) -> String {
+    match failures {
+        [] => format!("all {slots} bands of {region:?} are held by tests judging a release"),
+        [first, ..] => format!(
+            "of the {slots} bands of {region:?}, {} are held by tests judging a release and {} could not be locked (the first {first})",
+            usize::from(slots).saturating_sub(failures.len()),
+            failures.len()
+        ),
     }
 }
 
@@ -226,19 +259,28 @@ pub fn netsh_start(text: &str) -> Option<u16> {
 }
 
 /// Takes the lock on `port`'s file in `dir`, or `None` when another holder has
-/// it.
-fn lock_port(dir: &Path, port: u16) -> Option<File> {
+/// it. A file that cannot be opened or locked at all is an error with its path,
+/// never `None`: read as held, it sent a claim round its whole wait and lost
+/// what the OS said (R10 P2, t-75669).
+fn lock_port(dir: &Path, port: u16) -> Result<Option<File>, LockFailure> {
     let path = lock_path_in(dir, port);
-    std::fs::create_dir_all(path.parent()?).ok()?;
+    let failure = |error| LockFailure {
+        path: path.clone(),
+        error,
+    };
+    std::fs::create_dir_all(dir).map_err(failure)?;
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(path)
-        .ok()?;
-    file.try_lock().ok()?;
-    Some(file)
+        .open(&path)
+        .map_err(failure)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(failure(error)),
+    }
 }
 
 impl QuietPort {
@@ -265,17 +307,29 @@ impl QuietPort {
         // Only spreads the processes over the band; the lock is what keeps
         // two of them apart.
         let first = RandomState::new().hash_one(std::process::id()) % span;
+        let mut failures = Vec::new();
         for step in 0..span {
             let offset = (first + step) % span;
             let port = band.start + u16::try_from(offset).expect("the offset is below the span");
-            let Some(lock) = lock_port(dir, port) else {
-                continue;
+            let lock = match lock_port(dir, port) {
+                Ok(Some(lock)) => lock,
+                Ok(None) => continue,
+                Err(failure) => {
+                    failures.push(failure);
+                    continue;
+                }
             };
             if let Ok(held) = bind(port) {
                 return (Self { port, _lock: lock }, held);
             }
         }
-        panic!("no free loopback port in {band:?}");
+        match failures.as_slice() {
+            [] => panic!("no free loopback port in {band:?}"),
+            [first, ..] => panic!(
+                "no free loopback port in {band:?}: {} of its lock files could not be taken (the first {first})",
+                failures.len()
+            ),
+        }
     }
 
     /// A loopback port nobody listens on, so a connection to it is refused, and
@@ -312,7 +366,13 @@ mod slot_tests {
 
     impl Drop for LockDir {
         fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.0).expect("remove the test's slot lock folder");
+            // A test may have put a file where the folder goes.
+            let removed = if self.0.is_dir() {
+                std::fs::remove_dir_all(&self.0)
+            } else {
+                std::fs::remove_file(&self.0)
+            };
+            removed.expect("remove the test's slot lock folder");
         }
     }
 
@@ -366,6 +426,30 @@ mod slot_tests {
         let message = panic.downcast_ref::<String>().expect("a panic message");
         assert!(message.contains("timed out after 20ms"), "{message}");
         assert!(message.contains("all 8 bands"), "{message}");
+        assert!(message.contains(&dir.0.display().to_string()), "{message}");
+    }
+
+    /// A lock that cannot be opened is held by nobody: a claim that read it
+    /// as held waited its whole thirty seconds and then blamed holders, the
+    /// OS's own words lost (R10 P2, t-75669 — EMFILE when parallel tests had
+    /// spent the file handles). A file where the lock folder goes cannot be
+    /// locked in; a read-only folder does not stand in, since the durable
+    /// writes put its permissions back.
+    #[test]
+    fn a_lock_folder_that_cannot_be_opened_is_said_with_the_os_words_not_read_as_held() {
+        let dir = LockDir::new();
+        std::fs::write(&dir.0, "not a folder").expect("a file where the folder goes");
+        let cause = std::fs::create_dir_all(&dir.0)
+            .expect_err("a file is no folder")
+            .to_string();
+        let panic = std::panic::catch_unwind(|| {
+            apart_slot_in(&dir.0, None, Duration::from_millis(20), std::thread::sleep)
+        })
+        .err()
+        .expect("no slot can be taken in a file");
+        let message = panic.downcast_ref::<String>().expect("a panic message");
+        assert!(message.contains("8 could not be locked"), "{message}");
+        assert!(message.contains(&cause), "{message}");
         assert!(message.contains(&dir.0.display().to_string()), "{message}");
     }
 }

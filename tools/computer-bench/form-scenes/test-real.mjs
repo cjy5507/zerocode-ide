@@ -72,8 +72,15 @@ const refused = await standIn("refused", ["cat > /dev/null", INIT,
   "exit 1"].join("\n"));
 /* An agent that never ends, with a child of its own that must not outlive it. */
 const spins = await standIn("spins", ["cat > /dev/null", INIT, "sleep 654321 &", "while :; do sleep 1; done"].join("\n"));
-/* An agent that takes turn after turn. */
-const chatters = await standIn("chatters", ["cat > /dev/null", INIT, ...["m1", "m2", "m3", "m4", "m5", "m6"].map((id) => turn(id, "zerocode-browser list")), "sleep 654322 &", "while :; do sleep 1; done"].join("\n"));
+/* A child that does not go at the first stop it hears, and goes at the next: a
+ * forked shell still holding its parent's trap eats a stop that lands between
+ * fork and exec, as bash 3.2 does (green v1 at load 12, t-84687). It says it is
+ * ready once it would eat one. */
+const deaf = await standIn("deaf", ["trap 'trap - TERM' TERM", ": > deaf-ready", "while :; do sleep 654322; done"].join("\n"));
+/* An agent that takes turn after turn, and starts that child as it is told to
+ * stop: born after the stop went out, the child never heard it — as a fork the
+ * stop crosses does not (l87c g2 at load 13–15, t-84687). */
+const chatters = await standIn("chatters", ["cat > /dev/null", `trap '${deaf} & until [ -e deaf-ready ]; do sleep 0.05; done; exit 0' TERM`, INIT, ...["m1", "m2", "m3", "m4", "m5", "m6"].map((id) => turn(id, "zerocode-browser list")), "sleep 654322 &", "while :; do sleep 1; done"].join("\n"));
 
 /* An agent whose stream breaks a Korean syllable (three bytes) across two writes. */
 const splits = await standIn("splits", ["cat > /dev/null", INIT,

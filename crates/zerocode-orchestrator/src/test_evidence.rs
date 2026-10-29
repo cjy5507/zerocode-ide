@@ -43,6 +43,10 @@ const EMPTY_GRAFT_FILE: &str = "/dev/null";
 
 static NEXT_WORKTREE: AtomicU64 = AtomicU64::new(0);
 
+/// Where a command's deadline reads the time when a test hands its own clock.
+#[cfg(test)]
+type CommandClock = std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync>;
+
 /// One executable and argv chosen by the host application.
 ///
 /// A command id is an immutable semantic version. Change it whenever the
@@ -238,6 +242,14 @@ pub struct VerificationRunner {
     git_output_limit: usize,
     stdout_limit: usize,
     stderr_limit: usize,
+    /// The clock the command's deadline reads instead of the monotonic one.
+    /// A test whose fixture must make something — a pipe holder, a
+    /// descendant — before the deadline is worth anything hands one that
+    /// stands still until the fixture says it has, instead of hoping a
+    /// loaded scheduler starts the fixture inside the budget (t-77995). Git
+    /// calls keep the monotonic clock.
+    #[cfg(test)]
+    command_clock: Option<CommandClock>,
 }
 
 impl std::fmt::Debug for VerificationRunner {
@@ -280,6 +292,8 @@ impl VerificationRunner {
                 git_output_limit: GIT_OUTPUT_LIMIT,
                 stdout_limit: TEST_STDOUT_LIMIT,
                 stderr_limit: TEST_STDERR_LIMIT,
+                #[cfg(test)]
+                command_clock: None,
             })
         }
     }
@@ -385,16 +399,19 @@ impl VerificationRunner {
         let mut command = Command::new(&configured.program);
         command.args(&configured.args).current_dir(worktree);
         sanitize_git_environment(&mut command);
-        bounded_process::run(
-            &mut command,
-            None,
-            ProcessLimits {
-                timeout: configured.timeout,
-                stdout_bytes: self.stdout_limit,
-                stderr_bytes: self.stderr_limit,
-            },
-        )
-        .map_err(process_error)
+        let limits = ProcessLimits {
+            timeout: configured.timeout,
+            stdout_bytes: self.stdout_limit,
+            stderr_bytes: self.stderr_limit,
+        };
+        #[cfg(test)]
+        {
+            if let Some(clock) = &self.command_clock {
+                return bounded_process::run_on(&mut command, None, limits, clock.as_ref())
+                    .map_err(process_error);
+            }
+        }
+        bounded_process::run(&mut command, None, limits).map_err(process_error)
     }
 
     fn create_worktree(
@@ -1611,6 +1628,56 @@ mod tests {
     /// not reach its marker inside two.
     const FAULT_DEADLINE: Duration = Duration::from_secs(5);
 
+    /// How far past its whole deadline a late fixture starts.
+    const LATE_START_MARGIN: Duration = Duration::from_millis(100);
+
+    /// A first line that holds a fixture back past `deadline` before it does
+    /// anything: the late start a loaded gate gives a fixture (l81e g2 at
+    /// load 19.7 on 12 cores, l87e g2 at 11–16; t-77995), made deterministic.
+    fn late_start(deadline: Duration) -> String {
+        format!("sleep {}", (deadline + LATE_START_MARGIN).as_secs_f64())
+    }
+
+    /// The command deadline of a fixture that must make something — a pipe
+    /// holder, a descendant — before its deadline is worth anything. It runs
+    /// from the fixture's own pid file ([`clock_from_signal`]), never from
+    /// the spawn, so a scheduler that starts the fixture late cannot spend it.
+    const SIGNALLED_DEADLINE: Duration = Duration::from_secs(2);
+
+    /// How long [`clock_from_signal`] stands still waiting for its signal
+    /// before it runs anyway: a ceiling for a starved machine, never a
+    /// measurement. A fixture that never signals then times out, and its
+    /// test says so.
+    const SIGNAL_PATIENCE: Duration = Duration::from_secs(60);
+
+    /// A command clock that stands still from its first reading until
+    /// `signal` is a non-empty file — the pid a fixture writes once what its
+    /// deadline must outlast exists — and runs from that reading on: the
+    /// runner's deadline then spends its whole budget after the signal,
+    /// however late the fixture started. It runs at the latest
+    /// [`SIGNAL_PATIENCE`] after its first reading.
+    fn clock_from_signal(signal: PathBuf) -> CommandClock {
+        use std::sync::{Mutex, PoisonError};
+        use std::time::Instant;
+        // The clock's first reading, and the reading that first saw the signal.
+        let readings: Mutex<(Option<Instant>, Option<Instant>)> = Mutex::new((None, None));
+        Arc::new(move || {
+            let now = Instant::now();
+            let mut readings = readings.lock().unwrap_or_else(PoisonError::into_inner);
+            let (first, signalled) = &mut *readings;
+            let first = *first.get_or_insert(now);
+            if signalled.is_none()
+                && (fs::metadata(&signal).is_ok_and(|file| file.len() > 0)
+                    || now.saturating_duration_since(first) >= SIGNAL_PATIENCE)
+            {
+                *signalled = Some(now);
+            }
+            signalled.map_or(first, |signalled| {
+                first + now.saturating_duration_since(signalled)
+            })
+        })
+    }
+
     fn private_dir(parent: &Path, name: &str) -> PathBuf {
         let path = parent.join(name);
         fs::create_dir(&path).expect("private directory");
@@ -2077,19 +2144,25 @@ mod tests {
         let script = executable(
             home.path(),
             "timeout",
-            &format!("sleep 30 &\necho $! > '{}'\nwait", marker.display()),
+            &format!(
+                "{}\nsleep 30 &\necho $! > '{}'\nwait",
+                late_start(SIGNALLED_DEADLINE),
+                marker.display()
+            ),
         );
         let command = VerificationCommand::new(
             "timeout-v1",
             script,
             Vec::<OsString>::new(),
-            // The full package runs many real-Git tests in parallel. Give the
-            // shell enough scheduling margin to publish its child pid before
-            // testing the runner's deadline and process-group kill.
-            FAULT_DEADLINE,
+            // Runs from the descendant's pid file, not from the spawn: the
+            // full package runs many real-Git tests in parallel, and a gate
+            // at load 11–16 kept the shell from publishing its child's pid
+            // inside five seconds of the spawn (t-77995).
+            SIGNALLED_DEADLINE,
         )
         .expect("timeout command");
-        let (verification_root, runner) = runner(&home, vec![command]);
+        let (verification_root, mut runner) = runner(&home, vec![command]);
+        runner.command_clock = Some(clock_from_signal(marker.clone()));
         let required = requirement("timeout-v1");
         assert_eq!(
             runner.run(
@@ -2107,10 +2180,7 @@ mod tests {
             .parse()
             .expect("numeric pid");
         for _ in 0..50 {
-            // SAFETY: signal 0 only checks the child process allocated above.
-            let exists = unsafe { libc::kill(descendant, 0) } == 0
-                || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
-            if !exists {
+            if !process_exists(descendant) {
                 assert_eq!(
                     runner
                         .resolver(&store)
@@ -2172,45 +2242,6 @@ mod tests {
             "the proof failed in a process of its own:\n{stdout}{}",
             String::from_utf8_lossy(&output.stderr)
         );
-    }
-
-    /// What one attempt of the pipe-holder proof can speak for.
-    #[derive(Debug, PartialEq, Eq)]
-    enum HolderAttempt {
-        /// The attempt proves nothing about holders either way: it is asked
-        /// again, and six of these is the proof's own honest failure.
-        DidNotRun,
-        /// A holder existed while the deadline ran: the attempt proves.
-        Proves,
-    }
-
-    /// Only an attempt whose command started AND made its holder speaks for
-    /// holders. Under load the two-second deadline can fall after the shell's
-    /// first line but before Python has started and forked — witnessed in the
-    /// l79e gate on 2026-10-26 at load ~100, read then as "the command never
-    /// created its pipe holder" — and a holder that never existed can neither
-    /// extend the deadline nor leave evidence.
-    fn holder_attempt(command_started: bool, holder_made: bool) -> HolderAttempt {
-        if command_started && holder_made {
-            HolderAttempt::Proves
-        } else {
-            HolderAttempt::DidNotRun
-        }
-    }
-
-    /// The pid a holder forked before the deadline writes after it, if it
-    /// does so within a few seconds; `None` when no holder ever came.
-    fn late_holder(marker: &Path) -> Option<i32> {
-        for _ in 0..300 {
-            if let Some(pid) = fs::read_to_string(marker)
-                .ok()
-                .and_then(|pid| pid.trim().parse::<i32>().ok())
-            {
-                return Some(pid);
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        None
     }
 
     /// Every other process whose command line names `path` — a holder found
@@ -2296,14 +2327,8 @@ mod tests {
         assert!(processes_naming(&marker).is_empty());
     }
 
-    #[test]
-    fn only_an_attempt_that_made_its_holder_proves_anything_about_holders() {
-        assert_eq!(holder_attempt(true, true), HolderAttempt::Proves);
-        // l79e g2: the command started, the deadline came before the holder.
-        assert_eq!(holder_attempt(true, false), HolderAttempt::DidNotRun);
-        assert_eq!(holder_attempt(false, false), HolderAttempt::DidNotRun);
-        assert_eq!(holder_attempt(false, true), HolderAttempt::DidNotRun);
-    }
+    /// How many holders the proof makes; every one of them must prove.
+    const HOLDER_PROOFS: usize = 3;
 
     fn prove_a_daemonized_pipe_holder_in_this_process() {
         let repository = repository(Vec::new());
@@ -2313,23 +2338,22 @@ mod tests {
         let python =
             resolve_host_executable(OsString::from("python3")).expect("absolute Python executable");
         let before_fds = open_fd_count();
-        let mut attempt = 0;
-        let mut proven = 0;
-        while proven < 3 {
-            attempt += 1;
-            assert!(
-                attempt <= 6,
-                "the host never managed to start the command in six tries"
-            );
+        /* Every attempt proves. The deadline runs from the holder's own pid
+         * file, so the holder exists — and has left the command's process
+         * group — before the deadline begins, however late the fixture
+         * starts; and it starts past its whole deadline. Until t-77995 the
+         * deadline ran from the spawn, an attempt whose holder came too late
+         * was asked again, and six such misses at load 11–20 were the
+         * gate's "never managed to start the command in six tries". */
+        for attempt in 1..=HOLDER_PROOFS {
             let marker = home.path().join(format!("daemon-{attempt}.pid"));
             let _sweep_attempt = ReapNaming(&marker);
-            let started_marker = home.path().join(format!("daemon-{attempt}.started"));
             let script = executable(
                 home.path(),
                 &format!("daemonize-{attempt}"),
                 &format!(
-                    "touch '{}'\n'{}' -c 'import os,time; os.fork() and os._exit(0); os.setsid(); open(\"{}\", \"w\").write(str(os.getpid())); time.sleep(30)' &\nwhile [ ! -s '{}' ]; do sleep 0.01; done\nexit 0",
-                    started_marker.display(),
+                    "{}\n'{}' -c 'import os,time; os.fork() and os._exit(0); os.setsid(); open(\"{}\", \"w\").write(str(os.getpid())); time.sleep(30)' &\nwhile [ ! -s '{}' ]; do sleep 0.01; done\nexit 0",
+                    late_start(SIGNALLED_DEADLINE),
                     python.display(),
                     marker.display(),
                     marker.display(),
@@ -2339,89 +2363,53 @@ mod tests {
                 "daemon-v1",
                 script,
                 Vec::<OsString>::new(),
-                Duration::from_secs(2),
+                SIGNALLED_DEADLINE,
             )
             .expect("daemon command");
             let root_name = format!("verification-daemon-{attempt}");
             let verification_root = private_dir(home.path(), &root_name);
-            let runner = VerificationRunner::open(
+            let mut runner = VerificationRunner::open(
                 &verification_root,
                 VerificationCatalog::new([command]).expect("daemon catalog"),
             )
             .expect("daemon runner");
+            runner.command_clock = Some(clock_from_signal(marker.clone()));
             let required = requirement("daemon-v1");
-            // The command's budget starts after clone/content verification.
-            // Observe its first line so unrelated Git preparation cannot be
-            // mistaken for an escaped writer extending that budget.
-            let (result, command_elapsed) = std::thread::scope(|scope| {
-                let (finished, pending) = std::sync::mpsc::channel::<()>();
-                let started_path = &started_marker;
-                let observer = scope.spawn(move || {
-                    while matches!(
-                        pending.recv_timeout(Duration::from_millis(10)),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-                    ) {
-                        if started_path.exists() {
-                            return Some(std::time::Instant::now());
-                        }
-                    }
-                    None
-                });
-                let result = runner.run(
-                    &repository.orchestrator,
-                    &store,
-                    &repository.manifest,
-                    &required,
-                );
-                let ended = std::time::Instant::now();
-                drop(finished);
-                let elapsed = observer
-                    .join()
-                    .expect("command observer")
-                    .map(|started| ended.saturating_duration_since(started));
-                (result, elapsed)
-            });
-            // Reap the deliberately escaped process before any assertion can
-            // unwind. A failing test must not leave a pipe holder behind.
-            let escaped = fs::read_to_string(&marker)
+            let result = runner.run(
+                &repository.orchestrator,
+                &store,
+                &repository.manifest,
+                &required,
+            );
+            // Read before anything is reaped: whether the escaped holder
+            // still held the command's pipes when the run came back.
+            let holder = fs::read_to_string(&marker)
                 .ok()
                 .and_then(|pid| pid.trim().parse::<i32>().ok());
-            if let Some(escaped) = escaped {
+            let held_at_return = holder.is_some_and(process_exists);
+            // Reap the deliberately escaped process before any assertion can
+            // unwind. A failing test must not leave a pipe holder behind.
+            if let Some(holder) = holder {
                 // SAFETY: the pid was written by this attempt's own child.
-                unsafe { libc::kill(escaped, libc::SIGKILL) };
-                wait_until_gone(escaped);
+                unsafe { libc::kill(holder, libc::SIGKILL) };
+                wait_until_gone(holder);
             }
+            assert!(
+                holder.is_some(),
+                "attempt {attempt}: the fixture never made its pipe holder within {SIGNAL_PATIENCE:?}"
+            );
             assert_eq!(result, Err(VerificationError::Timeout));
             assert_empty(&verification_root);
-            let Some(command_elapsed) = command_elapsed else {
-                /* A DID-NOT-RUN, not a red. Under load the two-second
-                 * command deadline can fall before the shell has executed
-                 * its first line, and an attempt whose command never
-                 * started proves nothing about pipe holders either way —
-                 * the timeout and clean root above were still exacted.
-                 * Witnessed 2026-08 at one-in-eight on a machine running
-                 * three review batteries; the assert that stood here read
-                 * that spawn latency as a defect. Three attempts must
-                 * PROVE; a miss is asked again, and six misses is its own
-                 * honest failure. */
-                continue;
-            };
+            /* The holder sleeps 30 s holding the pipes, so a runner that
+             * waited for an escaped writer to let go comes back only after it
+             * has. This order of events stands where `elapsed < 5 s` from the
+             * shell's first line stood, which leaned on the scheduler too;
+             * how promptly the deadline loop returns at all is
+             * `bounded_process`'s own test. */
             assert!(
-                command_elapsed < Duration::from_secs(5),
-                "escaped pipe holder extended the deadline: {command_elapsed:?}"
+                held_at_return,
+                "attempt {attempt}: the run came back only after the escaped pipe holder let go of its pipes"
             );
-            if holder_attempt(true, escaped.is_some()) == HolderAttempt::DidNotRun {
-                // A holder that forked before the deadline and wrote its pid
-                // after it is reaped here, so no attempt leaves one behind.
-                if let Some(late) = late_holder(&marker) {
-                    // SAFETY: the pid was written by this attempt's own child.
-                    unsafe { libc::kill(late, libc::SIGKILL) };
-                    wait_until_gone(late);
-                }
-                // One that never wrote its pid is still found by its argv.
-                reap_naming(&marker);
-                continue;
-            }
             assert_eq!(
                 runner
                     .resolver(&store)
@@ -2433,10 +2421,9 @@ mod tests {
                     .expect("missing escaped evidence"),
                 None
             );
-            proven += 1;
         }
-        // Whatever attempt left a holder behind — one that woke after every
-        // wait for it — names this proof's home and goes with it.
+        // Whatever attempt left a holder behind — one that never wrote its
+        // pid — names this proof's home and goes with it.
         reap_naming(home.path());
         assert!(
             fd_count_settles_at(before_fds + 2),
@@ -2643,12 +2630,16 @@ mod tests {
         }
     }
 
+    /// Whether `process` is still there: signal 0 delivers nothing, it asks.
+    fn process_exists(process: i32) -> bool {
+        // SAFETY: signal 0 only checks a pid this test's own fixture made.
+        let answered = unsafe { libc::kill(process, 0) } == 0;
+        answered || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
     fn wait_until_gone(process: i32) {
         for _ in 0..100 {
-            // SAFETY: signal 0 only checks the process created by this test.
-            let exists = unsafe { libc::kill(process, 0) } == 0
-                || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
-            if !exists {
+            if !process_exists(process) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));
