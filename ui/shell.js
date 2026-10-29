@@ -131,6 +131,12 @@ const paneNow = new Map();
  * question. The conversation view draws it as the extension's card; a
  * question the hook only signalled is on the program's screen alone. */
 const paneAsks = new Map();
+/* Why a worker's question is the person's after all (t-82296): a worker's own
+ * question goes to its run's coordinator, and comes here only when nobody sat
+ * in that seat any more or nobody answered in ten minutes. Keyed by pane
+ * (`term:<n>`), said by `ask:raised` ahead of the report that draws the card,
+ * and gone with the question (`hook:agent`). */
+const askRaised = new Map();
 const hookStamps = new Map();
 
 /* The live turn's prompt and the last assistant words, sticky the same way —
@@ -920,6 +926,19 @@ function decideApproval(card, draft, choice, message = null) {
   repaintAsk(draft);
 }
 
+/* The sentence a raised worker question's card opens with (`askRaised`), or
+ * nothing for every other question. */
+function askRaisedWords(pane) {
+  switch (askRaised.get(pane)) {
+    case "coordinator-silent":
+      return t("board.ask.raisedSilent", "코디가 답하지 않아 올림");
+    case "coordinator-gone":
+      return t("board.ask.raisedGone", "코디 자리가 비어 올림");
+    default:
+      return "";
+  }
+}
+
 /* The answer panel, unfolded from the amber box — Orca's ask card
  * (`NativeChatQuestionCard`, :69245), drawn at card scale: step chips when
  * there are several questions, the numbered option rows, and the free-text
@@ -932,6 +951,16 @@ function askPanelNode(card, draft) {
   panel.className = "board-ask";
   // Its answers are the person's: an agent pressing in the window never makes them (t-73906).
   panel.dataset.personOnly = "";
+
+  // A worker's question its coordinator did not take says why it is here (t-82296).
+  const raised = askRaisedWords(card.pane);
+  if (raised) {
+    const why = document.createElement("span");
+    why.className = "board-ask-raised";
+    why.setAttribute("role", "status");
+    why.textContent = raised;
+    panel.appendChild(why);
+  }
 
   if (total > 1) {
     const steps = document.createElement("span");
@@ -12478,6 +12507,13 @@ const agentClock = idlePoller({
   },
 });
 
+/* A worker's question reached the person after all (t-82296): why, ahead of
+ * the asking report that draws its card and its 「당신 차례」 row. */
+listen("ask:raised", (event) => {
+  const { term, why } = event.payload;
+  askRaised.set(`term:${term}`, why);
+});
+
 listen("hook:agent", (event) => {
   scheduleInbox();
   const { term, state, agent, session } = event.payload;
@@ -12554,6 +12590,8 @@ listen("hook:agent", (event) => {
     paneAsks.delete(term);
   }
   const askNow = paneAsks.get(term)?.sig ?? null;
+  // A report that asks nothing ends the reason a raised question was given (t-82296).
+  if (!shaped) askRaised.delete(`term:${term}`);
   // The 「당신 차례」 rows follow the same word at once (t-82287): a pane not
   // asking has moved past every question the column lists for it, and one
   // asking a described question has moved past the others. A wait it only
