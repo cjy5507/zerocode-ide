@@ -88,6 +88,9 @@ const LOOK = () => {
     sent: [...window.__HOLD__.sent],
     wires: window.__HOLD__.wires.length,
     refused: chat?.querySelector('.pane-chat-notice[data-says="worker.wireRefused"]')?.textContent ?? null,
+    exitTyped: chat?.querySelector('.pane-chat-notice[data-says="worker.handOverExitTyped"]')?.textContent ?? null,
+    box: composer?.querySelector(".worker-composer-box")?.value ?? null,
+    toasts: [...document.querySelectorAll(".toast")].map((note) => ({ words: note.textContent, tip: note.dataset.tip ?? null })),
   };
 };
 
@@ -142,6 +145,8 @@ export async function testComposerHold(browser, origin, ok) {
   await testHandOverReadAnswersLate(browser, origin, ok);
   await testWireStartStalls(browser, origin, ok);
   await testCoordinatorSeatRefused(browser, origin, ok);
+  await testExitTypedThenRefused(browser, origin, ok);
+  await testPaneLeftAndWireRefused(browser, origin, ok);
   await testAnsweredCardHolds(browser, origin, ok);
   await testSentTurnHolds(browser, origin, ok);
 }
@@ -388,8 +393,21 @@ async function testWireStartStalls(browser, origin, ok) {
  * words — no 60 s, no line saying the conversation is being continued live —
  * and the page says why in the backend's words. */
 async function testCoordinatorSeatRefused(browser, origin, ok) {
-  await scene(browser, origin, ok, "coordinator seat refused", async (page) => {
-    const reason = "a coordinator's pane stays a pane: the ledger brings its run's mail to that screen";
+  // The refusals the backend gives before anything is typed (t-84850 r2): a
+  // CLI started from the pane's shell, one that has taken no input since it
+  // began (a pane restored a moment ago), one at work, one whose line holds
+  // words, a ledger that cannot be read. Each takes the coordinator's road.
+  for (const [name, reason] of [
+    ["coordinator seat refused", "a coordinator's pane stays a pane: the ledger brings its run's mail to that screen"],
+    ["shell pane refused", "a CLI started from the pane's shell stays in the pane: the terminal is its live view"],
+    ["waking pane refused", "the pane's CLI has taken no input since it started: try again in a moment"],
+    ["line with words refused", "the pane's input line is not shown empty — words may be written there: nothing was typed"],
+    ["unread ledger refused", "the ledger cannot be read now, so this pane may be a coordinator's: it stays a pane"],
+  ]) await refusedBeforeTyping(browser, origin, ok, name, reason);
+}
+
+async function refusedBeforeTyping(browser, origin, ok, name, reason) {
+  await scene(browser, origin, ok, name, async (page) => {
     await page.evaluate(async (reason) => {
       window.__ANSWER__.wire_start = (args) => {
         window.__HOLD__.wires.push(args);
@@ -402,9 +420,101 @@ async function testCoordinatorSeatRefused(browser, origin, ok) {
     await untilKeys(page, 1);
     const seen = await page.evaluate(LOOK);
     ok(
-      "a_coordinators_pane_keeps_its_conversation_and_the_words_go_straight_to_it: the hand-over asked for a coordinator's pane is refused at once — Enter sends the words to the pane straight (paste, then Enter), nothing waits in the queue and no line says the conversation is being continued, and the page says why in the backend's words",
+      `a_pane_refused_before_typing_keeps_its_conversation_and_the_words_go_straight_to_it (${name}): the hand-over is refused at once — Enter sends the words to the pane straight (paste, then Enter), nothing waits in the queue and no line says the conversation is being continued, and the page says why in the backend's words`,
       seen.wires === 1 && JSON.stringify(seen.sent) === JSON.stringify(["paste:곧바로", ENTER]) && seen.queue.length === 0 &&
-        (seen.why ?? "") === "" && typeof seen.refused === "string" && seen.refused.includes(reason),
+        (seen.why ?? "") === "" && typeof seen.refused === "string" && seen.refused.includes(reason) && seen.exitTyped === null,
+      JSON.stringify(seen),
+    );
+  });
+}
+
+/* The wire's answer the scene gives when it says so: `wire_start` tells the
+ * window the pane's exit command was typed (`wire:exit-typed`, as the backend
+ * does right after its first key) and then waits. */
+const EXIT_TYPED = "the exit command was typed at the pane and the pane still stands";
+const typedAndWaiting = () => {
+  window.__ANSWER__.wire_start = (args) => {
+    window.__HOLD__.wires.push(args);
+    for (const heard of window.__LISTENERS__["wire:exit-typed"] ?? []) heard({ payload: { term: args.fromPane } });
+    return new Promise((done, fail) => { window.__WIRE__ = { done, fail }; });
+  };
+};
+const paneLeft = () => {
+  for (const heard of window.__LISTENERS__["term:exited"] ?? []) heard({ payload: { term: window.__TERM__, code: 0 } });
+};
+
+/* ② The pane's exit command was typed and the pane does not leave — a CLI
+ * that reads its line late (t-84850 r2 B, P2-5). The hold has no clock now:
+ * past `COMPOSER_HOLD_MS` nothing goes to the pane, whose line may still hold
+ * `/exit`. Refused at the end of the backend's watch, what waited comes back
+ * to the box as one draft, one line says why, and nothing was ever typed at
+ * the pane. When the CLI then reads `/exit` and the pane leaves, the draft is
+ * said with a way to copy it rather than gone. */
+async function testExitTypedThenRefused(browser, origin, ok) {
+  await scene(browser, origin, ok, "exit typed then refused", async (page) => {
+    await page.evaluate(typedAndWaiting);
+    await page.evaluate(async () => {
+      el("view-toggle-chat").click();
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    });
+    const words = await page.evaluate(() => ({
+      waiting: t("composer.queue.why.exitTyped", "판의 CLI가 끝나기를 기다립니다 — 끝나면 대화로 보내고, 아니면 입력칸에 돌려 둡니다"),
+      line: t("worker.handOverExitTyped", "종료 명령을 보냈지만 판이 아직 떠 있습니다 — 판을 확인한 뒤 입력칸의 글을 다시 보내세요."),
+    }));
+    await enter(page, "첫 글");
+    const held = await page.evaluate(LOOK);
+    await page.evaluate(() => window.__PASS__());
+    await enter(page, "둘째 글");
+    const past = await page.evaluate(LOOK);
+    await page.evaluate((reason) => window.__WIRE__.fail(new Error(`${reason} 60s after \`/exit\` — check the pane, then send again`)), EXIT_TYPED);
+    for (let beat = 0; beat < 3; beat += 1) await page.evaluate(() => window.__PAINTED__());
+    const back = await page.evaluate(LOOK);
+    ok(
+      "a_typed_exit_holds_the_words_with_no_clock: once the pane's exit command is typed, what is sent waits in the queue under its own line — and past the hold's 60 s it still waits: nothing is typed at a pane that may yet read `/exit`",
+      JSON.stringify(held.queue) === JSON.stringify(["첫 글"]) && held.why === words.waiting && held.sent.length === 0 &&
+        JSON.stringify(past.queue) === JSON.stringify(["첫 글", "둘째 글"]) && past.sent.length === 0,
+      JSON.stringify({ held, past, words }),
+    );
+    ok(
+      "a_refusal_after_the_exit_was_typed_gives_the_words_back_to_the_box: the backend refuses after typing the exit command — the queue empties into the box as one draft in the order sent, one line says the pane is still open, no other refusal line stands, and nothing ever reached the pane",
+      back.queue.length === 0 && back.box === "첫 글\n\n둘째 글" && back.exitTyped !== null && back.exitTyped.includes(words.line) &&
+        back.refused === null && back.sent.length === 0,
+      JSON.stringify({ back, words }),
+    );
+    await page.evaluate(paneLeft);
+    for (let beat = 0; beat < 3; beat += 1) await page.evaluate(() => window.__PAINTED__());
+    const gone = await page.evaluate(LOOK);
+    const lost = await page.evaluate(() => t("composer.queue.lost", "판이 닫혀 기다리던 글 {{n}}개를 보내지 못했습니다", { n: 2 }));
+    ok(
+      "a_pane_that_leaves_with_the_words_in_its_box_says_them: the CLI reads `/exit` late and the pane leaves — the words its box held are said in a toast that keeps them to copy, and still nothing was typed at the pane",
+      gone.toasts.some((note) => note.words.includes(lost) && note.tip === "첫 글\n\n둘째 글") && gone.sent.length === 0,
+      JSON.stringify({ gone, lost }),
+    );
+  });
+}
+
+/* The pane leaves while its hand-over runs and the wire is refused anyway
+ * (t-84850 r2 P2-1): no box and no screen are left, so the words that waited
+ * are said with a way to copy them — never dropped without a word. */
+async function testPaneLeftAndWireRefused(browser, origin, ok) {
+  await scene(browser, origin, ok, "pane left and wire refused", async (page) => {
+    await page.evaluate(typedAndWaiting);
+    await page.evaluate(async () => {
+      el("view-toggle-chat").click();
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    });
+    await enter(page, "남은 글");
+    await page.evaluate(paneLeft);
+    await page.evaluate(() => window.__WIRE__.fail(new Error("the wire closed")));
+    for (let beat = 0; beat < 3; beat += 1) await page.evaluate(() => window.__PAINTED__());
+    const seen = await page.evaluate(() => ({
+      sent: [...window.__HOLD__.sent],
+      toasts: [...document.querySelectorAll(".toast")].map((note) => ({ words: note.textContent, tip: note.dataset.tip ?? null })),
+      lost: t("composer.queue.lost", "판이 닫혀 기다리던 글 {{n}}개를 보내지 못했습니다", { n: 1 }),
+    }));
+    ok(
+      "words_that_waited_on_a_pane_that_left_are_said_when_the_wire_is_refused: the pane leaves during the hand-over and the wire is refused — the word that waited is said in a toast that keeps it to copy, and nothing went anywhere silently",
+      seen.toasts.some((note) => note.words.includes(seen.lost) && note.tip === "남은 글") && seen.sent.length === 0,
       JSON.stringify(seen),
     );
   });
