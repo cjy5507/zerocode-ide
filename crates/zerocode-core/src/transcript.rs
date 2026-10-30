@@ -1994,6 +1994,58 @@ pub fn turns_in(chunk: &str) -> Vec<TranscriptTurn> {
 /// ([`Detail::Whole`]).
 #[must_use]
 pub fn turns_in_with(chunk: &str, detail: Detail) -> Vec<TranscriptTurn> {
+    turns_of(chunk, detail, Meta::PictureNotes)
+}
+
+/// [`turns_in`] with every user line the CLI marks `isMeta` left out, as the
+/// readers that count what the person said (a step's effort judges per
+/// prompt) have always read it: a scheduled check or a hook's feedback is not
+/// a prompt there either.
+#[must_use]
+pub fn turns_in_without_meta(chunk: &str) -> Vec<TranscriptTurn> {
+    turns_of(chunk, Detail::Clipped, Meta::All)
+}
+
+/// Which `isMeta` user lines a read leaves out.
+#[derive(Clone, Copy)]
+enum Meta {
+    /// Only the size note of a picture a tool returned — the one meta line the
+    /// person saw as their own speech; a scheduled prompt, a hook's feedback
+    /// and a skill's body stay as they were written.
+    PictureNotes,
+    All,
+}
+
+/// A user line the CLI wrote only to tell the model a returned picture's size
+/// or source. Marked `isMeta` and `turnCompanion` (it rides the turn of the
+/// result) and carries no queue marker (a scheduled prompt does). A skill's
+/// body and a usage notice share those marks, so the last test is that every
+/// text part opens with `[Image`.
+fn is_picture_note(row: &serde_json::Value, message: &serde_json::Value) -> bool {
+    let flag = |key: &str| row.get(key).and_then(serde_json::Value::as_bool) == Some(true);
+    if !flag("isMeta")
+        || !flag("turnCompanion")
+        || row.get("queuePriority").is_some()
+        || row.get("queueSkipAttachments").is_some()
+    {
+        return false;
+    }
+    let opens_a_picture_note = |text: &str| text.starts_with("[Image");
+    match message.get("content") {
+        Some(serde_json::Value::String(text)) => opens_a_picture_note(text),
+        Some(serde_json::Value::Array(parts)) => {
+            !parts.is_empty()
+                && parts.iter().all(|part| {
+                    part.get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(opens_a_picture_note)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn turns_of(chunk: &str, detail: Detail, meta: Meta) -> Vec<TranscriptTurn> {
     let mut turns = Vec::new();
     for line in chunk.lines() {
         let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -2068,10 +2120,14 @@ pub fn turns_in_with(chunk: &str, detail: Detail) -> Vec<TranscriptTurn> {
         {
             continue;
         }
-        // A line the CLI marks `isMeta` is written for the model (a picture's size
-        // note, a caveat), not by the person; its picture, if any, rides the
-        // tool result that returned it.
-        if kind == "user" && row.get("isMeta").and_then(serde_json::Value::as_bool) == Some(true) {
+        // The size note of a picture a tool returned is written for the model, not
+        // by the person; its picture rides the tool result that returned it.
+        if kind == "user"
+            && match meta {
+                Meta::PictureNotes => is_picture_note(&row, message),
+                Meta::All => row.get("isMeta").and_then(serde_json::Value::as_bool) == Some(true),
+            }
+        {
             continue;
         }
         // The parts of the message: `content` for Claude Code, `blocks` for zo.
@@ -2738,6 +2794,43 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("user", "[Image #1] 이거 봐")]
         );
+    }
+
+    #[test]
+    fn only_the_picture_size_note_is_left_out_of_a_read_other_meta_lines_stay() {
+        // Shapes taken from this machine's transcripts: a picture note as a bare
+        // string and as text parts, a scheduled `/loop` prompt (queue markers), a
+        // skill's body and a Stop hook's feedback — all `isMeta`.
+        let note = r#"{"type":"user","isMeta":true,"turnCompanion":true,"message":{"role":"user","content":"[Image: original 3696x2160, displayed at 2000x1169. Multiply coordinates by 1.85 to map to original image.]"}}"#;
+        let source_note = r#"{"type":"user","isMeta":true,"turnCompanion":true,"message":{"role":"user","content":[{"type":"text","text":"[Image: source: /tmp/a.png]"}]}}"#;
+        let scheduled = r##"{"type":"user","isMeta":true,"turnCompanion":true,"queuePriority":"later","queueSkipAttachments":true,"message":{"role":"user","content":[{"type":"text","text":"# /loop — schedule a recurring prompt"}]}}"##;
+        let skill = r#"{"type":"user","isMeta":true,"turnCompanion":true,"message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /x"}]}}"#;
+        let hook = r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"Stop hook feedback: you have 1 message"}}"#;
+        let typed = r#"{"type":"user","message":{"role":"user","content":"계속"}}"#;
+        let input = [note, source_note, scheduled, skill, hook, typed].join("\n");
+        let said: Vec<String> = turns_in(&input).into_iter().map(|turn| turn.text).collect();
+        assert_eq!(
+            said,
+            [
+                "# /loop — schedule a recurring prompt",
+                "Base directory for this skill: /x",
+                "Stop hook feedback: you have 1 message",
+                "계속",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_read_that_counts_prompts_still_leaves_out_every_meta_line() {
+        let scheduled = r##"{"type":"user","isMeta":true,"turnCompanion":true,"queuePriority":"later","message":{"role":"user","content":"# /loop"}}"##;
+        let hook = r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"Stop hook feedback"}}"#;
+        let typed = r#"{"type":"user","message":{"role":"user","content":"계속"}}"#;
+        let input = [scheduled, hook, typed].join("\n");
+        let said: Vec<String> = turns_in_without_meta(&input)
+            .into_iter()
+            .map(|turn| turn.text)
+            .collect();
+        assert_eq!(said, ["계속"]);
     }
 
     #[test]
