@@ -6754,6 +6754,13 @@ fn expire_sleepers(host: &dyn Host, now_ms: i64) {
 /// released rows are not panes a restart would cut. The restart census
 /// ([`restart_census::take`]) reads its workers here and nowhere else.
 pub(crate) fn seated_live_workers() -> Vec<restart_census::Seated> {
+    seated_live_workers_read().unwrap_or_default()
+}
+
+/// [`seated_live_workers`], or `None` when the ledger cannot be read now. A
+/// caller that must not mistake a worker's pane for a person's refuses on
+/// `None` (`cmd::wire::ledger_pane_refusal`, t-84850 r4).
+pub(crate) fn seated_live_workers_read() -> Option<Vec<restart_census::Seated>> {
     with_ledger_seats(|ledger, seats| {
         ledger
             .runs()
@@ -6772,7 +6779,6 @@ pub(crate) fn seated_live_workers() -> Vec<restart_census::Seated> {
             })
             .collect()
     })
-    .unwrap_or_default()
 }
 
 /// Every run's coordinator seated in THIS window's panes, with the terminal

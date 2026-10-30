@@ -32929,31 +32929,66 @@ fn only_a_pane_the_ledger_does_not_drive_hands_its_conversation_to_a_wire() {
     };
     // A person's own Claude Code, beside a worker and a coordinator.
     assert_eq!(
-        pane_the_ledger_drives(7, [3], || Some(vec![coordinator_at(2)])),
+        pane_the_ledger_drives(7, || Some(vec![3]), || Some(vec![coordinator_at(2)])),
         None
     );
-    // A worker's seat, refused before the ledger is asked.
+    // A worker's seat, refused before the coordinators are asked.
     assert_eq!(
-        pane_the_ledger_drives(3, [3], || unreachable!("a worker's seat asks no ledger")),
+        pane_the_ledger_drives(3, || Some(vec![3]), || {
+            unreachable!("a worker's seat asks for no coordinators")
+        }),
         Some(WORKER_PANE_STAYS)
     );
     // A run's coordinator seat.
     assert_eq!(
-        pane_the_ledger_drives(2, [3], || Some(vec![coordinator_at(2)])),
+        pane_the_ledger_drives(2, || Some(vec![3]), || Some(vec![coordinator_at(2)])),
         Some(COORDINATOR_PANE_STAYS)
     );
     // The seat moved to another pane (a restart): the pane that held it
     // before is nobody's seat now.
     assert_eq!(
-        pane_the_ledger_drives(2, [3], || Some(vec![coordinator_at(9)])),
+        pane_the_ledger_drives(2, || Some(vec![3]), || Some(vec![coordinator_at(9)])),
         None
     );
     // A ledger that cannot be read (closed on a full disk, not up): nothing
-    // says this pane is not a coordinator's, so it stays (t-84850 r2).
+    // says this pane is not a worker's or a coordinator's, so it stays
+    // (t-84850 r2, r4) — whichever of the two reads failed.
     assert_eq!(
-        pane_the_ledger_drives(7, [3], || None),
+        pane_the_ledger_drives(7, || Some(vec![3]), || None),
         Some(LEDGER_UNREAD_PANE_STAYS)
     );
+    assert_eq!(
+        pane_the_ledger_drives(7, || None, || {
+            unreachable!("an unread ledger asks for no coordinators")
+        }),
+        Some(LEDGER_UNREAD_PANE_STAYS)
+    );
+}
+
+/// Whether a pane is a worker's is the ledger's to say, as it seats its
+/// workers now (t-84850 r4). The window's map of its own nested runs
+/// (`AppState::workers`) holds none of the ledger's workers, so a 「대화」 on
+/// a pane the ledger seated a worker in went past the worker's refusal and
+/// typed `/exit` at that worker's CLI.
+#[test]
+fn the_hand_over_asks_the_ledger_whether_the_pane_is_a_workers() {
+    let backend = shipped_backend();
+    let stand = block_after(backend, "fn stand_wire(");
+    assert!(
+        !stand.contains("state.workers()"),
+        "the hand-over reads its workers off the window's nested runs:\n{stand}"
+    );
+    assert!(
+        stand.contains("ledger_pane_refusal(term)"),
+        "the hand-over does not ask the ledger whose pane it is:\n{stand}"
+    );
+    let refusal = block_after(backend, "fn ledger_pane_refusal(");
+    for read in ["seated_live_workers_read", "seated_coordinators_read"] {
+        assert!(
+            refusal.contains(read),
+            "the ledger's seats are not read through {read}:\n{refusal}"
+        );
+    }
 }
 
 /// A pane's CLI is told its exit command only when that exit ends the pane

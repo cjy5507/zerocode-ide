@@ -2396,8 +2396,8 @@ pub(crate) fn term_paste(
 /// hand-over types `/exit` — its text, then its Enter (`ask::line_keys`) —
 /// and its first key goes through the answer door
 /// ([`answer_door::type_rewind`]): only into a pane the ledger does not drive
-/// (`cmd::wire::pane_the_ledger_drives` — a worker's seat, a coordinator's,
-/// or any pane while the ledger cannot be read), whose agent ended its turn
+/// (`cmd::wire::ledger_pane_refusal` — a worker's seat, a coordinator's, or
+/// any pane while the ledger cannot be read), whose agent ended its turn
 /// and asks nothing (the hook's word, read now, not when the button stood),
 /// and whose screen — read in the same hold as the write — shows its input
 /// line empty and no menu. A refusal types nothing and returns the word the
@@ -2420,13 +2420,10 @@ pub(crate) fn pane_rewind(
         .rewind_command
         .ok_or_else(|| format!("{agent} has no way back this window knows"))?;
     // Each fact read under its own lock, one at a time. A seat is the
-    // ledger's: a live worker of a run (by its row, not a nested run's page),
-    // or a run's coordinator, as the hand-over reads them (t-84850).
-    let seat = crate::answer_door::rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(
-        term,
-        orchestration::worker_at_term(term).map(|_| term),
-        orchestration::seated_coordinators_read,
-    ));
+    // ledger's, read as the hand-over reads it (t-84850): its live workers'
+    // and its runs' coordinators' seats as they stand now — and a ledger that
+    // cannot be read refuses.
+    let seat = crate::answer_door::rewind_seat_word(crate::cmd::wire::ledger_pane_refusal(term));
     let between_turns = state
         .pane_states()
         .get(&term)

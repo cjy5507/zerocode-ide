@@ -132,18 +132,22 @@ pub(crate) fn wire_start(
 /// ledger drives through its screen. A worker's seat; and a run's
 /// coordinator seat (t-84850) — the ledger brings that run's mail to its
 /// screen, and a coordinator whose CLI left would leave its run without the
-/// seat the ledger knows it by. The coordinators' seats are asked only when
-/// the pane is no worker's, and read from the ledger as they stand now
-/// (`orchestration::seated_coordinators_read`), never from a seat the window
-/// remembered: a restart moves them. A ledger that cannot be read says
-/// nothing of whose pane this is, and the pane stays (t-84850 r2). `None` for
-/// a person's own pane.
+/// seat the ledger knows it by. Both are read from the ledger as they stand
+/// now, never from a seat the window remembered: a restart moves them, and
+/// the window's map of its own nested runs holds none of the ledger's
+/// workers (t-84850 r4). The coordinators' seats are asked only when the
+/// pane is no worker's. A ledger that cannot be read says nothing of whose
+/// pane this is, and the pane stays (t-84850 r2). `None` for a person's own
+/// pane.
 pub(crate) fn pane_the_ledger_drives(
     term: TermId,
-    workers: impl IntoIterator<Item = TermId>,
+    workers: impl FnOnce() -> Option<Vec<TermId>>,
     coordinators: impl FnOnce() -> Option<Vec<crate::orchestration::restart_census::KeyedPane>>,
 ) -> Option<&'static str> {
-    if workers.into_iter().any(|seat| seat == term) {
+    let Some(workers) = workers() else {
+        return Some(LEDGER_UNREAD_PANE_STAYS);
+    };
+    if workers.contains(&term) {
         return Some(WORKER_PANE_STAYS);
     }
     let Some(coordinators) = coordinators() else {
@@ -153,6 +157,20 @@ pub(crate) fn pane_the_ledger_drives(
         .iter()
         .any(|seated| seated.term == term)
         .then_some(COORDINATOR_PANE_STAYS)
+}
+
+/// [`pane_the_ledger_drives`] for `term`, asked of the ledger's seats as they
+/// stand now: its live workers' (`orchestration::seated_live_workers_read`)
+/// and its runs' coordinators' (`orchestration::seated_coordinators_read`).
+pub(crate) fn ledger_pane_refusal(term: TermId) -> Option<&'static str> {
+    pane_the_ledger_drives(
+        term,
+        || {
+            crate::orchestration::seated_live_workers_read()
+                .map(|seated| seated.iter().map(|worker| worker.term).collect())
+        },
+        crate::orchestration::seated_coordinators_read,
+    )
 }
 
 /// The refusals [`pane_the_ledger_drives`] gives, in the hand-over's log line
@@ -404,12 +422,7 @@ fn stand_wire(
     from_pane: Option<TermId>,
 ) -> Result<Arc<wire_runtime::WireSession>, String> {
     if let Some(term) = from_pane {
-        let workers: Vec<TermId> = state.workers().values().map(|(seat, _)| *seat).collect();
-        if let Some(reason) = pane_the_ledger_drives(
-            term,
-            workers,
-            crate::orchestration::seated_coordinators_read,
-        ) {
+        if let Some(reason) = ledger_pane_refusal(term) {
             return Err(reason.into());
         }
         if zerocode_core::agent::agent_voice(agent)
