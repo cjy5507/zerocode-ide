@@ -16085,8 +16085,9 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   gap: var(--space-2);
   min-width: 0;
   min-height: var(--chat-status-h);
-  /* The ring stands on the column's left edge; the plate hangs its padding into the gutter. */
-  margin: var(--space-2) calc(-1 * var(--space-3)) 0;
+  /* The plate is painted all the time, so its edges are the column's, as a code block's are; the
+   * ring stands inside it by its padding. */
+  margin: var(--space-2) 0 0;
   padding: var(--space-2) var(--space-3);
   border-radius: var(--chat-panel-radius);
   background: var(--chat-tool-bg);
@@ -16173,8 +16174,8 @@ details[open] > .helper-step-line::after {
   transform: rotate(90deg);
 }
 
-/* A step's dot stands where a kind's icon stood, centred in that column, so
- * the words of every row start on one axis. */
+/* A step's dot stands at the left of the column a kind's icon stood in, so the
+ * words of every row start on one axis. */
 .helper-step-line > .helper-step-dot {
   flex: none;
   width: var(--chat-dot);
@@ -16767,7 +16768,8 @@ details[open] > .helper-step-line::after {
 }
 
 .helper-group-body {
-  margin: var(--space-1) calc(-1 * var(--space-2)) var(--space-2);
+  /* Painted all the time: its edges are the column's, as a code block's are. */
+  margin: var(--space-1) 0 var(--space-2);
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-md);
   background: var(--chat-tool-bg);

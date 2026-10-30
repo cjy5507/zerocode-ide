@@ -37228,9 +37228,9 @@ const helperWide = await page.evaluate(async () => {
   seen.liveShows = status !== null && !status.hidden &&
     status.querySelector(".helper-status-lead")?.textContent === t("worker.now", "지금") &&
     (status.querySelector(".helper-status-now")?.textContent ?? "").startsWith(t("worker.stepSearch", "검색"));
-  // The line's ring stands on the axis (its plate hangs its padding into the gutter, t-85975).
+  // The line's plate stands on the column's edge, as a code block does (t-85975 r3).
   seen.liveOnAxis = status
-    ? Math.abs(status.getBoundingClientRect().left + parseFloat(getComputedStyle(status).paddingLeft) - proseBox.left) <= 2
+    ? Math.abs(status.getBoundingClientRect().left - proseBox.left) <= 2
     : false;
   seen.tailOut = [...face.querySelectorAll(".helper-turn.is-tool")]
     .every((row) => row.classList.contains("is-live"));
