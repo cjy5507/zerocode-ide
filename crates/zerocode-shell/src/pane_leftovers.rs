@@ -369,6 +369,19 @@ pub(crate) fn launched(term: u32, pid: Option<u32>, agent: &str) {
     ));
 }
 
+/// What the window launched as `term`'s own child, as it was written down
+/// ([`launched`]): the pid and the agent. `None` for a pane this window
+/// spawned no agent into — a shell, whatever runs in front of it now.
+pub(crate) fn launched_as(term: u32) -> Option<(u32, String)> {
+    LAUNCHES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .rev()
+        .find(|(was, _)| *was == term)
+        .map(|(_, launch)| (launch.pid, launch.agent.clone()))
+}
+
 /// The groups the way out ends: each launched agent that is still the
 /// process the window spawned — the same pid and beginning, leading its own
 /// group, this user's — with the executable it runs now, which every later

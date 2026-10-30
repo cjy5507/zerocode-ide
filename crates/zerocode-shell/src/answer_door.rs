@@ -91,6 +91,9 @@ pub(super) struct Expect<'a> {
     row: Option<usize>,
     /// No numbered menu at all — for words the window types by itself.
     absent: bool,
+    /// And this agent's input line shown empty (`composer_empty::observed`)
+    /// — for a line that must stand alone on it (t-84850 r2).
+    empty_line: Option<&'a str>,
 }
 
 impl<'a> Expect<'a> {
@@ -101,6 +104,7 @@ impl<'a> Expect<'a> {
             question: None,
             row: None,
             absent: false,
+            empty_line: None,
         }
     }
 
@@ -113,6 +117,7 @@ impl<'a> Expect<'a> {
             question: None,
             row: None,
             absent: true,
+            empty_line: None,
         }
     }
 
@@ -122,12 +127,20 @@ impl<'a> Expect<'a> {
             question: Some(question),
             row: None,
             absent: false,
+            empty_line: None,
         }
     }
 
     /// And the selection standing on this row.
     pub(super) const fn on_row(mut self, row: usize) -> Self {
         self.row = Some(row);
+        self
+    }
+
+    /// And `agent`'s input line shown empty: words the window types by itself
+    /// that must not join a draft standing there.
+    pub(super) const fn with_empty_line(mut self, agent: &'a str) -> Self {
+        self.empty_line = Some(agent);
         self
     }
 }
@@ -143,6 +156,11 @@ fn screen_of(pty: &PtyHandle) -> (Vec<String>, Option<usize>) {
 
 /// Whether the screen shows what `expect` says.
 fn shows(pty: &PtyHandle, expect: &Expect<'_>) -> bool {
+    if let Some(agent) = expect.empty_line
+        && !crate::composer_empty::observed(agent, pty.terminal().grid())
+    {
+        return false;
+    }
     let (rows, cursor) = screen_of(pty);
     if expect.absent {
         return screen_menu::read_menu(&rows, cursor).is_none();
@@ -1136,17 +1154,42 @@ mod tests {
         assert_eq!(pane.typed(), vec!["/exit"]);
     }
 
+    /// The hand-over's exit command stands alone on its line (t-84850 r2):
+    /// typed only while the screen shows Claude Code's input line empty —
+    /// the cursor right after `❯`, between its two rules — never onto words
+    /// a person left there, which it would send to the model with it.
+    #[test]
+    fn the_exit_line_is_typed_only_onto_an_empty_input_line() {
+        let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+        let expect = Expect::no_menu().with_empty_line("claude");
+        let rule = "─".repeat(40);
+        pane.draw(&format!(
+            "\x1b[?2004h● Done.\n\n{rule}\n❯ abc\n{rule}\x1b[4;6H"
+        ));
+        assert_eq!(type_if_up(&pane.held, &expect, b"/exit").ok(), Some(false));
+        assert!(
+            pane.typed().is_empty(),
+            "the exit line joined words on the line"
+        );
+        pane.draw(&format!(
+            "\x1b[?2004h● Done.\n\n{rule}\n❯ \n{rule}\x1b[4;3H"
+        ));
+        assert_eq!(type_if_up(&pane.held, &expect, b"/exit").ok(), Some(true));
+        assert_eq!(pane.typed(), vec!["/exit"]);
+    }
+
     /// How long a fake CLI on a real pty takes to leave after the keys the
     /// hand-over types (`cmd::wire::hand_over_pane`): the exit command's first
     /// key through this door, the rest after the line's step. The CLI reads
     /// nothing for its first `deaf` seconds — a resumed Claude Code can draw
     /// its screen and read no input for up to a minute — and then reads lines
     /// until its exit command. `None` when it is still there after the
-    /// hand-over's wait (`HAND_OVER_EXIT_WAIT`); `then` says when it left,
-    /// looked for up to `after` more. A shell loop; no agent runs.
+    /// hand-over's watch (`HAND_OVER_LEAVE_LIMIT`); `then` says when it left,
+    /// looked for up to `after` more. A shell loop draws no input line, so
+    /// the door here asks for no menu only; no agent runs.
     #[cfg(unix)]
     fn fake_cli_leaves(deaf: u64, after: Duration) -> (Option<Duration>, Option<Duration>) {
-        use crate::cmd::wire::{HAND_OVER_EXIT_POLL, HAND_OVER_EXIT_WAIT};
+        use crate::cmd::wire::{HAND_OVER_EXIT_POLL, HAND_OVER_LEAVE_LIMIT};
         let exit = zerocode_core::agent::agent_voice("claude")
             .exit_command
             .expect("claude has an exit command");
@@ -1184,8 +1227,8 @@ mod tests {
             }
             None
         };
-        let within = left(HAND_OVER_EXIT_WAIT);
-        let then = within.or_else(|| left(HAND_OVER_EXIT_WAIT + after));
+        let within = left(HAND_OVER_LEAVE_LIMIT);
+        let then = within.or_else(|| left(HAND_OVER_LEAVE_LIMIT + after));
         let _ = lock_pty(&held).kill();
         (within, then)
     }
@@ -1212,19 +1255,22 @@ mod tests {
         eprintln!("exit line: a resting CLI left in {resting:?}, one reading 2 s late in {late:?}");
     }
 
-    /// What a CLI deaf for longer than the hand-over's wait does with the keys
-    /// typed into it: the window has refused by then and stopped the wire, and
-    /// the CLI still reads the line later. A shell loop leaves then — the
-    /// conversation on no screen and no wire; the measured Claude Code drops an
-    /// Enter written before its text shows and keeps `/exit` in its input line
-    /// (wiki: a resumed Claude reads no input for up to a minute).
+    /// A CLI that reads its line ten seconds late — past the 8 s a pane's CLI
+    /// usually takes (`HAND_OVER_EXIT_WAIT`) — still leaves within the
+    /// hand-over's watch (t-84850 r2 P2-5). Under r1 the window had refused
+    /// and stopped the wire at 8 s, and the CLI left at 10.1 s: the
+    /// conversation on no screen and no wire.
     #[cfg(unix)]
     #[test]
-    #[ignore = "measurement: cargo test -p zerocode-shell --bin zerocode-shell answer_door::tests::measure_a_cli_deaf_past_the_hand_overs_wait -- --ignored --nocapture"]
-    fn measure_a_cli_deaf_past_the_hand_overs_wait() {
-        let (within, then) = fake_cli_leaves(10, Duration::from_secs(5));
-        eprintln!("deaf 10 s: left within the wait {within:?}, left at {then:?}");
-        assert!(within.is_none() && then.is_some());
+    fn a_cli_reading_its_line_ten_seconds_late_leaves_within_the_hand_overs_watch() {
+        use crate::cmd::wire::HAND_OVER_EXIT_WAIT;
+        let (within, _) = fake_cli_leaves(10, Duration::ZERO);
+        let within = within.expect("a CLI reading 10 s late outlasted the hand-over's watch");
+        assert!(
+            within > HAND_OVER_EXIT_WAIT,
+            "the CLI left in {within:?}, inside the usual wait — the test proves nothing"
+        );
+        eprintln!("deaf 10 s: left within the hand-over's watch at {within:?}");
     }
 
     /// A menu takes one row: the answer's single pick of a single-select

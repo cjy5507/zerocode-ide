@@ -1907,6 +1907,14 @@ pub(crate) struct WireSession {
 }
 
 impl WireSession {
+    /// Whether the wire's child is still running — asked of the process
+    /// itself, not of what the wire last said (t-84850 r2).
+    pub(crate) fn running(&self) -> bool {
+        self.child
+            .lock()
+            .is_ok_and(|mut child| matches!(child.try_wait(), Ok(None)))
+    }
+
     /// A settled change: the page hears now.
     fn settled(&self) {
         if let Ok(mut at) = self.last_live_notice.lock() {

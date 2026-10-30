@@ -271,3 +271,37 @@ fn a_refusal_has_words_in_five_catalogs_and_a_signalled_wait_asks_the_board_agai
         "the retry schedule is no longer three asks"
     );
 }
+
+/// The refusal that comes after the hand-over typed its exit command opens
+/// with words the backend names once (`EXIT_TYPED_PANE_STANDS`) and the
+/// window knows them by (`WIRE_EXIT_TYPED`, t-84850 r2): the window gives the
+/// words that waited back to its input box rather than type them after
+/// `/exit`. The two must be the same words, or the window types them at a
+/// pane that may be reading `/exit` late or be a shell now.
+#[test]
+fn the_window_knows_the_refusal_that_comes_after_the_exit_command_was_typed() {
+    let literal_after = |source: &'static str, opening: &str| -> &'static str {
+        let from = source
+            .find(opening)
+            .unwrap_or_else(|| panic!("`{opening}` is gone"));
+        let rest = &source[from + opening.len()..];
+        let open = rest.find('"').expect("no string follows") + 1;
+        let close = rest[open..].find('"').expect("the string does not end") + open;
+        &rest[open..close]
+    };
+    let backend = literal_after(
+        shipped_backend(),
+        "pub(crate) const EXIT_TYPED_PANE_STANDS: &str =",
+    );
+    let window = literal_after(window_source(), "const WIRE_EXIT_TYPED =");
+    assert!(!backend.is_empty(), "the backend's opening words are empty");
+    assert_eq!(
+        window, backend,
+        "the window does not know the refusal the hand-over gives after typing its exit command"
+    );
+    let hand = block_after(window_source(), "async function handPaneToWire(");
+    assert!(
+        hand.contains("startsWith(WIRE_EXIT_TYPED)"),
+        "the hand-over does not tell a refusal after the exit command from one before it:\n{hand}"
+    );
+}
