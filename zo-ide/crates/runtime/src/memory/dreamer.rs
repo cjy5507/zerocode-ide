@@ -3776,11 +3776,109 @@ fn read_auto_dream_failure(dir: &Path) -> Option<AutoDreamFailure> {
     Some(AutoDreamFailure { at, failures: failures.max(1) })
 }
 
+static AUTO_DREAM_PROGRAM: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// A reply is one short JSON line; anything longer is not one.
+const MAX_AUTO_DREAM_REPLY_BYTES: u64 = 64 * 1024;
+
+/// Run every idle and compaction pass of this process as `<zo> auto-dream`.
+/// A pass reads up to 256 logs per source, and the allocator keeps what a
+/// pass allocated long after it ends; a process of its own gives all of it
+/// back when it exits. Only a binary that answers the verb may declare it: a
+/// host that does not, a test binary among them, curates on a thread of its
+/// own process. The pass at session end stays in the process, which is ending.
+pub fn curate_automatic_passes_in(zo: PathBuf) {
+    let _ = AUTO_DREAM_PROGRAM.set(zo);
+}
+
+/// The program [`curate_automatic_passes_in`] declared, if any.
+#[must_use]
+pub fn auto_dream_program() -> Option<&'static Path> {
+    AUTO_DREAM_PROGRAM.get().map(PathBuf::as_path)
+}
+
+/// Which automatic path asks a process of its own for a pass. The process
+/// keeps that path's interval, so `zo auto-dream` is told only which path
+/// asks, never an interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoDreamTrigger {
+    /// An idle session, on [`DEFAULT_AUTO_DREAM_INTERVAL`].
+    Idle,
+    /// A full compaction, on [`DEFAULT_COMPACTION_DREAM_INTERVAL`].
+    Compaction,
+}
+
+impl AutoDreamTrigger {
+    /// The word `zo auto-dream --on` takes for this path.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Compaction => "compaction",
+        }
+    }
+
+    /// The path `word` names.
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        [Self::Idle, Self::Compaction].into_iter().find(|trigger| trigger.word() == word)
+    }
+}
+
+/// One automatic pass in `<zo> auto-dream`, run in the workspace: the reply
+/// it printed, or `None` when it could not start or exited badly.
+#[must_use]
+pub fn run_auto_dream_pass(
+    zo: &Path,
+    trigger: AutoDreamTrigger,
+    cwd: &Path,
+    session_id: Option<&str>,
+    active_model: Option<&str>,
+) -> Option<Vec<u8>> {
+    let child = spawn_auto_dream_pass(zo, trigger, cwd, session_id, active_model).ok()?;
+    await_auto_dream_pass(child)
+}
+
+fn spawn_auto_dream_pass(
+    zo: &Path,
+    trigger: AutoDreamTrigger,
+    cwd: &Path,
+    session_id: Option<&str>,
+    active_model: Option<&str>,
+) -> std::io::Result<std::process::Child> {
+    let mut command = std::process::Command::new(zo);
+    command.args(["auto-dream", "--on", trigger.word()]).arg("--cwd").arg(cwd);
+    if let Some(session_id) = session_id {
+        command.args(["--session", session_id]);
+    }
+    if let Some(model) = active_model {
+        command.args(["--model", model]);
+    }
+    command
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+}
+
+fn await_auto_dream_pass(mut child: std::process::Child) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut out = Vec::new();
+    let read = child.stdout.take()
+        .map(|stdout| stdout.take(MAX_AUTO_DREAM_REPLY_BYTES).read_to_end(&mut out));
+    let exited = child.wait();
+    match (read, exited) {
+        (Some(Ok(_)), Ok(status)) if status.success() => Some(out),
+        _ => None,
+    }
+}
+
 /// Schedule curation after a successful conversation compaction without ever
 /// borrowing or blocking the render/stream loop. The cheap gate runs on the
 /// detached worker before the full Dreamer pass: no evidence files, or a pass
 /// inside the compact-trigger throttle window, means no index load, no model
-/// work, and no memory write.
+/// work, and no memory write. A pass the gate lets through runs in the program
+/// the host declared ([`curate_automatic_passes_in`]), else on the worker.
 ///
 /// The worker intentionally has no UI callback. A compaction must be usable
 /// even when its initiating render stream has ended; successful promotions are
@@ -3790,12 +3888,18 @@ fn read_auto_dream_failure(dir: &Path) -> Option<AutoDreamFailure> {
 pub fn spawn_auto_dream_on_compaction(cwd: PathBuf, active_model: Option<String>) -> bool {
     std::thread::Builder::new()
         .name("dreamer-compaction".to_string())
-        .spawn(move || compaction_pass(None, &cwd, active_model.as_deref()))
+        .spawn(move || compaction_pass(auto_dream_program(), &cwd, active_model.as_deref()))
         .is_ok()
 }
 
-fn compaction_pass(_program: Option<&Path>, cwd: &Path, active_model: Option<&str>) {
-    let _ = maybe_auto_dream_on_compaction(cwd, DEFAULT_COMPACTION_DREAM_INTERVAL, active_model);
+fn compaction_pass(program: Option<&Path>, cwd: &Path, active_model: Option<&str>) {
+    let Some(zo) = program else {
+        let _ = maybe_auto_dream_on_compaction(cwd, DEFAULT_COMPACTION_DREAM_INTERVAL, active_model);
+        return;
+    };
+    if auto_dream_held(cwd, DEFAULT_COMPACTION_DREAM_INTERVAL).is_none() {
+        let _ = run_auto_dream_pass(zo, AutoDreamTrigger::Compaction, cwd, None, active_model);
+    }
 }
 
 /// Detached-worker half of [`spawn_auto_dream_on_compaction`]. Public for

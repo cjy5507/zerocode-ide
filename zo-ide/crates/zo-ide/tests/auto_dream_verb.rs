@@ -1,6 +1,6 @@
-//! `zo auto-dream` is the idle pass a session runs in a process of its own:
-//! the real binary curates the evidence where the session keeps it, outside
-//! the checkout, and answers with one JSON line.
+//! `zo auto-dream` is the idle or compaction pass a session runs in a process
+//! of its own: the real binary curates the evidence where the session keeps
+//! it, outside the checkout, and answers with one JSON line.
 
 #![cfg(unix)]
 
@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-fn auto_dream(root: &Path, cwd: &Path) -> String {
+fn auto_dream(root: &Path, cwd: &Path, words: &[&str]) -> String {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zo"));
     command.env_clear();
     if let Some(path) = std::env::var_os("PATH") {
@@ -19,7 +19,7 @@ fn auto_dream(root: &Path, cwd: &Path) -> String {
     let output = command
         .args(["auto-dream", "--cwd"])
         .arg(cwd)
-        .args(["--session", "idle-session", "--model", "test-model"])
+        .args(words)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .env("HOME", root.join("home"))
@@ -63,7 +63,8 @@ fn the_real_binary_curates_the_relocated_evidence_and_then_says_until_when_it_wa
     }
     fs::write(dream.join("seen.jsonl"), lines).expect("the evidence");
 
-    let ran = one_line(&auto_dream(root.path(), &cwd));
+    let idle = ["--on", "idle", "--session", "idle-session", "--model", "test-model"];
+    let ran = one_line(&auto_dream(root.path(), &cwd, &idle));
     assert_eq!(ran["outcome"], "ran", "{ran}");
     assert_eq!(ran["promoted"].as_array().map(Vec::len), Some(1), "{ran}");
 
@@ -72,7 +73,15 @@ fn the_real_binary_curates_the_relocated_evidence_and_then_says_until_when_it_wa
         .trim()
         .parse()
         .expect("the marker holds unix seconds");
-    let waits = one_line(&auto_dream(root.path(), &cwd));
+    let waits = one_line(&auto_dream(root.path(), &cwd, &idle));
     assert_eq!(waits["outcome"], "not_due", "{waits}");
     assert_eq!(waits["untilMs"].as_u64(), Some((stamped + 6 * 60 * 60) * 1000), "{waits}");
+
+    let after_compaction = one_line(&auto_dream(root.path(), &cwd, &["--on", "compaction"]));
+    assert_eq!(after_compaction["outcome"], "not_due", "{after_compaction}");
+    assert_eq!(
+        after_compaction["untilMs"].as_u64(),
+        Some((stamped + 15 * 60) * 1000),
+        "{after_compaction}"
+    );
 }
