@@ -488,8 +488,9 @@ async function testExitTypedThenRefused(browser, origin, ok) {
     await page.evaluate(paneLeft);
     for (let beat = 0; beat < 3; beat += 1) await page.evaluate(() => window.__PAINTED__());
     const gone = await page.evaluate(LOOK);
-    // The two messages are one draft in the box by now: one piece of words.
-    const lost = await page.evaluate(() => t("composer.queue.lost", "판이 닫혀 기다리던 글 {{n}}개를 보내지 못했습니다", { n: 1 }));
+    // The two messages are one draft in the box by now, and the notice still
+    // counts the two the person sent.
+    const lost = await page.evaluate(() => t("composer.queue.lost", "판이 닫혀 기다리던 글 {{n}}개를 보내지 못했습니다", { n: 2 }));
     ok(
       "a_pane_that_leaves_with_the_words_in_its_box_says_them: the CLI reads `/exit` late and the pane leaves — the words its box held are said in a toast that keeps them to copy, and still nothing was typed at the pane",
       gone.toasts.some((note) => note.words.includes(lost) && note.tip === "첫 글\n\n둘째 글") && gone.sent.length === 0,

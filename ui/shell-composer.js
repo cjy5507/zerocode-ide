@@ -457,7 +457,11 @@ function returnComposerQueueToBox(run) {
   const held = run.queue?.splice(0) ?? [];
   dropComposerRelease(run);
   if (held.length > 0) {
-    run.draft = [...held, run.draft ?? ""].filter((words) => words.trim() !== "").join("\n\n");
+    const pieces = [...held, run.draft ?? ""].filter((words) => words.trim() !== "");
+    run.draft = pieces.join("\n\n");
+    // How many messages this draft is — the person's own count, for a
+    // notice that has to say them again (`sayComposerQueueLost`).
+    run.returned = { draft: run.draft, count: pieces.length };
     for (const form of document.querySelectorAll(".worker-composer")) {
       if (form.__workerRun !== run) continue;
       form.querySelector(".worker-composer-box").value = run.draft;
@@ -472,13 +476,19 @@ function returnComposerQueueToBox(run) {
  * to hold them, so they are said — in a toast that stands until they are
  * copied, with the words under it — rather than dropped. */
 function sayComposerQueueLost(run) {
-  const held = [...(run.queue?.splice(0) ?? []), run.draft ?? ""].filter((words) => words.trim() !== "");
+  const draft = run.draft ?? "";
+  const held = [...(run.queue?.splice(0) ?? []), draft].filter((words) => words.trim() !== "");
+  // A draft the window made of returned messages counts as the messages the
+  // person sent, while it still stands as returned; one they have written
+  // since counts as one.
+  const count = held.length + (draft.trim() !== "" && run.returned?.draft === draft ? run.returned.count - 1 : 0);
   run.draft = "";
+  run.returned = null;
   dropComposerRelease(run);
   if (held.length === 0) return;
   const words = held.join("\n\n");
   const note = toast(
-    t("composer.queue.lost", "판이 닫혀 기다리던 글 {{n}}개를 보내지 못했습니다", { n: held.length }),
+    t("composer.queue.lost", "판이 닫혀 기다리던 글 {{n}}개를 보내지 못했습니다", { n: count }),
     "halt",
     {
       sticky: true,
