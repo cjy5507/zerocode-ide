@@ -2404,7 +2404,11 @@ pub(crate) fn term_paste(
 /// A chip's write, never the person's words (t-57712): the window log says
 /// what was opened, and a delivery yields to the line it reached.
 #[tauri::command(async)]
-pub(crate) fn pane_rewind(app: AppHandle, state: State<'_, AppState>, term: TermId) -> Result<(), String> {
+pub(crate) fn pane_rewind(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    term: TermId,
+) -> Result<(), String> {
     let agent = state
         .agent_terms()
         .get(&term)
@@ -2413,9 +2417,9 @@ pub(crate) fn pane_rewind(app: AppHandle, state: State<'_, AppState>, term: Term
     let command = zerocode_core::agent::agent_voice(agent)
         .rewind_command
         .ok_or_else(|| format!("{agent} has no way back this window knows"))?;
-    // Each fact read under its own lock, one at a time.
-    let worker_seat = state.workers().values().any(|(seat, _)| *seat == term);
-    let seated = worker_seat
+    // Each fact read under its own lock, one at a time. A seat is the
+    // ledger's: a live worker of a run, or a run's coordinator, in this pane.
+    let seated = orchestration::worker_at_term(term).is_some()
         || orchestration::seated_coordinators()
             .iter()
             .any(|seat| seat.term == term);

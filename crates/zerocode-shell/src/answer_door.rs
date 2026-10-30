@@ -9,9 +9,9 @@
 //! So every road that types an answer a card prepared (`answer_ask`,
 //! `answer_approval`) — and the lines the window types by itself that a menu
 //! would take for an answer (the hand-over's exit command, a CLI's way back
-//! to an earlier message) — goes through here, and here the screen is read again under the pane's own
-//! terminal lock, in the same hold as the write: [`type_if_up`] writes only if
-//! the screen shows what the caller needs. The pump needs that lock to move
+//! to an earlier message) — goes through here, and here the screen is read
+//! again under the pane's own terminal lock, in the same hold as the write:
+//! [`type_if_up`] writes only if the screen shows what the caller needs. The pump needs that lock to move
 //! output into the grid, so the screen read and the key are not separated by a
 //! redraw this window parsed.
 //!
@@ -213,7 +213,11 @@ pub(super) struct RewindPane {
 /// on its screen, whose Enter would take the highlighted row: a permission
 /// nobody gave. The hand-over's exit command takes the same last look. A
 /// refusal types nothing and carries the word the page says it with.
-pub(super) fn type_rewind(held: &HeldTerminal, pane: &RewindPane, first: &[u8]) -> Result<(), String> {
+pub(super) fn type_rewind(
+    held: &HeldTerminal,
+    pane: &RewindPane,
+    first: &[u8],
+) -> Result<(), String> {
     if pane.seated {
         return Err(REWIND_SEAT.to_string());
     }
