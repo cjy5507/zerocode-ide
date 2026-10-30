@@ -594,7 +594,7 @@ pub fn record_terminal(
 /// This is the bridge that lets the Dreamer mine the externalized turn trace
 /// (recurring tool failures) alongside the deep-gate green-accept producer, so
 /// curation no longer depends on a single signal source. Each log is read only
-/// past where the last call stopped ([`crate::jsonl_log::read_jsonl_resumed`]).
+/// past where the last call stopped (`jsonl_log::read_jsonl_resumed`).
 #[must_use]
 pub fn read_all_digests(cwd: &Path) -> Vec<decision_core::dreamer::TurnDigest> {
     // Same root as the writer (`log_path`): the caller-resolved `trace_cwd`.

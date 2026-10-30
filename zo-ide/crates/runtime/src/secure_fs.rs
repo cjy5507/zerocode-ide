@@ -374,7 +374,7 @@ pub fn write_atomic_owner_only_with(
 }
 
 /// [`write_atomic_owner_only_with`] with its temporary file named for the file
-/// it replaces ([`TempName::Target`]), so [`remove_abandoned_temp_files`] can
+/// it replaces (`TempName::Target`), so [`remove_abandoned_temp_files`] can
 /// take the one a writer killed before its rename left behind.
 pub fn write_atomic_owner_only_named_temp(
     root: &Path,

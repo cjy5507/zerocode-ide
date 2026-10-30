@@ -2252,7 +2252,7 @@ pub fn record_user_pattern_observation(
 /// `.zo/dream/`. Each non-empty line is one JSON [`LessonObservation`];
 /// unparseable lines are skipped so a single corrupt write never blocks a run.
 /// Each log is read only past where the last pass stopped
-/// ([`crate::jsonl_log::read_jsonl_resumed`]).
+/// (`jsonl_log::read_jsonl_resumed`).
 pub struct JsonlLessonSource {
     dir: PathBuf,
 }
