@@ -1398,21 +1398,31 @@ mod tests {
         pane.draw(&format!(
             "\x1b[?2004h● Done.\n\n{rule}\n❯ \n{rule}\x1b[4;3H"
         ));
-        let unread = rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(7, None, || None));
-        let coordinator =
-            rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(7, None, || {
+        use crate::cmd::wire::pane_the_ledger_drives as drives;
+        let unread = rewind_seat_word(drives(7, || Some(Vec::new()), || None));
+        let unread_workers = rewind_seat_word(drives(7, || None, || Some(Vec::new())));
+        let coordinator = rewind_seat_word(drives(
+            7,
+            || Some(Vec::new()),
+            || {
                 Some(vec![crate::orchestration::restart_census::KeyedPane {
                     key: "run-1".to_string(),
                     term: 7,
                 }])
-            }));
-        let worker = rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(7, Some(7), || {
-            Some(Vec::new())
-        }));
+            },
+        ));
+        let worker = rewind_seat_word(drives(7, || Some(vec![7]), || Some(Vec::new())));
         for (refused, word) in [
             (
                 RewindPane {
                     seat: unread,
+                    ..free
+                },
+                REWIND_LEDGER_UNREAD,
+            ),
+            (
+                RewindPane {
+                    seat: unread_workers,
                     ..free
                 },
                 REWIND_LEDGER_UNREAD,
