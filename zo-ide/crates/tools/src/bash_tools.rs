@@ -151,6 +151,17 @@ pub(crate) fn dispatch_result(
                 runtime::live_output::with_dispatch_key(tool_call_id, || {
                     let session_id = ctx.session_id();
                     from_value::<BashCommandInput>(input).and_then(|mut inp| {
+                        let roots = runtime::file_ops::additional_workspace_roots();
+                        if !roots.is_empty() {
+                            let directory = cwd.map_or_else(|| std::env::current_dir().unwrap_or_default(), Path::to_path_buf);
+                            let config = ConfigLoader::default_for(&directory).load().map_err(|error| ToolError::Execution(error.to_string()))?;
+                            let mut mounts = inp.allowed_mounts.take().unwrap_or_else(|| config.sandbox().allowed_mounts.clone());
+                            mounts.extend(roots.iter().map(|root| root.to_string_lossy().into_owned()));
+                            inp.allowed_mounts = Some(mounts);
+                            if inp.filesystem_mode.unwrap_or(config.sandbox().filesystem_mode.unwrap_or_default()) != runtime::FilesystemIsolationMode::Off {
+                                inp.filesystem_mode = Some(runtime::FilesystemIsolationMode::AllowList);
+                            }
+                        }
                         if ctx.inspection_shell() {
                             if inp.run_in_background == Some(true) {
                                 return Err(ToolError::PermissionDenied { tool: name.to_string(), reason: "Inspection Bash runs one local query in the foreground.".to_string() });
@@ -225,6 +236,7 @@ fn run_bash_as_dedicated_read(
 ) -> Result<String, ToolError> {
     let input = read.input();
     maybe_enforce_permission_check(enforcer, read.tool_name(), &input)?;
+    if !runtime::file_ops::additional_workspace_roots().is_empty() { crate::file_tools::additional_root_deny_check(ctx, read.tool_name(), &input)?; }
     let session_mode = ctx.session_permission_mode();
     let workspace_root = ctx.workspace_root.as_deref();
     let body = match read {

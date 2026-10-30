@@ -24,7 +24,7 @@ pub(crate) mod pulse;
 mod request_types;
 pub(crate) mod route_fact;
 pub mod runtime_bridge;
-mod runtime_builder;
+pub(crate) mod runtime_builder;
 #[cfg(test)]
 mod wire_ceiling_tests;
 mod smart_runtime;

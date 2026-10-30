@@ -270,6 +270,9 @@ pub(crate) fn dispatch(
     name: &str,
     input: &Value,
 ) -> Option<Result<String, ToolError>> {
+    if !runtime::file_ops::additional_workspace_roots().is_empty() {
+        if let Err(error) = additional_root_deny_check(ctx, name, input) { return Some(Err(error)); }
+    }
     match name {
         READ_FILE_TOOL_NAME => Some(
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
@@ -462,6 +465,18 @@ fn boundary_is_full_access(
 /// `/private/tmp` on macOS) are normalised before comparing against
 /// the canonical workspace root. Skipped when no workspace root is
 /// configured (tests, harness runs).
+pub(crate) fn additional_root_deny_check(ctx: &ToolContext, name: &str, input: &Value) -> Result<(), ToolError> {
+    let cwd = ctx.cwd.as_deref().or(ctx.workspace_root.as_deref()).unwrap_or_else(|| Path::new("."));
+    let config = runtime::ConfigLoader::default_for(cwd).load().map_err(|error| ToolError::PermissionDenied { tool:name.into(), reason:error.to_string() })?;
+    let mut canonical_input = input.clone();
+    if let Some(path) = input.get("path").and_then(Value::as_str) {
+        canonical_input["path"] = Value::String(ctx.resolved_workspace_path(path).to_string_lossy().into_owned());
+    }
+    let policy = runtime::PermissionPolicy::new(ctx.session_permission_mode().unwrap_or(PermissionMode::ReadOnly)).with_permission_rules(config.permission_rules());
+    if let Some(reason) = policy.deny_reason(name, &input.to_string()).or_else(|| policy.deny_reason(name, &canonical_input.to_string())) { return Err(ToolError::PermissionDenied { tool:name.into(),reason }); }
+    Ok(())
+}
+
 pub(crate) fn enforce_workspace_boundary(
     enforcer: Option<&PermissionEnforcer>,
     session_mode: Option<PermissionMode>,

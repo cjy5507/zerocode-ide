@@ -992,6 +992,13 @@ impl ToolContext {
         self
     }
 
+    pub(crate) fn resolved_workspace_path(&self, path: &str) -> PathBuf {
+        let path = std::path::Path::new(path);
+        let candidate = if path.is_absolute() { path.to_path_buf() }
+            else { self.workspace_root.as_ref().or(self.cwd.as_ref()).map_or_else(|| path.to_path_buf(), |root| root.join(path)) };
+        crate::file_tools::resolve_for_boundary_check(&candidate)
+    }
+
     /// Attach a user-question channel for `AskUserQuestion` tool support.
     #[must_use]
     pub fn with_user_question_channel(self, channel: Arc<dyn UserQuestionChannel>) -> Self {

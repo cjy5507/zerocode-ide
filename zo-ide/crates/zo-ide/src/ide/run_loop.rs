@@ -38,17 +38,11 @@ const PASTE_MODE_OFF: &str = "\u{1b}[?2004l";
 /// 유휴 상태에서 Ctrl-C 두 번이 이 간격 안에 오면 종료.
 const DOUBLE_INTERRUPT_WINDOW: Duration = Duration::from_secs(1);
 
-const KEEP_LIST_HELP: &str = "\
-/model <alias>        모델 교체 (effort 는 TUI 의 /model 피커 2단계에서)
-/permissions <mode>   read-only·workspace-write·danger-full-access
-/compact [focus]      대화 압축
-/goal [command]       지속 목표·bounded autonomous gate
-/loop [command]       횟수·간격·파일 변화 반복
-/status               사용량 카드 — 모델·권한·세션·컨텍스트·한도
-/context              컨텍스트 창을 무엇이 채우나·언제 압축하나
-/help                 이 목록
-/exit                 종료 (Ctrl-D 도 같다)
-그 외 슬래시는 zerocode IDE 에서 하세요.";
+static KEEP_LIST_HELP: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    Slash::CATALOG.iter().filter(|command| command.handled_in_pipe())
+        .map(|command| format!("{:<20} {}", command.name(), command.description()))
+        .collect::<Vec<_>>().join("\n")
+});
 
 /// 루프가 끝난 이유 — 세션 종료 훅의 `reason` 이 된다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,8 +274,16 @@ async fn run_frontend(
         );
     }
 
+    let literal_prompt = session.invocation.prompt.is_some();
     let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(16);
-    tokio::spawn(pump_stdin(input_tx));
+    if let Some(prompt) = session.take_initial_prompt() {
+        // A named prompt is one headless invocation. Stdin keeps its existing
+        // line/paste behavior when no prompt was named.
+        input_tx.send(InputEvent::Submit(prompt)).await?;
+        input_tx.send(InputEvent::Eof).await?;
+    } else {
+        tokio::spawn(pump_stdin(input_tx));
+    }
     let mut headless_loop = headless_loop.map(HeadlessLoopRun::new);
     let mut input_open = true;
 
@@ -324,7 +326,7 @@ async fn run_frontend(
                         )?);
                     } else if headless_loop.is_some() {
                         note(&mut renderer, "headless loop ignores stdin after its first prompt");
-                    } else if let Some(command) = trimmed.strip_prefix('/') {
+                    } else if let Some(command) = trimmed.strip_prefix('/').filter(|_| !literal_prompt) {
                         match handle_slash(&mut session, command, &mut renderer, reporter.as_ref()) {
                             SlashOutcome::Continue => {}
                             SlashOutcome::Exit => break ExitReason::UserExit,
@@ -453,7 +455,18 @@ async fn run_frontend(
             .await;
     }
     let _ = session.persist();
-    write_last_message(last_message.as_deref(), renderer.last_assistant_message());
+    let mut failure = session.invocation_failure().map(str::to_string);
+    if failure.is_none() && session.invocation.schema.is_some() && renderer.last_assistant_message().trim().is_empty() {
+        failure = Some("no final JSON output was produced".into());
+    }
+    if failure.is_none() {
+        if let Some(path) = last_message.as_deref() {
+            if let Err(error) = crate::write_atomic(path, renderer.last_assistant_message().as_bytes()) { failure = Some(format!("--last-message: {error}")); }
+        }
+    }
+    let stopped = matches!(reason, ExitReason::AutonomousLimit | ExitReason::Interrupted).then(|| format!("run ended: {reason:?}"));
+    renderer.completion(failure.as_deref().or(stopped.as_deref()), session.invocation.schema.is_some());
+    if let Some(failure) = failure { return Err(failure.into()); }
     if !flags.json {
         let _ = stdout.write_all(PASTE_MODE_OFF.as_bytes());
     }
@@ -585,11 +598,20 @@ fn handle_slash<W: Write>(
     };
     match Slash::from_word(name) {
         Some(Slash::Exit) => SlashOutcome::Exit,
+        Some(Slash::Fork | Slash::Rename | Slash::Export) => {
+            let result = match Slash::from_word(name) {
+                Some(Slash::Fork) => session.fork((!arg.is_empty()).then_some(arg)).map(|path| format!("Fork saved: {}", path.display())),
+                Some(Slash::Rename) => session.set_name(arg).map(|()| "Session renamed".to_string()).map_err(|e| e.to_string()),
+                _ => session.export(std::path::Path::new(arg)).map(|()| format!("Exported to {arg}")),
+            };
+            match result { Ok(text) => note(renderer, &text), Err(error) => note_error(renderer, &error) }
+            SlashOutcome::Continue
+        }
         Some(Slash::Help) => {
             // System 블록은 이제 첫 줄만 남는다(멀티라인 System 은 codex 에
             // 없다). 일곱 줄짜리 keep-list 는 통지가 아니라 카드라 원문
             // 블록으로 흘린다.
-            notice(renderer, KEEP_LIST_HELP);
+            notice(renderer, &KEEP_LIST_HELP);
             SlashOutcome::Continue
         }
         // TUI 와 **같은 행**이다 — 조립은 `status_format::session_status_card`

@@ -72,7 +72,7 @@ pub(crate) fn resolve_session_reference(
     let path = if direct.exists() {
         direct
     } else if looks_like_path {
-        return Err(format_missing_session_reference(reference).into());
+        named_session_path(reference)?.ok_or_else(|| format_missing_session_reference(reference))?
     } else {
         resolve_managed_session_path(reference)?
     };
@@ -97,7 +97,16 @@ fn resolve_managed_session_path(session_id: &str) -> Result<PathBuf, Box<dyn std
             }
         }
     }
-    Err(format_missing_session_reference(session_id).into())
+    named_session_path(session_id)?.ok_or_else(|| format_missing_session_reference(session_id).into())
+}
+
+fn named_session_path(name: &str) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let rows = search_session_summaries_inner(name, 0, 2, None, &cancelled, true)?;
+    match rows.as_slice() {
+        [] => Ok(None), [row] => Ok(Some(row.path.clone())),
+        _ => Err(format!("session name '{name}' is ambiguous; use an id").into()),
+    }
 }
 
 // The canonical sidecar filter lives in `runtime::session_control` so serve
@@ -165,6 +174,57 @@ pub(crate) fn list_managed_sessions_limited(
     order_session_summaries(&mut sessions);
     Ok(sessions)
 }
+
+/// Search eligible heads once and retain only the requested result page prefix.
+/// The ordinary recent-session view keeps its separate cheap metadata-first path.
+pub(crate) fn search_session_summaries(
+    query: &str, offset: usize, limit: usize, cwd_filter: Option<&Path>, cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<ManagedSessionSummary>, Box<dyn std::error::Error>> {
+    search_session_summaries_inner(query, offset, limit, cwd_filter, cancelled, false)
+}
+
+fn search_session_summaries_inner(
+    query: &str, offset: usize, limit: usize, cwd_filter: Option<&Path>, cancelled: &std::sync::atomic::AtomicBool, exact_name: bool,
+) -> Result<Vec<ManagedSessionSummary>, Box<dyn std::error::Error>> {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::Ordering;
+    let query = query.to_lowercase();
+    let capacity = offset.saturating_add(limit);
+    if limit == 0 { return Ok(Vec::new()); }
+    // Keep only the requested newest matching rows. Every directory entry and
+    // transcript head is visited once, including old and no-match queries.
+    let mut newest: BTreeMap<(u128, String, PathBuf), ManagedSessionSummary> = BTreeMap::new();
+    for directory in session_search_dirs()? {
+        if !directory.exists() { continue; }
+        for entry in fs::read_dir(directory)? {
+            if cancelled.load(Ordering::Relaxed) { return Ok(Vec::new()); }
+            let entry = entry?;
+            let path = entry.path();
+            if !is_managed_session_file(&path) { continue; }
+            let modified = entry.metadata()?.modified().ok().and_then(|time| time.duration_since(UNIX_EPOCH).ok()).map_or(0, |time| time.as_millis());
+            let row = session_summary(path, modified);
+            if !row.has_user_input || row.id.ends_with(".system-prompt") { continue; }
+            let cwd = crate::resume::load_session_cwd(&row.path);
+            if cwd_filter.is_some_and(|filter| cwd.as_deref() != Some(filter)) { continue; }
+            if exact_name && row.name.as_deref().map(str::to_lowercase).as_deref() != Some(query.as_str()) { continue; }
+            if !exact_name && !query.is_empty() && !row.id.to_lowercase().contains(&query)
+                && !row.name.as_deref().is_some_and(|name| name.to_lowercase().contains(&query))
+                && !row.first_user_text.as_deref().is_some_and(|text| text.to_lowercase().contains(&query))
+                && !cwd.as_ref().is_some_and(|path| path.to_string_lossy().to_lowercase().contains(&query)) { continue; }
+            let key = (modified, row.id.clone(), row.path.clone());
+            if let Some(previous) = newest.iter().find(|(_, found)| found.id == row.id).map(|(key, _)| key.clone()) {
+                if previous >= key { continue; }
+                newest.remove(&previous);
+            }
+            if newest.len() < capacity || newest.first_key_value().is_some_and(|(oldest, _)| key > *oldest) {
+                newest.insert(key, row);
+                if newest.len() > capacity { let _ = newest.pop_first(); }
+            }
+        }
+    }
+    Ok(newest.into_values().rev().skip(offset).take(limit).collect())
+}
+
 
 fn session_summary(path: PathBuf, modified_epoch_millis: u128) -> ManagedSessionSummary {
     let (id, name, parent_session_id, branch_name, first_user_text, has_user_input, created_epoch_millis) =

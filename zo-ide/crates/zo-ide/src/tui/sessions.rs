@@ -36,9 +36,9 @@
 //! | 스크롤 퍼센트 구분선 | 옮김 | `picker_footer_scroll_percent` 그대로 |
 //! | `ctrl+o` 밀도 전환 | 옮김 | comfortable 의 메타 줄은 날짜와 cwd 다 |
 //! | `Status: [Active] Archived` | **안 옮김** | zo 에 보관(archive) 개념이 없다. 두 값 중 하나가 언제나 빈 목록인 토글은 컨트롤이 아니라 거짓말이다 |
-//! | 페이지네이션 | **안 옮김** | codex 는 app-server 에서 페이지를 더 받아 오고 우리는 디스크에서 한 번에 스무 개를 읽는다(`resume::DEFAULT_LIST_LIMIT`). 화면에 보이는 부분(`N / M · P%`·`↑ more`·`↓ more`)은 옮겼다 |
+//! | 페이지네이션 | 비동기 검색 | 전체 적격 세션 머리글에서 검색하고 결과 100개씩 PageUp·PageDown으로 옮긴다 |
 //! | `ctrl+t`/`ctrl+e` 트랜스크립트 미리보기 | **안 옮김** | codex 에서 이 둘은 한 기능이다 — `toggle_selected_expansion` 이 상세 블록을 펴면서 `PickerLoadRequest::Preview` 로 대화를 **비동기로** 불러온다. 우리 피커에는 그 로더 자리가 없고, `ctrl+t` 는 이미 zo 의 트랜스크립트 페이저에 묶여 있다. 상세 블록만 옮기면 `Conversation:` 이라 적어 놓고 그 아래가 늘 비는 화면이 된다 |
-//! | 세션 이름으로 재개 | **안 옮김** | `SessionHandle` 은 id 와 경로뿐이라 `resume_hint_for_resumable_thread` 의 `<name> (<id>)` 갈래가 성립하지 않는다 |
+//! | 세션 이름으로 재개 | 지원 | 저장한 이름을 검색하고 CLI에서도 이름으로 재개한다. 중복 이름은 id를 요구한다 |
 //!
 //! 행 배경(zebra·선택)은 codex처럼 OSC로 측정한 터미널 배경색이 있을 때만
 //! 낸다. 어두운 배경의 zebra는 흰색 5.5%, 선택 행은 12%를 섞고, 밝은
@@ -176,6 +176,7 @@ impl ToolbarControl {
 /// 피커에 실을 세션 하나.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRow {
+    pub name: Option<String>,
     /// `PlainSession::open` 에 넘길 세션 id.
     pub id: String,
     /// codex `Row::cwd` — comfortable 메타 줄과 `Filter: [Cwd]` 의 기준.
@@ -197,6 +198,7 @@ impl SessionRow {
     /// 이름·스레드 id·git 브랜치·cwd 다섯을 훑고, 우리는 이름과 브랜치가
     /// 없으니 셋이다. 소문자 비교도 원본 그대로.
     fn matches_query(&self, query: &str) -> bool {
+        if self.name.as_deref().is_some_and(|name| name.to_lowercase().contains(query)) { return true; }
         if self.preview.to_lowercase().contains(query) {
             return true;
         }
@@ -285,10 +287,11 @@ pub fn rows(sessions: &[ResumeSession]) -> Vec<SessionRow> {
     sessions
         .iter()
         .map(|session| SessionRow {
+            name: session.name.clone(),
             created_millis: session.created_epoch_millis,
             id: session.id.clone(),
             cwd: session.cwd.clone(),
-            preview: one_line(session.first_prompt.as_deref().unwrap_or_default()),
+            preview: one_line(&match &session.name { Some(name) => format!("{name} — {}", session.first_prompt.as_deref().unwrap_or("")), None => session.first_prompt.clone().unwrap_or_default() }),
             updated_millis: session.modified_epoch_millis,
             held_by: core_types::session::writer_lease_holder(&session.path)
                 .map(|holder| holder.said()),
@@ -311,6 +314,7 @@ pub struct SessionPicker {
     /// `all` 안 색인들. 필터와 검색을 통과한 행만, 정렬된 순서로.
     filtered: Vec<usize>,
     query: String,
+    loading: bool,
     filter: FilterMode,
     sort: SortKey,
     density: Density,
@@ -343,6 +347,7 @@ impl SessionPicker {
             all,
             filtered: Vec::new(),
             query: String::new(),
+            loading: false,
             filter,
             sort: SortKey::UpdatedAt,
             density: Density::Dense,
@@ -355,6 +360,23 @@ impl SessionPicker {
         };
         picker.apply_filter();
         picker
+    }
+
+    pub fn query(&self) -> &str { &self.query }
+
+    pub fn search_cwd(&self) -> Option<PathBuf> {
+        (self.filter == FilterMode::Cwd).then(|| self.filter_cwd.clone()).flatten()
+    }
+
+    pub fn begin_loading(&mut self) {
+        self.loading = true;
+        self.all.clear(); self.filtered.clear(); self.selected = 0;
+    }
+
+    pub fn replace_rows(&mut self, rows: Vec<SessionRow>) {
+        self.loading = false;
+        self.all = rows;
+        self.apply_filter();
     }
 
     /// zo (t-6042): 목록의 첫 페이지가 바뀌었으면 mention 자리에 묻는다 —
@@ -724,7 +746,9 @@ impl SessionPicker {
     fn list_lines(&self, width: usize, viewport: usize) -> Vec<Line> {
         if self.filtered.is_empty() {
             // codex `render_empty_state_line`.
-            let text = if self.query.is_empty() {
+            let text = if self.loading {
+                "Loading sessions…"
+            } else if self.query.is_empty() {
                 "No sessions yet"
             } else {
                 "No results for your search"
@@ -1194,6 +1218,7 @@ mod tests {
     fn rows_carry_the_id_the_columns_and_the_two_times() {
         let now = 10_000_000_000u128;
         let sessions = vec![ResumeSession {
+            name: None,
             id: "session-9999999000000-0".to_string(),
             path: PathBuf::from("/tmp/s-1.jsonl"),
             modified_epoch_millis: now - 120_000,
@@ -1219,6 +1244,7 @@ mod tests {
         let mut picker = SessionPicker::new(
             vec![
                 SessionRow {
+                    name: None,
                     id: "long-lived".to_string(),
                     cwd: None,
                     preview: "still being written".to_string(),
@@ -1227,6 +1253,7 @@ mod tests {
                     held_by: None,
                 },
                 SessionRow {
+                    name: None,
                     id: "short-lived".to_string(),
                     cwd: None,
                     preview: "opened and left".to_string(),
@@ -1251,6 +1278,7 @@ mod tests {
     fn without_a_cwd_the_filter_control_has_one_value() {
         let mut picker = SessionPicker::new(
             vec![SessionRow {
+                name: None,
                 id: "session-1-0".to_string(),
                 cwd: None,
                 preview: "only".to_string(),
@@ -1275,6 +1303,7 @@ mod tests {
         let now = 10_000_000_000u128;
         let rows: Vec<SessionRow> = (0..40)
             .map(|index| SessionRow {
+                name: None,
                 id: format!("session-{}-0", 9_000_000_000_000u128 + index),
                 cwd: None,
                 preview: format!("session number {index}"),
@@ -1318,6 +1347,7 @@ mod tests {
         let now = 10_000_000_000u128;
         let rows: Vec<SessionRow> = (0..10)
             .map(|index| SessionRow {
+                name: None,
                 id: format!("session-{}-0", 9_000_000_000_000u128 + index),
                 cwd: Some(PathBuf::from("/w/one")),
                 preview: format!("session number {index}"),
@@ -1380,6 +1410,7 @@ mod tests {
     fn comfortable_resume_rows_carry_the_background_through_full_width_padding() {
         let now = 10_000_000_000u128;
         let row = SessionRow {
+            name: None,
             id: "session-1-0".to_string(),
             cwd: Some(PathBuf::from("/work")),
             preview: "zebra row".to_string(),
@@ -1429,6 +1460,7 @@ mod tests {
 
         let picker = SessionPicker::new(
             vec![SessionRow {
+                name: None,
                 id: "session-1-0".to_string(),
                 // 사이드카가 심링크 쪽 이름을 들고 있다.
                 cwd: Some(link.clone()),
@@ -1452,6 +1484,7 @@ mod tests {
         std::fs::create_dir_all(&other).expect("other directory");
         let picker = SessionPicker::new(
             vec![SessionRow {
+                name: None,
                 id: "session-2-0".to_string(),
                 cwd: Some(other),
                 preview: "someone else's tree".to_string(),
@@ -1501,6 +1534,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, (id, preview))| SessionRow {
+                name: None,
                 id: (*id).to_string(),
                 cwd: None,
                 preview: (*preview).to_string(),

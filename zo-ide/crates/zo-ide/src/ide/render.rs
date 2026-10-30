@@ -134,6 +134,7 @@ pub const JSON_EVENT_TYPES: &[&str] = &[
     "question",
     "loop",
     "launch_refused",
+    "result",
 ];
 
 /// The one line a `--json` run prints when its exact launch contract refused
@@ -610,6 +611,14 @@ impl<W: Write> Renderer<W> {
     ///
     /// 셋을 한 자리에 두는 이유는 자동화가 이것들을 함께 읽기 때문이다 —
     /// `id` 로 호출과 결과를 잇고, 본문은 접지 않은 원문이다.
+    /// Host completion, after schema/budget validation and output persistence.
+    /// Assistant stream events remain provisional until this result.
+    pub fn completion(&mut self, error: Option<&str>, validated: bool) {
+        if self.options.json {
+            self.json_line(&serde_json::json!({"type": "result", "status":if error.is_some() { "failed" } else { "succeeded" }, "error":error, "output_validated":validated && error.is_none()}));
+        }
+    }
+
     fn json_work(&mut self, block: RenderBlock) {
         let value = match block {
             RenderBlock::ToolCall {

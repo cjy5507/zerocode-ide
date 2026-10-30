@@ -21629,3 +21629,52 @@ fn the_words_of_a_standing_decline_are_written_only_in_the_retry_table() {
         }
     }
 }
+
+#[test]
+fn invocation_limits_survive_nested_turn_boundaries() {
+    struct CountApi(Arc<AtomicUsize>);
+    impl ApiClient for CountApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![AssistantEvent::TextDelta("answer".into()), AssistantEvent::MessageStop])
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut runtime = ConversationRuntime::new(Session::new(), CountApi(calls.clone()), StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::ReadOnly), vec!["system".into()]);
+    runtime.set_invocation_limits(Some(2), None);
+    assert_eq!(runtime.run_turn("phase one", None).unwrap().budget_exhausted, None);
+    assert_eq!(runtime.run_turn("phase two", None).unwrap().budget_exhausted, None);
+    assert_eq!(runtime.run_turn("phase three", None).unwrap().budget_exhausted, Some(BudgetExhausted::Iterations));
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "the third phase must not open a provider request");
+}
+
+#[test]
+fn invocation_usage_carries_nested_phases_into_the_next_outer_prompt() {
+    struct CountApi(Arc<AtomicUsize>);
+    impl ApiClient for CountApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![AssistantEvent::TextDelta("answer".into()),
+                AssistantEvent::Usage(TokenUsage { output_tokens: 8, ..TokenUsage::default() }), AssistantEvent::MessageStop])
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let make_runtime = |session| ConversationRuntime::new(session, CountApi(calls.clone()), StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::ReadOnly), vec!["system".into()]);
+    let mut runtime = make_runtime(Session::new());
+    runtime.set_invocation_limits(Some(3), Some(24));
+    runtime.run_turn("first outer prompt: plan phase", None).unwrap();
+    let last_phase = runtime.run_turn("first outer prompt: verify phase", None).unwrap();
+    assert_eq!(last_phase.iterations, 1, "a subturn summary alone undercounts the outer work");
+    let (used_iterations, used_tokens) = runtime.invocation_usage();
+    assert_eq!((used_iterations, used_tokens), (Some(2), Some(16)));
+    // A model change rebuilds the runtime. The host carries this invocation's
+    // consumed account across that rebuild instead of using the last summary.
+    let mut replacement = make_runtime(runtime.session().clone());
+    replacement.set_invocation_limits(Some(3 - used_iterations.unwrap()), Some(24 - used_tokens.unwrap()));
+    assert_eq!(replacement.run_turn("second outer prompt", None).unwrap().budget_exhausted, None);
+    let exhausted = replacement.run_turn("third outer prompt", None).unwrap();
+    assert!(exhausted.budget_exhausted.is_some());
+    assert_eq!(calls.load(Ordering::SeqCst), 3, "nested phases and a new model cannot replenish the account");
+}

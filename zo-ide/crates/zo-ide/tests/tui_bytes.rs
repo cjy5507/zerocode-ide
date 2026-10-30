@@ -1695,6 +1695,7 @@ fn the_resume_picker_chrome_is_the_captured_one() {
     let picker = sessions::SessionPicker::new(
         vec![
             sessions::SessionRow {
+                name: None,
                 id: "session-9999999880000-0".to_string(),
                 cwd: Some(std::path::PathBuf::from("/w/one")),
                 preview: "fix the parser".to_string(),
@@ -1703,6 +1704,7 @@ fn the_resume_picker_chrome_is_the_captured_one() {
                 held_by: None,
             },
             sessions::SessionRow {
+                name: None,
                 id: "session-9999989200000-1".to_string(),
                 cwd: Some(std::path::PathBuf::from("/w/one")),
                 preview: "port the picker".to_string(),
@@ -1783,6 +1785,7 @@ fn the_resume_picker_controls_change_the_rows() {
     let rows = vec![
         // 이 워크스페이스의 세션. 오래 살아서 생성과 수정이 멀다.
         sessions::SessionRow {
+                name: None,
             id: "session-9000000000000-0".to_string(),
             cwd: Some(std::path::PathBuf::from("/w/here")),
             preview: "long lived session".to_string(),
@@ -1792,6 +1795,7 @@ fn the_resume_picker_controls_change_the_rows() {
         },
         // 남의 워크스페이스. 방금 만들어졌다.
         sessions::SessionRow {
+                name: None,
             id: "session-9999999000000-0".to_string(),
             cwd: Some(std::path::PathBuf::from("/w/elsewhere")),
             preview: "another tree".to_string(),
