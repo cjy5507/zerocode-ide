@@ -250,6 +250,7 @@ pub(super) fn type_rewind(
         Ok(false) => Err(REWIND_BUSY.to_string()),
         Err(error) => Err(error.to_string()),
     }
+}
 
 /// What typing the hand-over's probe at a pane showed (t-84850 r2).
 #[derive(Debug, PartialEq, Eq)]
