@@ -3671,6 +3671,13 @@ function isTableRule(line) {
   return /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(line) && line.includes("-");
 }
 
+/* Whether the line at `at` opens a GFM table: a row of pipes with the rule under it. A table breaks
+ * a paragraph off the way a list item does, so a sentence and the table on the line under it are two
+ * blocks and not one run of words. */
+function opensATable(lines, at) {
+  return lines[at].trimStart().startsWith("|") && isTableRule(lines[at + 1] ?? "");
+}
+
 /* A rendered block remembers the source lines it came from. Review notes use
  * that stable source coordinate rather than DOM offsets, which change with
  * fonts, wrapping and Mermaid's asynchronous replacement. */
@@ -3754,7 +3761,7 @@ function paintMarkdown(body, text) {
 
     // A table is a header row and the rule under it. Without the rule it is
     // just a line with pipes in it, which is what GFM says too.
-    if (line.trimStart().startsWith("|") && isTableRule(lines[at + 1] ?? "")) {
+    if (opensATable(lines, at)) {
       const startLine = at + 1;
       closeLists(0);
       const table = document.createElement("table");
@@ -3843,7 +3850,8 @@ function paintMarkdown(body, text) {
     // Anything else is a paragraph, running to the next blank line.
     const startLine = at + 1;
     const held = [];
-    while (at < lines.length && lines[at].trim() !== "" && !opensABlock(lines[at])) {
+    while (at < lines.length && lines[at].trim() !== "" && !opensABlock(lines[at]) &&
+      !(held.length > 0 && opensATable(lines, at))) {
       held.push(lines[at].trim());
       at += 1;
     }

@@ -15330,6 +15330,16 @@ details.worker-command {
   line-height: var(--chat-prose-leading);
 }
 
+/* A table in an answer is its own scroll box: a wide one scrolls inside the
+ * reading column instead of pushing the page sideways, and the cells keep the
+ * document viewer's rule (`.md-table`) in the answer's own size. */
+.helper-turn.is-assistant .helper-said .md-table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  font-size: inherit;
+}
+
 .helper-turn.is-assistant .helper-said > :last-child {
   margin-bottom: 0;
 }
@@ -15647,7 +15657,8 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 .helper-actions {
   position: absolute;
   bottom: 0;
-  left: 0;
+  /* The copy icon, not its button, stands on the column's left edge. */
+  left: calc((var(--icon-size) - var(--chat-copy-size)) / 2);
   display: flex;
   align-items: center;
   gap: var(--chat-actions-gap);
@@ -16074,7 +16085,8 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   gap: var(--space-2);
   min-width: 0;
   min-height: var(--chat-status-h);
-  margin: var(--space-2) 0 0;
+  /* The ring stands on the column's left edge; the plate hangs its padding into the gutter. */
+  margin: var(--space-2) calc(-1 * var(--space-3)) 0;
   padding: var(--space-2) var(--space-3);
   border-radius: var(--chat-panel-radius);
   background: var(--chat-tool-bg);
@@ -16113,7 +16125,9 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
  * the extension's beat while it is out. */
 .helper-turn:is(.is-tool, .is-thinking) {
   min-width: 0;
-  margin: 1px 0;
+  /* Hung by the line's own padding: the dot stands on the column's left edge, the plate reaches
+   * into the gutter (t-85975). */
+  margin: 1px calc(-1 * var(--space-2));
   border: 0;
   border-radius: var(--radius-md);
   font-size: var(--chat-prose-size);
@@ -16165,7 +16179,7 @@ details[open] > .helper-step-line::after {
   flex: none;
   width: var(--chat-dot);
   height: var(--chat-dot);
-  margin-inline: calc((var(--chat-step-icon) - var(--chat-dot)) / 2);
+  margin-inline: 0 calc(var(--chat-step-icon) - var(--chat-dot));
   border-radius: 50%;
   background: var(--ink-mist);
 }
@@ -16698,7 +16712,9 @@ details[open] > .helper-step-line::after {
   max-width: 100%;
   min-width: 0;
   min-height: var(--row-height);
-  margin: 0;
+  /* One column (t-85975): the pill's dot stands where the answer's words start; its plate, drawn
+   * on the pointer or the keyboard, hangs the pill's own padding into the list's gutter. */
+  margin: 0 0 0 calc(-1 * var(--space-2));
   padding: 0 var(--space-3) 0 var(--space-2);
   border: 0;
   border-radius: var(--radius-pill);
@@ -16751,7 +16767,7 @@ details[open] > .helper-step-line::after {
 }
 
 .helper-group-body {
-  margin: var(--space-1) 0 var(--space-2);
+  margin: var(--space-1) calc(-1 * var(--space-2)) var(--space-2);
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-md);
   background: var(--chat-tool-bg);
@@ -16766,7 +16782,7 @@ details[open] > .helper-step-line::after {
 .helper-group-tail {
   display: grid;
   min-width: 0;
-  margin: 0 0 var(--space-1) calc(var(--space-2) + var(--chat-run-dot) / 2);
+  margin: 0 0 var(--space-1) calc(var(--chat-run-dot) / 2);
   padding-left: var(--space-3);
   border-left: var(--rule-width) solid var(--edge-rule);
 }

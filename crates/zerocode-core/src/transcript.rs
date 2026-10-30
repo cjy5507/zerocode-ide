@@ -2068,6 +2068,12 @@ pub fn turns_in_with(chunk: &str, detail: Detail) -> Vec<TranscriptTurn> {
         {
             continue;
         }
+        // A line the CLI marks `isMeta` is written for the model (a picture's size
+        // note, a caveat), not by the person; its picture, if any, rides the
+        // tool result that returned it.
+        if kind == "user" && row.get("isMeta").and_then(serde_json::Value::as_bool) == Some(true) {
+            continue;
+        }
         // The parts of the message: `content` for Claude Code, `blocks` for zo.
         let content = message.get("content").or_else(|| message.get("blocks"));
         let at_ms = moment_of(&row);
@@ -2712,6 +2718,25 @@ mod tests {
             !serde_json::to_string(&turns)
                 .unwrap()
                 .contains("not-display-content")
+        );
+    }
+
+    #[test]
+    fn a_meta_line_the_cli_writes_for_the_model_is_not_the_person_speaking() {
+        // Claude Code writes the size note of a picture a tool returned as its own
+        // user line marked `isMeta`; the person typed none of it.
+        let input = [
+            r#"{"type":"user","isMeta":true,"turnCompanion":true,"message":{"role":"user","content":"[Image: original 3696x2160, displayed at 2000x1169. Multiply coordinates by 1.85 to map to original image.]"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"[Image #1] 이거 봐"}}"#,
+        ]
+        .join("\n");
+        let turns = turns_in(&input);
+        assert_eq!(
+            turns
+                .iter()
+                .map(|turn| (turn.role.as_str(), turn.text.as_str()))
+                .collect::<Vec<_>>(),
+            [("user", "[Image #1] 이거 봐")]
         );
     }
 
