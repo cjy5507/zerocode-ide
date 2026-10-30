@@ -202,52 +202,66 @@ pub(super) fn type_if_up(
 }
 
 /// Why the window would not type a CLI's way back to an earlier message
-/// (draft C10, t-82196) — the words the page turns into its sentence: the
-/// pane's agent is not between turns, or a menu stands on its screen.
+/// (draft C10, t-82196) — the words the page turns into its sentence. The
+/// pane's agent is not between turns (the hook's word).
 pub(crate) const REWIND_BUSY: &str = "rewind-busy";
 
-/// The person's own unsent words are on the pane's line: the way back would
-/// be typed after them and sent with them.
-pub(crate) const REWIND_OWN_WORDS: &str = "rewind-own-words";
+/// The pane's screen shows a menu, or words on its input line: the way back's
+/// Enter would take the menu's highlighted row, or send those words with it.
+pub(crate) const REWIND_SCREEN: &str = "rewind-screen";
 
 /// A run's worker or coordinator sits in the pane: winding its conversation
 /// back is the run's business, and the ledger would not hear of it.
 pub(crate) const REWIND_SEAT: &str = "rewind-seat";
 
+/// The ledger cannot be read now, so the pane may be a run's coordinator's.
+pub(crate) const REWIND_LEDGER_UNREAD: &str = "rewind-ledger-unread";
+
 /// What the window knows of a pane before it types a CLI's way back into it.
-pub(super) struct RewindPane {
-    /// A run's worker or coordinator sits in it.
-    pub(super) seated: bool,
+pub(super) struct RewindPane<'a> {
+    /// The ledger's reason the pane is a run's
+    /// (`cmd::wire::pane_the_ledger_drives`), already the page's word.
+    pub(super) seat: Option<&'static str>,
     /// Its agent ended its turn and asks nothing (the hook's word).
     pub(super) between_turns: bool,
-    /// The person's own words wait unsent on its line.
-    pub(super) own_words: bool,
+    /// The agent whose input line the screen is read for.
+    pub(super) agent: &'a str,
+}
+
+/// The page's word for the ledger's reason a pane is a run's: the one it
+/// gives when it cannot be read, or a seat.
+pub(crate) fn rewind_seat_word(reason: Option<&str>) -> Option<&'static str> {
+    reason.map(|said| {
+        if said == crate::cmd::wire::LEDGER_UNREAD_PANE_STAYS {
+            REWIND_LEDGER_UNREAD
+        } else {
+            REWIND_SEAT
+        }
+    })
 }
 
 /// The first key group of a CLI's way back — Claude Code's `/rewind` — typed
 /// into the pane only when the pane takes it (draft C10, t-82196): no run
-/// sits in it, its agent is between turns, its line holds none of the
-/// person's words, and — read in the same hold as the write — no menu stands
-/// on its screen, whose Enter would take the highlighted row: a permission
-/// nobody gave. The hand-over's exit command takes the same last look. A
-/// refusal types nothing and carries the word the page says it with.
+/// sits in it, nor may (a ledger that cannot be read), its agent is between
+/// turns, and — read in the same hold as the write — its screen shows its
+/// input line empty and no menu, whose Enter would take the highlighted row:
+/// a permission nobody gave. The hand-over's exit command takes the same last
+/// look (t-84850). A refusal types nothing and carries the word the page says
+/// it with.
 pub(super) fn type_rewind(
     held: &HeldTerminal,
-    pane: &RewindPane,
+    pane: &RewindPane<'_>,
     first: &[u8],
 ) -> Result<(), String> {
-    if pane.seated {
-        return Err(REWIND_SEAT.to_string());
+    if let Some(word) = pane.seat {
+        return Err(word.to_string());
     }
     if !pane.between_turns {
         return Err(REWIND_BUSY.to_string());
     }
-    if pane.own_words {
-        return Err(REWIND_OWN_WORDS.to_string());
-    }
-    match type_if_up(held, &Expect::no_menu(), first) {
+    match type_if_up(held, &Expect::no_menu().with_empty_line(pane.agent), first) {
         Ok(true) => Ok(()),
-        Ok(false) => Err(REWIND_BUSY.to_string()),
+        Ok(false) => Err(REWIND_SCREEN.to_string()),
         Err(error) => Err(error.to_string()),
     }
 }
@@ -1352,27 +1366,67 @@ mod tests {
     }
 
     /// A CLI's way back the window types by itself (draft C10, t-82196) goes
-    /// into a pane only when the pane is the person's, between turns, with
-    /// none of their words on its line — and never onto a menu, where its
-    /// Enter would take the highlighted row.
+    /// into a pane only when no run sits in it — nor may, when the ledger
+    /// cannot be read — its agent is between turns, and its screen shows its
+    /// input line empty with no menu: never onto a permission menu, where its
+    /// Enter would take the highlighted row, nor after words on the line.
     #[test]
     fn a_way_back_is_typed_only_into_a_pane_that_takes_it() {
+        let rule = "─".repeat(40);
         let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
         let free = RewindPane {
-            seated: false,
+            seat: None,
             between_turns: true,
-            own_words: false,
+            agent: "claude",
         };
         assert_eq!(
             type_rewind(&pane.held, &free, b"/rewind"),
-            Err(REWIND_BUSY.to_string())
+            Err(REWIND_SCREEN.to_string())
         );
         assert!(pane.typed().is_empty(), "a way back was typed into a menu");
-        pane.draw("● Done.\n\n❯ \n");
+        pane.draw(&format!(
+            "\x1b[?2004h● Done.\n\n{rule}\n❯ fix login\n{rule}\x1b[4;12H"
+        ));
+        assert_eq!(
+            type_rewind(&pane.held, &free, b"/rewind"),
+            Err(REWIND_SCREEN.to_string())
+        );
+        assert!(
+            pane.typed().is_empty(),
+            "a way back joined words on the line"
+        );
+        pane.draw(&format!(
+            "\x1b[?2004h● Done.\n\n{rule}\n❯ \n{rule}\x1b[4;3H"
+        ));
+        let unread = rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(7, None, || None));
+        let coordinator =
+            rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(7, None, || {
+                Some(vec![crate::orchestration::restart_census::KeyedPane {
+                    key: "run-1".to_string(),
+                    term: 7,
+                }])
+            }));
+        let worker = rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(7, Some(7), || {
+            Some(Vec::new())
+        }));
         for (refused, word) in [
             (
                 RewindPane {
-                    seated: true,
+                    seat: unread,
+                    ..free
+                },
+                REWIND_LEDGER_UNREAD,
+            ),
+            (
+                RewindPane {
+                    seat: coordinator,
+                    ..free
+                },
+                REWIND_SEAT,
+            ),
+            (
+                RewindPane {
+                    seat: worker,
                     ..free
                 },
                 REWIND_SEAT,
@@ -1383,13 +1437,6 @@ mod tests {
                     ..free
                 },
                 REWIND_BUSY,
-            ),
-            (
-                RewindPane {
-                    own_words: true,
-                    ..free
-                },
-                REWIND_OWN_WORDS,
             ),
         ] {
             assert_eq!(

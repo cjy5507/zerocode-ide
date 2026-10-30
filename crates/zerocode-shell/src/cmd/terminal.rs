@@ -2395,11 +2395,13 @@ pub(crate) fn term_paste(
 /// knows runs in the pane, never one the page names. It is typed the way the
 /// hand-over types `/exit` — its text, then its Enter (`ask::line_keys`) —
 /// and its first key goes through the answer door
-/// ([`answer_door::type_rewind`]): only into a pane no run sits in, whose
-/// agent ended its turn and asks nothing (the hook's word, read now, not
-/// when the button stood), whose line holds none of the person's unsent
-/// words, and on whose screen no menu stands — read in the same hold as the
-/// write. A refusal types nothing and returns the word the page says it with.
+/// ([`answer_door::type_rewind`]): only into a pane the ledger does not drive
+/// (`cmd::wire::pane_the_ledger_drives` — a worker's seat, a coordinator's,
+/// or any pane while the ledger cannot be read), whose agent ended its turn
+/// and asks nothing (the hook's word, read now, not when the button stood),
+/// and whose screen — read in the same hold as the write — shows its input
+/// line empty and no menu. A refusal types nothing and returns the word the
+/// page says it with.
 ///
 /// A chip's write, never the person's words (t-57712): the window log says
 /// what was opened, and a delivery yields to the line it reached.
@@ -2418,19 +2420,21 @@ pub(crate) fn pane_rewind(
         .rewind_command
         .ok_or_else(|| format!("{agent} has no way back this window knows"))?;
     // Each fact read under its own lock, one at a time. A seat is the
-    // ledger's: a live worker of a run, or a run's coordinator, in this pane.
-    let seated = orchestration::worker_at_term(term).is_some()
-        || orchestration::seated_coordinators()
-            .iter()
-            .any(|seat| seat.term == term);
+    // ledger's: a live worker of a run (by its row, not a nested run's page),
+    // or a run's coordinator, as the hand-over reads them (t-84850).
+    let seat = crate::answer_door::rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(
+        term,
+        orchestration::worker_at_term(term).map(|_| term),
+        orchestration::seated_coordinators_read,
+    ));
     let between_turns = state
         .pane_states()
         .get(&term)
         .is_some_and(|held| held.state == zerocode_core::hook::HookState::Done);
     let pane = crate::answer_door::RewindPane {
-        seated,
+        seat,
         between_turns,
-        own_words: crate::human_input::holds_own_words(term),
+        agent,
     };
     let (groups, step) = zerocode_core::ask::line_keys(command);
     let Some((first, rest)) = groups.split_first() else {
