@@ -427,11 +427,24 @@ fn settled_failure(manifest: &AgentOutput) -> String {
     results[0].error.clone().unwrap_or_default()
 }
 
+/// How much longer the call's own part takes on a loaded machine than on a
+/// quiet one: its three fixture processes (run-current, task-create,
+/// dispatch-show) took 3.6 s in all on gate l87f, where the same test run on
+/// its own took 0.8 s, at load 15 too. The test adds it before the
+/// worker-start is even asked (t-84792).
+const LOADED_CALL: Duration = Duration::from_millis(1_200);
+
 /// Adversarial review A (Z7): the window opening a worker's pane held the
 /// parent's turn for the whole worker-start (8.6–9.8 s on 2026-10-27). The
 /// start runs in the background now, so the `Agent` call hands back its
 /// starting receipt at once. The fixture answers worker-start after ten
 /// seconds unless the test lets it go, which it does once the call returned.
+///
+/// The order is the evidence, not the time (t-84792): the fixture writes
+/// `started` just before it answers worker-start, so a call that returns
+/// while `started` is missing returned before the answer, however long its
+/// own part took. A worker that is not bound yet is no such evidence: the
+/// binding is written after the answer and the receipt checks.
 #[cfg(unix)]
 #[test]
 fn an_agent_call_returns_before_a_slow_worker_start_answers() {
@@ -444,11 +457,15 @@ fn an_agent_call_returns_before_a_slow_worker_start_answers() {
     let launch = input.launch.clone();
     let began = Instant::now();
     let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input,
-        move |job| spawn(&client, &launch, Some("exact-model".into()), job), None, None, None)
+        move |job| {
+            std::thread::sleep(LOADED_CALL);
+            spawn(&client, &launch, Some("exact-model".into()), job)
+        }, None, None, None)
         .unwrap_or_else(|failure| panic!("{failure}"));
     let took = began.elapsed();
+    let answered = root.path().join("started").exists();
     std::fs::write(root.path().join("release"), "go").unwrap();
-    assert!(took < Duration::from_secs(1), "the Agent call waited {took:?} for the worker-start");
+    assert!(!answered, "the Agent call returned after the worker-start answered, in {took:?}");
     // The number a hand-in quotes: `cargo test ... -- --nocapture` prints it.
     println!("the Agent call returned in {} ms", took.as_millis());
     assert_eq!(manifest.status, "running");
