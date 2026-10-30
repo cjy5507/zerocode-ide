@@ -2071,9 +2071,7 @@ pub fn turns_in_with(chunk: &str, detail: Detail) -> Vec<TranscriptTurn> {
         // A line the CLI marks `isMeta` is written for the model (a picture's size
         // note, a caveat), not by the person; its picture, if any, rides the
         // tool result that returned it.
-        if kind == "user"
-            && row.get("isMeta").and_then(serde_json::Value::as_bool) == Some(true)
-        {
+        if kind == "user" && row.get("isMeta").and_then(serde_json::Value::as_bool) == Some(true) {
             continue;
         }
         // The parts of the message: `content` for Claude Code, `blocks` for zo.
