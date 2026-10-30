@@ -2725,7 +2725,7 @@ where
                     .cumulative_usage()
                     .output_tokens
                     .saturating_sub(turn_start_output_tokens)
-                    >= budget
+                    > budget
             }) || self.invocation_output_budget.is_some_and(|(baseline, max)| {
                 self.usage_tracker.cumulative_usage().output_tokens.saturating_sub(baseline) >= max
             }) {
@@ -3254,9 +3254,8 @@ where
             let mut precomputed: HashMap<usize, (ToolExecutionResult, bool)> = HashMap::new();
             // The waves: consecutive reads and spawns run side by side when the
             // serial pass below reaches them (`parallel_waves`). This sync path
-            // spawns a raw OS thread per tool, so each wave is capped at
-            // MAX_PARALLEL_SAFE_TOOL_DISPATCHES: nine reads run 8 + 1, never
-            // more than the cap of threads at once (BUG-D8-a).
+            // uses a bounded scoped worker pool. A free worker takes the next
+            // admitted call while results remain indexed for model order.
             let waves = if self.sync_parallel_batch_has_repetition_risk(&prepared) {
                 Vec::new()
             } else {
@@ -3276,28 +3275,38 @@ where
                 if waves.peek().is_some_and(|wave| wave[0] == idx) {
                     let wave = waves.next().unwrap_or_default();
                     if let Some(dispatch) = self.result_dispatch() {
-                        for batch in wave.chunks(MAX_PARALLEL_SAFE_TOOL_DISPATCHES) {
-                            let mut handles = Vec::with_capacity(batch.len());
-                            for &idx in batch {
-                                let p = &prepared[idx];
+                        let next = std::sync::atomic::AtomicUsize::new(0);
+                        let epoch = self.tool_cancel_signal.epoch();
+                        let signal = self.tool_cancel_signal.clone();
+                        let (sender, receiver) = std::sync::mpsc::sync_channel(MAX_PARALLEL_SAFE_TOOL_DISPATCHES);
+                        std::thread::scope(|scope| {
+                            for _ in 0..wave.len().min(MAX_PARALLEL_SAFE_TOOL_DISPATCHES) {
+                                let next = &next;
+                                let wave = &wave;
+                                let prepared = &prepared;
+                                let sender = sender.clone();
                                 let dispatch = Arc::clone(&dispatch);
-                                let name = p.tool_name.clone();
-                                let input = p.effective_input.to_string();
-                                handles.push((
-                                    idx,
-                                    std::thread::spawn(move || match dispatch(&name, &input) {
-                                        Ok(output) => (output, false),
-                                        Err(error) => (error.to_string().into(), true),
-                                    }),
-                                ));
-                            }
-                            for (idx, handle) in handles {
-                                let result = handle.join().unwrap_or_else(|_| {
-                                    ("parallel tool execution panicked".to_string().into(), true)
+                                let signal = signal.clone();
+                                let _ = scope.spawn(move || loop {
+                                    let position = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    let Some(&idx) = wave.get(position) else { break; };
+                                    let prepared = &prepared[idx];
+                                    let result = if signal.epoch() != epoch {
+                                        (crate::tool_cancel::CANCELLED_TOOL_RESULT.to_string().into(), true)
+                                    } else {
+                                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                            match dispatch(&prepared.tool_name, prepared.effective_input.as_ref()) {
+                                                Ok(output) => (output, false),
+                                                Err(error) => (error.to_string().into(), true),
+                                            }
+                                        })).unwrap_or_else(|_| ("parallel tool execution panicked".to_string().into(), true))
+                                    };
+                                    if sender.send((idx, result)).is_err() { break; }
                                 });
-                                precomputed.insert(idx, result);
                             }
-                        }
+                            drop(sender);
+                            for (idx, result) in receiver { precomputed.insert(idx, result); }
+                        });
                     }
                 }
                 let result_message = match &p.permission_outcome {
@@ -3588,6 +3597,8 @@ where
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod queue_tests;
 #[cfg(test)]
 mod refusal_repeat_tests;
 
