@@ -20459,13 +20459,17 @@ fn last_user_words(request: &ApiRequest) -> Option<String> {
         })
 }
 
-/// Every turn record written under `cwd`, as JSON.
+/// Every turn record written under `cwd`, as JSON. Only the `.jsonl` logs: the
+/// folder also holds the resumed reader's `.read-cursor.json`.
 fn turn_records(cwd: &std::path::Path) -> Vec<serde_json::Value> {
     let dir = crate::traces_base(cwd)
         .join(core_types::paths::ZO_DIR_NAME)
         .join("turns");
     let mut records = Vec::new();
     for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+        if entry.path().extension().is_none_or(|extension| extension != "jsonl") {
+            continue;
+        }
         let body = fs::read_to_string(entry.path()).unwrap_or_default();
         records.extend(body.lines().filter_map(|line| serde_json::from_str(line).ok()));
     }

@@ -394,7 +394,8 @@ fn answer_of(summary: &TurnSummary) -> Option<&str> {
     }
 }
 
-/// How many turn records were written under `cwd`.
+/// How many turn records were written under `cwd`. Only the `.jsonl` logs: the
+/// folder also holds the resumed reader's `.read-cursor.json`.
 fn turn_records(cwd: &Path) -> usize {
     let dir = crate::traces_base(cwd)
         .join(core_types::paths::ZO_DIR_NAME)
@@ -403,6 +404,7 @@ fn turn_records(cwd: &Path) -> usize {
         .into_iter()
         .flatten()
         .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "jsonl"))
         .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default().lines().count())
         .sum()
 }
