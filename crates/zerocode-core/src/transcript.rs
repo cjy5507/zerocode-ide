@@ -1997,13 +1997,12 @@ pub fn turns_in_with(chunk: &str, detail: Detail) -> Vec<TranscriptTurn> {
     turns_of(chunk, detail, Meta::PictureNotes)
 }
 
-/// [`turns_in`] with every user line the CLI marks `isMeta` left out, as the
-/// readers that count what the person said (a step's effort judges per
-/// prompt) have always read it: a scheduled check or a hook's feedback is not
-/// a prompt there either.
+/// [`turns_in`] with no `isMeta` user line left out, as every reader read a
+/// transcript before the conversation view hid a picture's size note: a step's
+/// effort judgment counts these lines as the user turns it always counted.
 #[must_use]
-pub fn turns_in_without_meta(chunk: &str) -> Vec<TranscriptTurn> {
-    turns_of(chunk, Detail::Clipped, Meta::All)
+pub fn turns_in_with_every_meta_line(chunk: &str) -> Vec<TranscriptTurn> {
+    turns_of(chunk, Detail::Clipped, Meta::Kept)
 }
 
 /// Which `isMeta` user lines a read leaves out.
@@ -2013,7 +2012,8 @@ enum Meta {
     /// person saw as their own speech; a scheduled prompt, a hook's feedback
     /// and a skill's body stay as they were written.
     PictureNotes,
-    All,
+    /// None: every `isMeta` line stays.
+    Kept,
 }
 
 /// A user line the CLI wrote only to tell the model a returned picture's size
@@ -2125,7 +2125,7 @@ fn turns_of(chunk: &str, detail: Detail, meta: Meta) -> Vec<TranscriptTurn> {
         if kind == "user"
             && match meta {
                 Meta::PictureNotes => is_picture_note(&row, message),
-                Meta::All => row.get("isMeta").and_then(serde_json::Value::as_bool) == Some(true),
+                Meta::Kept => false,
             }
         {
             continue;
@@ -2821,16 +2821,18 @@ mod tests {
     }
 
     #[test]
-    fn the_read_that_counts_prompts_still_leaves_out_every_meta_line() {
+    fn the_read_that_counts_prompts_keeps_every_meta_line_as_before() {
+        let note = r#"{"type":"user","isMeta":true,"turnCompanion":true,"message":{"role":"user","content":"[Image: original 3696x2160, displayed at 2000x1169. Multiply coordinates by 1.85 to map to original image.]"}}"#;
         let scheduled = r##"{"type":"user","isMeta":true,"turnCompanion":true,"queuePriority":"later","message":{"role":"user","content":"# /loop"}}"##;
         let hook = r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"Stop hook feedback"}}"#;
         let typed = r#"{"type":"user","message":{"role":"user","content":"계속"}}"#;
-        let input = [scheduled, hook, typed].join("\n");
-        let said: Vec<String> = turns_in_without_meta(&input)
+        let input = [note, scheduled, hook, typed].join("\n");
+        let said: Vec<String> = turns_in_with_every_meta_line(&input)
             .into_iter()
             .map(|turn| turn.text)
             .collect();
-        assert_eq!(said, ["계속"]);
+        assert_eq!(said.len(), 4, "main's turns_in counted all four user lines");
+        assert_eq!(said[3], "계속");
     }
 
     #[test]

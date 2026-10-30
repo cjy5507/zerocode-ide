@@ -45,7 +45,9 @@ use zerocode_core::step_effort::{
     self, Followed, Move, STEP_EFFORT_LABEL_WINDOW_MS, STEP_EFFORT_RUBRIC_VERSION, Standing,
     StepAsk, StepLook,
 };
-use zerocode_core::transcript::{effort_in, effort_record_in, tail_lines, turns_in_without_meta};
+use zerocode_core::transcript::{
+    effort_in, effort_record_in, tail_lines, turns_in_with_every_meta_line,
+};
 use zerocode_pty::DeliveryOutcome;
 
 use super::{ComposerBusy, PaneTurn, composer_at_rest};
@@ -249,7 +251,7 @@ pub(super) fn sweep(host: &dyn Host, now_ms: i64) {
             continue;
         };
         let raw = lines.join("\n");
-        let turns = turns_in_without_meta(&raw);
+        let turns = turns_in_with_every_meta_line(&raw);
         let prompts = turns.iter().filter(|turn| turn.role == "user").count();
         let heard = super::pane_turns()
             .lock()
