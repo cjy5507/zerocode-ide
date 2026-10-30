@@ -34,7 +34,7 @@ pub use dreamer::{
     Dreamer, FsMemoryStore, JsonlLessonSource, LessonSource, ManualApplyGateRequest,
     MemoryStore, MemoryWriteRequest, QuarantineCheckCommand, QuarantinePatchRequest,
     SelfImproveLock, TurnLogLessonSource, UserPatternLessonSource, WriteOutcome,
-    DEFAULT_AUTO_DREAM_INTERVAL, DEFAULT_COMPACTION_DREAM_INTERVAL,
+    AUTO_DREAM_PASS_DEADLINE, DEFAULT_AUTO_DREAM_INTERVAL, DEFAULT_COMPACTION_DREAM_INTERVAL,
 };
 pub use recall::{
     load_lexical_memory_retriever, load_memory_retriever, parse_memory_index,

@@ -3834,7 +3834,8 @@ impl AutoDreamTrigger {
 }
 
 /// One automatic pass in `<zo> auto-dream`, run in the workspace: the reply
-/// it printed, or `None` when it could not start or exited badly.
+/// it printed, or `None` when it could not start, exited badly or ran past
+/// [`AUTO_DREAM_PASS_DEADLINE`], which stops it.
 #[must_use]
 pub fn run_auto_dream_pass(
     zo: &Path,
@@ -3869,15 +3870,29 @@ fn spawn_auto_dream_pass(
         .spawn()
 }
 
-fn await_auto_dream_pass(mut child: std::process::Child, _deadline: std::time::Duration) -> Option<Vec<u8>> {
+fn await_auto_dream_pass(mut child: std::process::Child, deadline: std::time::Duration) -> Option<Vec<u8>> {
     use std::io::Read as _;
-    let mut out = Vec::new();
-    let read = child.stdout.take()
-        .map(|stdout| stdout.take(MAX_AUTO_DREAM_REPLY_BYTES).read_to_end(&mut out));
-    let exited = child.wait();
-    match (read, exited) {
-        (Some(Ok(_)), Ok(status)) if status.success() => Some(out),
-        _ => None,
+    let stdout = child.stdout.take();
+    let (sent, reply) = std::sync::mpsc::channel();
+    // Read on a thread of its own, so the wait below can give up at the
+    // deadline, and read to the end, so a long answer never blocks the child.
+    let _ = std::thread::Builder::new().name("dreamer-reply".to_string()).spawn(move || {
+        let Some(mut stdout) = stdout else {
+            return;
+        };
+        let mut out = Vec::new();
+        let read = stdout.by_ref().take(MAX_AUTO_DREAM_REPLY_BYTES).read_to_end(&mut out);
+        let drained = std::io::copy(&mut stdout, &mut std::io::sink());
+        if read.is_ok() && drained.is_ok() {
+            let _ = sent.send(out);
+        }
+    });
+    if let Ok(out) = reply.recv_timeout(deadline) {
+        child.wait().ok().filter(std::process::ExitStatus::success).map(|_| out)
+    } else {
+        let _ = child.kill();
+        let _ = child.wait();
+        None
     }
 }
 
