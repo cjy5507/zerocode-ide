@@ -46,6 +46,13 @@ export const DISPLAY_FRAME_MS = 16.7;
 const WINDOW = (suite) => ({ cmd: ["node", "ui/tests/window.mjs", "--suite", suite] });
 const JSON_OUT = (script, ...more) => ({ cmd: ["node", `ui/tests/${script}`, "--rounds", "1", ...more, "--json", "{json}"], json: true });
 
+/** The memory census's scenes the profile reads — panes 1·5·10 and each surface a person opens. */
+const MEMORY_SCENES = "empty,panes-1,panes-5,panes-10,conversation,knowledge,sidebar,layers,layers-chat";
+/** The still scenes the idle probes sit in: nothing open, ten panes, the team sidebar, everything opened once. */
+const IDLE_SCENES = "empty,panes-10,sidebar,layers";
+/** Everything opened once and left behind the panes, then each surface left out or the graph opened as the universe. */
+const HIDDEN_SCENES = "layers,layers-no-orbit,layers-no-knowledge,layers-universe";
+
 /** The probes, each one run `--runs` times. `calibrate` first: it is the ruler. */
 export const PROBES = {
   calibrate: { cmd: ["node", "tools/low-spec/spin.mjs"] },
@@ -59,6 +66,23 @@ export const PROBES = {
   "terminal-cadence": WINDOW("terminal-cadence"),
   "terminal-pacing": WINDOW("terminal-pacing"),
   window: { cmd: ["node", "ui/tests/window.mjs", "--suite", "^window$"] },
+  // What each scene holds (t-82914): the window's engine first, then Chromium for its JS heap and DOM counters.
+  "memory-webkit": JSON_OUT("memory-census.mjs", "--scenarios", MEMORY_SCENES),
+  "memory-chromium": JSON_OUT("memory-census.mjs", "--engine", "chromium", "--scenarios", MEMORY_SCENES),
+  // What a still scene costs over a minute: CPU and wake-ups, IPC and timers by where they were set (t-82914).
+  "idle-webkit": JSON_OUT("memory-census.mjs", "--scenarios", IDLE_SCENES, "--idle-s", "60"),
+  "idle-chromium": JSON_OUT("memory-census.mjs", "--engine", "chromium", "--scenarios", IDLE_SCENES, "--idle-s", "60"),
+  "sidebar-team-perf": JSON_OUT("sidebar-team-perf.mjs"),
+  // A pane's tab brought to the front until its frame is drawn, over ten panes (t-82914).
+  "pane-switch": JSON_OUT("memory-census.mjs", "--engine", "chromium", "--scenarios", "panes-10", "--switch-rounds", "3"),
+  // A long pane turned from its terminal to its conversation by the head's switch, press to first turn drawn (t-82901's
+  // --open; the person's 「대화창이 열 때 바로 안 그려짐」 10-29). Its first read is the last 256 KiB chunk, as both
+  // v1.1.104's backend and v1.1.105's answer it, so one probe gives the page's before and after.
+  "pane-open": JSON_OUT("conversation-earlier.mjs", "--open", "--tail", "chunk"),
+  // What the board and the graph keep once opened and left behind the panes, the graph as a flat map and as the 3D
+  // universe — each scene's difference from `layers` is one candidate's share (t-82914, M1 review k and r2 P3-7).
+  "memory-hidden": JSON_OUT("memory-census.mjs", "--scenarios", HIDDEN_SCENES),
+  "idle-hidden": JSON_OUT("memory-census.mjs", "--scenarios", HIDDEN_SCENES, "--idle-s", "60"),
 };
 
 const sh = (cmd, args) => spawnSync(cmd, args, { encoding: "utf8" }).stdout ?? "";
@@ -176,7 +200,9 @@ function report(dirs) {
   // The control: a level whose empty page cannot make a frame inside one display frame
   // (DISPLAY_FRAME_MS) cannot judge a frame metric.
   const supply = loaded.map((rows) => median(rows.filter((r) => r.probe === "frame-supply").map((r) => r.numbers["frame supply · controlGapP50"]).filter((n) => n !== undefined)));
-  const FRAME_ROW = /scroll|over16|over20|frame|프레임|놓친|gap/i;
+  // A pane switch waits for its frame (memory-census --switch-rounds), and so do a pane's first turn and its rows
+  // filled (conversation-earlier --open): frame rows too.
+  const FRAME_ROW = /scroll|over16|over20|frame|프레임|놓친|gap|switch|TurnMs|filledMs/i;
   const out = ["Frame supply (empty page rAF gap p50, ms): " + levels.map((l, at) => `${l} ${fmt(supply[at])}${supply[at] > DISPLAY_FRAME_MS ? ` (${(1000 / supply[at]).toFixed(0)} Hz)` : ""}`).join(", "), "",
     "| probe | metric | " + levels.join(" | ") + " | budget | low-spec |", "|---|---|" + levels.map(() => "---:").join("|") + "|---|---|"];
   for (const full of keys.keys()) {

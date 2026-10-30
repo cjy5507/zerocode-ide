@@ -32,7 +32,8 @@
  *                  `layers-chat`은 `layers-panes`에 400턴 대화 하나를 열었다가 판으로 돌아와 그 페이지를 뒤에
  *                  세운 장면(`.is-behind`, 창은 많아야 두 장을 세워 둔다 — `CHAT_PARK`). `layers-chat-gone`은 같은
  *                  장면에서 뒤에 선 페이지를 창이 메모리를 돌려줄 때처럼 문서에서 뺀 것(`sweepBehind({ tight })`) —
- *                  둘의 차이가 뒤에 선 페이지의 몫이다.
+ *                  둘의 차이가 뒤에 선 페이지의 몫이다. `layers-universe`는 지식 그래프를 입체 우주(3D)로 연
+ *                  같은 장면 — `layers`(평면 지도)와의 차이가 판 뒤에 숨은 우주의 몫이다(t-82914, M1 r2 P3-7).
  *                  WebContent와 GPU 프로세스를 함께 읽고, 그래픽 표면(`(graphics)` 범주)을 따로 센다.
  *
  * 두 릴리즈의 `ui/`를 같은 하네스로 비교하려면 `ZEROCODE_WINDOW_UI=<다른 트리의 ui>`로 띄운다(window-boot.mjs).
@@ -40,13 +41,25 @@
  * 저사양: 스크립트 전체를 `taskpolicy -b`(효율 코어·낮은 I/O 우선순위)로 돌리고 `--low-spec`로
  * 표시한다 — 띄운 브라우저도 그 정책을 물려받는다.
  *
- *   node ui/tests/memory-census.mjs [--engine webkit|chromium] [--scenarios a,b] [--low-spec] [--json out.json]
+ * 쉬는 비용(`--idle-s N`, t-82914): 장면을 세우고 가라앉힌 뒤 아무것도 하지 않는 N초 동안 페이지와
+ * GPU 프로세스의 CPU·깨어남(tools/memory-census/idle.py, 커널 카운터), 명령별 IPC 횟수(`__COUNTS__`),
+ * 타이머·rAF가 몇 번 울렸는지를 건 자리(파일:줄·함수)별로, Chromium에서는 CDP `Performance.getMetrics`의
+ * 메인 스레드 시간을 잰다. 타이머를 세는 손은 페이지가 뜨기 전에 깔리므로 이 옵션을 준 판의 메모리 수는
+ * 그 손의 몫을 조금 더 진다 — 메모리 판과 쉬는 판은 따로 돌린다. cpu4x(CDP 스로틀)는 페이지를 멈춰 세우는
+ * 방식이라 운영체제가 보는 CPU %를 올리지 않는다: 쉬는 CPU는 normal·low에서 읽는다.
+ *
+ * 판 전환(`--switch-rounds N`, t-82914): `panes-*` 장면에서 탭을 하나씩 앞에 세우기를 N바퀴 — 앞에 세운
+ * 때부터 그 프레임이 그려진 뒤(rAF 안에서 부친 메시지가 도는 때)까지, p50·p95. 다음 프레임을 기다리는
+ * 몫(60 Hz에서 많아야 16.7 ms)이 들어 있다.
+ *
+ *   node ui/tests/memory-census.mjs [--engine webkit|chromium] [--scenarios a,b] [--low-spec] [--idle-s 60]
+ *                                   [--switch-rounds 3] [--json out.json]
  */
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { crc32, deflateSync } from "node:zlib";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
 import { conversationFixture, openFixtureConversation, standingPids, webkitType } from "./conversation-perf.mjs";
@@ -60,7 +73,7 @@ import { standLongPaneChats } from "./conversation-earlier.mjs";
 
 export const SCENARIOS = Object.freeze([
   "empty", "panes-1", "panes-10", "panes-30", "scrollback", "conversation", "gallery", "knowledge", "sidebar",
-  "layers", "layers-no-orbit", "layers-no-knowledge", "layers-panes", "layers-chat", "layers-chat-gone",
+  "layers", "layers-no-orbit", "layers-no-knowledge", "layers-panes", "layers-chat", "layers-chat-gone", "layers-universe",
   "chat-long", "chat-long-3", "chat-long-top", "chat-long-held",
 ]);
 /* 읽기를 많이 하고 놓은 것이 많은 장면 — 할당기가 놓은 페이지를 돌려준 뒤 잰다. */
@@ -93,6 +106,110 @@ const SETTLE_MS = 2000;
 /* 장면 하나를 세우는 데 주는 시간. 넘으면 그 장면은 실패로 적고 다음 장면으로 간다 — 한 장면이
  * 멈춰 나머지 장면의 수까지 잃지 않게. */
 const SCENARIO_PATIENCE_MS = 180000;
+
+/* 쉬는 판에서 출처별로 남기는 줄 수 — 표는 상위 다섯을 쓰고, 나머지 몇 줄은 순위가 흔들릴 때를 위해. */
+const IDLE_TOP = 8;
+const IDLE_PROBE = fileURLToPath(new URL("../../tools/memory-census/idle.py", import.meta.url));
+
+/* 타이머·rAF를 건 자리마다 울린 수를 세는 손. 페이지 스크립트보다 먼저 깔려 창 코드가 잡아 두는
+ * `setTimeout` 따위도 이 손을 거친다. 자리는 스택에서 처음 만나는 창 파일(`*.js:줄`)과 그 함수 이름이다;
+ * 창 파일이 없는 스택(하네스의 스텁)은 `harness`로 묶는다. 워커 안의 타이머는 세지 못한다. */
+export const installTimerCensus = () => {
+  const fired = new Map();
+  const site = (kind) => {
+    for (const line of String(new Error().stack).split("\n").slice(1)) {
+      // WebKit spells a frame `name@url:line:col`, Chromium `    at name (url:line:col)`.
+      // The hand's own frames come first, and WebKit files them under whatever script was loading.
+      const at = line.match(/^([^@\s]*)@.*\/([\w.-]+\.js):(\d+):\d+/) ?? line.match(/(?:at\s+([^\s(]+)\s+\()?[^\s(@]*?\/([\w.-]+\.js):(\d+):\d+/);
+      if (at && !/(?:^|\.)(?:site|census|counted)$/.test(at[1] ?? "")) return `${kind} ${at[1] || "(anonymous)"} ${at[2]}:${at[3]}`;
+    }
+    return `${kind} harness`;
+  };
+  const wrap = (kind, original) => function census(callback, ...rest) {
+    if (typeof callback !== "function") return original.call(this, callback, ...rest);
+    const where = site(kind);
+    return original.call(this, function counted(...args) {
+      fired.set(where, (fired.get(where) ?? 0) + 1);
+      return callback.apply(this, args);
+    }, ...rest);
+  };
+  window.setTimeout = wrap("timeout", window.setTimeout);
+  window.setInterval = wrap("interval", window.setInterval);
+  window.requestAnimationFrame = wrap("raf", window.requestAnimationFrame);
+  if (window.requestIdleCallback) window.requestIdleCallback = wrap("idle", window.requestIdleCallback);
+  window.__TIMER_FIRES__ = () => Object.fromEntries(fired);
+};
+
+/* 커널 카운터로 읽은 프로세스들의 쉬는 비용 — idle.py 한 번, `seconds` 동안. 노드를 막지 않는다. */
+function idleCost(processes, seconds, folder) {
+  const out = join(folder, `idle-${Date.now()}`);
+  const args = [IDLE_PROBE, "--out", out, "--seconds", String(seconds), "--repeat", "1", "--threads", "4",
+    ...Object.entries(processes).filter(([, pid]) => pid !== null).flatMap(([role, pid]) => ["--process", `${role}=${pid}`])];
+  return new Promise((done, fail) => execFile("python3", args, { encoding: "utf8" }, (error) => {
+    if (error) return fail(error);
+    const line = JSON.parse(readFileSync(join(out, "idle.jsonl"), "utf8").trim().split("\n")[0]);
+    rmSync(out, { recursive: true });
+    done(line);
+  }));
+}
+
+const perMinute = (before, after, seconds) => Object.entries(after)
+  .map(([key, count]) => [key, Math.round(((count - (before[key] ?? 0)) * 60) / seconds * 10) / 10])
+  .filter(([, rate]) => rate > 0).sort((a, b) => b[1] - a[1]);
+
+/* 판 전환의 첫 그림: 탭마다 앞에 세운 때부터 그 프레임이 그려진 뒤까지. */
+function measureSwitch(page, rounds) {
+  return page.evaluate(async (rounds) => {
+    const terms = window.__CENSUS_TERMS__ ?? [];
+    const painted = () => new Promise((done) => requestAnimationFrame(() => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = done;
+      channel.port2.postMessage(null);
+    }));
+    await painted();
+    const taken = [];
+    for (let round = 0; round < rounds; round += 1) {
+      for (const term of terms) {
+        const started = performance.now();
+        setActiveTab(tabOfTerm(term).id);
+        await painted();
+        taken.push(performance.now() - started);
+      }
+    }
+    taken.sort((a, b) => a - b);
+    const at = (q) => Math.round(taken[Math.min(taken.length - 1, Math.floor(taken.length * q))] * 10) / 10;
+    return taken.length ? { switches: taken.length, p50Ms: at(0.5), p95Ms: at(0.95), maxMs: at(1) } : null;
+  }, rounds);
+}
+
+/* 장면이 선 페이지가 `seconds` 동안 아무것도 안 할 때 드는 것. */
+async function measureIdle({ page, cdp, pids, seconds, folder }) {
+  const counts = () => page.evaluate(() => ({ invokes: { ...window.__COUNTS__ }, timers: window.__TIMER_FIRES__?.() ?? {} }));
+  const metrics = async () => (cdp ? Object.fromEntries((await cdp.send("Performance.getMetrics")).metrics.map((one) => [one.name, one.value])) : null);
+  if (cdp) await cdp.send("Performance.enable");
+  const before = await counts();
+  const cdpBefore = await metrics();
+  const kernel = await idleCost(pids, seconds, folder);
+  const after = await counts();
+  const cdpAfter = await metrics();
+  const invokes = perMinute(before.invokes, after.invokes, kernel.wall_s);
+  const timers = perMinute(before.timers, after.timers, kernel.wall_s);
+  const role = (name) => kernel.rows.find((row) => row.role === name);
+  const msPerMinute = (name) => (cdpAfter ? Math.round(((cdpAfter[name] - cdpBefore[name]) * 1000 * 60) / kernel.wall_s * 10) / 10 : null);
+  return {
+    seconds: kernel.wall_s, load1: kernel.conditions.load1, loud: kernel.conditions.loud,
+    pageCpuPct: role("page")?.cpu_pct ?? null, pageIdleWakeupsPerS: role("page")?.idle_wakeups_per_s ?? null,
+    pageInterruptWakeupsPerS: role("page")?.interrupt_wakeups_per_s ?? null,
+    gpuCpuPct: role("gpu")?.cpu_pct ?? null, gpuInterruptWakeupsPerS: role("gpu")?.interrupt_wakeups_per_s ?? null,
+    invokesPerMin: invokes.reduce((sum, [, rate]) => sum + rate, 0),
+    timerFiresPerMin: timers.reduce((sum, [, rate]) => sum + rate, 0),
+    rafPerMin: timers.filter(([site]) => site.startsWith("raf ")).reduce((sum, [, rate]) => sum + rate, 0),
+    taskMsPerMin: msPerMinute("TaskDuration"), scriptMsPerMin: msPerMinute("ScriptDuration"),
+    layoutMsPerMin: msPerMinute("LayoutDuration"), styleMsPerMin: msPerMinute("RecalcStyleDuration"),
+    topInvokes: invokes.slice(0, IDLE_TOP), topTimers: timers.slice(0, IDLE_TOP),
+    threads: kernel.threads,
+  };
+}
 
 /* `promise`, 또는 `ms` 뒤의 실패. */
 function within(ms, promise, what) {
@@ -343,7 +460,7 @@ async function openGallery(page, pictures) {
 /* 숨긴 것 장면: 판 `LAYER_PANES`개를 탭으로 열고, 궤도 보드와 지식 그래프를 한 번씩 연 뒤 마지막
  * 판으로 돌아온다 — 사람이 보드와 그래프를 들여다보고 일하던 판으로 돌아온 창. 보드와 그래프는
  * 닫히지 않고 숨는다. 돌아온 뒤에 무엇이 보이는지 적는다: 숨김이 장면의 전제다. */
-async function standLayers(page, { orbit, knowledge, chat, chatGone }) {
+async function standLayers(page, { orbit, knowledge, chat, chatGone, dimension }) {
   const detail = await openPanes(page, LAYER_PANES);
   if (chat) await openFixtureConversation(page, conversationFixture());
   if (orbit) {
@@ -352,7 +469,7 @@ async function standLayers(page, { orbit, knowledge, chat, chatGone }) {
       orbitBloom: window.__ORBIT__?.()?.bloom ?? null })));
   }
   if (knowledge) {
-    Object.assign(detail, await openKnowledge(page));
+    Object.assign(detail, await openKnowledge(page, { dimension }));
     detail.knowledgePainter = await page.evaluate(() => {
       const view = document.querySelector(".knowledge-view:not([hidden])");
       return view === null ? null : knowledgePainters.get(view)?.id ?? (knowledgeUniverses.has(view) ? "universe" : null);
@@ -374,24 +491,27 @@ async function standLayers(page, { orbit, knowledge, chat, chatGone }) {
   }, Boolean(chatGone)) };
 }
 
-async function openKnowledge(page) {
-  await page.evaluate((pages) => {
+/* The graph as the person last left it: the flat map (`2d`) or the universe (`3d`), which stands once it is mounted. */
+async function openKnowledge(page, { dimension = "2d" } = {}) {
+  await page.evaluate(({ pages, dimension }) => {
     secondBrainVault = "/universe";
     window.__VAULT__ = window.__universeVaultSpec__(pages);
-    noteKnowledgeExploreLines({ "/universe": JSON.stringify({ mode: "global", dimension: "2d" }) });
+    noteKnowledgeExploreLines({ "/universe": JSON.stringify({ mode: "global", dimension }) });
     document.getElementById("nav-knowledge").click();
-  }, KNOWLEDGE_PAGES);
-  await page.waitForFunction((pages) => {
+  }, { pages: KNOWLEDGE_PAGES, dimension });
+  await page.waitForFunction(({ pages, dimension }) => {
     const view = document.querySelector(".knowledge-view:not([hidden])");
-    const layout = view === null ? undefined : knowledgeLayouts.get(view);
+    if (view === null) return false;
+    if (dimension === "3d") return knowledgeUniverses.has(view) && view.classList.contains("is-universe");
+    const layout = knowledgeLayouts.get(view);
     return layout !== undefined && layout.count >= pages && layout.left === 0;
-  }, KNOWLEDGE_PAGES, { timeout: SCENARIO_PATIENCE_MS, polling: 250 });
+  }, { pages: KNOWLEDGE_PAGES, dimension }, { timeout: SCENARIO_PATIENCE_MS, polling: 250 });
   return page.evaluate(() => ({ nodes: document.querySelectorAll(".knowledge-view:not([hidden]) *").length }));
 }
 
 /* ---- 한 장면, 한 브라우저 ------------------------------------------------------------ */
 
-async function measureScenario({ engine, name, origin, pictures, folder }) {
+async function measureScenario({ engine, name, origin, pictures, folder, idleS = 0, switchRounds = 0 }) {
   const before = standingPids();
   const type = engine === "webkit" ? webkitType() : chromium;
   const browser = await type.launch({ headless: true });
@@ -401,7 +521,10 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
     const layers = name.startsWith("layers");
     if (layers) {
       // The window's own fixtures (terminals, board, conversation) with the vault the knowledge view reads.
-      ({ page, faults } = await openWindowTestPage(browser, origin, { before: seedUniverseVault,
+      ({ page, faults } = await openWindowTestPage(browser, origin, { before: async (one) => {
+        if (idleS > 0) await one.addInitScript(installTimerCensus);
+        await seedUniverseVault(one);
+      },
         context: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: LAYER_SCALE,
           // The person's window moves: an animation is part of what a layer costs.
           reducedMotion: "no-preference" } }));
@@ -409,12 +532,14 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
       const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
       page = await context.newPage();
       page.on("pageerror", (error) => faults.push(String(error).slice(0, 200)));
+      if (idleS > 0) await page.addInitScript(installTimerCensus);
       await seedKnowledgeWindow(page);
       await seedUniverseVault(page);
       await page.goto(`${origin}/index.html`);
       await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
     } else {
-      ({ page, faults } = await openWindowTestPage(browser, origin));
+      ({ page, faults } = await openWindowTestPage(browser, origin,
+        { before: idleS > 0 ? (one) => one.addInitScript(installTimerCensus) : null }));
     }
     const cdp = engine === "chromium" ? await page.context().newCDPSession(page) : null;
     const stand = async () => {
@@ -432,7 +557,7 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
         const chat = name.startsWith("layers-chat");
         return standLayers(page, { orbit: !["layers-no-orbit", "layers-panes"].includes(name) && !chat,
           knowledge: !["layers-no-knowledge", "layers-panes"].includes(name) && !chat,
-          chat, chatGone: name === "layers-chat-gone" });
+          chat, chatGone: name === "layers-chat-gone", dimension: name === "layers-universe" ? "3d" : "2d" });
       }
       if (name !== "empty") throw new Error(`no scenario named ${name}`);
       return {};
@@ -440,6 +565,7 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
     const detail = await within(SCENARIO_PATIENCE_MS, stand(), name);
     await page.waitForTimeout(layers || CHURNING.has(name) ? LAYER_SETTLE_MS : SETTLE_MS);
     const row = { engine, scenario: name, ...detail };
+    if (switchRounds > 0 && name.startsWith("panes-")) row.switch = await measureSwitch(page, switchRounds);
     if (cdp) {
       await cdp.send("HeapProfiler.collectGarbage");
       await cdp.send("HeapProfiler.collectGarbage");
@@ -450,6 +576,9 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
     }
     const pid = pageProcess(engine, before);
     row.pid = pid;
+    if (idleS > 0) {
+      row.idle = await measureIdle({ page, cdp, pids: { page: pid, gpu: gpuProcess(engine, before) }, seconds: idleS, folder });
+    }
     if (pid !== null) {
       row.process = footprintOf(pid, folder);
       if (engine === "webkit") row.heap = heapOf(pid);
@@ -463,7 +592,7 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
   }
 }
 
-export async function census({ engine = "webkit", scenarios = SCENARIOS, lowSpec = false, out = null } = {}) {
+export async function census({ engine = "webkit", scenarios = SCENARIOS, lowSpec = false, idleS = 0, switchRounds = 0, out = null } = {}) {
   const pictures = PICTURES.map((picture) => {
     const bytes = syntheticPng(picture);
     return { ...picture, bytes: bytes.length, base64: bytes.toString("base64") };
@@ -475,7 +604,7 @@ export async function census({ engine = "webkit", scenarios = SCENARIOS, lowSpec
     for (const name of scenarios) {
       let row;
       try {
-        row = await measureScenario({ engine, name, origin, pictures, folder });
+        row = await measureScenario({ engine, name, origin, pictures, folder, idleS, switchRounds });
       } catch (error) {
         row = { engine, scenario: name, error: String(error?.stack ?? error).slice(0, 600) };
       }
@@ -488,6 +617,9 @@ export async function census({ engine = "webkit", scenarios = SCENARIOS, lowSpec
         + (row.heap ? ` heap ${mib(row.heap.bytes)} MiB/${row.heap.nodes} nodes` : "")
         + (row.jsHeap !== undefined ? ` js ${mib(row.jsHeap)} MiB dom ${row.domNodes}` : "")
         + (row.previewBytesHeld !== undefined ? ` previews ${row.previewsHeld}/${row.previewAsks} asks ${mib(row.previewBytesHeld)} MiB held` : "")
+        + (row.idle ? ` idle page ${row.idle.pageCpuPct}% gpu ${row.idle.gpuCpuPct}% ipc ${row.idle.invokesPerMin}/min`
+          + ` timers ${row.idle.timerFiresPerMin}/min raf ${row.idle.rafPerMin}/min` : "")
+        + (row.switch ? ` switch p50 ${row.switch.p50Ms} ms p95 ${row.switch.p95Ms} ms` : "")
         + (row.faults?.length ? ` FAULT ${row.faults[0]}` : "")
         + (row.error ? ` ERROR ${row.error.split("\n")[0]}` : ""));
     }
@@ -495,7 +627,26 @@ export async function census({ engine = "webkit", scenarios = SCENARIOS, lowSpec
     files.close();
     rmdirSync(folder);
   }
-  return { engine, lowSpec, pictures: pictures.map(({ base64, ...kept }) => kept), rows };
+  return { engine, lowSpec, pictures: pictures.map(({ base64, ...kept }) => kept), rows, summary: summaryOf(rows) };
+}
+
+/* 장면마다 수 몇 개 — tools/low-spec/profile.mjs가 판들의 중앙값을 내는 모양(`summary`). */
+function summaryOf(rows) {
+  const kept = {};
+  for (const row of rows) {
+    if (row.error) continue;
+    const idle = row.idle ?? {};
+    kept[row.scenario] = Object.fromEntries(Object.entries({
+      footprintMiB: row.process?.footprint, dirtyMiB: row.process?.dirty, graphicsMiB: row.process?.graphics,
+      gpuFootprintMiB: row.gpu?.footprint, gpuGraphicsMiB: row.gpu?.graphics, jsHeapMiB: row.jsHeap,
+    }).filter(([, bytes]) => typeof bytes === "number").map(([key, bytes]) => [key, Math.round(bytes / 10485.76) / 100])
+      .concat(Object.entries({ domNodes: row.domNodes, idlePageCpuPct: idle.pageCpuPct, idleGpuCpuPct: idle.gpuCpuPct,
+        idlePageInterruptWakeupsPerS: idle.pageInterruptWakeupsPerS, idleInvokesPerMin: idle.invokesPerMin,
+        idleTimerFiresPerMin: idle.timerFiresPerMin, idleRafPerMin: idle.rafPerMin, idleTaskMsPerMin: idle.taskMsPerMin,
+        idleScriptMsPerMin: idle.scriptMsPerMin, switchP50Ms: row.switch?.p50Ms, switchP95Ms: row.switch?.p95Ms })
+        .filter(([, value]) => typeof value === "number")));
+  }
+  return kept;
 }
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
@@ -506,7 +657,8 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   };
   const scenarios = option("--scenarios", SCENARIOS.join(",")).split(",").filter(Boolean);
   const out = option("--json", null);
-  const result = await census({ engine: option("--engine", "webkit"), scenarios, lowSpec: argv.includes("--low-spec"), out });
+  const result = await census({ engine: option("--engine", "webkit"), scenarios, lowSpec: argv.includes("--low-spec"),
+    idleS: Number(option("--idle-s", "0")), switchRounds: Number(option("--switch-rounds", "0")), out });
   if (out) writeFileSync(out, `${JSON.stringify(result, null, 1)}\n`);
   // A scenario that could not be stood is a failed census, its row says why.
   if (result.rows.some((row) => row.error)) process.exitCode = 1;
