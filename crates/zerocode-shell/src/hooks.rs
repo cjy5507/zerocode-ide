@@ -2217,6 +2217,34 @@ pub fn background_tasks_of(
     Some((term, reading))
 }
 
+/// The panes whose CLI said, in its latest `background_tasks` roll call, that
+/// work which is no helper still runs — a background shell (t-84850 r2). No
+/// row shows it; the hand-over reads it, because the exit it types ends that
+/// work too. A pane id is never used twice, so a pane that left keeps at
+/// most one stale number here.
+static OTHER_BACKGROUND_WORK: std::sync::Mutex<std::collections::BTreeSet<u32>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// What the pane's latest roll call said of its other background work.
+pub(crate) fn note_other_background_work(term: u32, running: bool) {
+    let mut held = OTHER_BACKGROUND_WORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if running {
+        held.insert(term);
+    } else {
+        held.remove(&term);
+    }
+}
+
+/// Whether the pane's latest roll call said other background work runs.
+pub(crate) fn other_background_work(term: u32) -> bool {
+    OTHER_BACKGROUND_WORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&term)
+}
+
 /// Fold one roll call into a pane's helper roster, and say whether it moved.
 ///
 /// The rules are Orca's (`foldClaudeBackgroundTasksIntoRoster`), carried in

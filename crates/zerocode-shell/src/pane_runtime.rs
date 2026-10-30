@@ -621,6 +621,7 @@ pub(super) async fn hook_loop(
         // `SubagentStop` whose list reconciles the rest of the roster, and it
         // may still be the pane report the roads below answer.
         if let Some((term, reading)) = hooks::background_tasks_of(&envelope, expected.as_deref()) {
+            hooks::note_other_background_work(term, reading.others_running);
             let (rows, retired) = {
                 let state = app.state::<AppState>();
                 let mut held = state.subagents();
