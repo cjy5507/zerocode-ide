@@ -2959,6 +2959,11 @@ function termFindView() {
  * than opening a bar: the chord means "the next one", and there is no next
  * one until something has been searched for. */
 function stepFind(step) {
+  const chat = chatFindPage();
+  if (chat?.find && !chat.find.bar.hidden) {
+    runChatFind(chat, step);
+    return;
+  }
   const screen = termFindView();
   if (screen !== null && screen.findOpen()) {
     screen.stepFind(step);
@@ -2972,6 +2977,14 @@ function stepFind(step) {
 }
 
 function openFind() {
+  // A conversation in front is what ⌘F searches — the page a pane was turned
+  // to stands over its terminal, and the terminal's history is not what the
+  // person is reading (draft C8, t-82196).
+  const chat = chatFindPage();
+  if (chat) {
+    openChatFind(chat);
+    return;
+  }
   const tab = currentTab();
   // ⌘F in a terminal used to be silence — `openFind` returned on anything that
   // was not a file, so the key everybody presses did nothing and the terminal

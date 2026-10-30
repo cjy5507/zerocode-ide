@@ -148,10 +148,12 @@ import { testSidebarScroll } from "./sidebar-scroll.mjs";
 import { testLandingAlerts } from "./landing-alerts.mjs";
 import { testLandCheckLetter } from "./land-check-letter.mjs";
 import { testLandBatch } from "./land-batch.mjs";
-import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationLinkLookup, testConversationOutsideLinks, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
+import { testConversationAgents, testConversationChipDoors, testConversationFolds, testConversationFont, testConversationKeys, testConversationLinkLookup, testConversationOutsideLinks, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
-import { testConversationB } from "./conversation-b.mjs";
+import { testConversationB, testConversationBTail } from "./conversation-b.mjs";
+import { testConversationFind, testConversationFindPane } from "./conversation-find.mjs";
+import { testPaneRewind } from "./pane-conversation.mjs";
 import { testConversationEarlier } from "./conversation-earlier.mjs";
 import { testConversationSwitch } from "./conversation-switch.mjs";
 import { testComposerHold } from "./composer-hold.mjs";
@@ -466,6 +468,8 @@ suite("land-batch", testLandBatch);
 suite("conversation-font", ({ browser, origin, ok }) => testConversationFont(browser, origin, ok));
 suite("conversation-folds", ({ browser, origin, ok }) => testConversationFolds(browser, origin, ok));
 suite("conversation-paths", ({ browser, origin, ok }) => testConversationPaths(browser, origin, ok));
+/* 답 안 코드 칩이 통째로 경로면 칩을 감싼 문 — 칩 안 글자는 그대로, 명령 칩·코드 블록은 문이 아님 (시안 C7, t-82196). */
+suite("conversation-chip-doors", ({ browser, origin, ok }) => testConversationChipDoors(browser, origin, ok));
 /* 답이 이름만 댄 파일 — 누를 때 체크아웃에서 끝이 맞는 파일을 찾아 연다: 하나면 그 파일, 둘이면 파일 찾기,
  * 없으면 한 문장 한 번 (t-83039). */
 suite("conversation-link-lookup", ({ browser, origin, ok }) => testConversationLinkLookup(browser, origin, ok));
@@ -502,6 +506,13 @@ suite("conversation-redesign", ({ browser, origin, ok }) => testConversationRede
 /* 사람이 고른 대화 시안 B (2026-10-29, t-81525) — 접힌 페이지를 네 폭과 두 테마에서: 옆으로
  * 밀림 0, 폭을 따르는 읽기, 알약·말풍선·코드 띠, 대비 4.5:1. */
 suite("conversation-b", ({ browser, origin, ok }) => testConversationB(browser, origin, ok));
+/* 일하는 동안 발의 알약 아래 마지막 세 걸음, 답이 서면 다시 한 줄 (시안 C6, t-82196). */
+suite("conversation-b-tail", ({ browser, origin, ok }) => testConversationBTail(browser, origin, ok));
+/* 대화 안 찾기 ⌘F — 대화가 앞에 서면 대화에서, 알약 안 일치는 펼침, 400턴 한 프레임 (시안 C8, t-82196). */
+suite("conversation-find", ({ browser, origin, ok }) => testConversationFind(browser, origin, ok));
+suite("conversation-find-pane", ({ browser, origin, ok }) => testConversationFindPane(browser, origin, ok));
+/* 사람 말에서 고쳐 보내기 — 되감기 명령을 아는 CLI의 판에만, 누르면 판을 터미널로 돌리고 /rewind (시안 C10, t-82196). */
+suite("pane-rewind", ({ browser, origin, ok }) => testPaneRewind(browser, origin, ok));
 suite("conversation-earlier", ({ browser, origin, ok }) => testConversationEarlier(browser, origin, ok));
 /* 대화를 바꿨다가 돌아오면 그 화면 그대로, 판의 「대화」는 전사부터(인계 중 보낸 글은 한 번만),
  * 늦은 첫 읽기는 늦게 한 줄 (t-54304 — Claude·Codex·Dots 역분석에서 가져온 1단계). */
@@ -36967,7 +36978,8 @@ ok(
 );
 
 /* 마지막 답의 꼬리(t-2973 §3.5·§3.6): 답 안의 맨 경로는 문서 뷰어로 가는
- * 문이 되고(코드 칩 안은 아니다), 마지막 어시스턴트 턴이 .html을 이름하면
+ * 문이 되고(코드 칩 안의 글자는 그대로다 — 글 전체가 경로인 칩은 칩 바깥을
+ * 감싼 문이 되고, 명령 칩은 문이 아니다: 시안 C7, t-82196), 마지막 어시스턴트 턴이 .html을 이름하면
  * 미리보기 카드가 서며 그 알약의 두 문은 창의 브라우저 탭과 기본 앱 — 새 문은
  * 없다. 복사 단추는 그 턴의 원문을 창의 클립보드 문으로 쓴다. 새 턴이 오면
  * 꼬리는 그리로 옮겨 가고, 이름한 것이 없으면 카드는 서지 않는다. */
@@ -36982,12 +36994,14 @@ const answerTail = await page.evaluate(async () => {
   tell("hook:subagent", { term, rows: [{ id: "tail", name: "@tail", state: "running" }] });
   await window.__PAINTED__();
   const answer = "완성했습니다: index.html — 열어 보세요.";
+  // The disk says which chip names a file there (draft C7): this checkout's ui/shell.js.
+  window.__ANSWER__.path_kinds = ({ paths }) => paths.map((path) => (path === `${owner.worktree}/ui/shell.js` ? "file" : "missing"));
   window.__ANSWER__.subagent_log = () => ({
     found: true,
     next: 3,
     turns: [
       { role: "user", text: "페이지를 만들어라" },
-      { role: "assistant", text: "먼저 `ui/shell.js`를 보고 docs/plan.md 를 읽었습니다." },
+      { role: "assistant", text: "먼저 `ui/shell.js`를 보고 docs/plan.md 를 읽은 뒤 `npm test`를 돌렸습니다." },
       { role: "assistant", text: answer },
     ],
   });
@@ -36999,15 +37013,22 @@ const answerTail = await page.evaluate(async () => {
   const face = document.querySelector("#worker-view");
   const list = face.querySelector(".helper-turns");
   const turns = [...list.querySelectorAll(".helper-turn")];
-  // 맨 경로 하나가 문이 된다 — 아이콘과 액센트를 입고, 코드 칩은 그대로다.
-  const links = [...turns[1].querySelectorAll(".helper-link")];
+  // 맨 경로 하나가 문이 된다 — 아이콘과 액센트를 입고, 코드 칩의 글자는 그대로다.
+  // 경로뿐인 칩은 칩을 감싼 문이고(C7), 명령 칩은 문이 아니다.
+  const answerDoors = [...turns[1].querySelectorAll(".helper-link")];
+  const links = answerDoors.filter((door) => !door.classList.contains("is-chip"));
+  const chipDoors = answerDoors.filter((door) => door.classList.contains("is-chip"));
   seen.linkCount = links.length;
+  seen.doorCount = answerDoors.length;
   seen.linkWords = links[0]?.textContent;
   seen.linkTip = links[0]?.dataset.tip;
   seen.linkIcon = links[0]?.querySelector(".icon use")?.getAttribute("href");
   seen.linkIsButton = links[0]?.getAttribute("role") === "button" && links[0]?.tabIndex === 0;
-  seen.codeUntouched = turns[1].querySelector("code")?.textContent === "ui/shell.js" &&
-    turns[1].querySelector("code .helper-link") === null;
+  const answerChips = [...turns[1].querySelectorAll("code")];
+  seen.codeUntouched = answerChips.map((code) => code.textContent).join("|") === "ui/shell.js|npm test" &&
+    answerChips.every((code) => code.childElementCount === 0) && turns[1].querySelector("code .helper-link") === null;
+  seen.pathChipDoor = chipDoors.length === 1 && chipDoors[0].querySelector(":scope > code") === answerChips[0] &&
+    chipDoors[0].dataset.tip === "ui/shell.js" && answerChips[1].closest(".helper-link") === null;
   const probe = document.createElement("span");
   probe.style.color = "var(--chat-link)";
   document.body.appendChild(probe);
@@ -37102,6 +37123,7 @@ const answerTail = await page.evaluate(async () => {
     Boolean(rows[3]?.querySelector(".helper-copy"));
   delete window.__ANSWER__.subagent_log;
   delete window.__ANSWER__.fs_open_default;
+  delete window.__ANSWER__.path_kinds;
   tell("hook:subagent", { term, rows: [] });
   tell("term:exited", { term });
   await new Promise((done) => setTimeout(done, 40));
@@ -37111,8 +37133,8 @@ const answerTail = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a bare path in the answer is an accent link with a file icon that opens the document viewer against the parent's checkout (code chips stay), the last answer naming index.html gets a preview card whose two doors are the browser tab and the default app, a copy button under every answer writes that answer through the window's clipboard and is reached from the keyboard too (the rail's Enter hands an earlier answer the focus and the copy follows it), and the tail goes with the last answer — no card, and no tail, when nothing is named",
-  answerTail.linkCount === 1 && answerTail.linkWords === "docs/plan.md" &&
+  "a bare path in the answer is an accent link with a file icon that opens the document viewer against the parent's checkout (a chip keeps its words letter for letter: a chip that is a path stands inside a door of its own, a command chip in none — draft C7), the last answer naming index.html gets a preview card whose two doors are the browser tab and the default app, a copy button under every answer writes that answer through the window's clipboard and is reached from the keyboard too (the rail's Enter hands an earlier answer the focus and the copy follows it), and the tail goes with the last answer — no card, and no tail, when nothing is named",
+  answerTail.linkCount === 1 && answerTail.doorCount === 2 && answerTail.pathChipDoor && answerTail.linkWords === "docs/plan.md" &&
     answerTail.linkTip === "docs/plan.md" && answerTail.linkIcon === "#i-file" &&
     answerTail.linkIsButton && answerTail.codeUntouched && answerTail.linkAccent &&
     JSON.stringify(answerTail.opened) === JSON.stringify(answerTail.wantOpened) &&
@@ -58294,7 +58316,9 @@ suite("context-meter", async ({ browser, origin, ok }) => {
       seen.chipShown = chip ? !chip.hidden : false;
       seen.words = chip?.querySelector(".worker-composer-pill-words")?.textContent;
       seen.ring = chip?.querySelector(".worker-composer-meter .is-fill")?.getAttribute("stroke-dasharray");
-      seen.ringShown = chip?.querySelector(".worker-composer-meter")?.hidden === false;
+      // An SVG has no `hidden` of its own: whether the ring stands is what the
+      // page draws.
+      seen.ringShown = chip ? getComputedStyle(chip.querySelector(".worker-composer-meter")).display !== "none" : false;
       seen.tip = chip?.dataset.tip;
       seen.wantTip = t("composer.context.tip", "컨텍스트 {{tokens}} / {{window}} — 눌러서 압축 ({{command}})",
         { tokens: (34000).toLocaleString(), window: (100000).toLocaleString(), command: "/compact" });
@@ -58338,7 +58362,7 @@ suite("context-meter", async ({ browser, origin, ok }) => {
         usage: { tokens: 24000, window: 0 },
       });
       const term = await openTermTab({ placement: "tab" });
-      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-meter", resumable: false });
+      tell("hook:agent", { term, state: "idle", agent: "claude", session: { id: "s-meter" }, resumable: false });
       await window.__PAINTED__();
       el("view-toggle-chat").click();
       await settle(200);
@@ -58346,11 +58370,27 @@ suite("context-meter", async ({ browser, origin, ok }) => {
       const paneChip = chat?.querySelector(".worker-composer-context");
       seen.paneShown = paneChip ? !paneChip.hidden : false;
       seen.paneWords = paneChip?.querySelector(".worker-composer-pill-words")?.textContent;
-      seen.wantPaneWords = usageCtxWord({ tokens: 24000, window: 0 });
-      seen.paneRingHidden = paneChip?.querySelector(".worker-composer-meter")?.hidden === true;
+      // A window nobody gave (draft C9, t-82196): the count shortened and
+      // 「창 모름」, a dashed ring with nothing filled in it, the exact count in
+      // the tip — no share of an invented whole anywhere.
+      seen.wantPaneWords = t("composer.context.noWindow", "{{tokens}} · 창 모름", { tokens: tokenShort(24000) });
+      const paneMeter = paneChip?.querySelector(".worker-composer-meter");
+      seen.paneRing = paneMeter ? {
+        shown: getComputedStyle(paneMeter).display !== "none",
+        dashed: getComputedStyle(paneMeter.querySelector(".is-track")).strokeDasharray !== "none",
+        filled: getComputedStyle(paneMeter.querySelector(".is-fill")).display !== "none",
+      } : null;
       seen.paneTip = paneChip?.dataset.tip;
       seen.wantPaneTip = t("composer.context.tip", "컨텍스트 {{tokens}} / {{window}} — 눌러서 압축 ({{command}})",
-        { tokens: (24000).toLocaleString(), window: t("composer.context.unknownWindow", "?"), command: "/compact" });
+        { tokens: (24000).toLocaleString(), window: t("composer.context.unknownWindow", "창 크기 모름"), command: "/compact" });
+      // zo's usage frame names no window; its session's status does (ZO
+      // m-85258): the chip takes the window from there and wears its share.
+      tell("session:frame", { session: "s-meter", frame: { type: "session_status", context_window: 96000 } });
+      await settle();
+      seen.paneWindowed = [paneChip?.querySelector(".worker-composer-pill-words")?.textContent,
+        paneChip?.classList.contains("is-window-unknown"), paneChip?.dataset.tip];
+      seen.wantPaneWindowed = ["25%", false, t("composer.context.tip", "컨텍스트 {{tokens}} / {{window}} — 눌러서 압축 ({{command}})",
+        { tokens: (24000).toLocaleString(), window: (96000).toLocaleString(), command: "/compact" })];
       const paneBefore = calls.length;
       paneChip?.click();
       await settle(800);
@@ -58382,9 +58422,10 @@ suite("context-meter", async ({ browser, origin, ok }) => {
       JSON.stringify(seen),
     );
     ok(
-      "a pane whose only source is its transcript says the count in the status bar's own words with no ring over a window nobody gave, compacts down its own road, and is forgotten with the shell",
-      seen.paneShown && seen.paneWords === seen.wantPaneWords && seen.paneRingHidden &&
+      "a pane whose only source is its transcript says its count shortened and 「창 모름」 over a dashed, empty ring — the exact count in its tip, no share of a window nobody gave (draft C9) — takes the window its session's status names when one comes, compacts down its own road, and is forgotten with the shell",
+      seen.paneShown && seen.paneWords === seen.wantPaneWords && seen.paneRing?.shown && seen.paneRing.dashed && !seen.paneRing.filled &&
         seen.paneTip === seen.wantPaneTip &&
+        JSON.stringify(seen.paneWindowed) === JSON.stringify(seen.wantPaneWindowed) &&
         seen.paneCompacted === seen.wantPaneCompacted &&
         seen.heldBeforeExit && seen.forgotten,
       JSON.stringify(seen),

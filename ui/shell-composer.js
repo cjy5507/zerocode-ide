@@ -187,10 +187,14 @@ function composerRoad(run, spec = null) {
     interrupt: () => invoke("term_key", { term: run.term, press: interruptPress(spec) }),
     // 판에게는 출처가 둘이다. 제 전사가 말한 것이 먼저고(모든 CLI가
     // 남긴다), 그것이 없으면 zo 채널이 세션에 대해 말한 것. 셋째는 없다 —
-    // 훅은 토큰을 나르지 않는다.
-    usage: () => paneUsage.get(run.term)
-      ?? sessionUsage.get(paneSessions.get(run.term)?.session?.id)
-      ?? null,
+    // 훅은 토큰을 나르지 않는다. 전사가 창 크기를 말하지 않으면 채널이 말한
+    // 창 크기를 함께 쓴다(시안 C9 — zo의 session_status가 싣는다).
+    usage: () => {
+      const said = paneUsage.get(run.term);
+      const session = sessionUsage.get(paneSessions.get(run.term)?.session?.id);
+      if (said && said.window === 0 && session?.window > 0) return { ...said, window: session.window };
+      return said ?? session ?? null;
+    },
   };
 }
 
@@ -1288,11 +1292,49 @@ function composerCompactCommand(run, spec) {
   return (run.wireLog?.commands ?? []).some((row) => row.name === command) ? command : null;
 }
 
-/* 창 크기를 말로 — 모르면 「?」. 지어낸 분모는 툴팁에서도 쓰지 않는다. */
+/* 이 대화에서 지금 사람의 말을 고쳐 다시 보낼 수 있는가(시안 C10, t-82196) —
+ * 카탈로그가 그 CLI의 되감기 명령을 알고(Claude Code의 `/rewind`), 대화가 판의
+ * 것이고(선(wire)의 페이지와 헬퍼의 페이지에는 고르개를 열 화면이 없다), 판이 그
+ * 줄을 받을 때. 받는다는 증거는 훅의 말이다: 에이전트가 턴을 끝냈다(「done」) —
+ * 일하는 중, 묻는 중(권한 카드), 에이전트가 떠난 판, 아직 말이 없는 판은 아니다.
+ * 그리고 run이 앉은 판(워커·코디)이 아니다: 그 대화를 되감는 것은 run의 일이다.
+ * 백엔드(`pane_rewind`)가 치기 직전에 같은 것을 다시 본다. */
+function paneRewindable(run, spec) {
+  if (!spec?.rewind_command || run.wire || run.term === undefined || isHelperPage(run)) return false;
+  if (hookStates.get(run.term) !== "done") return false;
+  return !paneLedger.has(run.term) && !coordinatorSeats.some((seat) => seat.term === run.term);
+}
+
+/* 백엔드가 되감기를 열지 않은 까닭 — 그 낱말을 사람의 한 문장으로. */
+const PANE_REWIND_REFUSALS = Object.freeze({
+  "rewind-busy": () => t("worker.rewindBusy", "에이전트가 일하거나 묻는 중이라 되감기를 열지 않았습니다 — 턴이 끝난 뒤 다시 누르세요"),
+  "rewind-screen": () => t("worker.rewindScreen", "터미널에 질문이 떠 있거나 입력줄에 쓰다 만 글이 있어 되감기를 열지 않았습니다 — 답하거나 그 글을 보내거나 지운 뒤 다시 누르세요"),
+  "rewind-seat": () => t("worker.rewindSeat", "워커나 코디가 앉은 판이라 되감기를 열지 않았습니다"),
+  "rewind-ledger-unread": () => t("worker.rewindLedgerUnread", "원장을 지금 읽지 못해 이 판이 코디의 판인지 알 수 없어 되감기를 열지 않았습니다 — 잠시 뒤 다시 누르세요"),
+});
+
+/* 고쳐 보내기를 눌렀다: 판에 치는 것은 백엔드의 문 하나다(`pane_rewind` — 판을
+ * 다시 보고, 메뉴가 서 있으면 아무것도 치지 않는다). 창은 판에 아무것도 직접
+ * 치지 않는다. 그 문이 쳤을 때만 대화를 입은 판을 터미널로 돌려 CLI의 고르개를
+ * 앞에 세운다 — 어느 말로 돌아갈지는 거기서 사람이 고른다. 거절이면 한 문장이고,
+ * 대화는 그대로 선다. */
+async function rewindPane(run) {
+  try {
+    await invoke("pane_rewind", { term: run.term });
+  } catch (error) {
+    const words = PANE_REWIND_REFUSALS[String(error)]?.() ?? String(error);
+    if (!standingToast(words, "halt")) toast(words, "halt");
+    return;
+  }
+  showPaneScreen(run.term);
+}
+
+/* 창 크기를 말로 — 모르면 「창 크기 모름」(시안 C9). 지어낸 분모는 툴팁에서도
+ * 쓰지 않는다. */
 function composerContextWindowWords(reading) {
   return reading.window > 0
     ? reading.window.toLocaleString()
-    : t("composer.context.unknownWindow", "?");
+    : t("composer.context.unknownWindow", "창 크기 모름");
 }
 
 function composerContextChip(run, spec) {
@@ -1303,7 +1345,7 @@ function composerContextChip(run, spec) {
   chip.append(composerMeterNode(), pillWordsNode(""));
   labelButton(chip, t("composer.context.tipPlain", "컨텍스트 {{tokens}} / {{window}}", {
     tokens: "0",
-    window: t("composer.context.unknownWindow", "?"),
+    window: t("composer.context.unknownWindow", "창 크기 모름"),
   }));
   chip.addEventListener("click", () => {
     const command = composerCompactCommand(run, spec);
@@ -1315,26 +1357,27 @@ function composerContextChip(run, spec) {
 }
 
 /* 읽은 값이 있을 때만 선다. 창을 아는 읽기는 고리와 백분율, 모르는 읽기는
- * 상태바와 **같은 낱말**(`usageCtxWord`)과 고리 없음 — 어휘를 두 벌 만들지
- * 않는다. 쓰기는 전부 값이 바뀔 때만(조용한 폴은 mutation 0). */
+ * 줄인 수와 「창 모름」, 빈 점선 고리(시안 C9, t-82196) — 차지 않은 고리가
+ * 「아직 모른다」를 말하고, 지어낸 분모의 몫은 어디에도 그리지 않는다. 정확한
+ * 수는 툴팁에 있다. 쓰기는 전부 값이 바뀔 때만(조용한 폴은 mutation 0). */
 function paintComposerContextChip(chip, run, spec) {
   const reading = composerRoad(run, spec).usage();
   const shown = Boolean(reading) && reading.tokens > 0;
   writeHidden(chip, !shown);
   if (!shown) return;
-  const ratio = reading.window > 0 ? Math.min(1, reading.tokens / reading.window) : 0;
-  const meter = chip.querySelector(".worker-composer-meter");
-  writeHidden(meter, reading.window <= 0);
-  if (reading.window > 0) {
-    writeAttribute(
-      meter.querySelector(".is-fill"),
-      "stroke-dasharray",
-      `${(ratio * METER_CIRCUMFERENCE).toFixed(1)} ${METER_CIRCUMFERENCE}`,
-    );
-  }
+  const known = reading.window > 0;
+  const ratio = known ? Math.min(1, reading.tokens / reading.window) : 0;
+  writeClass(chip, "is-window-unknown", !known);
+  writeAttribute(
+    chip.querySelector(".worker-composer-meter .is-fill"),
+    "stroke-dasharray",
+    `${(ratio * METER_CIRCUMFERENCE).toFixed(1)} ${METER_CIRCUMFERENCE}`,
+  );
   writeTextContent(
     chip.querySelector(".worker-composer-pill-words"),
-    reading.window > 0 ? `${Math.round(ratio * 100)}%` : usageCtxWord(reading),
+    known
+      ? `${Math.round(ratio * 100)}%`
+      : t("composer.context.noWindow", "{{tokens}} · 창 모름", { tokens: tokenShort(reading.tokens) }),
   );
   const command = composerCompactCommand(run, spec);
   const words = { tokens: reading.tokens.toLocaleString(), window: composerContextWindowWords(reading) };

@@ -2966,6 +2966,7 @@ fn main() -> ExitCode {
             pane_effort_press,
             pane_image,
             pane_log,
+            cmd::terminal::pane_rewind,
             subagent_log,
             terminal_command,
             set_terminal_command,

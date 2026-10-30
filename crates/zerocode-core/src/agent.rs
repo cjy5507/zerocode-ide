@@ -1693,6 +1693,10 @@ pub struct AgentPresence {
     /// that chip a reading with no door — the window never invents a
     /// command a CLI did not name.
     pub compact_command: Option<&'static str>,
+    /// The CLI's own word for going back to an earlier message
+    /// ([`AgentVoice::rewind_command`]), which a person's words in the
+    /// conversation open from 「여기서 고쳐 보내기」. `None` leaves no door.
+    pub rewind_command: Option<&'static str>,
     /// Where the CLI's read tool counts its `offset` from
     /// ([`AgentVoice::read_offset_base`]) — what the conversation's tool row
     /// opens a read's file at.
@@ -1823,6 +1827,13 @@ pub struct AgentVoice {
     /// The composer's context meter IS that button, so the word has to be
     /// this CLI's own; `None` leaves the meter a reading and no door.
     pub compact_command: Option<&'static str>,
+    /// The slash command that opens the CLI's own picker of earlier messages
+    /// to go back to and say again — Claude Code's `/rewind` (its
+    /// checkpointing: the conversation, the code or both, from a message the
+    /// person picks). A person's words in the conversation open it on the
+    /// pane's screen (draft C10, t-82196); `None` where the word was not
+    /// measured leaves no door — the window never invents a command.
+    pub rewind_command: Option<&'static str>,
     /// The line its read tool's `offset` counts from — `1` when the offset
     /// IS the first line returned, `0` when it is 0-based. The page opens a
     /// read's file where the read began (the extension's tool header does)
@@ -2020,6 +2031,10 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // the stream-json wire named `compact` among 138 slash commands,
             // and the command answered down that wire (measured 2026-09-21).
             compact_command: Some("/compact"),
+            // Claude Code's own checkpointing command (code.claude.com docs,
+            // `checkpointing`): it opens the list of the person's earlier
+            // messages, and the one picked is said again from there.
+            rewind_command: Some("/rewind"),
             // `Read {offset: 10930}` came back opening `10930→` (2.1.280,
             // measured 2026-09-23): the offset is the first line itself.
             read_offset_base: Some(1),
@@ -2062,6 +2077,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // conversation to prevent hitting the context limit"
             // (docs/design/zo-vs-codex-gaps-20260921.md #23, `S:53003`).
             compact_command: Some("/compact"),
+            // Codex's way back to an earlier message is not measured here.
+            rewind_command: None,
             // Codex reads files through its shell; it has no read tool.
             read_offset_base: None,
             // The 0.156.0 binary names no interrupt key in its words.
@@ -2092,6 +2109,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             plan_tool: None,
             // zo's own twelve (`zo-ide/README.md:36`).
             compact_command: Some("/compact"),
+            // None of zo's own twelve goes back to an earlier message.
+            rewind_command: None,
             // `read_file`'s schema: "a 0-based line window".
             read_offset_base: Some(0),
             // Its status line: "Working (0s • esc to interrupt)" (tui/view.rs).
@@ -2127,6 +2146,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             plan_tool: None,
             // agy's compaction word is not measured here.
             compact_command: None,
+            // Nor its way back to an earlier message.
+            rewind_command: None,
             // agy's read tool is not measured here.
             read_offset_base: None,
             // Nor its interrupt key.
@@ -2150,6 +2171,7 @@ const SILENT_CONSOLE: AgentVoice = AgentVoice {
     exit_command: None,
     plan_tool: None,
     compact_command: None,
+    rewind_command: None,
     read_offset_base: None,
     interrupt_key: None,
     spinner_verbs: &[],
@@ -2250,6 +2272,7 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                     .is_some_and(|road| road.resume.is_some())
                     && agent_voice(spec.id).exit_command.is_some(),
                 compact_command: agent_voice(spec.id).compact_command,
+                rewind_command: agent_voice(spec.id).rewind_command,
                 read_offset_base: agent_voice(spec.id).read_offset_base,
                 interrupt_key: agent_voice(spec.id).interrupt_key,
                 spinner_verbs: agent_voice(spec.id).spinner_verbs,
@@ -2332,6 +2355,9 @@ mod tests {
             if let Some(compact) = console.compact_command {
                 assert!(compact.starts_with('/'), "{id}: {compact}");
             }
+            if let Some(rewind) = console.rewind_command {
+                assert!(rewind.starts_with('/'), "{id}: {rewind}");
+            }
         }
         assert_eq!(
             super::wire_road("codex").map(|road| road.protocol),
@@ -2362,6 +2388,16 @@ mod tests {
         }
         assert!(super::agent_voice("antigravity").compact_command.is_none());
         assert!(super::SILENT_CONSOLE.compact_command.is_none());
+        // The way back to an earlier message: Claude Code names it, the rest
+        // are not measured, and the silent console never does (C10).
+        assert_eq!(super::agent_voice("claude").rewind_command, Some("/rewind"));
+        for unmeasured in ["codex", "zo", "antigravity"] {
+            assert!(
+                super::agent_voice(unmeasured).rewind_command.is_none(),
+                "{unmeasured}"
+            );
+        }
+        assert!(super::SILENT_CONSOLE.rewind_command.is_none());
         // Where a read's offset counts from is each CLI's own (measured for
         // two), and the presence row the page reads carries it.
         assert_eq!(super::agent_voice("claude").read_offset_base, Some(1));
