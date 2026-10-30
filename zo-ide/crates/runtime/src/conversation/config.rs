@@ -438,6 +438,22 @@ where
         self.deadline_extension = policy;
     }
 
+    /// Install the host's remaining foreground invocation account. Nested
+    /// deep subturns consume this same account; helpers/compaction are separate.
+    pub fn set_invocation_limits(&mut self, iterations: Option<usize>, output_tokens: Option<u32>) {
+        self.invocation_iterations_remaining = iterations;
+        self.invocation_initial_iterations = iterations;
+        self.invocation_output_budget = output_tokens.map(|max| (self.usage_tracker.cumulative_usage().output_tokens, max));
+    }
+
+    /// Usage consumed by every nested foreground subturn since the host armed
+    /// its invocation account, independent of which summary a deep leg returns.
+    #[must_use]
+    pub fn invocation_usage(&self) -> (Option<usize>, Option<u32>) {
+        (self.invocation_initial_iterations.zip(self.invocation_iterations_remaining).map(|(initial, left)| initial.saturating_sub(left)),
+         self.invocation_output_budget.map(|(baseline, _)| self.usage_tracker.cumulative_usage().output_tokens.saturating_sub(baseline)))
+    }
+
     /// Set the per-turn cumulative-output-token budget (the cost circuit
     /// breaker). `None` clears it (unbounded). See
     /// `ConversationRuntime::turn_output_token_budget`.

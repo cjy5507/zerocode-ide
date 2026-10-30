@@ -1083,7 +1083,7 @@ where
                 break 'outer;
             }
             iterations += 1;
-            if iterations > self.max_iterations {
+            if iterations > self.max_iterations || self.invocation_iterations_remaining == Some(0) {
                 let error = RuntimeError::new(
                     "conversation loop exceeded the maximum number of iterations",
                 );
@@ -1202,7 +1202,9 @@ where
                     .cumulative_usage()
                     .output_tokens
                     .saturating_sub(turn_start_output_tokens)
-                    > budget
+                    >= budget
+            }) || self.invocation_output_budget.is_some_and(|(baseline, max)| {
+                self.usage_tracker.cumulative_usage().output_tokens.saturating_sub(baseline) >= max
             }) {
                 let error = RuntimeError::new("turn exceeded its output-token budget");
                 self.clear_empty_retry_reminder(empty_retries);
@@ -1256,6 +1258,8 @@ where
                     .await;
                 break 'outer;
             }
+
+            if let Some(remaining) = &mut self.invocation_iterations_remaining { *remaining = remaining.saturating_sub(1); }
 
             if render_tx.is_closed() {
                 self.clear_empty_retry_reminder(empty_retries);

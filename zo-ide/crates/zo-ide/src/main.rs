@@ -67,6 +67,7 @@ fn main() -> ExitCode {
         }
         Err(error) => {
             process_exit.finish("error", Some(&error.to_string()));
+            eprintln!("{error}");
             say_on_the_terminal(&error.to_string());
             ExitCode::FAILURE
         }
@@ -133,6 +134,9 @@ const ANSWERED_BEFORE_A_SESSION: &[(&str, Answer)] = &[
     ("decision-shadow", run_decision_shadow),
     ("jev", run_jev),
     ("mcp", run_mcp),
+    ("session", run_session),
+    ("plugin", run_plugin),
+    ("hooks", run_hooks),
     ("settings", run_settings),
     ("vault", run_vault),
 ];
@@ -154,6 +158,8 @@ fn run(
     if let Some(done) = run_without_a_session(&launch)? {
         return Ok(done);
     }
+    prepare_invocation(&mut launch)?;
+    if launch.requested.model.is_some() { launch.open.model = zo_ide::cli_args::resolve_model_alias(&launch.open.model); }
     // The refusal ladder's switching mode, declared for every runtime this
     // process builds, before the first one is (t-6747).
     if let Some(mode) = launch.classifier_fallback {
@@ -217,7 +223,13 @@ fn run(
         return run_teammate(&tokio_runtime()?, launch, &directory, process_exit);
     }
 
-    let session = PlainSession::open(launch.open)?;
+    let mut session = PlainSession::open(launch.open)?;
+    session.configure_invocation(launch.invocation);
+    if let Some(path) = launch.last_message.as_deref() {
+        if core_types::session::writer_lease_holder(path).is_some() {
+            return Err("--last-message cannot overwrite a transcript with an active writer".into());
+        }
+    }
     if let Err(failure) = confirm_guarded(guarded.as_ref(), &launch.requested, &session) {
         // Opened, never spoken to: the session is dropped with the refusal.
         drop(session);
@@ -298,6 +310,50 @@ fn run(
     Ok((reason_label(reason), exit_code))
 }
 
+/// All file/input/target errors precede trust prompts, sessions, and model calls.
+fn prepare_invocation(launch: &mut args::Launch) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Read;
+    if let Some(path) = &launch.prompt_file {
+        let prompt = if path == std::path::Path::new("-") {
+            let mut prompt = String::new();
+            std::io::stdin().read_to_string(&mut prompt)?;
+            prompt
+        } else {
+            std::fs::read_to_string(path).map_err(|error| format!("cannot read prompt file {}: {error}", path.display()))?
+        };
+        if prompt.trim().is_empty() { return Err("prompt file is empty".into()); }
+        launch.invocation.prompt = Some(prompt);
+    }
+    if launch.invocation.prompt.is_some() && !std::io::stdin().is_terminal() && launch.prompt_file.as_deref() != Some(std::path::Path::new("-")) {
+        let mut piped = String::new();
+        std::io::stdin().read_to_string(&mut piped)?;
+        if !piped.trim().is_empty() { return Err("choose one prompt source: positional text, --prompt-file, or stdin".into()); }
+    }
+    if let Some(target) = &launch.review_target {
+        zo_ide::review::prepare_git_environment(&launch.open.cwd)?;
+        launch.invocation.prompt = Some(zo_ide::review::prompt(&launch.open.cwd, target)?);
+    }
+    if launch.invocation.schema.is_some() && launch.invocation.prompt.is_none() {
+        if std::io::stdin().is_terminal() { return Err("--output-schema requires a prompt or piped stdin".into()); }
+        let mut prompt = String::new();
+        std::io::stdin().read_to_string(&mut prompt)?;
+        if prompt.trim().is_empty() { return Err("--output-schema requires a non-empty prompt".into()); }
+        launch.invocation.prompt = Some(prompt);
+    }
+    if let Some(destination) = &launch.last_message {
+        let parent = destination.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+        if destination.is_dir() { return Err("--last-message requires a file path".into()); }
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Some(path) = &launch.worktree {
+        if launch.open.resume.is_some() { return Err("--worktree cannot be combined with --resume or --continue".into()); }
+        std::env::set_current_dir(&launch.open.cwd)?;
+        let path = if path.is_absolute() { path.clone() } else { launch.open.cwd.join(path) };
+        launch.open.cwd = tools::prepare_start_worktree(&path)?;
+    }
+    Ok(())
+}
+
 /// `zo scoreboard …` reads the evidence ledgers against a baseline and, asked
 /// to, files each regression as a ledger task — the scoreboard beat's hands,
 /// fired by a cron (docs/design/scoreboard-beat-20260911.md). No session.
@@ -370,6 +426,24 @@ fn run_decision_shadow(args: &[String]) -> Result<(&'static str, u8), Box<dyn st
 /// session: the same settings documents `ConfigLoader` merges, written back
 /// through the loader's own parser. `--doctor`'s principle exactly — no
 /// credentials, no workspace trust, no provider runtime.
+fn run_plugin(args: &[String]) -> Answered { run_management(args, zo_ide::management_cli::plugins, "plugin") }
+fn run_hooks(args: &[String]) -> Answered { run_management(args, zo_ide::management_cli::hooks, "hooks") }
+
+fn run_management(args: &[String], handler: fn(&[String], &std::path::Path) -> Result<String, String>, name: &'static str) -> Answered {
+    match handler(args, &std::env::current_dir()?) {
+        Ok(text) => { println!("{text}"); Ok(success(name)) }
+        Err(error) => { eprintln!("zo {name}: {error}"); Ok(("management-refused", 1)) }
+    }
+}
+
+fn run_session(args: &[String]) -> Answered {
+    let cwd = std::env::current_dir()?;
+    match zo_ide::session_cli::run(args, &cwd) {
+        Ok(text) => { println!("{text}"); Ok(success("session")) }
+        Err(error) => { eprintln!("zo session: {error}"); Ok(("session-refused", 1)) }
+    }
+}
+
 fn run_mcp(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     Ok(match zo_ide::mcp_cli::run(args, &cwd) {
@@ -475,7 +549,7 @@ fn run_without_a_session(
             success("models")
         }
         Action::Commands => {
-            println!("{}", zo_ide::slash::render_catalog(launch.render.json));
+            println!("{}", zo_ide::slash::render_available_catalog(&launch.open.cwd, launch.render.json)?);
             success("commands")
         }
         Action::Status | Action::PromptInput | Action::Repl => return Ok(None),

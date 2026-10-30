@@ -1704,15 +1704,55 @@ async fn e2e_resume_picker_finds_a_session_below_home() {
     second.wait_for("directory:", TEST_TIMEOUT);
     second.send(b"/resume\r").expect("open resume picker");
     second.wait_for("Resume a previous session", TEST_TIMEOUT);
+    second.wait_for_screen("remember the home nested resume fixture", 40, TEST_TIMEOUT);
     let capture = second.snapshot_output();
     let _ = second.finish();
-    let screen = strip_ansi(&String::from_utf8_lossy(&capture));
+    let mut terminal = Screen::new(40);
+    terminal.feed(&capture);
+    let screen = terminal.visible().join("\n");
 
     assert!(
         screen.contains("remember the home nested resume fixture"),
         "the Cwd filter hid the session below HOME:\n{screen}"
     );
     assert!(!screen.contains("No sessions yet"), "{screen}");
+}
+
+/// A disk search wakes the idle picker through its completion channel. The
+/// result is older than its first page. No extra key or idle-maintenance tick
+/// is supplied after the query; a superseded query must not replace it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_resume_picker_search_completion_wakes_without_another_key() {
+    let layout = Layout::new();
+    let directory = layout.sessions.join("sessions");
+    fs::create_dir_all(&directory).unwrap();
+    let cwd = layout.cwd.canonicalize().unwrap();
+    for index in 0..180_u64 {
+        let mut session = core_types::Session::new();
+        session.session_id = format!("filler-{index}");
+        session.push_user_text(format!("filler conversation {index}")).unwrap();
+        let path = directory.join(format!("{}.jsonl", session.session_id));
+        session.save_to_path(&path).unwrap();
+        fs::write(path.with_extension("cwd"), serde_json::json!({"cwd":cwd}).to_string()).unwrap();
+        fs::File::open(path).unwrap().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(100 + index)).unwrap();
+    }
+    let mut session = core_types::Session::new();
+    session.session_id = "wakeup-match".into();
+    session.push_user_text("SESSION_SEARCH_WAKEUP_MATCH").unwrap();
+    let path = directory.join("wakeup-match.jsonl");
+    session.save_to_path(&path).unwrap();
+    fs::write(path.with_extension("cwd"), serde_json::json!({"cwd":cwd}).to_string()).unwrap();
+    fs::File::open(path).unwrap().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1)).unwrap();
+    let service = ScriptedAnthropicService::text("unused").await.unwrap();
+    let mut run = pty(&layout, service.base_url(), &interactive_args());
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"/resume\r").unwrap();
+    run.wait_for("Resume a previous session", TEST_TIMEOUT);
+    run.send(b"discard").unwrap();
+    run.send(b"\x7f\x7f\x7f\x7f\x7f\x7f\x7fwakeup-match").unwrap();
+    run.wait_for_screen("SESSION_SEARCH_WAKEUP_MATCH", 40, TEST_TIMEOUT);
+    let _ = run.finish();
+    assert!(service.request_bodies().await.is_empty(), "session search must not ask a model");
 }
 
 /// Codex `/new [name]` starts a named resumable chat without touching the

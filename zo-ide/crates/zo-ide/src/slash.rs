@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::tui::fast;
 
-/// zo 가 실제로 처리하는 슬래시 열여섯.
+/// zo 가 실제로 처리하는 슬래시 명령.
 ///
 /// 순서는 팝업이 그리는 순서다. `/new` 는 codex `SlashCommand` 열거와 같이
 /// `/permissions` 와 `/resume` 사이에, `/clear` 는 종료 명령 뒤에 선다.
@@ -33,6 +33,9 @@ pub enum Slash {
     Permissions,
     New,
     Resume,
+    Fork,
+    Rename,
+    Export,
     Compact,
     /// `/rewind`: list the workspace checkpoints, restore guarded file
     /// writes (`/rewind 12 [force]`) or drop the last finished turn
@@ -84,6 +87,28 @@ pub fn render_catalog(json: bool) -> String {
         .join("\n")
 }
 
+/// Commands callable in this cwd. Discovery reads metadata only; no script,
+/// inline shell, plugin initialization, or model request runs here.
+pub fn render_available_catalog(cwd: &Path, json: bool) -> Result<String, String> {
+    let mut rows: Vec<serde_json::Value> = Slash::CATALOG.iter().map(|slash| serde_json::json!({
+        "name":slash.name(), "description":slash.description(), "source":"builtin", "pipe":slash.handled_in_pipe()
+    })).collect();
+    let mut seen: std::collections::BTreeSet<String> = Slash::CATALOG.iter().map(|slash| slash.word().to_lowercase()).collect();
+    for command in commands::discover_prompt_commands(cwd) {
+        if !seen.insert(command.name.to_lowercase()) { continue; }
+        rows.push(serde_json::json!({"name":format!("/{}", command.name),"description":command.summary(),
+            "source":"prompt", "path":command.path,"scope":format!("{:?}",command.scope),"shadows":command.shadows}));
+    }
+    let registry = crate::management_cli::manager(cwd)?.plugin_registry().map_err(|error| error.to_string())?;
+    for (plugin, name, description) in registry.slash_command_specs() {
+        if !seen.insert(name.trim_start_matches('/').to_lowercase()) { continue; }
+        rows.push(serde_json::json!({"name":format!("/{}",name.trim_start_matches('/')),"description":description,
+            "source":"plugin","plugin":plugin,"path":registry.get(&plugin).and_then(|plugin| plugin.metadata().root.clone())}));
+    }
+    if json { Ok(serde_json::Value::Array(rows).to_string()) }
+    else { Ok(rows.iter().map(|row| format!("{}  {} [{}]",row["name"].as_str().unwrap_or(""),row["description"].as_str().unwrap_or(""),row["source"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n")) }
+}
+
 impl Slash {
     /// 팝업 순서 그대로의 전체 목록.
     pub const CATALOG: &'static [Self] = &[
@@ -93,6 +118,9 @@ impl Slash {
         Self::Permissions,
         Self::New,
         Self::Resume,
+        Self::Fork,
+        Self::Rename,
+        Self::Export,
         Self::Compact,
         Self::Rewind,
         Self::Goal,
@@ -115,6 +143,9 @@ impl Slash {
             Self::Permissions => "/permissions",
             Self::New => "/new",
             Self::Resume => "/resume",
+            Self::Fork => "/fork",
+            Self::Rename => "/rename",
+            Self::Export => "/export",
             Self::Compact => "/compact",
             Self::Rewind => "/rewind",
             Self::Goal => "/goal",
@@ -148,6 +179,9 @@ impl Slash {
             // 원본 문안 그대로(`slash_command.rs:95`), 캡처
             // `codex-tui-v0.149.1-resume-picker.bin` 의 26.07s 프레임.
             Self::Resume => "resume a saved chat",
+            Self::Fork => "fork this chat into independent saved history",
+            Self::Rename => "rename this saved chat",
+            Self::Export => "export this chat to a new JSONL file",
             Self::Compact => "compact the conversation to free context",
             Self::Rewind => crate::tui::strings::REWIND_COMMAND_DESCRIPTION,
             Self::Goal => "persist a goal and run bounded autonomous checks",
@@ -265,7 +299,9 @@ pub fn prompt_command(
     origin: ModeOrigin,
 ) -> Option<PromptExpansion> {
     let found = commands::discover_prompt_commands(cwd);
-    let command = commands::find_prompt_command(&found, name)?;
+    let Some(command) = commands::find_prompt_command(&found, name) else {
+        return plugin_command(cwd, name, arg, mode, origin);
+    };
     let workspace = match command.workspace_folder() {
         None => commands::WorkspaceTrust::Trusted,
         Some(_) if origin.named => commands::WorkspaceTrust::Trusted,
@@ -299,6 +335,38 @@ pub fn prompt_command(
     }));
     shown.extend(rendered.trace.iter().map(|line| format!("  {line}")));
     Some(PromptExpansion { text: rendered.text, shown })
+}
+
+fn plugin_command(cwd: &Path, name: &str, arg: &str, mode: core_types::PermissionMode, origin: ModeOrigin) -> Option<PromptExpansion> {
+    let registry = crate::management_cli::manager(cwd).ok()?.plugin_registry().ok()?;
+    let (plugin, command) = registry.find_slash_command(name)?;
+    let id = plugin.metadata().id.clone();
+    let config = runtime::ConfigLoader::default_for(cwd).load();
+    let trusted = origin.named || (!origin.piped && crate::workspace_trust::person_trusts_folder(cwd));
+    let refusal = if mode == core_types::PermissionMode::ReadOnly {
+        Some("plugin scripts do not run in read-only mode".to_string())
+    } else if !trusted {
+        Some("plugin scripts require a trusted workspace or an explicit permission mode".to_string())
+    } else {
+        match config {
+            Err(error) => Some(error.to_string()),
+            Ok(config) => {
+                let policy = runtime::PermissionPolicy::new(mode).with_permission_rules(config.permission_rules());
+                let input = serde_json::json!({"command":command.command,"args":arg}).to_string();
+                policy.deny_reason("Bash", &input).or_else(|| match policy.authorize("Bash", &input, None) {
+                    runtime::PermissionOutcome::Allow => None,
+                    runtime::PermissionOutcome::Deny { reason } => Some(reason),
+                })
+            }
+        }
+    };
+    let mut shown = vec![format!("/{} — plugin {id}", command.name)];
+    let text = if let Some(reason) = refusal { shown.push(reason.clone()); format!("Plugin command not run: {reason}") }
+        else { match plugin.validate().and_then(|()| registry.run_slash_command(name, arg)) {
+            Ok(text) => text,
+            Err(error) => { shown.push(format!("plugin command failed: {error}")); format!("Plugin command failed: {error}") }
+        }};
+    Some(PromptExpansion { text, shown })
 }
 
 #[cfg(test)]
@@ -450,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn the_keep_list_is_the_sixteen_commands_zo_handles() {
+    fn the_keep_list_is_the_commands_zo_handles() {
         let names: Vec<&str> = Slash::CATALOG.iter().map(|command| command.name()).collect();
         assert_eq!(
             names,
@@ -461,6 +529,9 @@ mod tests {
                 "/permissions",
                 "/new",
                 "/resume",
+                "/fork",
+                "/rename",
+                "/export",
                 "/compact",
                 "/rewind",
                 "/goal",

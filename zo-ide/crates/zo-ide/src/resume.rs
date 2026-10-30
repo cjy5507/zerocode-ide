@@ -19,6 +19,7 @@ use crate::session_registry;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeSession {
     pub id: String,
+    pub name: Option<String>,
     pub path: PathBuf,
     pub modified_epoch_millis: u128,
     /// 트랜스크립트 머리글의 `created_at_ms` — `/resume` 의 `Sort: [Created]`
@@ -33,8 +34,8 @@ pub type SessionSummary = ResumeSession;
 
 /// Every limit of the resume list, in one table (t-2947).
 pub mod limits {
-    /// Rows the no-argument `--resume` view prints and the `/resume` picker
-    /// lists — read from disk once, at open.
+    /// Rows printed by the short no-argument `--resume` view. The TUI
+    /// searches all eligible sessions and has independent result pages.
     pub const LIST_LIMIT: usize = 20;
     /// Characters of the first prompt a row carries. Read from the head of
     /// the transcript, never from further in.
@@ -64,6 +65,7 @@ pub fn list_recent_sessions_limited(
             .map(|session| ResumeSession {
                 cwd: load_session_cwd(&session.path),
                 id: session.id,
+                name: session.name,
                 path: session.path,
                 modified_epoch_millis: session.modified_epoch_millis,
                 created_epoch_millis: session.created_epoch_millis,
@@ -71,6 +73,20 @@ pub fn list_recent_sessions_limited(
             })
             .collect()
     })
+}
+
+/// Search every eligible transcript head, then page the matching summaries.
+/// This never loads full conversations. TUI callers run it on a worker thread.
+pub fn search_sessions(query: &str, offset: usize, limit: usize) -> Result<Vec<ResumeSession>, Box<dyn std::error::Error>> {
+    search_sessions_cancellable(query, offset, limit, None, &std::sync::atomic::AtomicBool::new(false))
+}
+
+pub(crate) fn search_sessions_cancellable(query: &str, offset: usize, limit: usize, cwd_filter: Option<&Path>, cancelled: &std::sync::atomic::AtomicBool) -> Result<Vec<ResumeSession>, Box<dyn std::error::Error>> {
+    Ok(session_registry::search_session_summaries(query, offset, limit, cwd_filter, cancelled)?.into_iter().map(|session| ResumeSession {
+        cwd: load_session_cwd(&session.path), id: session.id, name: session.name, path: session.path,
+        modified_epoch_millis: session.modified_epoch_millis, created_epoch_millis: session.created_epoch_millis,
+        first_prompt: Some(session.first_user_text.unwrap_or_else(|| crate::tui::strings::MCP_IMAGE_ITEM.to_string())),
+    }).collect())
 }
 
 /// Return the most recent session in the current workspace, if one exists.

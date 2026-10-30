@@ -805,6 +805,10 @@ pub struct ConversationRuntime<C, T> {
     /// cannot silently burn tokens for hours. `None` is unbounded. Set by the
     /// interactive host each turn from `ZO_TURN_OUTPUT_TOKEN_BUDGET`.
     turn_output_token_budget: Option<u32>,
+    /// Foreground invocation limits survive nested deep subturn boundaries.
+    invocation_iterations_remaining: Option<usize>,
+    invocation_initial_iterations: Option<usize>,
+    invocation_output_budget: Option<(u32, u32)>,
     /// Optional per-turn cumulative full-price-input-token budget — the third
     /// cost circuit breaker, covering the axis the other two miss: a
     /// cache-dead loop that re-sends the whole transcript uncached on every
@@ -1881,6 +1885,9 @@ where
             deadline: None,
             deadline_extension: None,
             turn_output_token_budget: None,
+            invocation_iterations_remaining: None,
+            invocation_initial_iterations: None,
+            invocation_output_budget: None,
             turn_input_token_budget: None,
             max_tool_calls: usize::MAX,
             max_stop_loops: DEFAULT_MAX_STOP_LOOPS,
@@ -2654,7 +2661,7 @@ where
             }
             iterations += 1;
             self.check_sync_turn_cancelled(iterations)?;
-            if iterations > self.max_iterations {
+            if iterations > self.max_iterations || self.invocation_iterations_remaining == Some(0) {
                 let error = RuntimeError::new(
                     "conversation loop exceeded the maximum number of iterations",
                 );
@@ -2718,7 +2725,9 @@ where
                     .cumulative_usage()
                     .output_tokens
                     .saturating_sub(turn_start_output_tokens)
-                    > budget
+                    >= budget
+            }) || self.invocation_output_budget.is_some_and(|(baseline, max)| {
+                self.usage_tracker.cumulative_usage().output_tokens.saturating_sub(baseline) >= max
             }) {
                 let error = RuntimeError::new("turn exceeded its output-token budget");
                 self.clear_empty_retry_reminder(empty_retries);
@@ -2763,6 +2772,8 @@ where
                 );
                 break;
             }
+
+            if let Some(remaining) = &mut self.invocation_iterations_remaining { *remaining = remaining.saturating_sub(1); }
 
             // Proactive compaction: compact before building the request. On
             // the first iteration use a local request estimate because provider

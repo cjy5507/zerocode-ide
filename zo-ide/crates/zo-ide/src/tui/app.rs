@@ -203,10 +203,6 @@ static PROFILE_TOOL_RESULTS: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::
 /// 자리다. zo 도 그렇다 — `/effort` 는 이 라운드에서 없앴다.
 const PICKER_EFFORTS: &[Effort] = Effort::ALL;
 
-/// `/resume` 피커가 읽는 최근 세션 수. codex 는 페이지네이션으로 더 불러오지만
-/// (`resume_picker::pagination`) 우리 번호 피커는 한 페이지라 여기서 끊는다.
-const RESUME_LIST_LIMIT: usize = crate::resume::DEFAULT_LIST_LIMIT;
-
 /// TUI 가 열릴 수 있는 화면인지. 아니면 호출자가 파이프 경로로 되돌린다.
 #[must_use]
 pub fn terminal_is_usable() -> bool {
@@ -603,6 +599,9 @@ struct Ui {
     /// 뷰포트 자리를 쓰므로 둘이 동시에 뜨는 일은 없다
     /// ([`Ui::open_resume_picker`] 가 먼저 확인한다).
     sessions: Option<sessions::SessionPicker>,
+    session_scan: Option<tokio::sync::mpsc::Receiver<SessionScanResult>>,
+    session_scan_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    session_page: usize,
     /// 떠 있는 `/permissions` 피커. 모델·재개 피커와 같은 뷰포트 자리를 쓴다.
     permissions: Option<PermissionPicker>,
     /// Alt+A session-scoped in-process agent overview.
@@ -798,6 +797,15 @@ enum IdleOutcome {
     Notice(String),
     /// The pane is done, and why.
     Close(runtime::subagent_panes::CloseReason),
+}
+
+type SessionScanResult = Result<Vec<crate::resume::ResumeSession>, String>;
+
+async fn next_session_scan(scan: &mut Option<tokio::sync::mpsc::Receiver<SessionScanResult>>) -> SessionScanResult {
+    match scan {
+        Some(scan) => scan.recv().await.unwrap_or_else(|| Err("session search stopped".into())),
+        None => std::future::pending().await,
+    }
 }
 
 async fn recv_agent_followup(pump: &mut Option<AgentCompletionPump>) -> AgentFollowup {
@@ -1268,6 +1276,7 @@ impl Ui {
     }
 
     fn draw_with_queue(&mut self, pending_blocks: impl FnOnce() -> usize) {
+        self.poll_session_scan();
         // The interrupt hint says what Esc does to running helpers (t-11354).
         self.pending_input
             .set_running_agents(tools::background_agent_ids_snapshot().len());
@@ -3153,12 +3162,41 @@ impl Ui {
         if self.picker.is_some() {
             return;
         }
-        let listed = match crate::resume::list_recent_sessions_limited(RESUME_LIST_LIMIT) {
+        self.session_page = 0;
+        self.sessions = Some(sessions::SessionPicker::new(Vec::new(), Some(self.session_cwd.clone()), sessions::now_millis()));
+        self.start_session_scan();
+    }
+
+    fn start_session_scan(&mut self) {
+        self.session_scan_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.session_scan_cancel = cancelled.clone();
+        let Some(picker) = self.sessions.as_ref() else { return; };
+        let query = picker.query().to_string();
+        let cwd = picker.search_cwd();
+        let offset = self.session_page.saturating_mul(100);
+        if let Some(picker) = self.sessions.as_mut() { picker.begin_loading(); }
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        self.session_scan = Some(receiver);
+        std::thread::spawn(move || {
+            let result = crate::resume::search_sessions_cancellable(&query, offset, 100, cwd.as_deref(), &cancelled).map_err(|error| error.to_string());
+            let _ = sender.blocking_send(result);
+        });
+    }
+
+    fn poll_session_scan(&mut self) {
+        if let Some(result) = self.session_scan.as_mut().and_then(|scan| scan.try_recv().ok()) { self.finish_session_scan(result); }
+    }
+
+    fn on_session_scan(&mut self, result: SessionScanResult) { self.finish_session_scan(result); self.draw(); }
+
+    fn finish_session_scan(&mut self, result: SessionScanResult) {
+        self.session_scan = None;
+        let listed = match result {
             Ok(listed) => listed,
             Err(error) => {
-                let text = format!("resume: could not read the session list: {error}");
-                self.note(SystemLevel::Error, &text);
-                return;
+                if let Some(picker) = self.sessions.as_mut() { picker.replace_rows(Vec::new()); }
+                self.note(SystemLevel::Error, &format!("resume: {error}")); return;
             }
         };
         // Never the session that is running: resuming it fails on its own
@@ -3168,15 +3206,7 @@ impl Ui {
             .filter(|session| session.id != self.session_id)
             .collect();
         let rows = sessions::rows(&listed);
-        if rows.is_empty() {
-            self.note(SystemLevel::Info, "no saved sessions in this workspace");
-            return;
-        }
-        self.sessions = Some(sessions::SessionPicker::new(
-            rows,
-            Some(self.session_cwd.clone()),
-            sessions::now_millis(),
-        ));
+        if let Some(picker) = self.sessions.as_mut() { picker.replace_rows(rows); }
         // zo (t-6042): the list is a page the mention seat may reorder once
         // the person types what they are looking for.
         self.mention_rerank.arm();
@@ -3190,6 +3220,12 @@ impl Ui {
     /// `ctrl+o` 는 밀도, `esc` 는 검색어가 있으면 그것부터 지운다
     /// (`footer_hint_lines` 의 `esc_label`).
     fn session_picker_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        if matches!(key.code, KeyCode::PageDown | KeyCode::PageUp) {
+            self.session_page = if key.code == KeyCode::PageDown { self.session_page.saturating_add(1) } else { self.session_page.saturating_sub(1) };
+            self.start_session_scan();
+            return KeyOutcome::Nothing;
+        }
+        let before = self.sessions.as_ref().map(|picker| (picker.query().to_string(), picker.search_cwd()));
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let mut confirm = false;
         let mut close = false;
@@ -3235,6 +3271,12 @@ impl Ui {
             self.sessions = None;
             self.mention_rerank.disarm();
         }
+        let after = self.sessions.as_ref().map(|picker| (picker.query().to_string(), picker.search_cwd()));
+        if before != after {
+            self.session_page = 0;
+            self.start_session_scan();
+        }
+        if close { self.session_scan_cancel.store(true, std::sync::atomic::Ordering::Relaxed); self.session_scan = None; }
         self.resume_page_stands();
         KeyOutcome::Nothing
     }
@@ -3811,6 +3853,9 @@ impl Ui {
             None => (command, ""),
         };
         match Slash::from_word(name) {
+            Some(Slash::Fork | Slash::Rename | Slash::Export) => {
+                self.deferred.push(Deferred::Slash(command.to_string()));
+            }
             Some(Slash::Help) => self.help_card(),
             Some(Slash::Warnings) => self.open_warnings(),
             Some(Slash::Model) if arg.is_empty() => self.open_model_picker(),
@@ -4743,6 +4788,9 @@ impl App {
                 parked: None,
                 picker: None,
                 sessions: None,
+            session_scan: None,
+            session_scan_cancel: std::sync::Arc::default(),
+            session_page: 0,
                 permissions: None,
                 agents: None,
                 footer_view: None,
@@ -4822,6 +4870,13 @@ impl App {
         self.ui.open_agents(progress);
     }
 
+    async fn run_initial_prompt(&mut self, events: &mut TerminalEvents) {
+        if let Some(prompt) = self.session_mut().take_initial_prompt() {
+            let submission = Submission { text: prompt, image_paths: Vec::new() };
+            Box::pin(self.run_turn_chain(Work::Turn(submission), events, None)).await;
+        }
+    }
+
     /// 끝까지 돈다. 종료 요약은 화면을 놓은 뒤 [`run`] 이 찍는다 — raw 모드가
     /// 풀린 다음이라야 `println!` 이 codex 와 같은 바이트를 낸다.
     /// 마지막 값은 이번 실행에서 완성된 마지막 어시스턴트 답변이다 —
@@ -4837,6 +4892,7 @@ impl App {
         // 없으면 [`IDLE_TEND`] 뒤에 한 번, 있으면 초당 한 번.
         let mut pulse = Pulse::new();
 
+        Box::pin(self.run_initial_prompt(&mut events)).await;
         let reason = loop {
             if let Some(reason) = self.ui.exit.take() {
                 break reason;
@@ -4889,6 +4945,7 @@ impl App {
                     Some(Err(_)) | None => break ExitReason::UserExit,
                 },
                 () = TerminationSignals::delivered(&mut self.signals) => break ExitReason::UserExit,
+                result = next_session_scan(&mut self.ui.session_scan) => self.ui.on_session_scan(result),
                 Some(result) = self.file_search_rx.recv() => {
                     self.ui.on_file_search_result(result);
                     self.ui.draw();
@@ -4954,7 +5011,9 @@ impl App {
         // 정리 future 는 화면 상태를 통째로 안고 가므로 힙에 둔다.
         // `finish` 가 self 를 가져가므로 답은 그 **전에** 꺼낸다.
         let last_answer = std::mem::take(&mut self.ui.last_answer);
+        let failure = self.session().invocation_failure().map(str::to_string);
         let summary = Box::pin(self.finish(reason)).await;
+        if let Some(failure) = failure { return Err(failure.into()); }
         Ok((reason, summary, last_answer))
     }
 
@@ -5380,6 +5439,18 @@ impl App {
         };
         match Slash::from_word(name) {
             Some(Slash::Exit) => self.ui.exit = Some(ExitReason::UserExit),
+            Some(Slash::Fork) => match self.session().fork((!arg.is_empty()).then_some(arg)) {
+                Ok(path) => self.resume_session(&path.to_string_lossy()),
+                Err(error) => self.ui.note(SystemLevel::Error, &error),
+            },
+            Some(Slash::Rename) => match self.session_mut().set_name(arg) {
+                Ok(()) => self.ui.note(SystemLevel::Info, "Session renamed"),
+                Err(error) => self.ui.note(SystemLevel::Error, &error.to_string()),
+            },
+            Some(Slash::Export) => match self.session().export(std::path::Path::new(arg)) {
+                Ok(()) => self.ui.note(SystemLevel::Info, &format!("Exported to {arg}")),
+                Err(error) => self.ui.note(SystemLevel::Error, &error),
+            },
             Some(Slash::Help) => self.ui.help_card(),
             Some(Slash::Warnings) => self.ui.open_warnings(),
             // codex 는 `/status` 에 한 줄이 아니라 카드로 답한다 — 조립은
@@ -5690,6 +5761,7 @@ impl App {
     /// Start a fresh chat while keeping the previous one resumable. `/clear`
     /// takes the same road after purging both the visible screen and scrollback.
     fn start_fresh_session(&mut self, name: Option<&str>, clear_terminal: bool) {
+        let invocation = self.session().invocation.clone();
         let launch: LaunchFlags = self.session().launch_flags();
         let current = self.session();
         let options = OpenOptions {
@@ -5718,6 +5790,7 @@ impl App {
         let opened = tokio::task::block_in_place(|| PlainSession::open(options));
         match opened {
             Ok(mut session) => {
+                session.configure_invocation(invocation);
                 let name_error = name.and_then(|name| session.set_name(name).err());
                 let composer_session_id = session.handle.id.clone();
                 let composer_seed = session.composer_history_seed();
@@ -5792,6 +5865,7 @@ impl App {
     /// (`PlainSession::launch_flags`) — 5라운드가 argv 를 한 번 더 파싱했던
     /// 자리다.
     fn resume_session(&mut self, id: &str) {
+        let invocation = self.session().invocation.clone();
         let launch: LaunchFlags = self.session().launch_flags();
         let current = self.session();
         let options = OpenOptions {
@@ -5817,6 +5891,7 @@ impl App {
         let opened = tokio::task::block_in_place(|| PlainSession::open(options));
         match opened {
             Ok(mut session) => {
+                session.configure_invocation(invocation);
                 let composer_seed = session.composer_history_seed();
                 let composer_session_id = session.handle.id.clone();
                 // The old roster must not publish into the new session's pane
@@ -6684,6 +6759,9 @@ fn test_ui() -> Ui {
         parked: None,
         picker: None,
         sessions: None,
+            session_scan: None,
+            session_scan_cancel: std::sync::Arc::default(),
+            session_page: 0,
         permissions: None,
         agents: None,
         footer_view: None,
