@@ -19273,9 +19273,24 @@ fn the_skill_describes_the_road_that_exists_and_names_no_verb_that_does_not() {
                  but the window no longer answers it"
         );
     }
+    // Words a coordinator writes as a whole reply body, which the window
+    // reads off a worker's question letter (`worker_question::TO_PERSON`,
+    // t-84343): typed, never run. Checked against the window's source the
+    // same way, so a word it stops reading cannot hide here.
+    let question = include_str!("../../../zerocode-shell/src/worker_question.rs");
+    let reply_words = ["to-person"];
+    for word in reply_words {
+        assert!(
+            question.contains(&format!("\"{word}\"")),
+            "`{word}` is excused as a reply word the window reads, \
+                 but the window no longer reads it"
+        );
+    }
     for word in named {
         assert!(
-            windows_own.contains(&word) || VERBS.iter().any(|(verb, _, _)| *verb == word),
+            windows_own.contains(&word)
+                || reply_words.contains(&word)
+                || VERBS.iter().any(|(verb, _, _)| *verb == word),
             "the skill tells agents to run `{word}`, which this binary refuses"
         );
     }
