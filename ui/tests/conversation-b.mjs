@@ -150,7 +150,13 @@ function readPage() {
     columnWidth: Math.round(column.right - column.left),
     proseSize: style ? parseFloat(style.fontSize) : null,
     proseLeading: style ? Math.round((parseFloat(style.lineHeight) / parseFloat(style.fontSize)) * 100) / 100 : null,
-    pillsInside: pills.length > 0 && pills.every((pill) => inside(pill.firstElementChild)),
+    // A pill's plate hangs its own padding into the gutter (t-85975); what stays in the column is
+    // its dot — the padding edge — and its right side.
+    pillsInside: pills.length > 0 && pills.every((pill) => {
+      const cap = pill.firstElementChild;
+      const at = box(cap);
+      return at.left + parseFloat(getComputedStyle(cap).paddingLeft) >= column.left - 1 && at.right <= column.right + 1;
+    }),
     codesInside: codes.length >= 2 && codes.every(inside),
     // What a block's code runs past its own box — the block's inside scroll,
     // which neither the page's nor the list's width counts.
