@@ -15330,6 +15330,16 @@ details.worker-command {
   line-height: var(--chat-prose-leading);
 }
 
+/* A table in an answer is its own scroll box: a wide one scrolls inside the
+ * reading column instead of pushing the page sideways, and the cells keep the
+ * document viewer's rule (`.md-table`) in the answer's own size. */
+.helper-turn.is-assistant .helper-said .md-table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  font-size: inherit;
+}
+
 .helper-turn.is-assistant .helper-said > :last-child {
   margin-bottom: 0;
 }
