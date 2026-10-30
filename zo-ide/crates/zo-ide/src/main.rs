@@ -9,7 +9,7 @@
 //! ambient tokio 런타임 안에서 패닉하고, 질문 채널의 `blocking_recv` 는
 //! 멀티스레드 런타임을 요구한다(zo-cli `run_repl` 과 같은 배치).
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
 use zo_ide::ide::args::{self, Action};
@@ -67,7 +67,7 @@ fn main() -> ExitCode {
         }
         Err(error) => {
             process_exit.finish("error", Some(&error.to_string()));
-            eprintln!("{error}");
+            let _ = writeln!(std::io::stderr().lock(), "{error}");
             say_on_the_terminal(&error.to_string());
             ExitCode::FAILURE
         }
@@ -85,7 +85,7 @@ fn main() -> ExitCode {
 fn say_on_the_terminal(error: &str) {
     if std::io::stdout().is_terminal() && !std::io::stderr().is_terminal() {
         let cwd = std::env::current_dir().ok();
-        println!("{}", terminal_exit_line(error, cwd.as_deref()));
+        let _ = writeln!(std::io::stdout().lock(), "{}", terminal_exit_line(error, cwd.as_deref()));
     }
 }
 

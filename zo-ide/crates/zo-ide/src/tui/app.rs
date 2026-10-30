@@ -5011,7 +5011,7 @@ impl App {
         // 정리 future 는 화면 상태를 통째로 안고 가므로 힙에 둔다.
         // `finish` 가 self 를 가져가므로 답은 그 **전에** 꺼낸다.
         let last_answer = std::mem::take(&mut self.ui.last_answer);
-        let failure = self.session().invocation_failure().map(str::to_string);
+        let failure = if reason == ExitReason::OutputClosed || self.ui.painter.failed() { None } else { self.session().invocation_failure().map(str::to_string) };
         let summary = Box::pin(self.finish(reason)).await;
         if let Some(failure) = failure { return Err(failure.into()); }
         Ok((reason, summary, last_answer))
@@ -6370,6 +6370,11 @@ impl App {
             parked.prompt.dismiss();
         }
         let cancelled = turn_scaffold.cancelled();
+        // Esc and pane closure are normal interactive shutdown, while a
+        // terminal budget/schema restriction remains a failure.
+        if let Some(session) = self.session.as_mut().filter(|session| cancelled && session.invocation.blocked.is_none()) {
+            session.invocation.failure = None;
+        }
         ui.status = None;
         ui.publish_working_activity(turn_scaffold.ide);
         turn_scaffold.finish(&outcome);

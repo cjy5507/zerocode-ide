@@ -54,6 +54,8 @@ fn the_checker_sees_a_missing_command_and_passes_a_real_one() {
     assert!(exists(&Command::Slash("model".into())));
     assert!(exists(&Command::Verb("mcp".into())));
     assert!(exists(&Command::Verb("models".into())));
+    assert!(exists(&Command::Verb("review".into())));
+    assert!(!exists(&Command::Verb("inspect-this-file".into())));
     // A path, a URL and prose about zo are not commands.
     assert!(found("wrote /tmp/x.json and https://example.com/login").is_empty());
     assert!(found("zo can read it").is_empty());
@@ -72,7 +74,10 @@ fn exists(command: &Command) -> bool {
         Command::Slash(word) => zo_ide::slash::Slash::from_word(word).is_some(),
         Command::Verb(word) => {
             super::ANSWERED_BEFORE_A_SESSION.iter().any(|(name, _)| name == word)
-                || zo_ide::ide::args::parse(std::slice::from_ref(word)).is_ok()
+                || zo_ide::ide::args::parse(std::slice::from_ref(word))
+                    .is_ok_and(|launch| launch.action != zo_ide::ide::args::Action::Repl)
+                || zo_ide::ide::args::parse(&[word.clone(), "--uncommitted".into()])
+                    .is_ok_and(|launch| launch.review_target.is_some())
         }
     }
 }
