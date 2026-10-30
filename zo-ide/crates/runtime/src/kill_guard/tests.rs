@@ -1200,6 +1200,10 @@ mod real_run {
                     assert!(no.asked[0].person_only, "{mode:?}: only a person may answer it");
                 }
                 PermissionMode::ReadOnly => {
+                    assert!(
+                        reason.contains("requires danger-full-access permission"),
+                        "{mode:?}: the mode's own refusal: {reason}"
+                    );
                     assert!(no.asked.is_empty(), "{mode:?}: read-only runs no such call, so nobody is asked");
                 }
             }
