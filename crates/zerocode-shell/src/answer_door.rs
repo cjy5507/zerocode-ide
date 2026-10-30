@@ -1370,9 +1370,27 @@ mod tests {
         assert!(pane.typed().is_empty(), "a way back was typed into a menu");
         pane.draw("● Done.\n\n❯ \n");
         for (refused, word) in [
-            (RewindPane { seated: true, ..free }, REWIND_SEAT),
-            (RewindPane { between_turns: false, ..free }, REWIND_BUSY),
-            (RewindPane { own_words: true, ..free }, REWIND_OWN_WORDS),
+            (
+                RewindPane {
+                    seated: true,
+                    ..free
+                },
+                REWIND_SEAT,
+            ),
+            (
+                RewindPane {
+                    between_turns: false,
+                    ..free
+                },
+                REWIND_BUSY,
+            ),
+            (
+                RewindPane {
+                    own_words: true,
+                    ..free
+                },
+                REWIND_OWN_WORDS,
+            ),
         ] {
             assert_eq!(
                 type_rewind(&pane.held, &refused, b"/rewind"),
