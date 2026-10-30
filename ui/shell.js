@@ -15167,7 +15167,9 @@ function paintHelperProse(host, text, base, { colour = true } = {}) {
   mdWhere = { base, page: null };
   try {
     paintMarkdown(host, text);
-    linkifyHelperProse(host);
+    // A settled answer's chips ask the disk whether they name a file; the
+    // words still being written are drawn again next frame and ask nothing.
+    linkifyHelperProse(host, { chips: colour });
     if (colour) paintMarkdownDiagrams(host);
     // Each code block wears the extension's copy over its corner (A9).
     dressCodeCopies(host);
@@ -15184,11 +15186,9 @@ function paintHelperProse(host, text, base, { colour = true } = {}) {
  * 모양은 셋: http(s) 주소, 슬래시로 시작하는(또는 ./ ../ ~/) 경로, 확장자를
  * 단 파일 이름(디렉터리 접두 허용, 뒤에 `:줄` 허용). 문장 끝의 문장부호는
  * 낱말의 것이 아니다. 문은 `mdLink`의 것이다 — 주소는 브라우저 링크 라우팅,
- * 경로는 문서 뷰어 — 여기서는 옷(아이콘·액센트)만 입힌다. 확장자는 답이 파일을
- * 이름하는 언어들의 것이다(시안 C7, t-82196) — 웹과 Rust만이 아니라 Java·Kotlin·
- * Go·Swift·C·C++·Ruby·PHP·C#·Scala·셸·SQL과 빌드·설정 파일. */
+ * 경로는 문서 뷰어 — 여기서는 옷(아이콘·액센트)만 입힌다. */
 const HELPER_FILE_EXTENSIONS =
-  "html?|md|rs|js|mjs|cjs|ts|tsx|jsx|vue|svelte|css|scss|json|toml|ya?ml|xml|ini|cfg|conf|lock|gradle|py|rb|php|java|kts?|scala|go|swift|dart|c|cc|cpp|hpp|h|cs|lua|sql|proto|sh|bash|zsh|txt|log|csv|svg|png|jpe?g|gif|pdf";
+  "html?|md|rs|js|mjs|cjs|ts|tsx|jsx|css|json|toml|ya?ml|py|sh|txt|csv|svg|png|jpe?g|gif|pdf";
 const HELPER_LINK_RE = new RegExp(
   String.raw`(?<![\w/.:@-])(?:(https?:\/\/[^\s<>()"'「」『』]+)|((?:~\/|\.{1,2}\/|\/)[\w.@%+~-]+(?:\/[\w.@%+~-]+)*)|((?:[\w@%+-]+\/)*[\w@%+-]+\.(?:${HELPER_FILE_EXTENSIONS})))(?::\d+(?:-\d+)?)?(?![\w/])`,
   "g",
@@ -15206,29 +15206,24 @@ function helperLinkHits(text) {
 
 /* 문장 안의 경로·주소를 찾아 문으로 바꾼다. 코드 칩·블록과 이미 문인 것 안은
  * 건드리지 않는다 — 코드는 기계의 글이고, 문 안의 문은 없다. 다만 글 전체가
- * 경로 하나(뒤에 `:줄` 허용)인 칩은 그 파일로 가는 문이다(시안 C7, t-82196):
- * 문이 칩을 바깥에서 감싸고, 칩 안의 글자는 한 자도 바뀌지 않는다. 명령 칩과
- * 블록 안의 경로는 그대로다. */
-function linkifyHelperProse(host) {
+ * 경로 하나(뒤에 `:줄` 허용)이고 그 파일이 정말 있는 칩은 그 파일로 가는
+ * 문이다(시안 C7, t-82196, 검수 r1 P2-4, `doorChipsThatAreFiles`). `chips`가
+ * 거짓이면 칩은 묻지 않는다. 명령 칩과 블록 안의 경로는 그대로다. */
+function linkifyHelperProse(host, { chips: askChips = false } = {}) {
   const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
   const found = [];
   const chips = [];
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     const held = node.parentElement?.closest("code, pre, .md-link, a");
     if (held) {
-      if (held.localName === "code" && held.childNodes.length === 1 && !held.parentElement.closest("pre, .md-link, a") &&
-        helperChipPath(node.data)) chips.push(held);
+      if (askChips && held.localName === "code" && held.childNodes.length === 1 &&
+        !held.parentElement.closest("pre, .md-link, a") && helperChipPath(node.data)) chips.push(held);
       continue;
     }
     const hits = helperLinkHits(node.data);
     if (hits.length) found.push([node, hits]);
   }
-  for (const chip of chips) {
-    const door = helperLinkNode(chip.textContent, false);
-    door.classList.add("is-chip");
-    chip.replaceWith(door);
-    door.lastChild.replaceWith(chip);
-  }
+  if (chips.length) void doorChipsThatAreFiles(chips, mdWhere?.base ?? "");
   for (const [node, hits] of found) {
     const parts = [];
     let last = 0;
@@ -15244,10 +15239,49 @@ function linkifyHelperProse(host) {
   }
 }
 
-/* 칩의 글이 경로 하나뿐인가 — 주소가 아닌, 칩 전체를 덮는 한 낱말. */
+/* 칩의 글이 경로 하나뿐인가 — 칩 전체를 덮는, 빈칸 없는 한 낱말에 슬래시나
+ * 점이 들고 뒤에 `:줄`이 붙을 수 있는 것. 낱말만으로는(`bundle`) 파일을 이름하지
+ * 않는다. 무엇이 파일인지는 이름의 모양이 아니라 디스크가 답한다. */
+const HELPER_CHIP_PATH_RE = /^(?:~\/|\.{1,2}\/|\/)?[\w.@%+~-]+(?:\/[\w.@%+~-]+)*(?::\d+(?:-\d+)?)?$/;
+
 function helperChipPath(words) {
-  const hits = helperLinkHits(words);
-  return hits.length === 1 && !hits[0][1] && hits[0][0] === words;
+  return HELPER_CHIP_PATH_RE.test(words) && /[./]/.test(words.replace(HELPER_LINK_LINE_RE, ""));
+}
+
+/* 칩 가운데 정말 있는 파일을 이름한 것만 그 파일로 가는 문이 된다(시안 C7, 검수
+ * r1 P2-4) — 한 답의 칩을 한 번에, 그 답의 체크아웃에서 재어 디스크에 묻는다
+ * (`path_kinds`, 이름마다 stat 하나, 읽는 것은 없다). 슬래시 명령(`/compact`),
+ * 호출(`console.log`), 아무도 쓰지 않은 경로, 폴더는 칩으로 남는다 — 이름의 목록이
+ * 가르지 않는다. 문은 칩을 바깥에서 감싸고 칩 안의 글자는 한 자도 바뀌지 않는다.
+ * 답이 오기 전에 페이지가 놓은 칩은 건드리지 않는다. 체크아웃을 모르는 답의
+ * 상대 경로는 묻지 않는다. */
+async function doorChipsThatAreFiles(chips, base) {
+  const asked = [];
+  for (const chip of chips) {
+    const path = chip.textContent.replace(HELPER_LINK_LINE_RE, "");
+    if (base || path.startsWith("/")) asked.push({ chip, path: resolveDocPath(base, path) });
+  }
+  if (asked.length === 0) return;
+  let kinds;
+  try {
+    kinds = await invoke("path_kinds", { paths: asked.map((one) => one.path) });
+  } catch {
+    return;
+  }
+  // The door is `mdLink`'s, which reads where the words were drawn.
+  const previous = mdWhere;
+  mdWhere = { base, page: null };
+  try {
+    asked.forEach(({ chip }, at) => {
+      if (kinds?.[at] !== "file" || !chip.isConnected) return;
+      const door = helperLinkNode(chip.textContent, false);
+      door.classList.add("is-chip");
+      chip.replaceWith(door);
+      door.lastChild.replaceWith(chip);
+    });
+  } finally {
+    mdWhere = previous;
+  }
 }
 
 function helperLinkNode(said, isUrl) {

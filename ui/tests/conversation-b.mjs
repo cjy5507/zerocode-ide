@@ -247,6 +247,10 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
     await foldConversations(page);
+    // The disk says the long path a chip names is a file (draft C7).
+    await page.evaluate(() => {
+      window.__ANSWER__.path_kinds = ({ paths }) => paths.map((path) => (path.endsWith("/file.ts") ? "file" : "missing"));
+    });
     await openConversation(page, draftTurns());
     if (shots) mkdirSync(shots, { recursive: true });
     const seen = {};

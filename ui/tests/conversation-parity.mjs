@@ -478,29 +478,40 @@ export async function testConversationPaths(browser, origin, ok) {
   }
 }
 
-/* Draft C7 (t-82196): a code chip whose words are a path and nothing else —
- * with its `:line` or not — is a door to that file, standing around the chip:
- * the chip's own words stay the machine's, letter for letter (the rule t-2973
- * kept by leaving chips alone). A chip that is a command and a fenced block's
- * path are not doors. The names the doors know cover the languages an answer
- * names files in — Java, Go, Kotlin, Swift, C and C++, Ruby, PHP, C#, Scala,
- * shell. */
+/* Draft C7 (t-82196, review r1 P2-4): a code chip whose words are a path and
+ * nothing else — with its `:line` or not — is a door to that file when the
+ * file is there: the answer's chips are asked of the disk at once, measured
+ * from the checkout (`path_kinds`), and only a file becomes a door. The door
+ * stands around the chip: the chip's own words stay the machine's, letter for
+ * letter (the rule t-2973 kept by leaving chips alone). A slash command, a
+ * call, a path nobody wrote, a folder, a command chip and a fenced block's
+ * path are not doors — the disk decides, no list of names. */
 export async function testConversationChipDoors(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
     const root = "/tmp/zerocode-window-test";
-    await page.evaluate(() => {
+    await page.evaluate((root) => {
       const lines = Array.from({ length: 200 }, (_, at) => `line ${at + 1}`).join("\n");
       window.__ANSWER__.read_text_file = () => ({ text: lines, version: 1, missing: false });
-    });
-    const chips = ["src/app.rs:12", "SessionGuard.java:120-138", "cmd/main.go", "npm test", "./gradlew test"];
+      const files = new Set(["src/app.rs", "SessionGuard.java", "cmd/main.go"].map((path) => `${root}/${path}`));
+      window.__KINDS_ASKED__ = [];
+      window.__ANSWER__.path_kinds = ({ paths }) => {
+        window.__KINDS_ASKED__.push(paths);
+        return paths.map((path) => (files.has(path) ? "file" : path.endsWith("/crates/zerocode-shell") ? "folder" : "missing"));
+      };
+    }, root);
+    const doors = ["src/app.rs:12", "SessionGuard.java:120-138", "cmd/main.go"];
+    const stays = ["/compact", "console.log", "self.h", "src/gone.rs:3", "crates/zerocode-shell"];
+    const commands = ["npm test", "./gradlew test"];
+    const chip = (words) => `\`${words}\``;
     await openConversation(page, [
       { role: "user", text: "어디를 고치나요?" },
       {
         role: "assistant",
         text: [
-          "고칠 곳은 `src/app.rs:12`와 `SessionGuard.java:120-138`이고, `cmd/main.go`도 봅니다.",
-          "명령 칩 `npm test`와 `./gradlew test`는 그대로이고, 글 속 Server.kt:7 과 lib/Store.swift 는 문입니다.",
+          `고칠 곳은 ${chip(doors[0])}와 ${chip(doors[1])}이고, ${chip(doors[2])}도 봅니다.`,
+          `컨텍스트가 차면 ${chip(stays[0])}를 치고, ${chip(stays[1])}와 ${chip(stays[2])}는 코드이며, ${chip(stays[3])}은 지운 파일이고 ${chip(stays[4])}는 폴더입니다.`,
+          `명령 칩 ${chip(commands[0])}와 ${chip(commands[1])}는 그대로입니다.`,
           "",
           "```",
           "src/app.rs:3",
@@ -508,7 +519,8 @@ export async function testConversationChipDoors(browser, origin, ok) {
         ].join("\n"),
       },
     ]);
-    const seen = await page.evaluate(async (chips) => {
+    const seen = await page.evaluate(async ({ doors, stays, commands }) => {
+      for (let beat = 0; beat < 4; beat += 1) await window.__PAINTED__();
       const said = document.querySelector("#worker-view .helper-turn.is-assistant .helper-said");
       const codes = [...said.querySelectorAll(":not(pre) > code")];
       const chipOf = (words) => codes.find((code) => code.textContent === words) ?? null;
@@ -524,43 +536,36 @@ export async function testConversationChipDoors(browser, origin, ok) {
         await window.__PAINTED__();
         return at;
       };
-      const bare = (words) => [...said.querySelectorAll(".helper-link:not(.is-chip)")].find((one) => one.textContent === words) ?? null;
-      const doors = {
-        app: doorOf(chipOf("src/app.rs:12")),
-        java: doorOf(chipOf("SessionGuard.java:120-138")),
-        go: doorOf(chipOf("cmd/main.go")),
-      };
+      const opened = {};
+      for (const words of doors) opened[words] = await openedAt(doorOf(chipOf(words)));
       return {
-        // Every chip still says exactly what the answer wrote.
         chipWords: codes.map((code) => code.textContent),
-        wantChipWords: chips,
         chipChildren: codes.every((code) => code.childElementCount === 0),
-        doorsAroundChips: Object.values(doors).every((door) => door !== null && door.classList.contains("is-chip") &&
-          door.getAttribute("role") === "button" && door.tabIndex === 0 && door.querySelector(":scope > .icon use")?.getAttribute("href") === "#i-file" &&
-          door.querySelector(":scope > code") !== null),
-        commandsStay: ["npm test", "./gradlew test"].every((words) => chipOf(words)?.closest(".md-link") === null),
+        doorsAroundChips: doors.every((words) => {
+          const door = doorOf(chipOf(words));
+          return door !== null && door.classList.contains("is-chip") && door.getAttribute("role") === "button" && door.tabIndex === 0 &&
+            door.querySelector(":scope > .icon use")?.getAttribute("href") === "#i-file";
+        }),
+        staysChips: Object.fromEntries([...stays, ...commands].map((words) => [words, chipOf(words) !== null && chipOf(words).closest(".md-link") === null])),
         fenceStays: said.querySelector("pre .md-link") === null,
-        bareKotlin: bare("Server.kt:7") !== null,
-        bareSwift: bare("lib/Store.swift") !== null,
-        app: await openedAt(doors.app),
-        java: await openedAt(doors.java),
-        go: await openedAt(doors.go),
-        kotlin: await openedAt(bare("Server.kt:7")),
+        asked: window.__KINDS_ASKED__,
+        opened,
       };
-    }, chips);
-    ok("C7: a chip that is a path stands inside a door to its file — the file icon, a button the keyboard reaches — and every chip keeps the words the answer wrote, with nothing put inside it",
-      seen.doorsAroundChips && seen.chipChildren && JSON.stringify(seen.chipWords) === JSON.stringify(seen.wantChipWords),
+    }, { doors, stays, commands });
+    const root2 = (path) => (path.startsWith("/") ? path : `${root}/${path.replace(/:\d+(?:-\d+)?$/, "")}`);
+    ok("C7: a chip that names a file which is there stands inside a door to it — the file icon, a button the keyboard reaches — and every chip keeps the words the answer wrote, with nothing put inside it",
+      seen.doorsAroundChips && seen.chipChildren && JSON.stringify(seen.chipWords) === JSON.stringify([...doors, ...stays, ...commands]),
       JSON.stringify(seen));
     ok("C7: a path chip's door opens its file at the line the chip names — `src/app.rs:12` at 12, `SessionGuard.java:120-138` at 120 — and a chip with no line at the top",
-      seen.app.tab === `file:${root}/src/app.rs` && seen.app.line === 12 &&
-        seen.java.tab === `file:${root}/SessionGuard.java` && seen.java.line === 120 &&
-        seen.go.tab === `file:${root}/cmd/main.go` && seen.go.line === 1,
-      JSON.stringify([seen.app, seen.java, seen.go]));
-    ok("C7: a command chip and a path in a fenced block are not doors",
-      seen.commandsStay && seen.fenceStays, JSON.stringify(seen));
-    ok("C7: the prose names Kotlin and Swift files as doors too — `Server.kt:7` opens at its line",
-      seen.bareKotlin && seen.bareSwift && seen.kotlin.tab === `file:${root}/Server.kt` && seen.kotlin.line === 7,
-      JSON.stringify([seen.bareKotlin, seen.bareSwift, seen.kotlin]));
+      seen.opened[doors[0]].tab === `file:${root}/src/app.rs` && seen.opened[doors[0]].line === 12 &&
+        seen.opened[doors[1]].tab === `file:${root}/SessionGuard.java` && seen.opened[doors[1]].line === 120 &&
+        seen.opened[doors[2]].tab === `file:${root}/cmd/main.go` && seen.opened[doors[2]].line === 1,
+      JSON.stringify(seen.opened));
+    ok("C7: a slash command (`/compact`), a call (`console.log`, `self.h`), a path nobody wrote, a folder, a command chip and a fenced block's path are not doors (review r1 P2-4)",
+      Object.values(seen.staysChips).every(Boolean) && seen.fenceStays, JSON.stringify(seen.staysChips));
+    ok("C7: the answer's path-shaped chips are asked of the disk once, measured from the checkout — words with no slash or dot, and command chips, are never asked",
+      seen.asked.length === 1 && JSON.stringify(seen.asked[0]) === JSON.stringify([...doors, ...stays].map(root2)),
+      JSON.stringify(seen.asked));
     ok("C7: the chip doors raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();

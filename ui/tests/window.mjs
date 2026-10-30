@@ -36994,6 +36994,8 @@ const answerTail = await page.evaluate(async () => {
   tell("hook:subagent", { term, rows: [{ id: "tail", name: "@tail", state: "running" }] });
   await window.__PAINTED__();
   const answer = "완성했습니다: index.html — 열어 보세요.";
+  // The disk says which chip names a file there (draft C7): this checkout's ui/shell.js.
+  window.__ANSWER__.path_kinds = ({ paths }) => paths.map((path) => (path === `${owner.worktree}/ui/shell.js` ? "file" : "missing"));
   window.__ANSWER__.subagent_log = () => ({
     found: true,
     next: 3,
@@ -37121,6 +37123,7 @@ const answerTail = await page.evaluate(async () => {
     Boolean(rows[3]?.querySelector(".helper-copy"));
   delete window.__ANSWER__.subagent_log;
   delete window.__ANSWER__.fs_open_default;
+  delete window.__ANSWER__.path_kinds;
   tell("hook:subagent", { term, rows: [] });
   tell("term:exited", { term });
   await new Promise((done) => setTimeout(done, 40));
