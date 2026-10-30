@@ -3863,6 +3863,10 @@ fn spawn_auto_dream_pass(
     if let Some(model) = active_model {
         command.args(["--model", model]);
     }
+    // On Windows nothing moves a session's stderr to its log, so the child's
+    // lines would land on the screen.
+    #[cfg(windows)]
+    command.stderr(std::process::Stdio::null());
     command
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())

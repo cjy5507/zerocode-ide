@@ -471,6 +471,7 @@ fn run_mcp(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Er
 /// call, no session.
 #[allow(clippy::unnecessary_wraps)]
 fn run_auto_dream(args: &[String]) -> Answered {
+    use std::io::Write as _;
     // The session stops a pass that runs past the deadline; the pass stops
     // itself as well, so one whose session has gone still lets go of the lock.
     let _ = std::thread::Builder::new().name("auto-dream-deadline".to_string()).spawn(|| {
@@ -480,7 +481,9 @@ fn run_auto_dream(args: &[String]) -> Answered {
     });
     Ok(match zo_ide::session::answer_auto_dream(args) {
         Ok(reply) => {
-            println!("{reply}");
+            // A session that went first has closed the pipe, where `println!`
+            // panics; the pass is done all the same.
+            let _ = writeln!(std::io::stdout(), "{reply}");
             success("auto-dream")
         }
         Err(message) => {
