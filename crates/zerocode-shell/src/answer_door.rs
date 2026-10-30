@@ -1391,35 +1391,53 @@ mod tests {
             type_rewind(&pane.held, &free, b"/rewind"),
             Err(REWIND_SCREEN.to_string())
         );
-        assert!(pane.typed().is_empty(), "a way back joined words on the line");
+        assert!(
+            pane.typed().is_empty(),
+            "a way back joined words on the line"
+        );
         pane.draw(&format!(
             "\x1b[?2004h● Done.\n\n{rule}\n❯ \n{rule}\x1b[4;3H"
         ));
-        let unread = rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(
-            7,
-            None,
-            || None,
-        ));
-        let coordinator = rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(
-            7,
-            None,
-            || {
+        let unread = rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(7, None, || None));
+        let coordinator =
+            rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(7, None, || {
                 Some(vec![crate::orchestration::restart_census::KeyedPane {
                     key: "run-1".to_string(),
                     term: 7,
                 }])
-            },
-        ));
-        let worker = rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(
-            7,
-            Some(7),
-            || Some(Vec::new()),
-        ));
+            }));
+        let worker = rewind_seat_word(crate::cmd::wire::pane_the_ledger_drives(7, Some(7), || {
+            Some(Vec::new())
+        }));
         for (refused, word) in [
-            (RewindPane { seat: unread, ..free }, REWIND_LEDGER_UNREAD),
-            (RewindPane { seat: coordinator, ..free }, REWIND_SEAT),
-            (RewindPane { seat: worker, ..free }, REWIND_SEAT),
-            (RewindPane { between_turns: false, ..free }, REWIND_BUSY),
+            (
+                RewindPane {
+                    seat: unread,
+                    ..free
+                },
+                REWIND_LEDGER_UNREAD,
+            ),
+            (
+                RewindPane {
+                    seat: coordinator,
+                    ..free
+                },
+                REWIND_SEAT,
+            ),
+            (
+                RewindPane {
+                    seat: worker,
+                    ..free
+                },
+                REWIND_SEAT,
+            ),
+            (
+                RewindPane {
+                    between_turns: false,
+                    ..free
+                },
+                REWIND_BUSY,
+            ),
         ] {
             assert_eq!(
                 type_rewind(&pane.held, &refused, b"/rewind"),
