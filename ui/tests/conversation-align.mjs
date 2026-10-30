@@ -53,6 +53,7 @@ const READ_COLUMN = `(() => {
   const px = (value) => Number.parseFloat(value) || 0;
   const said = [...root.querySelectorAll(".helper-turn.is-assistant .helper-said")].find((one) => one.textContent.includes("굵은 글"));
   const left = (node) => (node ? Math.round(node.getBoundingClientRect().left * 10) / 10 : null);
+  const right = (node) => (node ? Math.round(node.getBoundingClientRect().right * 10) / 10 : null);
   const markLeft = (node, dot) => {
     if (!node) return null;
     const style = getComputedStyle(node);
@@ -73,7 +74,12 @@ const READ_COLUMN = `(() => {
     pillDot: markLeft(cap),
     stepDot: markLeft(step, step?.querySelector(".helper-step-dot")),
     actions: left(actions?.querySelector(".icon")),
-    status: status && !status.hidden ? markLeft(status) : null,
+    /* The boxes that are always painted (the live line, an opened pill's body) stand on the edges of the
+     * code block: their marks sit inside them, by their own padding, not outside the column. */
+    codeRight: right(said?.querySelector("pre")),
+    statusBox: status && !status.hidden ? [left(status), right(status)] : null,
+    bodyBox: (() => { const body = root.querySelector(".helper-group-body"); return body ? [left(body), right(body)] : null; })(),
+    bodyPad: px(getComputedStyle(root.querySelector(".helper-group-body") ?? root).paddingLeft),
     bubbleRight: bubble ? Math.round(bubble.getBoundingClientRect().right * 10) / 10 : null,
     columnRight: said ? Math.round(said.getBoundingClientRect().right * 10) / 10 : null,
     pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -112,10 +118,17 @@ export async function testConversationColumn(browser, origin, ok, { shots = proc
       }
       for (const width of COLUMN_WIDTHS) {
         const one = seen[width];
-        const marks = ["list", "quote", "code", "table", "pillDot", "stepDot", "actions", "status"].filter((key) => one[key] !== null);
+        const marks = ["list", "quote", "code", "table", "pillDot", "actions"].filter((key) => one[key] !== null);
         const off = marks.filter((key) => Math.abs(one[key] - one.prose) > 1.5);
         ok(`${theme} ${width}px: every row starts its marks where the answer's words start (${marks.join(", ")})`,
-          one.prose !== null && marks.length >= 7 && off.length === 0, JSON.stringify(one));
+          one.prose !== null && marks.length >= 6 && off.length === 0, JSON.stringify(one));
+        /* A box painted all the time shares its edges with the code block above it, not the gutter's. */
+        const boxes = [["live line", one.statusBox], ["opened pill", one.bodyBox]].filter(([, box]) => box !== null);
+        const crooked = boxes.filter(([, [from, to]]) => Math.abs(from - one.code) > 1.5 || Math.abs(to - one.codeRight) > 1.5);
+        ok(`${theme} ${width}px: the live line and an opened pill's body stand on the code block's edges (${boxes.map(([name]) => name).join(", ")})`,
+          one.code !== null && boxes.length === 2 && crooked.length === 0, JSON.stringify(one));
+        ok(`${theme} ${width}px: a step's dot in an opened pill stands inside the body by the body's own padding`,
+          one.stepDot !== null && one.bodyBox !== null && Math.abs(one.stepDot - (one.bodyBox[0] + one.bodyPad)) <= 1.5, JSON.stringify(one));
         ok(`${theme} ${width}px: the person's bubble ends on the column's right edge and the page does not scroll sideways`,
           one.bubbleRight !== null && Math.abs(one.bubbleRight - one.columnRight) <= 1.5 && one.pageOverflow <= 0, JSON.stringify(one));
       }
