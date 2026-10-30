@@ -27,15 +27,15 @@ impl ApiClient for BatchApi {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> { Ok(self.response(&request)) }
 }
 impl AsyncApiClient for BatchApi {
-    fn stream_async<'a>(&'a self, request: ApiRequest, _tx: tokio::sync::mpsc::Sender<RenderBlock>, _id: BlockId)
-        -> BoxFuture<'a, Result<Vec<AssistantEvent>, RuntimeError>> {
+    fn stream_async(&self, request: ApiRequest, _tx: tokio::sync::mpsc::Sender<RenderBlock>, _id: BlockId)
+        -> BoxFuture<'_, Result<Vec<AssistantEvent>, RuntimeError>> {
         let result = self.response(&request);
         Box::pin(async move { Ok(result) })
     }
 }
 struct Allow;
 impl PermissionPrompter for Allow {
-    fn decide<'a>(&'a self, _request: PermissionRequest) -> BoxFuture<'a, Result<PermissionDecision, PermissionError>> {
+    fn decide(&self, _request: PermissionRequest) -> BoxFuture<'_, Result<PermissionDecision, PermissionError>> {
         Box::pin(async { Ok(PermissionDecision::Allow) })
     }
 }

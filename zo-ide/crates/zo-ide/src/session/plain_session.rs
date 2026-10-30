@@ -1103,10 +1103,7 @@ impl PlainSession {
         self.idle_dreamer.activity(now_unix_ms());
         self.clear_notice_mark();
         self.end_task_continuity(origin, user_cancel_requested.load(Ordering::SeqCst));
-        let mut summary = match result {
-            Ok(summary) => summary,
-            Err(error) => return Err(error),
-        };
+        let mut summary = result?;
         self.persist().map_err(|error| error.to_string())?;
         if let Some(inner) = self.runtime.try_runtime() {
             let (iterations, tokens) = inner.invocation_usage();

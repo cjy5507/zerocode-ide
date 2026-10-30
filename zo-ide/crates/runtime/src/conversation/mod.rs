@@ -3291,15 +3291,15 @@ where
                                     let position = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                     let Some(&idx) = wave.get(position) else { break; };
                                     let prepared = &prepared[idx];
-                                    let result = if signal.epoch() != epoch {
-                                        (crate::tool_cancel::CANCELLED_TOOL_RESULT.to_string().into(), true)
-                                    } else {
+                                    let result = if signal.epoch() == epoch {
                                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                             match dispatch(&prepared.tool_name, prepared.effective_input.as_ref()) {
                                                 Ok(output) => (output, false),
                                                 Err(error) => (error.to_string().into(), true),
                                             }
                                         })).unwrap_or_else(|_| ("parallel tool execution panicked".to_string().into(), true))
+                                    } else {
+                                        (crate::tool_cancel::CANCELLED_TOOL_RESULT.to_string().into(), true)
                                     };
                                     if sender.send((idx, result)).is_err() { break; }
                                 });

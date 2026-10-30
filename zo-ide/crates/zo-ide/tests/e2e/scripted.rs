@@ -150,11 +150,7 @@ impl Script {
         match self {
             Self::Baseline { task, root, patch } => baseline_response(task, root, patch, request),
             Self::Text(text) => text_sse("msg_text_script", text),
-            Self::ErrorThenText(_) if request_index == 0 => {
-                let mut body = String::new();
-                append_sse(&mut body, "error", &json!({"type":"error", "error":{"type":"invalid_request_error", "message":"scripted first-turn failure"}}));
-                body
-            }
+            Self::ErrorThenText(_) if request_index == 0 => provider_error_sse(),
             Self::ErrorThenText(text) => text_sse("msg_recovered_script", text),
             Self::BashRead { .. } if request_index == 0 => bash_read_sse(),
             Self::BashRead { final_text } => text_sse("msg_bash_read_final", final_text),
@@ -895,6 +891,12 @@ fn http_response(content_type: &str, body: &str) -> String {
         "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     )
+}
+
+fn provider_error_sse() -> String {
+    let mut body = String::new();
+    append_sse(&mut body, "error", &json!({"type":"error", "error":{"type":"invalid_request_error", "message":"scripted first-turn failure"}}));
+    body
 }
 
 fn text_sse(message_id: &str, text: &str) -> String {
