@@ -81,7 +81,7 @@ impl ToolCancelSignal {
 }
 
 /// A single tool dispatch's view of the cancel signal.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ToolCancelWatch {
     rx: watch::Receiver<u64>,
 }

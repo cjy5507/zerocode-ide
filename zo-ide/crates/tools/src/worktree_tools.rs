@@ -149,6 +149,17 @@ fn ensure_worktree(path: &Path, branch: Option<&str>) -> Result<Option<String>, 
     Ok(warning)
 }
 
+/// Prepare a CLI startup worktree through the same disk check and git creation path.
+pub fn prepare_start_worktree(path: &Path) -> Result<std::path::PathBuf, String> {
+    if let Some(warning) = ensure_worktree(path, None)? { eprintln!("{warning}"); }
+    let output = Command::new("git").arg("-C").arg(path).args(["rev-parse", "--show-toplevel"]).output().map_err(|e| e.to_string())?;
+    if !output.status.success() { return Err("--worktree requires a git working tree".into()); }
+    let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+    if root.canonicalize().map_err(|e| e.to_string())? != canonical { return Err("--worktree must name the root of a git working tree".into()); }
+    Ok(canonical)
+}
+
 pub(crate) fn run_enter_worktree(input: &EnterWorktreeInput) -> Result<String, ToolError> {
     let target = PathBuf::from(&input.path);
     let target = if target.is_absolute() {

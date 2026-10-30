@@ -44,7 +44,44 @@ zo --permission-mode read-only --status
 zo models --refresh
 zo decision-shadow eval --labels labels.jsonl   # probe·typed 판단을 사람의 라벨로 채점
 ```
-슬래시: `/model /effort /fast /permissions /compact /status /new /new-project /resume /goal /loop /clear /help /exit`.
+`zo commands --json`은 현재 폴더에서 호출할 수 있는 내장·사용자·활성 플러그인 명령과 출처를 보여 준다. 발견 중에는 명령이나 훅을 실행하지 않는다. 내장 명령이 같은 이름의 사용자·플러그인 명령보다 우선한다.
+
+내장 슬래시: `/model /fast /thinking /permissions /new /resume /fork /rename /export /compact /rewind /goal /loop /status /context /warnings /help /exit /clear`.
+추론 강도는 `/model`에서 고른다.
+
+```sh
+zo --plain 'Explain this repository'            # 한 번 실행하고 종료
+zo --plain --prompt-file task.txt              # UTF-8 파일, - 는 stdin 전체
+zo --output-schema result.schema.json --last-message result.json 'Return the result'
+zo --plain --max-turns 6 --max-output-tokens 4096 'Inspect the code'
+zo --add-dir ../library --worktree ../review-tree 'Inspect this checkout'
+zo session list --query 'migration' --offset 0 --limit 100 --json
+zo session fork latest --name experiment
+zo session rename latest 'Investigation'
+zo session export latest conversation.jsonl     # 새 파일에만 저장
+zo review --uncommitted                        # read-only 검사
+zo review --base main
+zo review --commit HEAD
+zo plugin list --json
+zo plugin get example
+zo plugin install ./example-plugin
+zo plugin enable example
+zo plugin disable example
+zo plugin validate ./example-plugin
+zo plugin update example
+zo plugin uninstall example
+zo hooks list --json                           # 설정과 플러그인의 병합된 훅
+zo mcp diagnose --json                         # 설정 진단, 연결 시험은 하지 않음
+```
+
+파일 경로는 `--cwd` 폴더를 기준으로 읽고, worktree로 이동하기 전에 정규화한다. 위치 인자·프롬프트 파일·stdin은 하나만 고른다. 파일이나 위치 인자를 주지 않은 파이프는 기존 줄·붙여넣기 동작을 유지한다. 대화형 터미널의 위치 인자는 첫 질문으로 실행한 뒤 TUI를 유지한다.
+
+출력 스키마는 세션을 열기 전에 검사한다. 외부 파일·네트워크 참조는 가져오지 않는다. 최종 답이 JSON 또는 스키마와 맞지 않으면 실패로 종료하고 `--last-message` 파일을 쓰지 않는다. JSONL 이벤트는 진행 기록이며 검증된 최종 JSON 파일과 구분한다.
+
+`--max-turns`는 이번 실행의 전경 모델·도구 반복 횟수를 센다. `--max-output-tokens`는 전경 런타임이 보고한 출력 토큰을 턴 사이에 누적한다. 하위 에이전트와 압축은 별도 사용량 계산을 쓴다. 이 옵션은 요청 사이와 최종 답에서 검사하는 중단 장치이며 달러 지출 상한이 아니다. 한 응답이 상한을 넘으면 답을 잘라 성공으로 보이지 않고 실패한다. 달러 상한은 하위 작업·압축·재시도·모델 변경을 함께 정산하는 계정이 필요해서 아직 제공하지 않는다.
+
+`--add-dir`는 이번 실행에 정규화한 폴더만 추가한다. 권한 모드와 deny 규칙은 계속 적용된다. `/resume`은 모든 적격 세션에서 비동기로 검색하며 PageUp·PageDown으로 결과 페이지를 바꾼다. `/fork [이름]`은 원본 대화를 보존하고 독립된 대화로 이동한다. 파이프의 `/fork`는 복제 경로를 출력한다. `/rename <이름>`과 `/export <새 파일>`도 사용할 수 있다.
+
 권한 모드 `read-only | workspace-write | danger-full-access`(Claude Code 별칭 수용), effort `off…max|ultra|smart`.
 
 ## 자동화 그래프

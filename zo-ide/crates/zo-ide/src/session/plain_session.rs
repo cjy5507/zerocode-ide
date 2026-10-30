@@ -156,6 +156,7 @@ pub enum RewindTurn {
 }
 
 pub struct PlainSession {
+    pub(crate) invocation: crate::automation::Invocation,
     selection_origins: (&'static str, &'static str),
     model_selection: super::plan_execution::ModelSelection,
     pub cwd: PathBuf,
@@ -740,6 +741,7 @@ impl PlainSession {
             autonomy.limits.idle_dream_delay_secs.saturating_mul(1000),
         );
         let session = Self {
+            invocation: crate::automation::Invocation::default(),
             selection_origins,
             model_selection,
             cwd,
@@ -781,6 +783,28 @@ impl PlainSession {
         super::process_lifecycle::track_session(&session.handle.id, &session.handle.path);
         crate::runtime_support::log_boot_stage("open/total", opened);
         Ok(session)
+    }
+
+    pub fn configure_invocation(&mut self, invocation: crate::automation::Invocation) {
+        self.invocation = invocation;
+        self.apply_invocation_context();
+    }
+
+    pub(crate) fn take_initial_prompt(&mut self) -> Option<String> { self.invocation.prompt.take() }
+
+    pub(crate) fn invocation_failure(&self) -> Option<&str> { self.invocation.failure.as_deref() }
+
+    fn apply_invocation_context(&mut self) {
+        if let Some(inner) = self.runtime.try_runtime_mut() {
+            let context = inner.tool_executor_mut().tool_registry_mut().context();
+            runtime::file_ops::set_additional_workspace_roots(self.invocation.additional_roots.clone());
+            if self.invocation.review {
+                context.set_inspection_shell(true);
+                // The inspection parser is the execution gate; deny rules retain
+                // precedence over this temporary read-only-shell permission.
+                let _ = inner.add_temporary_permission_allow_rules(&["Bash(*)"]);
+            }
+        }
     }
 
     #[must_use]
@@ -944,8 +968,19 @@ impl PlainSession {
 
     /// 스트리밍 턴 하나를 이미지 첨부와 함께 실행한다. 이미지 쌍은 엔진의
     /// `push_user_with_images` 입력과 같은 `(media_type, base64)` 모양이다.
-    #[expect(clippy::too_many_lines, reason = "shared turn entry keeps scheduled dispatch and model lifecycle in order")]
     pub(crate) async fn run_turn_with_images(
+        &mut self, input: &str, images: Vec<(String, String)>,
+        block_tx: tokio::sync::mpsc::Sender<RenderBlock>,
+        prompter: std::sync::Arc<dyn runtime::permission::PermissionPrompter>,
+        hook_abort_signal: HookAbortSignal, user_cancel_requested: Arc<AtomicBool>,
+    ) -> Result<runtime::TurnSummary, String> {
+        let outcome = Box::pin(self.run_turn_with_images_inner(input, images, block_tx, prompter, hook_abort_signal, user_cancel_requested)).await;
+        self.invocation.observe_turn(&outcome);
+        outcome
+    }
+
+    #[expect(clippy::too_many_lines, reason = "shared turn entry keeps scheduled dispatch and model lifecycle in order")]
+    async fn run_turn_with_images_inner(
         &mut self,
         input: &str,
         images: Vec<(String, String)>,
@@ -954,6 +989,9 @@ impl PlainSession {
         hook_abort_signal: HookAbortSignal,
         user_cancel_requested: Arc<AtomicBool>,
     ) -> Result<runtime::TurnSummary, String> {
+        self.invocation.check_remaining()?;
+        let schema_input = self.invocation.schema.as_ref().map(|schema| schema.instruction(input));
+        let input = schema_input.as_deref().unwrap_or(input);
         if let Some(payload) = self.pending_scheduled_workflow.take() {
             return self.run_scheduled_workflow(input, payload, block_tx, hook_abort_signal, user_cancel_requested).await;
         }
@@ -1065,8 +1103,20 @@ impl PlainSession {
         self.idle_dreamer.activity(now_unix_ms());
         self.clear_notice_mark();
         self.end_task_continuity(origin, user_cancel_requested.load(Ordering::SeqCst));
-        let summary = result?;
+        let mut summary = result?;
         self.persist().map_err(|error| error.to_string())?;
+        if let Some(inner) = self.runtime.try_runtime() {
+            let (iterations, tokens) = inner.invocation_usage();
+            if let Some(iterations) = iterations { summary.iterations = iterations; }
+            if let Some(tokens) = tokens { summary.turn_output_tokens = summary.turn_output_tokens.max(tokens); }
+        }
+        self.invocation.record(&summary)?;
+        if let Some(schema) = &self.invocation.schema {
+            let answer = summary.assistant_messages.last().map(|message| message.blocks.iter().filter_map(|block| match block {
+                core_types::ContentBlock::Text { text } => Some(text.as_str()), _ => None,
+            }).collect::<String>()).unwrap_or_default();
+            schema.validate(&answer)?;
+        }
         Ok(summary)
     }
 
@@ -1242,6 +1292,7 @@ impl PlainSession {
     /// it. Its own method so the turn's body stays readable (clippy's line
     /// budget), not because any of it is reused.
     fn arm_turn_limits(&mut self) {
+    self.apply_invocation_context();
     let background_work = self.background_work_probe();
     if let Some(inner) = self.runtime.try_runtime_mut() {
         // Who stops this turn if it does not stop itself. A person at the
@@ -1264,6 +1315,16 @@ impl PlainSession {
             Some(budget) => inner.set_deadline(std::time::Instant::now() + budget),
             None => inner.clear_deadline(),
         }
+        let output_budget = match (output_budget, self.invocation.max_output_tokens) {
+            (Some(default), Some(max)) => Some(default.min(max.saturating_sub(self.invocation.used_output_tokens))),
+            (None, Some(max)) => Some(max.saturating_sub(self.invocation.used_output_tokens)),
+            (existing, None) => existing,
+        };
+        inner.set_invocation_limits(
+            self.invocation.max_turns.map(|max| max.saturating_sub(self.invocation.used_turns)),
+            self.invocation.max_output_tokens.map(|max| max.saturating_sub(self.invocation.used_output_tokens)),
+        );
+        if let Some(max) = self.invocation.max_turns { inner.set_max_iterations(max.saturating_sub(self.invocation.used_turns)); }
         inner.set_turn_output_token_budget(output_budget);
         inner.set_turn_input_token_budget(input_budget);
         // Arm the progress-gated deadline extension.
@@ -1470,6 +1531,7 @@ impl PlainSession {
     /// one — they only record into an open checkpoint — so without this
     /// `/rewind` would list nothing, ever (t-19459).
     fn begin_workspace_checkpoint(&mut self) {
+        if self.invocation.review { return; }
         if let Some(runtime) = self.runtime.try_runtime_mut() {
             let turn = runtime
                 .session()
@@ -1504,20 +1566,28 @@ impl PlainSession {
     /// Give a freshly opened chat the optional display name accepted by
     /// Codex's `/new <name>` and `/clear <name>` forms.
     pub fn set_name(&mut self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        crate::session_cli::validate_name(name)?;
         let name = name.trim();
-        if name.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "session name cannot be empty",
-            )
-            .into());
-        }
         let runtime = self
             .runtime
             .try_runtime_mut()
             .ok_or_else(|| std::io::Error::other("runtime not available"))?;
+        let previous = runtime.session().name.clone();
         runtime.session_mut().name = Some(name.to_string());
-        self.persist()
+        if let Err(error) = self.persist() {
+            if let Some(runtime) = self.runtime.try_runtime_mut() { runtime.session_mut().name = previous; }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Fork the in-memory conversation into independent managed persistence.
+    pub fn fork(&self, name: Option<&str>) -> Result<PathBuf, String> {
+        crate::session_cli::fork_session(self.runtime.session(), &self.handle.path, name, &self.cwd)
+    }
+
+    pub fn export(&self, destination: &Path) -> Result<(), String> {
+        crate::session_cli::export(self.runtime.session(), destination)
     }
 
     pub fn fire_session_start(&self) {

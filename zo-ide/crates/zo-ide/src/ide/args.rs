@@ -1,9 +1,7 @@
 //! `zo-ide` 명령줄 — 손으로 쓴 작은 파서(의존 추가 없음).
 //!
-//! 플래그는 계획서 keep-list 만큼만: 모델·권한·effort·resume·MCP 설정·cwd,
-//! 그리고 표시 옵션 셋(`--render-markdown`, `--show-thinking`,
-//! `--verbose-stderr`). 나머지 zo 플래그
-//! 164종은 이 바이너리에 없다.
+//! Input validation precedes provider/bootstrap work. Invocation-only controls
+//! do not change saved defaults or a teammate's carried contract.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,17 +13,23 @@ use crate::permission_mode::{normalize_permission_mode, permission_mode_from_lab
 use crate::session::plain_session::OpenOptions;
 
 pub const USAGE: &str = "\
-zo [--model <alias>] [--permission-mode <mode>] [--effort <level>]
-       [--resume [<id|latest|path>]] [--continue] [--mcp-config <file>] [--cwd <dir>]
+zo [<prompt>…] [--prompt-file <file|->] [--model <alias>] [--permission-mode <mode>] [--effort <level>]
+       [--resume [<id|latest|name|path>]] [--continue] [--mcp-config <file>] [--cwd <dir>]
        [--no-spawn] [--allowed-tools <names>] [--render-markdown] [--show-thinking] [--verbose-stderr]
        [--teammate <dir> [--resume-transcript <path>]] [--launch-contract <version>]
        [--classifier-fallback off|ask|auto]
        [--events-bind <addr>] [-p|--plain] [--json] [--last-message <file>]
        [--loop-every <duration>|--loop-until <command>] [--loop-max <runs>]
+       [--output-schema <file> --last-message <file>] [--max-turns <iterations>] [--max-output-tokens <tokens>]
+       [--add-dir <dir>]… [--worktree <path>]
        [--status] [--prompt-input] [--orchestration-accuracy] [--version] [--help]
 zo models [--refresh] [--json]
 zo commands [--json]
-zo mcp list|get|add|remove|login|logout [<name>] [--url <url>|-- <command>…] [--env K=V] [--header K=V]
+zo session list|fork|rename|export (zo session --help for arguments)
+zo review --uncommitted|--base <ref>|--commit <ref> [--model <alias>] [--effort <level>] [--json]
+zo plugin list|get|install|validate|enable|disable|uninstall|update [<id|source>] [--json] [--cwd <dir>]
+zo hooks list|show [--json] [--cwd <dir>]
+zo mcp diagnose|list|get|add|remove|login|logout [<name>] [--url <url>|-- <command>…] [--env K=V] [--header K=V]
        [--transport stdio|http|sse|ws] [--scopes <a,b>] [--project [--trust]] [--cwd <dir>] [--json]
 zo cron ensure|show|remove --description <name> [--schedule <expr>] [--prompt <text>|--prompt-file <path|->] [--cwd <dir>]
 zo vault path <from> <to> [--k <n>] [--json] [--vault <dir>] [--cwd <dir>]
@@ -80,6 +84,21 @@ zo decision-shadow check [--json]
                      --plain; nothing is folded, summarized or coloured
   --last-message     write the final assistant message to this file (also with
                      --json), so a caller reads one answer without parsing
+  --prompt-file      read one UTF-8 prompt from a file, or - for all stdin;
+                     conflicts with positional text and another stdin prompt
+  --output-schema    JSON Schema file (also --json-schema); requires --last-message.
+                     Only a validated final JSON value is written there. Local
+                     schema references work; external retrieval is disabled.
+  --max-turns        foreground model/tool iterations across this invocation;
+                     helpers and compaction have separate runtime accounting
+  --max-output-tokens
+                     foreground runtime output tokens across this invocation;
+                     checked between provider requests and on final completion.
+                     A response may exceed the cap, which fails without truncation.
+                     These limits are circuit breakers, not dollar spending caps.
+  --add-dir          additional existing workspace root for this invocation;
+                     paths are canonicalized; deny rules and the mode still apply
+  --worktree         create or select a git worktree at this path before startup
   --loop-every       repeat the first piped prompt at this interval
   --loop-until       repeat it until this read-only command succeeds
   --loop-max         bound the run count (defaults to autonomy.maxLoopRuns)
@@ -198,6 +217,10 @@ pub struct Launch {
     /// nobody answers a worker's questions — and `off` when it did (t-7153):
     /// a pinned model is a binding.
     pub classifier_fallback: Option<runtime::ClassifierFallback>,
+    pub invocation: crate::automation::Invocation,
+    pub prompt_file: Option<PathBuf>,
+    pub worktree: Option<PathBuf>,
+    pub review_target: Option<crate::review::Target>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +254,14 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
     let mut loop_max: Option<u32> = None;
     let mut launch_contract: Option<String> = None;
     let mut classifier_fallback: Option<runtime::ClassifierFallback> = None;
+    let mut invocation = crate::automation::Invocation::default();
+    let mut prompt_words = Vec::new();
+    let mut prompt_file = None;
+    let mut schema_file: Option<PathBuf> = None;
+    let mut roots = Vec::new();
+    let mut worktree = None;
+    let reviewing = args.first().is_some_and(|word| word == "review");
+    let mut review_target = None;
     let mut action = Action::Repl;
 
     let mut index = 0;
@@ -238,10 +269,42 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
         let flag = args[index].as_str();
         let value = |name: &str| -> Result<String, String> {
             args.get(index + 1)
+                .filter(|value| !value.starts_with('-') || value.as_str() == "-")
                 .cloned()
                 .ok_or_else(|| format!("{name} requires a value"))
         };
         match flag {
+            "review" if index == 0 => { index += 1; }
+            "--uncommitted" | "--base" | "--commit" => {
+                if !reviewing { return Err(format!("{flag} belongs to zo review")); }
+                if review_target.is_some() { return Err("choose exactly one review target: --uncommitted, --base, or --commit".into()); }
+                review_target = Some(match flag {
+                    "--uncommitted" => crate::review::Target::Uncommitted,
+                    "--base" => crate::review::Target::Base(value(flag)?),
+                    _ => crate::review::Target::Commit(value(flag)?),
+                });
+                index += if flag == "--uncommitted" { 1 } else { 2 };
+            }
+            "--prompt-file" => {
+                if prompt_file.is_some() { return Err("--prompt-file may only be supplied once".into()); }
+                prompt_file = Some(PathBuf::from(value(flag)?)); index += 2;
+            }
+            "--output-schema" | "--json-schema" => {
+                if schema_file.is_some() { return Err("choose one output schema file".into()); }
+                schema_file = Some(PathBuf::from(value(flag)?)); index += 2;
+            }
+            "--max-turns" => {
+                invocation.max_turns = Some(value(flag)?.parse::<usize>().ok().filter(|v| *v > 0).ok_or("--max-turns requires a positive integer")?); index += 2;
+            }
+            "--max-output-tokens" => {
+                invocation.max_output_tokens = Some(value(flag)?.parse::<u32>().ok().filter(|v| *v > 0).ok_or("--max-output-tokens requires a positive integer")?); index += 2;
+            }
+            "--add-dir" => { roots.push(PathBuf::from(value(flag)?)); index += 2; }
+            "--worktree" => {
+                if worktree.is_some() { return Err("--worktree may only be supplied once".into()); }
+                worktree = Some(PathBuf::from(value(flag)?)); index += 2;
+            }
+            "--" => { prompt_words.extend_from_slice(&args[index + 1..]); break; }
             "models" if index == 0 => {
                 action = Action::Models { refresh: false };
                 index += 1;
@@ -259,7 +322,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
             }
             "--model" | "-m" => {
                 let raw = value("--model")?;
-                model = crate::cli_args::resolve_model_alias(&raw);
+                model.clone_from(&raw);
                 requested.model = Some(raw);
                 index += 2;
             }
@@ -295,6 +358,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
                 index += 2;
             }
             "--resume" | "-r" => {
+                if resume.is_some() || action == Action::Sessions { return Err("choose one --resume or --continue source".into()); }
                 // Bare `--resume` (no value, or the next token is another flag)
                 // asks for the list instead of restoring anything.
                 if let Some(reference) = args.get(index + 1).filter(|next| !next.starts_with('-')) {
@@ -306,6 +370,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
                 }
             }
             "--continue" | "-c" => {
+                if resume.is_some() || action == Action::Sessions { return Err("choose one --resume or --continue source".into()); }
                 resume = Some(crate::LATEST_SESSION_REFERENCE.to_string());
                 index += 1;
             }
@@ -372,7 +437,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
                 index += 1;
             }
             "--last-message" => {
-                let Some(path) = args.get(index + 1) else {
+                let Some(path) = args.get(index + 1).filter(|path| !path.starts_with('-') || path.as_str() == "-") else {
                     return Err(format!("--last-message needs a file path\n\n{USAGE}"));
                 };
                 last_message = Some(PathBuf::from(path));
@@ -432,6 +497,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
                 action = Action::Help;
                 index += 1;
             }
+            other if !other.starts_with('-') && action == Action::Repl => { prompt_words.push(other.to_string()); index += 1; }
             other => return Err(format!("unknown argument '{other}'\n\n{USAGE}")),
         }
     }
@@ -440,6 +506,41 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
         Some(cwd) => cwd,
         None => crate::current_cli_cwd().map_err(|error| error.to_string())?,
     };
+    let cwd = if cwd.is_absolute() { cwd } else { std::env::current_dir().map_err(|e| e.to_string())?.join(cwd) };
+    if !cwd.is_dir() { return Err(format!("--cwd {} is not a directory", cwd.display())); }
+    let prompt_file = prompt_file.map(|path| if path == std::path::Path::new("-") || path.is_absolute() { path } else { cwd.join(path) });
+    let last_message = last_message.map(|path| if path.is_absolute() { path } else { cwd.join(path) });
+    if prompt_file.is_some() && !prompt_words.is_empty() { return Err("choose positional prompt text or --prompt-file".into()); }
+    if !prompt_words.is_empty() {
+        let prompt = prompt_words.join(" ");
+        if prompt.trim().is_empty() { return Err("prompt cannot be empty".into()); }
+        invocation.prompt = Some(prompt);
+    }
+    if reviewing {
+        if review_target.is_none() { return Err("choose exactly one review target: --uncommitted, --base, or --commit".into()); }
+        if permission_mode.is_some_and(|mode| mode != PermissionMode::ReadOnly) || resume.is_some() || worktree.is_some() || prompt_file.is_some() || invocation.prompt.is_some() || teammate.is_some() || loop_trigger.is_some() || action != Action::Repl || allowed_tools.is_some() {
+            return Err("review requires a fresh read-only session; incompatible prompt, resume, tools, mode, worktree, or action".into());
+        }
+        permission_mode = Some(PermissionMode::ReadOnly);
+        no_spawn = true;
+        // Only read tools and the existing inspected shell. No MCP/plugin tools
+        // whose effects are unknown and no mode-changing slash session.
+        allowed_tools = allowed_tool_names("Read,Glob,Grep,Bash")?;
+        invocation.review = true;
+        render.plain = true;
+    }
+    if teammate.is_some() && (invocation.prompt.is_some() || prompt_file.is_some() || schema_file.is_some() || invocation.max_turns.is_some() || invocation.max_output_tokens.is_some() || !roots.is_empty() || worktree.is_some()) {
+        return Err("automation options cannot override a teammate brief".into());
+    }
+    if action != Action::Repl && (invocation.prompt.is_some() || prompt_file.is_some() || schema_file.is_some() || !roots.is_empty() || worktree.is_some() || invocation.max_turns.is_some() || invocation.max_output_tokens.is_some()) {
+        return Err("automation options require a session invocation".into());
+    }
+    invocation.additional_roots = crate::automation::canonical_roots(&cwd, &roots)?;
+    if let Some(file) = schema_file {
+        if last_message.is_none() { return Err("--output-schema requires --last-message <file> for the validated final JSON".into()); }
+        invocation.schema = Some(std::sync::Arc::new(crate::automation::OutputSchema::load(&if file.is_absolute() { file } else { cwd.join(file) })?));
+        render.plain = true;
+    }
     let permission_mode_explicit = permission_mode.is_some();
     if loop_max.is_some() && loop_trigger.is_none() {
         return Err("--loop-max requires --loop-every or --loop-until".to_string());
@@ -486,6 +587,10 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
         headless_loop,
         launch_contract,
         classifier_fallback,
+        invocation,
+        prompt_file,
+        worktree,
+        review_target,
     })
 }
 

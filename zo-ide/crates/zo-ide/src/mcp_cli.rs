@@ -130,6 +130,21 @@ pub struct Report {
 /// The usage, what was wrong with the arguments, or what stopped the verb —
 /// an unknown server name, a document that cannot be written, a refused login.
 pub fn run(args: &[String], cwd: &Path) -> Result<Report, String> {
+    if args.first().is_some_and(|word| word == "diagnose") {
+        let mut list_args = args.to_vec(); list_args[0] = "list".into();
+        let request = parse(&list_args)?;
+        let cwd = request.cwd.clone().unwrap_or_else(|| cwd.to_path_buf());
+        // ConfigLoader and doctor own parsing/trust diagnosis. This command
+        // deliberately makes no connection or login claim.
+        ConfigLoader::default_for(&cwd).load().map_err(|error| error.to_string())?;
+        let report = crate::doctor::diagnose(&cwd);
+        let findings: Vec<_> = report.findings.into_iter().filter(|row| row.label.contains("MCP")).collect();
+        if let Some(failed) = findings.iter().find(|row| row.status == crate::doctor::Status::Fail) { return Err(failed.value.clone()); }
+        let text = if request.json {
+            serde_json::json!({"scope":"configuration", "connection_tested":false,"findings":findings.iter().map(|row|serde_json::json!({"label":row.label,"status":format!("{:?}",row.status),"detail":row.value})).collect::<Vec<_>>()}).to_string()
+        } else { format!("Configuration diagnosis (connections were not tested)\n{}", crate::doctor::DoctorReport { findings }.render()) };
+        return Ok(Report { text });
+    }
     let request = parse(args)?;
     let cwd = request.cwd.clone().unwrap_or_else(|| cwd.to_path_buf());
     let loader = ConfigLoader::default_for(&cwd);

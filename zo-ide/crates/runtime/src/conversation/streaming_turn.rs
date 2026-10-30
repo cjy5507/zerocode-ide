@@ -446,6 +446,13 @@ struct PrecomputedStreamingToolResult {
     cancelled: bool,
 }
 
+struct StreamingWaveCompletion {
+    idx: usize,
+    tool_start: std::time::Instant,
+    finished: std::time::Instant,
+    outcome: (ToolExecutionResult, ToolTextKind, bool),
+}
+
 struct StreamingToolRenderContext<'a> {
     render_tx: &'a mpsc::Sender<RenderBlock>,
     id_gen: &'a BlockIdGen,
@@ -1083,7 +1090,7 @@ where
                 break 'outer;
             }
             iterations += 1;
-            if iterations > self.max_iterations {
+            if iterations > self.max_iterations || self.invocation_iterations_remaining == Some(0) {
                 let error = RuntimeError::new(
                     "conversation loop exceeded the maximum number of iterations",
                 );
@@ -1203,6 +1210,8 @@ where
                     .output_tokens
                     .saturating_sub(turn_start_output_tokens)
                     > budget
+            }) || self.invocation_output_budget.is_some_and(|(baseline, max)| {
+                self.usage_tracker.cumulative_usage().output_tokens.saturating_sub(baseline) >= max
             }) {
                 let error = RuntimeError::new("turn exceeded its output-token budget");
                 self.clear_empty_retry_reminder(empty_retries);
@@ -1256,6 +1265,8 @@ where
                     .await;
                 break 'outer;
             }
+
+            if let Some(remaining) = &mut self.invocation_iterations_remaining { *remaining = remaining.saturating_sub(1); }
 
             if render_tx.is_closed() {
                 self.clear_empty_retry_reminder(empty_retries);
@@ -3159,10 +3170,9 @@ where
     C: ApiClient,
     T: ToolExecutor,
 {
-    /// One wave: its tools dispatched together through `spawn_blocking`, in
-    /// chunks of [`MAX_PARALLEL_SAFE_TOOL_DISPATCHES`], each result rendered
-    /// as it completes — a slow first read must not hide later fast results
-    /// from the TUI — and kept by index for Pass 3 to append in model order.
+    /// Admit an independent wave with at most eight active dispatches. Each
+    /// completion admits the next call before rendering can apply backpressure.
+    /// Results still append in model order in Pass 3.
     #[allow(clippy::too_many_arguments)]
     async fn run_streaming_wave(
         &mut self,
@@ -3175,77 +3185,67 @@ where
         message_count_before: usize,
         dispatch: ConcurrentResultDispatchFn,
     ) -> Result<(), StreamingTurnError> {
-        for batch in wave.chunks(MAX_PARALLEL_SAFE_TOOL_DISPATCHES) {
-            let mut handles = FuturesUnordered::new();
-            for &idx in batch {
-                let p = &prepared[idx];
-                self.record_tool_started(iterations, &p.tool_name);
-                let tool_start = std::time::Instant::now();
-                let dispatch = Arc::clone(&dispatch);
-                let name = p.tool_name.clone();
-                // The same execution input the serial pass hands a tool: a
-                // spawn carries its own `tool_use` id for manifest attribution.
-                let input = tool_execution_input(&p.tool_name, &p.tool_use_id, &p.effective_input)
-                    .unwrap_or_else(|| p.effective_input.clone());
-                // Opened BEFORE the tool starts, so this dispatch is cancelled
-                // only by an Esc that arrives while it is genuinely in flight.
-                // Every member of the wave gets its own watch off the same
-                // epoch, which is why one keypress settles the whole wave.
-                let mut watch = self.tool_cancel_signal.watch();
-                let owner_session = self.session.session_id.clone();
-                let handle = tokio::task::spawn_blocking(move || match dispatch(&name, &input) {
-                    Ok(output) => (output, ToolTextKind::Answer),
-                    Err(error) => (error.to_string().into(), error.kind()),
-                });
-                handles.push(async move {
-                    let outcome =
-                        await_cancellable_tool_dispatch(handle, &mut watch, &owner_session).await;
-                    (idx, tool_start, std::time::Instant::now(), outcome)
-                });
+        let epoch = self.tool_cancel_signal.epoch();
+        let watch = self.tool_cancel_signal.watch();
+        let mut queued = wave.iter().copied();
+        let mut handles = FuturesUnordered::new();
+        for idx in queued.by_ref().take(MAX_PARALLEL_SAFE_TOOL_DISPATCHES) {
+            handles.push(self.start_streaming_wave_tool(idx, &prepared[idx], iterations, Arc::clone(&dispatch), epoch, watch.clone()));
+        }
+        while let Some(completion) = handles.next().await {
+            if let Some(idx) = queued.next() {
+                handles.push(self.start_streaming_wave_tool(idx, &prepared[idx], iterations, Arc::clone(&dispatch), epoch, watch.clone()));
             }
-            while let Some((idx, tool_start, finished, outcome)) = handles.next().await {
-                let (output, kind, cancelled) = outcome;
-                if cancelled {
-                    self.mark_streaming_tool_cancelled(
-                        iterations,
-                        &prepared[idx],
-                        render_tx,
-                        id_gen,
-                        message_count_before,
-                    )
-                    .await?;
-                } else {
-                    crate::notifications::notify_if_slow(
-                        &prepared[idx].tool_name,
-                        tool_start,
-                        std::time::Duration::from_secs(10),
-                    );
-                }
-                self.render_precomputed_streaming_tool_result(
-                    iterations,
-                    &prepared[idx],
-                    &output.text,
-                    kind,
-                    StreamingToolRenderContext {
-                        render_tx,
-                        id_gen,
-                        rollback_message_count: message_count_before,
-                    },
-                )
-                .await?;
-                precomputed.insert(
-                    idx,
-                    PrecomputedStreamingToolResult {
-                        output,
-                        kind,
-                        tool_start,
-                        finished,
-                        cancelled,
-                    },
-                );
+            let StreamingWaveCompletion { idx, tool_start, finished, outcome } = completion;
+            let (output, kind, cancelled) = outcome;
+            if cancelled {
+                self.mark_streaming_tool_cancelled(iterations, &prepared[idx], render_tx, id_gen, message_count_before).await?;
+            } else {
+                crate::notifications::notify_if_slow(&prepared[idx].tool_name, tool_start, std::time::Duration::from_secs(10));
             }
+            self.render_precomputed_streaming_tool_result(
+                iterations, &prepared[idx], &output.text, kind,
+                StreamingToolRenderContext { render_tx, id_gen, rollback_message_count: message_count_before },
+            ).await?;
+            precomputed.insert(idx, PrecomputedStreamingToolResult { output, kind, tool_start, finished, cancelled });
         }
         Ok(())
+    }
+
+    fn start_streaming_wave_tool(
+        &mut self, idx: usize, prepared: &PreparedStreamingTool, iterations: usize,
+        dispatch: ConcurrentResultDispatchFn, epoch: u64, mut watch: ToolCancelWatch,
+    ) -> futures_util::future::BoxFuture<'static, StreamingWaveCompletion> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        self.record_tool_started(iterations, &prepared.tool_name);
+        let tool_start = std::time::Instant::now();
+        let name = prepared.tool_name.clone();
+        let input = tool_execution_input(&name, &prepared.tool_use_id, &prepared.effective_input)
+            .unwrap_or_else(|| prepared.effective_input.clone());
+        let owner_session = self.session.session_id.clone();
+        let signal = self.tool_cancel_signal.clone();
+        let cancelled_before_start = Arc::new(AtomicBool::new(false));
+        let admission = Arc::clone(&cancelled_before_start);
+        let handle = (signal.epoch() == epoch).then(|| tokio::task::spawn_blocking(move || {
+            // A blocking-pool queue can outlive admission. Check the wave's
+            // original epoch again before the dispatch actually starts.
+            if signal.epoch() != epoch {
+                admission.store(true, Ordering::SeqCst);
+                return (CANCELLED_TOOL_RESULT.to_string().into(), ToolTextKind::Failure);
+            }
+            match dispatch(&name, &input) {
+                Ok(output) => (output, ToolTextKind::Answer),
+                Err(error) => (error.to_string().into(), error.kind()),
+            }
+        }));
+        Box::pin(async move {
+            let mut outcome = match handle {
+                Some(handle) => await_cancellable_tool_dispatch(handle, &mut watch, &owner_session).await,
+                None => (CANCELLED_TOOL_RESULT.to_string().into(), ToolTextKind::Failure, true),
+            };
+            outcome.2 |= cancelled_before_start.load(Ordering::SeqCst);
+            StreamingWaveCompletion { idx, tool_start, finished: std::time::Instant::now(), outcome }
+        })
     }
 
     fn streaming_parallel_batch_has_repetition_risk(&self, prepared: &[PreparedStreamingTool]) -> bool {
