@@ -42,17 +42,23 @@ static LAST_PASS: Mutex<Option<LastPass>> = Mutex::new(None);
 
 /// 끝난 패스 하나를 기록한다. 세션 종료 훅이 부른다.
 pub(crate) fn record(report: &DreamReport) {
-    let pass = LastPass {
-        at_millis: now_millis(),
-        summary: report.summary_line(),
-        promoted: report
-            .applied
-            .iter()
-            .filter(|applied| applied.outcome != WriteOutcome::Unchanged)
-            .map(|applied| applied.slug.clone())
-            .collect(),
-    };
-    *lock() = Some(pass);
+    record_pass(report.summary_line(), promoted_slugs(report));
+}
+
+/// 엔진의 요약 문안과 실제로 쓰인 슬러그만으로 패스 하나를 기록한다. 유휴
+/// 패스는 보고서 전체가 아니라 이 둘을 들고 온다.
+pub(crate) fn record_pass(summary: String, promoted: Vec<String>) {
+    *lock() = Some(LastPass { at_millis: now_millis(), summary, promoted });
+}
+
+/// 보고서에서 실제로 **쓰인** 항목의 슬러그.
+pub(crate) fn promoted_slugs(report: &DreamReport) -> Vec<String> {
+    report
+        .applied
+        .iter()
+        .filter(|applied| applied.outcome != WriteOutcome::Unchanged)
+        .map(|applied| applied.slug.clone())
+        .collect()
 }
 
 /// `/status` 카드의 드리머 줄 — 언제 돌았고 무엇이 승격됐는지.

@@ -907,7 +907,7 @@ fn confidence_from_evidence(distinct_sessions: usize, verified: bool) -> f32 {
 /// turn belonged to (for cross-session repetition counting) and which distinct
 /// tools errored in it (the attributable friction). Counts, tokens, and goals
 /// are audit-trail detail the curation policy does not act on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnDigest {
     /// The session this turn belonged to; distinct values across a tool's
     /// failures are what satisfy [`PromotionPolicy::min_distinct_sessions`].
@@ -978,7 +978,7 @@ pub fn lessons_from_turns(digests: &[TurnDigest]) -> Vec<LessonObservation> {
 }
 
 /// A minimal, IO-free digest of one goal/loop automation event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutomationDigest {
     /// The session this event belonged to; distinct values satisfy the same
     /// cross-session repetition gate as turn digests.

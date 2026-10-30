@@ -23,10 +23,52 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use runtime::memory::DreamReport;
+use runtime::memory::{AutoDream, AutoDreamTrigger, DreamError, DreamReport};
+
+use crate::autonomy::dreaming::DreamAttempt;
 
 const SESSION_END_BUDGET: Duration = Duration::from_secs(2);
 const DREAM_ENV: &str = "ZO_DREAM";
+
+/// `zo auto-dream --on idle|compaction --cwd <dir> [--session <id>] [--model
+/// <name>]`: one automatic pass in this process, on the interval of the path
+/// that asks, answered as the one JSON line the session reads back. An idle
+/// pass also mirrors into the second-brain vault, so it needs its session.
+///
+/// # Errors
+/// Says which word was missing or not understood.
+pub fn answer_auto_dream(args: &[String]) -> Result<String, String> {
+    let (mut on, mut cwd, mut session, mut model) = (None, None, None, None);
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        let slot = match word.as_str() {
+            "--on" => &mut on,
+            "--cwd" => &mut cwd,
+            "--session" => &mut session,
+            "--model" => &mut model,
+            other => return Err(format!("unknown word {other:?}")),
+        };
+        *slot = Some(words.next().ok_or_else(|| format!("{word} needs a value"))?);
+    }
+    let (Some(on), Some(cwd)) = (on, cwd) else {
+        return Err("needs --on and --cwd".to_string());
+    };
+    let reply = match AutoDreamTrigger::from_word(on) {
+        Some(AutoDreamTrigger::Idle) => {
+            let (Some(session), Some(model)) = (session, model) else {
+                return Err("an idle pass needs --session and --model".to_string());
+            };
+            curate_here(Path::new(cwd), session, model)
+        }
+        Some(AutoDreamTrigger::Compaction) => PassReply::of(&runtime::memory::try_auto_dream(
+            Path::new(cwd),
+            runtime::memory::DEFAULT_COMPACTION_DREAM_INTERVAL,
+            model.map(String::as_str),
+        )),
+        None => return Err(format!("--on takes idle or compaction, not {on:?}")),
+    };
+    serde_json::to_string(&reply).map_err(|error| error.to_string())
+}
 
 /// Run the automatic Dreamer pass when a session ends.
 ///
@@ -109,23 +151,101 @@ pub(crate) fn run_on_session_end(
 /// Start an idle pass without borrowing the session or blocking its renderer.
 pub(crate) fn spawn_on_idle(
     cwd: &Path, session_id: &str, model: &str,
-    attempt: crate::autonomy::dreaming::DreamAttempt,
+    attempt: DreamAttempt,
 ) {
     let cwd = cwd.to_path_buf();
     let session_id = session_id.to_string();
     let model = model.to_string();
     let _ = thread::Builder::new().name("dreamer-idle".to_string()).spawn(move || {
-        match runtime::maybe_auto_dream(&cwd, runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL, Some(&model)) {
-            Ok(Some(report)) => {
-                crate::dream::record(&report);
-                promote_to_second_brain(&cwd, &session_id, &report);
-                attempt.completed(crate::autonomy::scheduler::now_unix_ms());
-                log_status(&session_id, &format!("idle {}", report.summary_line()));
+        let reply = idle_pass(runtime::memory::auto_dream_program(), &cwd, &session_id, &model);
+        settle(&attempt, &reply, crate::autonomy::scheduler::now_unix_ms());
+        match reply {
+            PassReply::Ran { summary, promoted } => {
+                log_status(&session_id, &format!("idle {summary}"));
+                crate::dream::record_pass(summary, promoted);
             }
-            Err(_) => log_status(&session_id, "idle_failed"),
-            Ok(None) => {}
+            PassReply::Failed => log_status(&session_id, "idle_failed"),
+            PassReply::NotDue { .. } | PassReply::NoEvidence | PassReply::Disabled | PassReply::Locked => {}
         }
     });
+}
+
+/// What an automatic pass found, in the terms the idle clock and the status
+/// card read.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub(crate) enum PassReply {
+    Ran { summary: String, promoted: Vec<String> },
+    NotDue { until_ms: u64 },
+    NoEvidence,
+    Disabled,
+    Locked,
+    Failed,
+}
+
+impl PassReply {
+    fn of(result: &Result<AutoDream, DreamError>) -> Self {
+        match result {
+            Ok(AutoDream::Ran(report)) => Self::Ran {
+                summary: report.summary_line(),
+                promoted: crate::dream::promoted_slugs(report),
+            },
+            Ok(AutoDream::NotDueUntil(until)) => Self::NotDue { until_ms: unix_ms(*until) },
+            Ok(AutoDream::NoEvidence) => Self::NoEvidence,
+            Ok(AutoDream::Disabled) => Self::Disabled,
+            Ok(AutoDream::Locked) => Self::Locked,
+            Err(_) => Self::Failed,
+        }
+    }
+}
+
+fn unix_ms(at: std::time::SystemTime) -> u64 {
+    at.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// The cheap gate first, in this process; a pass it lets through curates in
+/// `program` when there is one, else here.
+fn idle_pass(program: Option<&Path>, cwd: &Path, session_id: &str, model: &str) -> PassReply {
+    if let Some(held) = runtime::memory::auto_dream_held(cwd, runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL) {
+        return PassReply::of(&Ok(held));
+    }
+    match program {
+        Some(zo) => run_idle_pass(zo, cwd, session_id, model),
+        None => curate_here(cwd, session_id, model),
+    }
+}
+
+fn curate_here(cwd: &Path, session_id: &str, model: &str) -> PassReply {
+    let result = runtime::memory::try_auto_dream(
+        cwd, runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL, Some(model),
+    );
+    if let Ok(AutoDream::Ran(report)) = &result {
+        promote_to_second_brain(cwd, session_id, report);
+    }
+    PassReply::of(&result)
+}
+
+/// One idle pass in `<zo> auto-dream`; the session keeps only the reply line.
+/// A child that cannot start, exits badly or answers something else counts as
+/// a failed pass.
+pub(crate) fn run_idle_pass(zo: &Path, cwd: &Path, session_id: &str, model: &str) -> PassReply {
+    runtime::memory::run_auto_dream_pass(zo, AutoDreamTrigger::Idle, cwd, Some(session_id), Some(model))
+        .and_then(|out| serde_json::from_slice(out.trim_ascii()).ok())
+        .unwrap_or(PassReply::Failed)
+}
+
+/// Move the idle clock by what the pass found: a pass that ran waits the full
+/// automatic interval, one the shared marker holds sleeps until it lets go,
+/// one with nothing to curate waits for this session's next turn, and one that
+/// failed or found another pass running looks again later each time.
+fn settle(attempt: &DreamAttempt, reply: &PassReply, now: u64) {
+    match reply {
+        PassReply::Ran { .. } => attempt.completed(now),
+        PassReply::NotDue { until_ms } => attempt.not_due_until(*until_ms, now),
+        PassReply::NoEvidence | PassReply::Disabled => attempt.awaits_activity(),
+        PassReply::Locked | PassReply::Failed => attempt.retry_later(now),
+    }
 }
 
 fn promote_to_second_brain(cwd: &Path, session_id: &str, report: &runtime::memory::DreamReport) {
@@ -264,6 +384,112 @@ mod tests {
                 !cwd.join(".zo/dream/.last_auto_dream").exists(),
                 "ZO_DREAM=0 must not create an automatic-dream marker"
             );
+        });
+
+        fs::remove_dir_all(root).expect("test root should be removed");
+    }
+
+    #[test]
+    fn an_idle_pass_moves_the_clock_by_what_it_found() {
+        use super::{settle, PassReply};
+        use crate::autonomy::dreaming::IdleDreamer;
+        let minute = 60_000;
+        let pass = |clock: &IdleDreamer, now: u64, reply: &PassReply| {
+            let attempt = clock.begin(now, true).expect("the idle clock is due");
+            settle(&attempt, reply, now);
+        };
+
+        let held = IdleDreamer::new(true, 0, minute);
+        pass(&held, minute, &PassReply::NotDue { until_ms: 300 * minute });
+        assert_eq!(held.next_wakeup(true), Some(300 * minute));
+
+        for reply in [PassReply::NoEvidence, PassReply::Disabled] {
+            let mut quiet = IdleDreamer::new(true, 0, minute);
+            pass(&quiet, minute, &reply);
+            assert_eq!(quiet.next_wakeup(true), None, "{reply:?}");
+            quiet.activity(9 * minute);
+            assert_eq!(quiet.next_wakeup(true), Some(10 * minute), "{reply:?}");
+        }
+
+        for reply in [PassReply::Locked, PassReply::Failed] {
+            let busy = IdleDreamer::new(true, 0, minute);
+            pass(&busy, minute, &reply);
+            pass(&busy, 2 * minute, &reply);
+            assert_eq!(busy.next_wakeup(true), Some(4 * minute), "{reply:?}");
+        }
+
+        let ran = IdleDreamer::new(true, 0, minute);
+        pass(&ran, minute, &PassReply::Ran { summary: String::new(), promoted: Vec::new() });
+        assert_eq!(ran.next_wakeup(true), Some(minute + 6 * 60 * minute));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_idle_pass_runs_in_a_process_of_its_own_and_the_session_keeps_only_its_reply() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = temp_root("child");
+        let cwd = root.join("workspace");
+        let config_home = root.join("config");
+        fs::create_dir_all(&cwd).expect("workspace should be created");
+        fs::create_dir_all(&config_home).expect("config home should be created");
+        let seen = root.join("seen");
+        let zo = root.join("zo");
+        fs::write(
+            &zo,
+            format!(
+                "#!/bin/sh\npwd > '{seen}'\nprintf '%s\\n' \"$@\" >> '{seen}'\necho '{{\"outcome\":\"locked\"}}'\n",
+                seen = seen.display(),
+            ),
+        )
+        .expect("a stand-in zo should be written");
+        fs::set_permissions(&zo, fs::Permissions::from_mode(0o755))
+            .expect("the stand-in zo should be executable");
+
+        let reply = with_dream_env(&config_home, "0", || {
+            super::run_idle_pass(&zo, &cwd, "session-7", "model-x")
+        });
+        assert_eq!(reply, super::PassReply::Locked);
+        let seen = fs::read_to_string(&seen).expect("the pass ran in the program it was given");
+        let mut lines = seen.lines();
+        let ran_in = lines.next().expect("the child says where it ran");
+        assert_eq!(
+            fs::canonicalize(ran_in).expect("the child's folder exists"),
+            fs::canonicalize(&cwd).expect("the workspace exists"),
+        );
+        let cwd_arg = cwd.to_str().expect("the test root is UTF-8");
+        assert_eq!(
+            lines.collect::<Vec<_>>(),
+            ["auto-dream", "--on", "idle", "--cwd", cwd_arg, "--session", "session-7", "--model", "model-x"]
+        );
+
+        fs::remove_dir_all(root).expect("test root should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pass_the_cheap_gate_holds_starts_no_process() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = temp_root("held");
+        let cwd = root.join("workspace");
+        let config_home = root.join("config");
+        fs::create_dir_all(&cwd).expect("workspace should be created");
+        fs::create_dir_all(&config_home).expect("config home should be created");
+        let seen = root.join("seen");
+        let zo = root.join("zo");
+        fs::write(
+            &zo,
+            format!("#!/bin/sh\ntouch '{}'\necho '{{\"outcome\":\"locked\"}}'\n", seen.display()),
+        )
+        .expect("a stand-in zo should be written");
+        fs::set_permissions(&zo, fs::Permissions::from_mode(0o755))
+            .expect("the stand-in zo should be executable");
+
+        with_dream_env(&config_home, "1", || {
+            assert_eq!(super::idle_pass(Some(&zo), &cwd, "s", "m"), super::PassReply::NoEvidence);
+            assert!(!seen.exists(), "a pass with nothing to curate must not start a process");
+            seed_verified_observations(&cwd);
+            assert_eq!(super::idle_pass(Some(&zo), &cwd, "s", "m"), super::PassReply::Locked);
+            assert!(seen.exists(), "a pass the gate lets through runs in the program");
         });
 
         fs::remove_dir_all(root).expect("test root should be removed");

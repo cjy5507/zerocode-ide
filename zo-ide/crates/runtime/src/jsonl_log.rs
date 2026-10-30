@@ -7,11 +7,23 @@
 //! rotating whole files). These were re-implemented identically in `turn_trace`
 //! and `memory::dreamer`; this module is the single source of truth.
 
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
+/// The file beside a directory's logs that keeps where the last pass stopped
+/// reading each one ([`read_jsonl_resumed`]).
+pub(crate) const READ_CURSOR_FILE: &str = ".read-cursor.json";
+/// A cursor larger than this reads as missing: that pass reads every log in full.
+const MAX_READ_CURSOR_BYTES: u64 = 64 * 1024 * 1024;
+/// How many bytes before a log's read offset its fingerprint covers.
+const EDGE_BYTES: u64 = 64;
 
 /// Rewrite `path` to retain only its newest `keep_lines` non-empty lines, or
 /// delete it entirely when `keep_lines == 0`. The rewrite goes through a
@@ -38,6 +50,7 @@ pub(crate) fn prune_jsonl_lines(path: &Path, keep_lines: usize) -> std::io::Resu
 ///
 /// # Errors
 /// Propagates metadata, open, and read errors. An absent path is an error.
+#[cfg(not(unix))]
 pub(crate) fn read_jsonl_lines(path: &Path) -> std::io::Result<Vec<String>> {
     read_non_empty_lines(open_jsonl_no_symlink(path)?)
 }
@@ -322,6 +335,225 @@ pub(crate) fn jsonl_files_oldest_first(dir: &Path, keep_latest_files: usize) -> 
     }
     files.reverse();
     files
+}
+
+/// Where reading each of one directory's logs stopped.
+#[derive(Serialize, Deserialize)]
+struct ReadCursor<T> {
+    files: Vec<FileCursor<T>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FileCursor<T> {
+    name: String,
+    dev: u64,
+    ino: u64,
+    /// Just past the last complete line read.
+    offset: u64,
+    /// FNV-1a of the [`EDGE_BYTES`] before `offset`: a log rewritten where it
+    /// lies no longer matches and is read again from its start.
+    edge: u64,
+    /// Whether items older than `items` were let go to keep the window at its cap.
+    trimmed: bool,
+    /// The newest items the lines before `offset` gave that the window still holds.
+    items: VecDeque<T>,
+}
+
+/// What `parse` finds in the lines of `dir`'s newest `keep_files` logs: the
+/// newest `cap` items, oldest first — what reading every log in full gives —
+/// reading each log only past where the previous call stopped.
+///
+/// Where each log was left, and those of its items the window still holds
+/// (at most `cap` over every log), is kept in [`READ_CURSOR_FILE`] beside the
+/// logs. A log that was replaced (another inode), shortened, or changed just
+/// before that point is read again from its start, and so is a log whose
+/// let-go items are back inside the window because it was appended to and
+/// moved up the order. An unfinished last line counts this time and is read
+/// again once finished. A missing or unreadable cursor costs one full read;
+/// one that cannot be written costs the next pass the same.
+pub(crate) fn read_jsonl_resumed<T: Serialize + DeserializeOwned>(
+    dir: &Path,
+    keep_files: usize,
+    cap: usize,
+    mut parse: impl FnMut(&str) -> Option<T>,
+) -> Vec<T> {
+    let mut earlier: HashMap<String, FileCursor<T>> = load_read_cursor(dir)
+        .into_iter()
+        .map(|file| (file.name.clone(), file))
+        .collect();
+    let mut cursor = ReadCursor { files: Vec::new() };
+    let mut paths = Vec::new();
+    let mut tails = Vec::new();
+    let mut changed = false;
+    let mut held = 0;
+    for path in jsonl_files_oldest_first(dir, keep_files) {
+        let Some(name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
+            continue;
+        };
+        let before = earlier.remove(name);
+        let Ok((file, tail, moved)) = read_file_resumed(&path, name, before, cap, &mut parse) else {
+            changed = true;
+            continue;
+        };
+        changed |= moved;
+        held += file.items.len();
+        cursor.files.push(file);
+        paths.push(path);
+        tails.push(tail);
+        // One window over every log, as a full read keeps: the oldest go first.
+        for file in &mut cursor.files {
+            while held > cap && file.items.pop_front().is_some() {
+                file.trimmed = true;
+                held -= 1;
+                changed = true;
+            }
+        }
+    }
+    let mut need = cap;
+    for ((file, tail), path) in cursor.files.iter_mut().zip(&mut tails).zip(&paths).rev() {
+        if file.trimmed && need > file.items.len() + usize::from(tail.is_some()) {
+            if let Ok((again, again_tail, _)) = read_file_resumed(path, &file.name, None, cap, &mut parse) {
+                *file = again;
+                *tail = again_tail;
+                changed = true;
+            }
+        }
+        let take = need.min(file.items.len() + usize::from(tail.is_some()));
+        if take == 0 {
+            *tail = None;
+        }
+        while file.items.len() + usize::from(tail.is_some()) > take {
+            file.items.pop_front();
+            file.trimmed = true;
+            changed = true;
+        }
+        need -= take;
+    }
+    if changed || !earlier.is_empty() {
+        save_read_cursor(dir, &cursor);
+    }
+    cursor
+        .files
+        .into_iter()
+        .zip(tails)
+        .flat_map(|(file, tail)| file.items.into_iter().chain(tail))
+        .collect()
+}
+
+/// Read one log past where `before` stopped, or from its start when `before`
+/// no longer describes it. Returns its cursor, what an unfinished last line
+/// gave, and whether the cursor moved.
+fn read_file_resumed<T>(
+    path: &Path,
+    name: &str,
+    before: Option<FileCursor<T>>,
+    cap: usize,
+    parse: &mut impl FnMut(&str) -> Option<T>,
+) -> std::io::Result<(FileCursor<T>, Option<T>, bool)> {
+    let mut file = open_jsonl_no_symlink(path)?;
+    let metadata = file.metadata()?;
+    let (dev, ino) = file_identity(&metadata);
+    let mut resumed = None;
+    if let Some(before) = before {
+        if before.dev == dev
+            && before.ino == ino
+            && before.offset <= metadata.len()
+            && edge_before(&mut file, before.offset)? == before.edge
+        {
+            resumed = Some(before);
+        }
+    }
+    let restarted = resumed.is_none();
+    let mut cursor = resumed.unwrap_or_else(|| FileCursor {
+        name: name.to_string(),
+        dev,
+        ino,
+        offset: 0,
+        edge: fnv1a(&[]),
+        trimmed: false,
+        items: VecDeque::new(),
+    });
+    let start = cursor.offset;
+    file.seek(SeekFrom::Start(start))?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut tail = None;
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 {
+            break;
+        }
+        let item = std::str::from_utf8(&line)
+            .ok()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .and_then(&mut *parse);
+        if line.last() != Some(&b'\n') {
+            tail = item;
+            break;
+        }
+        cursor.offset = cursor.offset.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        if let Some(item) = item {
+            cursor.items.push_back(item);
+            if cursor.items.len() > cap {
+                cursor.items.pop_front();
+                cursor.trimmed = true;
+            }
+        }
+    }
+    let moved = restarted || cursor.offset != start;
+    if moved {
+        cursor.edge = edge_before(reader.get_mut(), cursor.offset)?;
+    }
+    Ok((cursor, tail, moved))
+}
+
+fn edge_before(file: &mut File, offset: u64) -> std::io::Result<u64> {
+    let start = offset.saturating_sub(EDGE_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    Read::by_ref(file).take(offset - start).read_to_end(&mut bytes)?;
+    Ok(fnv1a(&bytes))
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+#[cfg(unix)]
+fn file_identity(metadata: &fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt as _;
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn file_identity(_metadata: &fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+fn load_read_cursor<T: DeserializeOwned>(dir: &Path) -> Vec<FileCursor<T>> {
+    crate::secure_fs::read_regular_file_absolute_no_follow_bounded(
+        &dir.join(READ_CURSOR_FILE),
+        MAX_READ_CURSOR_BYTES,
+    )
+    .ok()
+    .flatten()
+    .and_then(|text| serde_json::from_str::<ReadCursor<T>>(&text).ok())
+    .map_or_else(Vec::new, |cursor| cursor.files)
+}
+
+fn save_read_cursor<T: Serialize>(dir: &Path, cursor: &ReadCursor<T>) {
+    if let Ok(bytes) = serde_json::to_vec(cursor) {
+        let _ = crate::secure_fs::write_atomic_owner_only_named_temp(
+            dir,
+            Path::new(READ_CURSOR_FILE),
+            &bytes,
+            crate::secure_fs::Durability::Published,
+        );
+    }
 }
 
 #[cfg(unix)]

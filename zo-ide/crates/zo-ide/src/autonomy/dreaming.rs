@@ -1,6 +1,6 @@
 //! Memory curation on the existing session idle clock; no model turn or daemon.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 
@@ -8,13 +8,21 @@ pub(crate) struct IdleDreamer {
     enabled: bool,
     delay_ms: u64,
     idle_after: u64,
+    /// Moves on every turn, so a pass with nothing to curate can wait for the next one.
+    epoch: u64,
     next_attempt: Arc<AtomicU64>,
     running: Arc<AtomicBool>,
+    failures: Arc<AtomicU32>,
+    /// The `epoch` a pass with nothing to curate parked the clock at.
+    parked: Arc<AtomicU64>,
 }
 
 pub(crate) struct DreamAttempt {
+    epoch: u64,
     next_attempt: Arc<AtomicU64>,
     running: Arc<AtomicBool>,
+    failures: Arc<AtomicU32>,
+    parked: Arc<AtomicU64>,
 }
 
 impl IdleDreamer {
@@ -23,17 +31,21 @@ impl IdleDreamer {
             enabled,
             delay_ms: delay_ms.max(1),
             idle_after: now.saturating_add(delay_ms.max(1)),
+            epoch: 0,
             next_attempt: Arc::new(AtomicU64::new(0)),
             running: Arc::new(AtomicBool::new(false)),
+            failures: Arc::new(AtomicU32::new(0)),
+            parked: Arc::new(AtomicU64::new(u64::MAX)),
         }
     }
 
     pub(crate) fn activity(&mut self, now: u64) {
         self.idle_after = now.saturating_add(self.delay_ms);
+        self.epoch = self.epoch.wrapping_add(1);
     }
 
     pub(crate) fn next_wakeup(&self, may_write: bool) -> Option<u64> {
-        (self.enabled && may_write).then(|| {
+        (self.enabled && may_write && self.parked.load(Ordering::Acquire) != self.epoch).then(|| {
             self.idle_after.max(self.next_attempt.load(Ordering::Acquire))
         })
     }
@@ -47,18 +59,48 @@ impl IdleDreamer {
         self.next_attempt.store(now.saturating_add(self.delay_ms), Ordering::Release);
         self.running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).ok()?;
         Some(DreamAttempt {
+            epoch: self.epoch,
             next_attempt: Arc::clone(&self.next_attempt),
             running: Arc::clone(&self.running),
+            failures: Arc::clone(&self.failures),
+            parked: Arc::clone(&self.parked),
         })
     }
 }
 
 impl DreamAttempt {
     pub(crate) fn completed(&self, now: u64) {
-        let interval = runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL.as_millis();
-        let interval = u64::try_from(interval).unwrap_or(u64::MAX);
-        self.next_attempt.store(now.saturating_add(interval), Ordering::Release);
+        self.failures.store(0, Ordering::Release);
+        self.next_attempt.store(now.saturating_add(automatic_interval_ms()), Ordering::Release);
     }
+
+    /// A pass that failed looks again later each time it fails in a row, on
+    /// the runtime's own retry steps, and never sooner than the idle delay.
+    pub(crate) fn retry_later(&self, now: u64) {
+        let failures = self.failures.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+        let wait = runtime::memory::auto_dream_retry_interval(failures).as_millis();
+        let wait = u64::try_from(wait).unwrap_or(u64::MAX);
+        self.next_attempt.fetch_max(now.saturating_add(wait), Ordering::AcqRel);
+    }
+
+    /// Another pass's success, or the backoff after a failure, holds the shared
+    /// clock until `until`. Sleep until then, but never longer than one
+    /// automatic interval: a marker stamped in the future must not park the
+    /// clock for good.
+    pub(crate) fn not_due_until(&self, until: u64, now: u64) {
+        let until = until.min(now.saturating_add(automatic_interval_ms()));
+        self.next_attempt.fetch_max(until, Ordering::AcqRel);
+    }
+
+    /// Nothing to curate: sleep until this session's next turn. Evidence
+    /// another session writes is that session's own idle pass to curate.
+    pub(crate) fn awaits_activity(&self) {
+        self.parked.store(self.epoch, Ordering::Release);
+    }
+}
+
+fn automatic_interval_ms() -> u64 {
+    u64::try_from(runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL.as_millis()).unwrap_or(u64::MAX)
 }
 
 impl Drop for DreamAttempt {
@@ -102,5 +144,64 @@ mod tests {
         clock.activity(70_000);
         assert_eq!(clock.next_wakeup(true), Some(61_000 + 6 * 60 * 60 * 1000));
         assert!(clock.begin(131_000, true).is_none());
+    }
+
+    #[test]
+    fn a_failing_pass_waits_longer_each_time_until_one_succeeds() {
+        let minute = 60_000;
+        let clock = IdleDreamer::new(true, 0, minute);
+        let mut now = minute;
+        for wait in [1, 2, 4, 8, 16, 32, 60, 60].map(|minutes| minutes * minute) {
+            let attempt = clock.begin(now, true).unwrap();
+            attempt.retry_later(now);
+            drop(attempt);
+            assert_eq!(clock.next_wakeup(true), Some(now + wait));
+            now += wait;
+        }
+
+        let attempt = clock.begin(now, true).unwrap();
+        attempt.completed(now);
+        drop(attempt);
+        now = clock.next_wakeup(true).unwrap();
+        let attempt = clock.begin(now, true).unwrap();
+        attempt.retry_later(now);
+        drop(attempt);
+        assert_eq!(clock.next_wakeup(true), Some(now + minute));
+    }
+
+    #[test]
+    fn a_pass_the_shared_marker_holds_sleeps_until_it_lets_go_but_never_past_one_interval() {
+        let minute = 60_000;
+        let interval = 6 * 60 * minute;
+        let clock = IdleDreamer::new(true, 0, minute);
+        let attempt = clock.begin(minute, true).unwrap();
+        attempt.not_due_until(minute + interval - 5_000, minute);
+        drop(attempt);
+        assert_eq!(clock.next_wakeup(true), Some(minute + interval - 5_000));
+
+        let now = minute + interval - 5_000;
+        let attempt = clock.begin(now, true).unwrap();
+        attempt.not_due_until(u64::MAX, now);
+        drop(attempt);
+        assert_eq!(clock.next_wakeup(true), Some(now + interval));
+    }
+
+    #[test]
+    fn a_pass_with_nothing_to_curate_waits_for_the_next_turn_even_one_that_began_during_it() {
+        let minute = 60_000;
+        let mut clock = IdleDreamer::new(true, 0, minute);
+        let attempt = clock.begin(minute, true).unwrap();
+        attempt.awaits_activity();
+        drop(attempt);
+        assert_eq!(clock.next_wakeup(true), None);
+        assert!(clock.begin(100 * minute, true).is_none());
+        clock.activity(100 * minute);
+        assert_eq!(clock.next_wakeup(true), Some(101 * minute));
+
+        let attempt = clock.begin(101 * minute, true).unwrap();
+        clock.activity(101 * minute + 1);
+        attempt.awaits_activity();
+        drop(attempt);
+        assert_eq!(clock.next_wakeup(true), Some(102 * minute + 1));
     }
 }

@@ -19,15 +19,15 @@
 //! curate them through the policy gate, then apply only the approved promotions
 //! and report the full audit trail ([`DreamReport`]).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use core_types::paths::ZO_DIR_NAME;
-use crate::jsonl_log::{
-    jsonl_files_newest_first, jsonl_files_oldest_first, prune_jsonl_lines, read_jsonl_lines,
-};
+use crate::jsonl_log::{jsonl_files_newest_first, prune_jsonl_lines, read_jsonl_resumed, READ_CURSOR_FILE};
+#[cfg(not(unix))]
+use crate::jsonl_log::{jsonl_files_oldest_first, read_jsonl_lines};
 #[cfg(unix)]
 use crate::jsonl_log::{
     append_jsonl_line_retained_durable, jsonl_files_oldest_first_retained,
@@ -619,13 +619,16 @@ pub fn record_automation_event(
 /// Best-effort observability for automatic Dreamer failures.
 pub fn record_auto_dream_failure(cwd: &Path, error: &DreamError) -> Result<(), DreamError> {
     let dir = ensure_repo_dream_dir_no_symlink(cwd)?;
+    let failures = unresolved_auto_dream_failure(&dir)
+        .map_or(1, |failure| failure.failures.saturating_add(1));
     let payload = serde_json::json!({
         "tsMs": now_ms(),
         "error": dream_error_signature(error),
+        "failures": failures,
     });
     let bytes = serde_json::to_vec_pretty(&payload)
         .map_err(|e| DreamError::Io(std::io::Error::other(e)))?;
-    write_text_atomic(
+    write_pass_file(
         &trace_base(cwd),
         &dir.join(AUTO_DREAM_ERROR_FILE),
         &String::from_utf8_lossy(&bytes),
@@ -656,16 +659,6 @@ fn self_improve_candidates_dir(cwd: &Path) -> PathBuf {
     dream_dir(cwd).join(SELF_IMPROVE_CANDIDATES_DIR)
 }
 
-fn push_capped<T>(items: &mut VecDeque<T>, item: T, cap: usize) {
-    if cap == 0 {
-        return;
-    }
-    items.push_back(item);
-    while items.len() > cap {
-        items.pop_front();
-    }
-}
-
 fn dream_error_signature(_error: &DreamError) -> &'static str {
     "dreamer_io_error"
 }
@@ -679,6 +672,22 @@ fn write_text_atomic(root: &Path, path: &Path, content: &str) -> Result<(), Drea
     })?;
     crate::secure_fs::write_atomic_owner_only(root, relative, content.as_bytes())
         .map_err(DreamError::Io)
+}
+
+/// [`write_text_atomic`] for a file only an automatic pass writes: its
+/// temporary file is named for it, so the next pass can remove one that a pass
+/// stopped at its deadline left ([`remove_abandoned_pass_writes`]).
+fn write_pass_file(root: &Path, path: &Path, content: &str) -> Result<(), DreamError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| io_error("pass file path escaped its trusted root"))?;
+    crate::secure_fs::write_atomic_owner_only_named_temp(
+        root,
+        relative,
+        content.as_bytes(),
+        crate::secure_fs::Durability::Flushed,
+    )
+    .map_err(DreamError::Io)
 }
 
 fn prune_jsonl_files(dir: &Path, keep_files: usize) -> std::io::Result<()> {
@@ -2242,6 +2251,8 @@ pub fn record_user_pattern_observation(
 /// Reads candidate observations from append-only JSONL logs under
 /// `.zo/dream/`. Each non-empty line is one JSON [`LessonObservation`];
 /// unparseable lines are skipped so a single corrupt write never blocks a run.
+/// Each log is read only past where the last pass stopped
+/// ([`crate::jsonl_log::read_jsonl_resumed`]).
 pub struct JsonlLessonSource {
     dir: PathBuf,
 }
@@ -2258,22 +2269,9 @@ impl JsonlLessonSource {
 
 impl LessonSource for JsonlLessonSource {
     fn observations(&self) -> Vec<LessonObservation> {
-        let mut out = VecDeque::new();
-        for path in jsonl_files_oldest_first(&self.dir, MAX_DREAM_JSONL_FILES) {
-            let Ok(lines) = read_jsonl_lines(&path) else {
-                continue;
-            };
-            for line in lines {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(obs) = serde_json::from_str::<LessonObservation>(line) {
-                    push_capped(&mut out, obs, MAX_DREAM_OBSERVATIONS);
-                }
-            }
-        }
-        out.into_iter().collect()
+        read_jsonl_resumed(&self.dir, MAX_DREAM_JSONL_FILES, MAX_DREAM_OBSERVATIONS, |line| {
+            serde_json::from_str::<LessonObservation>(line).ok()
+        })
     }
 }
 
@@ -2323,24 +2321,12 @@ impl UserPatternLessonSource {
 impl LessonSource for UserPatternLessonSource {
     fn observations(&self) -> Vec<LessonObservation> {
         let dir = user_pattern_dir(&self.cwd);
-        let mut out = VecDeque::new();
-        for path in jsonl_files_oldest_first(&dir, MAX_DREAM_JSONL_FILES) {
-            let Ok(lines) = read_jsonl_lines(&path) else {
-                continue;
-            };
-            for line in lines {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(record) = serde_json::from_str::<UserPatternRecord>(line) {
-                    if user_pattern_record_is_valid(&record) {
-                        push_capped(&mut out, record.observation, MAX_DREAM_OBSERVATIONS);
-                    }
-                }
-            }
-        }
-        out.into_iter().collect()
+        read_jsonl_resumed(&dir, MAX_DREAM_JSONL_FILES, MAX_DREAM_OBSERVATIONS, |line| {
+            serde_json::from_str::<UserPatternRecord>(line)
+                .ok()
+                .filter(user_pattern_record_is_valid)
+                .map(|record| record.observation)
+        })
     }
 }
 
@@ -2364,31 +2350,15 @@ impl LessonSource for AutomationLessonSource {
             .join(ZO_DIR_NAME)
             .join(DREAM_DIR)
             .join(AUTOMATION_DIR);
-        let mut digests = VecDeque::new();
-        for path in jsonl_files_oldest_first(&dir, MAX_DREAM_JSONL_FILES) {
-            let Ok(lines) = read_jsonl_lines(&path) else {
-                continue;
-            };
-            for line in lines {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(record) = serde_json::from_str::<AutomationEventRecord>(line) {
-                    push_capped(
-                        &mut digests,
-                        AutomationDigest {
-                            session_id: record.session_id,
-                            kind: record.kind,
-                            event: record.event,
-                            verified: record.verified,
-                        },
-                        MAX_AUTOMATION_DIGESTS,
-                    );
-                }
-            }
-        }
-        decision_core::dreamer::lessons_from_automation(&digests.into_iter().collect::<Vec<_>>())
+        let digests = read_jsonl_resumed(&dir, MAX_DREAM_JSONL_FILES, MAX_AUTOMATION_DIGESTS, |line| {
+            serde_json::from_str::<AutomationEventRecord>(line).ok().map(|record| AutomationDigest {
+                session_id: record.session_id,
+                kind: record.kind,
+                event: record.event,
+                verified: record.verified,
+            })
+        });
+        decision_core::dreamer::lessons_from_automation(&digests)
     }
 }
 
@@ -3650,6 +3620,19 @@ const THROTTLE_MARKER: &str = ".last_auto_dream";
 const COMPACTION_THROTTLE_MARKER: &str = ".last_compaction_dream";
 const AUTO_DREAM_LOCK_FILE: &str = ".automatic_dream.lock";
 const AUTO_DREAM_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+const AUTO_DREAM_MAX_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// How long automatic curation waits after the `failures`-th failed pass in a
+/// row: a minute, doubling with each failure, never more than an hour. A store
+/// that keeps failing is looked at hourly instead of every minute, and a pass
+/// that succeeds starts the count again.
+#[must_use]
+pub fn auto_dream_retry_interval(failures: u32) -> std::time::Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    AUTO_DREAM_RETRY_INTERVAL
+        .saturating_mul(1 << doublings)
+        .min(AUTO_DREAM_MAX_RETRY_INTERVAL)
+}
 
 /// Whether automatic curation is enabled for this workspace. Explicit
 /// [`dream_at_cwd`] calls remain independent of the automatic scheduling switch.
@@ -3680,37 +3663,60 @@ pub fn should_auto_dream(
     }
 }
 
+/// What one automatic trigger did. Only `Ran` curated; every other answer says
+/// why not, so a caller can wait for what would change it instead of asking
+/// again on a fixed clock.
+#[derive(Debug)]
+pub enum AutoDream {
+    Ran(DreamReport),
+    /// `ZO_DREAM=0` or `autoDreamEnabled: false` for this workspace.
+    Disabled,
+    /// The last pass, or the backoff after a failed one, holds the next until then.
+    NotDueUntil(SystemTime),
+    /// No producer has written any evidence yet.
+    NoEvidence,
+    /// Another pass holds the shared lock.
+    Locked,
+}
+
+impl AutoDream {
+    /// The report of a pass that ran.
+    #[must_use]
+    pub fn into_report(self) -> Option<DreamReport> {
+        match self {
+            Self::Ran(report) => Some(report),
+            Self::Disabled | Self::NotDueUntil(_) | Self::NoEvidence | Self::Locked => None,
+        }
+    }
+}
+
 /// Fire an automatic dreaming pass if the throttle window has elapsed, updating
-/// the shared marker on success. Disabled, empty, throttled, and already-running
-/// work returns `Ok(None)`. The lock spans the second throttle check, curation,
-/// local decay, and the success stamp, across processes and automatic triggers.
-pub fn maybe_auto_dream(
+/// the shared marker on success, and say why when it does not run. The lock
+/// spans the second throttle check, curation, local decay, and the success
+/// stamp, across processes and automatic triggers.
+pub fn try_auto_dream(
     cwd: &Path,
     min_interval: std::time::Duration,
     active_model: Option<&str>,
-) -> Result<Option<DreamReport>, DreamError> {
-    if !automatic_dream_enabled(cwd) {
-        return Ok(None);
-    }
-    let dir = dream_dir(cwd);
-    if !automatic_dream_due(&dir, SystemTime::now(), min_interval)
-        || !has_automatic_curation_evidence(cwd)
-    {
-        return Ok(None);
+) -> Result<AutoDream, DreamError> {
+    if let Some(held) = auto_dream_held(cwd, min_interval) {
+        return Ok(held);
     }
     let dir = ensure_repo_dream_dir_no_symlink(cwd)?;
     let Some(_lock) = crate::secure_fs::try_lock_owner_only(&dir, Path::new(AUTO_DREAM_LOCK_FILE))? else {
-        return Ok(None);
+        return Ok(AutoDream::Locked);
     };
     // Another process may have completed between the cheap gate and the lock.
-    if !automatic_dream_due(&dir, SystemTime::now(), min_interval) {
-        return Ok(None);
+    let now = SystemTime::now();
+    if let Some(until) = automatic_dream_not_due_until(&dir, now, min_interval) {
+        return Ok(AutoDream::NotDueUntil(until));
     }
+    remove_abandoned_pass_writes(cwd, now);
     let result = (|| {
         let report = dream_at_cwd(cwd, active_model)?;
         FsMemoryStore::local_at_cwd(cwd).decay_expired(now_secs())?;
-        write_marker(&trace_base(cwd), &dir.join(THROTTLE_MARKER))?;
-        Ok(Some(report))
+        write_pass_file(&trace_base(cwd), &dir.join(THROTTLE_MARKER), &now_secs().to_string())?;
+        Ok(AutoDream::Ran(report))
     })();
     if let Err(error) = &result {
         // Failure has its own bounded retry clock, never a success timestamp.
@@ -3720,30 +3726,204 @@ pub fn maybe_auto_dream(
     result
 }
 
-fn automatic_dream_due(dir: &Path, now: SystemTime, min_interval: std::time::Duration) -> bool {
-    let succeeded = [THROTTLE_MARKER, COMPACTION_THROTTLE_MARKER]
-        .into_iter().filter_map(|name| read_marker(&dir.join(name))).max();
-    let failed = read_auto_dream_failure_time(dir)
-        .filter(|failed| succeeded.is_none_or(|success| *failed > success));
-    if failed.is_some() {
-        return should_auto_dream(failed, now, AUTO_DREAM_RETRY_INTERVAL);
-    }
-    should_auto_dream(succeeded, now, min_interval)
+/// [`try_auto_dream`] for a caller that wants only the report: disabled,
+/// empty, throttled, and already-running work returns `Ok(None)`.
+pub fn maybe_auto_dream(
+    cwd: &Path,
+    min_interval: std::time::Duration,
+    active_model: Option<&str>,
+) -> Result<Option<DreamReport>, DreamError> {
+    try_auto_dream(cwd, min_interval, active_model).map(AutoDream::into_report)
 }
 
-fn read_auto_dream_failure_time(dir: &Path) -> Option<SystemTime> {
+/// Why an automatic pass would not run now, read from the switches, the shared
+/// markers and whether any evidence exists; `None` when it would. Takes no lock
+/// and reads no log, so a host can ask before it spends a process on
+/// [`try_auto_dream`], which asks the same again under the lock.
+#[must_use]
+pub fn auto_dream_held(cwd: &Path, min_interval: std::time::Duration) -> Option<AutoDream> {
+    if !automatic_dream_enabled(cwd) {
+        return Some(AutoDream::Disabled);
+    }
+    if let Some(until) = automatic_dream_not_due_until(&dream_dir(cwd), SystemTime::now(), min_interval) {
+        return Some(AutoDream::NotDueUntil(until));
+    }
+    (!has_automatic_curation_evidence(cwd)).then_some(AutoDream::NoEvidence)
+}
+
+/// When the next automatic pass may start: `None` when it may start now.
+fn automatic_dream_not_due_until(
+    dir: &Path,
+    now: SystemTime,
+    min_interval: std::time::Duration,
+) -> Option<SystemTime> {
+    let (last, wait) = match unresolved_auto_dream_failure(dir) {
+        Some(failure) => (failure.at, auto_dream_retry_interval(failure.failures)),
+        None => (last_auto_dream_success(dir)?, min_interval),
+    };
+    (!should_auto_dream(Some(last), now, wait)).then(|| last.checked_add(wait).unwrap_or(last))
+}
+
+fn last_auto_dream_success(dir: &Path) -> Option<SystemTime> {
+    [THROTTLE_MARKER, COMPACTION_THROTTLE_MARKER]
+        .into_iter().filter_map(|name| read_marker(&dir.join(name))).max()
+}
+
+/// The last failed automatic pass, and how many failed in a row up to it.
+struct AutoDreamFailure {
+    at: SystemTime,
+    failures: u32,
+}
+
+/// The last failure, unless a pass has succeeded since.
+fn unresolved_auto_dream_failure(dir: &Path) -> Option<AutoDreamFailure> {
+    let succeeded = last_auto_dream_success(dir);
+    read_auto_dream_failure(dir).filter(|failure| succeeded.is_none_or(|success| failure.at > success))
+}
+
+fn read_auto_dream_failure(dir: &Path) -> Option<AutoDreamFailure> {
     let text = crate::secure_fs::read_regular_file_absolute_no_follow_bounded(
         &dir.join(AUTO_DREAM_ERROR_FILE), 1_024,
     ).ok()??;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(value.get("tsMs")?.as_u64()?))
+    let at = std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::from_millis(value.get("tsMs")?.as_u64()?))?;
+    // A file written before failures were counted stands for one failure.
+    let failures = value.get("failures").and_then(serde_json::Value::as_u64)
+        .map_or(1, |count| u32::try_from(count).unwrap_or(u32::MAX));
+    Some(AutoDreamFailure { at, failures: failures.max(1) })
+}
+
+static AUTO_DREAM_PROGRAM: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// A reply is one short JSON line; anything longer is not one.
+const MAX_AUTO_DREAM_REPLY_BYTES: u64 = 64 * 1024;
+
+/// How long an automatic pass in a process of its own may run before it is
+/// stopped. The night measurement's largest set, 256 turn logs, curated
+/// within 2 s; a minute leaves a slow disk thirty times that, and a pass
+/// that hangs holds the shared lock no longer. The session stops the child
+/// then, and the child stops itself, so it lets go even when its session has
+/// gone first.
+pub const AUTO_DREAM_PASS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Run every idle and compaction pass of this process as `<zo> auto-dream`.
+/// A pass reads up to 256 logs per source, and the allocator keeps what a
+/// pass allocated long after it ends; a process of its own gives all of it
+/// back when it exits. Only a binary that answers the verb may declare it: a
+/// host that does not, a test binary among them, curates on a thread of its
+/// own process. The pass at session end stays in the process, which is ending.
+pub fn curate_automatic_passes_in(zo: PathBuf) {
+    let _ = AUTO_DREAM_PROGRAM.set(zo);
+}
+
+/// The program [`curate_automatic_passes_in`] declared, if any.
+#[must_use]
+pub fn auto_dream_program() -> Option<&'static Path> {
+    AUTO_DREAM_PROGRAM.get().map(PathBuf::as_path)
+}
+
+/// Which automatic path asks a process of its own for a pass. The process
+/// keeps that path's interval, so `zo auto-dream` is told only which path
+/// asks, never an interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoDreamTrigger {
+    /// An idle session, on [`DEFAULT_AUTO_DREAM_INTERVAL`].
+    Idle,
+    /// A full compaction, on [`DEFAULT_COMPACTION_DREAM_INTERVAL`].
+    Compaction,
+}
+
+impl AutoDreamTrigger {
+    /// The word `zo auto-dream --on` takes for this path.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Compaction => "compaction",
+        }
+    }
+
+    /// The path `word` names.
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        [Self::Idle, Self::Compaction].into_iter().find(|trigger| trigger.word() == word)
+    }
+}
+
+/// One automatic pass in `<zo> auto-dream`, run in the workspace: the reply
+/// it printed, or `None` when it could not start, exited badly or ran past
+/// [`AUTO_DREAM_PASS_DEADLINE`], which stops it.
+#[must_use]
+pub fn run_auto_dream_pass(
+    zo: &Path,
+    trigger: AutoDreamTrigger,
+    cwd: &Path,
+    session_id: Option<&str>,
+    active_model: Option<&str>,
+) -> Option<Vec<u8>> {
+    let child = spawn_auto_dream_pass(zo, trigger, cwd, session_id, active_model).ok()?;
+    await_auto_dream_pass(child, AUTO_DREAM_PASS_DEADLINE)
+}
+
+fn spawn_auto_dream_pass(
+    zo: &Path,
+    trigger: AutoDreamTrigger,
+    cwd: &Path,
+    session_id: Option<&str>,
+    active_model: Option<&str>,
+) -> std::io::Result<std::process::Child> {
+    let mut command = std::process::Command::new(zo);
+    command.args(["auto-dream", "--on", trigger.word()]).arg("--cwd").arg(cwd);
+    if let Some(session_id) = session_id {
+        command.args(["--session", session_id]);
+    }
+    if let Some(model) = active_model {
+        command.args(["--model", model]);
+    }
+    // On Windows nothing moves a session's stderr to its log, so the child's
+    // lines would land on the screen.
+    #[cfg(windows)]
+    command.stderr(std::process::Stdio::null());
+    command
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+}
+
+fn await_auto_dream_pass(mut child: std::process::Child, deadline: std::time::Duration) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let stdout = child.stdout.take();
+    let (sent, reply) = std::sync::mpsc::channel();
+    // Read on a thread of its own, so the wait below can give up at the
+    // deadline, and read to the end, so a long answer never blocks the child.
+    let _ = std::thread::Builder::new().name("dreamer-reply".to_string()).spawn(move || {
+        let Some(mut stdout) = stdout else {
+            return;
+        };
+        let mut out = Vec::new();
+        let read = stdout.by_ref().take(MAX_AUTO_DREAM_REPLY_BYTES).read_to_end(&mut out);
+        let drained = std::io::copy(&mut stdout, &mut std::io::sink());
+        if read.is_ok() && drained.is_ok() {
+            let _ = sent.send(out);
+        }
+    });
+    if let Ok(out) = reply.recv_timeout(deadline) {
+        child.wait().ok().filter(std::process::ExitStatus::success).map(|_| out)
+    } else {
+        let _ = child.kill();
+        let _ = child.wait();
+        None
+    }
 }
 
 /// Schedule curation after a successful conversation compaction without ever
 /// borrowing or blocking the render/stream loop. The cheap gate runs on the
 /// detached worker before the full Dreamer pass: no evidence files, or a pass
 /// inside the compact-trigger throttle window, means no index load, no model
-/// work, and no memory write.
+/// work, and no memory write. A pass the gate lets through runs in the program
+/// the host declared ([`curate_automatic_passes_in`]), else on the worker.
 ///
 /// The worker intentionally has no UI callback. A compaction must be usable
 /// even when its initiating render stream has ended; successful promotions are
@@ -3753,14 +3933,18 @@ fn read_auto_dream_failure_time(dir: &Path) -> Option<SystemTime> {
 pub fn spawn_auto_dream_on_compaction(cwd: PathBuf, active_model: Option<String>) -> bool {
     std::thread::Builder::new()
         .name("dreamer-compaction".to_string())
-        .spawn(move || {
-            let _ = maybe_auto_dream_on_compaction(
-                &cwd,
-                DEFAULT_COMPACTION_DREAM_INTERVAL,
-                active_model.as_deref(),
-            );
-        })
+        .spawn(move || compaction_pass(auto_dream_program(), &cwd, active_model.as_deref()))
         .is_ok()
+}
+
+fn compaction_pass(program: Option<&Path>, cwd: &Path, active_model: Option<&str>) {
+    let Some(zo) = program else {
+        let _ = maybe_auto_dream_on_compaction(cwd, DEFAULT_COMPACTION_DREAM_INTERVAL, active_model);
+        return;
+    };
+    if auto_dream_held(cwd, DEFAULT_COMPACTION_DREAM_INTERVAL).is_none() {
+        let _ = run_auto_dream_pass(zo, AutoDreamTrigger::Compaction, cwd, None, active_model);
+    }
 }
 
 /// Detached-worker half of [`spawn_auto_dream_on_compaction`]. Public for
@@ -3774,14 +3958,19 @@ pub fn maybe_auto_dream_on_compaction(
     maybe_auto_dream(cwd, min_interval, active_model)
 }
 
+/// The folders whose logs an automatic pass reads, each beside its read cursor.
+fn automatic_curation_dirs(cwd: &Path) -> [PathBuf; 4] {
+    let dream = dream_dir(cwd);
+    [dream.clone(), trace_base(cwd).join(ZO_DIR_NAME).join("turns"),
+        dream.join(AUTOMATION_DIR), user_pattern_dir(cwd)]
+}
+
 /// Cheap file-presence prefilter for automatic curation. The actual
 /// promotion gate still rejects one-off noise, unsupported hypotheses, and
 /// transient tool output; this merely avoids opening every candidate/index
 /// file when neither producer has written any evidence at all.
 fn has_automatic_curation_evidence(cwd: &Path) -> bool {
-    let dream = dream_dir(cwd);
-    [dream.clone(), trace_base(cwd).join(ZO_DIR_NAME).join("turns"),
-        dream.join(AUTOMATION_DIR), user_pattern_dir(cwd)]
+    automatic_curation_dirs(cwd)
         .into_iter().any(|dir| {
             if !fs::symlink_metadata(&dir).is_ok_and(|metadata| metadata.file_type().is_dir()) {
                 return false;
@@ -3792,6 +3981,23 @@ fn has_automatic_curation_evidence(cwd: &Path) -> bool {
                     && entry.metadata().is_ok_and(|metadata| metadata.len() > 0)
             }))
         })
+}
+
+/// Remove what an automatic pass stopped at its deadline left half-written:
+/// the temporary files of the read cursors, the marker and the error file
+/// that were last written more than [`AUTO_DREAM_PASS_DEADLINE`] before `now`.
+/// Only a pass that holds the lock calls it, and a writer still at work wrote
+/// its temporary file within the deadline, so that one stays.
+fn remove_abandoned_pass_writes(cwd: &Path, now: SystemTime) {
+    let Some(cutoff) = now.checked_sub(AUTO_DREAM_PASS_DEADLINE) else {
+        return;
+    };
+    let dream = dream_dir(cwd);
+    let cursors = automatic_curation_dirs(cwd).map(|dir| (dir, READ_CURSOR_FILE));
+    let pass_files = [(dream.clone(), THROTTLE_MARKER), (dream, AUTO_DREAM_ERROR_FILE)];
+    for (dir, file) in cursors.into_iter().chain(pass_files) {
+        crate::secure_fs::remove_abandoned_temp_files(&dir, Path::new(file), cutoff);
+    }
 }
 
 /// Read the unix-seconds timestamp from the throttle marker, if present and

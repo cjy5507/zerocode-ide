@@ -2794,6 +2794,167 @@ fn automatic_failure_has_a_bounded_retry_and_never_stamps_success() {
     });
 }
 
+/// Overwrite a log's first line where it lies, keeping its length and the file
+/// itself: a reader that reads the line again loses it, one that resumes past
+/// it never looks.
+fn overwrite_first_line(log: &Path) {
+    use std::io::Write as _;
+    let text = fs::read_to_string(log).unwrap();
+    let first = text.find('\n').unwrap();
+    let mut file = fs::OpenOptions::new().write(true).open(log).unwrap();
+    file.write_all(&vec![b'#'; first]).unwrap();
+}
+
+#[test]
+fn a_pass_reads_only_the_lines_appended_since_the_last_one() {
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path();
+    let signatures = || {
+        JsonlLessonSource::at_cwd(cwd).observations().into_iter()
+            .map(|observation| observation.signature).collect::<Vec<_>>()
+    };
+    super::record_observation(cwd, &obs("first", "s1", true)).unwrap();
+    super::record_observation(cwd, &obs("second", "s1", true)).unwrap();
+    assert_eq!(signatures(), ["first", "second"]);
+
+    overwrite_first_line(&cwd.join(".zo").join("dream").join("s1.jsonl"));
+    super::record_observation(cwd, &obs("third", "s1", true)).unwrap();
+    assert_eq!(signatures(), ["first", "second", "third"]);
+}
+
+#[test]
+fn the_turn_trace_is_read_from_where_the_last_pass_stopped() {
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path();
+    let failed = |tool: &str| {
+        let mut record = crate::turn_trace::TurnRecord::terminal(
+            "s1", 0, crate::turn_trace::TurnOutcome::Completed, 0, None,
+        );
+        record.error_tools = vec![tool.to_string()];
+        crate::turn_trace::append(cwd, &record).unwrap();
+    };
+    let signatures = || {
+        super::TurnLogLessonSource::at_cwd(cwd).observations().into_iter()
+            .map(|observation| observation.signature).collect::<Vec<_>>()
+    };
+    failed("bash");
+    failed("grep");
+    assert_eq!(signatures(), ["recurring tool failure: bash", "recurring tool failure: grep"]);
+
+    let log = fs::read_dir(cwd.join(".zo").join("turns")).unwrap().flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "jsonl"))
+        .unwrap();
+    overwrite_first_line(&log);
+    failed("edit");
+    assert_eq!(
+        signatures(),
+        ["recurring tool failure: bash", "recurring tool failure: grep", "recurring tool failure: edit"]
+    );
+}
+
+#[test]
+fn a_resumed_read_sees_what_a_full_read_sees_through_rewrites_and_removals() {
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path();
+    let cursor = cwd.join(".zo").join("dream").join(".read-cursor.json");
+    let resumed_cursor = cwd.join("resumed-cursor.json");
+    let read = || {
+        JsonlLessonSource::at_cwd(cwd).observations().into_iter()
+            .map(|observation| format!("{}@{}", observation.signature, observation.session_id))
+            .collect::<Vec<_>>()
+    };
+    // Three sessions take turns, so the oldest log keeps coming back to the
+    // top of the order with items the window had let go, until their logs pass
+    // the line cap and are rewritten; then new sessions push the oldest logs
+    // past the file cap. Each resumed read goes on from the one before it and
+    // is held to a full read of the same logs.
+    for step in 0..24_usize {
+        let session = if step < 15 { step % 3 } else { step - 12 };
+        super::record_observation(cwd, &obs(&format!("lesson {step}"), &format!("s{session}"), true)).unwrap();
+        let resumed = read();
+        let kept = fs::rename(&cursor, &resumed_cursor).is_ok();
+        let full = read();
+        if kept {
+            fs::rename(&resumed_cursor, &cursor).unwrap();
+        }
+        assert_eq!(resumed, full, "step {step}");
+    }
+}
+
+#[test]
+fn the_read_cursor_keeps_no_more_than_the_newest_items_a_pass_reads() {
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path();
+    for step in 0..12_usize {
+        super::record_observation(cwd, &obs(&format!("lesson {step}"), &format!("s{}", step % 3), true)).unwrap();
+    }
+    assert_eq!(JsonlLessonSource::at_cwd(cwd).observations().len(), super::MAX_DREAM_OBSERVATIONS);
+
+    let cursor = cwd.join(".zo").join("dream").join(".read-cursor.json");
+    assert!(cursor.is_file(), "a pass keeps its read cursor beside the logs");
+    let cursor: serde_json::Value = serde_json::from_slice(&fs::read(cursor).unwrap()).unwrap();
+    let kept: usize = cursor["files"].as_array().unwrap().iter()
+        .map(|file| file["items"].as_array().unwrap().len())
+        .sum();
+    assert_eq!(kept, super::MAX_DREAM_OBSERVATIONS);
+}
+
+#[test]
+fn an_unfinished_last_line_counts_now_and_is_read_again_once_finished() {
+    use std::io::Write as _;
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path();
+    let dream = cwd.join(".zo").join("dream");
+    fs::create_dir_all(&dream).unwrap();
+    let line = |signature: &str| serde_json::to_string(&obs(signature, "s1", true)).unwrap();
+    let log = dream.join("s1.jsonl");
+    fs::write(&log, format!("{}\n{}", line("first"), line("second"))).unwrap();
+    let signatures = || {
+        JsonlLessonSource::at_cwd(cwd).observations().into_iter()
+            .map(|observation| observation.signature).collect::<Vec<_>>()
+    };
+    assert_eq!(signatures(), ["first", "second"]);
+
+    let mut file = fs::OpenOptions::new().append(true).open(&log).unwrap();
+    write!(file, "\n{}\n", line("third")).unwrap();
+    drop(file);
+    assert_eq!(signatures(), ["first", "second", "third"]);
+}
+
+#[test]
+fn an_automatic_pass_that_does_not_run_says_why() {
+    let home = tempfile::tempdir().unwrap();
+    let lock = crate::test_env_lock();
+    with_automatic_home(&lock, home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path();
+        let interval = std::time::Duration::from_secs(3600);
+        let pass = || super::try_auto_dream(cwd, interval, None).unwrap();
+        let got = pass();
+        assert!(matches!(got, super::AutoDream::NoEvidence), "{got:?}");
+
+        for session in ["s1", "s2"] {
+            super::record_observation(cwd, &obs("a reason to wait", session, true)).unwrap();
+        }
+        let dir = super::dream_dir(cwd);
+        let held = crate::secure_fs::try_lock_owner_only(&dir, Path::new(super::AUTO_DREAM_LOCK_FILE)).unwrap().unwrap();
+        let got = pass();
+        assert!(matches!(got, super::AutoDream::Locked), "{got:?}");
+        drop(held);
+
+        let stamped = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        fs::write(dir.join(super::THROTTLE_MARKER), stamped.to_string()).unwrap();
+        let until = std::time::UNIX_EPOCH + std::time::Duration::from_secs(stamped) + interval;
+        let got = pass();
+        assert!(matches!(got, super::AutoDream::NotDueUntil(at) if at == until), "{got:?}");
+
+        std::env::set_var("ZO_DREAM", "0");
+        let got = pass();
+        assert!(matches!(got, super::AutoDream::Disabled), "{got:?}");
+    });
+}
+
 #[test]
 fn a_later_failure_uses_retry_backoff_instead_of_the_last_success_interval() {
     let directory = tempfile::tempdir().unwrap();
@@ -2801,10 +2962,164 @@ fn a_later_failure_uses_retry_backoff_instead_of_the_last_success_interval() {
     fs::write(dir.join(super::THROTTLE_MARKER), "100").unwrap();
     fs::write(dir.join(super::AUTO_DREAM_ERROR_FILE), "{\"tsMs\":101000}").unwrap();
     let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
-    assert!(!super::automatic_dream_due(dir, at(160), super::DEFAULT_AUTO_DREAM_INTERVAL));
-    assert!(super::automatic_dream_due(dir, at(161), super::DEFAULT_AUTO_DREAM_INTERVAL));
+    let interval = super::DEFAULT_AUTO_DREAM_INTERVAL;
+    assert_eq!(super::automatic_dream_not_due_until(dir, at(160), interval), Some(at(161)));
+    assert_eq!(super::automatic_dream_not_due_until(dir, at(161), interval), None);
     fs::write(dir.join(super::THROTTLE_MARKER), "162").unwrap();
-    assert!(!super::automatic_dream_due(dir, at(163), super::DEFAULT_AUTO_DREAM_INTERVAL));
+    assert_eq!(super::automatic_dream_not_due_until(dir, at(163), interval), Some(at(162) + interval));
+}
+
+#[test]
+fn failures_in_a_row_wait_longer_each_time_up_to_an_hour() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    let interval = super::DEFAULT_AUTO_DREAM_INTERVAL;
+    for (failures, wait) in [(1, 60), (2, 120), (3, 240), (6, 1_920), (7, 3_600), (40, 3_600)] {
+        fs::write(
+            dir.join(super::AUTO_DREAM_ERROR_FILE),
+            format!("{{\"tsMs\":1000000,\"failures\":{failures}}}"),
+        )
+        .unwrap();
+        assert_eq!(
+            super::automatic_dream_not_due_until(dir, at(1_000 + wait - 1), interval),
+            Some(at(1_000 + wait)),
+            "{failures} failures in a row must wait {wait} s"
+        );
+        assert_eq!(
+            super::automatic_dream_not_due_until(dir, at(1_000 + wait), interval),
+            None,
+            "{failures} failures in a row wait no more than {wait} s"
+        );
+    }
+}
+
+#[test]
+fn each_failure_in_a_row_is_counted_and_a_success_starts_the_count_again() {
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path();
+    let error = DreamError::Io(std::io::Error::other("disk full"));
+    let recorded = || -> serde_json::Value {
+        let bytes = fs::read(super::dream_dir(cwd).join(super::AUTO_DREAM_ERROR_FILE)).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    };
+
+    super::record_auto_dream_failure(cwd, &error).unwrap();
+    assert_eq!(recorded()["failures"], 1);
+    super::record_auto_dream_failure(cwd, &error).unwrap();
+    assert_eq!(recorded()["failures"], 2);
+
+    let failed_secs = recorded()["tsMs"].as_u64().unwrap() / 1_000;
+    fs::write(
+        super::dream_dir(cwd).join(super::THROTTLE_MARKER),
+        (failed_secs + 1).to_string(),
+    )
+    .unwrap();
+    super::record_auto_dream_failure(cwd, &error).unwrap();
+    assert_eq!(recorded()["failures"], 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pass_after_compaction_runs_in_the_zo_the_host_declared() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().unwrap();
+    let lock = crate::test_env_lock();
+    with_automatic_home(&lock, home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path();
+        for session in ["s1", "s2"] {
+            super::record_observation(cwd, &obs("a lesson after compaction", session, true)).unwrap();
+        }
+        let seen = home.path().join("seen");
+        let zo = home.path().join("zo");
+        fs::write(&zo, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", seen.display())).unwrap();
+        fs::set_permissions(&zo, fs::Permissions::from_mode(0o755)).unwrap();
+
+        super::compaction_pass(Some(&zo), cwd, Some("model-x"));
+        let args = fs::read_to_string(&seen).unwrap_or_default();
+        let cwd_arg = cwd.to_str().unwrap();
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            ["auto-dream", "--on", "compaction", "--cwd", cwd_arg, "--model", "model-x"],
+            "the pass after compaction runs in the zo it was given"
+        );
+        assert!(
+            !super::dream_dir(cwd).join(super::THROTTLE_MARKER).exists(),
+            "the pass does not also run in this process"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pass_past_its_deadline_is_stopped_and_reaped() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let zo = root.path().join("zo");
+    // It answers at once and then does not end: only a deadline stops it.
+    fs::write(&zo, "#!/bin/sh\necho '{\"outcome\":\"locked\"}'\nexec sleep 5\n").unwrap();
+    fs::set_permissions(&zo, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let child = super::spawn_auto_dream_pass(&zo, super::AutoDreamTrigger::Idle, root.path(), Some("s"), Some("m"))
+        .unwrap();
+    let pid = child.id().to_string();
+    let reply = super::await_auto_dream_pass(child, std::time::Duration::from_millis(100));
+    assert!(
+        reply.is_none(),
+        "a pass past its deadline has no reply, which a session counts as failed: {:?}",
+        reply.as_deref().map(String::from_utf8_lossy)
+    );
+    let ps = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&ps.stdout).trim(),
+        "",
+        "the stopped pass is reaped, neither running nor a zombie"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pass_removes_what_a_pass_killed_mid_write_left_and_nothing_else() {
+    let home = tempfile::tempdir().unwrap();
+    let lock = crate::test_env_lock();
+    with_automatic_home(&lock, home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path();
+        for session in ["s1", "s2"] {
+            super::record_observation(cwd, &obs("a lesson a killed pass read", session, true)).unwrap();
+        }
+        let dream = super::dream_dir(cwd);
+        let turns = super::trace_base(cwd).join(core_types::paths::ZO_DIR_NAME).join("turns");
+        fs::create_dir_all(&turns).unwrap();
+        // The killed pass ran in a process of its own, so its files carry another pid.
+        let killed = std::process::id() + 1;
+        let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        let leave = |dir: &Path, name: String| {
+            let path = dir.join(name);
+            fs::File::create(&path).unwrap().set_modified(long_ago).unwrap();
+            path
+        };
+        let abandoned = [
+            leave(&dream, format!(".zo-state-.read-cursor.json-{killed}-1.tmp")),
+            leave(&turns, format!(".zo-state-.read-cursor.json-{killed}-2.tmp")),
+            leave(&dream, format!(".zo-state-{}-{killed}-3.tmp", super::THROTTLE_MARKER)),
+            leave(&dream, format!(".zo-state-{}-{killed}-4.tmp", super::AUTO_DREAM_ERROR_FILE)),
+        ];
+        let others = [
+            leave(&dream, format!(".zo-state-{killed}-5.tmp")),
+            leave(&dream, format!(".zo-state-tasks.json-{killed}-6.tmp")),
+        ];
+
+        let pass = super::try_auto_dream(cwd, super::DEFAULT_AUTO_DREAM_INTERVAL, None).unwrap();
+        assert!(matches!(pass, super::AutoDream::Ran(_)), "{pass:?}");
+        for path in &abandoned {
+            assert!(!path.exists(), "a pass removes what a killed pass left half-written: {}", path.display());
+        }
+        for path in &others {
+            assert!(path.exists(), "a pass keeps every other writer's temporary file: {}", path.display());
+        }
+    });
 }
 
 #[cfg(unix)]

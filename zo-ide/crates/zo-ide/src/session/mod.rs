@@ -38,6 +38,7 @@ pub mod user_question_bridge;
 
 use std::path::PathBuf;
 
+pub use dreamer_hook::answer_auto_dream;
 pub(crate) use built_runtime::{BuiltRuntime, RuntimePluginState};
 pub(crate) use agent_completion_pump::{AgentCompletionPump, AgentFollowup};
 pub(crate) use lsp_runtime::{build_runtime_lsp_state, RuntimeLspState};
