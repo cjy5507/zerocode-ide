@@ -27762,7 +27762,7 @@ fn a_hand_over_is_typed_as_a_line_and_verified_before_the_wire_stands() {
         "answer_door::Expect::no_menu()",
         "walk_key_groups(state, term, rest, step)",
         "while state.terminals().contains_key(&term) {",
-        "started.elapsed() >= HAND_OVER_EXIT_WAIT",
+        "started.elapsed() >= HAND_OVER_LEAVE_LIMIT",
     ] {
         assert!(
             hand.contains(needed),
@@ -27775,7 +27775,7 @@ fn a_hand_over_is_typed_as_a_line_and_verified_before_the_wire_stands() {
     );
     let start = block_after(backend, "fn wire_start(");
     for needed in [
-        "let outcome = hand_over_pane(&state, term, &agent);",
+        "let outcome = hand_over_pane(",
         "hand_over_line(term, &agent, resume.as_deref(), session.id, &outcome)",
         "if let Err(reason) = outcome {",
         "wires.stop(session.id)",
@@ -32909,4 +32909,297 @@ fn a_hand_over_past_the_windows_deadline_leaves_the_pane_alone() {
     assert!(!hand_over_overdue(Some(1_000), 999));
     assert!(hand_over_overdue(Some(1_000), 1_000));
     assert!(hand_over_overdue(Some(1_000), 61_000));
+}
+
+/// A person's own pane hands its conversation to its wire; the panes the
+/// ledger drives through their screens stay panes — a worker's seat, and a
+/// run's coordinator seat as the ledger holds it now (t-84850: once the
+/// hand-over really ended a pane's CLI, a 「대화」 on a coordinator's pane
+/// would have ended the coordinator).
+#[test]
+fn only_a_pane_the_ledger_does_not_drive_hands_its_conversation_to_a_wire() {
+    use crate::cmd::wire::{
+        COORDINATOR_PANE_STAYS, LEDGER_UNREAD_PANE_STAYS, WORKER_PANE_STAYS,
+        pane_the_ledger_drives,
+    };
+    use crate::orchestration::restart_census::KeyedPane;
+    let coordinator_at = |term| KeyedPane {
+        key: "run-1@/work".to_string(),
+        term,
+    };
+    // A person's own Claude Code, beside a worker and a coordinator.
+    assert_eq!(
+        pane_the_ledger_drives(7, [3], || Some(vec![coordinator_at(2)])),
+        None
+    );
+    // A worker's seat, refused before the ledger is asked.
+    assert_eq!(
+        pane_the_ledger_drives(3, [3], || unreachable!("a worker's seat asks no ledger")),
+        Some(WORKER_PANE_STAYS)
+    );
+    // A run's coordinator seat.
+    assert_eq!(
+        pane_the_ledger_drives(2, [3], || Some(vec![coordinator_at(2)])),
+        Some(COORDINATOR_PANE_STAYS)
+    );
+    // The seat moved to another pane (a restart): the pane that held it
+    // before is nobody's seat now.
+    assert_eq!(
+        pane_the_ledger_drives(2, [3], || Some(vec![coordinator_at(9)])),
+        None
+    );
+    // A ledger that cannot be read (closed on a full disk, not up): nothing
+    // says this pane is not a coordinator's, so it stays (t-84850 r2).
+    assert_eq!(
+        pane_the_ledger_drives(7, [3], || None),
+        Some(LEDGER_UNREAD_PANE_STAYS)
+    );
+}
+
+/// A pane's CLI is told its exit command only when that exit ends the pane
+/// and the CLI reads the line (t-84850 r2). A Claude Code a person started
+/// from the pane's shell would leave the shell standing, and the words that
+/// waited would be typed at it as commands; a CLI that has taken no input
+/// since it began — a pane just restored — would keep `/exit` on its line
+/// and read the waiting words after it. Both are refused before anything is
+/// typed; the agent this window spawned as the pane's own child, in front
+/// and reading, is handed over.
+#[test]
+fn only_a_cli_the_window_spawned_as_the_pane_and_that_reads_its_input_is_told_to_exit() {
+    use crate::cmd::wire::{
+        PANE_BACKGROUND_WORK, PANE_LINE_HOLDS_WORDS, PANE_NOT_AT_REST, PANE_NOT_READING_YET,
+        PaneCli, SHELL_PANE_STAYS, pane_cli_cannot_leave,
+    };
+    use zerocode_core::hook::HookState;
+    let spawned = PaneCli {
+        child: Some(400),
+        child_in_front: Some(true),
+        launched: Some((400, "claude")),
+        reads_input: true,
+        state: Some(HookState::Done),
+        background_work: false,
+        line_shown_empty: true,
+    };
+    // The window's own Claude Code pane, idle and reading: handed over.
+    assert_eq!(pane_cli_cannot_leave("claude", &spawned), None);
+    // A person's shell pane with `claude` typed into it: the shell is the
+    // pane's child, nothing was spawned there as an agent, and the CLI leads
+    // a group of its own in front.
+    let shell = PaneCli {
+        launched: None,
+        child_in_front: Some(false),
+        ..spawned
+    };
+    assert_eq!(pane_cli_cannot_leave("claude", &shell), Some(SHELL_PANE_STAYS));
+    // The same shell back at its prompt: the child is in front, but it is no
+    // agent this window spawned.
+    let at_prompt = PaneCli {
+        launched: None,
+        ..spawned
+    };
+    assert_eq!(
+        pane_cli_cannot_leave("claude", &at_prompt),
+        Some(SHELL_PANE_STAYS)
+    );
+    // The window's agent pane with something else in front of it.
+    let covered = PaneCli {
+        child_in_front: Some(false),
+        ..spawned
+    };
+    assert_eq!(pane_cli_cannot_leave("claude", &covered), Some(SHELL_PANE_STAYS));
+    // A terminal that cannot say who is in front, or which child it has.
+    for unknown in [
+        PaneCli {
+            child_in_front: None,
+            ..spawned
+        },
+        PaneCli {
+            child: None,
+            ..spawned
+        },
+    ] {
+        assert_eq!(pane_cli_cannot_leave("claude", &unknown), Some(SHELL_PANE_STAYS));
+    }
+    // What the window spawned there was another process, or another agent.
+    let other_pid = PaneCli {
+        launched: Some((401, "claude")),
+        ..spawned
+    };
+    assert_eq!(pane_cli_cannot_leave("claude", &other_pid), Some(SHELL_PANE_STAYS));
+    let other_agent = PaneCli {
+        launched: Some((400, "codex")),
+        ..spawned
+    };
+    assert_eq!(
+        pane_cli_cannot_leave("claude", &other_agent),
+        Some(SHELL_PANE_STAYS)
+    );
+    // Restored a moment ago: the window's own child, in front, but it has
+    // shown no reading yet — the one answer the probe is typed for, so it
+    // comes after every other.
+    let waking = PaneCli {
+        reads_input: false,
+        ..spawned
+    };
+    assert_eq!(
+        pane_cli_cannot_leave("claude", &waking),
+        Some(PANE_NOT_READING_YET)
+    );
+    // At rest is done or idle; a turn, a question, an approval, or a pane
+    // whose hooks have said nothing is not (r2 P2-3: the backend asks again
+    // at the moment it would type, not the window once at the start).
+    let idle = PaneCli {
+        state: Some(HookState::Idle),
+        ..spawned
+    };
+    assert_eq!(pane_cli_cannot_leave("claude", &idle), None);
+    for busy in [
+        Some(HookState::Working),
+        Some(HookState::NeedsAttention),
+        None,
+    ] {
+        let busy = PaneCli {
+            state: busy,
+            ..spawned
+        };
+        assert_eq!(pane_cli_cannot_leave("claude", &busy), Some(PANE_NOT_AT_REST));
+    }
+    // A helper or a background shell its exit would end.
+    let helping = PaneCli {
+        background_work: true,
+        ..spawned
+    };
+    assert_eq!(
+        pane_cli_cannot_leave("claude", &helping),
+        Some(PANE_BACKGROUND_WORK)
+    );
+    // An input line not shown empty: `/exit` would join the words on it
+    // (r2 P2-2).
+    let drafted = PaneCli {
+        line_shown_empty: false,
+        ..spawned
+    };
+    assert_eq!(
+        pane_cli_cannot_leave("claude", &drafted),
+        Some(PANE_LINE_HOLDS_WORDS)
+    );
+    // Not reading AND busy, or with words on its line: the probe is never
+    // typed there — the other refusal comes first.
+    let waking_busy = PaneCli {
+        reads_input: false,
+        state: Some(HookState::Working),
+        ..spawned
+    };
+    assert_eq!(
+        pane_cli_cannot_leave("claude", &waking_busy),
+        Some(PANE_NOT_AT_REST)
+    );
+    let waking_drafted = PaneCli {
+        reads_input: false,
+        line_shown_empty: false,
+        ..spawned
+    };
+    assert_eq!(
+        pane_cli_cannot_leave("claude", &waking_drafted),
+        Some(PANE_LINE_HOLDS_WORDS)
+    );
+}
+
+/// The wire is trusted with the conversation only while its child runs and
+/// the conversation's record is on disk in the store Claude Code keeps for
+/// the wire's folder — where its `--resume` looks (t-84850 r2 P1). Otherwise
+/// the pane's CLI is not told to exit: a resume that finds nothing would
+/// leave the conversation on neither.
+#[test]
+fn the_wire_takes_the_conversation_only_with_its_record_where_its_resume_looks() {
+    use crate::cmd::wire::{
+        RECORD_IN_ANOTHER_STORE, RECORD_NOT_ON_DISK, WIRE_NOT_RUNNING, transcript_in_store_of,
+        wire_cannot_take,
+    };
+    use std::path::Path;
+    let cwd = Path::new("/Users/dev/work/zero.code");
+    let record = Path::new("/Users/dev/.claude/projects/-Users-dev-work-zero-code/s-1.jsonl");
+    let older = Path::new("/Users/dev/.claude/projects/-Users-dev-work-zero.code/s-1.jsonl");
+    let elsewhere = Path::new("/Users/dev/.claude/projects/-Users-dev-other/s-1.jsonl");
+    assert!(transcript_in_store_of(record, cwd));
+    assert!(
+        transcript_in_store_of(older, cwd),
+        "the older spelling keeps the dot"
+    );
+    assert!(!transcript_in_store_of(elsewhere, cwd));
+    assert_eq!(wire_cannot_take(true, Some(record), true, cwd), None);
+    assert_eq!(
+        wire_cannot_take(false, Some(record), true, cwd),
+        Some(WIRE_NOT_RUNNING)
+    );
+    assert_eq!(
+        wire_cannot_take(true, Some(record), false, cwd),
+        Some(RECORD_NOT_ON_DISK)
+    );
+    assert_eq!(
+        wire_cannot_take(true, None, true, cwd),
+        Some(RECORD_NOT_ON_DISK)
+    );
+    assert_eq!(
+        wire_cannot_take(true, Some(elsewhere), true, cwd),
+        Some(RECORD_IN_ANOTHER_STORE)
+    );
+}
+
+/// Both gates are asked before anything is typed, and again just before the
+/// exit command's first key; and every refusal after that key opens with the
+/// words the window knows it by, so the words that waited are never typed
+/// after `/exit` (t-84850 r2).
+#[test]
+fn the_hand_over_asks_its_gates_before_typing_and_names_a_refusal_after_it() {
+    let backend = shipped_backend();
+    let stand = block_after(backend, "fn stand_wire(");
+    let gate = stand
+        .find("pane_cli_refusal(state, term, agent, Probing::Later)?;")
+        .expect("stand_wire does not ask whether the pane's CLI can leave");
+    let spawn = stand
+        .find("state.shell_runtime().wires.start(")
+        .expect("stand_wire starts no wire");
+    assert!(gate < spawn, "the wire starts before the pane is asked:\n{stand}");
+    let hand = block_after(backend, "fn hand_over_pane(");
+    let again = hand
+        .find("pane_cli_refusal(state, term, agent, Probing::Now)?;")
+        .expect("the hand-over does not ask again before typing");
+    let typed = hand
+        .find("crate::answer_door::type_if_up(")
+        .expect("the hand-over types no exit command");
+    assert!(again < typed, "the pane is asked after its exit command:\n{hand}");
+    // The probe types at the pane, so it is the last thing asked: after the
+    // wire and the conversation's record (t-84850 r3 P3-5).
+    let record = hand
+        .find("wire_cannot_take(")
+        .expect("the hand-over does not ask the wire");
+    assert!(record < again, "the probe can be typed before the wire is asked:\n{hand}");
+    // From the pause after the first key on, the exit command is on the line.
+    let after = &hand[typed
+        + hand[typed..]
+            .find("std::thread::sleep(step);")
+            .expect("no pause after the exit command's first key")..];
+    let refusals: Vec<String> = after
+        .match_indices("Err(")
+        .map(|(at, _)| after[at..].chars().take(120).collect())
+        .collect();
+    assert!(!refusals.is_empty(), "no refusal after the exit command:\n{after}");
+    for refusal in refusals {
+        assert!(
+            refusal.contains("EXIT_TYPED_PANE_STANDS"),
+            "a refusal after the exit command was typed does not say so:\n{refusal}"
+        );
+    }
+    let walk: String = after
+        [after.find("walk_key_groups(").expect("the rest of the line is not walked")..]
+        .chars()
+        .filter(|glyph| !glyph.is_whitespace())
+        .take(160)
+        .collect();
+    assert!(
+        walk.contains(".map_err(|error|{format!(\"{EXIT_TYPED_PANE_STANDS}")
+            || walk.contains(".map_err(|error|format!(\"{EXIT_TYPED_PANE_STANDS}"),
+        "a walk that stops part way does not say the exit command was typed:\n{walk}"
+    );
 }

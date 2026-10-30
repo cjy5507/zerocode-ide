@@ -57458,7 +57458,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       seen.opened = Boolean(tab) && tab.kind === "worker" && tab.worker.wire === 7 && activeTabId === tabId;
       seen.startArgs = JSON.stringify(calls.find((call) => call[0] === "start")?.[1]);
       // A wire opened from the menu hands nothing over: no deadline (t-84670).
-      seen.wantStartArgs = JSON.stringify({ agent: "codex", cwd: "/tmp/zerocode-window-test", resume: null, from_pane: null, deadlineMs: null });
+      seen.wantStartArgs = JSON.stringify({ agent: "codex", cwd: "/tmp/zerocode-window-test", resume: null, fromPane: null, deadlineMs: null });
       const face = document.querySelector("#worker-view");
       seen.head = face?.querySelector(".worker-name")?.textContent ?? "";
       seen.wantHead = agentName("codex");
@@ -58441,7 +58441,9 @@ suite("pane-hands-over-to-wire", async ({ browser, origin, ok }) => {
       await settle();
       const started = calls.find((call) => call[0] === "start")?.[1];
       seen.startArgs = JSON.stringify(started);
-      seen.wantStartArgs = JSON.stringify({ agent: "claude", cwd: paneTab.worktree, resume: "s-hand", from_pane: term, deadlineMs: pressedAt + COMPOSER_HAND_OVER_DUE_MS });
+      // `fromPane`: tauri reads the backend's `from_pane` by its camelCase name
+      // and drops a snake_case key — until 10-30 this line pinned that key.
+      seen.wantStartArgs = JSON.stringify({ agent: "claude", cwd: paneTab.worktree, resume: "s-hand", fromPane: term, deadlineMs: pressedAt + COMPOSER_HAND_OVER_DUE_MS });
       const wireTab = tabs.find((tab) => tab.worker?.wire === 11);
       seen.seat = tabs.indexOf(wireTab) === at;
       seen.active = activeTabId === wireTab?.id;

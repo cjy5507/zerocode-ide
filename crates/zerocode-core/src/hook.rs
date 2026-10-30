@@ -248,6 +248,11 @@ pub struct BackgroundTasksReading {
     /// the cap was passed — so a tracked row this list does not name must be
     /// KEPT, never deleted on the strength of an incomplete roll call.
     pub truncated: bool,
+    /// Whether any entry that is no helper — a background shell, whatever
+    /// else the CLI runs on its own — is still running by the same `status`
+    /// rule. Not a row anywhere; what a road that would end the CLI must
+    /// know, because ending it ends that work too (t-84850 r2).
+    pub others_running: bool,
 }
 
 /// The words that mean a background task has ENDED — Orca's
@@ -291,9 +296,15 @@ pub fn background_agent_tasks_parsed(payload: &HookPayload<'_>) -> Option<Backgr
     let raw = payload.tree()?.get("background_tasks")?.as_array()?;
     let mut tasks: Vec<BackgroundAgentTask> = Vec::new();
     let mut truncated = false;
+    let mut others_running = false;
     let word = |value: Option<&serde_json::Value>| -> Option<String> {
         let text = value?.as_str()?.trim();
         (!text.is_empty()).then(|| text.to_string())
+    };
+    let running_by = |status: Option<String>| {
+        !status
+            .map(|status| status.to_ascii_lowercase())
+            .is_some_and(|status| BACKGROUND_TASK_TERMINAL.contains(&status.as_str()))
     };
     for item in raw {
         let Some(entry) = item.as_object() else {
@@ -305,6 +316,7 @@ pub fn background_agent_tasks_parsed(payload: &HookPayload<'_>) -> Option<Backgr
             continue;
         };
         if kind != "subagent" && kind != "teammate" {
+            others_running |= running_by(word(entry.get("status")));
             continue;
         }
         let Some(id) = word(entry.get("id")) else {
@@ -315,10 +327,7 @@ pub fn background_agent_tasks_parsed(payload: &HookPayload<'_>) -> Option<Backgr
             truncated = true;
             continue;
         }
-        let status = word(entry.get("status")).map(|status| status.to_ascii_lowercase());
-        let running = !status
-            .as_deref()
-            .is_some_and(|status| BACKGROUND_TASK_TERMINAL.contains(&status));
+        let running = running_by(word(entry.get("status")));
         tasks.push(BackgroundAgentTask {
             id,
             agent_type: word(entry.get("agent_type")),
@@ -327,7 +336,11 @@ pub fn background_agent_tasks_parsed(payload: &HookPayload<'_>) -> Option<Backgr
             teammate: kind == "teammate",
         });
     }
-    Some(BackgroundTasksReading { tasks, truncated })
+    Some(BackgroundTasksReading {
+        tasks,
+        truncated,
+        others_running,
+    })
 }
 
 /// A tool whose "use" is a question to a PERSON — Orca's
@@ -4077,6 +4090,20 @@ mod tests {
             clean.tasks[0].running,
             "an unrecognised status fails active"
         );
+        // Work that is no helper is no row, but its running is said: a road
+        // that would end the CLI ends it too (t-84850 r2).
+        assert!(read.others_running, "the running bash task is said");
+        assert!(!clean.others_running, "a helper alone is no other work");
+        let ended = background_agent_tasks(
+            r#"{"background_tasks":[{"id":"b-1","type":"bash","status":"completed"},
+                {"id":"b-2","type":"shell","status":"killed"}]}"#,
+        )
+        .expect("present");
+        assert!(!ended.others_running, "ended shells are not running work");
+        let silent =
+            background_agent_tasks(r#"{"background_tasks":[{"id":"b-3","type":"shell"}]}"#)
+                .expect("present");
+        assert!(silent.others_running, "a shell with no status fails active");
 
         // The cap: entry thirty-three is dropped and the reading says so.
         let many: Vec<String> = (0..33)

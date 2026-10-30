@@ -27,6 +27,7 @@ mod hand_in_keep;
 mod handoff_code;
 mod has_reach;
 mod jev_pane_seats;
+mod keys_tauri_reads;
 mod land_batch;
 mod plain_words;
 mod pre_handin;

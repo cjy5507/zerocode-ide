@@ -613,9 +613,20 @@ async function standHandover(page, { refuse, standMs }) {
     };
     window.__ANSWER__.term_key = () => null;
     let status = "idle";
-    window.__ANSWER__.wire_start = (args) => new Promise((done, fail) => setTimeout(() => (hand.refuse
-      ? fail(new Error("the wire was refused in the test"))
-      : done({ id: 77, agent: args.agent, protocol: "claude-stream", version: "2.1.280", model: null, session: args.resume })), hand.standMs));
+    window.__ANSWER__.wire_start = (args) => new Promise((done, fail) => setTimeout(() => {
+      if (hand.refuse) {
+        fail(new Error("the wire was refused in the test"));
+        return;
+      }
+      // As the backend does (`hand_over_pane`): the pane named as `fromPane`
+      // is told its exit command and the wire answers once its screen has
+      // gone, so the window hears the pane leave first.
+      if (args.fromPane === hand.term) {
+        hand.left = true;
+        for (const heard of window.__LISTENERS__["term:exited"] ?? []) heard({ payload: { term: args.fromPane } });
+      }
+      done({ id: 77, agent: args.agent, protocol: "claude-stream", version: "2.1.280", model: null, session: args.resume });
+    }, hand.standMs));
     // A sent message turns the session to work and back, each said on `wire:update`
     // as the backend says it — the queue sends its next message only after it saw
     // the turn start (`settleComposerQueue`).
@@ -665,6 +676,8 @@ async function testPaneHandover(browser, origin, ok, { refuse }) {
   try {
     const term = await standHandover(page, { refuse, standMs });
     const seen = {};
+    // The tab the pane stands in, and its seat on the strip.
+    seen.before = await page.evaluate((term) => ({ tab: tabOfTerm(term)?.id ?? null, at: tabs.indexOf(tabOfTerm(term)) }), term);
     // The press, and two frames after it.
     seen.early = await page.evaluate(async (term) => {
       const from = performance.now();
@@ -708,12 +721,15 @@ async function testPaneHandover(browser, origin, ok, { refuse }) {
     await page.waitForTimeout(standMs + 200);
     await page.waitForFunction((count) => window.__HAND__.wire.length + window.__HAND__.paste.length >= count, words.length, { timeout: 4000 }).catch(() => null);
     await page.waitForTimeout(300);
-    seen.after = await page.evaluate(() => ({
+    seen.after = await page.evaluate((paneTab) => ({
       active: activeTabId,
       paste: [...window.__HAND__.paste],
       wire: [...window.__HAND__.wire],
       refusedSays: Boolean(document.querySelector('.pane-chat-notice[data-says="worker.wireRefused"]')),
-    }));
+      left: window.__HAND__.left === true,
+      paneTab: tabs.some((tab) => tab.id === paneTab),
+      wireAt: tabs.findIndex((tab) => tab.id === "wire:77"),
+    }), seen.before.tab);
     seen.returned = await page.evaluate(READING);
     if (!refuse) {
       ok(
@@ -726,6 +742,12 @@ async function testPaneHandover(browser, origin, ok, { refuse }) {
         JSON.stringify(seen.whileHanding.wire) === "[]" && JSON.stringify(seen.whileHanding.paste) === "[]" &&
           JSON.stringify(seen.after.wire) === JSON.stringify(words) && JSON.stringify(seen.after.paste) === "[]",
         JSON.stringify({ whileHanding: seen.whileHanding, after: seen.after }),
+      );
+      ok(
+        "the_pane_the_wire_continues_leaves_and_the_wire_takes_its_seat: the hand-over names its pane, the backend ends that pane's CLI before the wire answers, and the wire's tab stands where the pane's tab stood — the pane's tab gone, the wire's in front, one process speaking for the conversation",
+        seen.before.tab !== null && seen.before.at >= 0 && seen.after.left && !seen.after.paneTab &&
+          seen.after.wireAt === seen.before.at && seen.after.active === "wire:77",
+        JSON.stringify({ before: seen.before, after: seen.after }),
       );
       ok(
         "the_live_session_opens_on_the_row_the_reader_left: the wire's page that replaces the transcript view stands on the row its reader was reading, at the same height (within two pixels)",
