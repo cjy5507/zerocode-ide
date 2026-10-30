@@ -247,6 +247,17 @@ pub(crate) const PANE_LINE_HOLDS_WORDS: &str =
 pub(crate) const EXIT_TYPED_PANE_STANDS: &str =
     "the exit command was typed at the pane and the pane still stands";
 
+/// Whether [`pane_cli_refusal`] may type its probe now (t-84850 r3): only as
+/// the very last thing before the exit command — after the catalog, the PATH,
+/// the account, the wire and the conversation's record — so a space is never
+/// typed at a pane the hand-over then refuses for another reason. Before
+/// that, a pane that has shown no reading yet passes, to be asked then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probing {
+    Later,
+    Now,
+}
+
 /// How long the probe looks for the space it typed to show on the pane's
 /// field (t-84850 r2). A CLI that reads its input draws a key well inside it;
 /// one that does not draw it by then is not reading yet.
@@ -260,11 +271,17 @@ pub(crate) const PROBE_LATE_LIMIT: std::time::Duration = std::time::Duration::fr
 /// terminal's foreground and its screen read in one hold of the pane's lock,
 /// what this window launched there, what its hooks last said, and whether its
 /// program has shown it reads. A pane that has shown no reading yet, and
-/// passes everything else, is asked by the probe (`answer_door::probe_reading`):
+/// passes everything else, is asked by the probe (`answer_door::probe_pane`):
 /// one space typed at its empty field, erased once it shows. One that does not
 /// show it is refused and typed nothing more; the space is looked for a while
-/// longer and erased if it shows late.
-fn pane_cli_refusal(state: &State<'_, AppState>, term: TermId, agent: &str) -> Result<(), String> {
+/// longer and erased if it shows late, and the pane is not probed again until
+/// that look ends.
+fn pane_cli_refusal(
+    state: &State<'_, AppState>,
+    term: TermId,
+    agent: &str,
+    probe: Probing,
+) -> Result<(), String> {
     let held = state
         .terminals()
         .handle(term)
@@ -296,48 +313,30 @@ fn pane_cli_refusal(state: &State<'_, AppState>, term: TermId, agent: &str) -> R
     };
     match pane_cli_cannot_leave(agent, &cli) {
         None => Ok(()),
+        Some(PANE_NOT_READING_YET) if probe == Probing::Later => Ok(()),
         Some(PANE_NOT_READING_YET) => {
             use crate::answer_door::Probe;
-            let probed =
-                crate::answer_door::probe_reading(&held, agent, PROBE_WAIT, HAND_OVER_EXIT_POLL)
-                    .map_err(|error| error.to_string())?;
+            let probed = crate::answer_door::probe_pane(
+                &held,
+                term,
+                agent,
+                PROBE_WAIT,
+                PROBE_LATE_LIMIT,
+                HAND_OVER_EXIT_POLL,
+            )
+            .map_err(|error| error.to_string())?;
             state.cadence().wake();
             match probed {
                 Probe::Read => {
                     crate::human_input::saw_reading(term);
                     Ok(())
                 }
-                Probe::Deaf => {
-                    erase_a_late_probe(held, term, agent.to_string());
-                    Err(PANE_NOT_READING_YET.to_string())
-                }
-                Probe::NotTyped => Err(PANE_LINE_HOLDS_WORDS.to_string()),
+                Probe::Deaf | Probe::StillOut => Err(PANE_NOT_READING_YET.to_string()),
+                Probe::NotTyped | Probe::Touched => Err(PANE_LINE_HOLDS_WORDS.to_string()),
             }
         }
         Some(reason) => Err(reason.to_string()),
     }
-}
-
-/// Look for a probe that did not show in time, up to [`PROBE_LATE_LIMIT`], and
-/// take it away when it shows — on a thread of its own, so the refusal is not
-/// held for it. It stops the moment a person's hand reaches the line (their
-/// words follow the space, which is harmless there) or the pane goes.
-fn erase_a_late_probe(held: crate::terminal_registry::HeldTerminal, term: TermId, agent: String) {
-    let hand = crate::human_input::line_of(term).1;
-    let _ = std::thread::Builder::new()
-        .name(format!("hand-over-probe-{term}"))
-        .spawn(move || {
-            let began = std::time::Instant::now();
-            while began.elapsed() < PROBE_LATE_LIMIT
-                && std::sync::Arc::strong_count(&held) > 1
-                && crate::human_input::line_of(term).1 == hand
-            {
-                if crate::answer_door::erase_probe(&held, &agent).unwrap_or(true) {
-                    return;
-                }
-                std::thread::sleep(HAND_OVER_EXIT_POLL);
-            }
-        });
 }
 
 /// Why the wire is not trusted to carry the conversation once the pane's CLI
@@ -420,8 +419,9 @@ fn stand_wire(
             return Err(format!("{agent} has no exit command this window knows"));
         }
         // Asked before any wire starts, so a pane that cannot hand over is
-        // refused at once and what waited goes to it straight.
-        pane_cli_refusal(state, term, agent)?;
+        // refused at once and what waited goes to it straight. Its probe
+        // waits for everything else to have held (`Probing::Later`).
+        pane_cli_refusal(state, term, agent, Probing::Later)?;
     }
     let found = scm_runtime::detected_agents(false)
         .into_iter()
@@ -618,7 +618,7 @@ fn hand_over_pane(
     ) {
         return Err(reason.to_string());
     }
-    pane_cli_refusal(state, term, agent)?;
+    pane_cli_refusal(state, term, agent, Probing::Now)?;
     let (groups, step) = zerocode_core::ask::line_keys(exit);
     let started = std::time::Instant::now();
     with_terminal(state, term, |pty| {

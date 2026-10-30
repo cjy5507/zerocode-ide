@@ -211,6 +211,72 @@ pub(super) enum Probe {
     Deaf,
     /// Not typed: the screen stood on a menu, or its field was not empty.
     NotTyped,
+    /// Not typed: an earlier probe at this pane has not shown yet and is
+    /// still looked for — a second space would join it and outlive both.
+    StillOut,
+    /// Typed, and a person's hand reached the line before it showed: it is
+    /// left where it is, ahead of their words.
+    Touched,
+}
+
+/// The panes an unshown probe is still out on, while [`probe_pane`]'s late
+/// look runs (t-84850 r3).
+static PROBES_OUT: std::sync::Mutex<std::collections::BTreeSet<u32>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn probes_out() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<u32>> {
+    PROBES_OUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// [`probe_reading`] for pane `term`, at most one probe out at a time. One
+/// that does not show within `wait` is looked for up to `late` more, on a
+/// thread of its own, and taken away when it shows — unless a person's hand
+/// reaches the line first, whose words then follow it, or the pane goes.
+/// While that look runs, the pane is not probed again ([`Probe::StillOut`]).
+pub(super) fn probe_pane(
+    held: &HeldTerminal,
+    term: u32,
+    agent: &str,
+    wait: Duration,
+    late: Duration,
+    poll: Duration,
+) -> Result<Probe, PtyTransportError> {
+    if !probes_out().insert(term) {
+        return Ok(Probe::StillOut);
+    }
+    let (probed, hand) = match probe_reading(held, term, agent, wait, poll) {
+        Ok((Probe::Deaf, hand)) => (Probe::Deaf, hand),
+        other => {
+            probes_out().remove(&term);
+            return other.map(|(probed, _)| probed);
+        }
+    };
+    let held = Arc::clone(held);
+    let agent = agent.to_string();
+    let looked = std::thread::Builder::new()
+        .name(format!("hand-over-probe-{term}"))
+        .spawn(move || {
+            let began = std::time::Instant::now();
+            while began.elapsed() < late && Arc::strong_count(&held) > 1 {
+                match erase_probe(&held, term, &agent, hand) {
+                    // Drawn late and taken away: the CLI reads now, and the
+                    // next press is not probed again (t-84850 r3).
+                    Ok(Erased::Done) => {
+                        crate::human_input::saw_reading(term);
+                        break;
+                    }
+                    Ok(Erased::NotShown) => std::thread::sleep(poll),
+                    Ok(Erased::Touched) | Err(_) => break,
+                }
+            }
+            probes_out().remove(&term);
+        });
+    if looked.is_err() {
+        probes_out().remove(&term);
+    }
+    Ok(probed)
 }
 
 /// The probe: one space, harmless on an empty field and nothing a CLI reads as
@@ -223,36 +289,62 @@ const PROBE_ERASE: &[u8] = b"\x7f";
 /// at its empty field — through this door, so never onto a menu or a draft —
 /// and looking up to `wait` (every `poll`) for the field to show it; once it
 /// shows, it is erased in the same hold of the pane's lock it was seen in.
+/// A person's hand that reaches the line meanwhile stops the look with
+/// nothing erased ([`Probe::Touched`]). Also answers the hand count read
+/// before the probe was typed, for a later look to hold its erasing to.
 pub(super) fn probe_reading(
     held: &HeldTerminal,
+    term: u32,
     agent: &str,
     wait: Duration,
     poll: Duration,
-) -> Result<Probe, PtyTransportError> {
+) -> Result<(Probe, Option<u64>), PtyTransportError> {
+    let hand = crate::human_input::line_of(term).1;
     if !type_if_up(held, &Expect::no_menu().with_empty_line(agent), PROBE_KEY)? {
-        return Ok(Probe::NotTyped);
+        return Ok((Probe::NotTyped, hand));
     }
     let began = std::time::Instant::now();
     loop {
-        if erase_probe(held, agent)? {
-            return Ok(Probe::Read);
+        match erase_probe(held, term, agent, hand)? {
+            Erased::Done => return Ok((Probe::Read, hand)),
+            Erased::Touched => return Ok((Probe::Touched, hand)),
+            Erased::NotShown if began.elapsed() >= wait => return Ok((Probe::Deaf, hand)),
+            Erased::NotShown => std::thread::sleep(poll),
         }
-        if began.elapsed() >= wait {
-            return Ok(Probe::Deaf);
-        }
-        std::thread::sleep(poll);
     }
 }
 
-/// Take the probe away if — and only if — the field shows exactly it, read
-/// and written in one hold of the pane's lock. `Ok(false)`: nothing typed.
-pub(super) fn erase_probe(held: &HeldTerminal, agent: &str) -> Result<bool, PtyTransportError> {
+/// What [`erase_probe`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Erased {
+    /// The field showed exactly the probe, and it was taken away.
+    Done,
+    /// The field does not show it (yet): nothing typed.
+    NotShown,
+    /// A person's hand reached the line since the probe was typed: nothing
+    /// typed, and nothing ever will be — the backspace could take their key.
+    Touched,
+}
+
+/// Take the probe away if — and only if — no person's hand has reached pane
+/// `term`'s line since `hand` (the hand count read before the probe was
+/// typed) and the field shows exactly the probe, both read and the key
+/// written in one hold of the pane's lock.
+pub(super) fn erase_probe(
+    held: &HeldTerminal,
+    term: u32,
+    agent: &str,
+    hand: Option<u64>,
+) -> Result<Erased, PtyTransportError> {
     let mut pty = lock_pty(held);
+    if crate::human_input::line_of(term).1 != hand {
+        return Ok(Erased::Touched);
+    }
     if !crate::composer_empty::holds_probe(agent, pty.terminal().grid()) {
-        return Ok(false);
+        return Ok(Erased::NotShown);
     }
     pty.write_input(PROBE_ERASE)?;
-    Ok(true)
+    Ok(Erased::Done)
 }
 
 /// Type one key group of a walk, refusing if the question is gone.
@@ -1259,7 +1351,9 @@ mod tests {
             })
         };
         assert_eq!(
-            probe_reading(&reading.held, "claude", wait, poll).ok(),
+            probe_reading(&reading.held, 91_101, "claude", wait, poll)
+                .ok()
+                .map(|(probed, _)| probed),
             Some(Probe::Read)
         );
         drawn.join().expect("the drawing thread");
@@ -1271,29 +1365,104 @@ mod tests {
         // A deaf CLI draws nothing: the space is typed once, nothing follows.
         let deaf = pane("Do you want to proceed?", &["Yes", "No"], true);
         deaf.draw(&empty);
-        assert_eq!(
-            probe_reading(&deaf.held, "claude", wait, poll).ok(),
-            Some(Probe::Deaf)
-        );
+        let (probed_deaf, hand) =
+            probe_reading(&deaf.held, 91_102, "claude", wait, poll).expect("the probe");
+        assert_eq!(probed_deaf, Probe::Deaf);
         assert_eq!(deaf.typed(), vec![" "]);
-        assert_eq!(erase_probe(&deaf.held, "claude").ok(), Some(false));
+        assert_eq!(
+            erase_probe(&deaf.held, 91_102, "claude", hand).ok(),
+            Some(Erased::NotShown)
+        );
         deaf.draw(&probed);
-        assert_eq!(erase_probe(&deaf.held, "claude").ok(), Some(true));
+        assert_eq!(
+            erase_probe(&deaf.held, 91_102, "claude", hand).ok(),
+            Some(Erased::Done)
+        );
         assert_eq!(
             deaf.typed(),
             vec![" ", "\x7f"],
             "a late probe was not taken away"
         );
+        // A person's hand reached the line before the probe showed: the
+        // backspace would take their key, so nothing is erased (r3 P3-1).
+        let touched = pane("Do you want to proceed?", &["Yes", "No"], true);
+        touched.draw(&empty);
+        let (_, hand) = probe_reading(&touched.held, 91_103, "claude", Duration::ZERO, poll)
+            .expect("the probe");
+        crate::human_input::typed(91_103);
+        touched.draw(&probed);
+        assert_eq!(
+            erase_probe(&touched.held, 91_103, "claude", hand).ok(),
+            Some(Erased::Touched)
+        );
+        assert_eq!(
+            touched.typed(),
+            vec![" "],
+            "a backspace raced a person's key"
+        );
+        crate::human_input::forget_term(91_103);
         // Words on the line: nothing is typed at all.
         let drafted = pane("Do you want to proceed?", &["Yes", "No"], true);
         drafted.draw(&format!(
             "\x1b[?2004h● Done.\n\n{rule}\n❯ abc\n{rule}\x1b[4;6H"
         ));
         assert_eq!(
-            probe_reading(&drafted.held, "claude", wait, poll).ok(),
+            probe_reading(&drafted.held, 91_104, "claude", wait, poll)
+                .ok()
+                .map(|(probed, _)| probed),
             Some(Probe::NotTyped)
         );
         assert!(drafted.typed().is_empty());
+    }
+
+    /// A second probe is never typed while the first is still out (t-84850
+    /// r3): it would join the first, and no look would know the two spaces.
+    /// Once the first shows late and is taken away, the pane may be asked
+    /// again.
+    #[test]
+    fn a_pane_is_not_probed_again_while_its_first_probe_is_out() {
+        const TERM: u32 = 91_201;
+        let rule = "─".repeat(40);
+        let empty = format!("\x1b[?2004h● Done.\n\n{rule}\n❯ \n{rule}\x1b[4;3H");
+        let probed = format!("\x1b[?2004h● Done.\n\n{rule}\n❯  \n{rule}\x1b[4;4H");
+        let (wait, late, poll) = (
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+            Duration::from_millis(20),
+        );
+        let deaf = pane("Do you want to proceed?", &["Yes", "No"], true);
+        deaf.draw(&empty);
+        assert_eq!(
+            probe_pane(&deaf.held, TERM, "claude", wait, late, poll).ok(),
+            Some(Probe::Deaf)
+        );
+        assert_eq!(
+            probe_pane(&deaf.held, TERM, "claude", wait, late, poll).ok(),
+            Some(Probe::StillOut),
+            "a second press probed a pane whose first probe was out"
+        );
+        assert_eq!(deaf.typed(), vec![" "]);
+        // The CLI wakes and draws the first space: the late look takes it
+        // away and lets the pane be asked again.
+        deaf.draw(&probed);
+        let began = std::time::Instant::now();
+        while probes_out().contains(&TERM) && began.elapsed() < late {
+            std::thread::sleep(poll);
+        }
+        assert_eq!(
+            deaf.typed(),
+            vec![" ", "\x7f"],
+            "the late probe was not taken away"
+        );
+        assert!(
+            !probes_out().contains(&TERM),
+            "the pane stayed marked after its probe went"
+        );
+        assert!(
+            crate::human_input::reads_input(TERM),
+            "a probe taken away late did not count the pane as reading (r3 P3-6)"
+        );
+        crate::human_input::forget_term(TERM);
     }
 
     /// How long a fake CLI on a real pty takes to leave after the keys the

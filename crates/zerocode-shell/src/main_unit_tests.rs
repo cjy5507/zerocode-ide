@@ -32929,7 +32929,7 @@ fn the_hand_over_asks_its_gates_before_typing_and_names_a_refusal_after_it() {
     let backend = shipped_backend();
     let stand = block_after(backend, "fn stand_wire(");
     let gate = stand
-        .find("pane_cli_refusal(state, term, agent)?;")
+        .find("pane_cli_refusal(state, term, agent, Probing::Later)?;")
         .expect("stand_wire does not ask whether the pane's CLI can leave");
     let spawn = stand
         .find("state.shell_runtime().wires.start(")
@@ -32937,12 +32937,18 @@ fn the_hand_over_asks_its_gates_before_typing_and_names_a_refusal_after_it() {
     assert!(gate < spawn, "the wire starts before the pane is asked:\n{stand}");
     let hand = block_after(backend, "fn hand_over_pane(");
     let again = hand
-        .find("pane_cli_refusal(state, term, agent)?;")
+        .find("pane_cli_refusal(state, term, agent, Probing::Now)?;")
         .expect("the hand-over does not ask again before typing");
     let typed = hand
         .find("crate::answer_door::type_if_up(")
         .expect("the hand-over types no exit command");
     assert!(again < typed, "the pane is asked after its exit command:\n{hand}");
+    // The probe types at the pane, so it is the last thing asked: after the
+    // wire and the conversation's record (t-84850 r3 P3-5).
+    let record = hand
+        .find("wire_cannot_take(")
+        .expect("the hand-over does not ask the wire");
+    assert!(record < again, "the probe can be typed before the wire is asked:\n{hand}");
     // From the pause after the first key on, the exit command is on the line.
     let after = &hand[typed
         + hand[typed..]
