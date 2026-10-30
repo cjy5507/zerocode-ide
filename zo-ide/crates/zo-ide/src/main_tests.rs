@@ -56,6 +56,8 @@ fn the_checker_sees_a_missing_command_and_passes_a_real_one() {
     assert!(exists(&Command::Verb("models".into())));
     assert!(exists(&Command::Verb("review".into())));
     assert!(!exists(&Command::Verb("inspect-this-file".into())));
+    assert!(exists(&Command::Verb("--continue".into())));
+    assert!(!exists(&Command::Verb("--no-such-flag".into())));
     // A path, a URL and prose about zo are not commands.
     assert!(found("wrote /tmp/x.json and https://example.com/login").is_empty());
     assert!(found("zo can read it").is_empty());
