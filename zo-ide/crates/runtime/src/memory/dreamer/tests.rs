@@ -3080,6 +3080,50 @@ fn a_pass_past_its_deadline_is_stopped_and_reaped() {
 
 #[cfg(unix)]
 #[test]
+fn a_pass_removes_what_a_pass_killed_mid_write_left_and_nothing_else() {
+    let home = tempfile::tempdir().unwrap();
+    let lock = crate::test_env_lock();
+    with_automatic_home(&lock, home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path();
+        for session in ["s1", "s2"] {
+            super::record_observation(cwd, &obs("a lesson a killed pass read", session, true)).unwrap();
+        }
+        let dream = super::dream_dir(cwd);
+        let turns = super::trace_base(cwd).join(core_types::paths::ZO_DIR_NAME).join("turns");
+        fs::create_dir_all(&turns).unwrap();
+        // The killed pass ran in a process of its own, so its files carry another pid.
+        let killed = std::process::id() + 1;
+        let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        let leave = |dir: &Path, name: String| {
+            let path = dir.join(name);
+            fs::File::create(&path).unwrap().set_modified(long_ago).unwrap();
+            path
+        };
+        let abandoned = [
+            leave(&dream, format!(".zo-state-.read-cursor.json-{killed}-1.tmp")),
+            leave(&turns, format!(".zo-state-.read-cursor.json-{killed}-2.tmp")),
+            leave(&dream, format!(".zo-state-{}-{killed}-3.tmp", super::THROTTLE_MARKER)),
+            leave(&dream, format!(".zo-state-{}-{killed}-4.tmp", super::AUTO_DREAM_ERROR_FILE)),
+        ];
+        let others = [
+            leave(&dream, format!(".zo-state-{killed}-5.tmp")),
+            leave(&dream, format!(".zo-state-tasks.json-{killed}-6.tmp")),
+        ];
+
+        let pass = super::try_auto_dream(cwd, super::DEFAULT_AUTO_DREAM_INTERVAL, None).unwrap();
+        assert!(matches!(pass, super::AutoDream::Ran(_)), "{pass:?}");
+        for path in &abandoned {
+            assert!(!path.exists(), "a pass removes what a killed pass left half-written: {}", path.display());
+        }
+        for path in &others {
+            assert!(path.exists(), "a pass keeps every other writer's temporary file: {}", path.display());
+        }
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn automatic_decay_archives_only_the_local_store_it_promotes_into() {
     let home = tempfile::tempdir().unwrap();
     let lock = crate::test_env_lock();

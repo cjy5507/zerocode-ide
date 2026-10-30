@@ -337,6 +337,17 @@ pub enum Durability {
     Published,
 }
 
+/// How a secure atomic replace names its temporary file, which a writer killed
+/// between its write and its rename leaves behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TempName {
+    /// `.zo-state-<pid>-<seq>.tmp`, which does not say what it replaces.
+    Anonymous,
+    /// `.zo-state-<file name>-<pid>-<seq>.tmp`, which
+    /// [`remove_abandoned_temp_files`] tells from every other writer's.
+    Target,
+}
+
 /// Atomically replace a private state file below `root` using owner-only
 /// permissions and retained no-follow directory handles, flushed to disk.
 pub fn write_atomic_owner_only(root: &Path, relative: &Path, contents: &[u8]) -> io::Result<()> {
@@ -350,22 +361,50 @@ pub fn write_atomic_owner_only_with(
     contents: &[u8],
     durability: Durability,
 ) -> io::Result<()> {
-    write_atomic_owner_only_observed(root, relative, contents, durability, &mut |_| {})
+    write_atomic_owner_only_observed(
+        root,
+        relative,
+        contents,
+        durability,
+        TempName::Anonymous,
+        &mut |_| {},
+    )
 }
 
-/// Seam for tests: `observe` receives, in order, `temp_written`, `file_synced`
-/// (flushed only), `renamed`, and `parent_dir_synced` (flushed only) as each
-/// step of the replace completes.
+/// [`write_atomic_owner_only_with`] with its temporary file named for the file
+/// it replaces ([`TempName::Target`]), so [`remove_abandoned_temp_files`] can
+/// take the one a writer killed before its rename left behind.
+pub fn write_atomic_owner_only_named_temp(
+    root: &Path,
+    relative: &Path,
+    contents: &[u8],
+    durability: Durability,
+) -> io::Result<()> {
+    write_atomic_owner_only_observed(root, relative, contents, durability, TempName::Target, &mut |_| {})
+}
+
+/// Seam for tests: `naming` picks the temporary file's name, and `observe`
+/// receives, in order, `temp_written`, `file_synced` (flushed only),
+/// `renamed`, and `parent_dir_synced` (flushed only) as each step of the
+/// replace completes.
 pub(crate) fn write_atomic_owner_only_observed(
     root: &Path,
     relative: &Path,
     contents: &[u8],
     durability: Durability,
+    _naming: TempName,
     observe: &mut dyn FnMut(&'static str),
 ) -> io::Result<()> {
     validate_relative(relative, false)?;
     write_atomic_owner_only_impl(root, relative, contents, durability, observe)
 }
+
+/// Remove the temporary files that writers of `relative` below `root` left
+/// when they were killed between their write and their rename: the ones named
+/// for it ([`write_atomic_owner_only_named_temp`]) and last written before
+/// `cutoff`. A newer one may still be in use, and every other writer's
+/// temporary file stays. Best effort.
+pub fn remove_abandoned_temp_files(_root: &Path, _relative: &Path, _cutoff: std::time::SystemTime) {}
 
 #[cfg(unix)]
 pub(crate) fn write_atomic_owner_only_retained(
@@ -2210,7 +2249,7 @@ mod tests {
         let root = TestRoot::new();
         let state = Path::new("tasks.json");
         let mut steps = Vec::new();
-        write_atomic_owner_only_observed(root.path(), state, b"{}", Durability::Published, &mut |step| {
+        write_atomic_owner_only_observed(root.path(), state, b"{}", Durability::Published, TempName::Anonymous, &mut |step| {
             steps.push(step);
         })
         .unwrap();
@@ -2222,7 +2261,7 @@ mod tests {
         );
 
         let mut steps = Vec::new();
-        write_atomic_owner_only_observed(root.path(), state, b"{\"rev\":1}", Durability::Flushed, &mut |step| {
+        write_atomic_owner_only_observed(root.path(), state, b"{\"rev\":1}", Durability::Flushed, TempName::Anonymous, &mut |step| {
             steps.push(step);
         })
         .unwrap();
@@ -2231,6 +2270,65 @@ mod tests {
             ["temp_written", "file_synced", "renamed", "parent_dir_synced"]
         );
         assert_eq!(fs::read_to_string(root.path().join(state)).unwrap(), "{\"rev\":1}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_temp_named_for_its_file_goes_once_older_than_the_cutoff_and_no_other_does() {
+        use std::collections::BTreeSet;
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let root = TestRoot::new();
+        let dir = root.path();
+        let temp_of = |relative: &str, naming: TempName| {
+            let mut temp = None;
+            write_atomic_owner_only_observed(dir, Path::new(relative), b"{}", Durability::Published, naming, &mut |step| {
+                if step == "temp_written" {
+                    temp = fs::read_dir(dir)
+                        .unwrap()
+                        .flatten()
+                        .map(|entry| entry.file_name().into_string().unwrap())
+                        .find(|name| Path::new(name).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("tmp")));
+                }
+            })
+            .unwrap();
+            temp.expect("a replace writes its temporary file first")
+        };
+        let stale = temp_of(".read-cursor.json", TempName::Target);
+        let in_use = temp_of(".read-cursor.json", TempName::Target);
+        let anonymous = temp_of(".read-cursor.json", TempName::Anonymous);
+        let other = temp_of("tasks.json", TempName::Target);
+        let pid = std::process::id();
+        assert!(
+            stale.starts_with(&format!(".zo-state-.read-cursor.json-{pid}-")),
+            "a temporary file names the file it replaces: {stale}"
+        );
+        assert!(
+            anonymous.starts_with(&format!(".zo-state-{pid}-")),
+            "an anonymous one is named as before: {anonymous}"
+        );
+
+        // As if each writer was killed after its write and before its rename.
+        let cutoff = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let hour = Duration::from_secs(3600);
+        for (name, written) in [
+            (&stale, cutoff - Duration::from_secs(1)),
+            (&in_use, cutoff),
+            (&anonymous, cutoff - hour),
+            (&other, cutoff - hour),
+        ] {
+            fs::File::create(dir.join(name)).unwrap().set_modified(written).unwrap();
+        }
+        remove_abandoned_temp_files(dir, Path::new(".read-cursor.json"), cutoff);
+
+        let left: BTreeSet<String> = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().into_string().unwrap())
+            .filter(|name| Path::new(name).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("tmp")))
+            .collect();
+        let kept: BTreeSet<String> = [in_use, anonymous, other].into_iter().collect();
+        assert_eq!(left, kept, "only this file's temporary file from before the cutoff goes");
     }
 
     #[cfg(unix)]
