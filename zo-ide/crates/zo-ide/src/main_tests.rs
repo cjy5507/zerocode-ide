@@ -75,9 +75,13 @@ fn exists(command: &Command) -> bool {
     match command {
         Command::Slash(word) => zo_ide::slash::Slash::from_word(word).is_some(),
         Command::Verb(word) => {
+            // The launch parser refuses a flag it does not know but takes any other
+            // bare word as prompt text, so an accepted flag is real while a bare word
+            // counts only when it changes what runs.
             super::ANSWERED_BEFORE_A_SESSION.iter().any(|(name, _)| name == word)
-                || zo_ide::ide::args::parse(std::slice::from_ref(word))
-                    .is_ok_and(|launch| launch.action != zo_ide::ide::args::Action::Repl)
+                || zo_ide::ide::args::parse(std::slice::from_ref(word)).is_ok_and(|launch| {
+                    word.starts_with('-') || launch.action != zo_ide::ide::args::Action::Repl
+                })
                 || zo_ide::ide::args::parse(&[word.clone(), "--uncommitted".into()])
                     .is_ok_and(|launch| launch.review_target.is_some())
         }
