@@ -1070,7 +1070,7 @@ fn all_ledger_image_readers_use_the_revision_cache() {
     for delegating in [
         "refresh_board_ledger",
         "ledger_agents",
-        "seated_live_workers",
+        "seated_live_workers_read",
     ] {
         let start = shipped
             .find(&format!("fn {delegating}()"))
@@ -24788,6 +24788,11 @@ mod restore_wake;
 /// the pane it sat from is no longer that conversation's pane here
 /// (`tests/seat_follows.rs`).
 mod seat_follows;
+
+/// t-84850 r4: a 「대화」 on a pane the ledger seated a worker or a
+/// coordinator in is refused by the ledger's own seats
+/// (`tests/hand_over_seat.rs`).
+mod hand_over_seat;
 
 /// t-81532: the composer's effort chip — what it shows for a pane, and a
 /// person's press on the seat's own road (`tests/effort_chip.rs`).
