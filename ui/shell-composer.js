@@ -1308,8 +1308,9 @@ function paneRewindable(run, spec) {
 /* 백엔드가 되감기를 열지 않은 까닭 — 그 낱말을 사람의 한 문장으로. */
 const PANE_REWIND_REFUSALS = Object.freeze({
   "rewind-busy": () => t("worker.rewindBusy", "에이전트가 일하거나 묻는 중이라 되감기를 열지 않았습니다 — 턴이 끝난 뒤 다시 누르세요"),
-  "rewind-own-words": () => t("worker.rewindOwnWords", "터미널 입력줄에 쓰다 만 글이 있어 되감기를 열지 않았습니다 — 그 글을 보내거나 지운 뒤 다시 누르세요"),
+  "rewind-screen": () => t("worker.rewindScreen", "터미널에 질문이 떠 있거나 입력줄에 쓰다 만 글이 있어 되감기를 열지 않았습니다 — 답하거나 그 글을 보내거나 지운 뒤 다시 누르세요"),
   "rewind-seat": () => t("worker.rewindSeat", "워커나 코디가 앉은 판이라 되감기를 열지 않았습니다"),
+  "rewind-ledger-unread": () => t("worker.rewindLedgerUnread", "원장을 지금 읽지 못해 이 판이 코디의 판인지 알 수 없어 되감기를 열지 않았습니다 — 잠시 뒤 다시 누르세요"),
 });
 
 /* 고쳐 보내기를 눌렀다: 판에 치는 것은 백엔드의 문 하나다(`pane_rewind` — 판을

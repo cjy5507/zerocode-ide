@@ -593,8 +593,9 @@ export async function testPaneRewind(browser, origin, ok) {
       // Refused by the backend: one sentence, nothing typed, the conversation stays.
       for (const [word, key, fallback] of [
         ["rewind-busy", "worker.rewindBusy", "에이전트가 일하거나 묻는 중이라 되감기를 열지 않았습니다 — 턴이 끝난 뒤 다시 누르세요"],
-        ["rewind-own-words", "worker.rewindOwnWords", "터미널 입력줄에 쓰다 만 글이 있어 되감기를 열지 않았습니다 — 그 글을 보내거나 지운 뒤 다시 누르세요"],
+        ["rewind-screen", "worker.rewindScreen", "터미널에 질문이 떠 있거나 입력줄에 쓰다 만 글이 있어 되감기를 열지 않았습니다 — 답하거나 그 글을 보내거나 지운 뒤 다시 누르세요"],
         ["rewind-seat", "worker.rewindSeat", "워커나 코디가 앉은 판이라 되감기를 열지 않았습니다"],
+        ["rewind-ledger-unread", "worker.rewindLedgerUnread", "원장을 지금 읽지 못해 이 판이 코디의 판인지 알 수 없어 되감기를 열지 않았습니다 — 잠시 뒤 다시 누르세요"],
       ]) {
         refusal = word;
         doorsOf(term)[0]?.click();
@@ -607,7 +608,7 @@ export async function testPaneRewind(browser, origin, ok) {
       await settle(200);
       seen.chatAfter = paneChatOn(term);
       seen.asked = JSON.stringify(asked);
-      seen.wantAsked = JSON.stringify([term, term, term, term]);
+      seen.wantAsked = JSON.stringify([term, term, term, term, term]);
       seen.typed = JSON.stringify(typed);
       // A turn that starts takes the door down; one that ends stands it again —
       // on the pane in front, before any other pane is opened.
@@ -654,8 +655,8 @@ export async function testPaneRewind(browser, origin, ok) {
       seen.carried && seen.sameHeight && seen.focusOpacity === "1", JSON.stringify(seen));
     ok("C10: a press asks the backend's one door and nothing else — the page pastes and keys nothing into the pane — and turns the pane to its terminal once that door typed (review r1 P1-1)",
       seen.asked === seen.wantAsked && seen.typed === "[]" && seen.chatBefore && !seen.chatAfter, JSON.stringify(seen));
-    ok("C10: a refusal — at work or asking, the person's own words on the pane's line, a seat a run drives — is one sentence, and the conversation stays where it was (review r1 P2-1, P2-2, P2-3)",
-      ["rewind-busy", "rewind-own-words", "rewind-seat"].every((word) => seen[word]?.said && seen[word].stays), JSON.stringify(seen));
+    ok("C10: a refusal — at work or asking, a question or the person's own words on the pane's screen, a seat a run drives, a ledger that cannot be read — is one sentence, and the conversation stays where it was (review r1 P2-1, P2-2, P2-3)",
+      ["rewind-busy", "rewind-screen", "rewind-seat", "rewind-ledger-unread"].every((word) => seen[word]?.said && seen[word].stays), JSON.stringify(seen));
     ok("C10: no door while the pane does not take the line — at work, asking, its agent gone, its state not yet said — and a turn that starts takes it down and one that ends stands it again (review r1 P1-1, P2-1)",
       Object.values(seen.notBetween).every((count) => count === 0) && Object.keys(seen.notBetween).length === 4 &&
         seen.downWhileWorking === 0 && seen.upAgain === 1,
