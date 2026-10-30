@@ -109,6 +109,7 @@ tools-test:
     t tools/tests/test_claude_code_panel_rules.py; \
     t tools/tests/test_codegraph_bench.py; \
     t tools/tests/test_test_times.py; \
+    t tools/tests/test_memory_census_idle.py; \
     t tools/login-renewal-probe/test_probe.py; \
     [ -z "$skipped" ] || echo "tools-test: skipped (macOS-only):$skipped"; \
     [ -z "$red" ] || { echo "tools-test: red scripts:$red" >&2; exit 1; }; exit $rc
