@@ -32730,6 +32730,32 @@ fn only_a_pane_the_ledger_does_not_drive_hands_its_conversation_to_a_wire() {
     );
 }
 
+/// Whether a pane is a worker's is the ledger's to say, as it seats its
+/// workers now (t-84850 r4). The window's map of its own nested runs
+/// (`AppState::workers`) holds none of the ledger's workers, so a 「대화」 on
+/// a pane the ledger seated a worker in went past the worker's refusal and
+/// typed `/exit` at that worker's CLI.
+#[test]
+fn the_hand_over_asks_the_ledger_whether_the_pane_is_a_workers() {
+    let backend = shipped_backend();
+    let stand = block_after(backend, "fn stand_wire(");
+    assert!(
+        !stand.contains("state.workers()"),
+        "the hand-over reads its workers off the window's nested runs:\n{stand}"
+    );
+    assert!(
+        stand.contains("ledger_pane_refusal(term)"),
+        "the hand-over does not ask the ledger whose pane it is:\n{stand}"
+    );
+    let refusal = block_after(backend, "fn ledger_pane_refusal(");
+    for read in ["seated_live_workers_read", "seated_coordinators_read"] {
+        assert!(
+            refusal.contains(read),
+            "the ledger's seats are not read through {read}:\n{refusal}"
+        );
+    }
+}
+
 /// A pane's CLI is told its exit command only when that exit ends the pane
 /// and the CLI reads the line (t-84850 r2). A Claude Code a person started
 /// from the pane's shell would leave the shell standing, and the words that
