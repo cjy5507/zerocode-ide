@@ -172,6 +172,33 @@ pub(crate) fn taken(term: u32) -> u64 {
         .unwrap_or_default()
 }
 
+/// The panes whose program the hand-over saw reading its line (t-84850 r2): a
+/// probe typed at its empty field showed on it. The other evidence besides a
+/// prompt taken, for a pane restored a moment ago that nobody has typed into.
+/// Gone with the pane.
+fn seen_reading_panes() -> &'static Mutex<std::collections::HashSet<u32>> {
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// The pane's program showed it read what was typed at it.
+pub(crate) fn saw_reading(term: u32) {
+    seen_reading_panes()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(term);
+}
+
+/// Whether the pane's program has shown it reads its input: a prompt it
+/// reported taking, or a probe that showed on its line.
+pub(crate) fn reads_input(term: u32) -> bool {
+    taken(term) > 0
+        || seen_reading_panes()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&term)
+}
+
 /// A person's hand put their own words on this pane's line: typed or IME
 /// text, a printable key, a paste.
 pub(crate) fn typed(term: u32) {
@@ -311,6 +338,10 @@ pub(crate) fn forget_term(term: u32) {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(&term);
     taken_counts()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&term);
+    seen_reading_panes()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(&term);

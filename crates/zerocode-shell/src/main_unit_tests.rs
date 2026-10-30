@@ -32749,7 +32749,7 @@ fn only_a_cli_the_window_spawned_as_the_pane_and_that_reads_its_input_is_told_to
         child: Some(400),
         child_in_front: Some(true),
         launched: Some((400, "claude")),
-        prompts_taken: 3,
+        reads_input: true,
         state: Some(HookState::Done),
         background_work: false,
         line_shown_empty: true,
@@ -32809,9 +32809,10 @@ fn only_a_cli_the_window_spawned_as_the_pane_and_that_reads_its_input_is_told_to
         Some(SHELL_PANE_STAYS)
     );
     // Restored a moment ago: the window's own child, in front, but it has
-    // taken no input yet.
+    // shown no reading yet — the one answer the probe is typed for, so it
+    // comes after every other.
     let waking = PaneCli {
-        prompts_taken: 0,
+        reads_input: false,
         ..spawned
     };
     assert_eq!(
@@ -32854,6 +32855,26 @@ fn only_a_cli_the_window_spawned_as_the_pane_and_that_reads_its_input_is_told_to
     };
     assert_eq!(
         pane_cli_cannot_leave("claude", &drafted),
+        Some(PANE_LINE_HOLDS_WORDS)
+    );
+    // Not reading AND busy, or with words on its line: the probe is never
+    // typed there — the other refusal comes first.
+    let waking_busy = PaneCli {
+        reads_input: false,
+        state: Some(HookState::Working),
+        ..spawned
+    };
+    assert_eq!(
+        pane_cli_cannot_leave("claude", &waking_busy),
+        Some(PANE_NOT_AT_REST)
+    );
+    let waking_drafted = PaneCli {
+        reads_input: false,
+        line_shown_empty: false,
+        ..spawned
+    };
+    assert_eq!(
+        pane_cli_cannot_leave("claude", &waking_drafted),
         Some(PANE_LINE_HOLDS_WORDS)
     );
 }

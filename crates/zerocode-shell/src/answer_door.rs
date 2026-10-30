@@ -201,6 +201,60 @@ pub(super) fn type_if_up(
     Ok(true)
 }
 
+/// What typing the hand-over's probe at a pane showed (t-84850 r2).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Probe {
+    /// It showed on the field and was erased: the CLI reads its input.
+    Read,
+    /// Typed, and not shown within the wait: the CLI is not reading yet. The
+    /// probe may still show later, for [`erase_probe`] to take away.
+    Deaf,
+    /// Not typed: the screen stood on a menu, or its field was not empty.
+    NotTyped,
+}
+
+/// The probe: one space, harmless on an empty field and nothing a CLI reads as
+/// a command.
+const PROBE_KEY: &[u8] = b" ";
+/// The key that takes it away again.
+const PROBE_ERASE: &[u8] = b"\x7f";
+
+/// Whether the pane's CLI reads what is typed at it, asked by typing one space
+/// at its empty field — through this door, so never onto a menu or a draft —
+/// and looking up to `wait` (every `poll`) for the field to show it; once it
+/// shows, it is erased in the same hold of the pane's lock it was seen in.
+pub(super) fn probe_reading(
+    held: &HeldTerminal,
+    agent: &str,
+    wait: Duration,
+    poll: Duration,
+) -> Result<Probe, PtyTransportError> {
+    if !type_if_up(held, &Expect::no_menu().with_empty_line(agent), PROBE_KEY)? {
+        return Ok(Probe::NotTyped);
+    }
+    let began = std::time::Instant::now();
+    loop {
+        if erase_probe(held, agent)? {
+            return Ok(Probe::Read);
+        }
+        if began.elapsed() >= wait {
+            return Ok(Probe::Deaf);
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+/// Take the probe away if — and only if — the field shows exactly it, read
+/// and written in one hold of the pane's lock. `Ok(false)`: nothing typed.
+pub(super) fn erase_probe(held: &HeldTerminal, agent: &str) -> Result<bool, PtyTransportError> {
+    let mut pty = lock_pty(held);
+    if !crate::composer_empty::holds_probe(agent, pty.terminal().grid()) {
+        return Ok(false);
+    }
+    pty.write_input(PROBE_ERASE)?;
+    Ok(true)
+}
+
 /// Type one key group of a walk, refusing if the question is gone.
 fn press(
     held: &HeldTerminal,
@@ -1176,6 +1230,70 @@ mod tests {
         ));
         assert_eq!(type_if_up(&pane.held, &expect, b"/exit").ok(), Some(true));
         assert_eq!(pane.typed(), vec!["/exit"]);
+    }
+
+    /// The hand-over's probe of a pane that has shown no reading (t-84850 r2):
+    /// one space typed at the empty field; a CLI that draws it has it erased
+    /// at once and counts as reading; one that does not is refused with the
+    /// space typed and nothing more, and the space is erased when it shows
+    /// late. Never typed onto a draft.
+    #[test]
+    fn the_probe_is_erased_when_it_shows_and_typed_once_where_it_does_not() {
+        let rule = "─".repeat(40);
+        let empty = format!("\x1b[?2004h● Done.\n\n{rule}\n❯ \n{rule}\x1b[4;3H");
+        let probed = format!("\x1b[?2004h● Done.\n\n{rule}\n❯  \n{rule}\x1b[4;4H");
+        let wait = Duration::from_millis(600);
+        let poll = Duration::from_millis(20);
+        // A reading CLI draws the space a moment after it is typed.
+        let reading = pane("Do you want to proceed?", &["Yes", "No"], true);
+        reading.draw(&empty);
+        let drawn = {
+            let held = Arc::clone(&reading.held);
+            let probed = probed.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                let mut pty = lock_pty(&held);
+                pty.terminal_mut().feed(b"\x1b[2J\x1b[H");
+                pty.terminal_mut()
+                    .feed(probed.replace('\n', "\r\n").as_bytes());
+            })
+        };
+        assert_eq!(
+            probe_reading(&reading.held, "claude", wait, poll).ok(),
+            Some(Probe::Read)
+        );
+        drawn.join().expect("the drawing thread");
+        assert_eq!(
+            reading.typed(),
+            vec![" ", "\x7f"],
+            "the probe was not taken away"
+        );
+        // A deaf CLI draws nothing: the space is typed once, nothing follows.
+        let deaf = pane("Do you want to proceed?", &["Yes", "No"], true);
+        deaf.draw(&empty);
+        assert_eq!(
+            probe_reading(&deaf.held, "claude", wait, poll).ok(),
+            Some(Probe::Deaf)
+        );
+        assert_eq!(deaf.typed(), vec![" "]);
+        assert_eq!(erase_probe(&deaf.held, "claude").ok(), Some(false));
+        deaf.draw(&probed);
+        assert_eq!(erase_probe(&deaf.held, "claude").ok(), Some(true));
+        assert_eq!(
+            deaf.typed(),
+            vec![" ", "\x7f"],
+            "a late probe was not taken away"
+        );
+        // Words on the line: nothing is typed at all.
+        let drafted = pane("Do you want to proceed?", &["Yes", "No"], true);
+        drafted.draw(&format!(
+            "\x1b[?2004h● Done.\n\n{rule}\n❯ abc\n{rule}\x1b[4;6H"
+        ));
+        assert_eq!(
+            probe_reading(&drafted.held, "claude", wait, poll).ok(),
+            Some(Probe::NotTyped)
+        );
+        assert!(drafted.typed().is_empty());
     }
 
     /// How long a fake CLI on a real pty takes to leave after the keys the

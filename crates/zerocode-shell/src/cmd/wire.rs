@@ -177,10 +177,11 @@ pub(crate) struct PaneCli<'a> {
     /// What this window spawned as the pane's agent, as written down at the
     /// spawn (`pane_leftovers::launched`): its pid and the agent.
     pub(crate) launched: Option<(u32, &'a str)>,
-    /// How many prompts the pane's program has reported taking since the
-    /// pane began (`human_input::taken`) — the receipt a delivery's Enter
-    /// waits for.
-    pub(crate) prompts_taken: u64,
+    /// Whether the pane's program has shown it reads its input since the
+    /// pane began (`human_input::reads_input`): a prompt it reported taking —
+    /// the receipt a delivery's Enter waits for — or the hand-over's probe
+    /// shown on its line.
+    pub(crate) reads_input: bool,
     /// What the pane's agent last said of itself through its hooks; `None`
     /// when it has said nothing.
     pub(crate) state: Option<zerocode_core::hook::HookState>,
@@ -200,12 +201,14 @@ pub(crate) struct PaneCli<'a> {
 ///   pane's own child, still in front of the terminal, leaves nothing behind
 ///   — a CLI started from the pane's shell leaves that shell standing, and
 ///   the words that waited would be typed at it.
-/// - It has to read the line: a CLI that has taken no prompt since it began
-///   may be one still waking (a resumed Claude Code reads nothing for up to a
-///   minute), and `/exit` would sit on its input line for the words after it
-///   to join.
 /// - It has to be at rest, with no helper or background shell the exit would
 ///   end, and an empty input line for `/exit` to stand alone on.
+/// - It has to read the line: a CLI that has shown no reading since it began
+///   may be one still waking (a resumed Claude Code reads nothing for up to a
+///   minute), and `/exit` would sit on its input line for the words after it
+///   to join. Asked last, because the one answer the window can still get —
+///   the probe ([`pane_cli_refusal`]) — types at the pane, and is typed only
+///   where everything else already holds.
 pub(crate) fn pane_cli_cannot_leave(agent: &str, cli: &PaneCli<'_>) -> Option<&'static str> {
     use zerocode_core::hook::HookState;
     let spawned_here = cli
@@ -214,23 +217,22 @@ pub(crate) fn pane_cli_cannot_leave(agent: &str, cli: &PaneCli<'_>) -> Option<&'
     if !spawned_here || cli.child_in_front != Some(true) {
         return Some(SHELL_PANE_STAYS);
     }
-    if cli.prompts_taken == 0 {
-        return Some(PANE_NOT_READING_YET);
-    }
     if !matches!(cli.state, Some(HookState::Done | HookState::Idle)) {
         return Some(PANE_NOT_AT_REST);
     }
     if cli.background_work {
         return Some(PANE_BACKGROUND_WORK);
     }
-    (!cli.line_shown_empty).then_some(PANE_LINE_HOLDS_WORDS)
+    if !cli.line_shown_empty {
+        return Some(PANE_LINE_HOLDS_WORDS);
+    }
+    (!cli.reads_input).then_some(PANE_NOT_READING_YET)
 }
 
 /// The refusals [`pane_cli_cannot_leave`] gives, beside the ledger's.
 pub(crate) const SHELL_PANE_STAYS: &str =
     "a CLI started from the pane's shell stays in the pane: the terminal is its live view";
-pub(crate) const PANE_NOT_READING_YET: &str =
-    "the pane's CLI has taken no input since it started: try again in a moment";
+pub(crate) const PANE_NOT_READING_YET: &str = "the pane's CLI did not show a key typed at it, so it is not reading its input yet: send one message on the pane, then ask again";
 pub(crate) const PANE_NOT_AT_REST: &str = "the pane's CLI is not at rest — a turn, a question or an approval is open: try again once it rests";
 pub(crate) const PANE_BACKGROUND_WORK: &str =
     "the pane's CLI still runs background work its exit would end: try again once it is done";
@@ -245,10 +247,23 @@ pub(crate) const PANE_LINE_HOLDS_WORDS: &str =
 pub(crate) const EXIT_TYPED_PANE_STANDS: &str =
     "the exit command was typed at the pane and the pane still stands";
 
+/// How long the probe looks for the space it typed to show on the pane's
+/// field (t-84850 r2). A CLI that reads its input draws a key well inside it;
+/// one that does not draw it by then is not reading yet.
+pub(crate) const PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long a probe that did not show in time is still looked for, to be taken
+/// away when a waking CLI draws it late — unless a person's hand reaches the
+/// line first, whose words then follow it.
+pub(crate) const PROBE_LATE_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// [`pane_cli_cannot_leave`] for the pane as it stands now: its child, the
 /// terminal's foreground and its screen read in one hold of the pane's lock,
-/// what this window launched there, what its hooks last said, and the prompts
-/// its program reported taking.
+/// what this window launched there, what its hooks last said, and whether its
+/// program has shown it reads. A pane that has shown no reading yet, and
+/// passes everything else, is asked by the probe (`answer_door::probe_reading`):
+/// one space typed at its empty field, erased once it shows. One that does not
+/// show it is refused and typed nothing more; the space is looked for a while
+/// longer and erased if it shows late.
 fn pane_cli_refusal(state: &State<'_, AppState>, term: TermId, agent: &str) -> Result<(), String> {
     let held = state
         .terminals()
@@ -274,12 +289,55 @@ fn pane_cli_refusal(state: &State<'_, AppState>, term: TermId, agent: &str) -> R
         launched: launched
             .as_ref()
             .map(|(pid, launched)| (*pid, launched.as_str())),
-        prompts_taken: crate::human_input::taken(term),
+        reads_input: crate::human_input::reads_input(term),
         state: said,
         background_work: helpers || hooks::other_background_work(term),
         line_shown_empty,
     };
-    pane_cli_cannot_leave(agent, &cli).map_or(Ok(()), |reason| Err(reason.to_string()))
+    match pane_cli_cannot_leave(agent, &cli) {
+        None => Ok(()),
+        Some(PANE_NOT_READING_YET) => {
+            use crate::answer_door::Probe;
+            let probed =
+                crate::answer_door::probe_reading(&held, agent, PROBE_WAIT, HAND_OVER_EXIT_POLL)
+                    .map_err(|error| error.to_string())?;
+            state.cadence().wake();
+            match probed {
+                Probe::Read => {
+                    crate::human_input::saw_reading(term);
+                    Ok(())
+                }
+                Probe::Deaf => {
+                    erase_a_late_probe(held, term, agent.to_string());
+                    Err(PANE_NOT_READING_YET.to_string())
+                }
+                Probe::NotTyped => Err(PANE_LINE_HOLDS_WORDS.to_string()),
+            }
+        }
+        Some(reason) => Err(reason.to_string()),
+    }
+}
+
+/// Look for a probe that did not show in time, up to [`PROBE_LATE_LIMIT`], and
+/// take it away when it shows — on a thread of its own, so the refusal is not
+/// held for it. It stops the moment a person's hand reaches the line (their
+/// words follow the space, which is harmless there) or the pane goes.
+fn erase_a_late_probe(held: crate::terminal_registry::HeldTerminal, term: TermId, agent: String) {
+    let hand = crate::human_input::line_of(term).1;
+    let _ = std::thread::Builder::new()
+        .name(format!("hand-over-probe-{term}"))
+        .spawn(move || {
+            let began = std::time::Instant::now();
+            while began.elapsed() < PROBE_LATE_LIMIT
+                && std::sync::Arc::strong_count(&held) > 1
+                && crate::human_input::line_of(term).1 == hand
+            {
+                if crate::answer_door::erase_probe(&held, &agent).unwrap_or(true) {
+                    return;
+                }
+                std::thread::sleep(HAND_OVER_EXIT_POLL);
+            }
+        });
 }
 
 /// Why the wire is not trusted to carry the conversation once the pane's CLI

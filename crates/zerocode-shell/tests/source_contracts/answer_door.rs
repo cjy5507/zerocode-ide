@@ -299,7 +299,20 @@ fn the_window_knows_the_refusal_that_comes_after_the_exit_command_was_typed() {
         window, backend,
         "the window does not know the refusal the hand-over gives after typing its exit command"
     );
+    let reading = literal_after(
+        shipped_backend(),
+        "pub(crate) const PANE_NOT_READING_YET: &str =",
+    );
+    let knows = literal_after(window_source(), "const WIRE_NOT_READING =");
+    assert!(
+        !knows.is_empty() && reading.starts_with(knows),
+        "the window does not know the refusal for a pane not reading yet: {knows:?} / {reading:?}"
+    );
     let hand = block_after(window_source(), "async function handPaneToWire(");
+    assert!(
+        hand.contains("startsWith(WIRE_NOT_READING)"),
+        "the hand-over does not put the not-reading refusal in the person's words:\n{hand}"
+    );
     assert!(
         hand.contains("startsWith(WIRE_EXIT_TYPED)"),
         "the hand-over does not tell a refusal after the exit command from one before it:\n{hand}"

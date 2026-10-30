@@ -13437,6 +13437,16 @@ function wireRowFor(term) {
   return row?.wire && row.wire_resumes ? row : null;
 }
 
+/* The opening words of the refusal the backend gives once it has typed the
+ * pane's exit command (`EXIT_TYPED_PANE_STANDS`, t-84850 r2): the pane still
+ * stands, and may yet read `/exit` or have left a shell behind — so what
+ * waited goes back to the box, never to the pane. */
+const WIRE_EXIT_TYPED = "the exit command was typed at the pane and the pane still stands";
+/* The opening words of the refusal for a pane whose CLI did not show a key
+ * typed at it (`PANE_NOT_READING_YET`, t-84850 r2): the page says what the
+ * person can do, in their language. */
+const WIRE_NOT_READING = "the pane's CLI did not show a key typed at it";
+
 /* Hand a pane's conversation to its wire — the toggle's 「대화」 on a Claude
  * Code pane. Same session, other renderer: the wire resumes the pane's
  * session id, the pane's CLI exits, and the tab that stood here is the
@@ -13445,12 +13455,6 @@ function wireRowFor(term) {
  * the turn ends (`pendingWire`). False when this pane cannot be handed
  * over — no wire, no session yet, mid-turn, or the start failed — and the
  * caller falls back to the transcript view. */
-/* The opening words of the refusal the backend gives once it has typed the
- * pane's exit command (`EXIT_TYPED_PANE_STANDS`, t-84850 r2): the pane still
- * stands, and may yet read `/exit` or have left a shell behind — so what
- * waited goes back to the box, never to the pane. */
-const WIRE_EXIT_TYPED = "the exit command was typed at the pane and the pane still stands";
-
 async function handPaneToWire(term) {
   const row = wireRowFor(term);
   const session = paneSessions.get(term)?.session?.id ?? null;
@@ -13506,7 +13510,11 @@ async function handPaneToWire(term) {
       refused: (reason) => {
         const said = String(reason?.message ?? reason);
         held.exitTyped = held.exitTyped || said.startsWith(WIRE_EXIT_TYPED);
-        held.wireRefusal = held.exitTyped ? null : said;
+        held.wireRefusal = held.exitTyped
+          ? null
+          : said.startsWith(WIRE_NOT_READING)
+            ? t("worker.handOverNotReading", "판의 CLI가 아직 입력을 읽지 않습니다 — 판에서 글을 한 번 보낸 뒤 「{{button}}」를 다시 누르세요", { button: t("view.conversation", "대화") })
+            : said;
       },
     });
     // The conversation lives on the wire's tab now: the pane's own view steps

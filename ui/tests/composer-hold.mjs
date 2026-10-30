@@ -397,17 +397,21 @@ async function testCoordinatorSeatRefused(browser, origin, ok) {
   // CLI started from the pane's shell, one that has taken no input since it
   // began (a pane restored a moment ago), one at work, one whose line holds
   // words, a ledger that cannot be read. Each takes the coordinator's road.
-  for (const [name, reason] of [
+  for (const [name, reason, shown] of [
     ["coordinator seat refused", "a coordinator's pane stays a pane: the ledger brings its run's mail to that screen"],
     ["shell pane refused", "a CLI started from the pane's shell stays in the pane: the terminal is its live view"],
-    ["waking pane refused", "the pane's CLI has taken no input since it started: try again in a moment"],
+    ["waking pane refused", "the pane's CLI did not show a key typed at it, so it is not reading its input yet: send one message on the pane, then ask again",
+      () => t("worker.handOverNotReading", "판의 CLI가 아직 입력을 읽지 않습니다 — 판에서 글을 한 번 보낸 뒤 「{{button}}」를 다시 누르세요", { button: t("view.conversation", "대화") })],
     ["line with words refused", "the pane's input line is not shown empty — words may be written there: nothing was typed"],
     ["unread ledger refused", "the ledger cannot be read now, so this pane may be a coordinator's: it stays a pane"],
-  ]) await refusedBeforeTyping(browser, origin, ok, name, reason);
+  ]) await refusedBeforeTyping(browser, origin, ok, name, reason, shown);
 }
 
-async function refusedBeforeTyping(browser, origin, ok, name, reason) {
+/* `shown`, when given, is what the page says instead of the backend's words —
+ * the person's own language for a refusal that asks something of them. */
+async function refusedBeforeTyping(browser, origin, ok, name, reason, shown = null) {
   await scene(browser, origin, ok, name, async (page) => {
+    const said = shown ? await page.evaluate(`(${shown})()`) : reason;
     await page.evaluate(async (reason) => {
       window.__ANSWER__.wire_start = (args) => {
         window.__HOLD__.wires.push(args);
@@ -422,8 +426,8 @@ async function refusedBeforeTyping(browser, origin, ok, name, reason) {
     ok(
       `a_pane_refused_before_typing_keeps_its_conversation_and_the_words_go_straight_to_it (${name}): the hand-over is refused at once — Enter sends the words to the pane straight (paste, then Enter), nothing waits in the queue and no line says the conversation is being continued, and the page says why in the backend's words`,
       seen.wires === 1 && JSON.stringify(seen.sent) === JSON.stringify(["paste:곧바로", ENTER]) && seen.queue.length === 0 &&
-        (seen.why ?? "") === "" && typeof seen.refused === "string" && seen.refused.includes(reason) && seen.exitTyped === null,
-      JSON.stringify(seen),
+        (seen.why ?? "") === "" && typeof seen.refused === "string" && seen.refused.includes(said) && seen.exitTyped === null,
+      JSON.stringify({ seen, said }),
     );
   });
 }
