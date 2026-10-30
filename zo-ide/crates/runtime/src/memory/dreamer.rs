@@ -3781,6 +3781,14 @@ static AUTO_DREAM_PROGRAM: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::n
 /// A reply is one short JSON line; anything longer is not one.
 const MAX_AUTO_DREAM_REPLY_BYTES: u64 = 64 * 1024;
 
+/// How long an automatic pass in a process of its own may run before it is
+/// stopped. The night measurement's largest set, 256 turn logs, curated
+/// within 2 s; a minute leaves a slow disk thirty times that, and a pass
+/// that hangs holds the shared lock no longer. The session stops the child
+/// then, and the child stops itself, so it lets go even when its session has
+/// gone first.
+pub const AUTO_DREAM_PASS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Run every idle and compaction pass of this process as `<zo> auto-dream`.
 /// A pass reads up to 256 logs per source, and the allocator keeps what a
 /// pass allocated long after it ends; a process of its own gives all of it
@@ -3836,7 +3844,7 @@ pub fn run_auto_dream_pass(
     active_model: Option<&str>,
 ) -> Option<Vec<u8>> {
     let child = spawn_auto_dream_pass(zo, trigger, cwd, session_id, active_model).ok()?;
-    await_auto_dream_pass(child)
+    await_auto_dream_pass(child, AUTO_DREAM_PASS_DEADLINE)
 }
 
 fn spawn_auto_dream_pass(
@@ -3861,7 +3869,7 @@ fn spawn_auto_dream_pass(
         .spawn()
 }
 
-fn await_auto_dream_pass(mut child: std::process::Child) -> Option<Vec<u8>> {
+fn await_auto_dream_pass(mut child: std::process::Child, _deadline: std::time::Duration) -> Option<Vec<u8>> {
     use std::io::Read as _;
     let mut out = Vec::new();
     let read = child.stdout.take()

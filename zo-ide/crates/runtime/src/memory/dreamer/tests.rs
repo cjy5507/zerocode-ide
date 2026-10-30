@@ -3053,6 +3053,33 @@ fn a_pass_after_compaction_runs_in_the_zo_the_host_declared() {
 
 #[cfg(unix)]
 #[test]
+fn a_pass_past_its_deadline_is_stopped_and_reaped() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let zo = root.path().join("zo");
+    // It answers at once and then does not end: only a deadline stops it.
+    fs::write(&zo, "#!/bin/sh\necho '{\"outcome\":\"locked\"}'\nexec sleep 5\n").unwrap();
+    fs::set_permissions(&zo, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let child = super::spawn_auto_dream_pass(&zo, super::AutoDreamTrigger::Idle, root.path(), Some("s"), Some("m"))
+        .unwrap();
+    let pid = child.id().to_string();
+    let reply = super::await_auto_dream_pass(child, std::time::Duration::from_millis(100));
+    assert!(
+        reply.is_none(),
+        "a pass past its deadline has no reply, which a session counts as failed: {:?}",
+        reply.as_deref().map(String::from_utf8_lossy)
+    );
+    let ps = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&ps.stdout).trim(),
+        "",
+        "the stopped pass is reaped, neither running nor a zombie"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn automatic_decay_archives_only_the_local_store_it_promotes_into() {
     let home = tempfile::tempdir().unwrap();
     let lock = crate::test_env_lock();
