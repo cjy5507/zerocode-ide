@@ -244,3 +244,39 @@ export async function testConversationDiagrams(browser, origin, ok) {
     }
   }
 }
+
+/* ---- the person's own pane: the conversation read off the transcript ---------------------------
+ * A pane without a wire (zo, or any agent the window did not start itself) draws its answers from
+ * the transcript the engine reads (`pane_log`), not from `wire_log`. Its answer takes the same road
+ * as the wire's — `paintHelperProse` — so a ```mermaid fence in it draws once, from one request. */
+export async function testConversationPaneDiagrams(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standDiagrams(page);
+    const answer = ["흐름은 아래와 같습니다.", "", "```mermaid", "flowchart LR", "  A[판흐름-그림] --> B[끝]", "```", "", "여기까지입니다."].join("\n");
+    const seen = await page.evaluate(async (text) => {
+      const term = await openTermTab({ placement: "tab" });
+      paneAgents.set(term, "zo");
+      hookStates.set(term, "idle");
+      window.__ANSWER__.pane_log = () => ({
+        found: true, next: 2, skipped: false, more: false, folded: false, model: "claude-opus-5",
+        turns: [{ role: "user", text: "흐름을 그림으로 보여 줘." }, { role: "assistant", text }],
+      });
+      await setPaneChat(term, true);
+      const asked = () => window.__DIAGRAMS__.asked.filter((name) => name === "판흐름-그림").length;
+      const landed = await window.__UNTIL__(() => document.querySelectorAll(".helper-turns .mmd-block svg.mmd").length === 1, 60);
+      await window.__FRAMES__(3);
+      const said = [...document.querySelectorAll(".helper-turns .helper-turn.is-assistant .helper-said")].at(-1);
+      return {
+        wire: wireRowFor(term)?.id ?? null, landed, asked: asked(),
+        drawn: window.__DRAWN__(said), code: window.__CODE__(said), after: said?.lastElementChild?.textContent ?? "",
+      };
+    }, answer);
+    ok("a pane's conversation read off the transcript (no wire) draws a ```mermaid fence as a diagram, from one request, with no code left",
+      seen.wire === null && seen.landed && seen.asked === 1 && seen.drawn === 1 && seen.code === 0 && seen.after === "여기까지입니다.",
+      JSON.stringify(seen));
+    ok("the page raised no errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
