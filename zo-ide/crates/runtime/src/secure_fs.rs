@@ -18,6 +18,8 @@ use std::sync::atomic::Ordering;
 
 #[cfg(any(unix, windows))]
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+/// Every secure atomic replace's temporary file starts with this.
+const TEMP_PREFIX: &str = ".zo-state-";
 
 fn invalid_path(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -392,11 +394,11 @@ pub(crate) fn write_atomic_owner_only_observed(
     relative: &Path,
     contents: &[u8],
     durability: Durability,
-    _naming: TempName,
+    naming: TempName,
     observe: &mut dyn FnMut(&'static str),
 ) -> io::Result<()> {
     validate_relative(relative, false)?;
-    write_atomic_owner_only_impl(root, relative, contents, durability, observe)
+    write_atomic_owner_only_impl(root, relative, contents, durability, naming, observe)
 }
 
 /// Remove the temporary files that writers of `relative` below `root` left
@@ -404,7 +406,54 @@ pub(crate) fn write_atomic_owner_only_observed(
 /// for it ([`write_atomic_owner_only_named_temp`]) and last written before
 /// `cutoff`. A newer one may still be in use, and every other writer's
 /// temporary file stays. Best effort.
-pub fn remove_abandoned_temp_files(_root: &Path, _relative: &Path, _cutoff: std::time::SystemTime) {}
+pub fn remove_abandoned_temp_files(root: &Path, relative: &Path, cutoff: std::time::SystemTime) {
+    if validate_relative(relative, false).is_err() {
+        return;
+    }
+    let Some(target) = relative.file_name() else {
+        return;
+    };
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let Ok(entries) = fs::read_dir(root.join(parent)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        // `DirEntry::metadata` does not follow a symlink, and a symlink is no file.
+        let abandoned = is_temp_file_of(&name, target)
+            && entry.metadata().is_ok_and(|metadata| {
+                metadata.is_file() && metadata.modified().is_ok_and(|written| written < cutoff)
+            });
+        if abandoned {
+            let _ = remove_file_no_symlink(root, &parent.join(&name));
+        }
+    }
+}
+
+/// The name of a secure atomic replace's temporary file for `target`.
+#[cfg(any(unix, windows))]
+fn temp_file_name(naming: TempName, target: &std::ffi::OsStr) -> String {
+    let sequence = TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    match naming {
+        TempName::Anonymous => format!("{TEMP_PREFIX}{pid}-{sequence}.tmp"),
+        TempName::Target => format!("{TEMP_PREFIX}{}-{pid}-{sequence}.tmp", target.to_string_lossy()),
+    }
+}
+
+/// Whether `name` is a temporary file [`temp_file_name`] named for `target`.
+fn is_temp_file_of(name: &std::ffi::OsStr, target: &std::ffi::OsStr) -> bool {
+    let (Some(name), Some(target)) = (name.to_str(), target.to_str()) else {
+        return false;
+    };
+    let number = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    name.strip_prefix(TEMP_PREFIX)
+        .and_then(|rest| rest.strip_prefix(target))
+        .and_then(|rest| rest.strip_prefix('-'))
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+        .and_then(|rest| rest.split_once('-'))
+        .is_some_and(|(pid, sequence)| number(pid) && number(sequence))
+}
 
 #[cfg(unix)]
 pub(crate) fn write_atomic_owner_only_retained(
@@ -1479,14 +1528,14 @@ fn write_atomic_owner_only_impl(
     relative: &Path,
     contents: &[u8],
     durability: Durability,
+    naming: TempName,
     observe: &mut dyn FnMut(&'static str),
 ) -> io::Result<()> {
     use rustix::fs::{AtFlags, Mode, OFlags, openat, renameat, unlinkat};
 
     let (parent, file_name) = open_parent_and_name(root, relative)?;
     reject_existing_non_file(&parent, &file_name)?;
-    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temp_name = format!(".zo-state-{}-{sequence}.tmp", std::process::id());
+    let temp_name = temp_file_name(naming, &file_name);
     let fd = openat(
         &parent,
         temp_name.as_str(),
@@ -1585,8 +1634,8 @@ fn remove_file_no_symlink_impl(root: &Path, relative: &Path) -> io::Result<()> {
 #[cfg(windows)]
 mod windows_impl {
     use super::{
-        AbsoluteDirLeaf, Component, ExclusiveFileLock, OsString, Path, PathBuf, TEMP_SEQUENCE,
-        invalid_path,
+        AbsoluteDirLeaf, Component, ExclusiveFileLock, OsString, Path, PathBuf, TempName,
+        invalid_path, temp_file_name,
     };
     use cap_fs_ext::{
         FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt as _,
@@ -1595,7 +1644,6 @@ mod windows_impl {
     use cap_std::fs::{Dir, File, OpenOptions, OpenOptionsExt as _};
     use cap_std::ambient_authority;
     use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
-    use std::sync::atomic::Ordering;
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE,
@@ -1944,6 +1992,7 @@ mod windows_impl {
         relative: &Path,
         contents: &[u8],
         durability: super::Durability,
+        naming: TempName,
         observe: &mut dyn FnMut(&'static str),
     ) -> io::Result<()> {
         let (parent, leaf) = open_parent(root, relative)?;
@@ -1954,11 +2003,7 @@ mod windows_impl {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let temp = OsString::from(format!(
-            ".zo-state-{}-{sequence}.tmp",
-            std::process::id()
-        ));
+        let temp = OsString::from(temp_file_name(naming, &leaf));
         let mut file = open_regular(&parent, &temp, true, false, true, false)?;
         let result = (|| {
             core_types::paths::restrict_windows_handle_owner_only(&mut file)?;
@@ -2096,9 +2141,10 @@ fn write_atomic_owner_only_impl(
     relative: &Path,
     contents: &[u8],
     durability: Durability,
+    naming: TempName,
     observe: &mut dyn FnMut(&'static str),
 ) -> io::Result<()> {
-    windows_impl::write_atomic_owner_only(root, relative, contents, durability, observe)
+    windows_impl::write_atomic_owner_only(root, relative, contents, durability, naming, observe)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2107,6 +2153,7 @@ fn write_atomic_owner_only_impl(
     _relative: &Path,
     _contents: &[u8],
     _durability: Durability,
+    _naming: TempName,
     _observe: &mut dyn FnMut(&'static str),
 ) -> io::Result<()> {
     Err(unsupported_secure_mutation())

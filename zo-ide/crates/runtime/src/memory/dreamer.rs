@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use core_types::paths::ZO_DIR_NAME;
-use crate::jsonl_log::{jsonl_files_newest_first, prune_jsonl_lines, read_jsonl_resumed};
+use crate::jsonl_log::{jsonl_files_newest_first, prune_jsonl_lines, read_jsonl_resumed, READ_CURSOR_FILE};
 #[cfg(not(unix))]
 use crate::jsonl_log::{jsonl_files_oldest_first, read_jsonl_lines};
 #[cfg(unix)]
@@ -628,7 +628,7 @@ pub fn record_auto_dream_failure(cwd: &Path, error: &DreamError) -> Result<(), D
     });
     let bytes = serde_json::to_vec_pretty(&payload)
         .map_err(|e| DreamError::Io(std::io::Error::other(e)))?;
-    write_text_atomic(
+    write_pass_file(
         &trace_base(cwd),
         &dir.join(AUTO_DREAM_ERROR_FILE),
         &String::from_utf8_lossy(&bytes),
@@ -672,6 +672,22 @@ fn write_text_atomic(root: &Path, path: &Path, content: &str) -> Result<(), Drea
     })?;
     crate::secure_fs::write_atomic_owner_only(root, relative, content.as_bytes())
         .map_err(DreamError::Io)
+}
+
+/// [`write_text_atomic`] for a file only an automatic pass writes: its
+/// temporary file is named for it, so the next pass can remove one that a pass
+/// stopped at its deadline left ([`remove_abandoned_pass_writes`]).
+fn write_pass_file(root: &Path, path: &Path, content: &str) -> Result<(), DreamError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| io_error("pass file path escaped its trusted root"))?;
+    crate::secure_fs::write_atomic_owner_only_named_temp(
+        root,
+        relative,
+        content.as_bytes(),
+        crate::secure_fs::Durability::Flushed,
+    )
+    .map_err(DreamError::Io)
 }
 
 fn prune_jsonl_files(dir: &Path, keep_files: usize) -> std::io::Result<()> {
@@ -3691,13 +3707,15 @@ pub fn try_auto_dream(
         return Ok(AutoDream::Locked);
     };
     // Another process may have completed between the cheap gate and the lock.
-    if let Some(until) = automatic_dream_not_due_until(&dir, SystemTime::now(), min_interval) {
+    let now = SystemTime::now();
+    if let Some(until) = automatic_dream_not_due_until(&dir, now, min_interval) {
         return Ok(AutoDream::NotDueUntil(until));
     }
+    remove_abandoned_pass_writes(cwd, now);
     let result = (|| {
         let report = dream_at_cwd(cwd, active_model)?;
         FsMemoryStore::local_at_cwd(cwd).decay_expired(now_secs())?;
-        write_marker(&trace_base(cwd), &dir.join(THROTTLE_MARKER))?;
+        write_pass_file(&trace_base(cwd), &dir.join(THROTTLE_MARKER), &now_secs().to_string())?;
         Ok(AutoDream::Ran(report))
     })();
     if let Err(error) = &result {
@@ -3940,14 +3958,19 @@ pub fn maybe_auto_dream_on_compaction(
     maybe_auto_dream(cwd, min_interval, active_model)
 }
 
+/// The folders whose logs an automatic pass reads, each beside its read cursor.
+fn automatic_curation_dirs(cwd: &Path) -> [PathBuf; 4] {
+    let dream = dream_dir(cwd);
+    [dream.clone(), trace_base(cwd).join(ZO_DIR_NAME).join("turns"),
+        dream.join(AUTOMATION_DIR), user_pattern_dir(cwd)]
+}
+
 /// Cheap file-presence prefilter for automatic curation. The actual
 /// promotion gate still rejects one-off noise, unsupported hypotheses, and
 /// transient tool output; this merely avoids opening every candidate/index
 /// file when neither producer has written any evidence at all.
 fn has_automatic_curation_evidence(cwd: &Path) -> bool {
-    let dream = dream_dir(cwd);
-    [dream.clone(), trace_base(cwd).join(ZO_DIR_NAME).join("turns"),
-        dream.join(AUTOMATION_DIR), user_pattern_dir(cwd)]
+    automatic_curation_dirs(cwd)
         .into_iter().any(|dir| {
             if !fs::symlink_metadata(&dir).is_ok_and(|metadata| metadata.file_type().is_dir()) {
                 return false;
@@ -3958,6 +3981,23 @@ fn has_automatic_curation_evidence(cwd: &Path) -> bool {
                     && entry.metadata().is_ok_and(|metadata| metadata.len() > 0)
             }))
         })
+}
+
+/// Remove what an automatic pass stopped at its deadline left half-written:
+/// the temporary files of the read cursors, the marker and the error file
+/// that were last written more than [`AUTO_DREAM_PASS_DEADLINE`] before `now`.
+/// Only a pass that holds the lock calls it, and a writer still at work wrote
+/// its temporary file within the deadline, so that one stays.
+fn remove_abandoned_pass_writes(cwd: &Path, now: SystemTime) {
+    let Some(cutoff) = now.checked_sub(AUTO_DREAM_PASS_DEADLINE) else {
+        return;
+    };
+    let dream = dream_dir(cwd);
+    let cursors = automatic_curation_dirs(cwd).map(|dir| (dir, READ_CURSOR_FILE));
+    let pass_files = [(dream.clone(), THROTTLE_MARKER), (dream, AUTO_DREAM_ERROR_FILE)];
+    for (dir, file) in cursors.into_iter().chain(pass_files) {
+        crate::secure_fs::remove_abandoned_temp_files(&dir, Path::new(file), cutoff);
+    }
 }
 
 /// Read the unix-seconds timestamp from the throttle marker, if present and

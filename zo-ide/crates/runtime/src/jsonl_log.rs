@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 /// The file beside a directory's logs that keeps where the last pass stopped
 /// reading each one ([`read_jsonl_resumed`]).
-const READ_CURSOR_FILE: &str = ".read-cursor.json";
+pub(crate) const READ_CURSOR_FILE: &str = ".read-cursor.json";
 /// A cursor larger than this reads as missing: that pass reads every log in full.
 const MAX_READ_CURSOR_BYTES: u64 = 64 * 1024 * 1024;
 /// How many bytes before a log's read offset its fingerprint covers.
@@ -547,7 +547,7 @@ fn load_read_cursor<T: DeserializeOwned>(dir: &Path) -> Vec<FileCursor<T>> {
 
 fn save_read_cursor<T: Serialize>(dir: &Path, cursor: &ReadCursor<T>) {
     if let Ok(bytes) = serde_json::to_vec(cursor) {
-        let _ = crate::secure_fs::write_atomic_owner_only_with(
+        let _ = crate::secure_fs::write_atomic_owner_only_named_temp(
             dir,
             Path::new(READ_CURSOR_FILE),
             &bytes,
