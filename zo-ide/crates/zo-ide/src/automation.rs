@@ -13,7 +13,10 @@ pub struct Invocation {
     pub review: bool,
     pub used_turns: usize,
     pub used_output_tokens: u32,
+    /// Last turn status controls the process result without blocking recovery.
     pub failure: Option<String>,
+    /// Only constraints that must stop this invocation block another prompt.
+    pub blocked: Option<String>,
 }
 
 pub struct OutputSchema {
@@ -50,10 +53,22 @@ impl OutputSchema {
 
 impl Invocation {
     pub fn check_remaining(&self) -> Result<(), String> {
-        if let Some(failure) = &self.failure { return Err(failure.clone()); }
+        if let Some(failure) = &self.blocked { return Err(failure.clone()); }
         if self.max_turns.is_some_and(|max| self.used_turns >= max) { return Err("invocation turn budget exhausted".into()); }
         if self.max_output_tokens.is_some_and(|max| self.used_output_tokens >= max) { return Err("invocation output-token budget exhausted".into()); }
         Ok(())
+    }
+
+    pub fn observe_turn(&mut self, outcome: &Result<runtime::TurnSummary, String>) {
+        match outcome {
+            Ok(_) => self.failure = None,
+            Err(error) => {
+                self.failure = Some(error.clone());
+                if self.max_turns.is_some() || self.max_output_tokens.is_some() || self.schema.is_some() || self.review {
+                    self.blocked = Some(error.clone());
+                }
+            }
+        }
     }
 
     pub fn record(&mut self, summary: &runtime::TurnSummary) -> Result<(), String> {
@@ -66,7 +81,7 @@ impl Invocation {
         } else if self.max_output_tokens.is_some_and(|max| self.used_output_tokens > max) {
             Some("invocation output-token budget exhausted".to_string())
         } else { None };
-        if let Some(failure) = failure { self.failure = Some(failure.clone()); return Err(failure); }
+        if let Some(failure) = failure { self.failure = Some(failure.clone()); self.blocked = Some(failure.clone()); return Err(failure); }
         Ok(())
     }
 }

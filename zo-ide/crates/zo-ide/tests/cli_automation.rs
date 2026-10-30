@@ -24,7 +24,7 @@ impl Fixture {
         fs::write(home.join("settings.json"), json!({"smart":{"autoClassifier":"off","orchestration":"model"}}).to_string()).unwrap();
         Self { root, cwd: cwd.canonicalize().unwrap(), home, store }
     }
-    async fn run(&self, args: &[&str], stdin: &str, service: Option<&ScriptedAnthropicService>) -> Output {
+    fn command(&self, args: &[&str], service: Option<&ScriptedAnthropicService>) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_zo"));
         command.env_clear();
         for name in ["PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT"] {
@@ -40,6 +40,10 @@ impl Fixture {
         if let Some(service) = service {
             command.env("ANTHROPIC_API_KEY", "test-dummy-key").env("ANTHROPIC_BASE_URL", service.base_url());
         }
+        command
+    }
+    async fn run(&self, args: &[&str], stdin: &str, service: Option<&ScriptedAnthropicService>) -> Output {
+        let mut command = self.command(args, service);
         let mut child = command.spawn().unwrap();
         child.stdin.take().unwrap().write_all(stdin.as_bytes()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(90), child.wait_with_output()).await.expect("CLI timed out").unwrap()
@@ -137,7 +141,7 @@ async fn old_sessions_are_searchable_with_query_preserved_across_pages() {
     let f=Fixture::new();
     for n in 0..260u64 {
         let path=f.seed(&format!("session-{n:02}"),&format!("eligible query {n}"));
-        fs::File::open(path).unwrap().set_modified(std::time::UNIX_EPOCH+Duration::from_secs(n+1)).unwrap();
+        fs::OpenOptions::new().write(true).open(path).unwrap().set_modified(std::time::UNIX_EPOCH+Duration::from_secs(n+1)).unwrap();
     }
     f.seed("blank","   ");
     let result=f.run(&["session","list","--query","query 0","--limit","1","--json"],"",None).await; success(&result);
@@ -360,4 +364,42 @@ async fn management_help_works_without_valid_configuration_or_a_provider() {
     }
     assert!(fs::read_dir(f.store.join("sessions")).unwrap().next().is_none());
     assert!(!f.run(&["plugin","enable","missing"],"",None).await.status.success());
+}
+
+#[tokio::test(flavor="multi_thread", worker_threads=2)]
+async fn persistent_plain_session_reports_last_error_and_recovers_the_next_prompt() {
+    use tokio::io::AsyncBufReadExt;
+    for recover in [false, true] {
+        let f=Fixture::new(); let service=ScriptedAnthropicService::error_then_text("RECOVERED_SECOND_REPLY").await.unwrap();
+        let mut args=OPTIONS.to_vec(); args.push("--json");
+        let mut child=f.command(&args,Some(&service)).spawn().unwrap();
+        let mut input=child.stdin.take().unwrap();
+        let mut output=tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        input.write_all(b"first persistent prompt\n").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20),async {
+            loop {
+                let line=output.next_line().await.unwrap().expect("stream closed before first error");
+                if line.contains("turn ended:") && line.contains("scripted first-turn failure") { break; }
+            }
+        }).await.expect("first turn never reported its failure");
+        if recover {
+            input.write_all(b"second distinct persistent prompt\n").await.unwrap();
+            let mut seen=Vec::new();
+            let recovered=tokio::time::timeout(Duration::from_secs(10),async {
+                loop {
+                    let line=output.next_line().await.unwrap().expect("stream closed before recovery");
+                    let found=line.contains("RECOVERED_SECOND_REPLY"); seen.push(line);
+                    if found { break; }
+                }
+            }).await;
+            assert!(recovered.is_ok(),"second prompt did not recover: {seen:?}");
+        }
+        // EOF finishes the current turn without cancelling a valid answer.
+        drop(input);
+        let status=tokio::time::timeout(Duration::from_secs(20),child.wait()).await.unwrap().unwrap();
+        assert_eq!(status.success(),recover,"the exit must describe the last completed turn");
+        let bodies=service.request_bodies().await;
+        assert_eq!(bodies.len(),if recover {2} else {1});
+        if recover { assert!(bodies[1].contains("second distinct persistent prompt")); }
+    }
 }

@@ -968,8 +968,19 @@ impl PlainSession {
 
     /// 스트리밍 턴 하나를 이미지 첨부와 함께 실행한다. 이미지 쌍은 엔진의
     /// `push_user_with_images` 입력과 같은 `(media_type, base64)` 모양이다.
-    #[expect(clippy::too_many_lines, reason = "shared turn entry keeps scheduled dispatch and model lifecycle in order")]
     pub(crate) async fn run_turn_with_images(
+        &mut self, input: &str, images: Vec<(String, String)>,
+        block_tx: tokio::sync::mpsc::Sender<RenderBlock>,
+        prompter: std::sync::Arc<dyn runtime::permission::PermissionPrompter>,
+        hook_abort_signal: HookAbortSignal, user_cancel_requested: Arc<AtomicBool>,
+    ) -> Result<runtime::TurnSummary, String> {
+        let outcome = Box::pin(self.run_turn_with_images_inner(input, images, block_tx, prompter, hook_abort_signal, user_cancel_requested)).await;
+        self.invocation.observe_turn(&outcome);
+        outcome
+    }
+
+    #[expect(clippy::too_many_lines, reason = "shared turn entry keeps scheduled dispatch and model lifecycle in order")]
+    async fn run_turn_with_images_inner(
         &mut self,
         input: &str,
         images: Vec<(String, String)>,
@@ -978,7 +989,7 @@ impl PlainSession {
         hook_abort_signal: HookAbortSignal,
         user_cancel_requested: Arc<AtomicBool>,
     ) -> Result<runtime::TurnSummary, String> {
-        self.invocation.check_remaining().inspect_err(|failure| self.invocation.failure = Some(failure.clone()))?;
+        self.invocation.check_remaining()?;
         let schema_input = self.invocation.schema.as_ref().map(|schema| schema.instruction(input));
         let input = schema_input.as_deref().unwrap_or(input);
         if let Some(payload) = self.pending_scheduled_workflow.take() {
@@ -1094,7 +1105,7 @@ impl PlainSession {
         self.end_task_continuity(origin, user_cancel_requested.load(Ordering::SeqCst));
         let mut summary = match result {
             Ok(summary) => summary,
-            Err(error) => { if self.headless || self.invocation.max_turns.is_some() || self.invocation.max_output_tokens.is_some() { self.invocation.failure = Some(error.clone()); } return Err(error); }
+            Err(error) => return Err(error),
         };
         self.persist().map_err(|error| error.to_string())?;
         if let Some(inner) = self.runtime.try_runtime() {
@@ -1107,7 +1118,7 @@ impl PlainSession {
             let answer = summary.assistant_messages.last().map(|message| message.blocks.iter().filter_map(|block| match block {
                 core_types::ContentBlock::Text { text } => Some(text.as_str()), _ => None,
             }).collect::<String>()).unwrap_or_default();
-            if let Err(error) = schema.validate(&answer) { self.invocation.failure = Some(error.clone()); return Err(error); }
+            schema.validate(&answer)?;
         }
         Ok(summary)
     }

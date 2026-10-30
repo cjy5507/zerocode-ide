@@ -19,6 +19,8 @@ enum Script {
     #[allow(dead_code)] // Used by the separate quality_baseline binary.
     Baseline { task: String, root: String, patch: String },
     Text(String),
+    #[allow(dead_code)]
+    ErrorThenText(String),
     BashRead { final_text: String },
     /// One `Agent` spawn, then a final answer. Drives the delegation cell and
     /// the mid-turn steering path.
@@ -148,6 +150,12 @@ impl Script {
         match self {
             Self::Baseline { task, root, patch } => baseline_response(task, root, patch, request),
             Self::Text(text) => text_sse("msg_text_script", text),
+            Self::ErrorThenText(_) if request_index == 0 => {
+                let mut body = String::new();
+                append_sse(&mut body, "error", &json!({"type":"error", "error":{"type":"invalid_request_error", "message":"scripted first-turn failure"}}));
+                body
+            }
+            Self::ErrorThenText(text) => text_sse("msg_recovered_script", text),
             Self::BashRead { .. } if request_index == 0 => bash_read_sse(),
             Self::BashRead { final_text } => text_sse("msg_bash_read_final", final_text),
             Self::Bash { command, .. } if request_index == 0 => bash_sse(command),
@@ -360,6 +368,12 @@ impl ScriptedAnthropicService {
     /// Respond with one text message containing exactly `text`.
     pub async fn text(text: impl Into<String>) -> io::Result<Self> {
         Self::spawn(Script::Text(text.into())).await
+    }
+
+    /// A failed turn followed by a valid response on the next request.
+    #[allow(dead_code)] // cli_automation; this fixture is shared by e2e binaries.
+    pub async fn error_then_text(text: impl Into<String>) -> io::Result<Self> {
+        Self::spawn(Script::ErrorThenText(text.into())).await
     }
 
     /// Respond first with Bash and Read tool calls, then with `final_text`.
