@@ -1228,22 +1228,40 @@ function composerCompactCommand(run, spec) {
   return (run.wireLog?.commands ?? []).some((row) => row.name === command) ? command : null;
 }
 
-/* 이 실행에서 사람의 말을 고쳐 다시 보낼 수 있는가(시안 C10, t-82196) — 카탈로그가
- * 그 CLI의 되감기 명령을 알고(Claude Code의 `/rewind`), 대화가 판의 것일 때의
- * 그 명령, 아니면 `null`. 명령은 CLI 자신의 고르개를 판의 화면에 연다: 선(wire)의
- * 페이지와 헬퍼의 페이지에는 그 화면이 없다. */
-function composerRewindCommand(run, spec) {
-  const command = spec?.rewind_command ?? null;
-  if (!command || run.wire || run.term === undefined || isHelperPage(run)) return null;
-  return command;
+/* 이 대화에서 지금 사람의 말을 고쳐 다시 보낼 수 있는가(시안 C10, t-82196) —
+ * 카탈로그가 그 CLI의 되감기 명령을 알고(Claude Code의 `/rewind`), 대화가 판의
+ * 것이고(선(wire)의 페이지와 헬퍼의 페이지에는 고르개를 열 화면이 없다), 판이 그
+ * 줄을 받을 때. 받는다는 증거는 훅의 말이다: 에이전트가 턴을 끝냈다(「done」) —
+ * 일하는 중, 묻는 중(권한 카드), 에이전트가 떠난 판, 아직 말이 없는 판은 아니다.
+ * 그리고 run이 앉은 판(워커·코디)이 아니다: 그 대화를 되감는 것은 run의 일이다.
+ * 백엔드(`pane_rewind`)가 치기 직전에 같은 것을 다시 본다. */
+function paneRewindable(run, spec) {
+  if (!spec?.rewind_command || run.wire || run.term === undefined || isHelperPage(run)) return false;
+  if (hookStates.get(run.term) !== "done") return false;
+  return !paneLedger.has(run.term) && !coordinatorSeats.some((seat) => seat.term === run.term);
 }
 
-/* 고쳐 보내기를 눌렀다: 대화를 입은 판은 터미널로 돌아가고(`showPaneScreen`), 명령은
- * 모델·권한 칩의 명령처럼 판의 길로 간다 — 사람의 말로 세지 않는다(`road`,
- * t-57712). 어느 말로 돌아갈지는 CLI의 고르개에서 사람이 고른다. */
-async function rewindPane(run, command) {
+/* 백엔드가 되감기를 열지 않은 까닭 — 그 낱말을 사람의 한 문장으로. */
+const PANE_REWIND_REFUSALS = Object.freeze({
+  "rewind-busy": () => t("worker.rewindBusy", "에이전트가 일하거나 묻는 중이라 되감기를 열지 않았습니다 — 턴이 끝난 뒤 다시 누르세요"),
+  "rewind-own-words": () => t("worker.rewindOwnWords", "터미널 입력줄에 쓰다 만 글이 있어 되감기를 열지 않았습니다 — 그 글을 보내거나 지운 뒤 다시 누르세요"),
+  "rewind-seat": () => t("worker.rewindSeat", "워커나 코디가 앉은 판이라 되감기를 열지 않았습니다"),
+});
+
+/* 고쳐 보내기를 눌렀다: 판에 치는 것은 백엔드의 문 하나다(`pane_rewind` — 판을
+ * 다시 보고, 메뉴가 서 있으면 아무것도 치지 않는다). 창은 판에 아무것도 직접
+ * 치지 않는다. 그 문이 쳤을 때만 대화를 입은 판을 터미널로 돌려 CLI의 고르개를
+ * 앞에 세운다 — 어느 말로 돌아갈지는 거기서 사람이 고른다. 거절이면 한 문장이고,
+ * 대화는 그대로 선다. */
+async function rewindPane(run) {
+  try {
+    await invoke("pane_rewind", { term: run.term });
+  } catch (error) {
+    const words = PANE_REWIND_REFUSALS[String(error)]?.() ?? String(error);
+    if (!standingToast(words, "halt")) toast(words, "halt");
+    return;
+  }
   showPaneScreen(run.term);
-  await deliverToPane(run.term, command, null, "rewind");
 }
 
 /* 창 크기를 말로 — 모르면 「창 크기 모름」(시안 C9). 지어낸 분모는 툴팁에서도

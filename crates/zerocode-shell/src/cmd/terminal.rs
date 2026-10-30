@@ -2388,6 +2388,68 @@ pub(crate) fn term_paste(
     Ok(())
 }
 
+/// Open the CLI's own way back to an earlier message on a pane's screen —
+/// 「여기서 고쳐 보내기」 under the person's words (draft C10, t-82196).
+///
+/// The line is the catalog's (`rewind_command`) for the agent this window
+/// knows runs in the pane, never one the page names. It is typed the way the
+/// hand-over types `/exit` — its text, then its Enter (`ask::line_keys`) —
+/// and its first key goes through the answer door
+/// ([`answer_door::type_rewind`]): only into a pane no run sits in, whose
+/// agent ended its turn and asks nothing (the hook's word, read now, not
+/// when the button stood), whose line holds none of the person's unsent
+/// words, and on whose screen no menu stands — read in the same hold as the
+/// write. A refusal types nothing and returns the word the page says it with.
+///
+/// A chip's write, never the person's words (t-57712): the window log says
+/// what was opened, and a delivery yields to the line it reached.
+#[tauri::command(async)]
+pub(crate) fn pane_rewind(app: AppHandle, state: State<'_, AppState>, term: TermId) -> Result<(), String> {
+    let agent = state
+        .agent_terms()
+        .get(&term)
+        .copied()
+        .ok_or("no agent this window knows runs in that pane")?;
+    let command = zerocode_core::agent::agent_voice(agent)
+        .rewind_command
+        .ok_or_else(|| format!("{agent} has no way back this window knows"))?;
+    // Each fact read under its own lock, one at a time.
+    let worker_seat = state.workers().values().any(|(seat, _)| *seat == term);
+    let seated = worker_seat
+        || orchestration::seated_coordinators()
+            .iter()
+            .any(|seat| seat.term == term);
+    let between_turns = state
+        .pane_states()
+        .get(&term)
+        .is_some_and(|held| held.state == zerocode_core::hook::HookState::Done);
+    let pane = crate::answer_door::RewindPane {
+        seated,
+        between_turns,
+        own_words: crate::human_input::holds_own_words(term),
+    };
+    let (groups, step) = zerocode_core::ask::line_keys(command);
+    let Some((first, rest)) = groups.split_first() else {
+        return Err(format!("{agent}'s way back has nothing to type"));
+    };
+    with_terminal(&state, term, |pty| {
+        pty.terminal_mut().grid_mut().view_to_bottom();
+        Ok(())
+    })?;
+    let held = state
+        .terminals()
+        .handle(term)
+        .ok_or("터미널이 떠 있지 않습니다")?;
+    crate::answer_door::type_rewind(&held, &pane, &key_group_bytes(first))?;
+    state.cadence().wake();
+    crate::human_input::keyed(term);
+    std::thread::sleep(step);
+    walk_key_groups(&state, term, rest, step)?;
+    note_chip(state.local_data_root(), term, ChipRoad::Rewind);
+    notify_call::note_hand(&app, term);
+    Ok(())
+}
+
 /// Answer an agent's question from a card, by walking its own TUI.
 ///
 /// The keys are the measured protocol (`zerocode_core::ask`), and this

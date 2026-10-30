@@ -7,9 +7,9 @@
 //! digit in somebody else's menu, an Escape that stops a running turn.
 //!
 //! So every road that types an answer a card prepared (`answer_ask`,
-//! `answer_approval`) — and the one line the window types by itself that a
-//! menu would take for an answer (the hand-over's exit command) — goes
-//! through here, and here the screen is read again under the pane's own
+//! `answer_approval`) — and the lines the window types by itself that a menu
+//! would take for an answer (the hand-over's exit command, a CLI's way back
+//! to an earlier message) — goes through here, and here the screen is read again under the pane's own
 //! terminal lock, in the same hold as the write: [`type_if_up`] writes only if
 //! the screen shows what the caller needs. The pump needs that lock to move
 //! output into the grid, so the screen read and the key are not separated by a
@@ -181,6 +181,53 @@ pub(super) fn type_if_up(
     }
     pty.write_input(bytes)?;
     Ok(true)
+}
+
+/// Why the window would not type a CLI's way back to an earlier message
+/// (draft C10, t-82196) — the words the page turns into its sentence: the
+/// pane's agent is not between turns, or a menu stands on its screen.
+pub(crate) const REWIND_BUSY: &str = "rewind-busy";
+
+/// The person's own unsent words are on the pane's line: the way back would
+/// be typed after them and sent with them.
+pub(crate) const REWIND_OWN_WORDS: &str = "rewind-own-words";
+
+/// A run's worker or coordinator sits in the pane: winding its conversation
+/// back is the run's business, and the ledger would not hear of it.
+pub(crate) const REWIND_SEAT: &str = "rewind-seat";
+
+/// What the window knows of a pane before it types a CLI's way back into it.
+pub(super) struct RewindPane {
+    /// A run's worker or coordinator sits in it.
+    pub(super) seated: bool,
+    /// Its agent ended its turn and asks nothing (the hook's word).
+    pub(super) between_turns: bool,
+    /// The person's own words wait unsent on its line.
+    pub(super) own_words: bool,
+}
+
+/// The first key group of a CLI's way back — Claude Code's `/rewind` — typed
+/// into the pane only when the pane takes it (draft C10, t-82196): no run
+/// sits in it, its agent is between turns, its line holds none of the
+/// person's words, and — read in the same hold as the write — no menu stands
+/// on its screen, whose Enter would take the highlighted row: a permission
+/// nobody gave. The hand-over's exit command takes the same last look. A
+/// refusal types nothing and carries the word the page says it with.
+pub(super) fn type_rewind(held: &HeldTerminal, pane: &RewindPane, first: &[u8]) -> Result<(), String> {
+    if pane.seated {
+        return Err(REWIND_SEAT.to_string());
+    }
+    if !pane.between_turns {
+        return Err(REWIND_BUSY.to_string());
+    }
+    if pane.own_words {
+        return Err(REWIND_OWN_WORDS.to_string());
+    }
+    match type_if_up(held, &Expect::no_menu(), first) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(REWIND_BUSY.to_string()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// Type one key group of a walk, refusing if the question is gone.
@@ -1134,6 +1181,39 @@ mod tests {
             Some(true)
         );
         assert_eq!(pane.typed(), vec!["/exit"]);
+    }
+
+    /// A CLI's way back the window types by itself (draft C10, t-82196) goes
+    /// into a pane only when the pane is the person's, between turns, with
+    /// none of their words on its line — and never onto a menu, where its
+    /// Enter would take the highlighted row.
+    #[test]
+    fn a_way_back_is_typed_only_into_a_pane_that_takes_it() {
+        let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+        let free = RewindPane {
+            seated: false,
+            between_turns: true,
+            own_words: false,
+        };
+        assert_eq!(
+            type_rewind(&pane.held, &free, b"/rewind"),
+            Err(REWIND_BUSY.to_string())
+        );
+        assert!(pane.typed().is_empty(), "a way back was typed into a menu");
+        pane.draw("● Done.\n\n❯ \n");
+        for (refused, word) in [
+            (RewindPane { seated: true, ..free }, REWIND_SEAT),
+            (RewindPane { between_turns: false, ..free }, REWIND_BUSY),
+            (RewindPane { own_words: true, ..free }, REWIND_OWN_WORDS),
+        ] {
+            assert_eq!(
+                type_rewind(&pane.held, &refused, b"/rewind"),
+                Err(word.to_string())
+            );
+        }
+        assert!(pane.typed().is_empty(), "a refused way back was typed");
+        assert_eq!(type_rewind(&pane.held, &free, b"/rewind"), Ok(()));
+        assert_eq!(pane.typed(), vec!["/rewind"]);
     }
 
     /// A menu takes one row: the answer's single pick of a single-select

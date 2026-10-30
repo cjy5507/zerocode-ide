@@ -15359,7 +15359,8 @@ function standAnswerActions(list, row) {
 function watchAnswerActions(list) {
   const stand = (event) => {
     standAnswerActions(list, event.target.closest?.(".helper-turn.is-assistant"));
-    standRewindDoor(list, event.target.closest?.(".helper-turn.is-user"));
+    const person = event.target.closest?.(".helper-turn.is-user");
+    if (person) standRewindDoor(list, person);
   };
   list.addEventListener("pointerover", stand);
   list.addEventListener("focusin", stand);
@@ -15379,21 +15380,34 @@ function rewindDoorNode(list) {
   door.dataset.tip = t("worker.rewindTip", "터미널에서 되감기를 엽니다 — 돌아갈 말을 거기서 고릅니다");
   door.addEventListener("click", () => {
     const run = list.__run;
-    const command = run ? composerRewindCommand(run, agentSpecOf(run)) : null;
-    if (command) void rewindPane(run, command).catch((error) => showError(error));
+    if (run && paneRewindable(run, agentSpecOf(run))) void rewindPane(run);
   });
   return door;
 }
 
-function standRewindDoor(list, row) {
-  if (!row || row.__turn?.role !== "user" || !list.contains(row)) return;
+/* Stand the list's way back under `row` — or, given none, leave it where it
+ * stands, or under the newest words when it stands nowhere — while the pane
+ * takes the line; take it down while it does not (`paneRewindable`). Asked by
+ * every paint, so a turn that starts takes it down and one that ends stands
+ * it again. */
+function standRewindDoor(list, row = null) {
   const run = list.__run;
-  if (!run || !composerRewindCommand(run, agentSpecOf(run))) {
+  if (!run || !paneRewindable(run, agentSpecOf(run))) {
     list.__rewind?.remove();
     return;
   }
+  if (row && (row.__turn?.role !== "user" || !list.contains(row))) return;
   const door = (list.__rewind ??= rewindDoorNode(list));
-  if (door.parentElement !== row) row.appendChild(door);
+  const at = row ?? (door.parentElement && list.contains(door) ? null : newestPersonRow(list));
+  if (at && door.parentElement !== at) at.appendChild(door);
+}
+
+/* The person's newest words on the page. */
+function newestPersonRow(list) {
+  for (let row = list.lastElementChild; row; row = row.previousElementSibling) {
+    if (row.__turn?.role === "user") return row;
+  }
+  return null;
 }
 
 /* The catalog's row for the agent a run speaks for. */
@@ -15998,8 +16012,8 @@ function syncHelperTurns(list, run) {
   // its frame does (t-55369).
   if (people.length) requestAnimationFrame(() => clipPersonRows(people.filter((row) => row.isConnected)));
   // The way back stands under the newest words until a hand reaches others —
-  // never pulled from under the keyboard's focus (C10).
-  if (people.length && document.activeElement !== list.__rewind) standRewindDoor(list, people.at(-1));
+  // never pulled from under the keyboard's focus — while the pane takes it (C10).
+  standRewindDoor(list, people.length && document.activeElement !== list.__rewind ? people.at(-1) : null);
   if (follow && !reported) scrollHelperToBottom(list);
   // Whether anything stands above, and whether the newest turns are held.
   paintEarlierDoor(list);

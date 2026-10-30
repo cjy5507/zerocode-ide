@@ -521,9 +521,13 @@ export async function testPaneConversation(browser, origin, ok) {
  * CLI names its way back to an earlier message — Claude Code's `/rewind` —
  * the person's words wear 「여기서 고쳐 보내기」: one door in the list, under
  * the newest words and carried to the ones a hand reaches, seen while a hand
- * is on them. A press turns the pane to its terminal and types the CLI's
- * command there, as a chip's command, not the person's words. A CLI that
- * names no such command, and a wire's page, wear no door. */
+ * is on them. It stands only while the pane takes the line: its agent between
+ * turns (the hook's 「done」), no question up, a pane no run sits in. A press
+ * asks the backend's one door (`pane_rewind`), which looks at the pane again
+ * and types through the answer door — the page itself types nothing into the
+ * pane — and only once that door typed is the pane turned to its terminal. A
+ * refusal is one sentence, and the conversation stays. A CLI that names no
+ * such command, and a wire's page, wear no door (review r1 P1-1, P2-1~3). */
 export async function testPaneRewind(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -539,61 +543,125 @@ export async function testPaneRewind(browser, origin, ok) {
         if (ms) await new Promise((done) => setTimeout(done, ms));
         await window.__PAINTED__();
       };
-      const sent = [];
-      window.__ANSWER__.term_paste = (args) => (sent.push(["paste", args.term, args.text, args.road ?? null]), null);
-      window.__ANSWER__.term_key = (args) => (sent.push(["key", args.term, args.press.key]), null);
+      // What the page sends the pane: nothing of its own — only the backend's door.
+      const typed = [];
+      const asked = [];
+      window.__ANSWER__.term_paste = (args) => (typed.push(["paste", args.term, args.text, args.road ?? null]), null);
+      window.__ANSWER__.term_key = (args) => (typed.push(["key", args.term, args.press.key]), null);
+      let refusal = null;
+      window.__ANSWER__.pane_rewind = (args) => {
+        asked.push(args.term);
+        if (refusal) throw refusal;
+        return null;
+      };
       window.__ANSWER__.pane_log = (args) => ({ found: true, next: turns.length, turns: args.after == null ? turns : turns.slice(args.after),
         skipped: false, more: false, folded: false, model: "claude-opus-5" });
-      const open = async (agent) => {
+      const open = async (agent, state) => {
         const term = await openTermTab({ placement: "tab" });
         paneAgents.set(term, agent);
-        hookStates.set(term, "idle");
+        if (state) hookStates.set(term, state);
         await setPaneChat(term, true, { wire: false });
         await pollHelperPages();
         await settle(60);
         return term;
       };
-      const term = await open("claude");
-      const list = document.querySelector(`.pane-chat[data-term="${term}"] .helper-turns`);
+      const listOf = (term) => document.querySelector(`.pane-chat[data-term="${term}"] .helper-turns`);
+      const doorsOf = (term) => [...(listOf(term)?.querySelectorAll(".helper-rewind") ?? [])];
+      const toasts = () => [...document.querySelectorAll(".toasts .toast")].map((one) => one.textContent);
+      // Between turns: the door stands.
+      const term = await open("claude", "done");
+      const list = listOf(term);
       const people = [...list.querySelectorAll(":scope > .helper-turn.is-user")];
-      const doors = () => [...list.querySelectorAll(".helper-rewind")];
       const seen = {
-        doors: doors().length,
-        onNewest: doors()[0]?.parentElement === people.at(-1),
-        words: doors()[0]?.textContent ?? "",
+        doors: doorsOf(term).length,
+        onNewest: doorsOf(term)[0]?.parentElement === people.at(-1),
+        words: doorsOf(term)[0]?.textContent ?? "",
         wantWords: t("worker.rewindHere", "여기서 고쳐 보내기"),
-        tip: doors()[0]?.dataset.tip ?? "",
+        tip: doorsOf(term)[0]?.dataset.tip ?? "",
         wantTip: t("worker.rewindTip", "터미널에서 되감기를 엽니다 — 돌아갈 말을 거기서 고릅니다"),
-        restOpacity: doors()[0] ? getComputedStyle(doors()[0]).opacity : null,
+        restOpacity: doorsOf(term)[0] ? getComputedStyle(doorsOf(term)[0]).opacity : null,
       };
       // A hand on the first words carries the door there, the list's one.
       const height = list.scrollHeight;
       people[0].querySelector(".helper-said").dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
       await settle();
-      seen.carried = doors().length === 1 && doors()[0].parentElement === people[0];
+      seen.carried = doorsOf(term).length === 1 && doorsOf(term)[0]?.parentElement === people[0];
       seen.sameHeight = list.scrollHeight === height;
-      doors()[0].focus();
+      doorsOf(term)[0]?.focus();
       await settle(400);
-      seen.focusOpacity = getComputedStyle(doors()[0]).opacity;
+      seen.focusOpacity = doorsOf(term)[0] ? getComputedStyle(doorsOf(term)[0]).opacity : null;
+      // Refused by the backend: one sentence, nothing typed, the conversation stays.
+      for (const [word, key, fallback] of [
+        ["rewind-busy", "worker.rewindBusy", "에이전트가 일하거나 묻는 중이라 되감기를 열지 않았습니다 — 턴이 끝난 뒤 다시 누르세요"],
+        ["rewind-own-words", "worker.rewindOwnWords", "터미널 입력줄에 쓰다 만 글이 있어 되감기를 열지 않았습니다 — 그 글을 보내거나 지운 뒤 다시 누르세요"],
+        ["rewind-seat", "worker.rewindSeat", "워커나 코디가 앉은 판이라 되감기를 열지 않았습니다"],
+      ]) {
+        refusal = word;
+        doorsOf(term)[0]?.click();
+        await settle(100);
+        seen[word] = { said: toasts().includes(t(key, fallback)), stays: paneChatOn(term) };
+      }
+      refusal = null;
       seen.chatBefore = paneChatOn(term);
-      doors()[0].click();
-      await settle(800);
+      doorsOf(term)[0]?.click();
+      await settle(200);
       seen.chatAfter = paneChatOn(term);
-      seen.sent = JSON.stringify(sent);
-      seen.wantSent = JSON.stringify([["paste", term, "/rewind", "rewind"], ["key", term, "Enter"]]);
+      seen.asked = JSON.stringify(asked);
+      seen.wantAsked = JSON.stringify([term, term, term, term]);
+      seen.typed = JSON.stringify(typed);
+      // A turn that starts takes the door down; one that ends stands it again —
+      // on the pane in front, before any other pane is opened.
+      await setPaneChat(term, true, { wire: false });
+      await settle(60);
+      hookStates.set(term, "working");
+      paintPaneChat(term);
+      await settle(60);
+      seen.downWhileWorking = doorsOf(term).length;
+      hookStates.set(term, "done");
+      paintPaneChat(term);
+      await settle(60);
+      seen.upAgain = doorsOf(term).length;
+      // No door while the pane does not take the line: at work, asking (its
+      // permission card up), its agent gone, its state not yet said.
+      seen.notBetween = {};
+      for (const state of ["working", "needs-attention", "idle", null]) {
+        const other = await open("claude", state);
+        seen.notBetween[state ?? "unknown"] = doorsOf(other).length;
+      }
+      // A pane a run sits in — a worker's, a coordinator's — wears none.
+      const worker = await open("claude", null);
+      paneLedger.set(worker, { run: "run-1", worker: "w-1", task: "", ledger: "working" });
+      hookStates.set(worker, "done");
+      paintPaneChat(worker);
+      await settle(60);
+      seen.workerDoors = doorsOf(worker).length;
+      const coordinator = await open("claude", null);
+      coordinatorSeats = [...coordinatorSeats, { run: "run-1", name: "coordinator", term: coordinator, held: true, generation: 1, vacatedMs: null }];
+      hookStates.set(coordinator, "done");
+      paintPaneChat(coordinator);
+      await settle(60);
+      seen.coordinatorDoors = doorsOf(coordinator).length;
       // zo names no way back: its pane wears no door.
-      const zo = await open("zo");
-      seen.zoDoors = document.querySelectorAll(`.pane-chat[data-term="${zo}"] .helper-rewind`).length;
-      seen.zoPeople = document.querySelectorAll(`.pane-chat[data-term="${zo}"] .helper-turn.is-user`).length;
+      const zo = await open("zo", "done");
+      seen.zoDoors = doorsOf(zo).length;
+      seen.zoPeople = listOf(zo)?.querySelectorAll(".helper-turn.is-user").length ?? 0;
       return seen;
     }, turns);
-    ok("C10: a Claude Code pane's conversation stands one 「여기서 고쳐 보내기」 under the person's newest words, hidden until a hand is on them, with what it does on its hover",
+    ok("C10: a Claude Code pane between turns stands one 「여기서 고쳐 보내기」 under the person's newest words, hidden until a hand is on them, with what it does on its hover",
       seen.doors === 1 && seen.onNewest && seen.words === seen.wantWords && seen.tip === seen.wantTip && seen.restOpacity === "0",
       JSON.stringify(seen));
     ok("C10: a hand on earlier words carries the one door there without moving a line, and the keyboard's focus shows it",
       seen.carried && seen.sameHeight && seen.focusOpacity === "1", JSON.stringify(seen));
-    ok("C10: a press turns the pane to its terminal and types Claude Code's /rewind there as a chip's command — not as the person's words",
-      seen.chatBefore && !seen.chatAfter && seen.sent === seen.wantSent, JSON.stringify(seen));
+    ok("C10: a press asks the backend's one door and nothing else — the page pastes and keys nothing into the pane — and turns the pane to its terminal once that door typed (review r1 P1-1)",
+      seen.asked === seen.wantAsked && seen.typed === "[]" && seen.chatBefore && !seen.chatAfter, JSON.stringify(seen));
+    ok("C10: a refusal — at work or asking, the person's own words on the pane's line, a seat a run drives — is one sentence, and the conversation stays where it was (review r1 P2-1, P2-2, P2-3)",
+      ["rewind-busy", "rewind-own-words", "rewind-seat"].every((word) => seen[word]?.said && seen[word].stays), JSON.stringify(seen));
+    ok("C10: no door while the pane does not take the line — at work, asking, its agent gone, its state not yet said — and a turn that starts takes it down and one that ends stands it again (review r1 P1-1, P2-1)",
+      Object.values(seen.notBetween).every((count) => count === 0) && Object.keys(seen.notBetween).length === 4 &&
+        seen.downWhileWorking === 0 && seen.upAgain === 1,
+      JSON.stringify(seen));
+    ok("C10: a pane a run sits in — a worker's, a coordinator's — wears no door (review r1 P2-3)",
+      seen.workerDoors === 0 && seen.coordinatorDoors === 0, JSON.stringify(seen));
     ok("C10: a pane whose CLI names no way back (zo) wears no door", seen.zoPeople > 0 && seen.zoDoors === 0, JSON.stringify(seen));
     // A wire's page has no screen of its own to open the picker on.
     const wire = await page.evaluate(async (turns) => {
