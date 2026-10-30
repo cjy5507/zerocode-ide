@@ -849,8 +849,11 @@ const modelConnectionsController = {
         if (!check.answered) return { applied: false, key, state: modelFailureState(check.failure) };
         await invoke("set_judgment_provider", { provider, expectedProviderIdentity, key: jevKey }, { hand });
       } else {
+        // The settings it was pressed over are named by the provider they
+        // made (`expectedProviderIdentity`): the backend refuses a write over
+        // any other, and reads no other key.
         this.hold(await invoke("select_model_connection", {
-          role: "judgment", reference: picked.reference, expectedReference: this.state?.judgment ?? null,
+          role: "judgment", reference: picked.reference,
           expectedProviderIdentity: this.state.activeProviderIdentity,
         }, { hand }));
       }

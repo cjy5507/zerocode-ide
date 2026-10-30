@@ -34,9 +34,44 @@ pub(crate) fn observed(agent: &str, grid: &TerminalGrid) -> bool {
                 && (3..3 + "Ask zo to do anything".len())
                     .all(|column| grid.cell(row, column).is_some_and(|cell| cell.style.dim))
         }
-        "claude" => horizontal(&above) && horizontal(&below) && col == 2 && line.trim_end() == "❯",
+        "claude" => {
+            horizontal(&above)
+                && horizontal(&below)
+                && col == 2
+                && line.starts_with("❯")
+                && only_faint_after(grid, row, col)
+        }
         _ => false,
     }
+}
+
+/// Whether the field holds exactly the hand-over's probe — one space typed on
+/// an empty line, the cursor one column on (t-84850 r2): the screen's word
+/// that the CLI read it. A suggestion the field drew faint goes the moment a
+/// key lands, so the line is then the prompt glyph alone.
+pub(crate) fn holds_probe(agent: &str, grid: &TerminalGrid) -> bool {
+    if agent != "claude" || !grid.bracketed_paste() || !grid.cursor_visible() {
+        return false;
+    }
+    let (row, col) = grid.cursor();
+    if row == 0 || row + 1 >= grid.rows() {
+        return false;
+    }
+    horizontal(&grid.line(row - 1))
+        && horizontal(&grid.line(row + 1))
+        && col == 3
+        && grid.line(row).trim_end() == "❯"
+}
+
+/// Whether every cell from `from` to the row's end is blank or drawn faint —
+/// a suggestion Claude Code stands in an empty field (`promptSuggestionEnabled`,
+/// 2.1.312) — read from the cell's own attribute, never from its words: what a
+/// person types is drawn at normal weight and stays words.
+fn only_faint_after(grid: &TerminalGrid, row: usize, from: usize) -> bool {
+    grid.row_cells(row)
+        .iter()
+        .skip(from)
+        .all(|cell| cell.ch == ' ' || cell.style.dim || cell.is_continuation())
 }
 
 fn horizontal(line: &str) -> bool {
@@ -112,5 +147,56 @@ mod tests {
         assert!(!observed("claude", term.grid()));
         term.feed(b"\x1b[4;1H\x1b[2K\x1b[?25l");
         assert!(!observed("claude", term.grid()));
+    }
+
+    fn claude(body: &str, cursor_col: usize) -> Terminal {
+        let mut term = Terminal::new(8, 64);
+        term.feed(
+            format!(
+                "\x1b[?2004h\x1b[?25h\x1b[3;1H────────\r\n❯ {body}\r\n────────\x1b[4;{}H",
+                cursor_col + 1
+            )
+            .as_bytes(),
+        );
+        term
+    }
+
+    /// Claude Code 2.1.312 can stand a faint suggestion in an empty field
+    /// after a turn (t-84850 r2): the field is empty by the cells' attribute,
+    /// and the same words at normal weight are a person's draft.
+    #[test]
+    fn a_faint_claude_suggestion_is_an_empty_field_and_the_same_words_typed_are_not() {
+        assert!(observed(
+            "claude",
+            claude("\x1b[2mrun the tests again\x1b[22m", 2).grid()
+        ));
+        assert!(!observed("claude", claude("run the tests again", 2).grid()));
+        assert!(
+            !observed(
+                "claude",
+                claude("ru\x1b[2mn the tests again\x1b[22m", 4).grid()
+            ),
+            "words typed before a faint rest are a draft"
+        );
+    }
+
+    /// The probe is one space on an empty field, the cursor one column on —
+    /// nothing else (t-84850 r2).
+    #[test]
+    fn the_probe_is_one_space_on_an_empty_claude_field() {
+        assert!(holds_probe("claude", claude(" ", 3).grid()));
+        assert!(
+            !holds_probe("claude", claude("", 2).grid()),
+            "an empty field holds no probe"
+        );
+        assert!(
+            !holds_probe("claude", claude("x", 3).grid()),
+            "a typed letter is no probe"
+        );
+        assert!(
+            !holds_probe("claude", claude("  ", 4).grid()),
+            "two spaces are no probe"
+        );
+        assert!(!holds_probe("zo", claude(" ", 3).grid()));
     }
 }

@@ -236,10 +236,13 @@ function composerWorking(run) {
 const COMPOSER_HOLD_MS = 60_000;
 
 /* By when, from the hand-over's start, its wire must have stood
- * (`wire_start`'s `deadline_ms`): the hold less the pane's exit wait (8 s,
- * `HAND_OVER_EXIT_WAIT`) and room for the answer to come back. The backend
- * stops a wire that stands later, so none ever opens beside — or ends — a
- * pane the held words were just given to. */
+ * (`wire_start`'s `deadline_ms`): well inside the hold, so the pane's exit
+ * command is typed before the hold's clock could let the words go to the
+ * pane. Once it is typed the window is told (`wire:exit-typed`) and the hold
+ * has no clock; the backend's watch for the pane's leaving bounds it
+ * (`HAND_OVER_LEAVE_LIMIT`, t-84850 r2). The backend stops a wire that stands
+ * later, so none ever opens beside — or ends — a pane the held words were
+ * just given to. */
 const COMPOSER_HAND_OVER_DUE_MS = COMPOSER_HOLD_MS - 15_000;
 
 /* Whether a hold that began at `since` has run past its bound. A hold with no
@@ -255,7 +258,10 @@ function composerHoldOver(since, now = Date.now()) {
  * pane too (t-84670). */
 function composerHolding(run) {
   const held = run.helper?.id === PANE_LOG_ID ? paneChats.get(run.term) : null;
-  return held?.handing === true && !composerHoldOver(held.handingSince);
+  // Once the exit command is typed the clock no longer lets them go: the
+  // pane may yet read `/exit`, and the backend's own watch bounds the wait
+  // (`HAND_OVER_LEAVE_LIMIT`, t-84850 r2).
+  return held?.handing === true && (held.exitTyped === true || !composerHoldOver(held.handingSince));
 }
 
 /* Whether words sent now wait in the queue rather than go — the submit's test
@@ -271,7 +277,9 @@ function composerQueues(run, asking) {
  * null when no hand-over holds it. */
 function composerHoldEnds(run, now = Date.now()) {
   const held = run.helper?.id === PANE_LOG_ID ? paneChats.get(run.term) : null;
-  const at = held?.handing === true && Number.isFinite(held.handingSince) ? held.handingSince + COMPOSER_HOLD_MS : null;
+  const at = held?.handing === true && held.exitTyped !== true && Number.isFinite(held.handingSince)
+    ? held.handingSince + COMPOSER_HOLD_MS
+    : null;
   return at !== null && at > now ? at : null;
 }
 
@@ -306,6 +314,10 @@ function composerQueueWhy(run) {
   const latest = { s: Math.round(COMPOSER_HOLD_MS / 1000) };
   if (composerWorking(run)) return t("composer.queue.why.turn", "이 턴이 끝나면 하나씩 보냅니다");
   if (composerHolding(run)) {
+    const held = paneChats.get(run.term);
+    if (held?.exitTyped === true) {
+      return t("composer.queue.why.exitTyped", "판의 CLI가 끝나기를 기다립니다 — 끝나면 대화로 보내고, 아니면 입력칸에 돌려 둡니다");
+    }
     return t("composer.queue.why.handing", "대화를 실시간으로 잇는 중 — 이어지면, 늦어도 {{s}}초 뒤 보냅니다", latest);
   }
   const standing = standingAskOf(run);
@@ -435,6 +447,58 @@ function settleComposerQueue(run) {
       run.sending = false;
       syncWorkerComposers(run);
     });
+}
+
+/* What waited for a hand-over that typed the pane's exit command and was
+ * refused (t-84850 r2), back in the box: the queued words first, in their
+ * order, then whatever was being written — one draft the person sends again.
+ * Never to the pane, which may be reading `/exit` late or be a shell now. */
+function returnComposerQueueToBox(run) {
+  const held = run.queue?.splice(0) ?? [];
+  dropComposerRelease(run);
+  if (held.length > 0) {
+    const pieces = [...held, run.draft ?? ""].filter((words) => words.trim() !== "");
+    run.draft = pieces.join("\n\n");
+    // How many messages this draft is — the person's own count, for a
+    // notice that has to say them again (`sayComposerQueueLost`).
+    run.returned = { draft: run.draft, count: pieces.length };
+    for (const form of document.querySelectorAll(".worker-composer")) {
+      if (form.__workerRun !== run) continue;
+      form.querySelector(".worker-composer-box").value = run.draft;
+      form.__workerFit?.();
+    }
+  }
+  syncWorkerComposers(run);
+}
+
+/* What waited for a hand-over whose pane left as its wire was refused, or
+ * left later with those words back in its box: no box and no screen are left
+ * to hold them, so they are said — in a toast that stands until they are
+ * copied, with the words under it — rather than dropped. */
+function sayComposerQueueLost(run) {
+  const draft = run.draft ?? "";
+  const held = [...(run.queue?.splice(0) ?? []), draft].filter((words) => words.trim() !== "");
+  // A draft the window made of returned messages counts as the messages the
+  // person sent, while it still stands as returned; one they have written
+  // since counts as one.
+  const count = held.length + (draft.trim() !== "" && run.returned?.draft === draft ? run.returned.count - 1 : 0);
+  run.draft = "";
+  run.returned = null;
+  dropComposerRelease(run);
+  if (held.length === 0) return;
+  const words = held.join("\n\n");
+  const note = toast(
+    t("composer.queue.lost", "판이 닫혀 기다리던 글 {{n}}개를 보내지 못했습니다", { n: count }),
+    "halt",
+    {
+      sticky: true,
+      tip: words,
+      action: {
+        label: t("composer.queue.copy", "글 복사"),
+        run: () => void clipboardText.write(words).then((copied) => { if (copied) closing(note, () => note.remove()); }),
+      },
+    },
+  );
 }
 
 /* 그 판에 말하는 실행들의 대기열 — 판의 상태가 움직인 자리(`hook:agent`)에서

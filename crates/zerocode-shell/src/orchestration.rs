@@ -6796,6 +6796,14 @@ pub(crate) fn seated_live_workers() -> Vec<restart_census::Seated> {
 /// table maps it. What the goodbye writes down beside the workers, so the
 /// wake that brings the coordinator's conversation back knows it was here.
 pub(crate) fn seated_coordinators() -> Vec<restart_census::KeyedPane> {
+    seated_coordinators_read().unwrap_or_default()
+}
+
+/// [`seated_coordinators`], or `None` when the ledger cannot be read now — a
+/// runtime that is not up, or a view that failed. A caller that must not
+/// mistake a coordinator's pane for a person's refuses on `None`
+/// (`cmd::wire::pane_the_ledger_drives`, t-84850 r2).
+pub(crate) fn seated_coordinators_read() -> Option<Vec<restart_census::KeyedPane>> {
     with_ledger_seats(|ledger, seats| {
         ledger
             .runs()
@@ -6810,7 +6818,6 @@ pub(crate) fn seated_coordinators() -> Vec<restart_census::KeyedPane> {
             })
             .collect()
     })
-    .unwrap_or_default()
 }
 
 /// A hook observed a provider session in this terminal.

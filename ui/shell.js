@@ -13362,7 +13362,7 @@ async function openHelperPage(row, sub) {
 async function openWirePage(agent, cwd, { resume = null, fromTerm = null, deadline = null, at = -1, history = [], historyFrom = 0, historyEnd = null, label = null, carry = null, refused = showError } = {}) {
   let started;
   try {
-    started = await invoke("wire_start", { agent, cwd, resume, from_pane: fromTerm, deadlineMs: deadline });
+    started = await invoke("wire_start", { agent, cwd, resume, fromPane: fromTerm, deadlineMs: deadline });
   } catch (error) {
     refused(error);
     return null;
@@ -13455,6 +13455,16 @@ function wireRowFor(term) {
   return row?.wire && row.wire_resumes ? row : null;
 }
 
+/* The opening words of the refusal the backend gives once it has typed the
+ * pane's exit command (`EXIT_TYPED_PANE_STANDS`, t-84850 r2): the pane still
+ * stands, and may yet read `/exit` or have left a shell behind — so what
+ * waited goes back to the box, never to the pane. */
+const WIRE_EXIT_TYPED = "the exit command was typed at the pane and the pane still stands";
+/* The opening words of the refusal for a pane whose CLI did not show a key
+ * typed at it (`PANE_NOT_READING_YET`, t-84850 r2): the page says what the
+ * person can do, in their language. */
+const WIRE_NOT_READING = "the pane's CLI did not show a key typed at it";
+
 /* Hand a pane's conversation to its wire — the toggle's 「대화」 on a Claude
  * Code pane. Same session, other renderer: the wire resumes the pane's
  * session id, the pane's CLI exits, and the tab that stood here is the
@@ -13477,6 +13487,7 @@ async function handPaneToWire(term) {
   }
   held.pendingWire = false;
   held.handing = true;
+  held.exitTyped = false;
   // When it began: what is sent meanwhile is held at most `COMPOSER_HOLD_MS`
   // from here, whatever the hand-over does (t-84670).
   held.handingSince = Date.now();
@@ -13512,18 +13523,50 @@ async function handPaneToWire(term) {
       // The refusal stays on the page (`paintPaneChat`), not only in a toast
       // — the backend logs it too (`refusal_line`), so the log and the page
       // give the same reason.
-      refused: (reason) => { held.wireRefusal = String(reason?.message ?? reason); },
+      // One that came after the exit command was typed says so in its own
+      // line, and what waited goes back to the box (`returnComposerQueueToBox`).
+      refused: (reason) => {
+        const said = String(reason?.message ?? reason);
+        held.exitTyped = held.exitTyped || said.startsWith(WIRE_EXIT_TYPED);
+        held.wireRefusal = held.exitTyped
+          ? null
+          : said.startsWith(WIRE_NOT_READING)
+            ? t("worker.handOverNotReading", "판의 CLI가 아직 입력을 읽지 않습니다 — 판에서 글을 한 번 보낸 뒤 「{{button}}」를 다시 누르세요", { button: t("view.conversation", "대화") })
+            : said;
+      },
     });
     // The conversation lives on the wire's tab now: the pane's own view steps
     // down, as it never stood when the hand-over came first.
-    if (tabId !== null) held.on = false;
+    if (tabId !== null) {
+      held.on = false;
+      held.exitTyped = false;
+    }
     return tabId !== null;
   } finally {
     held.handing = false;
     held.handingSince = null;
+    // The pane that left during the hand-over goes now, once the wire's page
+    // has taken its seat and what waited on it.
+    const left = held.left;
+    held.left = null;
+    // A pane that left while its wire was refused has no box and no screen
+    // for what waited: the words are said, with a way to copy them, rather
+    // than go nowhere.
+    if (left) {
+      if (tabId === null) sayComposerQueueLost(held.run);
+      left();
+    }
+    // A wire refused after the pane's exit command was typed: what waited
+    // goes back to the box, a draft the person sends again once they have
+    // looked at the pane — typed now, it would land after `/exit`, or at the
+    // shell a CLI left behind (t-84850 r2).
+    else if (tabId === null && held.exitTyped) {
+      returnComposerQueueToBox(held.run);
+      paintPaneChat(term);
+    }
     // A wire that never stood leaves the pane its conversation: the view says
     // why, and what waited goes the pane's own way, once (t-54304).
-    if (tabId === null) {
+    else if (tabId === null) {
       paintPaneChat(term);
       settleComposerQueue(held.run);
     }
@@ -13640,6 +13683,18 @@ function wireStateKey(log) {
 listen("wire:update", (event) => {
   const tab = activeHelperPage();
   if (tab?.worker.wire === event.payload?.id) void pollHelperPages();
+});
+
+/* The backend typed the pane's exit command (`wire:exit-typed`, t-84850 r2):
+ * from now on what is sent waits for the hand-over with no clock of its own —
+ * it goes to the wire's page, or back to the box, never to the pane, which
+ * may yet read `/exit` (`composerHolding`). */
+listen("wire:exit-typed", (event) => {
+  const held = paneChats.get(event.payload?.term);
+  if (!held?.handing) return;
+  held.exitTyped = true;
+  dropComposerRelease(held.run);
+  syncWorkerComposers(held.run);
 });
 
 /* A wire's question in the card's shape: an approval with the wire's own
@@ -13862,7 +13917,10 @@ async function setPaneChat(term, on, { wire = true } = {}) {
     if (on && wire && !held.handing) void handPaneToWire(term);
     return;
   }
-  if (!on) held.wireRefusal = null;
+  if (!on) {
+    held.wireRefusal = null;
+    held.exitTyped = false;
+  }
   // The late line's wait, read while nothing on the page has moved yet.
   if (on) chatLateMs();
   held.on = on;
@@ -14239,6 +14297,14 @@ function paintPaneChat(term) {
     "worker.wireRefused",
     typeof held.wireRefusal === "string" && held.wireRefusal !== "",
     t("worker.wireRefused", "실시간 대화로 넘기지 못했습니다: {{reason}} — 전사 뷰로 봅니다(답은 턴이 닫힐 때 한 번에). 「대화」를 다시 누르면 다시 시도합니다.", { reason: held.wireRefusal ?? "" }),
+  );
+  // Refused after the exit command went to the pane (t-84850 r2): one line,
+  // and what waited stands in the box.
+  noticeOnPaneChat(
+    held,
+    "worker.handOverExitTyped",
+    held.exitTyped === true && held.handing !== true,
+    t("worker.handOverExitTyped", "종료 명령을 보냈지만 판이 아직 떠 있습니다 — 판을 확인한 뒤 입력칸의 글을 다시 보내세요."),
   );
   // The first read is out. Said only once it is late: the stylesheet holds the
   // line hidden for `--chat-late-ms`, so a read that comes sooner is never seen
@@ -18081,8 +18147,22 @@ listen("term:exited", (event) => {
   // every leaf has spawned, and a resume that dies inside that window would
   // otherwise slip this prune and mount as a pane nothing ever clears. The
   // id is parked and `mountStoredLayout` prunes it before the layout stands.
-  if (!dropClosedTermLeaf(term, "exit") && waking.size > 0) {
-    exitedUnheld.add(term);
+  const dropLeaf = () => {
+    if (!dropClosedTermLeaf(term, "exit") && waking.size > 0) exitedUnheld.add(term);
+  };
+  // A pane that leaves while its conversation is being handed to its wire
+  // leaves because of it: `wire_start` typed its exit command and answers
+  // only once the screen has gone, so this event comes first. Its tab, and
+  // what waited on its page, stay for the wire's page to take — the
+  // hand-over drops the leaf once that page stands (`handPaneToWire`).
+  const handing = paneChats.get(term);
+  if (handing?.handing) handing.left = dropLeaf;
+  else {
+    // A pane refused after its exit command was typed, whose CLI read it
+    // late: what waited stood in its box, and the box goes with the pane —
+    // said, with a way to copy it, rather than dropped (t-84850 r2).
+    if (handing?.exitTyped) sayComposerQueueLost(handing.run);
+    dropLeaf();
   }
 });
 

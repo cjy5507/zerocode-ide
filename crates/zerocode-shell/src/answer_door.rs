@@ -91,6 +91,9 @@ pub(super) struct Expect<'a> {
     row: Option<usize>,
     /// No numbered menu at all — for words the window types by itself.
     absent: bool,
+    /// And this agent's input line shown empty (`composer_empty::observed`)
+    /// — for a line that must stand alone on it (t-84850 r2).
+    empty_line: Option<&'a str>,
 }
 
 impl<'a> Expect<'a> {
@@ -101,6 +104,7 @@ impl<'a> Expect<'a> {
             question: None,
             row: None,
             absent: false,
+            empty_line: None,
         }
     }
 
@@ -113,6 +117,7 @@ impl<'a> Expect<'a> {
             question: None,
             row: None,
             absent: true,
+            empty_line: None,
         }
     }
 
@@ -122,12 +127,20 @@ impl<'a> Expect<'a> {
             question: Some(question),
             row: None,
             absent: false,
+            empty_line: None,
         }
     }
 
     /// And the selection standing on this row.
     pub(super) const fn on_row(mut self, row: usize) -> Self {
         self.row = Some(row);
+        self
+    }
+
+    /// And `agent`'s input line shown empty: words the window types by itself
+    /// that must not join a draft standing there.
+    pub(super) const fn with_empty_line(mut self, agent: &'a str) -> Self {
+        self.empty_line = Some(agent);
         self
     }
 }
@@ -143,6 +156,11 @@ fn screen_of(pty: &PtyHandle) -> (Vec<String>, Option<usize>) {
 
 /// Whether the screen shows what `expect` says.
 fn shows(pty: &PtyHandle, expect: &Expect<'_>) -> bool {
+    if let Some(agent) = expect.empty_line
+        && !crate::composer_empty::observed(agent, pty.terminal().grid())
+    {
+        return false;
+    }
     let (rows, cursor) = screen_of(pty);
     if expect.absent {
         return screen_menu::read_menu(&rows, cursor).is_none();
@@ -181,6 +199,152 @@ pub(super) fn type_if_up(
     }
     pty.write_input(bytes)?;
     Ok(true)
+}
+
+/// What typing the hand-over's probe at a pane showed (t-84850 r2).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Probe {
+    /// It showed on the field and was erased: the CLI reads its input.
+    Read,
+    /// Typed, and not shown within the wait: the CLI is not reading yet. The
+    /// probe may still show later, for [`erase_probe`] to take away.
+    Deaf,
+    /// Not typed: the screen stood on a menu, or its field was not empty.
+    NotTyped,
+    /// Not typed: an earlier probe at this pane has not shown yet and is
+    /// still looked for — a second space would join it and outlive both.
+    StillOut,
+    /// Typed, and a person's hand reached the line before it showed: it is
+    /// left where it is, ahead of their words.
+    Touched,
+}
+
+/// The panes an unshown probe is still out on, while [`probe_pane`]'s late
+/// look runs (t-84850 r3).
+static PROBES_OUT: std::sync::Mutex<std::collections::BTreeSet<u32>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn probes_out() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<u32>> {
+    PROBES_OUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// [`probe_reading`] for pane `term`, at most one probe out at a time. One
+/// that does not show within `wait` is looked for up to `late` more, on a
+/// thread of its own, and taken away when it shows — unless a person's hand
+/// reaches the line first, whose words then follow it, or the pane goes.
+/// While that look runs, the pane is not probed again ([`Probe::StillOut`]).
+pub(super) fn probe_pane(
+    held: &HeldTerminal,
+    term: u32,
+    agent: &str,
+    wait: Duration,
+    late: Duration,
+    poll: Duration,
+) -> Result<Probe, PtyTransportError> {
+    if !probes_out().insert(term) {
+        return Ok(Probe::StillOut);
+    }
+    let (probed, hand) = match probe_reading(held, term, agent, wait, poll) {
+        Ok((Probe::Deaf, hand)) => (Probe::Deaf, hand),
+        other => {
+            probes_out().remove(&term);
+            return other.map(|(probed, _)| probed);
+        }
+    };
+    let held = Arc::clone(held);
+    let agent = agent.to_string();
+    let looked = std::thread::Builder::new()
+        .name(format!("hand-over-probe-{term}"))
+        .spawn(move || {
+            let began = std::time::Instant::now();
+            while began.elapsed() < late && Arc::strong_count(&held) > 1 {
+                match erase_probe(&held, term, &agent, hand) {
+                    // Drawn late and taken away: the CLI reads now, and the
+                    // next press is not probed again (t-84850 r3).
+                    Ok(Erased::Done) => {
+                        crate::human_input::saw_reading(term);
+                        break;
+                    }
+                    Ok(Erased::NotShown) => std::thread::sleep(poll),
+                    Ok(Erased::Touched) | Err(_) => break,
+                }
+            }
+            probes_out().remove(&term);
+        });
+    if looked.is_err() {
+        probes_out().remove(&term);
+    }
+    Ok(probed)
+}
+
+/// The probe: one space, harmless on an empty field and nothing a CLI reads as
+/// a command.
+const PROBE_KEY: &[u8] = b" ";
+/// The key that takes it away again.
+const PROBE_ERASE: &[u8] = b"\x7f";
+
+/// Whether the pane's CLI reads what is typed at it, asked by typing one space
+/// at its empty field — through this door, so never onto a menu or a draft —
+/// and looking up to `wait` (every `poll`) for the field to show it; once it
+/// shows, it is erased in the same hold of the pane's lock it was seen in.
+/// A person's hand that reaches the line meanwhile stops the look with
+/// nothing erased ([`Probe::Touched`]). Also answers the hand count read
+/// before the probe was typed, for a later look to hold its erasing to.
+pub(super) fn probe_reading(
+    held: &HeldTerminal,
+    term: u32,
+    agent: &str,
+    wait: Duration,
+    poll: Duration,
+) -> Result<(Probe, Option<u64>), PtyTransportError> {
+    let hand = crate::human_input::line_of(term).1;
+    if !type_if_up(held, &Expect::no_menu().with_empty_line(agent), PROBE_KEY)? {
+        return Ok((Probe::NotTyped, hand));
+    }
+    let began = std::time::Instant::now();
+    loop {
+        match erase_probe(held, term, agent, hand)? {
+            Erased::Done => return Ok((Probe::Read, hand)),
+            Erased::Touched => return Ok((Probe::Touched, hand)),
+            Erased::NotShown if began.elapsed() >= wait => return Ok((Probe::Deaf, hand)),
+            Erased::NotShown => std::thread::sleep(poll),
+        }
+    }
+}
+
+/// What [`erase_probe`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Erased {
+    /// The field showed exactly the probe, and it was taken away.
+    Done,
+    /// The field does not show it (yet): nothing typed.
+    NotShown,
+    /// A person's hand reached the line since the probe was typed: nothing
+    /// typed, and nothing ever will be — the backspace could take their key.
+    Touched,
+}
+
+/// Take the probe away if — and only if — no person's hand has reached pane
+/// `term`'s line since `hand` (the hand count read before the probe was
+/// typed) and the field shows exactly the probe, both read and the key
+/// written in one hold of the pane's lock.
+pub(super) fn erase_probe(
+    held: &HeldTerminal,
+    term: u32,
+    agent: &str,
+    hand: Option<u64>,
+) -> Result<Erased, PtyTransportError> {
+    let mut pty = lock_pty(held);
+    if crate::human_input::line_of(term).1 != hand {
+        return Ok(Erased::Touched);
+    }
+    if !crate::composer_empty::holds_probe(agent, pty.terminal().grid()) {
+        return Ok(Erased::NotShown);
+    }
+    pty.write_input(PROBE_ERASE)?;
+    Ok(Erased::Done)
 }
 
 /// Type one key group of a walk, refusing if the question is gone.
@@ -1134,6 +1298,266 @@ mod tests {
             Some(true)
         );
         assert_eq!(pane.typed(), vec!["/exit"]);
+    }
+
+    /// The hand-over's exit command stands alone on its line (t-84850 r2):
+    /// typed only while the screen shows Claude Code's input line empty —
+    /// the cursor right after `❯`, between its two rules — never onto words
+    /// a person left there, which it would send to the model with it.
+    #[test]
+    fn the_exit_line_is_typed_only_onto_an_empty_input_line() {
+        let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+        let expect = Expect::no_menu().with_empty_line("claude");
+        let rule = "─".repeat(40);
+        pane.draw(&format!(
+            "\x1b[?2004h● Done.\n\n{rule}\n❯ abc\n{rule}\x1b[4;6H"
+        ));
+        assert_eq!(type_if_up(&pane.held, &expect, b"/exit").ok(), Some(false));
+        assert!(
+            pane.typed().is_empty(),
+            "the exit line joined words on the line"
+        );
+        pane.draw(&format!(
+            "\x1b[?2004h● Done.\n\n{rule}\n❯ \n{rule}\x1b[4;3H"
+        ));
+        assert_eq!(type_if_up(&pane.held, &expect, b"/exit").ok(), Some(true));
+        assert_eq!(pane.typed(), vec!["/exit"]);
+    }
+
+    /// The hand-over's probe of a pane that has shown no reading (t-84850 r2):
+    /// one space typed at the empty field; a CLI that draws it has it erased
+    /// at once and counts as reading; one that does not is refused with the
+    /// space typed and nothing more, and the space is erased when it shows
+    /// late. Never typed onto a draft.
+    #[test]
+    fn the_probe_is_erased_when_it_shows_and_typed_once_where_it_does_not() {
+        let rule = "─".repeat(40);
+        let empty = format!("\x1b[?2004h● Done.\n\n{rule}\n❯ \n{rule}\x1b[4;3H");
+        let probed = format!("\x1b[?2004h● Done.\n\n{rule}\n❯  \n{rule}\x1b[4;4H");
+        let wait = Duration::from_millis(600);
+        let poll = Duration::from_millis(20);
+        // A reading CLI draws the space a moment after it is typed.
+        let reading = pane("Do you want to proceed?", &["Yes", "No"], true);
+        reading.draw(&empty);
+        let drawn = {
+            let held = Arc::clone(&reading.held);
+            let probed = probed.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                let mut pty = lock_pty(&held);
+                pty.terminal_mut().feed(b"\x1b[2J\x1b[H");
+                pty.terminal_mut()
+                    .feed(probed.replace('\n', "\r\n").as_bytes());
+            })
+        };
+        assert_eq!(
+            probe_reading(&reading.held, 91_101, "claude", wait, poll)
+                .ok()
+                .map(|(probed, _)| probed),
+            Some(Probe::Read)
+        );
+        drawn.join().expect("the drawing thread");
+        assert_eq!(
+            reading.typed(),
+            vec![" ", "\x7f"],
+            "the probe was not taken away"
+        );
+        // A deaf CLI draws nothing: the space is typed once, nothing follows.
+        let deaf = pane("Do you want to proceed?", &["Yes", "No"], true);
+        deaf.draw(&empty);
+        let (probed_deaf, hand) =
+            probe_reading(&deaf.held, 91_102, "claude", wait, poll).expect("the probe");
+        assert_eq!(probed_deaf, Probe::Deaf);
+        assert_eq!(deaf.typed(), vec![" "]);
+        assert_eq!(
+            erase_probe(&deaf.held, 91_102, "claude", hand).ok(),
+            Some(Erased::NotShown)
+        );
+        deaf.draw(&probed);
+        assert_eq!(
+            erase_probe(&deaf.held, 91_102, "claude", hand).ok(),
+            Some(Erased::Done)
+        );
+        assert_eq!(
+            deaf.typed(),
+            vec![" ", "\x7f"],
+            "a late probe was not taken away"
+        );
+        // A person's hand reached the line before the probe showed: the
+        // backspace would take their key, so nothing is erased (r3 P3-1).
+        let touched = pane("Do you want to proceed?", &["Yes", "No"], true);
+        touched.draw(&empty);
+        let (_, hand) = probe_reading(&touched.held, 91_103, "claude", Duration::ZERO, poll)
+            .expect("the probe");
+        crate::human_input::typed(91_103);
+        touched.draw(&probed);
+        assert_eq!(
+            erase_probe(&touched.held, 91_103, "claude", hand).ok(),
+            Some(Erased::Touched)
+        );
+        assert_eq!(
+            touched.typed(),
+            vec![" "],
+            "a backspace raced a person's key"
+        );
+        crate::human_input::forget_term(91_103);
+        // Words on the line: nothing is typed at all.
+        let drafted = pane("Do you want to proceed?", &["Yes", "No"], true);
+        drafted.draw(&format!(
+            "\x1b[?2004h● Done.\n\n{rule}\n❯ abc\n{rule}\x1b[4;6H"
+        ));
+        assert_eq!(
+            probe_reading(&drafted.held, 91_104, "claude", wait, poll)
+                .ok()
+                .map(|(probed, _)| probed),
+            Some(Probe::NotTyped)
+        );
+        assert!(drafted.typed().is_empty());
+    }
+
+    /// A second probe is never typed while the first is still out (t-84850
+    /// r3): it would join the first, and no look would know the two spaces.
+    /// Once the first shows late and is taken away, the pane may be asked
+    /// again.
+    #[test]
+    fn a_pane_is_not_probed_again_while_its_first_probe_is_out() {
+        const TERM: u32 = 91_201;
+        let rule = "─".repeat(40);
+        let empty = format!("\x1b[?2004h● Done.\n\n{rule}\n❯ \n{rule}\x1b[4;3H");
+        let probed = format!("\x1b[?2004h● Done.\n\n{rule}\n❯  \n{rule}\x1b[4;4H");
+        let (wait, late, poll) = (
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+            Duration::from_millis(20),
+        );
+        let deaf = pane("Do you want to proceed?", &["Yes", "No"], true);
+        deaf.draw(&empty);
+        assert_eq!(
+            probe_pane(&deaf.held, TERM, "claude", wait, late, poll).ok(),
+            Some(Probe::Deaf)
+        );
+        assert_eq!(
+            probe_pane(&deaf.held, TERM, "claude", wait, late, poll).ok(),
+            Some(Probe::StillOut),
+            "a second press probed a pane whose first probe was out"
+        );
+        assert_eq!(deaf.typed(), vec![" "]);
+        // The CLI wakes and draws the first space: the late look takes it
+        // away and lets the pane be asked again.
+        deaf.draw(&probed);
+        let began = std::time::Instant::now();
+        while probes_out().contains(&TERM) && began.elapsed() < late {
+            std::thread::sleep(poll);
+        }
+        assert_eq!(
+            deaf.typed(),
+            vec![" ", "\x7f"],
+            "the late probe was not taken away"
+        );
+        assert!(
+            !probes_out().contains(&TERM),
+            "the pane stayed marked after its probe went"
+        );
+        assert!(
+            crate::human_input::reads_input(TERM),
+            "a probe taken away late did not count the pane as reading (r3 P3-6)"
+        );
+        crate::human_input::forget_term(TERM);
+    }
+
+    /// How long a fake CLI on a real pty takes to leave after the keys the
+    /// hand-over types (`cmd::wire::hand_over_pane`): the exit command's first
+    /// key through this door, the rest after the line's step. The CLI reads
+    /// nothing for its first `deaf` seconds — a resumed Claude Code can draw
+    /// its screen and read no input for up to a minute — and then reads lines
+    /// until its exit command. `None` when it is still there after the
+    /// hand-over's watch (`HAND_OVER_LEAVE_LIMIT`); `then` says when it left,
+    /// looked for up to `after` more. A shell loop draws no input line, so
+    /// the door here asks for no menu only; no agent runs.
+    #[cfg(unix)]
+    fn fake_cli_leaves(deaf: u64, after: Duration) -> (Option<Duration>, Option<Duration>) {
+        use crate::cmd::wire::{HAND_OVER_EXIT_POLL, HAND_OVER_LEAVE_LIMIT};
+        let exit = zerocode_core::agent::agent_voice("claude")
+            .exit_command
+            .expect("claude has an exit command");
+        let script = format!(
+            "sleep {deaf}; while IFS= read -r line; do [ \"$line\" = '{exit}' ] && exit 0; done"
+        );
+        let lane =
+            zerocode_pty::PtyLane::spawn("/bin/sh", &["-c".into(), script], None, &[], 24, 80)
+                .expect("the fake CLI starts");
+        let held: HeldTerminal = Arc::new(Mutex::new(PtyHandle::new(lane)));
+        let (groups, step) = zerocode_core::ask::line_keys(exit);
+        let (first, rest) = groups.split_first().expect("a line has keys");
+        let key = |group| crate::cmd::terminal::key_group_bytes(group);
+        let started = Instant::now();
+        assert_eq!(
+            type_if_up(&held, &Expect::no_menu(), &key(first)).ok(),
+            Some(true),
+            "a resting screen takes the exit command"
+        );
+        for group in rest {
+            std::thread::sleep(step);
+            lock_pty(&held)
+                .write_input(&key(group))
+                .expect("the line's keys");
+        }
+        let left = |until: Duration| {
+            while started.elapsed() < until {
+                let mut pty = lock_pty(&held);
+                pty.pump();
+                if pty.try_wait().ok().flatten().is_some() {
+                    return Some(started.elapsed());
+                }
+                drop(pty);
+                std::thread::sleep(HAND_OVER_EXIT_POLL);
+            }
+            None
+        };
+        let within = left(HAND_OVER_LEAVE_LIMIT);
+        let then = within.or_else(|| left(HAND_OVER_LEAVE_LIMIT + after));
+        let _ = lock_pty(&held).kill();
+        (within, then)
+    }
+
+    /// The hand-over's exit line ends a CLI resting at its prompt at once,
+    /// and one that reads nothing for its first two seconds still within the
+    /// hand-over's wait: the pty keeps the keys until the CLI reads (t-84850,
+    /// the 「대화」 road's first turn on).
+    #[cfg(unix)]
+    #[test]
+    fn a_hand_overs_exit_line_ends_a_resting_cli_and_one_that_reads_late() {
+        let (resting, _) = fake_cli_leaves(0, Duration::ZERO);
+        let resting = resting.expect("a resting CLI kept its screen after its exit line");
+        assert!(
+            resting < Duration::from_secs(2),
+            "a resting CLI took {resting:?} to leave"
+        );
+        let (late, _) = fake_cli_leaves(2, Duration::ZERO);
+        let late = late.expect("a CLI reading 2 s late kept its screen past the hand-over's wait");
+        assert!(
+            late >= Duration::from_millis(1_900),
+            "a CLI that read nothing for 2 s left in {late:?}"
+        );
+        eprintln!("exit line: a resting CLI left in {resting:?}, one reading 2 s late in {late:?}");
+    }
+
+    /// A CLI that reads its line ten seconds late — past the 8 s a pane's CLI
+    /// usually takes (`HAND_OVER_EXIT_WAIT`) — still leaves within the
+    /// hand-over's watch (t-84850 r2 P2-5). Under r1 the window had refused
+    /// and stopped the wire at 8 s, and the CLI left at 10.1 s: the
+    /// conversation on no screen and no wire.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_reading_its_line_ten_seconds_late_leaves_within_the_hand_overs_watch() {
+        use crate::cmd::wire::HAND_OVER_EXIT_WAIT;
+        let (within, _) = fake_cli_leaves(10, Duration::ZERO);
+        let within = within.expect("a CLI reading 10 s late outlasted the hand-over's watch");
+        assert!(
+            within > HAND_OVER_EXIT_WAIT,
+            "the CLI left in {within:?}, inside the usual wait — the test proves nothing"
+        );
+        eprintln!("deaf 10 s: left within the hand-over's watch at {within:?}");
     }
 
     /// A menu takes one row: the answer's single pick of a single-select
