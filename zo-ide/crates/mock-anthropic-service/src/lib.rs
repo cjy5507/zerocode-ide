@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::{InputContentBlock, MessageRequest, MessageResponse, OutputContentBlock, Usage};
 use serde_json::{json, Value};
@@ -102,10 +102,13 @@ enum Scenario {
     TokenCostReporting,
     GoalRateLimitResume,
     GoalGateExact,
+    DenseStream(DenseStream),
 }
 
 impl Scenario {
-    fn parse(value: &str) -> Option<Self> {
+    /// The scenario `value` names. Only `dense_stream` reads the `key=value`
+    /// words that follow it; the others ignore what comes after their name.
+    fn parse<'a>(value: &str, words: impl Iterator<Item = &'a str>) -> Option<Self> {
         match value.trim() {
             "streaming_text" => Some(Self::StreamingText),
             "read_file_roundtrip" => Some(Self::ReadFileRoundtrip),
@@ -121,6 +124,7 @@ impl Scenario {
             "token_cost_reporting" => Some(Self::TokenCostReporting),
             "goal_rate_limit_resume" => Some(Self::GoalRateLimitResume),
             "goal_gate_exact" => Some(Self::GoalGateExact),
+            "dense_stream" => DenseStream::parse(words).map(Self::DenseStream),
             _ => None,
         }
     }
@@ -141,8 +145,220 @@ impl Scenario {
             Self::TokenCostReporting => "token_cost_reporting",
             Self::GoalRateLimitResume => "goal_rate_limit_resume",
             Self::GoalGateExact => "goal_gate_exact",
+            Self::DenseStream(_) => "dense_stream",
         }
     }
+}
+
+/// The shape of the `dense_stream` answer: a long text of code blocks,
+/// tables, long lines and Korean lines, streamed in many small text deltas,
+/// for measuring what a zo pane and the window drawing it spend on a heavy
+/// answer (t-82949). Each field is read from a `key=value` word after the
+/// scenario name, as `PARITY_SCENARIO:dense_stream bytes=393216 chunk=24
+/// pace_ms=1`; a field no word names keeps its default, and
+/// `tests/dense_stream.rs` writes the defaults down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DenseStream {
+    /// `bytes=`: the least number of UTF-8 bytes the answer's text holds.
+    bytes: usize,
+    /// `chunk=`: the most bytes one text delta carries — though a delta
+    /// always holds at least one whole character.
+    chunk: usize,
+    /// `width=`: the least length in bytes of the long line that closes each
+    /// section of the answer.
+    width: usize,
+    /// `pace_ms=`: how long the mock waits after each event of a streamed
+    /// answer; 0 writes the whole stream at once.
+    pace_ms: u64,
+    /// `refdef=`: how many sections, from the first, carry a line that reads
+    /// as a link reference definition (`` `args[1]:` ``) — the shape that
+    /// turns off zo's stream restarts for the rest of an answer.
+    refdef: usize,
+    /// `table_rows=`: the rows under each section's table head.
+    table_rows: usize,
+    /// `list_items=`: the items of a list with no blank line between them in
+    /// each section; 0 leaves the list out.
+    list_items: usize,
+}
+
+impl Default for DenseStream {
+    fn default() -> Self {
+        Self {
+            bytes: 256 * 1024,
+            chunk: 32,
+            width: 480,
+            pace_ms: 0,
+            refdef: 0,
+            table_rows: 2,
+            list_items: 0,
+        }
+    }
+}
+
+impl DenseStream {
+    /// The shape the `key=value` words name, up to the first word that is not
+    /// one. An unknown key, or a value that is not a whole number (above zero
+    /// for all but `pace_ms`, `refdef` and `list_items`), refuses the scenario
+    /// rather than drawing some other answer than the one asked for.
+    fn parse<'a>(words: impl Iterator<Item = &'a str>) -> Option<Self> {
+        let mut shape = Self::default();
+        for word in words {
+            let Some((key, value)) = word.split_once('=') else {
+                break;
+            };
+            let whole = || value.parse::<usize>().ok();
+            let positive = || whole().filter(|number| *number > 0);
+            match key {
+                "bytes" => shape.bytes = positive()?,
+                "chunk" => shape.chunk = positive()?,
+                "width" => shape.width = positive()?,
+                "pace_ms" => shape.pace_ms = value.parse().ok()?,
+                "refdef" => shape.refdef = whole()?,
+                "table_rows" => shape.table_rows = positive()?,
+                "list_items" => shape.list_items = whole()?,
+                _ => return None,
+            }
+        }
+        Some(shape)
+    }
+
+    /// The answer: numbered sections — a heading, a Korean paragraph, a fenced
+    /// code block, a table, the list when one is asked for, and one long line
+    /// — until the text holds [`Self::bytes`]. The same shape always gives the
+    /// same text.
+    fn answer(&self) -> String {
+        use std::fmt::Write as _;
+        let mut text = String::new();
+        let mut section = 0_usize;
+        while text.len() < self.bytes {
+            section += 1;
+            write!(
+                text,
+                "## 구간 {section}\n\n\
+                 이 구간은 긴 답을 그리는 비용을 재려고 가짜 공급자가 만든 글입니다. \
+                 코드 블록, 표, 긴 줄이 섞여 있습니다.\n\n"
+            )
+            .expect("section write should succeed");
+            if section <= self.refdef {
+                write!(text, "`args[{section}]:` 첫 인자를 읽는 자리입니다.\n\n")
+                    .expect("reference line write should succeed");
+            }
+            write!(
+                text,
+                "```rust\n\
+                 fn section_{section}(values: &[u64]) -> u64 {{\n\
+                 \x20   values.iter().map(|value| value.wrapping_mul({section})).sum()\n\
+                 }}\n\
+                 ```\n\n\
+                 | 칸 | 값 | 설명 |\n\
+                 |---|---|---|\n"
+            )
+            .expect("code and table head write should succeed");
+            for row in 1..=self.table_rows {
+                writeln!(text, "| 행 {row} | {section}.{row} | 한국어 칸 ASCII cell |")
+                    .expect("table row write should succeed");
+            }
+            text.push('\n');
+            if self.list_items > 0 {
+                for item in 1..=self.list_items {
+                    writeln!(text, "- 항목 {item}: 구간 {section}의 목록 줄")
+                        .expect("list item write should succeed");
+                }
+                text.push('\n');
+            }
+            let line_start = text.len();
+            while text.len() - line_start < self.width {
+                write!(text, "긴 줄 {section} long line ").expect("line write should succeed");
+            }
+            text.push_str("\n\n");
+        }
+        text
+    }
+
+    /// The streamed answer, one SSE event per element, its text cut into
+    /// deltas of at most [`Self::chunk`] bytes.
+    fn events(&self) -> Vec<String> {
+        let text = self.answer();
+        let deltas = split_on_char_boundaries(&text, self.chunk);
+        let output_tokens = u32::try_from(deltas.len()).unwrap_or(u32::MAX);
+        let mut events = Vec::with_capacity(deltas.len() + 5);
+        let mut event = |name: &str, payload: &Value| {
+            let mut frame = String::new();
+            append_sse(&mut frame, name, payload);
+            events.push(frame);
+        };
+        event(
+            "message_start",
+            &json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_dense_stream",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": DEFAULT_MODEL,
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": usage_json(11, 0)
+                }
+            }),
+        );
+        event(
+            "content_block_start",
+            &json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            }),
+        );
+        for delta in deltas {
+            event(
+                "content_block_delta",
+                &json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": delta}
+                }),
+            );
+        }
+        event(
+            "content_block_stop",
+            &json!({
+                "type": "content_block_stop",
+                "index": 0
+            }),
+        );
+        event(
+            "message_delta",
+            &json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                "usage": usage_json(11, output_tokens)
+            }),
+        );
+        event("message_stop", &json!({"type": "message_stop"}));
+        events
+    }
+}
+
+/// `text` cut into pieces of at most `limit` bytes, each ending on a character
+/// boundary; a character longer than `limit` is a piece of its own.
+fn split_on_char_boundaries(text: &str, limit: usize) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let mut end = limit.min(rest.len());
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == 0 {
+            end = rest.chars().next().map_or(rest.len(), char::len_utf8);
+        }
+        let (piece, tail) = rest.split_at(end);
+        pieces.push(piece);
+        rest = tail;
+    }
+    pieces
 }
 
 /// What an obedient model does in a `/goal` turn (`goal_gate_exact`): in a
@@ -206,6 +422,9 @@ async fn handle_connection(
     });
     drop(captured);
 
+    if let Some((events, pace)) = paced_stream(&request, scenario) {
+        return write_paced(&mut socket, scenario, &events, pace).await;
+    }
     let response = if scenario == Scenario::GoalRateLimitResume && scenario_attempt <= 6 {
         http_response(
             "429 Too Many Requests",
@@ -217,6 +436,43 @@ async fn handle_connection(
         build_http_response(&request, scenario)
     };
     socket.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+/// A streamed `dense_stream` answer asked to keep a pace: its events, and the
+/// wait after each. Every other answer is written in one piece.
+fn paced_stream(request: &MessageRequest, scenario: Scenario) -> Option<(Vec<String>, Duration)> {
+    match scenario {
+        Scenario::DenseStream(shape) if request.stream && shape.pace_ms > 0 => {
+            Some((shape.events(), Duration::from_millis(shape.pace_ms)))
+        }
+        _ => None,
+    }
+}
+
+/// Write the head of a streamed answer, then its events one at a time with
+/// `pace` after each, so the client reads them as they are written.
+async fn write_paced(
+    socket: &mut tokio::net::TcpStream,
+    scenario: Scenario,
+    events: &[String],
+    pace: Duration,
+) -> io::Result<()> {
+    // A small write held back for the previous one's acknowledgement would
+    // arrive late and in a clump — the opposite of a pace.
+    socket.set_nodelay(true)?;
+    let length = events.iter().map(String::len).sum();
+    let head = http_head(
+        "200 OK",
+        "text/event-stream",
+        length,
+        &[("x-request-id", request_id_for(scenario))],
+    );
+    socket.write_all(head.as_bytes()).await?;
+    for event in events {
+        socket.write_all(event.as_bytes()).await?;
+        tokio::time::sleep(pace).await;
+    }
     Ok(())
 }
 
@@ -301,10 +557,11 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
 fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
     request.messages.iter().rev().find_map(|message| {
         message.content.iter().rev().find_map(|block| match block {
-            InputContentBlock::Text { text, .. } => text
-                .split_whitespace()
-                .find_map(|token| token.strip_prefix(SCENARIO_PREFIX))
-                .and_then(Scenario::parse),
+            InputContentBlock::Text { text, .. } => {
+                let mut tokens = text.split_whitespace();
+                let name = tokens.find_map(|token| token.strip_prefix(SCENARIO_PREFIX))?;
+                Scenario::parse(name, tokens)
+            }
             _ => None,
         })
     })
@@ -393,6 +650,7 @@ fn build_http_response(request: &MessageRequest, scenario: Scenario) -> String {
 fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
     match scenario {
         Scenario::StreamingText => streaming_text_sse(),
+        Scenario::DenseStream(shape) => shape.events().concat(),
         Scenario::ReadFileRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
                 "read_file roundtrip complete: {}",
@@ -730,6 +988,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             ),
             GoalStep::Say(text) => text_message_response("msg_goal_gate_text", text),
         },
+        Scenario::DenseStream(shape) => text_message_response("msg_dense_stream", &shape.answer()),
     }
 }
 
@@ -749,18 +1008,29 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::TokenCostReporting => "req_token_cost_reporting",
         Scenario::GoalRateLimitResume => "req_goal_rate_limit_resume",
         Scenario::GoalGateExact => "req_goal_gate_exact",
+        Scenario::DenseStream(_) => "req_dense_stream",
     }
 }
 
 fn http_response(status: &str, content_type: &str, body: &str, headers: &[(&str, &str)]) -> String {
+    let mut response = http_head(status, content_type, body.len(), headers);
+    response.push_str(body);
+    response
+}
+
+fn http_head(
+    status: &str,
+    content_type: &str,
+    content_length: usize,
+    headers: &[(&str, &str)],
+) -> String {
     let mut extra_headers = String::new();
     for (name, value) in headers {
         use std::fmt::Write as _;
         write!(&mut extra_headers, "{name}: {value}\r\n").expect("header write should succeed");
     }
     format!(
-        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\n{extra_headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
+        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\n{extra_headers}content-length: {content_length}\r\nconnection: close\r\n\r\n"
     )
 }
 
