@@ -3790,14 +3790,12 @@ fn read_auto_dream_failure(dir: &Path) -> Option<AutoDreamFailure> {
 pub fn spawn_auto_dream_on_compaction(cwd: PathBuf, active_model: Option<String>) -> bool {
     std::thread::Builder::new()
         .name("dreamer-compaction".to_string())
-        .spawn(move || {
-            let _ = maybe_auto_dream_on_compaction(
-                &cwd,
-                DEFAULT_COMPACTION_DREAM_INTERVAL,
-                active_model.as_deref(),
-            );
-        })
+        .spawn(move || compaction_pass(None, &cwd, active_model.as_deref()))
         .is_ok()
+}
+
+fn compaction_pass(_program: Option<&Path>, cwd: &Path, active_model: Option<&str>) {
+    let _ = maybe_auto_dream_on_compaction(cwd, DEFAULT_COMPACTION_DREAM_INTERVAL, active_model);
 }
 
 /// Detached-worker half of [`spawn_auto_dream_on_compaction`]. Public for

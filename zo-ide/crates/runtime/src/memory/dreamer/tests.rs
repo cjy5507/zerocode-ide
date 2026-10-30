@@ -3021,6 +3021,38 @@ fn each_failure_in_a_row_is_counted_and_a_success_starts_the_count_again() {
 
 #[cfg(unix)]
 #[test]
+fn a_pass_after_compaction_runs_in_the_zo_the_host_declared() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().unwrap();
+    let lock = crate::test_env_lock();
+    with_automatic_home(&lock, home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path();
+        for session in ["s1", "s2"] {
+            super::record_observation(cwd, &obs("a lesson after compaction", session, true)).unwrap();
+        }
+        let seen = home.path().join("seen");
+        let zo = home.path().join("zo");
+        fs::write(&zo, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", seen.display())).unwrap();
+        fs::set_permissions(&zo, fs::Permissions::from_mode(0o755)).unwrap();
+
+        super::compaction_pass(Some(&zo), cwd, Some("model-x"));
+        let args = fs::read_to_string(&seen).unwrap_or_default();
+        let cwd_arg = cwd.to_str().unwrap();
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            ["auto-dream", "--on", "compaction", "--cwd", cwd_arg, "--model", "model-x"],
+            "the pass after compaction runs in the zo it was given"
+        );
+        assert!(
+            !super::dream_dir(cwd).join(super::THROTTLE_MARKER).exists(),
+            "the pass does not also run in this process"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn automatic_decay_archives_only_the_local_store_it_promotes_into() {
     let home = tempfile::tempdir().unwrap();
     let lock = crate::test_env_lock();
