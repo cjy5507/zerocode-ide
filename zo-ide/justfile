@@ -67,8 +67,13 @@ gate: fmt clippy test
 #
 # 이 레시피가 없으면 `cfg(windows)` 분기는 아무도 컴파일하지 않는 죽은 글이
 # 되고, 실제로 그렇게 세 개가 썩어 있었다.
+#
+# 검사만 하던 때는 Windows 에서만 쓰이지 않는 시험 도우미(유닉스 시험만 부르는
+# 함수·상수)를 못 잡아, v1.1.105 의 CI Windows 다리가 처음으로 그 린트에서
+# 멈췄다(t-85055). 그래서 CI zo-ide-verify (windows) 와 같은 `-D warnings`
+# clippy 로 돈다 — 루트 `win-check` 와 같은 문턱이다.
 win-check:
-    PATH="/opt/homebrew/opt/llvm/bin:$PATH" cargo xwin check --workspace --all-targets --target x86_64-pc-windows-msvc
+    PATH="/opt/homebrew/opt/llvm/bin:$PATH" cargo xwin clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 
 # `verify` member: the cross-compile where the tools exist, a loud SKIPPED where
 # they do not (a CI macOS runner; the Windows leg compiles for real there).

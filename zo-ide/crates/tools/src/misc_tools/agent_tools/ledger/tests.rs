@@ -420,6 +420,7 @@ fn an_agent_call_that_opens_a_ledger_worker_leaves_a_running_manifest_with_its_c
 }
 
 /// The one completion a launch settles with, which must be a failure: its error.
+#[cfg(unix)]
 fn settled_failure(manifest: &AgentOutput) -> String {
     let results = super::super::wait_for_agent_completions(std::slice::from_ref(&manifest.agent_id), Duration::from_secs(10));
     assert_eq!(results.len(), 1, "{results:?}");
@@ -432,6 +433,7 @@ fn settled_failure(manifest: &AgentOutput) -> String {
 /// dispatch-show) took 3.6 s in all on gate l87f, where the same test run on
 /// its own took 0.8 s, at load 15 too. The test adds it before the
 /// worker-start is even asked (t-84792).
+#[cfg(unix)]
 const LOADED_CALL: Duration = Duration::from_millis(1_200);
 
 /// Adversarial review A (Z7): the window opening a worker's pane held the
