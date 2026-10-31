@@ -5646,7 +5646,7 @@ fn the_quiet_stretch_record_names_kinds_and_counts_and_carries_no_content() {
     heard.hear(&[]);
     heard.hear(&[]);
 
-    let words = heard.quiet_words(true);
+    let words = heard.quiet_words(super::StreamRequestKind::CompactionSummary);
     assert!(!words.contains("PRIVATE"), "the record carries content: {words}");
     for said in [
         "compaction summary request",
@@ -5661,7 +5661,7 @@ fn the_quiet_stretch_record_names_kinds_and_counts_and_carries_no_content() {
     }
     assert!(
         super::AttemptHeard::sent_at(std::time::Instant::now())
-            .quiet_words(false)
+            .quiet_words(super::StreamRequestKind::Turn)
             .starts_with("turn request, waiting for the model;"),
         "a turn's record with nothing heard"
     );

@@ -685,8 +685,10 @@ async fn a_quiet_summary_request_is_not_called_reasoning_on_the_turns_channel() 
         .iter()
         .skip(started)
         .position(|block| matches!(block, RenderBlock::StreamPhase(StreamPhase::CompactionEnded)))
-        .map(|offset| started + offset)
-        .unwrap_or_else(|| panic!("no phase tells the status line the compaction ended: {blocks:?}"));
+        .map_or_else(
+            || panic!("no phase tells the status line the compaction ended: {blocks:?}"),
+            |offset| started + offset,
+        );
     let reasoning = blocks[started..ended]
         .iter()
         .filter(|block| matches!(block, RenderBlock::StreamPhase(StreamPhase::QuietReasoning { .. })))

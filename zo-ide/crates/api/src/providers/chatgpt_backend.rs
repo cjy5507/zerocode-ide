@@ -2042,7 +2042,7 @@ impl ChatGptBackendClient {
             heard: AttemptHeard::sent_at(startup_started_at),
             no_progress_cuts: Vec::new(),
             request_seq: NEXT_STREAM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            compaction_summary: false,
+            request_kind: StreamRequestKind::Turn,
         })
     }
 
@@ -2409,9 +2409,19 @@ pub struct ChatGptStream {
     no_progress_cuts: Vec<String>,
     /// This stream's number among the process's streams, for the restart log.
     request_seq: u64,
-    /// Whether this stream carries a compaction's summary request, which the
-    /// quiet-stretch record names (t-71285).
-    compaction_summary: bool,
+    /// Which request this stream carries, which the quiet-stretch record names
+    /// (t-71285).
+    request_kind: StreamRequestKind,
+}
+
+/// The request a [`ChatGptStream`] carries, as its quiet-stretch record names
+/// it (t-71285).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamRequestKind {
+    /// A turn's own request.
+    Turn,
+    /// The summary request a compaction waits on.
+    CompactionSummary,
 }
 
 /// Sink for [`ChatGptStream`] mid-stream restart notices. Boxed `Fn` so the
@@ -2443,7 +2453,7 @@ impl std::fmt::Debug for ChatGptStream {
             .field("heard", &self.heard)
             .field("no_progress_cuts", &self.no_progress_cuts)
             .field("request_seq", &self.request_seq)
-            .field("compaction_summary", &self.compaction_summary)
+            .field("request_kind", &self.request_kind)
             .finish()
     }
 }
@@ -2605,11 +2615,10 @@ impl AttemptHeard {
     /// keep-alive counts, never what the events carried:
     /// `turn request, waiting for the model; heard response.created@0.4s; 3
     /// keep-alives after it, the last 1.2s ago`.
-    fn quiet_words(&self, compaction_summary: bool) -> String {
-        let request = if compaction_summary {
-            "compaction summary request"
-        } else {
-            "turn request"
+    fn quiet_words(&self, request_kind: StreamRequestKind) -> String {
+        let request = match request_kind {
+            StreamRequestKind::Turn => "turn request",
+            StreamRequestKind::CompactionSummary => "compaction summary request",
         };
         format!(
             "{request}, {}; heard {}",
@@ -2823,8 +2832,30 @@ impl ChatGptStream {
     /// quiet stretch leaves (t-71285).
     #[must_use]
     pub fn for_compaction_summary(mut self, compaction_summary: bool) -> Self {
-        self.compaction_summary = compaction_summary;
+        self.request_kind = if compaction_summary {
+            StreamRequestKind::CompactionSummary
+        } else {
+            StreamRequestKind::Turn
+        };
         self
+    }
+
+    /// A quiet stretch that has lasted `quiet_for` leaves its one record line
+    /// and raises its one notice (t-71285). Kept out of [`Self::next_event`],
+    /// whose loop is long enough already.
+    fn quiet_stretch_reached(&self, quiet_for: std::time::Duration) {
+        eprintln!(
+            "[zo] gpt stream quiet for {:.1}s ({}) (attempt {}, request {}, session {}, at {}ms)",
+            quiet_for.as_secs_f64(),
+            self.heard.quiet_words(self.request_kind),
+            self.restart_attempts.saturating_add(1),
+            self.request_seq,
+            self.client.cache_scope(),
+            unix_millis(),
+        );
+        if let Some(notice) = &self.retry_notice {
+            notice(self.heard.quiet_notice(quiet_for));
+        }
     }
 
     pub async fn next_event(&mut self) -> Result<Option<StreamEvent>, ApiError> {
@@ -2929,18 +2960,7 @@ impl ChatGptStream {
                             && since.elapsed() >= self.client.quiet_notice_after
                         {
                             quiet_notified = true;
-                            eprintln!(
-                                "[zo] gpt stream quiet for {:.1}s ({}) (attempt {}, request {}, session {}, at {}ms)",
-                                since.elapsed().as_secs_f64(),
-                                self.heard.quiet_words(self.compaction_summary),
-                                self.restart_attempts.saturating_add(1),
-                                self.request_seq,
-                                self.client.cache_scope(),
-                                unix_millis(),
-                            );
-                            if let Some(notice) = &self.retry_notice {
-                                notice(self.heard.quiet_notice(since.elapsed()));
-                            }
+                            self.quiet_stretch_reached(since.elapsed());
                         }
                     }
                 }
