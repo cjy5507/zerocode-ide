@@ -587,7 +587,7 @@
     "small_tokens": ["fast", "flash", "mini", "haiku", "nano", "lite", "spark"],
     "small_parameter_billion_below": 12,
     "frontier_family_tokens": ["claude", "gpt", "codex", "gemini", "grok", "deepseek", "qwen", "llama", "glm", "mistral", "mixtral", "ornith"],
-    "deep_flagship_tokens": ["opus", "pro", "reasoner", "reasoning", "thinking", "r1"],
+    "deep_flagship_tokens": ["opus", "pro", "argon", "reasoner", "reasoning", "thinking", "r1"],
     "specialty_seed": {
       "coding": ["gpt", "claude"],
       "debugging": ["gpt", "claude"],

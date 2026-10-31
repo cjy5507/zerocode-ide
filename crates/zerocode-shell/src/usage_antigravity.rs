@@ -19,10 +19,13 @@
 //! read-only calls once that refusal came back (2026-10-28).
 
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use crate::google_login;
 use crate::usage::{NamedWindow, ProviderUsage, UsageWindow};
 use crate::usage_http;
+use crate::vendor_cli::{CliCall, CliRunner as _, ProcessRunner, VendorCli};
 use zerocode_core::civil::epoch_ms_of_iso;
 
 const LOAD_CODE_ASSIST_URL: &str =
@@ -34,15 +37,17 @@ const LOAD_CODE_ASSIST: &str = "loadCodeAssist";
 const RETRIEVE_USER_QUOTA: &str = "retrieveUserQuota";
 const BUCKET_WINDOW_MINUTES: u32 = 60;
 
-/// The IDE version zo presents: this floor, raised by an installed IDE and
-/// overridden by zo's own variable — zo's `ANTIGRAVITY_VERSION` and
+/// The CLI version zo presents: this floor, raised by an installed `agy` CLI
+/// and overridden by zo's own variable — zo's `ANTIGRAVITY_VERSION` and
 /// `ANTIGRAVITY_VERSION_ENV`, which say why the floor moves.
-const ANTIGRAVITY_VERSION: &str = "2.9.1";
+const ANTIGRAVITY_VERSION: &str = "1.4.12";
 const ANTIGRAVITY_VERSION_ENV: &str = "ZO_ANTIGRAVITY_VERSION";
+const ANTIGRAVITY_CLI_BINARY: &str = "agy";
+const ANTIGRAVITY_CLI_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// zo's `ANTIGRAVITY_API_CLIENT`.
 const ANTIGRAVITY_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 
-/// The headers of every Code Assist call: the Antigravity IDE identity zo's
+/// The headers of every Code Assist call: the Antigravity CLI identity zo's
 /// `antigravity_headers` puts on every call it sends for this login. A test
 /// holds each value to zo's source, so the two never drift apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +60,7 @@ impl AntigravityHeaders {
     fn new() -> Self {
         Self {
             user_agent: format!(
-                "antigravity/{} darwin/arm64",
+                "antigravity/cli/{} darwin/arm64",
                 antigravity_version(
                     std::env::var(ANTIGRAVITY_VERSION_ENV).ok(),
                     installed_antigravity_version()
@@ -102,7 +107,7 @@ fn client_platform() -> &'static str {
 }
 
 /// The version zo's `antigravity_user_agent` presents: its variable when set
-/// to something, else the newer of the installed IDE and the floor.
+/// to something, else the newer of the installed `agy` CLI and the floor.
 fn antigravity_version(overridden: Option<String>, installed: Option<String>) -> String {
     overridden
         .map(|value| value.trim().to_string())
@@ -110,8 +115,8 @@ fn antigravity_version(overridden: Option<String>, installed: Option<String>) ->
         .unwrap_or_else(|| newest_version(installed, ANTIGRAVITY_VERSION))
 }
 
-/// zo's `newest_version`: compared numerically per dotted part, so `2.10.0`
-/// is newer than `2.9.1`, and an older IDE does not lower the floor.
+/// zo's `newest_version`: compared numerically per dotted part, so `1.10.0`
+/// is newer than `1.4.12`, and an older CLI does not lower the floor.
 fn newest_version(installed: Option<String>, floor: &str) -> String {
     let parts = |version: &str| -> Vec<u64> {
         version
@@ -125,39 +130,52 @@ fn newest_version(installed: Option<String>, floor: &str) -> String {
     }
 }
 
-/// zo's `installed_antigravity_version`: the IDE bundle's short version,
-/// from `/Applications` or the home's `Applications`.
+/// zo's `installed_antigravity_version`: the installed `agy` CLI version on
+/// the hydrated login-shell `PATH`, cached once per hydrated `PATH` value.
 fn installed_antigravity_version() -> Option<String> {
-    #[cfg(target_os = "macos")]
+    type CachedCliVersion = (Option<String>, Option<String>);
+    static INSTALLED_CLI_VERSION: Mutex<Option<CachedCliVersion>> = Mutex::new(None);
+
+    let hydrated = crate::shell_path::hydrated();
+    if let Ok(guard) = INSTALLED_CLI_VERSION.lock()
+        && let Some((cached_path, cached_version)) = guard.as_ref()
+        && *cached_path == hydrated
     {
-        let mut roots = vec![std::path::PathBuf::from("/Applications")];
-        if let Some(home) = dirs::home_dir() {
-            roots.push(home.join("Applications"));
-        }
-        roots.into_iter().find_map(|root| {
-            let plist = root.join("Antigravity.app/Contents/Info.plist");
-            bundle_short_version(&std::fs::read_to_string(plist).ok()?)
-        })
+        return cached_version.clone();
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
+
+    let args = ["--version".to_string()];
+    let call = CliCall {
+        cwd: None,
+        args: &args,
+        stdin: None,
+        budget: Some(ANTIGRAVITY_CLI_PROBE_TIMEOUT),
+    };
+    let probed = ProcessRunner
+        .run(VendorCli::new(ANTIGRAVITY_CLI_BINARY), &call)
+        .ok()
+        .filter(|output| output.success)
+        .and_then(|output| cli_short_version(&output.stdout));
+
+    if let Ok(mut guard) = INSTALLED_CLI_VERSION.lock() {
+        *guard = Some((hydrated, probed.clone()));
     }
+    probed
 }
 
-/// The `CFBundleShortVersionString` of an XML property list, when it reads
-/// as a dotted version.
-#[cfg(any(target_os = "macos", test))]
-fn bundle_short_version(plist: &str) -> Option<String> {
-    let (_, after_key) = plist.split_once("<key>CFBundleShortVersionString</key>")?;
-    let (_, after_open) = after_key.split_once("<string>")?;
-    let (version, _) = after_open.split_once("</string>")?;
-    let version = version.trim();
-    let plausible = !version.is_empty()
-        && version
-            .chars()
-            .all(|glyph| glyph.is_ascii_digit() || glyph == '.');
-    plausible.then(|| version.to_string())
+/// The dotted version printed by `agy --version`, when plausible.
+fn cli_short_version(output: &str) -> Option<String> {
+    output.split_whitespace().find_map(|token| {
+        let version =
+            token.trim_matches(|glyph: char| matches!(glyph, 'v' | 'V' | ',' | '(' | ')'));
+        let plausible = version.contains('.')
+            && !version.starts_with('.')
+            && !version.ends_with('.')
+            && version
+                .chars()
+                .all(|glyph| glyph.is_ascii_digit() || glyph == '.');
+        plausible.then(|| version.to_string())
+    })
 }
 
 /// The seam the tests replace: everything this reader says to a server.
@@ -472,12 +490,26 @@ fn named_bucket(model_id: &str) -> Option<&'static str> {
         .map(|(_, name)| *name)
 }
 
-/// `gemini-2.5-something-new` → `2.5 Something New`.
+/// `gemini-2.5-something-new` → `2.5 Something New`; tiered serving ids like
+/// `gemini-4-argon-low` drop their tier suffix (`4 Argon`) so shared-quota
+/// families do not carry a random rung label into the bar.
 fn humanize_model_id(model_id: &str) -> String {
     let without = model_id
         .strip_prefix("gemini-")
         .or_else(|| model_id.strip_prefix("Gemini-"))
         .unwrap_or(model_id);
+    let without = [
+        "-extra-low",
+        "-xhigh",
+        "-max",
+        "-low",
+        "-medium",
+        "-high",
+        "-tiered",
+    ]
+    .into_iter()
+    .find_map(|suffix| without.strip_suffix(suffix).filter(|stem| !stem.is_empty()))
+    .unwrap_or(without);
     without
         .split('-')
         .map(|part| {
@@ -1146,7 +1178,7 @@ mod tests {
             };
             let agent = header("User-Agent");
             assert!(
-                agent.starts_with("antigravity/") && agent.ends_with(" darwin/arm64"),
+                agent.starts_with("antigravity/cli/") && agent.ends_with(" darwin/arm64"),
                 "{} went out as {agent}",
                 request.url
             );
@@ -1229,9 +1261,10 @@ mod tests {
         let pinned = [
             format!(r#"const ANTIGRAVITY_VERSION: &str = "{ANTIGRAVITY_VERSION}";"#),
             format!(r#"const ANTIGRAVITY_VERSION_ENV: &str = "{ANTIGRAVITY_VERSION_ENV}";"#),
+            format!(r#"const ANTIGRAVITY_CLI_BINARY: &str = "{ANTIGRAVITY_CLI_BINARY}";"#),
             format!(r#"const ANTIGRAVITY_API_CLIENT: &str = "{ANTIGRAVITY_API_CLIENT}";"#),
             format!(r#"const DEFAULT_CODE_ASSIST_ENDPOINT: &str = "{host}";"#),
-            r#"format!("antigravity/{version} darwin/arm64")"#.to_string(),
+            r#"format!("antigravity/cli/{version} darwin/arm64")"#.to_string(),
             r#".header("User-Agent", antigravity_user_agent())"#.to_string(),
             r#".header("X-Goog-Api-Client", ANTIGRAVITY_API_CLIENT)"#.to_string(),
             r#".header("Client-Metadata", client_metadata(None).to_string())"#.to_string(),
@@ -1240,8 +1273,7 @@ mod tests {
             r#""pluginType": "GEMINI","#.to_string(),
             r#"metadata["duetProject"] = Value::String(project.to_string());"#.to_string(),
             r#""cloudaicompanionProject": project_id,"#.to_string(),
-            r#"let plist = root.join("Antigravity.app/Contents/Info.plist");"#.to_string(),
-            r#"<key>CFBundleShortVersionString</key>"#.to_string(),
+            r#"fn cli_short_version(output: &str) -> Option<String>"#.to_string(),
         ]
         .into_iter()
         .chain(platform_rows.iter().map(|row| (*row).to_string()));
@@ -1267,15 +1299,15 @@ mod tests {
     }
 
     /// The version zo presents: its variable when set to something, else the
-    /// newer of the installed IDE and the floor, numerically per part.
+    /// newer of the installed `agy` CLI and the floor, numerically per part.
     #[test]
-    fn the_version_is_zos_variable_else_the_newer_of_the_ide_and_the_floor() {
+    fn the_version_is_zos_variable_else_the_newer_of_the_cli_and_the_floor() {
         let some = |text: &str| Some(text.to_string());
         for (overridden, installed, presented) in [
-            (some(" 3.0.0 "), some("2.10.0"), "3.0.0"),
-            (some("   "), some("2.10.0"), "2.10.0"),
-            (None, some("2.10.0"), "2.10.0"),
-            (None, some("2.1.4"), ANTIGRAVITY_VERSION),
+            (some(" 1.9.0 "), some("1.6.0"), "1.9.0"),
+            (some("   "), some("1.6.0"), "1.6.0"),
+            (None, some("1.10.0"), "1.10.0"),
+            (None, some("1.3.9"), ANTIGRAVITY_VERSION),
             (None, None, ANTIGRAVITY_VERSION),
         ] {
             assert_eq!(
@@ -1284,18 +1316,15 @@ mod tests {
                 "{overridden:?} over {installed:?}"
             );
         }
-        let plist = |version: &str| {
-            format!(
-                "<dict>\n\t<key>CFBundleShortVersionString</key>\n\t<string> {version} </string>\n</dict>"
-            )
-        };
+        assert_eq!(cli_short_version("1.4.12\n").as_deref(), Some("1.4.12"));
         assert_eq!(
-            bundle_short_version(&plist("2.10.3")).as_deref(),
-            Some("2.10.3")
+            cli_short_version("agy version v1.5.2 (darwin/arm64)").as_deref(),
+            Some("1.5.2")
         );
-        assert_eq!(bundle_short_version(&plist("2.10-beta")), None);
-        assert_eq!(bundle_short_version(&plist("")), None);
-        assert_eq!(bundle_short_version("<dict></dict>"), None);
+        assert_eq!(cli_short_version("1.5-beta"), None);
+        assert_eq!(cli_short_version(""), None);
+        assert_eq!(humanize_model_id("gemini-4-argon-low"), "4 Argon");
+        assert_eq!(humanize_model_id("gemini-4-argon-high"), "4 Argon");
     }
 
     /// A refusal from Google is an answer, not a reason to ask again. The gauge

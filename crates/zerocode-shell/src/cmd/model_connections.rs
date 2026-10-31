@@ -60,12 +60,20 @@ pub(crate) async fn select_model_connection(
 }
 
 /// zo's own model list — the catalog the window already reads and caches for
-/// the model menu (`slash_catalog::zo_model_list`), never a second read.
+/// the model menu (`slash_catalog::zo_model_list`), or a forced live refresh
+/// when `fresh` is `Some(true)` (such as the setup wizard's login check).
 #[tauri::command]
-pub(crate) async fn zo_model_list() -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+pub(crate) async fn zo_model_list(fresh: Option<bool>) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or("home")?;
-        Ok(crate::slash_catalog::zo_model_list(&home))
+        if fresh == Some(true) {
+            crate::slash_catalog::refresh_zo_models();
+        }
+        let list = crate::slash_catalog::zo_model_list(&home);
+        if fresh == Some(true) {
+            crate::summon_lineup::refresh();
+        }
+        Ok(list)
     })
     .await
     .map_err(|error| error.to_string())?

@@ -2920,7 +2920,9 @@ class StatefulBackend {
         this.connectionMemory.lastApplied = identity;
         return this.connectionMemoryRead();
       }
-      case "zo_model_list": return this.zoListRead();
+      case "zo_model_list":
+        if (args?.fresh) this.zoListHeld = null;
+        return this.zoListRead();
       case "select_coding_model": {
         // Mirrors `model_connections::apply_coding_model`, checked against
         // the same cached list the screen read.

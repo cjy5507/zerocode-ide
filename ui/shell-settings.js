@@ -7246,10 +7246,24 @@ async function resetWorkerCells(cells) {
   for (const { agent, difficulty } of cells) await saveWorkerCell(agent, difficulty, null, null);
 }
 
-/* A read of the lineup finished — a refresh, a connection saved, the hourly
- * one — while the page that shows it is open: paint what it holds. */
+/* A read of the lineup finished — a refresh, a connection saved, a login
+ * switch, or the hourly background check: drop the per-agent 60s model chip
+ * cache and repaint whichever settings screen shows the catalog. */
 listen("summon-lineup:read", () => {
+  agentModelLists.clear();
+  if (typeof boardModelsAsked !== "undefined") boardModelsAsked.clear();
   if (!settingsView.hidden && settingsPane === "orchestration" && !typesafeBusy) void refreshTypeSafe();
+  if (
+    !settingsView.hidden &&
+    (settingsPane === "judgment-models" || settingsPane === "api-routers") &&
+    !modelConnectionsController.busy &&
+    !modelConnectionsController.picking &&
+    !modelConnectionsController.setup &&
+    !modelConnectionsController.editing &&
+    !modelConnectionsController.deletion
+  ) {
+    void modelConnectionsController.refresh();
+  }
 });
 
 /* One seat's row of the backend's answer, by the use's own name. The words a

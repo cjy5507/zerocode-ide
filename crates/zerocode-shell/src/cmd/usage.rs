@@ -1175,6 +1175,7 @@ pub(crate) async fn google_login_finish(
             let name = name.unwrap_or_default();
             announce_google_login(&state, Some(name.as_str()));
             remember_google_account(&app, &webview, &state, name)?;
+            crate::summon_lineup::force_refresh();
         }
         Err(error) => return Err(error),
     }
@@ -1206,6 +1207,7 @@ pub(crate) async fn google_logout(
         .await
         .map_err(|error| error.to_string())??;
     remember_google_account(&app, &webview, &state, String::new())?;
+    crate::summon_lineup::force_refresh();
     Ok(google_standing(&state))
 }
 

@@ -401,11 +401,14 @@ const modelConnectionsController = {
   /* ---- what zo lists ---------------------------------------------------- */
 
   /* Every login zo knows of: the providers its model rows name and the ones
-   * its reports name, each with its rows and whether a report answered. */
+   * its reports name, each with its rows (`models`, which zo routes) and the
+   * rows another CLI's login lists (`listedModels`, including `otherLogins`
+   * such as xAI/Grok and Kimi). */
   logins() {
     const rows = this.zo?.models ?? [];
+    const others = this.zo?.otherLogins ?? [];
     const reports = this.zo?.reports ?? [];
-    const providers = new Set(rows.map((row) => row.provider));
+    const providers = new Set([...rows.map((row) => row.provider), ...others.map((row) => row.provider)]);
     for (const report of reports) providers.add(ZO_REPORT_PROVIDER[report.provider] ?? report.provider);
     const order = (provider) => {
       const at = MODEL_LOGIN_ORDER.indexOf(provider);
@@ -415,12 +418,16 @@ const modelConnectionsController = {
       const own = reports.filter((report) => (ZO_REPORT_PROVIDER[report.provider] ?? report.provider) === provider);
       const answered = own.filter((report) => report.ok);
       const models = rows.filter((row) => row.provider === provider);
+      const ordered = [...models.filter((row) => row.band !== "superseded"), ...models.filter((row) => row.band === "superseded")];
+      const otherModels = others.filter((row) => row.provider === provider);
+      const listedModels = ordered.length ? ordered : otherModels;
       return {
         provider,
         name: MODEL_LOGINS[provider]?.() ?? t("settings.models.login.other", "{{provider}} 로그인", { provider }),
-        state: this.loginState(own, answered, models),
+        state: this.loginState(own, answered, listedModels),
         report: answered[0] ?? own[0] ?? null,
-        models: [...models.filter((row) => row.band !== "superseded"), ...models.filter((row) => row.band === "superseded")],
+        models: ordered,
+        listedModels,
       };
     });
   },
@@ -458,7 +465,8 @@ const modelConnectionsController = {
     const kind = failure && typeof failure.kind === "string" ? (MODEL_FAILURE_KINDS[failure.kind] ?? MODEL_FAILURE_KINDS.unknown)() : "";
     const detail = failure && Number.isInteger(failure.status) ? [`HTTP ${failure.status}`, kind].filter(Boolean).join(" · ") : kind;
     if (login.state === "ok") {
-      return [t("settings.connections.modelCount", "모델 {{count}}개", { count: login.models.length }), age ? t("settings.models.zoChecked", "zo가 확인한 때: {{age}}", { age }) : ""].filter(Boolean).join(" · ");
+      const count = (login.listedModels ?? login.models).length;
+      return [t("settings.connections.modelCount", "모델 {{count}}개", { count }), age ? t("settings.models.zoChecked", "zo가 확인한 때: {{age}}", { age }) : ""].filter(Boolean).join(" · ");
     }
     if (login.state === "stale") {
       return [age ? t("settings.models.staleWhen", "목록은 이전 확인 것({{age}})", { age }) : modelStateWords("stale").word,
@@ -681,7 +689,7 @@ const modelConnectionsController = {
     setup.checking = true;
     this.renderSetup();
     try {
-      this.zo = await invoke("zo_model_list");
+      this.zo = await invoke("zo_model_list", { fresh: true });
     } catch {
       // The rows below say what was last read.
     }
@@ -1506,7 +1514,8 @@ const modelConnectionsController = {
       const copy = modelNode("div", "model-line-copy");
       copy.append(modelNode("strong", "model-line-name", login.name));
       copy.append(modelNode("span", "model-line-way", this.loginWords(login)));
-      if (login.models.length) copy.append(this.namesFold(login.models.map((model) => model.displayName || model.id), login.provider));
+      const listed = login.listedModels ?? login.models;
+      if (listed.length) copy.append(this.namesFold(listed.map((model) => model.displayName || model.id), login.provider));
       const actions = modelNode("div", "model-line-actions");
       actions.append(modelBadge(login.state), ...this.usePills((role) => role === "coding" && login.models.some((model) => model.id === this.codingKey(this.state?.codingModel))));
       line.append(copy, actions);

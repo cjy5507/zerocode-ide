@@ -94,20 +94,19 @@ const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 /// `http://localhost:51121/oauth-callback`, so the local listener must bind it.
 pub const ANTIGRAVITY_CALLBACK_PORT: u16 = 51121;
 
-/// Antigravity IDE client version zo presents in the `User-Agent`. The
-/// backend enforces a *minimum* client version and rejects anything older with
-/// "This version of Antigravity is no longer supported" — that floor rises over
-/// time, so this is pinned to a recent release (above the floor) and overridable
-/// via `ZO_ANTIGRAVITY_VERSION` so a future bump needs no rebuild.
-// The floor, not the truth: the registry gates its model list on this
-// version (2.3.1 was served 25 models with 3.7 as one `-tiered` id; 2.9.x
-// was served 31, the 3.7 rungs and `gemini-3.8-flash` among them, 3.8-high
-// the default). 2.9.1 is the version the Antigravity CLI carries in its
-// own binary (2026-09-03), so a floor of 2.9.1 is what agy itself
-// presents; an installed IDE newer than this raises it, an older one does
-// not lower it.
-const ANTIGRAVITY_VERSION: &str = "2.9.1";
+/// Antigravity CLI client version zo presents in `User-Agent`
+/// (`antigravity/cli/<version> darwin/arm64`). The Code Assist backend gates
+/// both minimum version support and CLI-served flagship models (`gemini-4-argon`)
+/// on the `antigravity/cli/<version>` identity — IDE-shaped `antigravity/<v>`
+/// headers omit Argon on both `fetchAvailableModels` and `retrieveUserQuota`.
+/// Overridable via `ZO_ANTIGRAVITY_VERSION` so a future floor bump needs no
+/// rebuild; a newer installed `agy` CLI raises this floor automatically while
+/// an older one never lowers it (`Antigravity.app` uses an unrelated `2.x`
+/// version train and is intentionally not compared here).
+const ANTIGRAVITY_VERSION: &str = "1.4.12";
 const ANTIGRAVITY_VERSION_ENV: &str = "ZO_ANTIGRAVITY_VERSION";
+const ANTIGRAVITY_CLI_BINARY: &str = "agy";
+const ANTIGRAVITY_CLI_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const ANTIGRAVITY_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 
 const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
@@ -699,11 +698,18 @@ impl GeminiCodeAssistClient {
     /// heard of (`gemini-3.7-flash-tiered`) reaches the model list without a
     /// new binary — the registry, not a snapshot of it, is the serving list.
     pub async fn fetch_available_models(&self) -> Result<Value, ApiError> {
-        self.post_json_with_timeout::<Value>(
-            FETCH_AVAILABLE_MODELS,
-            &json!({}),
-            Some(LOGIN_HTTP_TIMEOUT),
-        )
+        self.with_project(|project_id| async move {
+            let mut body = json!({});
+            if let Some(project) = project_id {
+                body["project"] = Value::String(project);
+            }
+            self.post_json_with_timeout::<Value>(
+                FETCH_AVAILABLE_MODELS,
+                &body,
+                Some(LOGIN_HTTP_TIMEOUT),
+            )
+            .await
+        })
         .await
     }
 
@@ -1684,13 +1690,12 @@ fn antigravity_user_agent() -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| newest_version(installed_antigravity_version(), ANTIGRAVITY_VERSION));
-    format!("antigravity/{version} darwin/arm64")
+    format!("antigravity/cli/{version} darwin/arm64")
 }
 
-/// The newer of an installed IDE's version and the shipped floor, compared
-/// numerically per dotted component — `2.10.0` is newer than `2.9.1`, and a
-/// version the IDE reports below the floor must not pull the client below
-/// what the Antigravity CLI presents.
+/// The newer of an installed `agy` CLI version and the shipped floor, compared
+/// numerically per dotted component — `1.10.0` is newer than `1.4.12`, and an
+/// older CLI installation never pulls the client below the floor.
 fn newest_version(installed: Option<String>, floor: &str) -> String {
     let parts = |version: &str| -> Vec<u64> {
         version
@@ -1704,36 +1709,92 @@ fn newest_version(installed: Option<String>, floor: &str) -> String {
     }
 }
 
-/// The version of the Antigravity IDE installed on this machine, read from its
-/// bundle. Following the installed IDE keeps "new models appear on their own"
-/// true when the IDE moves past the shipped floor; see [`ANTIGRAVITY_VERSION`]
-/// for why the registry cares, and `newest_version` for why an older IDE does
-/// not lower the client. The environment override still wins over both.
+/// The version of the Antigravity CLI (`agy`) installed on this machine,
+/// probed once per `PATH` and cached for the process lifetime. Following the
+/// installed CLI keeps new model releases reachable when `agy` updates past
+/// [`ANTIGRAVITY_VERSION`], without crossing into `Antigravity.app`'s separate
+/// `2.x` version train.
 fn installed_antigravity_version() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut roots = vec![std::path::PathBuf::from("/Applications")];
-        if let Some(home) = std::env::var_os("HOME") {
-            roots.push(std::path::PathBuf::from(home).join("Applications"));
+    type CachedCliVersion = (Option<std::ffi::OsString>, Option<String>);
+    static INSTALLED_CLI_VERSION: Mutex<Option<CachedCliVersion>> = Mutex::new(None);
+
+    let path_var = std::env::var_os("PATH");
+    if let Ok(guard) = INSTALLED_CLI_VERSION.lock() {
+        if let Some((cached_path, cached_version)) = guard.as_ref() {
+            if *cached_path == path_var {
+                return cached_version.clone();
+            }
         }
-        roots.into_iter().find_map(|root| {
-            let plist = root.join("Antigravity.app/Contents/Info.plist");
-            let text = std::fs::read_to_string(plist).ok()?;
-            let (_, after_key) = text.split_once("<key>CFBundleShortVersionString</key>")?;
-            let (_, after_open) = after_key.split_once("<string>")?;
-            let (version, _) = after_open.split_once("</string>")?;
-            let version = version.trim();
-            let plausible = !version.is_empty()
-                && version
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || c == '.');
-            plausible.then(|| version.to_string())
-        })
     }
-    #[cfg(not(target_os = "macos"))]
+
+    let probed = probe_antigravity_cli_version();
+    if let Ok(mut guard) = INSTALLED_CLI_VERSION.lock() {
+        *guard = Some((path_var, probed.clone()));
+    }
+    probed
+}
+
+fn probe_antigravity_cli_version() -> Option<String> {
+    let mut candidates = vec![std::path::PathBuf::from(ANTIGRAVITY_CLI_BINARY)];
+    #[cfg(not(windows))]
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(std::path::PathBuf::from(home).join(".local/bin/agy"));
+    }
+    #[cfg(windows)]
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        candidates.push(std::path::PathBuf::from(home).join(r".local\bin\agy.exe"));
+    }
+    candidates
+        .into_iter()
+        .find_map(|candidate| run_cli_version_probe(&candidate))
+}
+
+fn run_cli_version_probe(program: &std::path::Path) -> Option<String> {
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    let mut command = Command::new(program);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
     {
-        None
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(0x0800_0000);
     }
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + ANTIGRAVITY_CLI_PROBE_TIMEOUT;
+    loop {
+        if child.try_wait().ok()?.is_some() {
+            let output = child.wait_with_output().ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            return cli_short_version(&String::from_utf8_lossy(&output.stdout));
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn cli_short_version(output: &str) -> Option<String> {
+    output.split_whitespace().find_map(|token| {
+        let version =
+            token.trim_matches(|glyph: char| matches!(glyph, 'v' | 'V' | ',' | '(' | ')'));
+        let plausible = version.contains('.')
+            && !version.starts_with('.')
+            && !version.ends_with('.')
+            && version
+                .chars()
+                .all(|glyph| glyph.is_ascii_digit() || glyph == '.');
+        plausible.then(|| version.to_string())
+    })
 }
 
 fn build_generate_content_request(request: &MessageRequest, project_id: Option<&str>) -> Value {

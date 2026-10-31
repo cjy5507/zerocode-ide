@@ -394,11 +394,18 @@ fn client_metadata_spoofs_antigravity_ide() {
 }
 
 #[test]
-fn the_client_version_never_drops_below_the_floor_and_follows_a_newer_ide() {
-    assert_eq!(newest_version(None, "2.9.1"), "2.9.1");
-    assert_eq!(newest_version(Some("2.3.1".into()), "2.9.1"), "2.9.1");
-    assert_eq!(newest_version(Some("2.10.0".into()), "2.9.1"), "2.10.0");
-    assert_eq!(newest_version(Some("3.0".into()), "2.9.1"), "3.0");
+fn the_client_version_never_drops_below_the_floor_and_follows_a_newer_cli() {
+    assert_eq!(newest_version(None, "1.4.12"), "1.4.12");
+    assert_eq!(newest_version(Some("1.3.9".into()), "1.4.12"), "1.4.12");
+    assert_eq!(newest_version(Some("1.10.0".into()), "1.4.12"), "1.10.0");
+    assert_eq!(newest_version(Some("2.0".into()), "1.4.12"), "2.0");
+    assert_eq!(cli_short_version("1.4.12\n").as_deref(), Some("1.4.12"));
+    assert_eq!(
+        cli_short_version("agy version v1.5.0 (darwin/arm64)").as_deref(),
+        Some("1.5.0")
+    );
+    assert_eq!(cli_short_version("1.5.0-beta"), None);
+    assert_eq!(cli_short_version(""), None);
 }
 
 #[test]
@@ -414,8 +421,13 @@ fn the_default_backend_is_the_one_the_antigravity_clients_call() {
 
 #[test]
 fn antigravity_user_agent_is_overridable() {
-    assert!(antigravity_user_agent().starts_with("antigravity/"));
+    let _lock = crate::test_env_lock();
+    let _clear = EnvVarGuard::set(ANTIGRAVITY_VERSION_ENV, None);
+    assert!(antigravity_user_agent().starts_with("antigravity/cli/"));
     assert!(antigravity_user_agent().ends_with(" darwin/arm64"));
+
+    let _override = EnvVarGuard::set(ANTIGRAVITY_VERSION_ENV, Some(" 1.9.0 "));
+    assert_eq!(antigravity_user_agent(), "antigravity/cli/1.9.0 darwin/arm64");
 }
 
 #[test]
@@ -3384,5 +3396,54 @@ async fn a_refused_remembered_project_is_re_resolved_on_the_streaming_path() {
         .map(|request| request.body["project"].clone())
         .collect();
     assert_eq!(projects, vec![json!("proj-gone"), json!("proj-moved")]);
+    assert_eq!(fake.seen("loadCodeAssist").len(), 1);
+}
+
+/// `fetchAvailableModels` resolves and sends the account's Code Assist project
+/// (healing a stale remembered project when refused) instead of sending `{}`.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn fetch_available_models_resolves_and_heals_the_account_project() {
+    let _lock = crate::test_env_lock();
+    let fake = FakeCodeAssist::start(|request| match request.method.as_str() {
+        "loadCodeAssist" => load_answer("proj-fresh"),
+        "fetchAvailableModels" if request.body["project"] == "proj-fresh" => (
+            200,
+            json!({
+                "models": {
+                    "gemini-4-argon-low": {
+                        "displayName": "Gemini 4 Argon (Low)",
+                        "maxTokens": 1_048_576,
+                        "maxOutputTokens": 65_536,
+                        "modelProvider": "MODEL_PROVIDER_GOOGLE"
+                    }
+                }
+            }),
+        ),
+        "fetchAvailableModels" => project_refused(),
+        _ => (404, json!({})),
+    })
+    .await;
+    let _env = ProjectTestEnv::at(&fake);
+    let login = google_login("a");
+    crate::oauth_store::save_google_code_assist_oauth(&login).unwrap();
+    crate::oauth_store::save_google_code_assist_project(
+        &crate::oauth_store::grant_fingerprint("refresh-a"),
+        None,
+        Some("proj-stale"),
+    )
+    .unwrap();
+
+    let document = GeminiCodeAssistClient::from_oauth(&login)
+        .fetch_available_models()
+        .await
+        .expect("fetchAvailableModels resolves project after healing stale grant project");
+    assert!(document["models"]["gemini-4-argon-low"].is_object());
+    let projects: Vec<Value> = fake
+        .seen("fetchAvailableModels")
+        .into_iter()
+        .map(|request| request.body["project"].clone())
+        .collect();
+    assert_eq!(projects, vec![json!("proj-stale"), json!("proj-fresh")]);
     assert_eq!(fake.seen("loadCodeAssist").len(), 1);
 }

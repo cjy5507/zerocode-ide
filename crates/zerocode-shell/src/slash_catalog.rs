@@ -112,6 +112,7 @@ type CatalogCache = HashMap<(String, String), (Instant, SlashCatalog)>;
 #[derive(Default)]
 struct ModelsCache {
     forgotten: u64,
+    force_refresh: bool,
     held: Option<(Option<Instant>, serde_json::Value)>,
 }
 
@@ -567,32 +568,134 @@ fn captured_lines_in(
 
 /// The models `agent` can switch to, from zo's live catalog (`zo models
 /// --json`, the one place this machine merges every provider's list),
-/// filtered to the provider the agent drives.
+/// filtered to the provider the agent drives, with withdrawn rows omitted and
+/// active generations ordered ahead of superseded ones.
 pub fn agent_models(agent: &str, home: &Path) -> Vec<ModelRow> {
-    let provider = zerocode_core::agent::agent_voice(agent).models_provider;
-    let catalog = zo_models_catalog(home);
+    agent_models_from(agent, &zo_models_catalog(home))
+}
+
+fn band_rank(band: Option<&str>) -> u8 {
+    match band {
+        Some("top") => 0,
+        Some("second") => 1,
+        Some("rest") => 2,
+        None => 3,
+        Some("superseded") => 4,
+        Some(_) => 3,
+    }
+}
+
+fn agent_models_from(agent: &str, catalog: &serde_json::Value) -> Vec<ModelRow> {
+    let other_provider = match agent {
+        "grok" => Some("xai"),
+        "kimi" => Some("kimi"),
+        _ => None,
+    };
+    if let Some(wanted) = other_provider {
+        return catalog
+            .get("otherLogins")
+            .and_then(serde_json::Value::as_array)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter_map(|row| {
+                let id = row.get("id")?.as_str()?;
+                let row_provider = row.get("provider")?.as_str()?;
+                (row_provider == wanted).then(|| ModelRow {
+                    id: id.to_string(),
+                    display_name: row
+                        .get("displayName")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(id)
+                        .to_string(),
+                    provider: row_provider.to_string(),
+                })
+            })
+            .collect();
+    }
+
+    let wanted_provider = if agent == "zo" {
+        None
+    } else {
+        let Some(provider) = zerocode_core::agent::agent_voice(agent).models_provider else {
+            return Vec::new();
+        };
+        Some(provider)
+    };
+
     let rows = catalog
         .get("models")
         .and_then(serde_json::Value::as_array)
         .map_or(&[][..], Vec::as_slice);
-    rows.iter()
-        .filter_map(|row| {
-            let id = row.get("id")?.as_str()?;
-            let row_provider = row.get("provider")?.as_str()?;
-            if provider.is_some_and(|wanted| wanted != row_provider) {
+    let mut ranked: Vec<(u8, usize, ModelRow)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            if row
+                .get("unlistedSince")
+                .is_some_and(|since| !since.is_null())
+            {
                 return None;
             }
-            Some(ModelRow {
-                id: id.to_string(),
-                display_name: row
-                    .get("displayName")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(id)
-                    .to_string(),
-                provider: row_provider.to_string(),
-            })
+            let id = row.get("id")?.as_str()?;
+            let row_provider = row.get("provider")?.as_str()?;
+            if wanted_provider.is_some_and(|wanted| wanted != row_provider) {
+                return None;
+            }
+            let rank = band_rank(row.get("band").and_then(serde_json::Value::as_str));
+            Some((
+                rank,
+                index,
+                ModelRow {
+                    id: id.to_string(),
+                    display_name: row
+                        .get("displayName")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(id)
+                        .to_string(),
+                    provider: row_provider.to_string(),
+                },
+            ))
         })
-        .collect()
+        .collect();
+    ranked.sort_by_key(|(rank, index, _)| (*rank, *index));
+    let mut out: Vec<ModelRow> = ranked.into_iter().map(|(_, _, row)| row).collect();
+
+    if agent == "zo" {
+        let custom = catalog
+            .get("customProviders")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|provider| {
+                provider.get("usable").and_then(serde_json::Value::as_bool) == Some(true)
+            });
+        for provider in custom {
+            let Some(name) = provider.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let models = provider
+                .get("models")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str);
+            for id in models {
+                if out.iter().any(|existing| existing.id == id) {
+                    continue;
+                }
+                let display_name = id
+                    .strip_prefix(&format!("{name}/"))
+                    .unwrap_or(id)
+                    .to_string();
+                out.push(ModelRow {
+                    id: id.to_string(),
+                    display_name,
+                    provider: name.to_string(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Today's lineup for `agent` — the same catalog [`agent_models`] reads, with
@@ -606,9 +709,12 @@ pub fn agent_lineup(
 ) -> Option<zerocode_core::summon_difficulty::lineup::Lineup> {
     use zerocode_core::summon_difficulty::lineup::Lineup;
     let catalog = zo_models_catalog(home);
-    match zerocode_core::agent::agent_voice(agent).models_provider {
-        Some(provider) => Lineup::from_catalog(&catalog, provider),
-        None => Lineup::from_catalog_all(&catalog),
+    if agent == "zo" {
+        Lineup::from_catalog_all(&catalog)
+    } else if let Some(provider) = zerocode_core::agent::agent_voice(agent).models_provider {
+        Lineup::from_catalog(&catalog, provider)
+    } else {
+        None
     }
 }
 
@@ -636,7 +742,13 @@ pub fn zo_model_list(home: &Path) -> serde_json::Value {
 /// ([`diagnosed`]).
 fn model_list_of(catalog: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     let mut list = serde_json::Map::new();
-    for key in ["models", "customProviders", "reports", "aliases"] {
+    for key in [
+        "models",
+        "otherLogins",
+        "customProviders",
+        "reports",
+        "aliases",
+    ] {
         list.insert(
             key.to_string(),
             catalog
@@ -811,9 +923,26 @@ pub fn forget_zo_models() {
     forget_models_in(models_cache());
 }
 
+/// Ask zo to re-query every provider registry on the next read (`zo models
+/// --refresh --json`) rather than serving its disk cache: a person's explicit
+/// catalog refresh, a login switch, or a fresh sign-in.
+pub fn refresh_zo_models() {
+    refresh_models_in(models_cache());
+}
+
 fn forget_models_in(cache: &Mutex<ModelsCache>) {
     if let Ok(mut cache) = cache.lock() {
         cache.forgotten += 1;
+        if let Some((at, _)) = cache.held.as_mut() {
+            *at = None;
+        }
+    }
+}
+
+fn refresh_models_in(cache: &Mutex<ModelsCache>) {
+    if let Ok(mut cache) = cache.lock() {
+        cache.forgotten += 1;
+        cache.force_refresh = true;
         if let Some((at, _)) = cache.held.as_mut() {
             *at = None;
         }
@@ -826,9 +955,14 @@ fn catalog_through(
     accounts: Option<&Path>,
 ) -> serde_json::Value {
     let bin = crate::zo_companion::zo_path_under(home);
-    catalog_read(cache, || {
+    catalog_read(cache, |force_refresh| {
         let env = accounts.map(listing_env).unwrap_or_default();
-        captured_lines_in(&bin, &["models", "--json"], MODELS_WAIT, &env)
+        let args: &[&str] = if force_refresh {
+            &["models", "--refresh", "--json"]
+        } else {
+            &["models", "--json"]
+        };
+        captured_lines_in(&bin, args, MODELS_WAIT, &env)
             .and_then(|lines| serde_json::from_str(&lines.join("\n")).ok())
             .map(diagnosed)
     })
@@ -840,29 +974,31 @@ fn catalog_through(
 /// change it forgot it for, so zo is asked again (t-76028 R2).
 fn catalog_read(
     cache: &Mutex<ModelsCache>,
-    read: impl Fn() -> Option<serde_json::Value>,
+    read: impl Fn(bool) -> Option<serde_json::Value>,
 ) -> serde_json::Value {
     loop {
-        let Some((forgotten, held)) = cache
+        let Some((forgotten, force_refresh, held)) = cache
             .lock()
             .ok()
-            .map(|cache| (cache.forgotten, cache.held.clone()))
+            .map(|cache| (cache.forgotten, cache.force_refresh, cache.held.clone()))
         else {
-            return read().unwrap_or_default();
+            return read(false).unwrap_or_default();
         };
-        if let Some((_, catalog)) = held
-            .as_ref()
-            .filter(|(at, _)| at.is_some_and(|at| at.elapsed() < MODELS_TTL))
+        if !force_refresh
+            && let Some((_, catalog)) = held
+                .as_ref()
+                .filter(|(at, _)| at.is_some_and(|at| at.elapsed() < MODELS_TTL))
         {
             return catalog.clone();
         }
-        let catalog = read()
+        let catalog = read(force_refresh)
             .or_else(|| held.map(|(_, catalog)| catalog))
             .unwrap_or_default();
         let Ok(mut cache) = cache.lock() else {
             return catalog;
         };
         if cache.forgotten == forgotten {
+            cache.force_refresh = false;
             cache.held = Some((Some(Instant::now()), catalog.clone()));
             return catalog;
         }
@@ -956,7 +1092,7 @@ mod tests {
                 .collect::<Vec<_>>()})
         };
         let listed = Mutex::new(Some(routers(&[])));
-        let zo = || listed.lock().expect("listed").clone();
+        let zo = |_: bool| listed.lock().expect("listed").clone();
         let cache = Mutex::new(ModelsCache::default());
         assert_eq!(catalog_read(&cache, zo), routers(&[]));
         *listed.lock().expect("listed") = Some(routers(&["Fixture"]));
@@ -996,7 +1132,7 @@ mod tests {
         let reads = std::sync::atomic::AtomicUsize::new(0);
         let read = std::thread::scope(|scope| {
             let reader = scope.spawn(|| {
-                catalog_read(&cache, || {
+                catalog_read(&cache, |_| {
                     if reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                         asked_tx.send(()).expect("asked");
                         answer_rx.lock().expect("answer").recv().expect("answer");
@@ -1016,10 +1152,82 @@ mod tests {
             "the read answered the list from before the save"
         );
         assert_eq!(
-            catalog_read(&cache, || panic!("a read inside the minute asked zo")),
+            catalog_read(&cache, |_| panic!("a read inside the minute asked zo")),
             after,
             "the list held after the save is the one from before it"
         );
+    }
+
+    /// An explicit refresh (`refresh_models_in`) passes `--refresh` to `zo models`
+    /// once, even inside the minute TTL, and if requested while an unforced read
+    /// is already running, follows it with a forced `--refresh` read.
+    #[cfg(unix)]
+    #[test]
+    fn refresh_models_asks_zo_with_refresh_flag_and_survives_inflight_unforced_reads() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().expect("home");
+        let bin = crate::zo_companion::zo_path_under(home.path());
+        std::fs::create_dir_all(bin.parent().expect("bin dir")).expect("bin dir");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nif [ \"$1 $2 $3\" = 'models --refresh --json' ]; then\n  echo '{\"models\":[{\"id\":\"gemini-4-argon\"}]}'\nelif [ \"$1 $2\" = 'models --json' ]; then\n  echo '{\"models\":[]}'\nfi\n",
+        )
+        .expect("zo");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
+
+        let cache = Mutex::new(ModelsCache::default());
+        assert_eq!(
+            catalog_through(&cache, home.path(), None),
+            serde_json::json!({"models": []})
+        );
+        refresh_models_in(&cache);
+        assert_eq!(
+            catalog_through(&cache, home.path(), None),
+            serde_json::json!({"models": [{"id": "gemini-4-argon"}]}),
+            "refresh_models_in must invoke `zo models --refresh --json`"
+        );
+        // Immediately after a forced refresh completes, the warm cache serves without re-spawning.
+        assert_eq!(
+            catalog_read(&cache, |_| panic!(
+                "warm cache after refresh should not re-spawn"
+            )),
+            serde_json::json!({"models": [{"id": "gemini-4-argon"}]})
+        );
+
+        // And a forced refresh arriving mid-flight during an unforced read forces the retry to pass `true`.
+        forget_models_in(&cache);
+        let (asked_tx, asked) = std::sync::mpsc::channel();
+        let (answer, answer_rx) = std::sync::mpsc::channel::<()>();
+        let answer_rx = Mutex::new(answer_rx);
+        let seen_flags = Mutex::new(Vec::new());
+        let out = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                catalog_read(&cache, |forced| {
+                    let first = {
+                        let mut flags = seen_flags.lock().expect("flags");
+                        let is_first = flags.is_empty();
+                        flags.push(forced);
+                        is_first
+                    };
+                    if first {
+                        asked_tx.send(()).expect("asked");
+                        answer_rx.lock().expect("answer").recv().expect("answer");
+                        Some(serde_json::json!({"models": []}))
+                    } else {
+                        Some(serde_json::json!({"models": [{"id": "gemini-4-argon"}]}))
+                    }
+                })
+            });
+            asked.recv().expect("unforced read started");
+            refresh_models_in(&cache);
+            answer.send(()).expect("release unforced read");
+            reader.join().expect("reader")
+        });
+        assert_eq!(
+            out,
+            serde_json::json!({"models": [{"id": "gemini-4-argon"}]})
+        );
+        assert_eq!(*seen_flags.lock().expect("flags"), vec![false, true]);
     }
 
     /// The list is `zo models --json` from the zo under the home, whole.
@@ -1476,19 +1684,53 @@ mod tests {
 
     #[test]
     fn models_follow_the_agents_provider_and_zo_lists_every_row() {
-        let rows = [
-            serde_json::json!({"id":"claude-opus-5","provider":"claude","displayName":"Opus 5"}),
-            serde_json::json!({"id":"gpt-6-astra","provider":"openai","displayName":"GPT-6-Astra"}),
-        ];
-        let pick = |agent: &str| -> Vec<String> {
-            let provider = zerocode_core::agent::agent_voice(agent).models_provider;
-            rows.iter()
-                .filter(|row| provider.is_none_or(|wanted| row["provider"] == wanted))
-                .map(|row| row["id"].as_str().unwrap().to_string())
+        let catalog = serde_json::json!({
+            "models": [
+                {"id":"claude-opus-4-7","provider":"claude","displayName":"Opus 4.7","band":"superseded"},
+                {"id":"claude-opus-5","provider":"claude","displayName":"Opus 5","band":"top"},
+                {"id":"gpt-6-astra","provider":"openai","displayName":"GPT-6-Astra","band":"top"},
+                {"id":"gemini-3.6-flash","provider":"google","displayName":"Gemini 3.6 Flash","unlistedSince":1_793_400_000},
+                {"id":"gemini-4-argon","provider":"google","displayName":"Gemini 4 Argon","band":"top"},
+                {"id":"gemini-3.8-flash","provider":"google","displayName":"Gemini 3.8 Flash","band":"second"}
+            ],
+            "otherLogins": [
+                {"id":"grok-4","provider":"xai","displayName":"Grok 4"},
+                {"id":"kimi-k2","provider":"kimi","displayName":"Kimi K2"}
+            ],
+            "customProviders": [
+                {"name":"openrouter","usable":true,"models":["openrouter/qwen-coder"]},
+                {"name":"keyless","usable":false,"models":["keyless/ignored"]}
+            ]
+        });
+        let ids = |agent: &str| -> Vec<String> {
+            agent_models_from(agent, &catalog)
+                .into_iter()
+                .map(|row| row.id)
                 .collect()
         };
-        assert_eq!(pick("claude"), vec!["claude-opus-5"]);
-        assert_eq!(pick("codex"), vec!["gpt-6-astra"]);
-        assert_eq!(pick("zo").len(), 2);
+        assert_eq!(ids("claude"), vec!["claude-opus-5", "claude-opus-4-7"]);
+        assert_eq!(ids("codex"), vec!["gpt-6-astra"]);
+        assert_eq!(
+            ids("antigravity"),
+            vec!["gemini-4-argon", "gemini-3.8-flash"],
+            "withdrawn rows are omitted and top stands ahead of second"
+        );
+        assert_eq!(
+            ids("zo"),
+            vec![
+                "claude-opus-5",
+                "gpt-6-astra",
+                "gemini-4-argon",
+                "gemini-3.8-flash",
+                "claude-opus-4-7",
+                "openrouter/qwen-coder",
+            ]
+        );
+        assert_eq!(ids("grok"), vec!["grok-4"]);
+        assert_eq!(ids("kimi"), vec!["kimi-k2"]);
+        assert!(ids("cursor").is_empty());
+
+        let list = model_list_of(&catalog);
+        assert_eq!(list["otherLogins"].as_array().unwrap().len(), 2);
     }
 }
