@@ -75,10 +75,11 @@ pub struct Status {
     /// retry being waited out (attempt, elapsed at which it fires).
     request_sent_at: Option<Duration>,
     retry: Option<(u32, Duration)>,
-    /// The turn-elapsed at which the model went quiet mid-stream (set by a
-    /// `QuietReasoning` phase, cleared by content), so the phrase keeps a
-    /// clock of its own.
-    quiet_reasoning_since: Option<Duration>,
+    /// The turn-elapsed at which the model went quiet mid-stream, and whether
+    /// that quiet is reasoning or a wait (set by a `QuietReasoning` or
+    /// `QuietWaiting` phase, cleared by content or the next request), so the
+    /// phrase keeps a clock of its own (t-71285).
+    quiet_stretch: Option<(core_types::QuietStretch, Duration)>,
     /// The compaction the turn stopped for, from its start phase to its end
     /// phase (t-68694) — or the `/compact` the row stands for.
     compaction: Option<CompactionStanding>,
@@ -221,7 +222,7 @@ impl Status {
             interrupt_binding: "esc".to_string(),
             interruptible: true,
             request_sent_at: None,
-            quiet_reasoning_since: None,
+            quiet_stretch: None,
             compaction: None,
             retry: None,
             active_tools: Vec::new(),
@@ -260,17 +261,17 @@ impl Status {
             StreamPhase::RequestSent { .. } => {
                 self.request_sent_at = Some(self.elapsed);
                 self.retry = None;
+                self.quiet_stretch = None;
             }
             StreamPhase::Retrying { attempt, delay_secs } => {
                 self.request_sent_at = None;
                 self.retry = Some((attempt, self.elapsed + Duration::from_secs(delay_secs)));
             }
             StreamPhase::QuietReasoning { since_secs } => {
-                // The stream that says it is reasoning is live: a reconnect
-                // it went through is over (t-69472).
-                self.retry = None;
-                self.quiet_reasoning_since =
-                    Some(self.elapsed.saturating_sub(Duration::from_secs(since_secs)));
+                self.note_quiet_stretch(core_types::QuietStretch::Reasoning, since_secs);
+            }
+            StreamPhase::QuietWaiting { since_secs } => {
+                self.note_quiet_stretch(core_types::QuietStretch::Waiting, since_secs);
             }
             StreamPhase::Compacting => {
                 // The compaction is the newer fact than any word before it,
@@ -301,7 +302,17 @@ impl Status {
     fn clear_wait(&mut self) {
         self.request_sent_at = None;
         self.retry = None;
-        self.quiet_reasoning_since = None;
+        self.quiet_stretch = None;
+    }
+
+    /// A stream that says it is quiet is live: a reconnect it went through is
+    /// over (t-69472), and its quiet has a clock of its own.
+    fn note_quiet_stretch(&mut self, stretch: core_types::QuietStretch, since_secs: u64) {
+        self.retry = None;
+        self.quiet_stretch = Some((
+            stretch,
+            self.elapsed.saturating_sub(Duration::from_secs(since_secs)),
+        ));
     }
 
     /// The compaction's summary has streamed `streamed_chars` so far: its
@@ -392,9 +403,19 @@ impl Status {
                 seconds_left: left,
             });
         }
-        if let Some(since) = self.quiet_reasoning_since {
-            return Some(StatusActivity::ReasoningSilently {
-                elapsed: self.elapsed.saturating_sub(since),
+        if let Some((stretch, quiet_since)) = self.quiet_stretch {
+            return Some(match stretch {
+                core_types::QuietStretch::Reasoning => StatusActivity::ReasoningSilently {
+                    elapsed: self.elapsed.saturating_sub(quiet_since),
+                },
+                // A wait counts from the request when it went out first, so
+                // the clock goes on when the stream says it is quiet instead
+                // of going back to the quiet's own start (t-71285).
+                core_types::QuietStretch::Waiting => StatusActivity::Waiting {
+                    elapsed: self.elapsed.saturating_sub(
+                        self.request_sent_at.map_or(quiet_since, |sent| sent.min(quiet_since)),
+                    ),
+                },
             });
         }
         let sent_at = self.request_sent_at?;
@@ -415,6 +436,11 @@ impl Status {
                     .map(|phase| phase.line())
                     .or_else(|| compaction.streamed_chars.map(strings::compaction_progress)),
             });
+        }
+        // A quiet stretch the stream named keeps its name past the quiet bar:
+        // the unnamed `quiet` is for a wait nothing named (t-71285).
+        if let Some(named) = self.quiet_stretch.and_then(|_| self.phase_activity()) {
+            return Some(named);
         }
         self.quiet_activity()
             .or_else(|| self.current_tool_activity())
@@ -2535,6 +2561,86 @@ mod tests {
         let plain: Vec<String> = rows.iter().map(Line::plain).collect();
         assert!(!plain.iter().any(|row| row.contains("Working")), "rows were {plain:?}");
         assert_eq!(plain[1], "• the sea holds a patience");
+    }
+
+    /// A wait the stream names as quiet keeps the clock its request started
+    /// (t-71285): the line goes on counting, and does not go back to the quiet
+    /// stretch's own start.
+    #[test]
+    fn a_quiet_wait_counts_on_from_its_request() {
+        use runtime::message_stream::types::StreamPhase;
+        let mut status = Status::working(Duration::from_secs(10));
+        status.note_stream_phase(StreamPhase::RequestSent { attempt: 1 });
+        status.elapsed = Duration::from_secs(30);
+        let before = status.line(120).plain();
+        assert!(before.contains("waiting for the model 20s"), "{before}");
+        // The stream has been quiet 15 s of the request's 20 s.
+        status.note_stream_phase(StreamPhase::QuietWaiting { since_secs: 15 });
+        let after = status.line(120).plain();
+        assert!(
+            after.contains("waiting for the model 20s"),
+            "the clock went back: {before:?} then {after:?}"
+        );
+    }
+
+    /// The two sides of a named wait's clock (t-71285), pinned on their own
+    /// since the commit that set them could not show them red first: after
+    /// the notice the clock goes on from the request, and a stretch that
+    /// comes after content — the request's wait already over — counts from
+    /// its own start.
+    #[test]
+    fn a_quiet_wait_counts_on_after_its_notice_and_after_content_from_its_own_start() {
+        use runtime::message_stream::types::StreamPhase;
+        let mut status = Status::working(Duration::from_secs(10));
+        status.note_stream_phase(StreamPhase::RequestSent { attempt: 1 });
+        status.elapsed = Duration::from_secs(30);
+        status.note_stream_phase(StreamPhase::QuietWaiting { since_secs: 15 });
+        status.elapsed = Duration::from_secs(45);
+        let line = status.line(120).plain();
+        assert!(line.contains("waiting for the model 35s"), "the clock stopped: {line}");
+
+        status.note_stream_content();
+        status.elapsed = Duration::from_secs(80);
+        status.note_stream_phase(StreamPhase::QuietWaiting { since_secs: 16 });
+        let line = status.line(120).plain();
+        assert!(line.contains("waiting for the model 16s"), "{line}");
+    }
+
+    /// A retried request starts its own wait (t-71285, review P3-2): the
+    /// quiet stretch the last attempt named does not stand on the next one, so
+    /// a stream that reasoned before the retry is not said to reason after it,
+    /// and a wait counts from the new request.
+    #[test]
+    fn a_retried_request_does_not_keep_the_last_attempts_quiet_stretch() {
+        use crate::autonomy::limits::DEFAULT_STREAM_PHASE_AFTER_SECS;
+        use runtime::message_stream::types::StreamPhase;
+        for (quiet, said) in [
+            (StreamPhase::QuietReasoning { since_secs: 16 }, "model reasoning silently"),
+            (StreamPhase::QuietWaiting { since_secs: 16 }, "waiting for the model"),
+        ] {
+            let mut status = Status::working(Duration::from_secs(10));
+            status.note_stream_phase(StreamPhase::RequestSent { attempt: 1 });
+            status.elapsed = Duration::from_secs(30);
+            status.note_stream_phase(quiet);
+            let line = status.line(120).plain();
+            assert!(line.contains(said), "{line}");
+
+            status.note_stream_phase(StreamPhase::Retrying { attempt: 2, delay_secs: 1 });
+            status.elapsed = Duration::from_secs(31);
+            status.note_stream_phase(StreamPhase::RequestSent { attempt: 2 });
+            status.elapsed = Duration::from_secs(33);
+            let line = status.line(120).plain();
+            assert!(
+                !line.contains("reasoning silently") && !line.contains("waiting"),
+                "a request out 2 s is not yet a wait, and the last attempt's stretch is over: {line}"
+            );
+            status.elapsed = Duration::from_secs(31 + DEFAULT_STREAM_PHASE_AFTER_SECS);
+            let line = status.line(120).plain();
+            assert!(
+                line.contains(&format!("waiting for the model {DEFAULT_STREAM_PHASE_AFTER_SECS}s")),
+                "the wait counts from the new request: {line}"
+            );
+        }
     }
 
     /// A model reasoning without visible output is a phrase on the status

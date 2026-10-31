@@ -405,6 +405,7 @@ impl AsyncApiClient for LiveAsyncApiClient {
     > {
         Box::pin(async move {
             let __wire_t = std::time::Instant::now();
+            let compaction_summary = request.compaction_summary;
             // Build the wire request off the async executor thread. `convert_messages`
             // re-compresses every historical tool result (uncached) and clones the
             // whole conversation into the provider payload; right after an auto
@@ -552,7 +553,9 @@ impl AsyncApiClient for LiveAsyncApiClient {
             // establish-time Anthropic notice wording.
             let restart_ids = ids.clone();
             let restart_tx = render_tx.clone();
-            let stream = stream.with_stream_retry_notice(move |notice| {
+            let stream = stream
+                .for_compaction_summary(compaction_summary)
+                .with_stream_retry_notice(move |notice| {
                 for block in stream_notice_blocks(&notice, &restart_ids) {
                     let _ = restart_tx.try_send(block);
                 }
@@ -600,11 +603,6 @@ fn destination_of(
     Some(format!("{}/v1/messages", client.base_url().trim_end_matches('/')))
 }
 
-/// One transcript row for a mid-stream notice. Reconnects render as warnings
-/// with the backoff/attempt detail; the quiet-reasoning heartbeat renders as
-/// an informational row (nothing is wrong — the model is thinking silently on
-/// a connection that is verifiably alive), so minutes of "no output" stop
-/// reading as a hang. Pure so the wording is unit-testable.
 /// What a stream notice becomes on screen: a quiet stretch is a PHASE the
 /// status line wears (content ends it), a reconnect is a transcript row.
 fn stream_notice_block(
@@ -614,6 +612,11 @@ fn stream_notice_block(
     match notice.kind {
         core_types::StreamNoticeKind::QuietReasoning => RenderBlock::StreamPhase(
             runtime::message_stream::types::StreamPhase::QuietReasoning {
+                since_secs: notice.delay.as_secs(),
+            },
+        ),
+        core_types::StreamNoticeKind::QuietWaiting => RenderBlock::StreamPhase(
+            runtime::message_stream::types::StreamPhase::QuietWaiting {
                 since_secs: notice.delay.as_secs(),
             },
         ),
@@ -632,7 +635,7 @@ fn stream_notice_block(
 /// phase ([`stream_notice_block`]), and for a reconnect the `Retrying` phase a
 /// turn's own retry sends too (t-69472). The Working line and the window's
 /// activity card then say the turn is reconnecting — the attempt, and the
-/// pause counted down — until the stream's text or a quiet-reasoning notice
+/// pause counted down — until the stream's text or a quiet-stretch notice
 /// says it is live again.
 pub(crate) fn stream_notice_blocks(
     notice: &core_types::StreamRetryNotice,
@@ -653,9 +656,13 @@ pub(crate) fn stream_notice_blocks(
     blocks
 }
 
+/// The transcript row for a reconnect notice: a warning with the
+/// backoff/attempt detail. Pure so the wording is unit-testable. A quiet
+/// stretch is a phase, not a row ([`stream_notice_block`]); its arm here only
+/// keeps the match whole.
 fn stream_notice_row(notice: &core_types::StreamRetryNotice) -> (SystemLevel, String) {
     match notice.kind {
-        core_types::StreamNoticeKind::QuietReasoning => (
+        core_types::StreamNoticeKind::QuietReasoning | core_types::StreamNoticeKind::QuietWaiting => (
             SystemLevel::Info,
             format!(
                 "{} ({}s+ without visible output)",
@@ -876,6 +883,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         };
         build_message_request(&request, model, true, None, registry, None, None, None)
             .tools
@@ -918,6 +926,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         };
         // No step: byte-identical to the turn's own reading.
         let turn = request_effort(&request, Some(L::Xhigh), Some(L::Max), Some(28_000));
@@ -971,6 +980,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         }
     }
 
@@ -1324,6 +1334,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         };
         let wire = build_message_request(
             &request,
@@ -1362,6 +1373,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         };
         let wire = build_message_request(
             &request,
@@ -1392,6 +1404,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         };
         let wire = build_message_request(
             &request,
@@ -1778,6 +1791,7 @@ pub(in crate::session) mod tests {
             effort_step: None,
             model_override: None,
             picture_cap: None,
+            compaction_summary: false,
         };
         (live, request, seen)
     }

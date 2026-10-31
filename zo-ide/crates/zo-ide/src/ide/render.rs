@@ -574,27 +574,7 @@ impl<W: Write> Renderer<W> {
                 }));
                 return Some(PendingPrompt::Question(prompt));
             }
-            RenderBlock::StreamPhase(phase) => {
-                use runtime::message_stream::types::StreamPhase;
-                self.json_line(&match phase {
-                    StreamPhase::RequestSent { attempt } => serde_json::json!({
-                        "type": "stream_phase", "phase": "request_sent", "attempt": attempt
-                    }),
-                    StreamPhase::Retrying { attempt, delay_secs } => serde_json::json!({
-                        "type": "stream_phase", "phase": "retrying", "attempt": attempt,
-                        "delay_secs": delay_secs
-                    }),
-                    StreamPhase::QuietReasoning { since_secs } => serde_json::json!({
-                        "type": "stream_phase", "phase": "quiet_reasoning", "since_secs": since_secs
-                    }),
-                    StreamPhase::Compacting => serde_json::json!({
-                        "type": "stream_phase", "phase": "compacting"
-                    }),
-                    StreamPhase::CompactionEnded => serde_json::json!({
-                        "type": "stream_phase", "phase": "compaction_ended"
-                    }),
-                });
-            }
+            RenderBlock::StreamPhase(phase) => self.json_line(&stream_phase_line(phase)),
             RenderBlock::WireModel(wire) => {
                 self.json_line(&serde_json::json!({
                     "type": "wire_model", "model": wire.model, "source": wire.source.as_tag()
@@ -1026,6 +1006,33 @@ fn permission_request_line(prompt: &runtime::message_stream::PermissionPrompt) -
         object.insert("title".to_string(), serde_json::json!(question.title));
     }
     line
+}
+
+/// JSON 로드가 스트림 단계 하나에 내는 줄. `push_json` 의 갈래가 늘 때마다
+/// 그 함수가 줄 수 자를 넘지 않게 여기 따로 둔다.
+fn stream_phase_line(phase: runtime::message_stream::types::StreamPhase) -> serde_json::Value {
+    use runtime::message_stream::types::StreamPhase;
+    match phase {
+        StreamPhase::RequestSent { attempt } => serde_json::json!({
+            "type": "stream_phase", "phase": "request_sent", "attempt": attempt
+        }),
+        StreamPhase::Retrying { attempt, delay_secs } => serde_json::json!({
+            "type": "stream_phase", "phase": "retrying", "attempt": attempt,
+            "delay_secs": delay_secs
+        }),
+        StreamPhase::QuietReasoning { since_secs } => serde_json::json!({
+            "type": "stream_phase", "phase": "quiet_reasoning", "since_secs": since_secs
+        }),
+        StreamPhase::QuietWaiting { since_secs } => serde_json::json!({
+            "type": "stream_phase", "phase": "quiet_waiting", "since_secs": since_secs
+        }),
+        StreamPhase::Compacting => serde_json::json!({
+            "type": "stream_phase", "phase": "compacting"
+        }),
+        StreamPhase::CompactionEnded => serde_json::json!({
+            "type": "stream_phase", "phase": "compaction_ended"
+        }),
+    }
 }
 
 /// 권한 프롬프트(도구 호출이든 사람에게 던지는 질문이든)의 키 목록 — 그

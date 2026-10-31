@@ -215,16 +215,26 @@ pub fn helper_may_be_stuck() -> String {
     format!("may be stuck — {} to stop or message it", super::agents::OPEN_KEY_LABEL)
 }
 
+/// A wait with no sign of the model reasoning, with its own clock; the words
+/// are core's (`QuietStretch::words`).
 #[must_use]
 pub fn waiting_for_model(elapsed: Duration) -> String {
-    format!("waiting for the model {}", fmt_elapsed_compact(elapsed.as_secs()))
+    format!(
+        "{} {}",
+        core_types::QuietStretch::Waiting.words().phrase,
+        fmt_elapsed_compact(elapsed.as_secs())
+    )
 }
 
 /// The stream is alive and the model is reasoning without visible output —
-/// the status line's word for it, with its own clock.
+/// the status line's word for it, with its own clock; the words are core's.
 #[must_use]
 pub fn reasoning_silently(elapsed: Duration) -> String {
-    format!("model reasoning silently · {}", fmt_elapsed_compact(elapsed.as_secs()))
+    format!(
+        "{} · {}",
+        core_types::QuietStretch::Reasoning.words().phrase,
+        fmt_elapsed_compact(elapsed.as_secs())
+    )
 }
 
 #[must_use]

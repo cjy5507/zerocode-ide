@@ -519,6 +519,19 @@ impl MessageStream {
         }
     }
 
+    /// Say whether this stream carries a compaction's summary request: the
+    /// `ChatGpt` backend names it in the record a quiet stretch leaves
+    /// (t-71285); the other backends keep no such record.
+    #[must_use]
+    pub fn for_compaction_summary(self, compaction_summary: bool) -> Self {
+        match self {
+            Self::ChatGpt(stream) => {
+                Self::ChatGpt(Box::new(stream.for_compaction_summary(compaction_summary)))
+            }
+            other => other,
+        }
+    }
+
     /// Install a mid-stream retry sink. The `ChatGpt`, `OpenAiCompat`, and
     /// `GeminiCodeAssist` backends perform internal transparent pre-commit
     /// restarts that the establish-time retry layer never sees, so without

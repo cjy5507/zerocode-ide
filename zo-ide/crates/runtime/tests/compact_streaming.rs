@@ -624,6 +624,81 @@ async fn an_in_turn_compaction_names_its_wait_on_the_turns_channel() {
     .unwrap_or_else(|| panic!("the done notice follows the end: {blocks:?}"));
 }
 
+/// A turn's request answers at once with the context near full. A summary
+/// request goes quiet first, the way a live stream reports a quiet stretch on
+/// the request's own channel, and then writes the summary.
+struct QuietSummaryApi;
+impl AsyncApiClient for QuietSummaryApi {
+    fn stream_async<'a>(
+        &'a self,
+        request: ApiRequest,
+        render_tx: mpsc::Sender<RenderBlock>,
+        text_block_id: BlockId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
+        Box::pin(async move {
+            if !is_summary_request(&request) {
+                return Ok(vec![
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::Usage(usage(1_000, 119_000)),
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            let _ = render_tx
+                .send(RenderBlock::StreamPhase(StreamPhase::QuietReasoning { since_secs: 15 }))
+                .await;
+            let _ = render_tx
+                .send(RenderBlock::TextDelta {
+                    id: text_block_id,
+                    text: SUMMARY.to_string(),
+                    done: true,
+                })
+                .await;
+            Ok(vec![
+                AssistantEvent::TextDelta(SUMMARY.to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        })
+    }
+}
+
+/// A compaction's quiet summary request is not called reasoning on the turn's
+/// channel (t-71285): from `Compacting` to `CompactionEnded` the turn waits on
+/// its compaction, and the status line says that, not that the model thinks.
+#[tokio::test]
+async fn a_quiet_summary_request_is_not_called_reasoning_on_the_turns_channel() {
+    let mut runtime = turn_runtime(Arc::new(QuietSummaryApi) as Arc<dyn AsyncApiClient>);
+    let (tx, rx) = mpsc::channel::<RenderBlock>(256);
+    let collected = tokio::spawn(drain(rx));
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(AllowPrompter);
+    let summary = runtime
+        .run_turn_streaming("T71285 survey", tx, prompter)
+        .await
+        .expect("the turn ends without an error");
+    let blocks = collected.await.expect("the channel drains");
+    assert!(summary.auto_compaction.is_some(), "the turn compacted");
+
+    let started = blocks
+        .iter()
+        .position(|block| matches!(block, RenderBlock::StreamPhase(StreamPhase::Compacting)))
+        .unwrap_or_else(|| panic!("no phase tells the status line the turn compacts: {blocks:?}"));
+    let ended = blocks
+        .iter()
+        .skip(started)
+        .position(|block| matches!(block, RenderBlock::StreamPhase(StreamPhase::CompactionEnded)))
+        .map_or_else(
+            || panic!("no phase tells the status line the compaction ended: {blocks:?}"),
+            |offset| started + offset,
+        );
+    let reasoning = blocks[started..ended]
+        .iter()
+        .filter(|block| matches!(block, RenderBlock::StreamPhase(StreamPhase::QuietReasoning { .. })))
+        .collect::<Vec<_>>();
+    assert!(
+        reasoning.is_empty(),
+        "the compaction's quiet stretch reads as reasoning: {reasoning:?} in {blocks:?}"
+    );
+}
+
 /// `/compact` waits on the same summary request, and is cut at the same
 /// deadline: the local summary folds the conversation and the report says why.
 #[tokio::test(start_paused = true)]

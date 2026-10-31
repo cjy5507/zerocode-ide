@@ -460,9 +460,10 @@ pub struct StreamRetryNotice {
     /// Most restarts the stream makes before it surfaces the error, so the
     /// request goes out at most `max_attempts + 1` times.
     pub max_attempts: u32,
-    /// Backoff delay before this attempt's reconnect — or, for
-    /// [`StreamNoticeKind::QuietReasoning`], how long the stream has been
-    /// quiet so far.
+    /// Backoff delay before this attempt's reconnect — or, for a quiet
+    /// stretch ([`StreamNoticeKind::QuietReasoning`],
+    /// [`StreamNoticeKind::QuietWaiting`]), how long the stream has been quiet
+    /// so far.
     pub delay: std::time::Duration,
     /// Set when zo cut the attempt itself because its model made no progress
     /// for the stall window: the row names the model and the wait instead of a
@@ -486,24 +487,70 @@ pub struct NoProgressCut {
 }
 
 /// What a [`StreamRetryNotice`] describes: a reconnect backoff (the stream
-/// stalled and is re-opening), or a quiet-reasoning heartbeat (the connection
-/// is alive and delivering keep-alive chunks, but the model has produced no
-/// visible event yet — deep reasoning on a large context can stay silent for
-/// minutes, and without this signal it reads as a hang).
+/// stalled and is re-opening), or a quiet stretch — the connection is alive and
+/// delivering keep-alive chunks, but the model has produced no visible event
+/// yet. A quiet stretch is reasoning only while the model said it began to
+/// think ([`QuietStretch::Reasoning`]); without that signal it is a wait
+/// ([`QuietStretch::Waiting`]): a request the server accepted and holds, or a
+/// summary the turn compacts on, is not the model thinking (t-71285).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StreamNoticeKind {
     #[default]
     Reconnect,
     QuietReasoning,
+    QuietWaiting,
 }
 
-/// Label of the quiet-reasoning heartbeat notice. A shared constant because
-/// two layers key on the exact wording: the streaming backend stamps it on the
-/// [`StreamNoticeKind::QuietReasoning`] notice, and the TUI matches the
-/// transcript row's prefix to flip its "no output" stall badge into a calm
-/// "reasoning · stream alive" state (the `STEERING_ECHO_PREFIX` precedent —
-/// keep every emitter and matcher on this constant).
-pub const QUIET_REASONING_LABEL: &str = "model reasoning silently — stream alive";
+/// What a quiet stretch of a stream is, as far as its events tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuietStretch {
+    /// Inside a reasoning item the model opened and has not closed.
+    Reasoning,
+    /// No reasoning signal: keep-alives, or events that say only that the
+    /// response is accepted and in progress.
+    Waiting,
+}
+
+/// The words one quiet stretch is said in: `phrase` before a clock, `label` on
+/// the stream's notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuietWords {
+    pub phrase: &'static str,
+    pub label: &'static str,
+}
+
+impl QuietStretch {
+    /// The one table of a quiet stretch's words: the status line's phrase
+    /// and the notice's label, which a helper's manifest shows, are read here.
+    #[must_use]
+    pub const fn words(self) -> QuietWords {
+        match self {
+            Self::Reasoning => QuietWords {
+                phrase: "model reasoning silently",
+                label: "model reasoning silently — stream alive",
+            },
+            Self::Waiting => QuietWords {
+                phrase: "waiting for the model",
+                label: "waiting for the model — stream alive",
+            },
+        }
+    }
+
+    /// The notice a stream raises for this stretch.
+    #[must_use]
+    pub const fn notice_kind(self) -> StreamNoticeKind {
+        match self {
+            Self::Reasoning => StreamNoticeKind::QuietReasoning,
+            Self::Waiting => StreamNoticeKind::QuietWaiting,
+        }
+    }
+}
+
+/// Label of the [`StreamNoticeKind::QuietReasoning`] notice, from
+/// [`QuietStretch::words`]: the name the tests that pin the wording read it by.
+/// Nothing matches on it at run time — a quiet stretch reaches the status line
+/// as a phase, not as a row whose text is read (t-71285).
+pub const QUIET_REASONING_LABEL: &str = QuietStretch::Reasoning.words().label;
 
 /// Prefix of the quota-hold warning the runtime emits when a hard 429 parks
 /// the turn on the same model until its quota window resets (the wait band).

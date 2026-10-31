@@ -5144,6 +5144,18 @@ async fn run_scene_noting(
     backoff: Option<(std::time::Duration, std::time::Duration)>,
     notices: &SceneNotices,
 ) -> (String, Option<ApiError>, usize, std::time::Duration) {
+    run_scene_shaped(wire, scripts, backoff, notices, |_| {}).await
+}
+
+/// [`run_scene_noting`] on a scene client `shape` has set up first.
+#[allow(clippy::await_holding_lock)]
+async fn run_scene_shaped(
+    wire: SceneWire,
+    scripts: Vec<SceneScript>,
+    backoff: Option<(std::time::Duration, std::time::Duration)>,
+    notices: &SceneNotices,
+    shape: impl FnOnce(&mut super::ChatGptBackendClient),
+) -> (String, Option<ApiError>, usize, std::time::Duration) {
     let _guard = env_lock();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -5157,10 +5169,11 @@ async fn run_scene_noting(
     let key = super::CHATGPT_STARTUP_NO_PROGRESS_TIMEOUT_ENV;
     let restore = std::env::var(key).ok();
     std::env::set_var(key, SCENE_WINDOW.as_millis().to_string());
-    let client = match backoff {
+    let mut client = match backoff {
         Some(backoff) => scene_client_backing_off(addr, wire, backoff),
         None => scene_client(addr, wire),
     };
+    shape(&mut client);
     let started = std::time::Instant::now();
     let (text, error) = tokio::time::timeout(SCENE_LIMIT, play_scene_turn_noting(&client, notices))
         .await
@@ -5514,6 +5527,144 @@ async fn reasoning_summary_deltas_keep_one_connection_alive_sse() {
     assert!(error.is_none(), "the turn must not end: {error:?}");
     assert_eq!(text, "finished reasoning", "the reasoning kept its first connection");
     assert_eq!(connections, 1, "no reconnect while reasoning deltas keep arriving");
+}
+
+/// How long a quiet-stretch scene stays quiet before its notice: under the
+/// window its in-progress beats keep open, so the notice comes on the first
+/// connection, long before the answer.
+const SCENE_QUIET: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// The notices one quiet stretch raises (t-71285): `response.created`, the
+/// `opening` frames, `response.in_progress` beats a third of a window apart
+/// for three windows — progress, but no content — then an answer on output
+/// index 1, all on one SSE connection.
+async fn quiet_stretch_notices(
+    name: &str,
+    opening: Vec<serde_json::Value>,
+) -> Vec<core_types::StreamRetryNotice> {
+    let frames = |frames: Vec<serde_json::Value>| {
+        frames
+            .into_iter()
+            .map(|frame| (std::time::Duration::ZERO, SceneBeat::Event(frame)))
+            .collect::<SceneScript>()
+    };
+    let mut script = frames(
+        std::iter::once(json!({"type":"response.created","response":{"id":"resp_scene"}}))
+            .chain(opening)
+            .collect(),
+    );
+    script.extend(in_progress_beats(9, SCENE_WINDOW / 3));
+    script.extend(frames(vec![
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","role":"assistant"}}),
+        json!({"type":"response.output_text.delta","output_index":1,"delta":"answered"}),
+        json!({"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answered","annotations":[]}]}}),
+        json!({"type":"response.completed","response":{"id":"resp_scene","usage":{"input_tokens":3,"output_tokens":4}}}),
+    ]));
+    let notices = SceneNotices::default();
+    let (text, error, connections, elapsed) =
+        run_scene_shaped(SceneWire::Sse, vec![script], None, &notices, |client| {
+            client.quiet_notice_after = SCENE_QUIET;
+        })
+        .await;
+    let raised = notices.lock().unwrap().clone();
+    report_scene(name, &text, error.as_ref(), connections, elapsed);
+    assert!(error.is_none(), "the turn must not end: {error:?}");
+    assert_eq!(text, "answered");
+    assert_eq!(connections, 1, "no reconnect while the server reports progress");
+    raised
+}
+
+/// The one quiet-stretch notice among `notices`.
+fn the_quiet_notice(notices: &[core_types::StreamRetryNotice]) -> &core_types::StreamRetryNotice {
+    let quiet = notices
+        .iter()
+        .filter(|notice| notice.kind != core_types::StreamNoticeKind::Reconnect)
+        .collect::<Vec<_>>();
+    assert_eq!(quiet.len(), 1, "one quiet stretch, one notice: {notices:?}");
+    quiet[0]
+}
+
+/// A quiet stretch with no reasoning signal — the response was accepted and is
+/// in progress, and nothing else came — is a wait, not reasoning (t-71285):
+/// the notice still comes, and it does not say the model is reasoning.
+#[tokio::test]
+async fn a_quiet_stretch_without_a_reasoning_signal_is_not_called_reasoning() {
+    let notices = quiet_stretch_notices("Q-no-signal-sse", Vec::new()).await;
+    let notice = the_quiet_notice(&notices);
+    assert_ne!(
+        notice.kind,
+        core_types::StreamNoticeKind::QuietReasoning,
+        "no reasoning item came, so the wait is not reasoning: {notice:?}"
+    );
+    assert_ne!(notice.label, core_types::QUIET_REASONING_LABEL, "{notice:?}");
+}
+
+/// A reasoning item that has closed is no signal for the quiet after it.
+#[tokio::test]
+async fn a_quiet_stretch_after_the_reasoning_item_closed_is_not_called_reasoning() {
+    let notices = quiet_stretch_notices(
+        "Q-reasoning-closed-sse",
+        vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_scene"}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_scene"}}),
+        ],
+    )
+    .await;
+    let notice = the_quiet_notice(&notices);
+    assert_ne!(
+        notice.kind,
+        core_types::StreamNoticeKind::QuietReasoning,
+        "the reasoning item closed before the quiet: {notice:?}"
+    );
+}
+
+/// A quiet stretch inside an open reasoning item is reasoning: the model said
+/// it began to think and has not written since.
+#[tokio::test]
+async fn a_quiet_stretch_inside_an_open_reasoning_item_is_called_reasoning() {
+    let notices = quiet_stretch_notices(
+        "Q-reasoning-open-sse",
+        vec![json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_scene"}})],
+    )
+    .await;
+    let notice = the_quiet_notice(&notices);
+    assert_eq!(notice.kind, core_types::StreamNoticeKind::QuietReasoning, "{notice:?}");
+    assert_eq!(notice.label, core_types::QUIET_REASONING_LABEL);
+}
+
+/// The record a quiet stretch leaves in the restart log names the request, the
+/// stretch, the event kinds and the keep-alives, and nothing the events
+/// carried: no text, no reasoning, no id, and no event kind the server chose
+/// off zo's list (t-71285).
+#[test]
+fn the_quiet_stretch_record_names_kinds_and_counts_and_carries_no_content() {
+    let mut heard = super::AttemptHeard::sent_at(std::time::Instant::now());
+    heard.hear(&[json!({"type":"response.created","response":{"id":"resp_PRIVATE"}})]);
+    heard.hear(&[json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_PRIVATE","summary":[{"text":"PRIVATE summary"}]}})]);
+    heard.hear(&[json!({"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"PRIVATE thought"})]);
+    heard.hear(&[json!({"type":"response.PRIVATE_kind","text":"PRIVATE text"})]);
+    heard.hear(&[]);
+    heard.hear(&[]);
+
+    let words = heard.quiet_words(super::StreamRequestKind::CompactionSummary);
+    assert!(!words.contains("PRIVATE"), "the record carries content: {words}");
+    for said in [
+        "compaction summary request",
+        core_types::QuietStretch::Reasoning.words().phrase,
+        "response.created",
+        "response.output_item.added (reasoning)",
+        "response.reasoning_summary_text.delta",
+        "another response event",
+        "2 keep-alives",
+    ] {
+        assert!(words.contains(said), "the record does not say {said:?}: {words}");
+    }
+    assert!(
+        super::AttemptHeard::sent_at(std::time::Instant::now())
+            .quiet_words(super::StreamRequestKind::Turn)
+            .starts_with("turn request, waiting for the model;"),
+        "a turn's record with nothing heard"
+    );
 }
 
 /// Scene E: the server accepts the response (`response.created`), then goes

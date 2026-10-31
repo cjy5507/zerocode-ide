@@ -327,6 +327,11 @@ pub enum StreamPhase {
     /// content ends, never a transcript row (2026-09-07: one long turn left
     /// five such rows behind).
     QuietReasoning { since_secs: u64 },
+    /// The stream is alive and has produced nothing visible for `since_secs`,
+    /// with no sign that the model is reasoning: a wait, said as one — a
+    /// request accepted and held, or the summary a compaction waits on
+    /// (t-71285). A phrase for the status line, like [`Self::QuietReasoning`].
+    QuietWaiting { since_secs: u64 },
     /// The turn stopped to compact the conversation: from here until
     /// [`StreamPhase::CompactionEnded`] it waits on the summary, not on an
     /// answer (t-68694). The summary request's own phases and its

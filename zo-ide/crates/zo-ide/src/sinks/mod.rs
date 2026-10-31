@@ -578,6 +578,13 @@ pub(crate) mod serializable {
                             delay_secs: Some(*since_secs),
                         }
                     }
+                    runtime::message_stream::types::StreamPhase::QuietWaiting { since_secs } => {
+                        Self::StreamPhase {
+                            phase: "quiet_waiting".to_string(),
+                            attempt: 0,
+                            delay_secs: Some(*since_secs),
+                        }
+                    }
                     runtime::message_stream::types::StreamPhase::Compacting => Self::StreamPhase {
                         phase: "compacting".to_string(),
                         attempt: 0,
@@ -847,6 +854,11 @@ pub(crate) mod serializable {
                 }
                 ("quiet_reasoning", Some(since_secs)) => {
                     runtime::message_stream::types::StreamPhase::QuietReasoning {
+                        since_secs: *since_secs,
+                    }
+                }
+                ("quiet_waiting", Some(since_secs)) => {
+                    runtime::message_stream::types::StreamPhase::QuietWaiting {
                         since_secs: *since_secs,
                     }
                 }

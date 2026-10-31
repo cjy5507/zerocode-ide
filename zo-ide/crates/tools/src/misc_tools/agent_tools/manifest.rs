@@ -1087,13 +1087,17 @@ pub(super) fn record_agent_stream_notice(
         let now = epoch_seconds_now_u64();
         manifest.activity.last_transport_at = Some(now);
         match notice.kind {
-            core_types::StreamNoticeKind::QuietReasoning => {
+            // The label is core's word for the stretch (`QuietStretch::words`):
+            // reasoning only inside an open reasoning item, a wait otherwise.
+            core_types::StreamNoticeKind::QuietReasoning
+            | core_types::StreamNoticeKind::QuietWaiting => {
                 manifest.activity.quiet_stream_since_at =
                     Some(now.saturating_sub(notice.delay.as_secs()));
                 manifest.activity.quiet_notice_count =
                     manifest.activity.quiet_notice_count.saturating_add(1);
                 manifest.current_phase = Some(format!(
-                    "reasoning stream alive · {}s+ without decoded output",
+                    "{} · {}s+ without decoded output",
+                    notice.label,
                     notice.delay.as_secs()
                 ));
             }
@@ -1514,6 +1518,40 @@ mod activity_tests {
         .expect("parse manifest");
         assert!(reasoning.activity.last_reasoning_at.is_some());
         assert!(reasoning.activity.first_task_action_at.is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A quiet stretch with no reasoning signal is a wait in a helper's
+    /// manifest too (t-71285): the phase says the notice's words, and the
+    /// stretch is not reasoning activity.
+    #[test]
+    fn a_quiet_wait_notice_is_a_wait_in_the_manifests_phase() {
+        let (dir, manifest) = test_manifest("quiet-wait");
+        write_agent_manifest(&manifest).expect("write manifest");
+        let path = std::path::Path::new(&manifest.manifest_file);
+        record_agent_stream_open(path, Some("xhigh"), Some(10_000));
+        record_agent_stream_notice(
+            path,
+            &core_types::StreamRetryNotice {
+                kind: core_types::StreamNoticeKind::QuietWaiting,
+                label: core_types::QuietStretch::Waiting.words().label,
+                attempt: 0,
+                max_attempts: 0,
+                delay: std::time::Duration::from_secs(20),
+                no_progress: None,
+            },
+        );
+
+        let waiting: AgentOutput = serde_json::from_str(
+            &std::fs::read_to_string(&manifest.manifest_file).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert_eq!(
+            waiting.current_phase.as_deref(),
+            Some("waiting for the model — stream alive · 20s+ without decoded output")
+        );
+        assert_eq!(waiting.activity.quiet_notice_count, 1);
+        assert!(waiting.activity.last_reasoning_at.is_none());
         std::fs::remove_dir_all(dir).ok();
     }
 

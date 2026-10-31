@@ -1671,6 +1671,10 @@ pub struct ChatGptBackendClient {
     /// [`MAX_RESTART_WALLCLOCK`]). A field so the scenario tests can scale it
     /// with the stall window, keeping production's ratio of ceiling to window.
     max_restart_wallclock: std::time::Duration,
+    /// How long a stream stays quiet before its one quiet-stretch notice (see
+    /// [`CHATGPT_QUIET_REASONING_NOTICE_AFTER`]). A field so the scenario tests
+    /// can reach the notice in milliseconds instead of seconds.
+    quiet_notice_after: std::time::Duration,
 }
 
 impl ChatGptBackendClient {
@@ -1690,6 +1694,7 @@ impl ChatGptBackendClient {
             transport: None,
             held: HeldSlot::default(),
             max_restart_wallclock: MAX_RESTART_WALLCLOCK,
+            quiet_notice_after: CHATGPT_QUIET_REASONING_NOTICE_AFTER,
         }
     }
 
@@ -2037,6 +2042,7 @@ impl ChatGptBackendClient {
             heard: AttemptHeard::sent_at(startup_started_at),
             no_progress_cuts: Vec::new(),
             request_seq: NEXT_STREAM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            request_kind: StreamRequestKind::Turn,
         })
     }
 
@@ -2403,6 +2409,19 @@ pub struct ChatGptStream {
     no_progress_cuts: Vec<String>,
     /// This stream's number among the process's streams, for the restart log.
     request_seq: u64,
+    /// Which request this stream carries, which the quiet-stretch record names
+    /// (t-71285).
+    request_kind: StreamRequestKind,
+}
+
+/// The request a [`ChatGptStream`] carries, as its quiet-stretch record names
+/// it (t-71285).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamRequestKind {
+    /// A turn's own request.
+    Turn,
+    /// The summary request a compaction waits on.
+    CompactionSummary,
 }
 
 /// Sink for [`ChatGptStream`] mid-stream restart notices. Boxed `Fn` so the
@@ -2434,6 +2453,7 @@ impl std::fmt::Debug for ChatGptStream {
             .field("heard", &self.heard)
             .field("no_progress_cuts", &self.no_progress_cuts)
             .field("request_seq", &self.request_seq)
+            .field("request_kind", &self.request_kind)
             .finish()
     }
 }
@@ -2441,19 +2461,16 @@ impl std::fmt::Debug for ChatGptStream {
 const CHATGPT_STREAM_COOPERATIVE_YIELD_EVERY: usize = 16;
 
 /// How long the stream may stay quiet (keep-alive chunks arriving, no decoded
-/// event) before the one-shot quiet-reasoning heartbeat notice fires. Kept just
-/// under the CLI's 20-second "no output" stall-badge threshold
-/// (`STALL_THRESHOLD_SECS`) so that, whenever keep-alives are still arriving,
-/// the badge latches to the calm "reasoning · stream alive" *before* it would
-/// ever read "no output" — the whole point of the heartbeat. At the old 60s it
-/// lost that race by 40 seconds, so a healthy gpt-5.x reasoning pass showed the
-/// alarming "no output" for most of a minute (live report: users could not tell
-/// a reasoning turn from a hang). Still above any normal first-token gap — a
-/// real delta resets `quiet_since`, so fast turns never trip it — and firing the
-/// notice only pre-arms the badge; nothing is shown until the 20s threshold, so
-/// an earlier fire adds no visual noise. A dead/congested connection sends no
-/// chunks at all, so this branch never runs and the idle/startup timeouts own
-/// that case instead.
+/// event) before the one-shot quiet-stretch notice fires. The notice names the
+/// stretch as the attempt's events tell it ([`core_types::QuietStretch`]):
+/// reasoning inside a reasoning item the model opened and has not closed, a
+/// wait otherwise (t-71285); the status line and a helper's manifest say its
+/// words. The value was first kept under a 20-second "no output" badge the CLI
+/// no longer has, so a live stream never read as a hang, and t-71285 keeps it.
+/// Still above any normal first-token gap — a real delta resets `quiet_since`,
+/// so fast turns never trip it. A dead/congested connection sends no chunks at
+/// all, so this branch never runs and the idle/startup timeouts own that case
+/// instead.
 const CHATGPT_QUIET_REASONING_NOTICE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(15);
 
@@ -2507,6 +2524,9 @@ struct AttemptHeard {
     keep_alives: u32,
     /// When the last of those keep-alives came.
     last_keep_alive: Option<std::time::Instant>,
+    /// The output indexes of the reasoning items open now: the model said it
+    /// began to think there and has not closed the item (t-71285).
+    open_reasoning: std::collections::BTreeSet<u64>,
 }
 
 impl AttemptHeard {
@@ -2516,6 +2536,7 @@ impl AttemptHeard {
             events: Vec::new(),
             keep_alives: 0,
             last_keep_alive: None,
+            open_reasoning: std::collections::BTreeSet::new(),
         }
     }
 
@@ -2530,6 +2551,7 @@ impl AttemptHeard {
         for value in batch.iter().filter(|value| is_response_level_event(value)) {
             self.keep_alives = 0;
             self.last_keep_alive = None;
+            self.hear_reasoning(value);
             if self.events.len() >= HEARD_KINDS_KEPT {
                 continue;
             }
@@ -2538,6 +2560,71 @@ impl AttemptHeard {
                 self.events.push((kind, self.sent.elapsed()));
             }
         }
+    }
+
+    /// A reasoning item opens at its `output_item.added`, and its summary and
+    /// text events say it is open; it closes at its `output_item.done`.
+    fn hear_reasoning(&mut self, value: &Value) {
+        let Some(index) = value.get("output_index").and_then(Value::as_u64) else {
+            return;
+        };
+        match value.get("type").and_then(Value::as_str).unwrap_or_default() {
+            "response.output_item.added"
+                if value.pointer("/item/type").and_then(Value::as_str) == Some("reasoning") =>
+            {
+                self.open_reasoning.insert(index);
+            }
+            "response.reasoning_summary_part.added"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_text.delta" => {
+                self.open_reasoning.insert(index);
+            }
+            "response.output_item.done" => {
+                self.open_reasoning.remove(&index);
+            }
+            _ => {}
+        }
+    }
+
+    /// What the quiet stretch the attempt is in is: reasoning while a reasoning
+    /// item is open, a wait otherwise.
+    fn quiet_stretch(&self) -> core_types::QuietStretch {
+        if self.open_reasoning.is_empty() {
+            core_types::QuietStretch::Waiting
+        } else {
+            core_types::QuietStretch::Reasoning
+        }
+    }
+
+    /// The notice a quiet stretch raises once it has lasted `quiet_for`: it
+    /// says reasoning only inside an open reasoning item, a wait otherwise.
+    fn quiet_notice(&self, quiet_for: std::time::Duration) -> StreamRetryNotice {
+        let stretch = self.quiet_stretch();
+        StreamRetryNotice {
+            kind: stretch.notice_kind(),
+            label: stretch.words().label,
+            attempt: 0,
+            max_attempts: 0,
+            delay: quiet_for,
+            no_progress: None,
+        }
+    }
+
+    /// The quiet-stretch record, for the restart log (t-71285): which request
+    /// went quiet and as what, and what the attempt heard — event kinds and
+    /// keep-alive counts, never what the events carried:
+    /// `turn request, waiting for the model; heard response.created@0.4s; 3
+    /// keep-alives after it, the last 1.2s ago`.
+    fn quiet_words(&self, request_kind: StreamRequestKind) -> String {
+        let request = match request_kind {
+            StreamRequestKind::Turn => "turn request",
+            StreamRequestKind::CompactionSummary => "compaction summary request",
+        };
+        format!(
+            "{request}, {}; heard {}",
+            self.quiet_stretch().words().phrase,
+            self.numbers()
+        )
     }
 
     /// The record in words, for the error: `response.created, then keep-alives
@@ -2576,6 +2663,22 @@ impl AttemptHeard {
         });
         format!("{events}; {} keep-alives{after}{last}", self.keep_alives)
     }
+}
+
+/// The notice a ChatGPT stream raises for a quiet stretch that has lasted
+/// `quiet_for` after an attempt heard `events` (t-71285): the one the stream
+/// sends, readable by a consumer's test without opening a stream. For tests
+/// only — zo-ide's status-card scenes, which `#[cfg(test)]` cannot reach
+/// across crates — so it stays off the documented surface.
+#[doc(hidden)]
+#[must_use]
+pub fn chatgpt_quiet_stretch_notice(
+    events: &[Value],
+    quiet_for: std::time::Duration,
+) -> StreamRetryNotice {
+    let mut heard = AttemptHeard::sent_at(std::time::Instant::now());
+    heard.hear(events);
+    heard.quiet_notice(quiet_for)
 }
 
 /// An event's kind as an attempt's record keeps it: its `type`, and for an
@@ -2725,15 +2828,46 @@ impl ChatGptStream {
         self
     }
 
+    /// Mark this stream as a compaction's summary request, for the record a
+    /// quiet stretch leaves (t-71285).
+    #[must_use]
+    pub fn for_compaction_summary(mut self, compaction_summary: bool) -> Self {
+        self.request_kind = if compaction_summary {
+            StreamRequestKind::CompactionSummary
+        } else {
+            StreamRequestKind::Turn
+        };
+        self
+    }
+
+    /// A quiet stretch that has lasted `quiet_for` leaves its one record line
+    /// and raises its one notice (t-71285). Kept out of [`Self::next_event`],
+    /// whose loop is long enough already.
+    fn quiet_stretch_reached(&self, quiet_for: std::time::Duration) {
+        eprintln!(
+            "[zo] gpt stream quiet for {:.1}s ({}) (attempt {}, request {}, session {}, at {}ms)",
+            quiet_for.as_secs_f64(),
+            self.heard.quiet_words(self.request_kind),
+            self.restart_attempts.saturating_add(1),
+            self.request_seq,
+            self.client.cache_scope(),
+            unix_millis(),
+        );
+        if let Some(notice) = &self.retry_notice {
+            notice(self.heard.quiet_notice(quiet_for));
+        }
+    }
+
     pub async fn next_event(&mut self) -> Result<Option<StreamEvent>, ApiError> {
         let idle_timeout = stream_idle_timeout();
         let mut quiet_chunks = 0usize;
-        // Quiet-reasoning heartbeat: the connection is delivering keep-alive
+        // Quiet-stretch heartbeat: the connection is delivering keep-alive
         // chunks (so the idle timeout never fires) but the model has emitted
         // no event yet — deep reasoning on a large context can stay silent
         // for minutes, and without a signal the live UI reads "no output Nm"
         // as a hang. Fired once per quiet stretch, through the same sink the
-        // reconnect notices ride.
+        // reconnect notices ride; it says reasoning only inside an open
+        // reasoning item, and a wait otherwise (t-71285).
         let mut quiet_since: Option<std::time::Instant> = None;
         let mut quiet_notified = false;
         loop {
@@ -2823,19 +2957,10 @@ impl ChatGptStream {
                             return Err(self.wrap_restart_exhaustion(error));
                         }
                         if !quiet_notified
-                            && since.elapsed() >= CHATGPT_QUIET_REASONING_NOTICE_AFTER
+                            && since.elapsed() >= self.client.quiet_notice_after
                         {
                             quiet_notified = true;
-                            if let Some(notice) = &self.retry_notice {
-                                notice(StreamRetryNotice {
-                                    kind: core_types::StreamNoticeKind::QuietReasoning,
-                                    label: core_types::QUIET_REASONING_LABEL,
-                                    attempt: 0,
-                                    max_attempts: 0,
-                                    delay: since.elapsed(),
-                                    no_progress: None,
-                                });
-                            }
+                            self.quiet_stretch_reached(since.elapsed());
                         }
                     }
                 }

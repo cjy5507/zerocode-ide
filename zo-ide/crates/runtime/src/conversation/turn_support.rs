@@ -707,6 +707,7 @@ where
             // until a provider refused a body as too large, then the newest
             // two, then the newest one (`overflow_recovery`).
             picture_cap: self.overflow_recovery.picture_cap(),
+            compaction_summary: false,
         }
     }
 
