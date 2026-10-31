@@ -388,6 +388,10 @@ enum WireIds {
         medium: Option<String>,
         #[serde(default)]
         high: Option<String>,
+        #[serde(default)]
+        xhigh: Option<String>,
+        #[serde(default)]
+        max: Option<String>,
     },
 }
 
@@ -408,15 +412,26 @@ impl WireIds {
     fn resolve(&self, effort: EffortLevel) -> Option<String> {
         match self {
             Self::Fixed(id) => non_blank_wire_id(id),
-            Self::ByEffort { low, medium, high } => {
-                let rungs = [low.as_deref(), medium.as_deref(), high.as_deref()];
+            Self::ByEffort {
+                low,
+                medium,
+                high,
+                xhigh,
+                max,
+            } => {
+                let rungs = [
+                    low.as_deref(),
+                    medium.as_deref(),
+                    high.as_deref(),
+                    xhigh.as_deref(),
+                    max.as_deref(),
+                ];
                 let tier = match effort {
                     EffortLevel::Low => 0,
                     EffortLevel::Medium => 1,
-                    EffortLevel::High
-                    | EffortLevel::Xhigh
-                    | EffortLevel::Max
-                    | EffortLevel::Ultra => 2,
+                    EffortLevel::High => 2,
+                    EffortLevel::Xhigh => 3,
+                    EffortLevel::Max | EffortLevel::Ultra => 4,
                 };
                 rungs[tier]
                     .or_else(|| rungs[tier + 1..].iter().copied().flatten().next())

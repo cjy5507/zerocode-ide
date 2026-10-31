@@ -257,6 +257,7 @@ pub(crate) fn login_moved(provider: Provider) {
             .and_then(|caps| caps.auth_probe)
             .is_some_and(|probe| probe.providers.contains(&provider))
     });
+    crate::summon_lineup::force_refresh();
 }
 
 /// The GitHub CLI's login moved: the agents whose witness it is.

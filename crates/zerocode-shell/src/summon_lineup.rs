@@ -26,6 +26,10 @@ use zerocode_core::summon_difficulty::lineup::{Change, Lineup, Seen};
 /// connection rule for its sources (`model_discovery::LIVE_TTL_SECS`, an
 /// hour); an earlier read would ask zo for the answer it already holds.
 const REFRESH_AFTER_MS: i64 = 60 * 60 * 1000;
+/// How often the window's background ticker checks wall-clock staleness so an
+/// open window refreshes its catalog every hour (including right after wake
+/// from sleep) even if nothing in the ledger peeked at `snapshot()`.
+const TICK_EVERY: Duration = Duration::from_secs(60);
 /// The book of models seen, under the window's config root.
 const SEEN_FILE: &str = "summon-lineup-seen.json";
 /// What the window's one-line notice listens for.
@@ -98,6 +102,9 @@ struct Held {
     /// Somebody asked for a read while one was running: read once more
     /// after it, so the answer postdates the ask.
     again: bool,
+    /// Whether the queued read must pass `--refresh` to `zo models` so zo
+    /// re-queries live provider registries rather than its disk cache.
+    force_next: bool,
     /// Reads finished since boot — what a waiter counts.
     finished: u64,
 }
@@ -122,13 +129,39 @@ fn finished() -> &'static Condvar {
 
 static ROOTS: OnceLock<Roots> = OnceLock::new();
 static WINDOW: OnceLock<tauri::AppHandle> = OnceLock::new();
+static TICKER: OnceLock<()> = OnceLock::new();
 
 /// Named once at boot, and the first read sent; until then every reader is
 /// answered with nothing held, which the rows read as "no lineup".
 pub(crate) fn configure(app: tauri::AppHandle, home: PathBuf, config_root: PathBuf) {
     let _ = WINDOW.set(app);
     let _ = ROOTS.set(Roots { home, config_root });
-    read_in_background(crate::usage_runtime::epoch_ms_now());
+    read_in_background(crate::usage_runtime::epoch_ms_now(), false);
+    TICKER.get_or_init(|| {
+        let _ = std::thread::Builder::new()
+            .name("summon-lineup-tick".into())
+            .spawn(periodic_tick);
+    });
+}
+
+fn due_for_periodic_refresh(read_at_ms: Option<i64>, now_ms: i64) -> bool {
+    read_at_ms.is_none_or(|at| now_ms.saturating_sub(at) >= REFRESH_AFTER_MS)
+}
+
+fn periodic_tick() {
+    loop {
+        std::thread::sleep(TICK_EVERY);
+        let now_ms = crate::usage_runtime::epoch_ms_now();
+        let stale = {
+            let held = held()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            !held.reading && due_for_periodic_refresh(held.read_at_ms, now_ms)
+        };
+        if stale {
+            read_in_background(now_ms, false);
+        }
+    }
 }
 
 /// What is held, whatever its age; an old answer sends one read.
@@ -138,33 +171,47 @@ pub(crate) fn snapshot() -> Snapshot {
         let held = held()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let stale = held
-            .read_at_ms
-            .is_none_or(|at| now_ms.saturating_sub(at) >= REFRESH_AFTER_MS);
+        let stale = due_for_periodic_refresh(held.read_at_ms, now_ms);
         (held.snapshot.clone(), stale)
     };
     if stale {
-        read_in_background(now_ms);
+        read_in_background(now_ms, false);
     }
     snapshot
 }
 
-fn read_in_background(now_ms: i64) {
+fn read_in_background(now_ms: i64, force: bool) {
     let Some(roots) = ROOTS.get() else { return };
     {
         let mut held = held()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if held.reading {
+            if force {
+                held.again = true;
+                held.force_next = true;
+            }
             return;
         }
         held.reading = true;
+        held.force_next = force;
     }
     let spawned = std::thread::Builder::new()
         .name("summon-lineup".into())
         .spawn(move || {
             let mut now_ms = now_ms;
             loop {
+                let force_this_run = {
+                    let mut held = held()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    std::mem::take(&mut held.force_next)
+                };
+                if force_this_run {
+                    crate::slash_catalog::refresh_zo_models();
+                } else {
+                    crate::slash_catalog::forget_zo_models();
+                }
                 read_once(roots, now_ms);
                 let mut held = held()
                     .lock()
@@ -177,10 +224,11 @@ fn read_in_background(now_ms: i64) {
             }
         });
     if spawned.is_err() {
-        held()
+        let mut held = held()
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .reading = false;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.reading = false;
+        held.force_next = false;
     }
 }
 
@@ -217,10 +265,10 @@ fn read_once(roots: &Roots, now_ms: i64) {
     }
 }
 
-/// Read again now, whatever the age of what is held: a person's
-/// 「목록 새로고침」, a connection saved or removed. zo's catalog is forgotten
-/// first, so the read asks zo rather than the window's cache; a read already
-/// running finishes and is followed by this one.
+/// Read again now after a local settings change (a connection saved or
+/// removed): zo's in-memory catalog cache is forgotten first, so the read asks
+/// zo rather than the window's 60-second cache; a read already running
+/// finishes and is followed by this one.
 pub(crate) fn refresh() {
     crate::slash_catalog::forget_zo_models();
     {
@@ -232,10 +280,28 @@ pub(crate) fn refresh() {
             return;
         }
     }
-    read_in_background(crate::usage_runtime::epoch_ms_now());
+    read_in_background(crate::usage_runtime::epoch_ms_now(), false);
 }
 
-/// [`refresh`], and wait — up to [`REFRESH_WAIT`] — for the read that
+/// Re-query live provider registries via `zo models --refresh --json` in the
+/// background: a login switch, a Google sign-in/sign-out, or an explicit
+/// 「목록 새로고침」.
+pub(crate) fn force_refresh() {
+    crate::slash_catalog::refresh_zo_models();
+    {
+        let mut held = held()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.reading {
+            held.again = true;
+            held.force_next = true;
+            return;
+        }
+    }
+    read_in_background(crate::usage_runtime::epoch_ms_now(), true);
+}
+
+/// [`force_refresh`], and wait — up to [`REFRESH_WAIT`] — for the read that
 /// postdates it; the settings screen answers with what that read holds.
 pub(crate) fn refresh_and_wait() {
     if ROOTS.get().is_none() {
@@ -249,7 +315,7 @@ pub(crate) fn refresh_and_wait() {
         // one after it is the one asked for.
         held.finished + if held.reading { 2 } else { 1 }
     };
-    refresh();
+    force_refresh();
     let held = held()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -578,5 +644,22 @@ mod tests {
             observe(&mut seen, &second, 3).is_empty(),
             "said once, across a restart"
         );
+    }
+
+    #[test]
+    fn periodic_refresh_is_due_when_unseeded_or_at_the_hour_boundary() {
+        assert!(due_for_periodic_refresh(None, 1_000));
+        assert!(!due_for_periodic_refresh(
+            Some(1_000),
+            1_000 + REFRESH_AFTER_MS - 1
+        ));
+        assert!(due_for_periodic_refresh(
+            Some(1_000),
+            1_000 + REFRESH_AFTER_MS
+        ));
+        assert!(due_for_periodic_refresh(
+            Some(1_000),
+            1_000 + 8 * REFRESH_AFTER_MS
+        ));
     }
 }

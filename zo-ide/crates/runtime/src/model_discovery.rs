@@ -2432,7 +2432,7 @@ fn antigravity_models() -> SourceAnswer {
         )));
     };
     let document = api::sync_bridge::run_blocking(async move {
-        api::GeminiCodeAssistClient::new(tokens.access_token)
+        api::GeminiCodeAssistClient::from_oauth(&tokens)
             .fetch_available_models()
             .await
             .map_err(|error| Fault::api(&error))
@@ -2546,13 +2546,16 @@ fn unix_date_ordinal(secs: i64) -> u64 {
 }
 
 /// The reasoning-tier suffixes the Antigravity registry folds into a model id,
-/// longest first so `-extra-low` is not read as `-low`.
-const ANTIGRAVITY_TIERS: [(&str, &str); 5] = [
+/// longest first so `-extra-low` is not read as `-low` and `-xhigh` not as
+/// `-high`.
+const ANTIGRAVITY_TIERS: [(&str, &str); 7] = [
     ("-extra-low", "extra-low"),
     ("-tiered", "tiered"),
     ("-medium", "medium"),
+    ("-xhigh", "xhigh"),
     ("-high", "high"),
     ("-low", "low"),
+    ("-max", "max"),
 ];
 
 /// `gemini-3.7-flash-tiered` → `("tiered", "gemini-3.7-flash")`. Only a
@@ -2575,11 +2578,14 @@ fn split_antigravity_tier(lower: &str) -> Option<(&'static str, String)> {
 /// The tier labels a registry display name ends in, and the rung each names.
 /// A label is the only place the registry spells the rung of an id that
 /// carries none in itself: `gemini-pro-agent` is `Gemini 3.1 Pro (High)`.
-const ANTIGRAVITY_TIER_LABELS: [(&str, &str); 4] = [
+const ANTIGRAVITY_TIER_LABELS: [(&str, &str); 7] = [
+    ("(Extra High)", "xhigh"),
     ("(Extra Low)", "low"),
-    ("(Low)", "low"),
+    ("(Xhigh)", "xhigh"),
     ("(Medium)", "medium"),
     ("(High)", "high"),
+    ("(Low)", "low"),
+    ("(Max)", "max"),
 ];
 
 /// `Gemini 3.6 Flash (High)` → `Gemini 3.6 Flash`.
@@ -2643,7 +2649,7 @@ impl<'a> Release<'a> {
     /// Every entry of the release, the strongest rung first — on one rung,
     /// the tiered id before the labelled one.
     fn entries(&self) -> impl Iterator<Item = &(String, &'a Value)> + '_ {
-        ["high", "tiered", "medium", "low", "extra-low"]
+        ["max", "xhigh", "high", "tiered", "medium", "low", "extra-low"]
             .into_iter()
             .flat_map(|rung| self.tiers.get(rung).into_iter().chain(self.labelled.get(rung)))
     }
@@ -2674,6 +2680,8 @@ impl<'a> Release<'a> {
                     .or_else(|| label("medium")),
             ),
             ("high", pick("high").or_else(|| label("high"))),
+            ("xhigh", pick("xhigh").or_else(|| label("xhigh"))),
+            ("max", pick("max").or_else(|| label("max"))),
         ];
         if rungs.iter().all(|(_, wire)| wire.is_none()) {
             return pick("tiered").map(Value::String);
@@ -2689,6 +2697,16 @@ impl<'a> Release<'a> {
 
 /// One registry release as a discovered row.
 fn registry_row(id: String, display_name: String, entry: &Value, wire: Value, source: &str) -> DiscoveredModel {
+    let effort_levels = wire
+        .as_object()
+        .map(|rungs| {
+            ["low", "medium", "high", "xhigh", "max"]
+                .into_iter()
+                .filter(|rung| rungs.contains_key(*rung))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     DiscoveredModel {
         provider: "google".to_string(),
         id,
@@ -2696,7 +2714,7 @@ fn registry_row(id: String, display_name: String, entry: &Value, wire: Value, so
         class: None,
         context_window: entry.get("maxTokens").and_then(Value::as_u64),
         max_output_tokens: entry.get("maxOutputTokens").and_then(Value::as_u64),
-        effort_levels: Vec::new(),
+        effort_levels,
         speed_tiers: Vec::new(),
         released: 0,
         prominence: 0,
@@ -6104,6 +6122,112 @@ mod tests {
         assert_eq!(row["context_window"], 1_048_576);
         let aliases = value["aliases"].as_array().unwrap();
         assert!(aliases.iter().any(|alias| alias["alias"] == "gemini-flash" && alias["canonical"] == "gemini-3.7-flash"));
+    }
+
+    #[test]
+    fn antigravity_argon_folds_ranks_top_and_moves_google_latest_plus_family_aliases() {
+        let document = json!({"models": {
+            "gemini-4-argon-low": {
+                "displayName": "Gemini 4 Argon (Low)",
+                "maxTokens": 1_048_576,
+                "maxOutputTokens": 65_536,
+                "modelProvider": "MODEL_PROVIDER_GOOGLE"
+            },
+            "gemini-4-argon-medium": {
+                "displayName": "Gemini 4 Argon (Medium)",
+                "maxTokens": 1_048_576,
+                "maxOutputTokens": 65_536,
+                "modelProvider": "MODEL_PROVIDER_GOOGLE"
+            },
+            "gemini-4-argon-high": {
+                "displayName": "Gemini 4 Argon (High)",
+                "maxTokens": 1_048_576,
+                "maxOutputTokens": 65_536,
+                "modelProvider": "MODEL_PROVIDER_GOOGLE"
+            },
+            "gemini-3.8-flash-low": {
+                "displayName": "Gemini 3.8 Flash (Low)",
+                "maxTokens": 1_048_576,
+                "maxOutputTokens": 65_536,
+                "modelProvider": "MODEL_PROVIDER_GOOGLE"
+            },
+            "gemini-3.8-flash-high": {
+                "displayName": "Gemini 3.8 Flash (High)",
+                "maxTokens": 1_048_576,
+                "maxOutputTokens": 65_536,
+                "modelProvider": "MODEL_PROVIDER_GOOGLE"
+            }
+        }});
+        let rows = antigravity_rows(&document, "antigravity-registry");
+        let argon = rows
+            .iter()
+            .find(|row| row.id == "gemini-4-argon")
+            .expect("gemini-4-argon folded from tiered serving ids");
+        assert_eq!(argon.display_name, "Gemini 4 Argon");
+        assert_eq!(argon.context_window, Some(1_048_576));
+        assert_eq!(argon.max_output_tokens, Some(65_536));
+        assert_eq!(argon.effort_levels, vec!["low", "medium", "high"]);
+        assert_eq!(
+            argon.wire,
+            Some(json!({
+                "low": "gemini-4-argon-low",
+                "medium": "gemini-4-argon-medium",
+                "high": "gemini-4-argon-high"
+            }))
+        );
+
+        let catalog = DiscoveredCatalog {
+            fetched_at: 1,
+            models: rows,
+            ..Default::default()
+        };
+        let overlay = overlay(&catalog, UpdatePolicy::Auto);
+        let value: Value =
+            serde_json::from_str(overlay.json.as_deref().expect("an overlay")).unwrap();
+        let models = value["models"].as_array().unwrap();
+        let argon_row = models
+            .iter()
+            .find(|row| row["ids"] == json!(["gemini-4-argon"]))
+            .expect("gemini-4-argon reaches overlay");
+        assert_eq!(argon_row["provider"], "google");
+        assert_eq!(argon_row["context_window"], 1_048_576);
+        assert_eq!(argon_row["effort_levels"], json!(["low", "medium", "high"]));
+
+        let tiers = crate::classify_model_tiers(&crate::tier_descriptors_of(&[
+            (api::ProviderKind::Google, "gemini-4-argon"),
+            (api::ProviderKind::Google, "gemini-3.7-pro"),
+            (api::ProviderKind::Google, "gemini-3.8-flash"),
+        ]));
+        let argon_tier = tiers
+            .iter()
+            .find(|tier| tier.id == "gemini-4-argon")
+            .expect("gemini-4-argon classified");
+        assert_eq!(argon_tier.band.key(), "top");
+
+        let aliases = value["aliases"].as_array().unwrap();
+        for expected in ["google-latest", "argon", "gemini-argon"] {
+            assert!(
+                aliases
+                    .iter()
+                    .any(|alias| alias["alias"] == expected && alias["canonical"] == "gemini-4-argon"),
+                "missing alias {expected} -> gemini-4-argon in {aliases:?}"
+            );
+        }
+
+        let extended = antigravity_rows(
+            &json!({"models": {
+                "gemini-4.2-argon-low": {"displayName": "Gemini 4.2 Argon (Low)", "modelProvider": "MODEL_PROVIDER_GOOGLE"},
+                "gemini-4.2-argon-xhigh": {"displayName": "Gemini 4.2 Argon (Extra High)", "modelProvider": "MODEL_PROVIDER_GOOGLE"},
+                "gemini-4.2-argon-max": {"displayName": "Gemini 4.2 Argon (Max)", "modelProvider": "MODEL_PROVIDER_GOOGLE"},
+                "gemini-3.9-flash-tiered": {"displayName": "Gemini 3.9 Flash", "modelProvider": "MODEL_PROVIDER_GOOGLE"}
+            }}),
+            super::ANTIGRAVITY_SOURCE,
+        );
+        let extended_argon = extended.iter().find(|row| row.id == "gemini-4.2-argon").unwrap();
+        assert_eq!(extended_argon.display_name, "Gemini 4.2 Argon");
+        assert_eq!(extended_argon.effort_levels, vec!["low", "xhigh", "max"]);
+        let tiered_only = extended.iter().find(|row| row.id == "gemini-3.9-flash").unwrap();
+        assert!(tiered_only.effort_levels.is_empty(), "single -tiered wire inherits scale");
     }
 
     #[test]
