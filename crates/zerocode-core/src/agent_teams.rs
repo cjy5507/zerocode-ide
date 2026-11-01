@@ -3367,7 +3367,13 @@ mod tests {
                 "-File",
             ])
             .arg(&shim)
-            .args(["check", "--wait"])
+            .args([
+                "send",
+                "--type",
+                "note",
+                "--body",
+                "run `ls` and $(pwd) now",
+            ])
             .env("PORT_V", port.to_string())
             .env("TOKEN_V", "tok")
             .env(TEAM_ID_VAR, "team-1")
@@ -3382,6 +3388,11 @@ mod tests {
             String::from_utf8_lossy(&ran.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&ran.stdout), "{\"ok\":1}");
+        // The text held a backtick and a `$(`: the shim said so once, on stderr, and still
+        // carried the verb (t-80980 5) — the content test above reads the script, this one runs it.
+        let said = String::from_utf8_lossy(&ran.stderr);
+        let warning = crate::orchestration::text_file::inline_warning();
+        assert_eq!(said.matches(&warning).count(), 1, "{said}");
         // The headers arrived; the argv rode the body as a separated blob.
         assert!(head.contains("x-zerocode-hook-token: tok"), "{head}");
         assert!(

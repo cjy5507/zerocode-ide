@@ -51,6 +51,63 @@ fn worker_briefings_ask_for_a_plain_report_by_the_skills_name() {
     }
 }
 
+/// A worker is taught to hand in and to ask through a file (t-84800, t-80980 7): the briefing's
+/// own example used to be a `--body '…'` of JSON, the shape in which a shell expands whatever a
+/// summary holds in double quotes — the road that took the window's panes down twice.
+#[test]
+fn worker_briefings_teach_the_file_road_for_the_report_and_the_question() {
+    for briefing in [
+        worker_briefing("t-1", "lint", ""),
+        federated_briefing("d-1"),
+    ] {
+        let (before, _) = briefing
+            .split_once(BRIEFING_HANDS_OVER)
+            .expect("the briefing hands over");
+        assert!(
+            before.matches("--body-file").count() >= 2,
+            "the report and the question both come as a file: {before}"
+        );
+        assert!(!before.contains("--body '"), "{before}");
+        assert!(before.contains("worker_done"), "{before}");
+        assert!(before.contains("\"ok\":false"), "{before}");
+    }
+}
+
+/// The briefing says where the report file goes (t-84800 r2 P2-4): a file inside the checkout is
+/// an uncommitted change that keeps the checkout from being taken back and may be committed into a
+/// public repository, and a name every worker picks is a name two workers overwrite.
+#[test]
+fn worker_briefings_say_where_the_report_file_goes() {
+    for (briefing, id) in [
+        (worker_briefing("t-1", "lint", ""), "done-t-1.json"),
+        (federated_briefing("d-1"), "done-d-1.json"),
+    ] {
+        let (before, _) = briefing
+            .split_once(BRIEFING_HANDS_OVER)
+            .expect("the briefing hands over");
+        assert_eq!(
+            // The one-checkout paragraph says "outside every checkout" of evidence too, so the
+            // count is of the report file's own sentence.
+            before.matches("to a file outside every checkout").count(),
+            1,
+            "{before}"
+        );
+        assert!(before.contains(id), "a name of its own, {id}: {before}");
+        assert!(before.contains("$TMPDIR"), "{before}");
+        assert!(before.contains("@'"), "PowerShell has no heredoc: {before}");
+    }
+}
+
+/// A refusal of a report that said nothing either way teaches the file road, not the inline body
+/// the briefing no longer teaches (t-84800 r2 P3-5): a worker sending it again copies the shape in
+/// front of it.
+#[test]
+fn a_report_with_no_verdict_is_refused_with_the_file_road() {
+    let why = worker_done_succeeded("{}").expect_err("no verdict");
+    assert!(why.contains("--body-file"), "{why}");
+    assert!(!why.contains("--body '"), "{why}");
+}
+
 /// A worker is told that a report citing a file it named writes the file's absolute path in its
 /// text (t-79642, review t-79586 P3-8): a log called only `red.log` was cited in a report and found
 /// nowhere, because the path rode in the hand-in's payload and not in the words a reader has.

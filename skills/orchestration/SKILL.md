@@ -57,13 +57,15 @@ moment calls for them.
 Each line is the short form of a paragraph below or in a reference file.
 
 1. **A verb's text goes in as a file** (`--prompt-file`, `--body-file`,
-   `--spec-file`, `--question-file`, `--resolution-file`, `--reason-file`),
+   `--spec-file`, `--question-file`, `--resolution-file`, `--reason-file`,
+   `--why-file`),
    written with a quoted heredoc. No backtick, `$(…)` or `$VAR` inside an inline
    double-quoted text: the shell runs it before the verb sees a word. A file
-   argument works only on a v1.1.102 or newer window; an older window takes
-   `--prompt-file` and `--body-file` as unknown arguments and quietly makes an
-   empty worker or an empty letter. To check, look for `--prompt-file` in the
-   `everyVerb` line of `zerocode-orc help`. A retry (the same `--retry-request`)
+   argument works only on a v1.1.102 or newer window (`--why-file` only on one
+   newer than v1.1.112); an older window takes `--prompt-file` and `--body-file`
+   as unknown arguments and quietly makes an empty worker or an empty letter. To
+   check, look for `--prompt-file` (or the flag you need) in the `everyVerb`
+   line of `zerocode-orc help`. A retry (the same `--retry-request`)
    reads the file again, so do not delete the file before the answer has come.
 2. **Every verb that changes anything needs `--retry-request <name>`**, the
    same name on a retry and a new one for a new request.
@@ -175,10 +177,12 @@ that everyone finished at the moment the ledger died. Read the failure as a
 failure.
 
 **Give a verb its text as a file, never inside double quotes.** `--prompt`,
-`--body`, `--spec`, `--question`, `--resolution` and `--reason` each have a
+`--body`, `--spec`, `--question`, `--resolution`, `--reason` and `--why` each have a
 file form — `--prompt-file`, `--body-file`, `--spec-file`, `--question-file`,
-`--resolution-file`, `--reason-file` — that takes the ABSOLUTE path of a UTF-8
-file and reads it as it lies, with no shell in between. Do not write a
+`--resolution-file`, `--reason-file`, `--why-file` — that takes the ABSOLUTE path of a UTF-8
+file and reads it as UTF-8 text, with no shell in between: a leading byte-order mark
+is dropped, CRLF line ends become LF, and a NUL byte, a link, a pipe or more than
+the verb's text bound is refused. Do not write a
 backtick, `$(…)` or `$VAR` inside an inline double-quoted text: the shell runs
 or replaces it before `zerocode-orc` sees a word. Twice (2026-10-28) a `pkill`
 inside a briefing ran that way and took the window's panes down. Write the

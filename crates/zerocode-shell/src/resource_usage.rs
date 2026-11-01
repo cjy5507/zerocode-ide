@@ -136,8 +136,8 @@ struct ProcessRow {
 }
 
 #[derive(Debug)]
-struct CapturedStream {
-    bytes: Vec<u8>,
+pub(crate) struct CapturedStream {
+    pub(crate) bytes: Vec<u8>,
     overflowed: bool,
 }
 
@@ -528,8 +528,40 @@ fn capture_stream(mut reader: impl Read, limit: usize) -> io::Result<CapturedStr
     Ok(CapturedStream { bytes, overflowed })
 }
 
-fn run_sampler(mut command: Command, timeout: Duration) -> Result<SamplerRun, String> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+/// A child that ran to its end inside its deadline, both streams read to their bounds.
+pub(crate) struct BoundedRun {
+    pub(crate) status: std::process::ExitStatus,
+    pub(crate) stdout: CapturedStream,
+    pub(crate) stderr: CapturedStream,
+    pub(crate) pid: u32,
+}
+
+/// Ends a child that ran past its deadline, or whose state cannot be read, and lets go of it at once
+/// (t-84800 r2 P3-1). Waiting for it and for its readers is a thread's own work: a helper it
+/// started may hold its pipes open after it is gone, and a caller bounded by a deadline must not
+/// wait on that. The thread reaps the child, so nothing stays in the table.
+fn let_go(
+    mut child: std::process::Child,
+    readers: [std::thread::JoinHandle<io::Result<CapturedStream>>; 2],
+) {
+    let _ = child.kill();
+    let _ = std::thread::Builder::new().spawn(move || {
+        let _ = child.wait();
+        for reader in readers {
+            let _ = reader.join();
+        }
+    });
+}
+
+/// The one runner of a child this window waits on inside a deadline: both streams are read to
+/// their bounds on threads of their own, the exit code is left to the caller, and a child that
+/// outlives `timeout` is killed and let go of ([`let_go`]). The process listing, `taskkill` and
+/// `lsof` all run through it.
+pub(crate) fn run_bounded(mut command: Command, timeout: Duration) -> Result<BoundedRun, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .map_err(|error| format!("프로세스 목록을 시작할 수 없습니다: {error}"))?;
@@ -554,17 +586,11 @@ fn run_sampler(mut command: Command, timeout: Duration) -> Result<SamplerRun, St
                 std::thread::sleep(PROCESS_POLL_INTERVAL);
             }
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
+                let_go(child, [stdout_reader, stderr_reader]);
                 return Err("프로세스 목록 읽기 시간이 초과되었습니다".to_string());
             }
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
+                let_go(child, [stdout_reader, stderr_reader]);
                 return Err(format!("프로세스 목록 상태를 읽을 수 없습니다: {error}"));
             }
         }
@@ -577,15 +603,25 @@ fn run_sampler(mut command: Command, timeout: Duration) -> Result<SamplerRun, St
         .join()
         .map_err(|_| "프로세스 목록 오류 읽기가 중단되었습니다".to_string())?
         .map_err(|error| format!("프로세스 목록 오류를 읽을 수 없습니다: {error}"))?;
-    if stdout.overflowed || stderr.overflowed {
+    Ok(BoundedRun {
+        status,
+        stdout,
+        stderr,
+        pid,
+    })
+}
+
+fn run_sampler(command: Command, timeout: Duration) -> Result<SamplerRun, String> {
+    let run = run_bounded(command, timeout)?;
+    if run.stdout.overflowed || run.stderr.overflowed {
         return Err("프로세스 목록이 너무 큽니다".to_string());
     }
-    if !status.success() {
+    if !run.status.success() {
         return Err("프로세스 목록을 읽을 수 없습니다".to_string());
     }
     Ok(SamplerRun {
-        stdout: stdout.bytes,
-        pid,
+        stdout: run.stdout.bytes,
+        pid: run.pid,
     })
 }
 

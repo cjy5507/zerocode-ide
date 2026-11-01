@@ -5174,6 +5174,7 @@ name = "zerocode-core"
 version = "1.1.113"
 dependencies = [
  "judgment-provider",
+ "libc",
  "model-prices",
  "nix 0.29.0",
  "regex",

@@ -11184,13 +11184,19 @@ fn read_commits(
 /// A link is not followed: `symlink_metadata` describes the link itself.
 fn read_receipt_text(path: &str) -> Option<String> {
     use std::io::Read;
+    let path = std::path::Path::new(path);
     if !std::fs::symlink_metadata(path).ok()?.is_file() {
         return None;
     }
+    // Opened as a text file is (t-84800 r2 P3-6): between the look above and the open the name may
+    // have become a pipe nobody writes, which a plain open would wait on; the open file is looked
+    // at again, since it is the file that is read.
+    let file = zerocode_core::orchestration::text_file::open_plain(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut text = String::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(zerocode_core::orchestration::evidence::RECEIPT_BYTES_MAX)
+    file.take(zerocode_core::orchestration::evidence::RECEIPT_BYTES_MAX)
         .read_to_string(&mut text)
         .ok()?;
     Some(text)
@@ -12693,7 +12699,7 @@ fn carried(
                 .and_then(|team| team.term_of(pane));
             let roots = host.kill_roots(caller);
             let trees = crate::process_sweep::coordinator_trees(ask.coordinator_seats(), host);
-            match crate::process_sweep::carry(&ask, roots, &trees) {
+            match crate::process_sweep::carry(&ask, roots, &trees, team_id, pane) {
                 Ok(carried) => {
                     if let Some(filed) = carried.filed {
                         match actor.observation_once(

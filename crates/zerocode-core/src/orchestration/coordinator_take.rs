@@ -471,7 +471,10 @@ pub(super) fn hand_in(
         format!("--head names a commit, seven hex digits or more, and {named:?} is not one")
     })?;
     let body = words.value("--body").ok_or_else(|| {
-        format!("{HAND_IN_VERB} needs --body '{{\"ok\":true,\"summary\":\"…\"}}'")
+        format!(
+            "{HAND_IN_VERB} needs the body {{\"ok\":true,\"summary\":\"…\"}} — write it to a file \
+             with a quoted heredoc and give --body-file <that file's absolute path>"
+        )
     })?;
     let ok = worker_done_succeeded(body)?;
     let serde_json::Value::Object(mut said_body) =
