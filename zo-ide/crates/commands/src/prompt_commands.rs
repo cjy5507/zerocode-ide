@@ -658,8 +658,21 @@ impl InlineShell<'_> {
         if policy.deny_reason(BASH_TOOL, &input).is_some() {
             return Some("not run — a deny rule in your permission settings forbids it".to_string());
         }
+        // A command file asks nobody, whatever the mode or the rules: the kill
+        // guard's refusal says what it refused and what to do instead, as a
+        // sub-agent's bash says it (t-82854).
+        if let Some(refused) = runtime::kill_guard::refusal_where_nobody_can_ask(command) {
+            return Some(format!("not run — {refused}"));
+        }
         match policy.authorize(BASH_TOOL, &input, None) {
             runtime::PermissionOutcome::Allow => None,
+            // The policy reads the processes again; a refusal of its own
+            // from the guard still says why in the guard's words.
+            runtime::PermissionOutcome::Deny { reason }
+                if runtime::kill_guard::is_refusal(&reason) =>
+            {
+                Some(format!("not run — {reason}"))
+            }
             runtime::PermissionOutcome::Deny { .. } => Some(
                 "not run — an ask rule in your permission settings wants your approval, and a command file cannot ask; run it yourself if you approve"
                     .to_string(),
@@ -1068,6 +1081,75 @@ mod tests {
                 format!("[!{line}: not run — a deny rule in your permission settings forbids it]\n"),
                 "deny {deny}"
             );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A `!` line the kill guard refuses says why in the guard's own words —
+    /// a signal no person said yes to — not that an ask rule wants approval
+    /// (t-82721 P3-3). The pid is known only when the line would run, so
+    /// nothing is aimed at.
+    #[test]
+    fn a_bang_line_the_kill_guard_refuses_says_why_in_the_guards_words() {
+        let root = temp_dir("bang-kill");
+        fs::create_dir_all(&root).expect("base dir");
+        let line = "kill \"$TARGET\"";
+        let command = parse_prompt_command_file(
+            "stop".to_string(),
+            PathBuf::from("stop.md"),
+            &format!("---\nallowed-tools: Bash\n---\n!{line}\n"),
+        )
+        .expect("command parsed");
+        let rules = runtime::RuntimePermissionRuleConfig::new(Vec::new(), Vec::new(), Vec::new());
+        let gate = InlineShellGate {
+            read_only: false,
+            workspace: WorkspaceTrust::Trusted,
+            rules: Ok(&rules),
+        };
+        let rendered = command.render_prompt_as("", &root, gate);
+        let refused = format!("[!{line}: not run — refused, since no person said yes to it");
+        assert!(rendered.starts_with(&refused), "{rendered}");
+        assert!(!rendered.contains("an ask rule"), "{rendered}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A command file asks nobody, whatever the mode or the rules: a `!` line
+    /// the kill guard refuses says what to do instead as a sub-agent's bash
+    /// says it, and never that the session runs calls without asking — under
+    /// no rule, an allow rule and an ask rule alike (t-82854, review w-83819
+    /// P3-1).
+    #[test]
+    fn a_bang_lines_kill_refusal_reads_as_check_bashs_under_any_rule() {
+        let root = temp_dir("bang-kill-rules");
+        fs::create_dir_all(&root).expect("base dir");
+        let line = "kill \"$TARGET\"";
+        let command = parse_prompt_command_file(
+            "stop".to_string(),
+            PathBuf::from("stop.md"),
+            &format!("---\nallowed-tools: Bash\n---\n!{line}\n"),
+        )
+        .expect("command parsed");
+        let check_bash = runtime::permission_enforcer::PermissionEnforcer::new(runtime::PermissionPolicy::new(
+            runtime::PermissionMode::DangerFullAccess,
+        ))
+        .check_bash(line);
+        let runtime::permission_enforcer::EnforcementResult::Denied { reason, .. } = check_bash else {
+            panic!("check_bash ran a kill no person said yes to");
+        };
+        let kill_rule = || vec!["bash(kill:*)".to_string()];
+        for (name, rules) in [
+            ("no rule", runtime::RuntimePermissionRuleConfig::new(Vec::new(), Vec::new(), Vec::new())),
+            ("an allow rule", runtime::RuntimePermissionRuleConfig::new(kill_rule(), Vec::new(), Vec::new())),
+            ("an ask rule", runtime::RuntimePermissionRuleConfig::new(Vec::new(), Vec::new(), kill_rule())),
+        ] {
+            let gate = InlineShellGate {
+                read_only: false,
+                workspace: WorkspaceTrust::Trusted,
+                rules: Ok(&rules),
+            };
+            let rendered = command.render_prompt_as("", &root, gate);
+            assert!(!rendered.contains("runs calls without asking"), "{name}: {rendered}");
+            assert_eq!(rendered, format!("[!{line}: not run — {reason}]\n"), "{name}");
         }
         let _ = fs::remove_dir_all(root);
     }
