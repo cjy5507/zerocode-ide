@@ -77,7 +77,7 @@ const SHARED_LEDGER_POLL: Duration = Duration::from_millis(1);
 
 /// Remove the records of built-in decision `id` from the zo home holding
 /// `settings`: its ledger in every evidence folder, its line in the act lines
-/// beside each, and what it left outside them ([`forget_leftovers`]). Returns
+/// beside each, and what it left outside them (`forget_leftovers`). Returns
 /// how many ledgers went.
 ///
 /// # Errors
@@ -190,7 +190,7 @@ pub fn decision_deleted(home: &Path, id: &str) {
 /// The first start erases what every marked seat left, and the rows of
 /// decisions the store no longer keeps. Every later one re-erases only what
 /// [`PENDING_FILE`] names, and is one look at that file when there is none.
-/// [`SWEPT_KEY`] and [`LEFTOVERS_KEY`] are read apart: a machine past the first
+/// `SWEPT_KEY` and `LEFTOVERS_KEY` are read apart: a machine past the first
 /// still owes the second, once, over the one listing of the folders.
 pub fn tidy_at_start(settings: &Path, lifted: bool) {
     if !lifted {
