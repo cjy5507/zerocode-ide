@@ -69,6 +69,7 @@ import { testWorkbenchResponsive } from "./workbench-responsive.mjs";
 import { testTabstripOverflow } from "./tabstrip-overflow.mjs";
 import { testNarrowWindow } from "./narrow-window.mjs";
 import { testChromeGeist } from "./chrome-geist.mjs";
+import { testSidebarAria } from "./sidebar-aria.mjs";
 import { testPasteRoad } from "./paste-road.mjs";
 import { testTermMouseMotion } from "./term-mouse-motion.mjs";
 import { testFaultReportStorm } from "./fault-report-storm.mjs";
@@ -370,6 +371,8 @@ suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsi
 suite("tabstrip-overflow", ({ browser, origin, ok }) => testTabstripOverflow(browser, origin, ok));
 suite("narrow-window", async ({ browser, origin, ok }) => { await testNarrowWindow(browser, origin, ok); });
 suite("chrome-geist", async ({ browser, origin, ok }) => { await testChromeGeist(browser, origin, ok); });
+// The sidebar list and the tab strip own only what their roles allow (t-88672).
+suite("sidebar-aria", testSidebarAria);
 // A paste never stops the window's main thread (t-19409).
 suite("paste-road", ({ browser, origin, ok }) => testPasteRoad(browser, origin, ok));
 // A pointer over a program that asked for motion is reported once per cell (t-20972).
