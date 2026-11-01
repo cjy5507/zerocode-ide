@@ -245,6 +245,7 @@ export async function testComposerQueueActs(browser, origin, ok) {
   await testUncertainBand(browser, origin, ok);
   await testTurnBoundaryKeepsTheRows(browser, origin, ok);
   await testRefusalsInFiveLanguages(browser, origin, ok);
+  await testFailedDeliveryKeepsTheWords(browser, origin, ok);
 }
 
 /* ① 행의 모양: 고치기·끼워 넣기·바로 보내기·지우기가 이 차례로 서고, 각 단추는 이름을
@@ -1221,11 +1222,16 @@ async function testSendNowLock(browser, origin, ok) {
       JSON.stringify({ note: seen.released.note, off: seen.released.rows.map((row) => row.off), calls: seen.second.calls }),
     );
   });
-  // 더블클릭: 첫 눌림이 행을 맨 앞으로 올리고, 같은 자리의 둘째 눌림은 다른 글을 올리지 않는다.
+  // 더블클릭: 첫 눌림이 행을 맨 앞으로 올리고, 같은 자리의 둘째 눌림은 다른 글을 올리지 않는다. 진짜 문은 몇
+  // ms 뒤에 답하고 둘째 눌림은 그 뒤에 온다 — 스텁은 바로 답하니, 둘 사이의 틈은 여기서 만든다.
   await scene(browser, origin, ok, "double click", async (page) => {
     const term = await openPane(page, "claude", "working");
     await queueWords(page, "가", "나", "다");
-    await page.locator(".composer-queue-item").nth(2).locator('button[data-act="now"]').dblclick();
+    const spot = await page.locator(".composer-queue-item").nth(2).locator('button[data-act="now"]').boundingBox();
+    const at = { x: spot.x + spot.width / 2, y: spot.y + spot.height / 2 };
+    await page.mouse.click(at.x, at.y);
+    await page.waitForTimeout(120);
+    await page.mouse.click(at.x, at.y);
     await page.waitForTimeout(300);
     const seen = await page.evaluate(LOOK);
     ok(
@@ -1583,7 +1589,9 @@ async function testUncertainBand(browser, origin, ok) {
   });
 }
 
-/* ㉓ P3-8 — 턴의 가장자리는 행을 다시 만들지 않는다: 두 단추가 숨고 돌아올 뿐이고, 같은 행 요소가 그대로다. */
+/* ㉓ P3-8 — 턴의 가장자리는 행을 다시 만들지 않는다: 두 단추가 숨고 돌아올 뿐이고, 같은 행 요소가 그대로다. 말과
+ * 단축키 말풍선을 다시 입히는 쓸기(`paintComposerQueueTips`)도 같다. (언어를 바꾸면 이 앱은 대화 페이지를 통째로 다시
+ * 세우므로 그것은 여기서 주장하지 않는다 — 그 뒤의 말은 「language switched mid-session」이 본다.) */
 async function testTurnBoundaryKeepsTheRows(browser, origin, ok) {
   await scene(browser, origin, ok, "turn boundary", async (page) => {
     const term = await openPane(page, "claude", "working");
@@ -1591,9 +1599,12 @@ async function testTurnBoundaryKeepsTheRows(browser, origin, ok) {
     await press(page, "edit", 0);
     const seen = await page.evaluate(async (term) => {
       const queue = window.__COMPOSER__().querySelector(".composer-queue");
+      // Asked of the live composer every time: a composer that was rebuilt would show unmarked rows,
+      // not the marked ones of the old node.
+      const live = () => window.__COMPOSER__().querySelector(".composer-queue");
       [...queue.querySelectorAll(".composer-queue-item")].forEach((row, at) => { row.__mark = at; });
-      const marks = () => [...queue.querySelectorAll(".composer-queue-item")].map((row) => row.__mark ?? null);
-      const shown = () => [...queue.querySelectorAll(".composer-queue-item")].map((row) => [...row.querySelectorAll("button[data-act]")].filter((button) => !button.hidden).map((button) => button.dataset.act));
+      const marks = () => [...live().querySelectorAll(".composer-queue-item")].map((row) => row.__mark ?? null);
+      const shown = () => [...live().querySelectorAll(".composer-queue-item")].map((row) => [...row.querySelectorAll("button[data-act]")].filter((button) => !button.hidden).map((button) => button.dataset.act));
       const watched = { added: 0, removed: 0 };
       const observer = new MutationObserver((list) => {
         for (const one of list) {
@@ -1609,19 +1620,21 @@ async function testTurnBoundaryKeepsTheRows(browser, origin, ok) {
       window.__TELL__({ term, state: "working", agent: "claude" });
       await window.__PAINT__(3);
       const running = { marks: marks(), shown: shown() };
-      await setLocale("ja", { refresh: false, persist: false });
+      const tips = () => [...live().querySelectorAll(".composer-queue-item button[data-tip]")].map((button) => button.dataset.tip);
+      const tipsBefore = tips();
+      paintComposerQueueTips();
       await window.__PAINT__(3);
-      const language = { marks: marks(), shown: shown(), label: queue.querySelector('button[data-act="drop"]')?.getAttribute("aria-label") ?? "" };
+      const sweep = { marks: marks(), shown: shown(), same: tips().length === tipsBefore.length && tips().every((tip, at) => tip === tipsBefore[at]) };
       observer.disconnect();
-      return { before, resting, running, language, watched };
+      return { before, resting, running, sweep, watched, same: live() === queue };
     }, term);
     const all = ["edit", "steer", "now", "drop"];
     ok(
-      "a_turn_edge_and_a_language_change_redraw_no_row: the same three row elements stand before the turn ends, while the pane rests, when the next turn runs and after the language changed — no element was added or removed in the queue — and the two buttons hide while no turn runs and come back with it",
-      SAME(seen.before.marks, [0, 1, 2]) && SAME(seen.resting.marks, [0, 1, 2]) && SAME(seen.running.marks, [0, 1, 2]) && SAME(seen.language.marks, [0, 1, 2]) &&
-        seen.watched.added === 0 && seen.watched.removed === 0 &&
+      "a_turn_edge_and_the_relabel_sweep_redraw_no_row: the same three row elements stand before the turn ends, while the pane rests, when the next turn runs and after the sweep that says the tooltips again — no element was added or removed in the queue, the tooltips are the same words — and the two buttons hide while no turn runs and come back with it",
+      seen.same && SAME(seen.before.marks, [0, 1, 2]) && SAME(seen.resting.marks, [0, 1, 2]) && SAME(seen.running.marks, [0, 1, 2]) && SAME(seen.sweep.marks, [0, 1, 2]) &&
+        seen.watched.added === 0 && seen.watched.removed === 0 && seen.sweep.same &&
         seen.before.shown.every((acts) => SAME(acts, all)) && seen.resting.shown.every((acts) => SAME(acts, ["edit", "drop"])) &&
-        seen.running.shown.every((acts) => SAME(acts, all)) && seen.language.label.length >= 2,
+        seen.running.shown.every((acts) => SAME(acts, all)) && seen.sweep.shown.every((acts) => SAME(acts, all)),
       JSON.stringify(seen),
     );
   });
@@ -1651,4 +1664,39 @@ async function testRefusalsInFiveLanguages(browser, origin, ok) {
     problems.length === 0,
     problems.slice(0, 6).join("\n"),
   );
+}
+
+/* ㉕ 보내려고 대기열에서 뺀 글이 판에 닿기도 전에 실패하면 — 붙여넣기 오류, 판이 없음 — 글은 맨 앞에 되돌아오고 오류가
+ * 말해진다. 예전에는 토스트 하나를 남기고 글이 사라졌다. 판이 다시 괜찮아지면 다음 가장자리에 같은 글이 먼저 나간다. */
+async function testFailedDeliveryKeepsTheWords(browser, origin, ok) {
+  await scene(browser, origin, ok, "failed delivery", async (page) => {
+    const term = await openPane(page, "claude", "working");
+    await queueWords(page, "가", "나");
+    await page.evaluate(() => { window.__ANSWER__.term_paste = () => { throw new Error("pty closed"); }; });
+    await page.evaluate(async (term) => {
+      window.__TELL__({ term, state: "done", agent: "claude" });
+      await window.__PAINT__(3);
+    }, term);
+    await page.waitForTimeout(400);
+    const failed = await page.evaluate(LOOK);
+    await page.evaluate(async (term) => {
+      window.__ANSWER__.term_paste = (args) => (window.__ACTS__.sent.push(`paste:${args.text}`), null);
+      window.__TELL__({ term, state: "working", agent: "claude" });
+      await window.__PAINT__(2);
+      window.__TELL__({ term, state: "done", agent: "claude" });
+      await window.__PAINT__(3);
+    }, term);
+    await page.waitForTimeout(900);
+    const later = await page.evaluate(LOOK);
+    ok(
+      "a_delivery_that_failed_before_anything_reached_the_pane_keeps_the_words_first: the paste failed, so both messages stand in the queue in their order, nothing was typed, and the failure was said to the person",
+      SAME(failed.queue, ["가", "나"]) && REACHED(failed.sent).length === 0 && failed.toasts.some((words) => words.includes("pty closed")),
+      JSON.stringify({ queue: failed.queue, sent: failed.sent, toasts: failed.toasts }),
+    );
+    ok(
+      "the_kept_words_go_first_at_the_panes_next_edge: once the pane takes a paste again, the next turn's end sends the same first message — paste, then Enter — and the second keeps waiting",
+      SAME(later.sent, ["paste:가", ENTER]) && SAME(later.queue, ["나"]),
+      JSON.stringify({ sent: later.sent, queue: later.queue }),
+    );
+  });
 }

@@ -13955,6 +13955,10 @@ async function setPaneChat(term, on, { wire = true } = {}) {
   // tab and Dots all draw what they hold first and connect behind it).
   void pollHelperPages();
   if (wire) void handPaneToWire(term);
+  // The person is back at the conversation: what the pane refused to take while they were away — the
+  // words of a 바로 보내기 behind a line that held words — asks again. A hand-over that began just
+  // above holds them instead (`composerHolding`).
+  settleComposerQueuesFor(term);
 }
 
 function forgetPaneChat(term) {
@@ -16588,7 +16592,10 @@ function workerComposerNode(run, owner = null) {
   const delivery = document.createElement("div");
   delivery.className = "worker-delivery";
   const deliveryWords = document.createElement("span");
-  deliveryWords.textContent = t("worker.sendUncertain", "부모 입력칸에는 전달됐지만 전송 완료를 확인하지 못했습니다. 부모 터미널에서 확인해 주세요.");
+  // A helper's page sends to its PARENT's input; a pane's own conversation sends to this pane (r2 P3-2).
+  deliveryWords.textContent = isHelperPage(run)
+    ? t("worker.sendUncertain", "부모 입력칸에는 전달됐지만 전송 완료를 확인하지 못했습니다. 부모 터미널에서 확인해 주세요.")
+    : t("worker.sendUncertainPane", "이 판의 입력칸에는 전달됐지만 전송 완료를 확인하지 못했습니다. 판에서 확인해 주세요.");
   const deliveryReset = document.createElement("button");
   deliveryReset.type = "button";
   deliveryReset.className = "worker-composer-pill";
@@ -16598,6 +16605,8 @@ function workerComposerNode(run, owner = null) {
     delivery.hidden = true;
     send.disabled = false;
     box.focus();
+    // What waited behind the uncertain send goes on now that the person has looked (r2 P3-2).
+    settleComposerQueue(run);
   };
   delivery.append(deliveryWords, deliveryReset);
   delivery.hidden = !run.sendUncertain;
@@ -16628,14 +16637,16 @@ function workerComposerNode(run, owner = null) {
     // + 첨부: + 경로들」의 형식을 입는다(t-2993). 칩은 보낸 뒤 비고, 살아남는
     // 초안은 글뿐이다.
     try {
-      const message = attachments.count() === 0 ? text || null : await attachments.outgoing(text);
       // A row of the queue is in the box (t-86909): these words go back to its place —
-      // not to the pane, not to the end of the queue — and the draft set aside returns.
+      // not to the pane, not to the end of the queue — and the draft set aside returns. A chip
+      // waiting in the composer is for the NEXT message: the row takes the words alone and the
+      // chip stays where it is (r2 P3-12).
       if (run.queueEdit) {
-        saved = saveComposerQueueEdit(run, message);
+        saved = saveComposerQueueEdit(run, text || null);
         fit();
         return;
       }
+      const message = attachments.count() === 0 ? text || null : await attachments.outgoing(text);
       if (message === null) return;
       // 실행 중에 친 글은 창이 들고 있다가 턴이 끝나면 보낸다 — 첨부까지
       // 조립된 그대로가 대기열에 든다(`settleComposerQueue`). 여기서

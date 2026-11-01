@@ -2493,13 +2493,15 @@ fn note_turn_door(state: &State<'_, AppState>, door: &str, term: TermId, refused
 /// the composer, sent on the road the catalog names for that agent
 /// ([`zerocode_core::agent::SteerRoad`]) and no other.
 ///
-/// - **Typed** (Claude Code): the words, then their Enter, are typed at the
-///   pane's screen, where the CLI's own queue takes a line entered mid-turn
-///   and folds it into the turn at its next step. Both keys go through the
-///   answer door ([`answer_door::type_at_a_turn`], `type_enter_after_words`):
-///   only into a pane no run sits in, whose hook says a turn runs and whose
-///   screen — read in the same hold as the write — shows its input line empty
-///   and no menu. The pane takes one answer at a time, as it does for a card.
+/// - **Typed** (Claude Code): the words as one bracketed paste — a single line
+///   too, so a Tab or a `^C` in them is text and not the CLI's key — then their
+///   Enter, are typed at the pane's screen, where the CLI's own queue takes a
+///   line entered mid-turn and folds it into the turn at its next step. Both
+///   keys go through the answer door ([`answer_door::type_queued_line`]): only
+///   into a pane no run sits in, whose CLI has shown it reads its input, whose
+///   hook says a turn runs and whose screen — read in the same hold as the
+///   write — shows its input line empty and no menu. The pane takes one answer
+///   at a time, as it does for a card.
 /// - **Channel** (zo): `session.steer` on the pane's own events channel. No
 ///   key is typed at all.
 ///
@@ -2530,7 +2532,7 @@ fn steer_pane(
         .steer_road
         .ok_or_else(|| refused::UNSUPPORTED.to_string())?;
     if text.trim().is_empty() {
-        return Err("끼워 넣을 글이 비어 있습니다".to_string());
+        return Err(refused::EMPTY.to_string());
     }
     if !working {
         return Err(refused::IDLE.to_string());
@@ -2541,8 +2543,9 @@ fn steer_pane(
                 .pane_sessions()
                 .get(&term)
                 .map(|held| held.id.clone())
-                .ok_or_else(|| "이 zo 판의 세션을 아직 모릅니다".to_string())?;
-            let channel = crate::shell_runtime::zo_channel(state, &session)?;
+                .ok_or_else(|| refused::NO_SESSION.to_string())?;
+            let channel = crate::shell_runtime::zo_channel(state, &session)
+                .map_err(|_| refused::NO_SESSION.to_string())?;
             crate::zo_notice::steer_turn(channel, session, text.to_string())?;
         }
         SteerRoad::Typed => steer_by_typing(state, term, agent, text)?,
@@ -2552,43 +2555,73 @@ fn steer_pane(
     Ok(())
 }
 
-/// The typed road of [`pane_steer`]: the words as a paste, one breath
-/// ([`zerocode_core::ask::line_keys`]'s submit delay), then Enter.
+/// The typed road of [`pane_steer`]: the words as one bracketed paste, one
+/// breath ([`zerocode_core::ask::line_keys`]'s submit delay), then Enter — both
+/// through the answer door ([`type_queue_line`]).
 fn steer_by_typing(
     state: &State<'_, AppState>,
     term: TermId,
     agent: &str,
     text: &str,
 ) -> Result<(), String> {
-    let held = state
-        .terminals()
-        .handle(term)
-        .ok_or("터미널이 떠 있지 않습니다")?;
-    let lease = answer_door::answer_lease(term).map_err(|_| refused::IN_FLIGHT.to_string())?;
-    let (groups, step) = zerocode_core::ask::line_keys(text);
-    let [words, enter] = groups.as_slice() else {
-        return Err("a line is its words and its Enter".to_string());
-    };
-    with_terminal(state, term, |pty| {
-        pty.terminal_mut().grid_mut().view_to_bottom();
-        Ok(())
-    })?;
     let pane = answer_door::TurnPane {
         seat: None,
         working: true,
         agent,
         reads_input: crate::human_input::reads_input(term),
     };
-    // The hand count before the words go in: one that reached the line by the
-    // time the Enter is due may have added to them or sent them.
-    let hand = crate::human_input::line_of(term).1;
-    let typed = answer_door::type_at_a_turn(&held, &pane, &key_group_bytes(words));
+    type_queue_line(
+        state,
+        term,
+        &pane,
+        answer_door::Moment::During,
+        text,
+        std::time::Duration::ZERO,
+    )
+}
+
+/// How long the screen is given to show the input line empty once the stop of a
+/// 바로 보내기 has gone (t-86909 r2): Claude Code redraws within a frame of the
+/// Escape, but the hook's "done" and the redraw are separate bytes. A line that
+/// holds words after this long holds them for a reason — the steered words the
+/// stop took back onto it — and the send now's words wait.
+const SEND_NOW_SCREEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// One line the queue types at a pane, on the pane's lease and through the
+/// answer door — the words as a bracketed paste, a breath, their Enter
+/// ([`answer_door::type_queued_line`]). The pane's view goes to the foot only
+/// once the door said yes: a refused line leaves the pane where its reader had
+/// it. The lease settles in the background whenever something went in, also
+/// when the Enter after the words did not ([`refused::LANDED`]): the CLI has
+/// not shown yet that it took those keys.
+fn type_queue_line(
+    state: &State<'_, AppState>,
+    term: TermId,
+    pane: &answer_door::TurnPane<'_>,
+    moment: answer_door::Moment,
+    text: &str,
+    wait: std::time::Duration,
+) -> Result<(), String> {
+    let held = state
+        .terminals()
+        .handle(term)
+        .ok_or_else(|| refused::NO_TERMINAL.to_string())?;
+    let lease = answer_door::answer_lease(term).map_err(|_| refused::IN_FLIGHT.to_string())?;
+    let (_, step) = zerocode_core::ask::line_keys(text);
+    let timing = answer_door::Timing { step, wait };
+    let sent = answer_door::type_queued_line(&held, term, pane, moment, text, timing);
     state.cadence().wake();
-    typed?;
-    std::thread::sleep(step);
-    let sent = answer_door::type_enter_after_words(&held, term, hand, &key_group_bytes(enter));
-    state.cadence().wake();
-    answer_door::settle_in_background(lease);
+    let went_in = match &sent {
+        Ok(()) => true,
+        Err(word) => word == refused::LANDED,
+    };
+    if went_in {
+        let _ = with_terminal(state, term, |pty| {
+            pty.terminal_mut().grid_mut().view_to_bottom();
+            Ok(())
+        });
+        answer_door::settle_in_background(lease);
+    }
     sent
 }
 
@@ -2634,12 +2667,8 @@ fn interrupt_pane(
     let held = state
         .terminals()
         .handle(term)
-        .ok_or("터미널이 떠 있지 않습니다")?;
+        .ok_or_else(|| refused::NO_TERMINAL.to_string())?;
     let lease = answer_door::answer_lease(term).map_err(|_| refused::IN_FLIGHT.to_string())?;
-    with_terminal(state, term, |pty| {
-        pty.terminal_mut().grid_mut().view_to_bottom();
-        Ok(())
-    })?;
     let pane = answer_door::TurnPane {
         seat: None,
         working,
@@ -2649,12 +2678,76 @@ fn interrupt_pane(
     let typed = answer_door::type_at_a_turn(&held, &pane, &bytes);
     state.cadence().wake();
     typed?;
+    // Only a stop the door typed moves the pane's view (t-86909 r2): one it refused leaves
+    // the pane where its reader had it.
+    let _ = with_terminal(state, term, |pty| {
+        pty.terminal_mut().grid_mut().view_to_bottom();
+        Ok(())
+    });
     answer_door::settle_in_background(lease);
     // A key can bring words onto a composer this window cannot read (the CLI
     // takes its own queue back into its line on a stop): the line is marked as
     // touched, so a door after this one yields to whatever is there.
     crate::human_input::keyed(term);
     observe_stop_gesture(app, term, &bytes);
+    notify_call::note_hand(app, term);
+    Ok(())
+}
+
+/// Put the words of a 바로 보내기 into a pane whose turn its stop has ended
+/// (t-86909 r2): the message that came to the front of the queue, typed as one
+/// bracketed paste and its Enter — through the answer door like every key the
+/// queue's buttons cause. The window used to paste them and press Enter itself
+/// (`term_paste`, `term_key`), looking at nothing: the stop's Escape makes
+/// Claude Code take back onto its line any message it had not yet taken, and the
+/// words pasted behind it and sent with the Enter went as one message.
+///
+/// The door asks again, at the moment the words are due: the ledger's seats, that
+/// the CLI has shown it reads its input, that the hook no longer says a turn
+/// runs, and — for up to [`SEND_NOW_SCREEN_WAIT`], read in the same hold as the
+/// write — the input line empty with no menu. A refusal types nothing and carries
+/// the word the page says it with ([`refused::LINE`] for a line that holds words);
+/// the page keeps the message first in its queue. [`refused::LANDED`] is the one
+/// refusal after the words went in.
+#[tauri::command(async)]
+pub(crate) fn pane_send_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    term: TermId,
+    text: String,
+) -> Result<(), String> {
+    let sent = send_now_pane(&app, &state, term, &text);
+    note_turn_door(&state, "pane_send_now", term, sent.as_ref().err());
+    sent
+}
+
+fn send_now_pane(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    term: TermId,
+    text: &str,
+) -> Result<(), String> {
+    let (agent, working) = turn_pane(state, term)?;
+    if !crate::composer_empty::reads(agent) {
+        return Err(refused::UNSUPPORTED.to_string());
+    }
+    if text.trim().is_empty() {
+        return Err(refused::EMPTY.to_string());
+    }
+    let pane = answer_door::TurnPane {
+        seat: None,
+        working,
+        agent,
+        reads_input: crate::human_input::reads_input(term),
+    };
+    type_queue_line(
+        state,
+        term,
+        &pane,
+        answer_door::Moment::After,
+        text,
+        SEND_NOW_SCREEN_WAIT,
+    )?;
     notify_call::note_hand(app, term);
     Ok(())
 }

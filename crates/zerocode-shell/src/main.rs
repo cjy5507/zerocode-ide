@@ -2969,6 +2969,7 @@ fn main() -> ExitCode {
             cmd::terminal::pane_rewind,
             cmd::terminal::pane_steer,
             cmd::terminal::pane_interrupt,
+            cmd::terminal::pane_send_now,
             subagent_log,
             terminal_command,
             set_terminal_command,

@@ -229,16 +229,27 @@ pub(super) struct RewindPane<'a> {
     pub(super) agent: &'a str,
 }
 
-/// The page's word for the ledger's reason a pane is a run's: the one it
-/// gives when it cannot be read, or a seat.
-pub(crate) fn rewind_seat_word(reason: Option<&str>) -> Option<&'static str> {
+/// The page's word for the ledger's reason a pane is a run's: `unread` when
+/// the ledger could not be read, `seat` for a worker's or a coordinator's seat.
+/// One reading for every door that asks the ledger first (the way back, the
+/// queue's three).
+fn seat_word(
+    reason: Option<&str>,
+    unread: &'static str,
+    seat: &'static str,
+) -> Option<&'static str> {
     reason.map(|said| {
         if said == crate::cmd::wire::LEDGER_UNREAD_PANE_STAYS {
-            REWIND_LEDGER_UNREAD
+            unread
         } else {
-            REWIND_SEAT
+            seat
         }
     })
+}
+
+/// [`seat_word`] as the way back says it.
+pub(crate) fn rewind_seat_word(reason: Option<&str>) -> Option<&'static str> {
+    seat_word(reason, REWIND_LEDGER_UNREAD, REWIND_SEAT)
 }
 
 /// The first key group of a CLI's way back — Claude Code's `/rewind` — typed
@@ -278,16 +289,10 @@ fn type_on_a_free_line(held: &HeldTerminal, agent: &str, bytes: &[u8]) -> Result
         .map_err(|error| error.to_string())
 }
 
-/// The page's word for the ledger's reason a pane is a run's, as the turn
-/// doors say it: a seat, or a ledger that cannot be read.
+/// [`seat_word`] as the turn doors say it: a seat, or a ledger that cannot be
+/// read.
 pub(crate) fn turn_seat_word(reason: Option<&str>) -> Option<&'static str> {
-    reason.map(|said| {
-        if said == crate::cmd::wire::LEDGER_UNREAD_PANE_STAYS {
-            refused::LEDGER_UNREAD
-        } else {
-            refused::SEAT
-        }
-    })
+    seat_word(reason, refused::LEDGER_UNREAD, refused::SEAT)
 }
 
 /// What the window knows of a pane before it types at the turn running in it.
@@ -307,25 +312,39 @@ pub(super) struct TurnPane<'a> {
     pub(super) reads_input: bool,
 }
 
+/// What is asked of a pane before its screen is looked at (t-86909 r2): that
+/// no run's seat holds it, that the hook's word is the one the words are for —
+/// a turn that runs for a steer or a stop, one that is over for the words of a
+/// send now — and that its CLI has shown it reads its input.
+fn before_the_screen(pane: &TurnPane<'_>, moment: Moment) -> Result<(), String> {
+    if let Some(word) = pane.seat {
+        return Err(word.to_string());
+    }
+    match (moment, pane.working) {
+        (Moment::During, false) => return Err(refused::IDLE.to_string()),
+        (Moment::After, true) => return Err(refused::RUNNING.to_string()),
+        _ => {}
+    }
+    if !pane.reads_input {
+        return Err(refused::NOT_READING.to_string());
+    }
+    Ok(())
+}
+
 /// The first key group typed at a pane whose turn RUNS (t-86909): the words a
 /// queued message steers into it, or the key that stops it. Typed only when no
 /// run sits in the pane — nor may, when the ledger cannot be read — the
-/// agent's turn runs, and — read in the same hold as the write — the screen
-/// shows its input line empty and no menu: never onto a permission menu,
-/// where an Escape would refuse it and an Enter take its highlighted row,
-/// nor after words a person left on the line. A refusal types nothing and
-/// carries the word the page says it with.
+/// agent's turn runs, its CLI has shown it reads its input, and — read in the
+/// same hold as the write — the screen shows its input line empty and no menu:
+/// never onto a permission menu, where an Escape would refuse it and an Enter
+/// take its highlighted row, nor after words a person left on the line. A
+/// refusal types nothing and carries the word the page says it with.
 pub(super) fn type_at_a_turn(
     held: &HeldTerminal,
     pane: &TurnPane<'_>,
     first: &[u8],
 ) -> Result<(), String> {
-    if let Some(word) = pane.seat {
-        return Err(word.to_string());
-    }
-    if !pane.working {
-        return Err(refused::IDLE.to_string());
-    }
+    before_the_screen(pane, Moment::During)?;
     match type_on_a_free_line(held, pane.agent, first) {
         Ok(true) => Ok(()),
         Ok(false) => Err(refused::SCREEN.to_string()),
@@ -375,17 +394,82 @@ pub(super) struct Timing {
     pub(super) wait: Duration,
 }
 
+/// How often the screen is looked at while the door waits for the empty line.
+const SCREEN_LOOK_EVERY: Duration = Duration::from_millis(50);
+
+/// [`type_at_a_turn`] for the words of a send now, after its stop (t-86909 r2):
+/// the hook says the turn is over, and the screen is given up to `wait` to show
+/// the input line empty and no menu — the redraw after a stop can trail the
+/// hook's word. Words the stop took back onto the line (a steer the CLI had not
+/// taken yet) stay there and refuse these as [`refused::LINE`]: pasted behind
+/// them, an Enter would send both as one message.
+fn type_after_a_turn(
+    held: &HeldTerminal,
+    pane: &TurnPane<'_>,
+    first: &[u8],
+    wait: Duration,
+) -> Result<(), String> {
+    before_the_screen(pane, Moment::After)?;
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match type_on_a_free_line(held, pane.agent, first) {
+            Ok(true) => return Ok(()),
+            Ok(false) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(SCREEN_LOOK_EVERY);
+            }
+            Ok(false) => return Err(refused::LINE.to_string()),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// A line the queue types at a pane — the words as one bracketed paste, a
 /// breath, their Enter — every key through the door (t-86909 r2).
+///
+/// The words are ALWAYS a bracketed paste, a single line too: bare, a Tab was
+/// the CLI's Tab and a `^C` its Ctrl+C. The door reads the screen first and
+/// types onto an empty field with no menu only, which for the two CLIs it can
+/// read means bracketed paste is on. `Moment::During` is a steer into a running
+/// turn; `Moment::After` the words of a send now, whose Enter is a gesture the
+/// provider's prompt report answers, so the tracker is told what the window's
+/// ordinary delivery tells it (`prompt_transaction::human_write`).
+///
+/// A person's hand that reaches the line between the words and the Enter ends
+/// the Enter ([`type_enter_after_words`]): [`refused::LANDED`].
 pub(super) fn type_queued_line(
-    _held: &HeldTerminal,
-    _term: u32,
-    _pane: &TurnPane<'_>,
-    _moment: Moment,
-    _text: &str,
-    _timing: Timing,
+    held: &HeldTerminal,
+    term: u32,
+    pane: &TurnPane<'_>,
+    moment: Moment,
+    text: &str,
+    timing: Timing,
 ) -> Result<(), String> {
-    todo!("t-86909 r2: the queue's line through the door")
+    let words = zerocode_pty::encode_paste(text, true);
+    let enter = zerocode_core::ask::line_keys(text)
+        .0
+        .iter()
+        .map(crate::cmd::terminal::key_group_bytes)
+        .next_back()
+        .ok_or_else(|| refused::UNSUPPORTED.to_string())?;
+    // The hand count before the words go in: one that reached the line by the time the Enter is
+    // due may have added to them or sent them.
+    let mut hand = crate::human_input::line_of(term).1;
+    match moment {
+        Moment::During => type_at_a_turn(held, pane, &words)?,
+        Moment::After => {
+            type_after_a_turn(held, pane, &words, timing.wait)?;
+            // The words are on the line: a draft until their Enter closes over them. The mark
+            // moves the count, so the Enter is held to the count after it.
+            crate::human_input::typed(term);
+            hand = crate::human_input::line_of(term).1;
+        }
+    }
+    std::thread::sleep(timing.step);
+    type_enter_after_words(held, term, hand, &enter)?;
+    if moment == Moment::After {
+        crate::human_input::entered(term);
+    }
+    Ok(())
 }
 
 /// What typing the hand-over's probe at a pane showed (t-84850 r2).

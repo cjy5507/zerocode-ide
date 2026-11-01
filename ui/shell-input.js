@@ -743,7 +743,13 @@ function frontKeyboardTarget() {
   // several and typing has to reach the one wearing the active mark.
   if (staged?.kind === "term") {
     const term = activePaneOf(staged);
-    return term === null ? null : { kind: "term", term };
+    if (term === null) return null;
+    // The pane's conversation stands over its screen: what is looked at is the conversation, and
+    // a key sent to a screen nobody sees is a key nobody can take back — the same rule as for the
+    // screens above that cover the stage. A key pressed with nothing focused (the button a press
+    // just took away, a click on the page's blank) went to the terminal under it (r2 P1-1).
+    if (typeof paneChatOn === "function" && paneChatOn(term)) return null;
+    return { kind: "term", term };
   }
   if (staged?.kind === "lane" && focusedId) return { kind: "lane", id: focusedId };
   return null;
@@ -979,6 +985,19 @@ for (const eventName of ["keypress", "keyup"]) {
   }, { capture: true });
 }
 
+/* Whether the key is AltGr. Windows reports it as Ctrl+Alt, which is also the primary modifier
+ * and Alt of a chord on that platform; the browser says which it was. */
+function altGraphHeld(event) {
+  return event.getModifierState?.("AltGraph") === true;
+}
+
+/* ⌘/Ctrl+Alt held and not as AltGr: the keys of the queue's chords (`composer.queueSteer`,
+ * `composer.queueSendNow`), which the box's own Enter leaves to the window's shortcut handler
+ * (r2 P3-9). */
+function queueChordHeld(event) {
+  return hasPrimaryModifier(event) && event.altKey && !altGraphHeld(event);
+}
+
 /* One canonical string per chord. `mod` is deliberately platform-neutral in
  * storage; `hasPrimaryModifier` decides which physical key produces it. */
 function chordOf(event) {
@@ -1016,12 +1035,12 @@ const ACTIONS = [
   { id: "composer.queueSteer", group: "agents", repeats: false,
     keywords: ["shortcut", "queue", "steer", "composer", "turn"],
     title: () => t("composer.queue.steer.action", "대기열 첫 글을 지금 턴에 끼워 넣기"), chord: "mod+alt+enter",
-    when: () => composerQueueKeyTarget("steer") !== null,
+    when: (event) => !altGraphHeld(event) && composerQueueKeyTarget("steer") !== null,
     run: () => { const run = composerQueueKeyTarget("steer"); if (run) actOnComposerQueue(run, "steer", 0); } },
   { id: "composer.queueSendNow", group: "agents", repeats: false,
     keywords: ["shortcut", "queue", "send", "now", "interrupt", "composer"],
     title: () => t("composer.queue.now.action", "대기열 첫 글을 턴을 멈추고 바로 보내기"), chord: "mod+alt+shift+enter",
-    when: () => composerQueueKeyTarget("now") !== null,
+    when: (event) => !altGraphHeld(event) && composerQueueKeyTarget("now") !== null,
     run: () => { const run = composerQueueKeyTarget("now"); if (run) actOnComposerQueue(run, "now", 0); } },
   {
     // What ⌘W means everywhere: close the tab in front of you. On the lane's
@@ -1530,7 +1549,7 @@ function primaryShortcut(event) {
   const terminalFirst = terminalShortcutPolicy === "terminal-first" &&
     terminalOwnsShortcutContext();
   if (
-    action && (!action.when || action.when()) &&
+    action && (!action.when || action.when(event)) &&
     (!terminalFirst || shortcutRunsInTerminal(action))
   ) return { action, path: null };
   if (terminalFirst) return null;

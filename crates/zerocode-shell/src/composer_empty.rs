@@ -4,6 +4,13 @@ use zerocode_pty::TerminalGrid;
 
 /// Read only the cursor's field, never a prompt glyph in transcript text.
 /// Unknown layouts, pickers, multiline fields and attachments stay protected.
+///
+/// One reading serves an idle screen and a running turn's (t-86909 r2): the
+/// field is drawn the same whatever the turn does, and what a running turn
+/// adds — the spinner and the effort line above the field, a name set into
+/// its upper rule, a hint or the status line under it — lies outside the three
+/// rows read. Measured on the text of three captures of a running Claude Code
+/// pane; zo's drawing was read from its source (`tui/view.rs`, `composer.rs`).
 pub(crate) fn observed(agent: &str, grid: &TerminalGrid) -> bool {
     if !grid.bracketed_paste() || !grid.cursor_visible() {
         return false;
@@ -35,7 +42,7 @@ pub(crate) fn observed(agent: &str, grid: &TerminalGrid) -> bool {
                     .all(|column| grid.cell(row, column).is_some_and(|cell| cell.style.dim))
         }
         "claude" => {
-            horizontal(&above)
+            upper_rule(&above)
                 && horizontal(&below)
                 && col == 2
                 && line.starts_with("❯")
@@ -74,7 +81,7 @@ pub(crate) fn holds_probe(agent: &str, grid: &TerminalGrid) -> bool {
     if row == 0 || row + 1 >= grid.rows() {
         return false;
     }
-    horizontal(&grid.line(row - 1))
+    upper_rule(&grid.line(row - 1))
         && horizontal(&grid.line(row + 1))
         && col == 3
         && grid.line(row).trim_end() == "❯"
@@ -93,7 +100,38 @@ fn only_faint_after(grid: &TerminalGrid, row: usize, from: usize) -> bool {
 
 fn horizontal(line: &str) -> bool {
     let line = line.trim();
-    line.chars().count() >= 3 && line.chars().all(|ch| matches!(ch, '─' | '━'))
+    line.chars().count() >= 3 && line.chars().all(is_rule_mark)
+}
+
+fn is_rule_mark(ch: char) -> bool {
+    matches!(ch, '─' | '━')
+}
+
+/// The rule over a Claude Code field: a bare run of rule marks, or one with the
+/// session's name set into it near its right end — `────── name ─`, which
+/// Claude Code 2.1.316 draws over the field of a named session, whether a turn
+/// runs or not (t-86909 r2: all three captures of a running pane carried it).
+/// The name stands between two spaces with rule marks after it, and at least
+/// three marks open the line. A name with no mark after it, a name on its own
+/// and a line of words are no border. Only this upper rule takes a name; the
+/// lower one is drawn bare ([`horizontal`]).
+fn upper_rule(line: &str) -> bool {
+    let line = line.trim();
+    if line.chars().take_while(|ch| is_rule_mark(*ch)).count() < 3 {
+        return false;
+    }
+    let rest = line.trim_start_matches(is_rule_mark);
+    if rest.is_empty() {
+        return true;
+    }
+    let Some(inner) = rest.strip_prefix(' ') else {
+        return false;
+    };
+    let named = inner.trim_end_matches(is_rule_mark);
+    named.len() < inner.len()
+        && named
+            .strip_suffix(' ')
+            .is_some_and(|name| !name.trim().is_empty())
 }
 
 fn border(line: &str, left: char, right: char) -> bool {

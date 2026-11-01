@@ -358,14 +358,7 @@ fn the_queues_steer_and_stop_type_only_through_the_door() {
     let shipped = shipped_backend();
     for (function, doors) in [
         (
-            "fn steer_by_typing(",
-            &[
-                "answer_door::answer_lease(",
-                "answer_door::type_queued_line(",
-            ][..],
-        ),
-        (
-            "fn send_now_pane(",
+            "fn type_queue_line(",
             &[
                 "answer_door::answer_lease(",
                 "answer_door::type_queued_line(",
@@ -406,6 +399,29 @@ fn the_queues_steer_and_stop_type_only_through_the_door() {
             );
         }
     }
+    // The two roads that type a queued line — the steer's words and the words of a send now —
+    // spend every key through the one helper above, and none writes to the pane itself.
+    for function in ["fn steer_by_typing(", "fn send_now_pane("] {
+        let body = block_after(shipped, function);
+        assert!(
+            body.contains("type_queue_line(") && !body.contains("write_input("),
+            "{function} does not type through `type_queue_line`:\n{body}"
+        );
+    }
+    // All three ask the door about the CLI too (r2 P3-3): a pane restored a moment ago may stand
+    // "working" by a hook word that outlived the restart while its CLI is still loading, and a key
+    // typed then goes to whatever reads the terminal. The hand-over asks the same before it types.
+    for function in [
+        "fn steer_by_typing(",
+        "fn interrupt_pane(",
+        "fn send_now_pane(",
+    ] {
+        let body = block_after(shipped, function);
+        assert!(
+            body.contains("reads_input: crate::human_input::reads_input(term)"),
+            "{function} does not hand the door whether the pane's CLI has shown it reads its input:\n{body}"
+        );
+    }
     for function in ["fn steer_pane(", "fn interrupt_pane(", "fn send_now_pane("] {
         let body = block_after(shipped, function);
         let seat = body
@@ -415,7 +431,7 @@ fn the_queues_steer_and_stop_type_only_through_the_door() {
             "steer_by_typing(",
             "steer_turn(",
             "type_at_a_turn(",
-            "type_queued_line(",
+            "type_queue_line(",
         ] {
             if let Some(at) = body.find(acts) {
                 assert!(
@@ -548,6 +564,50 @@ fn every_word_a_turn_door_refuses_with_has_a_sentence_in_five_catalogs() {
     );
 }
 
+/// The queue's doors refuse in WORDS, never in a sentence of one language (t-86909 r2, P3-7): the
+/// Korean sentences the first cut returned — "끼워 넣을 글이 비어 있습니다", "이 zo 판의 세션을 아직
+/// 모릅니다", "터미널이 떠 있지 않습니다", zo's timeout — reached a person who reads another
+/// language exactly as written. The page words each refusal in its five catalogs
+/// (`every_word_a_turn_door_refuses_with_has_a_sentence_in_five_catalogs`). Comments may be Korean;
+/// what a door returns may not.
+#[test]
+fn the_queue_doors_refuse_in_words_and_not_in_korean_sentences() {
+    let shipped = shipped_backend();
+    let hangul = |text: &str| {
+        text.chars()
+            .any(|ch| ('\u{AC00}'..='\u{D7A3}').contains(&ch))
+    };
+    for (haystack, function) in [
+        (shipped, "fn turn_pane("),
+        (shipped, "fn steer_pane("),
+        (shipped, "fn steer_by_typing("),
+        (shipped, "fn type_queue_line("),
+        (shipped, "fn interrupt_pane("),
+        (shipped, "fn send_now_pane("),
+        (shipped, "fn steer("),
+        (ZO_NOTICE, "fn steer_turn("),
+        (ZO_NOTICE, "fn steer_turn_within("),
+    ] {
+        let body = strip_rust_comments(block_after(haystack, function));
+        assert!(
+            !hangul(&body),
+            "{function} refuses in a Korean sentence, not in a word:\n{body}"
+        );
+    }
+    let door = door_code();
+    for function in [
+        "fn before_the_screen(",
+        "fn type_after_a_turn(",
+        "fn type_queued_line(",
+    ] {
+        let body = block_after(&door, function);
+        assert!(
+            !hangul(body),
+            "{function} refuses in a Korean sentence, not in a word:\n{body}"
+        );
+    }
+}
+
 /// Every call of the composer's file that puts anything at a pane or a wire, counted
 /// (t-86909 r2). The queue's claim — nothing the buttons do types at a pane but through the
 /// answer door — holds only while no call is added beside the doors: this list is the grep, and
@@ -610,16 +670,25 @@ fn the_calls_the_composer_makes_at_a_pane_are_these_and_the_queue_adds_none() {
             "the queue's section reaches a pane by `{raw}`"
         );
     }
+    // A message that came to the front by 바로 보내기 leaves `settleComposerQueue` by its own function
+    // — which asks the door, and nothing else — before the ordinary road is even considered.
     let settle = block_after(&composer, "function settleComposerQueue(");
     let front = settle
-        .find("sendFront(")
-        .expect("the words after a stop no longer go through the door");
+        .find("deliverQueueFront(")
+        .expect("the words after a stop no longer go through their own delivery");
     let ordinary = settle
         .find("composerDeliver(")
         .expect("the ordinary delivery moved");
     assert!(
         front < ordinary,
-        "a message that came to the front by 바로 보내기 is asked of the door before the ordinary road:\n{settle}"
+        "a message that came to the front by 바로 보내기 is delivered by the door before the ordinary road:\n{settle}"
+    );
+    let door = block_after(&composer, "async function deliverQueueFront(");
+    assert!(
+        door.contains("composerRoad(run).sendFront(")
+            && !door.contains("composerDeliver(")
+            && !door.contains("deliverToPane("),
+        "the front's delivery reaches the pane by something other than the door:\n{door}"
     );
     assert_eq!(queue.matches("composerDeliver(").count(), 1);
     assert_eq!(queue.matches("sendFront(").count(), 1);

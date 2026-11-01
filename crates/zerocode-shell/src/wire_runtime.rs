@@ -2023,14 +2023,31 @@ impl WireSession {
         params: serde_json::Value,
         wait: Duration,
     ) -> Result<serde_json::Value, String> {
+        self.ask(method, params, wait).map_err(Asked::into_message)
+    }
+
+    /// [`Self::request`] with the way it failed kept (t-86909 r2): a request
+    /// that never left, one the agent refused, and one it never answered are
+    /// three different things to the caller that must say whether a message went in.
+    fn ask(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        wait: Duration,
+    ) -> Result<serde_json::Value, Asked> {
         let (sender, receiver) = mpsc::sync_channel(1);
-        let id = self.send_request(method, params, Some(sender))?;
+        let id = self
+            .send_request(method, params, Some(sender))
+            .map_err(Asked::NotSent)?;
         let answer = receiver.recv_timeout(wait).map_err(|_| {
             let _ = self.replies.lock().map(|mut replies| replies.remove(&id));
-            format!("{method}: no answer in {} s", wait.as_secs())
+            Asked::NoAnswer(format!("{method}: no answer in {} s", wait.as_secs()))
         })?;
         if let Some(error) = answer.get("error").filter(|error| !error.is_null()) {
-            return Err(format!("{method}: {}", text_of(error.get("message"))));
+            return Err(Asked::Refused(format!(
+                "{method}: {}",
+                text_of(error.get("message"))
+            )));
         }
         Ok(answer
             .get("result")
@@ -2156,13 +2173,17 @@ impl WireSession {
     /// ([`Protocol::steers`]), and only while a turn runs: with none, the words
     /// are refused ([`zerocode_core::agent::turn_refusal::IDLE`]) and stay the page's
     /// queued message rather than opening a turn the person did not start.
+    ///
+    /// A failure comes back as the page's word ([`steer_word`]); an answer that
+    /// never came is [`zerocode_core::agent::turn_refusal::UNKNOWN`]: the page
+    /// keeps the message and sends it no second time on its own.
     pub(crate) fn steer(&self, text: &str) -> Result<(), String> {
-        use zerocode_core::agent::turn_refusal::{DENIED, IDLE, UNSUPPORTED};
+        use zerocode_core::agent::turn_refusal::{EMPTY, IDLE, UNSUPPORTED};
         if !self.protocol.steers() {
             return Err(UNSUPPORTED.to_string());
         }
         if text.trim().is_empty() {
-            return Err("끼워 넣을 글이 비어 있습니다".to_string());
+            return Err(EMPTY.to_string());
         }
         let (thread, turn, running) = {
             let state = self
@@ -2182,14 +2203,8 @@ impl WireSession {
                 };
                 // `expectedTurnId`: the request fails when the turn it was
                 // aimed at is not the one running, instead of opening a new one.
-                self.request("turn/steer", steer_params(&thread, &turn, text), REPLY_WAIT)
-                    .map_err(|said| {
-                        if said.contains("active turn") || said.contains("steerable") {
-                            DENIED.to_string()
-                        } else {
-                            said
-                        }
-                    })?;
+                self.ask("turn/steer", steer_params(&thread, &turn, text), REPLY_WAIT)
+                    .map_err(steer_word)?;
             }
             Protocol::ClaudeStream => {
                 if !running {
@@ -2198,6 +2213,13 @@ impl WireSession {
                 // The CLI queues a line that arrives mid-turn and absorbs it at
                 // the turn's next step — the same line a turn starts with, and
                 // the assistant's words in flight (`live`) go on.
+                //
+                // The status read above and this write are two moments: a turn
+                // that ends between them takes the line as the start of a new
+                // one. The words are not lost — they are a message the CLI
+                // answers — but the state reads idle until its `message_start`,
+                // and the page's "read at the next step" was then not true
+                // (t-86909 r2, P3-4: left, as it costs no words).
                 self.write(&serde_json::json!({ "type": "user", "message": { "role": "user", "content": text } }))?;
             }
             Protocol::Acp => return Err(UNSUPPORTED.to_string()),
@@ -2775,17 +2797,33 @@ pub(crate) enum Asked {
     NotSent(String),
 }
 
+impl Asked {
+    /// The words of the failure, whichever it was.
+    fn into_message(self) -> String {
+        match self {
+            Self::NoAnswer(said) | Self::Refused(said) | Self::NotSent(said) => said,
+        }
+    }
+}
+
+/// The phrases Codex refuses a `turn/steer` with when the turn it was aimed at
+/// will not take the words: "no active turn to steer", "expected active turn id
+/// … but found …", "cannot steer a review turn", "cannot steer a compact turn"
+/// (read off the installed binary's strings, t-86909 r1 review).
+const STEER_NOT_TAKEN: [&str; 3] = ["active turn", "steerable", "cannot steer"];
+
 /// A failed steer as the page says it: the word for a turn the agent will not
 /// take the words into, the word for an answer that never came, and anything
 /// else — a line that could not be written, an error the window does not know —
 /// in its own words, which the page shows as they came (t-86909 r2).
 fn steer_word(asked: Asked) -> String {
-    use zerocode_core::agent::turn_refusal::DENIED;
+    use zerocode_core::agent::turn_refusal::{DENIED, UNKNOWN};
     match asked {
-        Asked::Refused(said) if said.contains("active turn") || said.contains("steerable") => {
+        Asked::NoAnswer(_) => UNKNOWN.to_string(),
+        Asked::Refused(said) if STEER_NOT_TAKEN.iter().any(|phrase| said.contains(phrase)) => {
             DENIED.to_string()
         }
-        Asked::NoAnswer(said) | Asked::Refused(said) | Asked::NotSent(said) => said,
+        Asked::Refused(said) | Asked::NotSent(said) => said,
     }
 }
 

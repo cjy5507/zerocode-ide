@@ -30,8 +30,10 @@ const STEER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 /// exchange, like every call on a pane's channel.
 ///
 /// A refusal is the page's word ([`zerocode_core::agent::turn_refusal::IDLE`] and its
-/// kin). A channel that does not answer in time is not one: the words may
-/// have gone in, so the row stays queued and says it does not know.
+/// kin). A channel that does not answer in time is the word for that too
+/// ([`zerocode_core::agent::turn_refusal::UNKNOWN`]): the words may have gone in,
+/// so the row stays queued, says it does not know in the person's language, and
+/// is not sent a second time on its own (t-86909 r2).
 pub(crate) fn steer_turn(channel: ZoChannel, session: String, text: String) -> Result<(), String> {
     steer_turn_within(channel, session, text, STEER_DEADLINE)
 }
@@ -59,8 +61,7 @@ fn steer_turn_within(
     )
     .map_err(|said| {
         if said == "connection_reload_timeout" {
-            "zo의 채널이 제때 답하지 않아 글이 들어갔는지 알 수 없습니다 — 대화에서 확인하세요"
-                .to_string()
+            zerocode_core::agent::turn_refusal::UNKNOWN.to_string()
         } else {
             said
         }
