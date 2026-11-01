@@ -23,9 +23,25 @@ const PROVIDERS_DIR: &str = "providers";
 const UNCONFIGURED_DIR: &str = "provider-unconfigured";
 const CUSTOM_ROW_ID: &str = "decision";
 
-/// The seats the person kept after they had deleted them (11-01): their marks
-/// are lifted once, and a later deletion stands.
-const KEPT_SEATS: [&JevUse; 2] = [&STALL, &ROUTING];
+/// What a kept seat does once its mark is lifted.
+#[derive(Clone, Copy)]
+enum AfterLift {
+    /// It stands where it stood before the deletion, as a restore would leave
+    /// it: its saved word, or no word and the seat's own default.
+    AsBefore,
+    /// It stays at the mode the settings name.
+    StaysAsWritten,
+}
+
+/// The seats the person kept after they had deleted them (11-01), lifted once;
+/// a later deletion stands. Stall asks again, since its remote beats the rule
+/// (54% to 25% over 538 pairs). Routing stays on the rule: the remote answered
+/// 0 of 427 requests and laya read below the rule (34.2% to 35.2% over 219
+/// pairs, reports/v1.1.113-zo/t-87506), so it stays off until something beats it.
+const KEPT_SEATS: [(&JevUse, AfterLift); 2] = [
+    (&STALL, AfterLift::AsBefore),
+    (&ROUTING, AfterLift::StaysAsWritten),
+];
 /// Set under `smart` once [`KEPT_SEATS`] have had their one lift.
 const LIFTED_KEY: &str = "keptSeatsLifted";
 
@@ -39,7 +55,7 @@ pub fn forget_seat(settings: &Path, id: &str) -> io::Result<usize> {
     let Some(seat) = builtin::seat(id) else {
         return Ok(0);
     };
-    if KEPT_SEATS.iter().any(|kept| kept.id == id) {
+    if KEPT_SEATS.iter().any(|(kept, _)| kept.id == id) {
         record_lift(settings)?;
     }
     let Some(home) = settings.parent() else {
@@ -106,10 +122,9 @@ pub fn may_write(ledger: &Path) -> bool {
     builtin::in_root(&root, seat.id).is_none_or(|decision| !decision.deleted)
 }
 
-/// Lift the deletion marks of [`KEPT_SEATS`], once per settings file. The
-/// seats stay at the mode the settings name, so nothing starts asking here.
-/// Returns whether the file changed in a way a reader of the marks can see;
-/// the first run on a file with no marks only records the lift.
+/// Lift the deletion marks of [`KEPT_SEATS`], once per settings file, and put
+/// each seat where [`AfterLift`] says. Returns whether a mark went; the first
+/// run on a file with no marks only records the lift.
 ///
 /// # Errors
 /// Whatever keeps the settings from being read or replaced.
@@ -149,25 +164,34 @@ fn record_lift(settings: &Path) -> io::Result<()> {
     write_settings(settings, &root)
 }
 
-/// Take the marks of [`KEPT_SEATS`] out of `root`. A typed edit carries the
-/// same `deleted` word for older clients, so what counts is what the seat's
-/// reader says ([`builtin::in_root`]): an edited seat keeps its edit.
+/// Take the marks of [`KEPT_SEATS`] out of `root`, and put each seat where
+/// [`AfterLift`] says. A typed edit carries the same `deleted` word for older
+/// clients, so what counts is what the seat's reader says
+/// ([`builtin::in_root`]): an edited seat keeps its edit.
 fn lift_marks(root: &mut Value) -> bool {
-    let marked: Vec<&str> = KEPT_SEATS
+    let marked: Vec<(&JevUse, AfterLift, Option<String>)> = KEPT_SEATS
         .iter()
-        .map(|seat| seat.id)
-        .filter(|id| builtin::in_root(root, id).is_some_and(|decision| decision.deleted))
+        .filter_map(|(seat, after)| {
+            let decision = builtin::in_root(root, seat.id)?;
+            decision.deleted.then_some((*seat, *after, decision.mode))
+        })
         .collect();
-    let Some(decisions) = root
-        .get_mut(SMART_SETTINGS_KEY)
-        .and_then(|smart| smart.get_mut(builtin::SETTING))
-        .and_then(Value::as_object_mut)
-    else {
+    let Some(smart) = root.get_mut(SMART_SETTINGS_KEY).and_then(Value::as_object_mut) else {
         return false;
     };
     let mut lifted = false;
-    for id in marked {
-        lifted |= decisions.remove(id).is_some();
+    for (seat, after, saved) in marked {
+        let removed = smart
+            .get_mut(builtin::SETTING)
+            .and_then(Value::as_object_mut)
+            .and_then(|decisions| decisions.remove(seat.id));
+        lifted |= removed.is_some();
+        if matches!(after, AfterLift::AsBefore) {
+            match saved {
+                Some(word) => smart.insert(seat.setting.to_string(), Value::String(word)),
+                None => smart.remove(seat.setting),
+            };
+        }
     }
     lifted
 }
