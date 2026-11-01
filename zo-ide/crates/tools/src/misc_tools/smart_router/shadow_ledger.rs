@@ -67,7 +67,8 @@ pub fn append_shadow_row<T: Serialize>(path: &Path, row: &T, max_bytes: u64) -> 
         runtime::durable_traces_armed(),
         runtime::conventional_config_home().as_deref(),
         path,
-    ) {
+    ) || !zerocode_core::jev::erase::may_write(path)
+    {
         return Ok(());
     }
     if let Some(parent) = path.parent() {

@@ -3688,6 +3688,11 @@ fn main() -> ExitCode {
             // agents' roads are open above, so a walk can now be asked for;
             // the handshake it would otherwise pay is opened here instead, on
             // the helper's own thread — nothing on the boot path waits for it.
+            // Before anything reads the seats: the marks the person chose to
+            // lift go once, here and in zo's own start (t-87506).
+            if let Some(path) = api_routers::zo_settings_path() {
+                let _ = zerocode_core::jev::erase::lift_kept_seats(&path);
+            }
             cmd::managed_judgment::restore_at_boot(app.handle());
             systemone::warm_for_walks();
             // The Jira sync outbox the last window enqueued but never finished:

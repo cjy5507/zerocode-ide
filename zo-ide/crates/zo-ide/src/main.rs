@@ -59,6 +59,9 @@ fn main() -> ExitCode {
     // never in the person's checkout. The crates keep the in-tree default for
     // their own tests; the host is the one that asks.
     runtime::relocate_traces_out_of_tree();
+    // The marks the person chose to lift go once, here and in the window's own
+    // start (t-87506).
+    let _ = zerocode_core::jev::erase::lift_kept_seats(&runtime::default_config_home().join("settings.json"));
     // This binary answers `auto-dream`, so a session's idle and compaction
     // passes curate in a process of their own and the memory a pass reads goes
     // back when it ends.

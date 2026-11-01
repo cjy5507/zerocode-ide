@@ -74,14 +74,14 @@ fn deleting_a_seat_takes_its_line_out_of_the_thresholds_beside_it() {
     let folder = home.path().join("jev/providers").join(PROVIDER);
     write(
         &folder.join("thresholds.json"),
-        &json!({"rows":[{"seat":RECALL.id,"n":1},{"seat":NOTIFY.id,"n":2}]}).to_string(),
+        &json!([{"seat":RECALL.id,"n":1},{"seat":NOTIFY.id,"n":2}]).to_string(),
     );
 
     forget_seat(&settings, RECALL.id).expect("the records go");
 
     let kept: Value =
         serde_json::from_slice(&fs::read(folder.join("thresholds.json")).unwrap()).unwrap();
-    assert_eq!(kept, json!({"rows":[{"seat":NOTIFY.id,"n":2}]}));
+    assert_eq!(kept, json!([{"seat":NOTIFY.id,"n":2}]));
 }
 
 #[test]
@@ -196,6 +196,17 @@ fn a_kept_seat_deleted_before_the_first_lift_is_not_brought_back() {
 
     assert!(!lift_kept_seats(&settings).expect("the lift"));
     assert_eq!(smart_of(&settings)[builtin::SETTING][STALL.id]["deleted"], true);
+}
+
+#[test]
+fn a_kept_seat_with_a_typed_edit_keeps_its_edit() {
+    let home = home();
+    let edit = json!({"deleted": true, "questionSchema": 2, "questionDeleted": false, "questions": {"cause": {"type": "choice", "instructions": "edited", "criteria": {"a": "A", "b": "B"}}}});
+    let settings = settings_with(home.path(), &json!({(builtin::SETTING): {(STALL.id): edit.clone()}}));
+
+    assert!(!lift_kept_seats(&settings).expect("the lift"));
+
+    assert_eq!(smart_of(&settings)[builtin::SETTING][STALL.id], edit);
 }
 
 #[test]

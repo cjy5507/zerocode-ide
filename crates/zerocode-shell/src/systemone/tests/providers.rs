@@ -573,7 +573,7 @@ fn a_deleted_screen_seat_leaves_the_walk_on_its_rule() {
         std::fs::write(&ledger, "{\"at\":1}\n").expect("a row");
         std::fs::write(
             folder.join(zerocode_core::jev::threshold::THRESHOLDS_FILE),
-            json!({"rows":[{"seat":seat.id,"rubricVersion":seat.rubric_version,"actFromPermille":500}]}).to_string(),
+            json!([{"seat":seat.id,"rubricVersion":seat.rubric_version,"actFromPermille":500}]).to_string(),
         )
         .expect("a line");
 
