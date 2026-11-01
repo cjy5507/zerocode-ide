@@ -430,6 +430,8 @@ final class Provider {
     private var shownTo: [pid_t: Set<String>] = [:]
     /// The apps whose web accessibility was switched on this session.
     private var webAccessibilityAsked: Set<pid_t> = []
+    /// When each app's web accessibility was switched on.
+    private var webAccessibilityOnAt: [pid_t: Date] = [:]
 
     private func book(for pid: pid_t) -> ElementIdentityBook<AXUIElement> {
         cacheLock.lock()
@@ -468,6 +470,7 @@ final class Provider {
             books[known] = nil
             shownTo[known] = nil
             webAccessibilityAsked.remove(known)
+            webAccessibilityOnAt[known] = nil
         }
     }
 
@@ -1236,6 +1239,7 @@ final class Provider {
               !cached.app.app.isTerminated,
               let record = cached.elements[index] ?? knownRecord(pid: cached.app.pid, index: index)
         else { return }
+        if method == "click" { waitForWebPress(record, pid: cached.app.pid) }
         let waitMs = min(try optionalInteger(params, "timeoutMs") ?? Actionability.defaultWaitMs, Actionability.longestWaitMs)
         let giveUp = Date().addingTimeInterval(TimeInterval(waitMs) / 1_000)
         let lastSeen = record.localFrame.map { $0.offsetBy(dx: cached.windowBounds.minX, dy: cached.windowBounds.minY) }
@@ -1264,6 +1268,19 @@ final class Provider {
             }
             previous = frame
             usleep(useconds_t(Actionability.pollMs * 1_000))
+        }
+    }
+
+    /// A web view offers a control's press only once its tree has settled, some seconds
+    /// after it was switched on. Holds up this app's lane alone.
+    private func waitForWebPress(_ record: ElementRecord, pid: pid_t) {
+        cacheLock.lock()
+        let on = webAccessibilityOnAt[pid]
+        cacheLock.unlock()
+        guard let on, BackgroundInput.pressableRoles.contains(record.role) else { return }
+        let giveUp = on.addingTimeInterval(WebAccessibility.settlesSeconds)
+        while Date() < giveUp, !OperatorGuardHost.isStopped(), !actions(record.element).contains("AXPress") {
+            usleep(UInt32(Actionability.pollMs * 1_000))
         }
     }
 
@@ -1604,6 +1621,7 @@ final class Provider {
         guard first else { return }
         if isSettable(appElement, WebAccessibility.manualAttribute) {
             _ = AXUIElementSetAttributeValue(appElement, WebAccessibility.manualAttribute as CFString, kCFBooleanTrue)
+            noteWebAccessibilityOn(app.pid)
             let giveUp = Date().addingTimeInterval(WebAccessibility.readySeconds)
             while boolAttribute(appElement, WebAccessibility.manualAttribute) != true, Date() < giveUp {
                 usleep(WebAccessibility.pollMicros)
@@ -1611,6 +1629,13 @@ final class Provider {
             return
         }
         prepareApplicationAccessibility(appElement, app: app)
+        if app.isKnownBrowser { noteWebAccessibilityOn(app.pid) }
+    }
+
+    private func noteWebAccessibilityOn(_ pid: pid_t) {
+        cacheLock.lock()
+        webAccessibilityOnAt[pid] = Date()
+        cacheLock.unlock()
     }
 
     /// Where a look at a surface starts, or nil when it is not open.
@@ -1920,6 +1945,17 @@ final class Provider {
                     BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
                 }
                 return actionMetadata(path: "accessibility", actionName: action)
+            }
+            // Pressing a field is asking for its focus, and a web view ignores events
+            // sent to a window that is not key.
+            if let record, modifiers.isEmpty, count == 1, button == .left,
+               MarkPin.textEntryRoles.contains(record.role),
+               AXUIElementSetAttributeValue(record.element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success {
+                try requireReachable(record, in: snapshot, at: requestedPoint)
+                if let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
+                    BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
+                }
+                return actionMetadata(path: "accessibility", actionName: "AXFocused")
             }
             let point: CGPoint
             if let requestedPoint {
@@ -3266,6 +3302,9 @@ private func windowFramesMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
 }
 
 private func openBundle(_ bundleId: String) {
+    // With two processes of one bundle this could raise the other one, which may be
+    // the person's.
+    guard NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).count <= 1 else { return }
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
     process.arguments = ["-b", bundleId]
@@ -3479,7 +3518,7 @@ private func performActionChecked(_ element: AXUIElement, _ action: String) thro
         context.sent = sentBefore
         throw ProviderError.coded("permission_denied", "Accessibility is off for ZeroCode Computer Use")
     case .uncertain:
-        throw ProviderError.coded("delivery_uncertain", "\(action) did not answer in time, and may have landed: a control that opens a dialog or menu answers late. Look before doing it again.")
+        throw ProviderError.coded("delivery_uncertain", "\(action) answered with an error or not at all, and may have landed: some apps do the press and still report a failure. Look before doing it again.")
     }
 }
 
@@ -7240,6 +7279,7 @@ private enum DesktopApps {
         let url = try resolveApplicationURL(query, running: running)
         let args = (params["args"]?.string ?? "").split(whereSeparator: { $0 == " " }).map(String.init)
         let comesUpBehind = params["background"]?.bool == true
+        let front = comesUpBehind ? NSWorkspace.shared.frontmostApplication : nil
         let launched = try BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
             // The configuration is built inside the closure: it is not Sendable.
             let configuration = NSWorkspace.OpenConfiguration()
@@ -7255,6 +7295,7 @@ private enum DesktopApps {
             usleep(readyPollMs * 1_000)
             windows = WindowCapture.candidates(pid: pid).filter { $0.layer == 0 }.count
         }
+        keepInFront(front, over: pid)
         return [
             "name": launched.localizedName ?? query,
             // The bundle's own unlocalized name: the word the next verb can
@@ -7266,6 +7307,24 @@ private enum DesktopApps {
             "ready": windows > 0,
             "windows": windows,
         ]
+    }
+
+    /// How long after its first window an app is watched for putting itself in front.
+    private static let settlesInFrontSeconds: TimeInterval = 1
+
+    /// Told to come up behind, a browser still brings itself to the front when its first
+    /// window opens. What the person had goes back in front.
+    private static func keepInFront(_ front: NSRunningApplication?, over pid: pid_t) {
+        guard let front, front.processIdentifier != pid else { return }
+        let giveUp = Date().addingTimeInterval(settlesInFrontSeconds)
+        while Date() < giveUp {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+                _ = front.activate(options: [])
+                if !front.isActive, let bundle = front.bundleIdentifier { openBundle(bundle) }
+                return
+            }
+            usleep(readyPollMs * 1_000)
+        }
     }
 
     static func quit(app: AppDescriptor, force: Bool) throws -> [String: Any] {
@@ -7308,11 +7367,15 @@ private enum DesktopApps {
         let comesUpBehind = params["background"]?.bool == true
         if let with = params["with"]?.string {
             let application = try resolveApplicationURL(with, running: running)
-            opened = (try? BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
+            let front = comesUpBehind ? NSWorkspace.shared.frontmostApplication : nil
+            let wasRunning = running.contains { $0.app.bundleURL == application }
+            let came = try? BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
                 let configuration = NSWorkspace.OpenConfiguration()
                 configuration.activates = !comesUpBehind
                 return try await NSWorkspace.shared.open([target], withApplicationAt: application, configuration: configuration)
-            }) != nil
+            }
+            opened = came != nil
+            if let came, !wasRunning { keepInFront(front, over: came.processIdentifier) }
         } else if comesUpBehind {
             opened = (try? BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
                 let configuration = NSWorkspace.OpenConfiguration()

@@ -38,7 +38,7 @@ public final class ElementIdentityBook<Element> {
 
     /// Past this many remembered elements the oldest are forgotten, so one app
     /// that makes a new object for every repaint cannot grow the book for ever.
-    public static var maxEntries: Int { 20_000 }
+    public static var maxEntries: Int { 5_000 }
 
     private let hash: (Element) -> UInt
     private let equal: (Element, Element) -> Bool

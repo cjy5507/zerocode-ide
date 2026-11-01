@@ -118,6 +118,9 @@ public enum WebAccessibility {
     public static let manualAttribute = "AXManualAccessibility"
     /// How long a look waits for the attribute to read back as set.
     public static let readySeconds: TimeInterval = 0.4
+    /// How long after it is turned on a control may still have no press to offer. A press
+    /// before that answers success and does nothing, so a press waits for the offer.
+    public static let settlesSeconds: TimeInterval = 8
     public static let pollMicros: UInt32 = 25_000
 }
 

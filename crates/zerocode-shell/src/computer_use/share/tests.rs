@@ -683,6 +683,8 @@ fn without_required_sharing_nothing_waits() {
 fn a_step_in_flight_never_moves_the_share_back() {
     let (_person, _) = person(Decision::Allowed);
     let in_flight = admit(ComputerMethod::Click, &click("Safari")).expect("admitted");
+    // A moment later, when the panel is free to follow.
+    stand_in::advance(SHARE_ASK_AGAIN_MS);
     drop(admit(ComputerMethod::Click, &click("Notes")).expect("admitted"));
     assert_eq!(state()["target"], "notes");
     let told = stand_in::notices().len();

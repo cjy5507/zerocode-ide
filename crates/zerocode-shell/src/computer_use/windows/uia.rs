@@ -307,6 +307,44 @@ pub(super) struct ElementFacts {
     pub settable: bool,
 }
 
+/// The id UI Automation gives an element for as long as it lives. A number names a
+/// place in the walk here, and this is what tells a removed row from the one after it.
+pub(super) fn runtime_id(element: &IUIAutomationElement) -> Option<String> {
+    use windows::Win32::System::Ole::{
+        SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetLBound, SafeArrayGetUBound,
+        SafeArrayUnaccessData,
+    };
+    // SAFETY: the array is this call's own, one dimension of 32-bit integers by UI
+    // Automation's contract, read only between access and unaccess and destroyed once.
+    unsafe {
+        let array = element.GetRuntimeId().ok()?;
+        if array.is_null() {
+            return None;
+        }
+        let mut id = None;
+        let low = SafeArrayGetLBound(array, 1);
+        let high = SafeArrayGetUBound(array, 1);
+        let mut data: *mut core::ffi::c_void = std::ptr::null_mut();
+        if let (Ok(low), Ok(high)) = (low, high)
+            && high >= low
+            && SafeArrayAccessData(array, &raw mut data).is_ok()
+        {
+            let count = usize::try_from(high - low + 1).unwrap_or(0);
+            let parts = std::slice::from_raw_parts(data.cast::<i32>(), count);
+            id = Some(
+                parts
+                    .iter()
+                    .map(i32::to_string)
+                    .collect::<Vec<_>>()
+                    .join("."),
+            );
+            let _ = SafeArrayUnaccessData(array);
+        }
+        let _ = SafeArrayDestroy(array);
+        id
+    }
+}
+
 fn cached_string(value: windows::core::Result<BSTR>) -> Option<String> {
     let text = value.ok()?.to_string();
     let trimmed = text.trim();

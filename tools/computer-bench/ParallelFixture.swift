@@ -116,6 +116,10 @@ final class Fixture: NSObject, NSApplicationDelegate {
             // Stands in for the app a person has in front.
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
+        case "raise":
+            // In front of everything without taking the focus: a picture holds this window alone.
+            window.level = .floating
+            window.orderFrontRegardless()
         case "quit":
             NSApp.terminate(nil)
         default: break

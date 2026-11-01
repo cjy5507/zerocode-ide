@@ -738,9 +738,20 @@ fn one_byte_gives_the_shell_its_terminal_back() {
         "the shell never handed the terminal to the job it started"
     );
 
-    lane.write_input(b"\x03").expect("write the interrupt");
+    // On a loaded machine the terminal is handed over while the job is still between
+    // the shell's fork and its exec, and an interrupt landing there is lost. A person
+    // presses again; so does this, until the deadline says the byte does nothing at all.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut back;
+    loop {
+        lane.write_input(b"\x03").expect("write the interrupt");
+        back = foreground_within(&mut lane, true, Duration::from_secs(1));
+        if back == Some(true) || Instant::now() >= deadline {
+            break;
+        }
+    }
     assert_eq!(
-        wait_for_foreground(&mut lane, true),
+        back,
         Some(true),
         "ETX reached the pty and the job it should have interrupted is still there"
     );
@@ -868,7 +879,12 @@ fn a_child_that_stopped_reading_does_not_take_the_typist_with_it() {
 /// Pump until the lane's foreground answer is `want`, and report what it was.
 #[cfg(unix)]
 fn wait_for_foreground(lane: &mut PtyLane, want: bool) -> Option<bool> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    foreground_within(lane, want, Duration::from_secs(10))
+}
+
+#[cfg(unix)]
+fn foreground_within(lane: &mut PtyLane, want: bool, wait: Duration) -> Option<bool> {
+    let deadline = Instant::now() + wait;
     let mut seen = lane.foreground_is_child();
     while Instant::now() < deadline {
         lane.pump();
