@@ -149,6 +149,7 @@ export async function testYourTurn(browser, origin, ok) {
     const cards = await page.evaluate(async () => {
       const seen = {};
       paneModels.set(6, "claude-opus-5-5");
+      paneSaid.set(6, "짧은 판은 600자, 긴 판은 1,800자입니다.");
       const base = window.__turnCards();
       const plan = { ...base[1], pane: "term:9", heading: "계획 에이전트", ask: "ExitPlanMode",
         approval: { tool: "ExitPlanMode", summary: "", plan: "## 계획\n\n1. 첫째 단계\n2. 둘째 단계" } };
@@ -161,18 +162,22 @@ export async function testYourTurn(browser, origin, ok) {
       const door = shell.querySelector(".your-turn-acts .your-turn-open");
       seen.door = door?.textContent.trim() ?? null;
       seen.doorMark = Boolean(door?.querySelector("svg use[href='#i-forward']"));
+      seen.context = question.querySelector(".your-turn-context")?.textContent.replace(/\s+/g, " ").trim() ?? null;
+      seen.shellContext = shell.querySelector(".your-turn-context") === null;
       seen.planTitle = planned.querySelector(".your-turn-question")?.textContent.replace(/\s+/g, " ").trim() ?? null;
       seen.planProse = planned.querySelector(".your-turn-plan")?.textContent.replace(/\s+/g, " ").trim() ?? null;
       seen.planHeading = Boolean(planned.querySelector(".your-turn-plan h2, .your-turn-plan h3, .your-turn-plan strong"));
       window.__press("Escape");
       await window.__settle();
       paneModels.delete(6);
+      paneSaid.delete(6);
       await window.__setTurns(window.__turnCards());
       return seen;
     });
     ok(
-      "a list question names the agent and its model, a shell permission reads 「셸 명령 허락 — npm install」 with a 「대화 열기 →」 door, and a plan permission shows the plan",
-      cards.head.includes("zo") && cards.head.includes("claude-opus-5-5") && cards.shell === "셸 명령 허락 — npm install" &&
+      "a list question names the agent and its model and quotes the agent's last answer, a shell permission reads 「셸 명령 허락 — npm install」 with a 「대화 열기 →」 door, and a plan permission shows the plan",
+      cards.head.includes("zo") && cards.head.includes("claude-opus-5-5") &&
+        cards.context === "직전 답에서 — 「짧은 판은 600자, 긴 판은 1,800자입니다.」" && cards.shellContext && cards.shell === "셸 명령 허락 — npm install" &&
         cards.door === "대화 열기" && cards.doorMark && cards.planTitle === "계획을 승인할까요?" &&
         cards.planProse?.includes("첫째 단계") && cards.planProse.includes("둘째 단계") && cards.planHeading,
       JSON.stringify(cards),
