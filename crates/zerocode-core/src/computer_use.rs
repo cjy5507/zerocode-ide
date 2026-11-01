@@ -1165,7 +1165,9 @@ pub const COMPUTER_PARALLEL_MAX_GROUPS: usize = 8;
 /// and each run at once with the others.
 pub fn parallel_groups(raw: &str) -> Result<Vec<Vec<Vec<String>>>, String> {
     let groups: Vec<Value> = serde_json::from_str(raw).map_err(|_| {
-        format!("--{BATCH_COMMANDS_FLAG} is a JSON array of batches, each an array of command lines")
+        format!(
+            "--{BATCH_COMMANDS_FLAG} is a JSON array of batches, each an array of command lines"
+        )
     })?;
     if groups.is_empty() || groups.len() > COMPUTER_PARALLEL_MAX_GROUPS {
         return Err(format!(

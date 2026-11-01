@@ -376,7 +376,10 @@ impl ProviderSession for Session {
         let answer = wire.request(method, params);
         // A wire that broke, or whose reply no longer lines up, is not reused.
         if !matches!(answer, Err(SessionFailure::Transport(_))) {
-            let mut idle = self.idle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut idle = self
+                .idle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if idle.len() < MAX_IDLE_WIRES {
                 idle.push(wire);
             }

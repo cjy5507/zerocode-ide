@@ -63,7 +63,10 @@ fn an_app_the_person_ended_asks_before_it_is_used_again() {
     assert_eq!(share.gate(act(Some("notes")), NOW), Gate::Go);
     assert!(share.end("notes", share.generation()));
     assert_eq!(share.target(), None);
-    assert_eq!(share.gate(act(Some("notes")), NOW), Gate::Ask("notes".into()));
+    assert_eq!(
+        share.gate(act(Some("notes")), NOW),
+        Gate::Ask("notes".into())
+    );
     share.answered("notes", Answer::Silent, NOW);
     assert_eq!(
         code(share.gate(act(Some("notes")), NOW)).as_deref(),
@@ -555,7 +558,9 @@ fn a_step_in_flight_is_judged_as_the_gate_judges_without_moving_anything() {
                             }
                         }
                         if let Some(target) = target {
-                            if share.answers.get(target) != Some(&Standing::Answered(Answer::Shared)) {
+                            if share.answers.get(target)
+                                != Some(&Standing::Answered(Answer::Shared))
+                            {
                                 continue;
                             }
                             share.answered(target, Answer::Shared, NOW);

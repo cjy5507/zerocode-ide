@@ -6,6 +6,7 @@
 //! swiftc -O tools/computer-bench/ParallelFixture.swift -o <dir>/fixture -framework AppKit
 //! ZEROCODE_PARALLEL_FIXTURE=<dir>/fixture \
 //! ZEROCODE_PARALLEL_BASELINE=/Applications/ZeroCode.app/Contents/Resources/ZeroCode\ Computer\ Use.app \
+//! ZEROCODE_PARALLEL_BUILT=target/debug/ZeroCode\ Computer\ Use.app \
 //! ZEROCODE_PARALLEL_OUT=<dir>/report.json \
 //! cargo test -p zerocode-shell --bin zerocode-shell parallel_bench -- --ignored --nocapture
 //! ```
@@ -72,7 +73,10 @@ impl Fixture {
                 self.acks = said;
                 break;
             }
-            assert!(started.elapsed() < Duration::from_secs(10), "ack for {line}");
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "ack for {line}"
+            );
             std::thread::sleep(Duration::from_millis(2));
         }
         // The app redraws and rebuilds its accessibility objects after a change.
@@ -167,6 +171,54 @@ fn press(session: &Session, app: &str, number: u64) -> Value {
     }
 }
 
+/// What one helper holds as a long session goes on: the same presses on the same
+/// window, from a fresh process.
+#[test]
+#[ignore = "drives the signed helper against an owned fixture; run by hand, see the module comment"]
+fn parallel_bench_memory() {
+    let program = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_FIXTURE").expect("fixture"));
+    let baseline = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BASELINE").expect("baseline"));
+    let built = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BUILT").expect("built helper"));
+    let out = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_OUT").expect("report path"));
+    let root = out.parent().expect("report folder").join("fixtures");
+    let mut report = json!({});
+    for (label, helper, after) in [
+        ("installed", &baseline, None),
+        ("new", &built, Some("changes")),
+    ] {
+        let session = Session::connect(launch_at(helper).expect("helper")).expect("answers");
+        let fixture = Fixture::start(&program, &root, &format!("memory-{label}"), 1000);
+        let app = fixture.app();
+        let number = number_of(&look(&session, &app), "button Target", 0);
+        let mut params = json!({"app": app, "elementIndex": number, "background": true, "noScreenshot": true, "timing": true});
+        if let Some(after) = after {
+            params["afterAct"] = after.into();
+        }
+        let mut rss = vec![helper_rss_kib(session.helper_pid())];
+        let (mut acts, mut in_the_app) = (vec![], vec![]);
+        for round in 1..=150 {
+            let (_, answer) = call(&session, "click", &params);
+            let answer = answer.expect("a press");
+            if let Some(ms) = answer.pointer("/action/actMs").and_then(Value::as_f64) {
+                acts.push(ms);
+            }
+            if let Some(ms) = answer
+                .pointer("/action/appActionMs")
+                .and_then(Value::as_f64)
+            {
+                in_the_app.push(ms);
+            }
+            if round % 50 == 0 {
+                rss.push(helper_rss_kib(session.helper_pid()));
+            }
+        }
+        report[label] = json!({"rss_kib_at_0_50_100_150_presses": rss, "act_ms": stats(acts), "in_the_app_ms": stats(in_the_app)});
+    }
+    let text = serde_json::to_string_pretty(&report).expect("a report");
+    std::fs::write(&out, &text).expect("the report");
+    println!("{text}");
+}
+
 fn helper_rss_kib(pid: Option<i32>) -> u64 {
     let Some(pid) = pid else { return 0 };
     Command::new("/bin/ps")
@@ -185,7 +237,7 @@ fn parallel_bench() {
     let baseline = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BASELINE").expect("baseline"));
     let out = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_OUT").expect("report path"));
     let root = out.parent().expect("report folder").join("fixtures");
-    let built = super::helper_app_path().expect("the built helper");
+    let built = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BUILT").expect("built helper"));
     let old = Session::connect(launch_at(&baseline).expect("baseline")).expect("baseline answers");
     let new = Session::connect(launch_at(&built).expect("built")).expect("built answers");
     let mut report = json!({});
@@ -244,7 +296,7 @@ fn parallel_bench() {
 
     // ---- many at once
     let mut big = Fixture::start(&program, &root, "big", 1000);
-    let mut small = Fixture::start(&program, &root, "small", 10);
+    let small = Fixture::start(&program, &root, "small", 10);
     let (big_app, small_app) = (big.app(), small.app());
     let big_look = json!({"app": big_app, "noScreenshot": true, "background": true});
     let small_look = json!({"app": small_app, "noScreenshot": true, "background": true});
@@ -298,7 +350,7 @@ fn parallel_bench() {
     drop(small);
 
     // ---- several apps pressed together
-    let mut apps: Vec<Fixture> = (0..3)
+    let apps: Vec<Fixture> = (0..3)
         .map(|at| Fixture::start(&program, &root, &format!("app{at}"), 100))
         .collect();
     let prepared: Vec<(String, u64)> = apps
@@ -342,9 +394,6 @@ fn parallel_bench() {
             .map(|fixture| fixture.events().len())
             .collect::<Vec<_>>()
     );
-    for fixture in &mut apps {
-        fixture.ctl("quit");
-    }
     drop(apps);
 
     // ---- pressing the right thing
@@ -405,7 +454,8 @@ fn parallel_bench() {
         let (row, number) = row_of(&state, 90);
         let before = rows.events().len();
         let reply = press(session, &app, number);
-        let below = json!({"row": row, "reply": reply, "the_window_recorded": rows.events()[before..]});
+        let below =
+            json!({"row": row, "reply": reply, "the_window_recorded": rows.events()[before..]});
         accuracy.insert(
             label.to_owned(),
             json!({
@@ -420,7 +470,7 @@ fn parallel_bench() {
     report["accuracy"] = Value::Object(accuracy);
 
     // ---- what the helper holds after a long session
-    let mut hold = Fixture::start(&program, &root, "hold", 1000);
+    let hold = Fixture::start(&program, &root, "hold", 1000);
     let app = hold.app();
     let target_old = number_of(&look(&old, &app), "button Target", 0);
     let target_new = number_of(&look(&new, &app), "button Target", 0);
@@ -440,7 +490,7 @@ fn parallel_bench() {
         "installed": helper_rss_kib(old.helper_pid()),
         "new": helper_rss_kib(new.helper_pid()),
     });
-    hold.ctl("quit");
+    drop(hold);
 
     let text = serde_json::to_string_pretty(&report).expect("a report");
     std::fs::write(&out, &text).expect("the report");

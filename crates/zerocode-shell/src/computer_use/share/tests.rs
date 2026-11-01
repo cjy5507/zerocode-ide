@@ -43,7 +43,11 @@ fn ending_a_share_forgets_the_answer_and_the_next_act_asks_again() {
     assert!(ended["revision"].as_u64() > before["revision"].as_u64());
     assert_eq!(stand_in::notices().last(), Some(&ended));
     admit(ComputerMethod::Click, &click("Sample")).expect("asks");
-    assert_eq!(asked.get(), 1, "what the person ended asks before it is used again");
+    assert_eq!(
+        asked.get(),
+        1,
+        "what the person ended asks before it is used again"
+    );
 }
 
 #[test]

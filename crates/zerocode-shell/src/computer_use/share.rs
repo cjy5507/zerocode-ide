@@ -208,7 +208,10 @@ fn reached(params: &Value) -> Option<(String, String)> {
 /// The key and the words for an app an agent named by process: the card and the
 /// band say what the person calls it, and a restarted app stays the same app.
 fn person_words_for(named: &str) -> (String, String) {
-    let Some(pid) = named.strip_prefix("pid:").and_then(|pid| pid.parse::<i64>().ok()) else {
+    let Some(pid) = named
+        .strip_prefix("pid:")
+        .and_then(|pid| pid.parse::<i64>().ok())
+    else {
         return (app_key(named), named.to_string());
     };
     let name = super::call("listApps", json!({})).ok().and_then(|listed| {
@@ -270,7 +273,9 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
                 && let Some((key, label)) = named.as_ref()
                 && held.share.targets().any(|target| target == key)
             {
-                held.labels.entry(key.clone()).or_insert_with(|| label.clone());
+                held.labels
+                    .entry(key.clone())
+                    .or_insert_with(|| label.clone());
             }
             (
                 gate,

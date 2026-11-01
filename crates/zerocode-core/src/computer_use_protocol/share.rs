@@ -290,9 +290,9 @@ impl Share {
     fn required_act(&self, app: &str, now_ms: u64) -> Judged {
         match self.answers.get(app) {
             Some(Standing::Answered(Answer::Shared)) => Judged::ShareAgain(app.to_string()),
-            Some(Standing::Answered(Answer::Declined)) => Judged::Refuse(scope(&format!(
-                "the person did not hand {app} over"
-            ))),
+            Some(Standing::Answered(Answer::Declined)) => {
+                Judged::Refuse(scope(&format!("the person did not hand {app} over")))
+            }
             Some(Standing::Answered(Answer::Silent)) => self.silent_required(app, now_ms),
             Some(Standing::Ended) | None => Judged::Ask(app.to_string()),
         }

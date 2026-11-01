@@ -92,6 +92,8 @@ final class RequestContext {
     var mayBorrowDesktop = false
     /// Set when the request borrowed the shared desktop.
     var borrowed = false
+    /// How long the app itself took to perform the action, in ms.
+    var appActionMs: Int?
 
     private static let key = "dev.zerocode.computer-use.request"
 
@@ -562,7 +564,9 @@ final class Provider {
             CGWarpMouseCursorPosition(pointer)
             _ = CGAssociateMouseAndMouseCursorPosition(1)
             if let front, !front.isTerminated, !front.isActive {
-                front.activate()
+                _ = front.activate(options: [])
+                // A helper in the background is not always let bring an app up.
+                if !front.isActive, let bundle = front.bundleIdentifier { openBundle(bundle) }
             }
         }
         if let query, !query.isEmpty { recoverWindow(try resolveApp(query)) }
@@ -826,7 +830,12 @@ final class Provider {
         let foreground = params["background"]?.bool == true ? NSWorkspace.shared.frontmostApplication?.processIdentifier : nil
         // What the window showed before the act, to tell what the act changed.
         let before = try? cachedSnapshot(params: params)
+        let acting = Date()
         var action = try runAction()
+        if params["timing"]?.bool == true {
+            action["actMs"] = Int(Date().timeIntervalSince(acting) * 1_000)
+            action["appActionMs"] = RequestContext.current.appActionMs as Any
+        }
         if RequestContext.current.borrowed { action["borrowedDesktop"] = true }
         func settleDelivery(effectSeen: Bool) {
             let verified = (action["verification"] as? [String: Any])?["state"] as? String == "verified"
@@ -3349,7 +3358,9 @@ private func performActionChecked(_ element: AXUIElement, _ action: String) thro
     let context = RequestContext.current
     let sentBefore = context.sent
     context.sent = true
+    let asked = Date()
     let status = AXUIElementPerformAction(element, action as CFString)
+    context.appActionMs = Int(Date().timeIntervalSince(asked) * 1_000)
     switch AXActionVerdict.of(raw: status.rawValue) {
     case .done:
         return true

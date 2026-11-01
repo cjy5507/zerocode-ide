@@ -3324,10 +3324,15 @@ pub(super) async fn computer_loop(
                     let answer = if command.method
                         == zerocode_core::computer_use::ComputerMethod::Parallel
                     {
-                        run_parallel(&app, &root, evidence.as_deref(), cwd.as_deref(), &command, deadline_ms)
-                    } else if command.method
-                        == zerocode_core::computer_use::ComputerMethod::Batch
-                    {
+                        run_parallel(
+                            &app,
+                            &root,
+                            evidence.as_deref(),
+                            cwd.as_deref(),
+                            &command,
+                            deadline_ms,
+                        )
+                    } else if command.method == zerocode_core::computer_use::ComputerMethod::Batch {
                         run_batch(
                             &command,
                             deadline_ms,
@@ -3885,7 +3890,9 @@ fn run_parallel(
     deadline_ms: u64,
 ) -> zerocode_hookd::TeamAnswer {
     use computer_use::confirm::Asking;
-    use zerocode_core::computer_use::{BATCH_COMMANDS_FLAG, ComputerCommand, ComputerMethod, parallel_steps};
+    use zerocode_core::computer_use::{
+        BATCH_COMMANDS_FLAG, ComputerCommand, ComputerMethod, parallel_steps,
+    };
 
     let actor = run_evidence::actor();
     let policy = computer_use::input_policy::capture();
@@ -3943,7 +3950,11 @@ fn run_parallel(
         })
         .collect();
     let body = serde_json::json!({ "ok": ok, "result": { "groups": groups } }).to_string();
-    if ok { computer_said(body) } else { computer_refused(body) }
+    if ok {
+        computer_said(body)
+    } else {
+        computer_refused(body)
+    }
 }
 
 pub(super) fn run_batch(
@@ -4959,10 +4970,12 @@ pub(super) fn door_refusal_with(
     }
     match computer_use::guard::stopped_reason() {
         Some(reason) => Some(computer_use::guard::refusal(&reason)),
-        None if computer_use::confirm::asking() && !acts_away_from_the_card(command) => Some(computer_use::ComputerUseError::new(
-            PERSON_ASKED,
-            "the person is being asked about a step (or has the desk); no other action goes until they answer — wait for that command's answer",
-        )),
+        None if computer_use::confirm::asking() && !acts_away_from_the_card(command) => {
+            Some(computer_use::ComputerUseError::new(
+                PERSON_ASKED,
+                "the person is being asked about a step (or has the desk); no other action goes until they answer — wait for that command's answer",
+            ))
+        }
         None => None,
     }
 }
@@ -6549,7 +6562,10 @@ pub(super) fn answer_computer_command_with(
                     computer_use::ComputerUseError::new("accessibility_error", error.to_string())
                 })
             }),
-            Err(error) => Err(computer_use::ComputerUseError::new("invalid_argument", error)),
+            Err(error) => Err(computer_use::ComputerUseError::new(
+                "invalid_argument",
+                error,
+            )),
         }
     } else if command.method == ComputerMethod::WaitFor {
         // A wait-for is the window's: it looks through the helper until what
@@ -6803,8 +6819,8 @@ pub(crate) fn click_by_words(
     ) -> Result<serde_json::Value, computer_use::ComputerUseError>,
 ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
     use zerocode_core::computer_use::{ComputerCommand, ComputerMethod};
-    use zerocode_core::computer_use_protocol::words;
     use zerocode_core::computer_use_protocol::execution::MAY_BORROW_DESKTOP;
+    use zerocode_core::computer_use_protocol::words;
     let params = &command.params;
     let may_borrow = params.get(MAY_BORROW_DESKTOP) == Some(&serde_json::Value::Bool(true));
     if params.get("background") == Some(&serde_json::Value::Bool(true)) && !may_borrow {
@@ -7625,11 +7641,7 @@ fn said_envelope_at(
     result: serde_json::Value,
     context: Option<&computer_use::surface_execution::Context>,
 ) -> zerocode_hookd::TeamAnswer {
-    let envelope = computer_use::surface_execution::envelope(
-        command,
-        result,
-        context,
-    );
+    let envelope = computer_use::surface_execution::envelope(command, result, context);
     if command.json {
         computer_said(format!("{envelope}\n"))
     } else {
