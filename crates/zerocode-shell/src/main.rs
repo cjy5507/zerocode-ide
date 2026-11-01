@@ -3750,6 +3750,8 @@ fn main() -> ExitCode {
                 cmd::tidy_decision_store_at_start();
                 // Then what deletes left in the records: the store just tidied
                 // judges the rows, and a failed lift leaves them all (t-87506).
+                // Review cases, memo rows and cache rows go in the same call,
+                // once, under a key of their own (t-88024).
                 if let Some(path) = api_routers::zo_settings_path() {
                     zerocode_core::jev::erase::tidy_at_start(&path, lifted);
                 }

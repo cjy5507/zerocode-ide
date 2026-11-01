@@ -289,6 +289,39 @@ fn a_repeated_command_is_answered_once() {
     );
 }
 
+/// A memo another writer will not let go of costs the memo row, never the guard's
+/// judgment: the row of the question still says what the wire answered.
+#[test]
+fn a_memo_held_too_long_loses_its_row_and_the_guard_still_judges() {
+    let endpoint = flagging();
+    let project = tempfile::tempdir().expect("a project");
+    let (home, wire) = home_asking(&endpoint, project.path(), JevMode::Shadow);
+    let memo = home
+        .path()
+        .join(zerocode_core::jev::count::REQUESTS_DIR)
+        .join(zerocode_core::jev::memo::MEMO_FILE);
+    std::fs::create_dir_all(memo.parent().expect("a folder")).expect("the folder");
+    std::fs::write(&memo, "").expect("an empty memo");
+    let held = zerocode_core::jev::erase::shared_ledger_lock(&memo).expect("the lock");
+    assert!(held.is_some(), "the memo takes no lock");
+
+    join(note(
+        fresh_guards(),
+        &wire,
+        &pane(AgentKind::Codex, project.path()),
+        Asking::ALL,
+        vec![about("call-1", "cargo test -p tools", project.path())],
+        1,
+    ));
+
+    let held_rows = rows(&home, &COMMAND_GUARD, 1);
+    let asked = requests(&held_rows);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0]["requests"], json!(1));
+    assert_eq!(asked[0]["outcome"], "answered", "{}", asked[0]);
+    assert_eq!(zerocode_core::jev::memo::rows(&memo), 0);
+}
+
 /// A guard's row names the client its question was put to, and the memo's
 /// answer to the same command, which sent nothing, names none and is no use
 /// of it: the reading of that client's real use is the request that left

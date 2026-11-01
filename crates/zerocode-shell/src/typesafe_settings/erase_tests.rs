@@ -3,8 +3,11 @@
 use std::fs;
 
 use serde_json::json;
-use zerocode_core::jev::erase::{PENDING_FILE, lift_kept_seats, tidy_at_start};
-use zerocode_core::jev::{CUSTOM_DECISIONS, JevMode, PLACEMENT, RECALL, STALL, builtin};
+use zerocode_core::jev::erase::{PENDING_FILE, lift_kept_seats, shared_ledger_lock, tidy_at_start};
+use zerocode_core::jev::{
+    BROWSER, CUSTOM_DECISIONS, DESKTOP, JUDGMENT_CACHE, JevMode, PLACEMENT, RECALL, STALL, builtin,
+    memo,
+};
 
 use super::*;
 
@@ -346,4 +349,149 @@ fn a_home_with_no_store_keeps_every_row() {
     tidy_at_start(&settings, true);
 
     assert_eq!(fs::read_to_string(&ledger).unwrap(), rows);
+}
+
+/// The rows a walk writes for the cache name the screen seat they answered for.
+fn cache_row(seat: &str) -> Value {
+    json!({ "seat": seat, "at": 1 })
+}
+
+#[test]
+fn the_window_s_delete_takes_the_seat_s_cases_and_rows() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = settings_in(home.path(), &json!({}));
+    let review = home.path().join("jev/review");
+    let gone = review.join(format!("{:064x}.json", 1));
+    let stays = review.join(format!("{:064x}.json", 2));
+    write(&gone, &json!({ "seat": BROWSER.id }).to_string());
+    write(&stays, &json!({ "seat": DESKTOP.id }).to_string());
+    let kept = format!("{}\n", cache_row(DESKTOP.id));
+    let rows = format!("{}\n{kept}", cache_row(BROWSER.id));
+    for folder in evidence_folders(home.path()) {
+        write(&folder.join(memo::MEMO_FILE), &rows);
+        write(&folder.join(JUDGMENT_CACHE.ledger), &rows);
+    }
+
+    update_builtin_decision(
+        &settings,
+        BROWSER.id,
+        "delete",
+        &builtin::Decision::default(),
+        None,
+    )
+    .unwrap();
+
+    assert!(!gone.exists(), "the deleted seat's case stayed");
+    assert!(stays.exists(), "another seat's case went");
+    for folder in evidence_folders(home.path()) {
+        assert_eq!(
+            fs::read_to_string(folder.join(memo::MEMO_FILE)).unwrap(),
+            kept
+        );
+        assert_eq!(
+            fs::read_to_string(folder.join(JUDGMENT_CACHE.ledger)).unwrap(),
+            kept
+        );
+    }
+    assert!(!home.path().join(PENDING_FILE).exists());
+}
+
+/// A walk holds its cache rows until it ends, so a seat deleted during the walk
+/// is gone by the time they are written.
+#[test]
+fn a_cache_row_naming_a_deleted_screen_seat_is_not_written() {
+    let home = tempfile::tempdir().unwrap();
+    settings_in(
+        home.path(),
+        &json!({ builtin::SETTING: { BROWSER.id: { "deleted": true } } }),
+    );
+    let cache = home.path().join("jev").join(JUDGMENT_CACHE.ledger);
+
+    crate::systemone::append_rows(&cache, &[cache_row(BROWSER.id)]);
+    assert!(!cache.exists(), "the only row named the deleted seat");
+
+    crate::systemone::append_rows(&cache, &[cache_row(BROWSER.id), cache_row(DESKTOP.id)]);
+    let rows = fs::read_to_string(&cache).unwrap();
+    assert_eq!(rows, format!("{}\n", cache_row(DESKTOP.id)));
+}
+
+#[test]
+fn a_cache_row_waits_for_a_rewrite_to_finish() {
+    let home = tempfile::tempdir().unwrap();
+    settings_in(home.path(), &json!({}));
+    let cache = home.path().join("jev").join(JUDGMENT_CACHE.ledger);
+    write(&cache, "");
+    let held = shared_ledger_lock(&cache).unwrap();
+    assert!(held.is_some(), "the cache takes no lock");
+
+    let writing = {
+        let cache = cache.clone();
+        std::thread::spawn(move || {
+            crate::systemone::append_rows(&cache, &[cache_row(DESKTOP.id)]);
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(
+        fs::read_to_string(&cache).unwrap(),
+        "",
+        "the row went past the lock"
+    );
+    drop(held);
+
+    writing.join().unwrap();
+    assert_eq!(
+        fs::read_to_string(&cache).unwrap(),
+        format!("{}\n", cache_row(DESKTOP.id))
+    );
+}
+
+/// The window wrote the person's decisions without the lock zo takes, so a row
+/// could go with a rewrite (B's gap).
+#[test]
+fn a_person_s_decision_row_waits_for_a_rewrite_to_finish() {
+    let home = tempfile::tempdir().unwrap();
+    settings_in(home.path(), &json!({}));
+    let ledger = home.path().join("jev").join(CUSTOM_DECISIONS.ledger);
+    write(&ledger, "");
+    let held = shared_ledger_lock(&ledger).unwrap();
+
+    let writing = {
+        let ledger = ledger.clone();
+        std::thread::spawn(move || {
+            crate::systemone::append_rows(&ledger, &[json!({ "decision": "d-kept" })]);
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(
+        fs::read_to_string(&ledger).unwrap(),
+        "",
+        "the row went past the lock"
+    );
+    drop(held);
+
+    writing.join().unwrap();
+    assert_eq!(
+        fs::read_to_string(&ledger).unwrap(),
+        format!("{}\n", json!({ "decision": "d-kept" }))
+    );
+}
+
+/// A record that cannot wait loses its row and nothing else: the window's writer
+/// logs and returns, and a writer whose row acknowledges an effect is told.
+#[test]
+fn a_row_gives_up_on_a_lock_held_too_long() {
+    let home = tempfile::tempdir().unwrap();
+    settings_in(home.path(), &json!({}));
+    let cache = home.path().join("jev").join(JUDGMENT_CACHE.ledger);
+    write(&cache, "");
+    let held = shared_ledger_lock(&cache).unwrap();
+    assert!(held.is_some(), "the cache takes no lock");
+
+    crate::systemone::append_rows(&cache, &[cache_row(DESKTOP.id)]);
+    assert_eq!(fs::read_to_string(&cache).unwrap(), "");
+
+    let error = crate::systemone::append_rows_checked(&cache, &[cache_row(DESKTOP.id)])
+        .expect_err("the lock stayed held");
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(fs::read_to_string(&cache).unwrap(), "");
 }

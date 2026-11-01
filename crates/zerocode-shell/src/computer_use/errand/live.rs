@@ -26,7 +26,7 @@ use crate::systemone::{SCHEMA, Wire, memo_path, request_body};
 
 /// The key the judgment cache's rows keep the screen seat they answered for
 /// under, and the memo key the lookup was made with.
-const FOR_SEAT_KEY: &str = "seat";
+const FOR_SEAT_KEY: &str = memo::SEAT;
 const MEMO_KEY: &str = "key";
 /// The key a lookup that found nothing is written under — a row with no
 /// `outcome`, which the judge does not count and a hit-rate reader does.

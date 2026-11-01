@@ -218,6 +218,7 @@ fn replay_priced(plan: &Plan, output: &Path, client: &SystemOneClient, cap: usiz
         match Store::at(output).record(&case).map_err(|error| error.to_string())? {
             Recorded::Saved | Recorded::Existing => saved += 1,
             Recorded::Full => return Err("study evidence store is full".into()),
+            Recorded::SeatDeleted => return Err("the seat under study was deleted; replay stopped".into()),
         }
         write_line(&mut journal, &json!({"kind":"retained","baseCaseId":row.base_case_id,"caseId":case.id}))?;
     }
