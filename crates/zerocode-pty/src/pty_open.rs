@@ -527,6 +527,27 @@ mod tests {
         }
     }
 
+    /// A hangup that comes only when a start in flight returns is a start
+    /// passing, not a holder — however long the start takes on a loaded
+    /// machine (t-84451 saw a process stall for seconds before its `exec`).
+    /// Here the start takes 900 ms, longer than [`HELD_TOO_LONG`].
+    #[test]
+    fn a_hangup_that_waits_for_a_start_in_flight_is_not_a_holder() {
+        let start_done = Arc::new(AtomicBool::new(false));
+        let start = {
+            let start_done = Arc::clone(&start_done);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(900));
+                start_done.store(true, Ordering::SeqCst);
+            })
+        };
+        let mut seen = Seen::default();
+        seen.note(|| start_done.load(Ordering::SeqCst));
+        start.join().unwrap();
+        assert_eq!(seen.kept, 0, "a start still in flight was counted a holder");
+        assert_eq!(seen.passing, 1);
+    }
+
     /// Whether `hung` answers yes within [`PATIENCE`]: a hangup already
     /// there passes at once, the patience is spent only by a failure.
     fn hangs_up_within_patience(mut hung: impl FnMut() -> bool) -> bool {
