@@ -1849,15 +1849,18 @@ impl From<RouterRefusal> for DecisionRefusal {
     }
 }
 
+/// The store sweep, once, at window start (stub).
+pub fn tidy_decision_store(home: &Path) {
+    let _ = custom::store::forget_deleted(home);
+}
+
 /// The person's decisions under `home`, zo's config home, and the folders
 /// `settings` consents to.
 ///
 /// # Errors
 /// A store that cannot be read.
 pub fn custom_decisions_at(home: &Path, settings: &Value) -> std::io::Result<CustomDecisions> {
-    // A trash folder an older window left is emptied on the first read; a
-    // failure to empty it never stops the list.
-    let _ = custom::store::forget_trash(home);
+    let _ = custom::store::forget_deleted(home);
     let decisions = custom::store::list(home)?
         .into_iter()
         .map(|entry| {
@@ -4432,7 +4435,7 @@ mod tests {
     /// deleted, it is gone for good, files and all; and a choice
     /// that names an option twice is refused at that name (t-62170 stage 3).
     #[test]
-    fn a_decision_goes_through_the_editors_doors_and_back() {
+    fn a_decision_goes_through_the_editors_doors_and_a_delete_is_final() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path();
         // Core keeps a decision's folders only as absolute paths, and an
@@ -4555,13 +4558,21 @@ mod tests {
         }
     }
 
-    /// A trash folder an older window left is emptied when the list is first
-    /// read; a folder that cannot be emptied never stops the list.
+    /// Reading the list sweeps nothing: the dashboard opening is not what
+    /// tidies the store. The window start's one pass does ([`tidy_decision_store`]),
+    /// and a trash folder an older window left goes with it, on the first
+    /// pass, whether or not the list was read; a store that is not there is
+    /// not made.
     #[test]
-    fn an_old_trash_folder_is_emptied_when_the_list_is_read() {
+    fn reading_the_list_sweeps_nothing_and_the_start_pass_does() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path();
         let settings = serde_json::json!({});
+        tidy_decision_store(home);
+        assert!(
+            !custom::store::root(home).exists(),
+            "a home with no store is left without one"
+        );
         let draft = DecisionDraft {
             id: None,
             name: "Kept".to_string(),
@@ -4582,18 +4593,18 @@ mod tests {
         std::fs::write(trash.join("d-00000001.json"), b"{}").expect("an old row");
         let listed = custom_decisions_at(home, &settings).expect("listed");
         assert_eq!(listed.decisions.len(), 1, "the list is read as before");
-        assert!(
-            !trash.exists(),
-            "the old trash is gone after the first read"
-        );
+        assert!(trash.exists(), "reading the list did not sweep the trash");
+        tidy_decision_store(home);
+        assert!(!trash.exists(), "the start pass removed the old trash");
         let again = custom_decisions_at(home, &settings).expect("listed again");
         assert_eq!(again.decisions.len(), 1, "no trash to find is no error");
     }
 
-    /// A trash folder that cannot be emptied leaves the list readable.
+    /// A trash folder that cannot be emptied stops neither the start pass
+    /// nor the list.
     #[cfg(unix)]
     #[test]
-    fn an_old_trash_that_cannot_be_emptied_does_not_stop_the_list() {
+    fn an_old_trash_that_cannot_be_emptied_stops_nothing() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4602,6 +4613,7 @@ mod tests {
         std::fs::create_dir_all(&locked).expect("an old trash");
         std::fs::write(locked.join("d-00000001.json"), b"{}").expect("an old row");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).expect("lock");
+        tidy_decision_store(home);
         let listed = custom_decisions_at(home, &serde_json::json!({}));
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("unlock");
         assert!(listed.is_ok(), "an unremovable trash stopped the list");

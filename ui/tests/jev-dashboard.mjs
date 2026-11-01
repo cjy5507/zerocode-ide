@@ -355,7 +355,7 @@ export function jevDashboardFixture(real = null) {
       const next = structuredClone(draft);
       if ((next.question || next.criteria || Object.keys(next.questions ?? {}).length) && (next.question !== (before.question ?? null) || next.criteria !== (before.criteria ?? null) || JSON.stringify(next.questions ?? {}) !== JSON.stringify(before.questions ?? {}))) next.mode = "shadow";
       builtin.saved[id] = next;
-    } else if (action === "delete") builtin.saved[id] = { ...before, deleted: true };
+    } else if (action === "delete") builtin.saved[id] = { deleted: true };
     else if (action === "reset") delete builtin.saved[id];
     else throw { message: "builtin_decision_action" };
     return settings();
@@ -3128,8 +3128,12 @@ export async function testJevCustomDecisions(browser, origin, ok) {
       JSON.stringify(deleted));
     ok("the deleted decision's name is on no part of the screen once its toast is gone", !deleted.onScreen, JSON.stringify(deleted));
     await picture("deleted");
-    const moved = await page.evaluate(() => ({ connected: document.activeElement?.isConnected ?? false }));
-    ok("focus does not stay on the row that left", moved.connected, JSON.stringify(moved));
+    const moved = await page.evaluate(() => {
+      const now = document.activeElement;
+      return { tag: now?.tagName ?? null, id: now?.id ?? "", inView: !!now?.closest("#jev-view"),
+        onNewDecision: !!now?.matches("[data-jev-custom-new], [data-jev-custom-guide]") };
+    });
+    ok("focus lands on the part's 「새 결정」 or its guide, not on the page body and not on the row that left", moved.inView && moved.onNewDecision, JSON.stringify(moved));
 
     const full = await page.evaluate(async () => {
       const custom = window.__JEV__.custom;
@@ -3434,13 +3438,18 @@ export async function testJevBuiltinDecisions(browser, origin, ok) {
         wording: document.body.innerText.includes("되살리기") || document.body.innerText.includes("되돌리기"),
         onScreen: document.body.innerText.includes(name),
         calls: window.__JEV__.builtin.calls.filter((one) => one.id === id).map((one) => one.action),
-        connected: document.activeElement?.isConnected ?? false,
+        focus: (() => {
+          const now = document.activeElement;
+          return { tag: now?.tagName ?? null, inView: !!now?.closest("#jev-view"),
+            onKeptRow: !!now?.matches("[data-jev-dash-row] [data-jev-builtin-edit]"), onHead: !!now?.matches("h1, h2") };
+        })(),
       };
     }, { id: gone, name: goneName });
     ok("deleting a built-in decision removes its row with a one-line toast and no restore, undo or fold",
-      after.row === 0 && after.fold === 0 && after.actions === 0 && !after.wording && after.said.some((line) => line.includes("결정을 지웠습니다")) && after.calls.join() === "delete" && after.connected,
+      after.row === 0 && after.fold === 0 && after.actions === 0 && !after.wording && after.said.some((line) => line.includes("결정을 지웠습니다")) && after.calls.join() === "delete",
       JSON.stringify(after));
     ok("a deleted built-in decision's name is on no part of the screen once its toast is gone", !after.onScreen, JSON.stringify(after));
+    ok("focus lands on a kept row's edit button or the head of the view, not on the page body", after.focus.inView && (after.focus.onKeptRow || after.focus.onHead), JSON.stringify(after.focus));
     const toggle = page.locator("#jev-view [data-jev-switch]");
     await toggle.uncheck(); await toggle.check();
     const stays = await page.evaluate(async ({ id, name }) => {
@@ -3449,6 +3458,27 @@ export async function testJevBuiltinDecisions(browser, origin, ok) {
         onScreen: document.body.innerText.includes(name), restoreCalls: window.__JEV__.builtin.calls.filter((one) => one.action === "restore").length };
     }, { id: gone, name: goneName });
     ok("turning all decisions on does not bring a deleted built-in decision back", stays.deleted && stays.row === 0 && !stays.onScreen && stays.restoreCalls === 0, JSON.stringify(stays));
+    // Another window deleted "recall" while this one still draws its row: pressing its edit button opens nothing,
+    // says the decision is deleted, and draws the list again without it.
+    if (!await page.locator('#jev-view [data-jev-builtin-edit="recall"]').count()) await page.locator("#jev-view .jev-fold").click();
+    await page.evaluate(() => { window.__JEV__.builtin.saved.recall = { deleted: true }; });
+    await page.locator('#jev-view [data-jev-builtin-edit="recall"]').click();
+    await page.waitForFunction(() => !document.querySelector('#jev-view [data-jev-dash-row="recall"]'));
+    const otherWindow = await page.evaluate(async () => {
+      await window.__PAINTED__();
+      const said = [...document.querySelectorAll(".toast")].map((one) => one.textContent.trim());
+      return { open: document.getElementById("jev-builtin-scrim").hidden === false, said,
+        row: document.querySelectorAll('[data-jev-dash-row="recall"], [data-jev-builtin-edit="recall"]').length,
+        saves: window.__JEV__.builtin.calls.filter((one) => one.id === "recall").length };
+    });
+    ok("the editor of a decision another window deleted does not open: it says so and the list is drawn again without the row",
+      !otherWindow.open && otherWindow.row === 0 && otherWindow.saves === 0
+        && otherWindow.said.some((line) => line.includes("지운 결정은")), JSON.stringify(otherWindow));
+    await page.evaluate(async () => {
+      delete window.__JEV__.builtin.saved.recall;
+      paintTypeSafe(await invoke("typesafe_settings"));
+      await window.__PAINTED__();
+    });
     const refused = await page.evaluate(() => {
       const words = {};
       for (const language of ["ko", "en", "ja", "zh", "es"]) {

@@ -8,7 +8,7 @@
 //!   rewritten. An edit writes another, and the old one stays.
 //! - A deleted decision is gone: its row leaves the index and every version of
 //!   its definition is removed ([`delete`]). An older window kept a `trash/`
-//!   folder; [`forget_trash`] removes it.
+//!   folder; [`forget_deleted`] removes it.
 //! - `.lock` is held by whatever writes.
 //!
 //! Every write is the project-rules store's (`super::super::project_rules`):
@@ -306,7 +306,7 @@ pub fn delete(home: &Path, id: &str) -> Result<(), Error> {
 ///
 /// # Errors
 /// A folder that cannot be removed.
-pub fn forget_trash(home: &Path) -> io::Result<bool> {
+pub fn forget_deleted(home: &Path) -> io::Result<bool> {
     let root = root(home);
     let trash = root.join(TRASH);
     if !trash.exists() {
@@ -665,21 +665,123 @@ mod tests {
     }
 
     /// The `trash/` folder an older window kept is removed, only when it is
-    /// there, and the store keeps working either way.
+    /// there, and the store keeps working either way. A home with no store
+    /// gets no folder made.
     #[test]
     fn the_old_trash_folder_is_forgotten() {
         let home = tempfile::tempdir().unwrap();
-        assert!(!forget_trash(home.path()).unwrap(), "nothing to remove");
+        assert!(!forget_deleted(home.path()).unwrap(), "nothing to remove");
+        assert!(!root(home.path()).exists(), "no store is made to be swept");
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
         let decision = yes_no("d-0000000a", "Release notes");
         create(home.path(), &decision, JevMode::On, NOW).unwrap();
-        assert!(!forget_trash(home.path()).unwrap());
+        assert!(!forget_deleted(home.path()).unwrap());
         let trash = root(home.path()).join(TRASH);
         fs::create_dir_all(&trash).unwrap();
         fs::write(trash.join("d-0000000z.json"), b"{}").unwrap();
-        assert!(forget_trash(home.path()).unwrap());
+        assert!(forget_deleted(home.path()).unwrap());
         assert!(!trash.exists());
-        assert!(!forget_trash(home.path()).unwrap());
+        assert!(!forget_deleted(home.path()).unwrap());
         assert_eq!(list(home.path()).unwrap().len(), 1, "the list is untouched");
+    }
+
+    /// An older window moved only a deleted decision's current version to
+    /// `trash/` and left the versions before it in `definitions/`. The sweep
+    /// removes those whose decision is not listed — with no `trash/` there —
+    /// and leaves a listed decision's older versions, and a file it cannot
+    /// read, where they are.
+    #[test]
+    fn the_sweep_removes_the_old_versions_of_a_decision_that_is_gone() {
+        let home = tempfile::tempdir().unwrap();
+        let gone = yes_no("d-0000000a", "Gone");
+        let kept = yes_no("d-0000000b", "Kept");
+        let gone_first = create(home.path(), &gone, JevMode::On, NOW).unwrap();
+        let mut gone_edit = gone.clone();
+        gone_edit.question = "Is this the newer question?".to_string();
+        let gone_second = edit(home.path(), &gone_edit, NOW + 1).unwrap();
+        let kept_first = create(home.path(), &kept, JevMode::On, NOW).unwrap();
+        let mut kept_edit = kept.clone();
+        kept_edit.question = "Is this the newer question?".to_string();
+        let kept_second = edit(home.path(), &kept_edit, NOW + 1).unwrap();
+        let store = root(home.path());
+        let definitions = store.join(DEFINITIONS);
+        // What the older window's delete left: the row gone, the current
+        // version moved out, the first version standing.
+        let rows = read_index(&store)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.id != gone.id)
+            .collect();
+        write_index(&store, rows).unwrap();
+        fs::remove_file(definitions.join(json(&gone_second))).unwrap();
+        let unreadable = definitions.join(json(&"f".repeat(VERSION_HEX_DIGITS)));
+        fs::write(&unreadable, b"not a definition").unwrap();
+        assert!(!store.join(TRASH).exists());
+
+        assert!(forget_deleted(home.path()).unwrap());
+        assert!(
+            !definitions.join(json(&gone_first)).exists(),
+            "the deleted decision's old version went"
+        );
+        for version in [&kept_first, &kept_second] {
+            assert!(
+                definitions.join(json(version)).is_file(),
+                "a listed decision keeps every version: {version}"
+            );
+        }
+        assert!(unreadable.is_file(), "a file it cannot read stays");
+        assert!(!forget_deleted(home.path()).unwrap(), "nothing left to do");
+    }
+
+    /// An index the store cannot read says nothing about which decisions are
+    /// gone, so the sweep removes no definition.
+    #[test]
+    fn the_sweep_removes_nothing_when_the_index_cannot_be_read() {
+        let home = tempfile::tempdir().unwrap();
+        let version = create(
+            home.path(),
+            &yes_no("d-0000000a", "Release notes"),
+            JevMode::On,
+            NOW,
+        )
+        .unwrap();
+        let store = root(home.path());
+        fs::write(store.join(INDEX), b"{ torn").unwrap();
+        assert!(forget_deleted(home.path()).is_err());
+        assert!(store.join(DEFINITIONS).join(json(&version)).is_file());
+        fs::remove_file(store.join(INDEX)).unwrap();
+        let _ = forget_deleted(home.path());
+        assert!(
+            store.join(DEFINITIONS).join(json(&version)).is_file(),
+            "a store with no index is not read as an empty list"
+        );
+    }
+
+    /// The row has left the list when a definition file will not go. The
+    /// delete is done all the same — the person sees it succeed — and the
+    /// next sweep removes what was left.
+    #[cfg(unix)]
+    #[test]
+    fn a_definition_that_will_not_go_does_not_fail_the_delete() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let decision = yes_no("d-0000000a", "Release notes");
+        let version = create(home.path(), &decision, JevMode::On, NOW).unwrap();
+        let definitions = root(home.path()).join(DEFINITIONS);
+        fs::set_permissions(&definitions, fs::Permissions::from_mode(0o500)).unwrap();
+        let stuck = fs::remove_file(definitions.join(json(&version))).is_err();
+        let deleted = delete(home.path(), &decision.id);
+        let listed = list(home.path()).unwrap();
+        let left = definitions.join(json(&version)).exists();
+        fs::set_permissions(&definitions, fs::Permissions::from_mode(0o700)).unwrap();
+        if !stuck {
+            return; // the folder lock does not bind this user (root)
+        }
+        assert!(deleted.is_ok(), "{deleted:?}");
+        assert!(listed.is_empty(), "the row left the list");
+        assert!(left, "the file is what was left");
+        assert!(forget_deleted(home.path()).unwrap());
+        assert!(!definitions.join(json(&version)).exists());
     }
 
     fn walk(path: &Path) -> Vec<String> {
