@@ -524,6 +524,26 @@ impl Book {
         // stamps the tie was made from, never the disk's a moment later — a
         // file that came in between is a change the next look reports.
         self.signature = with_ties(read_so_far, self.ties_tied());
+        let lanes: Vec<LaneRun> = self
+            .lanes
+            .runs
+            .iter()
+            .filter(|run| run.running || run.end_ms.unwrap_or(run.start_ms) >= from_ms)
+            .cloned()
+            .collect();
+        // A range holding no ended lane still names the last one that ended.
+        let last_lane = lanes
+            .iter()
+            .all(|run| run.running)
+            .then(|| {
+                self.lanes
+                    .runs
+                    .iter()
+                    .filter(|run| !run.running)
+                    .max_by_key(|run| run.end_ms.unwrap_or(run.start_ms))
+                    .cloned()
+            })
+            .flatten();
         Timeline {
             revision: self.revision,
             unchanged: false,
@@ -541,14 +561,8 @@ impl Book {
             },
             task_lines: task_lines(&jobs),
             jobs,
-            lanes: self
-                .lanes
-                .runs
-                .iter()
-                .filter(|run| run.running || run.end_ms.unwrap_or(run.start_ms) >= from_ms)
-                .cloned()
-                .collect(),
-            last_lane: None,
+            lanes,
+            last_lane,
             landings: self.landings.clone(),
             log,
         }

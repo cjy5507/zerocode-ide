@@ -940,7 +940,7 @@ function boardScheduleVertical(zoomId) {
 /* 안내판의 넉 줄(t-77628) — 공항 출발 안내판의 문법: 한 줄에 무엇 · 큰 글(시각이나 수) 하나 · 낱말 · 비고 · 행동.
  * 다음 발행, 게이트, 착지 대기, 끝남. 줄은 비어도 남고 「—」·「이 범위에 없음」을 말한다. 수는 시간표의 행
  * 목록에서 센다 — 따로 세지 않는다. */
-function boardScheduleBoardLines(groups, now) {
+function boardScheduleBoardLines(groups, now, outsideLane = null) {
   const group = (id) => groups.find((one) => one.id === id);
   const rows = (id) => (group(id)?.rows ?? []).filter((row) => row.depth === 0);
   const clock = (ms) => boardScheduleClock(ms, now);
@@ -958,7 +958,8 @@ function boardScheduleBoardLines(groups, now) {
   // 1. The next release: the lane running, else the last one that ended in the range.
   const lanes = rows("lanes");
   const running = lanes.find((row) => row.state === "running") ?? null;
-  const lastLane = lanes.filter((row) => row.state !== "running").sort((a, b) => b.end - a.end)[0] ?? null;
+  // The range may hold none that ended: the answer's own last lane (`last_lane`) is the one to name then.
+  const lastLane = lanes.filter((row) => row.state !== "running").sort((a, b) => b.end - a.end)[0] ?? outsideLane;
   const lane = running
     ? {
       tone: running.late ? "wait" : "run", big: running.eta, word: running.etaSub,
@@ -1202,7 +1203,8 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false, mea
       const at = percent(tick.at);
       return { ...tick, at, covered: (Math.abs(at - nowAt) / 100) * height < chipReach };
     }),
-    board: boardScheduleBoardLines(groups, now),
+    board: boardScheduleBoardLines(groups, now,
+      answer?.last_lane ? boardScheduleLaneRows([answer.last_lane], now)[0] ?? null : null),
     // Nothing moving is expected to end after now: the timetable says so under the 「now」 line.
     aheadEmpty: latest <= now,
   };
