@@ -54,7 +54,7 @@ final class AgentEntrypointSourceSafetyTests: XCTestCase {
         XCTAssertTrue(source.contains("let stroke = try KeyMap.parse(key).stroke"))
         XCTAssertTrue(source.contains(
             """
-            let ups = stroke.ups(route: .desktop)
+            let ups = stroke.ups(route: route)
                     defer {
                         for modifier in ups.dropFirst() { try? OperatorHandHost.post(modifier) }
                     }
