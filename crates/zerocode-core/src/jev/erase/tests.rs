@@ -552,7 +552,7 @@ fn a_file_already_lifted_does_not_wait_for_the_settings_lock() {
     lift_kept_seats(&settings).unwrap();
     let other_writer = crate::settings_file_lock::SettingsFileLock::acquire(&settings).unwrap();
 
-    assert_eq!(lift_kept_seats(&settings).unwrap(), false);
+    assert!(!lift_kept_seats(&settings).unwrap());
     forget_seat(&settings, STALL.id).unwrap();
 
     drop(other_writer);
