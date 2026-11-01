@@ -3730,6 +3730,15 @@ fn each(
 /// holds none — a long-lived run beside a fresh one (t-82988).
 #[cfg(test)]
 pub(crate) fn a_ledger_with_mail(letters: usize) -> zerocode_core::orchestration::Ledger {
+    a_ledger_with_mail_of(letters, 500)
+}
+
+/// [`a_ledger_with_mail`], each letter's body `body_bytes` long.
+#[cfg(test)]
+pub(crate) fn a_ledger_with_mail_of(
+    letters: usize,
+    body_bytes: usize,
+) -> zerocode_core::orchestration::Ledger {
     use zerocode_core::orchestration::{Ledger, MessageKind};
     const BATCH: usize = 50;
     let mut ledger = Ledger::new();
@@ -3752,7 +3761,7 @@ pub(crate) fn a_ledger_with_mail(letters: usize) -> zerocode_core::orchestration
             from: "worker:w-writer".to_string(),
             to: address.clone(),
             kind: MessageKind::Status,
-            body: Text::from(format!("{at:0>500}")),
+            body: Text::from(format!("{at:0>body_bytes$}")),
             subject: Text::default(),
             priority: Default::default(),
             payload: Text::default(),
@@ -3855,6 +3864,103 @@ pub(crate) fn letter_rows_touched(connection: &Connection) -> (i64, i64, i64) {
         .expect("the letters' rows touched")
 }
 
+/// Number every run's rows by their place in the table, children's
+/// parents with them, as generation one laid out all eight tables a run
+/// owns rows in (t-85378, review t-85335 P3-4).
+#[cfg(test)]
+fn lay_out_densely(connection: &Connection, ledger_id: &str) {
+    let transaction = connection
+        .unchecked_transaction()
+        .expect("one transaction for the renumbering");
+    transaction
+        .execute_batch("PRAGMA defer_foreign_keys = ON;")
+        .expect("a child and its parent move together");
+    for family in Family::ALL.into_iter().filter(|family| family.by_run()) {
+        let table = family.table().name();
+        let mut places = Vec::new();
+        each(
+            &transaction,
+            &format!("SELECT ordinal FROM {table} WHERE ledger_id = ?1 ORDER BY ordinal"),
+            ledger_id,
+            |row| {
+                places.push(row.get::<_, i64>(0)?);
+                Ok(())
+            },
+        )
+        .expect("the table's places");
+        // Upwards: a row only ever moves down, into a place already left.
+        for (dense, place) in places.into_iter().enumerate() {
+            let dense = ordinal(dense).expect("an ordinal");
+            transaction
+                .execute(
+                    &format!(
+                        "UPDATE {table} SET ordinal = ?1 WHERE ledger_id = ?2 AND ordinal = ?3"
+                    ),
+                    params![dense, ledger_id, place],
+                )
+                .expect("a dense row");
+            for (child, parent) in family.children() {
+                transaction
+                    .execute(
+                        &format!(
+                            "UPDATE {} SET {parent} = ?1 WHERE ledger_id = ?2 AND {parent} = ?3",
+                            child.name()
+                        ),
+                        params![dense, ledger_id, place],
+                    )
+                    .expect("a dense child");
+            }
+        }
+    }
+    transaction.commit().expect("the renumbering");
+}
+
+/// Leave a populated store as a writer of generation one left it: every
+/// table a run owns rows in numbered densely, one digest per table, each
+/// the table's JSON, and the root over all eighteen (t-82988).
+#[cfg(test)]
+pub(crate) fn as_generation_one_wrote_it(
+    connection: &Connection,
+    ledger_id: &str,
+    projection: &LedgerProjectionV1,
+) {
+    lay_out_densely(connection, ledger_id);
+    let first = table_digests_v1(projection).expect("generation one's digests");
+    connection
+        .execute(
+            "DELETE FROM ledger_table_digests WHERE ledger_id = ?1",
+            [ledger_id],
+        )
+        .expect("clear the current witnesses");
+    for table in LedgerTable::ALL {
+        connection
+            .execute(
+                "INSERT INTO ledger_table_digests (
+                    ledger_id, table_name, format_generation, digest
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    ledger_id,
+                    table.name(),
+                    i64::from(TABLE_DIGEST_FORMAT_GENERATION_V1),
+                    first[table.index()].as_slice()
+                ],
+            )
+            .expect("a generation-one witness");
+    }
+    connection
+        .execute(
+            "UPDATE orchestration_ledger_heads
+                SET table_digest_format_generation = ?1, table_digest_root = ?2
+              WHERE ledger_id = ?3",
+            params![
+                i64::from(TABLE_DIGEST_FORMAT_GENERATION_V1),
+                digest_rows(&first).as_slice(),
+                ledger_id
+            ],
+        )
+        .expect("a generation-one root");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3909,50 +4015,6 @@ mod tests {
         )
         .expect("populated ledger");
         (root, path, store)
-    }
-
-    /// Leave a populated store's witnesses as a writer of generation one
-    /// left them: one digest per table, each the table's JSON, and the root
-    /// over all eighteen (t-82988).
-    fn as_generation_one_wrote_it(
-        connection: &Connection,
-        ledger_id: &str,
-        projection: &LedgerProjectionV1,
-    ) {
-        let first = table_digests_v1(projection).expect("generation one's digests");
-        connection
-            .execute(
-                "DELETE FROM ledger_table_digests WHERE ledger_id = ?1",
-                [ledger_id],
-            )
-            .expect("clear the current witnesses");
-        for table in LedgerTable::ALL {
-            connection
-                .execute(
-                    "INSERT INTO ledger_table_digests (
-                        ledger_id, table_name, format_generation, digest
-                     ) VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        ledger_id,
-                        table.name(),
-                        i64::from(TABLE_DIGEST_FORMAT_GENERATION_V1),
-                        first[table.index()].as_slice()
-                    ],
-                )
-                .expect("a generation-one witness");
-        }
-        connection
-            .execute(
-                "UPDATE orchestration_ledger_heads
-                    SET table_digest_format_generation = ?1, table_digest_root = ?2
-                  WHERE ledger_id = ?3",
-                params![
-                    i64::from(TABLE_DIGEST_FORMAT_GENERATION_V1),
-                    digest_rows(&first).as_slice(),
-                    ledger_id
-                ],
-            )
-            .expect("a generation-one root");
     }
 
     /// A ledger whose every list is longer than one and in an order that is
@@ -5485,32 +5547,13 @@ mod tests {
         let mut revision = 0;
         let mut now_ms = 10;
         let mut check = |ledger: &zerocode_core::orchestration::Ledger, step: &str| {
-            let export = ledger.export_marked();
-            write_remembered(
+            write_and_compare(
                 &connection,
                 store.written(),
-                "main-ledger",
-                revision,
-                revision + 1,
-                (&export).into(),
-                now_ms,
-            )
-            .unwrap_or_else(|why| panic!("{step}: the write was refused: {why:?}"));
-            revision += 1;
-            now_ms += 1;
-            let (rows, root, receipts) = what_the_store_holds(&connection, "main-ledger");
-            assert_eq!(rows, *export.projection(), "{step}: the rows");
-            assert_eq!(
-                root,
-                generation_two_root(export.projection()).to_vec(),
-                "{step}: the root"
+                ledger,
+                (&mut revision, &mut now_ms),
+                step,
             );
-            let receipts_digests: ReceiptDigests = served_row_digests(&rows.served)
-                .into_iter()
-                .enumerate()
-                .map(|(at, digest)| (ordinal(at).expect("an ordinal"), digest.to_vec()))
-                .collect();
-            assert_eq!(receipts, receipts_digests, "{step}: the receipts' digests");
         };
         check(&ledger, "the first write");
         for at in 0..3 {
@@ -5634,15 +5677,6 @@ mod tests {
         }
         let projection = ledger.export();
         write(&connection, "main-ledger", 0, 1, &projection, 10).expect("the ledger");
-        /* Generation one numbered every letter by its place in the table: the
-         * second run's letters follow the first run's. */
-        connection
-            .execute(
-                "UPDATE ledger_messages SET ordinal = ordinal - ?1 + ?2
-                  WHERE ledger_id = 'main-ledger' AND ordinal >= ?1",
-                params![1_i64 << RUN_ROW_BITS, ordinal(LETTERS).expect("an ordinal")],
-            )
-            .expect("dense letters");
         as_generation_one_wrote_it(&connection, "main-ledger", &projection);
         drop(connection);
         drop(store);
@@ -5691,6 +5725,141 @@ mod tests {
         )
         .expect("a letter after the move");
         assert_eq!(letter_rows_touched(&connection), (1, 0, 0));
+    }
+
+    /// [`a_ledger_where_order_is_load_bearing`] with a run ahead of its first,
+    /// holding a row of its own in each of the eight tables a run owns rows
+    /// in, so the fixture's rows lie above that run's on disk.
+    fn a_ledger_with_rows_in_two_runs() -> LedgerProjectionV1 {
+        let mut projection = a_ledger_where_order_is_load_bearing();
+        macro_rules! a_row_of_the_first_run {
+            ($($table:ident),+) => {$(
+                let mut row = projection.$table[0].clone();
+                row.run = "run-0".to_string();
+                projection.$table.insert(0, row);
+            )+};
+        }
+        a_row_of_the_first_run!(
+            tasks, dispatches, workers, attachments, gates, messages, inboxes, acked
+        );
+        // An attachment is unique by its home and dispatch, across runs.
+        projection.attachments[0].dispatch = "dp-of-the-first-run".to_string();
+        let mut run = projection.runs[1].clone();
+        run.id = "run-0".to_string();
+        projection.runs.insert(0, run);
+        projection
+    }
+
+    /// The first write after a store of generation one opens lays out all
+    /// eight tables a run owns rows in by run, at once, whether or not a row
+    /// of that table moved: the open took their digests, so none of them can
+    /// say it is unchanged. The tables no run owns stay in place (t-85378,
+    /// review t-85335 P3-3).
+    #[test]
+    fn the_first_write_over_generation_one_rewrites_all_eight_run_tables_by_run() {
+        let (_root, path, store) = a_current_store();
+        let connection = store.connection().expect("ledger connection");
+        let projection = a_ledger_with_rows_in_two_runs();
+        write(&connection, "main-ledger", 0, 1, &projection, 10).expect("the ledger");
+        as_generation_one_wrote_it(&connection, "main-ledger", &projection);
+        let by_run = || Family::ALL.into_iter().filter(|family| family.by_run());
+        for family in by_run() {
+            let second_run_starts: i64 = connection
+                .query_row(
+                    &format!(
+                        "SELECT MIN(ordinal) FROM {} WHERE run = 'run-2'",
+                        family.table().name()
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the second run's first row");
+            assert_eq!(second_run_starts, 1, "{family:?} lies densely");
+        }
+        drop(connection);
+        drop(store);
+
+        let reopened = crate::workflow_store::WorkflowStore::open(&path)
+            .expect("generation one's witnesses are checked and pass");
+        let connection = reopened.connection().expect("reopened connection");
+        let before = write_work_here();
+        write_remembered(
+            &connection,
+            reopened.written(),
+            "main-ledger",
+            1,
+            2,
+            (&projection).into(),
+            20,
+        )
+        .expect("the first write after the upgrade");
+        let spent = write_work_here().since(before);
+
+        for family in by_run() {
+            let second_run_starts: i64 = connection
+                .query_row(
+                    &format!(
+                        "SELECT MIN(ordinal) FROM {} WHERE run = 'run-2'",
+                        family.table().name()
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the second run's first row");
+            assert_eq!(second_run_starts, 1 << RUN_ROW_BITS, "{family:?} by run");
+        }
+        let run_owned: usize = by_run().map(|family| family.rows(&projection)).sum();
+        assert!(
+            spent.rows_written >= run_owned as u64,
+            "{spent:?} wrote fewer rows than the {run_owned} the eight tables hold"
+        );
+        let (rows, root, _) = what_the_store_holds(&connection, "main-ledger");
+        assert_eq!(rows, projection);
+        assert_eq!(root, generation_two_root(&projection).to_vec());
+        drop(connection);
+        drop(reopened);
+        crate::workflow_store::WorkflowStore::open(&path)
+            .expect("the next open checks what the move left");
+    }
+
+    /// One write through the store's memory, and what it left checked against
+    /// what a write with no memory would leave.
+    fn write_and_compare(
+        connection: &Connection,
+        written: &WrittenLedgers,
+        ledger: &zerocode_core::orchestration::Ledger,
+        (revision, now_ms): (&mut u64, &mut i64),
+        step: &str,
+    ) -> WriteWork {
+        let export = ledger.export_marked();
+        let before = write_work_here();
+        write_remembered(
+            connection,
+            written,
+            "main-ledger",
+            *revision,
+            *revision + 1,
+            (&export).into(),
+            *now_ms,
+        )
+        .unwrap_or_else(|why| panic!("{step}: the write was refused: {why:?}"));
+        let spent = write_work_here().since(before);
+        *revision += 1;
+        *now_ms += 1;
+        let (rows, root, receipts) = what_the_store_holds(connection, "main-ledger");
+        assert_eq!(rows, *export.projection(), "{step}: the rows");
+        assert_eq!(
+            root,
+            generation_two_root(export.projection()).to_vec(),
+            "{step}: the root"
+        );
+        let receipts_digests: ReceiptDigests = served_row_digests(&rows.served)
+            .into_iter()
+            .enumerate()
+            .map(|(at, digest)| (ordinal(at).expect("an ordinal"), digest.to_vec()))
+            .collect();
+        assert_eq!(receipts, receipts_digests, "{step}: the receipts' digests");
+        spent
     }
 
     /// The revision a writer expects is the revision it gets, or nothing.

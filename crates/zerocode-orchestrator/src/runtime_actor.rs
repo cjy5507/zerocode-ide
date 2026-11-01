@@ -8376,6 +8376,624 @@ mod tests {
         actor.shutdown().expect("release owner");
     }
 
+    /// A store left on disk holding `letters` letters of `body_bytes` bytes in
+    /// its first run and a few in its second, its own handle and runtime gone:
+    /// what a window finds when it opens (t-85378). Answers the folder that
+    /// keeps it, and its path.
+    fn a_store_left_on_disk(letters: usize, body_bytes: usize) -> (TempDir, std::path::PathBuf) {
+        let fixture = Fixture::new();
+        let mut seeded = ledger_store::a_ledger_with_mail_of(letters, body_bytes);
+        for at in 0..3 {
+            ledger_store::a_letter_to(&mut seeded, 1, 3 + at);
+        }
+        let actor = start(
+            &fixture,
+            RuntimeBoot::Cutover {
+                legacy: Some(Box::new((seeded.export(), digest(7)))),
+                now_ms: 10,
+            },
+            2,
+        );
+        actor.shutdown().expect("release owner");
+        let Fixture { _root: root, store } = fixture;
+        drop(store);
+        let path = root.path().join("authority").join("authority.sqlite");
+        (root, path)
+    }
+
+    /// What a window's boot does with a store it has just opened, on this
+    /// thread so a write's work can be read here. Dropped without a word, it is
+    /// a window killed where it stands: the lock goes with the process, and the
+    /// authority row stays claimed.
+    struct Opened {
+        store: WorkflowStore,
+        journal: EffectJournal,
+        lease: AuthorityLease,
+        ledger: Ledger,
+        revision: u64,
+    }
+
+    fn booted(store: WorkflowStore) -> Opened {
+        let journal = EffectJournal::new(&store);
+        let lease = journal
+            .claim_authority("main-ledger", &digest(9), 100)
+            .expect("the authority");
+        let held = ledger_store::read_repairable(
+            &store.connection().expect("store connection"),
+            "main-ledger",
+            PROJECTION_SCHEMA,
+        )
+        .expect("the store reads")
+        .expect("the ledger is there");
+        let (ledger, revision, repairs) =
+            rebuild_stored_ledger(&journal, &lease, held, 100).expect("a sound ledger");
+        assert!(repairs.is_empty(), "nothing here needs repair: {repairs:?}");
+        Opened {
+            store,
+            journal,
+            lease,
+            ledger,
+            revision,
+        }
+    }
+
+    fn opened(path: &std::path::Path) -> Opened {
+        booted(WorkflowStore::open(path).expect("the open checks the store"))
+    }
+
+    impl Opened {
+        /// One more letter, written the way the runtime writes one. Answers
+        /// what the write cost.
+        fn a_letter(&mut self, now_ms: i64) -> ledger_store::WriteWork {
+            ledger_store::one_more_letter(&mut self.ledger, now_ms);
+            let export = self.ledger.export_marked();
+            let before = ledger_store::write_work_here();
+            self.journal
+                .advance_ledger(&self.lease, self.revision, &export, now_ms)
+                .expect("the write");
+            self.revision += 1;
+            ledger_store::write_work_here().since(before)
+        }
+    }
+
+    /// A real runtime on the store at `path`, one letter through it, and a
+    /// clean shutdown.
+    fn a_letter_through_a_runtime(path: &std::path::Path, name: &str, now_ms: i64) {
+        let store = WorkflowStore::open(path).expect("the open checks the store");
+        let actor = RuntimeActor::start(
+            &store,
+            "main-ledger",
+            RuntimeBoot::Reopen,
+            4,
+            TableFixture::holding(a_team()),
+            Box::new(NoLauncher),
+        )
+        .expect("runtime actor");
+        let sent = a_letter_by(&actor, name, now_ms).expect("the letter");
+        assert_eq!(sent.reply.exit_code, 0, "{}", sent.reply.stderr);
+        actor.shutdown().expect("release owner");
+    }
+
+    fn a_letter_by(
+        actor: &RuntimeActor,
+        name: &str,
+        now_ms: i64,
+    ) -> Result<Box<Decided>, RuntimeError> {
+        let busy = actor.view().expect("an image").projection().runs[0]
+            .id
+            .clone();
+        actor
+            .plan(a_command(
+                &[
+                    "send",
+                    "--run",
+                    &busy,
+                    "--to",
+                    &format!("run:{busy}"),
+                    "--type",
+                    "status",
+                    "--body",
+                    "one more",
+                    "--retry-request",
+                    name,
+                ],
+                now_ms,
+            ))
+            .map(|(decision, _)| decision)
+    }
+
+    /// The first write after a window opens digests what moved, not the whole
+    /// ledger a second time (t-85378, review t-85335 P3-2): the open has just
+    /// digested these very rows.
+    #[test]
+    fn the_first_write_after_an_open_digests_only_what_moved() {
+        const LETTERS: usize = 2_000;
+        let (_root, path) = a_store_left_on_disk(LETTERS, 500);
+        let mut window = opened(&path);
+        let connection = window.store.connection().expect("store connection");
+        ledger_store::count_letter_rows(&connection);
+
+        let spent = window.a_letter(101);
+
+        assert_eq!(
+            ledger_store::letter_rows_touched(&connection),
+            (1, 0, 0),
+            "(inserted, updated, deleted) letters for one new letter"
+        );
+        assert!(
+            spent.rows_digested < (LETTERS / 10) as u64,
+            "the first write digested {spent:?} of a ledger of {LETTERS} letters"
+        );
+        let held = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
+            .expect("it reads")
+            .expect("it is there");
+        assert_eq!(held.projection, window.ledger.export());
+        drop((connection, window));
+        WorkflowStore::open(&path).expect("the next open checks every witness the write left");
+    }
+
+    /// Damage done after the first write of a window is refused by the next
+    /// open, whichever row or witness it fell on: the first write leaves the
+    /// witnesses a whole digest would (t-85378).
+    #[test]
+    fn damage_after_the_first_write_is_refused_by_the_next_open() {
+        for damage in [
+            "UPDATE ledger_messages SET body = 'tampered' WHERE ordinal = 0",
+            "DELETE FROM ledger_messages WHERE ordinal = 1",
+            "UPDATE ledger_runs SET name = 'tampered' WHERE ordinal = 0",
+            "UPDATE ledger_table_digests SET digest = zeroblob(32)
+              WHERE table_name = 'ledger_messages'",
+            "UPDATE orchestration_ledger_heads SET table_digest_root = zeroblob(32)",
+        ] {
+            let (_root, path) = a_store_left_on_disk(100, 50);
+            let mut window = opened(&path);
+            window.a_letter(101);
+            window
+                .store
+                .connection()
+                .expect("store connection")
+                .execute(damage, [])
+                .expect("private damage fixture");
+            drop(window);
+            assert_eq!(
+                WorkflowStore::open(&path).err(),
+                Some(crate::workflow_store::WorkflowStoreError::Corrupt),
+                "{damage}"
+            );
+        }
+    }
+
+    /// A row that changed between the open and the boot's read is not the row
+    /// the open digested, so nothing the open made is carried over: the first
+    /// write digests the ledger whole and takes the row, and the next open
+    /// passes the store, as it always has (t-85378).
+    #[test]
+    fn a_row_changed_between_the_open_and_the_boot_is_digested_as_it_always_was() {
+        const LETTERS: usize = 100;
+        let (_root, path) = a_store_left_on_disk(LETTERS, 50);
+        let store = WorkflowStore::open(&path).expect("the open checks the store");
+        store
+            .connection()
+            .expect("store connection")
+            // The same length: the head's byte count would refuse any other.
+            .execute(
+                "UPDATE ledger_messages SET body = substr('x' || body, 1, length(body))
+                  WHERE ordinal = 0",
+                [],
+            )
+            .expect("a change behind the store");
+        let mut window = booted(store);
+        let spent = window.a_letter(101);
+        assert!(
+            spent.rows_digested >= LETTERS as u64,
+            "{spent:?}: rows the open never saw took its digests"
+        );
+        drop(window);
+        WorkflowStore::open(&path).expect("the first write digested what it holds");
+    }
+
+    /// Whatever format a store comes up from — this build's, generation one's
+    /// digests and dense places, digests with no generation on them, columns a
+    /// later build added — a window killed before its first write leaves a
+    /// store the next open passes, and so do the writes after it (t-85378).
+    #[test]
+    fn a_store_of_any_format_opens_after_a_kill_before_the_first_write_and_after_the_writes() {
+        const NO_GENERATION: &str = "ALTER TABLE ledger_table_digests DROP COLUMN format_generation;
+             ALTER TABLE orchestration_ledger_heads DROP COLUMN table_digest_root;
+             ALTER TABLE orchestration_ledger_heads DROP COLUMN table_digest_format_generation;";
+        const FEWER_COLUMNS: &str = "ALTER TABLE ledger_messages DROP COLUMN payload;
+             ALTER TABLE ledger_workers DROP COLUMN session;";
+        for (format, generation_one, sql) in [
+            ("this build's", false, ""),
+            ("generation one", true, ""),
+            ("no generation", true, NO_GENERATION),
+            ("fewer columns", false, FEWER_COLUMNS),
+        ] {
+            let (_root, path) = a_store_left_on_disk(60, 50);
+            let aging = WorkflowStore::open(&path).expect("the store to age");
+            let connection = aging.connection().expect("store connection");
+            if generation_one {
+                let held = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
+                    .expect("it reads")
+                    .expect("it is there");
+                ledger_store::as_generation_one_wrote_it(
+                    &connection,
+                    "main-ledger",
+                    &held.projection,
+                );
+            }
+            connection
+                .execute_batch(sql)
+                .unwrap_or_else(|why| panic!("{format}: {why}"));
+            drop((connection, aging));
+
+            for _kill in 0..2 {
+                drop(opened(&path));
+            }
+            let mut window = opened(&path);
+            window.a_letter(101);
+            let holds = window.ledger.export();
+            drop(window);
+            a_letter_through_a_runtime(&path, "r-after-the-first", 102);
+            let reopened = WorkflowStore::open(&path)
+                .unwrap_or_else(|why| panic!("{format}: the last open refused it: {why}"));
+            let held = ledger_store::read(
+                &reopened.connection().expect("store connection"),
+                "main-ledger",
+                PROJECTION_SCHEMA,
+            )
+            .expect("it reads")
+            .expect("it is there");
+            assert_eq!(
+                held.projection.messages.len(),
+                holds.messages.len() + 1,
+                "{format}"
+            );
+        }
+    }
+
+    /// A boot that repairs writes the repair before anything else, and what it
+    /// wrote passes the next open (t-85378).
+    #[test]
+    fn a_boot_that_repairs_leaves_a_store_the_next_open_passes() {
+        let fixture = Fixture::new();
+        ledger_store::write(
+            &fixture.store.connection().expect("private store"),
+            "main-ledger",
+            0,
+            7,
+            &an_unattempted_dispatched_legacy(),
+            7,
+        )
+        .expect("historical generation");
+        let Fixture { _root: root, store } = fixture;
+        drop(store);
+        let path = root.path().join("authority").join("authority.sqlite");
+        for round in 0..2 {
+            let store = WorkflowStore::open(&path)
+                .unwrap_or_else(|why| panic!("round {round}: the open refused it: {why}"));
+            let actor = RuntimeActor::start(
+                &store,
+                "main-ledger",
+                RuntimeBoot::Reopen,
+                4,
+                a_seated_table(),
+                Box::new(NoLauncher),
+            )
+            .expect("runtime actor");
+            assert_eq!(
+                actor.view().expect("an image").revision(),
+                8,
+                "round {round}: the repair is written once"
+            );
+            actor.shutdown().expect("release owner");
+        }
+        WorkflowStore::open(&path).expect("the last open checks it");
+    }
+
+    /// A retention sweep as a window's first write, folding letters out of a
+    /// working run, leaves a store the next open passes (t-85378).
+    #[test]
+    fn a_sweep_as_the_first_write_leaves_a_store_the_next_open_passes() {
+        let (_root, path) = a_store_left_on_disk(200, 50);
+        let store = WorkflowStore::open(&path).expect("the open checks the store");
+        let actor = RuntimeActor::start(
+            &store,
+            "main-ledger",
+            RuntimeBoot::Reopen,
+            4,
+            TableFixture::holding(a_team()),
+            Box::new(NoLauncher),
+        )
+        .expect("runtime actor");
+        let before = actor.view().expect("an image").projection().messages.len();
+        actor
+            .retention_sweep(i64::from(u32::MAX) * 1_000)
+            .expect("the sweep");
+        let after = actor.view().expect("an image");
+        assert!(
+            after.projection().messages.len() < before,
+            "the sweep took no letter"
+        );
+        actor.shutdown().expect("release owner");
+        WorkflowStore::open(&path).expect("the next open checks what the sweep left");
+    }
+
+    /// Another handle or another writer between the open and the boot: the
+    /// boot reads what that writer left, nothing the open made is carried over
+    /// a row it did not digest, and the next open passes (t-85378).
+    #[test]
+    fn another_writer_between_the_open_and_the_boot_leaves_a_store_the_next_open_passes() {
+        const LETTERS: usize = 100;
+        let (_root, path) = a_store_left_on_disk(LETTERS, 50);
+        let store = WorkflowStore::open(&path).expect("the open checks the store");
+        drop(WorkflowStore::open(&path).expect("a second opener checks it too"));
+        let connection = store.connection().expect("another connection");
+        let held = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
+            .expect("it reads")
+            .expect("it is there");
+        let mut ledger = Ledger::rebuild(held.projection).expect("a sound ledger");
+        ledger_store::one_more_letter(&mut ledger, 50);
+        ledger_store::write(
+            &connection,
+            "main-ledger",
+            held.revision,
+            held.revision + 1,
+            &ledger.export(),
+            50,
+        )
+        .expect("the other writer");
+        drop(connection);
+
+        let mut window = booted(store);
+        assert_eq!(window.revision, held.revision + 1);
+        let spent = window.a_letter(101);
+        assert!(
+            spent.rows_digested >= LETTERS as u64,
+            "{spent:?}: rows the open never saw took its digests"
+        );
+        drop(window);
+        WorkflowStore::open(&path).expect("the next open checks it");
+    }
+
+    /// Another writer between the boot and the first write: that write is
+    /// refused by the head's revision, the other writer's ledger stands, and
+    /// the next open passes it (t-85378).
+    #[test]
+    fn another_writer_before_the_first_write_refuses_it_and_the_next_open_passes() {
+        let (_root, path) = a_store_left_on_disk(100, 50);
+        let mut window = opened(&path);
+        let connection = window.store.connection().expect("another connection");
+        let mut theirs = window.ledger.clone();
+        ledger_store::a_letter_to(&mut theirs, 1, 50);
+        ledger_store::write(
+            &connection,
+            "main-ledger",
+            window.revision,
+            window.revision + 1,
+            &theirs.export(),
+            50,
+        )
+        .expect("the other writer");
+        ledger_store::one_more_letter(&mut window.ledger, 101);
+        let refused = window
+            .journal
+            .advance_ledger(
+                &window.lease,
+                window.revision,
+                &window.ledger.export_marked(),
+                101,
+            )
+            .expect_err("a write against a revision that moved");
+        assert_eq!(refused, EffectJournalError::RevisionMismatch);
+        drop((connection, window));
+        let reopened = WorkflowStore::open(&path).expect("the other writer's ledger stands");
+        let held = ledger_store::read(
+            &reopened.connection().expect("store connection"),
+            "main-ledger",
+            PROJECTION_SCHEMA,
+        )
+        .expect("it reads")
+        .expect("it is there");
+        assert_eq!(held.projection, theirs.export());
+    }
+
+    /// A first write the store refuses is rolled back, the runtime takes the
+    /// disk's word, its next write goes through and the next open passes
+    /// (t-85378).
+    #[test]
+    fn a_first_write_that_fails_leaves_a_store_the_next_open_passes() {
+        let (_root, path) = a_store_left_on_disk(100, 50);
+        let store = WorkflowStore::open(&path).expect("the open checks the store");
+        let actor = RuntimeActor::start(
+            &store,
+            "main-ledger",
+            RuntimeBoot::Reopen,
+            4,
+            TableFixture::holding(a_team()),
+            Box::new(NoLauncher),
+        )
+        .expect("runtime actor");
+        let connection = store.connection().expect("store connection");
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_row_insert
+                    AFTER INSERT ON ledger_messages
+                    BEGIN SELECT RAISE(ABORT, 'injected row failure'); END;",
+            )
+            .expect("row fault");
+        assert_eq!(
+            a_letter_by(&actor, "r-lost", 200)
+                .err()
+                .expect("a write the rows refused"),
+            RuntimeError::NotDurable
+        );
+        connection
+            .execute_batch("DROP TRIGGER fail_row_insert;")
+            .expect("remove row fault");
+        let sent = a_letter_by(&actor, "r-kept", 201).expect("the letter after the fault");
+        assert_eq!(sent.reply.exit_code, 0, "{}", sent.reply.stderr);
+        drop(connection);
+        actor.shutdown().expect("release owner");
+        WorkflowStore::open(&path).expect("the next open checks it");
+    }
+
+    /// What a runtime that opens a store twice leaves, line by line, on a ledger
+    /// nothing random went into: the root, the rows and where each table's rows
+    /// sit. Printed, never asserted: the same lines read on the tree before a
+    /// change to the write and after it (t-85378).
+    #[test]
+    #[ignore = "a comparison: prints what a reopened runtime leaves, to diff across two trees"]
+    fn print_what_a_reopened_runtime_leaves() {
+        use sha2::{Digest as _, Sha256};
+        let (_root, path) = a_store_left_on_disk(300, 500);
+        let say = |step: &str, store: &WorkflowStore| {
+            let connection = store.connection().expect("store connection");
+            let held = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
+                .expect("it reads")
+                .expect("it is there");
+            let root: Vec<u8> = connection
+                .query_row(
+                    "SELECT table_digest_root FROM orchestration_ledger_heads",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the root");
+            let rows = serde_json::to_vec(&held.projection).expect("the rows");
+            let mut places = String::new();
+            for table in [
+                "ledger_runs",
+                "ledger_tasks",
+                "ledger_messages",
+                "ledger_inboxes",
+                "ledger_acked",
+                "ledger_bound",
+                "ledger_served",
+            ] {
+                let (count, sum): (i64, i64) = connection
+                    .query_row(
+                        &format!("SELECT COUNT(*), COALESCE(SUM(ordinal), 0) FROM {table}"),
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .expect("the table's places");
+                places.push_str(&format!(" {table}={count}/{sum}"));
+            }
+            eprintln!(
+                "leaves: {step} revision={} root={} rows={:x}{places}",
+                held.revision,
+                root.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+                Sha256::digest(&rows),
+            );
+        };
+        let mut now_ms = 1_000;
+        for opening in 0..3 {
+            let store = WorkflowStore::open(&path).expect("the open checks the store");
+            let actor = RuntimeActor::start(
+                &store,
+                "main-ledger",
+                RuntimeBoot::Reopen,
+                4,
+                TableFixture::holding(a_team()),
+                Box::new(NoLauncher),
+            )
+            .expect("runtime actor");
+            say(&format!("opening {opening}, booted"), &store);
+            let busy = actor.view().expect("an image").projection().runs[0].id.clone();
+            let address = format!("run:{busy}");
+            for (step, argv) in [
+                (
+                    "a letter",
+                    vec!["send", "--run", &busy, "--to", &address, "--type", "status"],
+                ),
+                ("a run", vec!["run-create", "--name", "another"]),
+                ("a task", vec!["task-create", "--spec", "something to do"]),
+                (
+                    "another letter",
+                    vec!["send", "--run", &busy, "--to", &address, "--type", "status"],
+                ),
+            ] {
+                let name = format!("r-{opening}-{now_ms}");
+                let mut argv = argv;
+                if argv[0] == "send" {
+                    argv.extend(["--body", "one more"]);
+                }
+                argv.extend(["--retry-request", &name]);
+                let (done, _) = actor.plan(a_command(&argv, now_ms)).expect("the verb");
+                assert_eq!(done.reply.exit_code, 0, "{step}: {}", done.reply.stderr);
+                now_ms += 1;
+                say(&format!("opening {opening}, {step}"), &store);
+            }
+            actor.shutdown().expect("release owner");
+        }
+    }
+
+    /// What the first write after an open costs, on a ledger of the person's
+    /// letters and bytes (t-85378): the open, the boot, the first letter and
+    /// the one after it, a round for each opening. Prints, never asserts: the
+    /// same lines read on the tree before the change and after it. Run it
+    /// alone, as the work it reads is the whole process's, and under
+    /// `taskpolicy -b` for the low-spec profile.
+    #[test]
+    #[ignore = "a measurement: prints what the first write after an open costs"]
+    fn measure_the_first_write_after_an_open() {
+        const LETTERS: usize = 43_540;
+        const BODY_BYTES: usize = 1_000;
+        const ROUNDS: usize = 5;
+        let (_root, path) = a_store_left_on_disk(LETTERS, BODY_BYTES);
+        let mut now_ms = 1_000;
+        for round in 0..ROUNDS {
+            let opening = std::time::Instant::now();
+            let store = WorkflowStore::open(&path).expect("the open checks the store");
+            let open_ms = opening.elapsed().as_secs_f64() * 1000.0;
+            let booting = std::time::Instant::now();
+            let actor = RuntimeActor::start(
+                &store,
+                "main-ledger",
+                RuntimeBoot::Reopen,
+                4,
+                TableFixture::holding(a_team()),
+                Box::new(NoLauncher),
+            )
+            .expect("runtime actor");
+            let boot_ms = booting.elapsed().as_secs_f64() * 1000.0;
+            let busy = actor.view().expect("an image").projection().runs[0].id.clone();
+            let address = format!("run:{busy}");
+            let mut letters = String::new();
+            for which in ["first", "second"] {
+                let name = format!("r-{round}-{which}");
+                let command = a_command(
+                    &[
+                        "send", "--run", &busy, "--to", &address, "--type", "status", "--body",
+                        "one more", "--retry-request", &name,
+                    ],
+                    now_ms,
+                );
+                now_ms += 1;
+                let work = ledger_store::write_work();
+                let sending = std::time::Instant::now();
+                let (sent, _) = actor.plan(command).expect("the letter");
+                let wall_ms = sending.elapsed().as_secs_f64() * 1000.0;
+                assert_eq!(sent.reply.exit_code, 0, "{}", sent.reply.stderr);
+                let spent = ledger_store::write_work().since(work);
+                letters.push_str(&format!(
+                    " {which}: wall={wall_ms:.1}ms digests={:.1}ms rows={:.1}ms \
+                     digested={} rows, {} bytes, written={} rows;",
+                    spent.digest_ns as f64 / 1e6,
+                    spent.rows_ns as f64 / 1e6,
+                    spent.rows_digested,
+                    spent.bytes_digested,
+                    spent.rows_written,
+                ));
+            }
+            actor.shutdown().expect("release owner");
+            eprintln!(
+                "measure: round {round}, {LETTERS} letters of {BODY_BYTES} bytes: \
+                 open={open_ms:.1}ms boot={boot_ms:.1}ms;{letters}"
+            );
+        }
+    }
+
     /// A write that dies half-way leaves the ledger that was there, whole.
     ///
     /// `ledger_store::write` moves the head, then deletes and re-inserts the
