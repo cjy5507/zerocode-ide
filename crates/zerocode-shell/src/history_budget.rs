@@ -58,8 +58,10 @@ pub(crate) fn shares(panes: &mut [PaneHistory]) -> Vec<(TermId, usize)> {
     // their clocks say: a clock alone ties a reader with a pane that printed
     // in the same round, and a tie fell to the pool's hash order. Among the
     // rest `None` orders first — a pane that has not moved since the window
-    // began counting is the quietest there is.
-    panes.sort_by_key(|pane| (pane.reading, pane.watched, pane.moved));
+    // began counting is the quietest there is. Two readers are stamped at the
+    // same round's clock and tie on every key above: the one read less far back
+    // gives first, and past that the lower pane number — decided, never drawn.
+    panes.sort_by_key(|pane| (pane.reading, pane.watched, pane.moved, pane.offset, pane.term));
     let mut kept = Vec::new();
     for pane in panes.iter() {
         if total <= budget {
@@ -94,7 +96,10 @@ pub(crate) fn hold(
         .map(|(term, held)| {
             let pty = lock_pty(held);
             let grid = pty.terminal().grid();
-            let reading = grid.view_offset() > 0;
+            // Read back by somebody: scrolled back AND a window shows it. A pane scrolled
+            // back and left behind another tab keeps its scroll for good — it is not read,
+            // and stamped as moved every beat it would outlast the pane being looked at.
+            let reading = grid.view_offset() > 0 && watched.contains_key(term);
             if reading {
                 moved.insert(*term, now);
             }
@@ -305,7 +310,9 @@ mod tests {
             seat(&pool, quiet, CHOSEN, CHOSEN, 0);
             let mut moved = HashMap::from([(read, now), (quiet, now)]);
             let mut entries = Vec::new();
-            hold(&pool, &mut entries, &HashMap::new(), &mut moved, now);
+            // The reader is on screen: a scroll left behind a tab is not a reading.
+            let watched = HashMap::from([(read, vec!["main".to_owned()])]);
+            hold(&pool, &mut entries, &watched, &mut moved, now);
             assert_eq!(held(&pool, read), (CHOSEN, 7_000), "round {round}");
             assert_eq!(
                 held(&pool, quiet),

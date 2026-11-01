@@ -4890,6 +4890,8 @@ function paintTabNode(node, tab) {
   // A pane whose ring the notify seat took away is not marked as waiting
   // either (t-6043): the mark is the ring's twin on the strip.
   const waiting = said === "needs-attention" && !tabHushed(tab);
+  // What the wait asks (t-84799 A2), where the hook described it: the tip says the word and the dot its shape.
+  const asks = waiting ? tabAskKind(tab) : null;
   const lead = tabAgentTerm(tab);
   const ago = termAgeWords(lead);
   const classes = [
@@ -4922,6 +4924,10 @@ function paintTabNode(node, tab) {
     .filter(Boolean)
     .join(" ");
   if (node.className !== classes) node.className = classes;
+  if ((node.dataset.ask ?? null) !== asks) {
+    if (asks === null) delete node.dataset.ask;
+    else node.dataset.ask = asks;
+  }
   // A repository's declared tab colour, on the identity dot the lane tint
   // already uses. Set as the custom property those rules read — never
   // interpolated into a style string — and the value itself came through
@@ -4995,9 +5001,23 @@ function paintTabNode(node, tab) {
       : tab.kind === "term"
         // The ring said in words too (시안 2: the shape and the word together),
         // the word the sidebar's row wears for the same state.
-        ? [waiting ? bucketWord("attention") : "", termTabTip(tab)].filter(Boolean).join(" · ")
+        ? [waiting ? (asks === null ? bucketWord("attention") : yourTurnKindWord(asks)) : "", termTabTip(tab)].filter(Boolean).join(" · ")
         : (tab.path ?? "");
   if (node.dataset.tip !== tip) node.dataset.tip = tip;
+}
+
+/* What a waiting tab's agent asks: `permission` when a pane of it holds a described permission request, `question`
+ * when one holds a described question, null for a wait the hook only signalled (`paneAsks` holds only what it
+ * described). The same two kinds the 「당신 차례」 list tells apart. */
+function tabAskKind(tab) {
+  if (tab.kind !== "term") return null;
+  let kind = null;
+  for (const term of paneLeaves(tab.layout)) {
+    const ask = paneAsks.get(term);
+    if (ask?.approval) return "permission";
+    if (ask?.ask_prompt) kind = "question";
+  }
+  return kind;
 }
 
 /* What a terminal tab's tip says (t-67936): for a tab holding a seat, or a

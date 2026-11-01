@@ -6811,6 +6811,12 @@ body.is-dragging-pane {
   box-shadow: inset 0 0 0 var(--status-dot-ring) var(--signal-you);
 }
 
+/* A permission is a hollow square where a question is the ring (t-84799 A2) — the shape the 「당신 차례」 list gives the
+ * same two kinds, and the tip says the word beside it. */
+.tab.is-waiting[data-ask="permission"] .tab-dot {
+  border-radius: var(--radius-xs);
+}
+
 /* 2차 A (t-78107, 시안 17): under `--fold-sidebar-rail` the strip folds the
  * tabs that are not on stage to their mark, state dot and age — the name
  * stays the tab's spoken name (visually hidden, never removed) and its tip.

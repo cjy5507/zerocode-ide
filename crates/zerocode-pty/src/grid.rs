@@ -90,6 +90,12 @@ const VTE_OSC_BYTES: usize = 1_024;
 /// How many OSC 7788 fold regions one terminal remembers.
 const MAX_FOLDS: usize = 4_096;
 
+/// After a shed the history's queues give their spare room back only when
+/// fewer than one slot in this many is in use: a pane the budget trims a few
+/// lines a beat while it prints would otherwise move its queues every beat,
+/// to grow them again on the next line.
+const QUEUES_SHRINK_BELOW_ONE_IN: usize = 2;
+
 /// Maximum decoded summary size. A summary longer than a screen row is data,
 /// not an accessible label, and the window would truncate it again.
 const MAX_FOLD_SUMMARY_BYTES: usize = 1_024;
@@ -2425,7 +2431,7 @@ impl TerminalGrid {
         // it back. Given back only when most of it is spare: a pane the
         // budget trims a few lines a beat while it prints would otherwise
         // move its queues every beat, to grow them again on the next line.
-        if self.scrollback.capacity() / 2 > self.scrollback.len() {
+        if self.scrollback.capacity() / QUEUES_SHRINK_BELOW_ONE_IN > self.scrollback.len() {
             self.scrollback.shrink_to_fit();
             self.scroll_wrap.shrink_to_fit();
             self.scroll_folds.shrink_to_fit();

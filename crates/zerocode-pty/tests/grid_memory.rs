@@ -149,6 +149,9 @@ fn measuring() -> MutexGuard<'static, ()> {
 /// the style runs that dress it).
 const HISTORY_BYTES_PER_CHAR: usize = 8;
 const HISTORY_BYTES_PER_LINE: usize = 160;
+/// A history shed to the default keeps at most one byte in this many of the
+/// deep one's: it gives back three quarters or more.
+const SHED_KEEPS_AT_MOST_ONE_IN: usize = 4;
 
 /// A full history costs its text, not a screen cell per written column.
 ///
@@ -223,7 +226,7 @@ fn a_deep_pane_shed_to_the_default_gives_back_all_but_the_defaults_share() {
     // the live one, the sent copy and the queues' spare room.
     assert!(shed <= bill + screen * 3, "{said}");
     assert!(
-        shed * 4 <= deep,
+        shed * SHED_KEEPS_AT_MOST_ONE_IN <= deep,
         "shedding gave back less than three quarters: {said}"
     );
 }
