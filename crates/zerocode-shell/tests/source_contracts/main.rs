@@ -22762,7 +22762,7 @@ mod tests {
     }
 
     /// The words the inbox page asks the catalog for.
-    const INBOX_KEYS: [&str; 37] = [
+    const INBOX_KEYS: [&str; 41] = [
         "inbox.title",
         "inbox.tabs.label",
         "inbox.tab.all",
@@ -22800,7 +22800,50 @@ mod tests {
         "inbox.close.needsReason",
         "inbox.closed",
         "inbox.note.closed",
+        "inbox.answered",
+        "inbox.note.answered",
+        "inbox.close.refused",
+        "inbox.reply.refused",
     ];
+
+    /// The length of a close's reason is one number (t-84271 ①): the ledger's
+    /// `QUESTION_CLOSE_REASON_MAX`, which the desk's command refuses past and
+    /// the inbox page's field stops at. The page cannot import a Rust
+    /// constant, so its own named constant is held to the ledger's here.
+    #[test]
+    fn the_inbox_close_reason_has_one_length_in_the_ledger_the_desk_and_the_page() {
+        let ledger = include_str!("../../../zerocode-core/src/orchestration.rs");
+        let number_after = |source: &str, mark: &str| -> usize {
+            let at = source.find(mark).unwrap_or_else(|| panic!("`{mark}` is gone"));
+            source[at + mark.len()..]
+                .trim_start()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or_else(|_| panic!("`{mark}` names no number"))
+        };
+        let named = number_after(ledger, "pub const QUESTION_CLOSE_REASON_MAX: usize =");
+        let page = number_after(
+            include_str!("../../../../ui/shell-inbox.js"),
+            "const INBOX_CLOSE_REASON_MAX =",
+        );
+        assert_eq!(page, named, "the page's field and the ledger's line differ");
+        assert!(
+            ledger.contains("QUESTION_CLOSE_REASON_MAX")
+                && ledger.matches("QUESTION_CLOSE_REASON_MAX").count() >= 3,
+            "the ledger no longer refuses a reason past its named length"
+        );
+        let desk = include_str!("../../src/orchestration/desk.rs");
+        assert!(
+            desk.contains("QUESTION_CLOSE_REASON_MAX"),
+            "the desk no longer holds a close's reason to the ledger's length"
+        );
+        assert!(
+            include_str!("../../../../ui/shell-inbox.js").contains("maxLength = INBOX_CLOSE_REASON_MAX"),
+            "the page's field takes any length"
+        );
+    }
 
     /// The inbox reads one snapshot (t-67483): its letters and its numbers are
     /// Rust's single reading (`board_inbox` → `orchestration::inbox::inbox_of`),

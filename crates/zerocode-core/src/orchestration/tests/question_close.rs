@@ -653,3 +653,40 @@ fn a_reply_while_the_asking_chair_is_empty_says_the_ways_out_and_the_close_works
     assert_eq!(closed["closedBy"], format!("run:{answering}"), "{closed}");
     assert_eq!(held_open(&bench, &answering), (vec![], vec![]));
 }
+
+/// t-84271 ①: a close's reason is one line of at most
+/// [`QUESTION_CLOSE_REASON_MAX`] characters. One character more is refused by
+/// the ledger and writes nothing; the longest allowed closes.
+#[test]
+fn a_close_reason_longer_than_its_named_length_is_refused_and_one_of_that_length_closes() {
+    let mut bench = Bench::new();
+    let mut asker = Team::new("team-asker", "asker", 60);
+    let mut answerer = Team::new("team-answerer", "answerer", 70);
+    let asking = run_of(&mut bench, &mut asker, "asker");
+    on_duty(&mut bench, &mut asker, &asking);
+    let answering = run_of(&mut bench, &mut answerer, "answerer");
+    let question = ask_another_run(&mut bench, &mut asker, &answering, "too long?");
+    let max = crate::orchestration::QUESTION_CLOSE_REASON_MAX;
+    let written = |bench: &Bench| bench.ledger.run(&answering).expect("run").messages().len();
+
+    let before = written(&bench);
+    let long = "가".repeat(max + 1);
+    let refused = answered_as_leader_of(
+        &mut bench,
+        &mut answerer,
+        &["question-close", "--message", &question, "--reason", &long],
+    );
+    assert!(
+        refused.exit_code != 0 && refused.stderr.contains(&max.to_string()),
+        "a reason one character over its length was taken: {refused:?}"
+    );
+    assert_eq!(written(&bench), before, "a refused close wrote");
+
+    let exact = "가".repeat(max);
+    let closed = as_leader_of(
+        &mut bench,
+        &mut answerer,
+        &["question-close", "--message", &question, "--reason", &exact],
+    );
+    assert_eq!(closed["closed"], true, "{closed}");
+}

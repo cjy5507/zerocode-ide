@@ -2858,6 +2858,11 @@ mod tests {
         let unnamed = close_question("run-x", "m-1", "이미 끝난 일", " ", 1)
             .expect_err("a close without a request name");
         assert!(unnamed.contains("retryRequest"), "{unnamed}");
+        // Nor one longer than the line the ledger takes (t-84271 ①): refused here, with the number.
+        let max = zerocode_core::orchestration::QUESTION_CLOSE_REASON_MAX;
+        let long = close_question("run-x", "m-1", &"가".repeat(max + 1), "ui-close-2", 1)
+            .expect_err("a reason over its length");
+        assert!(long.contains(&max.to_string()), "{long}");
     }
 
     /// The board's pass is written over the result the task holds (t-82501):

@@ -4881,6 +4881,14 @@ const SEAT_TAKEN_OVER: &str = "coordinator seat taken over";
 /// ([`project_scope::acting_run`]).
 pub const QUESTION_CLOSE: &str = "question-close";
 
+/// The longest reason `question-close` takes, in characters (t-84271 ①): the
+/// one line of why a question closes without an answer is the record it
+/// leaves in the thread, so it is a line and not a pasted log. The ledger
+/// refuses a longer one; the desk (`desk_question_close`) refuses it before
+/// the ledger is asked; the inbox page's field stops at the same number
+/// (`INBOX_CLOSE_REASON_MAX`, held equal by a source contract).
+pub const QUESTION_CLOSE_REASON_MAX: usize = 200;
+
 /// The final word an ending is to the askers of the worker it ended: a
 /// terminal that died or a sleeper the restart lost EXITED, and everything
 /// else — a stop, an abandon — is its coordinator CANCELLING it. Read off
