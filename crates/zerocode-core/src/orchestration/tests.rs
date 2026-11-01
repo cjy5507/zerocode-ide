@@ -86,7 +86,9 @@ fn worker_briefings_say_where_the_report_file_goes() {
             .split_once(BRIEFING_HANDS_OVER)
             .expect("the briefing hands over");
         assert_eq!(
-            before.matches("outside every checkout").count(),
+            // The one-checkout paragraph says "outside every checkout" of evidence too, so the
+            // count is of the report file's own sentence.
+            before.matches("to a file outside every checkout").count(),
             1,
             "{before}"
         );
