@@ -3461,16 +3461,19 @@ export async function testJevBuiltinDecisions(browser, origin, ok) {
     // Another window deleted "recall" while this one still draws its row: pressing its edit button opens nothing,
     // says the decision is deleted, and draws the list again without it.
     if (!await page.locator('#jev-view [data-jev-builtin-edit="recall"]').count()) await page.locator("#jev-view .jev-fold").click();
-    await page.evaluate(() => { window.__JEV__.builtin.saved.recall = { deleted: true }; });
+    const callsBefore = await page.evaluate(() => {
+      window.__JEV__.builtin.saved.recall = { deleted: true };
+      return window.__JEV__.builtin.calls.length;
+    });
     await page.locator('#jev-view [data-jev-builtin-edit="recall"]').click();
     await page.waitForFunction(() => !document.querySelector('#jev-view [data-jev-dash-row="recall"]'));
-    const otherWindow = await page.evaluate(async () => {
+    const otherWindow = await page.evaluate(async (before) => {
       await window.__PAINTED__();
       const said = [...document.querySelectorAll(".toast")].map((one) => one.textContent.trim());
       return { open: document.getElementById("jev-builtin-scrim").hidden === false, said,
         row: document.querySelectorAll('[data-jev-dash-row="recall"], [data-jev-builtin-edit="recall"]').length,
-        saves: window.__JEV__.builtin.calls.filter((one) => one.id === "recall").length };
-    });
+        saves: window.__JEV__.builtin.calls.length - before };
+    }, callsBefore);
     ok("the editor of a decision another window deleted does not open: it says so and the list is drawn again without the row",
       !otherWindow.open && otherWindow.row === 0 && otherWindow.saves === 0
         && otherWindow.said.some((line) => line.includes("지운 결정은")), JSON.stringify(otherWindow));
