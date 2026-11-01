@@ -35426,7 +35426,13 @@ mod tests {
             "the prompt fetch lost its bound or stopped sharing the row \
              cache:\n{fetching}"
         );
-        let tally = block_after(window, "function paintChecksSummary(");
+        // One count serves the summary row and the pile (t-84799 B11): the summary reads it, never counts again.
+        let summary = block_after(window, "function paintChecksSummary(");
+        assert!(
+            summary.contains("checksTally(checks)"),
+            "the summary counts the verdicts again instead of reading `checksTally`:\n{summary}"
+        );
+        let tally = block_after(window, "function checksTally(");
         assert!(
             tally.contains("\"action_required\""),
             "the failing count stopped counting approval blockers:\n{tally}"
