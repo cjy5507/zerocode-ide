@@ -1607,6 +1607,44 @@ pub(crate) struct Written {
     revision: u64,
     root: Option<TableDigest>,
     families: Vec<Kept>,
+    unstamped: UnstampedRows,
+    /// The rows an open digested, until the boot that follows compares them
+    /// with its ledger's ([`WrittenLedgers::adopt_lists`]) or the first write
+    /// goes without. `None` for a memory a write left.
+    as_opened: Option<LedgerProjectionV1>,
+}
+
+/// The rows of the families no list stamps ([`Family::Runs`], [`Family::Bound`]),
+/// as the kept digests were made of them (t-85378).
+///
+/// A run's own row sits beside its lists on the [`Run`], so anything that
+/// reaches one of its lists also reaches the row, and a stamp on the runs
+/// would move with every letter. There are few of these rows, so they are
+/// kept whole and compared: a row equal to the one kept has its digest, and
+/// only a row that moved is serialized and hashed.
+///
+/// [`Run`]: zerocode_core::orchestration::Run
+struct UnstampedRows {
+    runs: Vec<zerocode_core::orchestration::RunRow>,
+    bound: Vec<zerocode_core::orchestration::BoundRow>,
+}
+
+impl UnstampedRows {
+    fn of(projection: &LedgerProjectionV1) -> Self {
+        Self {
+            runs: projection.runs.clone(),
+            bound: projection.bound.clone(),
+        }
+    }
+
+    /// Whether row `at` of `family` in `projection` is the row kept here.
+    fn holds(&self, family: Family, projection: &LedgerProjectionV1, at: usize) -> bool {
+        match family {
+            Family::Runs => self.runs.get(at) == projection.runs.get(at),
+            Family::Bound => self.bound.get(at) == projection.bound.get(at),
+            _ => false,
+        }
+    }
 }
 
 impl Written {
@@ -1659,6 +1697,58 @@ impl WrittenLedgers {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         held.extend(found);
+    }
+
+    /// Tell the memory of `ledger_id` which lists hold the rows its open
+    /// digested, now that a ledger has been built (t-85378), and answer whether
+    /// it took that.
+    ///
+    /// An open digests every row and has no lists to name, so without this the
+    /// first marked export matches nothing the memory holds and digests the
+    /// same rows a second time. The export is compared row for row with the very
+    /// rows those digests were made of. A row's digest is a function of the row,
+    /// so on a match the first write finds what a whole digest would have found,
+    /// and the store ends up the same to the byte. Anything else — a row changed
+    /// between the open and the boot's read, another writer, a rebuild that put
+    /// rows in another order — takes nothing, and the first write digests as it
+    /// always did. No judgement on a store changes here, in either direction.
+    ///
+    /// All or nothing, and once: the rows the open read are let go either way.
+    pub(crate) fn adopt_lists(&self, ledger_id: &str, export: &MarkedExport) -> bool {
+        let marks = LedgerRows::Marked(export).marks();
+        let mut held = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(kept) = held.get_mut(ledger_id) else {
+            return false;
+        };
+        let Some(as_opened) = kept.as_opened.take() else {
+            return false;
+        };
+        if *export.projection() != as_opened {
+            return false;
+        }
+        let mut lists = Vec::with_capacity(FAMILY_COUNT);
+        for family in Family::ALL {
+            let (layout, spans) = spans(family, export.projection(), marks);
+            let laid = &kept.families[family.index()].laid;
+            let same_rows = laid.layout == layout
+                && laid.segments.len() == spans.len()
+                && laid.segments.iter().zip(&spans).all(|(segment, span)| {
+                    segment.start == span.start && segment.rows.len() == span.rows
+                });
+            if !same_rows {
+                return false;
+            }
+            lists.push(spans);
+        }
+        for (one, spans) in kept.families.iter_mut().zip(lists) {
+            for (segment, span) in one.laid.segments.iter_mut().zip(spans) {
+                segment.edit = span.edit;
+            }
+        }
+        true
     }
 }
 
@@ -1788,6 +1878,7 @@ fn lay_out(
     projection: &LedgerProjectionV1,
     marks: Option<Marks<'_>>,
     kept: Option<&Kept>,
+    unstamped: Option<&UnstampedRows>,
     work: &mut WriteWork,
 ) -> Result<Laid, EffectJournalError> {
     let (layout, spans) = spans(family, projection, marks);
@@ -1795,7 +1886,7 @@ fn lay_out(
     let mut segments = Vec::with_capacity(spans.len());
     for (at, span) in spans.into_iter().enumerate() {
         let before = kept.and_then(|kept| kept.laid.segments.get(at));
-        segments.push(segment(family, projection, span, before, work)?);
+        segments.push(segment(family, projection, span, before, unstamped, work)?);
     }
     let digest = digest_rows(
         &segments
@@ -1816,15 +1907,28 @@ fn lay_out(
 ///
 /// The last row the memory holds is digested again when rows were appended
 /// after it, as a witness that the list is the one the memory saw — a stamp
-/// kept by a copy whose rows went another way would fail it.
+/// kept by a copy whose rows went another way would fail it. A list of the
+/// same stamp and the same length has no witness: nothing is digested, and
+/// the memory is believed. That rests on [`zerocode_core::orchestration::Marked`]'s
+/// rule that a copy and its original are never both appended to.
+///
+/// A family no list stamps comes with its rows kept whole ([`UnstampedRows`]):
+/// a row equal to the kept one has the kept digest.
 fn segment(
     family: Family,
     projection: &LedgerProjectionV1,
     span: Span,
     before: Option<&Segment>,
+    unstamped: Option<&UnstampedRows>,
     work: &mut WriteWork,
 ) -> Result<Segment, EffectJournalError> {
     let mut digest_row = |at: usize| {
+        if let Some(kept) = before
+            .and_then(|before| before.rows.get(at - span.start))
+            .filter(|_| unstamped.is_some_and(|rows| rows.holds(family, projection, at)))
+        {
+            return Ok(*kept);
+        }
         let (row, bytes) = family.row_digest(projection, at)?;
         work.rows_digested += 1;
         work.bytes_digested += bytes;
@@ -2088,6 +2192,7 @@ fn write_with(
                 projection,
                 marks,
                 kept.as_ref().map(|kept| &kept.families[family.index()]),
+                kept.as_ref().map(|kept| &kept.unstamped),
                 &mut work,
             )
         })
@@ -2197,6 +2302,8 @@ fn write_with(
         revision: next_revision,
         root: Some(digest_root),
         families,
+        unstamped: UnstampedRows::of(projection),
+        as_opened: None,
     })
 }
 
@@ -2832,8 +2939,10 @@ pub fn read(
 /// digest) from a populated table that disappeared (stored digest mismatch),
 /// and the independent head root preserves that witness if the digest table
 /// itself disappeared. Keeping this scan at open avoids reserializing the full
-/// projection on every runtime read — and the row digests it makes here are
-/// the ones a write would otherwise make again.
+/// projection on every runtime read. The row digests it makes here are compared
+/// with what the first write finds, and that write digests only what moved once
+/// the runtime has said which lists hold these rows
+/// ([`WrittenLedgers::adopt_lists`], t-85378).
 pub(crate) fn require_current_table_integrity(
     connection: &Connection,
     schema: u32,
@@ -2863,7 +2972,7 @@ pub(crate) fn require_current_table_integrity(
         let mut work = WriteWork::ZERO;
         let laid = Family::ALL
             .into_iter()
-            .map(|family| lay_out(family, &held.projection, None, None, &mut work))
+            .map(|family| lay_out(family, &held.projection, None, None, None, &mut work))
             .collect::<Result<Vec<_>, _>>()?;
         let mut expected = [[0; TABLE_DIGEST_BYTES]; FAMILY_COUNT];
         for (digest, laid) in expected.iter_mut().zip(&laid) {
@@ -2922,6 +3031,8 @@ pub(crate) fn require_current_table_integrity(
                 revision: held.revision,
                 root: (stored_root != StoredTableDigestRoot::Stale).then_some(expected_root),
                 families,
+                unstamped: UnstampedRows::of(&held.projection),
+                as_opened: Some(held.projection),
             },
         ));
     }
@@ -3730,6 +3841,15 @@ fn each(
 /// holds none — a long-lived run beside a fresh one (t-82988).
 #[cfg(test)]
 pub(crate) fn a_ledger_with_mail(letters: usize) -> zerocode_core::orchestration::Ledger {
+    a_ledger_with_mail_of(letters, 500)
+}
+
+/// [`a_ledger_with_mail`], each letter's body `body_bytes` long.
+#[cfg(test)]
+pub(crate) fn a_ledger_with_mail_of(
+    letters: usize,
+    body_bytes: usize,
+) -> zerocode_core::orchestration::Ledger {
     use zerocode_core::orchestration::{Ledger, MessageKind};
     const BATCH: usize = 50;
     let mut ledger = Ledger::new();
@@ -3752,7 +3872,7 @@ pub(crate) fn a_ledger_with_mail(letters: usize) -> zerocode_core::orchestration
             from: "worker:w-writer".to_string(),
             to: address.clone(),
             kind: MessageKind::Status,
-            body: Text::from(format!("{at:0>500}")),
+            body: Text::from(format!("{at:0>body_bytes$}")),
             subject: Text::default(),
             priority: Default::default(),
             payload: Text::default(),
@@ -3783,6 +3903,169 @@ pub(crate) fn a_ledger_with_mail(letters: usize) -> zerocode_core::orchestration
     });
     rows.next_id = next + 1;
     Ledger::rebuild(rows).expect("a ledger with mail")
+}
+
+/// [`a_ledger_with_mail_of`], with something in every table: in its second run
+/// a seated coordinator, a task under a live worker that can sleep, a finished
+/// attempt, a borrowed pane, a gate, a handover the last window was walking;
+/// then a binding, a receipt, and a third run a sweep has compacted (t-85378).
+/// A window restart has something to do with each of them.
+#[cfg(test)]
+pub(crate) fn a_ledger_with_every_table(
+    letters: usize,
+    body_bytes: usize,
+) -> zerocode_core::orchestration::Ledger {
+    use zerocode_core::orchestration::{CoordinatorSeat, Ledger, RunSummary};
+    let mut rows = a_ledger_with_mail_of(letters, body_bytes).export();
+    let quiet = rows.runs[1].id.clone();
+    rows.runs[1].coordinator = Some(CoordinatorSeat {
+        seat: "team-2/%1".to_string(),
+        actor: None,
+        generation: 1,
+        since_ms: 2,
+        vacated_ms: None,
+        handover: None,
+    });
+    let task = |id: &str, status: &str| TaskRow {
+        run: quiet.clone(),
+        id: id.to_string(),
+        spec: Text::from("something to do"),
+        title: Text::from("something"),
+        deps: Vec::new(),
+        parent: None,
+        status: serde_json::from_str(&format!("\"{status}\"")).expect("a status"),
+        result: Text::default(),
+        failures: 0,
+        created_ms: 3,
+        result_author: None,
+        closed: None,
+    };
+    rows.tasks.push(task("t-asleep", "dispatched"));
+    rows.tasks.push(task("t-done", "completed"));
+    rows.tasks.push(task("t-gated", "blocked"));
+    let dispatch = |id: &str, task: &str, worker: &str, ended_ms: Option<i64>| DispatchRow {
+        run: quiet.clone(),
+        id: id.to_string(),
+        task: task.to_string(),
+        worker: worker.to_string(),
+        started_ms: 4,
+        ended_ms,
+        succeeded: ended_ms.map(|_| true),
+        retry_of: None,
+        source: None,
+        session_history: None,
+        remote: None,
+    };
+    rows.dispatches
+        .push(dispatch("dp-asleep", "t-asleep", "w-asleep", None));
+    rows.dispatches
+        .push(dispatch("dp-done", "t-done", "w-done", Some(5)));
+    let worker =
+        |id: &str, state: &str, dispatch: Option<&str>, checkout: Option<&str>| WorkerRow {
+            run: quiet.clone(),
+            id: id.to_string(),
+            team: "team-2".to_string(),
+            agent: "codex".to_string(),
+            pane: format!("%{id}"),
+            state: serde_json::from_str(&format!("\"{state}\"")).expect("a state"),
+            started_ms: 4,
+            dispatch: dispatch.map(str::to_string),
+            model: None,
+            effort: None,
+            session: None,
+            ready_by_ms: None,
+            hook_unreachable_since_ms: None,
+            pane_missing_since_ms: None,
+            taken_over: false,
+            checkout: checkout.map(str::to_string),
+            in_worktree: false,
+            quiet_at: None,
+            archive: None,
+            started_by: None,
+            adopted_by: None,
+            on_quota_wall: None,
+            quota_wait: false,
+            exit_unconfirmed: None,
+        };
+    rows.workers.push(worker(
+        "w-asleep",
+        "active",
+        Some("dp-asleep"),
+        Some("/wt/asleep"),
+    ));
+    rows.workers.push(worker("w-done", "released", None, None));
+    rows.workers.push(worker("w-far", "active", None, None));
+    rows.attachments.push(AttachmentRow {
+        run: quiet.clone(),
+        dispatch: "dp-far".to_string(),
+        home: "home-fp-abcd".to_string(),
+        worker: "w-far".to_string(),
+        state: serde_json::from_str("\"ready\"").expect("a state"),
+        to_home: Vec::new(),
+        acked_seq: 0,
+        imported_seq: 0,
+        created_ms: 4,
+    });
+    rows.gates.push(GateRow {
+        run: quiet.clone(),
+        id: "gate-1".to_string(),
+        task: "t-gated".to_string(),
+        question: Text::from("which way?"),
+        options: vec![Text::from("left"), Text::from("right")],
+        status: serde_json::from_str("\"pending\"").expect("a status"),
+        resolution: Text::default(),
+        created_ms: 5,
+        resolved_ms: None,
+        held_for: None,
+    });
+    rows.messages.push(MessageRow {
+        run: quiet.clone(),
+        id: "m-walking".to_string(),
+        from: "ledger".to_string(),
+        to: format!("run:{quiet}"),
+        kind: serde_json::from_str("\"handover\"").expect("a kind"),
+        body: Text::from(r#"{"status":"walking","steps":[{"name":"wip-commit","ok":true}]}"#),
+        subject: Text::default(),
+        priority: Default::default(),
+        payload: Text::default(),
+        thread: None,
+        task: None,
+        dispatch: None,
+        author_seat: None,
+        created_ms: 5,
+    });
+    rows.bound.push(BoundRow {
+        caller: Text::from("team-2/%1"),
+        run: quiet,
+    });
+    rows.served.push(ServedRow {
+        caller: Some(Text::from("somebody")),
+        request: Text::from("r-kept"),
+        answer: ServedAnswer::Inline("what it printed\n".to_string()),
+        fingerprint: Some(Text::from("f".repeat(64))),
+        verb: None,
+        filed_ms: Some(5),
+        expired: false,
+    });
+    let mut compacted = rows.runs[1].clone();
+    compacted.id = "run-compacted".to_string();
+    compacted.name = Text::from("long done");
+    compacted.coordinator = None;
+    compacted.summary = Some(RunSummary {
+        tasks: 3,
+        completed: 2,
+        failed: 1,
+        dispatches: 4,
+        workers: 2,
+        messages: 9,
+        gates: 1,
+        headlines: vec![Text::from("drain the gate")],
+        last_activity_ms: 2,
+        compacted_ms: 3,
+        sweeps: 1,
+    });
+    rows.runs.push(compacted);
+    Ledger::rebuild(rows).expect("a ledger with every table")
 }
 
 /// One more status letter from the writer to the first run of
@@ -3855,6 +4138,103 @@ pub(crate) fn letter_rows_touched(connection: &Connection) -> (i64, i64, i64) {
         .expect("the letters' rows touched")
 }
 
+/// Number every run's rows by their place in the table, children's
+/// parents with them, as generation one laid out all eight tables a run
+/// owns rows in (t-85378, review t-85335 P3-4).
+#[cfg(test)]
+fn lay_out_densely(connection: &Connection, ledger_id: &str) {
+    let transaction = connection
+        .unchecked_transaction()
+        .expect("one transaction for the renumbering");
+    transaction
+        .execute_batch("PRAGMA defer_foreign_keys = ON;")
+        .expect("a child and its parent move together");
+    for family in Family::ALL.into_iter().filter(|family| family.by_run()) {
+        let table = family.table().name();
+        let mut places = Vec::new();
+        each(
+            &transaction,
+            &format!("SELECT ordinal FROM {table} WHERE ledger_id = ?1 ORDER BY ordinal"),
+            ledger_id,
+            |row| {
+                places.push(row.get::<_, i64>(0)?);
+                Ok(())
+            },
+        )
+        .expect("the table's places");
+        // Upwards: a row only ever moves down, into a place already left.
+        for (dense, place) in places.into_iter().enumerate() {
+            let dense = ordinal(dense).expect("an ordinal");
+            transaction
+                .execute(
+                    &format!(
+                        "UPDATE {table} SET ordinal = ?1 WHERE ledger_id = ?2 AND ordinal = ?3"
+                    ),
+                    params![dense, ledger_id, place],
+                )
+                .expect("a dense row");
+            for (child, parent) in family.children() {
+                transaction
+                    .execute(
+                        &format!(
+                            "UPDATE {} SET {parent} = ?1 WHERE ledger_id = ?2 AND {parent} = ?3",
+                            child.name()
+                        ),
+                        params![dense, ledger_id, place],
+                    )
+                    .expect("a dense child");
+            }
+        }
+    }
+    transaction.commit().expect("the renumbering");
+}
+
+/// Leave a populated store as a writer of generation one left it: every
+/// table a run owns rows in numbered densely, one digest per table, each
+/// the table's JSON, and the root over all eighteen (t-82988).
+#[cfg(test)]
+pub(crate) fn as_generation_one_wrote_it(
+    connection: &Connection,
+    ledger_id: &str,
+    projection: &LedgerProjectionV1,
+) {
+    lay_out_densely(connection, ledger_id);
+    let first = table_digests_v1(projection).expect("generation one's digests");
+    connection
+        .execute(
+            "DELETE FROM ledger_table_digests WHERE ledger_id = ?1",
+            [ledger_id],
+        )
+        .expect("clear the current witnesses");
+    for table in LedgerTable::ALL {
+        connection
+            .execute(
+                "INSERT INTO ledger_table_digests (
+                    ledger_id, table_name, format_generation, digest
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    ledger_id,
+                    table.name(),
+                    i64::from(TABLE_DIGEST_FORMAT_GENERATION_V1),
+                    first[table.index()].as_slice()
+                ],
+            )
+            .expect("a generation-one witness");
+    }
+    connection
+        .execute(
+            "UPDATE orchestration_ledger_heads
+                SET table_digest_format_generation = ?1, table_digest_root = ?2
+              WHERE ledger_id = ?3",
+            params![
+                i64::from(TABLE_DIGEST_FORMAT_GENERATION_V1),
+                digest_rows(&first).as_slice(),
+                ledger_id
+            ],
+        )
+        .expect("a generation-one root");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3909,50 +4289,6 @@ mod tests {
         )
         .expect("populated ledger");
         (root, path, store)
-    }
-
-    /// Leave a populated store's witnesses as a writer of generation one
-    /// left them: one digest per table, each the table's JSON, and the root
-    /// over all eighteen (t-82988).
-    fn as_generation_one_wrote_it(
-        connection: &Connection,
-        ledger_id: &str,
-        projection: &LedgerProjectionV1,
-    ) {
-        let first = table_digests_v1(projection).expect("generation one's digests");
-        connection
-            .execute(
-                "DELETE FROM ledger_table_digests WHERE ledger_id = ?1",
-                [ledger_id],
-            )
-            .expect("clear the current witnesses");
-        for table in LedgerTable::ALL {
-            connection
-                .execute(
-                    "INSERT INTO ledger_table_digests (
-                        ledger_id, table_name, format_generation, digest
-                     ) VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        ledger_id,
-                        table.name(),
-                        i64::from(TABLE_DIGEST_FORMAT_GENERATION_V1),
-                        first[table.index()].as_slice()
-                    ],
-                )
-                .expect("a generation-one witness");
-        }
-        connection
-            .execute(
-                "UPDATE orchestration_ledger_heads
-                    SET table_digest_format_generation = ?1, table_digest_root = ?2
-                  WHERE ledger_id = ?3",
-                params![
-                    i64::from(TABLE_DIGEST_FORMAT_GENERATION_V1),
-                    digest_rows(&first).as_slice(),
-                    ledger_id
-                ],
-            )
-            .expect("a generation-one root");
     }
 
     /// A ledger whose every list is longer than one and in an order that is
@@ -4497,7 +4833,7 @@ mod tests {
         let digests = Family::ALL
             .into_iter()
             .map(|family| {
-                lay_out(family, projection, None, None, &mut work)
+                lay_out(family, projection, None, None, None, &mut work)
                     .expect("a family laid out")
                     .digest
             })
@@ -5485,32 +5821,13 @@ mod tests {
         let mut revision = 0;
         let mut now_ms = 10;
         let mut check = |ledger: &zerocode_core::orchestration::Ledger, step: &str| {
-            let export = ledger.export_marked();
-            write_remembered(
+            write_and_compare(
                 &connection,
                 store.written(),
-                "main-ledger",
-                revision,
-                revision + 1,
-                (&export).into(),
-                now_ms,
-            )
-            .unwrap_or_else(|why| panic!("{step}: the write was refused: {why:?}"));
-            revision += 1;
-            now_ms += 1;
-            let (rows, root, receipts) = what_the_store_holds(&connection, "main-ledger");
-            assert_eq!(rows, *export.projection(), "{step}: the rows");
-            assert_eq!(
-                root,
-                generation_two_root(export.projection()).to_vec(),
-                "{step}: the root"
+                ledger,
+                (&mut revision, &mut now_ms),
+                step,
             );
-            let receipts_digests: ReceiptDigests = served_row_digests(&rows.served)
-                .into_iter()
-                .enumerate()
-                .map(|(at, digest)| (ordinal(at).expect("an ordinal"), digest.to_vec()))
-                .collect();
-            assert_eq!(receipts, receipts_digests, "{step}: the receipts' digests");
         };
         check(&ledger, "the first write");
         for at in 0..3 {
@@ -5634,15 +5951,6 @@ mod tests {
         }
         let projection = ledger.export();
         write(&connection, "main-ledger", 0, 1, &projection, 10).expect("the ledger");
-        /* Generation one numbered every letter by its place in the table: the
-         * second run's letters follow the first run's. */
-        connection
-            .execute(
-                "UPDATE ledger_messages SET ordinal = ordinal - ?1 + ?2
-                  WHERE ledger_id = 'main-ledger' AND ordinal >= ?1",
-                params![1_i64 << RUN_ROW_BITS, ordinal(LETTERS).expect("an ordinal")],
-            )
-            .expect("dense letters");
         as_generation_one_wrote_it(&connection, "main-ledger", &projection);
         drop(connection);
         drop(store);
@@ -5691,6 +5999,457 @@ mod tests {
         )
         .expect("a letter after the move");
         assert_eq!(letter_rows_touched(&connection), (1, 0, 0));
+    }
+
+    /// [`a_ledger_where_order_is_load_bearing`] with a run ahead of its first,
+    /// holding a row of its own in each of the eight tables a run owns rows
+    /// in, so the fixture's rows lie above that run's on disk.
+    fn a_ledger_with_rows_in_two_runs() -> LedgerProjectionV1 {
+        let mut projection = a_ledger_where_order_is_load_bearing();
+        macro_rules! a_row_of_the_first_run {
+            ($($table:ident),+) => {$(
+                let mut row = projection.$table[0].clone();
+                row.run = "run-0".to_string();
+                projection.$table.insert(0, row);
+            )+};
+        }
+        a_row_of_the_first_run!(
+            tasks,
+            dispatches,
+            workers,
+            attachments,
+            gates,
+            messages,
+            inboxes,
+            acked
+        );
+        // An attachment is unique by its home and dispatch, across runs.
+        projection.attachments[0].dispatch = "dp-of-the-first-run".to_string();
+        let mut run = projection.runs[1].clone();
+        run.id = "run-0".to_string();
+        projection.runs.insert(0, run);
+        projection
+    }
+
+    /// The first write after a store of generation one opens lays out all
+    /// eight tables a run owns rows in by run, at once, whether or not a row
+    /// of that table moved: the open took their digests, so none of them can
+    /// say it is unchanged. The tables no run owns stay in place (t-85378,
+    /// review t-85335 P3-3).
+    #[test]
+    fn the_first_write_over_generation_one_rewrites_all_eight_run_tables_by_run() {
+        let (_root, path, store) = a_current_store();
+        let connection = store.connection().expect("ledger connection");
+        let projection = a_ledger_with_rows_in_two_runs();
+        write(&connection, "main-ledger", 0, 1, &projection, 10).expect("the ledger");
+        as_generation_one_wrote_it(&connection, "main-ledger", &projection);
+        let by_run = || Family::ALL.into_iter().filter(|family| family.by_run());
+        for family in by_run() {
+            let second_run_starts: i64 = connection
+                .query_row(
+                    &format!(
+                        "SELECT MIN(ordinal) FROM {} WHERE run = 'run-2'",
+                        family.table().name()
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the second run's first row");
+            assert_eq!(second_run_starts, 1, "{family:?} lies densely");
+        }
+        drop(connection);
+        drop(store);
+
+        let reopened = crate::workflow_store::WorkflowStore::open(&path)
+            .expect("generation one's witnesses are checked and pass");
+        let connection = reopened.connection().expect("reopened connection");
+        let before = write_work_here();
+        write_remembered(
+            &connection,
+            reopened.written(),
+            "main-ledger",
+            1,
+            2,
+            (&projection).into(),
+            20,
+        )
+        .expect("the first write after the upgrade");
+        let spent = write_work_here().since(before);
+
+        for family in by_run() {
+            let second_run_starts: i64 = connection
+                .query_row(
+                    &format!(
+                        "SELECT MIN(ordinal) FROM {} WHERE run = 'run-2'",
+                        family.table().name()
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the second run's first row");
+            assert_eq!(second_run_starts, 1 << RUN_ROW_BITS, "{family:?} by run");
+        }
+        let run_owned: usize = by_run().map(|family| family.rows(&projection)).sum();
+        assert!(
+            spent.rows_written >= run_owned as u64,
+            "{spent:?} wrote fewer rows than the {run_owned} the eight tables hold"
+        );
+        let (rows, root, _) = what_the_store_holds(&connection, "main-ledger");
+        assert_eq!(rows, projection);
+        assert_eq!(root, generation_two_root(&projection).to_vec());
+        drop(connection);
+        drop(reopened);
+        crate::workflow_store::WorkflowStore::open(&path)
+            .expect("the next open checks what the move left");
+    }
+
+    /// One write through the store's memory, and what it left checked against
+    /// what a write with no memory would leave.
+    fn write_and_compare(
+        connection: &Connection,
+        written: &WrittenLedgers,
+        ledger: &zerocode_core::orchestration::Ledger,
+        (revision, now_ms): (&mut u64, &mut i64),
+        step: &str,
+    ) -> WriteWork {
+        let export = ledger.export_marked();
+        let before = write_work_here();
+        write_remembered(
+            connection,
+            written,
+            "main-ledger",
+            *revision,
+            *revision + 1,
+            (&export).into(),
+            *now_ms,
+        )
+        .unwrap_or_else(|why| panic!("{step}: the write was refused: {why:?}"));
+        let spent = write_work_here().since(before);
+        *revision += 1;
+        *now_ms += 1;
+        let (rows, root, receipts) = what_the_store_holds(connection, "main-ledger");
+        assert_eq!(rows, *export.projection(), "{step}: the rows");
+        assert_eq!(
+            root,
+            generation_two_root(export.projection()).to_vec(),
+            "{step}: the root"
+        );
+        let receipts_digests: ReceiptDigests = served_row_digests(&rows.served)
+            .into_iter()
+            .enumerate()
+            .map(|(at, digest)| (ordinal(at).expect("an ordinal"), digest.to_vec()))
+            .collect();
+        assert_eq!(receipts, receipts_digests, "{step}: the receipts' digests");
+        spent
+    }
+
+    /// A store opened, its rows read and a ledger built from them, its lists
+    /// told to the store's memory: where a window stands before its first
+    /// write. Answers the ledger, and the revision it stands at.
+    fn a_ledger_opened_from(
+        store: &crate::workflow_store::WorkflowStore,
+        connection: &Connection,
+    ) -> (zerocode_core::orchestration::Ledger, u64) {
+        let held = read(
+            connection,
+            "main-ledger",
+            zerocode_core::orchestration::PROJECTION_SCHEMA,
+        )
+        .expect("it reads")
+        .expect("it is there");
+        let ledger =
+            zerocode_core::orchestration::Ledger::rebuild(held.projection).expect("a sound ledger");
+        assert!(
+            store
+                .written()
+                .adopt_lists("main-ledger", &ledger.export_marked()),
+            "these lists hold the rows the open digested"
+        );
+        (ledger, held.revision)
+    }
+
+    /// A ledger with rows in every table, saved and opened again, gives its
+    /// lists the digests the open made, and the write after it leaves what a
+    /// whole write would (t-85378 r2).
+    #[test]
+    fn a_ledger_with_every_table_takes_what_its_open_digested() {
+        let (_root, path, store) = a_current_store();
+        let connection = store.connection().expect("ledger connection");
+        let seeded = a_ledger_with_every_table(60, 50);
+        let projection = seeded.export();
+        for (table, rows) in [
+            ("runs", projection.runs.len()),
+            ("tasks", projection.tasks.len()),
+            ("dispatches", projection.dispatches.len()),
+            ("workers", projection.workers.len()),
+            ("attachments", projection.attachments.len()),
+            ("gates", projection.gates.len()),
+            ("messages", projection.messages.len()),
+            ("inboxes", projection.inboxes.len()),
+            ("acked", projection.acked.len()),
+            ("bound", projection.bound.len()),
+            ("served", projection.served.len()),
+        ] {
+            assert!(rows > 0, "the fixture holds no {table}");
+        }
+        write(&connection, "main-ledger", 0, 1, &projection, 10).expect("the ledger");
+        drop(connection);
+        drop(store);
+
+        let store = crate::workflow_store::WorkflowStore::open(&path).expect("the open");
+        let connection = store.connection().expect("ledger connection");
+        // The helper asserts that the lists took what the open digested.
+        let (mut ledger, mut revision) = a_ledger_opened_from(&store, &connection);
+        a_letter_to(&mut ledger, 1, 20);
+        let mut now_ms = 20;
+        let spent = write_and_compare(
+            &connection,
+            store.written(),
+            &ledger,
+            (&mut revision, &mut now_ms),
+            "the first write",
+        );
+        assert!(spent.rows_digested < 60, "{spent:?}");
+    }
+
+    /// From the first write after an open on, whatever a ledger does — nothing,
+    /// a letter, a seat on a run's row, a new run, a binding, a sweep, a reset —
+    /// a write leaves what a write with no memory would, and digests only what
+    /// moved (t-85378).
+    #[test]
+    fn a_write_after_an_open_leaves_what_a_whole_write_would() {
+        use zerocode_core::orchestration::ResetScope;
+        let (_root, path, store) = a_current_store();
+        let connection = store.connection().expect("ledger connection");
+        let mut seeded = a_ledger_with_mail(300);
+        a_letter_to(&mut seeded, 1, 3);
+        write(&connection, "main-ledger", 0, 1, &seeded.export(), 10).expect("the ledger");
+        drop(connection);
+        drop(store);
+
+        let store = crate::workflow_store::WorkflowStore::open(&path).expect("the open");
+        let connection = store.connection().expect("ledger connection");
+        let (mut ledger, mut revision) = a_ledger_opened_from(&store, &connection);
+        let mut now_ms = 20;
+        let written = store.written();
+        macro_rules! step {
+            ($step:literal) => {
+                write_and_compare(
+                    &connection,
+                    written,
+                    &ledger,
+                    (&mut revision, &mut now_ms),
+                    $step,
+                )
+            };
+        }
+        let spent = step!("the first write, nothing moved");
+        assert_eq!(
+            (spent.rows_digested, spent.rows_written),
+            (0, 0),
+            "nothing moved, and nothing was digested or written"
+        );
+
+        one_more_letter(&mut ledger, 21);
+        let spent = step!("a letter");
+        assert!(
+            spent.rows_digested < 30,
+            "one letter digested {spent:?} of a ledger of 300"
+        );
+
+        let first_run = ledger.runs()[0].id.clone();
+        ledger
+            .seat_coordinator(&first_run, "team-a/%0", None, 22)
+            .expect("a seat");
+        let spent = step!("a seat, on a run's own row");
+        assert!(spent.rows_written >= 1, "the run's row moved: {spent:?}");
+
+        ledger.create_run("another", 23);
+        step!("a new run");
+
+        // A caller's binding has no verb of its own here, so the ledger is
+        // rebuilt around one, as a boot's would be: new lists, the same rows.
+        let mut rows = ledger.export();
+        rows.bound.push(zerocode_core::orchestration::BoundRow {
+            caller: Text::from("caller-a"),
+            run: first_run,
+        });
+        ledger = zerocode_core::orchestration::Ledger::rebuild(rows).expect("a binding");
+        step!("a binding");
+        let mut rows = ledger.export();
+        rows.bound[0].run = ledger.runs()[1].id.clone();
+        ledger = zerocode_core::orchestration::Ledger::rebuild(rows).expect("a moved binding");
+        step!("the binding moved");
+
+        let before = ledger.export().messages.len();
+        let swept = ledger.sweep_retention(i64::from(u32::MAX) * 1_000);
+        assert!(
+            ledger.export().messages.len() < before,
+            "the sweep took no letter: {swept:?}"
+        );
+        step!("a sweep");
+        ledger.reset(ResetScope::Messages);
+        step!("mail reset whole");
+        one_more_letter(&mut ledger, 50);
+        step!("a letter after the reset");
+        drop(connection);
+        drop(store);
+
+        let reopened =
+            crate::workflow_store::WorkflowStore::open(&path).expect("the next open checks it");
+        let held = read(
+            &reopened.connection().expect("read the reopened ledger"),
+            "main-ledger",
+            zerocode_core::orchestration::PROJECTION_SCHEMA,
+        )
+        .expect("it reads")
+        .expect("it is there");
+        assert_eq!(held.projection, ledger.export());
+    }
+
+    /// A row of a family no list stamps is digested when it moves and only
+    /// then, and two writes of the same rows digest neither (t-85378, review
+    /// t-85335 P3-5).
+    #[test]
+    fn a_run_row_is_digested_only_when_it_moves() {
+        let store = a_store();
+        let written = WrittenLedgers::default();
+        let mut ledger = a_ledger_with_mail(10);
+        let write_it = |ledger: &zerocode_core::orchestration::Ledger, revision: u64| {
+            let before = write_work_here();
+            write_remembered(
+                &store,
+                &written,
+                "main-ledger",
+                revision,
+                revision + 1,
+                (&ledger.export_marked()).into(),
+                10 + revision as i64,
+            )
+            .expect("the write");
+            write_work_here().since(before)
+        };
+        let whole = write_it(&ledger, 0);
+        assert!(whole.rows_digested > 2, "{whole:?}");
+        assert_eq!(write_it(&ledger, 1).rows_digested, 0, "nothing moved");
+        let run = ledger.runs()[1].id.clone();
+        ledger
+            .seat_coordinator(&run, "team-a/%0", None, 20)
+            .expect("a seat");
+        assert_eq!(
+            write_it(&ledger, 2).rows_digested,
+            1,
+            "one run's row moved, and no list did"
+        );
+    }
+
+    /// The memory takes a ledger's lists only when the ledger exports the very
+    /// rows its open digested, and only once. Anything else keeps the memory as
+    /// it was, and the first write digests as it always did (t-85378).
+    #[test]
+    fn lists_that_do_not_hold_the_rows_the_open_digested_are_not_taken() {
+        let (_root, path, store) = a_current_store();
+        let connection = store.connection().expect("ledger connection");
+        let mut seeded = a_ledger_with_mail(50);
+        let same = seeded.export_marked();
+        write(&connection, "main-ledger", 0, 1, same.projection(), 10).expect("the ledger");
+        drop(connection);
+        drop(store);
+
+        let store = crate::workflow_store::WorkflowStore::open(&path).expect("the open");
+        assert!(
+            !store.written().adopt_lists("another-ledger", &same),
+            "a ledger the memory does not hold"
+        );
+        one_more_letter(&mut seeded, 11);
+        assert!(
+            !store
+                .written()
+                .adopt_lists("main-ledger", &seeded.export_marked()),
+            "a ledger that has moved since the read"
+        );
+        assert!(
+            !store.written().adopt_lists("main-ledger", &same),
+            "the rows the open read are let go after one look"
+        );
+
+        // None of those left the memory believing anything: the write digests
+        // the whole ledger, and leaves what a whole write would.
+        let connection = store.connection().expect("ledger connection");
+        let (mut revision, mut now_ms) = (1, 20);
+        let spent = write_and_compare(
+            &connection,
+            store.written(),
+            &seeded,
+            (&mut revision, &mut now_ms),
+            "the first write",
+        );
+        assert!(spent.rows_digested > 50, "{spent:?}");
+    }
+
+    /// A store can hold acknowledgements in an order a rebuilt ledger does not
+    /// export: a rebuild places them by run, inbox and number. Those rows are
+    /// not the rows the open digested, so the first write brings them into the
+    /// ledger's order as it always did (t-85378).
+    #[test]
+    fn rows_a_rebuild_puts_in_another_order_are_written_in_the_ledgers_order() {
+        let (_root, path, store) = a_current_store();
+        let connection = store.connection().expect("ledger connection");
+        let mut projection = a_ledger_with_mail(100).export();
+        let run = projection.runs[0].id.clone();
+        projection.inboxes.insert(
+            0,
+            InboxRow {
+                run: run.clone(),
+                address: "worker:w-other".to_string(),
+                pending: Vec::new(),
+                open: None,
+            },
+        );
+        // The inbox comes first and its acknowledgement last.
+        let delivery = format!("d-{}", projection.next_id);
+        projection.next_id += 1;
+        projection.acked.push(AckedRow {
+            run,
+            address: "worker:w-other".to_string(),
+            delivery,
+            messages: None,
+            seq: 0,
+            current: true,
+        });
+        write(&connection, "main-ledger", 0, 1, &projection, 10).expect("the ledger");
+        drop(connection);
+        drop(store);
+
+        let store = crate::workflow_store::WorkflowStore::open(&path).expect("the open");
+        let connection = store.connection().expect("ledger connection");
+        let held = read(
+            &connection,
+            "main-ledger",
+            zerocode_core::orchestration::PROJECTION_SCHEMA,
+        )
+        .expect("it reads")
+        .expect("it is there");
+        let ledger = zerocode_core::orchestration::Ledger::rebuild(held.projection.clone())
+            .expect("a sound ledger");
+        let export = ledger.export_marked();
+        assert_ne!(
+            *export.projection(),
+            held.projection,
+            "the fixture no longer differs in order"
+        );
+        assert!(
+            !store.written().adopt_lists("main-ledger", &export),
+            "these lists do not hold the rows read, in that order"
+        );
+        let (mut revision, mut now_ms) = (1, 20);
+        write_and_compare(
+            &connection,
+            store.written(),
+            &ledger,
+            (&mut revision, &mut now_ms),
+            "the first write",
+        );
     }
 
     /// The revision a writer expects is the revision it gets, or nothing.

@@ -17,7 +17,7 @@
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
-use zerocode_core::orchestration::{LedgerProjectionV1, PROJECTION_SCHEMA};
+use zerocode_core::orchestration::{LedgerProjectionV1, MarkedExport, PROJECTION_SCHEMA};
 
 use crate::authority_lock::{OwnerLock, OwnerLockError, stable_path_bytes};
 use crate::ledger_store::LedgerRows;
@@ -597,6 +597,12 @@ impl EffectJournal {
             .commit()
             .map_err(|_| EffectJournalError::Database)?;
         Ok(())
+    }
+
+    /// Say which lists hold the rows this store's open digested of the ledger
+    /// `lease` names ([`crate::ledger_store::WrittenLedgers::adopt_lists`]).
+    pub(crate) fn adopt_lists(&self, lease: &AuthorityLease, export: &MarkedExport) -> bool {
+        self.store.written().adopt_lists(&lease.ledger_id, export)
     }
 
     /// Atomically reserve a fresh attempt and publish the ledger image that
