@@ -40,6 +40,8 @@ mod tcc;
 #[cfg(test)]
 mod background_tests;
 #[cfg(test)]
+mod parallel_bench;
+#[cfg(test)]
 pub(crate) mod stand_in;
 
 const HELPER_APP_NAME: &str = "ZeroCode Computer Use.app";
@@ -62,11 +64,19 @@ const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const STOP_WATCH_WAIT: Duration = Duration::from_secs(20);
 /// The helper's road for that request (`OperatorGuardHost.watch`).
 const STOP_WATCH_METHOD: &str = "stopWatch";
+/// How many unused connections to keep. More than this at once is a burst, and
+/// the extra ones are closed when it is over.
+const MAX_IDLE_WIRES: usize = 8;
 // Every waiting request is answered inside the limit every answer has.
 const _: () = assert!(STOP_WATCH_WAIT.as_secs() < REQUEST_TIMEOUT.as_secs());
 
 pub(super) struct Session {
-    wire: Wire,
+    /// Connections with no request on them. A request takes one or opens a new
+    /// one, so requests to different apps run at once and the helper keeps them
+    /// in order per app.
+    idle: std::sync::Mutex<Vec<Wire>>,
+    socket: PathBuf,
+    token: String,
     /// The window's waiting request (t-66753 B): its own connection, shut
     /// when the session ends, and the thread that waits on it.
     watching: Option<StopWatch>,
@@ -161,7 +171,7 @@ impl Wire {
                 "Computer Use response exceeded the 64 MiB safety cap",
             )));
         }
-        let response: Value = serde_json::from_slice(&response).map_err(|error| {
+        let mut response: Value = serde_json::from_slice(&response).map_err(|error| {
             SessionFailure::Transport(ComputerUseError::new(
                 error_code::ACCESSIBILITY_ERROR,
                 error.to_string(),
@@ -174,19 +184,23 @@ impl Wire {
             )));
         }
         if response.get("ok").and_then(Value::as_bool) == Some(true) {
-            return Ok(response.get("result").cloned().unwrap_or(Value::Null));
+            // Taken, not cloned: an answer can carry a picture of several MB.
+            return Ok(response.get_mut("result").map_or(Value::Null, Value::take));
         }
-        let error = response.get("error").cloned().unwrap_or(Value::Null);
-        Err(SessionFailure::Provider(ComputerUseError::new(
-            error
-                .get("code")
-                .and_then(Value::as_str)
-                .unwrap_or(error_code::ACCESSIBILITY_ERROR),
-            error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("Computer Use helper refused the request"),
-        )))
+        let error = response.get("error").unwrap_or(&Value::Null);
+        Err(SessionFailure::Provider(
+            ComputerUseError::new(
+                error
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .unwrap_or(error_code::ACCESSIBILITY_ERROR),
+                error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Computer Use helper refused the request"),
+            )
+            .with_delivery(error.get("delivery").and_then(Value::as_str)),
+        ))
     }
 }
 
@@ -357,16 +371,26 @@ impl ProviderSession for Session {
         Self::connect(launch()?)
     }
 
-    fn request(&mut self, method: &str, params: Value) -> Result<Value, SessionFailure> {
-        self.wire.request(method, params)
+    fn request(&self, method: &str, params: Value) -> Result<Value, SessionFailure> {
+        let mut wire = self.take_wire().map_err(SessionFailure::Transport)?;
+        let answer = wire.request(method, params);
+        // A wire that broke, or whose reply no longer lines up, is not reused.
+        if !matches!(answer, Err(SessionFailure::Transport(_))) {
+            let mut idle = self
+                .idle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if idle.len() < MAX_IDLE_WIRES {
+                idle.push(wire);
+            }
+        }
+        answer
     }
 }
 
 /// Launch the signed helper through LaunchServices with a fresh token —
 /// the first half of [`Session::start`]; [`Session::connect`] is the other.
 fn launch() -> Result<Launched, ComputerUseError> {
-    use std::os::unix::fs::PermissionsExt as _;
-
     // The bundle, because LaunchServices launches bundles; the executable
     // check keeps the older "app found but hollow" answer.
     let app = helper_app_path()
@@ -377,6 +401,13 @@ fn launch() -> Result<Launched, ComputerUseError> {
                 "ZeroCode Computer Use.app was not found",
             )
         })?;
+    launch_at(&app)
+}
+
+/// Launch the helper bundle at `app`.
+fn launch_at(app: &Path) -> Result<Launched, ComputerUseError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
     let nonce = crate::hooks::random_token().ok_or_else(|| {
         ComputerUseError::new(
             error_code::ACCESSIBILITY_ERROR,
@@ -406,7 +437,7 @@ fn launch() -> Result<Launched, ComputerUseError> {
     // fallback travels as `--env`; the per-launch 0600 token still
     // authenticates the exact socket session either way.
     let mut command = crate::proc::quiet_command("/usr/bin/open");
-    command.arg("-n").arg(&app);
+    command.arg("-n").arg(app);
     if cfg!(debug_assertions) {
         command.args(["--env", "ZEROCODE_COMPUTER_USE_ALLOW_UNBUNDLED=1"]);
     }
@@ -440,6 +471,20 @@ fn launch() -> Result<Launched, ComputerUseError> {
 }
 
 impl Session {
+    fn take_wire(&self) -> Result<Wire, ComputerUseError> {
+        if let Some(wire) = self
+            .idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop()
+        {
+            return Ok(wire);
+        }
+        let stream = std::os::unix::net::UnixStream::connect(&self.socket)
+            .map_err(io_error("connect to the Computer Use helper"))?;
+        Wire::new(stream, self.token.clone())
+    }
+
     pub(super) fn panel_watch_ended(&self) -> bool {
         self.watching
             .as_ref()
@@ -478,8 +523,11 @@ impl Session {
         };
         let helper_pid = peer_pid(&stream);
         let _ = std::fs::remove_file(&token_file);
+        let wire = Wire::new(stream, token.clone())?;
         let mut client = Self {
-            wire: Wire::new(stream, token)?,
+            idle: std::sync::Mutex::new(vec![wire]),
+            socket: socket.clone(),
+            token,
             watching: None,
             helper_pid,
             directory,
@@ -504,12 +552,12 @@ impl Session {
         client.supports_background =
             handshake.pointer("/supports/actions/background") == Some(&Value::Bool(true));
         if handshake.pointer("/supports/windows/shareControlPanel") == Some(&Value::Bool(true)) {
-            remember_panel(&socket, &client.wire.token);
+            remember_panel(&socket, &client.token);
             sync_share_panel(&super::share::state());
         }
         // The person's chord reaches the window as the helper hears it
         // (t-66753 B), not at the window's next command.
-        client.watching = StopWatch::start(&socket, &client.wire.token);
+        client.watching = StopWatch::start(&socket, &client.token);
         Ok(client)
     }
 }
@@ -530,16 +578,17 @@ impl Drop for Session {
         }
         // The session is over, and its watch with it: nothing is lost.
         super::guard::watch_left();
-        let id = self.wire.next_id;
-        if let Ok(line) = serde_json::to_vec(&json!({
-            "id": id,
-            "method": "terminate",
-            "params": {},
-            "token": self.wire.token,
-        })) {
-            let _ = self.wire.stream.write_all(&line);
-            let _ = self.wire.stream.write_all(b"\n");
-            let _ = self.wire.stream.flush();
+        if let Ok(mut wire) = self.take_wire()
+            && let Ok(line) = serde_json::to_vec(&json!({
+                "id": wire.next_id,
+                "method": "terminate",
+                "params": {},
+                "token": self.token,
+            }))
+        {
+            let _ = wire.stream.write_all(&line);
+            let _ = wire.stream.write_all(b"\n");
+            let _ = wire.stream.flush();
         }
         // `terminate` is the helper's own exit; the signal is for a helper
         // that stopped reading. Only ever aimed at the process this socket

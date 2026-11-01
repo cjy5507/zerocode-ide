@@ -81,9 +81,7 @@ Where a paragraph below says "above" or "below", it means the whole guide, which
     window or `pid:`: do it on this screen), `check_failed`, `step_failed`
     (refused, or its work did not happen — a `run` that failed, a `launch`
     with no window, a `quit` that did not quit), `nothing_changed` (a
-    click changed nothing about its point), `person_moved` (a hand moved
-    the pointer during a recipe that borrows the shared desktop —
-    `handWatched: false` means an isolated recipe or an unreadable pointer),
+    click changed nothing about its point),
     `budget` (the next step would outlast the call;
     nothing is cut short), `stopped`, `money_step` (the step marked
     `— money`: a `dry` Flow rehearses up to it and never presses it; a

@@ -10,7 +10,7 @@ private func stopRoadLine(_ method: String, _ params: [String: Any] = [:]) throw
 /// The answer to one request line, as the connection's thread answers it.
 private func stopRoadAnswer(_ line: Data) -> [String: Any]? {
     guard let request = try? JSONDecoder().decode(Request.self, from: line) else { return nil }
-    return handleRequest(provider: Provider(), lock: NSLock(), request: request, expectedToken: nil, authorizedPeer: true) as? [String: Any]
+    return handleRequest(provider: Provider(), lanes: LaneLocks(), request: request, expectedToken: nil, authorizedPeer: true) as? [String: Any]
 }
 
 /// The person's stop on the helper's own roads (t-66753 A·B): the chord the

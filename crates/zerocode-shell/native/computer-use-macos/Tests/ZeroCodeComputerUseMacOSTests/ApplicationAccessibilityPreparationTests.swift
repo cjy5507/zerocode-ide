@@ -17,7 +17,7 @@ final class ApplicationAccessibilityPreparationTests: XCTestCase {
         let end = try XCTUnwrap(source.range(of: "private func renderSnapshot(", range: start.upperBound..<source.endIndex))
         let snapshot = String(source[start.lowerBound..<end.lowerBound])
         let trusted = try XCTUnwrap(snapshot.range(of: "guard accessibilityTrustedSettled()"))
-        let preparation = try XCTUnwrap(snapshot.range(of: "prepareApplicationAccessibility(appElement, app: app)"))
+        let preparation = try XCTUnwrap(snapshot.range(of: "prepareWebAccessibility(appElement, app: app)"))
         let discovery = try XCTUnwrap(snapshot.range(of: "WindowCapture.candidates(pid: app.pid)"))
         XCTAssertLessThan(trusted.lowerBound, preparation.lowerBound)
         XCTAssertLessThan(preparation.lowerBound, discovery.lowerBound)
@@ -28,6 +28,17 @@ final class ApplicationAccessibilityPreparationTests: XCTestCase {
         let start = try XCTUnwrap(source.range(of: "private func prepareApplicationAccessibility("))
         let end = try XCTUnwrap(source.range(of: "private func focusedWindow(", range: start.upperBound..<source.endIndex))
         let preparation = String(source[start.lowerBound..<end.lowerBound])
+        for forbidden in ["recoverWindow(", "activate(", "kAXFocusedAttribute", "kAXRaiseAction", "OperatorHandHost", "AXIsProcessTrustedWithOptions"] {
+            XCTAssertFalse(preparation.contains(forbidden), forbidden)
+        }
+    }
+
+    func testAskingAnAppForItsWebTreeDoesNotFocusOrTypeOrRequestPermissions() throws {
+        let source = try helperSource()
+        let start = try XCTUnwrap(source.range(of: "private func prepareWebAccessibility("))
+        let end = try XCTUnwrap(source.range(of: "/// Where a look at a surface starts", range: start.upperBound..<source.endIndex))
+        let preparation = String(source[start.lowerBound..<end.lowerBound])
+        XCTAssertTrue(preparation.contains("isSettable(appElement, WebAccessibility.manualAttribute)"))
         for forbidden in ["recoverWindow(", "activate(", "kAXFocusedAttribute", "kAXRaiseAction", "OperatorHandHost", "AXIsProcessTrustedWithOptions"] {
             XCTAssertFalse(preparation.contains(forbidden), forbidden)
         }

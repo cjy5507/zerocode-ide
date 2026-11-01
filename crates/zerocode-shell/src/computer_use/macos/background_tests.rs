@@ -470,7 +470,8 @@ fn assert_background_input(route: EditingRoute, oracle: PointerOracle) {
         admission_time.as_secs_f64() * 1000.0
     );
     if visible_pointer {
-        std::thread::sleep(Duration::from_millis(1100));
+        // A pointer stays 5 s after the agent's last act.
+        std::thread::sleep(Duration::from_millis(5100));
         let status = session
             .request("status", json!({}))
             .expect("pointer expiry status");
@@ -550,7 +551,7 @@ fn background_observation_memory_and_latency() {
         "app": format!("pid:{}", initial["pid"].as_u64().expect("pid")),
         "windowId": initial["windows"][0]["id"], "noScreenshot": true, "background": true,
     });
-    let mut session = Session::start().expect("signed helper");
+    let session = Session::start().expect("signed helper");
     let pid = session.helper_pid().expect("helper pid");
     for _ in 0..200 {
         session

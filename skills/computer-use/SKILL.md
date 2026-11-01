@@ -8,17 +8,55 @@ description: Inspect and operate local desktop app windows through ZeroCode when
 Use the narrowest ZeroCode surface that owns the target:
 
 - Website or web app: use `zerocode-browser --help` and the built-in browser.
+  It is the fastest road for a page. When the person asks for their own browser
+  (its sign-ins and tabs), or the page needs what only that browser has, drive it
+  with `zerocode-computer` like any other app.
 - iOS Simulator, Android Emulator, or a phone the person says is connected or open in the IDE: use the `mobile-device` skill — it starts with `zerocode-emulator list`.
 - A shell, a saved SSH host, a remote workspace or remote server: use
   `zerocode-ssh --help` and the terminal panes this window owns.
 - Any other local desktop app: use `zerocode-computer` below.
 
-Do not drive a desktop browser, Simulator or terminal window through
-accessibility when a ZeroCode-native surface can address the page, device or
-machine directly — and never drive ZeroCode's own window that way, because
-every surface it draws has a command above that reaches the same thing without
-a click. If the user explicitly asks to control the browser application's
-chrome rather than a web page, desktop Computer Use is appropriate.
+Do not drive a Simulator or terminal window through accessibility when a
+ZeroCode-native surface can address the device or machine directly — and never
+drive ZeroCode's own window that way, because every surface it draws has a
+command above that reaches the same thing without a click.
+
+## The whole computer, several apps at once
+
+Any app is yours to use, and several at once, while the person keeps working.
+Requests to different apps run side by side; a hung app holds up only the requests
+naming it (`app_unresponsive`, after about a second).
+
+- **Numbers last.** An element's number stays with that control until the app
+  removes it, so an earlier look stays good after other acts and looks. A number
+  that is gone, or older than a restart of the app or helper, is refused: look again.
+- **Answers are small.** An act answers `action` and `changes` (`added`, `changed`,
+  `removed`, `omitted`), in lines with numbers you can use. `--full-state` answers
+  the whole tree, `--no-state` no look at all.
+- **Repeat only on `retry: safe`.** Every act and refusal says `delivery`:
+  `not_delivered`, `delivered_unverified`, `delivered_verified` or `uncertain`.
+  `delivery_uncertain` may have landed (a control that opens a dialog answers
+  late); `effect: none_seen` was delivered and changed nothing. Look first.
+- **It waits for its control.** A disabled or moving control is waited for, 2 s by
+  default (`--timeout-ms N`, 0 for none, 10 s at most), then refused `not_actionable`.
+  A control scrolled out of its list is pressed by its own action.
+- **Background first.** An act stays in its app's window and leaves the person's
+  pointer and focus alone. Where the setting allows the shared desktop
+  (`status.inputPolicy` is `shared-desktop`) and the background cannot do it, the
+  act borrows the pointer and keyboard, then puts back the pointer and the app in
+  front (`borrowedDesktop` in the answer). `--foreground` borrows at once,
+  `--background` never does. Under the background-only setting such an act is
+  refused `requires_foreground`.
+- **Dense windows and menus:** `--skeleton`, `--root`, `--surface` (`observation.md`).
+- **Several apps in one call.** `zerocode-computer parallel --commands
+  '[[<batch for one app>],[<batch for another>]]' --json`: each batch keeps its
+  own order, they run together, and `result.groups` holds each batch's answer.
+  Open apps first: `open --url <address> [--with <app>]` and `launch --app <app>`
+  come up behind, without taking focus.
+- **Sign-ins stay the person's.** Fill what you know; a password goes through
+  `handoff` (see the rules below). An account already signed in needs nothing.
+- **On Windows** an act goes on the shared desktop, and a number holds only until
+  the window changes: look again then.
 
 ## Reference files — open one when its row says so
 
@@ -73,10 +111,8 @@ actions, tied to the observed window, not model-written key strings.
 The window's default input policy is background-only, including preparation,
 observation, nested walks and result inspection. `status.inputPolicy` reports
 the effective policy. A missing field on an older window is not proof that it
-enforces this default. Still add `--background` to an app walk or to
-app-scoped observation, click, scroll, set-value, type-text, paste-text,
-press-key and hotkey commands (zo's Computer tool: `background: true` on an
-app `walk`). This is local app/window-scoped input, not a separate computer.
+enforces this default. This is local app/window-scoped input, not a separate
+computer.
 Semantic actions remain preferred. Otherwise clicks, scrolling and keyboard
 events use the observed window and a private input source, without moving
 the person's pointer, raising the window or suppressing their input. A click
@@ -87,26 +123,22 @@ refused. Text replacement and Select All prefer field-specific accessibility
 operations. Native keys require the app's actual keyboard receiver to belong
 to the requested window: an event's window number alone is not enough. If
 that receiver cannot be verified, use observed, pinned field operations;
-never activate the app or guess another receiver. Global keys, drags, unsupported windows and stale geometry are
-refused without a desktop fallback. Never remove the flag automatically.
+never activate the app or guess another receiver. On the background road alone, global keys, drags, unsupported windows and stale
+geometry are refused without a desktop fallback.
 
 Background input pauses when the person is using the target app or its
 foreground state cannot be read. An app can still activate itself in response
 to its own action: the receipt reports `action.background.foregroundUnchanged`,
 and a walk stops taking actions when that receipt is missing or false.
-Avoid using the same app concurrently. Old helpers and Windows currently
-refuse unsupported background verbs rather than claiming isolation. Check
-the resulting state: event delivery alone does not prove the task completed.
+Windows refuses unsupported background verbs rather than claiming isolation.
 Guarded background clicks require a readable control label, not merely a
 window title. If accessibility has not exposed that control, observe or wait
 for it before retrying; do not turn confirmation off or switch to the shared
 mouse to force the action through.
-Apps that activate themselves or do not accept window-scoped events need an
-explicitly separate desktop/VM or a handoff to the person. Do not restore or
-activate a window during preparation, remove background protection, change the
-person's input setting, or substitute a shared-input shell command. Only the
-person can explicitly enable shared desktop input in Computer Use settings.
-A background run cannot inherit that weaker policy partway through its steps.
+Under the background-only setting, apps that activate themselves or do not accept
+window-scoped events need a handoff to the person. Do not change the person's
+input setting or substitute a shared-input shell command: only the person can
+enable shared desktop input, in Computer Use settings.
 
 The looks a walk and every other action rely on (the bounds on unchanged looks, `--no-screenshot`, OCR) are in `observation.md`. A walk's answer is read like this:
 
@@ -289,7 +321,7 @@ zerocode-computer scroll --app <app> --element-index <n> --direction down --json
 zerocode-computer drag --app <app> --from-element-index <n> --to-element-index <n> --json
 ```
 
-Element indexes are short-lived: look again before the next action. A transport success is not a result: read `action.verification` and look.
+An element's number lasts until the app removes that control. A transport success is not a result: read `action.verification` and look.
 
 ### The desktop, no app named — `app-and-desktop.md`
 
@@ -425,13 +457,16 @@ zerocode-computer verdict --pass | verdict --fail --reason "…"        # the QA
 - `window_not_focused`: retry once with `--restore-window`; if still unfocused,
   stop retrying and use a semantic action or ask the user to foreground it.
 - `element_not_found`: observe again and use a fresh index.
-- `wrong_verb`: a verb of the desktop's hand (`mouse-*`, `key`, `hold-key`,
-  `type`) was given `--app`; nothing moved. These act on the whole desktop:
-  screen points, keys where the focus is. For `mouse-click`, `mouse-drag`,
-  `mouse-scroll`, `type` and `key` the message names the app's verb for the
-  same act (`click`, `drag`, `scroll`, `type-text`, `press-key` with
-  `--app`), whose points count inside that app's window. `mouse-move` and
-  `hold-key` have no app's verb: drop `--app` and give screen points.
+- `wrong_verb`: a desktop verb (`mouse-*`, `key`, `hold-key`, `type`) was given
+  `--app`; nothing moved. The message names the app's verb for the same act
+  (`click`, `drag`, `scroll`, `type-text`, `press-key` with `--app`). `mouse-move`
+  and `hold-key` have none: drop `--app` and give screen points.
+- `not_actionable`: the control stayed disabled or kept moving; nothing was
+  pressed. Read why in the message, then do what would enable it.
+- `app_unresponsive`: the app did not answer; nothing was read or pressed. Try
+  again shortly, and work elsewhere meanwhile.
+- `delivery_uncertain`: the act may have landed. Look before doing it again.
+- `surface_not_open`: that menu or sheet is not open. Open it, then look.
 - `covered`: another window stands over the place and the hand did not move
   it — the message names whose app it is. The person was asked in one line
   when a person is there; do not look again or retry until it is cleared,
@@ -440,18 +475,17 @@ zerocode-computer verdict --pass | verdict --fail --reason "…"        # the QA
   Observe the current target again and verify the pending step before
   continuing; a missed interval is not evidence that nothing changed.
 - `screenshot_failed`: grant Screen Recording or retry with `--no-screenshot`.
-- `permission_denied` / `accessibility_error`: use the window's recovery card
-  or `permissions --id <id>`, grant the named helper permission, then check
-  again and retry. For a row that is already on but still denied, use the
-  targeted `--reset` flow above.
+- `permission_denied` / `accessibility_error`: use the window's recovery card or
+  `permissions --id <id>`, grant the named helper permission, then check again and
+  retry. For a row already on but still denied, use the targeted `--reset` flow above.
 - `unsupported_capability`: use an advertised action or the built-in browser /
   emulator route where applicable.
 - `secure_input`: a password field — hand it to the person (`handoff`), then
   look; do not retry, paste or copy it (see the rule above).
 - `self_sensitive`: that control of ZeroCode's own window is the person's;
   nothing was pressed. Do not look for another way to press it — ask them.
-- `person_typing`: the person is in that field of ZeroCode's own window, or
-  typed in it a moment ago; nothing was pressed. Look again later.
+- `person_typing`: the person is typing there or on the shared desktop; nothing
+  was pressed. Look again later.
 - `share_scope`: the request reaches outside the window the person shared, or
   the person declined that app; nothing was done. Stay in the shared app.
 - `share_required`: sharing is required and the person has not handed that
@@ -461,16 +495,6 @@ zerocode-computer verdict --pass | verdict --fail --reason "…"        # the QA
 
 ### Concurrent requests
 
-A batch or recipe owns its complete sequence. Another request that could
-change the screen or its cached observation receives `sequence_busy` before
-any input; it is not queued. Wait for the owning request's result, then take
-a fresh observation before deciding the next action. Stop and status remain
-available during the sequence, as do passive repaint and sound watches.
-Ownership ends with that request, not an
-entire multi-call conversation; coordinate separate observe/action calls in
-the ledger when sharing a desktop.
-
-`list-all-windows --all-layers` exposes the existing native occlusion map,
-including panels and menus, in front-to-back order. Full-display transparent
-overlay rows have `overlay: true`; their actual visible cover regions appear
-as separate non-overlay rows. Use this map when validating a desktop point.
+A batch or recipe owns the apps it walks until it ends. An act in the same app
+waits, told `sequence_busy` only after 30 s; other apps' acts and every look go
+on. Acts on the shared pointer take turns. Stop and status always answer.

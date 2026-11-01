@@ -793,10 +793,35 @@ const KEYCHAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// How much of a password `security add-generic-password -w` keeps when the
 /// value is typed at its prompt instead of passed as the argument — measured
 /// 2026-09-10 (a 562-byte value came back as 128). The shipped writer never
-/// takes that road; the fake tool models it so the round-trip test stays red
-/// on the prompt and green on the argument.
+/// takes that road; the fake tool models it so a write that went back to the
+/// prompt comes out cut.
 #[cfg(all(target_os = "macos", test))]
 const SECURITY_PROMPT_BYTES: usize = 128;
+
+/// The longest command line, newline not counted, that `security -i` both runs
+/// whole and answers for truthfully. Measured against the real tool 2026-11-01,
+/// with an 84-byte command around the value:
+///
+/// | line bytes | item holds | exit over a standing item | the tool prints |
+/// |---|---|---|---|
+/// | 4,094 | the whole value | 45 | nothing |
+/// | 4,095 | the whole value | **0**, the newline ran as an empty command | nothing |
+/// | 4,096 | the whole value, closing quote cut | **0** | its help text |
+/// | 5,000 | **4,012 of 4,916 bytes** | 1 | **the rest, as `unknown command`** |
+///
+/// The buffer is Apple's `MAX_LINE_LEN`, which no document promises, so the
+/// read-back in `write_keychain_service` is what catches it moving.
+#[cfg(target_os = "macos")]
+const SECURITY_LINE_BYTES: usize = 4094;
+
+// Every argv the fake tool was started with on this thread: what a `ps` on this
+// Mac would have shown. Per thread because the suite runs in parallel and a
+// write calls the tool on the caller's own thread.
+#[cfg(all(target_os = "macos", test))]
+thread_local! {
+    static SECURITY_ARGV_SEEN: std::cell::RefCell<Vec<Vec<String>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 /// Every keychain call goes through Apple's own tool, and the reason is the
 /// ACCESS LIST rather than convenience.
@@ -809,12 +834,14 @@ const SECURITY_PROMPT_BYTES: usize = 128;
 /// ("키체인이 계속"). Going through `/usr/bin/security` puts a stable system
 /// binary on the list instead of a name that is different every time we compile.
 ///
-/// `security` does not read a piped stdin for `-w`: leaving the value off opens
-/// an interactive terminal prompt and parks this call until the timeout. The
-/// password therefore follows `-w`, matching Orca (`keychain.ts:135`). That
-/// briefly exposes it in this short-lived process's argv; the three-second bound
-/// above limits that window and is preferable to an authentication dialog that
-/// can never consume the bytes we sent it.
+/// A secret reaches the tool on stdin, as a command line for `security -i`: the
+/// tool's argv is readable through `ps` by every process on this Mac while it
+/// runs. Leaving the value off `-w` is not the alternative: that opens the tool's
+/// password prompt, which kept 128 bytes of a login (`SECURITY_PROMPT_BYTES`).
+/// `-i` runs a line through the same command code as argv, so the item's access
+/// list and partition came out the same (measured 2026-11-01). Only a value past
+/// the line's limit still goes as the argument, and says so
+/// (`keychain_line_too_long`).
 ///
 /// **Under test this never runs.** The suite exercises the whole switch, and a
 /// switch reaches the keychain — so a version of this without the guard below
@@ -825,50 +852,70 @@ const SECURITY_PROMPT_BYTES: usize = 128;
 /// every future test to remember.
 #[cfg(all(target_os = "macos", not(test)))]
 fn security_command(args: &[&str], stdin: Option<&str>) -> Result<String, String> {
+    crate::credential_store_policy::ensure_access()?;
+    let mut tool = crate::proc::quiet_command("/usr/bin/security");
+    tool.args(args);
+    run_keychain_tool(tool, stdin, KEYCHAIN_TIMEOUT)
+}
+
+/// One bounded run of the keychain tool, with `stdin` written to it exactly as
+/// given. A run fed a secret gets nothing of the tool's output back but its exit
+/// and a sentence `security_refusal` has cleared, because the tool can print what
+/// it was fed.
+#[cfg(target_os = "macos")]
+fn run_keychain_tool(
+    mut tool: std::process::Command,
+    stdin: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
     use std::io::{Read, Write};
 
-    crate::credential_store_policy::ensure_access()?;
-    let mut child = crate::proc::quiet_command("/usr/bin/security")
-        .args(args)
+    let mut child = tool
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|error| error.to_string())?;
-    if let Some(secret) = stdin
+    if let Some(input) = stdin
         && let Some(pipe) = child.stdin.as_mut()
+        // Inline rather than from a thread: `SECURITY_LINE_BYTES` fits an empty
+        // pipe buffer. A failed write is a failed run, not a detail: `security -i`
+        // given a line with no newline runs nothing and still exits 0.
+        && let Err(error) = pipe.write_all(input.as_bytes())
     {
-        // Twice, because that is what the tool asks for when `-w` carries no
-        // value. Small enough never to fill a pipe buffer, which is why this can
-        // be written inline rather than from a thread.
-        let _ = pipe.write_all(format!("{secret}\n{secret}\n").as_bytes());
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("security에 입력을 넘기지 못했습니다: {error}"));
     }
     // Closed either way: a `security` that is waiting on a pipe nobody will
     // write to waits until the deadline and looks like a hung keychain.
     drop(child.stdin.take());
-    let deadline = std::time::Instant::now() + KEYCHAIN_TIMEOUT;
+    let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut out = String::new();
-                if let Some(pipe) = child.stdout.as_mut() {
-                    let _ = pipe.read_to_string(&mut out);
-                }
                 if status.success() {
+                    if stdin.is_some() {
+                        return Ok(String::new());
+                    }
+                    let mut out = String::new();
+                    if let Some(pipe) = child.stdout.as_mut()
+                        && let Err(error) = pipe.read_to_string(&mut out)
+                    {
+                        return Err(format!("security의 출력을 읽지 못했습니다: {error}"));
+                    }
                     return Ok(out.trim_end_matches(['\n', '\r']).to_string());
                 }
                 // The tool's own sentence rides with the code. "종료 45" alone
                 // left 2026-09-13's refusal undiagnosable — a duplicate, a
                 // refused delete or a locked keychain all exit with a number.
-                // stderr never carries the secret: `security` names the call
-                // it made and the OSStatus it got.
                 let mut said = String::new();
                 if let Some(pipe) = child.stderr.as_mut() {
                     let _ = pipe.read_to_string(&mut said);
                 }
                 return Err(format!(
                     "security {}",
-                    security_failure_word(status.code(), &said)
+                    security_refusal(status.code(), &said, stdin)
                 ));
             }
             Ok(None) => {
@@ -882,6 +929,68 @@ fn security_command(args: &[&str], stdin: Option<&str>) -> Result<String, String
             Err(error) => return Err(error.to_string()),
         }
     }
+}
+
+/// The refusal of a run, in words safe to show and log.
+///
+/// A run fed a secret cannot be trusted to keep it: `security -i` prints whatever
+/// stands in a line's command position, and on 2026-11-01 a line past the buffer
+/// came back as `security: unknown command "<the rest of the value>"`. The exit
+/// code classifies the run either way.
+#[cfg(target_os = "macos")]
+fn security_refusal(code: Option<i32>, stderr: &str, input: Option<&str>) -> String {
+    let Some(input) = input else {
+        return security_failure_word(code, stderr);
+    };
+    let first = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let value = input.split_once(" -w '").map_or(input, |(_, value)| value);
+    let cleared = tool_sentence_is_clear(first, value);
+    security_failure_word(code, if cleared { first } else { "" })
+}
+
+/// Whether a line the tool printed is safe to keep beside a secret: it has the
+/// measured shape of the tool's refusals (`security: Sec<call> (<default>): <why>`),
+/// and no word of the why came from the value.
+///
+/// Only the why against only the value, and only words of `ECHO_WORD_BYTES` or more:
+/// a real login holds `default` in `rateLimitTier` and `user` in `scopes`, and the
+/// tool's own head and sentences hold those words too. Read wider, the check dropped
+/// the sentence on every real login, which left a locked keychain as a bare number.
+#[cfg(target_os = "macos")]
+fn tool_sentence_is_clear(line: &str, value: &str) -> bool {
+    const ECHO_WORD_BYTES: usize = 6;
+    line.strip_prefix("security: Sec")
+        .and_then(|rest| rest.split_once(" (<default>): "))
+        .filter(|(call, _)| call.chars().all(|ch| ch.is_ascii_alphanumeric()))
+        .is_some_and(|(_, why)| {
+            !why.split(|ch: char| !ch.is_ascii_alphanumeric())
+                .any(|word| word.len() >= ECHO_WORD_BYTES && value.contains(word))
+        })
+}
+
+/// The refusal of a run that carried `value` as its argument: the classification
+/// the callers read, and the tool's sentence only as `security_refusal` would keep
+/// it. Nothing measured echoes the argument, but this road's stderr gets the same
+/// distrust as the line's.
+#[cfg(target_os = "macos")]
+fn argument_road_refusal(error: &str, value: &str) -> String {
+    match error.split_once(" — ") {
+        Some((word, said)) if !tool_sentence_is_clear(said, value) => word.to_string(),
+        _ => error.to_string(),
+    }
+}
+
+/// What the log says when a value goes as the tool's argument: its size and what
+/// that costs, and nothing else about it.
+#[cfg(target_os = "macos")]
+fn argument_road_warning(value_bytes: usize) -> String {
+    format!(
+        "zerocode-shell: 키체인에 쓸 값이 {value_bytes}바이트로 길어 명령줄 인자로 넘깁니다. 이 값은 ps에 잠깐 보일 수 있습니다"
+    )
 }
 
 /// The exit of a `security` run, in words. Code 44 is its "no such item" and 45
@@ -917,6 +1026,85 @@ fn security_failure_word(code: Option<i32>, stderr: &str) -> String {
 /// Mac, and no test can reach the login keychain to find out.
 #[cfg(all(target_os = "macos", test))]
 fn security_command(args: &[&str], stdin: Option<&str>) -> Result<String, String> {
+    SECURITY_ARGV_SEEN.with(|seen| {
+        seen.borrow_mut()
+            .push(args.iter().map(|arg| (*arg).to_string()).collect());
+    });
+    if args == ["-i"] {
+        return fake_security_lines(stdin.unwrap_or_default());
+    }
+    fake_security_tool(args, stdin)
+}
+
+/// The fake tool's `-i`, cut the way the real one cuts (`SECURITY_LINE_BYTES`):
+/// a buffer of 4,095 bytes, the rest of a long line running as the next command,
+/// an unfinished last line running nothing, and the last command's result as the
+/// run's result.
+#[cfg(all(target_os = "macos", test))]
+fn fake_security_lines(input: &str) -> Result<String, String> {
+    const BUFFER_BYTES: usize = 4095;
+    let mut rest = input.as_bytes();
+    let mut last = Ok(String::new());
+    loop {
+        let (line, taken) = match rest.iter().position(|byte| *byte == b'\n') {
+            Some(at) if at < BUFFER_BYTES => (&rest[..at], at + 1),
+            _ if rest.len() >= BUFFER_BYTES => (&rest[..BUFFER_BYTES], BUFFER_BYTES),
+            _ => return last,
+        };
+        rest = &rest[taken..];
+        let words = fake_security_split_line(&String::from_utf8_lossy(line));
+        let argv: Vec<&str> = words.iter().map(String::as_str).collect();
+        last = match argv.first().copied() {
+            None | Some("") => Ok(String::new()),
+            Some("add-generic-password") if !argv.contains(&"-A") => {
+                Err("security 종료 1 — fixture: an add with no open access list".into())
+            }
+            Some("add-generic-password" | "find-generic-password" | "delete-generic-password") => {
+                fake_security_tool(&argv, None)
+            }
+            Some(other) => Err(format!(
+                "security {}",
+                security_refusal(
+                    Some(1),
+                    &format!("security: unknown command \"{other}\"\n"),
+                    Some(input),
+                )
+            )),
+        };
+    }
+}
+
+/// The real tool's `split_line`: spaces part words, either quote holds them, a
+/// backslash takes the next character as it is, and a quote left open at the end
+/// of the line is accepted.
+#[cfg(all(target_os = "macos", test))]
+fn fake_security_split_line(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut quote = None;
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        match (ch, quote) {
+            ('\\', _) => {
+                let next = chars.next();
+                word.get_or_insert_default().extend(next);
+            }
+            ('\'' | '"', None) => {
+                quote = Some(ch);
+                word.get_or_insert_default();
+            }
+            (ch, Some(open)) if ch == open => quote = None,
+            (ch, None) if ch.is_ascii_whitespace() => words.extend(word.take()),
+            (ch, _) => word.get_or_insert_default().push(ch),
+        }
+    }
+    words.extend(word);
+    words
+}
+
+/// The keychain itself, behind the fake tool's two ways in.
+#[cfg(all(target_os = "macos", test))]
+fn fake_security_tool(args: &[&str], stdin: Option<&str>) -> Result<String, String> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -948,9 +1136,12 @@ fn security_command(args: &[&str], stdin: Option<&str>) -> Result<String, String
             // goes through the tool's password prompt, which keeps the first
             // `SECURITY_PROMPT_BYTES` and drops the rest. An empty stdin would
             // mean the tool was left asking a question nobody is there to answer.
-            let argv_value = value_after("-w");
-            let password = if !argv_value.is_empty() {
-                argv_value
+            let argv_value = args
+                .iter()
+                .position(|arg| *arg == "-w")
+                .and_then(|at| args.get(at + 1));
+            let mut password = if let Some(value) = argv_value {
+                (*value).to_string()
             } else {
                 let Some(typed) = stdin.filter(|held| !held.is_empty()) else {
                     return Err("`security -w` was left interactive".into());
@@ -963,16 +1154,41 @@ fn security_command(args: &[&str], stdin: Option<&str>) -> Result<String, String
             if table.contains_key(&key) && !args.contains(&"-U") {
                 return Err(format!("security {DUPLICATE_ITEM}"));
             }
+            if pinned.remove(&format!("cut\u{0}{key}")) {
+                password.truncate(password.len() / 2);
+            }
+            if pinned.remove(&format!("read-after\u{0}{key}")) {
+                pinned.insert(format!("read\u{0}{key}"));
+            }
+            if pinned.remove(&format!("gone\u{0}{key}")) {
+                return Ok(String::new());
+            }
+            let password = table
+                .remove(&format!("other\u{0}{key}"))
+                .and_then(Result::ok)
+                .unwrap_or(password);
             table.insert(key, Ok(password));
             Ok(String::new())
         }
         // Refused in the tool's own words, out of the same constant the real
         // exit code is translated with — a classification that read one word on
         // a Mac and another in a test would be a gate that proves nothing.
+        Some("find-generic-password") if pinned.remove(&format!("read\u{0}{key}")) => {
+            Err("security 종료 36 — fixture refused this read".into())
+        }
+        // `-w` prints a value holding any byte outside printable ASCII as hex,
+        // measured 2026-11-01 for Korean, a tab and a carriage return.
         Some("find-generic-password") => table
             .get(&key)
             .cloned()
-            .unwrap_or_else(|| Err(format!("security {NO_SUCH_ITEM}"))),
+            .unwrap_or_else(|| Err(format!("security {NO_SUCH_ITEM}")))
+            .map(|held| {
+                if held.bytes().all(|byte| (0x20..0x7f).contains(&byte)) {
+                    held
+                } else {
+                    held.bytes().map(|byte| format!("{byte:02x}")).collect()
+                }
+            }),
         Some("test-refuse-read") => {
             table.insert(key, Err("fixture locked keychain".into()));
             Ok(String::new())
@@ -988,6 +1204,30 @@ fn security_command(args: &[&str], stdin: Option<&str>) -> Result<String, String
             pinned.insert(key);
             Ok(String::new())
         }
+        Some("test-cut-next-add") => {
+            pinned.insert(format!("cut\u{0}{key}"));
+            Ok(String::new())
+        }
+        Some("test-refuse-next-read") => {
+            pinned.insert(format!("read\u{0}{key}"));
+            Ok(String::new())
+        }
+        // The next add lands and the read straight after it is refused, with
+        // any read before that add answered as usual.
+        Some("test-refuse-read-after-add") => {
+            pinned.insert(format!("read-after\u{0}{key}"));
+            Ok(String::new())
+        }
+        // Another process removes the item between the next add and its read.
+        Some("test-vanish-after-add") => {
+            pinned.insert(format!("gone\u{0}{key}"));
+            Ok(String::new())
+        }
+        // Another process writes this value between the next add and its read.
+        Some("test-other-writer-after-add") => {
+            table.insert(format!("other\u{0}{key}"), Ok(value_after("-w")));
+            Ok(String::new())
+        }
         other => Err(format!("이 시험 키체인이 모르는 명령입니다: {other:?}")),
     }
 }
@@ -997,6 +1237,78 @@ fn security_command(args: &[&str], stdin: Option<&str>) -> Result<String, String
 /// file holds only a variable's name (a router row) must refuse a secret when
 /// this is false, because the no-op writes below would keep it nowhere.
 pub(crate) const KEYCHAIN_AVAILABLE: bool = cfg!(target_os = "macos");
+
+/// The command line that adds one item through `security -i`, or why this value
+/// cannot be kept on either road. The words of a refusal never carry the value.
+///
+/// A line break would end the command and run the rest of the value as the next
+/// one, which the tool then prints; NUL ends the line early. A value with any byte
+/// outside printable ASCII would land, but `find -w` answers it in hex on either
+/// road (measured 2026-11-01 for Korean, a tab and a carriage return), so no reader
+/// could get it back. Refused here rather than by the read-back, which runs after
+/// the old item is gone, and whatever the value's length: the argument road is for
+/// what the line cannot hold and not for what no reader could read.
+///
+/// The line's length is not judged here: see `keychain_line_too_long`.
+#[cfg(target_os = "macos")]
+fn keychain_add_line(service: &str, user: &str, credentials: &str) -> Result<String, String> {
+    let quoted = |text: &str| text.replace('\\', "\\\\").replace('\'', "\\'");
+    let line = format!(
+        "add-generic-password -A -s '{}' -a '{}' -w '{}'",
+        quoted(service),
+        quoted(user),
+        quoted(credentials)
+    );
+    if line.contains(['\n', '\r', '\0']) {
+        return Err("값에 줄바꿈이나 NUL 글자가 들어 있어 쓰지 않았습니다".to_string());
+    }
+    if !credentials.bytes().all(|byte| (0x20..0x7f).contains(&byte)) {
+        return Err(
+            "값에 영문·숫자·기호가 아닌 글자가 들어 있어 쓰지 않았습니다(읽을 때 다른 값으로 나옵니다)"
+                .to_string(),
+        );
+    }
+    Ok(line + "\n")
+}
+
+/// Whether a command line is longer than `security -i` runs whole, newline not
+/// counted. The one judgment of length, and the one place the two roads part.
+///
+/// Such a value goes as the tool's argument (the person's decision, 2026-11-01):
+/// refusing it stopped every launch of an account whose login had grown past the
+/// line, and the argument is where every value went before. It stands in `ps` while
+/// the tool runs, so the write says so. Measured 2026-11-01 for 4,011 to 60,000
+/// bytes: the same value read back, and exit 45 over a standing item.
+#[cfg(target_os = "macos")]
+const fn keychain_line_too_long(line: &str) -> bool {
+    line.len() - 1 > SECURITY_LINE_BYTES
+}
+
+/// Why a write of this value would be refused before anything is touched, for a
+/// caller that does something different about such a refusal. In the same words as
+/// the refusal of `write_keychain_service`.
+pub(crate) fn keychain_refuses_value(service: &str, credentials: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // No account to name is the write's own refusal, and no judgment of the value.
+        let Ok(user) = keychain_account(keychain_user()) else {
+            return Ok(());
+        };
+        keychain_add_line(service, &user, credentials)
+            .map(|_| ())
+            .map_err(|error| keychain_write_refused(service, &error))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (service, credentials);
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_write_refused(service: &str, error: &str) -> String {
+    format!("키체인에 자격증명을 쓰지 못했습니다: {service} — {error}")
+}
 
 /// Put the credentials into a named service.
 ///
@@ -1014,29 +1326,40 @@ pub(crate) fn write_keychain_service(service: &str, credentials: &str) -> Result
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let user = keychain_account(keychain_user())?;
+        let refused = |error: String| keychain_write_refused(service, &error);
+        // Before the delete below: a value no reader could get back must not cost
+        // the person the item standing there, and no process has seen it yet.
+        let line = keychain_add_line(service, &user, credentials).map_err(refused)?;
         let delete = || {
             security_command(
                 &["delete-generic-password", "-s", service, "-a", &user],
                 None,
             )
         };
+        let past_the_line = keychain_line_too_long(&line);
+        if past_the_line {
+            eprintln!("{}", argument_road_warning(credentials.len()));
+        }
         let add = || {
-            security_command(
-                &[
-                    "add-generic-password",
-                    "-A",
-                    "-s",
-                    service,
-                    "-a",
-                    &user,
-                    "-w",
-                    credentials,
-                ],
-                None,
-            )
+            if past_the_line {
+                security_command(
+                    &[
+                        "add-generic-password",
+                        "-A",
+                        "-s",
+                        service,
+                        "-a",
+                        &user,
+                        "-w",
+                        credentials,
+                    ],
+                    None,
+                )
+                .map_err(|error| argument_road_refusal(&error, credentials))
+            } else {
+                security_command(&["-i"], Some(&line))
+            }
         };
-        let refused =
-            |error: String| format!("키체인에 자격증명을 쓰지 못했습니다: {service} — {error}");
         // Delete, then add — deliberately not `-U`. An update in place keeps
         // the OLD item's access list, and the reason every write goes through
         // `security -A` is to leave an item any signer can read (see
@@ -1044,7 +1367,7 @@ pub(crate) fn write_keychain_service(service: &str, credentials: &str) -> Result
         // any other refusal of this delete is diagnosed by the add below.
         let _ = delete();
         match add() {
-            Ok(_) => Ok(()),
+            Ok(_) => {}
             Err(error) if error.contains(DUPLICATE_ITEM) => {
                 // The item was still standing: the delete above was refused,
                 // or a writer this process cannot see landed between the two
@@ -1060,9 +1383,60 @@ pub(crate) fn write_keychain_service(service: &str, credentials: &str) -> Result
                         ));
                     }
                 }
-                add().map(|_| ()).map_err(refused)
+                add().map(|_| ()).map_err(refused)?;
             }
-            Err(error) => Err(refused(error)),
+            Err(error) => return Err(refused(error)),
+        }
+        // Read it back. A cut login planted by a road nobody compared stood for
+        // three days from 2026-09-06, and the line limit this road lives under is
+        // no promise of Apple's. Sizes only in the words: a value that differs is
+        // still most of a secret.
+        //
+        // A read that fails proves nothing against an add that landed, so the
+        // write stands and says so. Answering "not written" here sent a switch back
+        // to the account before with the new login left in the keychain, and the
+        // next launch filed that login under the account before. A cut this read
+        // missed heals by itself: the next launch finds a damaged item and writes
+        // it again.
+        let held = match security_command(
+            &["find-generic-password", "-s", service, "-a", &user, "-w"],
+            None,
+        ) {
+            Ok(held) => held,
+            Err(error) if error.contains(NO_SUCH_ITEM) => {
+                return Err(format!(
+                    "키체인에 쓴 자격증명을 다시 읽어 보니 항목이 없습니다: {service} — {error}"
+                ));
+            }
+            Err(error) => {
+                eprintln!(
+                    "zerocode-shell: 키체인 {service}에 쓴 자격증명을 다시 읽지 못했습니다. 쓰기는 끝났습니다: {error}"
+                );
+                return Ok(());
+            }
+        };
+        if held == credentials {
+            return Ok(());
+        }
+        let wrote = credentials.len();
+        let read = held.len();
+        // Only a cut of this value is this write's own to remove. Anything else was
+        // written by somebody else after the add, and the CLI refreshing a token is
+        // the ordinary somebody: that value is the only live copy, because its
+        // refresh token has already replaced the one in our file. The refusal sends
+        // a switch back to the account before, whose refresh this value is.
+        if held.is_empty() || !credentials.starts_with(&held) {
+            return Err(format!(
+                "키체인 항목을 다시 읽어 보니 다른 값이라 그대로 두었습니다(다른 프로그램이 썼을 수 있습니다): {service} — 쓴 값 {wrote}바이트, 읽은 값 {read}바이트"
+            ));
+        }
+        match delete() {
+            Ok(_) => Err(format!(
+                "키체인에 쓴 자격증명을 다시 읽어 보니 달라서 항목을 지웠습니다: {service} — 쓴 값 {wrote}바이트, 읽은 값 {read}바이트"
+            )),
+            Err(word) => Err(format!(
+                "키체인에 쓴 자격증명을 다시 읽어 보니 다른데 항목을 지우지 못했습니다: {service} — 쓴 값 {wrote}바이트, 읽은 값 {read}바이트 — {word}"
+            )),
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -1127,10 +1501,57 @@ pub(crate) fn read_keychain_service_if_present(service: &str) -> Result<Option<S
     }
 }
 
+/// A login document in the bytes the keychain's road can carry: the same document,
+/// with whitespace outside its strings dropped and everything outside printable
+/// ASCII in a string written as `\uXXXX`. The tool answers a value holding any other
+/// byte in hex, and a line break ends the command, so a CLI's indented file or a
+/// Korean organization name would otherwise stop a launch for a form it has no say
+/// in.
+///
+/// Worked on the text rather than through a parsed value, so key order and every
+/// number stay as written. Anything the road can carry already, and anything that
+/// is no JSON document, comes back untouched: the first to stay byte for byte, the
+/// second to be refused in `keychain_add_line`.
+#[cfg(target_os = "macos")]
+fn keychain_form(document: &str) -> std::borrow::Cow<'_, str> {
+    use std::fmt::Write as _;
+
+    if document.bytes().all(|byte| (0x20..0x7f).contains(&byte))
+        || serde_json::from_str::<serde::de::IgnoredAny>(document).is_err()
+    {
+        return std::borrow::Cow::Borrowed(document);
+    }
+    let mut form = String::with_capacity(document.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in document.chars() {
+        if !in_string && ch.is_ascii_whitespace() {
+            continue;
+        }
+        if (' '..='~').contains(&ch) {
+            form.push(ch);
+        } else {
+            for unit in ch.encode_utf16(&mut [0; 2]) {
+                let _ = write!(form, "\\u{unit:04x}");
+            }
+        }
+        if escaped {
+            escaped = false;
+        } else if in_string && ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            in_string = !in_string;
+        }
+    }
+    std::borrow::Cow::Owned(form)
+}
+
 /// Put the credentials into the scoped service this home answers to.
 fn write_keychain(home: &Path, credentials: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
+        let form = keychain_form(credentials);
+        let credentials = form.as_ref();
         for service in keychain_services(home) {
             write_keychain_service(&service, credentials)?;
         }
@@ -1337,6 +1758,13 @@ fn materialize_into(
         }
     }
 
+    // The file, the keychain and the record hold one set of bytes, or the skip
+    // above never matches and every launch writes the keychain.
+    #[cfg(target_os = "macos")]
+    if let std::borrow::Cow::Owned(form) = keychain_form(&credentials) {
+        credentials = form;
+    }
+
     // The record says a put is under way BEFORE the home changes hands
     // (t-7538, astra R6-2). A put that ended without recording its end — the
     // disk refusing the record's last replace — left this login in the home
@@ -1363,7 +1791,9 @@ fn materialize_into(
     // 3. And the keychain, or the file goes back.
     if let Err(error) = write_keychain(home, &credentials) {
         // The undo restores the FILE, which is the only half this window wrote
-        // before the keychain refused.
+        // before the keychain refused: a refusal means this login is not standing
+        // in the keychain, since an add that landed and could not be read back
+        // answers Ok.
         let undone = already_on_file
             || match on_file.as_deref() {
                 Some(previous) => write_private(&live, previous).is_ok(),
@@ -2956,8 +3386,8 @@ mod tests {
     /// the first 128 bytes and no more — a 562-byte fixture came back as 128,
     /// and every real Claude blob is 509–2040 bytes. The window had seeded
     /// every scoped item that way since 09-06, so each held a login cut off
-    /// inside its access token. Passed as the `-w` argument the same fixture
-    /// came back whole. The fake tool models both roads.
+    /// inside its access token. The fake tool models that prompt, and the write
+    /// now reaches the tool as a `security -i` line, which came back whole.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_full_size_login_survives_the_keychain_write() {
@@ -4984,24 +5414,849 @@ JSON
         assert!(held.starts_with("hand-"), "{held}");
     }
 
-    /// A real Claude blob is 509–2040 bytes and a router table can be longer.
-    /// The write takes the argument road, so nothing is cut at the prompt's
-    /// 128 bytes (measured 2026-09-10).
+    /// t-76905: while `security` runs, its argv is readable by other users'
+    /// processes through `ps` on this Mac, so no argument of any run may carry
+    /// a secret the line can carry, in plain text or as the hex `-X` takes.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_long_credential_round_trips_whole() {
-        let service = "zerocode-test-long-credential";
-        let long = format!(
-            r#"{{"claudeAiOauth":{{"accessToken":"{}"}}}}"#,
-            "T".repeat(4096)
+    fn a_keychain_write_keeps_the_secret_out_of_the_tools_argv() {
+        let service = "zerocode-test-secret-not-in-argv";
+        let secret = "fixture-not-a-real-secret-t76905";
+        let secret_hex: String = secret.bytes().map(|byte| format!("{byte:02x}")).collect();
+
+        SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+        write_keychain_service(service, secret).expect("write");
+        let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+
+        assert!(!started.is_empty(), "the write never started the tool");
+        let carrying: Vec<_> = started
+            .iter()
+            .filter(|argv| {
+                argv.iter().any(|arg| {
+                    let lowered = arg.to_ascii_lowercase();
+                    arg.contains(secret) || lowered.contains(&secret_hex)
+                })
+            })
+            .collect();
+        assert!(
+            carrying.is_empty(),
+            "the secret stood in a process's argv: {carrying:?}"
         );
-        write_keychain_service(service, &long).expect("write");
+        assert_eq!(read_keychain_service(service).as_deref(), Ok(secret));
+    }
+
+    /// The fake tool's `-i` against what the real one did on 2026-11-01. Every
+    /// test below leans on these numbers, so they are pinned on their own: the
+    /// item the line left, the exit over a standing item, and the rest of a long
+    /// line coming back as a command.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_fake_tools_line_buffer_cuts_like_the_measured_tool() {
+        let service = "zerocode-test-line-buffer";
+        let user = this_machines_account();
+        let fixed = keychain_add_line(service, &user, "").unwrap().len() - 1;
+        let line_of = |line_bytes: usize| {
+            let value = "M".repeat(line_bytes - fixed);
+            (
+                format!("add-generic-password -A -s '{service}' -a '{user}' -w '{value}'\n"),
+                value,
+            )
+        };
+        let forget = || delete_keychain_service(service).expect("forget");
+
+        forget();
+        let (line, value) = line_of(SECURITY_LINE_BYTES);
+        assert_eq!(
+            keychain_add_line(service, &user, &value).as_deref(),
+            Ok(line.as_str()),
+            "the writer's own line is the one this measures"
+        );
+        security_command(&["-i"], Some(&line)).expect("4,094 bytes");
+        assert_eq!(
+            read_keychain_service(service).as_deref(),
+            Ok(value.as_str())
+        );
+        let standing = security_command(&["-i"], Some(&line)).unwrap_err();
+        assert!(standing.contains(DUPLICATE_ITEM), "{standing}");
+
+        forget();
+        let (line, value) = line_of(SECURITY_LINE_BYTES + 1);
+        security_command(&["-i"], Some(&line)).expect("4,095 bytes");
+        assert_eq!(
+            read_keychain_service(service).as_deref(),
+            Ok(value.as_str())
+        );
+        assert_eq!(
+            security_command(&["-i"], Some(&line)),
+            Ok(String::new()),
+            "the newline ran as an empty command, whose exit hides the duplicate"
+        );
+
+        forget();
+        let (line, value) = line_of(SECURITY_LINE_BYTES + 2);
+        security_command(&["-i"], Some(&line)).expect("4,096 bytes");
+        assert_eq!(
+            read_keychain_service(service).as_deref(),
+            Ok(value.as_str()),
+            "only the closing quote was cut"
+        );
+
+        forget();
+        let (line, _) = line_of(5000);
+        let failed = security_command(&["-i"], Some(&line)).unwrap_err();
+        assert!(failed.contains("종료 1"), "{failed}");
+        assert_eq!(
+            read_keychain_service(service).map(|held| held.len()),
+            Ok(4096 - fixed),
+            "the value is cut where the buffer ends"
+        );
+
+        forget();
+        let (line, _) = line_of(1000);
+        assert_eq!(
+            security_command(&["-i"], Some(line.trim_end())),
+            Ok(String::new()),
+            "no newline: nothing ran, and the exit says all is well"
+        );
+        assert!(
+            read_keychain_service(service)
+                .unwrap_err()
+                .contains(NO_SUCH_ITEM)
+        );
+    }
+
+    /// The characters the line's own quoting is made of, and the ones a shell
+    /// would have cared about, all come back as themselves.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_value_with_the_lines_own_quoting_round_trips_whole() {
+        let service = "zerocode-test-quoting";
+        for value in [
+            r#"FAKE'mix\of"quotes'\'end"#,
+            r"FAKE\",
+            "FAKE'",
+            "FAKE $HOME `x` #y  z ",
+            "-FAKE",
+            "",
+        ] {
+            write_keychain_service(service, value).expect(value);
+            assert_eq!(read_keychain_service(service).as_deref(), Ok(value));
+        }
+        // A service name goes through the same quoting.
+        let awkward = r"zerocode-test-quote'in\name";
+        write_keychain_service(awkward, "fixture").expect("awkward name");
+        assert_eq!(read_keychain_service(awkward).as_deref(), Ok("fixture"));
+    }
+
+    /// The command around the value on the line, in bytes.
+    #[cfg(target_os = "macos")]
+    fn room_on_the_line(service: &str, user: &str) -> usize {
+        let around = format!("add-generic-password -A -s '{service}' -a '{user}' -w ''");
+        SECURITY_LINE_BYTES - around.len()
+    }
+
+    /// A value the line can carry never stands in an argv, and a value it cannot
+    /// goes on the old argument road whole: refusing it stopped every launch of an
+    /// account whose login had grown. `'` and a backslash take two bytes of the line each,
+    /// which is the edge this walks.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_a_value_past_the_line_limit_takes_the_argument_road() {
+        let service = "zerocode-test-line-limit";
+        let user = this_machines_account();
+        let room = room_on_the_line(service, &user);
+        let written = |value: &str| {
+            SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+            write_keychain_service(service, value).expect("the write");
+            assert_eq!(read_keychain_service(service).as_deref(), Ok(value));
+            SECURITY_ARGV_SEEN.with(std::cell::RefCell::take)
+        };
+        for fits in [
+            "T".repeat(room),
+            "'".repeat(room / 2),
+            "\\".repeat(room / 2),
+            "L".repeat(2040),
+            "short".to_string(),
+        ] {
+            let started = written(&fits);
+            assert!(started.iter().any(|argv| argv == &["-i"]), "{started:?}");
+            assert!(
+                !started.iter().flatten().any(|arg| arg == &fits),
+                "a value the line can carry stood in an argv"
+            );
+        }
+        for too_long in [
+            "T".repeat(room + 1),
+            "'".repeat(room / 2 + 1),
+            "\\".repeat(room / 2 + 1),
+            "T".repeat(20_000),
+        ] {
+            let started = written(&too_long);
+            let add = [
+                "add-generic-password",
+                "-A",
+                "-s",
+                service,
+                "-a",
+                &user,
+                "-w",
+                &too_long,
+            ];
+            assert!(
+                started.iter().any(|argv| argv == &add),
+                "not on the argument road"
+            );
+            assert!(!started.iter().any(|argv| argv == &["-i"]));
+        }
+    }
+
+    /// The length changes the road and nothing else: a long value with a byte the
+    /// tool would answer in hex, or a line break, is no more welcome in an argv.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_long_value_the_tool_cannot_return_is_still_refused_before_any_process_starts() {
+        let service = "zerocode-test-long-refused";
+        write_keychain_service(service, "standing").expect("seed");
+        let long = "FAKE".repeat(2_000);
+        for value in [
+            format!("{long}\n"),
+            format!("{long}\r"),
+            format!("{long}\0"),
+            format!("{long}한글"),
+            format!("{long}\t"),
+        ] {
+            SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+            let refused = write_keychain_service(service, &value).unwrap_err();
+            let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+            assert!(started.is_empty(), "the tool was started: {started:?}");
+            assert!(!refused.contains("FAKE"), "{refused}");
+            assert_eq!(read_keychain_service(service).as_deref(), Ok("standing"));
+        }
+    }
+
+    /// The argument road keeps the rest of the write: a duplicate is classified and
+    /// retried, and the read-back removes a cut of its own value.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_argument_road_keeps_the_retry_and_the_read_back() {
+        let user = this_machines_account();
+        let long = "T".repeat(6_000);
+
+        let service = "zerocode-test-long-duplicate";
+        write_keychain_service(service, "stale").expect("seed");
+        security_command(&["test-pin-item", "-s", service, "-a", &user], None).expect("arm");
+        write_keychain_service(service, &long).expect("the retry lands the write");
         assert_eq!(read_keychain_service(service).as_deref(), Ok(long.as_str()));
+
+        let service = "zerocode-test-long-cut";
+        security_command(&["test-cut-next-add", "-s", service, "-a", &user], None).expect("arm");
+        let refused = write_keychain_service(service, &long).unwrap_err();
+        assert!(refused.contains("항목을 지웠습니다"), "{refused}");
+        assert!(
+            read_keychain_service(service)
+                .unwrap_err()
+                .contains(NO_SUCH_ITEM)
+        );
+    }
+
+    /// A refusal on the argument road keeps the word the callers classify by, and
+    /// the tool's sentence only as the line's road would. The warning carries a size
+    /// and what that costs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_argument_road_says_nothing_of_the_value() {
+        let value = format!("FAKE-value-fragment{}", "T".repeat(5_000));
+        let duplicate = format!(
+            "security {DUPLICATE_ITEM} — security: SecKeychainItemCreateFromContent (<default>): The specified item already exists in the keychain."
+        );
+        assert_eq!(argument_road_refusal(&duplicate, &value), duplicate);
+        for echoed in [
+            format!("security 종료 1 — security: unknown command \"{value}\""),
+            "security 종료 1 — add-generic-password -w FAKE-value-fragment".to_string(),
+            "security 종료 1 — security: SecKeychainItemCreateFromContent (<default>): FAKE-value-fragment".to_string(),
+        ] {
+            assert_eq!(argument_road_refusal(&echoed, &value), "security 종료 1");
+        }
+        assert_eq!(
+            argument_road_warning(value.len()),
+            "zerocode-shell: 키체인에 쓸 값이 5019바이트로 길어 명령줄 인자로 넘깁니다. 이 값은 ps에 잠깐 보일 수 있습니다"
+        );
+    }
+
+    /// The whole road a long login walks, which is what the refusal broke: a switch
+    /// to it, the launch after it, and the CLI itself growing the login in the home.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_login_past_the_line_limit_still_switches_and_launches() {
+        let config = tempfile::tempdir().expect("no config dir");
+        let home = tempfile::tempdir().expect("no home");
+        let first = one_account(config.path(), "a-1", "one@example.com", "tok-one");
+        let second = one_account(config.path(), "a-2", "two@example.com", "tok-two");
+        let long_login = |email: &str, mark: &str| {
+            serde_json::json!({
+                "claudeAiOauth": {"accessToken": "FAKE", "mcpOAuth": mark.repeat(5_000)},
+                "oauthAccount": {"emailAddress": email},
+            })
+            .to_string()
+        };
+        // Indented with a Korean name: the document's form first, then its length.
+        let grown = serde_json::to_string_pretty(&serde_json::json!({
+            "claudeAiOauth": {"accessToken": "FAKE", "mcpOAuth": "s".repeat(5_000)},
+            "oauthAccount": {"emailAddress": "two@example.com", "organizationName": "한글"},
+        }))
+        .expect("json");
+        let second_store = Path::new(&second.config_dir);
+        std::fs::write(second_store.join(CREDENTIALS_FILE), &grown).expect("the store's file");
+
+        materialize_into(config.path(), &second, home.path()).expect("the switch");
+
+        let service = keychain_services(home.path()).remove(0);
+        let held = read_keychain_service(&service).expect("the home's item");
+        let meaning = |text: &str| serde_json::from_str::<serde_json::Value>(text).expect("json");
+        assert_eq!(meaning(&held), meaning(&grown));
+        assert!(held.is_ascii() && !held.contains('\n'));
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(CREDENTIALS_FILE)).expect("the home's file"),
+            held
+        );
+        assert_eq!(read_runtime(config.path()).written.as_deref(), Some(&*held));
+
+        SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+        materialize_into(config.path(), &second, home.path()).expect("the next launch");
+        let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+        assert!(
+            !started
+                .iter()
+                .flatten()
+                .any(|arg| arg == "add-generic-password" || arg == "-i"),
+            "the next launch wrote the keychain again: {started:?}"
+        );
+
+        // The CLI grows the login in the home, and the next switch files it first.
+        let refreshed = long_login("two@example.com", "r");
+        let user = this_machines_account();
+        security_command(
+            &[
+                "add-generic-password",
+                "-U",
+                "-A",
+                "-s",
+                &service,
+                "-a",
+                &user,
+                "-w",
+                &refreshed,
+            ],
+            None,
+        )
+        .expect("the CLI's write");
+        materialize_into(config.path(), &first, home.path()).expect("the switch back");
+        assert_eq!(
+            credentials_at(second_store).as_deref(),
+            Some(refreshed.as_str())
+        );
+    }
+
+    /// A line break would end the command and run the value's rest as the next
+    /// one. The service and account go through the same check, because a break
+    /// in either is the same injection.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_line_break_anywhere_in_the_line_is_refused_before_any_process_starts() {
+        let service = "zerocode-test-line-break";
+        write_keychain_service(service, "standing").expect("seed");
+        for value in [
+            "FAKE-first\nFAKE-second",
+            "FAKE-end\n",
+            "FAKE-return\r",
+            "FAKE\0nul",
+        ] {
+            SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+            let refused = write_keychain_service(service, value).unwrap_err();
+            let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+            assert!(started.is_empty(), "the tool was started: {started:?}");
+            assert!(!refused.contains("FAKE"), "{refused}");
+            assert_eq!(read_keychain_service(service).as_deref(), Ok("standing"));
+        }
+        let injected = "zerocode-test\ndelete-generic-password -s victim";
+        SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+        assert!(write_keychain_service(injected, "fixture").is_err());
+        assert!(SECURITY_ARGV_SEEN.with(std::cell::RefCell::take).is_empty());
+    }
+
+    /// `find -w` answers in hex for any byte outside printable ASCII, on either
+    /// road (measured 2026-11-01), so every reader would get the wrong secret.
+    /// Known before the delete, so the item standing there survives it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_value_the_tool_would_read_back_as_hex_is_refused_before_any_process_starts() {
+        let service = "zerocode-test-unprintable";
+        let user = this_machines_account();
+        let printed = "FAKE한글값";
+        security_command(
+            &["-i"],
+            Some(&format!(
+                "add-generic-password -A -s '{service}' -a '{user}' -w '{printed}'\n"
+            )),
+        )
+        .expect("the tool itself takes it");
+        let hex: String = printed.bytes().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(read_keychain_service(service), Ok(hex));
+        delete_keychain_service(service).expect("forget");
+
+        write_keychain_service(service, "standing").expect("seed");
+        for value in [printed, "FAKE\tTAB", "FAKE\u{7f}"] {
+            SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+            let refused = write_keychain_service(service, value).unwrap_err();
+            let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+            assert!(started.is_empty(), "the tool was started: {started:?}");
+            assert!(!refused.contains("FAKE"), "{refused}");
+            assert_eq!(read_keychain_service(service).as_deref(), Ok("standing"));
+        }
+    }
+
+    /// The limit this road lives under is no promise of Apple's. If the tool ever
+    /// keeps less than it was given, the write says so in sizes and no cut login
+    /// stays behind for a reader to find.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_value_that_does_not_read_back_as_itself_is_refused_and_removed() {
+        let service = "zerocode-test-read-back";
+        let user = this_machines_account();
+        let value = "FAKE-a-value-the-tool-cuts";
+        security_command(&["test-cut-next-add", "-s", service, "-a", &user], None).expect("arm");
+        let refused = write_keychain_service(service, value).unwrap_err();
+        assert!(refused.contains("항목을 지웠습니다"), "{refused}");
+        assert!(
+            refused.contains(&format!("쓴 값 {}바이트", value.len())),
+            "{refused}"
+        );
+        assert!(
+            refused.contains(&format!("읽은 값 {}바이트", value.len() / 2)),
+            "{refused}"
+        );
+        assert!(!refused.contains("FAKE"), "{refused}");
+        assert!(
+            read_keychain_service(service)
+                .unwrap_err()
+                .contains(NO_SUCH_ITEM),
+            "the cut value stayed in the keychain"
+        );
+    }
+
+    /// A read-back that was itself refused proves nothing against an add that
+    /// landed, and the item stands. Answering "not written" here is what sent the
+    /// caller back to the account before, with the new login still in the
+    /// keychain.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_refused_read_back_answers_for_the_add_that_landed() {
+        let service = "zerocode-test-read-back-refused";
+        let user = this_machines_account();
+        security_command(
+            &["test-refuse-read-after-add", "-s", service, "-a", &user],
+            None,
+        )
+        .expect("arm");
+        write_keychain_service(service, "fixture").expect("the add landed");
+        assert_eq!(read_keychain_service(service).as_deref(), Ok("fixture"));
+    }
+
+    /// A read that says the item is not there is an answer, and the write did
+    /// not leave what it was asked to.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_item_gone_at_the_read_back_fails_the_write() {
+        let service = "zerocode-test-read-back-gone";
+        let user = this_machines_account();
+        security_command(&["test-vanish-after-add", "-s", service, "-a", &user], None)
+            .expect("arm");
+        let refused = write_keychain_service(service, "fixture").unwrap_err();
+        assert!(refused.contains(NO_SUCH_ITEM), "{refused}");
+    }
+
+    /// A switch whose read-back was refused must not leave the file and the record
+    /// on the account before with the keychain on the account after: the next
+    /// launch took the keychain's login for the CLI's own refresh and filed it
+    /// under the account the settings file still named.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_refused_read_back_on_a_switch_files_no_login_under_the_account_before() {
+        let config = tempfile::tempdir().expect("no config dir");
+        let home = tempfile::tempdir().expect("no home");
+        let first = one_account(config.path(), "a-1", "one@example.com", "tok-one");
+        let second = one_account(config.path(), "a-2", "two@example.com", "tok-two");
+        materialize_into(config.path(), &first, home.path()).expect("first");
+
+        let service = keychain_services(home.path()).remove(0);
+        let user = this_machines_account();
+        security_command(
+            &["test-refuse-read-after-add", "-s", &service, "-a", &user],
+            None,
+        )
+        .expect("arm");
+        let switched = materialize_into(config.path(), &second, home.path());
+        let held_after_the_switch = read_keychain_service(&service).expect("the home's item");
+        let file_after_the_switch =
+            std::fs::read_to_string(home.path().join(CREDENTIALS_FILE)).expect("the home's file");
+
+        // The launch after it, of the account the window was on before.
+        materialize_into(config.path(), &first, home.path()).expect("the next launch");
+        let first_login =
+            credentials_at(Path::new(&first.config_dir)).expect("the first account's login");
+        assert!(
+            first_login.contains("tok-one") && !first_login.contains("tok-two"),
+            "the second account's login was filed under the first account"
+        );
+
+        switched.expect("the add landed, so the switch did");
+        assert!(held_after_the_switch.contains("tok-two"));
+        assert_eq!(file_after_the_switch, held_after_the_switch);
+    }
+
+    /// The item differs because somebody else wrote it. The CLI refreshing a token
+    /// between the add and the read is the ordinary way, and that value is the only
+    /// live copy: its refresh token has already replaced the one in our file.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_value_another_writer_left_at_the_read_back_stands() {
+        let user = this_machines_account();
+        for (service, theirs) in [
+            (
+                "zerocode-test-read-back-other",
+                "FAKE-another-writers-value",
+            ),
+            ("zerocode-test-read-back-empty", ""),
+        ] {
+            security_command(
+                &[
+                    "test-other-writer-after-add",
+                    "-s",
+                    service,
+                    "-a",
+                    &user,
+                    "-w",
+                    theirs,
+                ],
+                None,
+            )
+            .expect("arm");
+            let refused = write_keychain_service(service, "FAKE-this-writers-value").unwrap_err();
+            assert!(refused.contains("그대로 두었습니다"), "{refused}");
+            assert!(!refused.contains("FAKE"), "{refused}");
+            assert_eq!(
+                read_keychain_service(service).as_deref(),
+                Ok(theirs),
+                "the other writer's value was removed"
+            );
+        }
+    }
+
+    /// A read whose output could not be taken is no answer. It came out as an
+    /// empty value, which the read-back took for a value that differs, and which
+    /// removed a good item.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn output_the_runner_could_not_read_is_no_answer() {
+        let answer = run_keychain_tool(
+            shell_tool("printf '\\377\\376'"),
+            None,
+            std::time::Duration::from_secs(5),
+        );
+        assert!(answer.is_err(), "{answer:?}");
+    }
+
+    /// A store's credentials file may hold indented JSON, a final line break or a
+    /// Korean organization name. None of that may stop a launch: the keychain gets
+    /// the same document in printable ASCII, and the file, the keychain and the
+    /// record agree on those bytes, so the next launch touches nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_login_file_the_line_cannot_carry_as_it_is_still_launches() {
+        let config = tempfile::tempdir().expect("no config dir");
+        let home = tempfile::tempdir().expect("no home");
+        let account = one_account(config.path(), "a-1", "pretty@example.com", "unused");
+        let document = "{\n  \"claudeAiOauth\": {\n    \"accessToken\": \"FAKE tok\\\"en\",\n    \
+                        \"expiresAt\": 1786169803544,\n    \"scopes\": [\"user:inference\"]\n  },\n  \
+                        \"oauthAccount\": {\"emailAddress\": \"pretty@example.com\", \
+                        \"organizationName\": \"한글 조직 😀\u{7f}\"}\n}\n";
+        let store = Path::new(&account.config_dir);
+        std::fs::write(store.join(CREDENTIALS_FILE), document).expect("the store's file");
+
+        materialize_into(config.path(), &account, home.path()).expect("the launch");
+
+        let service = keychain_services(home.path()).remove(0);
+        let held = read_keychain_service(&service).expect("the home's item");
+        assert!(
+            held.bytes().all(|byte| (0x20..0x7f).contains(&byte)),
+            "the item holds more than printable ASCII"
+        );
+        let meaning = |text: &str| serde_json::from_str::<serde_json::Value>(text).expect("json");
+        assert_eq!(meaning(&held), meaning(document));
+        for kept in [
+            r#""accessToken":"FAKE tok\"en""#,
+            r#""expiresAt":1786169803544"#,
+            r#"\ud55c\uae00 \uc870\uc9c1 \ud83d\ude00\u007f"#,
+        ] {
+            assert!(held.contains(kept), "{kept} did not survive");
+        }
+        assert_eq!(
+            read_keychain_service(&keychain_services(store).remove(0)).as_deref(),
+            Ok(held.as_str()),
+            "the store's item is the same document"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(CREDENTIALS_FILE)).expect("the home's file"),
+            held
+        );
+        assert_eq!(read_runtime(config.path()).written.as_deref(), Some(&*held));
+
+        SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+        materialize_into(config.path(), &account, home.path()).expect("the next launch");
+        let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+        assert!(
+            !started.iter().any(|argv| argv == &["-i"]),
+            "the next launch wrote the keychain again: {started:?}"
+        );
+    }
+
+    /// A document the line carries as it is goes as it is, and a value that is no
+    /// document is no less refused.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_a_document_the_line_cannot_carry_is_rewritten() {
+        let dir = tempfile::tempdir().expect("no dir");
+        let service = keychain_services(dir.path()).remove(0);
+        let spaced = r#"{"a": "b c", "d": 1.50}"#;
+        write_keychain(dir.path(), spaced).expect("printable");
+        assert_eq!(read_keychain_service(&service).as_deref(), Ok(spaced));
+        for not_a_document in ["한글", "line\nbreak", "{\"a\":\"line\nbreak\"}"] {
+            assert!(write_keychain(dir.path(), not_a_document).is_err());
+            assert_eq!(read_keychain_service(&service).as_deref(), Ok(spaced));
+        }
+    }
+
+    /// The sentence a locked keychain gets from the tool has to survive a real
+    /// login. The word `default` of `(<default>)` stands in `rateLimitTier`, and
+    /// `user` of the sentence stands in `scopes`, so a check that reads the whole
+    /// line against the whole input left only `종료 36`, the shape that left
+    /// 2026-09-13 undiagnosable. The sentences are Apple's for these two errors;
+    /// a locked keychain itself has not been measured here.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_tools_sentence_survives_a_value_shaped_like_a_real_login() {
+        let value = r#"{"claudeAiOauth":{"accessToken":"FAKE-token-fragment","scopes":["user:inference","user:profile"],"subscriptionType":"max","rateLimitTier":"default_claude_max_20x"}}"#;
+        let input = format!(
+            "add-generic-password -A -s 'Claude Code-credentials-0000' -a 'someone' -w '{value}'\n"
+        );
+        for (code, sentence) in [
+            (36, "User interaction is not allowed."),
+            (
+                51,
+                "The user name or passphrase you entered is not correct.",
+            ),
+            (1, "The password for this someone is not credentials."),
+        ] {
+            let line =
+                format!("security: SecKeychainItemCreateFromContent (<default>): {sentence}");
+            assert_eq!(
+                security_refusal(Some(code), &format!("{line}\n"), Some(&input)),
+                format!("종료 {code} — {line}")
+            );
+        }
+        for leaked in [
+            "security: SecKeychainItemCreateFromContent (FAKE-token-fragment): Refused.\n",
+            "security: SecKeychainItemCreateFromContent (<default>): Refused token:fragment here.\n",
+            "security: SecKeychainItemCreateFromContent (<default>): Refused \"subscriptionType\".\n",
+        ] {
+            assert_eq!(
+                security_refusal(Some(1), leaked, Some(&input)),
+                "종료 1",
+                "{leaked}"
+            );
+        }
+    }
+
+    /// The fake tool's `-i` holds the item's access list to what the shipped line
+    /// has to say. Without `-A` the real tool lists only itself, and the CLI asks
+    /// for a password on every launch.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_fake_tools_line_refuses_an_add_with_no_open_access_list() {
+        let refused =
+            fake_security_lines("add-generic-password -s 'no-access-list' -a 'u' -w 'v'\n");
+        assert!(refused.is_err(), "{refused:?}");
+    }
+
+    /// `security -i` prints what stands in a line's command position: on
+    /// 2026-11-01 a 5,000-byte line returned 1,808 bytes of its value as
+    /// `unknown command "…"`. That first line is what `security_failure_word`
+    /// shows, and it reaches the refusal and the log, so a run fed a secret keeps
+    /// only the tool's own `security: Sec…` sentence, and only when none of its
+    /// words came from the input. The exit classification does not depend on it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_refusal_of_a_fed_run_never_repeats_what_it_was_fed() {
+        let secret = "fixture-not-a-real-secret-t76905";
+        let input = format!("add-generic-password -A -s 'service' -a 'user' -w '{secret}'\n");
+        let tail = &secret[20..];
+        for stderr in [
+            format!("security: unknown command \"{secret}\"\n"),
+            format!("security: unknown command \"{tail}\"\n"),
+            format!("{input}\n"),
+            format!("\n  add-generic-password \"-w\" \"{secret}\"\n"),
+            format!("security: SecKeychainItemCreateFromContent (<default>): \"{secret}\"\n"),
+            format!("security: SecKeychainItemCreateFromContent (<default>): {tail}\n"),
+        ] {
+            for code in [Some(1), Some(45), Some(36), None] {
+                let word = security_refusal(code, &stderr, Some(&input));
+                assert!(!word.contains(secret) && !word.contains(tail), "{word}");
+            }
+            assert_eq!(security_refusal(Some(1), &stderr, Some(&input)), "종료 1");
+            assert_eq!(
+                security_refusal(Some(45), &stderr, Some(&input)),
+                DUPLICATE_ITEM
+            );
+            assert_eq!(
+                security_refusal(Some(44), &stderr, Some(&input)),
+                NO_SUCH_ITEM
+            );
+        }
+        // Too short for the word check to see: the shape alone keeps this out.
+        assert_eq!(
+            security_refusal(
+                Some(1),
+                "security: unknown command \"xyz\"\n",
+                Some("add-generic-password -w 'xyz'\n"),
+            ),
+            "종료 1"
+        );
+        // The sentence the measured refusals print stays, so a locked keychain
+        // can still be told from a duplicate.
+        let duplicate = "security: SecKeychainItemCreateFromContent (<default>): The specified item already exists in the keychain.\n";
+        assert_eq!(
+            security_refusal(Some(45), duplicate, Some(&input)),
+            format!("{DUPLICATE_ITEM} — {}", duplicate.trim_end())
+        );
+        // A usage line is dropped too; the exit still names the run.
+        assert_eq!(
+            security_refusal(
+                Some(2),
+                "Usage: add-generic-password [-h] [-a account] [-s service] [-w password]\n",
+                Some(&input),
+            ),
+            "종료 2"
+        );
+        // A run fed nothing has nothing to repeat and keeps its first line.
+        assert_eq!(
+            security_refusal(
+                Some(51),
+                "find-generic-password: illegal option -- Z\n",
+                None
+            ),
+            "종료 51 — find-generic-password: illegal option -- Z"
+        );
+    }
+
+    /// A stand-in for the tool: a shell script, so the pipes, the exit and the
+    /// deadline are the shipped runner's while no keychain is anywhere near it.
+    #[cfg(target_os = "macos")]
+    fn shell_tool(script: &str) -> std::process::Command {
+        let mut tool = crate::proc::quiet_command("/bin/sh");
+        tool.args(["-c", script]);
+        tool
+    }
+
+    /// Every way a run's output comes back through the shipped runner, against a
+    /// tool that prints everything it is fed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_runner_gives_nothing_a_tool_was_fed_back_on_any_road() {
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(20);
+        let secret = "fixture-not-a-real-secret-t76905";
+        let input = format!("add-generic-password -w '{secret}'\n");
+        for (script, failed) in [
+            ("cat >&2; exit 1", true),
+            ("cat; exit 1", true),
+            ("tee /dev/stderr; exit 45", true),
+            (
+                r#"printf 'security: unknown command "%s"\n' "$(cat)" >&2; exit 1"#,
+                true,
+            ),
+            ("cat; exit 0", false),
+            ("cat >&2; exit 0", false),
+        ] {
+            let answer = run_keychain_tool(shell_tool(script), Some(&input), BOUND);
+            assert_eq!(answer.is_err(), failed, "{script}: {answer:?}");
+            let text = answer.unwrap_or_else(|error| error);
+            assert!(!text.contains(secret), "{script}: {text}");
+        }
+        // The sentence and the code survive the same road.
+        let refused = run_keychain_tool(
+            shell_tool(
+                "cat >/dev/null; echo 'security: SecKeychainItemCreateFromContent (<default>): The specified item already exists in the keychain.' >&2; exit 45",
+            ),
+            Some(&input),
+            BOUND,
+        )
+        .unwrap_err();
+        assert!(refused.contains(DUPLICATE_ITEM), "{refused}");
+        assert!(refused.contains("already exists"), "{refused}");
+        // A run fed nothing still answers with what it printed: that is a read.
+        assert_eq!(
+            run_keychain_tool(shell_tool("echo held"), None, BOUND).as_deref(),
+            Ok("held")
+        );
+    }
+
+    /// `security -i` given no complete line runs nothing and exits 0, so a tool
+    /// that could not take the input must not read as a write that landed.
+    /// Standard input is closed before the tool starts. Retried because another
+    /// test's fork can hold the pipe open for an instant.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn input_the_tool_could_not_take_fails_the_run_even_on_exit_zero() {
+        use std::os::unix::process::CommandExt as _;
+        let failed = (0..20).any(|_| {
+            let mut tool = shell_tool("exit 0");
+            // SAFETY: `close` is async-signal-safe and touches only the child's
+            // copy of its own standard input.
+            unsafe {
+                tool.pre_exec(|| {
+                    libc::close(0);
+                    Ok(())
+                });
+            }
+            let answer = run_keychain_tool(
+                tool,
+                Some("fixture-not-a-real-secret-t76905\n"),
+                std::time::Duration::from_secs(20),
+            );
+            matches!(&answer, Err(error) if error.contains("입력을 넘기지 못했습니다")
+                && !error.contains("fixture-not-a-real-secret"))
+        });
+        assert!(failed, "a write nobody read still looked like success");
+    }
+
+    /// The bound still takes the tool down when it sits on the fed input, which
+    /// is what removes a dialog from the person's screen.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_runner_kills_a_fed_tool_at_the_deadline() {
+        let started = std::time::Instant::now();
+        let refused = run_keychain_tool(
+            shell_tool("exec sleep 30"),
+            Some("fixture-not-a-real-secret-t76905\n"),
+            std::time::Duration::from_millis(200),
+        )
+        .unwrap_err();
+        assert!(refused.contains("응답하지 않습니다"), "{refused}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
     }
 
     /// A refusal names the tool's exit AND its sentence, so "종료 45" reads as a
-    /// duplicate, a refused delete or a locked keychain — and never the secret,
-    /// which `security` does not print.
+    /// duplicate, a refused delete or a locked keychain. A run fed a secret keeps
+    /// less: `a_refusal_of_a_fed_run_never_repeats_what_it_was_fed`.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_refused_security_run_is_named_by_code_and_sentence() {

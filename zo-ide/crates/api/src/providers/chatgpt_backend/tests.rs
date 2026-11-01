@@ -4955,8 +4955,14 @@ fn answer(text: &str) -> SceneScript {
 /// The code rides both places a backend puts it: top level (SSE `error` events)
 /// and under `error` (the WebSocket error frame).
 fn server_error_connection() -> SceneScript {
+    server_error_connection_after(std::time::Duration::ZERO)
+}
+
+/// [`server_error_connection`], its failure frame arriving after `pause`: a
+/// connection as slow as the backend or the machine makes it.
+fn server_error_connection_after(pause: std::time::Duration) -> SceneScript {
     vec![(
-        std::time::Duration::ZERO,
+        pause,
         SceneBeat::Event(json!({
             "type": "error",
             "code": "server_error",
@@ -5070,6 +5076,13 @@ fn scene_client_backing_off(
         SceneWire::Sse => client.with_transport(super::websocket::Transport::Sse),
         SceneWire::WebSocket => client.with_transport(super::websocket::Transport::Websocket),
     }
+}
+
+/// A bundle clock that stands still: every reading is the first one, so a
+/// bundle never runs out by the machine's time (t-76270).
+fn held_restart_clock() -> std::time::Instant {
+    static HELD: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *HELD.get_or_init(std::time::Instant::now)
 }
 
 /// The notices a scene's stream raised, in order.
@@ -5279,27 +5292,48 @@ async fn quick_failures_then_silence_end_at_the_ceiling_websocket() {
 /// Scene R: seven server errors in a row, then silence: the shape of the
 /// reported turn. The eighth connection waits only the bundle's rest, and the
 /// final error names the seven server errors that came before it.
+///
+/// Each error comes a fifth of the ceiling after its connection opens, as
+/// slow as a Windows runner opens one (about 29 ms, t-76270): seven of them
+/// outlast the ceiling by the machine's time. The scene holds the bundle's
+/// clock still ([`held_restart_clock`]), so the bundle is judged by the count
+/// and order of its connections, not by how fast the machine opens them, and
+/// no elapsed time is asserted; [`SCENE_LIMIT`] still bounds a hang. That the
+/// eighth waits only the bundle's rest is read from the final error, which
+/// says how long it waited: the whole ceiling on the held clock, not the
+/// window.
 #[tokio::test]
 async fn seven_server_errors_then_silence_names_the_bundle_and_ends_at_the_ceiling() {
-    let mut scripts: Vec<SceneScript> = (0..7).map(|_| server_error_connection()).collect();
+    let slow = SCENE_CEILING / 5;
+    let mut scripts: Vec<SceneScript> =
+        (0..7).map(|_| server_error_connection_after(slow)).collect();
     scripts.push(silent_connection());
     scripts.push(answer("never reached"));
-    let (text, error, connections, elapsed) = run_scene(SceneWire::Sse, scripts).await;
+    let (text, error, connections, elapsed) = run_scene_shaped(
+        SceneWire::Sse,
+        scripts,
+        None,
+        &SceneNotices::default(),
+        |client| client.restart_clock = held_restart_clock,
+    )
+    .await;
     report_scene("R-seven-errors-then-silence-sse", &text, error.as_ref(), connections, elapsed);
     assert!(text.is_empty(), "nothing was answered: {text:?}");
     let error = error.expect("the silent eighth connection ends the turn");
+    assert_eq!(
+        scene_error_type(&error),
+        Some("stream_startup_no_progress"),
+        "the silent eighth's wait ends the turn: {error}"
+    );
     assert!(
         matches!(error, ApiError::RetriesExhausted { attempts: 8, .. }),
         "eight connections were tried: {error}"
     );
     assert_eq!(connections, 8, "seven server errors and the silent eighth");
+    let rest = format!("for {:.1}s after server_error x7", SCENE_CEILING.as_secs_f64());
     assert!(
-        error.to_string().contains("server_error x7"),
-        "the final error names the bundle's seven server errors: {error}"
-    );
-    assert!(
-        elapsed <= SCENE_CEILING + SCENE_SLACK,
-        "the silent eighth waits only the bundle's rest: {elapsed:?}"
+        error.to_string().contains(&rest),
+        "the silent eighth waits only the bundle's rest, after its seven server errors: {error}"
     );
 }
 

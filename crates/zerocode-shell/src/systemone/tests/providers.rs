@@ -1,7 +1,9 @@
 use super::*;
 use crate::systemone::latest;
 use judgment_provider::{Protocol, Provider, ProviderKind, Refusal};
-use zerocode_core::jev::{JEV_USES, STALL};
+use zerocode_core::jev::{
+    BROWSER, DESKTOP, EMULATOR, JEV_USES, NOTIFY, RECALL, STALL, builtin, erase,
+};
 
 fn provider(base: String) -> Provider {
     Provider {
@@ -531,4 +533,63 @@ fn a_jev_502_keeps_its_status_whatever_its_body_names() {
         Duration::from_secs(5),
     );
     assert_eq!(asked.answer, Err(token_for(502)));
+}
+
+/// A seat the person deleted keeps no records (t-87506): the window's own
+/// writer brings no file back, and a seat beside it writes on.
+#[test]
+fn the_window_writes_nothing_for_a_deleted_seat() {
+    let home = tempfile::tempdir().expect("home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        json!({"smart":{(builtin::SETTING):{(RECALL.id):{"deleted":true}}}}).to_string(),
+    )
+    .expect("settings");
+    let folder = home.path().join("jev/providers/judgment-aaaa");
+    let row = [json!({"at":1})];
+    append_rows(&folder.join(RECALL.ledger), &row);
+    append_rows_checked(&folder.join(RECALL.ledger), &row).expect("a refusal is no error");
+    append_rows(&folder.join(NOTIFY.ledger), &row);
+    assert!(!folder.join(RECALL.ledger).exists());
+    assert!(folder.join(NOTIFY.ledger).exists());
+}
+
+/// Deleting a screen seat leaves a walk on its rule (t-87506): the seat asks
+/// nothing, and with its ledger and its line gone the walk has no act line to
+/// read, so it presses as it does for a seat that never drew one.
+#[test]
+fn a_deleted_screen_seat_leaves_the_walk_on_its_rule() {
+    for seat in [BROWSER, DESKTOP, EMULATOR] {
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().join("settings.json");
+        let root = json!({"smart":{
+            "jev":{"enabled":true},
+            (seat.setting):"on",
+            (builtin::SETTING):{(seat.id):{"deleted":true}}
+        }});
+        std::fs::write(&path, root.to_string()).expect("settings");
+        let wire = Wire::at("http://127.0.0.1:1", "", Some(path.clone()));
+        let ledger = ledger_of(&wire, &seat).expect("a ledger path");
+        let folder = ledger.parent().expect("a folder");
+        std::fs::create_dir_all(folder).expect("a folder");
+        std::fs::write(&ledger, "{\"at\":1}\n").expect("a row");
+        std::fs::write(
+            folder.join(zerocode_core::jev::threshold::THRESHOLDS_FILE),
+            json!([{"seat":seat.id,"rubricVersion":seat.rubric_version,"actFromPermille":500}])
+                .to_string(),
+        )
+        .expect("a line");
+
+        erase::forget_seat(&path, seat.id).expect("the records go");
+
+        assert_eq!(
+            seat.mode_in(&root),
+            zerocode_core::jev::JevMode::Off,
+            "{}",
+            seat.id
+        );
+        assert!(!applies_once_risen(&wire, &seat), "{}", seat.id);
+        assert_eq!(act_line(&wire, &seat), None, "{}", seat.id);
+        assert!(!ledger.exists(), "{}", seat.id);
+    }
 }

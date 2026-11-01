@@ -276,6 +276,16 @@ fn decisions_home() -> Result<std::path::PathBuf, RouterRefusal> {
         .ok_or_else(|| RouterRefusal::from("설정 경로를 찾을 수 없습니다".to_string()))
 }
 
+/// The window's start pass over the decision store: what a delete left behind
+/// is removed ([`typesafe_settings::tidy_decision_store`]). Blocking file work,
+/// so the caller runs it off the interface thread; a home it cannot find, or a
+/// store it cannot tidy, never stops the start.
+pub(crate) fn tidy_decision_store_at_start() {
+    if let Ok(home) = decisions_home() {
+        typesafe_settings::tidy_decision_store(&home);
+    }
+}
+
 fn decisions_now() -> Result<CustomDecisions, DecisionRefusal> {
     let root =
         api_routers::read_zo_settings_root(&settings_path()?).map_err(RouterRefusal::from)?;
@@ -285,8 +295,8 @@ fn decisions_now() -> Result<CustomDecisions, DecisionRefusal> {
     )?)
 }
 
-/// The decisions a person made, the deleted ones still to be restored, and
-/// the folders a decision may be narrowed to (t-62170 stage 3).
+/// The decisions a person made and the folders a decision may be narrowed
+/// to (t-62170 stage 3).
 #[tauri::command(async)]
 pub(crate) fn list_custom_decisions() -> Result<CustomDecisions, DecisionRefusal> {
     decisions_now()
@@ -309,18 +319,10 @@ pub(crate) fn save_custom_decision(
     decisions_now()
 }
 
-/// Delete a decision. Its records stay, and the store keeps it to be
-/// restored for its days.
+/// Delete a decision for good: nothing keeps it to be brought back.
 #[tauri::command(async)]
 pub(crate) fn delete_custom_decision(id: String) -> Result<CustomDecisions, DecisionRefusal> {
-    typesafe_settings::delete_custom_decision_at(&decisions_home()?, &id, crate::now_epoch_ms())?;
-    decisions_now()
-}
-
-/// Bring a deleted decision back as it was, mode and version.
-#[tauri::command(async)]
-pub(crate) fn restore_custom_decision(id: String) -> Result<CustomDecisions, DecisionRefusal> {
-    zerocode_core::jev::custom::store::restore(&decisions_home()?, &id)?;
+    typesafe_settings::delete_custom_decision_at(&decisions_home()?, &id)?;
     decisions_now()
 }
 

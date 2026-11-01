@@ -1128,6 +1128,11 @@ pub fn computer_deadline_ms(argv: &[String]) -> u64 {
                 }
         }
         ComputerMethod::Batch => batch_deadline_ms(&batch_steps(&command)),
+        ComputerMethod::Parallel => parallel_steps(&command)
+            .iter()
+            .map(|group| batch_deadline_ms(group))
+            .max()
+            .unwrap_or(base),
         // A repeat holds until the person stops it, its bound, or the
         // person's whole turn — the ladder's top, like a handoff.
         ComputerMethod::RecipeRun if command.params.get("repeat") == Some(&Value::Bool(true)) => {
@@ -1149,6 +1154,44 @@ pub fn batch_steps(command: &ComputerCommand) -> Vec<Vec<String>> {
         .get(BATCH_COMMANDS_FLAG)
         .cloned()
         .and_then(|steps| serde_json::from_value(steps).ok())
+        .unwrap_or_default()
+}
+
+/// The most batches one `parallel` runs at once. Past this, an agent is launching
+/// more work than a person could follow on the band.
+pub const COMPUTER_PARALLEL_MAX_GROUPS: usize = 8;
+
+/// A `parallel`'s groups: a JSON array of batches, each checked as a batch is,
+/// and each run at once with the others.
+pub fn parallel_groups(raw: &str) -> Result<Vec<Vec<Vec<String>>>, String> {
+    let groups: Vec<Value> = serde_json::from_str(raw).map_err(|_| {
+        format!(
+            "--{BATCH_COMMANDS_FLAG} is a JSON array of batches, each an array of command lines"
+        )
+    })?;
+    if groups.is_empty() || groups.len() > COMPUTER_PARALLEL_MAX_GROUPS {
+        return Err(format!(
+            "a parallel holds 1 to {COMPUTER_PARALLEL_MAX_GROUPS} batches (this one has {})",
+            groups.len()
+        ));
+    }
+    groups
+        .iter()
+        .enumerate()
+        .map(|(at, group)| {
+            batch_commands(&group.to_string()).map_err(|why| format!("batch {}: {why}", at + 1))
+        })
+        .collect()
+}
+
+/// The batches a parsed `parallel` carries.
+#[must_use]
+pub fn parallel_steps(command: &ComputerCommand) -> Vec<Vec<Vec<String>>> {
+    command
+        .params
+        .get(BATCH_COMMANDS_FLAG)
+        .cloned()
+        .and_then(|groups| serde_json::from_value(groups).ok())
         .unwrap_or_default()
 }
 
@@ -1201,7 +1244,10 @@ pub fn batch_commands(raw: &str) -> Result<Vec<Vec<String>>, String> {
                 "step {n}: `{verb}` cannot be a batch step — a batch holds the hand's actions and the waits; look after it"
             ));
         }
-        if rebuilt
+        // An element's number outlives a look on macOS, so a step may name one
+        // after any other step. Windows still numbers by place in the walk.
+        if cfg!(not(target_os = "macos"))
+            && rebuilt
             && step
                 .iter()
                 .skip(1)
@@ -1212,8 +1258,13 @@ pub fn batch_commands(raw: &str) -> Result<Vec<Vec<String>>, String> {
                 "step {n}: element indexes change after every action and every element wait-for — use coordinates, or batch from a fresh get-app-state"
             ));
         }
-        // A batch is looked at once, after: no frame of its steps.
-        let step = settled_wait(walked_step(step, false), normalised.last());
+        // A batch is looked at once, after: no frame of its steps, and no look
+        // after each of them.
+        let mut step = settled_wait(walked_step(step, false), normalised.last());
+        step.retain(|word| word != "--full-state");
+        if method.is_app_act() && !step.iter().any(|word| word == "--no-state") {
+            step.push("--no-state".to_owned());
+        }
         let command =
             parse_command(&step).map_err(|error| format!("step {n} ({verb}): {error}"))?;
         if let Some(why) = walked_step_refusal(&step, &command) {
@@ -1471,6 +1522,11 @@ pub fn walked_step(mut step: Vec<String>, framed: bool) -> Vec<String> {
     let Some(method) = step.first().and_then(|verb| verb_method(verb)) else {
         return step;
     };
+    // A walk's checks and frames read the look after each act, so a recipe's step
+    // keeps the whole answer; a batch, which looks once after, takes this off.
+    if method.is_app_act() && !step.iter().any(|word| word == "--full-state") {
+        step.push("--full-state".to_owned());
+    }
     for flag in walked_step_flags(framed) {
         let spelled = format!("--{flag}");
         if allowed(method).contains(&flag) && !step.contains(&spelled) {
@@ -2191,6 +2247,9 @@ pub enum ComputerMethod {
     /// lone command's road, so it is stopped, paced, confirmed and logged as
     /// if alone.
     Batch,
+    /// Several batches at once, each in its own app — the window's: a person
+    /// writes in one window while another loads; agents do not have to wait.
+    Parallel,
     /// The one step of a procedure whose next press cannot be written down in
     /// advance (t-4774) — the window's, like a batch. Everything a caller
     /// already knows the shape of belongs in a `batch`; this is where the
@@ -2339,6 +2398,7 @@ impl ComputerMethod {
         Self::SoundWait,
         Self::Watch,
         Self::Batch,
+        Self::Parallel,
         Self::Walk,
         Self::ReflexStart,
         Self::ReflexStatus,
@@ -2407,7 +2467,7 @@ impl ComputerMethod {
             Self::ListenStart => Some("listenStart"),
             Self::ListenStop => Some("listenStop"),
             Self::SoundRead => Some("soundRead"),
-            Self::SoundWait | Self::Watch | Self::Batch | Self::Walk => None,
+            Self::SoundWait | Self::Watch | Self::Batch | Self::Parallel | Self::Walk => None,
             Self::ReflexStart | Self::ReflexStatus | Self::ReflexStop | Self::ReflexAuto => None,
         }
     }
@@ -2477,6 +2537,7 @@ impl ComputerMethod {
             Self::SoundWait => "sound-wait",
             Self::Watch => "watch",
             Self::Batch => "batch",
+            Self::Parallel => "parallel",
             Self::Walk => "walk",
             Self::ReflexStart => "reflex-start",
             Self::ReflexStatus => "reflex-status",
@@ -2491,6 +2552,29 @@ impl ComputerMethod {
     #[must_use]
     pub const fn types_keys(self) -> bool {
         matches!(self, Self::Type | Self::TypeText)
+    }
+
+    /// Whether this acts in one named app's window.
+    #[must_use]
+    pub const fn is_app_act(self) -> bool {
+        matches!(
+            self,
+            Self::Click
+                | Self::PerformSecondaryAction
+                | Self::Scroll
+                | Self::Drag
+                | Self::TypeText
+                | Self::PressKey
+                | Self::Hotkey
+                | Self::PasteText
+                | Self::SetValue
+        )
+    }
+
+    /// Whether this brings up an app or a page.
+    #[must_use]
+    pub const fn opens_something(self) -> bool {
+        matches!(self, Self::Launch | Self::Open)
     }
 
     /// Whether the verb presses something a confirmation may guard (§1.5):
@@ -2547,6 +2631,7 @@ impl ComputerMethod {
                 | Self::WindowClose
                 | Self::ClipboardWrite
                 | Self::Batch
+                | Self::Parallel
                 | Self::RecipeRun
                 | Self::Walk
                 | Self::ReflexStart
@@ -2709,6 +2794,7 @@ impl ComputerMethod {
                 | Self::SoundWait
                 | Self::Watch
                 | Self::Batch
+                | Self::Parallel
                 | Self::ReflexStart
                 | Self::ReflexStatus
                 | Self::ReflexStop
@@ -3295,6 +3381,7 @@ pub fn verb_method(verb: &str) -> Option<ComputerMethod> {
         "reflex-stop" => ComputerMethod::ReflexStop,
         "reflex-auto" => ComputerMethod::ReflexAuto,
         "batch" => ComputerMethod::Batch,
+        "parallel" => ComputerMethod::Parallel,
         _ => return None,
     })
 }
@@ -3474,6 +3561,8 @@ fn parse_flags(
         ("end", "end"),
         ("mark", "mark"),
         ("seconds", "seconds"),
+        ("root", "root"),
+        ("max-depth", "maxDepth"),
     ] {
         if let Some(value) = optional_non_negative_integer(&flags, flag)? {
             params.insert(key.into(), json!(value));
@@ -3501,6 +3590,7 @@ fn parse_flags(
     for (flag, key) in [
         ("worktree", "worktree"),
         ("session", "session"),
+        ("surface", "surface"),
         ("mouse-button", "mouseButton"),
         ("modifiers", "modifiers"),
         ("action", "action"),
@@ -3546,6 +3636,10 @@ fn parse_flags(
     for (flag, key) in [
         ("restore-window", "restoreWindow"),
         ("background", "background"),
+        ("foreground", "foreground"),
+        ("full-state", "fullState"),
+        ("no-state", "noState"),
+        ("skeleton", "skeleton"),
         ("browser-chrome", "browserChrome"),
         ("no-screenshot", "noScreenshot"),
         ("full-res", "fullRes"),
@@ -3627,6 +3721,11 @@ fn parse_flags(
     {
         params.insert(BATCH_COMMANDS_FLAG.into(), json!(batch_commands(&raw)?));
     }
+    if method == ComputerMethod::Parallel
+        && let Some(raw) = optional_string(&flags, BATCH_COMMANDS_FLAG)?
+    {
+        params.insert(BATCH_COMMANDS_FLAG.into(), json!(parallel_groups(&raw)?));
+    }
 
     validate(method, &flags, &params)?;
     Ok(ComputerCommand {
@@ -3635,6 +3734,10 @@ fn parse_flags(
         json,
     })
 }
+
+/// What every act in one app may also say. How long to wait for its control,
+/// which road to take, and what its answer carries.
+pub const ACT_FLAGS: &[&str] = &["foreground", "full-state", "no-state", "timeout-ms"];
 
 /// Flags whose value is a program's own argument words — dashes and all.
 pub(crate) const PROGRAM_WORD_FLAGS: &[&str] = &["args"];
@@ -3686,6 +3789,10 @@ fn takes_no_value(name: &str) -> bool {
         name,
         "json"
             | "background"
+            | "foreground"
+            | "full-state"
+            | "no-state"
+            | "skeleton"
             | "restore-window"
             | "no-screenshot"
             | "local"
@@ -3763,6 +3870,10 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         "window-index",
         "restore-window",
         "no-screenshot",
+        "root",
+        "max-depth",
+        "skeleton",
+        "surface",
     ];
     match method {
         ComputerMethod::Capabilities | ComputerMethod::ListApps => BASIC,
@@ -4006,7 +4117,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ComputerMethod::SoundRead => &["json", "after"],
         ComputerMethod::SoundWait => &["json", "label", "min-confidence", "timeout-ms", "after"],
         ComputerMethod::Watch => &["json", "until", "timeout-ms", "display"],
-        ComputerMethod::Batch => &["json", BATCH_COMMANDS_FLAG],
+        ComputerMethod::Batch | ComputerMethod::Parallel => &["json", BATCH_COMMANDS_FLAG],
         ComputerMethod::Walk => &[
             "background",
             "json",
@@ -4051,7 +4162,11 @@ fn reject_unknown(
     flags: &BTreeMap<String, Option<String>>,
 ) -> Result<(), String> {
     for name in flags.keys() {
-        if name != "browser-chrome" && !allowed(method).contains(&name.as_str()) {
+        let known = name == "browser-chrome"
+            || allowed(method).contains(&name.as_str())
+            || (method.is_app_act() && ACT_FLAGS.contains(&name.as_str()))
+            || (method.opens_something() && name == "foreground");
+        if !known {
             return Err(format!("unknown flag --{name}"));
         }
     }
@@ -4370,7 +4485,7 @@ fn validate(
         }
         ComputerMethod::Observe | ComputerMethod::RecipeList => {}
         ComputerMethod::ListenStart | ComputerMethod::ListenStop | ComputerMethod::SoundRead => {}
-        ComputerMethod::Batch => require(
+        ComputerMethod::Batch | ComputerMethod::Parallel => require(
             params,
             BATCH_COMMANDS_FLAG,
             &format!("--{BATCH_COMMANDS_FLAG}"),
@@ -4649,7 +4764,9 @@ const TREELESS_CHECK_MS: u64 = 5_000;
 pub fn treeless_click_next(params: &Value, answer: &Value) -> Option<String> {
     let app = params.get("app")?.as_str()?.trim();
     let at_a_point = ["x", "y"].iter().all(|key| params.get(*key).is_some());
-    let background = params.get("background") == Some(&Value::Bool(true));
+    // A background click that may borrow the desktop can still press by words.
+    let background = params.get("background") == Some(&Value::Bool(true))
+        && params.get("mayBorrowDesktop") != Some(&Value::Bool(true));
     if app.is_empty() || !at_a_point || background {
         return None;
     }
@@ -4859,7 +4976,11 @@ pub fn usage() -> String {
         "  zerocode-computer permissions [--id accessibility|screenshots [--reset]] [--json]",
         "  zerocode-computer list-apps [--json]",
         "  zerocode-computer list-windows --app <name|bundle|pid:N> [--json]",
-        "  zerocode-computer get-app-state --app <app> [--window-id N|--window-index N] [--restore-window] [--no-screenshot] [--json]",
+        "  zerocode-computer get-app-state --app <app> [--window-id N|--window-index N] [--restore-window] [--no-screenshot] [--skeleton|--max-depth N] [--root N] [--surface menubar|menu|sheet] [--json]",
+        "    numbers stay with their control until the app removes it: earlier looks stay good; --skeleton reads the top of a dense window, --root N one region, --surface a menu or the menu bar",
+        "  every act in an app answers delivery (not_delivered|delivered_unverified|delivered_verified|uncertain), retry (safe|unsafe) and what it changed; repeat only when retry is safe",
+        "    --timeout-ms N how long to wait for its control (0: not at all); --full-state answers the whole tree; --no-state answers no look",
+        "    it goes in the background first; --foreground takes the shared pointer and keyboard at once",
         "  zerocode-computer click --app <app> (--element-index N|--x X --y Y|--text <t>|--role <r> [--label <l>]) [--mouse-button left|right|middle] [--click-count N] [--modifiers chord] [--json]",
         "    --text/--label/--role name the control by what it reads (find's matcher), read off a fresh tree right before the press —",
         "    the target a batch step may name after earlier steps; one match presses, none or several answers which",
@@ -4897,12 +5018,14 @@ pub fn usage() -> String {
         "  zerocode-computer launch --app <name|bundle-id|path> [--args <words>] [--wait-ready ms] [--json]",
         "  zerocode-computer quit --app <app> [--force] [--json]",
         "  zerocode-computer activate --app <app> [--json]",
-        "  zerocode-computer open (--path <file> | --url <address>) [--with <app>] [--json]",
+        "  zerocode-computer open (--path <file> | --url <address>) [--with <app>] [--foreground] [--json]",
         "  zerocode-computer run --program <path> [--args <words>] [--cwd <dir>] [--timeout-ms N] [--json]",
         "  zerocode-computer list-all-windows [--all-layers] [--json]",
         "  zerocode-computer window-focus|window-minimize|window-zoom|window-close --id <window-id> [--json]",
         "  zerocode-computer window-move --id <window-id> --x X --y Y [--json]",
         "  zerocode-computer window-resize --id <window-id> --width W --height H [--json]",
+        "  zerocode-computer parallel --commands '[[<a batch>],[<another batch>]]' [--json]",
+        "      (several apps at once: each batch keeps its own order, they run together, and the answer holds every batch's result)",
         "  zerocode-computer clipboard-read [--json]",
         "  zerocode-computer clipboard-write --text <text> [--json]",
         "",
@@ -4941,8 +5064,8 @@ pub fn usage() -> String {
         "  zerocode-computer walk --goal <what to reach> (--app <app> | --pane <browser pane> | --platform <ios|android> --device <id>) [--until <text on screen when it worked>] [--steps N] [--overlap] [--rescue] [--replay] [--json]",
         "      (--replay: this walk repeats one walked before, so a question it asked then is answered from the judgment memo)",
         "      (walks the steps in one call, filling {{name}} from --params; stops at the person's turn or last step,",
-        "       a step naming the saved screen's element or window, a check the screen fails, an act that changed",
-        "       nothing, or a person's hand on a shared desktop — and answers the step to resume from; a guarded Flow's",
+        "       a step naming the saved screen's element or window, a check the screen fails, or an act that changed",
+        "       nothing — and answers the step to resume from; a guarded Flow's",
         "       money step waits for --confirm <txn>, the person's word on the transaction the card names;",
         "       --repeat walks round after round — each when the document's `## Trigger` line flips, at once without one —",
         "       until --until (a time of day, or N rounds), a stop, a shared-desktop handoff, or the person's whole turn;",
@@ -6130,11 +6253,12 @@ mod tests {
             "--commands",
             r#"[["click","--app","Fixture","--element-index","1"],["click","--app","Fixture","--element-index=2"]]"#,
         ]));
-        assert!(
+        assert_eq!(
             stale
                 .as_ref()
                 .is_err_and(|error| error.contains("element indexes change after every action")),
-            "a stale index after an action is refused in either spelling: {stale:?}"
+            cfg!(not(target_os = "macos")),
+            "an index after an action reads the same in either spelling: {stale:?}"
         );
         let recipe = recipe_lines(
             "## Steps\n\n1. `zerocode-computer click --app=Fixture --element-index=3`\n",
@@ -6463,13 +6587,17 @@ mod tests {
         ]))
         .expect("a plan in one call");
         assert_eq!(batch_steps(&planned).len(), 4);
-        assert!(
-            batch(&json!([
-                ["click", "--app", "Notes", "--text", "New Note"],
-                ["click", "--app", "Notes", "--element-index", "4"],
-            ]))
-            .expect_err("stale index")
-            .contains("element indexes change")
+        // A number names one element on macOS, so a later step may use it. Windows
+        // still numbers by place in the walk.
+        let after_a_press = batch(&json!([
+            ["click", "--app", "Notes", "--text", "New Note"],
+            ["click", "--app", "Notes", "--element-index", "4"],
+        ]));
+        assert_eq!(
+            after_a_press
+                .err()
+                .is_some_and(|error| error.contains("element indexes change")),
+            cfg!(not(target_os = "macos"))
         );
         assert!(usage().contains("--text <t>|--role <r> [--label <l>]"));
     }
@@ -8515,7 +8643,8 @@ mod tests {
                     "--text",
                     "hi",
                     "--json",
-                    "--no-screenshot"
+                    "--no-screenshot",
+                    "--no-state"
                 ],
                 [
                     "key",
@@ -8587,14 +8716,20 @@ mod tests {
             ]]))
             .starts_with("step 1")
         );
-        let stale = refused(json!([
+        let in_turn = batch(&json!([
             ["click", "--app", "x", "--element-index", "3"],
             ["click", "--app", "x", "--element-index", "4"],
         ]));
-        assert!(
-            stale.starts_with("step 2:") && stale.contains("element indexes"),
-            "{stale}"
-        );
+        // A number names one element on macOS and survives the step before it.
+        if cfg!(target_os = "macos") {
+            assert!(in_turn.is_ok(), "{in_turn:?}");
+        } else {
+            let stale = in_turn.expect_err("a place in the walk moves with the step before it");
+            assert!(
+                stale.starts_with("step 2:") && stale.contains("element indexes"),
+                "{stale}"
+            );
+        }
         assert!(
             batch(&json!([
                 ["wait", "--ms", "1"],
@@ -8612,9 +8747,10 @@ mod tests {
                 ["click", "--app", "x", "--element-index", "4"]
             ]))
         };
-        assert!(
+        assert_eq!(
             after_wait_for(&["--app", "x", "--text", "Loaded"])
                 .is_err_and(|why| why.starts_with("step 2:") && why.contains("element indexes")),
+            cfg!(not(target_os = "macos")),
             "a wait-for through the app's elements rebuilds the tree the index points into"
         );
         assert!(

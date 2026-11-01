@@ -6,9 +6,9 @@
 //!   its definition, and when it was made and last changed.
 //! - `definitions/<version>.json` is one version of a definition, never
 //!   rewritten. An edit writes another, and the old one stays.
-//! - `trash/<id>.json` is a deleted decision's row and when it was deleted,
-//!   and `trash/<version>.json` its definition, until [`TRASH_KEPT_DAYS`] have
-//!   passed ([`empty_trash`]).
+//! - A deleted decision is gone: its row leaves the index and every version of
+//!   its definition is removed ([`delete`]). An older window kept a `trash/`
+//!   folder; [`forget_deleted`] removes it.
 //! - `.lock` is held by whatever writes.
 //!
 //! Every write is the project-rules store's (`super::super::project_rules`):
@@ -34,13 +34,10 @@ use crate::jev::JevMode;
 /// Where the store lives under zo's config home.
 pub const DIRECTORY: &str = "jev/decisions";
 
-/// Days a deleted decision waits in the trash before [`empty_trash`] removes it: the person's choice of 2026-10-17 (t-62170).
-pub const TRASH_KEPT_DAYS: i64 = 30;
-
 /// The largest definition the store keeps, in bytes: the longest words a definition holds, every character escaped, come to under 48 KiB, and the rest is room for its folders.
 pub const DEFINITION_MAX_BYTES: usize = 64 * 1024;
 
-/// The largest index, or trash row, the store reads back, in bytes: twenty rows of the longest name, every character escaped, come to under 9 KiB.
+/// The largest index the store reads back, in bytes: twenty rows of the longest name, every character escaped, come to under 9 KiB.
 const INDEX_MAX_BYTES: usize = 16 * 1024;
 
 /// Hex digits in a version's name: a SHA-256, written out.
@@ -60,7 +57,7 @@ const PRIVATE_MODE: u32 = 0o600;
 #[cfg(unix)]
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 
-const INDEX: &str = "index.json";
+pub(crate) const INDEX: &str = "index.json";
 const DEFINITIONS: &str = "definitions";
 const TRASH: &str = "trash";
 const LOCK: &str = ".lock";
@@ -83,15 +80,6 @@ pub struct Entry {
     pub updated_at: String,
 }
 
-/// A deleted decision waiting in the trash.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Trashed {
-    /// Its row as the index held it.
-    pub decision: Entry,
-    /// When it was deleted, as [`civil::iso_utc_of`] writes a stamp.
-    pub deleted_at: String,
-}
-
 /// Why the store kept nothing.
 #[derive(Debug)]
 pub enum Error {
@@ -99,7 +87,7 @@ pub enum Error {
     /// the store can see — an id or a name taken, a mode no decision offers,
     /// a store already full, a definition past [`DEFINITION_MAX_BYTES`].
     Refused(Vec<Refusal>),
-    /// No decision, or no deleted one, has this id.
+    /// No decision has this id.
     Missing,
     /// A file could not be read or written, a definition no longer hashes to
     /// its name, or another writer held the store past `LOCK_WAIT`
@@ -161,8 +149,7 @@ pub fn asking_in(home: &Path, workspace: &Path) -> io::Result<Vec<(Entry, Defini
 /// version.
 ///
 /// # Errors
-/// [`Error::Refused`] with every rule it breaks — an id taken by a deleted
-/// decision too, while it waits in the trash — and [`Error::Io`].
+/// [`Error::Refused`] with every rule it breaks, and [`Error::Io`].
 pub fn create(
     home: &Path,
     definition: &Definition,
@@ -176,9 +163,7 @@ pub fn create(
     if !MODES.contains(&mode) {
         refused.push(Refusal::Mode);
     }
-    if index.iter().any(|entry| entry.id == definition.id)
-        || (is_id(&definition.id) && root.join(TRASH).join(json(&definition.id)).exists())
-    {
+    if index.iter().any(|entry| entry.id == definition.id) {
         refused.push(Refusal::IdTaken);
     }
     if name_taken(&index, definition) {
@@ -264,13 +249,18 @@ pub fn set_mode(home: &Path, id: &str, mode: JevMode, now_ms: i64) -> Result<(),
     Ok(())
 }
 
-/// Delete the decision `id` at `now_ms`: its row leaves the index, and the row
-/// and its definition wait in the trash. Its ledger lines stay where they
-/// are.
+/// Delete the decision `id` for good: its row leaves the index, and every
+/// version of its definition no other row uses is removed with it. Its ledger
+/// lines stay where they are.
+///
+/// Once the row has left the index the delete has happened: a definition file
+/// that then will not go is not an error the person is shown. It names a
+/// decision no row lists, and [`forget_deleted`] removes it on a later pass.
 ///
 /// # Errors
-/// [`Error::Missing`] and [`Error::Io`].
-pub fn delete(home: &Path, id: &str, now_ms: i64) -> Result<(), Error> {
+/// [`Error::Missing`], and [`Error::Io`] for a store whose index cannot be
+/// read or written.
+pub fn delete(home: &Path, id: &str) -> Result<(), Error> {
     if !is_id(id) {
         return Err(Error::Missing);
     }
@@ -280,122 +270,94 @@ pub fn delete(home: &Path, id: &str, now_ms: i64) -> Result<(), Error> {
     let Some(at) = index.iter().position(|entry| entry.id == id) else {
         return Err(Error::Missing);
     };
-    let decision = index.remove(at);
-    let trash = root.join(TRASH);
-    private_directory(&trash)?;
-    let from = root.join(DEFINITIONS).join(json(&decision.definition));
-    let to = trash.join(json(&decision.definition));
-    let row = TrashFile {
-        schema_version: SCHEMA_VERSION,
-        decision,
-        deleted_at: civil::iso_utc_of(now_ms),
-    };
-    replace(
-        &trash.join(json(id)),
-        &serde_json::to_vec(&row).map_err(io::Error::other)?,
-    )?;
-    write_index(&root, index)?;
-    match fs::rename(from, to) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.into()),
-        _ => Ok(()),
-    }
-}
-
-/// The deleted decisions still waiting in the trash, the earliest deleted
-/// first. A row that does not read is left out: it cannot be restored.
-///
-/// # Errors
-/// A trash that cannot be listed.
-pub fn trash(home: &Path) -> io::Result<Vec<Trashed>> {
-    let mut trashed: Vec<Trashed> = trashed_in(&root(home).join(TRASH))?
-        .into_iter()
-        .map(|(_, trashed)| trashed)
-        .collect();
-    trashed.sort_by(|one, other| {
-        (&one.deleted_at, &one.decision.id).cmp(&(&other.deleted_at, &other.decision.id))
-    });
-    Ok(trashed)
-}
-
-/// Bring the deleted decision `id` back from the trash as it was: the same
-/// row, so the same mode and the same version.
-///
-/// # Errors
-/// [`Error::Missing`] when the trash holds no such decision,
-/// [`Error::Refused`] when a decision made since took its name or filled the
-/// store, and [`Error::Io`] — a definition that no longer hashes to its name
-/// among them.
-pub fn restore(home: &Path, id: &str) -> Result<(), Error> {
-    if !is_id(id) {
-        return Err(Error::Missing);
-    }
-    let root = root(home);
-    let _lock = lock(&root)?;
-    let mut index = read_index(&root)?;
-    let trash = root.join(TRASH);
-    let row = trash.join(json(id));
-    let Trashed { decision, .. } = match read_trashed(&row) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(Error::Missing),
-        read => read?,
-    };
-    let mut refused = Vec::new();
-    if index.iter().any(|entry| entry.id == decision.id) {
-        refused.push(Refusal::IdTaken);
-    }
-    if index
-        .iter()
-        .any(|entry| entry.name.trim() == decision.name.trim())
-    {
-        refused.push(Refusal::NameTaken);
-    }
-    if index.len() >= DECISIONS_MAX {
-        refused.push(Refusal::TooMany);
-    }
-    if !refused.is_empty() {
-        return Err(Error::Refused(refused));
-    }
+    index.remove(at);
+    write_index(&root, index.clone())?;
+    // An edit writes another definition and keeps the old one, so a decision
+    // may leave several: read what is there and remove those that are this
+    // decision's and that no remaining row names.
     let definitions = root.join(DEFINITIONS);
-    let trashed = trash.join(json(&decision.definition));
-    if trashed.exists() {
-        private_directory(&definitions)?;
-        fs::rename(trashed, definitions.join(json(&decision.definition)))?;
+    let used: BTreeSet<&str> = index
+        .iter()
+        .map(|entry| entry.definition.as_str())
+        .collect();
+    for path in definition_files(&definitions) {
+        let Some(version) = version_named(&path) else {
+            continue;
+        };
+        if !used.contains(version)
+            && read_definition(&definitions, version).is_ok_and(|one| one.id == id)
+        {
+            let _ = fs::remove_file(&path);
+        }
     }
-    read_definition(&definitions, &decision.definition)?;
-    let at = index.partition_point(|entry| entry.created_at <= decision.created_at);
-    index.insert(at, decision);
-    write_index(&root, index)?;
-    fs::remove_file(row)?;
     Ok(())
 }
 
-/// Remove from the trash every decision deleted longer than
-/// [`TRASH_KEPT_DAYS`] before `now_ms`, its definition with it; how many it
-/// removed. A row whose deletion time does not read stays: what this cannot
-/// date, it cannot call old.
+/// Tidy the store of what a delete left: the `trash/` folder an older window
+/// kept for deleted decisions, and every definition file whose decision the
+/// index no longer lists (an older window moved only a deleted decision's
+/// current version out, and a delete here may have failed to remove a file).
+/// Whether anything was removed. A listed decision keeps every version it
+/// has, and a file that does not read as a definition is left alone, as is
+/// everything when the index itself cannot be read.
+///
+/// Under the store's lock; a home with no store gets none made.
 ///
 /// # Errors
-/// A trash that cannot be listed, or a file in it that cannot be removed.
-pub fn empty_trash(home: &Path, now_ms: i64) -> io::Result<usize> {
+/// A `trash/` folder that cannot be removed, or an index that cannot be read.
+/// The other half is done either way.
+pub fn forget_deleted(home: &Path) -> io::Result<bool> {
     let root = root(home);
+    if !root.is_dir() {
+        return Ok(false);
+    }
     let _lock = lock(&root)?;
-    let trash = root.join(TRASH);
-    let kept = TRASH_KEPT_DAYS * civil::MS_PER_DAY;
-    let mut emptied = 0;
-    for (row, trashed) in trashed_in(&trash)? {
-        let Some(deleted) = civil::epoch_ms_of_iso(&trashed.deleted_at) else {
+    let trash = match fs::remove_dir_all(root.join(TRASH)) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    };
+    let definitions = sweep_definitions(&root);
+    Ok(trash? | definitions?)
+}
+
+fn sweep_definitions(root: &Path) -> io::Result<bool> {
+    // No index is no list to judge by: every file would read as a stranger's.
+    if !root.join(INDEX).is_file() {
+        return Ok(false);
+    }
+    let listed: BTreeSet<String> = read_index(root)?
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
+    let definitions = root.join(DEFINITIONS);
+    let mut removed = false;
+    for path in definition_files(&definitions) {
+        let Some(version) = version_named(&path) else {
             continue;
         };
-        if now_ms.saturating_sub(deleted) > kept {
-            if let Err(error) = fs::remove_file(trash.join(json(&trashed.decision.definition)))
-                && error.kind() != io::ErrorKind::NotFound
-            {
-                return Err(error);
-            }
-            fs::remove_file(row)?;
-            emptied += 1;
+        if read_definition(&definitions, version).is_ok_and(|one| !listed.contains(&one.id))
+            && fs::remove_file(&path).is_ok()
+        {
+            removed = true;
         }
     }
-    Ok(emptied)
+    Ok(removed)
+}
+
+/// The files in `definitions/`; none when the folder is not there or not
+/// readable.
+fn definition_files(definitions: &Path) -> Vec<PathBuf> {
+    fs::read_dir(definitions)
+        .map(|files| files.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default()
+}
+
+/// The version a definition file's name carries, when it is named like one.
+fn version_named(path: &Path) -> Option<&str> {
+    path.file_stem()
+        .and_then(OsStr::to_str)
+        .filter(|version| path.extension() == Some(OsStr::new(JSON)) && is_version(version))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -403,14 +365,6 @@ pub fn empty_trash(home: &Path, now_ms: i64) -> io::Result<usize> {
 struct IndexFile {
     schema_version: u32,
     decisions: Vec<Entry>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TrashFile {
-    schema_version: u32,
-    decision: Entry,
-    deleted_at: String,
 }
 
 fn write_mode<S: Serializer>(mode: &JevMode, serializer: S) -> Result<S::Ok, S::Error> {
@@ -481,40 +435,6 @@ fn write_definition(root: &Path, bytes: &[u8]) -> io::Result<String> {
         return Err(unreadable("a definition that no longer hashes to its name"));
     }
     Ok(version)
-}
-
-fn read_trashed(path: &Path) -> io::Result<Trashed> {
-    let row: TrashFile = serde_json::from_slice(&bounded(path, INDEX_MAX_BYTES)?)
-        .map_err(|_| unreadable("not a trash row this store writes"))?;
-    if row.schema_version != SCHEMA_VERSION || !well_named(&row.decision) {
-        return Err(unreadable("not a trash row this store writes"));
-    }
-    Ok(Trashed {
-        decision: row.decision,
-        deleted_at: row.deleted_at,
-    })
-}
-
-/// Every row in `trash` that reads, with its file: named by its own
-/// decision's id.
-fn trashed_in(trash: &Path) -> io::Result<Vec<(PathBuf, Trashed)>> {
-    let entries = match fs::read_dir(trash) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        read => read?,
-    };
-    Ok(entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension() == Some(OsStr::new(JSON)))
-        .filter_map(|path| {
-            let id = path.file_stem()?.to_str()?;
-            if !is_id(id) {
-                return None;
-            }
-            let trashed = read_trashed(&path).ok()?;
-            (trashed.decision.id == id).then_some((path, trashed))
-        })
-        .collect())
 }
 
 fn well_named(entry: &Entry) -> bool {
@@ -645,14 +565,11 @@ mod tests {
         let home = temp.path().join("config");
         let decision = yes_no("d-0000000a", "Release notes");
         create(&home, &decision, JevMode::On, NOW).unwrap();
-        delete(&home, &decision.id, NOW + 1).unwrap();
-        restore(&home, &decision.id).unwrap();
         let store = root(&home);
         for directory in [
             home,
             store.parent().unwrap().to_path_buf(),
             store.join(DEFINITIONS),
-            store.join(TRASH),
             store,
         ] {
             assert_eq!(
@@ -711,102 +628,211 @@ mod tests {
         );
     }
 
-    /// Deleting keeps the decision whole in the trash, and restoring puts the
-    /// same row back: its mode, and the version its definition hashes to.
+    /// Deleting is final: the row leaves the list, every version of the
+    /// definition is removed — the edited ones too — and nothing is kept
+    /// anywhere, so the id is free again. Another decision's files stay.
     #[test]
-    fn delete_moves_to_trash_and_restore_brings_it_back() {
+    fn delete_removes_the_row_and_every_version_and_keeps_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let decision = yes_no("d-0000000a", "Release notes");
+        let other = yes_no("d-0000000b", "Other");
+        let first = create(home.path(), &decision, JevMode::On, NOW).unwrap();
+        let other_version = create(home.path(), &other, JevMode::On, NOW).unwrap();
+        let mut edited = decision.clone();
+        edited.question = "Is this the newer question?".to_string();
+        let second = edit(home.path(), &edited, NOW + 1).unwrap();
+        assert_ne!(first, second);
+        let store = root(home.path());
+        assert!(store.join(DEFINITIONS).join(json(&first)).is_file());
+
+        delete(home.path(), &decision.id).unwrap();
+        let left: Vec<String> = list(home.path())
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        assert_eq!(
+            left,
+            std::slice::from_ref(&other.id),
+            "a deleted decision leaves the list"
+        );
+        for version in [&first, &second] {
+            assert!(
+                !store.join(DEFINITIONS).join(json(version)).exists(),
+                "version {version} went with it"
+            );
+        }
+        assert!(
+            store.join(DEFINITIONS).join(json(&other_version)).is_file(),
+            "another decision's definition stays"
+        );
+        assert!(!store.join(TRASH).exists(), "no trash is made");
+        let everything: Vec<_> = walk(&store);
+        assert!(
+            everything.iter().all(|path| !path.contains(&decision.id)),
+            "nothing under the store names it: {everything:?}"
+        );
+        assert!(matches!(
+            delete(home.path(), &decision.id),
+            Err(Error::Missing)
+        ));
+        assert!(matches!(
+            delete(home.path(), "d-ffffffff"),
+            Err(Error::Missing)
+        ));
+        create(home.path(), &decision, JevMode::On, NOW + 2)
+            .expect("its id and its name are free again");
+    }
+
+    /// A definition another row still names is not removed with a delete.
+    #[test]
+    fn delete_keeps_a_definition_another_row_names() {
+        let home = tempfile::tempdir().unwrap();
+        let one = yes_no("d-0000000a", "One");
+        let version = create(home.path(), &one, JevMode::On, NOW).unwrap();
+        let mut index = read_index(&root(home.path())).unwrap();
+        let mut twin = index[0].clone();
+        twin.id = "d-0000000b".to_string();
+        twin.name = "Twin".to_string();
+        index.push(twin);
+        write_index(&root(home.path()), index).unwrap();
+        delete(home.path(), &one.id).unwrap();
+        assert!(
+            root(home.path())
+                .join(DEFINITIONS)
+                .join(json(&version))
+                .is_file()
+        );
+    }
+
+    /// The `trash/` folder an older window kept is removed, only when it is
+    /// there, and the store keeps working either way. A home with no store
+    /// gets no folder made.
+    #[test]
+    fn the_old_trash_folder_is_forgotten() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(!forget_deleted(home.path()).unwrap(), "nothing to remove");
+        assert!(!root(home.path()).exists(), "no store is made to be swept");
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+        let decision = yes_no("d-0000000a", "Release notes");
+        create(home.path(), &decision, JevMode::On, NOW).unwrap();
+        assert!(!forget_deleted(home.path()).unwrap());
+        let trash = root(home.path()).join(TRASH);
+        fs::create_dir_all(&trash).unwrap();
+        fs::write(trash.join("d-0000000z.json"), b"{}").unwrap();
+        assert!(forget_deleted(home.path()).unwrap());
+        assert!(!trash.exists());
+        assert!(!forget_deleted(home.path()).unwrap());
+        assert_eq!(list(home.path()).unwrap().len(), 1, "the list is untouched");
+    }
+
+    /// An older window moved only a deleted decision's current version to
+    /// `trash/` and left the versions before it in `definitions/`. The sweep
+    /// removes those whose decision is not listed — with no `trash/` there —
+    /// and leaves a listed decision's older versions, and a file it cannot
+    /// read, where they are.
+    #[test]
+    fn the_sweep_removes_the_old_versions_of_a_decision_that_is_gone() {
+        let home = tempfile::tempdir().unwrap();
+        let gone = yes_no("d-0000000a", "Gone");
+        let kept = yes_no("d-0000000b", "Kept");
+        let gone_first = create(home.path(), &gone, JevMode::On, NOW).unwrap();
+        let mut gone_edit = gone.clone();
+        gone_edit.question = "Is this the newer question?".to_string();
+        let gone_second = edit(home.path(), &gone_edit, NOW + 1).unwrap();
+        let kept_first = create(home.path(), &kept, JevMode::On, NOW).unwrap();
+        let mut kept_edit = kept.clone();
+        kept_edit.question = "Is this the newer question?".to_string();
+        let kept_second = edit(home.path(), &kept_edit, NOW + 1).unwrap();
+        let store = root(home.path());
+        let definitions = store.join(DEFINITIONS);
+        // What the older window's delete left: the row gone, the current
+        // version moved out, the first version standing.
+        let rows = read_index(&store)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.id != gone.id)
+            .collect();
+        write_index(&store, rows).unwrap();
+        fs::remove_file(definitions.join(json(&gone_second))).unwrap();
+        let unreadable = definitions.join(json(&"f".repeat(VERSION_HEX_DIGITS)));
+        fs::write(&unreadable, b"not a definition").unwrap();
+        assert!(!store.join(TRASH).exists());
+
+        assert!(forget_deleted(home.path()).unwrap());
+        assert!(
+            !definitions.join(json(&gone_first)).exists(),
+            "the deleted decision's old version went"
+        );
+        for version in [&kept_first, &kept_second] {
+            assert!(
+                definitions.join(json(version)).is_file(),
+                "a listed decision keeps every version: {version}"
+            );
+        }
+        assert!(unreadable.is_file(), "a file it cannot read stays");
+        assert!(!forget_deleted(home.path()).unwrap(), "nothing left to do");
+    }
+
+    /// An index the store cannot read says nothing about which decisions are
+    /// gone, so the sweep removes no definition.
+    #[test]
+    fn the_sweep_removes_nothing_when_the_index_cannot_be_read() {
+        let home = tempfile::tempdir().unwrap();
+        let version = create(
+            home.path(),
+            &yes_no("d-0000000a", "Release notes"),
+            JevMode::On,
+            NOW,
+        )
+        .unwrap();
+        let store = root(home.path());
+        fs::write(store.join(INDEX), b"{ torn").unwrap();
+        assert!(forget_deleted(home.path()).is_err());
+        assert!(store.join(DEFINITIONS).join(json(&version)).is_file());
+        fs::remove_file(store.join(INDEX)).unwrap();
+        let _ = forget_deleted(home.path());
+        assert!(
+            store.join(DEFINITIONS).join(json(&version)).is_file(),
+            "a store with no index is not read as an empty list"
+        );
+    }
+
+    /// The row has left the list when a definition file will not go. The
+    /// delete is done all the same — the person sees it succeed — and the
+    /// next sweep removes what was left.
+    #[cfg(unix)]
+    #[test]
+    fn a_definition_that_will_not_go_does_not_fail_the_delete() {
+        use std::os::unix::fs::PermissionsExt;
         let home = tempfile::tempdir().unwrap();
         let decision = yes_no("d-0000000a", "Release notes");
         let version = create(home.path(), &decision, JevMode::On, NOW).unwrap();
-        let before = list(home.path()).unwrap();
-
-        delete(home.path(), &decision.id, NOW + 1).unwrap();
-        assert!(
-            list(home.path()).unwrap().is_empty(),
-            "a deleted decision leaves the list"
-        );
-        let store = root(home.path());
-        assert!(!store.join(DEFINITIONS).join(json(&version)).exists());
-        assert!(
-            store.join(TRASH).join(json(&version)).is_file(),
-            "its definition waits in the trash",
-        );
-        assert_eq!(
-            trash(home.path()).unwrap(),
-            [Trashed {
-                decision: before[0].clone(),
-                deleted_at: civil::iso_utc_of(NOW + 1),
-            }],
-        );
-        assert!(
-            matches!(
-                create(home.path(), &decision, JevMode::On, NOW + 2),
-                Err(Error::Refused(refused)) if refused == [Refusal::IdTaken]
-            ),
-            "its id stays taken while it waits",
-        );
-
-        restore(home.path(), &decision.id).unwrap();
-        assert_eq!(
-            list(home.path()).unwrap(),
-            before,
-            "it comes back as it was: its mode, and the same version",
-        );
-        assert_eq!(definition(home.path(), &version).unwrap(), decision);
-        assert!(trash(home.path()).unwrap().is_empty());
-        assert!(matches!(
-            restore(home.path(), &decision.id),
-            Err(Error::Missing)
-        ));
-        assert!(matches!(
-            delete(home.path(), "d-ffffffff", NOW),
-            Err(Error::Missing)
-        ));
+        let definitions = root(home.path()).join(DEFINITIONS);
+        fs::set_permissions(&definitions, fs::Permissions::from_mode(0o500)).unwrap();
+        let stuck = fs::remove_file(definitions.join(json(&version))).is_err();
+        let deleted = delete(home.path(), &decision.id);
+        let listed = list(home.path()).unwrap();
+        let left = definitions.join(json(&version)).exists();
+        fs::set_permissions(&definitions, fs::Permissions::from_mode(0o700)).unwrap();
+        if !stuck {
+            return; // the folder lock does not bind this user (root)
+        }
+        assert!(deleted.is_ok(), "{deleted:?}");
+        assert!(listed.is_empty(), "the row left the list");
+        assert!(left, "the file is what was left");
+        assert!(forget_deleted(home.path()).unwrap());
+        assert!(!definitions.join(json(&version)).exists());
     }
 
-    /// The trash keeps a deleted decision thirty days, and no longer.
-    #[test]
-    fn trash_older_than_30_days_is_emptied() {
-        let home = tempfile::tempdir().unwrap();
-        let old = yes_no("d-0000000a", "Old");
-        let recent = yes_no("d-0000000b", "Recent");
-        let old_version = create(home.path(), &old, JevMode::Shadow, NOW).unwrap();
-        create(home.path(), &recent, JevMode::Shadow, NOW).unwrap();
-        delete(home.path(), &old.id, NOW).unwrap();
-        delete(home.path(), &recent.id, NOW + civil::MS_PER_DAY).unwrap();
-        let kept = TRASH_KEPT_DAYS * civil::MS_PER_DAY;
-
-        assert_eq!(
-            empty_trash(home.path(), NOW + kept).unwrap(),
-            0,
-            "thirty days to the millisecond is not older than thirty days",
-        );
-        assert_eq!(empty_trash(home.path(), NOW + kept + 1).unwrap(), 1);
-        let left: Vec<String> = trash(home.path())
-            .unwrap()
-            .into_iter()
-            .map(|trashed| trashed.decision.id)
-            .collect();
-        assert_eq!(left, std::slice::from_ref(&recent.id));
-        assert!(
-            !root(home.path())
-                .join(TRASH)
-                .join(json(&old_version))
-                .exists(),
-            "its definition went with it",
-        );
-        assert!(matches!(restore(home.path(), &old.id), Err(Error::Missing)));
-
-        let undated = root(home.path()).join(TRASH).join(json(&recent.id));
-        let mut row: serde_json::Value =
-            serde_json::from_slice(&fs::read(&undated).unwrap()).unwrap();
-        row["deletedAt"] = "yesterday".into();
-        fs::write(undated, serde_json::to_vec(&row).unwrap()).unwrap();
-        assert_eq!(
-            empty_trash(home.path(), i64::MAX).unwrap(),
-            0,
-            "a row it cannot date stays"
-        );
+    fn walk(path: &Path) -> Vec<String> {
+        let mut found = vec![path.display().to_string()];
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                found.extend(walk(&entry.path()));
+            }
+        }
+        found
     }
 
     /// Every write holds the store's lock, so two writers at once each land

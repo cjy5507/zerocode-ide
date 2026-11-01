@@ -265,11 +265,58 @@ pub mod unverified_reason {
     ];
 }
 
+/// Nothing reached the app, so the act may be repeated.
+pub const NOT_DELIVERED: &str = "not_delivered";
+/// The act may have landed: look before doing it again.
+pub const DELIVERY_UNCERTAIN: &str = "uncertain";
+
+/// What a refusal means for delivery when its provider did not say. Only a refusal
+/// made before any input is known to have reached nothing; anything else, a failure
+/// half way through a click included, may have landed.
+#[must_use]
+pub fn delivery_of_refusal(code: &str) -> &'static str {
+    use error_code as e;
+    match code {
+        e::INVALID_ARGUMENT
+        | e::WRONG_VERB
+        | e::APP_NOT_FOUND
+        | e::APP_BLOCKED
+        | e::SELF_SENSITIVE
+        | e::PERSON_TYPING
+        | e::SHARE_SCOPE
+        | e::SHARE_REQUIRED
+        | e::WINDOW_NOT_FOUND
+        | e::WINDOW_STALE
+        | e::WINDOW_NOT_FOCUSED
+        | e::ELEMENT_NOT_FOUND
+        | e::AMBIGUOUS_TARGET
+        | e::ELEMENT_NOT_CLICKABLE
+        | e::ACTION_NOT_SUPPORTED
+        | e::VALUE_NOT_SETTABLE
+        | e::PERMISSION_DENIED
+        | e::UNSUPPORTED_CAPABILITY
+        | e::PROVIDER_INCOMPATIBLE
+        | e::SEQUENCE_BUSY
+        | e::CONFIRMATION_REQUIRED
+        | e::CONFIRMATION_REFUSED
+        | e::CONFIRMATION_TIMEOUT
+        | e::PERSON_ASKED
+        | e::COVERED
+        | e::SECURE_INPUT
+        | execution::REQUIRES_FOREGROUND => NOT_DELIVERED,
+        _ => DELIVERY_UNCERTAIN,
+    }
+}
+
 /// A provider refusal: a code the skill can act on and a sentence for a person.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderError {
     pub code: String,
     pub message: String,
+    /// Whether anything reached the app, when the provider says: the agent must
+    /// not repeat an act that may have landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<String>,
 }
 
 impl ProviderError {
@@ -277,7 +324,15 @@ impl ProviderError {
         Self {
             code: code.into(),
             message: message.into(),
+            delivery: None,
         }
+    }
+
+    /// What the provider said of delivery, kept beside its refusal.
+    #[must_use]
+    pub fn with_delivery(mut self, delivery: Option<&str>) -> Self {
+        self.delivery = delivery.map(str::to_owned);
+        self
     }
 
     pub fn invalid_argument(message: impl Into<String>) -> Self {

@@ -333,7 +333,6 @@ const fn ends_the_repeat(kind: RecipeStop) -> bool {
         kind,
         RecipeStop::PersonsTurn
             | RecipeStop::PersonsLastStep
-            | RecipeStop::PersonMoved
             | RecipeStop::Stopped
             | RecipeStop::Budget
     )
@@ -634,8 +633,8 @@ mod tests {
 
     /// Where a repeat ends: the count of rounds, the clock, the fail ceiling
     /// (`FLOW_REPEAT_MAX_FAILS` failed rounds in a row — a failed oracle is
-    /// a failed round), the operator's stop, the person's hand, the shut
-    /// door, the caller gone, and the call's own deadline.
+    /// a failed round), the operator's stop, the shut door, the caller gone,
+    /// and the call's own deadline.
     #[test]
     fn a_repeat_ends_at_until_or_after_the_fail_ceiling_or_when_the_person_stops_it() {
         let text = document(false);
@@ -760,7 +759,7 @@ mod tests {
             (6, 3, Ended::Rounds)
         );
 
-        // The operator's stop, the person's hand, the shut door.
+        // The operator's stop and the shut door.
         let bench = Bench::new();
         let stopped: Road<'_> = Box::new(|_, _, _| refused("stopped"));
         let stopped = rig(&bench, &command, &text).ends(
@@ -775,22 +774,6 @@ mod tests {
             (1, Ended::Stopped(RecipeStop::Stopped))
         );
         assert_eq!(stopped.ended.as_str(), "stopped");
-        let bench = Bench::at(Some((0.0, 0.0)));
-        let moving: Road<'_> = Box::new(|_, _, _| {
-            bench.pointer.set(Some((100.0, 100.0)));
-            ok()
-        });
-        let moved = rig(&bench, &command, &text).ends(
-            None,
-            COMPUTER_LONGEST_DEADLINE_MS,
-            moving,
-            false,
-            true,
-        );
-        assert_eq!(
-            (moved.rounds, moved.ended),
-            (1, Ended::Stopped(RecipeStop::PersonMoved))
-        );
         let bench = Bench::new();
         let walked = std::cell::Cell::new(0);
         let shut = rig(&bench, &command, &text).ends(
@@ -828,10 +811,6 @@ mod tests {
             late.text()
         );
         assert_eq!(late.ended.as_str(), "deadline");
-        assert_eq!(
-            Ended::Stopped(RecipeStop::PersonMoved).as_str(),
-            "person_moved"
-        );
     }
 
     /// The repeat layer's own cost per round, the trigger's wait left out:

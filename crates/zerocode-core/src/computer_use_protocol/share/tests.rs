@@ -4,7 +4,7 @@ use super::*;
 const NOW: u64 = 0;
 
 #[test]
-fn ending_a_share_forgets_only_its_app_and_moves_the_generation() {
+fn ending_a_share_ends_every_app_on_the_band_and_moves_the_generation() {
     let mut share = Share::default();
     share.set_required(true);
     share.answered("other", Answer::Shared, NOW);
@@ -19,7 +19,103 @@ fn ending_a_share_forgets_only_its_app_and_moves_the_generation() {
         share.gate(act(Some("sample")), NOW),
         Gate::Ask("sample".into())
     );
-    assert_eq!(share.gate(act(Some("other")), NOW), Gate::Go);
+    assert_eq!(
+        share.gate(act(Some("other")), NOW),
+        Gate::Ask("other".into()),
+        "the band's one press ends everything it names"
+    );
+}
+
+/// The whole computer: an agent acts in any app at once, and several apps are in
+/// use together. A card standing thirty seconds before each new app stalled every
+/// run whose person was away.
+#[test]
+fn by_default_an_act_goes_at_once_and_its_app_joins_the_ones_in_use() {
+    let mut share = Share::default();
+    for app in ["safari", "notes", "kakaotalk"] {
+        assert_eq!(share.gate(act(Some(app)), NOW), Gate::Go);
+    }
+    assert_eq!(
+        share.targets().collect::<Vec<_>>(),
+        ["kakaotalk", "notes", "safari"]
+    );
+    assert_eq!(share.target(), Some("kakaotalk"), "the one acted in last");
+    assert_eq!(share.gate(act(Some("safari")), NOW), Gate::Go);
+    assert_eq!(share.target(), Some("safari"));
+}
+
+/// Two agents taking turns in two apps leave the panel where it stands; it moves
+/// once the app beside it has gone quiet.
+#[test]
+fn agents_taking_turns_do_not_walk_the_panel_between_their_windows() {
+    let mut share = Share::default();
+    assert_eq!(share.gate(act(Some("notes")), 0), Gate::Go);
+    assert_eq!(share.panel_target(), Some("notes"));
+    for at in [500, 1_000, 1_500, 2_000] {
+        let app = if at % 1_000 == 0 { "notes" } else { "safari" };
+        assert_eq!(share.gate(act(Some(app)), at), Gate::Go);
+        assert_eq!(share.panel_target(), Some("notes"), "at {at} ms");
+    }
+    assert_eq!(share.target(), Some("notes"));
+    assert_eq!(share.gate(act(Some("safari")), 2_500), Gate::Go);
+    assert_eq!(
+        share.target(),
+        Some("safari"),
+        "the last act is still known"
+    );
+    assert_eq!(share.panel_target(), Some("notes"));
+    assert_eq!(share.gate(act(Some("safari")), 5_000), Gate::Go);
+    assert_eq!(share.panel_target(), Some("safari"), "notes went quiet");
+}
+
+/// One agent's app limits nothing another agent looks at or acts in.
+#[test]
+fn by_default_an_app_in_use_narrows_nothing_for_anyone_else() {
+    let mut share = Share::default();
+    assert_eq!(share.gate(act(Some("safari")), NOW), Gate::Go);
+    assert_eq!(share.gate(look(Some("notes")), NOW), Gate::Go);
+    assert_eq!(share.gate(SCREEN, NOW), Gate::Go);
+    assert_eq!(share.gate(act(None), NOW), Gate::Go);
+    assert_eq!(share.gate(act(Some("notes")), NOW), Gate::Go);
+}
+
+/// What the person ended does not come back by itself: its next act asks, a yes
+/// lets it go on, and silence keeps it refused.
+#[test]
+fn an_app_the_person_ended_asks_before_it_is_used_again() {
+    let mut share = Share::default();
+    assert_eq!(share.gate(act(Some("notes")), NOW), Gate::Go);
+    assert!(share.end("notes", share.generation()));
+    assert_eq!(share.target(), None);
+    assert_eq!(
+        share.gate(act(Some("notes")), NOW),
+        Gate::Ask("notes".into())
+    );
+    share.answered("notes", Answer::Silent, NOW);
+    assert_eq!(
+        code(share.gate(act(Some("notes")), NOW)).as_deref(),
+        Some(error_code::SHARE_SCOPE),
+        "silence is no yes for what the person took away"
+    );
+
+    let mut asked_again = Share::default();
+    assert_eq!(asked_again.gate(act(Some("notes")), NOW), Gate::Go);
+    assert!(asked_again.end("notes", asked_again.generation()));
+    assert_eq!(
+        asked_again.gate(act(Some("notes")), NOW),
+        Gate::Ask("notes".into())
+    );
+    asked_again.answered("notes", Answer::Shared, NOW);
+    assert_eq!(asked_again.gate(act(Some("notes")), NOW), Gate::Go);
+}
+
+/// A process that ended leaves its app's name behind it, not a share that blocks
+/// every other app: nothing else is narrowed by what stays on the band.
+#[test]
+fn an_app_in_use_that_quit_holds_nothing_up() {
+    let mut share = Share::default();
+    assert_eq!(share.gate(act(Some("pid:1811")), NOW), Gate::Go);
+    assert_eq!(share.gate(look(Some("pid:2912")), NOW), Gate::Go);
 }
 
 #[test]
@@ -66,8 +162,9 @@ fn code(gate: Gate) -> Option<String> {
 /// The first act in an app asks; a yes shares it, and the same app is never
 /// asked again.
 #[test]
-fn the_first_act_in_an_app_asks_once_and_a_yes_shares_it() {
+fn required_the_first_act_in_an_app_asks_once_and_a_yes_shares_it() {
     let mut share = Share::default();
+    share.set_required(true);
     assert_eq!(
         share.gate(act(Some("safari")), NOW),
         Gate::Ask("safari".into())
@@ -82,8 +179,9 @@ fn the_first_act_in_an_app_asks_once_and_a_yes_shares_it() {
 /// While a share stands, everything outside it is refused: another app's
 /// look, a whole-screen picture, an act naming no app. Another app's act asks.
 #[test]
-fn a_share_holds_the_agent_to_its_one_window() {
+fn required_a_share_holds_the_agent_to_what_was_handed_over() {
     let mut share = Share::default();
+    share.set_required(true);
     share.answered("safari", Answer::Shared, NOW);
     assert_eq!(
         code(share.gate(look(Some("notes")), NOW)).as_deref(),
@@ -126,23 +224,24 @@ fn a_no_refuses_and_silence_never_widens_a_share() {
         code(share.gate(act(Some("notes")), NOW)).as_deref(),
         Some(error_code::SHARE_SCOPE)
     );
+    share.set_required(true);
     share.answered("safari", Answer::Shared, NOW);
     share.answered("mail", Answer::Silent, NOW);
     assert_eq!(
         code(share.gate(act(Some("mail")), NOW)).as_deref(),
-        Some(error_code::SHARE_SCOPE)
+        Some(error_code::SHARE_REQUIRED)
     );
     assert_eq!(share.target(), Some("safari"));
 }
 
-/// Silence with nothing shared — the person away — leaves the agent working
-/// as before, and that app is not asked again this session.
+/// Silence about an app the person never took back — they were away — leaves
+/// the agent working, and that app is not asked again this session.
 #[test]
-fn silence_with_nothing_shared_works_as_before_and_is_not_asked_again() {
+fn silence_about_an_app_leaves_the_agent_working_and_is_not_asked_again() {
     let mut share = Share::default();
     share.answered("calculator", Answer::Silent, NOW);
     assert_eq!(share.gate(act(Some("calculator")), NOW), Gate::Go);
-    assert_eq!(share.target(), None);
+    assert_eq!(share.target(), Some("calculator"));
     assert_eq!(
         share.gate(SCREEN, NOW),
         Gate::Go,
@@ -419,16 +518,16 @@ fn a_request_in_flight_is_judged_again_without_moving_the_share() {
     assert_eq!(share.target(), Some("notes"));
 }
 
-/// R3 (t-74826 again): handing over another app ends a request in flight
-/// outside it. Nothing shared, a request is admitted in an unanswered app,
-/// or looks at the whole screen, or acts naming no app; once the person
-/// hands over B only, its next step is refused as the gate refuses it — and
-/// judging it moves nothing.
+/// R3 (t-74826 again): with sharing required, handing over another app ends a
+/// request in flight outside it. Nothing shared, a request is admitted to look at
+/// the whole screen or to look at an app; once the person hands over B only, its
+/// next step is refused as the gate refuses it — and judging it moves nothing.
+/// Without required sharing, another app in use limits nothing.
 #[test]
 fn handing_over_another_app_refuses_the_next_step_of_a_request_outside_it() {
     let mut share = Share::default();
-    share.answered("safari", Answer::Silent, NOW);
-    let in_flight = [act(Some("safari")), SCREEN, act(None), look(Some("safari"))];
+    share.set_required(true);
+    let in_flight = [SCREEN, look(Some("safari"))];
     for reach in in_flight {
         assert_eq!(share.gate(reach, NOW), Gate::Go, "admitted: {reach:?}");
     }
@@ -447,6 +546,12 @@ fn handing_over_another_app_refuses_the_next_step_of_a_request_outside_it() {
     }
     assert_eq!(share, before, "judging a step in flight moves nothing");
     assert_eq!(share.still_holds(act(Some("notes")), NOW), Ok(()));
+
+    let mut free = Share::default();
+    free.answered("notes", Answer::Shared, NOW);
+    for reach in [act(Some("safari")), SCREEN, act(None), look(Some("safari"))] {
+        assert_eq!(free.still_holds(reach, NOW), Ok(()), "{reach:?}");
+    }
 }
 
 /// A step in flight is judged as the gate judges a new request, without
@@ -477,7 +582,9 @@ fn a_step_in_flight_is_judged_as_the_gate_judges_without_moving_anything() {
                             }
                         }
                         if let Some(target) = target {
-                            if share.answers.get(target) != Some(&Answer::Shared) {
+                            if share.answers.get(target)
+                                != Some(&Standing::Answered(Answer::Shared))
+                            {
                                 continue;
                             }
                             share.answered(target, Answer::Shared, NOW);

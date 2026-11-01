@@ -1,6 +1,6 @@
 # Looking: what a repeated look proves, `observe`, `--diff`, `watch`, marks
 
-Read this when you look at a window, a tab or the screen and must judge what the look shows: the bounds on unchanged looks, the purple pointer, `--no-screenshot`, OCR, `observe --diff --settle`, `watch`, marks. The text was moved here word for word from the former single-file guide.
+Read this when you look at a window, a tab or the screen and must judge what the look shows: the bounds on unchanged looks, the agents' pointers, `--no-screenshot`, OCR, `observe --diff --settle`, `watch`, marks. The text was moved here word for word from the former single-file guide.
 
 Where a paragraph below says "above" or "below", it means the whole guide, which is now split over several files: the table in `SKILL.md` says which file holds what.
 
@@ -26,18 +26,16 @@ Keep the original target and background requirement when a bound is reached.
 Do not switch to a global screenshot, `open`, `activate`, or shared-pointer
 input to get around a scoped refusal. Report the missing evidence instead.
 
-Under background-only policy, recipes never watch the person's shared pointer;
-each desktop input is admitted independently and an unsupported step stops.
-Recipes containing only built-in browser, emulator or explicitly background
-app steps do not watch the shared pointer and continue when the person moves
-it. A recipe containing a foreground desktop step retains the person's
-pointer handoff. Do not mix a foreground fallback into a background task.
+A recipe never watches the person's pointer: it goes on when they move it, and
+they stop it with the stop chord or the band. Under background-only policy each
+desktop input is admitted independently and an unsupported step stops.
 
-Accepted macOS background clicks and scrolls update a separate purple pointer
-on the visible part of the target window. It cannot take keyboard focus or
-receive mouse input. Target visibility and geometry are checked before it is
-shown; stopping or changing the foreground clears it, and it expires when
-idle. The helper status reports its latest accepted
+Every accepted macOS background act moves a separate pointer to where it
+happened, in the agent's own colour with its name, so a person can watch several
+agents at once. It is faint over a window they have covered. It cannot take
+keyboard focus or receive mouse input, and agents' screen captures leave it out.
+A stop clears it, and it goes 5 s after the agent's last act. The helper status
+reports its latest accepted
 window-local point separately from the point actually displayed; neither is
 the person's hardware cursor. This indicator is not a separate desktop or a
 claim that the task succeeded.
@@ -98,6 +96,15 @@ still need the normal screenshot-analysis fallback; do not guess a target.
   that repainted since the last reading — reading twice is cheap.
   The stream closes 30 s after the last look, and with it the system's
   recording indicator.
+- **Reading less**: `get-app-state --skeleton` reads the top three levels and says
+  how much each cut branch holds; `--root N` reads the element numbered N and what
+  is inside it; `--max-depth N` sets how deep. Their numbers join the others, and
+  the window's look stands. `truncation.cutShort` says a walk ran out of time
+  (`time_budget`) or the app stopped answering (`app_unresponsive`).
+- **Menus and sheets**: `get-app-state --surface menubar` reads the menu bar,
+  `--surface menu` the open menu or context menu, `--surface sheet` a sheet. Press
+  their items by number: an item's action needs no pointer. `surfaces` in an act's
+  answer names a menu or dialog that opened, which a look at the window would not.
 - **Marks — point by number** (`observe --marks`): the look numbers the
   controls of one window on its picture (the named app's window, or the
   frontmost document window that is not ZeroCode's) and answers `marks:

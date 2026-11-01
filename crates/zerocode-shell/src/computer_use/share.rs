@@ -1,16 +1,15 @@
-//! One window shared with an agent, held by the window (t-73906; the rule is
-//! core `computer_use_protocol::share`).
+//! The apps agents work in, held by the window (t-73906; the rule is core
+//! `computer_use_protocol::share`).
 //!
-//! A command is admitted here before it acts: the first act in an app asks
-//! the person once through the question popup (`computer:share`, answered by
-//! `computer_confirm_answer`), and the answer is held until the person ends
-//! that app's share or the window closes. The band paints the share
-//! (`computer:share-state`) and offers "take control", "hand back" and
-//! "end sharing"; a request admitted under one generation
-//! is refused at its next provider step once the person took control. With
-//! sharing required, an app whose card went unanswered waits (t-74826): the
-//! band names it and offers the hand-over (`computer_share_hand_over`), and
-//! the card is raised again only after the quiet.
+//! A command is admitted here before it acts. By default it goes at once and its
+//! app joins the ones in use. The band paints them (`computer:share-state`) and
+//! offers "take control", "hand back" and "end sharing"; a request admitted under
+//! one generation is refused at its next provider step once the person took
+//! control. A card (`computer:share`, answered by `computer_confirm_answer`) asks
+//! only when the person ended an app's use or requires sharing. With sharing
+//! required, an app whose card went unanswered waits (t-74826): the band names it
+//! and offers the hand-over (`computer_share_hand_over`), and the card is raised
+//! again only after the quiet.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -140,7 +139,7 @@ thread_local! {
 fn with_held<T>(touch: impl FnOnce(&mut Held) -> T) -> T {
     let tracked = |held: &mut Held| {
         let result = touch(held);
-        if held.panel_share.0.as_deref() != held.share.target()
+        if held.panel_share.0.as_deref() != held.share.panel_target()
             || held.panel_share.1 != held.share.generation()
         {
             // A target change is a presentation change, not a hand-back. A
@@ -150,7 +149,7 @@ fn with_held<T>(touch: impl FnOnce(&mut Held) -> T) -> T {
                 held.panel_first_revision = held.panel_revision;
             }
             held.panel_share = (
-                held.share.target().map(str::to_string),
+                held.share.panel_target().map(str::to_string),
                 held.share.generation(),
             );
         }
@@ -200,8 +199,35 @@ fn reached(params: &Value) -> Option<(String, String)> {
             let pinned = super::marks::pinned_click(params).ok()?;
             pinned.params.get("app")?.as_str().map(str::to_string)
         })?;
-    let key = super::self_surface::own_app_key(&named).unwrap_or_else(|| app_key(&named));
-    Some((key, named.trim().to_string()))
+    if let Some(key) = super::self_surface::own_app_key(&named) {
+        return Some((key, named.trim().to_string()));
+    }
+    Some(person_words_for(named.trim()))
+}
+
+/// The key and the words for an app an agent named by process: the card and the
+/// band say what the person calls it, and a restarted app stays the same app.
+fn person_words_for(named: &str) -> (String, String) {
+    let Some(pid) = named
+        .strip_prefix("pid:")
+        .and_then(|pid| pid.parse::<i64>().ok())
+    else {
+        return (app_key(named), named.to_string());
+    };
+    let name = super::call("listApps", json!({})).ok().and_then(|listed| {
+        listed
+            .get("apps")?
+            .as_array()?
+            .iter()
+            .find(|app| app.get("pid").and_then(Value::as_i64) == Some(pid))?
+            .get("name")?
+            .as_str()
+            .map(str::to_string)
+    });
+    name.map_or_else(
+        || (app_key(named), named.to_string()),
+        |name| (app_key(&name), name),
+    )
 }
 
 /// Whether a request looks at the whole screen rather than one app's window.
@@ -219,12 +245,20 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
     if NEVER_HELD.contains(&method) {
         return Ok(scope(None));
     }
-    let named = reached(params);
     let acts = method.acts();
     let screen = whole_screen(method, params);
+    // A look needs no words: naming the process costs the helper a round trip.
+    let named = if acts {
+        reached(params)
+    } else {
+        params
+            .get("app")
+            .and_then(Value::as_str)
+            .map(|named| (app_key(named), named.trim().to_string()))
+    };
     loop {
         refresh_required();
-        let before = with_held(|held| held.share.target().map(str::to_string));
+        let before = with_held(|held| held.share.panel_target().map(str::to_string));
         let now = now_ms();
         let (gate, generation, after) = with_held(|held| {
             let gate = held.share.gate(
@@ -235,10 +269,18 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
                 },
                 now,
             );
+            if matches!(gate, Gate::Go)
+                && let Some((key, label)) = named.as_ref()
+                && held.share.targets().any(|target| target == key)
+            {
+                held.labels
+                    .entry(key.clone())
+                    .or_insert_with(|| label.clone());
+            }
             (
                 gate,
                 held.share.generation(),
-                held.share.target().map(str::to_string),
+                held.share.panel_target().map(str::to_string),
             )
         });
         if before != after {
@@ -247,7 +289,7 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
         match gate {
             Gate::Go => {
                 if named.as_ref().is_some_and(|(key, _)| {
-                    with_held(|held| held.share.target() == Some(key.as_str()))
+                    with_held(|held| held.share.panel_target() == Some(key.as_str()))
                 }) {
                     let pinned = params
                         .get("mark")
@@ -355,7 +397,7 @@ pub(crate) fn end(app: &str, generation: u64) -> Value {
         if !held.share.end(app, generation) {
             return false;
         }
-        held.labels.remove(app);
+        held.labels.clear();
         held.panel_window = Value::Null;
         true
     });
@@ -381,11 +423,19 @@ pub(crate) fn hand_over(app: &str) -> bool {
 /// waits for them to hand it over.
 pub(crate) fn state() -> Value {
     with_held(|held| {
-        let target = held.share.target();
+        let target = held.share.panel_target();
         let waiting = held.share.waiting();
+        // The band names every app in use; a press there acts on all of them.
+        let label = target.map(|_| {
+            held.share
+                .targets()
+                .map(|key| held.labels.get(key).map_or(key, String::as_str))
+                .collect::<Vec<_>>()
+                .join(", ")
+        });
         json!({
             "target": target,
-            "label": target.and_then(|key| held.labels.get(key)),
+            "label": label,
             "waiting": waiting,
             "waitingLabel": waiting.and_then(|key| held.labels.get(key)),
             "takenBack": held.share.taken_back(),

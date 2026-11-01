@@ -3983,12 +3983,9 @@ pub(super) fn goal_road(mode: Mode, with_key: bool, until: Option<[u64; 2]>) -> 
         .to_string()
     };
 
-    /// A desk that knows only the pane's page: no pointer, no picture.
+    /// A desk that knows only the pane's page: no picture.
     struct PaneDesk;
     impl crate::computer_use::recipe_run::Desk for PaneDesk {
-        fn pointer(&mut self) -> Option<(f64, f64)> {
-            None
-        }
         fn picture(&mut self, _: [f64; 4]) -> Option<(Vec<u8>, ShotFrame)> {
             None
         }

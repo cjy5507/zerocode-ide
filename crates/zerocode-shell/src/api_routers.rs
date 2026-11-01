@@ -375,6 +375,9 @@ pub enum RouterRefusalKind {
     KeychainUnavailable,
     /// The entered key cannot form an HTTP authentication value.
     InvalidKey,
+    /// The keychain's road cannot carry this value. Refused before any process
+    /// started, so the item standing there was not touched.
+    ValueRefused,
     /// Anything else; the message says what.
     Failed,
 }
@@ -457,6 +460,12 @@ impl RouterKeys for Keychain {
         if !self.available {
             return Err(RouterRefusal::keychain_unavailable());
         }
+        crate::accounts::keychain_refuses_value(service, secret).map_err(|message| {
+            RouterRefusal {
+                kind: RouterRefusalKind::ValueRefused,
+                message,
+            }
+        })?;
         crate::accounts::write_keychain_service(service, secret).map_err(RouterRefusal::from)
     }
 
@@ -625,7 +634,9 @@ fn commit_settings_and_key(
     };
     if let Err(mut error) = changed.and_then(|()| write(path, updated).map_err(RouterRefusal::from))
     {
-        if let Some(change) = key {
+        // A value the keychain's road refused touched nothing, so nothing is put
+        // back: the put-back is a delete and a write of a key that was fine.
+        if let Some(change) = key.filter(|_| error.kind != RouterRefusalKind::ValueRefused) {
             let restored = match change.previous {
                 Some(previous) => keys.write(change.service, previous),
                 None => keys.delete(change.service),
@@ -2299,6 +2310,89 @@ mod tests {
             assert_eq!(keys.held(&service).as_deref(), previous);
             assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
         }
+    }
+
+    /// A value the keychain's road refused left the item as it stood, so there is
+    /// nothing to put back. Putting it back anyway deleted the item and wrote it
+    /// again, which could fail on a key that was fine.
+    #[test]
+    fn a_refused_value_is_not_answered_by_rewriting_the_key_standing_there() {
+        struct RefusesTheNewKey {
+            keys: HeldKeys,
+            writes: std::cell::RefCell<Vec<String>>,
+        }
+        impl RouterKeys for RefusesTheNewKey {
+            fn read(&self, service: &str) -> Result<Option<String>, RouterRefusal> {
+                self.keys.read(service)
+            }
+            fn write(&self, service: &str, secret: &str) -> Result<(), RouterRefusal> {
+                self.writes.borrow_mut().push(secret.to_string());
+                if secret == "new-key" {
+                    return Err(RouterRefusal {
+                        kind: RouterRefusalKind::ValueRefused,
+                        message: "fixture refused this value".to_string(),
+                    });
+                }
+                self.keys.write(service, secret)
+            }
+            fn delete(&self, service: &str) -> Result<(), RouterRefusal> {
+                self.keys.delete(service)
+            }
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let keys = RefusesTheNewKey {
+            keys: HeldKeys::default(),
+            writes: std::cell::RefCell::default(),
+        };
+        save_router(&path, router_save("gateway", None, Some("old-key")), &keys).unwrap();
+        let existing = std::fs::read_to_string(&path).unwrap();
+        keys.writes.borrow_mut().clear();
+
+        let refused =
+            save_router(&path, router_save("gateway", None, Some("new-key")), &keys).unwrap_err();
+
+        assert_eq!(refused.kind, RouterRefusalKind::ValueRefused);
+        assert!(!refused.message.contains("복구"), "{}", refused.message);
+        assert_eq!(*keys.writes.borrow(), ["new-key"]);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
+        let service = router_keychain_service_for_env(&router_auth_env_name("gateway"));
+        assert_eq!(keys.keys.held(&service).as_deref(), Some("old-key"));
+    }
+
+    /// The real store says which of its refusals touched nothing, and in words
+    /// that carry no part of the value.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_keychain_names_a_value_it_refused_before_touching_anything() {
+        let keychain = Keychain { available: true };
+        let service = "zerocode-test-router-value-refused";
+        keychain.write(service, "fixture-standing").expect("seed");
+        for value in ["FAKE한글".to_string(), "FAKE\nbreak".to_string()] {
+            let refused = keychain.write(service, &value).unwrap_err();
+            assert_eq!(refused.kind, RouterRefusalKind::ValueRefused);
+            assert!(!refused.message.contains("FAKE"), "{}", refused.message);
+            assert_eq!(
+                keychain.read(service).unwrap().as_deref(),
+                Some("fixture-standing")
+            );
+        }
+    }
+
+    /// A key past the line's limit is kept whole. It is one the keychain's road can
+    /// carry, on the old argument road, and refusing it would lose a save that worked
+    /// before.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_key_past_the_line_limit_is_kept_whole() {
+        let keychain = Keychain { available: true };
+        let service = "zerocode-test-router-long-key";
+        let key = "FAKE".repeat(2_000);
+        keychain.write(service, &key).expect("the long key");
+        assert_eq!(
+            keychain.read(service).unwrap().as_deref(),
+            Some(key.as_str())
+        );
     }
 
     #[test]

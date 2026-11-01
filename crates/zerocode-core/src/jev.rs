@@ -37,6 +37,7 @@ pub mod count;
 pub mod cover;
 pub mod custom;
 pub mod door;
+pub mod erase;
 pub mod file_pick;
 pub mod hedge;
 pub mod journal;

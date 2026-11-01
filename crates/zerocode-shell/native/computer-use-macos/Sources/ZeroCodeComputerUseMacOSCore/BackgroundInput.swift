@@ -18,7 +18,7 @@ public enum BackgroundInput {
 
     public static let methods: Set<String> = [
         "getAppState", "readText", "findElements", "waitFor", "click", "setValue", "scroll",
-        "typeText", "pressKey", "hotkey", "pasteText",
+        "typeText", "pressKey", "hotkey", "pasteText", "launchApp", "openTarget",
     ]
 
     public enum Refusal: String, Error {
@@ -30,13 +30,32 @@ public enum BackgroundInput {
         guard requested else { return nil }
         guard !restoresWindow else { return .invalidArgument }
         guard methods.contains(method) else { return .requiresForeground }
-        return hasApp ? nil : .invalidArgument
+        // Opening a page or a file names no app: it comes up behind, whichever opens it.
+        return hasApp || method == "openTarget" ? nil : .invalidArgument
+    }
+
+    /// Whether the shared desktop can do what the background road just refused.
+    /// A field that cannot be written is the same field with the app in front.
+    public static func foregroundMayTakeOver(method: String, refusal: String) -> Bool {
+        switch refusal {
+        case "requires_foreground", "focus_changed":
+            return true
+        case "value_not_settable":
+            return method == "typeText" || method == "pasteText"
+        default:
+            return false
+        }
     }
 
     public static func admitsTarget(_ target: Int32, foreground: Int32?) -> Bool {
         guard target > 0, let foreground, foreground > 0 else { return false }
         return target != foreground
     }
+
+    /// The roles whose controls a web view comes to offer a press on.
+    public static let pressableRoles: Set<String> = [
+        "AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXMenuItem", "AXTab", "AXPopUpButton",
+    ]
 
     public static func clickAction(actions: [String], textEntry: Bool, plainLeftClick: Bool) -> String? {
         guard plainLeftClick else { return nil }

@@ -968,7 +968,10 @@ pub fn builtin_decision_editor(
 }
 
 /// One settings lock covers the stale-editor check and the whole edit.
-/// Deletion is a persistent tombstone; reset alone forgets the override.
+/// Deletion is a persistent tombstone and the end of the decision: nothing
+/// writes it back — there is no restore, and a save (which would clear the
+/// mark) or a reset (which would remove the whole entry) on a deleted
+/// decision is refused as `builtin_decision_deleted`.
 pub fn update_builtin_decision(
     path: &Path,
     id: &str,
@@ -984,15 +987,17 @@ pub fn update_builtin_decision(
         if &current != expected {
             return Err("builtin_decision_changed".to_string());
         }
+        if current.deleted && matches!(action, "save" | "reset") {
+            return Err("builtin_decision_deleted".to_string());
+        }
         let mut next = match action {
             "save" => draft.ok_or("builtin_decision_draft")?,
+            // A delete is the end of the wording as well: only the mark stays,
+            // so nothing the person wrote is kept and a question the app has
+            // since changed cannot make the delete fail its own check.
             "delete" => builtin::Decision {
                 deleted: true,
-                ..current.clone()
-            },
-            "restore" => builtin::Decision {
-                deleted: false,
-                ..current.clone()
+                ..builtin::Decision::default()
             },
             "reset" => builtin::Decision::default(),
             _ => return Err("builtin_decision_action".to_string()),
@@ -1053,7 +1058,12 @@ pub fn update_builtin_decision(
             );
         }
         Ok(())
-    })
+    })?;
+    // After the settings lock is back: the seat's records go with the mark.
+    if action == "delete" {
+        zerocode_core::jev::erase::seat_deleted(path, id);
+    }
+    Ok(())
 }
 
 /// Set the routing classifier to one of its four words, leaving every other
@@ -1646,8 +1656,6 @@ pub struct CustomDecisionRules {
     pub hourly_all: u64,
     pub act_from: Within<f64>,
     pub act_from_default: f64,
-    /// How many days a deleted decision waits to be restored.
-    pub trash_kept_days: i64,
     /// The word each kind of answer travels under, in the editor's order.
     pub kinds: Vec<String>,
     /// Where a decision may ask, and what it may read there.
@@ -1684,7 +1692,6 @@ impl CustomDecisionRules {
             hourly_all: door::custom_hourly_requests(document),
             act_from: Within::of(&custom::ACT_FROM),
             act_from_default: custom::ACT_FROM_DEFAULT,
-            trash_kept_days: custom::store::TRASH_KEPT_DAYS,
             kinds: AnswerDraft::EVERY_KIND
                 .iter()
                 .filter_map(|answer| {
@@ -1728,22 +1735,12 @@ pub struct KeptDecision {
     pub draft: DecisionDraft,
 }
 
-/// A deleted decision the store can still bring back.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TrashedDecision {
-    pub id: String,
-    pub name: String,
-    pub deleted_at: String,
-}
-
-/// Every decision the person keeps, the deleted ones still to be restored,
-/// and the folders a decision may be narrowed to.
+/// Every decision the person keeps and the folders a decision may be
+/// narrowed to.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomDecisions {
     pub decisions: Vec<KeptDecision>,
-    pub trash: Vec<TrashedDecision>,
     /// The folders the person consented to by name.
     pub folders: Vec<String>,
     /// Whether the person consented to every folder.
@@ -1860,6 +1857,15 @@ impl From<RouterRefusal> for DecisionRefusal {
     }
 }
 
+/// Tidy the person's decision store of what a delete left behind — an older
+/// window's `trash/` folder and the definition files of decisions the list no
+/// longer holds — once, when the window starts, off the interface thread.
+/// A failure never stops the start (the next start tries again), and a home
+/// with no store gets none made.
+pub fn tidy_decision_store(home: &Path) {
+    let _ = custom::store::forget_deleted(home);
+}
+
 /// The person's decisions under `home`, zo's config home, and the folders
 /// `settings` consents to.
 ///
@@ -1878,18 +1884,9 @@ pub fn custom_decisions_at(home: &Path, settings: &Value) -> std::io::Result<Cus
             })
         })
         .collect::<std::io::Result<_>>()?;
-    let trash = custom::store::trash(home)?
-        .into_iter()
-        .map(|trashed| TrashedDecision {
-            id: trashed.decision.id,
-            name: trashed.decision.name,
-            deleted_at: trashed.deleted_at,
-        })
-        .collect();
     let door = JevSettings::from_root(settings);
     Ok(CustomDecisions {
         decisions,
-        trash,
         folders: door.folders().map(str::to_string).collect(),
         everywhere: door.everywhere(),
     })
@@ -1919,18 +1916,15 @@ pub fn check_custom_decision(draft: DecisionDraft) -> DraftCheck {
     }
 }
 
-/// Delete the decision `id` under `home` at `now_ms`, and empty the trash of
-/// what waited in it past its days.
+/// Delete the decision `id` under `home` for good: its row and its
+/// definitions leave the store with its ledger rows, and nothing brings them
+/// back.
 ///
 /// # Errors
 /// Whatever keeps the store from it.
-pub fn delete_custom_decision_at(
-    home: &Path,
-    id: &str,
-    now_ms: i64,
-) -> Result<(), custom::store::Error> {
-    custom::store::delete(home, id, now_ms)?;
-    custom::store::empty_trash(home, now_ms)?;
+pub fn delete_custom_decision_at(home: &Path, id: &str) -> Result<(), custom::store::Error> {
+    custom::store::delete(home, id)?;
+    zerocode_core::jev::erase::decision_deleted(home, id);
     Ok(())
 }
 
@@ -1958,6 +1952,9 @@ mod provider_tests;
 
 #[cfg(test)]
 mod builtin_tests;
+
+#[cfg(test)]
+mod erase_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4275,7 +4272,6 @@ mod tests {
                 "hourlyAll": hourly_all,
                 "actFrom": { "least": custom::ACT_FROM.start(), "most": custom::ACT_FROM.end() },
                 "actFromDefault": custom::ACT_FROM_DEFAULT,
-                "trashKeptDays": custom::store::TRASH_KEPT_DAYS,
                 "kinds": kinds,
                 "points": custom::Point::ALL.map(|at| serde_json::json!({
                     "at": at.key(),
@@ -4287,13 +4283,14 @@ mod tests {
         );
     }
 
-    /// The editor's six doors (t-62170 stage 3) are registered with the
+    /// The editor's five doors (t-62170 stage 3) are registered with the
     /// webview, answered by the settings harness's fake backend, and asked
     /// by the dashboard: a door the page asks that nobody registered is a
     /// button that does nothing, and one the harness never answers is one no
-    /// page test presses.
+    /// page test presses. There is no door that brings a deleted decision
+    /// back: none is registered, answered or asked.
     #[test]
-    fn the_decision_editor_asks_six_registered_doors_the_harness_answers() {
+    fn the_decision_editor_asks_five_registered_doors_the_harness_answers() {
         let main = include_str!("main.rs");
         let handlers = main
             .split_once("tauri::generate_handler![")
@@ -4306,7 +4303,6 @@ mod tests {
             "check_custom_decision",
             "save_custom_decision",
             "delete_custom_decision",
-            "restore_custom_decision",
             "set_custom_decision_mode",
         ] {
             assert!(
@@ -4320,6 +4316,12 @@ mod tests {
             assert!(
                 dashboard.contains(&format!("invoke(\"{command}\"")),
                 "the dashboard never asks {command}"
+            );
+        }
+        for sources in [main, harness, dashboard] {
+            assert!(
+                !sources.contains("restore_custom_decision"),
+                "a door that brings a deleted decision back is left"
             );
         }
     }
@@ -4447,10 +4449,10 @@ mod tests {
     /// wrote it, recording first; core's check finds nothing in it and names
     /// the version the store keeps; switched on and then edited into a new
     /// version, it keeps its mode; a mode no decision offers is refused;
-    /// deleted, it waits in the trash and comes back as it was; and a choice
+    /// deleted, it is gone for good, files and all; and a choice
     /// that names an option twice is refused at that name (t-62170 stage 3).
     #[test]
-    fn a_decision_goes_through_the_editors_doors_and_back() {
+    fn a_decision_goes_through_the_editors_doors_and_a_delete_is_final() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path();
         // Core keeps a decision's folders only as absolute paths, and an
@@ -4537,31 +4539,26 @@ mod tests {
             kept => panic!("a decision took the automatic mode: {kept:?}"),
         }
 
-        delete_custom_decision_at(home, &id, 5_000).expect("deleted");
+        delete_custom_decision_at(home, &id).expect("deleted");
         let listed = custom_decisions_at(home, &settings).expect("listed");
         assert!(
             listed.decisions.is_empty(),
             "a deleted decision is not listed"
         );
-        assert_eq!(
-            listed
-                .trash
-                .iter()
-                .map(|trashed| trashed.id.as_str())
-                .collect::<Vec<_>>(),
-            vec![id.as_str()],
-            "it waits in the trash"
+        let sent = serde_json::to_value(&listed).expect("the list, sent");
+        assert!(
+            sent.get("trash").is_none(),
+            "the list carries no trash to restore from: {sent}"
         );
-        custom::store::restore(home, &id).expect("restored");
-        let listed = custom_decisions_at(home, &settings).expect("listed");
-        assert_eq!(
-            (
-                listed.decisions[0].mode,
-                listed.decisions[0].version.as_str()
-            ),
-            (JevMode::On.key(), second.as_str()),
-            "it comes back as it was"
-        );
+        let store = custom::store::root(home);
+        let left: Vec<_> = std::fs::read_dir(store.join("definitions"))
+            .map(|entries| entries.flatten().collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "no version of it is kept: {left:?}");
+        assert!(matches!(
+            delete_custom_decision_at(home, &id),
+            Err(custom::store::Error::Missing)
+        ));
 
         let twice = DecisionDraft {
             answer: AnswerDraft::Choice {
@@ -4575,6 +4572,76 @@ mod tests {
                 "refused, but not at the name given twice: {refusals:?}"
             ),
             kept => panic!("a choice that names an option twice was kept: {kept:?}"),
+        }
+    }
+
+    /// Reading the list sweeps nothing: the dashboard opening is not what
+    /// tidies the store. The window start's one pass does ([`tidy_decision_store`]),
+    /// and a trash folder an older window left goes with it, on the first
+    /// pass, whether or not the list was read; a store that is not there is
+    /// not made.
+    #[test]
+    fn reading_the_list_sweeps_nothing_and_the_start_pass_does() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let settings = serde_json::json!({});
+        tidy_decision_store(home);
+        assert!(
+            !custom::store::root(home).exists(),
+            "a home with no store is left without one"
+        );
+        let draft = DecisionDraft {
+            id: None,
+            name: "Kept".to_string(),
+            question: "Is it kept?".to_string(),
+            answer: AnswerDraft::YesNo {
+                yes: "Yes.".to_string(),
+                no: "No.".to_string(),
+            },
+            at: custom::Point::TurnStart,
+            reads: BTreeSet::from([custom::Input::Task]),
+            folders: None,
+            act_from: custom::ACT_FROM_DEFAULT,
+            max_per_hour: custom::HOURLY_DEFAULT,
+        };
+        save_custom_decision_at(home, draft, 1_000).expect("kept");
+        let trash = custom::store::root(home).join("trash");
+        std::fs::create_dir_all(&trash).expect("an old trash");
+        std::fs::write(trash.join("d-00000001.json"), b"{}").expect("an old row");
+        let listed = custom_decisions_at(home, &settings).expect("listed");
+        assert_eq!(listed.decisions.len(), 1, "the list is read as before");
+        assert!(trash.exists(), "reading the list did not sweep the trash");
+        tidy_decision_store(home);
+        assert!(!trash.exists(), "the start pass removed the old trash");
+        let again = custom_decisions_at(home, &settings).expect("listed again");
+        assert_eq!(again.decisions.len(), 1, "no trash to find is no error");
+    }
+
+    /// A trash folder that cannot be emptied stops neither the start pass
+    /// nor the list.
+    #[cfg(unix)]
+    #[test]
+    fn an_old_trash_that_cannot_be_emptied_stops_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let locked = custom::store::root(home).join("trash").join("locked");
+        std::fs::create_dir_all(&locked).expect("an old trash");
+        std::fs::write(locked.join("d-00000001.json"), b"{}").expect("an old row");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).expect("lock");
+        tidy_decision_store(home);
+        let held = locked.exists();
+        let listed = custom_decisions_at(home, &serde_json::json!({}));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("unlock");
+        assert!(listed.is_ok(), "an unremovable trash stopped the list");
+        if held {
+            // The folder really was held: the next start pass removes it.
+            tidy_decision_store(home);
+            assert!(
+                !custom::store::root(home).join("trash").exists(),
+                "the trash was still there after the next pass"
+            );
         }
     }
 }

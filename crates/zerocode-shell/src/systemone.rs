@@ -453,7 +453,7 @@ pub fn append_rows_checked(ledger: &Path, rows: &[Value]) -> std::io::Result<()>
 }
 
 fn append_rows_inner(ledger: &Path, rows: &[Value], durable: bool) -> std::io::Result<()> {
-    if rows.is_empty() {
+    if rows.is_empty() || !zerocode_core::jev::erase::may_write(ledger) {
         return Ok(());
     }
     let mut said = String::new();

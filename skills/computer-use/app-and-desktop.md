@@ -15,9 +15,10 @@ zerocode-computer click --app <bundle-id-or-name> --element-index <n> --json
 
 Use bundle IDs from `list-apps` when possible. If an app has several windows,
 select a fresh `window-id` from `list-windows` and keep passing it until the UI
-changes. Element indexes are short-lived: every action may repaint the target,
-so use the returned state or run `get-app-state` again before the next action.
-Never infer indexes from `elementCount`; use the numeric labels in `treeText`.
+changes. An element's number lasts until the app removes that control, so an
+earlier look stays good: read what an act changed in its answer's `changes`, and
+look again only when you need more than that. Never infer numbers from
+`elementCount` or from their order; use the labels in `treeText`.
 
 ## Actions
 
@@ -27,7 +28,7 @@ it runs `hotkey` and reports `ranAs: "hotkey"`. For example,
 `command+v` and `Ctrl+Shift+T` work too. Keep the app and window scope.
 
 ```text
-zerocode-computer get-app-state --app <app> [--window-id <id>|--window-index <n>] [--restore-window] [--no-screenshot] --json
+zerocode-computer get-app-state --app <app> [--window-id <id>|--window-index <n>] [--restore-window] [--no-screenshot] [--skeleton|--max-depth <n>] [--root <n>] [--surface menubar|menu|sheet] --json
 zerocode-computer click --app <app> (--element-index <n>|--x <x> --y <y>) [--mouse-button left|right|middle] [--modifiers CmdOrCtrl+Shift] --json
 zerocode-computer perform-secondary-action --app <app> --element-index <n> --action <advertised-name> --json
 zerocode-computer set-value --app <app> --element-index <n> --value <text> --json
@@ -145,3 +146,8 @@ small text has to be read. `wait` is answered by the window and capped by its
 table; anything longer belongs to a scheduler, not a pause. `screenshot` needs
 the screen-recording permission and every input verb the accessibility one
 (`zerocode-computer permissions`).
+
+`list-all-windows --all-layers` exposes the native occlusion map, including
+panels and menus, in front-to-back order. Full-display transparent overlay rows
+have `overlay: true`; their actual visible cover regions appear as separate
+non-overlay rows. Use this map when validating a desktop point.

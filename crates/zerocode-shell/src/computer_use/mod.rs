@@ -85,7 +85,7 @@ use unsupported as platform;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value;
 use zerocode_core::computer_use::{
@@ -101,7 +101,9 @@ pub use zerocode_core::computer_use_protocol::ProviderError as ComputerUseError;
 use session::{ProviderSession as _, SessionFailure};
 
 static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
-static CLIENT: OnceLock<Mutex<Option<platform::Session>>> = OnceLock::new();
+/// The session that stands. The lock is held to read this or to start a session,
+/// never across a request: requests to different apps run at once.
+static CLIENT: OnceLock<Mutex<Option<Arc<platform::Session>>>> = OnceLock::new();
 static SESSION_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 fn session_epoch() -> u64 {
@@ -121,8 +123,24 @@ pub(crate) fn resource_dir() -> Option<&'static Path> {
     RESOURCE_DIR.get().map(PathBuf::as_path)
 }
 
-fn held_client() -> &'static Mutex<Option<platform::Session>> {
+fn held_client() -> &'static Mutex<Option<Arc<platform::Session>>> {
     CLIENT.get_or_init(|| Mutex::new(None))
+}
+
+/// The session that stands, started if none does.
+fn standing_session() -> Result<Arc<platform::Session>, ComputerUseError> {
+    let mut held = held_client()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    input_policy::ensure_current()?;
+    if let Some(session) = held.as_ref() {
+        return Ok(Arc::clone(session));
+    }
+    let session = Arc::new(platform::Session::start()?);
+    guard::remember_helper(session.helper_pid());
+    SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
+    *held = Some(Arc::clone(&session));
+    Ok(session)
 }
 
 /// Only a request in flight defers panel startup. Poison still grants the
@@ -161,7 +179,7 @@ fn ensure_share_panel() -> bool {
     };
     if held
         .as_ref()
-        .is_some_and(platform::Session::panel_watch_ended)
+        .is_some_and(|session| session.panel_watch_ended())
     {
         discard_session(&mut held);
     }
@@ -170,7 +188,7 @@ fn ensure_share_panel() -> bool {
     {
         guard::remember_helper(session.helper_pid());
         SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
-        *held = Some(session);
+        *held = Some(Arc::new(session));
     }
     // The panel worker remembers an attempted launch, including a failure.
     true
@@ -188,30 +206,16 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
     if let Some(answer) = self_surface::route(method, &params) {
         return answer;
     }
-    browser_route::provider(method, &params)?;
     let params = input_policy::current().prepare_provider(method, params)?;
+    let (params, card_held_the_borrow) = keep_off_the_desk(params, confirm::asking())?;
     if let Some(params) = params.as_object() {
         zerocode_core::computer_use_protocol::execution::validate(method, params)?;
-    }
-    #[cfg(test)]
-    if let Some(answer) = browser_route::tests::helper(method, &params) {
-        return answer;
     }
     #[cfg(test)]
     if let Some(answer) = test_helper::answer(method, &params) {
         return answer;
     }
-    let mut held = held_client()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    input_policy::ensure_current()?;
-    if held.is_none() {
-        let session = platform::Session::start()?;
-        guard::remember_helper(session.helper_pid());
-        SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
-        *held = Some(session);
-    }
-    let session = held.as_mut().expect("session stood");
+    let session = standing_session()?;
     if let Some(params) = params.as_object() {
         zerocode_core::computer_use_protocol::execution::require_support(
             session.supports_background(),
@@ -242,28 +246,109 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
             .ok()
         });
         if let Some(error) = broke {
-            return Err(discard(&mut held, error));
+            return Err(discard(&session, error));
         }
         if let Some(refused) = refused {
             return Err(refused);
         }
     }
     input_policy::ensure_current()?;
+    let acts = acts_on_something(method);
     match session.request(method, params) {
         Ok(answer) => Ok(answer),
-        Err(SessionFailure::Provider(error)) => Err(error),
-        Err(SessionFailure::Transport(error)) => Err(discard(&mut held, error)),
+        Err(SessionFailure::Provider(error)) => {
+            Err(said_of_delivery(error, acts, card_held_the_borrow))
+        }
+        // The request may have gone out before the road broke, and the old helper
+        // may still be carrying it out.
+        Err(SessionFailure::Transport(error)) => Err(discard(&session, error).with_delivery(
+            acts.then_some(zerocode_core::computer_use_protocol::DELIVERY_UNCERTAIN),
+        )),
     }
 }
 
-/// A broken road's end: the session is discarded so the next call starts a
-/// clean one, and the break is the answer.
-fn discard(held: &mut Option<platform::Session>, error: ComputerUseError) -> ComputerUseError {
-    discard_session(held);
+/// Whether a helper method changes something, so that its answer must say
+/// whether it landed.
+fn acts_on_something(method: &str) -> bool {
+    use zerocode_core::computer_use::ComputerMethod;
+    ComputerMethod::ALL
+        .iter()
+        .any(|known| known.provider_name() == Some(method) && known.acts())
+}
+
+/// While the person answers a card, nothing takes the pointer or the keyboard: a
+/// raised app or a moved pointer could take what they type. An act goes on in the
+/// background, or waits for them. `true`: the borrow was taken away.
+fn keep_off_the_desk(mut params: Value, asking: bool) -> Result<(Value, bool), ComputerUseError> {
+    use zerocode_core::computer_use_protocol::execution::{BACKGROUND, MAY_BORROW_DESKTOP};
+    let on = |params: &Value, key: &str| params.get(key) == Some(&Value::Bool(true));
+    if !asking || !on(&params, MAY_BORROW_DESKTOP) {
+        return Ok((params, false));
+    }
+    if !on(&params, BACKGROUND) {
+        return Err(person_has_the_desk());
+    }
+    if let Some(params) = params.as_object_mut() {
+        params.remove(MAY_BORROW_DESKTOP);
+    }
+    Ok((params, true))
+}
+
+fn person_has_the_desk() -> ComputerUseError {
+    ComputerUseError::new(
+        zerocode_core::computer_use_protocol::error_code::PERSON_ASKED,
+        "the person is answering a question, and this act needs the pointer or the keyboard; nothing was done. Wait for their answer, then try again",
+    )
+}
+
+/// A helper's refusal, saying whether anything landed where the helper did not.
+fn said_of_delivery(
+    error: ComputerUseError,
+    acts: bool,
+    card_held_the_borrow: bool,
+) -> ComputerUseError {
+    use zerocode_core::computer_use_protocol::{
+        NOT_DELIVERED, delivery_of_refusal, error_code, execution::REQUIRES_FOREGROUND,
+    };
+    let nothing_sent = error
+        .delivery
+        .as_deref()
+        .is_none_or(|said| said == NOT_DELIVERED);
+    // Only the desktop could do this one, and the person has it for now.
+    if card_held_the_borrow
+        && nothing_sent
+        && matches!(
+            error.code.as_str(),
+            REQUIRES_FOREGROUND | "focus_changed" | error_code::VALUE_NOT_SETTABLE
+        )
+    {
+        return person_has_the_desk();
+    }
+    if acts && error.delivery.is_none() {
+        let delivery = delivery_of_refusal(&error.code);
+        return error.with_delivery(Some(delivery));
+    }
     error
 }
 
-fn discard_session(held: &mut Option<platform::Session>) {
+/// A broken road's end: the session is discarded so the next call starts a
+/// clean one, and the break is the answer. Other requests may have seen the same
+/// break, or a new session may already stand: only the session this request used
+/// goes.
+fn discard(session: &Arc<platform::Session>, error: ComputerUseError) -> ComputerUseError {
+    let mut held = held_client()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held
+        .as_ref()
+        .is_some_and(|standing| Arc::ptr_eq(standing, session))
+    {
+        discard_session(&mut held);
+    }
+    error
+}
+
+fn discard_session(held: &mut Option<Arc<platform::Session>>) {
     *held = None;
     SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
     guard::remember_helper(None);
@@ -323,17 +408,18 @@ pub fn status_unless_busy() -> Option<Value> {
     if let Some(answer) = test_helper::answer("status", &Value::Null) {
         return answer.ok();
     }
-    let mut held = match held_client().try_lock() {
+    let held = match held_client().try_lock() {
         Ok(held) => held,
         Err(std::sync::TryLockError::Poisoned(held)) => held.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => return None,
     };
-    let session = held.as_mut()?;
+    let session = Arc::clone(held.as_ref()?);
+    drop(held);
     match session.request("status", Value::Object(serde_json::Map::new())) {
         Ok(answer) => Some(answer),
         Err(SessionFailure::Provider(_)) => None,
         Err(SessionFailure::Transport(error)) => {
-            discard(&mut held, error);
+            discard(&session, error);
             None
         }
     }
@@ -433,5 +519,71 @@ pub(crate) mod test_helper {
                 .as_mut()
                 .map(|answers| answers(method, params))
         })
+    }
+}
+
+#[cfg(test)]
+mod desk_and_delivery_tests {
+    use super::*;
+    use serde_json::json;
+    use zerocode_core::computer_use_protocol::{DELIVERY_UNCERTAIN, NOT_DELIVERED, error_code};
+
+    #[test]
+    fn a_card_keeps_a_background_act_in_the_background() {
+        let asked = json!({"app": "Notes", "background": true, "mayBorrowDesktop": true});
+        let (held, took) = keep_off_the_desk(asked.clone(), true).unwrap();
+        assert!(took);
+        assert!(held.get("mayBorrowDesktop").is_none());
+        assert_eq!(held["background"], true);
+        // With no card nothing changes.
+        let (same, took) = keep_off_the_desk(asked.clone(), false).unwrap();
+        assert!(!took);
+        assert_eq!(same, asked);
+    }
+
+    #[test]
+    fn a_card_stops_an_act_that_can_only_borrow() {
+        let asked = json!({"x": 1, "y": 1, "mayBorrowDesktop": true, "borrowApp": "Notes"});
+        let refused = keep_off_the_desk(asked, true).unwrap_err();
+        assert_eq!(refused.code, error_code::PERSON_ASKED);
+    }
+
+    #[test]
+    fn what_only_the_desktop_could_do_waits_for_the_person_answering() {
+        let error = ComputerUseError::new("requires_foreground", "no background road")
+            .with_delivery(Some(NOT_DELIVERED));
+        let said = said_of_delivery(error, true, true);
+        assert_eq!(said.code, error_code::PERSON_ASKED);
+        // Without a card it is the refusal it was.
+        let error = ComputerUseError::new("requires_foreground", "no background road");
+        assert_eq!(
+            said_of_delivery(error, true, false).code,
+            "requires_foreground"
+        );
+    }
+
+    #[test]
+    fn a_silent_failure_of_an_act_may_have_landed_and_a_refusal_before_input_did_not() {
+        let failed = ComputerUseError::new(error_code::ACCESSIBILITY_ERROR, "half a click");
+        assert_eq!(
+            said_of_delivery(failed, true, false).delivery.as_deref(),
+            Some(DELIVERY_UNCERTAIN)
+        );
+        let refused = ComputerUseError::new(error_code::ELEMENT_NOT_FOUND, "gone");
+        assert_eq!(
+            said_of_delivery(refused, true, false).delivery.as_deref(),
+            Some(NOT_DELIVERED)
+        );
+        // A look says nothing of delivery.
+        let look = ComputerUseError::new(error_code::ACCESSIBILITY_ERROR, "no answer");
+        assert_eq!(said_of_delivery(look, false, false).delivery, None);
+    }
+
+    #[test]
+    fn only_a_verb_that_changes_something_counts_as_acting() {
+        assert!(acts_on_something("click"));
+        assert!(acts_on_something("typeText"));
+        assert!(!acts_on_something("getAppState"));
+        assert!(!acts_on_something("status"));
     }
 }

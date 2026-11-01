@@ -3243,7 +3243,17 @@ pub(super) async fn computer_loop(
             // This guard outlives spawn_blocking and every walked step. The
             // provider mutex alone covered only one step of a batch.
             let _sequence = if let Some(command) = parsed.as_ref() {
-                match sequences.enter(command) {
+                let names = if computer_use::sequence::takes_a_turn(command.method) {
+                    let (asked, root) = (command.clone(), local_data_root.clone());
+                    tauri::async_runtime::spawn_blocking(move || {
+                        computer_use::sequence::names_of(&asked, &root)
+                    })
+                    .await
+                    .unwrap_or_default()
+                } else {
+                    std::collections::BTreeSet::new()
+                };
+                match sequences.enter(command, &names).await {
                     Ok(owner) => owner,
                     Err(error) => {
                         // Preserve a person's stop/confirmation over contention,
@@ -3289,7 +3299,10 @@ pub(super) async fn computer_loop(
                     use zerocode_core::computer_use::ComputerMethod;
                     matches!(
                         command.method,
-                        ComputerMethod::Batch | ComputerMethod::RecipeRun | ComputerMethod::Walk
+                        ComputerMethod::Batch
+                            | ComputerMethod::Parallel
+                            | ComputerMethod::RecipeRun
+                            | ComputerMethod::Walk
                     )
                 })
                 .cloned()
@@ -3305,16 +3318,12 @@ pub(super) async fn computer_loop(
                             app.state::<AppState>().settings(),
                         )
                     });
-                    let _browser_route = match computer_use::browser_route::command(&command) {
-                        Ok(scope) => scope,
-                        Err(error) => {
-                            let answer =
-                                computer_cli_error(command.json, &error.code, &error.message);
-                            leave_step(&app, &root, evidence.as_deref(), &argv, &argv, &answer);
-                            let _ = reply.send(answer);
-                            return;
-                        }
-                    };
+                    if let Err(error) = computer_use::browser_route::command(&command) {
+                        let answer = computer_cli_error(command.json, &error.code, &error.message);
+                        leave_step(&app, &root, evidence.as_deref(), &argv, &argv, &answer);
+                        let _ = reply.send(answer);
+                        return;
+                    }
                     if let Err(error) = computer_use::input_policy::current().prepare(&mut command)
                     {
                         let answer = computer_cli_error(command.json, &error.code, &error.message);
@@ -3323,8 +3332,18 @@ pub(super) async fn computer_loop(
                         return;
                     }
                     let answer = if command.method
-                        == zerocode_core::computer_use::ComputerMethod::Batch
+                        == zerocode_core::computer_use::ComputerMethod::Parallel
                     {
+                        run_parallel(
+                            &app,
+                            &root,
+                            evidence.as_deref(),
+                            cwd.as_deref(),
+                            &command,
+                            deadline_ms,
+                            &|| !reply.is_closed(),
+                        )
+                    } else if command.method == zerocode_core::computer_use::ComputerMethod::Batch {
                         run_batch(
                             &command,
                             deadline_ms,
@@ -3870,6 +3889,86 @@ pub(super) async fn emulator_step(
 /// the caller has gone) — and answering every step that ran. A batch the stop
 /// refuses whole leaves its first refused action with `refused`, as that
 /// action would have left itself alone.
+/// Several batches at once, each on its own thread, each stopped, confirmed and
+/// logged step by step as any batch is. Their steps name different apps, so the
+/// helper runs them side by side; two that name one app take turns there.
+fn run_parallel(
+    app: &AppHandle,
+    root: &Path,
+    evidence: Option<&str>,
+    cwd: Option<&str>,
+    command: &zerocode_core::computer_use::ComputerCommand,
+    deadline_ms: u64,
+    caller_waits: &(dyn Fn() -> bool + Sync),
+) -> zerocode_hookd::TeamAnswer {
+    use computer_use::confirm::Asking;
+    use zerocode_core::computer_use::{
+        BATCH_COMMANDS_FLAG, ComputerCommand, ComputerMethod, parallel_steps,
+    };
+
+    let actor = run_evidence::actor();
+    let policy = computer_use::input_policy::capture();
+    let answers: Vec<zerocode_hookd::TeamAnswer> = std::thread::scope(|scope| {
+        let running: Vec<_> = parallel_steps(command)
+            .into_iter()
+            .map(|steps| {
+                let actor = actor.clone();
+                scope.spawn(move || {
+                    let _acting = actor.map(run_evidence::acting_for);
+                    let _input_policy = computer_use::input_policy::enter_captured(policy);
+                    let batch = ComputerCommand {
+                        method: ComputerMethod::Batch,
+                        params: serde_json::json!({ BATCH_COMMANDS_FLAG: steps }),
+                        json: true,
+                    };
+                    run_batch(
+                        &batch,
+                        deadline_ms,
+                        |step| {
+                            desktop_step(
+                                app,
+                                root,
+                                evidence,
+                                step,
+                                step,
+                                Asking::Person,
+                                cwd.map(Path::new),
+                            )
+                        },
+                        |step, refusal| leave_step(app, root, evidence, step, step, refusal),
+                        caller_waits,
+                    )
+                })
+            })
+            .collect();
+        running
+            .into_iter()
+            .map(|group| {
+                group.join().unwrap_or_else(|panic| {
+                    computer_refused(format!(
+                        "computer task failed: {}",
+                        crate::system_runtime::panic_payload(panic.as_ref())
+                    ))
+                })
+            })
+            .collect()
+    });
+    let ok = answers.iter().all(|answer| answer.exit_code == 0);
+    let groups: Vec<serde_json::Value> = answers
+        .iter()
+        .map(|answer| {
+            evidence_runtime::envelope(answer)
+                .unwrap_or_else(|| serde_json::json!({ "ok": false, "message": answer.stderr }))
+        })
+        .collect();
+    let body = serde_json::json!({ "ok": ok, "result": { "groups": groups } }).to_string();
+    if ok {
+        computer_said(body)
+    } else {
+        computer_refused(body)
+    }
+}
+
 pub(super) fn run_batch(
     command: &zerocode_core::computer_use::ComputerCommand,
     deadline_ms: u64,
@@ -4468,6 +4567,9 @@ pub(super) fn run_goal(
     };
     let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0)
         .background(command.params.get("background") == Some(&serde_json::Value::Bool(true)))
+        .may_borrow_desktop(
+            command.params.get("mayBorrowDesktop") == Some(&serde_json::Value::Bool(true)),
+        )
         .with_snapshots(snapshots)
         .previewing(options.overlap)
         .writing(Box::new(writer));
@@ -4883,12 +4985,37 @@ pub(super) fn door_refusal_with(
     }
     match computer_use::guard::stopped_reason() {
         Some(reason) => Some(computer_use::guard::refusal(&reason)),
-        None if computer_use::confirm::asking() => Some(computer_use::ComputerUseError::new(
-            PERSON_ASKED,
-            "the person is being asked about a step (or has the desk); no other action goes until they answer — wait for that command's answer",
-        )),
+        // A card with a line stops every act: nothing may answer for the person there.
+        None if computer_use::confirm::taking_a_code()
+            || (computer_use::confirm::asking() && !acts_away_from_the_card(command)) =>
+        {
+            Some(computer_use::ComputerUseError::new(
+                PERSON_ASKED,
+                "the person is being asked about a step (or has the desk); no other action goes until they answer — wait for that command's answer",
+            ))
+        }
         None => None,
     }
+}
+
+/// Whether an act stays inside another app's window: it cannot press the person's
+/// card, which ZeroCode draws, so an agent working elsewhere goes on while the
+/// person answers. An act on the shared desktop could land on the card and waits.
+fn acts_away_from_the_card(command: &zerocode_core::computer_use::ComputerCommand) -> bool {
+    use zerocode_core::computer_use_protocol::execution::{FOREGROUND, METHODS};
+
+    let params = &command.params;
+    let on = |key: &str| params.get(key) == Some(&serde_json::Value::Bool(true));
+    command
+        .method
+        .provider_name()
+        .is_some_and(|name| METHODS.contains(&name))
+        && !on(FOREGROUND)
+        && !on("restoreWindow")
+        && params
+            .get("app")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|app| computer_use::self_surface::own_app_key(app).is_none())
 }
 
 /// Whether a look names ZeroCode: the app it says (by name, bundle identifier
@@ -6304,10 +6431,9 @@ pub(super) fn answer_computer_command_with(
     if let Some(refusal) = refused_at_the_door(&command) {
         return refusal;
     }
-    let _browser_route = match computer_use::browser_route::command(&command) {
-        Ok(scope) => scope,
-        Err(error) => return computer_cli_error(command.json, &error.code, &error.message),
-    };
+    if let Err(error) = computer_use::browser_route::command(&command) {
+        return computer_cli_error(command.json, &error.code, &error.message);
+    }
     let _input_policy = permission_window.map_or_else(
         || computer_use::input_policy::enter_captured(computer_use::input_policy::capture()),
         |window| {
@@ -6325,8 +6451,9 @@ pub(super) fn answer_computer_command_with(
     if let Err(error) = input_policy.prepare(&mut command) {
         return computer_cli_error(command.json, &error.code, &error.message);
     }
-    // One window shared with an agent (t-73906): the first act in an app asks
-    // the person once, and nothing outside the shared window is reached.
+    shape_the_act(&mut command, run_evidence::actor());
+    // The apps in use (t-73906): by default an act goes at once and its app joins
+    // them; a card asks only what the person took back or requires.
     let _share = match computer_use::share::admit(command.method, &command.params) {
         Ok(scope) => scope,
         Err(error) => return computer_cli_error(command.json, &error.code, &error.message),
@@ -6449,15 +6576,14 @@ pub(super) fn answer_computer_command_with(
                     .unwrap_or(false),
             )
             .and_then(|report| {
-                serde_json::to_value(report).map_err(|error| computer_use::ComputerUseError {
-                    code: "accessibility_error".into(),
-                    message: error.to_string(),
+                serde_json::to_value(report).map_err(|error| {
+                    computer_use::ComputerUseError::new("accessibility_error", error.to_string())
                 })
             }),
-            Err(error) => Err(computer_use::ComputerUseError {
-                code: "invalid_argument".into(),
-                message: error,
-            }),
+            Err(error) => Err(computer_use::ComputerUseError::new(
+                "invalid_argument",
+                error,
+            )),
         }
     } else if command.method == ComputerMethod::WaitFor {
         // A wait-for is the window's: it looks through the helper until what
@@ -6649,7 +6775,13 @@ pub(super) fn answer_computer_command_with(
             {
                 return refused;
             }
-            computer_cli_error(command.json, &error.code, &message)
+            computer_cli_error_with(
+                command.json,
+                &error.code,
+                &message,
+                None,
+                error.delivery.as_deref(),
+            )
         }
     }
 }
@@ -6705,9 +6837,11 @@ pub(crate) fn click_by_words(
     ) -> Result<serde_json::Value, computer_use::ComputerUseError>,
 ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
     use zerocode_core::computer_use::{ComputerCommand, ComputerMethod};
+    use zerocode_core::computer_use_protocol::execution::MAY_BORROW_DESKTOP;
     use zerocode_core::computer_use_protocol::words;
     let params = &command.params;
-    if params.get("background") == Some(&serde_json::Value::Bool(true)) {
+    let may_borrow = params.get(MAY_BORROW_DESKTOP) == Some(&serde_json::Value::Bool(true));
+    if params.get("background") == Some(&serde_json::Value::Bool(true)) && !may_borrow {
         return Err(zerocode_core::computer_use_protocol::execution::unavailable());
     }
     let word = |key: &str| params.get(key).and_then(serde_json::Value::as_str);
@@ -6738,6 +6872,12 @@ pub(crate) fn click_by_words(
         && let Some(kind) = zerocode_core::guarded::confirm_kind_of(&line.text)
     {
         press["confirming"] = kind.as_str().into();
+    }
+    // Pixels have no background road: the press borrows the pointer, brings the
+    // window up so the point lands on it, and gives both back.
+    if may_borrow {
+        press[MAY_BORROW_DESKTOP] = true.into();
+        press["borrowApp"] = params.get("app").cloned().unwrap_or_default();
     }
     let resolved = ComputerCommand {
         method: ComputerMethod::MouseClick,
@@ -7256,9 +7396,9 @@ pub(super) fn desktop_wait_for_with(
             return Ok(result);
         }
         if elapsed().saturating_add(poll) >= budget {
-            return Err(computer_use::ComputerUseError {
-                code: zerocode_core::computer_use_protocol::error_code::TIMEOUT.into(),
-                message: format!(
+            return Err(computer_use::ComputerUseError::new(
+                zerocode_core::computer_use_protocol::error_code::TIMEOUT,
+                format!(
                     "still {} after {} ms ({looks} looks, {count} matches{}{})",
                     if absent { "present" } else { "absent" },
                     elapsed().as_millis(),
@@ -7272,7 +7412,7 @@ pub(super) fn desktop_wait_for_with(
                         String::new()
                     },
                 ),
-            });
+            ));
         }
         sleep(poll);
     }
@@ -7519,11 +7659,7 @@ fn said_envelope_at(
     result: serde_json::Value,
     context: Option<&computer_use::surface_execution::Context>,
 ) -> zerocode_hookd::TeamAnswer {
-    let envelope = computer_use::surface_execution::envelope(
-        command,
-        computer_use::browser_route::annotate(result),
-        context,
-    );
+    let envelope = computer_use::surface_execution::envelope(command, result, context);
     if command.json {
         computer_said(format!("{envelope}\n"))
     } else {
@@ -7770,6 +7906,7 @@ fn stopped_wait(json: bool) -> Option<zerocode_hookd::TeamAnswer> {
         &refusal.code,
         &refusal.message,
         Some((zerocode_core::computer_use::STOPPED_BY_KEY, by)),
+        None,
     ))
 }
 
@@ -7800,33 +7937,71 @@ pub(super) fn computer_refused(stderr: impl Into<String>) -> zerocode_hookd::Tea
     }
 }
 
+/// What the window adds to an act before it reaches the helper: whose pointer it
+/// draws, and how much its answer carries. A lone act answers what it changed: the
+/// numbers in the agent's last look still hold, so a tree after every press is
+/// thousands of tokens nobody needs.
+fn shape_the_act(
+    command: &mut zerocode_core::computer_use::ComputerCommand,
+    actor: Option<run_evidence::Actor>,
+) {
+    let method = command.method;
+    let Some(params) = command.params.as_object_mut() else {
+        return;
+    };
+    if let Some(pane) = actor.and_then(|actor| actor.pane) {
+        params.insert("agent".into(), pane.into());
+    }
+    if !method.is_app_act() || !params.contains_key("app") {
+        return;
+    }
+    let on = |params: &serde_json::Map<String, serde_json::Value>, key: &str| {
+        params.get(key) == Some(&serde_json::Value::Bool(true))
+    };
+    let after_act = if on(params, "noState") {
+        Some("none")
+    } else if on(params, "fullState") {
+        None
+    } else {
+        Some("changes")
+    };
+    if let Some(after_act) = after_act {
+        params.insert("afterAct".into(), after_act.into());
+    }
+}
+
 pub(super) fn computer_cli_error(
     json: bool,
     code: &str,
     message: &str,
 ) -> zerocode_hookd::TeamAnswer {
-    computer_cli_error_with(json, code, message, None)
+    computer_cli_error_with(json, code, message, None, None)
 }
 
 /// [`computer_cli_error`] with one word its error carries besides its code
 /// and message — a stopped wait's `stoppedBy` (t-66760).
+///
+/// `delivery` is what the helper said reached the app. A refusal that never left
+/// the window reached nothing, so it may always be repeated.
 fn computer_cli_error_with(
     json: bool,
     code: &str,
     message: &str,
     besides: Option<(&str, &str)>,
+    delivery: Option<&str>,
 ) -> zerocode_hookd::TeamAnswer {
     if json {
-        let mut error = serde_json::json!({ "code": code, "message": message });
+        let delivery = delivery.unwrap_or("not_delivered");
+        let mut error = serde_json::json!({
+            "code": code,
+            "message": message,
+            "delivery": delivery,
+            "retry": if delivery == "not_delivered" { "safe" } else { "unsafe" },
+        });
         if let Some((key, word)) = besides {
             error[key] = serde_json::Value::from(word);
         }
-        computer_refused(
-            computer_use::browser_route::annotate(serde_json::json!({
-                "ok": false, "error": error
-            }))
-            .to_string(),
-        )
+        computer_refused(serde_json::json!({ "ok": false, "error": error }).to_string())
     } else {
         computer_refused(format!(
             "{}: {message}",

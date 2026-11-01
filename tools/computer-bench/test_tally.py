@@ -213,7 +213,7 @@ class TallyTest(unittest.TestCase):
 
     def test_stage_table_reads_walk_json_and_scales_to_the_human_floor(self):
         # A walk leaves walk-NNN.json beside steps.jsonl: per step the phases
-        # the run closure timed (act/settle/verify/pointer) and the walk's own
+        # the run closure timed (act/settle/verify) and the walk's own
         # ms; per run resolve/report. The stage table pools them, gives each
         # stage its share and p50/p95, and scales the median step against the
         # human floor (200 APM = 300 ms a step) — flygym's "x realtime" column.
@@ -227,15 +227,14 @@ class TallyTest(unittest.TestCase):
                 "phases": {"resolve": 20, "report": 8},
                 "ran": [
                     {"step": 1, "tool": "computer", "verb": "click", "ok": True, "ms": 300, "evidence_n": 1,
-                     "phases": {"act": 250, "settle": 30, "verify": 15, "pointer": 5}},
+                     "phases": {"act": 250, "settle": 30, "verify": 20}},
                     {"step": 2, "tool": "browser", "verb": "type", "ok": True, "ms": 600, "evidence_n": 2,
-                     "phases": {"act": 500, "settle": 60, "verify": 30, "pointer": 10}},
+                     "phases": {"act": 500, "settle": 60, "verify": 40}},
                 ],
             }))
             write(run, "walk-002.json", "not json")  # a broken walk is skipped, never a crash
             stages = tally.stages(run)
             self.assertEqual(stages["act"], [250, 500])
-            self.assertEqual(stages["pointer"], [5, 10])
             self.assertEqual(stages["step"], [300, 600])
             self.assertEqual((stages["resolve"], stages["report"]), ([20], [8]))
             row = tally.measure(run)
@@ -246,7 +245,7 @@ class TallyTest(unittest.TestCase):
             self.assertEqual(summary["act"]["n"], 2)
             self.assertEqual(summary["act"]["p50"], 375)
             self.assertEqual(summary["act"]["p95"], 500)
-            # act 750 of 900 timed ms = 83.3%; the shares of the four step stages sum to 100.
+            # act 750 of 900 timed ms = 83.3%; the shares of the three step stages sum to 100.
             self.assertEqual(summary["act"]["share_pct"], 83.3)
             self.assertEqual(round(sum(summary[s]["share_pct"] for s in tally.STEP_STAGES), 1), 100.0)
             # median step 450 ms against the 300 ms human floor = 0.67x human speed.

@@ -67,12 +67,14 @@ pub fn append_shadow_row<T: Serialize>(path: &Path, row: &T, max_bytes: u64) -> 
         runtime::durable_traces_armed(),
         runtime::conventional_config_home().as_deref(),
         path,
-    ) {
+    ) || !zerocode_core::jev::erase::may_write(path)
+    {
         return Ok(());
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let _shared = zerocode_core::jev::erase::shared_ledger_lock(path)?;
     if fs::metadata(path).is_ok_and(|meta| meta.len() > max_bytes) {
         keep_newer_half(path)?;
     }
@@ -330,6 +332,56 @@ mod tests {
         append_shadow_row(&path, &serde_json::json!({"n": 2}), u64::MAX).unwrap();
         let rows: Vec<serde_json::Value> = read_shadow_rows(&path);
         assert_eq!(rows, vec![serde_json::json!({"n": 1}), serde_json::json!({"n": 2})]);
+    }
+
+    /// A seat the person deleted keeps no records (t-87506): another pane's zo
+    /// that still holds an answer brings no file back.
+    #[test]
+    fn a_deleted_seat_is_not_written_back() {
+        use zerocode_core::jev::{builtin, NOTIFY, RECALL};
+        let home = tempfile::tempdir().unwrap();
+        fs::write(
+            home.path().join("settings.json"),
+            serde_json::json!({"smart": {(builtin::SETTING): {(RECALL.id): {"deleted": true}}}}).to_string(),
+        )
+        .unwrap();
+        let folder = home.path().join("projects/slug/state/smart-router/providers/judgment-aaaa");
+        let row = serde_json::json!({"n": 1});
+        append_shadow_row(&folder.join(RECALL.ledger), &row, u64::MAX).unwrap();
+        append_shadow_row(&folder.join(NOTIFY.ledger), &row, u64::MAX).unwrap();
+        assert!(!folder.join(RECALL.ledger).exists());
+        assert!(folder.join(NOTIFY.ledger).exists());
+    }
+
+    /// A rewrite replaces the shared ledger whole: a row appended between its
+    /// read and its rename would go with the old file. Each round here gives
+    /// the eraser a row to take, so it rewrites all through the appends.
+    #[test]
+    fn a_row_appended_while_the_shared_ledger_is_rewritten_is_kept() {
+        use zerocode_core::jev::{erase, CUSTOM_DECISIONS};
+        const ROUNDS: usize = 600;
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("settings.json"), "{}").unwrap();
+        let ledger = home.path().join("jev").join(CUSTOM_DECISIONS.ledger);
+        let appending = {
+            let ledger = ledger.clone();
+            std::thread::spawn(move || {
+                for round in 0..ROUNDS {
+                    let kept = serde_json::json!({"decision": "d-kept", "round": round});
+                    append_shadow_row(&ledger, &kept, u64::MAX).unwrap();
+                    append_shadow_row(&ledger, &serde_json::json!({"decision": "d-gone"}), u64::MAX).unwrap();
+                }
+            })
+        };
+        while !appending.is_finished() {
+            erase::forget_custom(home.path(), "d-gone").unwrap();
+            // A person's delete does not spin: the appender gets its turns.
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        appending.join().unwrap();
+        erase::forget_custom(home.path(), "d-gone").unwrap();
+        let text = fs::read_to_string(&ledger).unwrap();
+        assert_eq!(text.lines().count(), ROUNDS, "rows went with a rewrite");
     }
 
     /// The challenger arm's share of the one judge (t-6263, t-6877): the arm

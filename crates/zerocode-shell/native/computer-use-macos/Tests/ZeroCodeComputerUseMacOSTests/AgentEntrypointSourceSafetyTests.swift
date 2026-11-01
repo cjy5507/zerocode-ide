@@ -6,7 +6,7 @@ final class AgentEntrypointSourceSafetyTests: XCTestCase {
         let start = try XCTUnwrap(source.range(of: "private func actionResult("))
         let end = try XCTUnwrap(source.range(of: "private func observe(", range: start.upperBound..<source.endIndex))
         let body = String(source[start.lowerBound..<end.lowerBound])
-        XCTAssertEqual(body.components(separatedBy: "observe(params:").count - 1, 1)
+        XCTAssertEqual(body.components(separatedBy: "lookAfterAct(params:").count - 1, 1)
         XCTAssertFalse(body.contains("removeValue(forKey:"))
         XCTAssertTrue(body.contains("hasRequestedWindowSelector(params)"))
         XCTAssertTrue(body.contains("action[\"targetWindowId\"] = windowID"))
@@ -20,7 +20,7 @@ final class AgentEntrypointSourceSafetyTests: XCTestCase {
         let body = String(source[start.lowerBound..<end.lowerBound])
         let acted = try XCTUnwrap(body.range(of: "var action = try runAction()"))
         let deferred = try XCTUnwrap(body.range(of: "params[\"deferObservation\"]?.bool == true"))
-        let observed = try XCTUnwrap(body.range(of: "snapshot: observe(params: params)"))
+        let observed = try XCTUnwrap(body.range(of: "lookAfterAct(params: params"))
         XCTAssertLessThan(acted.lowerBound, deferred.lowerBound)
         XCTAssertLessThan(deferred.lowerBound, observed.lowerBound)
         XCTAssertTrue(body.contains("params[\"noScreenshot\"]?.bool == true"))
@@ -54,7 +54,7 @@ final class AgentEntrypointSourceSafetyTests: XCTestCase {
         XCTAssertTrue(source.contains("let stroke = try KeyMap.parse(key).stroke"))
         XCTAssertTrue(source.contains(
             """
-            let ups = stroke.ups(route: .desktop)
+            let ups = stroke.ups(route: route)
                     defer {
                         for modifier in ups.dropFirst() { try? OperatorHandHost.post(modifier) }
                     }

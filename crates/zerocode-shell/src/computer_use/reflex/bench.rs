@@ -345,7 +345,7 @@ fn a_reflex_run_on_the_benchs_own_fixture() {
     }
 
     let launched_ns = uptime_ns();
-    let mut session = Session::start().expect("the installed helper answers this build");
+    let session = Session::start().expect("the installed helper answers this build");
     let connected_ns = uptime_ns();
     let helper_pid = session.helper_pid();
     let calls = folder.join(CALLS);

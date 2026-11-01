@@ -24,10 +24,11 @@ zerocode-computer batch --commands '[["mouse-click","--x","640","--y","412"],["t
 - The batch stops at the first refusal and answers every step (`steps`,
   `refusedAt`, and the refused step's own code — the Recovery list below
   applies unchanged). Then `observe --diff` and decide from what you see.
-- Element indexes change after every action, and after a `wait-for` that
-  looks through an app's elements (`--app` without `--window`/`--ocr`): after
-  such a step, name places by coordinates, or batch from a fresh
-  `get-app-state`.
+- On macOS an element's number lasts until the app removes that control, so a
+  step may name one after any other step. On Windows numbers follow the walk: after
+  an action or a `wait-for` that looks through an app's elements, name places by
+  coordinates, or batch from a fresh `get-app-state`.
+- `parallel` runs several batches at once, one per app; see `SKILL.md`.
 - It runs faster than anyone can reach the hotkey. Batch only what you have
   seen work; never secrets (typed text rides the command line — use
   `paste-text --text-stdin` alone). On a Windows cmd host the JSON's quotes do

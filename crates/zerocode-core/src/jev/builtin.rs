@@ -18,7 +18,7 @@ pub const CRITERIA_MAX: usize = 8_000;
 pub const RUBRIC_KEY: &str = "decisionRubric";
 pub const EDITED_RUBRIC_FLAG: u32 = 1 << 31;
 const DECISION_STATE_KEY: &str = "__builtinDecision";
-const QUESTION_SCHEMA: u64 = 2;
+pub(crate) const QUESTION_SCHEMA: u64 = 2;
 
 mod definitions;
 mod schema;

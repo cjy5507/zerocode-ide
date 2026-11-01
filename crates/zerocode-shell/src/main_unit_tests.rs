@@ -23270,9 +23270,6 @@ pub(crate) mod computer_desktop_wait {
         let _policy = crate::computer_use::input_policy::enter(
             crate::computer_use::input_policy::InputPolicy::SharedDesktop,
         );
-        // The press is at a bare point: whatever app the person has in front
-        // would decide the browser route before the confirmation is asked.
-        let _not_a_browser = crate::computer_use::browser_route::tests::hold_not_a_browser();
         crate::computer_use::confirm::set_policy(crate::computer_use::confirm::Policy::default());
         let command = batch_of(&serde_json::json!([
             ["wait", "--ms", "1"],
@@ -23589,9 +23586,6 @@ pub(crate) mod computer_desktop_wait {
         let _policy = crate::computer_use::input_policy::enter(
             crate::computer_use::input_policy::InputPolicy::SharedDesktop,
         );
-        // The press is at a bare point: whatever app the person has in front
-        // would decide the browser route before the confirmation is asked.
-        let _not_a_browser = crate::computer_use::browser_route::tests::hold_not_a_browser();
         let words = |argv: &[&str]| {
             argv.iter()
                 .map(|word| (*word).to_string())
@@ -24662,14 +24656,10 @@ pub(crate) mod computer_desktop_wait {
         }
     }
 
-    /// A desk that sees nothing: the walk judges no landing and watches no
-    /// hand, and says so.
+    /// A desk that sees nothing: the walk judges no landing, and says so.
     struct BlindDesk(std::time::Instant);
 
     impl crate::computer_use::recipe_run::Desk for BlindDesk {
-        fn pointer(&mut self) -> Option<(f64, f64)> {
-            None
-        }
         fn picture(
             &mut self,
             _: [f64; 4],
@@ -24818,7 +24808,6 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(said["error"]["code"], "recipe_stopped", "{said}");
         assert_eq!(said["result"]["stop"]["kind"], "persons_turn");
         assert_eq!(said["result"]["next"], 4);
-        assert_eq!(said["result"]["handWatched"], false);
 
         let done = crate::agent_tools_runtime::run_recipe(
             &recipe(&["--start", "4"]),

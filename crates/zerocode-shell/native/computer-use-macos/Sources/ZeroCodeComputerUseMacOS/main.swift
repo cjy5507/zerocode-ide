@@ -79,6 +79,40 @@ enum ProviderError: Error {
     }
 }
 
+/// What one request has done so far, read on its own thread: requests in
+/// different lanes run at once, so nothing about one of them may live in a shared
+/// place.
+final class RequestContext {
+    /// Whether anything reached the app. A refusal after this may have landed.
+    var sent = false
+    /// The agent the window says this request is for: whose pointer it draws.
+    var agent: String?
+    /// Whether the person's setting lets this request borrow the shared desktop
+    /// when the background road cannot go.
+    var mayBorrowDesktop = false
+    /// Set when the request borrowed the shared desktop.
+    var borrowed = false
+    /// How long the app itself took to perform the action, in ms.
+    var appActionMs: Int?
+
+    private static let key = "dev.zerocode.computer-use.request"
+
+    static var current: RequestContext {
+        let thread = Thread.current
+        if let context = thread.threadDictionary[key] as? RequestContext { return context }
+        let context = RequestContext()
+        thread.threadDictionary[key] = context
+        return context
+    }
+
+    static func begin(_ params: [String: JSONValue]) {
+        let context = RequestContext()
+        context.agent = params["agent"]?.string
+        context.mayBorrowDesktop = params["mayBorrowDesktop"]?.bool == true
+        Thread.current.threadDictionary[key] = context
+    }
+}
+
 struct AppDescriptor {
     let name: String
     let bundleId: String?
@@ -156,6 +190,17 @@ final class ElementRecord {
     /// and the nearest named element above it (the row a star sits in).
     let visible: CGRect?
     let context: String?
+    /// The named element above it that `context` was read from.
+    let contextOwner: AXUIElement?
+    /// The line the look showed for it: what the next look is compared against.
+    let line: String
+    /// What the walk read of it, so finding by words asks the app nothing more.
+    let title: String?
+    let label: String?
+    let value: String?
+    /// Whether it lives on a menu or the menu bar, which no window holds: nothing
+    /// is on top of it, and it is pressed only by its accessibility action.
+    let onSurface: Bool
 
     init(
         index: Int,
@@ -169,7 +214,13 @@ final class ElementRecord {
         plainInput: String? = nil,
         traits: [String] = [],
         visible: CGRect? = nil,
-        context: String? = nil
+        context: String? = nil,
+        contextOwner: AXUIElement? = nil,
+        line: String = "",
+        title: String? = nil,
+        label: String? = nil,
+        value: String? = nil,
+        onSurface: Bool = false
     ) {
         self.index = index
         self.element = element
@@ -183,10 +234,27 @@ final class ElementRecord {
         self.traits = traits
         self.visible = visible
         self.context = context
+        self.contextOwner = contextOwner
+        self.line = line
+        self.title = title
+        self.label = label
+        self.value = value
+        self.onSurface = onSurface
     }
 
     /// The words a mark's pin holds to: the name, else the placeholder.
     var words: String? { name ?? placeholder }
+
+    /// The same element as it stands now: `actions` and `frame` read just now.
+    func standing(actions: [String], frame: CGRect?) -> ElementRecord {
+        let moved = frame.map { new in localFrame.map { !Actionability.framesAgree($0, new) } ?? true } ?? false
+        return ElementRecord(
+            index: index, element: element, localFrame: frame ?? localFrame, actions: actions, signature: signature,
+            role: role, name: name, placeholder: placeholder, plainInput: plainInput, traits: traits,
+            visible: moved ? frame : visible, context: context, contextOwner: contextOwner, line: line,
+            title: title, label: label, value: value, onSurface: onSurface
+        )
+    }
 }
 
 struct Snapshot {
@@ -208,9 +276,18 @@ struct Snapshot {
     let elements: [Int: ElementRecord]
     let truncated: Bool
     let maxDepthReached: Bool
+    /// The elements' numbers in reading order. A number no longer says where an
+    /// element stands, so nothing reads the order off the numbers.
+    var order: [Int] = []
+    /// The number of the element the walk started at.
+    var rootIndex: Int?
+    /// Why the walk stopped early, when it was not the node limit.
+    var cutShort: String?
 
-    func withoutScreenshotPayload() -> Snapshot {
-        Snapshot(
+    /// What is kept between requests. Numbers outlive a look, so what is kept
+    /// only has to resolve them: no picture and no text.
+    func keptBetweenRequests() -> Snapshot {
+        var kept = Snapshot(
             id: id,
             app: app,
             windowTitle: windowTitle,
@@ -218,7 +295,7 @@ struct Snapshot {
             windowId: windowId,
             windowLayer: windowLayer,
             document: document,
-            treeText: treeText,
+            treeText: "",
             focusedElementId: focusedElementId,
             screenshot: nil,
             screenshotStatus: .skipped,
@@ -228,6 +305,36 @@ struct Snapshot {
             truncated: truncated,
             maxDepthReached: maxDepthReached
         )
+        kept.order = order
+        kept.rootIndex = rootIndex
+        kept.cutShort = cutShort
+        return kept
+    }
+
+    /// The kept look with what was read just now, without walking the window.
+    func standing(windowBounds bounds: CGRect, focusedElementId focused: Int?, elements live: [Int: ElementRecord]) -> Snapshot {
+        var fresh = Snapshot(
+            id: id,
+            app: app,
+            windowTitle: windowTitle,
+            windowBounds: bounds,
+            windowId: windowId,
+            windowLayer: windowLayer,
+            document: document,
+            treeText: "",
+            focusedElementId: focused,
+            screenshot: nil,
+            screenshotStatus: .skipped,
+            screenshotScale: screenshotScale,
+            screenshotEngine: nil,
+            elements: elements.merging(live) { _, new in new },
+            truncated: truncated,
+            maxDepthReached: maxDepthReached
+        )
+        fresh.order = order
+        fresh.rootIndex = rootIndex
+        fresh.cutShort = cutShort
+        return fresh
     }
 }
 
@@ -304,11 +411,68 @@ private struct CachedSnapshotEntry {
     let snapshotId: String
     let keys: [String]
     let createdAt: Date
+    /// The namespace and window it is of: one look per window is kept.
+    let windowKey: String
 }
 
 final class Provider {
     private var snapshots: [String: Snapshot] = [:]
     private var snapshotEntries: [CachedSnapshotEntry] = []
+    /// Guards everything here that lanes share. Held only to read or write the
+    /// tables, never across a call into an app.
+    private let cacheLock = NSLock()
+    /// Each app's element numbers, and every element it last showed by number.
+    private var books: [pid_t: ElementIdentityBook<AXUIElement>] = [:]
+    private var tables: [pid_t: [Int: ElementRecord]] = [:]
+    /// The numbers each app draws from, kept past any one of its processes.
+    private var numberSources: [String: ElementNumbers] = [:]
+    /// The agents each process has shown numbers to since it or this helper started.
+    private var shownTo: [pid_t: Set<String>] = [:]
+    /// The apps whose web accessibility was switched on this session.
+    private var webAccessibilityAsked: Set<pid_t> = []
+    /// When each app's web accessibility was switched on.
+    private var webAccessibilityOnAt: [pid_t: Date] = [:]
+
+    private func book(for pid: pid_t) -> ElementIdentityBook<AXUIElement> {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if let book = books[pid] { return book }
+        let owner = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "pid:\(pid)"
+        let numbers = numberSources[owner] ?? ElementNumbers()
+        numberSources[owner] = numbers
+        let book = ElementIdentityBook<AXUIElement>(
+            numbers: numbers,
+            hash: { CFHash($0) },
+            equal: { CFEqual($0, $1) }
+        )
+        books[pid] = book
+        return book
+    }
+
+    private func knownRecord(pid: pid_t, index: Int) -> ElementRecord? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return tables[pid]?[index]
+    }
+
+    /// File what a walk showed under its numbers. `gone` left the screen.
+    private func fileRecords(pid: pid_t, records: [Int: ElementRecord], gone: [Int]) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        var table = tables[pid] ?? [:]
+        for number in gone { table[number] = nil }
+        table.merge(records) { _, new in new }
+        tables[pid] = table
+        if let agent = RequestContext.current.agent { shownTo[pid, default: []].insert(agent) }
+        // A process that ended takes its elements with it.
+        for known in Array(tables.keys) where known != pid && !pidIsLive(known) {
+            tables[known] = nil
+            books[known] = nil
+            shownTo[known] = nil
+            webAccessibilityAsked.remove(known)
+            webAccessibilityOnAt[known] = nil
+        }
+    }
 
     /// The methods that change something — a stopped operator refuses these
     /// and still answers every look. Mirrors `ComputerMethod::acts` in
@@ -328,6 +492,22 @@ final class Provider {
     ]
     static let keyedMethods: Set<String> = ["key", "holdKey", "type"]
 
+    /// The lane a request runs in: the app it names, so one app's slow answer
+    /// holds up nobody else. Whatever names no app shares one lane, as it shared
+    /// one lock before.
+    func lane(method: String, params: [String: JSONValue]) -> String {
+        if let query = params["app"]?.string, !query.isEmpty {
+            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let pid = parsePid(trimmed) { return "pid:\(pid)" }
+            if let app = listApps().first(where: { matches($0, query: trimmed) }) { return "pid:\(app.pid)" }
+            return "app:\(trimmed.lowercased())"
+        }
+        if let id = params["windowId"]?.number.flatMap(UInt32.init(exactly:)), let owner = DesktopWindows.ownerPid(windowId: id) {
+            return "pid:\(owner)"
+        }
+        return "desktop"
+    }
+
     func handle(method: String, params: [String: JSONValue]) throws -> Any {
         if let id = params["windowId"]?.number.flatMap(UInt32.init(exactly:)), let owner = DesktopWindows.ownerPid(windowId: id) {
             try ShareControlPanel.refuseHelper(pid: owner)
@@ -340,14 +520,37 @@ final class Provider {
             restoresWindow: params["restoreWindow"]?.bool == true,
             hasApp: params["app"]?.string?.isEmpty == false
         ) {
-            throw ProviderError.coded(refusal.rawValue, "background input requires an app-scoped action; no foreground fallback was attempted")
+            guard refusal == .requiresForeground, RequestContext.current.mayBorrowDesktop, Self.actingMethods.contains(method) else {
+                throw ProviderError.coded(refusal.rawValue, "background input requires an app-scoped action; no foreground fallback was attempted")
+            }
+            try ShareControlPanel.refuseInput(method: method, params: params)
+            return try borrowingDesktop(method: method, params: foregroundParams(params))
         }
         guard Self.actingMethods.contains(method) else { return try dispatch(method: method, params: params) }
         try ShareControlPanel.refuseInput(method: method, params: params)
-        // One hand (realtime v1 §5.4): an acting request holds it from its
-        // count to its last event — never beside a reflex run — and a stop
-        // lets go of whatever it pressed.
-        return try OperatorHandHost.whileHeld {
+        // A control that is about to be ready is waited for before any turn is
+        // taken: waiting holds up nobody. It is read again once the turn is held.
+        try waitUntilActionable(method: method, params: params)
+        let background = params["background"]?.bool == true
+        if !background, RequestContext.current.mayBorrowDesktop {
+            return try borrowingDesktop(bringingUp: params["borrowApp"]?.string, method: method, params: params)
+        }
+        do {
+            return try act(method: method, params: params, scoped: background)
+        } catch let error as ProviderError where background && RequestContext.current.mayBorrowDesktop
+            && !RequestContext.current.sent && BackgroundInput.foregroundMayTakeOver(method: method, refusal: error.code) {
+            // The background road cannot do this one. The person's setting lets
+            // the agent borrow the pointer and the keyboard, so it does, and
+            // gives them back when it is done.
+            return try borrowingDesktop(method: method, params: foregroundParams(params))
+        }
+    }
+
+    /// One hand (realtime v1 §5.4): an acting request holds its part of it from
+    /// its count to its last event — never beside a reflex run — and a stop lets
+    /// go of whatever it pressed.
+    private func act(method: String, params: [String: JSONValue], scoped: Bool) throws -> Any {
+        try OperatorHandHost.whileHeld(scoped: scoped) {
             try OperatorGuardHost.admit()
             // What repaints from here on may be this act's doing (§7.1 eye).
             ScreenEye.markAct()
@@ -355,7 +558,61 @@ final class Provider {
         }
     }
 
-    private func dispatch(method: String, params: [String: JSONValue]) throws -> Any {
+    private func foregroundParams(_ params: [String: JSONValue]) -> [String: JSONValue] {
+        var foreground = params
+        foreground["background"] = nil
+        foreground["restoreWindow"] = .bool(true)
+        return foreground
+    }
+
+    /// How long what a borrowed act sent gets to arrive before the person's app is back.
+    private static let borrowSettleSeconds: TimeInterval = 0.15
+    /// Raising another app under someone typing would hand it their next keys, so a
+    /// borrow waits for a pause, and gives up rather than take them.
+    private static let keysQuietSeconds: CFTimeInterval = 0.8
+    private static let longestWaitForKeys: TimeInterval = 3
+
+    private func waitForThePersonsKeys() throws {
+        let giveUp = Date().addingTimeInterval(Self.longestWaitForKeys)
+        while CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown) < Self.keysQuietSeconds {
+            guard Date() < giveUp else {
+                throw ProviderError.coded("person_typing", "the person is typing, and this act needs the keyboard or the pointer; nothing was done. Try again shortly")
+            }
+            usleep(50_000)
+        }
+    }
+
+    /// Take the shared desktop for one act and put back what the person had: the
+    /// app in front and where the pointer was. All of it happens with the hand held,
+    /// so a borrow in turn after this one reads what the person had, and raising a
+    /// window or giving it back never lands in the middle of another act's keys.
+    private func borrowingDesktop(bringingUp query: String? = nil, method: String, params: [String: JSONValue]) throws -> Any {
+        try OperatorHandHost.whileHeld(scoped: false) {
+            try OperatorGuardHost.admit()
+            try waitForThePersonsKeys()
+            RequestContext.current.borrowed = true
+            let front = NSWorkspace.shared.frontmostApplication
+            let pointer = Input.desktopCursorPosition()
+            defer {
+                // What was sent is still on its way: what the person had comes back after it.
+                if RequestContext.current.sent { Thread.sleep(forTimeInterval: Self.borrowSettleSeconds) }
+                CGWarpMouseCursorPosition(pointer)
+                _ = CGAssociateMouseAndMouseCursorPosition(1)
+                if let front, !front.isTerminated, !front.isActive {
+                    _ = front.activate(options: [])
+                    // A helper in the background is not always let bring an app up.
+                    if !front.isActive, let bundle = front.bundleIdentifier { openBundle(bundle) }
+                }
+            }
+            if let query, !query.isEmpty { recoverWindow(try resolveApp(query)) }
+            ScreenEye.markAct()
+            return try dispatch(method: method, params: params)
+        }
+    }
+
+    private func dispatch(method: String, params unmarked: [String: JSONValue]) throws -> Any {
+        var params = unmarked
+        params["method"] = .string(method)
         // Confirmation and execution share one fresh dispatch snapshot. It
         // is local to this request: a confirmed retry must observe anew.
         var dispatchSnapshot: Snapshot?
@@ -548,9 +805,101 @@ final class Provider {
         }
     }
 
+    /// What an action's answer says of the window afterwards.
+    private enum AfterAct {
+        /// Only what changed: the default for a lone act.
+        static let changes = "changes"
+        /// Nothing: a batch looks once, after its last step.
+        static let none = "none"
+    }
+
+    /// How long a web app gets to repaint before a look says nothing changed:
+    /// its accessibility tree follows its renderer, a beat behind the press.
+    private static let webSettleMicros: UInt32 = 120_000
+
+    private func lookAfterAct(params: [String: JSONValue], afterAct: String?, before: Snapshot?, action: [String: Any]) throws -> Snapshot {
+        var quiet = params
+        if afterAct == AfterAct.changes { quiet["noScreenshot"] = .bool(true) }
+        let after = try observe(params: quiet)
+        guard afterAct == AfterAct.changes, let before, Self.changes(from: before, to: after).isEmpty,
+              after.elements.values.contains(where: { $0.role == "AXWebArea" }) else { return after }
+        usleep(Self.webSettleMicros)
+        return try observe(params: quiet)
+    }
+
+    private static func changes(from before: Snapshot, to after: Snapshot) -> ElementChanges {
+        ElementChanges.between(
+            previous: before.elements.mapValues(\.line),
+            current: after.elements.mapValues(\.line),
+            order: after.order
+        )
+    }
+
+    /// An action's small answer: what it did and what it changed. The numbers in
+    /// the agent's last look still hold, so no tree comes back.
+    private func renderChanges(action: [String: Any], snapshot: Snapshot, changes: ElementChanges, surfaces: [[String: Any]]) -> [String: Any] {
+        var metadata = action
+        metadata["targetWindowId"] = Int(snapshot.windowId)
+        var result: [String: Any] = [
+            "action": metadata,
+            "snapshot": [
+                "id": snapshot.id,
+                "app": ["name": snapshot.app.name, "bundleId": jsonNullable(snapshot.app.bundleId), "pid": Int(snapshot.app.pid)],
+                "window": placedWindow(snapshot),
+                "coordinateSpace": "window",
+                "elementCount": snapshot.elements.count,
+                "focusedElementId": snapshot.focusedElementId as Any,
+            ],
+            "changes": [
+                "added": changes.added,
+                "changed": changes.changed,
+                "removed": changes.removed,
+                "omitted": changes.omitted,
+            ],
+            "screenshot": NSNull(),
+            "screenshotStatus": renderScreenshotStatus(.skipped, snapshot: snapshot),
+        ]
+        if !surfaces.isEmpty { result["surfaces"] = surfaces }
+        return result
+    }
+
+    private static let actsWithNoPoint: Set<String> = ["typeText", "pasteText", "pressKey", "hotkey", "setValue", "performSecondaryAction"]
+
+    /// Where an act with no point of its own happens, so a person can see it: the
+    /// control it names, else the focus. Clicks and scrolls show their own point.
+    private func showPointerForKeys(params: [String: JSONValue], look: Snapshot) {
+        guard Self.actsWithNoPoint.contains(params["method"]?.string ?? "") else { return }
+        let pid = look.app.pid
+        let named = (try? optionalInteger(params, "elementIndex")).flatMap { $0 }.flatMap { index in
+            look.elements[index] ?? knownRecord(pid: pid, index: index)
+        }
+        let frame = named.flatMap { absoluteFrame($0.element) } ?? appFocusedElement(pid).flatMap { absoluteFrame($0) }
+        let bounds = DesktopWindows.bounds(windowId: look.windowId, ownerPid: pid) ?? look.windowBounds
+        var point = CGPoint(x: bounds.midX, y: bounds.midY)
+        if let frame, bounds.contains(CGPoint(x: frame.midX, y: frame.midY)) {
+            point = CGPoint(x: frame.midX, y: frame.midY)
+        }
+        BackgroundPointerOverlay.show(pid: pid, windowID: look.windowId, bounds: bounds, point: point, agent: RequestContext.current.agent)
+    }
+
     private func actionResult(params: [String: JSONValue], action runAction: () throws -> [String: Any]) throws -> [String: Any] {
         let foreground = params["background"]?.bool == true ? NSWorkspace.shared.frontmostApplication?.processIdentifier : nil
+        // What the window showed before the act, to tell what the act changed.
+        let before = try? cachedSnapshot(params: params)
+        let acting = Date()
         var action = try runAction()
+        if params["timing"]?.bool == true {
+            action["actMs"] = Int(Date().timeIntervalSince(acting) * 1_000)
+            action["appActionMs"] = RequestContext.current.appActionMs as Any
+        }
+        if RequestContext.current.borrowed { action["borrowedDesktop"] = true }
+        if params["background"]?.bool == true, let before { showPointerForKeys(params: params, look: before) }
+        func settleDelivery(effectSeen: Bool) {
+            let verified = (action["verification"] as? [String: Any])?["state"] as? String == "verified"
+            let delivery = ActionDelivery.finished(readBackVerified: verified, effectSeen: effectSeen)
+            action["delivery"] = delivery.rawValue
+            action["retry"] = delivery.retry
+        }
         if params["background"]?.bool == true {
             action["background"] = [
                 "requested": true,
@@ -562,10 +911,26 @@ final class Provider {
            let window = params["windowId"]?.number,
            let windowID = boundedInteger(window, as: UInt32.self), windowID > 0 {
             action["targetWindowId"] = Int(windowID)
+            settleDelivery(effectSeen: false)
+            return ["action": action, "observationDeferred": true]
+        }
+        let afterAct = params["afterAct"]?.string
+        if afterAct == AfterAct.none {
+            settleDelivery(effectSeen: false)
+            if let before { action["targetWindowId"] = Int(before.windowId) }
             return ["action": action, "observationDeferred": true]
         }
         do {
-            return try renderActionResult(action: action, snapshot: observe(params: params))
+            let after = try lookAfterAct(params: params, afterAct: afterAct, before: before, action: action)
+            let changes = before.map { Self.changes(from: $0, to: after) } ?? ElementChanges()
+            let surfaces = afterAct == AfterAct.changes ? openSurfaces(after.app.pid) : []
+            let effectSeen = !changes.isEmpty || !surfaces.isEmpty
+            action["effect"] = before == nil ? "unknown" : (effectSeen ? "changed" : "none_seen")
+            settleDelivery(effectSeen: effectSeen)
+            guard afterAct == AfterAct.changes else {
+                return renderActionResult(action: action, snapshot: after)
+            }
+            return renderChanges(action: action, snapshot: after, changes: changes, surfaces: surfaces)
         } catch let error as ProviderError where (error.code == "window_not_found" || error.code == "window_stale") && hasRequestedWindowSelector(params) {
             if action["verification"] == nil {
                 action["verification"] = ["state": "unverified", "reason": "window_changed"]
@@ -573,6 +938,16 @@ final class Provider {
             if let windowID = params["windowId"]?.number {
                 action["targetWindowId"] = windowID
             }
+            settleDelivery(effectSeen: true)
+            return [
+                "action": action,
+                "observationDeferred": true,
+                "observation": ["state": "unavailable", "reason": error.code],
+            ]
+        } catch let error as ProviderError {
+            // The act is done. Only the look after it failed, and an answer that
+            // called the act a failure would have it done twice.
+            settleDelivery(effectSeen: false)
             return [
                 "action": action,
                 "observationDeferred": true,
@@ -593,23 +968,29 @@ final class Provider {
         if params["restoreWindow"]?.bool == true {
             recoverWindow(app)
         }
+        let shape = try LookShape(params)
         let snapshot = try buildSnapshot(
             app: app,
             includeScreenshot: params["noScreenshot"]?.bool != true,
             windowId: windowId,
             windowIndex: windowIndex,
             restoreWindow: params["restoreWindow"]?.bool == true,
-            readsTheTree: !acting
+            readsTheTree: !acting,
+            shape: shape
         )
-        // Why: cached snapshots only validate element identity for follow-up
-        // actions; retaining MB-scale screenshot base64 in the long-lived agent grows memory.
-        rememberSnapshot(
-            query: query,
-            app: app,
-            snapshot: snapshot.withoutScreenshotPayload(),
-            params: params,
-            windowIndex: windowIndex
-        )
+        // A look at a menu or at one region leaves the window's look standing.
+        // Its elements resolve from the app's table.
+        if shape.complete && shape.surface == nil {
+            // Why: cached snapshots only validate element identity for follow-up
+            // actions; retaining MB-scale screenshot base64 in the long-lived agent grows memory.
+            rememberSnapshot(
+                query: query,
+                app: app,
+                snapshot: snapshot.keptBetweenRequests(),
+                params: params,
+                windowIndex: windowIndex
+            )
+        }
         return snapshot
     }
 
@@ -623,9 +1004,21 @@ final class Provider {
         let keys = [query, app.name, app.bundleId ?? "", "pid:\(app.pid)"]
             .filter { !$0.isEmpty }
             .map { $0.lowercased() }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
         let namespace = snapshotNamespace(params)
         var storedKeys: [String] = []
         let canonicalWindowKey = snapshotCanonicalWindowIdKey(cachedSnapshot.windowId)
+        // Numbers outlive a look, so an older look at this window is worth
+        // nothing: it only holds the memory of a whole tree.
+        let windowKey = namespacedSnapshotKey(namespace, canonicalWindowKey)
+        snapshotEntries.removeAll { entry in
+            guard entry.windowKey == windowKey else { return false }
+            for key in entry.keys where snapshots[key]?.id == entry.snapshotId {
+                snapshots.removeValue(forKey: key)
+            }
+            return true
+        }
         if !isExplicitSnapshotNamespace(namespace) {
             snapshots[canonicalWindowKey.lowercased()] = cachedSnapshot
             storedKeys.append(canonicalWindowKey.lowercased())
@@ -670,12 +1063,18 @@ final class Provider {
             }
         }
         snapshotEntries.append(
-            CachedSnapshotEntry(snapshotId: cachedSnapshot.id, keys: storedKeys, createdAt: Date())
+            CachedSnapshotEntry(snapshotId: cachedSnapshot.id, keys: storedKeys, createdAt: Date(), windowKey: windowKey)
         )
-        pruneSnapshotCache()
+        pruneSnapshotCacheLocked()
     }
 
     private func pruneSnapshotCache() {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        pruneSnapshotCacheLocked()
+    }
+
+    private func pruneSnapshotCacheLocked() {
         let now = Date()
         while let oldest = snapshotEntries.first,
               ComputerSnapshotCachePolicy.shouldPrune(
@@ -692,12 +1091,53 @@ final class Provider {
 
     private func currentSnapshot(params: [String: JSONValue]) throws -> Snapshot {
         pruneSnapshotCache()
+        if let standing = try standingSnapshot(params: params) { return standing }
         let cached = try cachedSnapshot(params: params)
+        try requireShownBeforeThisWalk(params: params, cached: cached)
         // Why: cached AX frames can be stale after a window move or resize, and
         // stale geometry can turn an intended action into a misclick.
         let snapshot = try observe(params: params.merging(["noScreenshot": .bool(true)]) { _, replacement in replacement }, acting: true)
         try validateRequestedElements(cached: cached, current: snapshot, params: params)
         return snapshot
+    }
+
+    /// The numbers a request names, whichever way it names them.
+    private func requestedNumbers(_ params: [String: JSONValue]) throws -> [Int] {
+        try ["elementIndex", "fromElementIndex", "toElementIndex"].compactMap { key -> Int? in
+            guard params[key]?.number != nil else { return nil }
+            return try optionalInteger(params, key)
+        }
+    }
+
+    /// A walk numbers what it meets, so a number only proves something if it was
+    /// shown before this request walked. One kept from before this helper or this
+    /// process started would otherwise name whatever the walk just numbered.
+    private func requireShownBeforeThisWalk(params: [String: JSONValue], cached: Snapshot?) throws {
+        let requested = try requestedNumbers(params)
+        guard !requested.isEmpty, try markPin(params) == nil else { return }
+        // A look at a process that has ended says nothing about the one running now.
+        let looked = cached.flatMap { $0.app.app.isTerminated ? nil : $0.app.pid }
+        let pid = try looked ?? resolveApp(try requiredString(params, "app")).pid
+        try requireShownToThisAgent(requested, pid: pid)
+        for index in requested where knownRecord(pid: pid, index: index) == nil {
+            throw staleElement(index)
+        }
+    }
+
+    /// Another agent's look can give out a number again after a restart. The agent
+    /// asking must have been shown this process's numbers itself. A request the
+    /// window names no agent for is judged by the numbers alone.
+    private func requireShownToThisAgent(_ requested: [Int], pid: pid_t) throws {
+        guard let agent = RequestContext.current.agent, let first = requested.first else { return }
+        cacheLock.lock()
+        let shown = shownTo[pid]?.contains(agent) == true
+        cacheLock.unlock()
+        guard shown else {
+            throw ProviderError.coded(
+                "element_not_found",
+                "element \(first) is from before this app or the helper restarted; look again and use a current number"
+            )
+        }
     }
 
     private func currentKeyboardSnapshot(params: [String: JSONValue]) throws -> Snapshot {
@@ -706,7 +1146,151 @@ final class Provider {
         try currentSnapshot(params: params.merging(["noScreenshot": .bool(true)]) { _, replacement in replacement })
     }
 
+    /// The window's last look brought up to now by reading only what this request
+    /// touches: the window's place, the focus and the named elements. Reading the
+    /// whole window for every press cost one tree walk per act, in the app being
+    /// driven. Nil when only a walk can answer: no look yet, a press by words, or
+    /// a focus the last look never saw.
+    private func standingSnapshot(params: [String: JSONValue]) throws -> Snapshot? {
+        guard readingQuery(params).isEmpty, params["restoreWindow"]?.bool != true,
+              let cached = try cachedSnapshot(params: params),
+              !cached.app.app.isTerminated,
+              let bounds = DesktopWindows.bounds(windowId: cached.windowId, ownerPid: cached.app.pid)
+        else { return nil }
+        let requested = try requestedNumbers(params)
+        if try markPin(params) == nil { try requireShownToThisAgent(requested, pid: cached.app.pid) }
+        var live: [Int: ElementRecord] = [:]
+        for index in requested {
+            guard let record = cached.elements[index] ?? knownRecord(pid: cached.app.pid, index: index) else { return nil }
+            live[index] = try liveRecord(record, windowBounds: bounds)
+        }
+        let focus = appFocusedElement(cached.app.pid)
+        let focused = focus.flatMap { book(for: cached.app.pid).existingNumber(for: $0) }
+        // Keys go where the focus is. A field the last look did not see needs a look.
+        if focus != nil, focused == nil, Self.keyboardMethods.contains(params["method"]?.string ?? "") { return nil }
+        let standing = cached.standing(windowBounds: bounds, focusedElementId: focused, elements: live)
+        if try markPin(params) != nil {
+            try validateRequestedElements(cached: cached, current: standing, params: params)
+        }
+        return standing
+    }
+
+    private static let keyboardMethods: Set<String> = ["typeText", "pressKey", "hotkey", "pasteText"]
+
+    /// One element as it stands now, read from the element itself. The object is
+    /// what the agent named: if the app removed it, this says so, and no other
+    /// control can answer in its place.
+    private func liveRecord(_ record: ElementRecord, windowBounds: CGRect) throws -> ElementRecord {
+        var probe: CFTypeRef?
+        switch AXUIElementCopyAttributeValue(record.element, kAXRoleAttribute as CFString, &probe) {
+        case .success:
+            break
+        case .cannotComplete:
+            throw ProviderError.coded("app_unresponsive", "the app is not answering; nothing was pressed")
+        default:
+            throw staleElement(record.index)
+        }
+        let reader = AXSnapshotReader()
+        let role = reader.stringAttribute(record.element, kAXRoleAttribute as String) ?? "AXUnknown"
+        let rawActions = reader.actions(record.element)
+        let node = SnapshotRenderNode(
+            role: role,
+            roleDescription: reader.stringAttribute(record.element, kAXRoleDescriptionAttribute as String),
+            title: reader.stringAttribute(record.element, kAXTitleAttribute as String),
+            label: reader.stringAttribute(record.element, kAXDescriptionAttribute as String),
+            linkText: role == "AXLink" ? reader.descendantTextSnippets(record.element, limit: 2, maxDepth: 3).first : nil,
+            url: reader.stringAttribute(record.element, kAXURLAttribute as String),
+            rawActions: rawActions
+        )
+        guard elementSignature(node) == record.signature else {
+            throw ProviderError.coded("element_not_found", "element \(record.index) changed since the last look; look again")
+        }
+        // A list can reuse one object for another row: the row around it says so.
+        if let owner = record.contextOwner, let expected = record.context {
+            let ownerReader = AXSnapshotReader()
+            let ownerRole = ownerReader.stringAttribute(owner, kAXRoleAttribute as String)
+            guard let ownerRole else { throw staleElement(record.index) }
+            let ownerNode = SnapshotRenderNode(
+                role: ownerRole,
+                roleDescription: ownerReader.stringAttribute(owner, kAXRoleDescriptionAttribute as String),
+                title: ownerReader.stringAttribute(owner, kAXTitleAttribute as String),
+                label: ownerReader.stringAttribute(owner, kAXDescriptionAttribute as String),
+                value: ownerReader.valueString(owner, role: ownerRole),
+                rowSummary: ownerReader.rowTextSummary(owner, role: ownerRole)
+            )
+            guard SnapshotRenderHeuristics.displayName(ownerNode) == expected else {
+                throw ProviderError.coded("element_not_found", "element \(record.index) now sits in another row than the last look showed; look again")
+            }
+        }
+        return record.standing(actions: rawActions, frame: reader.frame(record.element, windowBounds: windowBounds))
+    }
+
+    private func staleElement(_ index: Int) -> ProviderError {
+        .coded("element_not_found", "element \(index) is gone: the app removed it since the last look; look again and use a current number")
+    }
+
+    /// Hold the press until its control can take it: it may be turning on, or
+    /// still moving. Waiting holds no turn on the hand, and the control is read
+    /// again once the turn is held.
+    private func waitUntilActionable(method: String, params: [String: JSONValue]) throws {
+        guard ["click", "performSecondaryAction", "setValue"].contains(method),
+              let index = try optionalInteger(params, "elementIndex"),
+              let cached = try cachedSnapshot(params: params),
+              !cached.app.app.isTerminated,
+              let record = cached.elements[index] ?? knownRecord(pid: cached.app.pid, index: index)
+        else { return }
+        if method == "click" { waitForWebPress(record, pid: cached.app.pid) }
+        let waitMs = min(try optionalInteger(params, "timeoutMs") ?? Actionability.defaultWaitMs, Actionability.longestWaitMs)
+        let giveUp = Date().addingTimeInterval(TimeInterval(waitMs) / 1_000)
+        let lastSeen = record.localFrame.map { $0.offsetBy(dx: cached.windowBounds.minX, dy: cached.windowBounds.minY) }
+        var previous = lastSeen
+        while true {
+            var probe: CFTypeRef?
+            switch AXUIElementCopyAttributeValue(record.element, kAXRoleAttribute as CFString, &probe) {
+            case .success:
+                break
+            case .cannotComplete:
+                throw ProviderError.coded("app_unresponsive", "the app is not answering; nothing was pressed")
+            default:
+                throw staleElement(index)
+            }
+            if OperatorGuardHost.isStopped() { return }
+            let frame = absoluteFrame(record.element)
+            let verdict = Actionability.of(
+                enabled: boolAttribute(record.element, kAXEnabledAttribute as String),
+                frame: frame,
+                previousFrame: record.onSurface ? nil : previous,
+                needsFrame: !record.onSurface
+            )
+            guard case let .wait(why) = verdict else { return }
+            guard Date() < giveUp else {
+                throw ProviderError.coded("not_actionable", "element \(index) \(why) after waiting \(waitMs) ms; nothing was pressed")
+            }
+            previous = frame
+            usleep(useconds_t(Actionability.pollMs * 1_000))
+        }
+    }
+
+    /// A web view offers a control's press only once its tree has settled, some seconds
+    /// after it was switched on. Holds up this app's lane alone.
+    private func waitForWebPress(_ record: ElementRecord, pid: pid_t) {
+        cacheLock.lock()
+        let on = webAccessibilityOnAt[pid]
+        cacheLock.unlock()
+        guard let on, BackgroundInput.pressableRoles.contains(record.role) else { return }
+        let giveUp = on.addingTimeInterval(WebAccessibility.settlesSeconds)
+        while Date() < giveUp, !OperatorGuardHost.isStopped(), !actions(record.element).contains("AXPress") {
+            usleep(UInt32(Actionability.pollMs * 1_000))
+        }
+    }
+
     private func cachedSnapshot(params: [String: JSONValue]) throws -> Snapshot? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return try cachedSnapshotLocked(params: params)
+    }
+
+    private func cachedSnapshotLocked(params: [String: JSONValue]) throws -> Snapshot? {
         guard let query = params["app"]?.string, !query.isEmpty else { return nil }
         let namespace = snapshotNamespace(params)
         if let targetWindowId = try requestedWindowId(params) {
@@ -772,20 +1356,15 @@ final class Provider {
             }
             return
         }
-        let requestedIndexes = try ["elementIndex", "fromElementIndex", "toElementIndex"].compactMap { key -> Int? in
-            guard params[key]?.number != nil else { return nil }
-            return try optionalInteger(params, key)
-        }
+        let requestedIndexes = try requestedNumbers(params)
         guard !requestedIndexes.isEmpty else { return }
-        guard let cached else {
-            throw ProviderError.coded("element_not_found", "element indexes require a fresh get-app-state snapshot for this app/window")
-        }
         for index in requestedIndexes {
-            guard let expected = cached.elements[index], let actual = current.elements[index] else {
-                throw ProviderError.coded("element_not_found", "element \(index) is stale; run get-app-state again and use a fresh element index")
+            // A number names one object, so the walk just made has it or it is gone.
+            guard let actual = current.elements[index] ?? knownRecord(pid: current.app.pid, index: index) else {
+                throw staleElement(index)
             }
-            guard expected.signature == actual.signature else {
-                throw ProviderError.coded("element_not_found", "element \(index) changed since the last snapshot; run get-app-state again and use a fresh element index")
+            if let expected = cached?.elements[index], expected.signature != actual.signature {
+                throw ProviderError.coded("element_not_found", "element \(index) changed since the last look; look again")
             }
         }
     }
@@ -889,10 +1468,10 @@ final class Provider {
                     "performAction": true,
                 ],
                 "surfaces": [
-                    "menus": false,
-                    "dialogs": false,
+                    "menus": true,
+                    "dialogs": true,
                     "dock": false,
-                    "menubar": false,
+                    "menubar": true,
                 ],
                 "desktop": [
                     "screenshot": true,
@@ -1022,13 +1601,120 @@ final class Provider {
         return AppDescriptor(name: name, bundleId: app.bundleIdentifier, pid: pid, app: app)
     }
 
+    /// A hung app answers one read late and then gets no more of them: the walk
+    /// would otherwise spend one timeout on every attribute of every element.
+    private func requireAnswering(_ appElement: AXUIElement, app: AppDescriptor) throws {
+        var role: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, kAXRoleAttribute as CFString, &role) == .cannotComplete {
+            throw ProviderError.coded("app_unresponsive", "\(app.name) is not answering; nothing was read or pressed. Other apps are not held up.")
+        }
+    }
+
+    /// Chromium and Electron build their web tree only when asked. Whether an app
+    /// is one of them is the app's to say: it offers this attribute as settable.
+    /// A native app does not, and is left alone. Read back, because a set that
+    /// returned success has not always taken.
+    private func prepareWebAccessibility(_ appElement: AXUIElement, app: AppDescriptor) {
+        cacheLock.lock()
+        let first = webAccessibilityAsked.insert(app.pid).inserted
+        cacheLock.unlock()
+        guard first else { return }
+        if isSettable(appElement, WebAccessibility.manualAttribute) {
+            _ = AXUIElementSetAttributeValue(appElement, WebAccessibility.manualAttribute as CFString, kCFBooleanTrue)
+            noteWebAccessibilityOn(app.pid)
+            let giveUp = Date().addingTimeInterval(WebAccessibility.readySeconds)
+            while boolAttribute(appElement, WebAccessibility.manualAttribute) != true, Date() < giveUp {
+                usleep(WebAccessibility.pollMicros)
+            }
+            return
+        }
+        prepareApplicationAccessibility(appElement, app: app)
+        if app.isKnownBrowser { noteWebAccessibilityOn(app.pid) }
+    }
+
+    private func noteWebAccessibilityOn(_ pid: pid_t) {
+        cacheLock.lock()
+        webAccessibilityOnAt[pid] = Date()
+        cacheLock.unlock()
+    }
+
+    /// Where a look at a surface starts, or nil when it is not open.
+    private func surfaceRoot(_ surface: String, appElement: AXUIElement, window: AXUIElement) -> AXUIElement? {
+        switch surface {
+        case "menubar":
+            return copyElement(appElement, kAXMenuBarAttribute as String)
+        case "menu":
+            return openMenu(appElement)
+        case "sheet":
+            return (copyArray(window, kAXChildrenAttribute as String) ?? [])
+                .first { stringAttribute($0, kAXRoleAttribute as String) == (kAXSheetRole as String) }
+        default:
+            return nil
+        }
+    }
+
+    /// The menu open now: one a menu bar item opened, else a context menu.
+    private func openMenu(_ appElement: AXUIElement) -> AXUIElement? {
+        if let bar = copyElement(appElement, kAXMenuBarAttribute as String) {
+            for item in copyArray(bar, kAXChildrenAttribute as String) ?? [] where boolAttribute(item, kAXSelectedAttribute as String) == true {
+                if let menu = (copyArray(item, kAXChildrenAttribute as String) ?? [])
+                    .first(where: { stringAttribute($0, kAXRoleAttribute as String) == (kAXMenuRole as String) }) {
+                    return menu
+                }
+            }
+        }
+        return (copyArray(appElement, kAXChildrenAttribute as String) ?? [])
+            .first { stringAttribute($0, kAXRoleAttribute as String) == (kAXMenuRole as String) }
+    }
+
+    /// What is open over the window now, which a look at the window does not show.
+    private func openSurfaces(_ pid: pid_t) -> [[String: Any]] {
+        let appElement = AXUIElementCreateApplication(pid)
+        var open: [[String: Any]] = []
+        if let menu = openMenu(appElement) {
+            open.append(["kind": "menu", "title": jsonNullable(stringAttribute(menu, kAXTitleAttribute as String))])
+        }
+        if let window = copyElement(appElement, kAXFocusedWindowAttribute as String) {
+            let subrole = stringAttribute(window, kAXSubroleAttribute as String)
+            if subrole == (kAXDialogSubrole as String) || subrole == (kAXSystemDialogSubrole as String) {
+                open.append(["kind": "dialog", "title": jsonNullable(stringAttribute(window, kAXTitleAttribute as String))])
+            }
+        }
+        return open
+    }
+
+    /// How much of a window a look reads.
+    private struct LookShape {
+        /// A menu or the menu bar instead of the window.
+        var surface: String?
+        /// One element's subtree instead of the whole window.
+        var root: Int?
+        /// How deep to read; what is cut says how much it holds.
+        var maxDepth: Int?
+
+        init(_ params: [String: JSONValue]) throws {
+            surface = params["surface"]?.string
+            root = try optionalInteger(params, "root")
+            maxDepth = try optionalInteger(params, "maxDepth")
+            if params["skeleton"]?.bool == true, maxDepth == nil { maxDepth = LookShape.skeletonDepth }
+        }
+
+        /// A skeleton reads this deep: enough to name the regions of a dense app.
+        static let skeletonDepth = 3
+        /// A look's whole budget. A hung or huge app answers what was read by
+        /// then, marked as cut short, instead of holding the request.
+        static let walkBudgetSeconds: TimeInterval = 3
+        var complete: Bool { root == nil && maxDepth == nil }
+    }
+
     private func buildSnapshot(
         app: AppDescriptor,
         includeScreenshot: Bool,
         windowId: CGWindowID?,
         windowIndex: Int?,
         restoreWindow: Bool,
-        readsTheTree: Bool
+        readsTheTree: Bool,
+        shape: LookShape
     ) throws -> Snapshot {
         guard accessibilityTrustedSettled() else {
             // Why: agents retry failed observations. Only the explicit setup flow
@@ -1039,7 +1725,8 @@ final class Provider {
             )
         }
         let appElement = AXUIElementCreateApplication(app.pid)
-        prepareApplicationAccessibility(appElement, app: app)
+        try requireAnswering(appElement, app: app)
+        prepareWebAccessibility(appElement, app: app)
         let listed = WindowCapture.candidates(pid: app.pid)
         // Without Screen Recording the window server names no other app's
         // window and may list none of them as shared (t-66753 C1): a look
@@ -1072,12 +1759,39 @@ final class Provider {
             throw ProviderError.coded("window_not_found", "could not match accessibility window to requested window; run get-app-state again or retry without a window selector")
         }
         let title = stringAttribute(window, kAXTitleAttribute as String) ?? capture.title ?? app.name
+        let book = book(for: app.pid)
+        let startsAt: AXUIElement
+        let rootKey: String
+        if let surface = shape.surface {
+            guard let root = surfaceRoot(surface, appElement: appElement, window: window) else {
+                throw ProviderError.coded("surface_not_open", "\(app.name) has no open \(surface); open it, then look again")
+            }
+            startsAt = root
+            rootKey = "surface:\(surface)"
+        } else if let rootIndex = shape.root {
+            guard let record = knownRecord(pid: app.pid, index: rootIndex) else {
+                throw ProviderError.coded("element_not_found", "element \(rootIndex) is gone; look at the window again")
+            }
+            startsAt = record.element
+            rootKey = "window:\(capture.windowId)"
+        } else {
+            startsAt = window
+            rootKey = "window:\(capture.windowId)"
+        }
+        book.beginWalk()
         let renderer = TreeRenderer(
             windowBounds: capture.bounds,
             focused: focusedElement(appElement: appElement),
-            compactBrowserTabs: app.isKnownBrowser
+            compactBrowserTabs: app.isKnownBrowser,
+            book: book,
+            rootKey: rootKey,
+            onSurface: shape.surface != nil,
+            maxDepth: shape.maxDepth,
+            deadline: Date().addingTimeInterval(LookShape.walkBudgetSeconds)
         )
-        renderer.render(window)
+        renderer.render(startsAt)
+        let wholeWalk = shape.complete && !renderer.truncated
+        fileRecords(pid: app.pid, records: renderer.records, gone: wholeWalk ? book.endCompleteWalk(root: rootKey) : book.endCutWalk())
         // What tells this window from another of its title (t-69973): its
         // own document — the one read a look adds — else the page its first
         // web area showed the walk above.
@@ -1097,7 +1811,7 @@ final class Provider {
         } else {
             .skipped
         }
-        return Snapshot(
+        var built = Snapshot(
             id: UUID().uuidString,
             app: app,
             windowTitle: title,
@@ -1115,6 +1829,10 @@ final class Provider {
             truncated: renderer.truncated,
             maxDepthReached: renderer.maxDepthReached
         )
+        built.order = renderer.order
+        built.rootIndex = renderer.order.first
+        built.cutShort = renderer.cutShort
+        return built
     }
 
     private func renderSnapshot(_ snapshot: Snapshot, elementFrames: Bool = false) -> [String: Any] {
@@ -1146,6 +1864,7 @@ final class Provider {
                     "maxNodes": TreeRenderer.maxNodes,
                     "maxDepth": TreeRenderer.maxDepth,
                     "maxDepthReached": snapshot.maxDepthReached,
+                    "cutShort": jsonNullable(snapshot.cutShort),
                 ],
             ].merging(elementFrames ? ["elements": renderElementFaces(snapshot)] : [:]) { current, _ in current },
             "screenshot": screenshot,
@@ -1156,7 +1875,7 @@ final class Provider {
     /// Every indexed element with a frame of positive area, by index: the
     /// faces the window plans a marked look from (the core's `ElementFace`).
     private func renderElementFaces(_ snapshot: Snapshot) -> [[String: Any]] {
-        snapshot.elements.keys.sorted().compactMap { index in
+        snapshot.order.compactMap { index in
             guard let record = snapshot.elements[index],
                   let frame = record.localFrame,
                   frame.width > 0, frame.height > 0
@@ -1218,14 +1937,25 @@ final class Provider {
                    textEntry: MarkPin.textEntryRoles.contains(record.role),
                    plainLeftClick: modifiers.isEmpty && count == 1 && button == .left
                ) {
-                try requireOnTop(record, in: snapshot, background: true, at: requestedPoint)
-                guard performAction(record.element, action) else {
+                try requireReachable(record, in: snapshot, at: requestedPoint)
+                guard try performActionChecked(record.element, action) else {
                     throw ProviderError.coded("accessibility_error", "the background semantic action failed; no fallback was attempted")
                 }
                 if let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
-                    BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point)
+                    BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
                 }
                 return actionMetadata(path: "accessibility", actionName: action)
+            }
+            // Pressing a field is asking for its focus, and a web view ignores events
+            // sent to a window that is not key.
+            if let record, modifiers.isEmpty, count == 1, button == .left,
+               MarkPin.textEntryRoles.contains(record.role),
+               AXUIElementSetAttributeValue(record.element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success {
+                try requireReachable(record, in: snapshot, at: requestedPoint)
+                if let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
+                    BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
+                }
+                return actionMetadata(path: "accessibility", actionName: "AXFocused")
             }
             let point: CGPoint
             if let requestedPoint {
@@ -1242,7 +1972,7 @@ final class Provider {
                 try self.requireBackgroundWindow(snapshot, at: point)
                 if let record { try self.requireOnTop(record, in: snapshot, background: true, at: point) }
             }
-            BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point)
+            BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
             return actionMetadata(path: "window", verification: unverifiedAction(reason: "synthetic_input"))
         }
         // Why: agents expect a click into a target app to make the next
@@ -1272,7 +2002,7 @@ final class Provider {
                 if AXUIElementSetAttributeValue(record.element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success {
                     return actionMetadata(path: "accessibility", actionName: "AXFocused")
                 }
-                if performAction(record.element, "AXPress") {
+                if try performActionChecked(record.element, "AXPress") {
                     return actionMetadata(path: "accessibility", actionName: "AXPress")
                 }
             } else if plain,
@@ -1281,6 +2011,9 @@ final class Provider {
                 return actionMetadata(path: "accessibility", actionName: actionName)
             }
             if let point = center(record.localFrame, in: snapshot.windowBounds) {
+                // A control this walk did not reach is pressed at its place only
+                // if that is what a pointer would hit there.
+                if snapshot.elements[elementIndex] == nil { try requireOnTop(record, in: snapshot) }
                 try Input.click(
                     at: point,
                     button: button,
@@ -1320,10 +2053,9 @@ final class Provider {
     /// the caller narrows with --role/--label or presses by index — the press
     /// never guesses between two controls.
     private func chosenIndex(_ query: ElementQuery, in snapshot: Snapshot) throws -> Int {
-        let faces = snapshot.elements.keys.sorted().compactMap { index -> ElementFace? in
+        let faces = snapshot.order.compactMap { index -> ElementFace? in
             guard let record = snapshot.elements[index] else { return nil }
-            let face = elementFace(record.element)
-            return ElementFace(index: index, role: face.role, label: face.label, value: face.value, description: face.description)
+            return ElementFace(index: index, role: record.role, label: record.title, value: record.value, description: record.label)
         }
         switch query.choose(among: faces) {
         case .one(let index):
@@ -1340,6 +2072,55 @@ final class Provider {
                 "\(some.count) controls read \(query.words): \(named) — add --role or --label, or press one by --element-index"
             )
         }
+    }
+
+    /// The control can be pressed by its accessibility action: it is on top where
+    /// it stands, or only scrolled out of its list with nothing over the list. A
+    /// person would scroll to it; its own action needs no pointer, so it asks the
+    /// list to bring it into view and presses it either way. A control under a
+    /// dialog or a menu is refused, as it would be for a person.
+    private func requireReachable(_ record: ElementRecord, in snapshot: Snapshot, at requestedPoint: CGPoint? = nil) throws {
+        if record.onSurface { return }
+        do {
+            try requireOnTop(record, in: snapshot, background: true, at: requestedPoint)
+            return
+        } catch let covered as ProviderError {
+            guard requestedPoint == nil, let list = scrollAreaHiding(record, in: snapshot) else { throw covered }
+            if record.actions.contains("AXScrollToVisible") {
+                _ = AXUIElementPerformAction(record.element, "AXScrollToVisible" as CFString)
+                if let frame = reader(frameOf: record.element, windowBounds: snapshot.windowBounds),
+                   (try? requireOnTop(record.standing(actions: record.actions, frame: frame), in: snapshot, background: true)) != nil {
+                    return
+                }
+            }
+            guard let listFrame = absoluteFrame(list) else { throw covered }
+            var hit: AXUIElement?
+            let scope = AXUIElementCreateApplication(snapshot.app.pid)
+            guard AXUIElementCopyElementAtPosition(scope, Float(listFrame.midX), Float(listFrame.midY), &hit) == .success,
+                  let hit, reaches(hit, list) || reaches(list, hit)
+            else { throw covered }
+        }
+    }
+
+    private func reader(frameOf element: AXUIElement, windowBounds: CGRect) -> CGRect? {
+        AXSnapshotReader().frame(element, windowBounds: windowBounds)
+    }
+
+    /// The list that keeps `record` out of view: the nearest scroll area above it
+    /// whose frame does not hold its centre. Nil when it is in view, so something
+    /// else is covering it.
+    private func scrollAreaHiding(_ record: ElementRecord, in snapshot: Snapshot) -> AXUIElement? {
+        guard let point = center(record.localFrame, in: snapshot.windowBounds) else { return nil }
+        var node = copyElement(record.element, kAXParentAttribute as String)
+        for _ in 0..<MarkPin.hitDepth {
+            guard let current = node else { return nil }
+            if MarkPin.clipRoles.contains(stringAttribute(current, kAXRoleAttribute as String) ?? ""),
+               let frame = absoluteFrame(current), !frame.contains(point) {
+                return current
+            }
+            node = copyElement(current, kAXParentAttribute as String)
+        }
+        return nil
     }
 
     /// What is on top at a marked control's centre must be the control, inside
@@ -1401,10 +2182,10 @@ final class Provider {
 
     private func performClickAction(record: ElementRecord, mouseButton: MouseButtonSelection) throws -> String? {
         if mouseButton == .right {
-            return performAction(record.element, "AXShowMenu") ? "AXShowMenu" : nil
+            return try performActionChecked(record.element, "AXShowMenu") ? "AXShowMenu" : nil
         }
         for action in ["AXPress", "AXConfirm", "AXOpen"] {
-            if performAction(record.element, action) {
+            if try performActionChecked(record.element, action) {
                 return action
             }
         }
@@ -1418,7 +2199,7 @@ final class Provider {
         guard let action else {
             throw ProviderError.coded("action_not_supported", "'\(requested)' is not a valid secondary action for element \(record.index)")
         }
-        guard performAction(record.element, action) else {
+        guard try performActionChecked(record.element, action) else {
             throw ProviderError.coded("accessibility_error", "AXUIElementPerformAction(\(action)) failed")
         }
         return actionMetadata(path: "accessibility", actionName: action)
@@ -1429,7 +2210,7 @@ final class Provider {
         let record = try element(snapshot, try requiredInteger(params, "elementIndex"))
         if params["background"]?.bool == true {
             try admitBackgroundTarget(snapshot)
-            try requireOnTop(record, in: snapshot, background: true)
+            try requireReachable(record, in: snapshot)
         }
         let expected = try requiredStringAllowingEmpty(params, "value")
         if params["plainInputOnly"]?.bool == true,
@@ -1441,6 +2222,7 @@ final class Provider {
         }
         let current = rawAttributeValue(record.element, kAXValueAttribute as String)
         let coercion = AttributeValueCoercion(existingValue: current, requested: expected)
+        RequestContext.current.sent = true
         let result: AXError
         switch coercion.writeValue {
         case .string:
@@ -1480,7 +2262,7 @@ final class Provider {
         }
         let focused = focusedRecord(snapshot)?.element
         let secureInput = try gateSecretEntry(writesText: true, pastes: false, focused: keyTargets(snapshot), receiver: snapshot.app.pid)
-        if let focused, case .applied(let verification) = TextInput.replaceSelection(focused, with: text) {
+        if let focused, case .applied(let verification) = try TextInput.replaceSelection(focused, with: text) {
             return withSecureInput(actionMetadata(path: "accessibility", actionName: "AXReplaceSelection", verification: verification), secureInput)
         }
         try requireTargetWindowFocused(snapshot, restoreWindowRequested: params["restoreWindow"]?.bool == true)
@@ -1540,7 +2322,7 @@ final class Provider {
         }
         let focused = focusedRecord(snapshot)?.element
         _ = try gateSecretEntry(writesText: true, pastes: false, focused: keyTargets(snapshot), receiver: snapshot.app.pid)
-        if let focused, case .applied(let verification) = TextInput.replaceSelection(focused, with: text) {
+        if let focused, case .applied(let verification) = try TextInput.replaceSelection(focused, with: text) {
             return withSecureInput(actionMetadata(path: "accessibility", actionName: "AXReplaceSelection", verification: verification), SecureInputState.now())
         }
         try requireTargetWindowFocused(snapshot, restoreWindowRequested: params["restoreWindow"]?.bool == true)
@@ -1747,7 +2529,7 @@ final class Provider {
     }
 
     private func requireBackgroundFocus(_ focus: AXUIElement?, in snapshot: Snapshot) throws {
-        guard let focus, let root = snapshot.elements[0]?.element,
+        guard let focus, let root = snapshot.rootIndex.flatMap({ snapshot.elements[$0]?.element }),
               copyElement(focus, kAXWindowAttribute as String).map({ CFEqual($0, root) }) == true || reaches(focus, root)
         else {
             throw ProviderError.coded("focus_changed", "the background keyboard receiver cannot be verified in the target window")
@@ -1788,7 +2570,7 @@ final class Provider {
         try requireBackgroundField(focus, in: snapshot)
         if pasting || isMultiLineText(focus) || !KeyboardInputSafety.movesTheFocus(text), isSettable(focus, kAXValueAttribute as String) {
             let state = try gateSecretEntry(writesText: true, pastes: false, focused: [focus], receiver: snapshot.app.pid)
-            switch TextInput.replaceSelection(focus, with: text) {
+            switch try TextInput.replaceSelection(focus, with: text) {
             case let .applied(verification):
                 return withSecureInput(actionMetadata(path: "accessibility", actionName: "AXReplaceSelection", verification: verification), state)
             case .unavailable:
@@ -1864,7 +2646,7 @@ final class Provider {
                 guard performAction(record.element, action) else {
                     throw ProviderError.coded("accessibility_error", "the background scroll failed; no fallback was attempted")
                 }
-                BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point)
+                BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
                 return actionMetadata(path: "accessibility", actionName: action)
             }
         }
@@ -1875,7 +2657,7 @@ final class Provider {
         }
         try requireBackgroundWindow(snapshot, at: point)
         try Input.windowScroll(at: point, direction: direction, delta: delta, snapshot: snapshot)
-        BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point)
+        BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
         return actionMetadata(path: "window", verification: unverifiedAction(reason: "synthetic_input"))
     }
 
@@ -1887,6 +2669,8 @@ final class Provider {
            let toIndex = try optionalInteger(params, "toElementIndex") {
             let from = try element(snapshot, fromIndex)
             let to = try element(snapshot, toIndex)
+            if snapshot.elements[fromIndex] == nil { try requireOnTop(from, in: snapshot) }
+            if snapshot.elements[toIndex] == nil { try requireOnTop(to, in: snapshot) }
             guard let fromPoint = center(from.localFrame, in: snapshot.windowBounds),
                   let toPoint = center(to.localFrame, in: snapshot.windowBounds)
             else {
@@ -1903,10 +2687,11 @@ final class Provider {
     }
 
     private func element(_ snapshot: Snapshot, _ index: Int) throws -> ElementRecord {
-        guard let record = snapshot.elements[index] else {
-            throw ProviderError.coded("element_not_found", "element \(index) is not in the current cached snapshot for \(snapshot.app.name); run get-app-state again and use a fresh element index")
-        }
-        return record
+        if let record = snapshot.elements[index] { return record }
+        guard let known = knownRecord(pid: snapshot.app.pid, index: index) else { throw staleElement(index) }
+        // This walk did not reach it: cut short, or another window. The table's
+        // frame is from an older look, so it is read from the element itself.
+        return try liveRecord(known, windowBounds: snapshot.windowBounds)
     }
 
     private func focusedRecord(_ snapshot: Snapshot) -> ElementRecord? {
@@ -1932,6 +2717,19 @@ private enum BlockedApps {
         "me.proton.pass.electron",
         "me.proton.pass.catalyst",
     ]
+}
+
+extension DesktopWindows {
+    /// Where one window stands, asked of the window server: no app is asked. Nil
+    /// when the window is gone or is not the owner's.
+    static func bounds(windowId: CGWindowID, ownerPid: pid_t) -> CGRect? {
+        guard let rows = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowId) as? [[String: Any]],
+              let row = rows.first,
+              row[kCGWindowOwnerPID as String] as? Int32 == ownerPid,
+              let raw = row[kCGWindowBounds as String] as? [String: Any]
+        else { return nil }
+        return CGRect(dictionaryRepresentation: raw as CFDictionary)
+    }
 }
 
 private func requiredString(_ params: [String: JSONValue], _ key: String) throws -> String {
@@ -2504,6 +3302,9 @@ private func windowFramesMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
 }
 
 private func openBundle(_ bundleId: String) {
+    // With two processes of one bundle this could raise the other one, which may be
+    // the person's.
+    guard NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).count <= 1 else { return }
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
     process.arguments = ["-b", bundleId]
@@ -2689,8 +3490,36 @@ private func actions(_ element: AXUIElement) -> [String] {
 }
 
 private func performAction(_ element: AXUIElement, _ action: String) -> Bool {
-    actions(element).contains(where: { $0.caseInsensitiveCompare(action) == .orderedSame }) &&
-        AXUIElementPerformAction(element, action as CFString) == .success
+    (try? performActionChecked(element, action)) == true
+}
+
+/// Perform an accessibility action and say what happened. True: it ran. False:
+/// the element does not offer it, so nothing happened and another road may go.
+/// A timeout or a generic failure throws: the action may have landed, and a
+/// second road after it could press twice.
+private func performActionChecked(_ element: AXUIElement, _ action: String) throws -> Bool {
+    guard actions(element).contains(where: { $0.caseInsensitiveCompare(action) == .orderedSame }) else { return false }
+    let context = RequestContext.current
+    let sentBefore = context.sent
+    context.sent = true
+    let asked = Date()
+    let status = AXUIElementPerformAction(element, action as CFString)
+    context.appActionMs = Int(Date().timeIntervalSince(asked) * 1_000)
+    switch AXActionVerdict.of(raw: status.rawValue) {
+    case .done:
+        return true
+    case .unsupported:
+        context.sent = sentBefore
+        return false
+    case .stale:
+        context.sent = sentBefore
+        throw ProviderError.coded("element_not_found", "the element is gone: the app removed it; look again")
+    case .denied:
+        context.sent = sentBefore
+        throw ProviderError.coded("permission_denied", "Accessibility is off for ZeroCode Computer Use")
+    case .uncertain:
+        throw ProviderError.coded("delivery_uncertain", "\(action) answered with an error or not at all, and may have landed: some apps do the press and still report a failure. Look before doing it again.")
+    }
 }
 
 private func isSettable(_ element: AXUIElement, _ attribute: String) -> Bool {
@@ -2862,14 +3691,37 @@ private final class TreeRenderer {
     private(set) var firstWebAreaURL: String?
     private var metWebArea = false
     private let reader = AXSnapshotReader()
-    private var nextIndex = 0
+    private var rendered = 0
+    private let book: ElementIdentityBook<AXUIElement>
+    private let rootKey: String
+    private let onSurface: Bool
+    private let cutDepth: Int?
+    private let deadline: Date
+    /// The numbers in reading order.
+    private(set) var order: [Int] = []
+    /// Why the walk stopped early, when it was not the node limit.
+    private(set) var cutShort: String?
     static let maxNodes = 1200
     static let maxDepth = 64
 
-    init(windowBounds: CGRect, focused: AXUIElement?, compactBrowserTabs: Bool) {
+    init(
+        windowBounds: CGRect,
+        focused: AXUIElement?,
+        compactBrowserTabs: Bool,
+        book: ElementIdentityBook<AXUIElement>,
+        rootKey: String,
+        onSurface: Bool,
+        maxDepth: Int?,
+        deadline: Date
+    ) {
         self.windowBounds = windowBounds
         self.focused = focused
         self.compactBrowserTabs = compactBrowserTabs
+        self.book = book
+        self.rootKey = rootKey
+        self.onSurface = onSurface
+        self.cutDepth = maxDepth
+        self.deadline = deadline
     }
 
     func render(
@@ -2877,10 +3729,21 @@ private final class TreeRenderer {
         depth: Int = 0,
         ancestors: [AXUIElement] = [],
         clip: CGRect? = nil,
-        context: String? = nil
+        context: String? = nil,
+        contextOwner: AXUIElement? = nil
     ) {
-        guard nextIndex < Self.maxNodes else {
+        guard rendered < Self.maxNodes else {
             truncated = true
+            return
+        }
+        if reader.unanswered {
+            truncated = true
+            cutShort = "app_unresponsive"
+            return
+        }
+        if Date() >= deadline {
+            truncated = true
+            cutShort = "time_budget"
             return
         }
         guard depth < Self.maxDepth else {
@@ -2945,7 +3808,7 @@ private final class TreeRenderer {
         )
         if SnapshotRenderHeuristics.shouldElide(node) {
             for child in children {
-                render(child, depth: depth, ancestors: ancestors + [element], clip: clip, context: context)
+                render(child, depth: depth, ancestors: ancestors + [element], clip: clip, context: context, contextOwner: contextOwner)
             }
             return
         }
@@ -2956,9 +3819,11 @@ private final class TreeRenderer {
             MarkPin.clipRoles.contains(role) ? MarkPin.clipped(frame, by: clip) : nil
         } ?? clip
         let childContext = name ?? context
+        let childContextOwner = name == nil ? contextOwner : element
 
-        let index = nextIndex
-        nextIndex += 1
+        let index = book.number(for: element, root: rootKey)
+        rendered += 1
+        order.append(index)
         let line = SnapshotRenderHeuristics.line(index: index, node: node)
         lines.append(String(repeating: "\t", count: depth) + line)
         records[index] = ElementRecord(
@@ -2973,7 +3838,13 @@ private final class TreeRenderer {
             plainInput: reader.plainInput(element, role: role),
             traits: traits,
             visible: visible,
-            context: context
+            context: context,
+            contextOwner: contextOwner,
+            line: line,
+            title: title,
+            label: label,
+            value: value,
+            onSurface: onSurface
         )
         if let focused, CFEqual(focused, element) {
             focusedElementId = index
@@ -2982,9 +3853,13 @@ private final class TreeRenderer {
         if summary != nil || SnapshotRenderHeuristics.shouldSuppressChildren(node) {
             return
         }
+        if let cutDepth, depth >= cutDepth, !children.isEmpty {
+            lines[lines.count - 1] += " [\(children.count) inside; --root \(index) reads them]"
+            return
+        }
         if compactBrowserTabs, let tabStripCompaction = tabStripCompaction(parent: node, children: children) {
             for (childIndex, child) in children.enumerated() where tabStripCompaction.retainedIndexes.contains(childIndex) {
-                render(child, depth: depth + 1, ancestors: ancestors + [element], clip: childClip, context: childContext)
+                render(child, depth: depth + 1, ancestors: ancestors + [element], clip: childClip, context: childContext, contextOwner: childContextOwner)
             }
             lines.append(
                 String(repeating: "\t", count: depth + 1) +
@@ -2994,7 +3869,7 @@ private final class TreeRenderer {
         }
         let childLineStart = lines.count
         for child in children {
-            render(child, depth: depth + 1, ancestors: ancestors + [element], clip: childClip, context: childContext)
+            render(child, depth: depth + 1, ancestors: ancestors + [element], clip: childClip, context: childContext, contextOwner: childContextOwner)
         }
         if compactBrowserTabs {
             compactRenderedBrowserTabs(parent: node, startLine: childLineStart, depth: depth + 1)
@@ -3035,6 +3910,7 @@ private final class TreeRenderer {
         for lineIndex in tabLineIndexes.reversed() where !activeLineIndexes.contains(lineIndex) {
             if let recordIndex = renderedElementIndex(lines[lineIndex], indent: indent) {
                 records.removeValue(forKey: recordIndex)
+                order.removeAll { $0 == recordIndex }
                 if focusedElementId == recordIndex {
                     focusedElementId = nil
                     focusedSummary = nil
@@ -3086,6 +3962,9 @@ private final class AXSnapshotReader {
     }
 
     private var elementsByHash: [CFHashCode: [ElementCache]] = [:]
+    /// Whether a read timed out. One timeout is enough to stop asking: every
+    /// further read of a hung app would wait out its own timeout.
+    private(set) var unanswered = false
 
     func stringAttribute(_ element: AXUIElement, _ attribute: String) -> String? {
         guard let value = copyAttribute(element, attribute) else { return nil }
@@ -3298,12 +4177,14 @@ private final class AXSnapshotReader {
         var answered: CFArray?
         // No `.stopOnError`: one attribute the element cannot answer must
         // come back as one absent value, not cut the other fifteen short.
-        guard AXUIElementCopyMultipleAttributeValues(
+        let status = AXUIElementCopyMultipleAttributeValues(
             cache.element,
             attributes as CFArray,
             [],
             &answered
-        ) == .success,
+        )
+        if status == .cannotComplete { unanswered = true }
+        guard status == .success,
             let values = answered as? [CFTypeRef],
             let decoded = SnapshotAttributeBatch.decode(attributes: attributes, values: values)
         else {
@@ -3919,12 +4800,20 @@ private enum Input {
         try mouse(.buttonUp(.left, clickState: 0), at: end, pid: pid)
     }
 
+    /// Where an app's keys go. On a borrowed desktop they go to that app's own process:
+    /// what the person had comes back moments later, and a key still on its way through
+    /// the shared queue would land in whatever is in front by then.
+    private static func keyRoute(pid: pid_t) -> HandRoute {
+        RequestContext.current.borrowed && pid > 0 ? .process(pid) : .desktop
+    }
+
     static func typeText(_ text: String, pid: pid_t) throws {
+        let route = keyRoute(pid: pid)
         for unit in text.utf16 {
             // A stop lands between two characters; one inside a press lets
             // go of it at once.
-            try OperatorHandHost.post(HandEvent(.text(unit: unit, down: true)))
-            try OperatorHandHost.post(HandEvent(.text(unit: unit, down: false)))
+            try OperatorHandHost.post(HandEvent(.text(unit: unit, down: true), route: route))
+            try OperatorHandHost.post(HandEvent(.text(unit: unit, down: false), route: route))
         }
     }
 
@@ -3934,11 +4823,12 @@ private enum Input {
     /// hand posts a release only of what the hold still holds.
     static func pressKey(_ key: String, pid: pid_t) throws {
         let stroke = try KeyMap.parse(key).stroke
-        let ups = stroke.ups(route: .desktop)
+        let route = keyRoute(pid: pid)
+        let ups = stroke.ups(route: route)
         defer {
             for modifier in ups.dropFirst() { try? OperatorHandHost.post(modifier) }
         }
-        for press in stroke.downs(route: .desktop) { try OperatorHandHost.post(press) }
+        for press in stroke.downs(route: route) { try OperatorHandHost.post(press) }
         try OperatorHandHost.post(ups[0])
     }
 
@@ -3989,7 +4879,9 @@ private enum ReplaceSelection {
 }
 
 private enum TextInput {
-    static func replaceSelection(_ element: AXUIElement, with text: String) -> ReplaceSelection {
+    /// Throws when the field did not answer and the text may have landed: typing
+    /// it again down another road could enter it twice.
+    static func replaceSelection(_ element: AXUIElement, with text: String) throws -> ReplaceSelection {
         guard isSettable(element, kAXValueAttribute as String),
               let current = rawStringAttribute(element, kAXValueAttribute as String)
         else {
@@ -4001,7 +4893,22 @@ private enum TextInput {
         let start = String.Index(utf16Offset: startOffset, in: current)
         let end = String.Index(utf16Offset: endOffset, in: current)
         let next = String(current[..<start]) + text + String(current[end...])
-        let setSucceeded = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, next as CFString) == .success
+        let context = RequestContext.current
+        let sentBefore = context.sent
+        context.sent = true
+        let status = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, next as CFString)
+        let setSucceeded = status == .success
+        if !setSucceeded {
+            // A field that answers with what it held took nothing. Any other answer,
+            // or none, may mean the text is in.
+            let holds = rawStringAttribute(element, kAXValueAttribute as String)
+            let verdict = AXActionVerdict.of(raw: status.rawValue)
+            guard verdict != .uncertain || holds == current else {
+                throw ProviderError.coded("delivery_uncertain", "the field did not answer in time, and the text may have landed; read it before typing again")
+            }
+            context.sent = sentBefore
+            return .unavailable
+        }
         if setSucceeded {
             setSelectedTextRange(element, CFRange(location: startOffset + text.utf16.count, length: 0))
         }
@@ -5217,7 +6124,7 @@ private final class SocketListener: @unchecked Sendable {
     private let onSessionClaimed: () -> Void
     private let onSessionClosed: () -> Void
     private let provider = Provider()
-    private let providerLock = NSLock()
+    private let lanes = LaneLocks()
     private let sessionLock = NSLock()
     private var sessionOwnership = AgentSessionOwnership()
     private var lastConnectionID: UInt64 = 0
@@ -5387,7 +6294,7 @@ private final class SocketListener: @unchecked Sendable {
                 }
                 let response = handleRequest(
                     provider: provider,
-                    lock: providerLock,
+                    lanes: lanes,
                     request: request,
                     expectedToken: token,
                     authorizedPeer: authorizedPeer
@@ -5495,6 +6402,9 @@ private func processField(pid: pid_t, field: String) -> String? {
 
 @MainActor
 private func runAgent(socketPath: String, token: String?) {
+    // One slow call must not hold a lane for the system's six seconds. Set on the
+    // system-wide element, this is the helper's default for every element.
+    _ = AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), AccessibilityTimeouts.messagingSeconds)
     let app = NSApplication.shared
     let delegate = AgentRuntime(socketPath: socketPath, token: token)
     app.delegate = delegate
@@ -5540,7 +6450,7 @@ private func runStdio() {
 
 func handleRequest(
     provider: Provider,
-    lock: NSLock,
+    lanes: LaneLocks,
     request: Request,
     expectedToken: String?,
     authorizedPeer: Bool
@@ -5561,26 +6471,43 @@ func handleRequest(
     // (realtime v1 §5.8): a stop lets go of what the hand holds on this
     // connection's thread, and a status — the operator's or a reflex run's —
     // is read beside whatever holds the provider lock.
+    let params = request.params ?? [:]
+    RequestContext.begin(params)
     do {
-        if let answer = try unlockedRoad(request.method, params: request.params ?? [:]) {
+        if let answer = try unlockedRoad(request.method, params: params) {
             return ["id": request.id, "ok": true, "result": answer]
         }
     } catch let error as ProviderError {
-        return ["id": request.id, "ok": false, "error": ["code": error.code, "message": error.message]]
+        return failureAnswer(id: request.id, code: error.code, message: error.message)
     } catch {
-        return ["id": request.id, "ok": false, "error": ["code": "invalid_argument", "message": String(describing: error)]]
+        return failureAnswer(id: request.id, code: "invalid_argument", message: String(describing: error))
     }
 
+    // The name a sequence holds an app by: however it was spelled, the lane it runs in.
+    if request.method == "appKey" {
+        return ["id": request.id, "ok": true, "result": ["key": provider.lane(method: request.method, params: params)]]
+    }
+    // One lane per app: a slow or hung app holds up only the requests naming it.
+    let lane = lanes.lock(for: provider.lane(method: request.method, params: params))
     do {
-        lock.lock()
-        defer { lock.unlock() }
-        let result = try provider.handle(method: request.method, params: request.params ?? [:])
+        lane.lock()
+        defer { lane.unlock() }
+        let result = try provider.handle(method: request.method, params: params)
         return ["id": request.id, "ok": true, "result": result]
     } catch let error as ProviderError {
-        return ["id": request.id, "ok": false, "error": ["code": error.code, "message": error.message]]
+        return failureAnswer(id: request.id, code: error.code, message: error.message)
     } catch {
-        return ["id": request.id, "ok": false, "error": ["code": "accessibility_error", "message": String(describing: error)]]
+        return failureAnswer(id: request.id, code: "accessibility_error", message: String(describing: error))
     }
+}
+
+/// A refusal, saying whether anything reached the app and so whether it may be
+/// repeated.
+private func failureAnswer(id: Int, code: String, message: String) -> [String: Any] {
+    let delivery = ActionDelivery.failed(anythingSent: RequestContext.current.sent)
+    return ["id": id, "ok": false, "error": [
+        "code": code, "message": message, "delivery": delivery.rawValue, "retry": delivery.retry,
+    ]]
 }
 
 /// The requests answered outside the provider lock, or nil for every other.
@@ -6093,19 +7020,18 @@ extension Provider {
         let snapshot = try observe(params: quiet)
         var matches: [[String: Any]] = []
         var seen = 0
-        for index in snapshot.elements.keys.sorted() {
+        for index in snapshot.order {
             guard let record = snapshot.elements[index] else { continue }
-            let face = elementFace(record.element)
-            guard query.matches(role: face.role, label: face.label, value: face.value, description: face.description) else { continue }
+            guard query.matches(role: record.role, label: record.title, value: record.value, description: record.label) else { continue }
             seen += 1
             guard matches.count < Self.findMatchLimit else { continue }
             let frame = absoluteFrame(record.element)
             matches.append([
                 "index": index,
-                "role": jsonNullable(face.role),
-                "label": jsonNullable(face.label),
-                "value": jsonNullable(face.value),
-                "description": jsonNullable(face.description),
+                "role": jsonNullable(record.role),
+                "label": jsonNullable(record.title),
+                "value": jsonNullable(record.value),
+                "description": jsonNullable(record.label),
                 "actions": record.actions,
                 "frame": frame.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height, "centerX": $0.midX, "centerY": $0.midY] } ?? NSNull(),
             ])
@@ -6352,10 +7278,12 @@ private enum DesktopApps {
         let query = try requiredString(params, "app")
         let url = try resolveApplicationURL(query, running: running)
         let args = (params["args"]?.string ?? "").split(whereSeparator: { $0 == " " }).map(String.init)
+        let comesUpBehind = params["background"]?.bool == true
+        let front = comesUpBehind ? NSWorkspace.shared.frontmostApplication : nil
         let launched = try BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
             // The configuration is built inside the closure: it is not Sendable.
             let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = true
+            configuration.activates = !comesUpBehind
             configuration.arguments = args
             return try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
         }
@@ -6367,6 +7295,7 @@ private enum DesktopApps {
             usleep(readyPollMs * 1_000)
             windows = WindowCapture.candidates(pid: pid).filter { $0.layer == 0 }.count
         }
+        keepInFront(front, over: pid)
         return [
             "name": launched.localizedName ?? query,
             // The bundle's own unlocalized name: the word the next verb can
@@ -6378,6 +7307,24 @@ private enum DesktopApps {
             "ready": windows > 0,
             "windows": windows,
         ]
+    }
+
+    /// How long after its first window an app is watched for putting itself in front.
+    private static let settlesInFrontSeconds: TimeInterval = 1
+
+    /// Told to come up behind, a browser still brings itself to the front when its first
+    /// window opens. What the person had goes back in front.
+    private static func keepInFront(_ front: NSRunningApplication?, over pid: pid_t) {
+        guard let front, front.processIdentifier != pid else { return }
+        let giveUp = Date().addingTimeInterval(settlesInFrontSeconds)
+        while Date() < giveUp {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+                _ = front.activate(options: [])
+                if !front.isActive, let bundle = front.bundleIdentifier { openBundle(bundle) }
+                return
+            }
+            usleep(readyPollMs * 1_000)
+        }
     }
 
     static func quit(app: AppDescriptor, force: Bool) throws -> [String: Any] {
@@ -6417,12 +7364,23 @@ private enum DesktopApps {
             target = URL(fileURLWithPath: path)
         }
         let opened: Bool
+        let comesUpBehind = params["background"]?.bool == true
         if let with = params["with"]?.string {
             let application = try resolveApplicationURL(with, running: running)
+            let front = comesUpBehind ? NSWorkspace.shared.frontmostApplication : nil
+            let wasRunning = running.contains { $0.app.bundleURL == application }
+            let came = try? BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = !comesUpBehind
+                return try await NSWorkspace.shared.open([target], withApplicationAt: application, configuration: configuration)
+            }
+            opened = came != nil
+            if let came, !wasRunning { keepInFront(front, over: came.processIdentifier) }
+        } else if comesUpBehind {
             opened = (try? BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
                 let configuration = NSWorkspace.OpenConfiguration()
-                configuration.activates = true
-                return try await NSWorkspace.shared.open([target], withApplicationAt: application, configuration: configuration)
+                configuration.activates = false
+                return try await NSWorkspace.shared.open(target, configuration: configuration)
             }) != nil
         } else {
             opened = NSWorkspace.shared.open(target)
@@ -6829,41 +7787,56 @@ enum OperatorHandHost {
         tag: Int64.random(in: 1...Int64.max)
     )
     private static let lock = NSLock()
-    /// The hold of the request running now: requests run one at a time under
-    /// the provider lock, so there is at most one.
-    nonisolated(unsafe) private static var request: OperatorHand.Token?
+    /// The hold of each request running now, by the thread it runs on: requests
+    /// in different lanes act at once.
+    nonisolated(unsafe) private static var requests: [ObjectIdentifier: OperatorHand.Token] = [:]
+    /// How long a shared-desktop request waits its turn for the pointer. Requests
+    /// take turns on it instead of being refused; a reflex run is still refused,
+    /// because it holds the desk until its deadline.
+    private static let turnWaitSeconds: TimeInterval = 10
+    private static let turnPollMicros: UInt32 = 2_000
 
-    /// Run one acting request while it holds the hand; whatever it left held
-    /// is let go of when it ends.
-    static func whileHeld<T>(_ body: () throws -> T) throws -> T {
-        let token: OperatorHand.Token
-        do {
-            token = try hand.acquire(.request)
-        } catch let refusal as OperatorHand.Refusal {
-            throw providerError(refusal, acquiring: true)
-        }
+    /// Run one acting request while it holds its part of the hand; whatever it
+    /// left held is let go of when it ends.
+    static func whileHeld<T>(scoped: Bool = false, _ body: () throws -> T) throws -> T {
+        let token = try take(scoped ? .scoped : .request)
+        let thread = ObjectIdentifier(Thread.current)
         lock.lock()
-        request = token
+        requests[thread] = token
         lock.unlock()
         defer {
             lock.lock()
-            request = nil
+            requests[thread] = nil
             lock.unlock()
             hand.relinquish(token)
         }
         return try body()
     }
 
+    private static func take(_ owner: OperatorHand.Owner) throws -> OperatorHand.Token {
+        let giveUp = Date().addingTimeInterval(turnWaitSeconds)
+        while true {
+            do {
+                return try hand.acquire(owner)
+            } catch OperatorHand.Refusal.busy(.request) where Date() < giveUp {
+                usleep(turnPollMicros)
+            } catch let refusal as OperatorHand.Refusal {
+                throw providerError(refusal, acquiring: true)
+            }
+        }
+    }
+
     static func revokeForShare() {
         lock.lock()
-        let held = request
+        let held = Array(requests.values)
         lock.unlock()
-        if let held { hand.revoke(held, reason: "person_took_control") }
+        for token in held { hand.revoke(token, reason: "person_took_control") }
     }
 
     /// Post one event for the request holding the hand.
     static func post(_ event: HandEvent) throws {
         let token = try current()
+        RequestContext.current.sent = true
         do {
             try hand.post(event, by: token)
         } catch let refusal as OperatorHand.Refusal {
@@ -6902,7 +7875,7 @@ enum OperatorHandHost {
     private static func current() throws -> OperatorHand.Token {
         lock.lock()
         defer { lock.unlock() }
-        guard let request else {
+        guard let request = requests[ObjectIdentifier(Thread.current)] else {
             throw ProviderError.coded("stopped", "no request holds the hand")
         }
         return request
@@ -6922,7 +7895,7 @@ enum OperatorHandHost {
                 : .coded("stopped", "the operator was stopped mid-action (\(reason)); `zerocode-computer resume` lifts it")
         case let .busy(.reflex(run)):
             return .coded("hand_busy", "reflex run \(run) holds the hand; stop it first (reflexStop)")
-        case .busy(.request):
+        case .busy(.request), .busy(.scoped):
             return .coded("hand_busy", "another request holds the hand")
         case .notHolder:
             return .coded("stopped", "this request no longer holds the hand")
@@ -7073,7 +8046,7 @@ extension Provider {
             if method == "pressKey" || method == "hotkey" {
                 let snapshot = try loadSnapshot()
                 focused = params["background"]?.bool == true ? backgroundFocusedElement(snapshot) : focusedRecord(snapshot)?.element
-                window = snapshot.elements[0]?.element
+                window = snapshot.rootIndex.flatMap { snapshot.elements[$0]?.element }
             } else {
                 focused = systemWideFocusedElement()
                 window = focused.flatMap(containingWindow)

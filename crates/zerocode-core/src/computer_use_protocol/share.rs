@@ -1,26 +1,26 @@
-//! One window shared with an agent at a time, and the person's hand back on
-//! it whenever they want (t-73906; the person's words, 10-25: "only the target
-//! it has to control is shared … it works without taking my ownership").
+//! Which apps the agents work in, and the person's hand back on them whenever
+//! they want (t-73906; widened 2026-11-01, the person's words: "내 컴퓨터를 다
+//! 사용할수있어야해", the agent can use the whole computer).
 //!
-//! The first time an agent acts in an app, the window asks the person once —
-//! "hand this window over?" — and a yes makes that app the shared one. Asked
-//! once a session per app, unless the person ends its share: that forgets
-//! its answer and invalidates requests in flight. Another app is asked when
-//! the agent turns to it. A no refuses that app. Silence (the
-//! person away) leaves the agent working as before, unshared, so an
-//! unattended run does not stop at a card by default. When the person requires
-//! sharing, unnamed acts are refused and silence is no lasting no (t-74826):
-//! the app waits for the person. Its acts are refused at once, with no card,
-//! for [`SHARE_ASK_AGAIN_MS`]; the first act after that asks again; and the
-//! person can hand the waiting app over from the window at any time. Looks
-//! keep the same rules. Silence never widens a share that
-//! stands. While a share stands, an act or a look outside it — another app,
-//! no app, the whole screen — is refused. "Take control" refuses every act
-//! until the person hands the window back; the card is not raised again.
+//! By default an agent acts in any app without waiting: the app joins the ones in
+//! use and the band names them, with the press that takes everything back. Several
+//! agents work in several apps at once, so nothing one of them reaches limits the
+//! others, and a look is never held to what another agent reaches. A card that
+//! stood for thirty seconds before each new app was a stall per app for a person
+//! who was away, and it interrupted one who was not.
+//!
+//! The person ending an app's use is a no until they say otherwise: its next act
+//! asks them with a card, and silence keeps it refused. "Take control" refuses
+//! every act until the person hands it back.
+//!
+//! When the person requires sharing (their setting, off by default) the old rule
+//! stands: nothing acts in an app they have not handed over, an unnamed act is
+//! refused, silence is no lasting no (t-74826) but makes the app wait, and while
+//! apps are handed over, a look outside them or at the whole screen is refused.
 //!
 //! This module is the rule alone: the window asks, waits and paints.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ProviderError, error_code};
 
@@ -41,6 +41,14 @@ pub enum Answer {
     Shared,
     Declined,
     Silent,
+}
+
+/// What is remembered of an app besides the person's answers: they ended its use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    Answered(Answer),
+    /// The person ended it. The next act asks, and only a yes lets it go on.
+    Ended,
 }
 
 /// What a request may do now.
@@ -74,12 +82,20 @@ pub struct Reach<'a> {
     pub whole_screen: bool,
 }
 
+/// How long the panel stays beside an app after its last act (ms).
+const PANEL_STAYS_MS: u64 = 3_000;
+
 /// The share, as the window holds it for its lifetime.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Share {
     required: bool,
-    target: Option<String>,
-    answers: BTreeMap<String, Answer>,
+    /// The apps in use, by key: acted in, or handed over when sharing is required.
+    targets: BTreeSet<String>,
+    /// The app acted in last: what the panel stands beside.
+    latest: Option<String>,
+    /// The app the panel stands beside, and when it was last acted in there (ms).
+    beside: Option<(String, u64)>,
+    answers: BTreeMap<String, Standing>,
     /// When each app's card went unanswered, on the window's clock (ms).
     silent_at: BTreeMap<String, u64>,
     /// The app whose card went unanswered last, while no answer replaced it.
@@ -96,27 +112,46 @@ pub fn app_key(app: &str) -> String {
 }
 
 impl Share {
-    /// End the displayed app's share, forgetting its answer. A late press
-    /// cannot end a share handed over since; requests already admitted lose
-    /// their generation even when the same app is shared again.
+    /// End the displayed share: every app in use, each remembered as ended. A
+    /// late press cannot end a share made since; requests already admitted lose
+    /// their generation even when the same app is used again.
     #[must_use]
     pub fn end(&mut self, app: &str, generation: u64) -> bool {
-        if self.target() != Some(app) || self.generation != generation {
+        if !self.targets.contains(app) || self.generation != generation {
             return false;
         }
-        self.target = None;
-        self.answers.remove(app);
-        self.silent_at.remove(app);
-        if self.waiting.as_deref() == Some(app) {
-            self.waiting = None;
+        for ended in std::mem::take(&mut self.targets) {
+            self.silent_at.remove(&ended);
+            if self.waiting.as_deref() == Some(ended.as_str()) {
+                self.waiting = None;
+            }
+            self.answers.insert(ended, Standing::Ended);
         }
+        self.latest = None;
         self.taken_back = false;
         self.generation += 1;
         true
     }
 
     /// Whether an act must wait for an explicit share (off by default).
+    ///
+    /// Turned on, only what the person handed over stays: an app the agents were
+    /// merely using goes back to waiting for its card.
     pub fn set_required(&mut self, required: bool) {
+        if required && !self.required {
+            let handed_over = |app: &String, answers: &BTreeMap<String, Standing>| {
+                answers.get(app) == Some(&Standing::Answered(Answer::Shared))
+            };
+            let answers = &self.answers;
+            self.targets.retain(|app| handed_over(app, answers));
+            if self
+                .latest
+                .as_ref()
+                .is_some_and(|app| !self.targets.contains(app))
+            {
+                self.latest = self.targets.iter().next_back().cloned();
+            }
+        }
         self.required = required;
     }
 
@@ -126,10 +161,29 @@ impl Share {
         self.required
     }
 
-    /// The shared app's key, while one is shared.
+    /// The app acted in last, while any is in use.
     #[must_use]
     pub fn target(&self) -> Option<&str> {
-        self.target.as_deref()
+        self.latest.as_deref()
+    }
+
+    /// The app the panel stands beside: the one acted in last, once a moment has
+    /// passed since another's act.
+    #[must_use]
+    pub fn panel_target(&self) -> Option<&str> {
+        let latest = self.latest.as_deref()?;
+        Some(
+            self.beside
+                .as_ref()
+                .map(|(beside, _)| beside.as_str())
+                .filter(|beside| self.targets.contains(*beside))
+                .unwrap_or(latest),
+        )
+    }
+
+    /// Every app in use, by key.
+    pub fn targets(&self) -> impl Iterator<Item = &str> {
+        self.targets.iter().map(String::as_str)
     }
 
     /// The app that waits for the person to hand it over: the last one whose
@@ -151,13 +205,24 @@ impl Share {
         self.generation
     }
 
-    /// What `reach` may do now, at `now_ms` on the window's clock. A yes the
-    /// person gave an app before makes it the shared one again without asking.
+    /// What `reach` may do now, at `now_ms` on the window's clock. An app that
+    /// may be acted in joins the ones in use.
     pub fn gate(&mut self, reach: Reach<'_>, now_ms: u64) -> Gate {
         match self.judge(reach, now_ms) {
-            Judged::Go => Gate::Go,
+            Judged::Go => {
+                if reach.acts
+                    && let Some(app) = reach.app
+                    && self.targets.contains(app)
+                {
+                    self.latest = Some(app.to_string());
+                    self.panel_follows(app, now_ms);
+                }
+                Gate::Go
+            }
             Judged::ShareAgain(app) => {
-                self.target = Some(app);
+                self.targets.insert(app.clone());
+                self.panel_follows(&app, now_ms);
+                self.latest = Some(app);
                 Gate::Go
             }
             Judged::Ask(app) => Gate::Ask(app),
@@ -167,10 +232,8 @@ impl Share {
 
     /// Whether a request admitted before may take its next step, at `now_ms`:
     /// judged as [`Self::gate`] judges a new request — the same refusals,
-    /// word for word — without moving anything (t-74826). An app said yes to
-    /// before goes on without the share coming back to it from the app the
-    /// person handed over since; what the gate would ask about is refused,
-    /// since no card is raised mid-step.
+    /// word for word — without moving anything (t-74826). What the gate would
+    /// ask about is refused, since no card is raised mid-step.
     pub fn still_holds(&self, reach: Reach<'_>, now_ms: u64) -> Result<(), ProviderError> {
         match self.judge(reach, now_ms) {
             Judged::Go | Judged::ShareAgain(_) => Ok(()),
@@ -187,51 +250,77 @@ impl Share {
         if reach.acts && self.taken_back {
             return Judged::Refuse(took_control());
         }
-        let Some(target) = self.target.as_deref() else {
+        if !self.required {
+            return self.judge_free(reach);
+        }
+        self.judge_required(reach, now_ms)
+    }
+
+    /// Sharing not required: every look goes, every act goes, and only what the
+    /// person said no to stops.
+    fn judge_free(&self, reach: Reach<'_>) -> Judged {
+        if !reach.acts {
+            return Judged::Go;
+        }
+        let Some(app) = reach.app else {
+            return Judged::Go;
+        };
+        if self.targets.contains(app) {
+            return Judged::Go;
+        }
+        match self.answers.get(app) {
+            Some(Standing::Answered(Answer::Declined)) => {
+                Judged::Refuse(scope(&format!("the person did not hand {app} over")))
+            }
+            Some(Standing::Ended) => Judged::Ask(app.to_string()),
+            _ => Judged::ShareAgain(app.to_string()),
+        }
+    }
+
+    /// Sharing required: only what the person handed over, and while anything is
+    /// handed over, nothing outside it is even looked at.
+    fn judge_required(&self, reach: Reach<'_>, now_ms: u64) -> Judged {
+        if self.targets.is_empty() {
             if !reach.acts {
                 return Judged::Go;
             }
             return match reach.app {
-                None if self.required => Judged::Refuse(required()),
-                None => Judged::Go,
-                Some(app) => self.first_act(app, now_ms),
+                None => Judged::Refuse(required()),
+                Some(app) => self.required_act(app, now_ms),
             };
-        };
+        }
+        let held = self.held_words();
         if reach.whole_screen {
             return Judged::Refuse(scope(&format!(
-                "the person shared {target} only; look at that app's window, not the whole screen"
+                "the person shared {held} only; look at that app's window, not the whole screen"
             )));
         }
         match reach.app {
-            Some(app) if app == target => Judged::Go,
+            Some(app) if self.targets.contains(app) => Judged::Go,
             None if !reach.acts => Judged::Go,
             None => Judged::Refuse(scope(&format!(
-                "the person shared {target} only; name it as --app"
+                "the person shared {held} only; name it as --app"
             ))),
-            Some(app) if !reach.acts => Judged::Refuse(scope(&format!(
-                "the person shared {target} only, not {app}"
-            ))),
-            Some(app) => match self.answers.get(app) {
-                Some(Answer::Shared) => Judged::ShareAgain(app.to_string()),
-                Some(Answer::Silent) if self.required => self.silent_required(app, now_ms),
-                Some(Answer::Declined | Answer::Silent) => Judged::Refuse(scope(&format!(
-                    "the person shared {target} only, not {app}"
-                ))),
-                None => Judged::Ask(app.to_string()),
-            },
+            Some(app) if !reach.acts => {
+                Judged::Refuse(scope(&format!("the person shared {held} only, not {app}")))
+            }
+            Some(app) => self.required_act(app, now_ms),
         }
     }
 
-    fn first_act(&self, app: &str, now_ms: u64) -> Judged {
+    fn required_act(&self, app: &str, now_ms: u64) -> Judged {
         match self.answers.get(app) {
-            Some(Answer::Shared) => Judged::ShareAgain(app.to_string()),
-            Some(Answer::Declined) => {
+            Some(Standing::Answered(Answer::Shared)) => Judged::ShareAgain(app.to_string()),
+            Some(Standing::Answered(Answer::Declined)) => {
                 Judged::Refuse(scope(&format!("the person did not hand {app} over")))
             }
-            Some(Answer::Silent) if self.required => self.silent_required(app, now_ms),
-            Some(Answer::Silent) => Judged::Go,
-            None => Judged::Ask(app.to_string()),
+            Some(Standing::Answered(Answer::Silent)) => self.silent_required(app, now_ms),
+            Some(Standing::Ended) | None => Judged::Ask(app.to_string()),
         }
+    }
+
+    fn held_words(&self) -> String {
+        self.targets.iter().cloned().collect::<Vec<_>>().join(", ")
     }
 
     /// An unanswered app under required sharing: refused while the quiet
@@ -247,11 +336,17 @@ impl Share {
         Judged::Refuse(waiting_for(app, again - now_ms))
     }
 
-    /// The person's answer about `app`, at `now_ms`. A yes shares it; silence
-    /// leaves it waiting, should sharing be required.
+    /// The person's answer about `app`, at `now_ms`. A yes shares it. Silence
+    /// leaves it waiting when sharing is required, and keeps it refused after the
+    /// person ended it: what they took away does not come back by itself.
     pub fn answered(&mut self, app: &str, answer: Answer, now_ms: u64) {
         if answer == Answer::Silent {
-            self.answers.insert(app.to_string(), answer);
+            if !self.required && self.answers.get(app) == Some(&Standing::Ended) {
+                self.settle(app, Answer::Declined);
+                return;
+            }
+            self.answers
+                .insert(app.to_string(), Standing::Answered(answer));
             self.silent_at.insert(app.to_string(), now_ms);
             self.waiting = Some(app.to_string());
             return;
@@ -269,15 +364,34 @@ impl Share {
         true
     }
 
+    /// The panel goes to the app acted in, unless another was acted in a moment ago:
+    /// agents taking turns in two apps would walk it between their windows. Where the
+    /// person hands over each app, the panel stays beside the one in use.
+    fn panel_follows(&mut self, app: &str, now_ms: u64) {
+        let another_in_use = !self.required
+            && self.beside.as_ref().is_some_and(|(beside, at)| {
+                beside != app
+                    && self.targets.contains(beside)
+                    && now_ms < at.saturating_add(PANEL_STAYS_MS)
+            });
+        if !another_in_use {
+            self.beside = Some((app.to_string(), now_ms));
+        }
+    }
+
     /// A yes or a no about `app`: it ends any wait for it.
     fn settle(&mut self, app: &str, answer: Answer) {
-        self.answers.insert(app.to_string(), answer);
+        self.answers
+            .insert(app.to_string(), Standing::Answered(answer));
         self.silent_at.remove(app);
         if self.waiting.as_deref() == Some(app) {
             self.waiting = None;
         }
         if answer == Answer::Shared {
-            self.target = Some(app.to_string());
+            self.targets.insert(app.to_string());
+            self.latest = Some(app.to_string());
+            // The person just named it: the panel goes there at once.
+            self.beside = None;
         }
     }
 

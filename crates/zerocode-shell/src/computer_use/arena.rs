@@ -447,10 +447,6 @@ impl ArenaDesk {
 }
 
 impl Desk for ArenaDesk {
-    fn pointer(&mut self) -> Option<(f64, f64)> {
-        None
-    }
-
     fn picture(&mut self, _: [f64; 4]) -> Option<(Vec<u8>, ShotFrame)> {
         None
     }
@@ -495,13 +491,6 @@ pub enum Stage<D> {
 }
 
 impl<D: Desk> Desk for Stage<D> {
-    fn pointer(&mut self) -> Option<(f64, f64)> {
-        match self {
-            Self::Live(desk) => desk.pointer(),
-            Self::Arena(desk) => desk.pointer(),
-        }
-    }
-
     fn picture(&mut self, region: [f64; 4]) -> Option<(Vec<u8>, ShotFrame)> {
         match self {
             Self::Live(desk) => desk.picture(region),
@@ -869,7 +858,6 @@ mod tests {
             json!({ "seen": { "present": true, "count": 1 } })
         );
         assert_eq!(report["flow"]["verdict"]["pass"], json!(true));
-        assert_eq!(report["handWatched"], json!(false), "nobody's hand");
         assert!(
             ran.iter().all(|step| step["landed"].is_null()),
             "nothing is looked at in pixels: {report}"
@@ -970,7 +958,6 @@ mod tests {
         for _ in 0..2 {
             let mut arena = Arena::read(dir.path(), 1).unwrap();
             let mut desk = ArenaDesk::new(arena.pages());
-            assert_eq!(desk.pointer(), None, "nobody's hand");
             assert!(desk.picture([0.0, 0.0, 10.0, 10.0]).is_none(), "no screen");
             assert_eq!(
                 desk.pages(),
@@ -981,11 +968,9 @@ mod tests {
             assert_eq!(report["done"], json!(true), "{report}");
             assert_eq!(report["flow"]["verdict"]["pass"], json!(true), "{report}");
             assert_eq!(report["flow"]["baseline"]["1"]["count"], json!(0));
-            assert_eq!(report["handWatched"], json!(false));
             for step in report["ran"].as_array().unwrap() {
                 assert_eq!(step["ok"], json!(true), "{step}");
                 assert_eq!(step["phases"]["settle"], json!(0), "{step}");
-                assert_eq!(step["phases"]["pointer"], json!(0), "{step}");
             }
         }
         assert_eq!(WALK_KIND, "arena");

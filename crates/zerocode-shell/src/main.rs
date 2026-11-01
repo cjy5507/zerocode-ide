@@ -436,8 +436,8 @@ use cmd::{
 };
 use cmd::{artifact_export_formats, artifact_export_reveal};
 use cmd::{
-    check_custom_decision, delete_custom_decision, list_custom_decisions, restore_custom_decision,
-    save_custom_decision, set_custom_decision_mode,
+    check_custom_decision, delete_custom_decision, list_custom_decisions, save_custom_decision,
+    set_custom_decision_mode,
 };
 use cmd::{
     claim_coordinator_seat, coordinator_handover_status, coordinator_seat_runs, coordinator_seats,
@@ -2706,7 +2706,6 @@ fn main() -> ExitCode {
             check_custom_decision,
             save_custom_decision,
             delete_custom_decision,
-            restore_custom_decision,
             set_custom_decision_mode,
             set_judgment_provider,
             managed_judgment_apply,
@@ -3693,6 +3692,10 @@ fn main() -> ExitCode {
             // agents' roads are open above, so a walk can now be asked for;
             // the handshake it would otherwise pay is opened here instead, on
             // the helper's own thread — nothing on the boot path waits for it.
+            // Before anything reads the seats: the marks the person chose to
+            // lift go once, here and in zo's own start (t-87506).
+            let lifted = api_routers::zo_settings_path()
+                .is_some_and(|path| zerocode_core::jev::erase::lift_kept_seats(&path).is_ok());
             cmd::managed_judgment::restore_at_boot(app.handle());
             systemone::warm_for_walks();
             // The Jira sync outbox the last window enqueued but never finished:
@@ -3742,6 +3745,14 @@ fn main() -> ExitCode {
             // to the update state for the settings pane's one line.
             let zo_resources = app.path().resource_dir().ok();
             std::thread::spawn(move || {
+                // What a delete left in the person's decision store goes first:
+                // two folder reads and, at most, a few file removals.
+                cmd::tidy_decision_store_at_start();
+                // Then what deletes left in the records: the store just tidied
+                // judges the rows, and a failed lift leaves them all (t-87506).
+                if let Some(path) = api_routers::zo_settings_path() {
+                    zerocode_core::jev::erase::tidy_at_start(&path, lifted);
+                }
                 if hooks::hooks_enabled(&config_root) {
                     hooks::reconcile(&config_root, &local_data_root, &installed_agent_slugs());
                 } else {

@@ -689,6 +689,7 @@ function paintJevStandings(root = document) {
   const heldOf = new Map((jevNumbers ?? []).map((held) => [held.id, held]));
   const rows = [];
   for (const seat of typesafeState.switches ?? []) {
+    if (seat.decision?.deleted) continue;
     const choice = jevSeatChoice(typesafeState, seat.id);
     const held = heldOf.get(seat.id);
     if (!choice?.asks || !held || !jevZoAsks(seat, held)) continue;
@@ -864,7 +865,7 @@ function buildJevView() {
   caption.hidden = true;
   const table = jevNode("table", "jev-table", caption, heads, body);
   table.setAttribute("role", "table");
-  root.append(jevNode("div", "jev-table-wrap", table), jevBuiltinTrashPart());
+  root.append(jevNode("div", "jev-table-wrap", table));
 
   return root;
 }
@@ -944,7 +945,6 @@ function wireJevView(host) {
   });
   host.querySelector(".jev-drawer-close").addEventListener("click", () => jevToggleDrawer(host, null));
   wireJevCustom(host);
-  host.querySelector("[data-jev-builtin-trash]")?.addEventListener("click", jevBuiltinPressed);
   host.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && jevDrawerSeat !== null) {
       event.stopPropagation();
@@ -2357,7 +2357,6 @@ function paintJevView(view) {
   jevArrange(body, drawn);
   paintJevCharts(view, inUse, heldOf, numbers);
   paintJevCustom(view);
-  paintJevBuiltinTrash(view);
   // The scope just chosen is being counted: what stands counted the other
   // one, and says so by stepping back until the answer lands (t-9633).
   const stale = jevScope !== null && jevScope.scope !== jevScopeChoice;
@@ -3054,10 +3053,6 @@ function jevDecisionNode(decision, now) {
  * decision the part does not stand and 「새 결정」 waits on the switch line,
  * so the first screen keeps its rows (`FIRST_SCREEN_ROWS`). */
 
-/* How long the undo after a delete stands (DESIGN 3): longer than a plain
- * toast (`TOAST_MS`), so it is held and taken away here. */
-const JEV_CUSTOM_UNDO_MS = 8_000;
-
 /* The pause after the last change in the drawer before core's check is
  * asked: one ask per pause in typing, not one per key. */
 const JEV_CUSTOM_CHECK_MS = 250;
@@ -3071,7 +3066,7 @@ const JEV_CUSTOM_MODE_WORDS = Object.freeze([
   Object.freeze({ asks: true, applies: true, key: "jev.custom.mode.on", word: "켜짐" }),
 ]);
 
-/* The store as `list_custom_decisions` last answered — `{ decisions, trash,
+/* The store as `list_custom_decisions` last answered — `{ decisions,
  * folders, everywhere }` — or `null` before it has. */
 let jevCustom = null;
 let jevCustomAsking = null;
@@ -3121,7 +3116,7 @@ function jevCustomBounds(rules) {
     optionsMost: jevCount(rules.options.most), hourlyLeast: jevCount(rules.hourly.least),
     hourlyMost: jevCount(rules.hourly.most), hourlyAll: jevCount(rules.hourlyAll),
     actLeast: jevPercent(rules.actFrom.least), actMost: jevPercent(rules.actFrom.most),
-    decisionsMax: jevCount(rules.decisionsMax), days: jevCount(rules.trashKeptDays),
+    decisionsMax: jevCount(rules.decisionsMax),
   };
 }
 
@@ -3195,7 +3190,7 @@ function jevCustomGuide() {
 }
 
 /* The part a person's decisions stand in: its head with the count and
- * 「새 결정」, the list, and the fold of deleted ones (`paintJevCustom`). */
+ * 「새 결정」, and the list (`paintJevCustom`). */
 function jevCustomPart() {
   const add = jevText("jev.custom.new", "＋ 새 결정", "button", "btn jev-custom-new");
   add.type = "button";
@@ -3204,12 +3199,10 @@ function jevCustomPart() {
   count.dataset.jevCustomCount = "";
   const list = jevNode("ul", "jev-custom-list");
   list.dataset.jevCustomList = "";
-  const trash = jevNode("details", "jev-custom-trash", jevNode("summary"), jevNode("ul", "jev-custom-trash-list"));
-  trash.dataset.jevCustomTrash = "";
   const part = jevNode("section", "jev-custom",
     jevNode("header", "jev-custom-head",
       jevNode("div", "jev-custom-heading", jevText("settings.typesafe.custom", "내가 만든 결정", "h2", "jev-custom-title"), count), add),
-    list, trash);
+    list);
   part.dataset.jevCustom = "";
   part.dataset.keyboardOwner = "jev-custom";
   part.dataset.i18nAria = "settings.typesafe.custom";
@@ -3219,7 +3212,7 @@ function jevCustomPart() {
 }
 
 /* The part's hands on one view: 「새 결정」, a row's mode, 「편집」 and
- * 「삭제」, and 「되살리기」 — and the arrow keys that move a mode. */
+ * 「삭제」 — and the arrow keys that move a mode. */
 function wireJevCustom(host) {
   host.querySelector("[data-jev-custom-guide]")?.addEventListener("click", (event) => {
     openJevCustomDrawer(null, event.currentTarget);
@@ -3230,11 +3223,6 @@ function wireJevCustom(host) {
     if (!button || button.disabled) return;
     if (button.matches("[data-jev-custom-new]")) {
       openJevCustomDrawer(null, button);
-      return;
-    }
-    if (button.dataset.jevCustomRestore) {
-      const id = button.dataset.jevCustomRestore;
-      void jevCustomChange(() => invoke("restore_custom_decision", { id }));
       return;
     }
     const id = button.closest("[data-jev-custom-row]")?.dataset.jevCustomRow;
@@ -3258,14 +3246,13 @@ function wireJevCustom(host) {
 }
 
 /* The part and the switch line's 「새 결정」 from the store in hand: the part
- * stands while the store keeps a decision, or a deleted one still to be
- * restored; with neither only the switch line's 「새 결정」 does. */
+ * stands while the store keeps a decision; with none only the switch line's
+ * 「새 결정」 does. */
 function paintJevCustom(view) {
   const rules = jevCustomRules();
   const store = rules ? jevCustom : null;
   const decisions = store?.decisions ?? [];
-  const trash = store?.trash ?? [];
-  const standing = decisions.length > 0 || trash.length > 0;
+  const standing = decisions.length > 0;
   const guide = view.querySelector("[data-jev-custom-guide]");
   if (guide) guide.hidden = !store || standing;
   const part = view.querySelector("[data-jev-custom]");
@@ -3288,16 +3275,6 @@ function paintJevCustom(view) {
       if (list.children[at] !== row) list.insertBefore(row, list.children[at] ?? null);
     });
   }
-  const fold = part.querySelector("[data-jev-custom-trash]");
-  fold.hidden = trash.length === 0;
-  jevSay(fold.querySelector("summary"), t("jev.custom.trash", "지운 결정 {{count}}개 · {{days}}일 동안 되살릴 수 있습니다",
-    { ...bounds, count: jevCount(trash.length) }));
-  fold.querySelector("ul").replaceChildren(...trash.map((one) => {
-    const restore = jevText("jev.custom.restore", "되살리기", "button", "btn jev-custom-restore");
-    restore.type = "button";
-    restore.dataset.jevCustomRestore = one.id;
-    return jevNode("li", "jev-custom-trashed", jevNode("span", "jev-custom-name", document.createTextNode(one.name)), restore);
-  }));
 }
 
 /* One decision's line, built once and kept: its name, what it is and when
@@ -3873,14 +3850,12 @@ async function saveJevCustomDrawer() {
     : t("jev.custom.made", "새 결정을 만들었습니다: 「{{name}}」. 기록만으로 시작합니다.", { name: draft.name }));
 }
 
-/* Ask once before `kept` is deleted (DESIGN 3): its records stay, and it
- * can be restored for the store's days. `opener` — the row's 「삭제」 or the
+/* Ask once before `kept` is deleted: it cannot be undone. `opener` — the row's 「삭제」 or the
  * drawer's — takes the keyboard back if the person keeps it. */
 function openJevCustomDelete(kept, opener) {
   jevCustomDeleting = { kept, view: opener?.closest(".jev-view") ?? jevCustomDrawer?.view ?? null };
   say(el("jev-custom-delete-title"), () => t("jev.custom.deleteTitle", "「{{name}}」 결정을 지울까요?", { name: kept.draft.name }));
-  say(el("jev-custom-delete-body"), () => t("jev.custom.deleteBody",
-    "지금까지의 기록은 남고, {{days}}일 동안 되살릴 수 있습니다.", jevCustomBounds(jevCustomRules())));
+  say(el("jev-custom-delete-body"), () => t("jev.custom.deleteBody", "지우면 되돌릴 수 없습니다."));
   showModal(el("jev-custom-delete-scrim"), { opener, animated: true });
 }
 
@@ -3890,8 +3865,8 @@ function closeJevCustomDelete() {
   hideModal(el("jev-custom-delete-scrim"));
 }
 
-/* 「지우기」: the drawer on the decision closes, the store deletes it, and
- * 「되돌리기」 stands for the design's time. */
+/* 「지우기」: the drawer on the decision closes and the store deletes it for
+ * good, with one line to say so. */
 async function confirmJevCustomDelete() {
   const asked = jevCustomDeleting;
   if (!asked) return;
@@ -3903,32 +3878,12 @@ async function confirmJevCustomDelete() {
   if (jevCustomDrawer?.kept?.draft.id === asked.kept.draft.id) closeJevCustomDrawer({ saved: true });
   if (!(await jevCustomChange(() => invoke("delete_custom_decision", { id: asked.kept.draft.id })))) return;
   if (document.activeElement === null || document.activeElement === document.body) {
-    asked.view?.querySelector("[data-jev-custom-new]")?.focus({ preventScroll: true });
+    // The row that left took the focus with it: the part's 「새 결정」, or the switch line's when the list is empty.
+    const next = [...(asked.view?.querySelectorAll("[data-jev-custom-new], [data-jev-custom-guide]") ?? [])]
+      .find((one) => !one.hidden && !one.closest("[hidden]"));
+    next?.focus({ preventScroll: true });
   }
-  jevCustomUndo(asked.kept);
-}
-
-/* 「되돌리기」 for the decision just deleted: it stands the design's time,
- * longer than a plain toast's, and leaves once used. */
-function jevCustomUndo(kept) {
-  const id = kept.draft.id;
-  let note = null;
-  const leave = () => {
-    if (note?.isConnected) closing(note, () => note.remove());
-  };
-  note = toast(t("jev.custom.deleted", "결정을 지웠습니다: 「{{name}}」", { name: kept.draft.name }), "", {
-    sticky: true,
-    action: {
-      label: t("jev.custom.undo", "되돌리기"),
-      run: () => {
-        leave();
-        void jevCustomChange(() => invoke("restore_custom_decision", { id }));
-      },
-    },
-  });
-  if (!note) return;
-  note.dataset.jevCustomUndo = id;
-  window.setTimeout(leave, JEV_CUSTOM_UNDO_MS);
+  toast(t("jev.custom.deleted", "결정을 지웠습니다: 「{{name}}」", { name: asked.kept.draft.name }));
 }
 
 el("jev-custom-close").addEventListener("click", () => closeJevCustomDrawer());
@@ -3974,46 +3929,19 @@ function jevBuiltinFailure(error) {
     builtin_decision_question_schema: t("jev.question.schemaChanged", "저장된 문항과 현재 앱의 유형·보기가 맞지 않습니다. 기본값을 불러온 뒤 다시 수정하세요."),
     builtin_decision_question_content: t("jev.question.invalidContent", "질문·보기의 내용이나 길이를 확인하세요."),
     builtin_decision_options: t("jev.question.invalidOptions", "선택한 유형에 맞는 보기와 단계가 필요합니다."),
+    builtin_decision_deleted: t("jev.builtin.deletedFinal", "지운 결정은 고치거나 되돌릴 수 없습니다. 목록을 새로 읽어 주세요."),
     builtin_decision_mode: t("jev.builtin.invalidMode", "이 결정이 지원하는 사용 방식을 골라 주세요. 수정한 기준은 기록만 또는 켜짐으로 사용할 수 있습니다."),
   };
   return words[token] ?? typesafeRefusal(error);
 }
 
-function jevBuiltinTrashPart() {
-  const fold = jevNode("details", "jev-custom-trash jev-builtin-trash", jevNode("summary"), jevNode("ul", "jev-custom-trash-list"));
-  fold.dataset.jevBuiltinTrash = "";
-  fold.hidden = true;
-  return fold;
-}
-
-function paintJevBuiltinTrash(view) {
-  const fold = view.querySelector("[data-jev-builtin-trash]");
-  const rows = (typesafeState?.switches ?? []).filter((row) => row.decision?.deleted);
-  fold.hidden = rows.length === 0;
-  if (!jevMoved(fold, JSON.stringify(rows), jevLanguage())) return;
-  fold.querySelector("summary").textContent = t("jev.builtin.trash", "삭제한 기본 결정 {{count}}개", { count: jevCount(rows.length) });
-  fold.querySelector("ul").replaceChildren(...rows.map((row) => {
-    const restore = jevText("jev.custom.restore", "되살리기", "button", "btn");
-    restore.type = "button";
-    restore.dataset.jevBuiltinRestore = row.id;
-    return jevNode("li", "jev-custom-trashed", jevNode("span", "jev-custom-name", document.createTextNode(jevSeatName(row.id))), restore);
-  }));
-}
-
 function jevBuiltinPressed(event) {
-  const button = event.target.closest("[data-jev-builtin-edit], [data-jev-builtin-delete], [data-jev-builtin-restore]");
+  const button = event.target.closest("[data-jev-builtin-edit], [data-jev-builtin-delete]");
   if (!button) return false;
   event.stopPropagation();
   if (button.disabled) return true;
   if (button.dataset.jevBuiltinEdit) void openJevBuiltinEditor(button.dataset.jevBuiltinEdit, button);
-  else if (button.dataset.jevBuiltinDelete) openJevBuiltinDelete(button.dataset.jevBuiltinDelete, button);
-  else {
-    button.disabled = true;
-    const id = button.dataset.jevBuiltinRestore;
-    void changeJevBuiltin(id, "restore", jevBuiltinSaved(id)).catch((error) => {
-      toast(jevBuiltinFailure(error), "halt");
-    }).finally(() => { button.disabled = false; });
-  }
+  else openJevBuiltinDelete(button.dataset.jevBuiltinDelete, button);
   return true;
 }
 
@@ -4256,6 +4184,15 @@ async function openJevBuiltinEditor(id, opener) {
   try {
     const definition = await invoke("builtin_decision_definition", { id });
     if (jevBuiltinEditor !== editor) return;
+    if (definition.saved?.deleted) {
+      // Another window deleted it after this list was drawn: nothing opens,
+      // the person is told, and the list is drawn again without the row.
+      jevBuiltinEditor = null;
+      hideModal(el("jev-builtin-scrim"));
+      toast(jevBuiltinFailure(new Error("builtin_decision_deleted")), "halt");
+      try { paintTypeSafe(await invoke("typesafe_settings")); } catch { /* the next poll draws it */ }
+      return;
+    }
     editor.definition = definition;
     editor.mode = definition.mode;
     const saved = definition.saved ?? {};
@@ -4335,26 +4272,29 @@ function openJevBuiltinDelete(id, opener) {
   const name = jevSeatName(id);
   jevCustomDeleting = { kind: "builtin", id, name, expected: structuredClone(jevBuiltinSaved(id)), view: opener.closest(".jev-view") };
   say(el("jev-custom-delete-title"), () => t("jev.custom.deleteTitle", "「{{name}}」 결정을 지울까요?", { name }));
-  say(el("jev-custom-delete-body"), () => t("jev.builtin.deleteBody", "삭제하면 이 결정의 판단 요청이 중지됩니다. 기록은 남고, 삭제한 결정에서 되살릴 수 있습니다. 전체 기능을 다시 켜도 이 결정은 삭제 상태를 유지합니다."));
+  say(el("jev-custom-delete-body"), () => t("jev.builtin.deleteBody", "삭제하면 이 결정의 판단 요청이 중지됩니다. 되돌릴 수 없습니다. 전체 기능을 다시 켜도 이 결정은 돌아오지 않습니다."));
   showModal(el("jev-custom-delete-scrim"), { opener, animated: true });
 }
 
 async function deleteJevBuiltin(asked) {
+  // The row about to leave hands the keyboard to the next row, or to the head of the view.
+  const rows = [...(asked.view?.querySelectorAll("[data-jev-dash-row]") ?? [])];
+  const at = rows.findIndex((one) => one.dataset.jevDashRow === asked.id);
+  const after = rows.slice(at + 1).find((one) => one.dataset.jevDashRow !== asked.id)?.dataset.jevDashRow ?? null;
   try {
-    const deleted = await changeJevBuiltin(asked.id, "delete", asked.expected);
-    if (jevDrawerSeat === asked.id) jevDrawerSeat = null;
-    const fold = asked.view?.querySelector("[data-jev-builtin-trash]");
-    if (fold) { fold.open = true; fold.querySelector("summary").focus({ preventScroll: true }); }
-    let note = null;
-    const leave = () => { if (note?.isConnected) closing(note, () => note.remove()); };
-    note = toast(t("jev.custom.deleted", "결정을 지웠습니다: 「{{name}}」", { name: asked.name }), "", {
-      sticky: true,
-      action: { label: t("jev.custom.undo", "되돌리기"), run: async () => {
-        try { await changeJevBuiltin(asked.id, "restore", deleted); leave(); }
-        catch (error) { toast(jevBuiltinFailure(error), "halt"); }
-      } },
-    });
-    window.setTimeout(leave, JEV_CUSTOM_UNDO_MS);
+    await changeJevBuiltin(asked.id, "delete", asked.expected);
+    if (jevDrawerSeat === asked.id) {
+      jevDrawerSeat = null;
+      paintJevViews();
+    }
+    const view = asked.view;
+    const next = (after && view?.querySelector(`[data-jev-dash-row="${after}"] [data-jev-builtin-edit]`))
+      ?? view?.querySelector("[data-jev-dash-row] [data-jev-builtin-edit]") ?? view?.querySelector("h1, h2");
+    if (next) {
+      if (!next.matches("button, a, [tabindex]")) next.tabIndex = -1;
+      next.focus({ preventScroll: true });
+    }
+    toast(t("jev.custom.deleted", "결정을 지웠습니다: 「{{name}}」", { name: asked.name }));
   } catch (error) { toast(jevBuiltinFailure(error), "halt"); }
 }
 

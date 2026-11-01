@@ -20,6 +20,13 @@ fn person(answer: Decision) -> (stand_in::Standing, Rc<Cell<u32>>) {
     (standing, asked)
 }
 
+/// The person who requires sharing, where cards still ask before every new app.
+fn person_requiring(answer: Decision) -> (stand_in::Standing, Rc<Cell<u32>>) {
+    let stood = person(answer);
+    super::install_required(Box::new(|| true));
+    stood
+}
+
 fn click(app: &str) -> Value {
     json!({ "app": app, "elementIndex": 2 })
 }
@@ -27,15 +34,20 @@ fn click(app: &str) -> Value {
 #[test]
 fn ending_a_share_forgets_the_answer_and_the_next_act_asks_again() {
     let (_person, asked) = person(Decision::Allowed);
-    admit(ComputerMethod::Click, &click("Sample")).expect("shared");
+    admit(ComputerMethod::Click, &click("Sample")).expect("goes at once");
+    assert_eq!(asked.get(), 0, "no card stands before an app is used");
     let before = state();
     let ended = super::end("sample", before["generation"].as_u64().unwrap());
     assert!(ended["target"].is_null(), "{ended}");
     assert!(ended["label"].is_null(), "{ended}");
     assert!(ended["revision"].as_u64() > before["revision"].as_u64());
     assert_eq!(stand_in::notices().last(), Some(&ended));
-    admit(ComputerMethod::Click, &click("Sample")).expect("asks again");
-    assert_eq!(asked.get(), 2, "ending forgets the earlier yes");
+    admit(ComputerMethod::Click, &click("Sample")).expect("asks");
+    assert_eq!(
+        asked.get(),
+        1,
+        "what the person ended asks before it is used again"
+    );
 }
 
 #[test]
@@ -69,7 +81,7 @@ fn ending_a_taken_back_share_clears_its_controls_and_keeps_old_requests_refused(
         error_code::PERSON_TOOK_CONTROL
     );
     admit(ComputerMethod::Click, &click("Sample")).expect("a new card");
-    assert_eq!(asked.get(), 2);
+    assert_eq!(asked.get(), 1);
 }
 
 #[test]
@@ -100,6 +112,7 @@ fn ending_a_share_while_another_card_waits_does_not_restore_a_share_from_its_ans
         }
         Decision::Allowed
     });
+    super::install_required(Box::new(|| true));
     admit(ComputerMethod::Click, &click("Sample")).unwrap();
     assert_eq!(
         refused(ComputerMethod::Click, &click("Other")).as_deref(),
@@ -133,8 +146,8 @@ fn refused(method: ComputerMethod, params: &Value) -> Option<String> {
 /// asks once; a yes holds the agent to that window and the same app is not
 /// asked again.
 #[test]
-fn the_first_act_asks_once_and_a_yes_holds_the_agent_to_that_window() {
-    let (_person, asked) = person(Decision::Allowed);
+fn required_the_first_act_asks_once_and_a_yes_holds_the_agent_to_that_window() {
+    let (_person, asked) = person_requiring(Decision::Allowed);
     assert!(admit(ComputerMethod::Click, &click("Safari")).is_ok());
     assert!(admit(ComputerMethod::Click, &click("safari")).is_ok());
     assert!(admit(ComputerMethod::SetValue, &click("Safari")).is_ok());
@@ -161,7 +174,7 @@ fn the_first_act_asks_once_and_a_yes_holds_the_agent_to_that_window() {
 /// A no refuses that app.
 #[test]
 fn a_no_refuses_that_app() {
-    let (_person, asked) = person(Decision::Refused);
+    let (_person, asked) = person_requiring(Decision::Refused);
     for _ in 0..2 {
         assert_eq!(
             refused(ComputerMethod::Click, &click("Notes")).as_deref(),
@@ -174,13 +187,18 @@ fn a_no_refuses_that_app() {
 /// Silence — the person away — leaves the agent working as before, and the
 /// app is not asked again: an unattended run never stops at a card.
 #[test]
-fn silence_leaves_the_agent_working_and_asks_no_more() {
+fn the_agent_uses_any_app_at_once_and_no_card_holds_it_up() {
     let (_person, asked) = person(Decision::TimedOut);
-    for _ in 0..3 {
-        assert!(admit(ComputerMethod::Click, &click("Calculator")).is_ok());
+    for app in ["Calculator", "Notes", "KakaoTalk"] {
+        assert!(admit(ComputerMethod::Click, &click(app)).is_ok());
     }
-    assert_eq!(asked.get(), 1);
+    assert_eq!(asked.get(), 0);
     assert!(admit(ComputerMethod::Screenshot, &json!({})).is_ok());
+    assert_eq!(
+        state()["label"],
+        "Calculator, KakaoTalk, Notes",
+        "the band names every app in use"
+    );
 }
 
 /// "Take control": the request in flight is refused at its next step, every
@@ -188,7 +206,7 @@ fn silence_leaves_the_agent_working_and_asks_no_more() {
 /// window be worked again.
 #[test]
 fn taking_control_stops_the_request_in_flight_and_every_act_until_handed_back() {
-    let (_person, asked) = person(Decision::Allowed);
+    let (_person, asked) = person_requiring(Decision::Allowed);
     let in_flight = admit(ComputerMethod::Click, &click("Safari")).expect("admitted");
     assert!(ensure_current().is_ok());
     take_control();
@@ -318,7 +336,7 @@ fn a_panel_press_takes_the_same_share_and_invalidates_the_inflight_request() {
 
 #[test]
 fn a_panel_press_survives_a_share_renotice_before_the_window_hears_it() {
-    let (_person, asked) = person(Decision::Allowed);
+    let (_person, asked) = person_requiring(Decision::Allowed);
     let request = admit(ComputerMethod::Click, &click("Sample")).unwrap();
     let mut pressed = state();
     pressed["takenBack"] = true.into();
@@ -348,7 +366,7 @@ fn a_panel_press_survives_a_share_renotice_before_the_window_hears_it() {
 
 #[test]
 fn a_panel_press_survives_a_switch_to_an_already_shared_target() {
-    let (_person, asked) = person(Decision::Allowed);
+    let (_person, asked) = person_requiring(Decision::Allowed);
     let _ = admit(ComputerMethod::Click, &click("Another")).unwrap();
     let _ = admit(ComputerMethod::Click, &click("Sample")).unwrap();
     let mut panel = state();
@@ -602,7 +620,10 @@ fn the_card_says_whether_sharing_is_required() {
         Decision::TimedOut
     });
     let _ = admit(ComputerMethod::Click, &click("Calculator"));
-    super::with_held(|held| held.share.set_required(true));
+    let current = state();
+    super::end("calculator", current["generation"].as_u64().unwrap());
+    let _ = admit(ComputerMethod::Click, &click("Calculator"));
+    super::install_required(Box::new(|| true));
     let _ = admit(ComputerMethod::Click, &click("Notes"));
     let cards = cards.borrow();
     assert_eq!(cards.len(), 2, "{cards:?}");
@@ -650,7 +671,7 @@ fn without_required_sharing_nothing_waits() {
     assert!(admit(ComputerMethod::Click, &click("Calculator")).is_ok());
     stand_in::advance(SHARE_ASK_AGAIN_MS * 10);
     assert!(admit(ComputerMethod::Click, &click("Calculator")).is_ok());
-    assert_eq!(asked.get(), 1);
+    assert_eq!(asked.get(), 0);
     assert!(state()["waiting"].is_null());
     assert!(!hand_over("calculator"));
 }
@@ -662,6 +683,8 @@ fn without_required_sharing_nothing_waits() {
 fn a_step_in_flight_never_moves_the_share_back() {
     let (_person, _) = person(Decision::Allowed);
     let in_flight = admit(ComputerMethod::Click, &click("Safari")).expect("admitted");
+    // A moment later, when the panel is free to follow.
+    stand_in::advance(SHARE_ASK_AGAIN_MS);
     drop(admit(ComputerMethod::Click, &click("Notes")).expect("admitted"));
     assert_eq!(state()["target"], "notes");
     let told = stand_in::notices().len();
@@ -680,7 +703,7 @@ fn handing_over_another_app_refuses_the_next_step_of_a_request_outside_it() {
     let answers = Rc::new(Cell::new(Decision::TimedOut));
     let answering = Rc::clone(&answers);
     let _person = stand_in::stand(move |_| answering.get());
-    let unshared = admit(ComputerMethod::Click, &click("Calculator")).expect("silence goes on");
+    super::install_required(Box::new(|| true));
     let screen = admit(ComputerMethod::Screenshot, &json!({})).expect("nothing shared yet");
     answers.set(Decision::Allowed);
     drop(admit(ComputerMethod::Click, &click("Notes")).expect("admitted"));
@@ -692,12 +715,6 @@ fn handing_over_another_app_refuses_the_next_step_of_a_request_outside_it() {
         "the whole-screen look in flight"
     );
     drop(screen);
-    assert_eq!(
-        ensure_current().err().map(|error| error.code).as_deref(),
-        Some(error_code::SHARE_SCOPE),
-        "the unshared click in flight"
-    );
-    drop(unshared);
     assert_eq!(state()["target"], "notes");
     assert_eq!(stand_in::notices().len(), told, "the band heard no move");
 }
