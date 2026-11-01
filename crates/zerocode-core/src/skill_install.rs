@@ -6,13 +6,16 @@
 //! (every directory under `skills/`, as `build.rs` lists them), only into the global roots
 //! each detected agent actually reads, and only where no copy stands or the copy
 //! holds the text of an earlier release (`skill_releases.tsv`). A copy with any
-//! other text, a person's edit or somebody else's skill, is left as it is and
-//! reported. A skill's reference files (`BundledSkill::files`) are written
-//! beside its `SKILL.md`, by the same rule file by file: a release whose
-//! reference file alone changed reaches a copy already installed (t-85243),
-//! and a reference file with a text no release had stays. Whether the copy as
-//! a whole is ours is still read from `SKILL.md` alone: a hand-edited one keeps
-//! every file beside it.
+//! other text, a person's edit or somebody else's skill, is left as it is, and
+//! the outcome says `Kept`. A skill's reference files (`BundledSkill::files`)
+//! are written beside its `SKILL.md`, by the same rule file by file: a release
+//! whose reference file alone changed reaches a copy already installed
+//! (t-85243), and a reference file with a text no release had stays, named in
+//! the outcome's `detail`. An empty reference file is what a full disk left, and
+//! reads as gone. Whether the copy as a whole is ours is still read from
+//! `SKILL.md` alone: a hand-edited one keeps every file beside it. Each file is
+//! put down whole under another name and then takes its own, so a write that
+//! stops part way leaves the text that was there.
 //!
 //! Why the app carries its own copy: the manual road
 //! (`skill::skill_install_command`, `npx skills add <repository>`) fetches
@@ -354,10 +357,15 @@ fn install_one(skill: &BundledSkill, agent: &str, label: &str, root: &Path) -> S
 }
 
 /// What one reference file of `skill` is in `dir`. A file that cannot be read
-/// is not ours to touch.
+/// is not ours to touch. An empty one holds nothing of anybody's: a write that
+/// ran out of disk leaves one, and no install would mend it if it read as a
+/// person's edit.
 fn reference_state(skill: &BundledSkill, dir: &Path, name: &str, carried: &str) -> CopyState {
     match std::fs::read(dir.join(name)) {
-        Ok(bytes) => text_state(&format!("{}/{name}", skill.name), carried, &bytes),
+        Ok(bytes) => match text_state(&format!("{}/{name}", skill.name), carried, &bytes) {
+            CopyState::Edited if bytes.is_empty() => CopyState::Missing,
+            state => state,
+        },
         Err(error) if error.kind() == io::ErrorKind::NotFound => CopyState::Missing,
         Err(_) => CopyState::Edited,
     }
@@ -381,13 +389,72 @@ fn references_to_write(
         .collect()
 }
 
+/// Where the whole new text of `path` is put before it takes that name.
+fn whole_write_scratch(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
+}
+
+/// The file a write to `path` lands in: through any link standing there, as
+/// a plain write goes, and a rename would replace the link instead.
+fn through_links(path: &Path) -> PathBuf {
+    let mut at = path.to_path_buf();
+    // The bound is a loop of links, which `read` has already refused.
+    for _ in 0..32 {
+        let Ok(next) = std::fs::read_link(&at) else {
+            break;
+        };
+        at = at
+            .parent()
+            .map_or_else(|| next.clone(), |dir| dir.join(&next));
+    }
+    at
+}
+
+/// Put `text` at `path` whole. The text goes under another name beside it and
+/// then takes the name, so a disk with no room leaves the file that was there.
+fn write_whole(path: &Path, text: &str) -> io::Result<()> {
+    let target = through_links(path);
+    let scratch = whole_write_scratch(&target);
+    let written = std::fs::write(&scratch, text).and_then(|()| {
+        if let Ok(standing) = std::fs::metadata(&target) {
+            std::fs::set_permissions(&scratch, standing.permissions())?;
+        }
+        std::fs::rename(&scratch, &target)
+    });
+    if written.is_err() {
+        // Nothing to do about a scrap that will not go, and the write's own
+        // error is the one to report.
+        let _ = std::fs::remove_file(&scratch);
+    }
+    written
+}
+
 /// Write the reference files [`references_to_write`] names.
 fn write_references(skill: &BundledSkill, dir: &Path) -> io::Result<usize> {
     let to_write = references_to_write(skill, dir);
     for (name, text) in &to_write {
-        std::fs::write(dir.join(name), text)?;
+        write_whole(&dir.join(name), text)?;
     }
     Ok(to_write.len())
+}
+
+/// What an outcome says of the reference files an install left because their
+/// text is somebody's; empty when it left none.
+fn kept_references_note(skill: &BundledSkill, dir: &Path) -> String {
+    let kept: Vec<&str> = skill
+        .files
+        .iter()
+        .filter(|(name, carried)| reference_state(skill, dir, name, carried) == CopyState::Edited)
+        .map(|(name, _)| *name)
+        .collect();
+    if kept.is_empty() {
+        String::new()
+    } else {
+        format!("손댄 참고 파일을 그대로 두었습니다: {}", kept.join(", "))
+    }
 }
 
 /// A copy whose `SKILL.md` is the one this build carries: bring its reference
@@ -399,8 +466,14 @@ fn complete_references(
     outcome: impl Fn(PathBuf, InstallState, String) -> SkillInstallOutcome,
 ) -> SkillInstallOutcome {
     match write_references(skill, dir) {
-        Ok(0) => outcome(path, InstallState::Unchanged, String::new()),
-        Ok(_) => outcome(path, InstallState::Written, String::new()),
+        Ok(0) => {
+            let kept = kept_references_note(skill, dir);
+            outcome(path, InstallState::Unchanged, kept)
+        }
+        Ok(_) => {
+            let kept = kept_references_note(skill, dir);
+            outcome(path, InstallState::Written, kept)
+        }
         Err(error) => outcome(path, InstallState::Failed, error.to_string()),
     }
 }
@@ -466,9 +539,18 @@ fn write_skill(
     // writes again.
     let written = std::fs::create_dir_all(dir)
         .and_then(|()| write_references(skill, dir))
-        .and_then(|_| std::fs::write(path, skill.content));
+        .and_then(|_| write_whole(path, skill.content));
     match written {
-        Ok(()) => outcome(path.to_path_buf(), InstallState::Written, detail),
+        Ok(()) => {
+            let kept = kept_references_note(skill, dir);
+            if !kept.is_empty() {
+                if !detail.is_empty() {
+                    detail.push_str(" · ");
+                }
+                detail.push_str(&kept);
+            }
+            outcome(path.to_path_buf(), InstallState::Written, detail)
+        }
         Err(error) => outcome(path.to_path_buf(), InstallState::Failed, error.to_string()),
     }
 }
@@ -946,6 +1028,163 @@ mod tests {
             MINE,
             "a new SKILL.md took a person's reference file with it"
         );
+    }
+
+    /// A reference file a full disk left empty is no one's text: an install
+    /// writes it, and the copy reads as incomplete until then (t-85243 r2).
+    #[test]
+    fn an_empty_reference_file_is_missing_and_an_install_writes_it() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = detected(&[("claude", "Claude")]);
+        let skill = bundled_skill("orchestration").unwrap();
+        install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+        let verbs = claude_skill_dir(home.path()).join(VERBS);
+        std::fs::write(&verbs, "").unwrap();
+
+        let copies = bundled_copies("orchestration", home.path(), &[], &agents).unwrap();
+        assert_eq!(copies[0].state, CopyState::Stale);
+
+        let outcomes = install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+        assert_eq!(outcomes[0].state, InstallState::Written);
+        let carried = skill
+            .files
+            .iter()
+            .find(|(name, _)| *name == VERBS)
+            .unwrap()
+            .1;
+        assert_eq!(std::fs::read_to_string(&verbs).unwrap(), carried);
+    }
+
+    /// A reference file is replaced whole: a write that cannot finish leaves
+    /// the text that was there, and no scrap of its own (t-85243 r2).
+    #[test]
+    fn a_reference_write_that_fails_leaves_the_file_as_it_was() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = detected(&[("claude", "Claude")]);
+        install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+        let dir = claude_skill_dir(home.path());
+        let verbs = dir.join(VERBS);
+        std::fs::write(&verbs, VERBS_5DDD03741).unwrap();
+        // A directory where the whole new text would be put first: the same
+        // failure as a disk with no room, without filling a disk.
+        let blocked = whole_write_scratch(&verbs);
+        std::fs::create_dir(&blocked).unwrap();
+
+        let outcomes = install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+
+        assert_eq!(
+            outcomes[0].state,
+            InstallState::Failed,
+            "{}",
+            outcomes[0].detail
+        );
+        assert_eq!(std::fs::read_to_string(&verbs).unwrap(), VERBS_5DDD03741);
+
+        std::fs::remove_dir(&blocked).unwrap();
+        let outcomes = install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+        assert_eq!(outcomes[0].state, InstallState::Written);
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !names.iter().any(|name| name.ends_with(".tmp")),
+            "{names:?}"
+        );
+    }
+
+    /// A link stays a link: the text goes to the file it points at, as a plain
+    /// write sends it (t-85243 r2).
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_reference_file_is_written_through_its_link() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = detected(&[("claude", "Claude")]);
+        install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+        let verbs = claude_skill_dir(home.path()).join(VERBS);
+        let elsewhere = home.path().join("verbs-kept-elsewhere.md");
+        std::fs::write(&elsewhere, VERBS_5DDD03741).unwrap();
+        std::fs::remove_file(&verbs).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &verbs).unwrap();
+
+        let outcomes = install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+
+        assert_eq!(
+            outcomes[0].state,
+            InstallState::Written,
+            "{}",
+            outcomes[0].detail
+        );
+        assert!(
+            std::fs::symlink_metadata(&verbs)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let carried = bundled_skill("orchestration")
+            .unwrap()
+            .files
+            .iter()
+            .find(|(name, _)| *name == VERBS)
+            .unwrap()
+            .1;
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), carried);
+    }
+
+    /// A reference file kept because somebody changed it is named in the
+    /// outcome, on every road an install takes (t-85243 r2): a new `SKILL.md`
+    /// may not agree with what it kept. The others are not named.
+    #[test]
+    fn a_kept_reference_file_is_named_in_the_outcome() {
+        const MINE: &str = "- 내 볼트는 ~/Notes 다.\n";
+        let skill = BundledSkill {
+            name: "orchestration",
+            content: bundled_skill("orchestration").unwrap().content,
+            files: &[
+                (VERBS, "this build's verbs\n"),
+                ("mine.md", "this build's\n"),
+            ],
+        };
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(skill.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(SKILL_FILE), skill.content).unwrap();
+        std::fs::write(dir.join("mine.md"), MINE).unwrap();
+
+        // A current `SKILL.md`, with something else to write.
+        let outcome = install_one(&skill, "claude", "Claude", root.path());
+        assert_eq!(outcome.state, InstallState::Written, "{}", outcome.detail);
+        assert!(outcome.detail.contains("mine.md"), "{}", outcome.detail);
+        assert!(!outcome.detail.contains(VERBS), "{}", outcome.detail);
+
+        // A current `SKILL.md`, with nothing to write.
+        let outcome = install_one(&skill, "claude", "Claude", root.path());
+        assert_eq!(outcome.state, InstallState::Unchanged);
+        assert!(outcome.detail.contains("mine.md"), "{}", outcome.detail);
+
+        // A `SKILL.md` of an earlier release.
+        let earlier = BundledSkill {
+            name: "second-brain",
+            content: bundled_skill("second-brain").unwrap().content,
+            files: &[("mine.md", "this build's\n")],
+        };
+        let dir = root.path().join(earlier.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(SKILL_FILE), SECOND_BRAIN_9F3B7DBCE).unwrap();
+        std::fs::write(dir.join("mine.md"), MINE).unwrap();
+        let outcome = install_one(&earlier, "claude", "Claude", root.path());
+        assert_eq!(outcome.state, InstallState::Written, "{}", outcome.detail);
+        assert!(outcome.detail.contains("mine.md"), "{}", outcome.detail);
+
+        // Nothing kept, nothing said.
+        std::fs::write(
+            root.path().join(earlier.name).join("mine.md"),
+            "this build's\n",
+        )
+        .unwrap();
+        let outcome = install_one(&earlier, "claude", "Claude", root.path());
+        assert_eq!(outcome.state, InstallState::Unchanged);
+        assert_eq!(outcome.detail, "");
     }
 
     /// A hand-edited `SKILL.md` keeps the whole copy: its reference files stay
