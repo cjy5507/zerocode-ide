@@ -90,7 +90,9 @@ export async function testStackedWork(browser, origin, ok) {
       openCleanup = realCleanup;
       seen.cleanup = cleanups.length;
       seen.checks = panel?.querySelector(".pile-checks")?.textContent.replace(/\s+/g, " ").trim() ?? "";
-      await new Promise((done) => setTimeout(done, 60));
+      // The history's answer, named — not a fixed wait (t-84799 B8).
+      const arrived = async () => { for (let frame = 0; frame < 600 && panel?.querySelectorAll(".pile-commits .history-row").length === 0; frame += 1) await new Promise((done) => requestAnimationFrame(done)); };
+      await arrived();
       seen.commitsHead = panel?.querySelector(".pile-commits")?.closest(".pile-section")?.querySelector(".pile-section-head")?.textContent ?? "";
       seen.commits = [...(panel?.querySelectorAll(".pile-commits .history-row") ?? [])].map((row) => row.querySelector(".history-subject")?.textContent ?? "");
       seen.more = Boolean(panel?.querySelector(".pile-more"));

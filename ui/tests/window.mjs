@@ -55883,6 +55883,12 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
         for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
       };
       const settle = (ms = 60) => new Promise((done) => setTimeout(done, ms));
+      // What a step waits for is named, not timed: a machine under load (`taskpolicy -b`) takes longer to arrive and
+      // never shorter (t-84799 B8). A step that never arrives ends at the limit and the assertion after it fails.
+      const until = async (arrived, most = 8000) => {
+        const end = performance.now() + most;
+        while (!arrived() && performance.now() < end) await new Promise((done) => setTimeout(done, 16));
+      };
       const seen = {};
       const calls = [];
       // Which road each write named (t-57712): a chip's command is the
@@ -55922,7 +55928,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-chips", resumable: false, model: "claude-fable-5-1", permission_mode: "bypassPermissions" });
       await window.__PAINTED__();
       el("view-toggle-chat").click();
-      await settle(150);
+      await until(() => document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat .worker-composer-box`));
       const chat = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat`);
       const composer = chat?.querySelector(".worker-composer");
       const box = composer?.querySelector(".worker-composer-box");
@@ -55945,7 +55951,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       seen.modeWords = modeChip?.querySelector(".worker-composer-pill-words")?.textContent;
       // The menu: models (current ticked, display names) and the other CLIs.
       agentChip?.click();
-      await settle(120);
+      await until(() => composer?.querySelector(".composer-menu .composer-menu-item"));
       const menu = composer?.querySelector(".composer-menu");
       seen.menuOpen = Boolean(menu) && agentChip?.getAttribute("aria-expanded") === "true";
       seen.menuModels = [...(menu?.querySelectorAll(".composer-menu-item") ?? [])]
@@ -55953,8 +55959,9 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       seen.chipModelNamed = agentChip?.querySelector(".worker-composer-model-words")?.textContent;
       // A pick: the CLI takes the id, so `/model <id>` travels the send road.
       const opus = [...menu.querySelectorAll(".composer-menu-item")].find((row) => row.querySelector(".composer-menu-name")?.textContent === "Opus 5");
+      const sentBeforeOpus = calls.length;
       opus?.click();
-      await settle(700);
+      await until(() => calls.length >= sentBeforeOpus + 2);
       seen.modelSent = JSON.stringify(calls.slice(-2));
       seen.wantModelSent = JSON.stringify([["paste", term, "/model claude-opus-5"], ["key", term, "Enter", false]]);
       seen.modelRoads = JSON.stringify(roads.slice(-2));
@@ -56021,8 +56028,9 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       box.value = "/cle";
       box.dispatchEvent(new Event("input", { bubbles: true }));
       await settle(30);
+      const sentBeforeClear = calls.length;
       press("Enter");
-      await settle(700);
+      await until(() => calls.length >= sentBeforeClear + 2);
       seen.enterRan = JSON.stringify(calls.slice(-2));
       seen.wantEnterRan = JSON.stringify([["paste", term, "/clear"], ["key", term, "Enter", false]]);
       seen.enterRanRoads = JSON.stringify(roads.slice(-2));
@@ -56057,14 +56065,15 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       tell("hook:agent", { term: codexTerm, state: "working", agent: "codex", session: "s-codex", resumable: false, model: "gpt-6-astra" });
       await window.__PAINTED__();
       el("view-toggle-chat").click();
-      await settle(150);
+      await until(() => document.querySelector(`.pane-slot[data-term="${codexTerm}"] .pane-chat .worker-composer-agent`));
       const codexChat = document.querySelector(`.pane-slot[data-term="${codexTerm}"] .pane-chat`);
       const codexChip = codexChat?.querySelector(".worker-composer-agent");
       codexChip?.click();
-      await settle(120);
+      await until(() => codexChat?.querySelector(".composer-menu-item"));
       const astra = [...(codexChat?.querySelectorAll(".composer-menu-item") ?? [])].find((row) => row.querySelector(".composer-menu-name")?.textContent === "GPT-6-Astra");
+      const sentBeforeAstra = calls.length;
       astra?.click();
-      await settle(700);
+      await until(() => calls.length >= sentBeforeAstra + 2);
       seen.codexPick = JSON.stringify(calls.slice(-2));
       seen.wantCodexPick = JSON.stringify([["paste", codexTerm, "/model"], ["key", codexTerm, "Enter", false]]);
       seen.codexRoads = JSON.stringify(roads.slice(-2));
@@ -56072,10 +56081,10 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // The palette head names a documented list as such.
       seen.codexHead = null;
       el("view-toggle-chat").click();
-      await settle(150);
+      await until(() => codexChat?.querySelector(".worker-composer-box"));
       const codexBox = codexChat?.querySelector(".worker-composer-box");
       if (codexBox) { codexBox.value = "/"; codexBox.dispatchEvent(new Event("input", { bubbles: true })); }
-      await settle(120);
+      await until(() => codexChat?.querySelector(".composer-slash-head")?.textContent);
       seen.codexHead = codexChat?.querySelector(".composer-slash-head")?.textContent ?? null;
       seen.wantCodexHead = `${agentName("codex")} 0.154.0 · ${t("composer.slash.sourceDocs", "문서 기준")}`;
       // A helper's page has no composer and so no door: its footer says which
@@ -56099,10 +56108,10 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       tell("hook:agent", { term: quietTerm, state: "idle", agent: "claude", session: "s-quiet", resumable: false, model: "claude-fable-5-1" });
       await window.__PAINTED__();
       el("view-toggle-chat").click();
-      await settle(150);
+      await until(() => document.querySelector(`.pane-slot[data-term="${quietTerm}"] .pane-chat .worker-composer-box`));
       const quietBox = document.querySelector(`.pane-slot[data-term="${quietTerm}"] .pane-chat .worker-composer-box`);
       if (quietBox) { quietBox.value = "/"; quietBox.dispatchEvent(new Event("input", { bubbles: true })); }
-      await settle(120);
+      await until(() => document.querySelector(`.pane-slot[data-term="${quietTerm}"] .pane-chat .composer-slash-row`));
       const quietRows = [...document.querySelectorAll(`.pane-slot[data-term="${quietTerm}"] .pane-chat .composer-slash-row .composer-slash-name`)]
         .map((one) => one.textContent);
       seen.helperRows = quietRows;

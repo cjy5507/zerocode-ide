@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { openWindowTestPage } from "./window-boot.mjs";
+import { installHarnessWaits } from "./harness-waits.mjs";
 import { axeViolations } from "./settings-quality.mjs";
 
 /* 「당신 차례」 — the chip, the list that drops from it, and the group at the top
@@ -60,6 +61,7 @@ export const installTurns = () => {
 export async function testYourTurn(browser, origin, ok) {
   const { page } = await openWindowTestPage(browser, origin);
   try {
+    await installHarnessWaits(page);
     await page.evaluate(installTurns);
 
     /* The chip: grey at nothing, blue with the count when something waits. */
@@ -85,8 +87,9 @@ export async function testYourTurn(browser, origin, ok) {
       seen.onSolid = getComputedStyle(probe).color;
       seen.solid = getComputedStyle(probe).backgroundColor;
       probe.remove();
-      // The colour eases in over the shared motion pair; read it once it has.
-      await new Promise((done) => setTimeout(done, 250));
+      // The colour eases in over the shared motion pair; read it once it has — named, not timed (t-84799 B8).
+      await window.__UNTIL__(() => getComputedStyle(node.querySelector(".your-turn-count")).color === seen.onSolid &&
+        getComputedStyle(node).backgroundColor === seen.solid, "the chip's colours eased to the lit pill", 8000);
       // The draft's lit chip: a filled you-blue pill, its words and count white, a chevron down.
       seen.liveColor = getComputedStyle(node.querySelector(".your-turn-count")).color;
       seen.liveGround = getComputedStyle(node).backgroundColor;
@@ -383,7 +386,9 @@ export async function testYourTurn(browser, origin, ok) {
       await window.__settle();
       const seen = {
         blue,
-        color: await new Promise((done) => setTimeout(() => done(getComputedStyle(node).backgroundColor), 250)),
+        // Motion stands still when reduced, so the colour is there at once; named, not timed (t-84799 B8).
+        color: await window.__UNTIL__(() => getComputedStyle(node).backgroundColor === blue, "the chip's you-blue", 8000)
+          .then(() => getComputedStyle(node).backgroundColor, () => getComputedStyle(node).backgroundColor),
         motion: getComputedStyle(node).transitionDuration,
         listMotion: getComputedStyle(window.__list()).transitionDuration,
       };
