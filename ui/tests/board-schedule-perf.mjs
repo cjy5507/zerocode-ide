@@ -37,7 +37,9 @@ import { loadNote } from "./machine-load.mjs";
  * 장면 시험(`board-schedule.mjs`)도 이 값으로 잰다. */
 export const BOARD_SCHEDULE_BUDGET = Object.freeze({ movedPaintP50Ms: 2.5, elements: 300, idleDeltaPercent: 0.5,
   // A busy week (fifty lanes, five hundred blocks) moves within one frame of the 60 Hz screen, on the low-end profile.
-  heavyMovedPaintP50Ms: 16 });
+  heavyMovedPaintP50Ms: 16,
+  // A press answered within about six frames reads as immediate; one page of a busy day stands inside it.
+  heavyPressMs: 100 });
 
 const option = (name, fallback) => {
   const at = process.argv.indexOf(`--${name}`);
@@ -203,13 +205,15 @@ async function measure(page, { polls, idleSecs }) {
       await window.__UNTIL__(() => !boardScheduleAsking, "the zoom's answer");
       await window.__UNTIL__(() => host.querySelectorAll(".board-schedule-row, .board-schedule-block").length >= least, `${least} rows`, 5000);
     }
+    // The busy week is read as of its last day, when every cell holds its work: `__WEEK_NOW__` stands for the clock.
+    const clock = () => window.__WEEK_NOW__ ?? Date.now();
     // The first paint of a holder: its elements built, then laid out.
     boardSchedulePainted.delete(host);
     boardScheduleBuilt.delete(host);
     host.replaceChildren();
     await settle();
     let began = performance.now();
-    paintBoardScheduleHost(host, view, Date.now());
+    paintBoardScheduleHost(host, view, clock());
     host.getBoundingClientRect();
     const first = performance.now() - began;
     const rows = host.querySelectorAll(".board-schedule-row, .board-schedule-block").length;
@@ -224,7 +228,7 @@ async function measure(page, { polls, idleSecs }) {
       window.__SCHEDULE__ = { ...held, revision: held.revision + 1, jobs };
       boardScheduleAnswer = window.__SCHEDULE__;
       began = performance.now();
-      paintBoardScheduleHost(host, view, Date.now());
+      paintBoardScheduleHost(host, view, clock());
       host.getBoundingClientRect();
       moved.push(performance.now() - began);
     }
@@ -272,25 +276,28 @@ async function measure(page, { polls, idleSecs }) {
   // the fixture fills starts where the view's own week does; a window with no calendar week yet reads five days back.
   const weekFrom = await page.evaluate(() => (typeof boardScheduleWeekBoundaries === "function"
     ? boardScheduleWeekBoundaries(Date.now())[0] : Date.now() - 5 * 86_400_000));
-  await page.evaluate(({ answer, desk }) => {
+  const weekNow = weekFrom + 6.5 * 86_400_000;
+  await page.evaluate(({ answer, desk, weekNow }) => {
+    window.__WEEK_NOW__ = weekNow;
     window.__SCHEDULE__ = answer;
     window.__ANSWER__.board_desk = () => desk;
     deskLedger = desk;
     boardScheduleAnswer = answer;
     document.querySelector('#board-view [data-board-tab-button="schedule"]').click();
     boardScheduleChoice.zoom = "day";
-  }, boardScheduleHeavyWeek(Date.now(), weekFrom));
+  }, { ...boardScheduleHeavyWeek(weekNow, weekFrom), weekNow });
   const heavy = await paintFor("week", 1);
-  // A press on a day's 「+N」 stands every block of the busiest day; the old chart has no such press.
+  // A press on the busiest day's 「+N」 stands one page of it; the old chart has no such press.
   heavy.expand = await page.evaluate(async () => {
-    const more = [...document.querySelectorAll("#board-view .board-schedule-week-day .board-schedule-more")]
+    const more = [...document.querySelectorAll("#board-view .board-schedule-week-day .board-schedule-more:not(.board-schedule-week-less)")]
       .filter((one) => !one.hidden).sort((a, b) => parseInt(b.textContent.slice(1), 10) - parseInt(a.textContent.slice(1), 10))[0];
     if (!more) return null;
     const host = document.querySelector("#board-view .task-board-schedule");
     const began = performance.now();
     more.click();
     host.getBoundingClientRect();
-    return { ms: performance.now() - began, elements: host.querySelectorAll("*").length };
+    const ms = performance.now() - began;
+    return { ms, elements: host.querySelectorAll("*").length };
   });
   return { ...day, week, heavy, ...paint, idleOpenPercent: open, idleClosedPercent: closed, idleDeltaPercent: open - closed };
 }
@@ -345,6 +352,8 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
       summary.rows < 40 && `day blocks ${summary.rows} < 40`,
       summary.week.rows < 1 && "the week drew no block",
       summary.heavyWeek.elements > budget.elements && `busy week elements ${summary.heavyWeek.elements} > ${budget.elements}`,
+      summary.heavyWeek.expandPaintMs > budget.heavyPressMs
+        && `a press on a busy day takes ${summary.heavyWeek.expandPaintMs} ms > ${budget.heavyPressMs} ms`,
       summary.heavyWeek.movedPaintP50Ms > budget.heavyMovedPaintP50Ms
         && `a moved beat of the busy week paints in ${summary.heavyWeek.movedPaintP50Ms} ms > ${budget.heavyMovedPaintP50Ms} ms`,
       summary.elements > budget.elements && `day elements ${summary.elements} > ${budget.elements}`,

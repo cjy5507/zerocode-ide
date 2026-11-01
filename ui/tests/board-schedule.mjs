@@ -63,6 +63,7 @@ export function installBoardSchedule({ answer, desk }) {
   boardScheduleChoice.zoom = "day";
   boardScheduleChoice.folded.clear();
   boardScheduleChoice.opened.clear();
+  boardScheduleChoice.dayMore.clear();
   boardScheduleChoice.log = null;
   openBoard();
 }
@@ -488,8 +489,8 @@ export async function testBoardSchedule(browser, origin, ok) {
     await zoomTo("week");
     await page.evaluate(async () => {
       document.querySelector('#board-view .board-schedule-week-day [data-key="gate:l61"]').click();
-      for (const more of document.querySelectorAll("#board-view .board-schedule-week-day .board-schedule-more")) {
-        if (!more.hidden) more.click();
+      for (const more of document.querySelectorAll("#board-view .board-schedule-week-day .board-schedule-more:not(.board-schedule-week-less)")) {
+        while (!more.hidden) more.click();
       }
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     });

@@ -467,7 +467,7 @@ async function testBoardHead(browser, origin, ok) {
       const search = box(".board-search");
       const tabs = box(".board-now-tabs");
       const zoom = box(".board-schedule-zoom");
-      const content = box(".board-schedule-head + *") ?? box(".board-schedule-chart");
+      const content = box(".board-schedule-head + *");
       const mid = (r) => r.top + r.height / 2;
       return {
         searchInHead: search.top >= head.top && search.bottom <= head.bottom,

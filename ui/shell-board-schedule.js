@@ -16,10 +16,11 @@
  * 접힌다(shell.css 「일정」 절의 `@container board-schedule`). 그릇은 작업 상황판의 네 탭
  * 가운데 「일정」의 블록이다(shell-board-now.js의 `BOARD_TABS`, t-67607의 시안 B).
  *
- * 그림은 둘이다(t-77628, 사람이 통과시킨 시안 B p-e7e48c0f0a3959fa): 「지금 앞뒤」와 「하루」는 출발
- * 안내판 넉 줄(다음 발행 · 게이트 · 착지 대기 · 끝남 — 큰 시각이나 수 하나, 색 띠와 낱말, 행동 칩)과
- * 캘린더 하루 보기식 세로 시간표(열 넷, 시간이 아래로, 「지금」 가로선, 겹치면 나란히)이고, 「한 주」는
- * 가로 막대 차트 그대로다. 모델은 하나(`boardScheduleModel`)이고 그 행이 막대도 블록도 된다. 기다리는
+ * 그림은 둘이다(t-77628·t-84802, 사람이 통과시킨 시안 B p-e7e48c0f0a3959fa와 그 둘째 판): 세 확대 모두 출발
+ * 안내판 넉 줄(다음 발행 · 게이트 · 착지 대기 · 끝남 — 큰 시각이나 수 하나, 색 띠와 낱말, 행동 칩)을 위에 두고,
+ * 「지금 앞뒤」와 「하루」는 캘린더 하루 보기식 세로 시간표(열 넷, 시간이 아래로, 「지금」 가로선, 겹치면 나란히),
+ * 「한 주」는 요일별 일곱 칸 달력(칸마다 그날의 블록, 넘치면 수, 날을 넘는 일은 칸마다 이어지는 조각)이다. 모델은
+ * 하나(`boardScheduleModel`)이고 그 행이 어느 그림에서든 블록이 된다. 기다리는
  * 과업은 그것을 실은 게이트를 안다 — 일감의 `# task:` 줄이나 `what` 줄의 과업 id로 — 그래서 왜 기다리는지
  * 말하고, 게이트가 돌면 그 예상 끝을 물려받는다. */
 
@@ -36,32 +37,28 @@ const BOARD_SCHEDULE = Object.freeze({
   /* 세 확대: 지금 앞뒤로 보이는 길이. 뒤쪽은 가장 늦은 예상 끝까지 늘어나되 상한이
    * 있다(`mostAfterMs`). */
   zooms: Object.freeze({
-    /* 눈금 간격의 후보(`ticksMs`): 축의 폭에 눈금 글이 들어가는 가장 촘촘한 것을 고른다. 축의 폭을
-     * 눈금 글 하나의 자리(`tickRoomPx`, CSS px)로 나눈 수만큼 눈금이 선다. 지금 앞뒤와 하루는 시각
-     * (「09:00」, 고정폭 12 px로 약 36 px)으로, 한 주는 날짜(「10. 21. (수)」, 다섯 언어 가운데 가장
-     * 넓어 약 84 px)로 읽는다 — 어느 쪽이든 두 글 사이에 12 px 넘게 남는다(t-71840). */
+    /* 눈금 간격의 후보(`ticksMs`): 홈통의 높이에 눈금 글이 들어가는 가장 촘촘한 것을 고른다(t-71840). */
     /* 지금 앞뒤 — 처음 여는 확대(t-71840): 사람이 통과시킨 상황판 시안 v2(p-7c4a751fccf3359d)의
      * 「지금 도는 일」 축 그대로, 정시에 맞춰(`alignMs`) 지금의 한 시간 앞에서 네 시간. 가장 늦은
      * 예상 끝이 그 뒤면 정시 단위로 늘어난다. */
     now: Object.freeze({
       alignMs: 3_600_000, beforeMs: 3_600_000, afterMs: 3 * 3_600_000, mostAfterMs: 11 * 3_600_000,
-      ticksMs: Object.freeze([3_600_000, 2 * 3_600_000, 3 * 3_600_000]), tickRoomPx: 72,
+      ticksMs: Object.freeze([3_600_000, 2 * 3_600_000, 3 * 3_600_000]),
     }),
     day: Object.freeze({
       beforeMs: 16 * 3_600_000, afterMs: 8 * 3_600_000, mostAfterMs: 24 * 3_600_000,
       ticksMs: Object.freeze([3_600_000, 2 * 3_600_000, 3 * 3_600_000, 6 * 3_600_000, 12 * 3_600_000]),
-      tickRoomPx: 72,
     }),
-    // Four days apart stands only on a narrow axis: a date in the board's monospace is wider than an hour.
-    week: Object.freeze({
-      beforeMs: 5 * 86_400_000, afterMs: 2 * 86_400_000, mostAfterMs: 4 * 86_400_000,
-      ticksMs: Object.freeze([86_400_000, 2 * 86_400_000, 4 * 86_400_000]), tickRoomPx: 96,
-    }),
+    /* 한 주는 달력이다(t-84802): 범위는 지금이 든 달력의 한 주 일곱 날이고 그 경계는 언어와 시간대의 것이다
+     * (`boardScheduleWeekBoundaries`). */
+    week: Object.freeze({ calendar: true }),
   }),
-  /* 축 위 「지금」 칩의 자리(CSS px): 두 글자와 안쪽 여백(약 40 px)에 틈. 칩과 눈금 글의 반폭을 더한
-   * 거리 안에 선 눈금은 글을 감추고 시간 선만 남긴다 — 시안 v2의 칩은 정시 글 곁에 서지, 그 위에
-   * 겹치지 않는다(t-71840). */
-  nowChipPx: 48,
+  /* 달력의 칸 하나에 서는 블록 수(t-84802): 나머지는 「+N개 더」 하나다. 일곱 칸에 여섯이면 블록이 많아도 요소 약 100개이고,
+   * 도는 것·실패한 것이 먼저 서서 접히는 것은 끝난 것부터다. */
+  weekDayShown: 6,
+  /* 「+N개 더」 한 번에 더 서는 블록 수: 눌린 한 프레임의 값은 칸의 수가 아니라 이것이 정한다 — 350개를 한 번에 세우면 저사양에서
+   * 380 ms가 들었다(t-84802). 넉 줄 안팎의 화면 하나만큼이다. */
+  weekDayPage: 24,
   /* 세로 시간표의 홈통(t-77628): 눈금 글 하나의 자리(높이, CSS px)와 「지금 hh:mm」 칩의 높이. 칩과 눈금 글의
    * 반높이를 더한 거리 안에 든 눈금은 글을 감춘다 — 축의 규칙 그대로, 세로로. */
   calTickRoomPx: 28,
@@ -69,8 +66,7 @@ const BOARD_SCHEDULE = Object.freeze({
   /* 게이트 블록의 단계 칸 줄: 칸 하나의 폭과 칸 사이 틈(CSS px) — 상태 점(10 px)과 같은 크기. */
   stepCellPx: 10,
   stepGapPx: 3,
-  /* 눈금 글 둘 사이에 남기는 틈(CSS px). 한 글이 차지하는 자리는 `tickRoomPx`와 (잰 글 폭 + 이 틈) 가운데
-   * 큰 쪽이다 — 글꼴이 커지거나 낱말이 길어지면 자리가 따라 커진다(검토 t-69069 P3 ⑧). */
+  /* 눈금 글 둘 사이에 남기는 틈(CSS px): 글 한 줄의 높이에 더한 것이 눈금 하나의 자리다(검토 t-69069 P3 ⑧). */
   tickGapPx: 12,
   /* 끝난 것은 묶음마다 가장 최근에 끝난 이만큼만 행으로 서고, 나머지는 「+N 끝남」 접힌 줄 하나다 —
    * 사람이 그 줄을 누르면 다 선다. 도는 것·기다리는 것은 늘 다 선다. 네 묶음이 같은 규칙이다(t-71840;
@@ -131,12 +127,14 @@ let boardScheduleAgain = false;
 /* 마지막으로 물은 때. 탭을 다시 열면 이것이 박자 하나보다 오래됐을 때만 곧바로
  * 묻는다 — 열 때마다 묻지도, 첫 박자를 기다리지도 않는다(데스크와 같은 규칙). */
 let boardScheduleAskedAt = 0;
+/* 마지막으로 물은 범위의 왼쪽 끝. 범위가 그보다 앞으로 가면(주가 더 일찍 시작하는 언어로 바꾸면) 쥔 답은 그 앞을 모른다. */
+let boardScheduleAskedFrom = Infinity;
 /* 답을 마지막으로 받은 시각 — 「그대로」 답도 받은 것이다. 판 번호 `read_ms`는 답이 바뀔 때만 움직이니 이 일은 못 한다
  * (검수 r2 P2-2). 쌓인 일의 게이트 줄이 낡은 답을 지금 일처럼 말하지 않게 하는 기준이다. */
 let boardScheduleAnsweredAt = 0;
-/* 사람이 고른 것: 확대, 접은 묶음, 편 게이트, 연 로그. 고른 탭은 상황판의 것이다
+/* 사람이 고른 것: 확대, 접은 묶음, 편 게이트, 연 로그, 달력의 칸마다 더 세운 수(`dayMore`). 고른 탭은 상황판의 것이다
  * (`boardNowTab`). 창의 기억이지 원장의 것이 아니다 — 판이 다시 그려져도 남는다. */
-const boardScheduleChoice = { zoom: "now", folded: new Set(), opened: new Set(), log: null };
+const boardScheduleChoice = { zoom: "now", folded: new Set(), opened: new Set(), log: null, dayMore: new Map() };
 /* 고른 것이 바뀔 때마다 오르는 수: 그림의 서명에 든다. */
 let boardScheduleChoiceRevision = 0;
 /* 연 로그의 답(`LogTail`), 읽는 중이면 `{ reading: true }`. */
@@ -215,7 +213,30 @@ function boardScheduleAnchor(zoom, now) {
 /* 보이는 범위의 왼쪽 끝: 백엔드는 이보다 먼저 끝난 것을 보내지 않는다. */
 function boardScheduleFrom() {
   const zoom = BOARD_SCHEDULE.zooms[boardScheduleChoice.zoom] ?? BOARD_SCHEDULE.zooms.now;
+  if (zoom.calendar) return boardScheduleWeekBoundaries(Date.now())[0];
   return boardScheduleAnchor(zoom, Date.now()) - zoom.beforeMs;
+}
+
+/* 달력의 주 시작(t-84802): 그 언어의 달력이 말하는 첫 요일, 0이 일요일. 브라우저가 말하지 않으면 일요일이다. */
+function boardScheduleWeekFirstDay(tongue) {
+  try {
+    const locale = new Intl.Locale(tongue || new Intl.DateTimeFormat().resolvedOptions().locale);
+    return ((locale.getWeekInfo?.() ?? locale.weekInfo)?.firstDay ?? 7) % 7;
+  } catch {
+    return 0;
+  }
+}
+
+/* 지금이 든 달력의 한 주: 칸 일곱의 경계 여덟, 이 기계의 시간대에서 자정마다. 날짜로 세므로 시계가 바뀌는 날은 그 길이
+ * 그대로다(23시간이나 25시간) — 24시간씩 더하면 그 뒤의 칸이 자정에서 어긋난다. */
+function boardScheduleWeekBoundaries(now) {
+  const tongue = document.documentElement.lang || "";
+  const today = new Date(now);
+  const [year, month, date] = [today.getFullYear(), today.getMonth(), today.getDate()];
+  return boardScheduleRemembered(`week:${new Date(year, month, date).getTime()}:${tongue}`, () => {
+    const back = (today.getDay() - boardScheduleWeekFirstDay(tongue) + 7) % 7;
+    return Array.from({ length: 8 }, (_, at) => new Date(year, month, date - back + at).getTime());
+  });
 }
 
 /* 백엔드에 묻는다. 쥔 판 번호를 함께 보내고, 같은 판이면 답은 「그대로」뿐이다.
@@ -227,8 +248,10 @@ function refreshBoardSchedule({ fresh = false } = {}) {
   }
   boardScheduleAsking = true;
   boardScheduleAskedAt = Date.now();
-  const known = fresh || !boardScheduleAnswer ? null : boardScheduleAnswer.revision;
-  invoke("schedule_timeline", { known, fromMs: boardScheduleFrom() })
+  const fromMs = boardScheduleFrom();
+  const known = fresh || !boardScheduleAnswer || fromMs < boardScheduleAskedFrom ? null : boardScheduleAnswer.revision;
+  boardScheduleAskedFrom = fromMs;
+  invoke("schedule_timeline", { known, fromMs })
     .then((answer) => {
       if (answer && typeof answer === "object") boardScheduleAnsweredAt = Date.now();
       if (answer && typeof answer === "object" && !answer.unchanged) {
@@ -612,8 +635,7 @@ function boardScheduleLaneRows(lanes, now) {
   });
 }
 
-/* 결합 게이트: 이름의 `-l<NN>` 토막마다 머리 한 행과, 펴면 바로 아래에 서는 그 일감들. 도는 일감이나
- * 기다리는 일감이 있는 게이트는 처음부터 펴져 있다. 머리 행은 제 단계들의 상태(`steps`, 세로 시간표의
+/* 결합 게이트: 이름의 `-l<NN>` 토막마다 머리 한 행과, 펴면 그 곁에 서는 그 일감들. 머리 행은 제 단계들의 상태(`steps`, 세로 시간표의
  * 단계 칸 줄)와 사실 한 벌(`facts`: 안내판과 기다리는 과업이 읽는다)을 함께 든다. */
 function boardScheduleGateRows(jobs, plan, now, choice, stall) {
   const gates = new Map();
@@ -679,7 +701,9 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
             : t("board.schedule.gatePassed", "통과 {{count}}개 · {{time}}", {
               count: steps.length, time: boardScheduleSpan(end - began),
             });
-    const opened = choice.opened.has(gate) || (open > 0 && !choice.opened.has(`-${gate}`));
+    // The calendar unfolds a gate by a press only: a block's jobs stand in the cell, and a running gate would fill it.
+    // The timetable draws no job row; a gate still going keeps its jobs in the model, for its reach.
+    const opened = boardScheduleVertical(choice.zoom) ? open > 0 : choice.opened.has(gate);
     // The bar's two names (the passed draft's 「12개 초록」): what ended, or the step running and the steps after it.
     const kinds = (states) => steps.filter((job) => states.includes(job.state)).map((job) => job.kind ?? job.name);
     const tally = state === "done"
@@ -894,30 +918,10 @@ function boardScheduleTaskRow({ task, landing, start, end, known }, now, link = 
   });
 }
 
-/* 눈금 글을 재는 자: 축의 눈금과 같은 글꼴로 낱말의 폭(CSS px)을 잰다. 글꼴은 서 있는 눈금이 말하고, 아직
- * 눈금이 없으면 토큰이 말한다. 잴 수 없으면 null — 눈금은 간격 후보의 자리(`tickRoomPx`)만으로 선다. */
-let boardScheduleCanvas = null;
-
-function boardScheduleTickFont(axis) {
-  const tick = axis.querySelector(".board-schedule-tick");
-  return tick ? getComputedStyle(tick).font : getComputedStyle(axis).getPropertyValue("--type-label-12-mono").trim();
-}
-
 /* 홈통의 눈금 글 한 줄의 높이(CSS px): 서 있는 눈금의 줄 높이, 아직 없으면 0 — 자리는 그보다 작지 않다. */
 function boardScheduleTickHeight(track) {
   const tick = track.querySelector(".board-schedule-tick");
   return tick ? parseFloat(getComputedStyle(tick).lineHeight) || 0 : 0;
-}
-
-function boardScheduleTickMeasure(font) {
-  if (!font) return null;
-  boardScheduleCanvas ??= document.createElement("canvas").getContext("2d");
-  const context = boardScheduleCanvas;
-  if (!context) return null;
-  return (text) => boardScheduleRemembered(`measure:${font}:${text}`, () => {
-    context.font = font;
-    return context.measureText(text).width;
-  });
 }
 
 /* 한 간격의 눈금들: 그 간격의 현지 시각 경계마다. */
@@ -943,35 +947,158 @@ function boardScheduleTickMoments(from, to, step) {
   return ticks;
 }
 
-/* 눈금 글 하나의 자리: 간격 후보가 말하는 자리와 잰 가장 넓은 글 + 틈 가운데 큰 쪽. */
-function boardScheduleTickRoom(ticks, zoom, measure) {
-  if (!measure) return zoom.tickRoomPx;
-  const widest = Math.max(0, ...ticks.map((tick) => measure(tick.label)));
-  return Math.max(zoom.tickRoomPx, Math.ceil(widest + BOARD_SCHEDULE.tickGapPx));
-}
-
-/* 눈금: 축의 폭에 글이 들어가는 가장 촘촘한 간격으로. 어느 간격도 안 맞으면 가장 성긴 간격의 눈금을
+/* 눈금: 홈통의 높이에 글이 들어가는 가장 촘촘한 간격으로. 어느 간격도 안 맞으면 가장 성긴 간격의 눈금을
  * 솎아 글이 겹치지 않게 한다. */
-function boardScheduleTicks(from, to, width, zoom, measure = null) {
-  let sparsest = [];
-  let room = zoom.tickRoomPx;
-  const fewest = Math.max(2, Math.floor(width / zoom.tickRoomPx));
-  for (const step of zoom.ticksMs) {
-    // A step that is too many for the candidate's own room is too many for any wider one: its labels are not built.
-    if ((to - from) / step > fewest && step !== zoom.ticksMs.at(-1)) continue;
-    const ticks = boardScheduleTickMoments(from, to, step);
-    room = boardScheduleTickRoom(ticks, zoom, measure);
-    if ((to - from) / step <= Math.max(2, Math.floor(width / room))) return { ticks, room };
-    sparsest = ticks;
-  }
-  const every = Math.ceil(sparsest.length / Math.max(1, Math.floor(width / room)));
-  return { ticks: sparsest.filter((_, at) => at % every === 0), room };
+function boardScheduleTicks(from, to, height, ticksMs, room) {
+  const fits = Math.max(2, Math.floor(height / room));
+  const step = ticksMs.find((one) => (to - from) / one <= fits);
+  if (step) return boardScheduleTickMoments(from, to, step);
+  const sparsest = boardScheduleTickMoments(from, to, ticksMs.at(-1));
+  const every = Math.ceil(sparsest.length / fits);
+  return sparsest.filter((_, at) => at % every === 0);
 }
 
-/* 세로 시간표를 그리는 확대(t-77628): 「지금 앞뒤」와 「하루」. 「한 주」는 가로 막대 그대로다 — 캘린더
- * 주간 보기(날짜 7열)는 다음 판의 것이다. */
+/* 세로 시간표를 그리는 확대(t-77628): 「지금 앞뒤」와 「하루」. 「한 주」는 일곱 칸 달력이다(t-84802). */
 function boardScheduleVertical(zoomId) {
-  return zoomId !== "week";
+  return !BOARD_SCHEDULE.zooms[zoomId]?.calendar;
+}
+
+/* 달력이 칸에 세우는 차례: 레인, 게이트, 과업, 그리고 줄의 일감 — 칸이 넘치면 먼저 접히는 것은 뒤의 것이다. */
+const BOARD_SCHEDULE_WEEK_GROUPS = Object.freeze(["lanes", "gates", "workers", "line"]);
+
+/* 시각 한 마디, 어느 날의 것이든 시:분. `boardClock`은 하루 밖이면 날짜를 말하는데, 칸이 이미 그 날이다. */
+function boardScheduleDayClock(ms) {
+  return boardScheduleClock(ms, ms);
+}
+
+/* 달력의 한 칸에 선 조각 하나: 행의 모양에 그 칸의 자리와 말을 더한 것. 날을 넘는 일은 칸마다 한 조각이고(t-84802), 조각의
+ * 첫 말이 그 칸에서의 시간을 말한다 — 시작한 날은 「hh:mm부터」, 끝나는 날은 「hh:mm까지」, 그 사이는 「이어짐」. 칠한
+ * 몫(`done`·`mark`)은 행 전체의 몫을 이 칸의 시간으로 다시 잰 것이라, 지난 칸은 꽉 차고 앞으로 올 칸은 빗금이다. */
+function boardScheduleWeekPiece(row, group, day, index, first, last, slot, now) {
+  const comesIn = index > first || (row.cut && index === 0);
+  const goesOn = index < last || (row.cutEnd && index === 6);
+  const flow = comesIn && goesOn ? "both" : comesIn ? "in" : goesOn ? "out" : "";
+  const unknown = row.paused || row.state === "held";
+  const when = row.cut && index === 0 && comesIn && goesOn
+    ? t("board.schedule.fromAt", "{{time}}부터", { time: boardScheduleClock(row.start, now) })
+    : flow === "both" ? t("board.schedule.continues", "이어짐")
+      : flow === "in" ? t("board.schedule.untilAt", "{{time}}까지", { time: boardScheduleDayClock(row.end) })
+        : flow === "out" ? t("board.schedule.fromAt", "{{time}}부터", { time: boardScheduleDayClock(row.start) })
+          : unknown ? "" : boardScheduleDayClock(row.start);
+  const span = row.end - row.start;
+  const near = Math.max(row.start, day.at);
+  const far = Math.min(row.end, day.end);
+  const share = (whole) => (whole === null || whole === undefined || far <= near ? whole
+    : Math.min(1, Math.max(0, (row.start + whole * span - near) / (far - near))));
+  return {
+    ...row, slot, flow, group, cut: row.cut && index === 0, cutEnd: row.cutEnd && index === 6,
+    sub: [when, row.sub].filter(Boolean).join(" · "),
+    flowWords: [comesIn ? t("board.schedule.continuesFrom", "앞 날에서 이어짐") : "",
+      goesOn ? t("board.schedule.continuesTo", "다음 날로 이어짐") : ""].filter(Boolean).join(" · "),
+    done: share(row.done), mark: share(row.mark),
+  };
+}
+
+/* 달력의 일곱 칸(t-84802): 칸마다 그날의 조각과 수, 머리의 말. 날을 넘는 일이 먼저 자리를 잡아 — 닿는 모든 칸에서 같은
+ * 자리(`slot`) — 조각들이 한 줄로 이어지고, 하루짜리는 남은 자리에 선다. 칸에 `weekDayShown`을 넘는 것은 수(`more`)이고,
+ * 사람이 누른 만큼(`extra`) 더 선다. 편 게이트의 일감은 그 수에 들지 않고 게이트 뒤에 선다 — 사람이 보려고 편 것이다. 끝난
+ * 것보다 볼 일이 먼저다: 묶음 안에서 도는 것·기다리는 것·실패한 것이 앞이다. 같은 입력이면 같은 자리다. */
+function boardScheduleWeekDays(groups, boundaries, now, choice, nowWords) {
+  const [from, to] = [boundaries[0], boundaries[7]];
+  const tongue = document.documentElement.lang || undefined;
+  const days = boundaries.slice(0, 7).map((at, index) => ({
+    at, end: boundaries[index + 1], today: now >= at && now < boundaries[index + 1], extra: choice.dayMore?.get(at) ?? 0,
+    taken: new Set(), placed: [], over: [], jobs: 0,
+  }));
+  const dayOf = (ms) => {
+    let index = 0;
+    while (index < 6 && ms >= days[index].end) index += 1;
+    return index;
+  };
+  const walk = [];
+  for (const id of BOARD_SCHEDULE_WEEK_GROUPS) {
+    const group = groups.find((one) => one.id === id);
+    if (!group || group.folded) continue;
+    const heads = [];
+    for (const row of group.rows) {
+      if (row.depth === 0) heads.push({ row, jobs: [] });
+      else heads.at(-1)?.jobs.push(row);
+    }
+    const quiet = (row) => (row.state === "done" ? 1 : 0);
+    heads.sort((a, b) => quiet(a.row) - quiet(b.row));
+    for (const { row, jobs } of heads) {
+      for (const one of [row, ...jobs]) {
+        const first = dayOf(Math.max(one.start, from));
+        const last = dayOf(Math.max(Math.min(one.end > one.start ? one.end - 1 : one.start, to - 1), one.start, from));
+        walk.push({ row: one, group: id, first, last, head: one === row ? null : row });
+      }
+    }
+  }
+  const shown = BOARD_SCHEDULE.weekDayShown;
+  const free = (index, slot) => !days[index].taken.has(slot);
+  const put = (entry, index, slot) => {
+    days[index].taken.add(slot);
+    days[index].placed.push({ entry, index, slot });
+    if (entry.row.depth === 0) entry.slots ??= new Map();
+    entry.slots?.set(index, slot);
+  };
+  // Work over midnight first, on one slot in every day it touches.
+  const slotOf = new Map();
+  for (const entry of walk) {
+    if (entry.first === entry.last || entry.row.depth !== 0) continue;
+    for (let slot = 0; slot < shown; slot += 1) {
+      let clear = true;
+      for (let index = entry.first; clear && index <= entry.last; index += 1) clear = free(index, slot);
+      if (!clear) continue;
+      for (let index = entry.first; index <= entry.last; index += 1) put(entry, index, slot);
+      slotOf.set(entry, slot);
+      break;
+    }
+  }
+  // The rest in the walk's order. A gate's unfolded jobs come right behind their gate and do not count against the cell.
+  const heads = new Map(walk.filter((entry) => entry.row.depth === 0).map((entry) => [entry.row, entry]));
+  for (const entry of walk) {
+    if (slotOf.has(entry)) continue;
+    for (let index = entry.first; index <= entry.last; index += 1) {
+      const day = days[index];
+      if (entry.row.depth !== 0) {
+        let slot = (heads.get(entry.head)?.slots?.get(index) ?? -1) + 1;
+        while (!free(index, slot)) slot += 1;
+        put(entry, index, slot);
+        day.jobs += 1;
+        continue;
+      }
+      let slot = 0;
+      while (slot < shown + day.jobs && !free(index, slot)) slot += 1;
+      if (slot < shown + day.jobs) put(entry, index, slot);
+      else day.over.push({ entry, index });
+    }
+  }
+  let rows = 0;
+  const built = days.map((day) => {
+    const placed = day.placed.slice().sort((a, b) => a.slot - b.slot);
+    let slot = (placed.at(-1)?.slot ?? -1) + 1;
+    const unfolded = day.over.slice(0, day.extra);
+    for (const over of unfolded) placed.push({ ...over, slot: slot++ });
+    const more = day.over.length - unfolded.length;
+    // The two buttons take a line each: what is left to stand, and what was stood.
+    rows = Math.max(rows, slot + (more > 0 ? 1 : 0) + (unfolded.length > 0 ? 1 : 0));
+    const moment = new Date(day.at);
+    const weekday = boardScheduleRemembered(`week-day:${day.at}:${tongue}`, () => moment.toLocaleDateString(tongue, { weekday: "short" }));
+    // The day of the month alone: a cell can be 5rem wide, and the full date stands in its name and its tip.
+    const date = boardScheduleRemembered(`week-date:${day.at}:${tongue}`, () => moment.toLocaleDateString(tongue, { day: "numeric" }));
+    const full = boardScheduleRemembered(`week-full:${day.at}:${tongue}`, () => moment.toLocaleDateString(tongue, { dateStyle: "full" }));
+    const count = day.placed.length + day.over.length;
+    return {
+      at: day.at, end: day.end, today: day.today, count, more, unfolded: unfolded.length, moreSlot: slot, full,
+      head: `${weekday} ${date}`, now: day.today ? nowWords : "",
+      name: day.today
+        ? t("board.schedule.dayNameToday", "{{date}} · 오늘 · 블록 {{count}}개", { date: full, count })
+        : t("board.schedule.dayName", "{{date}} · 블록 {{count}}개", { date: full, count }),
+      pieces: placed.map(({ entry, index, slot: at }) => boardScheduleWeekPiece(entry.row, entry.group, day, index, entry.first, entry.last, at, now)),
+    };
+  });
+  return { days: built, rows: rows + 1 };
 }
 
 /* 안내판의 넉 줄(t-77628) — 공항 출발 안내판의 문법: 한 줄에 무엇 · 큰 글(시각이나 수) 하나 · 낱말 · 비고 · 행동.
@@ -1120,11 +1247,11 @@ function boardScheduleBoardLines(groups, now, outsideLane = null) {
   };
 }
 
-/* 그릴 것 한 벌: 보이는 범위, 눈금, 묶음 넷과 그 행들, 안내판 넉 줄. 백엔드의 답과 데스크의 과업,
- * 지금, 고른 것, 축의 폭에서 DOM 없이 짓는다 — 장면 시험이 이것을 그대로 읽는다. 세로 시간표를 그리는
- * 확대면(`vertical`) 시각 홈통의 눈금(`gutter`)과 블록의 부열(`col`·`cols`)도 여기서 정한다 — 시간당
- * 높이(`hourPx`)는 CSS의 것이라 그릇이 읽어 넘긴다. */
-function boardScheduleModel(answer, tasks, now, choice, width, loud = false, measure = null, metrics = null) {
+/* 그릴 것 한 벌: 보이는 범위, 묶음 넷과 그 행들, 안내판 넉 줄. 백엔드의 답과 데스크의 과업, 지금, 고른 것에서
+ * 짓는다 — 장면 시험이 이것을 그대로 읽는다. 세로 시간표를 그리는 확대면(`vertical`) 시각 홈통의 눈금(`gutter`)과
+ * 블록의 부열(`col`·`cols`)도 여기서 정한다 — 시간당 높이(`hourPx`)는 CSS의 것이라 그릇이 읽어 넘긴다. 달력이면
+ * 칸 일곱(`week`)을 정한다. */
+function boardScheduleModel(answer, tasks, now, choice, loud = false, metrics = null) {
   // The vertical timetable's measures, read off the stylesheet by the holder: the hour's height, a tick's line
   // height and a block's least height (review P3-8: the stylesheet holds them once).
   const hourPx = Number(metrics?.hourPx) || 0;
@@ -1138,9 +1265,11 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false, mea
   const runnerLanes = Array.isArray(facts.runner_lanes) ? facts.runner_lanes : [];
   const stall = boardScheduleStall(facts, runnerLanes);
   const plan = boardScheduleQueuePlan(jobs, runnerLanes, now);
+  const boundaries = zoom.calendar ? boardScheduleWeekBoundaries(now) : null;
   const anchor = boardScheduleAnchor(zoom, now);
-  const from = anchor - zoom.beforeMs;
-  const opened = (group) => choice.opened.has(`ended:${group}`);
+  const from = boundaries ? boundaries[0] : anchor - zoom.beforeMs;
+  // The calendar stands every finished row in its own day: what a cell cannot hold is that cell's count, not the group's.
+  const opened = (group) => Boolean(boundaries) || choice.opened.has(`ended:${group}`);
   // The gates first: the tasks they carry read their facts (t-77628).
   const gates = boardScheduleGateRows(jobs, plan, now, choice, stall);
   const link = { carried: boardScheduleTaskGates(jobs), gates: new Map(gates.map((entry) => [entry.facts.gate, entry.facts])) };
@@ -1160,7 +1289,8 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false, mea
     .filter((row) => ["running", "waiting", "held"].includes(row.state)).map((row) => row.end));
   // An aligned zoom ends on the hour too — the passed draft's 09:00–13:00.
   const reach = Math.max(anchor + zoom.afterMs, latest + BOARD_SCHEDULE.tailMs);
-  const to = Math.min(anchor + zoom.mostAfterMs, zoom.alignMs ? Math.ceil(reach / zoom.alignMs) * zoom.alignMs : reach);
+  const to = boundaries ? boundaries[7]
+    : Math.min(anchor + zoom.mostAfterMs, zoom.alignMs ? Math.ceil(reach / zoom.alignMs) * zoom.alignMs : reach);
   const span = Math.max(1, to - from);
   const percent = (ms) => Math.min(100, Math.max(0, ((ms - from) / span) * 100));
   const seen = (row) => row.end >= from && row.start <= to;
@@ -1195,6 +1325,7 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false, mea
       // The vertical timetable's block (t-77628): cut at the top when it began before the range, and the
       // share of a waiting task's block that is the gate's time still ahead.
       cut: row.start < from,
+      cutEnd: row.end > to,
       // A gate's block cannot unfold its jobs (the timetable draws heads only): it opens its telling job's log.
       act: vertical && row.depth === 0 && row.act?.fold ? (row.facts?.logJob ? { log: { job: row.facts.logJob } } : null) : row.act,
       mark: row.ride?.inherits && row.end > row.start
@@ -1202,7 +1333,10 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false, mea
       col: 0,
       cols: 1,
     }));
-    const heads = boardScheduleSubColumns(rows.filter((row) => row.depth === 0), leastMs);
+    const standing = rows.filter((row) => row.depth === 0);
+    // Blocks stand side by side on the timetable only; the calendar's cells are lists.
+    const heads = boundaries ? standing : boardScheduleSubColumns(standing, leastMs);
+    if (boundaries) more = 0;
     return {
       id: group.id,
       label: t(group.key, group.word),
@@ -1217,30 +1351,22 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false, mea
       moreOpened: opened(group.id),
     };
   });
-  const heading = zoom === BOARD_SCHEDULE.zooms.now
-    ? t("board.now.running", "지금 도는 일") : boardScheduleZoomWord(choice.zoom);
   const nowAt = percent(now);
-  const axis = boardScheduleTicks(from, to, width, zoom, measure);
-  const covers = (axis.room + BOARD_SCHEDULE.nowChipPx) / 2;
   // The vertical gutter's ticks are counted by its height, as the axis's by its width (t-71840's rule).
   const hours = span / 3_600_000;
   const height = hourPx > 0 ? hours * hourPx : 0;
   const tickRoom = Math.max(BOARD_SCHEDULE.calTickRoomPx, Math.ceil(tickPx + BOARD_SCHEDULE.tickGapPx));
-  const gutter = vertical && height > 0
-    ? boardScheduleTicks(from, to, height, { ticksMs: zoom.ticksMs, tickRoomPx: tickRoom })
-    : { ticks: [], room: tickRoom };
-  const chipReach = (gutter.room + BOARD_SCHEDULE.calChipPx) / 2;
+  const gutter = vertical && height > 0 ? boardScheduleTicks(from, to, height, zoom.ticksMs, tickRoom) : [];
+  const chipReach = (tickRoom + BOARD_SCHEDULE.calChipPx) / 2;
+  const board = boardScheduleBoardLines(groups, now, boardScheduleOutsideLane(answer, lanes, now));
   return {
-    from, to, now, nowAt, groups, stall, heading, vertical, hours,
-    ticks: axis.ticks.map((tick) => {
-      const at = percent(tick.at);
-      return { ...tick, at, covered: (Math.abs(at - nowAt) / 100) * width < covers };
-    }),
-    gutter: gutter.ticks.map((tick) => {
+    from, to, now, nowAt, groups, stall, vertical, hours,
+    gutter: gutter.map((tick) => {
       const at = percent(tick.at);
       return { ...tick, at, covered: (Math.abs(at - nowAt) / 100) * height < chipReach };
     }),
-    board: boardScheduleBoardLines(groups, now, boardScheduleOutsideLane(answer, lanes, now)),
+    board,
+    week: boundaries ? boardScheduleWeekDays(groups, boundaries, now, choice, board.head.now) : null,
     // Nothing moving is expected to end after now: the timetable says so under the 「now」 line.
     aheadEmpty: latest <= now,
   };
@@ -1263,14 +1389,12 @@ function boardScheduleElement(tag, className, text = "") {
   return node;
 }
 
-/* 행이나 블록이나 안내판의 줄을 누르면: 게이트를 펴거나 접고, 로그를 열고, 과업은 「기록」 탭으로. */
+/* 블록이나 안내판의 줄을 누르면: 게이트를 펴거나 접고, 로그를 열고, 과업은 「기록」 탭으로. */
 function boardScheduleAct(view, act) {
   if (!act) return;
   if (act.fold) {
-    const gate = act.fold;
-    boardScheduleChoice.opened.delete(gate);
-    boardScheduleChoice.opened.delete(`-${gate}`);
-    boardScheduleChoice.opened.add(act.opened ? `-${gate}` : gate);
+    if (act.opened) boardScheduleChoice.opened.delete(act.fold);
+    else boardScheduleChoice.opened.add(act.fold);
     noteBoardScheduleChoice();
     paintBoardScheduleHosts();
   } else if (act.log) openBoardScheduleLog(act.log);
@@ -1287,9 +1411,9 @@ function boardScheduleActWord(act) {
   return "";
 }
 
-/* 그릇의 뼈대: 머리(확대와 줄의 사정), 가로 차트(눈금·「지금」 선), 안내판과 세로 시간표(t-77628), 묶음 넷,
- * 로그 칸, 빈 말. 한 번 짓고 키로 살아남는다. 묶음 상자 넷은 하나뿐이고, 확대에 따라 가로 차트와 세로
- * 시간표 사이를 옮겨 다닌다 — 한 주는 차트의 행으로, 지금 앞뒤와 하루는 시간표의 열로 선다. */
+/* 그릇의 뼈대: 머리(확대와 줄의 사정), 안내판과 세로 시간표(t-77628)와 일곱 칸 달력(t-84802), 묶음 넷, 로그 칸,
+ * 빈 말. 한 번 짓고 키로 살아남는다. 묶음 상자 넷은 하나뿐이고, 확대에 따라 시간표와 달력 사이를 옮겨 다닌다 — 지금
+ * 앞뒤와 하루는 시간표의 열로, 한 주는 달력 위의 머리 줄로 선다. */
 function boardScheduleSkeleton(host, view) {
   const head = boardScheduleElement("div", "board-schedule-head");
   const zoom = boardScheduleElement("div", "board-mode board-schedule-zoom");
@@ -1308,18 +1432,6 @@ function boardScheduleSkeleton(host, view) {
     zoom.append(button);
   }
   head.append(zoom, boardScheduleElement("p", "board-schedule-note"));
-  // The card of the passed draft's 「지금 도는 일」: a head (name · count · what a bar says), the axis in a
-  // table head's band with the 「지금」 chip on it, then the groups.
-  const chart = boardScheduleElement("div", "board-schedule-chart");
-  const card = boardScheduleElement("header", "board-schedule-card-head");
-  card.append(boardScheduleElement("strong", "board-schedule-title"), boardScheduleElement("span", "board-schedule-count"),
-    boardScheduleElement("p", "board-schedule-legend"));
-  const band = boardScheduleElement("div", "board-schedule-axis-band");
-  band.setAttribute("aria-hidden", "true");
-  const axis = boardScheduleElement("div", "board-schedule-axis");
-  axis.__now = boardScheduleElement("span", "board-schedule-now");
-  band.append(axis);
-  chart.append(card, band);
   const boxes = [];
   for (const group of BOARD_SCHEDULE_GROUPS) {
     const box = boardScheduleElement("div", "board-schedule-group");
@@ -1346,7 +1458,6 @@ function boardScheduleSkeleton(host, view) {
     box.append(fold, rows, more);
     boxes.push(box);
   }
-  chart.append(...boxes);
   // The departure board and the vertical timetable (t-77628, the person's draft B).
   const cal = boardScheduleElement("section", "board-schedule-cal");
   const board = boardScheduleElement("div", "board-schedule-board");
@@ -1378,7 +1489,15 @@ function boardScheduleSkeleton(host, view) {
   day.append(body);
   // What a block's fill, stripes, dashes and zigzag say — one line the eye can read (review P3-6).
   const calLegend = boardScheduleElement("p", "board-schedule-cal-legend");
-  cal.append(board, day, calLegend);
+  // The week's calendar (t-84802): the groups' heads, then seven cells, built while the week is the zoom (`boardScheduleWeekCells`).
+  const week = boardScheduleElement("div", "board-schedule-week");
+  week.setAttribute("role", "group");
+  const weekGroups = boardScheduleElement("div", "board-schedule-week-groups");
+  const weekDays = boardScheduleElement("div", "board-schedule-week-days");
+  weekDays.addEventListener("focusin", (event) => boardScheduleWeekStop(weekDays, event.target));
+  weekDays.addEventListener("keydown", (event) => boardScheduleWeekKey(event, weekDays));
+  week.append(weekGroups, weekDays);
+  cal.append(board, day, week, calLegend);
   const log = boardScheduleElement("section", "board-schedule-log");
   log.hidden = true;
   const logHead = boardScheduleElement("header", "board-schedule-log-head");
@@ -1390,19 +1509,81 @@ function boardScheduleSkeleton(host, view) {
   logHead.append(boardScheduleElement("strong", "board-schedule-log-title"), close);
   log.append(logHead, boardScheduleElement("pre", "board-schedule-log-lines"));
   const empty = boardScheduleElement("p", "board-schedule-empty");
-  host.replaceChildren(head, chart, cal, log, empty);
-  host.__parts = { head, chart, card, band, axis, boxes, cal, boardNow, boardSum, lines, day, body, gutter, track, aheadEmpty, calLegend, log, empty };
+  host.replaceChildren(head, cal, log, empty);
+  host.__parts = { head, boxes, cal, boardNow, boardSum, lines, day, body, gutter, track, aheadEmpty, calLegend, week, weekGroups, weekDays, log, empty };
 }
 
-/* 행 하나: 단추 하나에 이름 · 막대 · 말. 막대의 자리는 커스텀 속성 셋(`--from`·`--to`·
- * `--done`)이고, 워커 과업은 넘김·검증의 자리 둘을 더 든다. */
-function boardScheduleRowNode(view) {
-  const row = boardScheduleElement("button", "board-schedule-row");
-  row.type = "button";
-  row.append(boardScheduleElement("span", "board-schedule-label"), boardScheduleElement("span", "board-schedule-bar"),
-    boardScheduleElement("span", "board-schedule-said"));
-  row.onclick = () => boardScheduleAct(view, row.__row?.act);
-  return row;
+/* 달력의 칸 일곱(t-84802): 칸마다 머리와 그 뒤의 블록, 끝에 「+N개 더」와 「N개 접기」. 한 주를 보는 동안만 서 있다 — 다른
+ * 확대의 무게에 들지 않는다. 누른 단추가 사라지면 초점은 다른 단추로 간다 — 키보드로 누른 사람이 제자리를 잃지 않는다. */
+function boardScheduleWeekCells() {
+  return Array.from({ length: 7 }, () => {
+    const cell = boardScheduleElement("div", "board-schedule-week-day");
+    cell.setAttribute("role", "group");
+    cell.tabIndex = -1;
+    const button = (className, press) => {
+      const node = boardScheduleElement("button", className);
+      node.type = "button";
+      node.tabIndex = -1;
+      node.onclick = () => {
+        const had = document.activeElement === node;
+        press(Number(cell.dataset.day));
+        noteBoardScheduleChoice();
+        paintBoardScheduleHosts();
+        if (had && node.hidden) (node === cell.__more ? cell.__less : cell.__more).focus();
+      };
+      return node;
+    };
+    const dayMore = boardScheduleChoice.dayMore;
+    cell.__head = boardScheduleElement("div", "board-schedule-week-head");
+    cell.__more = button("board-schedule-more", (at) => dayMore.set(at, (dayMore.get(at) ?? 0) + BOARD_SCHEDULE.weekDayPage));
+    cell.__less = button("board-schedule-more board-schedule-week-less", (at) => dayMore.delete(at));
+    cell.append(cell.__head, cell.__more, cell.__less);
+    return cell;
+  });
+}
+
+/* 달력의 탭 멈춤은 하나다(t-84802): 칸과 블록 수십 개를 탭으로 걷지 않게, 초점이 선 곳 하나만 `tabindex=0`이고 안에서는
+ * 방향키로 다닌다. 처음엔 오늘의 칸이다. */
+function boardScheduleWeekStop(days, node) {
+  if (days.__stop === node) return;
+  if (days.__stop) days.__stop.tabIndex = -1;
+  node.tabIndex = 0;
+  days.__stop = node;
+}
+
+/* 달력 안의 키: ←→는 옆 날의 같은 자리, ↑↓는 그날의 위아래, Home·End는 주의 첫 칸·끝 칸, 칸에서 Enter·Space는 첫 블록으로.
+ * 날이 쌓인 좁은 폭에서는 ↑↓가 날의 끝에서 앞뒤 날로 넘어간다 — 보이는 차례 그대로다. */
+function boardScheduleWeekKey(event, days) {
+  const cell = event.target.closest?.(".board-schedule-week-day");
+  if (!cell) return;
+  const cells = [...days.children];
+  const at = cells.indexOf(cell);
+  const stops = (one) => [one, ...one.querySelectorAll(".board-schedule-block, .board-schedule-more:not([hidden])")];
+  const mine = stops(cell);
+  const place = mine.indexOf(event.target);
+  const stacked = () => cells[0].offsetTop !== cells[1].offsetTop;
+  const beside = (other) => {
+    if (!other) return null;
+    const theirs = stops(other);
+    return theirs[Math.min(place, theirs.length - 1)];
+  };
+  let next = null;
+  switch (event.key) {
+    case "ArrowLeft": next = beside(cells[at - 1]); break;
+    case "ArrowRight": next = beside(cells[at + 1]); break;
+    case "ArrowDown": next = mine[place + 1] ?? (stacked() ? cells[at + 1] : null); break;
+    case "ArrowUp": next = mine[place - 1] ?? (stacked() && at > 0 ? stops(cells[at - 1]).at(-1) : null); break;
+    case "Home": next = cells[0]; break;
+    case "End": next = cells[6]; break;
+    case "Enter":
+    case " ":
+      if (event.target !== cell) return;
+      next = mine[1] ?? null;
+      break;
+    default: return;
+  }
+  event.preventDefault();
+  next?.focus();
 }
 
 /* 쌓인 일의 「게이트 일감」 줄(t-84799 B9): 일정의 마지막 답이 말하는 게이트 — 안내판의 둘째 줄과 같은 규칙으로 고른 것 —
@@ -1418,8 +1599,8 @@ function boardScheduleGateWords(now = Date.now()) {
   const minute = Math.floor(now / 60_000) * 60_000;
   const held = boardScheduleGateWordsHeld.get(answer);
   if (held?.minute === minute && held.language === document.documentElement.lang) return held.words;
-  const model = boardScheduleModel(answer, [], minute, { zoom: "now", folded: new Set(), opened: new Set(), log: null }, 900,
-    false, null, { hourPx: 120, tickPx: 16, leastPx: 24 });
+  const model = boardScheduleModel(answer, [], minute, { zoom: "now", folded: new Set(), opened: new Set(), log: null },
+    false, { hourPx: 120, tickPx: 16, leastPx: 24 });
   const line = model.board.lines[1];
   const words = line.name ? [line.name, line.word, line.big === "—" ? "" : line.big].filter(Boolean).join(" · ") : "";
   boardScheduleGateWordsHeld.set(answer, { minute, language: document.documentElement.lang, words });
@@ -1450,44 +1631,6 @@ function writeBoardScheduleText(node, value) {
   }
 }
 
-function paintBoardScheduleRow(node, row) {
-  node.__row = row;
-  const from = row.from.toFixed(2);
-  const to = row.to.toFixed(2);
-  const done = (row.done * 100).toFixed(1);
-  // What the row was last painted with: a row the beat did not move reads nothing back from
-  // the DOM (twelve reads a row, fifty rows a beat, were most of a moved beat's cost after the
-  // words were remembered — t-67482).
-  const painted = [row.key, row.state, row.basis, row.depth, row.tip, row.label, row.said, row.sub, row.eta, row.etaSub,
-    row.nowLabel, row.aheadLabel, Boolean(row.act?.fold), Boolean(row.opened), Boolean(row.paused), Boolean(row.late),
-    from, to, done].join("\u0000");
-  if (node.__painted === painted) return;
-  node.__painted = painted;
-  writeAttribute(node, "data-key", row.key);
-  writeAttribute(node, "data-bar-state", row.state);
-  writeAttribute(node, "data-basis", row.basis);
-  writeAttribute(node, "data-depth", String(row.depth));
-  writeAttribute(node, "data-tip", row.tip);
-  writeAttribute(node, "data-said", row.said);
-  writeAttribute(node, "aria-label", [row.label, row.sub, row.said].filter(Boolean).join(" · "));
-  if (row.act?.fold) writeAttribute(node, "aria-expanded", String(Boolean(row.opened)));
-  else if (node.hasAttribute("aria-expanded")) node.removeAttribute("aria-expanded");
-  writeClass(node, "is-paused", Boolean(row.paused));
-  writeClass(node, "is-late", Boolean(row.late));
-  // The second lines and the bar's two names are the cells' generated content (`data-*`), not
-  // elements: a row stays four elements however much it says.
-  const [label, bar, said] = node.children;
-  writeBoardScheduleText(label, row.label);
-  writeAttribute(label, "data-sub", row.sub);
-  writeBoardScheduleText(said, row.eta);
-  writeAttribute(said, "data-sub", row.etaSub);
-  writeCustomProperty(bar, "--from", from);
-  writeCustomProperty(bar, "--to", to);
-  writeCustomProperty(bar, "--done", done);
-  writeAttribute(bar, "data-now-label", row.nowLabel);
-  writeAttribute(bar, "data-ahead-label", row.aheadLabel);
-}
-
 /* 게이트 블록의 단계 칸 줄: 칸 하나가 10 px, 틈 3 px — 요소가 아니라 그라디언트 하나다. 상태는 칸의 색이고
  * 블록의 둘째 줄이 같은 것을 수로 말한다. */
 const BOARD_SCHEDULE_STEP_INKS = Object.freeze({
@@ -1498,12 +1641,15 @@ const BOARD_SCHEDULE_STEP_INKS = Object.freeze({
 function boardScheduleStepsPaint(steps) {
   const cell = BOARD_SCHEDULE.stepCellPx;
   const gap = BOARD_SCHEDULE.stepGapPx;
+  const whole = steps.length * (cell + gap) - gap;
+  // Stops as shares of the strip's width: a strip wider than a calendar cell shrinks with its cells instead of losing the last ones.
+  const share = (px) => `${((px / whole) * 100).toFixed(2)}%`;
   const stops = steps.map((state, index) => {
     const ink = BOARD_SCHEDULE_STEP_INKS[state] ?? BOARD_SCHEDULE_STEP_INKS.idle;
     const start = index * (cell + gap);
-    return `transparent ${start}px, ${ink} ${start}px, ${ink} ${start + cell}px, transparent ${start + cell}px`;
+    return `transparent ${share(start)}, ${ink} ${share(start)}, ${ink} ${share(start + cell)}, transparent ${share(start + cell)}`;
   });
-  return { image: `linear-gradient(to right, ${stops.join(", ")})`, width: `${steps.length * (cell + gap) - gap}px` };
+  return { image: `linear-gradient(to right, ${stops.join(", ")})`, width: `${whole}px` };
 }
 
 function paintBoardScheduleBlock(node, row) {
@@ -1516,13 +1662,14 @@ function paintBoardScheduleBlock(node, row) {
   const actWord = boardScheduleActWord(row.act);
   const painted = [row.key, row.state, row.basis, row.tip, row.label, row.said, row.sub, row.why, row.eta, row.etaSub,
     row.nowLabel, row.aheadLabel, Boolean(row.act?.fold), Boolean(row.opened), Boolean(row.paused), Boolean(row.late),
-    Boolean(row.cut), row.ride?.state ?? "", from, to, done, mark, row.col, row.cols, steps, actWord].join("\u0000");
+    Boolean(row.cut), row.ride?.state ?? "", from, to, done, mark, row.col, row.cols, steps, actWord, row.depth,
+    Boolean(row.cutEnd), row.flow ?? "", row.flowWords ?? "", row.group ?? "", row.slot ?? ""].join("\u0000");
   if (node.__painted === painted) return;
   node.__painted = painted;
   writeAttribute(node, "data-key", row.key);
   writeAttribute(node, "data-bar-state", row.state);
   writeAttribute(node, "data-basis", row.basis);
-  writeAttribute(node, "data-depth", "0");
+  writeAttribute(node, "data-depth", String(row.depth));
   writeAttribute(node, "data-tip", row.tip);
   writeAttribute(node, "data-said", row.said);
   writeAttribute(node, "data-why", row.why ?? "");
@@ -1532,12 +1679,19 @@ function paintBoardScheduleBlock(node, row) {
   writeAttribute(node, "data-ahead-label", row.aheadLabel);
   writeAttribute(node, "data-steps", steps);
   writeAttribute(node, "data-act", actWord);
-  writeAttribute(node, "aria-label", [row.label, row.sub, row.said].filter(Boolean).join(" · "));
+  writeAttribute(node, "aria-label", [row.label, row.sub, row.said, row.flowWords].filter(Boolean).join(" · "));
   if (row.act?.fold) writeAttribute(node, "aria-expanded", String(Boolean(row.opened)));
   else if (node.hasAttribute("aria-expanded")) node.removeAttribute("aria-expanded");
   writeClass(node, "is-paused", Boolean(row.paused));
   writeClass(node, "is-late", Boolean(row.late));
   writeClass(node, "is-cut", Boolean(row.cut));
+  // The calendar's piece (t-84802): which edges carry on to another day, the group it belongs to, its line in the cell.
+  if (row.group) {
+    writeClass(node, "is-cut-end", Boolean(row.cutEnd));
+    writeAttribute(node, "data-flow", row.flow);
+    writeAttribute(node, "data-schedule-group", row.group);
+    writeCustomProperty(node, "--slot", String(row.slot + 2));
+  }
   writeClass(node, "is-inherited", mark !== "");
   writeAttribute(node, "data-ride-state", row.ride?.state ?? "");
   const [label, strip] = node.children;
@@ -1557,7 +1711,7 @@ function paintBoardScheduleBlock(node, row) {
   }
 }
 
-/* 눈금 하나하나를 축이나 홈통에 세운다: 글, 자리(`--at`), 칩 밑에 들면 글만 감춤. 안 그리는 쪽은 비운다. */
+/* 눈금 하나하나를 홈통에 세운다: 글, 자리(`--at`), 칩 밑에 들면 글만 감춤. 달력이면 비운다. */
 function paintBoardScheduleTicks(axis, ticks) {
   const held = [...axis.children].filter((node) => node !== axis.__now);
   reconcileElementOrder(axis, [...ticks.map((tick, at) => {
@@ -1569,10 +1723,10 @@ function paintBoardScheduleTicks(axis, ticks) {
   }), axis.__now]);
 }
 
-/* 눈금마다 선 하나: 가로 차트는 트랙의 왼→오른쪽, 세로 시간표는 위→아래. 카드(차트)나 몸통(시간표)에 둔다. */
-function boardScheduleGridPaint(ticks, direction) {
+/* 눈금마다 선 하나: 세로 시간표의 위→아래. 몸통에 둔다. */
+function boardScheduleGridPaint(ticks) {
   if (ticks.length === 0) return "none";
-  return `linear-gradient(to ${direction}, ${ticks.map((tick) => {
+  return `linear-gradient(to bottom, ${ticks.map((tick) => {
     const at = `${tick.at.toFixed(2)}%`;
     return `transparent ${at}, var(--edge-rule) ${at}, var(--edge-rule) calc(${at} + var(--rule-width)), transparent calc(${at} + var(--rule-width))`;
   }).join(", ")})`;
@@ -1600,14 +1754,64 @@ function paintBoardScheduleBoard(parts, board) {
   }
 }
 
-/* 그릇 하나를 그린다. 답·데스크·분·고른 것·언어·폭이 지난번과 같으면 아무것도
- * 쓰지 않는다 — 조용한 박자는 DOM을 건드리지 않는다. 막대와 「지금」 선은 분 단위의
- * 지금에 선다: 같은 분 안의 박자는 바뀐 행만 고쳐 쓰고 막대 하나 옮기지 않는다
- * (t-67482: 밀리초의 지금으로는 박자마다 막대 몇 개가 반올림 경계를 넘어 다시 쓰였다).
- * 눈금 수는 축의 폭으로 센다. 넓은 그릇의 축은 이름 칸과 말 칸을 뺀 자리라, 그릇 폭으로
- * 세면 1440 px 창의 축 약 450 px에 세 시간 눈금 여덟이 붙어 섰다(t-67482).
- * 한 주는 가로 차트에, 지금 앞뒤와 하루는 안내판과 세로 시간표에 그린다(t-77628): 묶음 상자
- * 넷을 그쪽으로 옮기고, 행이나 블록을 키로 맞춘다 — 다른 종류의 노드는 다시 짓는다. */
+/* 달력의 일곱 칸을 쓴다(t-84802): 칸은 그 자리에 있고, 머리와 조각을 그 칸의 키로 맞춘다. 칸을 옮겨 간 조각은 새로 짓는다. */
+function paintBoardScheduleWeek(parts, week, view) {
+  if (parts.weekDays.children.length === 0) {
+    parts.weekDays.append(...boardScheduleWeekCells());
+    parts.weekDays.__stop = null;
+  }
+  const cells = parts.weekDays.children;
+  writeCustomProperty(parts.weekDays, "--schedule-week-rows", String(week.rows));
+  writeAttribute(parts.week, "aria-label", t("board.schedule.weekName", "한 주 달력"));
+  for (const [index, day] of week.days.entries()) {
+    const cell = cells[index];
+    writeAttribute(cell, "data-day", String(day.at));
+    writeAttribute(cell, "data-day-end", String(day.end));
+    writeAttribute(cell, "aria-label", day.name);
+    writeAttributeOrNone(cell, "aria-current", day.today ? "date" : null);
+    writeBoardScheduleText(cell.__head, day.head);
+    writeAttribute(cell.__head, "data-now", day.now);
+    writeAttribute(cell.__head, "data-count", String(day.count));
+    writeAttribute(cell.__head, "data-tip", day.full);
+    const held = new Map([...cell.querySelectorAll(".board-schedule-block")].map((node) => [node.dataset.key, node]));
+    const nodes = day.pieces.map((piece) => {
+      const steps = Array.isArray(piece.steps);
+      let node = held.get(piece.key);
+      if (node && Boolean(node.children[1]) !== steps) node = null;
+      if (!node) {
+        node = boardScheduleBlockNode(view, steps);
+        node.tabIndex = -1;
+      }
+      paintBoardScheduleBlock(node, piece);
+      return node;
+    });
+    reconcileElementOrder(cell, [cell.__head, ...nodes, cell.__more, cell.__less]);
+    const { __more: more, __less: less } = cell;
+    writeHidden(more, day.more === 0);
+    writeHidden(less, day.unfolded === 0);
+    if (day.more > 0) {
+      writeBoardScheduleText(more, t("board.schedule.moreInDay", "+{{count}}개 더", { count: day.more }));
+      writeAttribute(more, "aria-label", t("board.schedule.moreInDayName", "{{date}} 블록 {{count}}개 더 보기", { date: day.full, count: day.more }));
+      writeCustomProperty(more, "--slot", String(day.moreSlot + 2));
+    }
+    if (day.unfolded > 0) {
+      writeBoardScheduleText(less, t("board.schedule.lessInDay", "{{count}}개 접기", { count: day.unfolded }));
+      writeAttribute(less, "aria-label", t("board.schedule.lessInDayName", "{{date}} 블록 {{count}}개 접기", { date: day.full, count: day.unfolded }));
+      writeCustomProperty(less, "--slot", String(day.moreSlot + (day.more > 0 ? 3 : 2)));
+    }
+  }
+  // The one Tab stop stays where the person left it, while that block still stands; else today's cell.
+  const stop = parts.weekDays.__stop;
+  if (!stop || !stop.isConnected || stop.hidden) {
+    const today = week.days.findIndex((day) => day.today);
+    boardScheduleWeekStop(parts.weekDays, cells[Math.max(0, today)]);
+  }
+}
+
+/* 그릇 하나를 그린다. 답·데스크·분·고른 것·언어가 지난번과 같으면 아무것도 쓰지 않는다 — 조용한 박자는 DOM을 건드리지
+ * 않고, 폭도 읽지 않는다: 폭에 따른 접힘은 스타일시트의 것이다. 블록과 칸의 말은 분 단위의 지금에 선다: 같은 분 안의
+ * 박자는 바뀐 블록만 고쳐 쓴다(t-67482). 안내판은 세 확대가 함께 쓴다. 지금 앞뒤와 하루는 세로 시간표에(t-77628), 한 주는
+ * 일곱 칸 달력에(t-84802) 그린다: 묶음 상자 넷을 그쪽으로 옮기고, 블록을 키로 맞춘다. */
 function paintBoardScheduleHost(host, view, now) {
   if (!boardScheduleBuilt.has(host)) {
     boardScheduleSkeleton(host, view);
@@ -1615,59 +1819,49 @@ function paintBoardScheduleHost(host, view, now) {
   }
   const parts = host.__parts;
   const vertical = boardScheduleVertical(boardScheduleChoice.zoom);
-  const width = vertical ? host.clientWidth : parts.axis.clientWidth;
   const desk = typeof deskLedger === "undefined" ? null : deskLedger;
   // The machine strip's own reading (`machine_load`, shell-board.js): read, never asked a second time.
   const machine = typeof deskMachine === "undefined" ? null : deskMachine;
   const minute = Math.floor(now / BOARD_SCHEDULE.clockMs) * BOARD_SCHEDULE.clockMs;
   const said = [boardScheduleAnswer, desk, machine, minute, boardScheduleChoiceRevision,
-    document.documentElement.lang, width, vertical];
+    document.documentElement.lang, vertical];
   const before = boardSchedulePainted.get(host);
   if (before && before.every((one, at) => one === said[at])) return;
   boardSchedulePainted.set(host, said);
-  // The type the ticks are set in, and the hour's height, are read only when the schedule is drawn again — a
-  // look that changes nothing (the same answer, minute and width) does not ask the page's style.
+  // The hour's height is read only when the schedule is drawn again — a look that changes nothing (the same answer and
+  // minute) does not ask the page's style.
   const styled = vertical ? getComputedStyle(host) : null;
   const metrics = vertical ? {
     hourPx: parseFloat(styled.getPropertyValue("--schedule-hour")) || 0,
     tickPx: boardScheduleTickHeight(parts.track),
     leastPx: parseFloat(styled.getPropertyValue("--schedule-block-least")) || 0,
   } : null;
-  const model = boardScheduleModel(boardScheduleAnswer, desk?.tasks, minute, boardScheduleChoice, width,
-    machine?.load?.loud === true, vertical ? null : boardScheduleTickMeasure(boardScheduleTickFont(parts.axis)), metrics);
+  const model = boardScheduleModel(boardScheduleAnswer, desk?.tasks, minute, boardScheduleChoice, machine?.load?.loud === true, metrics);
   paintBoardScheduleHead(parts.head, model);
   writeAttribute(host, "data-schedule-zoom", boardScheduleChoice.zoom);
-  writeHidden(parts.chart, vertical);
-  writeHidden(parts.cal, !vertical);
-  const nowAt = model.nowAt.toFixed(2);
+  writeHidden(parts.day, !vertical);
+  writeHidden(parts.week, vertical);
+  paintBoardScheduleBoard(parts, model.board);
+  paintBoardScheduleTicks(parts.track, model.gutter);
   if (vertical) {
-    paintBoardScheduleBoard(parts, model.board);
-    paintBoardScheduleTicks(parts.axis, []);
-    paintBoardScheduleTicks(parts.track, model.gutter);
+    const nowAt = model.nowAt.toFixed(2);
     writeTextContent(parts.track.__now, model.board.head.now);
     writeCustomProperty(parts.body, "--now", nowAt);
     writeCustomProperty(parts.body, "--schedule-hours", model.hours.toFixed(3));
-    writeCustomProperty(parts.body, "--schedule-grid", boardScheduleGridPaint(model.gutter, "bottom"));
+    writeCustomProperty(parts.body, "--schedule-grid", boardScheduleGridPaint(model.gutter));
     const legendBlocks = t("board.schedule.legendBlocks", "칠함 = 지난·끝남 · 빗금 = 앞으로(지난 소요로 잰 예상) · 점선 = 근거 없음 · 톱니 = 범위 앞에서 시작");
     writeAttribute(parts.gutter, "data-tip", legendBlocks);
     writeTextContent(parts.calLegend, legendBlocks);
     writeTextContent(parts.aheadEmpty, t("board.schedule.aheadEmpty", "앞으로 잡힌 일 없음"));
     writeHidden(parts.aheadEmpty, !model.aheadEmpty);
-    reconcileElementOrder(parts.chart, [parts.card, parts.band]);
+    reconcileElementOrder(parts.weekGroups, []);
+    reconcileElementOrder(parts.weekDays, []);
     reconcileElementOrder(parts.body, [parts.gutter, ...parts.boxes, parts.aheadEmpty]);
   } else {
-    const [named, count, legend] = parts.card.children;
-    writeTextContent(named, model.heading);
-    writeTextContent(count, String(model.groups.reduce((sum, group) => sum + group.count, 0)));
-    writeTextContent(legend, t("board.schedule.legend", "막대 끝 = 지난 소요로 잰 예상 · 빗금 = 아직 안 온 구간 · 점선 = 근거 없음"));
-    paintBoardScheduleTicks(parts.track, []);
-    paintBoardScheduleTicks(parts.axis, model.ticks);
-    writeTextContent(parts.axis.__now, t("board.schedule.nowLine", "지금"));
-    writeCustomProperty(parts.chart, "--now", nowAt);
-    // The track's hour lines (the draft's quarter rules): one line on each tick, drawn by every row's track.
-    writeCustomProperty(parts.chart, "--schedule-grid", boardScheduleGridPaint(model.ticks, "right"));
+    writeTextContent(parts.calLegend, t("board.schedule.legendWeek", "칠함 = 지난·끝남 · 빗금 = 앞으로(지난 소요로 잰 예상) · 점선 = 근거 없음 · 납작한 끝 = 옆 날로 이어짐 · 톱니 = 이 주 밖으로 이어짐"));
     reconcileElementOrder(parts.body, [parts.gutter, parts.aheadEmpty]);
-    reconcileElementOrder(parts.chart, [parts.card, parts.band, ...parts.boxes]);
+    reconcileElementOrder(parts.weekGroups, parts.boxes);
+    paintBoardScheduleWeek(parts, model.week, view);
   }
   const queueWord = t(BOARD_RUN_STATES.queue.key, BOARD_RUN_STATES.queue.word);
   const doneWord = t(BOARD_RUN_STATES.done.key, BOARD_RUN_STATES.done.word);
@@ -1678,32 +1872,25 @@ function paintBoardScheduleHost(host, view, now) {
     writeBoardScheduleText(fold, group.label);
     // The column's head counts its blocks (t-77628): 「7 · 차례 기다림 4 · 끝남 3」 — a zero is left out —, or that
     // the range holds none. The column is at least as wide as its widest cluster of blocks standing side by side.
-    writeAttribute(fold, "data-sub", !vertical ? ""
-      : group.count === 0 && group.more === 0
-        ? t("board.schedule.notInRange", "이 범위에 없음")
-        : [String(group.count), group.waiting > 0 ? `${queueWord} ${group.waiting}` : "", group.ended > 0 ? `${doneWord} ${group.ended}` : ""]
-          .filter(Boolean).join(" · "));
+    writeAttribute(fold, "data-sub", group.count === 0 && group.more === 0
+      ? t("board.schedule.notInRange", "이 범위에 없음")
+      : [String(group.count), group.waiting > 0 ? `${queueWord} ${group.waiting}` : "", group.ended > 0 ? `${doneWord} ${group.ended}` : ""]
+        .filter(Boolean).join(" · "));
     writeCustomProperty(box, "--schedule-subcols", String(vertical ? group.subcols : 1));
     writeAttribute(fold, "aria-expanded", String(!group.folded));
-    // A column stays when it is empty — the timetable's four columns are its grammar; a chart's group folds away.
-    writeHidden(box, !vertical && group.rows.length === 0 && group.more === 0);
-    const kind = vertical ? "board-schedule-block" : "board-schedule-row";
-    const held = new Map([...list.children].filter((node) => node.classList.contains(kind)).map((node) => [node.dataset.key, node]));
-    const rows = group.folded ? [] : vertical ? group.rows.filter((row) => row.depth === 0) : group.rows;
+    // A column stays when it is empty — the timetable's four columns are its grammar. On the calendar the box is its head
+    // alone: its blocks stand in the day cells.
+    const held = new Map([...list.children].map((node) => [node.dataset.key, node]));
+    const rows = group.folded || !vertical ? [] : group.rows.filter((row) => row.depth === 0);
     reconcileElementOrder(list, rows.map((row) => {
-      if (vertical) {
-        const steps = Array.isArray(row.steps);
-        let node = held.get(row.key);
-        if (node && Boolean(node.children[1]) !== steps) node = null;
-        node ??= boardScheduleBlockNode(view, steps);
-        paintBoardScheduleBlock(node, row);
-        return node;
-      }
-      const node = held.get(row.key) ?? boardScheduleRowNode(view);
-      paintBoardScheduleRow(node, row);
+      const steps = Array.isArray(row.steps);
+      let node = held.get(row.key);
+      if (node && Boolean(node.children[1]) !== steps) node = null;
+      node ??= boardScheduleBlockNode(view, steps);
+      paintBoardScheduleBlock(node, row);
       return node;
     }));
-    writeHidden(list, rows.length === 0 && !vertical);
+    writeHidden(list, !vertical);
     const moreWords = group.more === 0 || group.folded ? ""
       : group.moreOpened
         ? t("board.schedule.lessEnded", "끝난 {{count}}개 접기", { count: group.more })
@@ -1719,8 +1906,7 @@ function paintBoardScheduleHost(host, view, now) {
   paintBoardScheduleLog(parts.log);
 }
 
-/* 확대 하나의 말 — 단추와 카드 머리가 같은 말을 쓴다. 지금 앞뒤의 카드는 시안 v2의 이름 그대로
- * 「지금 도는 일」이다. */
+/* 확대 하나의 말. */
 function boardScheduleZoomWord(id) {
   return id === "week" ? t("board.schedule.week", "한 주")
     : id === "day" ? t("board.schedule.day", "하루") : t("board.schedule.zoomNow", "지금 앞뒤");

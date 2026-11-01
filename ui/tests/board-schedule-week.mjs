@@ -32,13 +32,14 @@ export async function readWeek(page) {
     };
     const days = [...host.querySelectorAll(".board-schedule-week-day")].map((day) => {
       const head = day.querySelector(".board-schedule-week-head");
-      const more = day.querySelector(".board-schedule-more");
+      const more = day.querySelector(".board-schedule-more:not(.board-schedule-week-less)");
+      const less = day.querySelector(".board-schedule-week-less");
       return {
         at: Number(day.dataset.day), end: Number(day.dataset.dayEnd), current: day.getAttribute("aria-current"),
         label: day.getAttribute("aria-label"), tab: day.tabIndex, box: box(day),
         head: head.textContent, chip: head.dataset.now ?? "", count: Number(head.dataset.count),
         more: more.hidden ? "" : more.textContent, moreName: more.getAttribute("aria-label") ?? "",
-        moreExpanded: more.getAttribute("aria-expanded"),
+        less: less.hidden ? "" : less.textContent, lessName: less.getAttribute("aria-label") ?? "",
         blocks: [...day.querySelectorAll(".board-schedule-block")].map((block) => {
           const label = block.querySelector(".board-schedule-label");
           return {
@@ -200,8 +201,11 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     ok("a task running since two days ago stands in each day to today, the day between saying only that it continues",
       middle[1]?.flow === "out" && middle[2]?.flow === "both" && middle[2].sub.startsWith("이어짐") && middle[3]?.flow === "in"
         && middle[4] === undefined, JSON.stringify(middle.map((one) => [one?.flow, one?.sub])));
-    ok("a piece before now is filled, today's is filled to now",
-      middle[2]?.done === 100 && middle[3]?.done > 0 && middle[3].done < 100, JSON.stringify(middle.map((one) => one?.done)));
+    const runningLane = week.days[3].blocks.find((block) => block.group === "lanes" && block.state === "running");
+    const laneTomorrow = week.days[4].blocks.find((block) => block.key === runningLane?.key);
+    ok("a piece before now is filled, today's expected work is filled to now, and tomorrow's is all ahead",
+      middle[2]?.done === 100 && runningLane?.done > 0 && runningLane.done < 100 && laneTomorrow?.done === 0,
+      JSON.stringify({ gone: middle[2]?.done, today: runningLane?.done, tomorrow: laneTomorrow?.done }));
     const cutStart = week.days[0].blocks.find((block) => block.key.endsWith("t-90002"));
     ok("a task begun before the week is toothed on the week's first day and says since when, with the date",
       cutStart?.cutStart === true && cutStart.flow === "both" && cutStart.sub.includes("부터") && cutStart.sub.includes("15"),
@@ -226,25 +230,29 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     const crowded = week.days[4];
     const hidden = crowded.count - crowded.blocks.length;
     ok("a cell holds what fits and says how many more, in words a person can read",
-      crowded.count === 21 && hidden > 0 && crowded.more === `+${hidden}개 더` && crowded.moreExpanded === "false",
+      crowded.count >= 21 && hidden > 0 && crowded.more === `+${hidden}개 더` && crowded.less === "",
       JSON.stringify({ count: crowded.count, shown: crowded.blocks.length, more: crowded.more }));
     ok("the more button's name says which day and how many", crowded.moreName.includes(String(hidden)) && crowded.moreName.includes("22"),
       crowded.moreName);
+    const waitingAt = crowded.blocks.findIndex((block) => block.key.endsWith("t-91999"));
+    const firstEnded = crowded.blocks.findIndex((block) => block.state === "done");
     ok("what waits for someone is never the block folded away: the waiting task stands before the finished ones",
-      crowded.blocks[0]?.key.endsWith("t-91999"), JSON.stringify(crowded.blocks.map((block) => block.key)));
+      waitingAt >= 0 && (firstEnded < 0 || waitingAt < firstEnded), JSON.stringify(crowded.blocks.map((block) => [block.key, block.state])));
     await page.evaluate(() => document.querySelectorAll("#board-view .board-schedule-week-day")[4].querySelector(".board-schedule-more").click());
     await page.evaluate(settle);
     week = await readWeek(page);
-    ok("a press stands every block of that day, and the button now folds them",
-      week.days[4].blocks.length === 21 && week.days[4].moreExpanded === "true" && week.days[4].more.includes("접기"),
-      JSON.stringify({ shown: week.days[4].blocks.length, more: week.days[4].more }));
+    ok("a press stands the rest of that day, and a button now folds them, named for the day",
+      week.days[4].blocks.length === crowded.count && week.days[4].more === "" && week.days[4].less === `${hidden}개 접기`
+        && week.days[4].lessName.includes("22"),
+      JSON.stringify({ shown: week.days[4].blocks.length, more: week.days[4].more, less: week.days[4].less }));
     ok("no block is cut by the cell: each one's full height stands inside its day",
       week.days[4].blocks.every((block) => block.box.top >= week.days[4].box.top - 1 && block.box.bottom <= week.days[4].box.bottom + 1),
       JSON.stringify(week.days[4].box));
-    await page.evaluate(() => document.querySelectorAll("#board-view .board-schedule-week-day")[4].querySelector(".board-schedule-more").click());
+    await page.evaluate(() => document.querySelectorAll("#board-view .board-schedule-week-day")[4].querySelector(".board-schedule-week-less").click());
     await page.evaluate(settle);
     week = await readWeek(page);
-    ok("a second press folds them again", week.days[4].blocks.length < 21 && week.days[4].moreExpanded === "false", String(week.days[4].blocks.length));
+    ok("the fold button folds them again", week.days[4].blocks.length === crowded.blocks.length && week.days[4].more === crowded.more && week.days[4].less === "",
+      JSON.stringify({ shown: week.days[4].blocks.length, more: week.days[4].more }));
     await page.clock.setFixedTime(new Date(SCHEDULE_NOW));
     await moveWeek(page, { tasks: fixture.desk.tasks });
 
@@ -298,10 +306,15 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
       JSON.stringify(week.asked));
     await page.evaluate(() => document.querySelector("#board-view .board-schedule-log-close").click());
     await pressGate();
+    // The gate carries two tasks by its running job's words, the way the timetable's scene does.
+    const lint = fixture.answer.jobs.find((job) => job.gate === "l61" && job.state === "running");
+    await moveWeek(page, { jobs: fixture.answer.jobs.map((job) => (job.name === lint.name
+      ? { ...job, what: "v1.1.84: t-66539/7102 ctty helper" } : job)) });
     week = await readWeek(page);
     const carried = week.days.flatMap((day) => day.blocks).filter((block) => block.key.endsWith("t-67102") || block.key.endsWith("t-66539"));
     ok("a task carried by the gate says so on its block in the week, as in the day",
-      carried.length > 0 && carried.every((block) => block.why.includes("l61")), JSON.stringify(carried.map((block) => block.why)));
+      carried.length >= 2 && carried.every((block) => block.why.includes("l61에 실림")), JSON.stringify(carried.map((block) => block.why)));
+    await moveWeek(page, { jobs: fixture.answer.jobs });
     // A real Enter, on a block holding the focus: the board's keys are the person's (t-84799 ③).
     await page.evaluate(() => {
       window.__SCHEDULE_ASKED__.length = 0;
@@ -324,8 +337,9 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
         && document.querySelector("#board-view .board-schedule-day").checkVisibility()), "");
     await zoomTo(page, "week");
 
-    /* ---- 키보드: 달력은 탭 멈춤 하나, 안에서는 방향키 ---------------------------------------- */
-    const focused = () => page.evaluate(() => {
+    /* ---- 키보드: 달력은 탭 멈춤 하나, 안에서는 방향키 — 멈춤이 처음 서는 자리를 보려 새 페이지에서 ---- */
+    const keys = await freshWeek(browser, origin, fixture);
+    const focused = () => keys.evaluate(() => {
       const node = document.activeElement;
       const day = node?.closest?.(".board-schedule-week-day");
       const days = [...document.querySelectorAll("#board-view .board-schedule-week-day")];
@@ -336,50 +350,69 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
         outline: node ? getComputedStyle(node).outlineStyle : "",
       };
     });
-    week = await readWeek(page);
+    week = await readWeek(keys);
     const stops = week.days.flatMap((day) => [day.tab, ...day.blocks.map((block) => block.tab)]).filter((tab) => tab === 0);
     ok("the calendar is one Tab stop, on today's cell at first", stops.length === 1 && week.days[3].tab === 0,
       JSON.stringify(week.days.map((day) => [day.tab, day.blocks.filter((block) => block.tab === 0).length])));
-    await page.evaluate(() => document.querySelector('#board-view [data-group="workers"] .board-schedule-group-head').focus());
-    await page.keyboard.press("Tab");
+    await keys.evaluate(() => document.querySelector('#board-view [data-group="workers"] .board-schedule-group-head').focus());
+    await keys.keyboard.press("Tab");
     let where = await focused();
     ok("Tab from the group heads lands on today's cell, its name read and its focus shown",
       where.day === 3 && where.cell && where.name.includes("오늘") && where.outline !== "none", JSON.stringify(where));
-    await page.keyboard.press("ArrowLeft");
+    await keys.keyboard.press("ArrowLeft");
     where = await focused();
     ok("← goes to the day before", where.day === 2 && where.cell, JSON.stringify(where));
-    await page.keyboard.press("ArrowRight");
-    await page.keyboard.press("ArrowDown");
+    await keys.keyboard.press("ArrowRight");
+    await keys.keyboard.press("ArrowDown");
     where = await focused();
     ok("↓ on a cell goes into its first block", where.day === 3 && where.block && where.key !== "", JSON.stringify(where));
     const firstBlock = where.key;
-    await page.keyboard.press("ArrowDown");
+    await keys.keyboard.press("ArrowDown");
     where = await focused();
     ok("↓ on a block goes to the next one in the day", where.day === 3 && where.block && where.key !== firstBlock, JSON.stringify(where));
-    await page.keyboard.press("ArrowUp");
-    await page.keyboard.press("ArrowUp");
+    await keys.keyboard.press("ArrowUp");
+    await keys.keyboard.press("ArrowUp");
     where = await focused();
     ok("↑ from the first block goes back to the cell", where.day === 3 && where.cell, JSON.stringify(where));
-    await page.keyboard.press("ArrowDown");
-    await page.keyboard.press("ArrowLeft");
+    await keys.keyboard.press("ArrowDown");
+    await keys.keyboard.press("ArrowLeft");
     where = await focused();
     ok("← on a block goes to the block at the same place the day before", where.day === 2 && where.block, JSON.stringify(where));
-    await page.keyboard.press("Home");
+    await keys.keyboard.press("Home");
     where = await focused();
     ok("Home goes to the week's first cell", where.day === 0 && where.cell, JSON.stringify(where));
-    await page.keyboard.press("End");
+    await keys.keyboard.press("End");
     where = await focused();
     ok("End goes to the week's last cell", where.day === 6 && where.cell, JSON.stringify(where));
-    week = await readWeek(page);
+    week = await readWeek(keys);
     ok("the Tab stop follows the focus: still one, on the cell last visited",
       week.days[6].tab === 0 && week.days.flatMap((day) => [day.tab, ...day.blocks.map((block) => block.tab)]).filter((tab) => tab === 0).length === 1,
       JSON.stringify(week.days.map((day) => day.tab)));
-    await page.keyboard.press("Tab");
+    await keys.keyboard.press("Tab");
     where = await focused();
     ok("Tab leaves the calendar instead of walking its blocks", where.day === -1, JSON.stringify(where));
-    const nameless = await page.evaluate(() => [...document.querySelectorAll("#board-view .board-schedule-week button, #board-view .board-schedule-week-day")]
+    const nameless = await keys.evaluate(() => [...document.querySelectorAll("#board-view .board-schedule-week button, #board-view .board-schedule-week-day")]
       .filter((node) => node.checkVisibility() && !(node.getAttribute("aria-label") ?? node.textContent).trim()).length);
     ok("every cell and every button of the calendar has a name", nameless === 0, String(nameless));
+
+    await keys.evaluate(() => document.querySelectorAll("#board-view .board-schedule-week-day")[2].querySelector(".board-schedule-more").focus());
+    for (let press = 0; press < 8; press += 1) {
+      if (await keys.evaluate(() => document.activeElement.classList.contains("board-schedule-week-less"))) break;
+      await keys.keyboard.press("Enter");
+    }
+    const handed = await keys.evaluate(() => ({
+      less: document.activeElement.classList.contains("board-schedule-week-less"),
+      moreHidden: document.querySelectorAll("#board-view .board-schedule-week-day")[2].querySelector(".board-schedule-more").hidden,
+    }));
+    ok("when the last page stands, the focus goes from the gone button to the fold button", handed.less && handed.moreHidden, JSON.stringify(handed));
+    await keys.keyboard.press("Enter");
+    const backed = await keys.evaluate(() => document.activeElement.className);
+    ok("and folding hands it back", backed === "board-schedule-more", backed);
+    await keys.evaluate(() => document.querySelectorAll("#board-view .board-schedule-week-day")[3].focus());
+    await keys.keyboard.press("Enter");
+    where = await focused();
+    ok("Enter on a cell goes into its first block rather than pressing anything", where.day === 3 && where.block, JSON.stringify(where));
+    await keys.close();
 
     /* ---- 조용한 박자는 아무것도 쓰지 않는다 ------------------------------------------------- */
     const writes = async (act) => page.evaluate(async (source) => {
@@ -429,6 +462,27 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
       week.elements <= BOARD_SCHEDULE_BUDGET.elements && heavyCount >= 500 && week.days.some((day) => day.more !== ""),
       JSON.stringify({ elements: week.elements, heavyCount }));
     ok("fifty lanes never push the page wide", week.scroll <= week.client + 1, JSON.stringify([week.scroll, week.client]));
+    // A press on the busiest day stands one page, not all: the press's cost does not grow with the day (t-84802).
+    const paged = await page.evaluate(async () => {
+      const buttons = [...document.querySelectorAll("#board-view .board-schedule-more:not(.board-schedule-week-less)")].filter((one) => !one.hidden);
+      const busiest = buttons.sort((a, b) => parseInt(b.textContent.slice(1), 10) - parseInt(a.textContent.slice(1), 10))[0];
+      const cell = busiest.closest(".board-schedule-week-day");
+      const before = cell.querySelectorAll(".board-schedule-block").length;
+      const hiddenBefore = parseInt(busiest.textContent.slice(1), 10);
+      busiest.focus();
+      busiest.click();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const after = cell.querySelectorAll(".board-schedule-block").length;
+      const less = cell.querySelector(".board-schedule-week-less");
+      const left = parseInt(busiest.textContent.slice(1), 10);
+      const shownLess = !less.hidden;
+      less.click();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      return { added: after - before, hiddenBefore, left, shownLess, back: cell.querySelectorAll(".board-schedule-block").length === before,
+        focus: document.activeElement === busiest };
+    });
+    ok("on the busiest day of a heavy week a press stands one page and says what is left, and the fold takes them back",
+      paged.added === 24 && paged.left === paged.hiddenBefore - 24 && paged.shownLess && paged.back, JSON.stringify(paged));
     await page.evaluate(async ({ answer, desk }) => {
       window.__SCHEDULE__ = { ...answer, revision: answer.revision + 1 };
       window.__DESK__ = desk;
@@ -526,7 +580,6 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
       await window.__UNTIL__(() => !boardScheduleAsking, "the earlier week's answer");
       return window.__SCHEDULE_ASKED__.slice();
     });
-    if (firstDay !== 0) ok("a language change that moves the week earlier reads that earlier day", true, "");
     ok("a beat in a language whose week starts earlier asks afresh, with no revision",
       asks.some((one) => one.known === null && one.fromMs === SUNDAY), JSON.stringify(asks));
   } finally {
