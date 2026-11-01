@@ -762,6 +762,31 @@ fn the_fixture_reads_into_the_answer_the_board_draws() {
     );
 }
 
+/// A range holding no ended lane still names the last one that ended
+/// (t-84799 ⑤): the board's first line says "last release" from it. A range
+/// that holds one sends nothing extra, and a running lane is never the last.
+#[test]
+fn the_newest_ended_lane_rides_the_answer_when_the_range_holds_none() {
+    let scratch = copied();
+    let wide = fixture_reading(scratch.path());
+    let newest = wide
+        .lanes
+        .iter()
+        .filter(|run| !run.running)
+        .max_by_key(|run| run.end_ms.unwrap_or(run.start_ms))
+        .expect("the fixture has ended lanes")
+        .clone();
+    assert_eq!(wide.last_lane, None, "a range with an ended lane sends none");
+    let ask = Ask {
+        known: None,
+        from_ms: Some(NOW_MS - 1),
+        log: None,
+    };
+    let narrow = Book::default().read(&roots_in(scratch.path()), &ask, NOW_MS, KST);
+    assert!(narrow.lanes.iter().all(|run| run.running));
+    assert_eq!(narrow.last_lane, Some(newest));
+}
+
 /// The window places a waiting job's start on the runner's lanes, so the
 /// answer carries the lanes the runner's log named — `lane=` on a `RUN` or a
 /// `DONE` line, in order, none before it names one — beside the flag that

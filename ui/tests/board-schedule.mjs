@@ -1314,6 +1314,20 @@ export async function testBoardSchedule(browser, origin, ok) {
         && emptyAnswer.gutter >= 4 && emptyAnswer.hours === 4 && emptyAnswer.sum === "다음 발행 없음 · 착지 대기 0",
       JSON.stringify(emptyAnswer));
 
+    /* ---- ⑤ (t-84799): 범위 안에 끝난 레인이 없어도 답이 실은 마지막 레인(`last_lane`)을 안내판 첫 줄이 말한다 ---- */
+    const outsideLane = await page.evaluate((now) => {
+      const base = boardScheduleAnswer;
+      const ended = base.lanes.filter((run) => !run.running).sort((a, b) => b.end_ms - a.end_ms)[0];
+      const model = boardScheduleModel({ ...base, jobs: [], lanes: [], last_lane: ended }, [], now,
+        { zoom: "now", folded: new Set(), opened: new Set(), log: null }, 900, false, null, { hourPx: 120, tickPx: 16, leastPx: 24 });
+      const none = boardScheduleModel({ ...base, jobs: [], lanes: [] }, [], now,
+        { zoom: "now", folded: new Set(), opened: new Set(), log: null }, 900, false, null, { hourPx: 120, tickPx: 16, leastPx: 24 });
+      return { told: model.board.lines[0].note, act: model.board.lines[0].act, silent: none.board.lines[0].note };
+    }, SCHEDULE_NOW);
+    ok("with no lane ended in the range the first line names the answer's last lane, and says nothing of one when the answer has none",
+      /^마지막 v1\.1\.82 레인 \d{2}:\d{2} · /.test(outsideLane.told) && outsideLane.act?.log?.lane === "3e13aaef" && outsideLane.silent === "이 범위에 없음",
+      JSON.stringify(outsideLane));
+
     // The same empty answer drawn (review P3-9): the lines, the columns' heads and the empty-future line on the screen.
     const emptyDrawn = await page.evaluate(async (now) => {
       const held = window.__SCHEDULE__;

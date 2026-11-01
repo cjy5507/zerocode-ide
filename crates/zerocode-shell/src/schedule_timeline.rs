@@ -188,6 +188,10 @@ pub(crate) struct Timeline {
     pub(crate) line: LineFacts,
     pub(crate) jobs: Vec<Job>,
     pub(crate) lanes: Vec<LaneRun>,
+    /// The newest lane run that ended, sent only when the range holds none:
+    /// the board's first line still names the last release (t-84799).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_lane: Option<LaneRun>,
     /// When the board's tasks landed and shipped, as git at the open
     /// repository says it, by task (t-71840, [`crate::artifact_flow::landings`]):
     /// the window ends a finished task's bar there before the times the desk
@@ -544,6 +548,7 @@ impl Book {
                 .filter(|run| run.running || run.end_ms.unwrap_or(run.start_ms) >= from_ms)
                 .cloned()
                 .collect(),
+            last_lane: None,
             landings: self.landings.clone(),
             log,
         }
