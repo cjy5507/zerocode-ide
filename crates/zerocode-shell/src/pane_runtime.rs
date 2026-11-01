@@ -1296,7 +1296,14 @@ pub(super) fn note_pane_state(
     // merge written twice.
     let (began_ms, ended) = {
         let state = app.state::<AppState>();
-        let mut states = state.pane_states();
+        let states = state.pane_states();
+        let runtime = state.shell_runtime();
+        let mut states = prompt_transaction::word_may_land(
+            states,
+            &runtime.pane_states,
+            &runtime.pane_holds,
+            report.term,
+        );
         let prior = states.get(&report.term);
         if prior.is_none_or(|held| held.state != report.state) {
             crumbs::record(

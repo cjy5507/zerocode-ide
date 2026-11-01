@@ -1368,14 +1368,19 @@ impl agent_teams::Host for TeamWindow {
             moving: &runtime.moving_terms,
         };
         let took = crate::prompt_transaction::with_no_prompt_in_flight(&lines, term, &mut || {
-            let states = state.pane_states();
-            let done = states
-                .get(&term)
-                .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Done);
-            if done && turn_rests_on_an_empty_line(self, term) && output_settled(&state, term) {
-                commit();
-            }
-            drop(states);
+            crate::prompt_transaction::observed_then_committed(
+                &runtime.pane_states,
+                &runtime.pane_holds,
+                term,
+                &|states| {
+                    states
+                        .get(&term)
+                        .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Done)
+                        && turn_rests_on_an_empty_line(self, term)
+                        && output_settled(&state, term)
+                },
+                commit,
+            );
         });
         if took {
             state.cadence().wake();

@@ -152,16 +152,63 @@ pub(super) fn line_is_taken(
             .contains(&term)
 }
 
+/// Panes whose hook word stands still, and which the pump leaves alone, while
+/// an account move is written for them.
+#[derive(Default)]
+pub(super) struct PaneHolds {
+    held: Mutex<HashMap<TermId, usize>>,
+    let_go: Condvar,
+}
+
+impl PaneHolds {
+    /// Whether a move holds this pane now.
+    pub(super) fn holds(&self, term: TermId) -> bool {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&term)
+    }
+}
+
+/// Look at a pane's hook word and, when it says so, commit a move for it.
+pub(super) fn observed_then_committed(
+    states: &Mutex<HashMap<TermId, PaneState>>,
+    _holds: &PaneHolds,
+    term: TermId,
+    observe: &dyn Fn(&HashMap<TermId, PaneState>) -> bool,
+    commit: &mut dyn FnMut(),
+) {
+    let _ = term;
+    let held = states
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if observe(&held) {
+        commit();
+    }
+    drop(held);
+}
+
+/// The guard a hook report writes the pane's word under.
+pub(super) fn word_may_land<'a>(
+    states: MutexGuard<'a, HashMap<TermId, PaneState>>,
+    _lock: &'a Mutex<HashMap<TermId, PaneState>>,
+    _holds: &PaneHolds,
+    _term: TermId,
+) -> MutexGuard<'a, HashMap<TermId, PaneState>> {
+    states
+}
+
 /// What the window knows about a pane's line, gathered for one round.
 ///
 /// Permission and launch maps are read before the terminal lock. The hand
 /// fields are refreshed under that lock by `refresh_hand` before a write.
 pub(super) fn line_facts(state: &AppState, term: TermId) -> Line {
+    let states = &state.shell_runtime().pane_states;
     Line {
-        parked: pane_is_parked(state, term),
+        parked: pane_is_parked(states, term),
         launch: crate::cmd::terminal::launch_of(state, term),
         taken: reports_what_it_takes(state, term).then(|| crate::human_input::taken(term)),
-        busy: pane_is_busy(state, term),
+        busy: pane_is_busy(states, term),
         ..Line::default()
     }
 }
@@ -179,9 +226,10 @@ fn reports_what_it_takes(state: &AppState, term: TermId) -> bool {
 
 /// Whether the pane's program says it is mid-turn — the hook road's word,
 /// the same one the board's 「작업 중」 reads.
-fn pane_is_busy(state: &AppState, term: TermId) -> bool {
-    state
-        .pane_states()
+fn pane_is_busy(states: &Mutex<HashMap<TermId, PaneState>>, term: TermId) -> bool {
+    states
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&term)
         .is_some_and(|held| held.state == zerocode_core::hook::HookState::Working)
 }
@@ -257,9 +305,10 @@ pub(super) fn chip_write<E>(
 /// Whether a question or an approval is on the pane's screen, waiting for a
 /// person — the hook road's word, which is the only reading of a TUI's
 /// dialog this window trusts.
-fn pane_is_parked(state: &AppState, term: TermId) -> bool {
-    state
-        .pane_states()
+fn pane_is_parked(states: &Mutex<HashMap<TermId, PaneState>>, term: TermId) -> bool {
+    states
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&term)
         .is_some_and(|held| held.state == zerocode_core::hook::HookState::NeedsAttention)
 }
@@ -451,7 +500,7 @@ impl PaneDoing {
 /// program's word that it is mid-turn first, then a restart's wake still
 /// waiting on it. Each map is asked under its own lock and let go.
 pub(super) fn pane_doing(state: &AppState, term: TermId) -> PaneDoing {
-    if pane_is_busy(state, term) {
+    if pane_is_busy(&state.shell_runtime().pane_states, term) {
         PaneDoing::Working
     } else if state.pending_nudges().holds(term) {
         PaneDoing::Resuming
@@ -795,6 +844,286 @@ mod tests {
             waits[SWITCHES / 2],
             waits[SWITCHES - 1],
         );
+    }
+
+    /* ---- t-75383: the hook word's lock and a move's commit ---- */
+
+    const MOVING: TermId = 75383;
+    const OTHER_PANE: TermId = 75384;
+    /// Long enough for a thread that is not waiting on anything to finish on
+    /// a loaded machine; a thread still out at the end of it is waiting.
+    const NOT_WAITING: Duration = Duration::from_secs(10);
+    /// How long a thread that must wait is given to wrongly finish.
+    const STILL_WAITING: Duration = Duration::from_millis(150);
+
+    type Words = Mutex<HashMap<TermId, PaneState>>;
+
+    fn word(state: zerocode_core::hook::HookState) -> PaneState {
+        PaneState {
+            state,
+            at: 0,
+            state_started_at: 0,
+            you: None,
+            said: None,
+            ask: None,
+            ask_prompt: None,
+            approval: None,
+            submit_shape: zerocode_core::ask::SubmitShape::NotAQuestion,
+            session_boundary: false,
+            interrupted: false,
+            turn_started_at: None,
+            finish_mark: false,
+            before_wait: None,
+            autonomy: None,
+        }
+    }
+
+    /// A window's words: the moving pane rests, the other works.
+    fn words() -> Words {
+        Mutex::new(HashMap::from([
+            (MOVING, word(zerocode_core::hook::HookState::Done)),
+            (OTHER_PANE, word(zerocode_core::hook::HookState::Working)),
+        ]))
+    }
+
+    fn rests(states: &HashMap<TermId, PaneState>) -> bool {
+        states
+            .get(&MOVING)
+            .is_some_and(|held| held.state == zerocode_core::hook::HookState::Done)
+    }
+
+    /// One round of the pump for one pane with a delivery, as `pump_loop`
+    /// walks it: under deliveries, the line's facts read off the hook word by
+    /// the real `pane_is_parked` and `pane_is_busy`. Answers `busy`.
+    fn pump_round(lines: &Lines, states: &Words, term: TermId) -> Option<bool> {
+        let deliveries = lines.deliveries.lock().unwrap();
+        deliveries.contains_key(&term).then(|| {
+            let _parked = pane_is_parked(states, term);
+            pane_is_busy(states, term)
+        })
+    }
+
+    /// A hook report's write, through the door `note_pane_state` writes by.
+    fn report_word(
+        states: &Words,
+        holds: &PaneHolds,
+        term: TermId,
+        state: zerocode_core::hook::HookState,
+    ) {
+        let held = states.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut held = word_may_land(held, states, holds, term);
+        held.insert(term, word(state));
+    }
+
+    /// The whole fence as `with_between_turns_observation` runs it.
+    fn move_with(lines: &Lines, states: &Words, holds: &PaneHolds, commit: &mut dyn FnMut()) -> bool {
+        with_no_prompt_in_flight(&lines.borrowed(), MOVING, &mut || {
+            observed_then_committed(states, holds, MOVING, &rests, commit);
+        })
+    }
+
+    /// R5's own finding: the pump finished a round for ANOTHER pane's delivery
+    /// while a move's slow commit ran, through the real `pane_is_busy`. The
+    /// earlier test looked at deliveries alone and stayed green over this.
+    #[test]
+    fn another_panes_pump_round_ends_during_a_slow_commit_through_the_hook_word() {
+        let (lines, states, holds) = (Lines::default(), words(), PaneHolds::default());
+        lines.register(OTHER_PANE, "other");
+        let mut round = None;
+        let (lines_ref, states_ref) = (&lines, &states);
+        std::thread::scope(|scope| {
+            move_with(&lines, &states, &holds, &mut || {
+                let (done, finished) = std::sync::mpsc::channel();
+                scope.spawn(move || {
+                    let _ = done.send(pump_round(lines_ref, states_ref, OTHER_PANE));
+                });
+                // The commit stands until the round ends or the wait runs out.
+                round = Some(finished.recv_timeout(NOT_WAITING));
+            });
+        });
+        assert_eq!(
+            round,
+            Some(Ok(Some(true))),
+            "the pump's round for another pane did not end while the commit ran"
+        );
+    }
+
+    /// The moving pane's own word waits the commit out, as it did under the
+    /// global lock; another pane's lands during it, and the commit reads the
+    /// word it observed from start to end.
+    #[test]
+    fn a_hook_word_waits_for_its_own_panes_commit_and_no_other_panes() {
+        use zerocode_core::hook::HookState::{Done, Working};
+        let (lines, states, holds) = (Lines::default(), words(), PaneHolds::default());
+        let mut seen = None;
+        let (states_ref, holds_ref) = (&states, &holds);
+        std::thread::scope(|scope| {
+            let (own_said, own_landed) = std::sync::mpsc::channel();
+            move_with(&lines, &states, &holds, &mut || {
+                let own_said = own_said.clone();
+                scope.spawn(move || {
+                    report_word(states_ref, holds_ref, MOVING, Working);
+                    let _ = own_said.send(());
+                });
+                let (other_said, other_landed) = std::sync::mpsc::channel();
+                scope.spawn(move || {
+                    report_word(states_ref, holds_ref, OTHER_PANE, Done);
+                    let _ = other_said.send(());
+                });
+                let other = other_landed.recv_timeout(NOT_WAITING).is_ok();
+                let own_early = own_landed.recv_timeout(STILL_WAITING).is_ok();
+                let word_now = states_ref
+                    .try_lock()
+                    .ok()
+                    .and_then(|held| held.get(&MOVING).map(|said| said.state));
+                seen = Some((other, own_early, word_now));
+            });
+            assert!(
+                own_landed.recv_timeout(NOT_WAITING).is_ok(),
+                "the word never landed after the commit"
+            );
+        });
+        assert_eq!(
+            seen,
+            Some((true, false, Some(Done))),
+            "(another pane's word landed, this pane's landed early, this pane's word) in the commit"
+        );
+        assert_eq!(states.lock().unwrap()[&MOVING].state, Working);
+    }
+
+    /// Every way a hold ends lets the waiting word go and leaves no mark: an
+    /// observation that says no, a commit that writes nothing (a refused
+    /// move), and a commit that unwinds. A timeout, not a hang, on a miss.
+    #[test]
+    fn a_hold_ends_on_a_refused_observation_a_failed_commit_and_a_panic() {
+        use zerocode_core::hook::HookState::Working;
+        for way in ["refused", "failed", "panicked"] {
+            let (lines, states, holds) = (Lines::default(), words(), PaneHolds::default());
+            let (states_ref, holds_ref) = (&states, &holds);
+            std::thread::scope(|scope| {
+                let (said, landed) = std::sync::mpsc::channel();
+                let spawn_word = || {
+                    let said = said.clone();
+                    scope.spawn(move || {
+                        report_word(states_ref, holds_ref, MOVING, Working);
+                        let _ = said.send(());
+                    });
+                };
+                let mut commits = 0;
+                let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    with_no_prompt_in_flight(&lines.borrowed(), MOVING, &mut || {
+                        observed_then_committed(
+                            &states,
+                            &holds,
+                            MOVING,
+                            &|_| way != "refused",
+                            &mut || {
+                                commits += 1;
+                                spawn_word();
+                                assert_ne!(way, "panicked", "the ledger's write failed");
+                            },
+                        );
+                    });
+                }));
+                assert_eq!(unwound.is_err(), way == "panicked", "{way}");
+                assert_eq!(commits, usize::from(way != "refused"), "{way}");
+                if way == "refused" {
+                    spawn_word();
+                }
+                assert!(
+                    landed.recv_timeout(NOT_WAITING).is_ok(),
+                    "the pane's word still waits after the {way} move"
+                );
+            });
+            assert!(!holds.holds(MOVING), "{way}: the pane stays held");
+            assert!(lines.moving.lock().unwrap().is_empty(), "{way}");
+            assert_eq!(states.lock().unwrap()[&MOVING].state, Working, "{way}");
+        }
+    }
+
+    /// Prompts meeting the move keep their order and go after it; another
+    /// pane's goes at once.
+    #[test]
+    fn prompts_keep_their_order_behind_a_move_and_another_panes_goes_at_once() {
+        let (lines, states, holds) = (Lines::default(), words(), PaneHolds::default());
+        let mut during = None;
+        let took = move_with(&lines, &states, &holds, &mut || {
+            lines.register(MOVING, "first");
+            lines.register(MOVING, "second");
+            lines.register(OTHER_PANE, "other");
+            during = Some((
+                lines.line(MOVING),
+                lines.queued(MOVING),
+                lines.line(OTHER_PANE),
+            ));
+        });
+        assert_eq!(during, Some((None, 2, Some("other".to_string()))));
+        assert!(took);
+        assert_eq!(lines.line(MOVING).as_deref(), Some("first"));
+        assert_eq!(lines.queued(MOVING), 1);
+    }
+
+    /// How long the pump's round for another pane stands still while a move
+    /// commits (t-75383), through deliveries and the hook word both, beside
+    /// the commit's own time: a row in a SQLite file in WAL with
+    /// `synchronous = FULL`, then a commit held at 50 ms for a slow disk. A
+    /// measurement, run by hand with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement: prints the pump's stop beside the commit's time"]
+    fn measure_the_pump_stop_during_a_slow_commit() {
+        const REAL: usize = 40;
+        const SLOW: usize = 10;
+        let root = tempfile::tempdir().expect("a scratch folder");
+        let ledger = rusqlite::Connection::open(root.path().join("ledger.sqlite")).unwrap();
+        ledger
+            .execute_batch(
+                "PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; \
+                 CREATE TABLE rests (worker INTEGER NOT NULL);",
+            )
+            .unwrap();
+        let (lines, states, holds) = (Lines::default(), words(), PaneHolds::default());
+        lines.register(OTHER_PANE, "other");
+        let (lines_ref, states_ref) = (&lines, &states);
+        let mut stops = [Vec::new(), Vec::new()];
+        let mut commits = [Vec::new(), Vec::new()];
+        for switch in 0..REAL + SLOW {
+            let kind = usize::from(switch >= REAL);
+            let mut took = None;
+            std::thread::scope(|scope| {
+                let mut pump = None;
+                move_with(&lines, &states, &holds, &mut || {
+                    let began = Instant::now();
+                    pump = Some(scope.spawn(move || {
+                        pump_round(lines_ref, states_ref, OTHER_PANE);
+                        began.elapsed()
+                    }));
+                    if kind == 0 {
+                        ledger
+                            .execute("INSERT INTO rests (worker) VALUES (?1)", [switch])
+                            .unwrap();
+                    } else {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    took = Some(began.elapsed());
+                });
+                stops[kind].push(pump.expect("the commit ran").join().unwrap());
+            });
+            commits[kind].push(took.expect("the commit ran"));
+        }
+        for (kind, name) in ["sqlite FULL", "held 50 ms"].iter().enumerate() {
+            stops[kind].sort();
+            commits[kind].sort();
+            let (stop, commit) = (&stops[kind], &commits[kind]);
+            eprintln!(
+                "{name}: commits={} commit median {:?}, longest {:?}; \
+                 the pump's round: median {:?}, longest {:?}",
+                commit.len(),
+                commit[commit.len() / 2],
+                commit[commit.len() - 1],
+                stop[stop.len() / 2],
+                stop[stop.len() - 1],
+            );
+        }
     }
 
     use zerocode_pty::ready::{Guard, PATIENCE, QUIET, Refusal, SUBMIT_GAP, TIMEOUT};
