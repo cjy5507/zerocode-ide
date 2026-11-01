@@ -30,7 +30,7 @@ fn the_command_guard_editor_reads_two_typed_questions_and_their_options() {
 }
 
 #[test]
-fn builtin_edits_delete_restore_and_reset_survive_settings_reloads() {
+fn builtin_edits_survive_settings_reloads_and_a_delete_is_final() {
     let folder = tempfile::tempdir().unwrap();
     let path = folder.path().join("settings.json");
     std::fs::write(&path, r#"{"theme":"dark"}"#).unwrap();
@@ -62,6 +62,7 @@ fn builtin_edits_delete_restore_and_reset_survive_settings_reloads() {
     );
     update_builtin_decision(&path, PLACEMENT.id, "delete", &saved, None).unwrap();
     let deleted = builtin::in_root(&document(&path), PLACEMENT.id).unwrap();
+    assert!(deleted.deleted);
     set_enabled(&path, false).unwrap();
     set_enabled(&path, true).unwrap();
     assert_eq!(PLACEMENT.mode_in(&document(&path)), JevMode::Off);
@@ -72,15 +73,35 @@ fn builtin_edits_delete_restore_and_reset_survive_settings_reloads() {
     assert!(
         builtin::in_root(&document(&path), PLACEMENT.id)
             .unwrap()
+            .deleted,
+        "turning every feature on again leaves a deleted decision deleted"
+    );
+    // No road leads back: restore is no action at all, and save and reset
+    // would each write the decision back (save clears the mark, reset removes
+    // the whole entry), so each is refused and the file stays as it was.
+    let before = std::fs::read(&path).unwrap();
+    let wording = builtin::Decision {
+        name: Some("Back again".into()),
+        ..builtin::Decision::default()
+    };
+    assert_eq!(
+        update_builtin_decision(&path, PLACEMENT.id, "restore", &deleted, None),
+        Err("builtin_decision_action".into())
+    );
+    for action in ["save", "reset"] {
+        assert_eq!(
+            update_builtin_decision(&path, PLACEMENT.id, action, &deleted, Some(wording.clone())),
+            Err("builtin_decision_deleted".into()),
+            "{action} on a deleted decision"
+        );
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(
+        builtin::in_root(&document(&path), PLACEMENT.id)
+            .unwrap()
             .deleted
     );
-    update_builtin_decision(&path, PLACEMENT.id, "restore", &deleted, None).unwrap();
-    let restored = builtin::in_root(&document(&path), PLACEMENT.id).unwrap();
-    assert_eq!(restored.question, saved.question);
-    assert_eq!(restored.mode, saved.mode);
-    update_builtin_decision(&path, PLACEMENT.id, "reset", &restored, None).unwrap();
-    assert!(builtin::in_root(&document(&path), PLACEMENT.id).is_none());
-    assert_eq!(PLACEMENT.mode_in(&document(&path)), PLACEMENT.recommended);
+    assert_eq!(PLACEMENT.mode_in(&document(&path)), JevMode::Off);
     assert_eq!(document(&path)["theme"], "dark");
 }
 
@@ -135,7 +156,7 @@ fn invalid_builtin_wording_writes_nothing_and_the_editor_reads_shipped_defaults(
 }
 
 #[test]
-fn typed_questions_survive_save_delete_restore_and_reset() {
+fn typed_questions_survive_save_and_reset_and_a_delete_keeps_them_out_of_reach() {
     use zerocode_core::jev::COMMAND_GUARD;
     let folder = tempfile::tempdir().unwrap();
     let path = folder.path().join("settings.json");
@@ -150,23 +171,33 @@ fn typed_questions_survive_save_delete_restore_and_reset() {
         .questions
         .insert(question.id.clone(), question.question);
     draft.mode = Some("auto".into());
-    update_builtin_decision(&path, COMMAND_GUARD.id, "save", &blank, Some(draft)).unwrap();
+    update_builtin_decision(&path, COMMAND_GUARD.id, "save", &blank, Some(draft.clone())).unwrap();
     let saved = builtin::in_root(&document(&path), COMMAND_GUARD.id).unwrap();
     assert_eq!(saved.mode.as_deref(), Some("shadow"));
     assert_eq!(document(&path)["smart"][COMMAND_GUARD.setting], "off");
     assert!(saved.rubric(COMMAND_GUARD.rubric_version).is_some());
-    update_builtin_decision(&path, COMMAND_GUARD.id, "delete", &saved, None).unwrap();
-    let deleted = builtin::in_root(&document(&path), COMMAND_GUARD.id).unwrap();
-    update_builtin_decision(&path, COMMAND_GUARD.id, "restore", &deleted, None).unwrap();
-    let restored = builtin::in_root(&document(&path), COMMAND_GUARD.id).unwrap();
-    assert_eq!(saved.questions, restored.questions);
     let before = std::fs::read(&path).unwrap();
-    let mut invalid = restored.clone();
+    let mut invalid = saved.clone();
     invalid.questions.get_mut(&question.id).unwrap().kind = builtin::QuestionKind::Choice;
     assert!(
-        update_builtin_decision(&path, COMMAND_GUARD.id, "save", &restored, Some(invalid)).is_err()
+        update_builtin_decision(&path, COMMAND_GUARD.id, "save", &saved, Some(invalid)).is_err()
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
-    update_builtin_decision(&path, COMMAND_GUARD.id, "reset", &restored, None).unwrap();
+    update_builtin_decision(&path, COMMAND_GUARD.id, "reset", &saved, None).unwrap();
     assert!(builtin::in_root(&document(&path), COMMAND_GUARD.id).is_none());
+    update_builtin_decision(&path, COMMAND_GUARD.id, "save", &blank, Some(draft)).unwrap();
+    let saved = builtin::in_root(&document(&path), COMMAND_GUARD.id).unwrap();
+    update_builtin_decision(&path, COMMAND_GUARD.id, "delete", &saved, None).unwrap();
+    let deleted = builtin::in_root(&document(&path), COMMAND_GUARD.id).unwrap();
+    assert!(deleted.deleted);
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(
+        update_builtin_decision(&path, COMMAND_GUARD.id, "restore", &deleted, None),
+        Err("builtin_decision_action".into())
+    );
+    assert_eq!(
+        update_builtin_decision(&path, COMMAND_GUARD.id, "reset", &deleted, None),
+        Err("builtin_decision_deleted".into())
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
