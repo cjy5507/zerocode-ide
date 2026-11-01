@@ -24819,6 +24819,9 @@ mod restore_door;
 /// not through a door that read it off a stored record, not off the file a
 /// visit reads, not into the file a save writes (`tests/restore_finished.rs`).
 mod restore_finished;
+/// t-68069: one folder, two conversations, two panes — each pane opens its own
+/// (`tests/one_folder.rs`).
+mod one_folder;
 /// t-9091: a closing window's beat leaves its sleepers to the next window
 /// (`tests/restore_goodbye.rs`).
 mod restore_goodbye;
