@@ -1278,10 +1278,18 @@ export async function testBoardSchedule(browser, origin, ok) {
           tasks: [carried("t-90003", now)], want: ["l61", "차례 기다림"], note: (note) => note.endsWith("시작 모름"), said: (said) => said === "대기 1개 · 시작 모름",
           task: "t-90003", why: (why) => why === "l61에 실림 → 차례 기다림 · 시작 모름" },
         /* ㉒ (t-84799 ⑥b): 끝 기록이 없는 단계만 있는 게이트는 통과한 단계가 0개다 — 「통과」가 아니다. */
-        { name: "㉒ l61의 모든 단계가 끝 기록 없음(lost) → 「통과」가 아니라 끝 기록 없음, 통과 단계 0개", jobs: [
+        { name: "㉒ l61의 모든 단계가 끝 기록 없음(lost) → 「통과」가 아니라 끝 기록 없음, 통과 단계 0개 · 걸림도 말하지 않음 · 실린 과업 행도 같은 말(r2 P2-1·P3-2)", jobs: carry([
           l61r("g1-build", "lost", at(30), null, { queued_ms: at(31) }), l61r("g2-tests", "lost", at(20), null, { queued_ms: at(31) })],
-        paused: false, want: ["l61", "끝 기록 없음"], note: (note) => !note.includes("통과"), state: "idle",
-        said: (said) => said === "끝 기록 없음 2개" },
+        l61r("g1-build", "lost", at(30), null, { queued_ms: at(31) }).name, "t-90004"),
+        paused: false, want: ["l61", "끝 기록 없음"], note: (note) => !note.includes("통과") && !note.includes("걸림"), state: "idle",
+        said: (said) => said === "끝 기록 없음 2개", tasks: [carried("t-90004", now - 40 * minute)], task: "t-90004",
+        why: (why) => why === "l61에 실림 → 끝 기록 없음", etaSub: (etaSub) => etaSub === "" },
+        /* ㉓ (r2 P3-3): 가장 새 게이트 l61이 끝 기록 없이 시작만 했으면 안내판은 그 이야기를 말한다 — 더 옛 l60의 「통과」가 아니라. */
+        { name: "㉓ l60은 통과, 더 나중에 시작한 l61은 끝 기록 없음 → 안내판 게이트 줄은 l61 끝 기록 없음(l60 통과가 아님) · 로그로 가는 길도 l61의 단계", jobs: [
+          job("0-1792543000-run11955-l60r-g1-build", "passed", at(90), at(80), "g1-build", { gate: "l60", queued_ms: at(91) }),
+          l61r("g1-build", "lost", at(30), null, { queued_ms: at(31) })],
+        paused: false, want: ["l61", "끝 기록 없음"], note: (note) => !note.includes("통과") && !note.includes("걸림"),
+        state: "idle", act: (act) => act?.log?.job?.includes("l61r") === true },
       ];
       const choice = { zoom: "now", folded: new Set(), opened: new Set(), log: null };
       return cases.map((one) => {
@@ -1292,11 +1300,12 @@ export async function testBoardSchedule(browser, origin, ok) {
         const task = one.task ? model.groups.find((group) => group.id === "workers")?.rows.find((row) => row.id === one.task) ?? null : null;
         const ok = got.name === one.want[0] && got.word === one.want[1] && (one.note ? one.note(got.note) : true)
           && (one.said ? head !== null && one.said(head.said) : true) && (one.why ? task !== null && one.why(task.why) : true)
-          && (one.state ? head?.state === one.state : true);
-        return { name: one.name, want: one.want, got: [got.name, got.word, got.note, head?.said ?? null, task?.why ?? null], ok };
+          && (one.state ? head?.state === one.state : true) && (one.etaSub ? one.etaSub(head?.etaSub) : true)
+          && (one.act ? one.act(got.act) : true);
+        return { name: one.name, want: one.want, got: [got.name, got.word, got.note, head?.said ?? null, task?.why ?? null, head?.etaSub ?? null], ok };
       });
     }, SCHEDULE_NOW);
-    ok("the board's gate line follows one rule in all twenty-two cases — running first, then the gate whose latest step began last (a gate or a step run again is its new attempt; on two lanes the later start, not the later end), then the one queued last; a tie is decided, and a waiting gate's row, its line and the task it carries say one present-attempt time, never a past moment as an expected start",
+    ok("the board's gate line follows one rule in all twenty-three cases — running first, then the gate whose latest step began last (a gate or a step run again is its new attempt; on two lanes the later start, not the later end), then the one queued last; a tie is decided, and a waiting gate's row, its line and the task it carries say one present-attempt time, never a past moment as an expected start",
       gateTable.every((row) => row.ok), JSON.stringify(gateTable.filter((row) => !row.ok)));
 
     /* ---- 비어 있어도 넉 줄: 레인도 게이트도 과업도 없는 답 ---- */
@@ -1327,6 +1336,21 @@ export async function testBoardSchedule(browser, origin, ok) {
     ok("with no lane ended in the range the first line names the answer's last lane, and says nothing of one when the answer has none",
       /^마지막 v1\.1\.82 레인 \d{2}:\d{2} · /.test(outsideLane.told) && outsideLane.act?.log?.lane === "3e13aaef" && outsideLane.silent === "이 범위에 없음",
       JSON.stringify(outsideLane));
+
+    /* ---- r2 P3-1: 조용한 동안 창이 옛 답을 그대로 쓰면 `last_lane`이 비어 있다 — 그 답의 레인이 범위 밖으로 밀려도 첫 줄은 그 답의 가장 최근 끝난 레인을 말한다 ---- */
+    const quietLane = await page.evaluate((now) => {
+      const base = boardScheduleAnswer;
+      const asked = (at) => boardScheduleModel({ ...base, jobs: [], last_lane: undefined }, [], at,
+        { zoom: "now", folded: new Set(), opened: new Set(), log: null }, 900, false, null, { hourPx: 120, tickPx: 16, leastPx: 24 });
+      // Thirty days on: every lane of the held answer is far behind the range, and the answer carries no `last_lane`.
+      const late = asked(now + 30 * 24 * 3_600_000);
+      const ended = base.lanes.filter((run) => !run.running).sort((a, b) => b.end_ms - a.end_ms)[0];
+      return { told: late.board.lines[0].note, act: late.board.lines[0].act, lanes: late.groups.find((group) => group.id === "lanes").rows.length,
+        sha: ended?.sha ?? null };
+    }, SCHEDULE_NOW);
+    ok("a held answer whose lanes fell out of the range, with no `last_lane` of its own, still has the first line name its newest ended lane",
+      quietLane.lanes === 0 && /^마지막 v1\.1\.\d+ 레인 \d{2}:\d{2} · /.test(quietLane.told) && quietLane.act?.log?.lane === quietLane.sha && quietLane.sha !== null,
+      JSON.stringify(quietLane));
 
     // The same empty answer drawn (review P3-9): the lines, the columns' heads and the empty-future line on the screen.
     const emptyDrawn = await page.evaluate(async (now) => {

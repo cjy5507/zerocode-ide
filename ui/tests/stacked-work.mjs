@@ -139,6 +139,8 @@ export async function testStackedWork(browser, origin, ok) {
         kind, gate: "l61", part: "r", what: null, expected: { secs: 300, samples: 5 } });
       boardScheduleAnswer = { revision: 7, unchanged: false, read_ms: now, line: { found: true, runner_lanes: [1], paused: false }, lanes: [],
         jobs: [step("g1-build", "passed", now - 18 * minute, now - 12 * minute), step("g2-tests", "failed", now - 12 * minute, now - 6 * minute)] };
+      // The answer's own arrival time is what keeps the line honest (r2 P2-2): this one came just now.
+      boardScheduleAnsweredAt = now;
       const tab = document.getElementById("activity-pile-tab");
       tab.click();
       await window.__PAINTED__();
@@ -153,6 +155,61 @@ export async function testStackedWork(browser, origin, ok) {
       "the gate line of 쌓인 일 names the gate the schedule's last answer holds and what became of it — a dash only without one",
       gate.gate.includes("l61") && gate.gate.includes("실패") && !gate.gate.includes("—") && gate.dash.includes("—"),
       JSON.stringify(gate),
+    );
+
+    /* r2 P2-2: the line must not tell an old answer as the present. With the panel up the schedule is asked again (at its
+     * own pace, not on every paint); until the new answer comes, an answer held for minutes says a dash — not a gate
+     * "running" that ended hours ago — and when the answer arrives the panel is drawn again without anyone painting it. */
+    const fresh = await page.evaluate(async () => {
+      const seen = {};
+      const now = Date.now();
+      const minute = 60_000;
+      const step = (kind, state, start, end, queued) => ({ name: `0-${Math.round(queued / 1000)}-run1-l61r-${kind}`, who: "run1-l61r", state,
+        class: "first", lane: 1, cap_secs: 600, queued_ms: queued, start_ms: start, end_ms: end,
+        secs: start && end ? Math.round((end - start) / 1000) : null, rc: state === "failed" ? 1 : state === "passed" ? 0 : null,
+        kind, gate: "l61", part: "r", what: null, expected: { secs: 300, samples: 5 } });
+      const line = { found: true, runner_lanes: [1], paused: false };
+      // Five hours ago the gate was running; the held answer says so and was received five hours ago.
+      boardScheduleAnswer = { revision: 11, unchanged: false, read_ms: now - 300 * minute, line, lanes: [],
+        jobs: [step("g1-build", "running", now - 301 * minute, null, now - 302 * minute)] };
+      boardScheduleAnsweredAt = now - 300 * minute;
+      boardScheduleAskedAt = 0;
+      const asked = [];
+      let release = null;
+      window.__ANSWER__.schedule_timeline = (args) => { asked.push(args); return new Promise((done) => { release = done; }); };
+      const gateText = () => document.querySelector("#activity-pile .pile-gate")?.textContent.replace(/\s+/g, " ").trim() ?? "";
+      const frames = async (count) => { for (let i = 0; i < count; i += 1) await new Promise((done) => requestAnimationFrame(done)); };
+      // Leave the tab and come back: the panel is drawn from nothing, with the old answer in hand.
+      document.getElementById("activity-files-tab")?.click();
+      await window.__PAINTED__();
+      document.getElementById("activity-pile-tab").click();
+      await window.__PAINTED__();
+      seen.askedOnOpen = asked.length;
+      seen.staleText = gateText();
+      for (let i = 0; i < 4; i += 1) paintStackedWork();
+      seen.askedAfterRepaints = asked.length;
+      // The answer comes: a gate that failed since. No paint is called from here.
+      release({ revision: 12, unchanged: false, read_ms: Date.now(), line, lanes: [],
+        jobs: [step("g1-build", "failed", now - 301 * minute, now - 295 * minute, now - 302 * minute)] });
+      await frames(6);
+      seen.freshText = gateText();
+      seen.answeredNow = Math.abs(Date.now() - boardScheduleAnsweredAt) < 5_000;
+      // An answer that stays silent (no change) is still an answer received: the line keeps its words.
+      boardScheduleAskedAt = 0;
+      window.__ANSWER__.schedule_timeline = (args) => { asked.push(args); return { revision: 12, unchanged: true, read_ms: Date.now() }; };
+      refreshBoardSchedule();
+      await frames(6);
+      seen.afterUnchanged = gateText();
+      delete window.__ANSWER__.schedule_timeline;
+      boardScheduleAnswer = null;
+      return seen;
+    });
+    ok(
+      "쌓인 일 asks the schedule again while it is up (once per beat, not per paint), says a dash for an answer held for hours, and draws again when the new answer arrives",
+      fresh.askedOnOpen === 1 && fresh.askedAfterRepaints === 1 && fresh.staleText.includes("—") && !fresh.staleText.includes("도는 중") &&
+        fresh.freshText.includes("l61") && fresh.freshText.includes("실패") && !fresh.freshText.includes("—") && fresh.answeredNow &&
+        fresh.afterUnchanged.includes("l61") && fresh.afterUnchanged.includes("실패"),
+      JSON.stringify(fresh),
     );
   } finally { await page.close(); }
 }
