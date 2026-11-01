@@ -1290,15 +1290,31 @@ pub(crate) fn write_keychain_service(service: &str, credentials: &str) -> Result
         // Read it back. A cut login planted by a road nobody compared stood for
         // three days from 2026-09-06, and the line limit this road lives under is
         // no promise of Apple's. Sizes only in the words: a value that differs is
-        // still most of a secret. A read that fails proves nothing about the
-        // item, so that leaves it standing.
-        let held = security_command(
+        // still most of a secret.
+        //
+        // A read that fails proves nothing against an add that landed, so the
+        // write stands and says so. Answering "not written" here sent a switch back
+        // to the account before with the new login left in the keychain, and the
+        // next launch filed that login under the account before. A cut this read
+        // missed heals by itself: the next launch finds a damaged item and writes
+        // it again.
+        let held = match security_command(
             &["find-generic-password", "-s", service, "-a", &user, "-w"],
             None,
-        )
-        .map_err(|error| {
-            format!("키체인에 쓴 자격증명을 다시 읽지 못했습니다: {service} — {error}")
-        })?;
+        ) {
+            Ok(held) => held,
+            Err(error) if error.contains(NO_SUCH_ITEM) => {
+                return Err(format!(
+                    "키체인에 쓴 자격증명을 다시 읽어 보니 항목이 없습니다: {service} — {error}"
+                ));
+            }
+            Err(error) => {
+                eprintln!(
+                    "zerocode-shell: 키체인 {service}에 쓴 자격증명을 다시 읽지 못했습니다. 쓰기는 끝났습니다: {error}"
+                );
+                return Ok(());
+            }
+        };
         if held == credentials {
             return Ok(());
         }
@@ -1611,7 +1627,9 @@ fn materialize_into(
     // 3. And the keychain, or the file goes back.
     if let Err(error) = write_keychain(home, &credentials) {
         // The undo restores the FILE, which is the only half this window wrote
-        // before the keychain refused.
+        // before the keychain refused: a refusal means this login is not standing
+        // in the keychain, since an add that landed and could not be read back
+        // answers Ok.
         let undone = already_on_file
             || match on_file.as_deref() {
                 Some(previous) => write_private(&live, previous).is_ok(),
