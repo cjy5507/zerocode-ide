@@ -57,7 +57,7 @@ const PRIVATE_MODE: u32 = 0o600;
 #[cfg(unix)]
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 
-const INDEX: &str = "index.json";
+pub(crate) const INDEX: &str = "index.json";
 const DEFINITIONS: &str = "definitions";
 const TRASH: &str = "trash";
 const LOCK: &str = ".lock";

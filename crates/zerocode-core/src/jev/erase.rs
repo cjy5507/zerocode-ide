@@ -5,16 +5,22 @@
 //! seat stays deleted. Deleting a person's own decision removes only its rows,
 //! since those decisions share one ledger.
 
-use std::fs;
+use std::collections::BTreeSet;
+use std::fs::{self, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::custom::store;
 use super::threshold::{SEAT_KEY, THRESHOLDS_FILE};
 use super::{
     CUSTOM_DECISIONS, JEV_USES, JevUse, ROUTING, SMART_SETTINGS_KEY, STALL, builtin, count,
 };
+use crate::held_file_lock::HeldFileLock;
 use crate::settings_file_lock::SettingsFileLock;
 
 const SETTINGS_FILE: &str = "settings.json";
@@ -46,6 +52,17 @@ const KEPT_SEATS: [(&JevUse, AfterLift); 2] = [
 ];
 /// Set under `smart` once [`KEPT_SEATS`] have had their one lift.
 const LIFTED_KEY: &str = "keptSeatsLifted";
+/// Set under `smart` once the first start has erased what older deletes left.
+const SWEPT_KEY: &str = "deletedRecordsSwept";
+/// The file under a zo home naming what a delete could not erase. Only a
+/// delete that failed writes it, so a usual start asks one question of the
+/// disk and reads no evidence folder: this machine has 2,540 of them, 205 ms a
+/// pass with a warm cache (11-01).
+pub const PENDING_FILE: &str = "jev-forget-pending.json";
+/// How long a writer of the shared ledger waits for another. Each holds it for
+/// one append or one rewrite.
+const SHARED_LEDGER_WAIT: Duration = Duration::from_secs(2);
+const SHARED_LEDGER_POLL: Duration = Duration::from_millis(5);
 
 /// Remove the records of built-in decision `id` from the zo home holding
 /// `settings`: its ledger in every evidence folder, and its line in the act
@@ -63,15 +80,19 @@ pub fn forget_seat(settings: &Path, id: &str) -> io::Result<usize> {
     let Some(home) = settings.parent() else {
         return Ok(0);
     };
+    forget_in(&evidence_folders(home), seat)
+}
+
+fn forget_in(folders: &[PathBuf], seat: &JevUse) -> io::Result<usize> {
     let mut removed = 0;
     let mut failed = None;
-    for folder in evidence_folders(home) {
+    for folder in folders {
         match fs::remove_file(folder.join(seat.ledger)) {
             Ok(()) => removed += 1,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => failed = Some(error),
         }
-        if let Err(error) = drop_threshold_line(&folder.join(THRESHOLDS_FILE), id) {
+        if let Err(error) = drop_threshold_line(&folder.join(THRESHOLDS_FILE), seat.id) {
             failed = Some(error);
         }
     }
@@ -89,12 +110,254 @@ pub fn forget_custom(home: &Path, id: &str) -> io::Result<usize> {
     let mut removed = 0;
     let mut failed = None;
     for folder in evidence_folders(home) {
-        match drop_custom_rows(&folder.join(CUSTOM_DECISIONS.ledger), id) {
+        match drop_custom_rows(&folder.join(CUSTOM_DECISIONS.ledger), |row| row == id) {
             Ok(rows) => removed += rows,
             Err(error) => failed = Some(error),
         }
     }
     failed.map_or(Ok(removed), Err)
+}
+
+/// The second half of the window's delete of built-in decision `id`. The mark
+/// is already written and the list already changed, so a record that will not
+/// go does not undo or fail the delete: it is logged and owed to the next start.
+pub fn seat_deleted(settings: &Path, id: &str) {
+    if let Err(error) = forget_seat(settings, id)
+        && let Some(home) = settings.parent()
+    {
+        owe(home, Owed::Seat(id), &error);
+    }
+}
+
+/// The second half of the window's delete of the person's decision `id`, on
+/// the same terms as [`seat_deleted`].
+pub fn decision_deleted(home: &Path, id: &str) {
+    if let Err(error) = forget_custom(home, id) {
+        owe(home, Owed::Decision(id), &error);
+    }
+}
+
+/// What the window's start owes the records, off the interface thread. Not
+/// after a failed lift: a mark about to go must not cost its seat's records.
+///
+/// The first start erases what every marked seat left, and the rows of
+/// decisions the store no longer keeps. Every later one re-erases only what
+/// [`PENDING_FILE`] names, and is one look at that file when there is none.
+pub fn tidy_at_start(settings: &Path, lifted: bool) {
+    if !lifted {
+        return;
+    }
+    let Some(home) = settings.parent() else {
+        return;
+    };
+    settle_owed(settings, home);
+    let Ok(root) = read_settings(settings) else {
+        return;
+    };
+    if root
+        .get(SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get(SWEPT_KEY))
+        .is_some()
+    {
+        return;
+    }
+    let folders = evidence_folders(home);
+    for seat in JEV_USES.iter().filter(|seat| is_deleted(&root, seat.id)) {
+        if let Err(error) = forget_in(&folders, seat) {
+            owe(home, Owed::Seat(seat.id), &error);
+        }
+    }
+    if sweep_decision_rows(home, &folders)
+        && let Err(error) = record_swept(settings)
+    {
+        log_failure("record the first tidy", &error);
+    }
+}
+
+/// Take from every ledger the rows of decisions the store no longer keeps.
+/// Whether this is finished: rows the store could not judge, or a ledger that
+/// would not be rewritten, leave it for the next start. A home with no index
+/// has nothing to judge by and nothing that would change, so that is finished,
+/// and its rows stay.
+fn sweep_decision_rows(home: &Path, folders: &[PathBuf]) -> bool {
+    let ledgers: Vec<PathBuf> = folders
+        .iter()
+        .map(|folder| folder.join(CUSTOM_DECISIONS.ledger))
+        .filter(|ledger| ledger.exists())
+        .collect();
+    if ledgers.is_empty() || !store::root(home).join(store::INDEX).is_file() {
+        return true;
+    }
+    let kept: BTreeSet<String> = match store::list(home) {
+        Ok(entries) => entries.into_iter().map(|entry| entry.id).collect(),
+        Err(error) => {
+            log_failure("read the decision store", &error);
+            return false;
+        }
+    };
+    let mut finished = true;
+    for ledger in ledgers {
+        if let Err(error) = drop_custom_rows(&ledger, |row| !kept.contains(row)) {
+            log_failure("rewrite a decision ledger", &error);
+            finished = false;
+        }
+    }
+    finished
+}
+
+fn is_deleted(root: &Value, id: &str) -> bool {
+    id != CUSTOM_DECISIONS.id && builtin::in_root(root, id).is_some_and(|seat| seat.deleted)
+}
+
+fn record_swept(settings: &Path) -> io::Result<()> {
+    let _lock = SettingsFileLock::acquire(settings)?;
+    let mut root = read_settings(settings)?;
+    let Some(smart) = smart_of(&mut root) else {
+        return Ok(());
+    };
+    smart.insert(SWEPT_KEY.to_string(), Value::Bool(true));
+    write_settings(settings, &root)
+}
+
+/// What [`PENDING_FILE`] holds.
+#[derive(Default, Serialize, Deserialize)]
+struct Pending {
+    #[serde(default)]
+    seats: BTreeSet<String>,
+    #[serde(default)]
+    decisions: BTreeSet<String>,
+}
+
+enum Owed<'id> {
+    Seat(&'id str),
+    Decision(&'id str),
+}
+
+fn log_failure(what: &str, error: &io::Error) {
+    eprintln!("jev: could not {what}: {error}");
+}
+
+fn owe(home: &Path, owed: Owed<'_>, error: &io::Error) {
+    log_failure("erase a deleted decision's records", error);
+    let noted = change_pending(home, |pending| {
+        match owed {
+            Owed::Seat(id) => pending.seats.insert(id.to_string()),
+            Owed::Decision(id) => pending.decisions.insert(id.to_string()),
+        };
+    });
+    if let Err(error) = noted {
+        log_failure("note what a delete left", &error);
+    }
+}
+
+fn read_pending(path: &Path) -> io::Result<Pending> {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Pending::default()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Change the note under its lock; a note left with nothing to name goes.
+fn change_pending(home: &Path, change: impl FnOnce(&mut Pending)) -> io::Result<()> {
+    let path = home.join(PENDING_FILE);
+    let _lock = SettingsFileLock::acquire(&path)?;
+    let mut pending = read_pending(&path)?;
+    change(&mut pending);
+    if pending.seats.is_empty() && pending.decisions.is_empty() {
+        return match fs::remove_file(&path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        };
+    }
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let bytes = serde_json::to_vec(&pending).map_err(io::Error::other)?;
+    let written = fs::write(&temp, bytes).and_then(|()| fs::rename(&temp, &path));
+    if written.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    written
+}
+
+/// Erase again what [`PENDING_FILE`] names, and strike what went. A seat no
+/// longer deleted and a decision the store keeps again owe nothing; a decision
+/// stays owed while the store cannot say.
+fn settle_owed(settings: &Path, home: &Path) {
+    let path = home.join(PENDING_FILE);
+    if !path.exists() {
+        return;
+    }
+    let (pending, root) = match (read_pending(&path), read_settings(settings)) {
+        (Ok(pending), Ok(root)) => (pending, root),
+        (Err(error), _) | (_, Err(error)) => {
+            log_failure("read what a delete left", &error);
+            return;
+        }
+    };
+    let settled_seats: BTreeSet<String> = pending
+        .seats
+        .into_iter()
+        .filter(|id| !is_deleted(&root, id) || forget_seat(settings, id).is_ok())
+        .collect();
+    let kept = store::list(home);
+    let settled_decisions: BTreeSet<String> = pending
+        .decisions
+        .into_iter()
+        .filter(|id| match &kept {
+            Ok(entries) if entries.iter().any(|entry| entry.id == **id) => true,
+            Ok(_) => forget_custom(home, id).is_ok(),
+            Err(_) => false,
+        })
+        .collect();
+    let struck = change_pending(home, |pending| {
+        pending.seats.retain(|id| !settled_seats.contains(id));
+        pending
+            .decisions
+            .retain(|id| !settled_decisions.contains(id));
+    });
+    if let Err(error) = struck {
+        log_failure("strike what a start erased", &error);
+    }
+}
+
+/// Hold while appending to or rewriting a copy of the ledger every person's
+/// decision shares: a rewrite replaces the file whole, and a row appended
+/// between its read and its rename would go with the old file. `None` for any
+/// other ledger, each of which only ever goes whole.
+///
+/// # Errors
+/// A lock that cannot be opened, or that stays busy past
+/// [`SHARED_LEDGER_WAIT`] (`WouldBlock`).
+pub fn shared_ledger_lock(ledger: &Path) -> io::Result<Option<HeldFileLock>> {
+    let Some(name) = ledger
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| *name == CUSTOM_DECISIONS.ledger)
+    else {
+        return Ok(None);
+    };
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(ledger.with_file_name(format!("{name}.lock")))?;
+    let until = Instant::now() + SHARED_LEDGER_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(HeldFileLock::locked(file))),
+            Err(TryLockError::WouldBlock) if Instant::now() < until => {
+                thread::sleep(SHARED_LEDGER_POLL);
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "another writer holds the decision ledger",
+                ));
+            }
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+    }
 }
 
 /// Whether a row may be appended to `ledger`: false while the seat that keeps
@@ -231,7 +494,13 @@ fn replace_keeping_mode(path: &Path, bytes: &[u8]) -> io::Result<()> {
     written
 }
 
-fn drop_custom_rows(ledger: &Path, id: &str) -> io::Result<usize> {
+/// Rewrite `ledger` without the rows whose decision `goes` says should. A
+/// missing ledger takes no lock, so no lock file is left where none stood.
+fn drop_custom_rows(ledger: &Path, goes: impl Fn(&str) -> bool) -> io::Result<usize> {
+    if !ledger.exists() {
+        return Ok(0);
+    }
+    let _lock = shared_ledger_lock(ledger)?;
     let text = match fs::read(ledger) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
@@ -240,9 +509,11 @@ fn drop_custom_rows(ledger: &Path, id: &str) -> io::Result<usize> {
     let mut kept = String::with_capacity(text.len());
     let mut removed = 0;
     for line in text.split_inclusive('\n') {
-        let names_it = serde_json::from_str::<Value>(line)
-            .ok()
-            .is_some_and(|row| row.get(CUSTOM_ROW_ID).and_then(Value::as_str) == Some(id));
+        let names_it = serde_json::from_str::<Value>(line).ok().is_some_and(|row| {
+            row.get(CUSTOM_ROW_ID)
+                .and_then(Value::as_str)
+                .is_some_and(&goes)
+        });
         if names_it {
             removed += 1;
         } else {
@@ -346,18 +617,6 @@ fn home_of(ledger: &Path) -> Option<PathBuf> {
     }
     None
 }
-
-// RED STUBS BEGIN
-const SWEPT_KEY: &str = "deletedRecordsSwept";
-pub const PENDING_FILE: &str = "jev-forget-pending.json";
-pub fn seat_deleted(settings: &Path, id: &str) {
-    let _ = forget_seat(settings, id);
-}
-pub fn decision_deleted(home: &Path, id: &str) {
-    let _ = forget_custom(home, id);
-}
-pub fn tidy_at_start(_settings: &Path, _lifted: bool) {}
-// RED STUBS END
 
 #[cfg(test)]
 mod tests;

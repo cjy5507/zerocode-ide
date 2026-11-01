@@ -1061,7 +1061,7 @@ pub fn update_builtin_decision(
     })?;
     // After the settings lock is back: the seat's records go with the mark.
     if action == "delete" {
-        zerocode_core::jev::erase::forget_seat(path, id).map_err(|error| error.to_string())?;
+        zerocode_core::jev::erase::seat_deleted(path, id);
     }
     Ok(())
 }
@@ -1924,7 +1924,7 @@ pub fn check_custom_decision(draft: DecisionDraft) -> DraftCheck {
 /// Whatever keeps the store from it.
 pub fn delete_custom_decision_at(home: &Path, id: &str) -> Result<(), custom::store::Error> {
     custom::store::delete(home, id)?;
-    zerocode_core::jev::erase::forget_custom(home, id)?;
+    zerocode_core::jev::erase::decision_deleted(home, id);
     Ok(())
 }
 

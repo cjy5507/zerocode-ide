@@ -74,6 +74,7 @@ pub fn append_shadow_row<T: Serialize>(path: &Path, row: &T, max_bytes: u64) -> 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let _shared = zerocode_core::jev::erase::shared_ledger_lock(path)?;
     if fs::metadata(path).is_ok_and(|meta| meta.len() > max_bytes) {
         keep_newer_half(path)?;
     }
