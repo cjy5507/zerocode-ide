@@ -7289,6 +7289,88 @@ async fn e2e_a_pane_closed_while_zo_idles_ends_zo_without_a_hang_up_signal() {
     );
 }
 
+/// The real zo, the real channel: every usage frame of a turn names the window
+/// `session.info` and `session_status` name, in tokens, and after `/model` to a
+/// model with another window every later usage frame names the new one. The
+/// window's composer chip draws its share from the usage frame (t-85257).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_usage_frame_names_the_window_the_session_status_names() {
+    fn context_windows(frames: &[serde_json::Value], kind: &str) -> Vec<Option<u64>> {
+        frames
+            .iter()
+            .filter(|frame| frame["type"] == kind)
+            .map(|frame| frame["context_window"].as_u64())
+            .collect()
+    }
+
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("the answer stands")
+        .await
+        .expect("start text script");
+    let address = layout.root.path().join("usage-window.addr");
+    let address_text = address.to_string_lossy().into_owned();
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &interactive_args(),
+        &[("ZO_EVENTS_ADDR_FILE", address_text.as_str()), ("ZO_SERVE_TOKEN", HELPER_STOP_TOKEN)],
+    )
+    .expect("spawn zo in PTY");
+    run.wait_for("directory:", TEST_TIMEOUT);
+    let mut client = connect_to_addr_file(&address, HELPER_STOP_TOKEN).await;
+    let info = client.call(method::INFO, serde_json::json!({})).await.expect("session.info");
+    let session = info["id"].as_str().expect("the channel names its session").to_string();
+    let first_window = info["context_window"].as_u64().expect("session.info names the window");
+    let (frames, watcher) = watch_frames(&address, &session).await;
+
+    run.send(b"answer once\r").expect("send the first prompt");
+    wait_for_turn_ends(&frames, 1).await;
+    let first_turn = frames.lock().unwrap().clone();
+    let first_usage = context_windows(&first_turn, "usage");
+    assert!(!first_usage.is_empty(), "a turn sends a usage frame: {first_turn:?}");
+    assert!(
+        first_usage.iter().all(|window| *window == Some(first_window)),
+        "session.info says {first_window}, the usage frames say {first_usage:?}"
+    );
+
+    wait_until_quiet(&run, Duration::from_millis(300), TEST_TIMEOUT);
+    run.send(b"/model haiku\r").expect("send /model");
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    let second_window = loop {
+        let moved = frames.lock().unwrap().iter().rev().find_map(|frame| {
+            let haiku = frame["type"] == "session_status"
+                && frame["model"].as_str().is_some_and(|model| model.contains("haiku"));
+            if haiku { frame["context_window"].as_u64() } else { None }
+        });
+        if let Some(window) = moved {
+            break window;
+        }
+        assert!(Instant::now() < deadline, "no status frame named the new model");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_ne!(second_window, first_window, "the two models must differ to prove anything");
+
+    wait_until_quiet(&run, Duration::from_millis(300), TEST_TIMEOUT);
+    let before_second_turn = frames.lock().unwrap().len();
+    run.send(b"answer again\r").expect("send the second prompt");
+    wait_for_turn_ends(&frames, 2).await;
+    let second_turn = frames.lock().unwrap()[before_second_turn..].to_vec();
+    let second_usage = context_windows(&second_turn, "usage");
+    assert!(!second_usage.is_empty(), "a turn sends a usage frame: {second_turn:?}");
+    assert!(
+        second_usage.iter().all(|window| *window == Some(second_window)),
+        "session_status says {second_window}, the usage frames say {second_usage:?}"
+    );
+
+    let last_info = client.call(method::INFO, serde_json::json!({})).await.expect("session.info");
+    assert_eq!(last_info["context_window"].as_u64(), Some(second_window));
+    watcher.abort();
+    let _ = run.finish();
+}
+
 /// How long a command a cancelled turn ends has to be gone in.
 const CHILD_GONE: Duration = Duration::from_secs(5);
 
