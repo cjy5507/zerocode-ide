@@ -244,6 +244,24 @@ async function testBranchLineRoom(browser, origin, ok) {
     for (const width of [1280, 1000]) {
       await page.setViewportSize({ width, height: 900 });
       await frames(page);
+      // The sidebar's width is a transition (`--panel-fold-duration`, 280 → 240 px at 1000 px): measured while it
+      // runs, the chip read 4 times in 2 as whole at a width the sidebar never stays at (t-84799 r3). It is
+      // measured once the sidebar's box has stood still for three frames, not after a time.
+      await page.evaluate(() => new Promise((done) => {
+        const side = document.querySelector(".threads");
+        let last = -1;
+        let still = 0;
+        let frame = 0;
+        const step = () => {
+          const now = side.getBoundingClientRect().width;
+          still = now === last ? still + 1 : 0;
+          last = now;
+          frame += 1;
+          if (still >= 3 || frame >= 120) done();
+          else requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+      }));
       const rows = await page.evaluate(() => [...document.querySelectorAll(".wt-row")].flatMap((row) => {
         const line = row.querySelector(".wt-titlebox > .wt-branch");
         if (!line || line.hidden || line.offsetParent === null) return [];
