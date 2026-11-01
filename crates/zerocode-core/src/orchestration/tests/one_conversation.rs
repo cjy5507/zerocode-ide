@@ -24,12 +24,17 @@ fn session(id: &str) -> ProviderSession {
 /// A claude worker seated in the shared checkout, its pane having reported
 /// `id` — answers the worker and its pane.
 fn a_worker_on(bench: &mut Bench, id: &str) -> (String, String) {
+    a_worker_in(bench, id, CHECKOUT)
+}
+
+/// [`a_worker_on`], seated in a folder of the test's own.
+fn a_worker_in(bench: &mut Bench, id: &str, checkout: &str) -> (String, String) {
     let task = bench.json("task-create --spec shared-folder")["taskId"]
         .as_str()
         .expect("a task")
         .to_string();
     let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
-    assert!(bench.ledger.worker_seated(("team-1", &pane), CHECKOUT));
+    assert!(bench.ledger.worker_seated(("team-1", &pane), checkout));
     assert!(
         bench
             .ledger
@@ -226,6 +231,84 @@ fn a_worker_seated_in_a_neighbours_checkout_is_told_who_it_shares_it_with() {
             "a {gone:?} worker holds no pane to share"
         );
     }
+}
+
+/// One folder spelled two ways is still one folder (t-85366): a trailing
+/// slash, whether or not the folder is there to ask, and a link to it.
+#[test]
+fn a_neighbour_in_one_folder_is_found_however_the_folder_is_spelled() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name one-folder");
+    let (first, _) = a_worker_on(&mut bench, MINE);
+    let (second, _) = a_worker_in(&mut bench, THEIRS, &format!("{CHECKOUT}/"));
+    assert_eq!(
+        bench
+            .ledger
+            .workers_sharing_checkout(&format!("{CHECKOUT}/"), &second)
+            .first()
+            .map(|(_, worker, _)| worker.clone()),
+        Some(first.clone()),
+        "a slash on the end of what was asked made two folders"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .workers_sharing_checkout(CHECKOUT, &first)
+            .first()
+            .map(|(_, worker, _)| worker.clone()),
+        Some(second),
+        "a slash on the end of a row's folder that is not there made two folders"
+    );
+    assert!(
+        bench
+            .ledger
+            .workers_sharing_checkout("/wt/main-too", &first)
+            .is_empty(),
+        "a folder whose name starts the same was called the same folder"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_neighbour_is_found_through_a_link_to_its_folder() {
+    let root = tempfile::tempdir().expect("a scratch folder");
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).expect("the folder");
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("the link");
+    let (real, link) = (
+        real.to_str().expect("a path"),
+        link.to_str().expect("a path"),
+    );
+    let slashed = format!("{link}/");
+    let mut bench = Bench::new();
+    bench.json("run-create --name one-folder");
+    let (first, _) = a_worker_in(&mut bench, MINE, real);
+    let (second, _) = a_worker_in(&mut bench, THEIRS, link);
+    for (asked, worker, neighbour) in [
+        (real, &second, &first),
+        (link, &first, &second),
+        (slashed.as_str(), &first, &second),
+    ] {
+        assert_eq!(
+            bench
+                .ledger
+                .workers_sharing_checkout(asked, worker)
+                .first()
+                .map(|(_, one, _)| one),
+            Some(neighbour),
+            "asked of {asked}"
+        );
+    }
+    // Another folder is another folder.
+    let other = root.path().join("other");
+    std::fs::create_dir(&other).expect("the other folder");
+    assert!(
+        bench
+            .ledger
+            .workers_sharing_checkout(other.to_str().expect("a path"), "nobody")
+            .is_empty()
+    );
 }
 
 /// t-68069 ③: a pane that re-entered a conversation nobody named has its
