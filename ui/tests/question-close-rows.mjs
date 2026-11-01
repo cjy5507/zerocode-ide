@@ -74,6 +74,34 @@ async function boardScene({ browser, origin, ok, faults }) {
         && first.lead !== null && first.lead.h <= first.act.box.h + 2 && first.form === false,
       JSON.stringify(first));
 
+    // ①b On a narrow board the question keeps its width: the text takes the line and the two buttons stand together
+    //    under it — at 360 px, in each of the five languages.
+    const narrow = {};
+    for (const locale of ["ko", "en", "ja", "zh", "es"]) {
+      await page.setViewportSize({ width: 360, height: 900 });
+      narrow[locale] = await page.evaluate(async ([row, locale]) => {
+        setLocale(locale, { persist: false });
+        scheduleDeskPaint();
+        await window.__PAINTED__();
+        const node = document.querySelector(row);
+        const box = (one) => one.getBoundingClientRect();
+        const line = box(node);
+        const body = box(node.querySelector(".board-desk-letter-body"));
+        const act = box(node.querySelector(".board-desk-letter-act"));
+        const close = box(node.querySelector(".board-desk-letter-close"));
+        return {
+          bodyShare: Math.round((body.width / line.width) * 100),
+          inside: act.right <= line.right + 1 && close.right <= line.right + 1 && close.left >= line.left - 1,
+          under: act.top >= body.bottom - 1 && close.top >= body.bottom - 1,
+          overflow: node.scrollWidth > node.clientWidth + 1,
+        };
+      }, [row, locale]);
+    }
+    await page.evaluate(() => setLocale("ko", { persist: false }));
+    await page.setViewportSize({ width: 1440, height: 900 });
+    ok("on a narrow board (360 px) the question keeps most of the line and the two buttons stand under it, in five languages",
+      Object.values(narrow).every((one) => one.bodyShare >= 70 && one.inside && one.under && !one.overflow), JSON.stringify(narrow));
+
     await page.click(`${row} .board-desk-letter-close`);
     const asked = await page.evaluate((row) => {
       const form = document.querySelector(`${row} .board-desk-close`);

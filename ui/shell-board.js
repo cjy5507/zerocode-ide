@@ -579,8 +579,17 @@ function deskCloseForm(row, view) {
     cancel: () => {
       closingOf().open = false;
       paintCoordinatorDesk(view);
+      // The door it came through: the focus goes back to 답 없이 닫기, not to the page.
+      row.querySelector(".board-desk-letter-close")?.focus();
     },
     send: () => void closeDeskQuestion(view, row.__letter),
+  });
+  // Esc is the cancel from any part of the form, not only from its field.
+  form.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    form.querySelector(".board-desk-close-cancel")?.click();
   });
   row.append(form);
   return form;
@@ -677,7 +686,9 @@ function paintDeskLetter(row, letter, seat, now, view, meta = null) {
   const note = row.querySelector(".board-desk-letter-note");
   const said = ack?.error || (draft?.sent
     ? t("board.desk.replySent", "답을 보냄 · 원장에 적히면 목록에서 빠져요")
-    : closing?.sent ? t("inbox.note.closed", "답 없이 닫음 · 원장에 적히면 목록에서 빠져요")
+    : closing?.sent ? (closing.answered
+      ? t("inbox.note.answered", "그 사이 다른 쪽에서 답했어요 · 원장에 적히면 목록에서 빠져요")
+      : t("inbox.note.closed", "답 없이 닫음 · 원장에 적히면 목록에서 빠져요"))
       : ack?.sent ? t("board.desk.ackSent", "묶음을 확인함 · 원장에 적히면 목록에서 빠져요") : "");
   writeTextContent(note, said);
   writeHidden(note, said === "");

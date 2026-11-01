@@ -1825,9 +1825,15 @@ function paintWorktreeActive() {
   for (const row of worktreeList.querySelectorAll(".wt-row[data-worktree-path]")) {
     const here = row.dataset.worktreePath === activeWorktreePath;
     row.classList.toggle("is-active", here);
-    row.closest(".wt-node")?.classList.toggle("is-active", here);
-    row.setAttribute("aria-current", here ? "location" : "false");
+    const node = row.closest(".wt-node");
+    node?.classList.toggle("is-active", here);
+    // The item carries "current", as it carries the name and the selection: the row inside it is a plain box.
+    node?.setAttribute("aria-current", here ? "location" : "false");
   }
+  // The list's focus stays on the list; this says which item the keys act on (t-88672).
+  const current = worktreeList.querySelector(".wt-node[aria-current=location]");
+  if (current?.id) writeAttribute(worktreeList, "aria-activedescendant", current.id);
+  else worktreeList.removeAttribute("aria-activedescendant");
 }
 
 /* What the sidebar would DRAW, as one string.
@@ -4231,7 +4237,7 @@ function dressWorktreeLanding(row, state, phase) {
       phase,
       merged: worktreeLedgerMerged(path),
       idle: state === "empty",
-      current: row.getAttribute("aria-current") === "location",
+      current: row.closest(".wt-node")?.getAttribute("aria-current") === "location",
     })
     : null;
   if (!say) {
@@ -4775,13 +4781,15 @@ function makeWorktreeNode(worktree, held) {
   // presentational (t-88672). The node owns the role and the selection mark;
   // the row keeps the "current" one.
   node.setAttribute("role", "treeitem");
+  node.id = `wt-node-${++treeNameSeq}`;
   node.setAttribute("aria-selected", selectedWorktreePaths.has(worktree.path) ? "true" : "false");
-  row.setAttribute("aria-current", worktree.path === activeWorktreePath ? "location" : "false");
+  node.setAttribute("aria-current", worktree.path === activeWorktreePath ? "location" : "false");
   row.tabIndex = -1;
   row.dataset.tip = worktree.path;
   row.dataset.label = worktreeDisplayName(worktree);
   // In its node from the start: the node wears the name the row's first painting writes.
   node.appendChild(row);
+  forwardTreeItemPress(node, row);
   row.innerHTML =
     '<button class="wt-twist" type="button"></button>' +
     '<span class="wt-dot" aria-hidden="true"></span>' +
@@ -5165,6 +5173,9 @@ function windowedWorktreeList(members, held) {
   top.className = "wt-window-pad";
   const bottom = document.createElement("div");
   bottom.className = "wt-window-pad";
+  // Spacers, not items: a tree's group holds items, and a role-less child makes some engines read it as a plain group.
+  top.setAttribute("role", "presentation");
+  bottom.setAttribute("role", "presentation");
   // 첫 그리기 전에도 절은 제 높이로 선다 — 빈 절로 리플로되면 브라우저가
   // scrollTop을 잘라 손 밑의 자리를 잃는다.
   bottom.style.height = `${members.reduce((sum, worktree) => sum + sidebarRowHeight(worktree.path), 0)}px`;
@@ -5848,13 +5859,31 @@ function restingProjectPaths(listed) {
  * name is read off the header's own words, so a change of language that
  * rewrites the header rewrites the name (t-88672). */
 let treeNameSeq = 0;
+/* `expanded` is true or false for an item with something to open, and `null` for one with nothing under it, which
+ * says neither (an item that is "shut" with nothing inside reads as a fold that hides something). */
 function treeParent(node, header, children, expanded) {
   const name = header.querySelector(".proj-name");
   name.id = `proj-name-${++treeNameSeq}`;
   node.setAttribute("role", "treeitem");
   node.setAttribute("aria-labelledby", name.id);
-  node.setAttribute("aria-expanded", String(expanded));
+  if (expanded === null) node.removeAttribute("aria-expanded");
+  else node.setAttribute("aria-expanded", String(expanded));
   children.setAttribute("role", "group");
+  forwardTreeItemPress(node, header);
+}
+
+/* A press on a tree item that lands on the item itself and not on its row — a screen reader's "press", the window's
+ * own surface for an agent (`node.click()`), neither of which has a pointer to aim at the row inside — goes to the
+ * row, whose handler is the one the person's pointer reaches. A real pointer press has `detail` ≥ 1 and keeps
+ * landing where it was aimed: the gaps of a card are not a button. */
+function forwardTreeItemPress(node, row) {
+  node.addEventListener("click", (event) => {
+    if (event.target !== node || event.detail !== 0) return;
+    row.dispatchEvent(new MouseEvent("click", {
+      bubbles: true, cancelable: true, view: window, detail: 0,
+      shiftKey: event.shiftKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey,
+    }));
+  });
 }
 
 function restingProjectsRow(resting) {
@@ -5887,6 +5916,9 @@ function restingProjectsRow(resting) {
   fold.id = `proj-resting-${++treeNameSeq}`;
   line.setAttribute("aria-labelledby", fold.id);
   line.appendChild(fold);
+  forwardTreeItemPress(line, fold);
+  // Its Enter is its own: the window's floor would hand it to the staged terminal.
+  fold.dataset.keyboardOwner = "true";
   return line;
 }
 
@@ -6161,7 +6193,8 @@ async function refreshWorktrees() {
     children.appendChild(list);
     if (finished) children.appendChild(finished);
     const projectHeader = makeProjectHeader(project);
-    treeParent(projectNode, projectHeader, children, !children.hidden);
+    // Nothing under it (every checkout filtered away) and not shut by the person: neither open nor shut.
+    treeParent(projectNode, projectHeader, children, closedProjects.has(project.path) ? false : (children.hidden ? null : true));
     projectNode.append(projectHeader, children);
     worktreeList.appendChild(projectNode);
   }
@@ -6362,6 +6395,8 @@ function standSidebarLayout({ rebuild }) {
     refreshSidebarTeam();
     scheduleSidebarTeamPaint();
   } else {
+    // Its row is going: the control and the form go with it (only a team that stood can have raised them).
+    closeTeamClose({ focus: false });
     sidebarTeam.replaceChildren();
     sidebarTeamNodes.clear();
     sidebarTeamPeeks.clear();
@@ -6972,19 +7007,27 @@ function paintSidebarTeam() {
   for (const [key, node] of sidebarTeamNodes) if (!standing.has(node)) sidebarTeamNodes.delete(key);
   for (const term of sidebarTeamPeeks.keys()) if (!terms.has(term)) sidebarTeamPeeks.delete(term);
   rovingTeamFocus();
+  // The rows may have moved, gone, or stopped asking: the control and the form follow their row.
+  placeTeamClose();
 }
 
-/* ---- 답 없이 닫기 on a worker's row (t-88847) ----
+/* ---- 답 없이 닫기 on a worker's row (t-88847, r2) ----
  *
- * A worker that asked a question the window already reads (`deskLedger.mail`, the board's own reading — no beat,
- * no ledger call of its own) wears one quiet control over its row while the row is pointed at or focused: it
- * adds no height and no width to the row, and a worker the window reads no open question of, or a run whose
- * coordinator seat this window does not hold, wears none. The control asks for the why first, in a small form
- * under the row, and closes through the inbox's door (`closeQuestionWithoutAnswer`) — the same limit, the same
- * refusal sentences. It stands beside the team, not in it: the team's rows are buttons and a button holds no
- * button, and `reconcileElementOrder` keeps only the rows. The tab order walks from the row onto it. */
+ * A worker the ledger says is asking (`row.asking`, the team's own reading) wears one quiet control over its row while
+ * the row is pointed at or focused: it adds no height and no width to the row, and a worker that is not asking, or a
+ * run whose coordinator seat this window does not hold (`coordinator_seats`, the team's reading again), wears none.
+ *
+ * The control reads no copy of the desk: the board's own copy (`deskLedger`) is taken only while the board is open,
+ * so it may be missing or old. The press reads the ledger once (`board_desk`), finds the worker's open question
+ * there — the oldest when it has several — and the form names that question; a press that finds none says so and
+ * closes nothing. It asks for the why first, in a small form under the row, and closes through the inbox's door
+ * (`closeQuestionWithoutAnswer`) — the same limit, the same refusal sentences — then says once what happened:
+ * closed, or answered first. It stands beside the team, not in it: the team's rows are buttons and a button holds
+ * no button, and `reconcileElementOrder` keeps only the rows. Both are kept by the row's key and set again after
+ * every painting of the team, so they follow their row when the rows move. The tab order walks from the row onto it. */
 let teamCloseHere = null;
 let teamCloseOpen = null;
+let teamCloseOpening = false;
 let teamCloseFormNode = null;
 const teamCloseButton = document.createElement("button");
 teamCloseButton.type = "button";
@@ -6994,28 +7037,31 @@ teamCloseButton.hidden = true;
 teamCloseButton.dataset.keyboardOwner = "true";
 sidebarTeam.after(teamCloseButton);
 
-function teamQuestionOf(node) {
-  const row = node?.__entry?.kind === "worker" ? node.__entry.row : null;
-  if (!row || isPopout || !boardSeatOf(row.run)) return null;
-  const letter = (Array.isArray(deskLedger?.mail) ? deskLedger.mail : [])
-    .find((one) => one.kind === "question" && one.run === row.run && one.worker === row.worker);
-  return letter && !questionClosing(letter.run, letter.id).sent ? letter : null;
+const teamCloseNode = (key) => {
+  const node = key ? sidebarTeamNodes.get(key) : null;
+  return node?.isConnected ? node : null;
+};
+
+/* The worker row the control may stand over: the ledger says it is asking, in a run this window sits the seat of. */
+function teamCloseEntry(node) {
+  const entry = node?.__entry;
+  const row = entry?.kind === "worker" ? entry.row : null;
+  if (!row || isPopout || row.asking !== true) return null;
+  return sidebarTeamData.seats.some((seat) => seat.run === row.run && seat.seat === true) ? entry : null;
 }
 
 function showTeamClose(node) {
   if (teamCloseOpen) return;
-  const letter = teamQuestionOf(node);
-  if (!letter) {
+  const entry = teamCloseEntry(node);
+  if (!entry) {
     hideTeamClose();
     return;
   }
-  teamCloseHere = { node, letter };
+  teamCloseHere = { key: node.dataset.teamKey };
   writeTextContent(teamCloseButton, t("inbox.close.send", "답 없이 닫기"));
-  const box = node.getBoundingClientRect();
-  // The control's own place is a corner of the row: the stylesheet pulls it in by its tokens.
-  teamCloseButton.style.left = `${box.right}px`;
-  teamCloseButton.style.top = `${box.top}px`;
+  teamCloseButton.setAttribute("aria-label", t("sidebar.team.closeFor", "답 없이 닫기 · {{who}}", { who: entry.title }));
   teamCloseButton.hidden = false;
+  placeTeamClose();
 }
 
 function hideTeamClose() {
@@ -7023,9 +7069,41 @@ function hideTeamClose() {
   teamCloseButton.hidden = true;
 }
 
+/* Where the control and the form stand, from the row they belong to as it stands now. A row that left the team, or
+ * stopped asking, takes the control with it; the form (it names its worker) stays only while its row can be found. */
+function placeTeamClose() {
+  if (teamCloseOpen) {
+    const node = teamCloseNode(teamCloseOpen.key);
+    const view = sidebarScroller.getBoundingClientRect();
+    const box = node?.getBoundingClientRect();
+    if (!box || box.bottom < view.top || box.top > view.bottom) {
+      closeTeamClose({ focus: false });
+      return;
+    }
+    const form = teamCloseFormNode;
+    form.style.left = `${box.left}px`;
+    form.style.width = `${box.width}px`;
+    // Under the row; above it when the window ends first.
+    const room = window.innerHeight - box.bottom;
+    form.style.top = `${room >= form.offsetHeight ? box.bottom : Math.max(0, box.top - form.offsetHeight)}px`;
+    return;
+  }
+  if (!teamCloseHere) return;
+  const node = teamCloseNode(teamCloseHere.key);
+  if (!node || !teamCloseEntry(node)) {
+    hideTeamClose();
+    return;
+  }
+  const box = node.getBoundingClientRect();
+  // The control's own place is a corner of the row: the stylesheet pulls it in by its tokens.
+  teamCloseButton.style.left = `${box.right}px`;
+  teamCloseButton.style.top = `${box.top}px`;
+}
+
 function teamCloseHeld() {
+  const node = teamCloseHere ? teamCloseNode(teamCloseHere.key) : null;
   return teamCloseButton.matches(":hover") || teamCloseButton.contains(document.activeElement)
-    || (teamCloseHere !== null && (teamCloseHere.node.matches(":hover") || teamCloseHere.node === document.activeElement));
+    || (node !== null && (node.matches(":hover") || node === document.activeElement));
 }
 
 // Leaving the row for the control is not leaving: the answer waits one frame for the pointer and the focus to land.
@@ -7045,28 +7123,43 @@ for (const name of ["pointerout", "focusout"]) {
   sidebarTeam.addEventListener(name, settleTeamClose);
   teamCloseButton.addEventListener(name, settleTeamClose);
 }
-sidebarScroller.addEventListener("scroll", () => {
-  if (!teamCloseOpen) hideTeamClose();
-}, { passive: true });
+sidebarScroller.addEventListener("scroll", () => placeTeamClose(), { passive: true });
+window.addEventListener("resize", () => placeTeamClose());
+// A press anywhere else puts the why away (what was written stays with the question, by its name).
+document.addEventListener("pointerdown", (event) => {
+  if (!teamCloseOpen || teamCloseFormNode.contains(event.target) || teamCloseButton.contains(event.target)) return;
+  if (!questionClosing(teamCloseOpen.letter.run, teamCloseOpen.letter.id).sending) closeTeamClose({ focus: false });
+}, true);
 // The control stands beside the team, not after its row, so Tab is walked by hand: from the row onto the control and
 // back (the rows after it keep their own roving stop).
 sidebarTeam.addEventListener("keydown", (event) => {
   if (event.key !== "Tab" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
   const node = event.target instanceof Element ? event.target.closest(".team-worker") : null;
-  if (!node || teamCloseButton.hidden || teamCloseHere?.node !== node) return;
+  if (!node || teamCloseButton.hidden || teamCloseHere?.key !== node.dataset.teamKey) return;
   event.preventDefault();
   teamCloseButton.focus();
 });
 teamCloseButton.addEventListener("keydown", (event) => {
   if (event.key !== "Tab" || !event.shiftKey || teamCloseHere === null) return;
   event.preventDefault();
-  teamCloseHere.node.focus();
+  teamCloseNode(teamCloseHere.key)?.focus();
 });
 
 function paintTeamClose() {
   if (!teamCloseOpen || !teamCloseFormNode) return;
-  const { letter } = teamCloseOpen;
-  paintQuestionCloseForm(teamCloseFormNode, "team-close", questionClosing(letter.run, letter.id));
+  const { letter, count } = teamCloseOpen;
+  const form = teamCloseFormNode;
+  const head = form.querySelector(".team-close-head");
+  const node = teamCloseNode(teamCloseOpen.key);
+  if (node?.__entry) teamCloseOpen.who = node.__entry.title;
+  writeTextContent(form.querySelector(".team-close-who"), teamCloseOpen.who);
+  writeTextContent(form.querySelector(".team-close-ask"), String(letter.body ?? "").split("\n")[0]);
+  const many = form.querySelector(".team-close-count");
+  writeTextContent(many, count > 1 ? t("sidebar.team.closeOldest", "{{count}}건 중 가장 오래된 질문", { count }) : "");
+  writeHidden(many, count <= 1);
+  setTip(head, String(letter.body ?? ""));
+  paintQuestionCloseForm(form, "team-close", questionClosing(letter.run, letter.id));
+  placeTeamClose();
 }
 
 function teamCloseForm() {
@@ -7077,34 +7170,72 @@ function teamCloseForm() {
     cancel: () => closeTeamClose(),
     send: () => void closeTeamQuestion(),
   });
+  // Which question this closes, said in words: whose it is, what it asks, and how many wait when more than one does.
+  const head = document.createElement("div");
+  head.className = "team-close-head";
+  for (const part of ["who", "count", "ask"]) {
+    const one = document.createElement("span");
+    one.className = `team-close-${part}`;
+    head.append(one);
+  }
+  teamCloseFormNode.prepend(head);
   teamCloseFormNode.hidden = true;
   teamCloseFormNode.dataset.keyboardOwner = "true";
+  // Esc is the cancel from any part of the form, not only from its field.
+  teamCloseFormNode.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeTeamClose();
+  });
   teamCloseButton.after(teamCloseFormNode);
   return teamCloseFormNode;
 }
 
-function openTeamClose() {
-  if (!teamCloseHere) return;
-  teamCloseOpen = teamCloseHere;
+/* The press: read the ledger now, find this worker's open question, and ask for the why. */
+async function openTeamClose() {
+  if (!teamCloseHere || teamCloseOpening) return;
+  const node = teamCloseNode(teamCloseHere.key);
+  const entry = node && teamCloseEntry(node);
+  if (!entry) {
+    hideTeamClose();
+    return;
+  }
+  const { run, worker } = entry.row;
+  teamCloseOpening = true;
+  let desk = null;
+  try {
+    desk = await invoke("board_desk");
+  } catch {
+    desk = null;
+  } finally {
+    teamCloseOpening = false;
+  }
+  const letters = (Array.isArray(desk?.mail) ? desk.mail : [])
+    .filter((one) => one?.kind === "question" && one.run === run && one.worker === worker && !questionClosing(one.run, one.id).sent)
+    .sort((one, other) => (Number(one.created_ms) || 0) - (Number(other.created_ms) || 0));
+  if (letters.length === 0) {
+    hideTeamClose();
+    toast(desk === null
+      ? t("sidebar.team.closeUnread", "원장을 읽지 못해 질문을 찾지 못했어요 — 잠시 뒤 다시 눌러 주세요")
+      : t("sidebar.team.closeGone", "이 워커의 열린 질문이 원장에 없습니다 — 이미 답했거나 닫혔을 수 있어요"));
+    return;
+  }
+  teamCloseOpen = { key: teamCloseHere.key, letter: letters[0], count: letters.length, who: entry.title };
   const form = teamCloseForm();
-  const box = teamCloseOpen.node.getBoundingClientRect();
-  form.style.left = `${box.left}px`;
-  form.style.width = `${box.width}px`;
   form.hidden = false;
-  paintTeamClose();
-  // Under the row; above it when the window ends first.
-  const room = window.innerHeight - box.bottom;
-  form.style.top = `${room >= form.offsetHeight ? box.bottom : Math.max(0, box.top - form.offsetHeight)}px`;
   teamCloseButton.hidden = true;
+  paintTeamClose();
   form.querySelector(".team-close-field").focus();
 }
 
-function closeTeamClose() {
+function closeTeamClose({ focus = true } = {}) {
   const open = teamCloseOpen;
   teamCloseOpen = null;
   if (teamCloseFormNode) teamCloseFormNode.hidden = true;
   hideTeamClose();
-  if (open?.node.isConnected) open.node.focus();
+  const node = open ? teamCloseNode(open.key) : null;
+  if (focus && node) node.focus();
 }
 
 async function closeTeamQuestion() {
@@ -7117,13 +7248,17 @@ async function closeTeamQuestion() {
     message: open.letter.id,
     repaint: paintTeamClose,
     closed: () => {
-      refreshDeskLedger();
+      if (deskViews().length > 0) refreshDeskLedger();
+      // One word of what happened: closed, or somebody answered first.
+      toast(closing.answered
+        ? t("inbox.note.answered", "그 사이 다른 쪽에서 답했어요 · 원장에 적히면 목록에서 빠져요")
+        : t("inbox.note.closed", "답 없이 닫음 · 원장에 적히면 목록에서 빠져요"));
       closeTeamClose();
     },
   });
 }
 
-teamCloseButton.addEventListener("click", openTeamClose);
+teamCloseButton.addEventListener("click", () => void openTeamClose());
 
 /* The rows the arrows walk, in order — and the one the keyboard stands on keeps the tab stop. */
 function teamSteppedRows() {
@@ -8847,8 +8982,59 @@ async function lookForCheckoutsNobodyAskedFor() {
   await refreshWorktrees();
 }
 
+/* The tree's own keys (t-88672). The list is a tree, and a tree answers Left, Right and Enter: the window's floor
+ * would hand all three to the staged terminal (`data-tree-keys` keeps them here while the list holds the focus —
+ * `rearmKeySink`). The up and down keys, Home and End are as they were.
+ *   Left   shuts what the current checkout has open — its own sessions, else the project or lane it stands in;
+ *   Right  opens what is shut — the project or lane the checkout stands in, else its own sessions;
+ *   Enter  opens the current checkout, the way a press on its row does. */
+worktreeList.dataset.treeKeys = "ArrowLeft ArrowRight Enter";
+
+/* The head of the project or lane the checkout stands in, found by what the window knows rather than by the DOM:
+ * a shut project builds no rows, so its checkouts are not there to be looked up. */
+function worktreeParentHead(path) {
+  let selector = null;
+  if (sidebarGroupBy === "repo") {
+    const project = projectHoldingCheckout(path);
+    if (project) selector = `.proj-row[data-project-path="${CSS.escape(project.path)}"]`;
+  } else if (sidebarGroupBy === "state") {
+    selector = `.proj-row[data-state-group="${CSS.escape(activityFrozen.get(path) ?? "inactive")}"]`;
+  }
+  return selector ? worktreeList.querySelector(selector) : null;
+}
+
+function worktreeTreeKey(event, worktree) {
+  const parent = worktreeParentHead(worktree.path);
+  const shut = parent?.getAttribute("aria-expanded") === "false";
+  const row = worktreeList.querySelector(`.wt-row[data-worktree-path="${CSS.escape(worktree.path)}"]`);
+  const twist = row?.querySelector(".wt-twist");
+  const hasSessions = twist !== null && twist !== undefined && !twist.hidden;
+  if (event.key === "ArrowLeft") {
+    if (hasSessions && expandedWorktrees.has(worktree.path)) toggleWorktreeExpanded(worktree.path);
+    else if (parent && !shut) parent.click();
+  } else if (event.key === "ArrowRight") {
+    if (parent && shut) parent.click();
+    else if (hasSessions && !expandedWorktrees.has(worktree.path)) toggleWorktreeExpanded(worktree.path);
+  } else {
+    selectWorktree(worktree.path, event);
+    activateWorktree(worktree);
+  }
+}
+
 worktreeList.addEventListener("keydown", (event) => {
   if (!visibleWorktrees.length) return;
+  if (event.target === worktreeList && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+    && ["ArrowLeft", "ArrowRight", "Enter"].includes(event.key)) {
+    event.preventDefault();
+    const current = visibleWorktrees.find((worktree) => worktree.path === activeWorktreePath);
+    if (current) worktreeTreeKey(event, current);
+    else if (event.key !== "Enter") {
+      // The checkout the window stands in is inside a shut project: it is not among the rows, but its head is.
+      const head = worktreeParentHead(activeWorktreePath ?? "");
+      if (head && (head.getAttribute("aria-expanded") === "false") === (event.key === "ArrowRight")) head.click();
+    }
+    return;
+  }
   const currentIndex = Math.max(0, visibleWorktrees.findIndex((worktree) => worktree.path === activeWorktreePath));
   let nextIndex = currentIndex;
   if (event.key === "ArrowUp") nextIndex = Math.max(0, currentIndex - 1);

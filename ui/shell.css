@@ -35347,6 +35347,38 @@ details.task-board-section > summary {
   gap: var(--space-2);
 }
 
+/* Whose question the form closes, and what it asks: the worker's name, the count when more than one waits, and the
+ * question's first line (the whole of it is the hover). */
+.team-close-head {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.team-close-who {
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-close-count {
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+}
+
+.team-close-ask {
+  color: var(--ink-label);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.team-close-count[hidden] {
+  display: none;
+}
+
 .board-desk-reply-field,
 .board-desk-close-field,
 .team-close-field {
@@ -37912,6 +37944,32 @@ details.task-board-section > summary {
 @container board (max-width: 543px) {
   .board-asks > li {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* A question row (`li.board-desk-letter`) keeps four columns from the wide rule above, which outranks the line
+   * before it: on a narrow board the question's text was squeezed between two buttons. Here the text takes the whole
+   * width and the two buttons stand together on a line under it (t-88847 r2). */
+  .board-asks > li.board-desk-letter {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .board-asks > li .board-desk-letter-body,
+  .board-asks > li .board-desk-letter-who {
+    grid-column: 1 / -1;
+  }
+
+  .board-asks > li .board-desk-letter-body { grid-row: 2; }
+  .board-asks > li .board-desk-letter-who { grid-row: 3; }
+
+  .board-asks > li .board-desk-letter-close {
+    grid-column: 2;
+    grid-row: 4;
+    justify-self: end;
+  }
+
+  .board-asks > li .board-desk-letter-act {
+    grid-column: 3;
+    grid-row: 4;
   }
 
   .board-ask-acts {

@@ -22864,6 +22864,36 @@ mod tests {
         );
     }
 
+    /// The sidebar's 답 없이 닫기 never closes a copy (t-88847 r2): the board's
+    /// own copy of the desk (`deskLedger`) is taken only while the board is
+    /// open, so a control that read it was missing before the board was opened
+    /// and pointed at an old question after it was left. The control's reading
+    /// is the team's (`row.asking`, `coordinator_seats`), and the press reads
+    /// the ledger itself.
+    #[test]
+    fn the_sidebar_close_control_reads_the_ledger_at_the_press_not_the_boards_copy() {
+        let window = window_source();
+        let code = strip_comments(window);
+        let eligible = block_after(&code, "function teamCloseEntry(node) {");
+        let press = block_after(&code, "async function openTeamClose() {");
+        assert!(
+            eligible.contains("row.asking !== true")
+                && eligible.contains("sidebarTeamData.seats")
+                && !eligible.contains("deskLedger")
+                && !eligible.contains("boardSeatOf"),
+            "the control is shown off the board's copy of the desk:\n{eligible}"
+        );
+        assert!(
+            press.contains("invoke(\"board_desk\")") && !press.contains("deskLedger"),
+            "the press does not read the ledger itself:\n{press}"
+        );
+        let paint = block_after(&code, "function paintSidebarTeam() {");
+        assert!(
+            paint.contains("placeTeamClose();"),
+            "the control and the form do not follow their row when the rows move"
+        );
+    }
+
     /// The inbox reads one snapshot (t-67483): its letters and its numbers are
     /// Rust's single reading (`board_inbox` → `orchestration::inbox::inbox_of`),
     /// and the page draws the numbers it is given. It does not ask the desk or

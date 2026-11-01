@@ -436,6 +436,10 @@ function rearmKeySink(event) {
     "input, textarea, select, [contenteditable], [data-keyboard-owner]",
   );
   if (editing) return;
+  // A tree owns the few keys its pattern names (`data-tree-keys`, a space-separated list of `event.key`s) while it
+  // is the focused element itself; every other key is the terminal's, as before (t-88672).
+  const owned = document.activeElement?.dataset?.treeKeys;
+  if (owned && owned.split(" ").includes(event.key) && !event.ctrlKey && !event.metaKey && !event.altKey) return;
   // A conversation stands over its pane's screen, and a letter typed with nothing focused — after a click on the
   // page's blank — used to go to the terminal's sink, which has no pane to take it there: it was lost without a
   // word. It belongs to the conversation's box (r3 P3-8). Only a typed character: the arrows and Space that scroll
