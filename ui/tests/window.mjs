@@ -7526,8 +7526,7 @@ ok(
   JSON.stringify(termFind.paintedAfterTrim) === JSON.stringify(["def"]) &&
     termFind.countAfterTrim === "1/1" &&
     termFind.paintedAfterGone.length === 0 &&
-    termFind.countAfterGone !== "1/1" &&
-    termFind.countAfterGone !== "",
+    termFind.countAfterGone === "일치 없음",
   JSON.stringify(termFind),
 );
 ok(
