@@ -1964,12 +1964,20 @@ mod tests {
             step(&question, &handed, false, None, false, NOW, NOW),
             Step::Raise(Raised::CoordinatorHanded)
         );
-        // The pane moved past it: nothing to raise, nobody to tell.
-        for raised in [false, true] {
+        // The pane moved past it. The person already holds it: nothing to
+        // raise, nobody to tell. The person never saw it: the coordinator
+        // believes the person has it, so it is told the pane moved on
+        // (t-85293 r1 P2-1) — with or without a seat.
+        for seat in [None, Some(&seat(true, false))] {
             assert_eq!(
-                step(&question, &handed, true, None, raised, NOW, NOW),
+                step(&question, &handed, true, seat, true, NOW, NOW),
                 Step::Forget,
-                "raised: {raised}"
+                "raised, seat: {seat:?}"
+            );
+            assert_eq!(
+                step(&question, &handed, true, seat, false, NOW, NOW),
+                Step::RefusePassed,
+                "not raised, seat: {seat:?}"
             );
         }
         // The pane goes: nothing is kept for a late answer to refuse.

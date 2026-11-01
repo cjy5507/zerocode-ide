@@ -5094,6 +5094,10 @@ struct Stopped {
     /// Where this window's System One wire points — an origin and zo's
     /// settings file — when the case is about a Jev question (t-4538).
     jev: Mutex<Option<(String, std::path::PathBuf)>>,
+    /// A shell, not the agent, stands in front at every pane (t-85293 r2).
+    shell: std::sync::atomic::AtomicBool,
+    /// The person's own words stand on every pane's line (t-85293 r2).
+    draft: std::sync::atomic::AtomicBool,
 }
 
 impl Stopped {
@@ -5159,6 +5163,12 @@ impl Host for Stopped {
     }
     fn pane_exists(&self, _term: u32) -> bool {
         true
+    }
+    fn shell_in_front(&self, _term: u32) -> bool {
+        self.shell.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn line_holds_a_draft(&self, _term: u32) -> bool {
+        self.draft.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn quiet_since(&self, _term: u32, _worker_started_ms: i64, now_ms: i64) -> Option<i64> {
         (!*self.busy.lock().unwrap_or_else(|held| held.into_inner()))
@@ -5266,6 +5276,8 @@ impl StoppedWorker {
             screen: Mutex::new(String::new()),
             persons: Mutex::new(None),
             jev: Mutex::new(None),
+            shell: std::sync::atomic::AtomicBool::new(false),
+            draft: std::sync::atomic::AtomicBool::new(false),
         };
         let mut stood = Self {
             window,

@@ -7,7 +7,7 @@
 use super::*;
 use crate::orchestration::step_effort::{PressRefused, pane_effort, press};
 use zerocode_core::capabilities::CLAUDE_EFFORT_PICKER;
-use zerocode_core::effort_chip::{EffortWitness, Stuck};
+use zerocode_core::effort_chip::{EffortChip, EffortWitness, Stuck};
 
 /// The worker's transcript as the pane's own tail reads it.
 fn tail_of(stood: &StoppedWorker) -> Option<String> {
@@ -570,4 +570,182 @@ fn the_seat_closes_a_picker_it_opened_but_never_saw_the_legend_of() {
         [CLAUDE_EFFORT_PICKER.open, "\r", CLAUDE_EFFORT_PICKER.cancel],
         "the command, then Esc: no arrow into a picker nobody saw"
     );
+}
+
+/// The seat's stuck-turn road up to its picker command being typed, the
+/// screen never showing the legend; `then` runs with the stand and the
+/// moment the legend's wait runs out (t-85293 r2).
+fn a_seat_waiting_on_a_legend_that_never_shows(
+    term_base: u32,
+    then: impl FnOnce(&StoppedWorker, i64),
+) {
+    use zerocode_core::jev::{JevMode, STEP_EFFORT};
+    let stood = StoppedWorker::stand_with(
+        term_base,
+        "--agent claude --model claude-opus-5-5 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let raise =
+        crate::systemone::tests::Endpoint::serving("HTTP/1.1 200 OK", a_move_answer("raise"), 0);
+    let _home = stood.asks_jev_for(&STEP_EFFORT, &raise, JevMode::On, "/wt");
+    let began = stood.began + 10_000;
+    let stuck = a_stuck_turn("fix the build", "medium");
+    a_turn_runs_then_ends(&stood, &stuck, began, began + 1_000);
+    tick(&stood.host, &[], began + 2_000);
+    tick(&stood.host, &[], began + 3_000);
+    tick(&stood.host, &[], began + 4_000);
+    assert_eq!(
+        stood.sent_at_worker(),
+        [CLAUDE_EFFORT_PICKER.open, "\r"],
+        "the command is in and nothing else"
+    );
+    let out = began + 4_000 + crate::orchestration::step_effort::PICKER_WAIT_MS + 1_000;
+    then(&stood, out);
+}
+
+/// t-85293 r2 (P3-1): Esc is safe only between turns — an Esc into a turn
+/// stops it. A turn that began while the seat waited for the legend gets no
+/// Esc; delete `look.at_rest` from the close and this fails.
+#[test]
+fn the_seat_types_no_esc_into_a_turn_that_began_while_it_waited_for_the_legend() {
+    a_seat_waiting_on_a_legend_that_never_shows(98_990, |stood, out| {
+        crate::orchestration::pane_turn_began(stood.host.worker_term, out - 500);
+        tick(&stood.host, &[], out);
+        assert_eq!(
+            stood.sent_at_worker(),
+            [CLAUDE_EFFORT_PICKER.open, "\r"],
+            "the command and its Enter, no Esc into the running turn"
+        );
+    });
+}
+
+/// t-85293 r2 (P3-4): the person's own words on the line are theirs; an Esc
+/// there may clear them. The seat closes a legend-less picker only over an
+/// empty line, as every door that types unasked leaves a draft alone.
+#[test]
+fn the_seat_types_no_esc_over_the_persons_words_on_the_line() {
+    a_seat_waiting_on_a_legend_that_never_shows(99_000, |stood, out| {
+        stood
+            .host
+            .draft
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        tick(&stood.host, &[], out);
+        assert_eq!(
+            stood.sent_at_worker(),
+            [CLAUDE_EFFORT_PICKER.open, "\r"],
+            "a draft stands: no Esc"
+        );
+    });
+}
+
+/// A press on the worker pane, a short moment after which `then` happens
+/// while the press waits for a legend that never shows. Returns what the pane
+/// was sent and what the press answered.
+fn a_press_that_waits_for_a_legend_while(
+    term_base: u32,
+    then: impl FnOnce(&StoppedWorker) + Send,
+) -> (Vec<String>, Result<EffortChip, PressRefused>) {
+    let stood = StoppedWorker::stand_with(
+        term_base,
+        "--agent claude --model claude-opus-5-5 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let term = stood.host.worker_term;
+    let ran = a_progressed_turn("read it", "medium");
+    let owned: Vec<&str> = ran.iter().map(String::as_str).collect();
+    stood.stops_on(&owned, stood.began + 5_000);
+    let tail = tail_of(&stood);
+    let answer = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            then(&stood);
+        });
+        press(&stood.host, term, tail.as_deref(), "high")
+    });
+    (stood.sent_at_worker(), answer)
+}
+
+/// t-85293 r2 (P3-1, the press's side): a turn that began while the press
+/// waited gets no Esc; delete `composer_at_rest` from `carry` and this fails.
+#[test]
+fn a_press_types_no_esc_into_a_turn_that_began_while_it_waited_for_the_legend() {
+    let (sent, answer) = a_press_that_waits_for_a_legend_while(99_010, |stood| {
+        crate::orchestration::pane_turn_began(stood.host.worker_term, stood.began + 6_000);
+    });
+    assert_eq!(answer.err(), Some(PressRefused::Door("picker_missing")));
+    assert_eq!(sent, [CLAUDE_EFFORT_PICKER.open, "\r"], "no Esc into a turn");
+}
+
+/// t-85293 r2 (P3-4, the press's side): the person's words on the line are
+/// not cleared by the Esc that closes a legend-less picker.
+#[test]
+fn a_press_types_no_esc_over_the_persons_words_on_the_line() {
+    let (sent, answer) = a_press_that_waits_for_a_legend_while(99_020, |stood| {
+        stood
+            .host
+            .draft
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    assert_eq!(answer.err(), Some(PressRefused::Door("picker_missing")));
+    assert_eq!(sent, [CLAUDE_EFFORT_PICKER.open, "\r"], "a draft stands");
+}
+
+/// t-85293 r2 (P3-2): the person's own pane, its turn stopped by hand, is
+/// theirs to press on (t-81861 P3-2) — so the Esc that closes a picker that
+/// never showed its legend is theirs too. Without it the half-open menu
+/// stays on their screen.
+#[test]
+fn a_press_on_the_persons_own_stopped_pane_closes_the_picker_it_opened_without_a_legend() {
+    let stood = StoppedWorker::stand_with(
+        99_030,
+        "--agent claude --model claude-opus-5-5 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let term = persons_pane(&stood, stood.host.worker_term + 40);
+    let ran = a_progressed_turn("read it", "medium");
+    std::fs::write(&stood.host.transcript, format!("{}\n", ran.join("\n"))).unwrap();
+    super::pane_turn_ended(term, stood.began + 4_999, true, stood.began + 5_000);
+    let tail = tail_of(&stood);
+    assert_eq!(
+        press(&stood.host, term, tail.as_deref(), "high").err(),
+        Some(PressRefused::Door("picker_missing"))
+    );
+    assert_eq!(
+        stood.host.typed_at(term),
+        [CLAUDE_EFFORT_PICKER.open, "\r", CLAUDE_EFFORT_PICKER.cancel],
+        "the command, then Esc: the person stopped the turn, the menu is closed for them"
+    );
+}
+
+/// t-85293 r2 (P3-3): a turn stopped by hand leaves the agent when the
+/// person quits it; a press then would type `/effort` into the shell. The
+/// shell check is made on that road too, as on the road of a turn that ended
+/// by itself.
+#[test]
+fn a_press_on_the_persons_stopped_pane_with_a_shell_in_front_types_nothing() {
+    let stood = StoppedWorker::stand_with(
+        99_040,
+        "--agent claude --model claude-opus-5-5 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let term = persons_pane(&stood, stood.host.worker_term + 40);
+    let ran = a_progressed_turn("read it", "medium");
+    std::fs::write(&stood.host.transcript, format!("{}\n", ran.join("\n"))).unwrap();
+    super::pane_turn_ended(term, stood.began + 4_999, true, stood.began + 5_000);
+    stood
+        .host
+        .shell
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let tail = tail_of(&stood);
+    let chip = pane_effort(&stood.host, term, tail.as_deref());
+    assert_eq!(chip.stuck, Some(Stuck::ShellInFront), "{chip:?}");
+    assert_eq!(
+        press(&stood.host, term, tail.as_deref(), "high").err(),
+        Some(PressRefused::Stuck(Stuck::ShellInFront))
+    );
+    assert!(stood.host.typed_at(term).is_empty(), "nothing went to the shell");
 }
