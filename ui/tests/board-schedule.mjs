@@ -1338,7 +1338,7 @@ export async function testBoardSchedule(browser, origin, ok) {
       JSON.stringify(outsideLane));
 
     /* ---- r2 P3-1: 조용한 동안 창이 옛 답을 그대로 쓰면 `last_lane`이 비어 있다 — 그 답의 레인이 범위 밖으로 밀려도 첫 줄은 그 답의 가장 최근 끝난 레인을 말한다 ---- */
-    const quietLane = await page.evaluate((now) => {
+    const heldLane = await page.evaluate((now) => {
       const base = boardScheduleAnswer;
       const asked = (at) => boardScheduleModel({ ...base, jobs: [], last_lane: undefined }, [], at,
         { zoom: "now", folded: new Set(), opened: new Set(), log: null }, 900, false, null, { hourPx: 120, tickPx: 16, leastPx: 24 });
@@ -1349,8 +1349,8 @@ export async function testBoardSchedule(browser, origin, ok) {
         sha: ended?.sha ?? null };
     }, SCHEDULE_NOW);
     ok("a held answer whose lanes fell out of the range, with no `last_lane` of its own, still has the first line name its newest ended lane",
-      quietLane.lanes === 0 && /^마지막 v1\.1\.\d+ 레인 \d{2}:\d{2} · /.test(quietLane.told) && quietLane.act?.log?.lane === quietLane.sha && quietLane.sha !== null,
-      JSON.stringify(quietLane));
+      heldLane.lanes === 0 && /^마지막 v1\.1\.\d+ 레인 \d{2}:\d{2} · /.test(heldLane.told) && heldLane.act?.log?.lane === heldLane.sha && heldLane.sha !== null,
+      JSON.stringify(heldLane));
 
     // The same empty answer drawn (review P3-9): the lines, the columns' heads and the empty-future line on the screen.
     const emptyDrawn = await page.evaluate(async (now) => {
