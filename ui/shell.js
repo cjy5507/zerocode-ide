@@ -3612,9 +3612,9 @@ listen("pane:autonomy", (event) => {
 function rememberSessionUsage(session, frame) {
   const tokens = Number(frame?.ctx_tokens ?? 0);
   const window = Number(frame?.context_window ?? 0);
-  // zo's usage frame names no window yet; its session_status does
-  // (`rememberSessionWindow`) — a count keeps the window it was given until
-  // a frame names another (draft C9, t-82196).
+  // A frame may not name a window yet (zo before its first session_status):
+  // a count keeps the window it was given until a frame names another
+  // (`rememberSessionWindow`; draft C9, t-82196).
   const held = session ? sessionUsage.get(session) : null;
   const reading = {
     tokens: Number.isFinite(tokens) && tokens > 0 ? tokens : 0,
