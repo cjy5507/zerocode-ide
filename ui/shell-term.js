@@ -6329,6 +6329,7 @@ function dropTermView(term) {
   // menu offering to reopen a conversation from a tab that is gone is a row
   // attached to nothing.
   paneSessions.delete(term);
+  paneConversationWords.delete(term);
   paneAutonomy.delete(term);
   // And which agent held it — the next shell to wear this id is a stranger.
   paneAgents.delete(term);
@@ -8225,7 +8226,7 @@ async function spawnStoredLeaf(wake, launched, grid = null, restore = null, work
   // sidebar's door reopens it once whatever refused it is gone.
   if (launched && !refused && !duplicate && !finished) {
     try {
-      const term = await launchAgentTab({ agent: launched, prompt: "", rows, cols, restore });
+      const term = await launchAgentTab({ agent: launched, prompt: "", restoredLeaf: true, rows, cols, restore });
       return { term, woke: false, agent: launched };
     } catch {
       // The agent is not on this machine any more. Same reading as a wake

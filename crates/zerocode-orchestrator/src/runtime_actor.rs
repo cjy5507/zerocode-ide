@@ -681,6 +681,13 @@ pub enum RuntimeRequest {
         session: ProviderSession,
         now_ms: i64,
     },
+    /// A terminal's process re-entered a conversation nobody named (t-68069):
+    /// the letter its coordinator is told. Resolved to its seat the same way.
+    WorkerConversationPicked {
+        term: u32,
+        session: ProviderSession,
+        now_ms: i64,
+    },
     /// The window reports where a summoned pane actually sits — the
     /// checkout under it, resolved by the split host. The sixth host fact,
     /// and the only road that fact has into the ledger.
@@ -1210,6 +1217,17 @@ impl std::fmt::Debug for RuntimeRequest {
                 .debug_struct("RuntimeRequest::WorkerExitSeen")
                 .field("worker", worker)
                 .field("group", &witness.group)
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::WorkerConversationPicked {
+                term,
+                session,
+                now_ms,
+            } => formatter
+                .debug_struct("RuntimeRequest::WorkerConversationPicked")
+                .field("term", term)
+                // The same reason as the report's: lengths, never the id.
+                .field("session_bytes", &session.id.len())
                 .field("now_ms", now_ms)
                 .finish(),
             Self::WorkerSessionReported {
@@ -2886,6 +2904,24 @@ impl RuntimeActor {
         }
     }
 
+    /// A terminal's process re-entered a conversation nobody named (t-68069).
+    /// Answers whether a letter was written, and the revision that speaks for.
+    pub fn worker_conversation_picked(
+        &self,
+        term: u32,
+        session: ProviderSession,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::WorkerConversationPicked {
+            term,
+            session,
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// One federation call, ledger law only — the wire stays with the
     /// caller. Mutations are durable before they answer.
     pub fn federation(
@@ -4112,6 +4148,11 @@ impl RuntimeState {
                 witness,
                 now_ms,
             } => self.worker_exit_seen(&worker, &witness, now_ms),
+            RuntimeRequest::WorkerConversationPicked {
+                term,
+                session,
+                now_ms,
+            } => self.worker_conversation_picked(term, &session, now_ms),
             RuntimeRequest::WorkerSessionReported {
                 term,
                 session,
@@ -4861,6 +4902,38 @@ impl RuntimeState {
         self.panes.with_seat_of_term(term, &mut |seat| {
             if let Some((team, pane)) = seat {
                 moved = ledger.worker_session_reported_at((team, pane), session.clone(), now_ms);
+            }
+        });
+        if !moved {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    fn worker_conversation_picked(
+        &mut self,
+        term: u32,
+        session: &ProviderSession,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0 {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let ledger = &mut self.ledger;
+        let mut moved = false;
+        self.panes.with_seat_of_term(term, &mut |seat| {
+            if let Some((team, pane)) = seat {
+                moved = ledger.worker_conversation_picked((team, pane), session, now_ms);
             }
         });
         if !moved {

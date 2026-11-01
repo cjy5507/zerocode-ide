@@ -1774,6 +1774,11 @@ impl agent_teams::Host for TeamWindow {
             (None, None)
         };
         let previous_pane_token = agent_teams::remember_pane_token(team, pane, token.to_string());
+        let opening = named
+            .map(|agent| crate::conversation_wake::PANE_LAUNCHES.opening(term, Some(agent), &root));
+        if let Some(session) = worker_host.as_ref().and_then(|ask| ask.session.clone()) {
+            state.pane_sessions().insert(term, session);
+        }
         let pty = match PtyLane::spawn(
             &program,
             &args,
@@ -1784,6 +1789,7 @@ impl agent_teams::Host for TeamWindow {
         ) {
             Ok(pty) => pty,
             Err(error) => {
+                state.pane_sessions().remove(&term);
                 let reason = format!("a worker process failed to spawn {program}: {error}");
                 agent_teams::restore_pane_token(team, pane, previous_pane_token);
                 cleanup_failed_worker_checkout(state.local_data_root(), isolated.as_ref(), &reason);
@@ -1791,6 +1797,9 @@ impl agent_teams::Host for TeamWindow {
                 return None;
             }
         };
+        if let Some(opening) = opening {
+            opening.opened();
+        }
         note_window_event(
             state.local_data_root(),
             &format!("term {term} spawned {program}"),

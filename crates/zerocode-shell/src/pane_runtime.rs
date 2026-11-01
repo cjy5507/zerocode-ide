@@ -815,6 +815,26 @@ pub(super) async fn hook_loop(
         // the point of the id is to outlive the tab: the window asks for it again
         // when somebody wants to reopen a session that was closed.
         if let Some(reported) = report.session.clone() {
+            // What this report says against the pane's record (t-68069), asked
+            // before the record takes it. A report no door asked for already
+            // chose its conversation: the window says which.
+            let word = {
+                let state = app.state::<AppState>();
+                let record = state.pane_sessions().get(&report.term).cloned();
+                conversation_wake::word_on_report(
+                    report.agent.slug(),
+                    report.term,
+                    record.as_ref(),
+                    &reported,
+                    || {
+                        zerocode_core::hook::session_start_resumed_parsed(
+                            &report.event,
+                            &zerocode_core::payload::HookPayload::of(&envelope.payload),
+                        )
+                    },
+                    |wanted| conversation_wake::holding_pane(state.inner(), wanted),
+                )
+            };
             // Replaced, but not stripped: an event that names the same
             // conversation without saying where it is written down keeps the
             // path the window already learned, or the conversation view goes
@@ -828,6 +848,21 @@ pub(super) async fn hook_loop(
             };
             codex_queue::bind_session(report.term, &session);
             orchestration::pane_session_reported(report.term, &session, now_epoch_ms());
+            if let Some(word) = word {
+                let state = app.state::<AppState>();
+                note_window_event(
+                    state.local_data_root(),
+                    &word.line(report.term, report.agent.slug(), &session.id),
+                );
+                if word.tells_the_coordinator() {
+                    orchestration::pane_conversation_picked(report.term, &session, now_epoch_ms());
+                }
+                let holder = match word {
+                    conversation_wake::ReportedWord::HeldBy(holder) => Some(holder),
+                    conversation_wake::ReportedWord::Picked => None,
+                };
+                say_pane_conversation(&app, report.term, word.word(), Some(&session.id), holder);
+            }
         }
         // And what it is doing, stamped, and out to the window. A turn whose model
         // request failed tells the ledger so, and why, the road zo's own channel
@@ -846,6 +881,35 @@ pub(super) async fn hook_loop(
         ring_for_pane(&app, &envelope.worktree_id, &report);
         note_automation_completion(&app, &report);
     }
+}
+
+/// What the window has to say about this pane's conversation (t-68069), for
+/// the pane's own head line: `word` is `picked`, `held` or `fresh`, the
+/// conversation it speaks of if it speaks of one, and the pane holding it.
+#[derive(Clone, Serialize)]
+struct PaneConversationWord<'a> {
+    term: TermId,
+    word: &'a str,
+    session: Option<&'a str>,
+    holder: Option<TermId>,
+}
+
+pub(crate) fn say_pane_conversation(
+    app: &AppHandle,
+    term: TermId,
+    word: &str,
+    session: Option<&str>,
+    holder: Option<TermId>,
+) {
+    let _ = app.emit(
+        "pane:conversation",
+        PaneConversationWord {
+            term,
+            word,
+            session,
+            holder,
+        },
+    );
 }
 
 /// How long the surface is given to repaint after an action before the

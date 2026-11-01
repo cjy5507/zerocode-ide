@@ -18420,7 +18420,7 @@ mod tests {
             .find("zerocode_core::launch_plan(spec.id, launch_override.as_ref())")
             .expect("the selected agent's launch plan is ignored");
         let plan_args = starting
-            .find("words.extend(plan.args);")
+            .find(".launch_args_without_selectors(&plan.args)")
             .expect("the launch plan's args do not reach the process");
         let plan_env = starting
             .find("launch_env = plan.env;")
@@ -25158,7 +25158,7 @@ mod tests {
             launching.contains("stored_launch_override(state.settings(), spec.id)?")
                 && launching
                     .contains("zerocode_core::launch_plan(spec.id, launch_override.as_ref())")
-                && launching.contains("argv.extend(plan.args"),
+                && launching.contains("unnamed_launch_args("),
             "a launched agent no longer carries its arguments:\n{launching}"
         );
         // The env half matters for exactly one agent (goose has no flag), and

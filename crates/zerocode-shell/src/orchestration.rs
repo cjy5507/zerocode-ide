@@ -603,7 +603,7 @@ fn reseat_sleeping_in_line(
 /// (t-7812): no terminal carries id 0, so a door told the conversation is
 /// held here finds no tab to go to and opens nothing — the reseat's own tab
 /// arrives with `term:worker`.
-const RESEAT_CLAIM_TERM: u32 = 0;
+pub(crate) const RESEAT_CLAIM_TERM: u32 = 0;
 
 /// The hold one sleeper's reseat keeps on its conversation, from before its
 /// pane is cut until the pane answers for it (t-7812). Dropped at the end of
@@ -6885,6 +6885,28 @@ pub(crate) fn pane_session_reported(
     }
 }
 
+/// A pane re-entered a conversation no door named (t-68069): the ledger tells
+/// its worker's coordinator which, once. A pane no worker sits in has no run to
+/// tell, and the window's log keeps its line.
+pub(crate) fn pane_conversation_picked(
+    term: u32,
+    session: &zerocode_core::ProviderSession,
+    now_ms: i64,
+) {
+    if unavailable().is_some() {
+        return;
+    }
+    let Some(held) = runtime() else {
+        return;
+    };
+    if let Ok((true, _)) = held
+        .actor
+        .worker_conversation_picked(term, session.clone(), now_ms)
+    {
+        rang(true);
+    }
+}
+
 /// The terminal is gone; its number may be minted again for a fresh pane.
 pub(crate) fn forget_taken_term(term: u32) {
     taken_terms()
@@ -10959,7 +10981,14 @@ impl Launcher for Catalog {
             return Err(format!("{agent} does not run on {}", std::env::consts::OS));
         }
         let mut words = vec![spec.launch.to_string()];
-        words.extend(launch_plan(agent, self.override_for(agent)).args);
+        // A summons is a new conversation whatever the launch args saved
+        // (t-68069): a saved `--continue` started a worker on the newest
+        // conversation of a folder a neighbour was writing.
+        words.extend(
+            spec.capabilities()
+                .resume
+                .launch_args_without_selectors(&launch_plan(agent, self.override_for(agent)).args),
+        );
         // The ledger's launch tuning — `--model`, and effort where the agent
         // takes one — rides after the launch flags and BEFORE the prompt:
         // past the separator it would be part of the instruction, and an
@@ -11910,6 +11939,7 @@ fn carried(
                     prompt: prepared.prompt.clone(),
                     timeout_ms: prepared.prompt_timeout_ms,
                     resumed: None,
+                    session: None,
                     seat: Some(crate::agent_teams::WorkerSeatWords::of(prepared)),
                 })
                 .or_else(|| {
@@ -11922,6 +11952,7 @@ fn carried(
                             prompt: prepared.prompt.clone(),
                             timeout_ms: prepared.prompt_timeout_ms,
                             resumed: Some(prepared.resumed),
+                            session: sleeper_record(&prepared.worker),
                             seat: None,
                         })
                 });
