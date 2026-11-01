@@ -532,6 +532,19 @@ impl ChannelState {
             .clone()
     }
 
+    /// The context window the last status card names, in tokens — `None` while
+    /// no status has reached this channel. Spares a usage frame a clone of the
+    /// whole card.
+    #[must_use]
+    pub fn context_window(&self) -> Option<u64> {
+        let window = self
+            .status
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .context_window;
+        (window > 0).then_some(window)
+    }
+
     /// 하이드레이션 히스토리를 갈아 끼운다.
     pub fn set_history(&self, history: Vec<HistoryEntry>) {
         *self.history.lock().unwrap_or_else(PoisonError::into_inner) = history;

@@ -312,7 +312,13 @@ impl EventsChannel {
         // A tool call's start and end blocks are what `session.list` counts
         // its running calls by; every block passes here on its way out.
         self.state.note_tool_block(block);
-        let projected = SerializableRenderBlock::from_block(block);
+        let mut projected = SerializableRenderBlock::from_block(block);
+        // The window's composer chip draws its share from this frame. The
+        // number is the status card's, not a second call to the catalog, so
+        // the usage and `session_status` frames cannot name different windows.
+        if let SerializableRenderBlock::Usage { context_window, .. } = &mut projected {
+            *context_window = self.state.context_window();
+        }
         let Some(kind) = prompt_kind_of(block) else {
             // 흔한 길(텍스트 델타·툴 호출)은 `Value` 를 거치지 않고 바로 줄이
             // 된다. 한 턴에 수천 장이 지나가는 경로라 중간 표현 하나가 그대로

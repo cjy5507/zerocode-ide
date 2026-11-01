@@ -278,6 +278,13 @@ pub(crate) mod serializable {
             cache_read_tokens: u32,
             /// Session-cumulative cache-creation input tokens.
             cache_creation_tokens: u32,
+            /// The size of the model's context window, in tokens: the number
+            /// the channel's `session_status` names, so the IDE channel fills
+            /// it in from its status card (`EventsChannel::publish`). A block
+            /// alone knows no model, so the headless sinks leave the key out,
+            /// and lines written before it existed read as `None`.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            context_window: Option<u64>,
         },
         /// Unified 5h/7d rate-limit utilization (subscription / OAuth only).
         RateLimit {
@@ -546,6 +553,7 @@ pub(crate) mod serializable {
                     output_tokens: cumulative.output_tokens,
                     cache_read_tokens: cumulative.cache_read_input_tokens,
                     cache_creation_tokens: cumulative.cache_creation_input_tokens,
+                    context_window: None,
                 },
                 RenderBlock::WireModel(wire) => Self::WireModel {
                     model: wire.model.clone(),
@@ -828,6 +836,9 @@ pub(crate) mod serializable {
                 output_tokens,
                 cache_read_tokens,
                 cache_creation_tokens,
+                // A render block has no room for it: the screen takes its
+                // window from the model it runs.
+                context_window: _,
             } => RenderBlock::Usage {
                 ctx_tokens: *ctx_tokens,
                 cumulative: TokenUsage {
