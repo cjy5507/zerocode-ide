@@ -26099,6 +26099,21 @@ mod tests {
             "the credential left the tool's stdin, for its argv or its password \
              prompt:\n{keychain_write}"
         );
+        // The one function under test nothing runs: the suite gets its double, and
+        // the shipped pipes behind it are run against a shell script. Its three
+        // lines are held here.
+        let shipped_tool = accounts
+            .split("#[cfg(all(target_os = \"macos\", not(test)))]\nfn security_command(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the shipped security_command");
+        assert!(
+            shipped_tool.contains("crate::credential_store_policy::ensure_access()?;")
+                && shipped_tool.contains("quiet_command(\"/usr/bin/security\")")
+                && shipped_tool.contains("run_keychain_tool(tool, stdin, KEYCHAIN_TIMEOUT)"),
+            "the shipped keychain call left Apple's tool, its access gate or its \
+             bounded runner:\n{shipped_tool}"
+        );
         assert!(
             accounts.contains("const SECURITY_LINE_BYTES: usize = 4094;")
                 && keychain_line.contains("keychain_line_too_long(&line)")

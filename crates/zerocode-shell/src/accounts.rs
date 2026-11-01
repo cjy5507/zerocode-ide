@@ -1028,6 +1028,9 @@ fn fake_security_lines(input: &str) -> Result<String, String> {
         let argv: Vec<&str> = words.iter().map(String::as_str).collect();
         last = match argv.first().copied() {
             None | Some("") => Ok(String::new()),
+            Some("add-generic-password") if !argv.contains(&"-A") => {
+                Err("security 종료 1 — fixture: an add with no open access list".into())
+            }
             Some("add-generic-password" | "find-generic-password" | "delete-generic-password") => {
                 fake_security_tool(&argv, None)
             }
