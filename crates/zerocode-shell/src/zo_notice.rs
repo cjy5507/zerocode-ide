@@ -56,7 +56,7 @@ fn steer_turn_within(
                 .steer(&session, &text, None)
                 .await
                 .map(|_| ())
-                .map_err(steer_refusal)
+                .map_err(steer_after_the_request)
         },
     )
     .map_err(|said| {
@@ -66,6 +66,19 @@ fn steer_turn_within(
             said
         }
     })
+}
+
+/// A failure of the exchange once the request has gone to the channel (t-86909 r3, P3-5):
+/// zo's own refusals are the page's words ([`steer_refusal`]); a connection that drops, a
+/// line that cannot be read or a transport error AFTER the request was written may have
+/// come after zo took the words in, so they are the word for "may have gone in" — the row
+/// is not sent again at the turn's end. A channel that could not be reached at all took
+/// nothing and says so in its own words ([`steer_refusal`] as `unconnected`).
+fn steer_after_the_request(error: zerocode_harness::HarnessError) -> String {
+    match error {
+        zerocode_harness::HarnessError::Rpc { .. } => steer_refusal(error),
+        _ => zerocode_core::agent::turn_refusal::UNKNOWN.to_string(),
+    }
 }
 
 /// A channel's refusal of a steer, in the page's words: no turn runs

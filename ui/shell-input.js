@@ -427,7 +427,25 @@ function rearmKeySink(event) {
     "input, textarea, select, [contenteditable], [data-keyboard-owner]",
   );
   if (editing) return;
+  // A conversation stands over its pane's screen, and a letter typed with nothing focused — after a click on the
+  // page's blank — used to go to the terminal's sink, which has no pane to take it there: it was lost without a
+  // word. It belongs to the conversation's box (r3 P3-8). Only a typed character: the arrows and Space that scroll
+  // the page keep doing that.
+  if (typedCharacter(event)) {
+    const box = frontConversationBox();
+    if (box !== null) {
+      box.focus();
+      return;
+    }
+  }
   keySink.focus();
+}
+
+/* Whether a key is a character being typed: one letter with no modifier, or a composition's key. */
+function typedCharacter(event) {
+  if (event.ctrlKey || event.metaKey || event.altKey) return false;
+  // Space scrolls a page; a composition's keys (`Process`) and one letter are the ones a box takes.
+  return (event.key?.length === 1 && event.key !== " ") || event.key === "Process" || event.isComposing === true || event.keyCode === 229;
 }
 
 document.addEventListener("keydown", rearmKeySink, true);
@@ -988,7 +1006,9 @@ for (const eventName of ["keypress", "keyup"]) {
 /* Whether the key is AltGr. Windows reports it as Ctrl+Alt, which is also the primary modifier
  * and Alt of a chord on that platform; the browser says which it was. */
 function altGraphHeld(event) {
-  return event.getModifierState?.("AltGraph") === true;
+  // Only where AltGr is a key of its own: on a Mac the Option key is what WebKit may report as AltGraph, and
+  // a chord with it is the queue's chord (r3 P3-7).
+  return !usesCommandModifier && event.getModifierState?.("AltGraph") === true;
 }
 
 /* ⌘/Ctrl+Alt held and not as AltGr: the keys of the queue's chords (`composer.queueSteer`,

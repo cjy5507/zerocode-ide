@@ -1152,7 +1152,13 @@ async function testKeyboardFollowsTheScreen(browser, origin, ok) {
     await page.evaluate(() => document.activeElement?.blur?.());
     for (const key of ["x", "Enter", "ArrowUp", "ArrowDown", "Backspace"]) await page.keyboard.press(key);
     await page.waitForTimeout(150);
-    const chat = await page.evaluate(() => ({ sent: [...window.__ACTS__.sent], onPage: document.activeElement === document.body || document.activeElement === keySink }));
+    // r3 P3-8: the first letter now takes the focus to the conversation's own box (it used to land in the terminal's sink and be
+    // lost), so "on the page" is the body, the sink or that box — never a terminal.
+    const chat = await page.evaluate(() => ({
+      sent: [...window.__ACTS__.sent],
+      onPage: document.activeElement === document.body || document.activeElement === keySink ||
+        document.activeElement?.classList?.contains("worker-composer-box") === true,
+    }));
     // 판의 화면으로 돌렸다: 같은 키가 이제는 판의 것이다.
     await page.evaluate(async (term) => {
       await setPaneChat(term, false);
@@ -1388,8 +1394,10 @@ async function testUnsureRow(browser, origin, ok) {
       await press(page, "drop", 0);
       await page.waitForTimeout(900);
       seen.after = await page.evaluate(LOOK);
+      // On a pane the row that went on was typed by the door: another row was steered earlier, so the line is doubted (r3 P2-1).
       seen.wentOn = road === "pane"
-        ? SAME(seen.after.sent, ["paste:셋", ENTER])
+        ? SAME(seen.after.calls.filter((call) => call.door === "pane_send_now"), [{ door: "pane_send_now", term, text: "셋" }]) &&
+          seen.after.sent.filter((one) => one.startsWith("paste:")).length === 0
         : SAME(seen.after.calls.filter((call) => call.door === "wire_send"), [{ door: "wire_send", id: 91, text: "셋" }]);
       ok(
         `an_unanswered_steer_on_a_${road}_says_it_does_not_know_and_keeps_the_row_from_going_twice: the row stays, the line says it is not known whether the words went in, steering or sending it now asks no door again, another row still steers, the turn's end does not send it, and dropping it lets the queue go on`,
@@ -1849,15 +1857,17 @@ async function testWireStartWithoutAnswer(browser, origin, ok) {
     await edge("idle");
     const first = await page.evaluate(LOOK);
     const said = await page.evaluate(() => window.__WORDS__("turn-unknown"));
+    // The wire runs again: the row's two buttons are there, and off — it is not known whether its words went in.
     await edge("working");
+    const running = await page.evaluate(LOOK);
     await edge("idle");
     const later = await page.evaluate(LOOK);
     const sends = (look) => look.calls.filter((call) => call.door === "wire_send");
     ok(
-      "a_start_with_no_answer_keeps_the_row_marked_and_says_it_does_not_know: the wire_send of the first row got the word for an answer that never came — the row stands first in the queue, the line says the words may have gone in, and its steer and send now are off",
+      "a_start_with_no_answer_keeps_the_row_marked_and_says_it_does_not_know: the wire_send of the first row got the word for an answer that never came — the row stands first in the queue, the line says the words may have gone in, and when the wire runs again its steer and send now are off while the row behind it keeps both",
       SAME(sends(first), [{ door: "wire_send", id: 91, text: "선에 하나" }]) && SAME(first.queue, ["선에 하나", "선에 둘"]) &&
-        first.note === said && said.length >= 8 && first.rows[0].off.includes("steer") && first.rows[0].off.includes("now"),
-      JSON.stringify({ sends: sends(first), queue: first.queue, note: first.note, off: first.rows.map((row) => row.off) }),
+        first.note === said && said.length >= 8 && running.rows[0].off.includes("steer") && running.rows[0].off.includes("now") && running.rows[1].off.length === 0,
+      JSON.stringify({ sends: sends(first), queue: first.queue, note: first.note, off: running.rows.map((row) => row.off) }),
     );
     ok(
       "the_same_words_do_not_go_to_the_wire_twice: two more turn edges later the unanswered row was not sent again and the row behind it did not go past it",
@@ -1932,7 +1942,7 @@ async function testWaitingForThePerson(browser, origin, ok) {
       said[locale] = await page.evaluate(() => ({
         why: document.querySelector(".composer-queue-why")?.textContent ?? null,
         going: t("composer.queue.why.going", "곧 보냅니다"),
-        refused: t("composer.queue.why.refused", ""),
+        refused: t("composer.queue.why.refused", "이 글은 아직 보내지 않았습니다 — 아래 까닭을 풀면 이어서 보냅니다"),
         note: document.querySelector(".composer-queue-note")?.textContent ?? "",
       }));
     });
@@ -2051,7 +2061,7 @@ async function testStopIsOneWhileTheStopIsOut(browser, origin, ok) {
     await page.keyboard.press("Escape");
     await page.waitForTimeout(150);
     // 상자가 비어 있고 턴이 도는 동안의 단추는 중지다 — 그것도 멈춤이 나가 있는 동안은 누름이 아니다.
-    await page.locator(".worker-composer-send:visible").first().click().catch(() => null);
+    await page.locator(".worker-composer-send:visible").first().click({ force: true, timeout: 2000 }).catch(() => null);
     await page.waitForTimeout(250);
     const seen = await page.evaluate(LOOK);
     ok(

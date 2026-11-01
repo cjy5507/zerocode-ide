@@ -13607,7 +13607,13 @@ function beforeHandOverDeadline(promise, deadline) {
  * the wire's own turns. */
 function carryPaneChat(held, run) {
   const from = held.run;
-  if (from.queue?.length) run.queue = from.queue.splice(0);
+  // A row of the queue is in the pane's box (r3 P2-3): it goes back to its place as the person left it — the change
+  // nobody saved with it — and the draft that was set aside returns to the box, before the queue and the draft are
+  // carried. Moved as they stood, the wire would have sent the row's old words and the changed ones come back to the
+  // box as a draft to be sent again, the set-aside draft gone.
+  keepComposerQueueEdit(from);
+  endComposerQueueEdit(from, { restore: true });
+  moveComposerQueue(from, run);
   if (from.draft) {
     run.draft = from.draft;
     from.draft = "";
@@ -16576,6 +16582,8 @@ function workerComposerNode(run, owner = null) {
     if (send.classList.contains("is-stop")) {
       event.preventDefault();
       event.stopPropagation();
+      // The stop of a send now is out (r3 P3-4): one stop, not two.
+      if (run.queueStopped) return;
       // The same interrupt Esc sends: the wire's request, or the key the
       // pane's CLI names (t-6323 A3 — the wire's road had none, and threw).
       if (run.wire || (run.term !== undefined && run.term !== null)) {
@@ -16632,6 +16640,8 @@ function workerComposerNode(run, owner = null) {
     syncWorkerComposers(run);
     let pasted = false;
     let saved = false;
+    let queued = false;
+    let message = null;
     // 칩이 없으면 글만 — 확인할 것이 없으니 첫 붙여넣기가 동기로 나간다. 칩이
     // 있으면 보내기 직전에 경로를 확인하고(없는 것은 칩에 남는다) 「글 + 빈 줄
     // + 첨부: + 경로들」의 형식을 입는다(t-2993). 칩은 보낸 뒤 비고, 살아남는
@@ -16646,7 +16656,7 @@ function workerComposerNode(run, owner = null) {
         fit();
         return;
       }
-      const message = attachments.count() === 0 ? text || null : await attachments.outgoing(text);
+      message = attachments.count() === 0 ? text || null : await attachments.outgoing(text);
       if (message === null) return;
       // 실행 중에 친 글은 창이 들고 있다가 턴이 끝나면 보낸다 — 첨부까지
       // 조립된 그대로가 대기열에 든다(`settleComposerQueue`). 여기서
@@ -16657,9 +16667,13 @@ function workerComposerNode(run, owner = null) {
       // (t-54304).
       // A hand-over that never ends is let go by its own clock
       // (`armComposerRelease`, t-84670).
-      if (composerQueues(run, asking)) {
+      // Nor does it go past words that wait (`composerQueues` reads the queue) or onto a line that may hold words
+      // (`run.lineDoubt`): behind a doubted line it waits in the queue, and the queue sends it through the door that
+      // looks at the line (r3 P2-1).
+      if (composerQueues(run, asking) || run.lineDoubt === true) {
         queueComposerMessage(run, message);
         armComposerRelease(run);
+        queued = true;
       }
       // 아니면 그 자리에서 실행의 길로 — 선이면 한 요청, 판이면
       // 붙여넣기·숨·Enter. `pasted`는 Enter가 실패했을 때 글이 이미 부모의
@@ -16678,13 +16692,24 @@ function workerComposerNode(run, owner = null) {
       if (pasted) {
         run.sendUncertain = true;
         delivery.hidden = false;
+      } else if (message !== null && composerQueueRefusalWord(error) === "turn-unknown") {
+        // A wire's request that got no answer (r3 P2-2): the words may be in a turn. They stand in the queue as a row of
+        // unknown outcome and leave the box — kept there, they would be sent again by the next press of Enter.
+        parkUnsureMessage(run, message);
+        if (run.draft === draft && box.value === draft) {
+          box.value = "";
+          run.draft = "";
+          syncWorkerComposers(run, draft);
+          fit();
+        }
       }
-      showError(error);
+      showQueueError(error);
     } finally {
       run.sending = false;
       syncWorkerComposers(run);
-      // The saved row may be the one the idle pane takes now — asked once the send is not out.
-      if (saved) settleComposerQueue(run);
+      // The saved row may be the one the idle pane takes now — asked once the send is not out. So may the words that
+      // were queued behind a queue that rests, a refused row or a doubted line (r3 P2-1): they ask the queue at once.
+      if (saved || queued) settleComposerQueue(run);
     }
   });
   return form;
@@ -16730,6 +16755,8 @@ function paintComposerSend(form, run, standing = standingAskOf(run)) {
     || (composerAttachmentsOf(form)?.count() ?? 0) > 0;
   const answering = Boolean(standing) && !standing.draft?.sending;
   const busy = Boolean(run.sending || run.sendUncertain);
+  // The stop of a send now is out (r3 P3-4): the stop button waits for the turn to end or the clock to run out.
+  const stopLocked = Boolean(run.queueStopped);
   let face = "send";
   // A row of the queue in the box: the button saves it back where it stood (t-86909) —
   // never stops the turn, whatever the box holds.
@@ -16743,7 +16770,7 @@ function paintComposerSend(form, run, standing = standingAskOf(run)) {
       : face === "save"
         ? t("composer.queue.save", "고친 글을 대기열에 저장")
         : t("worker.send", "보내기");
-  writeDisabled(send, busy);
+  writeDisabled(send, busy || (face === "stop" && stopLocked));
   writeClass(send, "is-stop", face === "stop");
   writeAttribute(send, "aria-label", name);
   writeAttribute(send, "data-tip", name);

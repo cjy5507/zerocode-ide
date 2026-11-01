@@ -2479,13 +2479,78 @@ fn turn_pane(state: &State<'_, AppState>, term: TermId) -> Result<(&'static str,
 }
 
 /// One window-log line per queue door (t-86909): which door, which pane, and
-/// the word it refused with — never the words it carried.
-fn note_turn_door(state: &State<'_, AppState>, door: &str, term: TermId, refused: Option<&String>) {
-    let line = match refused {
-        Some(word) => format!("{door}: pane {term} refused ({word})"),
-        None => format!("{door}: pane {term} done"),
-    };
+/// the word it refused with — never the words it carried. A refusal that came
+/// from reading the screen ([`refused::SCREEN`], [`refused::LINE`]) adds the look
+/// the reading took (t-86909 r3, [`crate::composer_empty::look`]): the verdicts
+/// it reached and no cell's character, so the next refusal from a real pane says
+/// which part of the reading failed (the cursor, bracketed paste, the rules, the
+/// caret) instead of leaving a guess.
+fn note_turn_door(
+    state: &State<'_, AppState>,
+    door: &str,
+    term: TermId,
+    refusal: Option<&String>,
+) {
+    let line = door_note(door, term, refusal.map(String::as_str), || {
+        let agent = state.agent_terms().get(&term).copied()?;
+        with_terminal(state, term, |pty| {
+            Ok(crate::composer_empty::look(agent, pty.terminal().grid()))
+        })
+        .ok()
+    });
     crate::system_runtime::note_window_event(state.local_data_root(), &line);
+}
+
+/// The text of [`note_turn_door`]'s line: `look` is asked only for a refusal that
+/// came from the screen.
+fn door_note(
+    door: &str,
+    term: TermId,
+    refusal: Option<&str>,
+    look: impl FnOnce() -> Option<String>,
+) -> String {
+    let Some(word) = refusal else {
+        return format!("{door}: pane {term} done");
+    };
+    let mut line = format!("{door}: pane {term} refused ({word})");
+    if (word == refused::SCREEN || word == refused::LINE)
+        && let Some(look) = look()
+    {
+        line.push_str(" — ");
+        line.push_str(&look);
+    }
+    line
+}
+
+#[cfg(test)]
+mod door_note_tests {
+    use super::*;
+
+    /// A refusal from the screen carries the look and the others do not ask for it (t-86909 r3).
+    #[test]
+    fn a_screen_refusal_logs_the_look_and_another_refusal_logs_only_its_word() {
+        let look = || Some("look claude: cursor=hidden paste=on row=3 of=8 col=2".to_string());
+        assert_eq!(
+            door_note("pane_steer", 7, Some(refused::SCREEN), look),
+            "pane_steer: pane 7 refused (turn-screen) — look claude: cursor=hidden paste=on row=3 of=8 col=2"
+        );
+        assert!(door_note("pane_send_now", 7, Some(refused::LINE), look).contains("— look claude"));
+        for word in [refused::IDLE, refused::SEAT, refused::NOT_READING, refused::LANDED] {
+            let line = door_note("pane_steer", 7, Some(word), || {
+                panic!("the look was asked for {word}")
+            });
+            assert_eq!(line, format!("pane_steer: pane 7 refused ({word})"));
+        }
+        assert_eq!(
+            door_note("pane_interrupt", 7, None, look),
+            "pane_interrupt: pane 7 done"
+        );
+        // A pane whose look could not be taken (no terminal) still logs the refusal.
+        assert_eq!(
+            door_note("pane_steer", 7, Some(refused::SCREEN), || None),
+            "pane_steer: pane 7 refused (turn-screen)"
+        );
+    }
 }
 
 /// Put a queued message into the turn a pane is running, without stopping it

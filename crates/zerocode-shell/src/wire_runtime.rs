@@ -2124,7 +2124,9 @@ impl WireSession {
                 state.status = "working";
                 drop(state);
                 self.settled();
-                let turn = self.request("turn/start", params, REPLY_WAIT)?;
+                let turn = self
+                    .ask("turn/start", params, REPLY_WAIT)
+                    .map_err(start_word)?;
                 if let Ok(mut state) = self.state.lock() {
                     state.turn = turn
                         .get("turn")
@@ -2827,9 +2829,19 @@ fn steer_word(asked: Asked) -> String {
     }
 }
 
-/// A failed `turn/start` as the page says it (t-86909 r3). Stub in the red commit: the message as it came.
+/// A failed `turn/start` as the page says it (t-86909 r3, P2-2): an answer that never came
+/// within the wait is the word for "the words may have started a turn" — the page keeps the
+/// message first in its queue, marked, and sends it no second time on its own. Before, `send`
+/// returned the request's English text, the page put the message back as an ordinary row, and
+/// the turn it may have started was followed by the same words again at its end (the
+/// transcript, written before the request, already held them once). A request that never left
+/// and one the agent refused took nothing: they keep their own words.
 fn start_word(asked: Asked) -> String {
-    asked.into_message()
+    use zerocode_core::agent::turn_refusal::UNKNOWN;
+    match asked {
+        Asked::NoAnswer(_) => UNKNOWN.to_string(),
+        other => other.into_message(),
+    }
 }
 
 /// The params of Codex's `turn/steer` (t-86909): the thread, the turn the

@@ -294,7 +294,10 @@ function composerHolding(run) {
  * the words after it wait as words sent mid-turn do. A card still waiting for
  * its answer takes the words as that answer, and is asked before this. */
 function composerQueues(run, asking) {
-  return composerWorking(run) || composerHolding(run) || Boolean(asking);
+  // A queue that holds words, or a delivery of its own in flight, is not overtaken by what the box sends (r3
+  // P2-1): the refused row stands first, and the box's words stand behind it.
+  return composerWorking(run) || composerHolding(run) || Boolean(asking) || (run.queue?.length ?? 0) > 0 ||
+    run.delivering === true;
 }
 
 /* The moment the hand-over now keeping `run`'s queue stops holding it, or
@@ -339,7 +342,7 @@ function composerQueueWhy(run) {
   // The first row is in the box (t-86909): the queue lets nothing past it, and says so.
   if (run.queueEdit?.at === 0) return t("composer.queue.why.editing", "고치는 글을 저장하거나 취소하면 이어서 보냅니다");
   // The row in front is one whose steer nobody can say went in (r2): it waits for the person, whatever the turn does.
-  if (run.queueUnsure?.has(run.queue?.[0])) {
+  if (run.queue?.length && queueRowUnsure(run, 0)) {
     return t("composer.queue.why.unsure", "끼워 넣은 글이 들어갔는지 알 수 없어 이 글은 보내지 않고 기다립니다 — 대화에서 확인한 뒤 ✕로 지우거나, 고치기로 저장하면 이어서 보냅니다");
   }
   // The stop of a send now is out (r2): the turn's end sends the words that came to the front.
@@ -358,6 +361,9 @@ function composerQueueWhy(run) {
       ? t("composer.queue.why.answered", "질문에 보낸 답이 닿기를 기다립니다 — 판이 넘어가면 보냅니다")
       : t("composer.queue.why.asking", "위 질문에 답하면 보냅니다");
   }
+  // The door refused the row in front (r3 P3-1): it waits for the person to clear what the line under it says, not for a
+  // turn or a clock — "goes shortly" beside "was not sent" was two lines saying the opposite.
+  if (run.queueRefused) return t("composer.queue.why.refused", "이 글은 아직 보내지 않았습니다 — 아래 까닭을 풀면 이어서 보냅니다");
   if (run.queueArmed === false) return t("composer.queue.why.started", "앞서 보낸 글의 턴이 시작되기를 기다립니다");
   return t("composer.queue.why.going", "곧 보냅니다");
 }
@@ -374,7 +380,80 @@ function composerDeliver(run, message, landed = null) {
  * (탭 drop, `forgetPaneChat`) 같이 사라진다. */
 function queueComposerMessage(run, message) {
   if (!run.queue) run.queue = [];
+  queueIdsOf(run);
   run.queue.push(message);
+  run.queueIds.push(++queueRowSeq);
+  return run.queueIds.at(-1);
+}
+
+/* ---- a queued row has an identity of its own (r3 P3-9) ------------------------------------
+ *
+ * `run.queue` is the list of the words — what the pages, the hand-over and the tests read. A mark kept against a
+ * row ("whether this row's steer went in is not known", `run.queueUnsure`) cannot be kept against the words: the same
+ * words queued twice are two rows, and a mark found by the words switched both off, and freed both when one went.
+ * So each row has a number (`run.queueIds`, beside the list, one for each row) and the mark is kept against the number.
+ * Every change to the list in this file goes through the functions here, so the two never part; a list somebody
+ * else replaced (the tests set `run.queue`) is met by `queueIdsOf`, which gives the rows of a list it does not know
+ * new numbers — never an old one. */
+let queueRowSeq = 0;
+
+function queueIdsOf(run) {
+  if (run.queueIdsFor !== run.queue) {
+    run.queueIds = [];
+    run.queueIdsFor = run.queue;
+    run.queueUnsure = null;
+  }
+  const ids = run.queueIds ?? (run.queueIds = []);
+  const wanted = run.queue?.length ?? 0;
+  while (ids.length < wanted) ids.push(++queueRowSeq);
+  ids.length = wanted;
+  return ids;
+}
+
+/* The row at `at` out of the list, with its number: `{ message, id }`, or null when there is none. The mark stays
+ * with the number, so a row taken out to be put back keeps it. */
+function takeQueueRow(run, at) {
+  const ids = queueIdsOf(run);
+  if (!(at >= 0 && at < run.queue.length)) return null;
+  const [message] = run.queue.splice(at, 1);
+  const [id] = ids.splice(at, 1);
+  return { message, id };
+}
+
+/* A row — one taken out, or one with a number of its own — into the list at `at`. */
+function putQueueRow(run, at, row) {
+  run.queue ??= [];
+  const ids = queueIdsOf(run);
+  const place = Math.min(Math.max(at, 0), run.queue.length);
+  run.queue.splice(place, 0, row.message);
+  ids.splice(place, 0, row.id);
+}
+
+/* Whether the row at `at` is one whose steer or start nobody can say went in. */
+function queueRowUnsure(run, at) {
+  return run.queueUnsure?.has(queueIdsOf(run)[at]) === true;
+}
+
+function markQueueRowUnsure(run, id) {
+  (run.queueUnsure ??= new Set()).add(id);
+}
+
+/* The queue of one run into another's: the pane's conversation handing its words to the wire's page. The rows keep
+ * their numbers, so the marks go with them. */
+function moveComposerQueue(from, to) {
+  if (!from.queue?.length) return;
+  const ids = queueIdsOf(from);
+  const unsure = from.queueUnsure;
+  const moved = from.queue.splice(0);
+  const numbers = ids.splice(0);
+  to.queue ??= [];
+  queueIdsOf(to);
+  to.queue.push(...moved);
+  to.queueIds.push(...numbers);
+  for (const id of numbers) {
+    if (unsure?.has(id)) markQueueRowUnsure(to, id);
+  }
+  forgetComposerQueueMarks(from);
 }
 
 /* 대기 중인 글의 한 줄 — 첫 줄(빈 줄은 건너뛴다)만. 길이는 CSS가 자른다
@@ -523,6 +602,24 @@ function putComposerDraft(run, words) {
   }
 }
 
+/* The box of the conversation that stands in front — a pane's own conversation over its screen, or a wire's page — or null
+ * (r3 P3-8). A letter typed with nothing focused belongs here: the terminal under a conversation takes no key from the page. */
+function frontConversationBox() {
+  const tab = activeTabIn(focusedPane);
+  let run = null;
+  if (tab?.kind === "worker") {
+    run = tab.worker;
+  } else if (tab?.kind === "term") {
+    const term = activePaneOf(tab);
+    if (term !== null && term !== undefined && typeof paneChatOn === "function" && paneChatOn(term)) {
+      run = paneChats.get(term)?.run ?? null;
+    }
+  }
+  if (!run || isHelperPage(run)) return null;
+  const form = composerFormsOf(run).find((one) => one.offsetParent !== null);
+  return form?.querySelector(".worker-composer-box") ?? null;
+}
+
 /* 눈에 보이는 상자에 손을 돌려주고 캐럿을 글 끝에 둔다(`atEnd`가 아니면 캐럿은 있던 자리). */
 function focusComposerBox(run, { atEnd = true } = {}) {
   const form = composerFormsOf(run).find((one) => one.offsetParent !== null);
@@ -552,11 +649,21 @@ function composerQueueNode() {
   queue.addEventListener("click", (event) => {
     const button = event.target instanceof Element ? event.target.closest("button[data-act]") : null;
     if (!button || !queue.contains(button)) return;
+    // One press is one act (r3 P3-3): the second press of a double click is not another one — the cross has no undo, and
+    // the rows that moved up under the pointer would be pressed in turn. A key makes a click of count 0.
+    if (event.detail > 1) return;
     const run = queue.closest(".worker-composer")?.__workerRun;
     const at = queue.__rows.indexOf(button.closest(".composer-queue-item"));
     // WebKit gives no focus to a button a mouse pressed (and takes it from where it was): then no
     // button holds the keyboard, and the press hands it to the box (r2 P1-1).
     if (run && at >= 0) actOnComposerQueue(run, button.dataset.act, at, { onButton: document.activeElement === button });
+  });
+  // A key held on a button repeats its press (the browser makes a click of every repeated Enter), and after a row goes the
+  // focus stands on the next row's button: held, the Enter would press them one after another (r3 P3-3). A repeat presses nothing.
+  queue.addEventListener("keydown", (event) => {
+    if (!event.repeat || (event.key !== "Enter" && event.key !== " ")) return;
+    const button = event.target instanceof Element ? event.target.closest("button[data-act]") : null;
+    if (button && queue.contains(button)) event.preventDefault();
   });
   return queue;
 }
@@ -626,7 +733,7 @@ function writeAttributeOrNone(node, name, value) {
  * 문에 나가 있는 동안, 이 행이 상자에 올라와 옛 글로 끼워 넣거나 보낼 수 없을 때, 바로 보내기의
  * 멈춤이 나가 있는 동안(r2), 끼워 넣은 글이 들어갔는지 알 수 없는 행(r2). 고치기와 지우기는 문에
  * 나가 있는 동안만 꺼진다. */
-function dressComposerQueueRow(row, at, held, { editing, acting, acts, unsure }) {
+function dressComposerQueueRow(row, at, { editing, acting, acts, unsure }) {
   const first = at === 0;
   const mine = acting && acting.at === at ? acting.kind : null;
   writeAttributeOrNone(row, "data-editing", at === editing ? "true" : null);
@@ -636,7 +743,7 @@ function dressComposerQueueRow(row, at, held, { editing, acting, acts, unsure })
   writeHidden(steer, !acts.steer);
   writeHidden(now, !acts.now);
   const busy = Boolean(acting);
-  const off = busy || acts.locked || at === editing || unsure?.has(held[at]) === true;
+  const off = busy || acts.locked || at === editing || unsure(at);
   writeDisabled(edit, busy);
   writeDisabled(drop, busy);
   writeDisabled(steer, off);
@@ -721,12 +828,18 @@ function paintComposerQueueRows(run, queue) {
     newEnd -= 1;
   }
   for (const row of rows.splice(head, oldEnd - head)) row.remove();
-  const ground = { editing: run.queueEdit?.at ?? -1, acting: run.queueActing ?? null, acts, unsure: run.queueUnsure };
+  const ids = queueIdsOf(run);
+  const ground = {
+    editing: run.queueEdit?.at ?? -1,
+    acting: run.queueActing ?? null,
+    acts,
+    unsure: (at) => run.queueUnsure?.has(ids[at]) === true,
+  };
   if (newEnd > head) {
     // A new row is dressed before it stands, so it arrives as it is and costs the page one insertion.
     const fresh = words.slice(head, newEnd).map((one, at) => {
       const row = composerQueueRowNode(one);
-      dressComposerQueueRow(row, head + at, held, ground);
+      dressComposerQueueRow(row, head + at, ground);
       return row;
     });
     const before = rows[head] ?? null;
@@ -735,7 +848,7 @@ function paintComposerQueueRows(run, queue) {
     queue.insertBefore(batch, before);
     rows.splice(head, 0, ...fresh);
   }
-  rows.forEach((row, at) => dressComposerQueueRow(row, at, held, ground));
+  rows.forEach((row, at) => dressComposerQueueRow(row, at, ground));
 }
 
 /* The rows say two chords in their tooltips and their short words in the language of the day: a
@@ -767,9 +880,12 @@ function actOnComposerQueue(run, act, at, { onButton = true } = {}) {
  * 번호가 하나 당겨진다. 지운 행이 대기열을 붙잡고 있었다면(맨 앞의 의심스러운 행) 남은 글이
  * 이어서 간다. */
 function dropQueuedMessage(run, at) {
-  const [gone] = run.queue.splice(at, 1);
-  run.queueUnsure?.delete(gone);
-  if (at === 0) run.queueFront = false;
+  const gone = takeQueueRow(run, at);
+  if (gone) run.queueUnsure?.delete(gone.id);
+  if (at === 0) {
+    run.queueFront = false;
+    run.queueRefused = null;
+  }
   if (run.queueEdit) {
     if (run.queueEdit.at === at) endComposerQueueEdit(run, { restore: true });
     else if (run.queueEdit.at > at) run.queueEdit.at -= 1;
@@ -834,22 +950,23 @@ function saveComposerQueueEdit(run, message) {
   }
   const { at } = run.queueEdit;
   if (at < run.queue.length) {
-    run.queueUnsure?.delete(run.queue[at]);
+    run.queueUnsure?.delete(queueIdsOf(run)[at]);
     run.queue[at] = message;
   } else {
-    run.queue.push(message);
+    queueComposerMessage(run, message);
   }
   run.queueNote = null;
   endComposerQueueEdit(run, { restore: true });
   return true;
 }
 
-/* 보낸 글을 대기열에서 뺀다 — 번호가 아니라 글로 찾는다(대기열이 그사이 비워졌다면 없다). */
-function takeQueuedMessage(run, message, near) {
-  const queue = run.queue ?? [];
-  const at = queue[near] === message ? near : queue.indexOf(message);
+/* 보낸 글을 대기열에서 뺀다 — 행의 번호로 찾는다(글이 같은 행이 둘 있어도, 행이 그사이 움직였어도). 대기열이 그사이
+ * 비워졌다면 없다. */
+function takeQueuedMessage(run, id) {
+  const at = queueIdsOf(run).indexOf(id);
   if (at < 0) return false;
-  queue.splice(at, 1);
+  takeQueueRow(run, at);
+  run.queueUnsure?.delete(id);
   if (run.queueEdit && run.queueEdit.at > at) run.queueEdit.at -= 1;
   return true;
 }
@@ -862,11 +979,20 @@ function takeQueuedMessage(run, message, near) {
 function queueActIsOpen(run, at, act) {
   if (run.queueEdit?.at === at) return false;
   const acts = composerQueueActs(run);
-  if (acts.locked || run.queueUnsure?.has(run.queue[at])) return false;
+  if (acts.locked || queueRowUnsure(run, at)) return false;
   if (acts[act]) return true;
   noteComposerQueue(run, composerQueueRefusalWords(composerWorking(run) ? "turn-unsupported" : "turn-idle"));
   syncWorkerComposers(run);
   return false;
+}
+
+/* Whether this run's steers are typed at a pane's screen (Claude Code): then the words wait in the CLI's own
+ * queue, and what comes next on its line can be a key that takes them back (r3 P2-1). A steer over a channel (zo)
+ * or a wire's request types nothing, so it leaves nothing on any line. */
+function composerSteerIsTyped(run) {
+  if (run.wire) return false;
+  const spec = installedAgents().find((row) => row.id === run.agent) ?? null;
+  return spec?.steer_road === "typed";
 }
 
 /* 끼워 넣기: 턴을 끊지 않고 이 글을 지금 턴에 넣는다. 문이 받았다고 답해야 대기열을 떠난다.
@@ -874,25 +1000,31 @@ function queueActIsOpen(run, at, act) {
 async function steerQueuedMessage(run, at) {
   const message = run.queue[at];
   if (!queueActIsOpen(run, at, "steer")) return;
+  const id = queueIdsOf(run)[at];
   run.queueActing = { at, kind: "steer" };
   run.queueNote = null;
   syncWorkerComposers(run);
   try {
     await composerRoad(run).steer(message);
-    takeQueuedMessage(run, message, at);
+    takeQueuedMessage(run, id);
+    // Typed at the pane, the words are in the CLI's queue until it takes them in: a key before then (the stop button,
+    // an Esc the person types in the pane) can put them back on its line, and what the window sends next must look
+    // at the line before it types (r3 P2-1).
+    if (composerSteerIsTyped(run)) run.lineDoubt = true;
     toast(t("composer.queue.steered", "지금 턴에 끼워 넣었습니다 — 에이전트가 다음 단계에서 읽습니다"));
   } catch (error) {
     const word = composerQueueRefusalWord(error);
     if (word === "turn-landed") {
       // The words reached the pane's line and the Enter did not follow: they are
       // over there now, so they leave this queue — and the page asks the person to look.
-      takeQueuedMessage(run, message, at);
+      takeQueuedMessage(run, id);
       run.sendUncertain = true;
+      run.lineDoubt = true;
     } else {
       if (word === "turn-unknown") {
         // No answer came: the words may be in the turn. The row stays, says it does not know, and is
         // not steered, sent now or sent at the turn's end a second time on its own (r2 P3-5).
-        (run.queueUnsure ??= new Set()).add(message);
+        markQueueRowUnsure(run, id);
       }
       noteComposerQueue(run, composerQueueRefusalWords(error));
     }
@@ -909,21 +1041,19 @@ async function steerQueuedMessage(run, at) {
  * 단추가 꺼진다 — 멈춤은 한 번이다: 둘째 Esc는 쉬는 입력줄에 가서 CLI의 되감기를 열 수 있다
  * (r2 P2-1). 멈춘 것이 끝내 안 보이면 글은 맨 앞에 남고 그렇게 말한다. */
 async function sendQueuedMessageNow(run, at) {
-  const message = run.queue[at];
   if (!queueActIsOpen(run, at, "now")) return;
   run.queueActing = { at, kind: "now" };
   run.queueNote = null;
-  run.queue.splice(at, 1);
-  run.queue.unshift(message);
+  const row = takeQueueRow(run, at);
+  putQueueRow(run, 0, row);
   if (run.queueEdit) run.queueEdit.at = run.queueEdit.at === at ? 0 : run.queueEdit.at + (run.queueEdit.at < at ? 1 : 0);
   syncWorkerComposers(run);
   try {
     await composerRoad(run).stopForSend();
   } catch (error) {
-    const now = run.queue.indexOf(message);
+    const now = queueIdsOf(run).indexOf(row.id);
     if (now >= 0) {
-      run.queue.splice(now, 1);
-      run.queue.splice(Math.min(at, run.queue.length), 0, message);
+      putQueueRow(run, Math.min(at, run.queue.length - 1), takeQueueRow(run, now));
       if (run.queueEdit) run.queueEdit.at = run.queueEdit.at === 0 ? at : run.queueEdit.at - (run.queueEdit.at <= at ? 1 : 0);
     }
     noteComposerQueue(run, composerQueueRefusalWords(error));
@@ -940,7 +1070,7 @@ async function sendQueuedMessageNow(run, at) {
   run.queueNowWatch = setTimeout(() => {
     run.queueNowWatch = null;
     run.queueStopped = false;
-    if (composerWorking(run) && run.queue?.[0] === message) {
+    if (composerWorking(run) && run.queue?.length && queueIdsOf(run)[0] === row.id) {
       noteComposerQueue(run, composerQueueRefusalWords("turn-unconfirmed"));
     }
     syncWorkerComposers(run);
@@ -956,7 +1086,7 @@ function composerQueueKeyTarget(act) {
   const run = form?.__workerRun;
   if (!run?.queue?.length || run.queueActing || run.queueEdit?.at === 0) return null;
   const acts = composerQueueActs(run);
-  if (acts.locked || run.queueUnsure?.has(run.queue[0])) return null;
+  if (acts.locked || queueRowUnsure(run, 0)) return null;
   return acts[act] ? run : null;
 }
 
@@ -971,8 +1101,9 @@ function composerQueueKeyTarget(act) {
  *
  * 턴이 끝난 이 자리에서 멈춤의 걸쇠가 풀린다(`queueStopped`). 바로 보내기로 앞에 온 글(`queueFront`)은
  * 판이면 문(`sendFront`)이 입력줄을 다시 보고 친다 — 멈춤이 되돌려 놓은 글 뒤에 붙지 않게(r2 P2-2);
- * 문이 거절하면 글은 맨 앞에 남고 까닭이 보이며, 판이 다음에 움직일 때 다시 묻는다. 끼워 넣은 글이
- * 들어갔는지 알 수 없는 행은 저절로 가지 않는다. */
+ * 문이 거절하면 글은 맨 앞에 남고 까닭이 보이며, 판이 다음에 움직일 때 다시 묻는다. 입력줄이 의심스러운 동안
+ * (`run.lineDoubt` — 끼워 넣은 글이 CLI 대기열에 있었거나 문이 입력줄에 글이 있다고 했다)에는 어느 글이든 같은 문을
+ * 지난다(r3 P2-1). 끼워 넣은 글이 들어갔는지 알 수 없는 행은 저절로 가지 않는다. */
 function settleComposerQueue(run) {
   // Held for a hand-over under way: they go with the conversation (t-54304).
   if (composerHolding(run)) {
@@ -991,63 +1122,94 @@ function settleComposerQueue(run) {
   // on the menu it shows (t-81786 P0). They go once the card is gone.
   if (standingAskOf(run)) return;
   if (run.queueArmed === false) return;
-  if (!run.queue?.length || run.sending || run.sendUncertain) return;
+  if (!run.queue?.length || run.sending || run.delivering || run.sendUncertain) return;
   // A row out on a door (steer, send now) is not sent a second time, and the first row
   // being in the box is the person's to finish: nothing goes past it (t-86909).
   if (run.queueActing || run.queueEdit?.at === 0) return;
   // A row whose steer nobody can say went in is the person's to look at: not sent a second time (r2).
-  if (run.queueUnsure?.has(run.queue[0])) return;
-  const message = run.queue.shift();
+  if (queueRowUnsure(run, 0)) return;
+  const row = takeQueueRow(run, 0);
   if (run.queueEdit) run.queueEdit.at -= 1;
-  const front = run.queueFront === true;
+  const front = run.queueFront === true || run.lineDoubt === true;
   run.queueFront = false;
+  run.queueRefused = null;
   run.queueNote = null;
   run.queueArmed = false;
-  run.sending = true;
+  // A delivery of the queue's own is not the box's send (r3 P3-2): the box stays open to the person's typing
+  // while the door looks at the line for up to two seconds, and what they send meanwhile waits behind it.
+  run.delivering = true;
   syncWorkerComposers(run);
   if (front) {
-    void deliverQueueFront(run, message);
+    void deliverQueueFront(run, row);
     return;
   }
   let pasted = false;
-  void composerDeliver(run, message, () => { pasted = true; })
+  void composerDeliver(run, row.message, () => { pasted = true; })
     .catch((error) => {
       if (pasted) run.sendUncertain = true;
-      else putBackQueueHead(run, message);
-      showError(error);
+      else putBackQueueHead(run, row, error);
+      showQueueError(error);
     })
     .finally(() => {
-      run.sending = false;
+      run.delivering = false;
       syncWorkerComposers(run);
     });
 }
 
-/* A message shifted out to be sent that could not be — nothing of it reached the pane — stands first
- * again and is asked of the next edge: a queued message is never lost to a failure (r2). */
-function putBackQueueHead(run, message) {
+/* A row shifted out to be sent that could not be — nothing of it reached the pane — stands first again and is asked
+ * of the next edge: a queued message is never lost to a failure (r2). One whose request got no answer (`turn-unknown`:
+ * a wire's `turn/start` that never replied) may have started a turn, and stands first MARKED: the same words are not sent
+ * again on their own, and the person decides — delete the row, or save it by editing (r3 P2-2). */
+function putBackQueueHead(run, row, error = null) {
   run.queue ??= [];
-  run.queue.unshift(message);
+  putQueueRow(run, 0, row);
   if (run.queueEdit) run.queueEdit.at += 1;
   run.queueArmed = true;
+  if (error !== null && composerQueueRefusalWord(error) === "turn-unknown") {
+    markQueueRowUnsure(run, row.id);
+    noteComposerQueue(run, composerQueueRefusalWords(error));
+  }
 }
 
-/* The words that came to the front by 바로 보내기, after their stop: asked of the door, which looks at the
- * line again. Whatever it refuses nothing of was typed, so the words stand first again with the sentence
- * for the refusal — and ask again at the pane's next move; `turn-landed` is the one refusal after they
- * went in, which leaves the queue and asks the person to look at the pane. */
-async function deliverQueueFront(run, message) {
+/* Words the box sent whose request got no answer (r3 P2-2): they may have started a turn, and the box would keep them for the
+ * person to send again. They stand in the queue as a row of unknown outcome instead — marked, with the sentence under the
+ * queue — and go nowhere on their own. */
+function parkUnsureMessage(run, message) {
+  markQueueRowUnsure(run, queueComposerMessage(run, message));
+  noteComposerQueue(run, composerQueueRefusalWords("turn-unknown"));
+}
+
+/* An error said to the person: the sentence for a word the doors know, as it came for any other. */
+function showQueueError(error) {
+  const word = composerQueueRefusalWord(error);
+  showError(QUEUE_ACT_REFUSALS[word] ? new Error(composerQueueRefusalWords(error)) : error);
+}
+
+/* The words that came to the front by 바로 보내기, after their stop — and any words sent while the line is doubted (r3
+ * P2-1): asked of the door, which looks at the line again. Whatever it refuses nothing of was typed, so the words
+ * stand first again with the sentence for the refusal — and ask again at the pane's next move; `turn-landed` is the one
+ * refusal after they went in, which leaves the queue and asks the person to look at the pane. A refusal because the
+ * line holds words (`turn-line`) makes the line doubted until a row has been typed through the door. */
+async function deliverQueueFront(run, row) {
   try {
-    await composerRoad(run).sendFront(message);
+    await composerRoad(run).sendFront(row.message);
+    // The door saw the line empty and typed on it: nothing is left to doubt.
+    run.lineDoubt = false;
   } catch (error) {
-    if (composerQueueRefusalWord(error) === "turn-landed") {
+    const word = composerQueueRefusalWord(error);
+    if (word === "turn-landed") {
       run.sendUncertain = true;
     } else {
-      putBackQueueHead(run, message);
+      putBackQueueHead(run, row, error);
       run.queueFront = true;
-      noteComposerQueue(run, composerQueueRefusalWords(error));
+      if (word === "turn-line") run.lineDoubt = true;
+      if (word !== "turn-unknown") {
+        run.queueRefused = word;
+        noteComposerQueue(run, composerQueueRefusalWords(error));
+      }
     }
   } finally {
-    run.sending = false;
+    run.delivering = false;
     syncWorkerComposers(run);
   }
 }
@@ -1056,6 +1218,8 @@ async function deliverQueueFront(run, message) {
 function forgetComposerQueueMarks(run) {
   run.queueFront = false;
   run.queueStopped = false;
+  run.queueRefused = null;
+  run.lineDoubt = false;
   run.queueUnsure = null;
   clearTimeout(run.queueNowWatch);
   run.queueNowWatch = null;
@@ -2383,6 +2547,9 @@ function interruptOnEscape(host) {
       focusComposerBox(run);
       return;
     }
+    // The stop of a send now is out (r3 P3-4): a second Esc would type at a pane that may rest by the time it lands,
+    // where two Escapes open the CLI's rewind. Until the turn ends or the clock runs out, there is nothing to stop twice.
+    if (run.queueStopped) return;
     if (!composerWorking(run)) return;
     const typing = event.target?.closest?.(".worker-composer-box") !== null && event.target?.closest?.(".worker-composer-box") !== undefined;
     if (host.querySelector(".pane-chat-ask") && !typing) return;

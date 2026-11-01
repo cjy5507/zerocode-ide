@@ -1,6 +1,6 @@
 //! Positive evidence that a supported TUI's live input field is empty.
 
-use zerocode_pty::TerminalGrid;
+use zerocode_pty::{Cell, TerminalGrid};
 
 /// Read only the cursor's field, never a prompt glyph in transcript text.
 /// Unknown layouts, pickers, multiline fields and attachments stay protected.
@@ -9,10 +9,20 @@ use zerocode_pty::TerminalGrid;
 /// field is drawn the same whatever the turn does, and what a running turn
 /// adds — the spinner and the effort line above the field, a name set into
 /// its upper rule, a hint or the status line under it — lies outside the three
-/// rows read. Measured on the text of three captures of a running Claude Code
-/// pane; zo's drawing was read from its source (`tui/view.rs`, `composer.rs`).
+/// rows read.
+///
+/// **Claude Code 2.1.316 hides the terminal's cursor** (t-86909 r3, measured on
+/// the real binary, see the recordings under `tests/fixtures`): it sets `?25l`
+/// once at its start and never shows the cursor again, a turn running or not,
+/// and draws its own caret as a reversed cell with the hidden cursor standing
+/// on it. The reading used to ask for a SHOWN cursor and so took no field of
+/// this CLI for empty: every pane of it refused the queue's doors. It reads the
+/// field's cells instead ([`claude_field`]) and no longer asks whether the
+/// cursor is shown. Bracketed paste (on throughout), the cursor on the field's
+/// first cell and the rules above and below are asked as before. zo draws its
+/// cursor into its bordered composer, and that is still asked.
 pub(crate) fn observed(agent: &str, grid: &TerminalGrid) -> bool {
-    if !grid.bracketed_paste() || !grid.cursor_visible() {
+    if !grid.bracketed_paste() {
         return false;
     }
     let (row, col) = grid.cursor();
@@ -24,6 +34,9 @@ pub(crate) fn observed(agent: &str, grid: &TerminalGrid) -> bool {
     let line = grid.line(row);
     match agent {
         "zo" => {
+            if !grid.cursor_visible() {
+                return false;
+            }
             if !border(&above, '╭', '╮') || !border(&below, '╰', '╯') || col != 3 {
                 return false;
             }
@@ -42,11 +55,11 @@ pub(crate) fn observed(agent: &str, grid: &TerminalGrid) -> bool {
                     .all(|column| grid.cell(row, column).is_some_and(|cell| cell.style.dim))
         }
         "claude" => {
-            upper_rule(&above)
+            upper_rule_kind(&above).is_some()
                 && horizontal(&below)
                 && col == 2
                 && line.starts_with("❯")
-                && only_faint_after(grid, row, col)
+                && claude_field(grid, row, col) != Field::Text
         }
         _ => false,
     }
@@ -72,35 +85,87 @@ pub(crate) fn stop_door(agent: &str, interrupt_key: Option<&str>) -> bool {
 /// Whether the field holds exactly the hand-over's probe — one space typed on
 /// an empty line, the cursor one column on (t-84850 r2): the screen's word
 /// that the CLI read it. A suggestion the field drew faint goes the moment a
-/// key lands, so the line is then the prompt glyph alone.
+/// key lands, so the line is then the prompt glyph alone. Read under a hidden
+/// cursor as [`observed`] is (t-86909 r3): the caret is then the reversed cell
+/// the cursor stands on, and no letter is on the line.
 pub(crate) fn holds_probe(agent: &str, grid: &TerminalGrid) -> bool {
-    if agent != "claude" || !grid.bracketed_paste() || !grid.cursor_visible() {
+    if agent != "claude" || !grid.bracketed_paste() {
         return false;
     }
     let (row, col) = grid.cursor();
     if row == 0 || row + 1 >= grid.rows() {
         return false;
     }
-    upper_rule(&grid.line(row - 1))
+    upper_rule_kind(&grid.line(row - 1)).is_some()
         && horizontal(&grid.line(row + 1))
         && col == 3
         && grid.line(row).trim_end() == "❯"
+        && claude_field(grid, row, col) == Field::Empty
 }
 
-/// Whether every cell from `from` to the row's end is blank or drawn faint —
-/// a suggestion Claude Code stands in an empty field (`promptSuggestionEnabled`,
-/// 2.1.312) — read from the cell's own attribute, never from its words: what a
-/// person types is drawn at normal weight and stays words.
-fn only_faint_after(grid: &TerminalGrid, row: usize, from: usize) -> bool {
-    grid.row_cells(row)
+/// What stands on a Claude Code field from the caret's cell to the row's end
+/// (t-86909 r3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Field {
+    /// Blank cells and faint ones, and the caret on a blank cell.
+    Empty,
+    /// The caret on the first letter of a faint run: the placeholder
+    /// `Press up to edit queued messages` an empty field shows while the CLI
+    /// holds queued messages, or a suggestion. Nothing a person wrote.
+    Ghost,
+    /// Anything else — plain letters, a paste chip, a letter under the caret
+    /// and nothing faint beside it: a draft.
+    Text,
+}
+
+/// Read the row `row` of a Claude Code field from column `from` (where the
+/// terminal's cursor stands, hidden or not) to its end, by the cells' own
+/// attributes and never by their words: what a person types is drawn at normal
+/// weight and stays text.
+///
+/// The shapes measured on Claude Code 2.1.316 (the recordings): an empty field
+/// is `❯ ` and a reversed blank, the caret. With messages queued in the CLI the
+/// placeholder's first letter is the caret (reversed, not faint) and the rest is
+/// faint, one run in the alternate-screen layout and a run per word in the inline
+/// one. A pane told it lost the keyboard draws no caret at all, so its field is
+/// blank. And the caret moved to the start of a draft stands on the draft's first
+/// letter, reversed like the placeholder's, followed by plain letters or by
+/// nothing. That last shape is why a reversed first letter is a placeholder only
+/// when a faint letter follows within two cells and every cell after it is blank
+/// or faint: a one-letter draft with the caret on it has blanks behind it, a longer
+/// one has plain letters, a paste chip opens with `[`, and a faint word far to the
+/// right is not beside the caret. A reversed cell anywhere else is a caret that an
+/// empty field does not have.
+fn claude_field(grid: &TerminalGrid, row: usize, from: usize) -> Field {
+    let quiet = |cell: &Cell| {
+        (cell.ch == ' ' || cell.style.dim || cell.is_continuation()) && !cell.style.reverse
+    };
+    let Some((first, rest)) = grid.row_cells(row).get(from..).and_then(<[Cell]>::split_first)
+    else {
+        return Field::Empty;
+    };
+    if !first.style.reverse {
+        return if quiet(first) && rest.iter().all(quiet) {
+            Field::Empty
+        } else {
+            Field::Text
+        };
+    }
+    if !rest.iter().all(quiet) {
+        return Field::Text;
+    }
+    if first.ch == ' ' {
+        return Field::Empty;
+    }
+    let faint_beside = rest
         .iter()
-        .skip(from)
-        .all(|cell| cell.ch == ' ' || cell.style.dim || cell.is_continuation())
-}
-
-/// One line of verdicts about the field a door refused to type at (t-86909 r3). Stub in the red commit.
-pub(crate) fn look(_agent: &str, _grid: &TerminalGrid) -> String {
-    String::new()
+        .take(2)
+        .any(|cell| cell.style.dim && cell.ch != ' ' && !cell.is_continuation());
+    if first.ch != '[' && faint_beside {
+        Field::Ghost
+    } else {
+        Field::Text
+    }
 }
 
 fn horizontal(line: &str) -> bool {
@@ -112,6 +177,14 @@ fn is_rule_mark(ch: char) -> bool {
     matches!(ch, '─' | '━')
 }
 
+/// How the rule over a Claude Code field is drawn: bare, or with the session's
+/// name set into it. Never the name itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rule {
+    Bare,
+    Named,
+}
+
 /// The rule over a Claude Code field: a bare run of rule marks, or one with the
 /// session's name set into it near its right end — `────── name ─`, which
 /// Claude Code 2.1.316 draws over the field of a named session, whether a turn
@@ -120,23 +193,22 @@ fn is_rule_mark(ch: char) -> bool {
 /// three marks open the line. A name with no mark after it, a name on its own
 /// and a line of words are no border. Only this upper rule takes a name; the
 /// lower one is drawn bare ([`horizontal`]).
-fn upper_rule(line: &str) -> bool {
+fn upper_rule_kind(line: &str) -> Option<Rule> {
     let line = line.trim();
     if line.chars().take_while(|ch| is_rule_mark(*ch)).count() < 3 {
-        return false;
+        return None;
     }
     let rest = line.trim_start_matches(is_rule_mark);
     if rest.is_empty() {
-        return true;
+        return Some(Rule::Bare);
     }
-    let Some(inner) = rest.strip_prefix(' ') else {
-        return false;
-    };
+    let inner = rest.strip_prefix(' ')?;
     let named = inner.trim_end_matches(is_rule_mark);
-    named.len() < inner.len()
+    (named.len() < inner.len()
         && named
             .strip_suffix(' ')
-            .is_some_and(|name| !name.trim().is_empty())
+            .is_some_and(|name| !name.trim().is_empty()))
+    .then_some(Rule::Named)
 }
 
 fn border(line: &str, left: char, right: char) -> bool {
@@ -146,6 +218,78 @@ fn border(line: &str, left: char, right: char) -> bool {
         .is_some_and(horizontal)
 }
 
+/// One line of verdicts about the field a door refused to type at (t-86909 r3),
+/// for the window log: the next time a refusal comes back from a real pane the
+/// log says WHICH part of the reading failed. Verdict words and numbers only —
+/// no cell's character is in it, so a draft, a session's name or a path cannot
+/// reach the log through it.
+pub(crate) fn look(agent: &str, grid: &TerminalGrid) -> String {
+    if !reads(agent) {
+        return format!("look {agent}: unread");
+    }
+    let (row, col) = grid.cursor();
+    let cursor = if grid.cursor_visible() {
+        "shown"
+    } else {
+        "hidden"
+    };
+    let paste = if grid.bracketed_paste() { "on" } else { "off" };
+    let mut said = format!(
+        "look {agent}: cursor={cursor} paste={paste} row={row} of={} col={col}",
+        grid.rows()
+    );
+    if row == 0 || row + 1 >= grid.rows() {
+        said.push_str(" edge=yes");
+        return said;
+    }
+    let above = grid.line(row - 1);
+    let below = grid.line(row + 1);
+    if agent == "claude" {
+        let upper = match upper_rule_kind(&above) {
+            Some(Rule::Bare) => "rule",
+            Some(Rule::Named) => "named",
+            None => "other",
+        };
+        let lower = if horizontal(&below) { "rule" } else { "other" };
+        let glyph = if grid.line(row).starts_with("❯") {
+            "yes"
+        } else {
+            "no"
+        };
+        let caret = match grid.cell(row, col) {
+            Some(cell) if cell.style.reverse && cell.ch == ' ' => "blank",
+            Some(cell) if cell.style.reverse => "letter",
+            Some(_) => "none",
+            None => "off",
+        };
+        let field = match claude_field(grid, row, col) {
+            Field::Empty => "empty",
+            Field::Ghost => "ghost",
+            Field::Text => "text",
+        };
+        said.push_str(&format!(
+            " upper={upper} lower={lower} glyph={glyph} caret={caret} field={field}"
+        ));
+    } else {
+        let top = if border(&above, '╭', '╮') {
+            "border"
+        } else {
+            "other"
+        };
+        let bottom = if border(&below, '╰', '╯') {
+            "border"
+        } else {
+            "other"
+        };
+        let prompt = if grid.line(row).trim().starts_with("│› ") {
+            "yes"
+        } else {
+            "no"
+        };
+        said.push_str(&format!(" top={top} bottom={bottom} prompt={prompt}"));
+    }
+    said
+}
 
 /// Screens of the real Claude Code 2.1.316 and fields built after them, for this module's tests and
 /// the answer door's (t-86909 r3).
