@@ -33194,6 +33194,7 @@ fn only_a_cli_the_window_spawned_as_the_pane_and_that_reads_its_input_is_told_to
         state: Some(HookState::Done),
         background_work: false,
         line_shown_empty: true,
+        output_quiet: true,
     };
     // The window's own Claude Code pane, idle and reading: handed over.
     assert_eq!(pane_cli_cannot_leave("claude", &spawned), None);
@@ -33317,6 +33318,144 @@ fn only_a_cli_the_window_spawned_as_the_pane_and_that_reads_its_input_is_told_to
     assert_eq!(
         pane_cli_cannot_leave("claude", &waking_drafted),
         Some(PANE_LINE_HOLDS_WORDS)
+    );
+}
+
+/// The hooks say rest and the input line is empty, yet the pane's output has not gone quiet
+/// (t-86909 r4 P2-1): a message the CLI held in its own queue began its turn after the stop, and no
+/// hook says so. `/exit` typed then ends that turn and the message's answer never comes — measured
+/// on Claude Code 2.1.316, which closed in 0.6 s with the spinner still going. Refused, and no
+/// probe is typed at such a pane; once the output stops, the same pane goes ahead.
+#[test]
+fn a_pane_whose_output_has_not_gone_quiet_is_not_told_to_exit_though_its_hooks_say_rest() {
+    use crate::cmd::wire::{PANE_NOT_AT_REST, PaneCli, pane_cli_cannot_leave};
+    use zerocode_core::hook::HookState;
+    let resting = PaneCli {
+        child: Some(400),
+        child_in_front: Some(true),
+        launched: Some((400, "claude")),
+        reads_input: true,
+        state: Some(HookState::Done),
+        background_work: false,
+        line_shown_empty: true,
+        output_quiet: true,
+    };
+    assert_eq!(pane_cli_cannot_leave("claude", &resting), None);
+    for said in [HookState::Done, HookState::Idle] {
+        let drawing = PaneCli {
+            state: Some(said),
+            output_quiet: false,
+            ..resting
+        };
+        assert_eq!(
+            pane_cli_cannot_leave("claude", &drawing),
+            Some(PANE_NOT_AT_REST),
+            "a pane the hooks call {said:?} that is still drawing was told to exit"
+        );
+    }
+    // Not yet reading AND still drawing: the probe types a space at the field, and is not typed here.
+    let waking_drawing = PaneCli {
+        reads_input: false,
+        output_quiet: false,
+        ..resting
+    };
+    assert_eq!(
+        pane_cli_cannot_leave("claude", &waking_drawing),
+        Some(PANE_NOT_AT_REST),
+        "the probe is typed at a pane that is still drawing"
+    );
+    // The output stopped: nothing else changed, and the pane goes ahead.
+    let drawing = PaneCli {
+        output_quiet: false,
+        ..resting
+    };
+    let stopped = PaneCli {
+        output_quiet: true,
+        ..drawing
+    };
+    assert_eq!(pane_cli_cannot_leave("claude", &stopped), None);
+}
+
+/// The quiet time is asked at the hand-over's second look only, and the way back asks the same
+/// function (t-86909 r4 P2-1, P3-3): one waits for the pane's output to go quiet before it reads the
+/// pane's facts, the other before it decides the pane is between turns. A first look that asked for
+/// it would refuse every hand-over, since it comes as a turn ends.
+#[test]
+fn the_hand_over_and_the_way_back_ask_one_function_whether_the_pane_is_quiet() {
+    let backend = shipped_backend();
+    let look = block_after(backend, "fn pane_cli_refusal(");
+    // One line of words, whatever the formatter does with the line breaks.
+    let flat = look.split_whitespace().collect::<Vec<_>>().join(" ");
+    let waits = flat
+        .find("crate::answer_door::wait_for_rest(&held)")
+        .expect("the hand-over's second look does not wait for the pane's output to go quiet");
+    let reads = flat
+        .find("crate::answer_door::output_quiet(&pty, crate::answer_door::REST_QUIET)")
+        .expect("the pane's quiet is not read in the hold of its other facts");
+    assert!(
+        waits < reads,
+        "the pane is read before it was waited for:\n{look}"
+    );
+    assert!(
+        flat[..waits].ends_with("if probe == Probing::Now { "),
+        "the wait is not limited to the second look:\n{look}"
+    );
+    assert!(
+        flat.contains(
+            "probe == Probing::Later || crate::answer_door::output_quiet(&pty, crate::answer_door::REST_QUIET)"
+        ),
+        "the first look does not pass the quiet time:\n{look}"
+    );
+    let rewind = block_after(backend, "fn pane_rewind(");
+    assert!(
+        rewind.contains("answer_door::wait_for_rest(&held)"),
+        "the way back decides on the hook's word alone:\n{rewind}"
+    );
+    // The wait is made before the hook's word is read into the pane the door gets, and never while
+    // a lock on the hooks' table is held across it.
+    let said = rewind
+        .find("let said_done =")
+        .expect("the hook's word is not read into a binding of its own");
+    let wait = rewind.find("wait_for_rest(&held)").expect("no wait");
+    let pane = rewind.find("RewindPane {").expect("the door gets no pane");
+    assert!(
+        said < wait && wait < pane,
+        "the hooks' table can be held across the wait, or the pane is built before it:\n{rewind}"
+    );
+}
+
+/// The first word of a line the window types by itself at a CLI's empty field goes in as a bracketed
+/// paste even on one line (t-86909 r4 P3-2): as keys, `/exit` in Claude Code's vim mode at NORMAL is
+/// a row of vim commands. Keys stay keys, and the walk of the rest of a line is the one it was.
+#[test]
+fn the_first_word_of_a_line_typed_at_a_field_is_a_bracketed_paste_though_it_is_one_line() {
+    use crate::cmd::terminal::{key_group_bytes, pasted_group_bytes};
+    let (groups, _) = zerocode_core::ask::line_keys("/exit");
+    assert_eq!(
+        pasted_group_bytes(&groups[0]),
+        b"\x1b[200~/exit\x1b[201~".to_vec()
+    );
+    assert_eq!(
+        key_group_bytes(&groups[0]),
+        b"/exit".to_vec(),
+        "the walk's own spelling of a one-line text changed"
+    );
+    assert_eq!(
+        pasted_group_bytes(&groups[1]),
+        key_group_bytes(&groups[1]),
+        "an Enter is a key"
+    );
+    let hand = block_after(shipped_backend(), "fn hand_over_pane(");
+    assert!(
+        hand.contains("cmd::terminal::pasted_group_bytes(first)")
+            && !hand.contains("key_group_bytes(first)"),
+        "the exit command's first group is typed as keys:\n{hand}"
+    );
+    // The way back is the same road (measured: `/rewind` as keys at vim NORMAL sent `nd` to the model).
+    let rewind = block_after(shipped_backend(), "fn pane_rewind(");
+    assert!(
+        rewind.contains("&pasted_group_bytes(first)") && !rewind.contains("key_group_bytes(first)"),
+        "the way back's first group is typed as keys:\n{rewind}"
     );
 }
 

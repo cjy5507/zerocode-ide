@@ -2697,4 +2697,126 @@ mod tests {
             assert!(pane.typed().is_empty(), "{what}: something was typed");
         }
     }
+
+    /// The hand-over's second look and the way back ask one question of a pane whose hook says its
+    /// turn is over (t-86909 r4): has its output been silent for the quiet time? One that wrote a
+    /// moment ago has not — a message the CLI held in its own queue began its turn with no hook — and
+    /// one silent for the whole time has.
+    #[test]
+    fn a_pane_is_at_rest_only_once_its_output_has_been_silent_for_the_quiet_time() {
+        let wrote = Instant::now();
+        let quiet = REST_QUIET;
+        assert!(
+            !silent_for(Some(wrote), wrote, quiet),
+            "it wrote this instant"
+        );
+        assert!(!silent_for(
+            Some(wrote),
+            wrote + Duration::from_millis(100),
+            quiet
+        ));
+        assert!(
+            !silent_for(Some(wrote), wrote + quiet - Duration::from_millis(1), quiet),
+            "a millisecond short of the quiet time"
+        );
+        assert!(
+            silent_for(Some(wrote), wrote + quiet, quiet),
+            "the whole quiet time"
+        );
+        assert!(silent_for(
+            Some(wrote),
+            wrote + Duration::from_secs(5),
+            quiet
+        ));
+        // A clock that reads earlier than the write does not make a pane quiet, nor fail.
+        assert!(!silent_for(
+            Some(wrote + Duration::from_secs(1)),
+            wrote,
+            quiet
+        ));
+        // A transport that does not say when it last wrote shows nothing against it.
+        assert!(silent_for(None, wrote, quiet));
+    }
+
+    /// The wait is what its last look found: yes as soon as a look says so, no only once the wait
+    /// is over — and a wait of nothing still looks once.
+    #[test]
+    fn the_wait_for_quiet_answers_what_its_last_look_found() {
+        let mut looks = 0;
+        assert!(wait_until(
+            || {
+                looks += 1;
+                looks == 3
+            },
+            Duration::from_secs(5),
+            Duration::from_millis(1)
+        ));
+        assert_eq!(looks, 3, "it looked again after a yes");
+        let began = Instant::now();
+        let mut never = 0;
+        assert!(!wait_until(
+            || {
+                never += 1;
+                false
+            },
+            Duration::from_millis(60),
+            Duration::from_millis(5)
+        ));
+        assert!(
+            began.elapsed() >= Duration::from_millis(60),
+            "it gave up before the wait was over"
+        );
+        assert!(never > 1, "it looked once and gave up");
+        let mut once = 0;
+        assert!(!wait_until(
+            || {
+                once += 1;
+                false
+            },
+            Duration::ZERO,
+            Duration::from_millis(5)
+        ));
+        assert_eq!(once, 1);
+    }
+
+    /// The same question asked of a real pane: one whose last write is a moment short of the quiet
+    /// time is waited for and found quiet; one that wrote just now and needs longer than the wait is
+    /// called busy only once the wait is over; one already silent is quiet at once.
+    #[test]
+    fn a_pane_about_to_be_quiet_is_waited_for_and_a_busy_one_only_to_the_bound() {
+        let quiet = Duration::from_millis(300);
+        let look = Duration::from_millis(10);
+        let settling = secret_pane("Done.", Duration::from_millis(200));
+        let began = Instant::now();
+        assert!(wait_for_quiet(
+            &settling.held,
+            quiet,
+            Duration::from_secs(5),
+            look
+        ));
+        assert!(
+            began.elapsed() < Duration::from_secs(4),
+            "it waited out the whole bound for a pane that needed 100 ms"
+        );
+        let busy = secret_pane("Working...", Duration::ZERO);
+        let began = Instant::now();
+        let bound = Duration::from_millis(150);
+        assert!(!wait_for_quiet(
+            &busy.held,
+            Duration::from_secs(60),
+            bound,
+            look
+        ));
+        assert!(
+            began.elapsed() >= bound,
+            "it called the pane busy before the bound"
+        );
+        let resting = secret_pane("Done.", quiet * 2);
+        assert!(wait_for_quiet(&resting.held, quiet, bound, look));
+        assert!(output_quiet(&lock_pty(&resting.held), quiet));
+        assert!(!output_quiet(
+            &lock_pty(&busy.held),
+            Duration::from_secs(60)
+        ));
+    }
 }
