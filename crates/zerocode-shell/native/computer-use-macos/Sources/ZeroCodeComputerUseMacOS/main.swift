@@ -562,6 +562,23 @@ final class Provider {
         return foreground
     }
 
+    /// How long what a borrowed act sent gets to arrive before the person's app is back.
+    private static let borrowSettleSeconds: TimeInterval = 0.15
+    /// Raising another app under someone typing would hand it their next keys, so a
+    /// borrow waits for a pause, and gives up rather than take them.
+    private static let keysQuietSeconds: CFTimeInterval = 0.8
+    private static let longestWaitForKeys: TimeInterval = 3
+
+    private func waitForThePersonsKeys() throws {
+        let giveUp = Date().addingTimeInterval(Self.longestWaitForKeys)
+        while CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown) < Self.keysQuietSeconds {
+            guard Date() < giveUp else {
+                throw ProviderError.coded("person_typing", "the person is typing, and this act needs the keyboard or the pointer; nothing was done. Try again shortly")
+            }
+            usleep(50_000)
+        }
+    }
+
     /// Take the shared desktop for one act and put back what the person had: the
     /// app in front and where the pointer was. All of it happens with the hand held,
     /// so a borrow in turn after this one reads what the person had, and raising a
@@ -569,10 +586,13 @@ final class Provider {
     private func borrowingDesktop(bringingUp query: String? = nil, method: String, params: [String: JSONValue]) throws -> Any {
         try OperatorHandHost.whileHeld(scoped: false) {
             try OperatorGuardHost.admit()
+            try waitForThePersonsKeys()
             RequestContext.current.borrowed = true
             let front = NSWorkspace.shared.frontmostApplication
             let pointer = Input.desktopCursorPosition()
             defer {
+                // What was sent is still on its way: what the person had comes back after it.
+                if RequestContext.current.sent { Thread.sleep(forTimeInterval: Self.borrowSettleSeconds) }
                 CGWarpMouseCursorPosition(pointer)
                 _ = CGAssociateMouseAndMouseCursorPosition(1)
                 if let front, !front.isTerminated, !front.isActive {
@@ -4741,12 +4761,20 @@ private enum Input {
         try mouse(.buttonUp(.left, clickState: 0), at: end, pid: pid)
     }
 
+    /// Where an app's keys go. On a borrowed desktop they go to that app's own process:
+    /// what the person had comes back moments later, and a key still on its way through
+    /// the shared queue would land in whatever is in front by then.
+    private static func keyRoute(pid: pid_t) -> HandRoute {
+        RequestContext.current.borrowed && pid > 0 ? .process(pid) : .desktop
+    }
+
     static func typeText(_ text: String, pid: pid_t) throws {
+        let route = keyRoute(pid: pid)
         for unit in text.utf16 {
             // A stop lands between two characters; one inside a press lets
             // go of it at once.
-            try OperatorHandHost.post(HandEvent(.text(unit: unit, down: true)))
-            try OperatorHandHost.post(HandEvent(.text(unit: unit, down: false)))
+            try OperatorHandHost.post(HandEvent(.text(unit: unit, down: true), route: route))
+            try OperatorHandHost.post(HandEvent(.text(unit: unit, down: false), route: route))
         }
     }
 
@@ -4756,11 +4784,12 @@ private enum Input {
     /// hand posts a release only of what the hold still holds.
     static func pressKey(_ key: String, pid: pid_t) throws {
         let stroke = try KeyMap.parse(key).stroke
-        let ups = stroke.ups(route: .desktop)
+        let route = keyRoute(pid: pid)
+        let ups = stroke.ups(route: route)
         defer {
             for modifier in ups.dropFirst() { try? OperatorHandHost.post(modifier) }
         }
-        for press in stroke.downs(route: .desktop) { try OperatorHandHost.post(press) }
+        for press in stroke.downs(route: route) { try OperatorHandHost.post(press) }
         try OperatorHandHost.post(ups[0])
     }
 

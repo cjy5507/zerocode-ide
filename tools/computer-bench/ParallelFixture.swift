@@ -112,6 +112,10 @@ final class Fixture: NSObject, NSApplicationDelegate {
         case "enable-flaky":
             let ms = Double(parts[1])!
             DispatchQueue.main.asyncAfter(deadline: .now() + ms / 1000) { [weak self] in self?.flaky.isEnabled = true }
+        case "activate":
+            // Stands in for the app a person has in front.
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
         case "quit":
             NSApp.terminate(nil)
         default: break

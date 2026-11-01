@@ -484,8 +484,8 @@ zerocode-computer verdict --pass | verdict --fail --reason "…"        # the QA
   look; do not retry, paste or copy it (see the rule above).
 - `self_sensitive`: that control of ZeroCode's own window is the person's;
   nothing was pressed. Do not look for another way to press it — ask them.
-- `person_typing`: the person is in that field of ZeroCode's own window, or
-  typed in it a moment ago; nothing was pressed. Look again later.
+- `person_typing`: the person is typing there or on the shared desktop; nothing
+  was pressed. Look again later.
 - `share_scope`: the request reaches outside the window the person shared, or
   the person declined that app; nothing was done. Stay in the shared app.
 - `share_required`: sharing is required and the person has not handed that

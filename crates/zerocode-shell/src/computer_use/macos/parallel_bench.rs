@@ -340,13 +340,11 @@ fn parallel_bench_borrow() {
                 "fromElementIndex": target, "toElementIndex": field, "background": true,
             })),
         );
-        // The keyboard is checked to be on the fixture before a key goes out.
-        let keyboard = borrowed_act(
-            &session,
-            "typeText",
-            &borrow(json!({"text": "zz", "elementIndex": field})),
-        );
-        let report = json!({"pointer": pointer, "ladder": ladder, "keyboard": keyboard});
+        // A key goes to the fixture's own process, wherever the focus has gone by then.
+        let focus = borrowed_act(&session, "click", &borrow(json!({"elementIndex": field})));
+        let keyboard = borrowed_act(&session, "pressKey", &borrow(json!({"key": "z"})));
+        let report =
+            json!({"pointer": pointer, "ladder": ladder, "focus": focus, "keyboard": keyboard});
         (side.join().expect("the other agent"), report)
     });
     let refused = presses
@@ -369,6 +367,12 @@ fn parallel_bench_borrow() {
         .lines()
         .find(|line| line.contains("text field"))
         .map(str::to_string);
+    assert!(
+        field_now
+            .as_deref()
+            .is_some_and(|line| line.contains("Value: z")),
+        "the borrowed key reached the fixture's field: {field_now:?}"
+    );
     let report = json!({
         "idleSecsAtStart": idle,
         "acts": report,
