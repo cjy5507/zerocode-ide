@@ -24,7 +24,10 @@ fn write(path: &Path, text: &str) {
 /// Every folder a seat's ledger can stand in under a zo home.
 fn evidence_folders(home: &Path) -> Vec<PathBuf> {
     let jev = home.join("jev");
-    let project = home.join("projects").join(PROJECT).join("state/smart-router");
+    let project = home
+        .join("projects")
+        .join(PROJECT)
+        .join("state/smart-router");
     vec![
         jev.clone(),
         jev.join("providers").join(PROVIDER),
@@ -127,8 +130,16 @@ fn no_row_reaches_a_deleted_seat_in_any_folder() {
         &json!({(builtin::SETTING): {(RECALL.id): {"deleted": true}}}),
     );
     for folder in evidence_folders(home.path()) {
-        assert!(!may_write(&folder.join(RECALL.ledger)), "{}", folder.display());
-        assert!(may_write(&folder.join(NOTIFY.ledger)), "{}", folder.display());
+        assert!(
+            !may_write(&folder.join(RECALL.ledger)),
+            "{}",
+            folder.display()
+        );
+        assert!(
+            may_write(&folder.join(NOTIFY.ledger)),
+            "{}",
+            folder.display()
+        );
         assert!(may_write(&folder.join("judgment-memo.jsonl")));
     }
 }
@@ -177,19 +188,34 @@ fn the_kept_seats_are_lifted_once_and_every_other_mark_stands() {
     let root = root_of(&settings);
     assert_eq!(STALL.mode_in(&root), STALL.mode_in(&never_deleted));
     assert_eq!(STALL.mode_in(&root), JevMode::Auto, "stall asks again");
-    assert_eq!(ROUTING.mode_in(&root), JevMode::Off, "routing stays on the rule");
+    assert_eq!(
+        ROUTING.mode_in(&root),
+        JevMode::Off,
+        "routing stays on the rule"
+    );
     assert_eq!(builtin::in_root(&root, STALL.id), None);
-    assert_eq!(builtin::in_root(&root, ROUTING.id), None, "routing is not deleted");
+    assert_eq!(
+        builtin::in_root(&root, ROUTING.id),
+        None,
+        "routing is not deleted"
+    );
     let lifted = smart_of(&settings);
     assert_eq!(lifted[ROUTING.setting], "off");
     assert_eq!(lifted[builtin::SETTING][RECALL.id]["deleted"], true);
-    assert_eq!(lifted[RECALL.setting], "off", "another deleted seat stays off");
+    assert_eq!(
+        lifted[RECALL.setting], "off",
+        "another deleted seat stays off"
+    );
     assert_eq!(RECALL.mode_in(&root), JevMode::Off);
     assert_eq!(lifted[builtin::SETTING][COMMAND_GUARD.id]["name"], "kept");
 
     let before = fs::read(&settings).unwrap();
     assert!(!lift_kept_seats(&settings).expect("the second run"));
-    assert_eq!(fs::read(&settings).unwrap(), before, "the second run changes nothing");
+    assert_eq!(
+        fs::read(&settings).unwrap(),
+        before,
+        "the second run changes nothing"
+    );
 }
 
 #[test]
@@ -221,7 +247,10 @@ fn a_seat_deleted_again_after_the_lift_stays_deleted() {
     fs::write(&settings, root.to_string()).unwrap();
 
     assert!(!lift_kept_seats(&settings).expect("the second run"));
-    assert_eq!(smart_of(&settings)[builtin::SETTING][STALL.id]["deleted"], true);
+    assert_eq!(
+        smart_of(&settings)[builtin::SETTING][STALL.id]["deleted"],
+        true
+    );
 }
 
 #[test]
@@ -236,14 +265,20 @@ fn a_kept_seat_deleted_before_the_first_lift_is_not_brought_back() {
     fs::write(&settings, root.to_string()).unwrap();
 
     assert!(!lift_kept_seats(&settings).expect("the lift"));
-    assert_eq!(smart_of(&settings)[builtin::SETTING][STALL.id]["deleted"], true);
+    assert_eq!(
+        smart_of(&settings)[builtin::SETTING][STALL.id]["deleted"],
+        true
+    );
 }
 
 #[test]
 fn a_kept_seat_with_a_typed_edit_keeps_its_edit() {
     let home = home();
     let edit = json!({"deleted": true, "questionSchema": 2, "questionDeleted": false, "questions": {"cause": {"type": "choice", "instructions": "edited", "criteria": {"a": "A", "b": "B"}}}});
-    let settings = settings_with(home.path(), &json!({(builtin::SETTING): {(STALL.id): edit.clone()}}));
+    let settings = settings_with(
+        home.path(),
+        &json!({(builtin::SETTING): {(STALL.id): edit.clone()}}),
+    );
 
     assert!(!lift_kept_seats(&settings).expect("the lift"));
 

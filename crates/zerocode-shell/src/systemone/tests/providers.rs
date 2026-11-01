@@ -1,7 +1,9 @@
 use super::*;
 use crate::systemone::latest;
 use judgment_provider::{Protocol, Provider, ProviderKind, Refusal};
-use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JEV_USES, NOTIFY, RECALL, STALL, builtin, erase};
+use zerocode_core::jev::{
+    BROWSER, DESKTOP, EMULATOR, JEV_USES, NOTIFY, RECALL, STALL, builtin, erase,
+};
 
 fn provider(base: String) -> Provider {
     Provider {
@@ -573,13 +575,19 @@ fn a_deleted_screen_seat_leaves_the_walk_on_its_rule() {
         std::fs::write(&ledger, "{\"at\":1}\n").expect("a row");
         std::fs::write(
             folder.join(zerocode_core::jev::threshold::THRESHOLDS_FILE),
-            json!([{"seat":seat.id,"rubricVersion":seat.rubric_version,"actFromPermille":500}]).to_string(),
+            json!([{"seat":seat.id,"rubricVersion":seat.rubric_version,"actFromPermille":500}])
+                .to_string(),
         )
         .expect("a line");
 
         erase::forget_seat(&path, seat.id).expect("the records go");
 
-        assert_eq!(seat.mode_in(&root), zerocode_core::jev::JevMode::Off, "{}", seat.id);
+        assert_eq!(
+            seat.mode_in(&root),
+            zerocode_core::jev::JevMode::Off,
+            "{}",
+            seat.id
+        );
         assert!(!applies_once_risen(&wire, &seat), "{}", seat.id);
         assert_eq!(act_line(&wire, &seat), None, "{}", seat.id);
         assert!(!ledger.exists(), "{}", seat.id);

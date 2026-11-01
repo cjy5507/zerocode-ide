@@ -1058,7 +1058,12 @@ pub fn update_builtin_decision(
             );
         }
         Ok(())
-    })
+    })?;
+    // After the settings lock is back: the seat's records go with the mark.
+    if action == "delete" {
+        zerocode_core::jev::erase::forget_seat(path, id).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 /// Set the routing classifier to one of its four words, leaving every other
@@ -1912,12 +1917,15 @@ pub fn check_custom_decision(draft: DecisionDraft) -> DraftCheck {
 }
 
 /// Delete the decision `id` under `home` for good: its row and its
-/// definitions leave the store, and nothing brings them back.
+/// definitions leave the store with its ledger rows, and nothing brings them
+/// back.
 ///
 /// # Errors
 /// Whatever keeps the store from it.
 pub fn delete_custom_decision_at(home: &Path, id: &str) -> Result<(), custom::store::Error> {
-    custom::store::delete(home, id)
+    custom::store::delete(home, id)?;
+    zerocode_core::jev::erase::forget_custom(home, id)?;
+    Ok(())
 }
 
 /// Set the decision `id` under `home` to the mode named `mode` at `now_ms`.

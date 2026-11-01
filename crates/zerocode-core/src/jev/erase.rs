@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use super::threshold::{SEAT_KEY, THRESHOLDS_FILE};
-use super::{CUSTOM_DECISIONS, JEV_USES, JevUse, ROUTING, SMART_SETTINGS_KEY, STALL, builtin, count};
+use super::{
+    CUSTOM_DECISIONS, JEV_USES, JevUse, ROUTING, SMART_SETTINGS_KEY, STALL, builtin, count,
+};
 use crate::settings_file_lock::SettingsFileLock;
 
 const SETTINGS_FILE: &str = "settings.json";
@@ -176,7 +178,10 @@ fn lift_marks(root: &mut Value) -> bool {
             decision.deleted.then_some((*seat, *after, decision.mode))
         })
         .collect();
-    let Some(smart) = root.get_mut(SMART_SETTINGS_KEY).and_then(Value::as_object_mut) else {
+    let Some(smart) = root
+        .get_mut(SMART_SETTINGS_KEY)
+        .and_then(Value::as_object_mut)
+    else {
         return false;
     };
     let mut lifted = false;
@@ -304,7 +309,10 @@ fn evidence_folders(home: &Path) -> Vec<PathBuf> {
 /// with `providers/<identity>` or `provider-unconfigured` in between.
 fn home_of(ledger: &Path) -> Option<PathBuf> {
     let mut base = ledger.parent()?;
-    if base.file_name().is_some_and(|name| name == UNCONFIGURED_DIR) {
+    if base
+        .file_name()
+        .is_some_and(|name| name == UNCONFIGURED_DIR)
+    {
         base = base.parent()?;
     } else if base
         .parent()
@@ -313,15 +321,25 @@ fn home_of(ledger: &Path) -> Option<PathBuf> {
     {
         base = base.parent()?.parent()?;
     }
-    if base.file_name().is_some_and(|name| name == count::REQUESTS_DIR) {
+    if base
+        .file_name()
+        .is_some_and(|name| name == count::REQUESTS_DIR)
+    {
         return base.parent().map(Path::to_path_buf);
     }
-    if base.file_name().is_some_and(|name| name == PROJECT_LEDGER_DIR) {
+    if base
+        .file_name()
+        .is_some_and(|name| name == PROJECT_LEDGER_DIR)
+    {
         let state = base.parent()?;
         let project = state.parent()?;
         let projects = project.parent()?;
-        if state.file_name().is_some_and(|name| name == PROJECT_STATE_DIR)
-            && projects.file_name().is_some_and(|name| name == PROJECTS_DIR)
+        if state
+            .file_name()
+            .is_some_and(|name| name == PROJECT_STATE_DIR)
+            && projects
+                .file_name()
+                .is_some_and(|name| name == PROJECTS_DIR)
         {
             return projects.parent().map(Path::to_path_buf);
         }
