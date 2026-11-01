@@ -5613,6 +5613,76 @@ JSON
         assert!(answer.is_err(), "{answer:?}");
     }
 
+    /// A store's credentials file may hold indented JSON, a final line break or a
+    /// Korean organization name. None of that may stop a launch: the keychain gets
+    /// the same document in printable ASCII, and the file, the keychain and the
+    /// record agree on those bytes, so the next launch touches nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_login_file_the_line_cannot_carry_as_it_is_still_launches() {
+        let config = tempfile::tempdir().expect("no config dir");
+        let home = tempfile::tempdir().expect("no home");
+        let account = one_account(config.path(), "a-1", "pretty@example.com", "unused");
+        let document = "{\n  \"claudeAiOauth\": {\n    \"accessToken\": \"FAKE tok\\\"en\",\n    \
+                        \"expiresAt\": 1786169803544,\n    \"scopes\": [\"user:inference\"]\n  },\n  \
+                        \"oauthAccount\": {\"emailAddress\": \"pretty@example.com\", \
+                        \"organizationName\": \"한글 조직 😀\u{7f}\"}\n}\n";
+        let store = Path::new(&account.config_dir);
+        std::fs::write(store.join(CREDENTIALS_FILE), document).expect("the store's file");
+
+        materialize_into(config.path(), &account, home.path()).expect("the launch");
+
+        let service = keychain_services(home.path()).remove(0);
+        let held = read_keychain_service(&service).expect("the home's item");
+        assert!(
+            held.bytes().all(|byte| (0x20..0x7f).contains(&byte)),
+            "the item holds more than printable ASCII"
+        );
+        let meaning = |text: &str| serde_json::from_str::<serde_json::Value>(text).expect("json");
+        assert_eq!(meaning(&held), meaning(document));
+        for kept in [
+            r#""accessToken":"FAKE tok\"en""#,
+            r#""expiresAt":1786169803544"#,
+            r#"\ud55c\uae00 \uc870\uc9c1 \ud83d\ude00\u007f"#,
+        ] {
+            assert!(held.contains(kept), "{kept} did not survive");
+        }
+        assert_eq!(
+            read_keychain_service(&keychain_services(store).remove(0)).as_deref(),
+            Ok(held.as_str()),
+            "the store's item is the same document"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(CREDENTIALS_FILE)).expect("the home's file"),
+            held
+        );
+        assert_eq!(read_runtime(config.path()).written.as_deref(), Some(&*held));
+
+        SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+        materialize_into(config.path(), &account, home.path()).expect("the next launch");
+        let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+        assert!(
+            !started.iter().any(|argv| argv == &["-i"]),
+            "the next launch wrote the keychain again: {started:?}"
+        );
+    }
+
+    /// A document the line carries as it is goes as it is, and a value that is no
+    /// document is no less refused.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_a_document_the_line_cannot_carry_is_rewritten() {
+        let dir = tempfile::tempdir().expect("no dir");
+        let service = keychain_services(dir.path()).remove(0);
+        let spaced = r#"{"a": "b c", "d": 1.50}"#;
+        write_keychain(dir.path(), spaced).expect("printable");
+        assert_eq!(read_keychain_service(&service).as_deref(), Ok(spaced));
+        for not_a_document in ["한글", "line\nbreak", "{\"a\":\"line\nbreak\"}"] {
+            assert!(write_keychain(dir.path(), not_a_document).is_err());
+            assert_eq!(read_keychain_service(&service).as_deref(), Ok(spaced));
+        }
+    }
+
     /// `security -i` prints what stands in a line's command position: on
     /// 2026-11-01 a 5,000-byte line returned 1,808 bytes of its value as
     /// `unknown command "…"`. That first line is what `security_failure_word`
