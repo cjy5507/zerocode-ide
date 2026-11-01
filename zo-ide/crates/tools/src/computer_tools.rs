@@ -430,7 +430,7 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
         "duration": { "type": "number", "minimum": 0 },
         "region": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4,
             "description": "[x0, y0, x1, y1] corners in last screenshot pixels" },
-        "browser_chrome": { "type": "boolean", "description": "Accepted and ignored: a browser is an app like any other" },
+        "browser_chrome": { "type": "boolean", "description": "Ignored" },
         "app": { "type": "string" },
         "url": { "type": "string" },
         "path": { "type": "string" },
@@ -504,13 +504,12 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         name: "Computer",
         description: "Drive desktop apps inside a ZeroCode pane: screenshots/zoom, mouse moves/clicks/drags/scroll, \
             keys/text/waits, app/window management, element/OCR reads, clipboard read/write and programs. \
-            For a web page with no sign-in of the person's own, zerocode-browser open <url> and its read, marks, click, type and fill are fastest; \
+            For web pages use zerocode-browser open <url>, then read, marks, click, type and fill; \
             the person's own browser is an app like any other when they ask for it. \
             Windows without trees (mirrored phones): one batch, not a call per click: \
             left_click {label, ocr: true, after_text: line above}, type, key Return, wait_for {ocr: true, text}. \
-            Acts in an app go in the background first and borrow the pointer only where the person's setting allows and only when they must; \
-            background: true stays in the background and is told when it cannot. Several apps run side by side; \
-            an element's number lasts until the app removes that control, and an act answers what it changed and whether it may be repeated. \
+            Acts go in the background first and borrow the pointer only where the person allows; background: true never borrows. \
+            Numbers last until the app removes the control; an act says what changed and whether to repeat it. \
             Unverified keyboard receiver: use a verified writable-field capability or handoff. \
             Positions/sizes, including returned positions and regions, use the last full screenshot's pixels; \
             zoom does not change that frame. Actions wait for repaint and observe the same target; unchanged \
@@ -2588,10 +2587,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_computer_description_routes_web_pages_and_names_the_browser_chrome_claim() {
+    fn the_computer_description_routes_web_pages_and_names_the_persons_own_browser() {
         let description = tool_specs()[0].description;
         assert!(description.contains("For web pages use zerocode-browser open <url>"), "the Computer description must name the work browser");
-        assert!(description.contains("browser_chrome") && description.contains("menus, tabs or extension UI"), "the exception must claim browser chrome");
+        assert!(description.contains("the person's own browser is an app"), "their own browser is one more app");
     }
 
     #[test]
