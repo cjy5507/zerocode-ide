@@ -1411,10 +1411,57 @@ pub(crate) fn read_keychain_service_if_present(service: &str) -> Result<Option<S
     }
 }
 
+/// A login document in the bytes the keychain's road can carry: the same document,
+/// with whitespace outside its strings dropped and everything outside printable
+/// ASCII in a string written as `\uXXXX`. The tool answers a value holding any other
+/// byte in hex, and a line break ends the command, so a CLI's indented file or a
+/// Korean organization name would otherwise stop a launch for a form it has no say
+/// in.
+///
+/// Worked on the text rather than through a parsed value, so key order and every
+/// number stay as written. Anything the road can carry already, and anything that
+/// is no JSON document, comes back untouched: the first to stay byte for byte, the
+/// second to be refused in `keychain_add_line`.
+#[cfg(target_os = "macos")]
+fn keychain_form(document: &str) -> std::borrow::Cow<'_, str> {
+    use std::fmt::Write as _;
+
+    if document.bytes().all(|byte| (0x20..0x7f).contains(&byte))
+        || serde_json::from_str::<serde::de::IgnoredAny>(document).is_err()
+    {
+        return std::borrow::Cow::Borrowed(document);
+    }
+    let mut form = String::with_capacity(document.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in document.chars() {
+        if !in_string && ch.is_ascii_whitespace() {
+            continue;
+        }
+        if (' '..='~').contains(&ch) {
+            form.push(ch);
+        } else {
+            for unit in ch.encode_utf16(&mut [0; 2]) {
+                let _ = write!(form, "\\u{unit:04x}");
+            }
+        }
+        if escaped {
+            escaped = false;
+        } else if in_string && ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            in_string = !in_string;
+        }
+    }
+    std::borrow::Cow::Owned(form)
+}
+
 /// Put the credentials into the scoped service this home answers to.
 fn write_keychain(home: &Path, credentials: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
+        let form = keychain_form(credentials);
+        let credentials = form.as_ref();
         for service in keychain_services(home) {
             write_keychain_service(&service, credentials)?;
         }
@@ -1619,6 +1666,13 @@ fn materialize_into(
         if dir == store_dir {
             credentials = disk.to_string();
         }
+    }
+
+    // The file, the keychain and the record hold one set of bytes, or the skip
+    // above never matches and every launch writes the keychain.
+    #[cfg(target_os = "macos")]
+    if let std::borrow::Cow::Owned(form) = keychain_form(&credentials) {
+        credentials = form;
     }
 
     // The record says a put is under way BEFORE the home changes hands
