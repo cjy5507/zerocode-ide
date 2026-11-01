@@ -2609,11 +2609,32 @@ async fn e2e_rewind_turn_after_a_model_switch_still_takes_the_last_turn() {
 /// The provider is the local SSE script, so the run spends nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_one_attempt_key_joins_the_request_timing_and_outcome_ledgers() {
-    let layout = Layout::new();
-    layout.model_led();
-    let service = ScriptedAnthropicService::spawn_agent("### Done\n\n- delegated\n")
+    let service = ScriptedAnthropicService::spawn_agent(ATTEMPT_JOIN_DONE)
         .await
         .expect("start spawn script");
+    one_attempt_key_joins_the_ledgers(&service).await;
+}
+
+/// The same join when the child's request row is on disk well before its run
+/// ends and writes the outcome row, the spread a loaded machine shows
+/// (t-87369): the outcome row can only appear while the run is alive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_one_attempt_key_joins_the_request_timing_and_outcome_ledgers_when_the_child_answers_late() {
+    // Longer than an idle `/exit` takes, and well under the wait for the row.
+    const LATE: Duration = Duration::from_secs(2);
+    const _: () = assert!(LATE.as_millis() < TEST_TIMEOUT.as_millis());
+    let service = ScriptedAnthropicService::spawn_agent_child_answers_late(ATTEMPT_JOIN_DONE, LATE)
+        .await
+        .expect("start spawn script");
+    one_attempt_key_joins_the_ledgers(&service).await;
+}
+
+const ATTEMPT_JOIN_DONE: &str = "### Done\n\n- delegated\n";
+
+async fn one_attempt_key_joins_the_ledgers(service: &ScriptedAnthropicService) {
+    let layout = Layout::new();
+    layout.model_led();
+    layout.fixture("the fixture tree\n");
     let args = interactive_args();
     let mut run = pty(&layout, service.base_url(), &args);
 
@@ -2626,6 +2647,14 @@ async fn e2e_one_attempt_key_joins_the_request_timing_and_outcome_ledgers() {
     // rows land while the run is still alive, so poll the ledgers rather than
     // guessing how long a spawn takes on a loaded machine.
     let requests = await_request_rows(&layout, TEST_TIMEOUT);
+    // The spawn's outcome row comes when its run ends, after these request
+    // rows, and it can only come while the process lives: reading it after
+    // `finish` would race `/exit` against the child (t-87369).
+    let outcomes = await_outcome_rows(
+        &layout,
+        attempts_under(&requests, "agent-").first().map(String::as_str),
+        TEST_TIMEOUT,
+    );
     let _ = run.finish();
 
     assert!(
@@ -2649,7 +2678,6 @@ async fn e2e_one_attempt_key_joins_the_request_timing_and_outcome_ledgers() {
 
     // The outcome ledger's spawn row IS the child's attempt, and it names the
     // turn it served.
-    let outcomes = read_outcome_rows(&layout);
     let spawn_row = outcomes
         .iter()
         .find(|row| row["runId"].as_str() == Some(child_attempt.as_str()))
@@ -2795,6 +2823,30 @@ fn await_request_rows(layout: &Layout, within: Duration) -> Vec<(String, serde_j
             })
         };
         if attempted("session-") && attempted("agent-") {
+            return rows;
+        }
+        if Instant::now() >= deadline {
+            return rows;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Poll until an outcome row names `attempt`, or the deadline passes — then
+/// answer with whatever is on disk, so the assertions (not this helper) say
+/// what was missing. With no attempt to look for there is nothing to wait on.
+fn await_outcome_rows(
+    layout: &Layout,
+    attempt: Option<&str>,
+    within: Duration,
+) -> Vec<serde_json::Value> {
+    let deadline = Instant::now() + within;
+    loop {
+        let rows = read_outcome_rows(layout);
+        let Some(attempt) = attempt else {
+            return rows;
+        };
+        if rows.iter().any(|row| row["runId"].as_str() == Some(attempt)) {
             return rows;
         }
         if Instant::now() >= deadline {
@@ -4841,9 +4893,10 @@ async fn e2e_writes_announced_beside_a_bash_are_edited_files_never_a_failed_patc
 /// Five files of 22 lines written in one batch on a 24-row pane. The finished
 /// cell, five write rows with their diffs, is taller than the pane, and it
 /// pushed the composer off the bottom while it stood live (2026-09-07 23:35
-/// screenshot, t-3063). The model is held for a while before its answer so
-/// the cell stays live: the footer must be on the last row, the composer on
-/// screen, and the cell must say how many of its lines it does not show.
+/// screenshot, t-3063). The model's answer waits behind a door the test opens
+/// once it has read the screen, so the cell stays live however long that takes
+/// (t-87901): the footer must be on the last row, the composer on screen, and
+/// the cell must say how many of its lines it does not show.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_a_tall_edit_cell_keeps_the_composer_on_the_floor() {
     const ROWS: u16 = 24;
@@ -4859,10 +4912,10 @@ async fn e2e_a_tall_edit_cell_keeps_the_composer_on_the_floor() {
             (format!("file{file}.txt"), content)
         })
         .collect();
-    let service = ScriptedAnthropicService::writes_then_bash(
+    let door = std::sync::Arc::new(tokio::sync::Notify::new());
+    let service = ScriptedAnthropicService::writes_then_answer_behind_door(
         files,
-        None,
-        Duration::from_secs(4),
+        std::sync::Arc::clone(&door),
         "### Done\n\n- five files written\n",
     )
     .await
@@ -4888,8 +4941,10 @@ async fn e2e_a_tall_edit_cell_keeps_the_composer_on_the_floor() {
             .iter()
             .any(|row| row.starts_with(FIRST_ROW))
     });
+    wait_for_request_count(&service, 2).await;
     wait_until_quiet(&run, Duration::from_millis(250), TEST_TIMEOUT);
     let live = run.snapshot_output();
+    door.notify_one();
     dump_capture(&live, "tall-cell-live");
     let visible = settled_screen(&live, ROWS).visible();
     assert_footer_on_the_last_row(&visible, "tall-cell", "live");
