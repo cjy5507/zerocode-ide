@@ -54170,6 +54170,15 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   flex: none;
 }
 
+/* The model the agent runs, after its name: mono, and the first to elide when the line is short. */
+.your-turn-model {
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-label-12-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .your-turn-age {
   flex: none;
   margin-left: auto;

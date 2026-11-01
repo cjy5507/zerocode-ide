@@ -2037,7 +2037,7 @@ function yourTurnsDrawing(turns) {
   return JSON.stringify([locale, turns.map((card) => {
     const key = yourTurnKey(card);
     const draft = yourTurnDrafts.get(key);
-    return [key, card.heading, card.changed_at, draft?.sending, draft?.refusal, draft?.index, draft?.selections];
+    return [key, card.heading, card.changed_at, yourTurnModelOf(card), draft?.sending, draft?.refusal, draft?.index, draft?.selections];
   })]);
 }
 
@@ -2082,8 +2082,23 @@ function yourTurnHeadNode(card, kind, now, open = null) {
   const agent = document.createElement("span");
   agent.className = "your-turn-agent";
   agent.textContent = card.agent;
-  head.append(mark, name, agent, yourTurnAgeNode(card.changed_at || card.at || now, now));
+  head.append(mark, name, agent);
+  // The model the agent runs (the draft's 「ZO · claude-opus-5-5」): what the window knows of the pane, nothing guessed.
+  const model = yourTurnModelOf(card);
+  if (model !== "") {
+    const run = document.createElement("span");
+    run.className = "your-turn-model";
+    run.textContent = model;
+    run.dataset.tip = model;
+    head.append(run);
+  }
+  head.append(yourTurnAgeNode(card.changed_at || card.at || now, now));
   return head;
+}
+
+function yourTurnModelOf(card) {
+  const pane = typeof card.pane === "string" && card.pane.startsWith("term:") ? Number(card.pane.slice(5)) : NaN;
+  return Number.isInteger(pane) ? String(paneModels.get(pane) ?? "") : "";
 }
 
 /* An age that moves on the clock's beat in place: the moment it counts from
@@ -2133,7 +2148,9 @@ function openTurnConversation(card) {
 }
 
 function yourTurnOpenNode(card) {
-  return yourTurnButton("btn your-turn-open", t("yourTurn.open", "대화 열기"), () => openTurnConversation(card));
+  const door = yourTurnButton("btn your-turn-open", t("yourTurn.open", "대화 열기"), () => openTurnConversation(card));
+  door.append(iconNode("forward"));
+  return door;
 }
 
 /* 「가장 오래 N분」 — how long the oldest of the turns has waited; nothing at none. */
@@ -2298,7 +2315,7 @@ function yourTurnItemNode(card, now) {
   const acts = document.createElement("div");
   acts.className = "your-turn-acts";
   if (kind === "permission") {
-    item.append(yourTurnPermissionNode(card));
+    item.append(...yourTurnPermissionNodes(card, draft));
     acts.append(yourTurnAllowNode(card, draft, true), yourTurnDenyNode(card, draft));
   } else if (card.ask_prompt) {
     draft.open = true;
@@ -2314,17 +2331,34 @@ function yourTurnItemNode(card, now) {
   return item;
 }
 
-function yourTurnPermissionNode(card) {
+/* A tool whose permission reads as a shell command (the draft's 「셸 명령 허락 — npm install」): the names the CLIs give
+ * their shell tool. Any other tool is said by its own name. */
+const YOUR_TURN_SHELL_TOOLS = new Set(["bash", "shell", "sh", "zsh", "run_shell_command", "shell_command", "exec_command"]);
+
+/* A permission, as the list says it: the sentence (a plan permission asks about the plan) and, for the plan tool, the
+ * plan itself in the well the board's card gives it — one painter, so a heading and a numbered step look the same. */
+function yourTurnPermissionNodes(card, draft) {
+  const plan = typeof card.approval.plan === "string" ? card.approval.plan : "";
   const box = document.createElement("p");
   box.className = "your-turn-question";
-  box.textContent = t("board.approve.title", "{{tool}} 허용할까요?", { tool: card.approval.tool });
+  if (plan) {
+    box.textContent = t("board.approve.planTitle", "계획을 승인할까요?");
+    const well = document.createElement("div");
+    well.className = "board-approve-plan your-turn-plan helper-said";
+    paintHelperProse(well, plan, draft.base ?? "");
+    return [box, well];
+  }
+  const tool = String(card.approval.tool ?? "");
+  box.textContent = YOUR_TURN_SHELL_TOOLS.has(tool.toLowerCase())
+    ? t("yourTurn.permShell", "셸 명령 허락")
+    : t("yourTurn.permTool", "{{tool}} 허락", { tool });
   if (card.approval.summary) {
     const mono = document.createElement("code");
     mono.className = "your-turn-mono";
     mono.textContent = card.approval.summary;
-    box.append(" ", mono);
+    box.append(" — ", mono);
   }
-  return box;
+  return [box];
 }
 
 /* The keys the list answers to. A number picks as far as the choices the
