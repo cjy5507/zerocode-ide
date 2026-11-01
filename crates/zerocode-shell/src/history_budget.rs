@@ -61,7 +61,15 @@ pub(crate) fn shares(panes: &mut [PaneHistory]) -> Vec<(TermId, usize)> {
     // began counting is the quietest there is. Two readers are stamped at the
     // same round's clock and tie on every key above: the one read less far back
     // gives first, and past that the lower pane number — decided, never drawn.
-    panes.sort_by_key(|pane| (pane.reading, pane.watched, pane.moved, pane.offset, pane.term));
+    panes.sort_by_key(|pane| {
+        (
+            pane.reading,
+            pane.watched,
+            pane.moved,
+            pane.offset,
+            pane.term,
+        )
+    });
     let mut kept = Vec::new();
     for pane in panes.iter() {
         if total <= budget {
@@ -380,13 +388,19 @@ mod tests {
             offset,
             ..pane(term, CHOSEN, CHOSEN, Some(now))
         };
-        for listed in [[reader(1, 100), reader(2, 9_000)], [reader(2, 9_000), reader(1, 100)]] {
+        for listed in [
+            [reader(1, 100), reader(2, 9_000)],
+            [reader(2, 9_000), reader(1, 100)],
+        ] {
             let mut panes = listed;
             // Budget 17,000 of 24,000: one reader gives 7,000, to the default.
             assert_eq!(shares(&mut panes), vec![(1, DEFAULT_SCROLLBACK_LINES)]);
         }
         // Read exactly as far back, the lower pane number goes: decided, not drawn.
-        for listed in [[reader(1, 500), reader(2, 500)], [reader(2, 500), reader(1, 500)]] {
+        for listed in [
+            [reader(1, 500), reader(2, 500)],
+            [reader(2, 500), reader(1, 500)],
+        ] {
             let mut panes = listed;
             assert_eq!(shares(&mut panes), vec![(1, DEFAULT_SCROLLBACK_LINES)]);
         }
@@ -400,7 +414,9 @@ mod tests {
     fn a_pane_scrolled_back_and_hidden_is_not_being_read() {
         const CHOSEN: usize = 12_000;
         let now = Instant::now();
-        let hour_ago = now.checked_sub(Duration::from_secs(3_600)).expect("an hour ago");
+        let hour_ago = now
+            .checked_sub(Duration::from_secs(3_600))
+            .expect("an hour ago");
         for round in 0..16 {
             let pool = TerminalRegistry::default();
             let (hidden, shown) = if round % 2 == 0 { (1, 2) } else { (2, 1) };
@@ -411,7 +427,11 @@ mod tests {
             let mut entries = Vec::new();
             hold(&pool, &mut entries, &watched, &mut moved, now);
             assert_eq!(held(&pool, shown), (CHOSEN, 0), "round {round}");
-            assert_eq!(held(&pool, hidden).0, DEFAULT_SCROLLBACK_LINES, "round {round}");
+            assert_eq!(
+                held(&pool, hidden).0,
+                DEFAULT_SCROLLBACK_LINES,
+                "round {round}"
+            );
             assert_eq!(
                 moved.get(&hidden),
                 Some(&hour_ago),

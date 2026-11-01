@@ -776,7 +776,10 @@ fn the_newest_ended_lane_rides_the_answer_when_the_range_holds_none() {
         .max_by_key(|run| run.end_ms.unwrap_or(run.start_ms))
         .expect("the fixture has ended lanes")
         .clone();
-    assert_eq!(wide.last_lane, None, "a range with an ended lane sends none");
+    assert_eq!(
+        wide.last_lane, None,
+        "a range with an ended lane sends none"
+    );
     let ask = Ask {
         known: None,
         from_ms: Some(NOW_MS - 1),
