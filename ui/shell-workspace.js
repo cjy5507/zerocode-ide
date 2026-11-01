@@ -1801,8 +1801,9 @@ function paintWorktreeSelection() {
   for (const row of worktreeList.querySelectorAll(".wt-row[data-worktree-path]")) {
     const selected = selectedWorktreePaths.has(row.dataset.worktreePath);
     row.classList.toggle("is-selected", selected);
-    row.closest(".wt-node")?.classList.toggle("is-selected", selected);
-    row.setAttribute("aria-selected", selected ? "true" : "false");
+    const node = row.closest(".wt-node");
+    node?.classList.toggle("is-selected", selected);
+    node?.setAttribute("aria-selected", selected ? "true" : "false");
   }
 }
 
@@ -4768,8 +4769,12 @@ function makeWorktreeNode(worktree, held) {
   const row = document.createElement("div");
   row.className = "wt-row";
   row.dataset.worktreePath = worktree.path;
-  row.setAttribute("role", "option");
-  row.setAttribute("aria-selected", selectedWorktreePaths.has(worktree.path) ? "true" : "false");
+  // The checkout is a treeitem, not an option: its row holds buttons of its own,
+  // its agents stand under it as buttons, and an option's children are
+  // presentational (t-88672). The node owns the role and the selection mark;
+  // the row keeps the "current" one.
+  node.setAttribute("role", "treeitem");
+  node.setAttribute("aria-selected", selectedWorktreePaths.has(worktree.path) ? "true" : "false");
   row.setAttribute("aria-current", worktree.path === activeWorktreePath ? "location" : "false");
   row.tabIndex = -1;
   row.dataset.tip = worktree.path;
@@ -5835,6 +5840,20 @@ function restingProjectPaths(listed) {
     .map((project) => project.path));
 }
 
+/* A project or a state lane is a tree item: its header names it, and the rows
+ * under it stand in a group, which is where a tree item's children belong. The
+ * name is read off the header's own words, so a change of language that
+ * rewrites the header rewrites the name (t-88672). */
+let treeNameSeq = 0;
+function treeParent(node, header, children, expanded) {
+  const name = header.querySelector(".proj-name");
+  name.id = `proj-name-${++treeNameSeq}`;
+  node.setAttribute("role", "treeitem");
+  node.setAttribute("aria-labelledby", name.id);
+  node.setAttribute("aria-expanded", String(expanded));
+  children.setAttribute("role", "group");
+}
+
 function restingProjectsRow(resting) {
   const fold = document.createElement("button");
   fold.type = "button";
@@ -5857,7 +5876,15 @@ function restingProjectsRow(resting) {
   fold.addEventListener("click", () => foldWithScrollAnchor(fold, () => {
     restingProjectsOpen = !restingProjectsOpen;
   }));
-  return fold;
+  // The list is a tree and owns only tree items: like a project, the resting
+  // line stands in one of its own, button and all (t-88672).
+  const line = document.createElement("div");
+  line.className = "proj";
+  line.setAttribute("role", "treeitem");
+  fold.id = `proj-resting-${++treeNameSeq}`;
+  line.setAttribute("aria-labelledby", fold.id);
+  line.appendChild(fold);
+  return line;
 }
 
 async function refreshWorktrees() {
@@ -6077,6 +6104,7 @@ async function refreshWorktrees() {
   if (sidebarGroupBy === "none") {
     const flat = windowedWorktreeList(visibleWorktrees, held);
     flat.classList.add("is-flat");
+    flat.setAttribute("role", "group");
     worktreeList.appendChild(flat);
   }
   for (const group of laneGroups) {
@@ -6089,7 +6117,9 @@ async function refreshWorktrees() {
     // 접힌 그룹은 빈 창이다 — 행을 짓지 않는 것은 접힌 저장소와 같은 이유로.
     const list = windowedWorktreeList(children.hidden ? [] : group.members, held);
     children.appendChild(list);
-    groupNode.append(makeStateGroupHeader(group), children);
+    const groupHeader = makeStateGroupHeader(group);
+    treeParent(groupNode, groupHeader, children, !children.hidden);
+    groupNode.append(groupHeader, children);
     worktreeList.appendChild(groupNode);
   }
   // The resting line stands after the projects at work, and the projects it
@@ -6127,7 +6157,9 @@ async function refreshWorktrees() {
     if (card) children.appendChild(card);
     children.appendChild(list);
     if (finished) children.appendChild(finished);
-    projectNode.append(makeProjectHeader(project), children);
+    const projectHeader = makeProjectHeader(project);
+    treeParent(projectNode, projectHeader, children, !children.hidden);
+    projectNode.append(projectHeader, children);
     worktreeList.appendChild(projectNode);
   }
   if (restingList.length > 0 && !restingProjectsOpen) worktreeList.appendChild(restingProjectsRow(restingList));

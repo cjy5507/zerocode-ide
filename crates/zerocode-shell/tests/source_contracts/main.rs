@@ -4176,8 +4176,12 @@ mod tests {
         let painting = block_after(source, "function makeWorktreeNode(worktree, held) {");
 
         assert!(
-            markup.contains("role=\"listbox\"") && markup.contains("aria-multiselectable=\"true\""),
-            "the workspace list does not expose its selection model"
+            markup.contains("id=\"worktrees\" role=\"tree\" aria-multiselectable=\"true\"")
+                && painting.contains("node.setAttribute(\"role\", \"treeitem\")")
+                && source.contains("flat.setAttribute(\"role\", \"group\")")
+                && source.contains("line.setAttribute(\"role\", \"treeitem\")")
+                && source.contains("function treeParent(node, header, children, expanded) {"),
+            "the workspace list does not expose its selection model as a tree whose children are tree items and groups"
         );
         for contract in [
             "selectWorktree(worktree.path, event)",
@@ -15448,7 +15452,7 @@ mod tests {
         }
         assert!(
             markup.contains(
-                r#"<div class="tabstrip" id="tabstrip" role="tablist" data-drag-surface"#
+                r#"<div class="tabstrip" id="tabstrip" data-drag-surface><div class="tab-list" role="tablist""#
             ),
             "the empty run of the tab strip stopped being a handle"
         );

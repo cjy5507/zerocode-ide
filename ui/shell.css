@@ -6645,6 +6645,13 @@ body.is-dragging-pane {
   );
 }
 
+/* The tablist is the tabs' owner for a screen reader and nothing to the eye:
+ * its tabs lay out as the strip's own items, with the menu, the pill and the
+ * new-tab button after them (t-88672). */
+.tab-list {
+  display: contents;
+}
+
 .tabstrip::-webkit-scrollbar {
   display: none;
 }

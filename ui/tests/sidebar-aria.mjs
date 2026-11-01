@@ -65,7 +65,7 @@ export async function ownedChildrenViolations(page, include, rules = ["aria-requ
 const standing = (page) => page.evaluate(() => ({
   active: activeWorktreePath,
   selected: [...selectedWorktreePaths].sort(),
-  marked: [...document.querySelectorAll("#worktrees [data-worktree-path][aria-selected=true]")].map((row) => row.dataset.worktreePath).sort(),
+  marked: [...document.querySelectorAll('#worktrees [role="treeitem"][aria-selected=true] > .wt-row[data-worktree-path]')].map((row) => row.dataset.worktreePath).sort(),
   focus: document.activeElement?.id ?? document.activeElement?.className ?? "",
 }));
 
