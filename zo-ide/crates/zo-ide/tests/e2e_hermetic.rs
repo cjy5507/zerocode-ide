@@ -4893,9 +4893,10 @@ async fn e2e_writes_announced_beside_a_bash_are_edited_files_never_a_failed_patc
 /// Five files of 22 lines written in one batch on a 24-row pane. The finished
 /// cell, five write rows with their diffs, is taller than the pane, and it
 /// pushed the composer off the bottom while it stood live (2026-09-07 23:35
-/// screenshot, t-3063). The model is held for a while before its answer so
-/// the cell stays live: the footer must be on the last row, the composer on
-/// screen, and the cell must say how many of its lines it does not show.
+/// screenshot, t-3063). The model's answer waits behind a door the test opens
+/// once it has read the screen, so the cell stays live however long that takes
+/// (t-87901): the footer must be on the last row, the composer on screen, and
+/// the cell must say how many of its lines it does not show.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_a_tall_edit_cell_keeps_the_composer_on_the_floor() {
     const ROWS: u16 = 24;
@@ -4911,10 +4912,10 @@ async fn e2e_a_tall_edit_cell_keeps_the_composer_on_the_floor() {
             (format!("file{file}.txt"), content)
         })
         .collect();
-    let service = ScriptedAnthropicService::writes_then_bash(
+    let door = std::sync::Arc::new(tokio::sync::Notify::new());
+    let service = ScriptedAnthropicService::writes_then_answer_behind_door(
         files,
-        None,
-        Duration::ZERO,
+        std::sync::Arc::clone(&door),
         "### Done\n\n- five files written\n",
     )
     .await
@@ -4940,8 +4941,10 @@ async fn e2e_a_tall_edit_cell_keeps_the_composer_on_the_floor() {
             .iter()
             .any(|row| row.starts_with(FIRST_ROW))
     });
+    wait_for_request_count(&service, 2).await;
     wait_until_quiet(&run, Duration::from_millis(250), TEST_TIMEOUT);
     let live = run.snapshot_output();
+    door.notify_one();
     dump_capture(&live, "tall-cell-live");
     let visible = settled_screen(&live, ROWS).visible();
     assert_footer_on_the_last_row(&visible, "tall-cell", "live");

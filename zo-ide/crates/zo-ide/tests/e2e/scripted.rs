@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, watch, Mutex};
+use tokio::sync::{oneshot, watch, Mutex, Notify};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
@@ -141,13 +141,15 @@ enum Script {
     /// `files` written with `write_file` and, after them, one `bash` running
     /// `command` — all announced in ONE assistant message, the batch shape
     /// whose `bash` announce used to close the running writes as failed —
-    /// then `final_text`, held back for `hold` so the finished edit cell
-    /// stands live on screen that long (t-3063).
+    /// then `final_text`, held back for `hold` and, when there is a `door`,
+    /// until the test opens it — so the finished edit cell stands live on
+    /// screen for as long as the test is reading it (t-3063, t-87901).
     #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
     WritesThenBash {
         files: Vec<(String, String)>,
         command: Option<String>,
         hold: Duration,
+        door: Option<Arc<Notify>>,
         final_text: String,
     },
 }
@@ -264,6 +266,15 @@ impl Script {
             }
             Self::SpawnChildAnswersLate { late, .. } if is_spawn_childs_last_request(request) => *late,
             _ => Duration::ZERO,
+        }
+    }
+
+    /// The door the server waits at before answering request `request_index`,
+    /// for a script whose answer waits for the test and not for a clock.
+    fn door_before(&self, request_index: usize) -> Option<Arc<Notify>> {
+        match self {
+            Self::WritesThenBash { door, .. } if request_index == 1 => door.clone(),
+            _ => None,
         }
     }
 
@@ -647,6 +658,25 @@ impl ScriptedAnthropicService {
             files,
             command: command.map(str::to_string),
             hold,
+            door: None,
+            final_text: final_text.into(),
+        })
+        .await
+    }
+
+    /// Respond first with one message that writes `files`, then with
+    /// `final_text` once the test has called `door.notify_one()`.
+    #[allow(dead_code)] // e2e_hermetic only
+    pub async fn writes_then_answer_behind_door(
+        files: Vec<(String, String)>,
+        door: Arc<Notify>,
+        final_text: impl Into<String>,
+    ) -> io::Result<Self> {
+        Self::spawn(Script::WritesThenBash {
+            files,
+            command: None,
+            hold: Duration::ZERO,
+            door: Some(door),
             final_text: final_text.into(),
         })
         .await
@@ -725,16 +755,17 @@ async fn handle_connection(
 ) -> io::Result<()> {
     let (method, body) = read_http_request(&mut socket).await?;
     if method.eq_ignore_ascii_case("POST") {
-        let (request_index, response, (pieces, gap), refusal, hold, rendezvous) = {
+        let (request_index, response, (pieces, gap), refusal, hold, door, rendezvous) = {
             let mut captured = requests.lock().await;
             let request_index = captured.len();
             let response = script.response(request_index, &body);
             let pacing = script.pacing(request_index, &body);
             let refusal = script.refusal(&body);
             let hold = script.delay_before(request_index, &body);
+            let door = script.door_before(request_index);
             let rendezvous = script.rendezvous(&body);
             captured.push(body);
-            (request_index, response, pacing, refusal, hold, rendezvous)
+            (request_index, response, pacing, refusal, hold, door, rendezvous)
         };
         if let Some(refusal) = refusal {
             socket.write_all(refusal.as_bytes()).await?;
@@ -753,6 +784,9 @@ async fn handle_connection(
         { let mut total = usage.lock().await; for (i, count) in emitted.iter().enumerate() { total[i] += count; } }
         if !hold.is_zero() {
             tokio::time::sleep(hold).await;
+        }
+        if let Some(door) = door {
+            door.notified().await;
         }
         // After the lock: every connection runs on its own task, so a held
         // answer never keeps the other helper's request from arriving.
