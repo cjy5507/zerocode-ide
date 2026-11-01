@@ -203,9 +203,11 @@ pub(crate) fn step(
         Standing::Closed => return Step::Raise(Raised::Unanswerable),
         // The coordinator gave it to the person: given at once, then the
         // person's until they answer — or until the worker or its pane goes,
-        // when it is let go with nobody told.
+        // when it is let go with nobody told. A worker gone before the person
+        // ever saw the question does not take the card with it: the pane still
+        // asks, so it is raised (t-85327, t-84343 r1 P3-1).
         Standing::Answered(words) if hands_to_person(words) => {
-            return if passed || seat.is_none() {
+            return if passed || (raised && seat.is_none()) {
                 Step::Forget
             } else if raised {
                 Step::Wait
@@ -778,13 +780,11 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
     };
     take_up(app, waiting, &facts, now_ms);
     for (question, was) in gone {
-        match facts.standing(&was.seat.run, &question) {
-            Standing::Waiting => {}
-            // Given to the person: nobody to tell.
-            Standing::Answered(words) if hands_to_person(&words) => {
-                left().remove(&question);
-            }
-            Standing::Answered(_) => {
+        match on_late(&facts.standing(&was.seat.run, &question)) {
+            Late::Wait => {}
+            // Answered after the pane left — a 「사람에게」 too: the coordinator
+            // believes the person holds it, and no screen does.
+            Late::Tell => {
                 tell(
                     &was.seat,
                     &question,
@@ -793,7 +793,7 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
                 );
                 left().remove(&question);
             }
-            Standing::Closed => {
+            Late::Drop => {
                 left().remove(&question);
             }
         }
@@ -845,7 +845,6 @@ enum Late {
 fn on_late(standing: &Standing) -> Late {
     match standing {
         Standing::Waiting => Late::Wait,
-        Standing::Answered(words) if hands_to_person(words) => Late::Drop,
         Standing::Answered(_) => Late::Tell,
         Standing::Closed => Late::Drop,
     }
