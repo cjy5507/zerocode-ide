@@ -36569,7 +36569,7 @@ details.task-board-section > summary {
   outline-offset: calc(var(--focus-ring-offset) * -1);
 }
 
-/* 칸 머리: 요일과 날짜, 오른쪽 끝에 그날의 수. 오늘이면 칩이 다음 줄로 접혀 선다. 머리는 칸의 안쪽 여백 밖까지 띠로 간다. */
+/* 칸 머리: 요일과 날짜, 오른쪽 끝에 그날의 수(답이 일감 일부를 싣지 못한 날이면 「12+」). 오늘이면 칩이 다음 줄로 접혀 선다. 머리는 칸의 안쪽 여백 밖까지 띠로 간다. */
 .board-schedule-week-head {
   grid-row: 1;
   display: flex;
@@ -36591,7 +36591,7 @@ details.task-board-section > summary {
 }
 
 .board-schedule-week-head::before {
-  content: attr(data-count);
+  content: attr(data-count) attr(data-partial);
   order: 1;
   margin-inline-start: auto;
   color: var(--ink-label);
@@ -36627,6 +36627,13 @@ details.task-board-section > summary {
   min-height: var(--schedule-block-least);
 }
 
+/* 기다리는 블록의 칠은 발치의 띠다: 칸 안의 블록은 칠이 옆으로 차서 글 뒤를 지난다 — 회색 칠 위의 글이 흐려진다(검수 r1 P3-7). */
+.board-schedule-week .board-schedule-block:is([data-bar-state="waiting"], [data-bar-state="held"]) {
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 100% var(--space-1);
+}
+
 /* 다음 날로 이어지는 끝과 앞 날에서 이어지는 끝: 둥글지 않고 칸의 가장자리까지 가서, 옆 칸의 조각과 맞닿는다. 이어져
  * 온 조각은 왼쪽 띠를 그리지 않는다 — 띠는 시작한 자리의 표시다. */
 .board-schedule-week .board-schedule-block:is([data-flow="out"], [data-flow="both"]) {
@@ -36642,7 +36649,7 @@ details.task-board-section > summary {
   border-end-start-radius: 0;
 }
 
-/* 이 주 밖으로 이어지는 끝: 시간표의 톱니를 옆으로 — 왼쪽 끝은 주 앞에서, 오른쪽 끝은 주 뒤로. 톱니 높이의 몫은 칸 높이에 맞춘 것. */
+/* 이 범위 밖으로 이어지는 끝: 시간표의 톱니를 옆으로 — 왼쪽 끝은 범위 앞에서, 오른쪽 끝은 범위 뒤로. 톱니 높이의 몫은 칸 높이에 맞춘 것. */
 .board-schedule-week .board-schedule-block.is-cut {
   clip-path: polygon(var(--space-1) 0, 100% 0, 100% 100%, var(--space-1) 100%, 0 87.5%, var(--space-1) 75%, 0 62.5%, var(--space-1) 50%, 0 37.5%, var(--space-1) 25%, 0 12.5%);
 }

@@ -23,7 +23,8 @@
  * 저사양 프로필(tools/low-spec/profile.mjs의 두 단계):
  *   taskpolicy -b node ui/tests/board-schedule-perf.mjs            효율 코어·배경 QoS (low)
  *   WINDOW_CPU_THROTTLE=4 node ui/tests/board-schedule-perf.mjs    페이지 CPU 4배 감속 (cpu4x)
- *   node ui/tests/board-schedule-perf.mjs --polls 40 --idle-secs 30 --json out.json */
+ *   node ui/tests/board-schedule-perf.mjs --polls 40 --idle-secs 30 --json out.json
+ *   node ui/tests/board-schedule-perf.mjs --line-jobs 860   더 긴 빌드 줄: 답의 일감 상한을 정할 때 잰다 */
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -285,8 +286,19 @@ async function measure(page, { polls, idleSecs }) {
     boardScheduleAnswer = answer;
     document.querySelector('#board-view [data-board-tab-button="schedule"]').click();
     boardScheduleChoice.zoom = "day";
-  }, { ...boardScheduleHeavyWeek(weekNow, weekFrom), weekNow });
+  }, { ...boardScheduleHeavyWeek(weekNow, weekFrom, Number(option("line-jobs", 140))), weekNow });
   const heavy = await paintFor("week", 1);
+  // What one changed answer costs the page before any drawing: its size and reading it.
+  heavy.answer = await page.evaluate(() => {
+    const text = JSON.stringify(window.__SCHEDULE__);
+    const runs = [];
+    for (let run = 0; run < 15; run += 1) {
+      const began = performance.now();
+      JSON.parse(text);
+      runs.push(performance.now() - began);
+    }
+    return { bytes: text.length, parseMs: runs.sort((a, b) => a - b)[7] };
+  });
   // A press on the busiest day's 「+N」 stands one page of it; the old chart has no such press.
   heavy.expand = await page.evaluate(async () => {
     const more = [...document.querySelectorAll("#board-view .board-schedule-week-day .board-schedule-more:not(.board-schedule-week-less)")]
@@ -338,6 +350,8 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
         movedPaintP95Ms: Number(quantile(result.heavy.moved, 0.95).toFixed(2)),
         expandPaintMs: result.heavy.expand ? Number(result.heavy.expand.ms.toFixed(2)) : null,
         expandedElements: result.heavy.expand?.elements ?? null,
+        answerBytes: result.heavy.answer.bytes,
+        answerParseMs: Number(result.heavy.answer.parseMs.toFixed(2)),
       },
       quietBeatMs: Number(result.quiet.toFixed(2)),
       quietWrites: result.writes,

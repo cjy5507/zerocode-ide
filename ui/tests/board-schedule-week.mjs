@@ -111,6 +111,20 @@ async function moveWeek(page, { jobs, lanes, tasks } = {}) {
   }, { jobs: jobs ?? null, lanes: lanes ?? null, tasks: tasks ?? null });
 }
 
+/* Every block of one day stands, or folds back: what the cell holds past its six is read this way. */
+const standDay = (page, at, stand = true) => page.evaluate(async ({ at, stand }) => {
+  const cell = document.querySelectorAll("#board-view .board-schedule-week-day")[at];
+  const more = cell.querySelector(".board-schedule-more:not(.board-schedule-week-less)");
+  const less = cell.querySelector(".board-schedule-week-less");
+  if (stand) {
+    while (!more.hidden) {
+      more.click();
+      await new Promise((done) => requestAnimationFrame(done));
+    }
+  } else if (!less.hidden) less.click();
+  await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+}, { at, stand });
+
 const task = (id, stage, times) => ({
   run: "run-4275", id, title: `주 ${id}`, stage, gate: null, blocked_by: [], closed: null,
   created_ms: times.started_ms - 60_000, cost: null, writing: null,
@@ -174,19 +188,9 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     ok("Sunday holds Sunday's release lanes, v1.1.77's three runs among them",
       sundayLanes.filter((block) => block.title.startsWith("v1.1.77 ")).length === 3 && inDay(SUNDAY_CELL, "lane:") !== undefined,
       JSON.stringify(sundayLanes.map((block) => block.title)));
-    const mondayAll = await page.evaluate(async (at) => {
-      const cell = document.querySelectorAll("#board-view .board-schedule-week-day")[at];
-      const more = cell.querySelector(".board-schedule-more:not(.board-schedule-week-less)");
-      while (!more.hidden) {
-        more.click();
-        await new Promise((done) => requestAnimationFrame(done));
-      }
-      const keys = [...cell.querySelectorAll(".board-schedule-block")].map((block) => block.dataset.key);
-      const less = cell.querySelector(".board-schedule-week-less");
-      if (!less.hidden) less.click();
-      await new Promise((done) => requestAnimationFrame(done));
-      return keys;
-    }, MONDAY_CELL);
+    await standDay(page, MONDAY_CELL);
+    const mondayAll = (await readWeek(page)).days[MONDAY_CELL].blocks.map((block) => block.key);
+    await standDay(page, MONDAY_CELL, false);
     ok("Monday holds the task that landed that day", mondayAll.some((key) => key.endsWith("t-62493")), JSON.stringify(mondayAll));
     ok("Wednesday holds today's running lane, and it reads as running",
       week.days[TODAY].blocks.some((block) => block.group === "lanes" && block.state === "running"),
@@ -273,19 +277,18 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     ok("six tasks that began yesterday and ended today do not stand before the running lane and gate",
       runningFirst(week.days[TODAY].blocks), JSON.stringify(week.days[TODAY].blocks.map((block) => [block.key, block.state])));
     const allEnded = [...fixture.desk.tasks, ...Array.from({ length: 12 }, (_, at) => task(`t-94${String(at).padStart(2, "0")}`, "merged", {
-      started_ms: FIRST + TUESDAY_CELL * DAY + (8 + at) * HOUR, landed_ms: FIRST + TUESDAY_CELL * DAY + (8.5 + at) * HOUR,
+      started_ms: FIRST + DAY + (8 + at) * HOUR, landed_ms: FIRST + DAY + (8.5 + at) * HOUR,
     }))];
     await moveWeek(page, { tasks: allEnded });
     week = await readWeek(page);
-    const tuesdayEnded = week.days[TUESDAY_CELL].blocks.filter((block) => block.group === "workers").map((block) => block.key);
+    const saturdayEnded = week.days[1].blocks.filter((block) => block.group === "workers").map((block) => block.key);
     ok("among what ended the newest stands first: the last thing to finish that day is not behind the count",
-      tuesdayEnded.some((key) => key.endsWith("t-9411")) && tuesdayEnded.findIndex((key) => key.endsWith("t-9411")) < tuesdayEnded.findIndex((key) => key.endsWith("t-9410")),
-      JSON.stringify(tuesdayEnded));
+      saturdayEnded.some((key) => key.endsWith("t-9411")) && saturdayEnded.findIndex((key) => key.endsWith("t-9411")) < saturdayEnded.findIndex((key) => key.endsWith("t-9410")),
+      JSON.stringify(saturdayEnded));
     await moveWeek(page, { tasks: fixture.desk.tasks });
 
     /* ---- 칸을 넘는 블록: 수를 말하고, 누르면 다 선다 ---------------------------------------- */
     const crowd = [
-      ...fixture.desk.tasks,
       ...Array.from({ length: 20 }, (_, at) => task(`t-91${String(at).padStart(3, "0")}`, "merged", {
         started_ms: SUNDAY + 4 * DAY + (9 + at / 4) * HOUR, landed_ms: SUNDAY + 4 * DAY + (9.1 + at / 4) * HOUR,
       })),
@@ -405,7 +408,9 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     const lint = fixture.answer.jobs.find((job) => job.gate === "l61" && job.state === "running");
     await moveWeek(page, { jobs: fixture.answer.jobs.map((job) => (job.name === lint.name
       ? { ...job, what: "v1.1.84: t-66539/7102 ctty helper" } : job)) });
+    await standDay(page, TODAY);
     week = await readWeek(page);
+    await standDay(page, TODAY, false);
     const carried = week.days.flatMap((day) => day.blocks).filter((block) => block.key.endsWith("t-67102") || block.key.endsWith("t-66539"));
     ok("a task carried by the gate says so on its block in the week, as in the day",
       carried.length >= 2 && carried.every((block) => block.why.includes("l61에 실림")), JSON.stringify(carried.map((block) => block.why)));
@@ -490,15 +495,15 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
       .filter((node) => node.checkVisibility() && !(node.getAttribute("aria-label") ?? node.textContent).trim()).length);
     ok("every cell and every button of the calendar has a name", nameless === 0, String(nameless));
 
-    await keys.evaluate(() => document.querySelectorAll("#board-view .board-schedule-week-day")[2].querySelector(".board-schedule-more").focus());
+    await keys.evaluate((at) => document.querySelectorAll("#board-view .board-schedule-week-day")[at].querySelector(".board-schedule-more").focus(), TUESDAY_CELL);
     for (let press = 0; press < 8; press += 1) {
       if (await keys.evaluate(() => document.activeElement.classList.contains("board-schedule-week-less"))) break;
       await keys.keyboard.press("Enter");
     }
-    const handed = await keys.evaluate(() => ({
+    const handed = await keys.evaluate((at) => ({
       less: document.activeElement.classList.contains("board-schedule-week-less"),
-      moreHidden: document.querySelectorAll("#board-view .board-schedule-week-day")[2].querySelector(".board-schedule-more").hidden,
-    }));
+      moreHidden: document.querySelectorAll("#board-view .board-schedule-week-day")[at].querySelector(".board-schedule-more").hidden,
+    }), TUESDAY_CELL);
     ok("when the last page stands, the focus goes from the gone button to the fold button", handed.less && handed.moreHidden, JSON.stringify(handed));
     await keys.keyboard.press("Enter");
     const backed = await keys.evaluate(() => document.activeElement.className);
@@ -670,6 +675,7 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     /* ---- 기다리는 블록의 칠은 글 뒤를 지나지 않는다 (검수 r1 P3-7) ------------------------------------- */
     await page.setViewportSize({ width: 1280, height: 860 });
     await page.evaluate(settle);
+    await standDay(page, TODAY);
     const waitingPaint = await page.evaluate(() => {
       const block = document.querySelector('#board-view .board-schedule-week [data-bar-state="waiting"]');
       if (!block) return null;
@@ -679,6 +685,7 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
       const strip = parseFloat(style.backgroundSize.split(",")[0].trim().split(" ")[1]);
       return { size: style.backgroundSize, position: style.backgroundPosition, strip, height: box.height, labelTop: label.top - box.top };
     });
+    await standDay(page, TODAY, false);
     ok("a waiting block's fill is a strip along its foot, so no words stand on it",
       waitingPaint && waitingPaint.strip > 0 && waitingPaint.strip < waitingPaint.height / 2 && waitingPaint.position.includes("100%"),
       JSON.stringify(waitingPaint));
@@ -727,8 +734,9 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
   const endOfWeek = [
     task("t-95001", "merged", { started_ms: saturdayLate - HOUR, landed_ms: saturdayLate }),
     task("t-95002", "merged", { started_ms: fridayNoon - HOUR, landed_ms: fridayNoon }),
+    // One an hour after midnight on each day from 10-20, the first cell of the Sunday scene.
     ...Array.from({ length: 7 }, (_, at) => task(`t-9510${at}`, "merged", {
-      started_ms: Date.UTC(2026, 9, 26 + at, 0) - 5 * DAY, landed_ms: Date.UTC(2026, 9, 26 + at, 1) - 5 * DAY,
+      started_ms: Date.UTC(2026, 9, 19, 16) + at * DAY, landed_ms: Date.UTC(2026, 9, 19, 16, 30) + at * DAY,
     })),
   ];
   const quietFixture = { answer: { ...fixture.answer, jobs: [], lanes: [] }, desk: { ...fixture.desk, tasks: endOfWeek } };
