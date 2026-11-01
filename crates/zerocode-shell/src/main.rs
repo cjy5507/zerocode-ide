@@ -436,8 +436,8 @@ use cmd::{
 };
 use cmd::{artifact_export_formats, artifact_export_reveal};
 use cmd::{
-    check_custom_decision, delete_custom_decision, list_custom_decisions, restore_custom_decision,
-    save_custom_decision, set_custom_decision_mode,
+    check_custom_decision, delete_custom_decision, list_custom_decisions, save_custom_decision,
+    set_custom_decision_mode,
 };
 use cmd::{
     claim_coordinator_seat, coordinator_handover_status, coordinator_seat_runs, coordinator_seats,
@@ -2706,7 +2706,6 @@ fn main() -> ExitCode {
             check_custom_decision,
             save_custom_decision,
             delete_custom_decision,
-            restore_custom_decision,
             set_custom_decision_mode,
             set_judgment_provider,
             managed_judgment_apply,
