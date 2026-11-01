@@ -31,6 +31,8 @@ pub(crate) struct PaneHistory {
     pub(crate) chosen: usize,
     /// Scrolled back: somebody is reading this history right now.
     pub(crate) reading: bool,
+    /// How far back it is scrolled, in lines — what tells two readers apart.
+    pub(crate) offset: usize,
     /// A window shows it (`readers_by_term`).
     pub(crate) watched: bool,
     /// When it last printed or was read back; `None` when not since the
@@ -101,6 +103,7 @@ pub(crate) fn hold(
                 lines: grid.scrollback_len(),
                 chosen: grid.scrollback_cap(),
                 reading,
+                offset: grid.view_offset(),
                 watched: watched.contains_key(term),
                 moved: moved.get(term).copied(),
             }
@@ -127,6 +130,7 @@ mod tests {
             lines,
             chosen,
             reading: false,
+            offset: 0,
             watched: false,
             moved,
         }
@@ -352,5 +356,60 @@ mod tests {
         assert_eq!(held(&pool, 3).0, DEFAULT_SCROLLBACK_LINES);
         assert_eq!(held(&pool, 1).0, DEFAULT_SCROLLBACK_LINES);
         assert_eq!(held(&pool, 2).0, CHOSEN);
+    }
+
+    /// Two panes read back at once, over the budget together (t-84801, the
+    /// review's P2-1): both are `reading`, both on screen, both stamped at the
+    /// round's clock — every key tied, and which of the two lost its history
+    /// fell to the pool's hash order. The one read less far back goes first,
+    /// whichever way the pool lists them.
+    #[test]
+    fn two_readers_over_the_budget_give_by_how_far_back_they_read() {
+        const CHOSEN: usize = 12_000;
+        let now = Instant::now();
+        let reader = |term, offset| PaneHistory {
+            reading: true,
+            watched: true,
+            offset,
+            ..pane(term, CHOSEN, CHOSEN, Some(now))
+        };
+        for listed in [[reader(1, 100), reader(2, 9_000)], [reader(2, 9_000), reader(1, 100)]] {
+            let mut panes = listed;
+            // Budget 17,000 of 24,000: one reader gives 7,000, to the default.
+            assert_eq!(shares(&mut panes), vec![(1, DEFAULT_SCROLLBACK_LINES)]);
+        }
+        // Read exactly as far back, the lower pane number goes: decided, not drawn.
+        for listed in [[reader(1, 500), reader(2, 500)], [reader(2, 500), reader(1, 500)]] {
+            let mut panes = listed;
+            assert_eq!(shares(&mut panes), vec![(1, DEFAULT_SCROLLBACK_LINES)]);
+        }
+    }
+
+    /// A pane scrolled back and then left behind another tab is not being
+    /// read (the review's P3-1): its scroll stood forever, stamped `moved =
+    /// now` every beat, so the pane the person was looking at gave up its
+    /// history first. Over the budget the hidden pane goes before it.
+    #[test]
+    fn a_pane_scrolled_back_and_hidden_is_not_being_read() {
+        const CHOSEN: usize = 12_000;
+        let now = Instant::now();
+        let hour_ago = now.checked_sub(Duration::from_secs(3_600)).expect("an hour ago");
+        for round in 0..16 {
+            let pool = TerminalRegistry::default();
+            let (hidden, shown) = if round % 2 == 0 { (1, 2) } else { (2, 1) };
+            seat(&pool, hidden, CHOSEN, CHOSEN, 7_000);
+            seat(&pool, shown, CHOSEN, CHOSEN, 0);
+            let mut moved = HashMap::from([(hidden, hour_ago), (shown, now)]);
+            let watched = HashMap::from([(shown, vec!["main".to_owned()])]);
+            let mut entries = Vec::new();
+            hold(&pool, &mut entries, &watched, &mut moved, now);
+            assert_eq!(held(&pool, shown), (CHOSEN, 0), "round {round}");
+            assert_eq!(held(&pool, hidden).0, DEFAULT_SCROLLBACK_LINES, "round {round}");
+            assert_eq!(
+                moved.get(&hidden),
+                Some(&hour_ago),
+                "a hidden scroll is not a reading: it is not stamped as moved"
+            );
+        }
     }
 }
