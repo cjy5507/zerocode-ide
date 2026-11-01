@@ -870,6 +870,28 @@ mod tests {
         assert_eq!(paths, vec!["/w/t-9", "/w/t-8"]);
     }
 
+    /// 끝나지 않는 자식은 시간 안에 죽고 `None` 이다 — 창의 답이 그 자식을 기다리지 않는다.
+    /// 시간 안에 끝난 자식은 종료 코드가 0이 아니어도 출력을 돌려준다(lsof 는 보고할 것이
+    /// 없을 때 0이 아닌 코드로 끝난다).
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_does_not_finish_is_ended_and_answers_none() {
+        let began = std::time::Instant::now();
+        let mut slow = crate::proc::quiet_command("sleep");
+        slow.arg("3");
+        assert!(
+            crate::system_runtime::output_within(slow, std::time::Duration::from_millis(150))
+                .is_none()
+        );
+        assert!(began.elapsed() < std::time::Duration::from_millis(2_500));
+        let mut quick = crate::proc::quiet_command("sh");
+        quick.args(["-c", "echo hello; exit 1"]);
+        let output = crate::system_runtime::output_within(quick, std::time::Duration::from_secs(5))
+            .expect("it finished");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+        assert!(!output.status.success());
+    }
+
     /// A worker's checkout told through a link is the folder the system says its processes
     /// stand in (r1-10): `lsof` prints the real place, and a tree told the other way round
     /// still takes its checkout out.

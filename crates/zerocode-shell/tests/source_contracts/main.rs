@@ -33195,7 +33195,9 @@ mod tests {
     /// killed and waited past it. The sixth is a wire session's child
     /// (`wire_runtime`): its stdout is read to the end on the session's
     /// reader thread, and the session kills and waits it when it is stopped
-    /// or dropped.
+    /// or dropped. The seventh is the bounded `output_within`
+    /// (`system_runtime`, r3w-4): both streams read to the end on their own
+    /// threads, waited to its budget and killed and waited past it.
     /// Emulator children moved behind the shared
     /// `SessionControl`: every adapter installs its child there and the one
     /// stop path kills and waits it. Everything truly fire-and-forget goes
@@ -33206,7 +33208,7 @@ mod tests {
         let (shipped, _) = shell.split_once("#[cfg(test)]").unwrap_or((shell, ""));
         assert_eq!(
             shipped.matches(".spawn()").count(),
-            6,
+            7,
             "a new bare child appeared in main.rs"
         );
         let wire = include_str!("../../src/wire_runtime.rs");
