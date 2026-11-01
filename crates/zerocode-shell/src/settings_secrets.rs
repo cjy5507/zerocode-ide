@@ -63,7 +63,7 @@ use serde_json::Value;
 use zerocode_core::settings_file_lock::SettingsFileLock;
 use zerocode_harness::SERVICE_KEYCHAIN_SERVICE_PREFIX;
 
-use crate::api_routers::RouterKeys;
+use crate::api_routers::{RouterKeys, RouterRefusalKind};
 use crate::typesafe_settings::KeptNot;
 
 /// How long one door may take. zo reads one file and asks one keychain item;
@@ -703,12 +703,28 @@ pub struct Stopped {
 }
 
 /// A press of 「키체인으로 옮기기」: the cells moved in order, where it
-/// stopped, and the names not tried because it stopped.
+/// stopped, and the names not moved besides that one. A stop on a value the
+/// keychain's road refused does not end the walk, so cells listed after it can
+/// stand in `moved`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MoveOutcome {
     pub moved: Vec<Moved>,
     pub stopped: Option<Stopped>,
     pub left: Vec<String>,
+}
+
+/// `move_one`'s word to `move_all` for a value the keychain's road refused. The
+/// page never sees it: to the person it is a stop like any keychain refusal.
+const VALUE_REFUSED: &str = "keychain_value_refused";
+
+impl MoveOutcome {
+    /// A stop that ends the walk. It is the one the page shows, and a refused
+    /// value that stood there goes on the list of what was not moved.
+    fn stop_with(&mut self, stopped: Stopped) {
+        if let Some(earlier) = self.stopped.replace(stopped) {
+            self.left.push(earlier.name);
+        }
+    }
 }
 
 /// The keychain item zo reads `${name}` from.
@@ -810,6 +826,11 @@ pub(crate) fn notice(zo: &ZoDoor, settings: &SettingsFile) -> Option<SecretNotic
 /// first is read from the file the move before it left, and the file the last
 /// move left is looked at too: one not as expected stops the outcome as
 /// `unconfirmed`, under the cell zo said it moved.
+///
+/// The one exception to stopping is a value the keychain's road refused. That
+/// says nothing about the next cell, nothing was touched and the file is as it
+/// was read, so the walk goes on. The first such cell is the stop the page shows,
+/// unless a stop that ended the walk replaces it, and the others are `left`.
 pub(crate) fn move_all(zo: &ZoDoor, settings: &SettingsFile, keys: &dyn RouterKeys) -> MoveOutcome {
     let before_any = |reason: &'static str| MoveOutcome {
         stopped: Some(Stopped {
@@ -851,7 +872,7 @@ pub(crate) fn move_all(zo: &ZoDoor, settings: &SettingsFile, keys: &dyn RouterKe
                 // other than the file read with that cell turned into its
                 // reference is not a finished move (t-76698 r4).
                 if next.is_err() && rest.as_slice().is_empty() {
-                    outcome.stopped = Some(Stopped {
+                    outcome.stop_with(Stopped {
                         name: literal.name.clone(),
                         reason: "unconfirmed",
                         why: None,
@@ -864,9 +885,20 @@ pub(crate) fn move_all(zo: &ZoDoor, settings: &SettingsFile, keys: &dyn RouterKe
                 });
                 pinned = next;
             }
+            Err(stopped) if stopped.reason == VALUE_REFUSED => {
+                let stopped = Stopped {
+                    reason: "keychain",
+                    ..stopped
+                };
+                if outcome.stopped.is_some() {
+                    outcome.left.push(stopped.name);
+                } else {
+                    outcome.stopped = Some(stopped);
+                }
+            }
             Err(stopped) => {
-                outcome.stopped = Some(stopped);
-                outcome.left = rest.map(|literal| literal.name).collect();
+                outcome.stop_with(stopped);
+                outcome.left.extend(rest.map(|literal| literal.name));
                 break;
             }
         }
@@ -926,7 +958,12 @@ fn move_one(
             KeptNot::Another => stop("keychain_differs", None, false),
             KeptNot::Changed(reason) => stop(reason, None, false),
             KeptNot::Refused(refusal) => {
-                stop("keychain", said_without(&refusal.message, &value), false)
+                let reason = if refusal.kind == RouterRefusalKind::ValueRefused {
+                    VALUE_REFUSED
+                } else {
+                    "keychain"
+                };
+                stop(reason, said_without(&refusal.message, &value), false)
             }
         })?;
         (value, bytes)

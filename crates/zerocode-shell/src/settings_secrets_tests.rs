@@ -1278,6 +1278,106 @@ fn a_file_zo_left_with_a_second_name_is_not_gone_on_from() {
     assert_eq!(bench.calls().len(), 3, "nothing asked for the second");
 }
 
+/// Refuses the named values as the real store does when its road cannot carry
+/// them, or as any other refusal when `kind` says so.
+struct RefusesValues {
+    keys: HeldKeys,
+    values: &'static [&'static str],
+    kind: crate::api_routers::RouterRefusalKind,
+}
+
+impl RouterKeys for RefusesValues {
+    fn read(&self, service: &str) -> Result<Option<String>, crate::api_routers::RouterRefusal> {
+        self.keys.read(service)
+    }
+    fn write(&self, service: &str, secret: &str) -> Result<(), crate::api_routers::RouterRefusal> {
+        if self.values.contains(&secret) {
+            return Err(crate::api_routers::RouterRefusal {
+                kind: self.kind,
+                message: "fixture: this road cannot carry the value".to_string(),
+            });
+        }
+        self.keys.write(service, secret)
+    }
+    fn delete(&self, service: &str) -> Result<(), crate::api_routers::RouterRefusal> {
+        self.keys.delete(service)
+    }
+}
+
+/// One value the keychain's road cannot carry costs the person that cell, and not
+/// the cells listed after it. The file still holds that value, and the page says
+/// which cell and why, the way it says any stop.
+#[test]
+fn a_value_the_keychain_refused_does_not_keep_the_next_cell_in_plain_text() {
+    let bench = two_cells();
+    let keys = RefusesValues {
+        keys: HeldKeys::default(),
+        values: &[VALUE],
+        kind: crate::api_routers::RouterRefusalKind::ValueRefused,
+    };
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert_eq!(
+        outcome
+            .moved
+            .iter()
+            .map(|moved| moved.name.as_str())
+            .collect::<Vec<_>>(),
+        [NAME_2]
+    );
+    assert_eq!(
+        outcome.stopped,
+        Some(Stopped {
+            name: NAME.to_string(),
+            reason: "keychain",
+            why: Some("fixture: this road cannot carry the value".to_string()),
+            keychain_kept: false,
+        })
+    );
+    assert!(outcome.left.is_empty(), "{:?}", outcome.left);
+    assert_eq!(keys.keys.held(&keychain_service(NAME)), None);
+    assert_eq!(
+        keys.keys.held(&keychain_service(NAME_2)).as_deref(),
+        Some(VALUE_2)
+    );
+    let file = std::fs::read_to_string(bench.settings()).expect("settings");
+    assert!(file.contains(VALUE) && !file.contains(VALUE_2), "{file}");
+}
+
+/// Every refused cell is still in plain text and the page names them all.
+#[test]
+fn each_value_the_keychain_refused_is_named_as_not_moved() {
+    let bench = two_cells();
+    let keys = RefusesValues {
+        keys: HeldKeys::default(),
+        values: &[VALUE, VALUE_2],
+        kind: crate::api_routers::RouterRefusalKind::ValueRefused,
+    };
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert!(outcome.moved.is_empty());
+    assert_eq!(
+        outcome.stopped.as_ref().map(|stop| stop.name.as_str()),
+        Some(NAME)
+    );
+    assert_eq!(outcome.left, [NAME_2]);
+}
+
+/// A keychain that refused for any other reason would refuse the next cell too,
+/// and says nothing about this value, so the move still stops there.
+#[test]
+fn a_keychain_that_refused_for_another_reason_still_stops_the_move() {
+    let bench = two_cells();
+    let keys = RefusesValues {
+        keys: HeldKeys::default(),
+        values: &[VALUE],
+        kind: crate::api_routers::RouterRefusalKind::Failed,
+    };
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert!(outcome.moved.is_empty());
+    assert_eq!(reason(&outcome), Some("keychain"));
+    assert_eq!(outcome.left, [NAME_2]);
+    assert_eq!(keys.keys.held(&keychain_service(NAME_2)), None);
+}
+
 /// The last cell's move answered, and the file it left is not the one read
 /// with that cell turned into its reference: the move is not reported
 /// finished. The cell zo said it moved is said moved, with its backup; the
