@@ -467,7 +467,10 @@ fn a_person_who_stopped_their_own_turn_can_press_and_a_summoned_workers_pane_sta
     );
     let tail = tail_of(&stood);
     let own = pane_effort(&stood.host, term, tail.as_deref());
-    assert_eq!(own.stuck, None, "the person's own pane, stopped by hand: {own:?}");
+    assert_eq!(
+        own.stuck, None,
+        "the person's own pane, stopped by hand: {own:?}"
+    );
     let worker = pane_effort(&stood.host, stood.host.worker_term, tail.as_deref());
     assert_eq!(worker.stuck, Some(Stuck::HeldByPerson), "{worker:?}");
 }
@@ -499,7 +502,11 @@ fn a_rung_the_seat_keyed_stays_the_rung_after_its_label_window_until_a_turn_runs
     tick(&stood.host, &[], began + 4_000);
     tick(&stood.host, &[], began + 5_000);
     // No turn ends; the label window runs out and the seat writes its row.
-    tick(&stood.host, &[], began + 5_000 + STEP_EFFORT_LABEL_WINDOW_MS + 1_000);
+    tick(
+        &stood.host,
+        &[],
+        began + 5_000 + STEP_EFFORT_LABEL_WINDOW_MS + 1_000,
+    );
     let tail = tail_of(&stood);
     let chip = pane_effort(&stood.host, term, tail.as_deref());
     assert_eq!(
