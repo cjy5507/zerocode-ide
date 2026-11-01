@@ -188,9 +188,7 @@ fn a_summons_beside_a_neighbour_starts_its_own_conversation() {
     let folder = Folder::new();
     for agent in ["claude", "zo"] {
         let catalog = Catalog::new(vec![(agent.to_string(), saved_continue())]);
-        let command = catalog
-            .command_for(agent, "", &[])
-            .expect("the summons");
+        let command = catalog.command_for(agent, "", &[]).expect("the summons");
         assert_eq!(
             opened_by(&folder, &command),
             None,
@@ -208,7 +206,10 @@ fn a_record_naming_the_folders_newest_opens_nothing() {
     let (_window, _store) = PrivateWindow::boot();
     let folder = Folder::new();
     let door = Door::new(folder.path());
-    for (at, word) in ["latest", "last", "recent", "LATEST"].into_iter().enumerate() {
+    for (at, word) in ["latest", "last", "recent", "LATEST"]
+        .into_iter()
+        .enumerate()
+    {
         let term = TERM + u32::try_from(at).expect("four words");
         let woke = door.wake(term, "zo", word);
         assert!(woke.is_err(), "{word} opened {woke:?}");

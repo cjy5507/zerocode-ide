@@ -249,32 +249,30 @@ fn a_conversation_nobody_named_is_told_once_by_its_first_letters() {
             .collect()
     };
 
-    assert!(bench.ledger.worker_conversation_picked(
-        ("team-1", &pane),
-        &session(FRESH),
-        1_000
-    ));
+    assert!(
+        bench
+            .ledger
+            .worker_conversation_picked(("team-1", &pane), &session(FRESH), 1_000)
+    );
     let letters = told(&bench);
     assert_eq!(letters.len(), 1);
     let said: serde_json::Value = serde_json::from_str(letters[0].body.as_str()).expect("json");
     assert_eq!(said["workerId"].as_str(), Some(mine.as_str()));
     assert_eq!(said["conversation"].as_str(), Some(&FRESH[..8]));
-    assert!(!letters[0].body.as_str().contains(FRESH) && !letters[0].subject.as_str().contains(FRESH));
+    assert!(
+        !letters[0].body.as_str().contains(FRESH) && !letters[0].subject.as_str().contains(FRESH)
+    );
 
     assert!(
-        !bench.ledger.worker_conversation_picked(
-            ("team-1", &pane),
-            &session(FRESH),
-            2_000
-        ),
+        !bench
+            .ledger
+            .worker_conversation_picked(("team-1", &pane), &session(FRESH), 2_000),
         "the same conversation was told twice"
     );
     assert!(
-        bench.ledger.worker_conversation_picked(
-            ("team-1", &pane),
-            &session(THEIRS),
-            3_000
-        ),
+        bench
+            .ledger
+            .worker_conversation_picked(("team-1", &pane), &session(THEIRS), 3_000),
         "another conversation was not told"
     );
     assert!(

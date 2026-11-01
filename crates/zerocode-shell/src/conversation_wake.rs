@@ -754,7 +754,10 @@ mod tests {
         let root = std::path::Path::new("/Users/dev/project");
         assert!(stands_in(Some(root), root));
         assert!(stands_in(None, root));
-        assert!(!stands_in(Some(std::path::Path::new("/Users/dev/other")), root));
+        assert!(!stands_in(
+            Some(std::path::Path::new("/Users/dev/other")),
+            root
+        ));
     }
 
     /// t-68069 ②: a vault row is judged by the record a pane reports, and the
@@ -780,7 +783,11 @@ mod tests {
 
         let door = include_str!("cmd/fs.rs");
         let door = &door[door.find("fn resume_vault_session(").expect("the door")..];
-        for word in ["conversation_wake::vault_record", "claim_among", "pane_sessions()"] {
+        for word in [
+            "conversation_wake::vault_record",
+            "claim_among",
+            "pane_sessions()",
+        ] {
             assert!(door.contains(word), "the vault's door lost {word}");
         }
     }
