@@ -28,6 +28,8 @@ const SET_LOOSE_BY_THE_OTHER_PANE: u32 = 4343;
 struct FakeWindow {
     tables: AtomicUsize,
     readable: bool,
+    /// Whether the window knows the mark it gave the calling pane.
+    marked: bool,
 }
 
 impl FakeWindow {
@@ -35,6 +37,16 @@ impl FakeWindow {
         Arc::new(Self {
             tables: AtomicUsize::new(0),
             readable,
+            marked: true,
+        })
+    }
+
+    /// A window that does not know the calling pane's mark.
+    fn without_the_callers_mark() -> Arc<Self> {
+        Arc::new(Self {
+            tables: AtomicUsize::new(0),
+            readable: true,
+            marked: false,
         })
     }
 
@@ -48,7 +60,7 @@ impl KillWitness for FakeWindow {
         assert_eq!(pane_key, "term-1", "the guard asked about another pane");
         KillRoots {
             caller: Some(CALLER),
-            caller_mark: Some(pane("term-1")),
+            caller_mark: self.marked.then(|| pane("term-1")),
             protected: vec![
                 ProtectedRoot {
                     pid: 100,
@@ -232,6 +244,43 @@ async fn the_callers_own_child_is_allowed_and_a_pid_known_only_at_run_time_is_re
     assert!(reason.contains("SERVER_PID"), "{reason}");
     for way_out in ["kill 4242", "kill %1", "pgrep"] {
         assert!(reason.contains(way_out), "{way_out:?} in {reason}");
+    }
+}
+
+/// What a refused pane is told it may still end itself follows what the
+/// window knows of it (t-82854): with the mark the window gave the pane, a
+/// job it set loose too, save one started from macOS's own programs; without
+/// it, only what still runs under the pane. `echo $!` is of use in the same
+/// command only, and what the pane did not start stays the person's or the
+/// coordinator's.
+#[tokio::test]
+async fn a_refusals_way_out_follows_the_pane_mark_the_window_knows() {
+    for (window, marked) in [
+        (FakeWindow::new(true), true),
+        (FakeWindow::without_the_callers_mark(), false),
+    ] {
+        let (_, body) = answer(Some(window), AgentKind::Claude, "kill $SERVER_PID").await;
+        let (word, reason) = decision(&body);
+        assert_eq!(word, "deny");
+        assert_eq!(
+            reason.contains("even once the shell that started it is gone"),
+            marked,
+            "{reason}"
+        );
+        assert_eq!(reason.contains("macOS's own programs"), marked, "{reason}");
+        assert_eq!(
+            reason.contains("while it still runs under this pane"),
+            !marked,
+            "{reason}"
+        );
+        assert!(
+            reason.contains("work only within the command that started it"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("the person's or the coordinator's to end"),
+            "{reason}"
+        );
     }
 }
 

@@ -14,7 +14,7 @@ use std::time::Duration;
 use zerocode_core::AgentKind;
 use zerocode_core::hook_continuation::{self, PreToolDecision};
 use zerocode_core::shell_rule::kill::{
-    self, KillCall, KillVerdict, PaneMark, ProcessTable, ProtectedRoot,
+    self, KillCall, KillVerdict, PaneMark, ProcessTable, ProtectedRoot, Refused,
 };
 
 /// What the window knows of its panes' processes, asked only for a command
@@ -76,6 +76,7 @@ pub(crate) async fn reply(
         .join("; ");
     let judging = tokio::task::spawn_blocking(move || {
         let roots = witness.roots(&pane_key);
+        let marked = roots.caller_mark.is_some();
         let table = if calls.iter().any(KillCall::needs_table) {
             match (roots.caller, roots.caller_mark) {
                 // The window's word for the pane it started the caller in:
@@ -86,42 +87,47 @@ pub(crate) async fn reply(
         } else {
             ProcessTable::new(Vec::new())
         };
-        kill::judge_kill(&calls, &table, roots.caller, &roots.protected)
+        let verdict = kill::judge_kill(&calls, &table, roots.caller, &roots.protected);
+        (verdict, marked)
     });
-    let verdict = match tokio::time::timeout(wall, judging).await {
-        Ok(Ok(verdict)) => verdict,
-        _ => KillVerdict::Ask {
-            reason: format!(
-                "`{written}` could not be checked within {} ms; a person should say yes first",
-                wall.as_millis()
-            ),
-        },
+    let (verdict, marked) = match tokio::time::timeout(wall, judging).await {
+        Ok(Ok(judged)) => judged,
+        // The pane's mark is the window's word, not heard in time: the way
+        // out speaks of what still runs under the pane alone.
+        _ => (
+            KillVerdict::Ask {
+                reason: format!(
+                    "`{written}` could not be checked within {} ms; a person should say yes first",
+                    wall.as_millis()
+                ),
+            },
+            false,
+        ),
     };
-    answer(decision, &verdict)
+    answer(decision, &verdict, marked)
 }
 
-/// What a pane can do instead of a kill it was refused for want of a person
-/// to ask: the pids it learns are its own to end by number, and a process it
-/// did not start is not its own to end.
-const WAY_OUT: &str = "nobody in a ZeroCode pane can answer a question, so it was refused. \
-To end what this pane started, name it so it can be checked before it runs: \
-its pid as a number (`echo $!` or `pgrep -f <name>`, then `kill 4242`), \
-`kill $(pgrep -f <name>)`, or its job (`kill %1`, `kill $!` in the same command). \
-A process this pane did not start is the person's or the coordinator's to end, \
-not this pane's";
+/// Why a pane was refused what core would ask of a person.
+const NOBODY_TO_ASK: &str = "nobody in a ZeroCode pane can answer a question, so it was refused.";
 
 /// The hook reply a verdict takes: nothing for a call that may run, so its
 /// reply stays what it was, and a refusal otherwise. A pane is a host with
 /// nobody to ask ([`KillVerdict::Ask`]) — a worker's pane has no person at
 /// it, and one sitting on a question waits forever — so a question is a
-/// refusal that says what the pane can do instead.
+/// refusal that says what the pane may still end itself ([`kill::way_out`],
+/// t-82854): with the mark the window gave it (`marked`), a job it set loose
+/// too.
 pub(crate) fn answer(
     decision: PreToolDecision,
     verdict: &KillVerdict,
+    marked: bool,
 ) -> Option<serde_json::Value> {
     let reason = match verdict {
         KillVerdict::Allow => return None,
-        KillVerdict::Ask { reason } => format!("{reason}; {WAY_OUT}"),
+        KillVerdict::Ask { reason } => format!(
+            "{reason}; {NOBODY_TO_ASK} {}",
+            kill::way_out(Refused::Pane, marked)
+        ),
         KillVerdict::Deny { reason } => reason.clone(),
     };
     Some(serde_json::json!({

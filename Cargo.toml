@@ -22,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.1.112"
+version = "1.1.113"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
@@ -131,6 +131,9 @@ libc = "0.2"
 # the async stack; named here so the version is reviewed at this boundary.
 socket2 = "0.6"
 portable-pty = "0.9"
+# The error type of `portable_pty`'s `MasterPty` and `SlavePty` traits, which
+# `zerocode-pty` implements for the pty it opens itself. Already in the lock.
+anyhow = "1"
 vte = "0.14"
 unicode-width = "0.2"
 unicode-segmentation = "1"

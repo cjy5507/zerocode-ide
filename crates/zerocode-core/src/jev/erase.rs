@@ -4,6 +4,11 @@
 //! provider's evidence is kept in, and no program writes it again while the
 //! seat stays deleted. Deleting a person's own decision removes only its rows,
 //! since those decisions share one ledger.
+//!
+//! A seat also leaves records outside its ledger (t-88024): review cases, memo
+//! rows and the judgment cache's rows that name it. They go with the ledger, and
+//! each writer reads the mark again under the lock a delete takes, so an answer
+//! on its way when the person deletes cannot write them back.
 
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions, TryLockError};
@@ -16,9 +21,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::custom::store;
+use super::learning::store::Store;
 use super::threshold::{SEAT_KEY, THRESHOLDS_FILE};
 use super::{
-    CUSTOM_DECISIONS, JEV_USES, JevMode, JevUse, ROUTING, SMART_SETTINGS_KEY, STALL, builtin, count,
+    CUSTOM_DECISIONS, JEV_USES, JUDGMENT_CACHE, JevMode, JevUse, ROUTING, SMART_SETTINGS_KEY,
+    STALL, builtin, count, memo,
 };
 use crate::held_file_lock::HeldFileLock;
 use crate::settings_file_lock::SettingsFileLock;
@@ -55,6 +62,9 @@ const KEPT_SEATS: [(&JevUse, AfterLift); 2] = [
 const LIFTED_KEY: &str = "keptSeatsLifted";
 /// Set under `smart` once the first start has erased what older deletes left.
 const SWEPT_KEY: &str = "deletedRecordsSwept";
+/// Set under `smart` once the first start has erased what older deletes left
+/// outside the ledgers. Its own key: a machine past [`SWEPT_KEY`] still has those.
+const LEFTOVERS_KEY: &str = "deletedLeftoversSwept";
 /// The file under a zo home naming what a delete could not erase. Only a
 /// delete that failed writes it, so a usual start asks one question of the
 /// disk and reads no evidence folder: this machine has 2,540 of them, 205 ms a
@@ -66,8 +76,9 @@ const SHARED_LEDGER_WAIT: Duration = Duration::from_secs(2);
 const SHARED_LEDGER_POLL: Duration = Duration::from_millis(1);
 
 /// Remove the records of built-in decision `id` from the zo home holding
-/// `settings`: its ledger in every evidence folder, and its line in the act
-/// lines beside each. Returns how many ledgers went.
+/// `settings`: its ledger in every evidence folder, its line in the act lines
+/// beside each, and what it left outside them (`forget_leftovers`). Returns
+/// how many ledgers went.
 ///
 /// # Errors
 /// Whatever keeps a file from being removed. The folders are all tried first.
@@ -82,8 +93,36 @@ pub fn forget_seat(settings: &Path, id: &str) -> io::Result<usize> {
         return Ok(0);
     };
     let (folders, unread) = evidence_folders(home);
-    let removed = forget_in(&folders, seat)?;
+    let removed = forget_in(&folders, seat);
+    let leftovers = forget_leftovers(home, &folders, &|row| row == seat.id);
+    let removed = removed?;
+    leftovers?;
     unread.map_or(Ok(removed), Err)
+}
+
+/// Remove what the seats `goes` names left outside their own ledgers: review
+/// cases with their labels, memo rows, and the judgment cache's rows. The rows
+/// left stay to the byte.
+///
+/// The memo holds more than the cache seat's own: the pane guards read it
+/// whatever that seat says, so deleting that seat takes no other seat's rows.
+///
+/// # Errors
+/// Whatever keeps a case or a file from going. Everything is tried first.
+fn forget_leftovers(
+    home: &Path,
+    folders: &[PathBuf],
+    goes: &dyn Fn(&str) -> bool,
+) -> io::Result<()> {
+    let mut failed = Store::at(home).forget(goes).err();
+    for folder in folders {
+        for file in [memo::MEMO_FILE, JUDGMENT_CACHE.ledger] {
+            if let Err(error) = drop_rows(&folder.join(file), memo::SEAT, goes) {
+                failed = Some(error);
+            }
+        }
+    }
+    failed.map_or(Ok(()), Err)
 }
 
 fn forget_in(folders: &[PathBuf], seat: &JevUse) -> io::Result<usize> {
@@ -114,7 +153,11 @@ pub fn forget_custom(home: &Path, id: &str) -> io::Result<usize> {
     let mut removed = 0;
     let mut failed = unread;
     for folder in folders {
-        match drop_custom_rows(&folder.join(CUSTOM_DECISIONS.ledger), |row| row == id) {
+        match drop_rows(
+            &folder.join(CUSTOM_DECISIONS.ledger),
+            CUSTOM_ROW_ID,
+            |row| row == id,
+        ) {
             Ok(rows) => removed += rows,
             Err(error) => failed = Some(error),
         }
@@ -147,6 +190,8 @@ pub fn decision_deleted(home: &Path, id: &str) {
 /// The first start erases what every marked seat left, and the rows of
 /// decisions the store no longer keeps. Every later one re-erases only what
 /// [`PENDING_FILE`] names, and is one look at that file when there is none.
+/// `SWEPT_KEY` and `LEFTOVERS_KEY` are read apart: a machine past the first
+/// still owes the second, once, over the one listing of the folders.
 pub fn tidy_at_start(settings: &Path, lifted: bool) {
     if !lifted {
         return;
@@ -160,41 +205,74 @@ pub fn tidy_at_start(settings: &Path, lifted: bool) {
     let Ok(root) = read_settings(settings) else {
         return;
     };
-    if root
-        .get(SMART_SETTINGS_KEY)
-        .and_then(|smart| smart.get(SWEPT_KEY))
-        .is_some()
-    {
+    let first_tidy = !holds_key(&root, SWEPT_KEY);
+    let leftovers = !holds_key(&root, LEFTOVERS_KEY);
+    if !first_tidy && !leftovers {
         return;
     }
     let (folders, unread) = evidence_folders(home);
-    let mut finished = true;
+    let saw_every_folder = unread.is_none();
     if let Some(error) = unread {
         log_failure("list every evidence folder", &error);
-        finished = false;
     }
-    for seat in JEV_USES.iter().filter(|seat| is_marked(&root, seat.id)) {
-        if let Err(error) = forget_in(&folders, seat) {
-            finished &= owe(home, Owed::Seat(seat.id), &error);
+    if first_tidy {
+        let mut finished = saw_every_folder;
+        for seat in JEV_USES.iter().filter(|seat| is_marked(&root, seat.id)) {
+            if let Err(error) = forget_in(&folders, seat) {
+                finished &= owe(home, Owed::Seat(seat.id), &error);
+            }
+        }
+        finished &= sweep_decision_rows(home, &folders);
+        if finished {
+            record_key(settings, SWEPT_KEY);
         }
     }
-    finished &= sweep_decision_rows(home, &folders);
-    if finished && let Err(error) = record_swept(settings) {
-        log_failure("record the first tidy", &error);
+    if leftovers && sweep_leftovers(home, &folders, &root) && saw_every_folder {
+        record_key(settings, LEFTOVERS_KEY);
     }
 }
 
+/// Take in one pass what every marked seat left outside its ledger, so 512 cases
+/// are read once however many seats were deleted. Whether all of it went: what
+/// would not go is owed by every marked seat, since a file that cannot be read
+/// cannot say whose rows it holds.
+fn sweep_leftovers(home: &Path, folders: &[PathBuf], root: &Value) -> bool {
+    let marked: BTreeSet<&str> = JEV_USES
+        .iter()
+        .map(|seat| seat.id)
+        .filter(|id| is_marked(root, id))
+        .collect();
+    if marked.is_empty() {
+        return true;
+    }
+    let Err(error) = forget_leftovers(home, folders, &|row| marked.contains(row)) else {
+        return true;
+    };
+    for id in marked {
+        owe(home, Owed::Seat(id), &error);
+    }
+    false
+}
+
+fn holds_key(root: &Value, key: &str) -> bool {
+    root.get(SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get(key))
+        .is_some()
+}
+
 /// A note that no longer parses names nothing anyone can read, so the first
-/// tidy runs again and notes afresh what still will not go. The key goes first:
-/// if the note could not then be removed, the next start finds it again.
+/// tidy and the sweep run again and note afresh what still will not go. The keys
+/// go first: if the note could not then be removed, the next start finds it again.
 fn start_over(settings: &Path, home: &Path) -> bool {
     let cleared = (|| {
         let _lock = SettingsFileLock::acquire(settings)?;
         let mut root = read_settings(settings)?;
-        if let Some(smart) = smart_of(&mut root)
-            && smart.remove(SWEPT_KEY).is_some()
-        {
-            write_settings(settings, &root)?;
+        if let Some(smart) = smart_of(&mut root) {
+            let swept = smart.remove(SWEPT_KEY).is_some();
+            let leftovers = smart.remove(LEFTOVERS_KEY).is_some();
+            if swept || leftovers {
+                write_settings(settings, &root)?;
+            }
         }
         fs::remove_file(home.join(PENDING_FILE))
     })();
@@ -227,7 +305,7 @@ fn sweep_decision_rows(home: &Path, folders: &[PathBuf]) -> bool {
     };
     let mut finished = true;
     for ledger in ledgers {
-        if let Err(error) = drop_custom_rows(&ledger, |row| !kept.contains(row)) {
+        if let Err(error) = drop_rows(&ledger, CUSTOM_ROW_ID, |row| !kept.contains(row)) {
             log_failure("rewrite a decision ledger", &error);
             finished = false;
         }
@@ -264,14 +342,20 @@ fn is_marked(root: &Value, id: &str) -> bool {
     }
 }
 
-fn record_swept(settings: &Path) -> io::Result<()> {
-    let _lock = SettingsFileLock::acquire(settings)?;
-    let mut root = read_settings(settings)?;
-    let Some(smart) = smart_of(&mut root) else {
-        return Ok(());
-    };
-    smart.insert(SWEPT_KEY.to_string(), Value::Bool(true));
-    write_settings(settings, &root)
+/// Note under `smart` that a once-only pass is done. Not noted, it runs again.
+fn record_key(settings: &Path, key: &str) {
+    let recorded = (|| {
+        let _lock = SettingsFileLock::acquire(settings)?;
+        let mut root = read_settings(settings)?;
+        let Some(smart) = smart_of(&mut root) else {
+            return Ok(());
+        };
+        smart.insert(key.to_string(), Value::Bool(true));
+        write_settings(settings, &root)
+    })();
+    if let Err(error) = recorded {
+        log_failure("record a tidy at start", &error);
+    }
 }
 
 /// What [`PENDING_FILE`] holds.
@@ -394,10 +478,15 @@ fn settle_owed(settings: &Path, home: &Path) -> bool {
     false
 }
 
-/// Hold while appending to or rewriting a copy of the ledger every person's
-/// decision shares: a rewrite replaces the file whole, and a row appended
-/// between its read and its rename would go with the old file. `None` for any
-/// other ledger, each of which only ever goes whole.
+/// Hold while appending to or rewriting a file whose rows a delete takes one by
+/// one: the ledger every person's decision shares, the memo and the judgment
+/// cache. A rewrite replaces the file whole, and a row appended between its read
+/// and its rename would go with the old file. `None` for any other ledger, each
+/// of which only ever goes whole.
+///
+/// A writer that gets `WouldBlock` drops its row and goes on: a holder keeps the
+/// lock for one append or one rewrite, so this is a stuck writer, and a record is
+/// never worth a judgment.
 ///
 /// # Errors
 /// A lock that cannot be opened, or that stays busy past
@@ -406,7 +495,14 @@ pub fn shared_ledger_lock(ledger: &Path) -> io::Result<Option<HeldFileLock>> {
     let Some(name) = ledger
         .file_name()
         .and_then(|name| name.to_str())
-        .filter(|name| *name == CUSTOM_DECISIONS.ledger)
+        .filter(|name| {
+            [
+                CUSTOM_DECISIONS.ledger,
+                memo::MEMO_FILE,
+                JUDGMENT_CACHE.ledger,
+            ]
+            .contains(name)
+        })
     else {
         return Ok(None);
     };
@@ -426,7 +522,7 @@ pub fn shared_ledger_lock(ledger: &Path) -> io::Result<Option<HeldFileLock>> {
             Err(TryLockError::WouldBlock) => {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
-                    "another writer holds the decision ledger",
+                    "another writer holds this file",
                 ));
             }
             Err(TryLockError::Error(error)) => return Err(error),
@@ -452,13 +548,52 @@ pub fn may_write(ledger: &Path) -> bool {
     let Some(home) = home_of(ledger) else {
         return true;
     };
-    let Ok(bytes) = fs::read(home.join(SETTINGS_FILE)) else {
-        return true;
+    !seat_written_off(&home, seat.id)
+}
+
+/// Whether seat `id` is deleted in the settings of zo home `home`, read as
+/// [`may_write`] reads it. Settings that cannot be read delete nothing. Each
+/// writer asks while holding the lock a delete's erasing takes, so a row written
+/// before the mark is erased and a row after it is never written.
+pub(crate) fn seat_written_off(home: &Path, id: &str) -> bool {
+    settings_root_of(home).is_some_and(|root| is_written_off(&root, id))
+}
+
+fn settings_root_of(home: &Path) -> Option<Value> {
+    serde_json::from_slice(&fs::read(home.join(SETTINGS_FILE)).ok()?).ok()
+}
+
+fn is_written_off(root: &Value, id: &str) -> bool {
+    builtin::in_root(root, id).is_some_and(|decision| decision.deleted)
+}
+
+/// Whether seat `id` may be remembered in `memo`: a memo outside a zo home is
+/// written as asked, as [`may_write`] writes a ledger there.
+pub(crate) fn may_remember(memo: &Path, id: &str) -> bool {
+    home_of(memo).is_none_or(|home| !seat_written_off(&home, id))
+}
+
+/// The rows of `rows` that may go into `ledger`: all of them, except that the
+/// judgment cache takes no row naming a deleted screen seat. A walk holds its rows
+/// until it ends, so that seat can be deleted before they are written. Ask while
+/// holding [`shared_ledger_lock`].
+#[must_use]
+pub fn rows_may_write<'rows>(ledger: &Path, rows: &'rows [Value]) -> Vec<&'rows Value> {
+    let root = ledger
+        .file_name()
+        .filter(|name| *name == JUDGMENT_CACHE.ledger)
+        .and_then(|_| home_of(ledger))
+        .and_then(|home| settings_root_of(&home));
+    let Some(root) = root else {
+        return rows.iter().collect();
     };
-    let Ok(root) = serde_json::from_slice::<Value>(&bytes) else {
-        return true;
-    };
-    builtin::in_root(&root, seat.id).is_none_or(|decision| !decision.deleted)
+    rows.iter()
+        .filter(|row| {
+            row.get(memo::SEAT)
+                .and_then(Value::as_str)
+                .is_none_or(|id| !is_written_off(&root, id))
+        })
+        .collect()
 }
 
 /// Whether the lift is on record, read with no lock: every start and every
@@ -585,9 +720,10 @@ fn replace_keeping_mode(path: &Path, bytes: &[u8]) -> io::Result<()> {
     written
 }
 
-/// Rewrite `ledger` without the rows whose decision `goes` says should. A
-/// missing ledger takes no lock, so no lock file is left where none stood.
-fn drop_custom_rows(ledger: &Path, goes: impl Fn(&str) -> bool) -> io::Result<usize> {
+/// Rewrite `ledger` without the rows whose `key` names what `goes` says should
+/// go; every other line stays to the byte. A missing ledger takes no lock, so no
+/// lock file is left where none stood.
+fn drop_rows(ledger: &Path, key: &str, goes: impl Fn(&str) -> bool) -> io::Result<usize> {
     if !ledger.exists() {
         return Ok(0);
     }
@@ -602,11 +738,7 @@ fn drop_custom_rows(ledger: &Path, goes: impl Fn(&str) -> bool) -> io::Result<us
     for line in bytes.split_inclusive(|byte| *byte == b'\n') {
         let names_it = serde_json::from_slice::<Value>(line)
             .ok()
-            .is_some_and(|row| {
-                row.get(CUSTOM_ROW_ID)
-                    .and_then(Value::as_str)
-                    .is_some_and(&goes)
-            });
+            .is_some_and(|row| row.get(key).and_then(Value::as_str).is_some_and(&goes));
         if names_it {
             removed += 1;
         } else {

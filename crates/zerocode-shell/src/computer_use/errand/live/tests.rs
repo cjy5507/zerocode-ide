@@ -746,6 +746,30 @@ fn a_cache_that_is_off_leaves_the_wire_every_byte_it_had() {
     assert_eq!(day_count(&home), 2);
 }
 
+/// A memo another writer will not let go of costs the row, never the answer.
+#[test]
+fn a_memo_held_too_long_loses_the_row_and_the_walk_keeps_its_answer() {
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_choosing("mark:1"), 0);
+    let home = tempfile::tempdir().expect("a zo home");
+    let mut judge = LiveJudge::at(
+        &endpoint.base(),
+        "test-key",
+        door_caching(&home, Some(zerocode_core::jev::JevMode::Shadow.key())),
+    );
+    let memo = memo_file(&home);
+    std::fs::create_dir_all(memo.parent().unwrap()).unwrap();
+    std::fs::write(&memo, "").unwrap();
+    let held = zerocode_core::jev::erase::shared_ledger_lock(&memo).unwrap();
+    assert!(held.is_some(), "the memo takes no lock");
+
+    let Judged::Chose(ActionRead { choice, .. }) = judge.choose(&asked()) else {
+        panic!("the wire answered");
+    };
+
+    assert_eq!(choice.chosen, Chosen::Mark(1));
+    assert_eq!(zerocode_core::jev::memo::rows(&memo), 0);
+}
+
 #[test]
 fn shadow_asks_the_wire_as_today_and_labels_the_memo_against_it() {
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_choosing("mark:1"), 0);

@@ -468,6 +468,61 @@ pub fn judge_kill(
     })
 }
 
+/// Who a refusal's way out ([`way_out`]) speaks to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refused {
+    /// A zo session judging its own calls.
+    Session,
+    /// A pane the window's pre-tool hook answers for; the coordinator, too,
+    /// may end what the pane did not start.
+    Pane,
+}
+
+/// What a caller refused for want of a person's yes may still end itself,
+/// as [`judge_kill`] judges it (t-82854): what it started, by a pid it names
+/// or as a job of the command that started it; with a pane mark (`marked`,
+/// [`PaneMark`]) a job it set loose too, save one whose environment does not
+/// read — macOS's own programs (`environ`) — and without one only what
+/// still runs under it; and nothing it did not start. zo and the window's
+/// hook each say before it why nobody was asked.
+#[must_use]
+pub fn way_out(refused: Refused, marked: bool) -> String {
+    let (caller, others) = match refused {
+        Refused::Session => (
+            "this session",
+            "the person's to end, or the pane's that started it",
+        ),
+        Refused::Pane => (
+            "this pane",
+            "the person's or the coordinator's to end, not this pane's",
+        ),
+    };
+    let (reach, gone) = if marked {
+        (
+            "even once the shell that started it is gone".to_string(),
+            "A job started from one of macOS's own programs (`/bin/sleep`, `/bin/zsh`, \
+             `/usr/bin/tail`) names no pane once that shell is gone, so end such a job \
+             within the command that started it."
+                .to_string(),
+        )
+    } else {
+        (
+            format!("while it still runs under {caller}"),
+            format!(
+                "Once a job has left {caller} (`nohup`, `setsid`, or `&` in a shell that has \
+                 since ended), it is the person's to end, so end such a job within the \
+                 command that started it."
+            ),
+        )
+    };
+    format!(
+        "What {caller} started is its own to end {reach}: name it by its pid as a number \
+         (find it with `pgrep -f <name>`, then `kill 4242`) or as `kill $(pgrep -f <name>)`; \
+         `echo $!`, `kill $!` and `kill %1` work only within the command that started it. \
+         {gone} A process {caller} did not start is {others}."
+    )
+}
+
 /// [`judge_kill`], a process's pane read with `read_mark` ([`Panes`]).
 fn judge_kill_reading(
     calls: &[KillCall],

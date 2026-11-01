@@ -26102,6 +26102,25 @@ mod tests {
             "the credential left the tool's stdin, for its argv or its password \
              prompt:\n{keychain_write}"
         );
+        // A value on the argument road says so in the log, and the tool's stderr
+        // goes through the road's own filter: `security_refusal` leaves the stderr
+        // of a run with no input alone. No test can see a log line, so the call is
+        // held here (t-87927).
+        assert!(
+            keychain_words.contains(
+                "if past_the_line { eprintln!(\"{}\", argument_road_warning(credentials.len())); }"
+            ) && keychain_words
+                .contains(".map_err(|error| argument_road_refusal(&error, credentials))"),
+            "the argument road lost its warning or its stderr filter:\n{keychain_write}"
+        );
+        // Only a value the line cannot hold reaches that road, not a short one under
+        // a long name (t-87927).
+        assert!(
+            keychain_line.contains(
+                "keychain_line_too_long(&line) && value.len() + KEYCHAIN_NAMES_BYTES <= SECURITY_LINE_BYTES"
+            ),
+            "a short value can reach the argument road under a long name:\n{keychain_line}"
+        );
         // The one function under test nothing runs: the suite gets its double, and
         // the shipped pipes behind it are run against a shell script. Its three
         // lines are held here.

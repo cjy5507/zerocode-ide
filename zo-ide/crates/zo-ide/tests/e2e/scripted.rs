@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, watch, Mutex};
+use tokio::sync::{oneshot, watch, Mutex, Notify};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
@@ -25,6 +25,13 @@ enum Script {
     /// One `Agent` spawn, then a final answer. Drives the delegation cell and
     /// the mid-turn steering path.
     Spawn { final_text: String },
+    /// [`Self::Spawn`] whose child takes two requests: a read answered at
+    /// once, so its first request row lands, then its last answer held for
+    /// `late`. The child's request row is on disk that long before the run
+    /// ends and writes its outcome row — the order a loaded machine shows
+    /// (t-87369).
+    #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+    SpawnChildAnswersLate { final_text: String, late: Duration },
     #[allow(dead_code)]
     LedgerSpawn { tool: String, input: String, final_text: String },
     /// Anthropic thinking on EVERY request — one `thinking_delta` per
@@ -134,13 +141,15 @@ enum Script {
     /// `files` written with `write_file` and, after them, one `bash` running
     /// `command` — all announced in ONE assistant message, the batch shape
     /// whose `bash` announce used to close the running writes as failed —
-    /// then `final_text`, held back for `hold` so the finished edit cell
-    /// stands live on screen that long (t-3063).
+    /// then `final_text`, held back for `hold` and, when there is a `door`,
+    /// until the test opens it — so the finished edit cell stands live on
+    /// screen for as long as the test is reading it (t-3063, t-87901).
     #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
     WritesThenBash {
         files: Vec<(String, String)>,
         command: Option<String>,
         hold: Duration,
+        door: Option<Arc<Notify>>,
         final_text: String,
     },
 }
@@ -185,8 +194,11 @@ impl Script {
                 tool_message_sse("msg_ledger_spawn", |body| append_tool_use(body, 0, "toolu_ledger_spawn", tool, input))
             }
             Self::LedgerSpawn { final_text, .. } => text_sse("msg_ledger_final", final_text),
-            Self::Spawn { .. } if request_index == 0 => spawn_sse(),
+            Self::Spawn { .. } | Self::SpawnChildAnswersLate { .. } if request_index == 0 => spawn_sse(),
             Self::Spawn { final_text } => text_sse("msg_spawn_final", final_text),
+            Self::SpawnChildAnswersLate { final_text, .. } => {
+                spawn_child_answers_late_response(request, final_text)
+            }
             Self::Thinking { sentences, final_text, .. } => {
                 thinking_sse(&format!("msg_thinking_{request_index}"), sentences, final_text)
             }
@@ -234,16 +246,7 @@ impl Script {
             }
             Self::ToolCalls { final_text, .. } => text_sse("msg_tool_calls_final", final_text),
             Self::WritesThenBash { files, command, .. } if request_index == 0 => {
-                tool_message_sse("msg_writes_then_bash", |body| {
-                    for (index, (path, content)) in files.iter().enumerate() {
-                        let input = json!({"path": path, "content": content}).to_string();
-                        append_tool_use(body, index, &format!("toolu_write_{index}"), "write_file", &input);
-                    }
-                    if let Some(command) = command {
-                        let input = json!({"command": command, "timeout": 10_000}).to_string();
-                        append_tool_use(body, files.len(), "toolu_bash_after_writes", "bash", &input);
-                    }
-                })
+                writes_then_bash_sse(files, command.as_deref())
             }
             Self::WritesThenBash { final_text, .. } => text_sse("msg_writes_then_bash_final", final_text),
         }
@@ -261,7 +264,17 @@ impl Script {
             {
                 *late
             }
+            Self::SpawnChildAnswersLate { late, .. } if is_spawn_childs_last_request(request) => *late,
             _ => Duration::ZERO,
+        }
+    }
+
+    /// The door the server waits at before answering request `request_index`,
+    /// for a script whose answer waits for the test and not for a clock.
+    fn door_before(&self, request_index: usize) -> Option<Arc<Notify>> {
+        match self {
+            Self::WritesThenBash { door, .. } if request_index == 1 => door.clone(),
+            _ => None,
         }
     }
 
@@ -488,6 +501,20 @@ impl ScriptedAnthropicService {
         .await
     }
 
+    /// [`Self::spawn_agent`] whose child's last answer is held `late`: see
+    /// [`Script::SpawnChildAnswersLate`].
+    #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+    pub async fn spawn_agent_child_answers_late(
+        final_text: impl Into<String>,
+        late: Duration,
+    ) -> io::Result<Self> {
+        Self::spawn(Script::SpawnChildAnswersLate {
+            final_text: final_text.into(),
+            late,
+        })
+        .await
+    }
+
     /// Respond first with a `bash` call that takes seconds, then `final_text`.
     pub async fn slow_tool(final_text: impl Into<String>) -> io::Result<Self> {
         Self::spawn(Script::SlowTool {
@@ -631,6 +658,25 @@ impl ScriptedAnthropicService {
             files,
             command: command.map(str::to_string),
             hold,
+            door: None,
+            final_text: final_text.into(),
+        })
+        .await
+    }
+
+    /// Respond first with one message that writes `files`, then with
+    /// `final_text` once the test has called `door.notify_one()`.
+    #[allow(dead_code)] // e2e_hermetic only
+    pub async fn writes_then_answer_behind_door(
+        files: Vec<(String, String)>,
+        door: Arc<Notify>,
+        final_text: impl Into<String>,
+    ) -> io::Result<Self> {
+        Self::spawn(Script::WritesThenBash {
+            files,
+            command: None,
+            hold: Duration::ZERO,
+            door: Some(door),
             final_text: final_text.into(),
         })
         .await
@@ -709,16 +755,17 @@ async fn handle_connection(
 ) -> io::Result<()> {
     let (method, body) = read_http_request(&mut socket).await?;
     if method.eq_ignore_ascii_case("POST") {
-        let (request_index, response, (pieces, gap), refusal, hold, rendezvous) = {
+        let (request_index, response, (pieces, gap), refusal, hold, door, rendezvous) = {
             let mut captured = requests.lock().await;
             let request_index = captured.len();
             let response = script.response(request_index, &body);
             let pacing = script.pacing(request_index, &body);
             let refusal = script.refusal(&body);
             let hold = script.delay_before(request_index, &body);
+            let door = script.door_before(request_index);
             let rendezvous = script.rendezvous(&body);
             captured.push(body);
-            (request_index, response, pacing, refusal, hold, rendezvous)
+            (request_index, response, pacing, refusal, hold, door, rendezvous)
         };
         if let Some(refusal) = refusal {
             socket.write_all(refusal.as_bytes()).await?;
@@ -737,6 +784,9 @@ async fn handle_connection(
         { let mut total = usage.lock().await; for (i, count) in emitted.iter().enumerate() { total[i] += count; } }
         if !hold.is_zero() {
             tokio::time::sleep(hold).await;
+        }
+        if let Some(door) = door {
+            door.notified().await;
         }
         // After the lock: every connection runs on its own task, so a held
         // answer never keeps the other helper's request from arriving.
@@ -1193,15 +1243,63 @@ fn bash_read_sse() -> String {
 /// says which harness. Everything else in the input is noise the cell used to
 /// print instead.
 fn spawn_sse() -> String {
-    tool_message_sse("msg_spawn_tools", |body| {
-        append_tool_use(
-            body,
-            0,
-            "toolu_spawn_e2e",
-            "Agent",
-            r#"{"allow_cross_provider":true,"description":"survey the fixture tree","subagent_type":"general-purpose","prompt":"look around and report"}"#,
-        );
+    let input = json!({
+        "allow_cross_provider": true,
+        "description": "survey the fixture tree",
+        "subagent_type": "general-purpose",
+        "prompt": SPAWN_CHILD_PROMPT,
     })
+    .to_string();
+    tool_message_sse("msg_spawn_tools", |body| {
+        append_tool_use(body, 0, "toolu_spawn_e2e", "Agent", &input);
+    })
+}
+
+/// What [`spawn_sse`] asks of the child. It stands in a USER text block only
+/// of the child's requests; the parent carries it inside a `tool_use` input.
+const SPAWN_CHILD_PROMPT: &str = "look around and report";
+
+/// The read a [`Script::SpawnChildAnswersLate`] child makes first.
+const SPAWN_CHILD_READ_ID: &str = "toolu_spawn_child_read";
+
+/// One assistant message announcing `files` with `write_file` and, after them,
+/// `command` with `bash`: see [`Script::WritesThenBash`].
+fn writes_then_bash_sse(files: &[(String, String)], command: Option<&str>) -> String {
+    tool_message_sse("msg_writes_then_bash", |body| {
+        for (index, (path, content)) in files.iter().enumerate() {
+            let input = json!({"path": path, "content": content}).to_string();
+            append_tool_use(body, index, &format!("toolu_write_{index}"), "write_file", &input);
+        }
+        if let Some(command) = command {
+            let input = json!({"command": command, "timeout": 10_000}).to_string();
+            append_tool_use(body, files.len(), "toolu_bash_after_writes", "bash", &input);
+        }
+    })
+}
+
+/// The parent's requests get `final_text`, and the child a read and then its
+/// last answer.
+fn spawn_child_answers_late_response(request: &str, final_text: &str) -> String {
+    if is_spawn_childs_last_request(request) {
+        return text_sse("msg_spawn_child_final", "### Survey\n\n- reported\n");
+    }
+    if is_spawn_child_request(request) {
+        return read_fixture_sse("msg_spawn_child_reads", SPAWN_CHILD_READ_ID);
+    }
+    text_sse("msg_spawn_final", final_text)
+}
+
+fn is_spawn_child_request(request: &str) -> bool {
+    serde_json::from_str::<Value>(request)
+        .is_ok_and(|body| user_text_contains(&body, SPAWN_CHILD_PROMPT))
+}
+
+/// The child's request that already carries its read: the one whose answer
+/// ends the run.
+fn is_spawn_childs_last_request(request: &str) -> bool {
+    is_spawn_child_request(request)
+        && serde_json::from_str::<Value>(request)
+            .is_ok_and(|body| has_tool_result_id(&body, SPAWN_CHILD_READ_ID))
 }
 
 /// The helpers a [`Script::WorkflowTwoHelpers`] fans out to: the marker each
