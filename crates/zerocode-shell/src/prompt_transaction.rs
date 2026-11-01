@@ -152,8 +152,21 @@ pub(super) fn line_is_taken(
             .contains(&term)
 }
 
-/// Panes whose hook word stands still, and which the pump leaves alone, while
-/// an account move is written for them.
+/// Panes an account move is being written for (t-75383), each held on its
+/// own so that no lock any other pane's pump round waits for stands through
+/// the ledger's write.
+///
+/// A hold says two things about its one pane. Its hook word waits to land
+/// ([`word_may_land`]), as it waited on the whole window's `pane_states` lock
+/// before: what the move observed still stands when it is written. And the
+/// pump leaves the pane unread and untyped-at for the round (`pump_loop`), as
+/// it did when the move held the pane's terminal lock: a delivery on its line
+/// goes after the move, on the bytes the move did not see.
+///
+/// The set's lock is a leaf: nothing is taken under it, and every other lock
+/// may be held to take it. Waiting ([`Self::wait_out`]) happens with no other
+/// lock held. A count, because two fenced moves of one pane must not end each
+/// other's hold.
 #[derive(Default)]
 pub(super) struct PaneHolds {
     held: Mutex<HashMap<TermId, usize>>,
@@ -161,6 +174,18 @@ pub(super) struct PaneHolds {
 }
 
 impl PaneHolds {
+    /// Hold `term` until the answer drops: a commit that returns, is refused
+    /// or unwinds all end it.
+    pub(super) fn hold(&self, term: TermId) -> PaneHold<'_> {
+        *self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(term)
+            .or_default() += 1;
+        PaneHold { holds: self, term }
+    }
+
     /// Whether a move holds this pane now.
     pub(super) fn holds(&self, term: TermId) -> bool {
         self.held
@@ -168,33 +193,89 @@ impl PaneHolds {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(&term)
     }
+
+    /// Wait until no move holds this pane.
+    fn wait_out(&self, term: TermId) {
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while held.contains_key(&term) {
+            held = self
+                .let_go
+                .wait(held)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
 }
 
-/// Look at a pane's hook word and, when it says so, commit a move for it.
+/// One move's hold on one pane; see [`PaneHolds`].
+pub(super) struct PaneHold<'h> {
+    holds: &'h PaneHolds,
+    term: TermId,
+}
+
+impl Drop for PaneHold<'_> {
+    fn drop(&mut self) {
+        let mut held = self
+            .holds
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(count) = held.get_mut(&self.term) {
+            *count -= 1;
+            if *count == 0 {
+                held.remove(&self.term);
+            }
+        }
+        drop(held);
+        self.holds.let_go.notify_all();
+    }
+}
+
+/// Look at a pane's hook word and, when it says so, commit a move for it
+/// (t-75383).
+///
+/// The pane is held before the look, so a report either landed under the lock
+/// before it and the look reads that report, or meets the hold and waits the
+/// commit out. The lock itself is let go before the commit: the pump reads
+/// this map for every pane with a delivery, under `deliveries`, and one move's
+/// ledger write must not stop them.
 pub(super) fn observed_then_committed(
     states: &Mutex<HashMap<TermId, PaneState>>,
-    _holds: &PaneHolds,
+    holds: &PaneHolds,
     term: TermId,
     observe: &dyn Fn(&HashMap<TermId, PaneState>) -> bool,
     commit: &mut dyn FnMut(),
 ) {
-    let _ = term;
-    let held = states
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if observe(&held) {
+    let _hold = holds.hold(term);
+    let observed = observe(
+        &states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    if observed {
         commit();
     }
-    drop(held);
 }
 
-/// The guard a hook report writes the pane's word under.
+/// The guard a hook report writes the pane's word under: `states`, once no
+/// move holds the pane. Asked under the lock, so a hold taken before this look
+/// is seen, and one taken after it reads what this report writes. Never asked
+/// from the pump's round, whose sweep leaves a held pane for its next look.
 pub(super) fn word_may_land<'a>(
-    states: MutexGuard<'a, HashMap<TermId, PaneState>>,
-    _lock: &'a Mutex<HashMap<TermId, PaneState>>,
-    _holds: &PaneHolds,
-    _term: TermId,
+    mut states: MutexGuard<'a, HashMap<TermId, PaneState>>,
+    lock: &'a Mutex<HashMap<TermId, PaneState>>,
+    holds: &PaneHolds,
+    term: TermId,
 ) -> MutexGuard<'a, HashMap<TermId, PaneState>> {
+    while holds.holds(term) {
+        drop(states);
+        holds.wait_out(term);
+        states = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
     states
 }
 
@@ -910,13 +991,20 @@ mod tests {
         term: TermId,
         state: zerocode_core::hook::HookState,
     ) {
-        let held = states.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut held = word_may_land(held, states, holds, term);
         held.insert(term, word(state));
     }
 
     /// The whole fence as `with_between_turns_observation` runs it.
-    fn move_with(lines: &Lines, states: &Words, holds: &PaneHolds, commit: &mut dyn FnMut()) -> bool {
+    fn move_with(
+        lines: &Lines,
+        states: &Words,
+        holds: &PaneHolds,
+        commit: &mut dyn FnMut(),
+    ) -> bool {
         with_no_prompt_in_flight(&lines.borrowed(), MOVING, &mut || {
             observed_then_committed(states, holds, MOVING, &rests, commit);
         })
@@ -1039,6 +1127,20 @@ mod tests {
             assert!(lines.moving.lock().unwrap().is_empty(), "{way}");
             assert_eq!(states.lock().unwrap()[&MOVING].state, Working, "{way}");
         }
+    }
+
+    /// Two moves of one pane: the first to end leaves the second's hold.
+    #[test]
+    fn a_pane_stays_held_until_its_last_hold_ends() {
+        let holds = PaneHolds::default();
+        let first = holds.hold(MOVING);
+        let second = holds.hold(MOVING);
+        drop(first);
+        assert!(holds.holds(MOVING));
+        assert!(!holds.holds(OTHER_PANE));
+        drop(second);
+        assert!(!holds.holds(MOVING));
+        holds.wait_out(MOVING);
     }
 
     /// Prompts meeting the move keep their order and go after it; another

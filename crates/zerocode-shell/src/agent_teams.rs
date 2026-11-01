@@ -1116,9 +1116,9 @@ pub trait Host {
         None
     }
 
-    /// Observe a quiet worker's own quota marker while holding the activity
-    /// locks that can invalidate it. Call `commit` at most once, and keep the
-    /// locks until it returns. This is asked after the actor dequeues terminal
+    /// Observe a quiet worker's own quota marker under the activity locks that
+    /// can invalidate it. Call `commit` at most once, and keep what they guard
+    /// still until it returns. This is asked after the actor dequeues terminal
     /// settlement; implementations must not call the actor or the team table.
     /// Hosts without an observation fence cannot authorize automatic stops.
     fn with_quota_wall_observation(

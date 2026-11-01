@@ -21054,6 +21054,43 @@ mod tests {
             "the switch must observe and hold the pane's prompts under the prompt \
              registration lock, and wake the pump for one it held:\n{fence}"
         );
+        // t-75383: no lock the pump waits for stands through the ledger's
+        // write, on either road a move commits by; the pane's own hold does
+        // what they did, and the pump's walk asks it.
+        assert!(
+            fence.contains("observed_then_committed(") && fence.contains("&runtime.pane_holds,"),
+            "the switch's commit is no longer fenced by the pane's own hold:\n{fence}"
+        );
+        let quiet = block_after(backend, "    fn with_quiet_screen(");
+        let held = quiet
+            .find("state.shell_runtime().pane_holds.hold(term),")
+            .expect("a wall's move holds its pane under the locks it reads through");
+        let released = quiet[held..]
+            .find("};")
+            .expect("the locks are let go in a block of their own");
+        let observed = quiet
+            .find("observe(&screen, since_ms);")
+            .expect("the screen is still observed");
+        assert!(
+            held + released < observed && quiet[observed..].contains("drop(hold);"),
+            "a wall's move commits under `pane_states` or a terminal lock:\n{quiet}"
+        );
+        assert!(
+            quiet[observed..].contains("state.cadence().wake()"),
+            "the pump is not woken for what it left for the hold:\n{quiet}"
+        );
+        let walk = backend
+            .find("let mut pty = lock_pty(held);")
+            .expect("the pump still takes each pane's lock in its walk");
+        assert!(
+            backend[walk..walk + 600].contains("pane_holds.holds(*id)"),
+            "the pump reads and types at a pane whose move is being written"
+        );
+        let sweep = block_after(backend, "fn sweep_departed_agents(app: &AppHandle) {");
+        assert!(
+            sweep.contains("pane_holds.holds(term)"),
+            "the pump's sweep can wait out a pane's move at the hook word's door:\n{sweep}"
+        );
         let switch = include_str!("../../src/account_switch.rs");
         let rests = block_after(
             switch,

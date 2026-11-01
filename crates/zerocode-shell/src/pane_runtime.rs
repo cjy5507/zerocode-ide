@@ -2355,6 +2355,12 @@ pub(super) fn sweep_departed_agents(app: &AppHandle) {
         watch.retain(|term, _| live.contains(term));
         let mut left = Vec::new();
         for (term, seen) in looks {
+            // Put down through the door that waits for a pane's account move:
+            // a held pane is asked again at the next look, so the pump does
+            // not wait out its ledger write (t-75383).
+            if state.shell_runtime().pane_holds.holds(term) {
+                continue;
+            }
             // A question the operating system would not answer is not evidence.
             // Left as it was rather than folded either way: counting silence as
             // a departure would empty every pane on a platform that has no
@@ -3507,6 +3513,14 @@ pub(super) fn pump_loop(app: &AppHandle) {
                     .then(|| state.agent_terms().get(id).copied())
                     .flatten();
                 let mut pty = lock_pty(held);
+                // An account move is being written for this pane (t-75383):
+                // its output and its delivery go after the move, next round,
+                // and every other pane's go now. Asked under the terminal lock
+                // a wall's move holds the pane under, so a round either ended
+                // before the move read the screen or sees its hold here.
+                if state.shell_runtime().pane_holds.holds(*id) {
+                    continue;
+                }
                 /* Drain this shell, rather than take one budget off it.
                  *
                  * `pump` moves at most [`zerocode_pty::PTY_OUTPUT_BYTE_BUDGET`]
