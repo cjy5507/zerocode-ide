@@ -29,7 +29,7 @@
 //! No token is ever logged or put in an error sentence. What comes back out
 //! of this module for a person to read is an email address and a clock.
 
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -780,7 +780,7 @@ impl Flow {
     fn await_code(&self, cancelled: &AtomicBool) -> Result<Option<String>, String> {
         let deadline = Instant::now() + CONSENT_CEILING;
         let mut held: Vec<(std::net::TcpStream, Vec<u8>)> = Vec::new();
-        let (mut stream, line) = 'redirect: loop {
+        let (stream, line) = 'redirect: loop {
             if cancelled.load(Ordering::Relaxed) {
                 return Ok(None);
             }
@@ -833,15 +833,37 @@ impl Flow {
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
-        // A browser that never takes the page holds the sign-in no longer
-        // than this.
-        if stream.set_nonblocking(false).is_ok()
-            && stream.set_write_timeout(Some(RESPONSE_WAIT)).is_ok()
-        {
-            let _ = stream.write_all(response.as_bytes());
-        }
+        answer_browser(stream, &response);
         answer.map(Some)
     }
+}
+
+/// What answering the browser asks of its connection.
+trait BrowserConnection: std::io::Write {
+    fn set_blocking(&self) -> std::io::Result<()>;
+    fn set_write_wait(&self, wait: Duration) -> std::io::Result<()>;
+}
+
+impl BrowserConnection for std::net::TcpStream {
+    fn set_blocking(&self) -> std::io::Result<()> {
+        self.set_nonblocking(false)
+    }
+
+    fn set_write_wait(&self, wait: Duration) -> std::io::Result<()> {
+        self.set_write_timeout(Some(wait))
+    }
+}
+
+/// Write `response` to the browser and close its connection, whichever of
+/// its settings took (t-85366): the page is far smaller than a socket's send
+/// buffer, so neither a connection left non-blocking nor one with no wait can
+/// hold the sign-in on it, and a tab with no answer reads as a hung sign-in.
+fn answer_browser(mut connection: impl BrowserConnection, response: &str) {
+    let _ = connection.set_blocking();
+    // A browser that never takes the page holds the sign-in no longer
+    // than this.
+    let _ = connection.set_write_wait(RESPONSE_WAIT);
+    let _ = connection.write_all(response.as_bytes());
 }
 
 /// What a held callback connection has brought so far — zo's own reading
@@ -881,6 +903,8 @@ fn read_request_line(stream: &mut std::net::TcpStream, received: &mut Vec<u8>) -
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
     use super::*;
 
     fn credentials() -> Credentials {
@@ -1320,6 +1344,77 @@ mod tests {
         drop(client);
         if let Err(error) = bind_seat(port) {
             panic!("the seat could not be retaken while the last one lingered: {error}");
+        }
+    }
+
+    /// A connection that refuses the settings an answer asks of it, keeping
+    /// what is written to it and whether it has been closed.
+    struct RefusingConnection {
+        refuses_blocking: bool,
+        refuses_wait: bool,
+        written: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+        closed: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+
+    impl std::io::Write for RefusingConnection {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.written.borrow_mut().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl BrowserConnection for RefusingConnection {
+        fn set_blocking(&self) -> std::io::Result<()> {
+            if self.refuses_blocking {
+                Err(std::io::ErrorKind::Unsupported.into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn set_write_wait(&self, _wait: Duration) -> std::io::Result<()> {
+            if self.refuses_wait {
+                Err(std::io::ErrorKind::Unsupported.into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Drop for RefusingConnection {
+        fn drop(&mut self) {
+            self.closed.set(true);
+        }
+    }
+
+    /// A connection whose settings fail still gets its page: a tab left with
+    /// no answer reads as a sign-in that hung (t-85366).
+    #[test]
+    fn the_browser_is_answered_and_let_go_when_its_connection_refuses_a_setting() {
+        for (refuses_blocking, refuses_wait) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let written = std::rc::Rc::default();
+            let closed = std::rc::Rc::default();
+            answer_browser(
+                RefusingConnection {
+                    refuses_blocking,
+                    refuses_wait,
+                    written: std::rc::Rc::clone(&written),
+                    closed: std::rc::Rc::clone(&closed),
+                },
+                "HTTP/1.1 200 OK\r\n\r\nthe page",
+            );
+            assert_eq!(
+                written.borrow().as_slice(),
+                b"HTTP/1.1 200 OK\r\n\r\nthe page",
+                "refuses blocking {refuses_blocking}, refuses a wait {refuses_wait}"
+            );
+            assert!(closed.get(), "the connection was kept open");
         }
     }
 

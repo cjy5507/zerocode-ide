@@ -1063,6 +1063,9 @@ struct ShellRuntime {
     /// to one of them waits in [`AppState::prompt_queue`] until the move is
     /// written, while the pump keeps turning every pane.
     moving_terms: Mutex<std::collections::HashSet<TermId>>,
+    /// Panes whose hook word waits, and which the pump leaves alone, while an
+    /// account move is written for them (t-75383).
+    pane_holds: prompt_transaction::PaneHolds,
     /// Restart continuations awaiting the resumed agent's first working hook.
     pending_nudges: Mutex<restart_nudge_runtime::PendingNudges>,
     /// Fresh Zo worker briefings held until their pane event subscriber has
@@ -2481,6 +2484,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         resource_usage: Mutex::new(resource_usage::ResourceUsageState::default()),
         deliveries: Mutex::new(HashMap::new()),
         moving_terms: Mutex::default(),
+        pane_holds: prompt_transaction::PaneHolds::default(),
         pending_nudges: Mutex::new(restart_nudge_runtime::PendingNudges::default()),
         zo_worker_deliveries: Mutex::new(HashMap::new()),
         delivery_waiters: Mutex::new(HashMap::new()),

@@ -1294,9 +1294,16 @@ pub(super) fn note_pane_state(
     // supervision road below — the facts it needs are merged here and nowhere
     // else, and recomputing them after the borrow closes would be the same
     // merge written twice.
-    let (began_ms, ended) = {
+    let (began_ms, ended, waiting) = {
         let state = app.state::<AppState>();
-        let mut states = state.pane_states();
+        let states = state.pane_states();
+        let runtime = state.shell_runtime();
+        let mut states = prompt_transaction::word_may_land(
+            states,
+            &runtime.pane_states,
+            &runtime.pane_holds,
+            report.term,
+        );
         let prior = states.get(&report.term);
         if prior.is_none_or(|held| held.state != report.state) {
             crumbs::record(
@@ -1504,12 +1511,9 @@ pub(super) fn note_pane_state(
         // evaluation, and NeedsAttention is the one state that means a
         // person — stamped with when that state began, which outlives the
         // dozens of tool events one waiting stretch can produce.
-        orchestration::pane_attention_noted(
-            report.term,
-            (report.state == zerocode_core::hook::HookState::NeedsAttention)
-                .then_some(state_started_at),
-            now,
-        );
+        let waiting = (report.state == zerocode_core::hook::HookState::NeedsAttention)
+            .then_some((state_started_at, now));
+        orchestration::pane_attention_seen(report.term, waiting.map(|(since_ms, _)| since_ms));
         (
             state_started_at,
             (report.state == zerocode_core::hook::HookState::Done).then_some((
@@ -1517,8 +1521,15 @@ pub(super) fn note_pane_state(
                 interrupted,
                 now,
             )),
+            waiting,
         )
     };
+    // The ledger hears it only now. A move's observation of ANY pane needs the
+    // lock above while the actor waits for it, so a report that stood in the
+    // actor's line holding that lock stood the window still (t-75383).
+    if let Some((since_ms, now)) = waiting {
+        orchestration::pane_attention_told(report.term, since_ms, now);
+    }
     // A `working` that is the lead's own `Stop` held back by the work it
     // left running: the done gate in [`hook_loop`] parked that very event a
     // moment ago, and every newer word evicts it first. The card stays
@@ -2348,6 +2359,12 @@ pub(super) fn sweep_departed_agents(app: &AppHandle) {
         watch.retain(|term, _| live.contains(term));
         let mut left = Vec::new();
         for (term, seen) in looks {
+            // Put down through the door that waits for a pane's account move:
+            // a held pane is asked again at the next look, so the pump does
+            // not wait out its ledger write (t-75383).
+            if state.shell_runtime().pane_holds.holds(term) {
+                continue;
+            }
             // A question the operating system would not answer is not evidence.
             // Left as it was rather than folded either way: counting silence as
             // a departure would empty every pane on a platform that has no
@@ -2816,6 +2833,13 @@ pub(super) fn publish_owed_rosters(app: &AppHandle) {
         owed.drain().collect()
     };
     for parent in owed {
+        // A parked all-clear would land at the door that waits out a pane's
+        // account move. Still owed, and asked again next round (t-75383).
+        let state = app.state::<AppState>();
+        if state.shell_runtime().pane_holds.holds(parent) {
+            state.unpublished_rosters().insert(parent);
+            continue;
+        }
         let rows = app
             .state::<AppState>()
             .subagents()
@@ -3500,6 +3524,14 @@ pub(super) fn pump_loop(app: &AppHandle) {
                     .then(|| state.agent_terms().get(id).copied())
                     .flatten();
                 let mut pty = lock_pty(held);
+                // An account move is being written for this pane (t-75383):
+                // its output and its delivery go after the move, next round,
+                // and every other pane's go now. Asked under the terminal lock
+                // a wall's move holds the pane under, so a round either ended
+                // before the move read the screen or sees its hold here.
+                if state.shell_runtime().pane_holds.holds(*id) {
+                    continue;
+                }
                 /* Drain this shell, rather than take one budget off it.
                  *
                  * `pump` moves at most [`zerocode_pty::PTY_OUTPUT_BYTE_BUDGET`]
