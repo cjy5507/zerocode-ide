@@ -3688,6 +3688,10 @@ fn main() -> ExitCode {
             // agents' roads are open above, so a walk can now be asked for;
             // the handshake it would otherwise pay is opened here instead, on
             // the helper's own thread — nothing on the boot path waits for it.
+            // Before anything reads the seats: the marks the person chose to
+            // lift go once, here and in zo's own start (t-87506).
+            let lifted = api_routers::zo_settings_path()
+                .is_some_and(|path| zerocode_core::jev::erase::lift_kept_seats(&path).is_ok());
             cmd::managed_judgment::restore_at_boot(app.handle());
             systemone::warm_for_walks();
             // The Jira sync outbox the last window enqueued but never finished:
@@ -3740,6 +3744,11 @@ fn main() -> ExitCode {
                 // What a delete left in the person's decision store goes first:
                 // two folder reads and, at most, a few file removals.
                 cmd::tidy_decision_store_at_start();
+                // Then what deletes left in the records: the store just tidied
+                // judges the rows, and a failed lift leaves them all (t-87506).
+                if let Some(path) = api_routers::zo_settings_path() {
+                    zerocode_core::jev::erase::tidy_at_start(&path, lifted);
+                }
                 if hooks::hooks_enabled(&config_root) {
                     hooks::reconcile(&config_root, &local_data_root, &installed_agent_slugs());
                 } else {

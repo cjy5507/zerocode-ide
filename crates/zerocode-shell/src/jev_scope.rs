@@ -887,6 +887,39 @@ mod tests {
     /// workspace are one project. Old records, no recorded workspace, a
     /// workspace under a temporary root and a workspace that is gone are not
     /// a project a person keeps records in.
+    /// A deleted seat's ledgers go from a project (t-87506): one that keeps
+    /// another seat's ledger still counts, and one left with none is simply
+    /// not a recorded project.
+    #[test]
+    fn a_project_whose_ledger_was_erased_reads_as_what_is_left() {
+        let home = tempfile::tempdir().expect("a home");
+        let places = tempfile::tempdir().expect("places");
+        let workspace = places.path().join("atlas");
+        std::fs::create_dir_all(&workspace).expect("a workspace");
+        let write = |path: &Path, text: &str| {
+            std::fs::create_dir_all(path.parent().expect("a folder")).expect("a folder");
+            std::fs::write(path, text).expect("a file");
+        };
+        let project = home.path().join(ZO_PROJECTS_DIR).join("atlas-1");
+        let ledgers = project.join(ZO_PROJECT_STATE_DIR).join(JEV_LEDGER_DIR);
+        write(&ledgers.join("decision-shadow.jsonl"), "{}\n");
+        write(
+            &project.join(ZO_SESSIONS_DIR).join("session-1.cwd"),
+            &json!({ "cwd": workspace }).to_string(),
+        );
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("after the epoch")
+                .as_millis(),
+        )
+        .expect("a time");
+        assert_eq!(recorded_projects(home.path(), now_ms, &[], &[]).len(), 1);
+        std::fs::remove_file(ledgers.join("decision-shadow.jsonl")).expect("the ledger goes");
+        assert!(newest_record_ms(&ledgers).is_none());
+        assert!(recorded_projects(home.path(), now_ms, &[], &[]).is_empty());
+    }
+
     #[test]
     fn a_project_is_one_with_records_in_the_window_by_the_workspace_its_sessions_recorded() {
         let home = tempfile::tempdir().expect("a zo home");
