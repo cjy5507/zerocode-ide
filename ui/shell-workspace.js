@@ -3640,9 +3640,10 @@ function workspaceStateGroups() {
 }
 
 /* The checkouts whose card holds nothing (no agent row, no finished-work or restart row, no restore-waiting row): the
- * painter that decides it (`paintWorktreeAgents`, a card's `hidden`) hands the set over. Empty until it has run — a
- * head built before that says nothing rather than guess a count that the first paint would then correct (r2 P3-7). */
-let projectSeatless = new Set();
+ * painter that decides it (`paintWorktreeAgents`, a card's `hidden`) hands the set over. `null` until it has run: a head
+ * built before that counts the checkouts with no live agent row — the first paint then corrects it from the cards
+ * (r2 P3-7), so the head never stands without its words while the list is being built. */
+let projectSeatless = null;
 
 /* How many of a project's checkouts hold no agent window and say no stage of the ledger's (a stage says more —
  * t-44016): what 「에이전트 창 없음」 on the project's head counts. A checkout folded under its task's row is not
@@ -3650,8 +3651,8 @@ let projectSeatless = new Set();
 function projectUnseatedCount(project) {
   let count = 0;
   for (const worktree of project.worktrees ?? []) {
-    if (projectSeatless.has(worktree.path) && !taskFoldedPaths.has(worktree.path)
-      && landingStageWord(worktreeStageOf(worktree.path)) === "") count += 1;
+    const empty = projectSeatless === null ? worktreeAgentRows(worktree.path).length === 0 : projectSeatless.has(worktree.path);
+    if (empty && !taskFoldedPaths.has(worktree.path) && landingStageWord(worktreeStageOf(worktree.path)) === "") count += 1;
   }
   return count;
 }
