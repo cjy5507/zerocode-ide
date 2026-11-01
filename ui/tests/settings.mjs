@@ -7902,12 +7902,9 @@ await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 
   return "search and support filters · no backend polling · no local run for an unsupported adapter · a server-only candidate offers its server alone · exact server ID and address preserved";
 });
 
-/* The settings › 판단 모델 picture the person sent on 10-22 (t-69998): the
- * bundled catalog plus the address they had checked, with only Laya received.
- * Written to `MANAGED_JUDGMENT_SHOTS` beside what the library drew, so the
- * same run makes the before and the after of a change. */
-async function photographManagedLibrary(folder) {
-  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+/* The catalog the app compiles in, as a snapshot says it: the two models
+ * bundled today, read off their manifests, each row `entry` draws. */
+async function bundledManagedCatalog() {
   const manifests = resolve(UI, "..", "crates", "local-judgment", "manifests");
   const bundled = [];
   for (const name of ["models.json", "native-models.json"]) bundled.push(...JSON.parse(await readFile(resolve(manifests, name), "utf8")).models);
@@ -7926,6 +7923,16 @@ async function photographManagedLibrary(folder) {
     };
   };
   const [laya, d3] = ["laya-multilingual-322m", "d3-lite"].map((id) => bundled.find((model) => model.id === id));
+  return { entry, laya, d3 };
+}
+
+/* The settings › 판단 모델 picture the person sent on 10-22 (t-69998): the
+ * bundled catalog plus the address they had checked, with only Laya received.
+ * Written to `MANAGED_JUDGMENT_SHOTS` beside what the library drew, so the
+ * same run makes the before and the after of a change. */
+async function photographManagedLibrary(folder) {
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  const { entry, laya, d3 } = await bundledManagedCatalog();
   delete backend.managedModelState;
   backend.managedJudgmentSettings();
   backend.managedModelState.runtime.state = "ready";
@@ -8161,6 +8168,59 @@ await test("받은 판단 모델도 연결된 서버도 없으면 목록은 빈 
     backend.managedModelState = previousManaged;
   }
   return "received 0 · server 0 → 0 rows, one line and the candidates folded · no search, count or notice · an empty catalog keeps its server line";
+});
+
+/* Each language says the local models are optional, and says it in its own words (t-88166). */
+const OPTIONAL_LOCAL_WORD = { ko: "선택", en: "ptional", ja: "任意", zh: "可选", es: "pcional" };
+
+await test("로컬 판단 모델의 문구는 다섯 언어 모두 선택 항목이라고 말하고, 받기 단추는 두 겹 접힘 안에 있다 (t-88166)", async () => {
+  const { entry, laya, d3 } = await bundledManagedCatalog();
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  Object.assign(backend.managedModelState, { instanceId: "fixture-optional-instance", runtime: { state: "ready", downloadBytes: 0, reason: null } });
+  backend.managedModelState.models = [entry(laya, false), entry(d3, false)];
+  const page = await context.newPage();
+  await installTauri(page, "managed-optional");
+  attachFaultRecorder(page, "managed-optional");
+  try {
+    await bootPage(page, "managed-optional");
+    await openSettings(page, "judgment-models");
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 2);
+    const install = page.locator(`#managed-judgment-candidate-list [data-model-id="${laya.id}"] [data-model-action="install"]`);
+    assert(!(await install.isVisible()), "the download button stands open with 고급 closed");
+    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+    await renderSettled(page);
+    assertEqual(await page.locator("#managed-judgment-candidates").evaluate((fold) => fold.open), false, "the candidates are not folded");
+    assert(!(await install.isVisible()), "the download button stands open with the candidates folded");
+    await page.locator("#managed-judgment-candidates > summary").click();
+    await renderSettled(page);
+    assert(await install.isVisible(), "the download button cannot be reached");
+    await page.locator("#managed-judgment-candidates > summary").click();
+    const words = new Set();
+    for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+      await setQualityLocale(page, locale);
+      await renderSettled(page);
+      const word = OPTIONAL_LOCAL_WORD[locale];
+      assert(word, `${locale}: no word to look for`);
+      const lines = await page.evaluate(() => ({
+        none: document.getElementById("managed-judgment-none").textContent,
+        fold: document.getElementById("managed-judgment-candidates-count").textContent,
+        notice: document.querySelector("#managed-judgment-candidates .settings-notice").textContent,
+        choice: t("settings.models.choiceLocalAbout", "선택 사항입니다. 원할 때 모델을 직접 받아 이 Mac 안에서 돌립니다."),
+      }));
+      for (const [name, line] of Object.entries(lines)) {
+        assert(line.toLowerCase().includes(word), `${locale}: ${name} does not say it is optional`, line);
+        if (locale !== "ko") assert(!/[가-힣]/.test(line), `${locale}: ${name} is not translated`, line);
+        words.add(line);
+      }
+    }
+    assertEqual(words.size, SETTINGS_QUALITY_SPEC.locales.length * 4, "a language shares a line with another");
+  } finally {
+    await page.close();
+    backend.managedModelState = previousManaged;
+  }
+  return "two folds over the download button · four lines in five languages say optional";
 });
 
 await test("로컬 모델 실패는 실제 원인과 다음 행동을 안내하고 적용된 모델을 보존한다", async () => {
@@ -15156,6 +15216,47 @@ await test("추천대로 쓰기: 로그인 계정의 「최상위」를 코딩�
   await modelScenePictures("done");
   return "one press: coding → the account's top model, decision kept, one sync";
 }));
+
+await test("로컬 판단 모델은 기본 후보가 아니다: 받기 전엔 어디에도 권하지 않고, 실행 중이어도 ③을 고른 흐름에서만 권한다 (t-88166)", async () => {
+  const { entry, laya, d3 } = await bundledManagedCatalog();
+  return withModelScene(() => {
+    backend.zoSettings.providers = [];
+    backend.zoSettings.smart = {};
+    backend.zoList.reports = backend.zoList.reports.map(signedOut);
+    delete backend.managedModelState;
+    backend.managedJudgmentSettings();
+    Object.assign(backend.managedModelState, { instanceId: "fixture-bundled-instance", runtime: { state: "ready", downloadBytes: 0, reason: null } });
+    backend.managedModelState.models = [entry(laya, false), entry(d3, false)];
+  }, async () => {
+    // Nothing received: the first question, the daily cards and the local step name neither model.
+    const names = [laya.label, d3.label, laya.id, d3.id];
+    const named = async (selector) => { const seen = await pageA.locator(selector).innerText(); return names.filter((name) => seen.includes(name)); };
+    assertEqual(await named("#model-setup"), [], "the first question puts a bundled model forward");
+    assertEqual(await pageA.evaluate(() => modelConnectionsController.recommendJudgment()?.key?.startsWith("managed:") ?? false), false, "a model not received was recommended");
+    await pageA.click('[data-model-choice="local"]');
+    await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "fail");
+    assertEqual(await named("#model-setup"), [], "the step for this computer puts a bundled model forward");
+    assertEqual(await pageA.evaluate(() => modelConnectionsController.setup.failure), "none", "a computer holding no model was not told so");
+    assertEqual(await pageA.evaluate(() => modelConnectionsController.judgmentRows().filter((row) => row.kind === "managed").length), 0, "a model not received stands among what judgment can use");
+    // Received and running but not applied, with ① picked: not put forward.
+    backend.managedModelState.models = [entry(laya, true), entry(d3, false)];
+    Object.assign(backend.managedModelState, {
+      server: { id: "fixture-bundled-server", state: "ready", modelId: laya.id, checked: true, error: null, provider: { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32105", model: laya.id, requiresAuth: false } },
+    });
+    backend.managedModelState.revision += 1;
+    backend.zoList.reports = clone(ZO_LIST_FIXTURE.reports);
+    await pageA.evaluate(() => refreshTypeSafe());
+    await pageA.click('[data-model-choice="login"]');
+    await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "ok");
+    assertEqual(await pageA.evaluate(() => modelConnectionsController.recommendJudgment()?.key?.startsWith("managed:") ?? false), false, "a running local model the person did not apply was put forward over the login they picked");
+    assert(!(await pageA.locator('[data-model-reco="judgment"]').textContent()).includes(laya.label), "the recommendation line names the local model");
+    // ③ picked: the person asked for this computer, so the running model is what it offers.
+    await pageA.click('[data-model-choice="local"]');
+    await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "ok");
+    assert((await pageA.locator('[data-model-reco="judgment"]').textContent()).includes(laya.label), "the running model was not offered to a person who asked for this computer");
+    return "nothing received → named nowhere · running, unapplied, ① → not recommended · ③ → offered";
+  });
+});
 
 await test("판단 모델: 고르면 확인이 저절로 돌고, 통과하지 못한 모델은 적용할 수 없다; 키 없는 연결은 미리 흐리게 (시험 9)", async () => withModelScene(() => {
   backend.zoSettings.providers = [

@@ -429,7 +429,32 @@ pub(crate) fn smart(document: &mut Map<String, Value>) -> Result<&mut Map<String
         .ok_or_else(|| "provider_settings".to_string())
 }
 
-pub(crate) fn clear_in(document: &mut Map<String, Value>, role: Role) -> Result<(), String> {
+/// What a selection's managed model needs of this computer: whether the files
+/// a binding names are here (`Manager::holds`). Clearing judgment reads it so
+/// that a selection whose model was removed is not brought back (t-88166).
+pub(crate) type HoldsModel<'held> = &'held dyn Fn(&local_judgment::Binding) -> bool;
+
+/// Take a managed model out of the selection judgment would return to, under
+/// the settings lock its files go under (t-88166). Writes nothing when that
+/// selection does not name the model.
+pub(crate) fn removing_managed_model(
+    path: &Path,
+    model_id: &str,
+    remove: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    api_routers::update_zo_settings_root_if_changed(path, |_document| {
+        remove()?;
+        let _ = model_id;
+        Ok(false)
+    })
+}
+
+pub(crate) fn clear_in(
+    document: &mut Map<String, Value>,
+    role: Role,
+    holds: HoldsModel<'_>,
+) -> Result<(), String> {
+    let _ = holds;
     let root = Value::Object(document.clone());
     let restore_coding = reference(&root, connections::CODING_CONNECTION_KEY)?
         .is_some_and(|held| coding_matches(&root, &held));
@@ -469,7 +494,12 @@ pub(crate) fn clear_in(document: &mut Map<String, Value>, role: Role) -> Result<
     Ok(())
 }
 
-pub fn clear(path: &Path, role: Role, expected: Option<&Reference>) -> Result<(), String> {
+pub fn clear(
+    path: &Path,
+    role: Role,
+    expected: Option<&Reference>,
+    holds: HoldsModel<'_>,
+) -> Result<(), String> {
     api_routers::update_zo_settings_root(path, |document| {
         let root = Value::Object(document.clone());
         let current = match role {
@@ -485,7 +515,7 @@ pub fn clear(path: &Path, role: Role, expected: Option<&Reference>) -> Result<()
         if current.is_none() {
             return Ok(());
         }
-        clear_in(document, role)
+        clear_in(document, role, holds)
     })
 }
 

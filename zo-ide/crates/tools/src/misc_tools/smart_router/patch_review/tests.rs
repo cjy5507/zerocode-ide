@@ -207,6 +207,34 @@ fn a_keyless_review_is_refused_at_the_door_and_is_unavailable() {
     assert_eq!(line, None);
 }
 
+/// A provider cut off (t-88166), both ways: the edit's result stays what it was
+/// at the cost of the wall, and the row says it fell back.
+#[test]
+fn a_review_on_a_cut_wire_changes_nothing_within_its_wall() {
+    let closed = {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a free port");
+        let port = listener.local_addr().expect("its address").port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}")
+    };
+    let silent = Mock::silent();
+    for (wire, base_url) in [("closed", closed.as_str()), ("silent", silent.base_url.as_str())] {
+        let started = std::time::Instant::now();
+        let (row, answers) = judged(base_url, &ask("edit-1"));
+        let took = started.elapsed();
+        println!("patch_review {wire}: {} ms", took.as_millis());
+        assert!(answers.is_none(), "{wire}");
+        assert!(
+            took < std::time::Duration::from_millis(zerocode_core::jev::PATCH_REVIEW_APPLY_DEADLINE_MS) * 2,
+            "{wire}: {took:?}"
+        );
+        let (row, verdict, line) = settle(JevMode::On, true, row, None);
+        assert_eq!(verdict, Verdict::Unavailable, "{wire}");
+        assert_eq!((row.route_use.as_str(), row.applied, row.noted), ("fallback", false, false), "{wire}");
+        assert_eq!(line, None, "{wire}: nothing is added to the result");
+    }
+}
+
 /// One answered review: four Nouls over one state that carries the hunks,
 /// the evidence's tail and the path's fingerprint — never the path — and a
 /// row whose receipt is the digest of exactly the bytes the wire was handed.

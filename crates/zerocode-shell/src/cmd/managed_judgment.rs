@@ -96,6 +96,12 @@ pub(crate) fn settings_changed() {
     }
 }
 
+/// Whether the files `binding` names are on this computer. A store that cannot
+/// be opened runs no model, so it holds none.
+pub(crate) fn holds_model(app: &AppHandle, binding: &Binding) -> bool {
+    service(app).is_ok_and(|manager| manager.holds(binding))
+}
+
 #[tauri::command(async)]
 pub(crate) fn managed_judgment_status(app: AppHandle) -> Result<Snapshot, String> {
     Ok(service(&app)?.snapshot())
@@ -303,7 +309,7 @@ pub(crate) fn managed_judgment_remove(
     let service = service(&app)?;
     service
         .remove_guarded(&model_id, &revision, |remove| {
-            typesafe_settings::with_provider_locked(&path, || {
+            crate::model_connection_store::removing_managed_model(&path, &model_id, || {
                 remove().map_err(|error| error.to_string())
             })
             .map_err(|error| match error.as_str() {

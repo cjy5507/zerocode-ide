@@ -590,6 +590,22 @@ pub(crate) fn update_zo_settings_root(
         .map_err(|err| format!("파일 쓰기 실패: {err}"))
 }
 
+/// [`update_zo_settings_root`] for a change that may find nothing to do: the
+/// file is written only when `change` says it changed something.
+pub(crate) fn update_zo_settings_root_if_changed(
+    path: &Path,
+    change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<bool, String>,
+) -> Result<(), String> {
+    let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
+    let mut root = read_zo_settings_root(path)?;
+    if !change(&mut root)? {
+        return Ok(());
+    }
+    crate::durable_file::replace_bytes(path, render_settings_root(&root)?.as_bytes())
+        .map(|_| ())
+        .map_err(|err| format!("파일 쓰기 실패: {err}"))
+}
+
 /// Apply a checked settings change and its credential under the same writer
 /// lock. A refused change never touches the key; a failed file write restores
 /// the key that was present when this commit began.
@@ -2060,6 +2076,7 @@ mod tests {
             &path,
             crate::model_connection_store::Role::Coding,
             Some(&reference),
+            &|_| true,
         )
         .unwrap();
         assert!(

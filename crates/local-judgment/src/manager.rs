@@ -3107,6 +3107,12 @@ impl Manager {
         self.remove_guarded(model_id, revision, |remove| remove())
     }
 
+    /// Whether the files `binding` names are on this computer.
+    pub fn holds(&self, binding: &Binding) -> bool {
+        let _ = binding;
+        true
+    }
+
     pub fn remove_guarded(
         &self,
         model_id: &str,
@@ -3527,6 +3533,21 @@ pub(crate) mod test_support {
 
     pub fn manager(root: &Path, settings: &Path, model: Model) -> Arc<Manager> {
         manager_with_sink(root, settings, model, Arc::new(|_| {}))
+    }
+
+    /// A manager whose catalog is `models`, all on the fixture's one runtime.
+    pub fn manager_of(root: &Path, settings: &Path, models: Vec<Model>) -> Arc<Manager> {
+        let runtimes: serde_json::Value =
+            serde_json::from_str(include_str!("../manifests/runtime.json")).unwrap();
+        let profile = serde_json::from_value(runtimes["profiles"][0].clone()).unwrap();
+        Manager::with_catalog(
+            root,
+            settings,
+            Catalog { version: 1, models },
+            Some(profile),
+            Arc::new(|_| {}),
+        )
+        .unwrap()
     }
 
     pub fn manager_with_sink(

@@ -932,6 +932,7 @@ fn returning_from_a_connection_restores_the_previous_managed_selection() {
         &path,
         crate::model_connection_store::Role::Judgment,
         Some(&reference),
+        &|_| true,
     )
     .expect("restore");
     let restored: Value =
