@@ -25,12 +25,40 @@ use crate::support::strip_rust_comments;
 
 /// Whole-env changes outside the door, with how many each file has and why
 /// its program cannot be a bare name under a changed `PATH`.
-const ENV_CHANGES_ALLOWED: &[(&str, &str, usize, &str)] = &[(
-    "zerocode-shell/src/accounts.rs",
-    ".envs(",
-    2,
-    "both blank OVERRIDING_AUTH_VARS, which name no PATH, on a command \
-     `quiet_command_on_path` built",
+const ENV_CHANGES_ALLOWED: &[(&str, &str, usize, &str)] = &[
+    (
+        "zerocode-shell/src/accounts.rs",
+        ".envs(",
+        2,
+        "both blank OVERRIDING_AUTH_VARS, which name no PATH, on a command \
+         `quiet_command_on_path` built",
+    ),
+    (
+        "zerocode-pty/src/pty_open.rs",
+        ".env_clear(",
+        1,
+        "the start of a lane's child on a unix that is not macOS, which has \
+         the `pre_exec` below and so forks whatever its program is called",
+    ),
+    (
+        "zerocode-pty/src/pty_open.rs",
+        ".envs(",
+        1,
+        "the same start: the environment the lane named, put on a command \
+         that forks anyway",
+    ),
+];
+
+/// Fork-making spellings that stay, with the file and why. The one start of
+/// a lane's child that is not `posix_spawn`: the unix that is not macOS,
+/// which has no `posix_launch` and which `portable_pty` started by this very
+/// `pre_exec` before the lane opened its own pty (t-85167). Compiled only
+/// there; on macOS the same method answers an error. The fork stall (t-73907)
+/// is macOS's libSystem fork handler under CEF.
+const FORKS_ALLOWED: &[(&str, &str, &str)] = &[(
+    "zerocode-pty/src/pty_open.rs",
+    "pre_exec(",
+    "the non-macOS start of a lane's child, `cfg`-ed off on macOS",
 )];
 
 /// Lock sites that hold their file lock through
@@ -70,7 +98,10 @@ fn nothing_the_window_ships_asks_std_to_fork() {
             ("chroot(", "a chroot"),
         ] {
             let count = file.code.matches(spelling).count();
-            if count > 0 {
+            let allowed = FORKS_ALLOWED
+                .iter()
+                .any(|(name, allowed, _)| *name == file.name && *allowed == spelling);
+            if count > 0 && !allowed {
                 offenders.push(format!("{}: {count} × {why} (`{spelling}`)", file.name));
             }
         }

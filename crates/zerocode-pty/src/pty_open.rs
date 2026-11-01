@@ -18,6 +18,7 @@ use std::ffi::{CStr, CString, OsStr};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt as _;
+#[cfg(not(target_os = "macos"))]
 use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 
@@ -129,6 +130,9 @@ struct UnixMaster {
 
 /// The slave end. Closes with the value.
 struct UnixSlave {
+    /// Held so that it closes with the value (the lane drops it once the
+    /// child has the terminal); only a start that is not macOS's reads it.
+    #[cfg_attr(target_os = "macos", allow(dead_code, reason = "held for its close"))]
     fd: OwnedFd,
 }
 
@@ -214,13 +218,31 @@ impl MasterPty for UnixMaster {
 }
 
 impl SlavePty for UnixSlave {
+    fn spawn_command(
+        &self,
+        builder: CommandBuilder,
+    ) -> Result<Box<dyn Child + Send + Sync>, anyhow::Error> {
+        self.start(builder)
+    }
+}
+
+impl UnixSlave {
+    /// On macOS a lane starts its child without a fork, by the terminal's
+    /// name ([`crate::posix_launch`]); nothing asks the slave to start one,
+    /// and a start here would be the fork that module exists to avoid.
+    #[cfg(target_os = "macos")]
+    fn start(&self, _: CommandBuilder) -> Result<Box<dyn Child + Send + Sync>, anyhow::Error> {
+        anyhow::bail!("a lane on macOS starts its child through posix_launch")
+    }
+
     /// The child leads a session of its own whose controlling terminal is
     /// this slave; signals it inherited are put back to their defaults and
     /// every descriptor above 2 is closed before it runs, as
     /// `portable_pty` starts one. A builder's `umask` is not carried (its
     /// field is private, and no lane sets one), and a default program is
     /// refused (no lane asks for one).
-    fn spawn_command(
+    #[cfg(not(target_os = "macos"))]
+    fn start(
         &self,
         builder: CommandBuilder,
     ) -> Result<Box<dyn Child + Send + Sync>, anyhow::Error> {
@@ -266,6 +288,7 @@ impl SlavePty for UnixSlave {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 /// The `Command` a builder describes, as `portable_pty` builds it from the
 /// builder's own program, arguments, working directory and environment (its
 /// own way is private to it): the program looked up on the builder's `PATH`,
@@ -299,6 +322,7 @@ fn command_of(builder: &CommandBuilder) -> Result<std::process::Command, anyhow:
     Ok(command)
 }
 
+#[cfg(not(target_os = "macos"))]
 /// This user's login shell from the password database, `/bin/sh` if it
 /// names none.
 fn login_shell() -> String {
@@ -318,6 +342,7 @@ fn login_shell() -> String {
     shell.to_string_lossy().into_owned()
 }
 
+#[cfg(not(target_os = "macos"))]
 /// Close every descriptor above 2 the child was handed, as `portable_pty`
 /// does for the ones a GUI process leaks.
 fn close_inherited() {
@@ -502,11 +527,25 @@ mod tests {
         }
     }
 
-    /// The control: with nobody else around the hangup is there at once
-    /// when an end closes, and is not there while the end is open — so a
+    /// Whether `hung` answers yes within [`PATIENCE`]: a hangup already
+    /// there passes at once, the patience is spent only by a failure.
+    fn hangs_up_within_patience(mut hung: impl FnMut() -> bool) -> bool {
+        let begun = Instant::now();
+        while !hung() {
+            if begun.elapsed() >= PATIENCE {
+                return false;
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        true
+    }
+
+    /// The control: with nobody holding the other end, the hangup is there
+    /// once an end closes, and is not there while the end is open — so a
     /// miss under pressure means a holder, nothing else.
     #[test]
-    fn a_pane_end_hangs_up_when_the_other_closes_and_not_before() {
+    #[ignore = "the pressure's own process, started by `the_pty_open_leaves_no_end_to_a_child_started_beside_it`"]
+    fn alone_a_pane_end_hangs_up_when_the_other_closes_and_not_before() {
         let PtyPair { master, slave } = open_pair(SIZE).expect("a pty");
         let held = slave_by_name(master.as_ref());
         drop(slave);
@@ -515,7 +554,7 @@ mod tests {
         assert!(!hung_up(master_fd), "hung up with a slave open");
         drop(held);
         assert!(
-            hung_up(master_fd),
+            hangs_up_within_patience(|| hung_up(master_fd)),
             "the master saw no hangup, no slave left"
         );
 
@@ -524,7 +563,7 @@ mod tests {
         drop(slave);
         drop(master);
         assert!(
-            hung_up(held.as_raw_fd()),
+            hangs_up_within_patience(|| hung_up(held.as_raw_fd())),
             "the slave saw no hangup, no master left"
         );
     }
@@ -533,7 +572,8 @@ mod tests {
     /// pane's master or slave. The red before the fix is a count of panes
     /// whose end hung up late; after it, none (1000 panes).
     #[test]
-    fn a_child_started_while_a_pane_opens_holds_none_of_its_ends() {
+    #[ignore = "the pressure's own process, started by `the_pty_open_leaves_no_end_to_a_child_started_beside_it`"]
+    fn alone_a_child_started_while_a_pane_opens_holds_none_of_its_ends() {
         let starters = Starters::begin();
         let (mut master_held, mut slave_held) = (Seen::default(), Seen::default());
         let began = Instant::now();
@@ -576,6 +616,39 @@ mod tests {
         );
         assert_eq!(master_held.kept, 0, "a child holds a pane's master");
         assert_eq!(slave_held.kept, 0, "a child holds a pane's slave");
+    }
+
+    /// The pressure's tests, each in a process of its own with the pane
+    /// opens: a child another test of this binary starts holds a copy of
+    /// every descriptor until its `exec`, and one that stalls there for long
+    /// would read as a holder this pty open left. Same shape as
+    /// `pane_leftovers`' held-back hangup (t-84451).
+    const ALONE: [&str; 2] = [
+        "pty_open::tests::alone_a_pane_end_hangs_up_when_the_other_closes_and_not_before",
+        "pty_open::tests::alone_a_child_started_while_a_pane_opens_holds_none_of_its_ends",
+    ];
+
+    #[test]
+    fn the_pty_open_leaves_no_end_to_a_child_started_beside_it() {
+        let exe = std::env::current_exe().expect("this test binary");
+        let alone = Command::new(exe)
+            .args([
+                "--exact",
+                ALONE[0],
+                ALONE[1],
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .output()
+            .expect("the pressure ran in a process of its own");
+        let said = String::from_utf8_lossy(&alone.stdout);
+        eprintln!("{said}");
+        assert!(
+            alone.status.success() && said.contains("test result: ok. 2 passed"),
+            "the pressure failed in its own process: {said}{}",
+            String::from_utf8_lossy(&alone.stderr)
+        );
     }
 
     fn close_on_exec(fd: RawFd) -> bool {
@@ -635,6 +708,7 @@ mod tests {
     /// foreground group (`ps` pid, pgid, tpgid), `tty` names the slave, and
     /// the window size is the pane's. The reader sees the stream end when
     /// the child is gone.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_child_started_on_the_slave_leads_a_session_with_the_pty_as_its_terminal() {
         use std::io::Read as _;
