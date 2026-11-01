@@ -36,7 +36,20 @@ const AROUND_CONVERSATIONS: &[&str] = &[
 /// Every selector in the stylesheet that names a `:has()`, one complex
 /// selector at a time, its whitespace folded.
 fn has_selectors() -> Vec<String> {
-    let css = strip_comments(include_str!("../../../../ui/shell.css"));
+    // Every stylesheet the window loads (t-85293): `tokens.css` is read as
+    // `shell.css` is.
+    [
+        include_str!("../../../../ui/shell.css"),
+        include_str!("../../../../ui/tokens.css"),
+    ]
+    .into_iter()
+    .flat_map(has_selectors_in)
+    .collect()
+}
+
+/// [`has_selectors`] of one stylesheet.
+fn has_selectors_in(source: &str) -> Vec<String> {
+    let css = strip_comments(source);
     let mut selectors = Vec::new();
     let mut buf = String::new();
     for glyph in css.chars() {
@@ -211,5 +224,25 @@ fn a_has_rule_styles_no_bare_tag() {
         "a rule with a `:has()` styles a bare tag — the engine then restyles every element of \
          that tag in the window whenever any `:has()` may have changed; name it by a class:\n  {}",
         wrong.join("\n  ")
+    );
+}
+
+/// The scan reads every stylesheet the window loads, not only `shell.css`
+/// (t-85293, t-84136 r1 P3-d): a `body:has(…)` that came in through
+/// `tokens.css` would otherwise pass both rules unseen. The count is the two
+/// sheets' own counts added, so it holds even where `shell.css` names a
+/// selector `tokens.css` names too.
+#[test]
+fn the_scan_reads_tokens_css_as_well_as_shell_css() {
+    let shell = has_selectors_in(include_str!("../../../../ui/shell.css")).len();
+    let tokens = has_selectors_in(include_str!("../../../../ui/tokens.css")).len();
+    assert!(
+        tokens > 0,
+        "`ui/tokens.css` no longer holds a `:has()` to scan"
+    );
+    assert_eq!(
+        has_selectors().len(),
+        shell + tokens,
+        "the `:has()` rules of `ui/tokens.css` are not all scanned"
     );
 }

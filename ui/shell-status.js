@@ -5906,6 +5906,9 @@ function dropTab(id, { closed = false, nativeClosed = false } = {}) {
   // a different question and stays with `closeTab`; this only takes away the
   // element the tab was drawn into.
   dropPaneHost(id);
+  // A drawer that stood in that host goes with it; the toast layer leaves its
+  // side now, not at the next toast (t-85293, t-84136 r1 P3-e).
+  sayDrawersDocked();
   tabs.splice(at, 1);
   // A question about a tab that has left is a question nobody can answer, so
   // it leaves too. (The answered one arrives here one shift later and finds

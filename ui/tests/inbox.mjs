@@ -76,7 +76,7 @@ export async function testInbox(browser, origin, standBackend, ok) {
   await standBackend(page);
   await page.addInitScript(() => {
     const base = window.__TAURI__.core.invoke;
-    window.__INBOX__ = { snapshot: { items: [], counts: { all: 0, question: 0, handoff: 0, blocked: 0, notice: 0, waiting: 0 } }, calls: [], fail: new Set(), already: new Set(), asks: 0 };
+    window.__INBOX__ = { snapshot: { items: [], counts: { all: 0, question: 0, handoff: 0, blocked: 0, notice: 0, waiting: 0 } }, calls: [], fail: new Set(), failWith: new Map(), already: new Set(), answered: new Set(), asks: 0 };
     window.__TAURI__.core.invoke = (name, args) => {
       const state = window.__INBOX__;
       if (name === "board_inbox") {
@@ -90,11 +90,18 @@ export async function testInbox(browser, origin, standBackend, ok) {
           state.fail.delete(key);
           return Promise.reject("the ledger refused");
         }
+        if (state.failWith.has(key)) {
+          const words = state.failWith.get(key);
+          state.failWith.delete(key);
+          return Promise.reject(words);
+        }
         if (name === "desk_question_close") {
           // The verb's own answer: the close's record, or the standing one with `already`.
-          const already = state.already.has(args.message);
+          const answered = state.answered.has(args.message);
+          const already = state.already.has(args.message) || answered;
           return Promise.resolve({
             questionId: args.message, runId: args.run, closed: true, already,
+            ...(answered ? { answerId: `m-answer-${args.message}` } : {}),
             closeId: `m-close-${args.message}`, closedBy: `run:${args.run}`, ...(already ? {} : { note: args.reason }),
           });
         }
@@ -309,8 +316,10 @@ export async function testInbox(browser, origin, standBackend, ok) {
       letter: { ...base.items[0].letter, id, body, created_ms: now - ago * MINUTE, delivery_id: `d-${id}` },
     });
     return {
-      items: [open("m-q4", 1, "예전 결제 화면도 같이 고칠까요?"), open("m-q5", 2, "로그 파일을 지워도 될까요?"), ...base.items],
-      counts: { ...base.counts, all: base.counts.all + 2, question: base.counts.question + 2, waiting: base.counts.waiting + 2 },
+      items: [open("m-q4", 1, "예전 결제 화면도 같이 고칠까요?"), open("m-q5", 2, "로그 파일을 지워도 될까요?"),
+        open("m-q6", 3, "배포 전에 한 번 더 볼까요?"), open("m-q7", 4, "그 판은 이미 닫혔나요?"),
+        open("m-q8", 5, "자리가 없는 런의 질문인가요?"), open("m-q9", 6, "원장이 잠깐 안 열리나요?"), ...base.items],
+      counts: { ...base.counts, all: base.counts.all + 6, question: base.counts.question + 6, waiting: base.counts.waiting + 6 },
     };
   })();
   await setSnapshot(withOpen);
@@ -323,6 +332,8 @@ export async function testInbox(browser, origin, standBackend, ok) {
     const button = () => view.querySelector('[data-inbox-act="close"]');
     const shown = (node) => node?.checkVisibility() ?? false;
     const offered = shown(field()) && shown(button()) && button().textContent === "답 없이 닫기";
+    const limit = field()?.maxLength ?? -1;
+    const named = typeof INBOX_CLOSE_REASON_MAX === "number" ? INBOX_CLOSE_REASON_MAX : -2;
     // Without a reason nothing leaves: the page asks for the one line instead.
     button()?.click();
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -338,7 +349,7 @@ export async function testInbox(browser, origin, standBackend, ok) {
     await new Promise((resolve) => setTimeout(resolve, 50));
     const row = view.querySelector('.inbox-row[data-id="run-a/m-q4"]');
     return {
-      offered, unreasoned,
+      offered, limit, named, unreasoned,
       calls: window.__INBOX__.calls.filter((call) => call.name === "desk_question_close").map((call) => call.args),
       rowTitle: row?.querySelector(".inbox-row-title").textContent ?? null,
       title: view.querySelector(".inbox-pv-title").textContent,
@@ -347,6 +358,7 @@ export async function testInbox(browser, origin, standBackend, ok) {
     };
   });
   ok("a question in a run this window sits for offers 답 없이 닫기 beside one line of why", closing.offered, JSON.stringify(closing));
+  ok("the reason field takes the one named length and no more (t-84271 ①)", closing.limit === closing.named && closing.named > 0, JSON.stringify(closing));
   ok("a close without a reason sends nothing and says the one line is needed", closing.unreasoned.sent === 0 && closing.unreasoned.error.length > 0, JSON.stringify(closing.unreasoned));
   ok(
     "답 없이 닫기 calls the ledger's question-close once, with the run, the question, the reason and a retry name",
@@ -376,17 +388,102 @@ export async function testInbox(browser, origin, standBackend, ok) {
     view.querySelector('[data-inbox-act="close"]')?.click();
     await new Promise((resolve) => setTimeout(resolve, 50));
     const refused = view.querySelector(".inbox-close .inbox-error")?.textContent ?? "";
+    const refusedTitle = view.querySelector(".inbox-close .inbox-error")?.dataset.tip ?? "";
     view.querySelector('[data-inbox-act="close"]')?.click();
     await new Promise((resolve) => setTimeout(resolve, 50));
     return {
-      refused,
+      refused, refusedTitle,
       names: window.__INBOX__.calls.filter((call) => call.name === "desk_question_close" && call.args.message === "m-q5").map((call) => call.args.retryRequest),
       rowTitle: view.querySelector('.inbox-row[data-id="run-a/m-q5"] .inbox-row-title')?.textContent ?? null,
       error: view.querySelector(".inbox-close .inbox-error")?.checkVisibility() ?? false,
     };
   });
   ok("a refused close says so and is retried under the same name", again.refused.length > 0 && again.names.length === 2 && again.names[0] === again.names[1], JSON.stringify(again));
+  ok(
+    "a refused close says one sentence of its own, and the ledger's words are its hover (t-84271 ③)",
+    again.refused === "답 없이 닫지 못했습니다 — 까닭은 이 줄에 포인터를 올리면 보입니다." && again.refusedTitle === "the ledger refused",
+    JSON.stringify(again),
+  );
   ok("a question the ledger already holds closed reads 「닫힘 · 까닭」 the same, with no error", again.rowTitle === "닫힘 · 질문한 판이 사라짐" && !again.error, JSON.stringify(again));
+
+  // What a refusal tells the person to do depends on why (t-85293 r2 P2-2). Only a refusal that
+  // pressing again can lift says "press again"; a question whose asker is gone says the way out in
+  // the sentence itself (close it without an answer), a window without the run's seat says where to
+  // go, and any other refusal says the ledger's words are on the line's hover. The name stays.
+  const refusals = await page.evaluate(async () => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    const state = window.__INBOX__;
+    const type = (selector, text) => {
+      const field = view.querySelector(selector);
+      field.value = text;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const press = async (id, act, fieldSelector, text, name, words) => {
+      view.querySelector(`.inbox-row[data-id="run-a/${id}"]`).click();
+      type(fieldSelector, text);
+      state.failWith.set(`${name}:${id}`, words);
+      view.querySelector(`[data-inbox-act="${act}"]`).click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const line = view.querySelector(act === "reply" ? ".inbox-reply .inbox-error" : ".inbox-close .inbox-error");
+      return { text: line?.textContent ?? "", tip: line?.dataset.tip ?? "", shown: line?.checkVisibility() ?? false };
+    };
+    const gone = await press("m-q7", "reply", ".inbox-reply-field", "색인부터 고치세요.", "desk_reply",
+      "unroutable address: pane:team-a/%7 — that pane no longer holds a seat (its window restarted or its pane ended)");
+    const noSeat = await press("m-q8", "reply", ".inbox-reply-field", "색인부터 고치세요.", "desk_reply", "the run has no live coordinator seat");
+    const otherWindow = await press("m-q8", "close", ".inbox-close-field", "자리가 없는 런", "desk_question_close",
+      "this window does not hold the run's coordinator seat");
+    const busy = await press("m-q9", "close", ".inbox-close-field", "잠깐 안 열림", "desk_question_close", "orchestration runtime unavailable");
+    const busyReply = await press("m-q9", "reply", ".inbox-reply-field", "다시 보내 봅니다.", "desk_reply", "orchestration runtime unavailable");
+    return { gone, noSeat, otherWindow, busy, busyReply };
+  });
+  ok(
+    "a reply to a question whose asker is gone says the way out in the sentence, not only on hover",
+    refusals.gone.shown && refusals.gone.text === "답을 보내지 못했습니다 — 질문한 판이 사라졌습니다. 「답 없이 닫기」로 닫을 수 있습니다."
+      && refusals.gone.tip.startsWith("unroutable address"),
+    JSON.stringify(refusals.gone),
+  );
+  ok(
+    "a refusal because this window holds no seat of the run says where to go, never to press again",
+    refusals.noSeat.text === "답을 보내지 못했습니다 — 이 런의 코디 자리를 이 창이 쥐고 있지 않습니다. 코디 자리가 있는 창에서 보내 주세요."
+      && refusals.otherWindow.text === "답 없이 닫지 못했습니다 — 이 런의 코디 자리를 이 창이 쥐고 있지 않습니다. 코디 자리가 있는 창에서 닫아 주세요.",
+    JSON.stringify([refusals.noSeat, refusals.otherWindow]),
+  );
+  ok(
+    "only a refusal pressing again can lift says so",
+    refusals.busy.text === "답 없이 닫지 못했습니다 — 잠시 뒤 다시 눌러 주세요."
+      && refusals.busyReply.text === "답을 보내지 못했습니다 — 잠시 뒤 다시 눌러 주세요.",
+    JSON.stringify([refusals.busy, refusals.busyReply]),
+  );
+  ok(
+    "no refusal that pressing again cannot lift tells the person to press again",
+    [refusals.gone, refusals.noSeat, refusals.otherWindow].every((one) => !one.text.includes("다시 눌러")),
+    JSON.stringify(refusals),
+  );
+
+  // A question someone answered meanwhile answers `already` with the answer's id: the row says it was
+  // answered, not closed (t-84271 ②).
+  const meanwhile = await page.evaluate(async () => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    window.__INBOX__.answered.add("m-q6");
+    view.querySelector('.inbox-row[data-id="run-a/m-q6"]').click();
+    const field = view.querySelector(".inbox-close-field");
+    field.value = "이미 끝난 일";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    view.querySelector('[data-inbox-act="close"]')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return {
+      rowTitle: view.querySelector('.inbox-row[data-id="run-a/m-q6"] .inbox-row-title')?.textContent ?? null,
+      title: view.querySelector(".inbox-pv-title").textContent,
+      note: view.querySelector(".inbox-preview .inbox-note")?.textContent ?? "",
+      closed: (view.querySelector(".inbox-row-title")?.textContent ?? "").includes("닫힘"),
+    };
+  });
+  ok(
+    "a question answered meanwhile reads 「이미 답함」 in its row and preview, not 「닫힘」",
+    meanwhile.rowTitle === "이미 답함" && meanwhile.title === "이미 답함"
+      && meanwhile.note === "그 사이 다른 쪽에서 답했어요 · 원장에 적히면 목록에서 빠져요",
+    JSON.stringify(meanwhile),
+  );
 
   // The ledger's next reading leaves both out; the numbers are Rust's again, one fewer each.
   await setSnapshot(inboxFixture());

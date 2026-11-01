@@ -123,9 +123,20 @@ struct Pressed {
     record: Option<u64>,
 }
 
+/// The rung the seat keyed whose label was written before any turn ended: the
+/// pane stands on `to` while the session's record still reads `record`.
+#[derive(Clone)]
+struct Keyed {
+    term: u32,
+    to: String,
+    record: Option<u64>,
+}
+
 /// One attempt's standing with the seat.
 #[derive(Default)]
 struct Seat {
+    /// See [`Keyed`].
+    keyed: Option<Keyed>,
     /// How many prompts its transcript held when the seat last judged a
     /// turn of it — a turn is judged once, when it is first seen ended.
     prompts_seen: usize,
@@ -621,7 +632,18 @@ fn advance(
                         settled(chosen, false, door_outcome::WITHHELD)
                     }
                 }
-                _ if now_ms.saturating_sub(waiting_since) > PICKER_WAIT_MS => {
+                keys if now_ms.saturating_sub(waiting_since) > PICKER_WAIT_MS => {
+                    // Whatever the command opened without its legend is closed,
+                    // as a person's press closes it — at a pane between turns
+                    // only: an Esc into a turn stops it (t-81861).
+                    // And over an empty line: the person's own words there are
+                    // theirs, and an Esc may clear them (t-85293 r2 P3-4).
+                    if look.at_rest
+                        && !host.line_holds_a_draft(look.pane.term)
+                        && let Some(keys) = keys
+                    {
+                        host.send(look.pane.term, keys.cancel);
+                    }
                     settled(chosen, false, door_outcome::PICKER_MISSING)
                 }
                 _ => Stage::Opened {
@@ -721,13 +743,25 @@ fn advance(
                 }
                 crate::systemone::record_rows(&STEP_EFFORT, ledger_path, &[label], now_ms);
                 let mut book = held.moves.lock().unwrap_or_else(|held| held.into_inner());
-                if let Some(seat) = book.seats.get_mut(&open.dispatch)
-                    && applied
-                {
-                    match chosen {
-                        Move::Raise => seat.raised = open.from.clone(),
-                        Move::Lower => seat.raised = None,
-                        Move::Hold => {}
+                if let Some(seat) = book.seats.get_mut(&open.dispatch) {
+                    // A keyed move whose window ran out with no turn ended: the
+                    // pane still stands on `to` while the record says the rung
+                    // before (t-81861). A turn that ended says the rest itself.
+                    seat.keyed = (applied && !ended && chosen != Move::Hold)
+                        .then(|| {
+                            open.to.clone().map(|to| Keyed {
+                                term: open.term,
+                                to,
+                                record: record_of(Some(look.raw)),
+                            })
+                        })
+                        .flatten();
+                    if applied {
+                        match chosen {
+                            Move::Raise => seat.raised = open.from.clone(),
+                            Move::Lower => seat.raised = None,
+                            Move::Hold => {}
+                        }
                     }
                 }
                 return;
@@ -752,12 +786,43 @@ fn advance(
 /// the summons' word, or none — and whether a press moves it now.
 pub(crate) fn pane_effort(host: &dyn Host, term: u32, tail: Option<&str>) -> EffortChip {
     let held = super::runtime();
-    let worker = held.as_ref().and_then(|held| worker_in(held, term));
+    let (worker, moves) = pane_reading(host, held.as_ref(), term);
+    chip_of(
+        host,
+        held.as_ref(),
+        term,
+        tail,
+        worker.as_ref(),
+        moves.as_ref(),
+    )
+}
+
+/// The one reading of the ledger and the team index a chip and a press are
+/// both made from: the worker seated at `term`, if any, and the moves of the
+/// agent in it (t-81861, P3-8).
+fn pane_reading(
+    host: &dyn Host,
+    held: Option<&super::LiveRuntime>,
+    term: u32,
+) -> (Option<WorkerPane>, Option<TurnMoves>) {
+    let worker = held.and_then(|held| worker_in(held, term));
     let moves = moves_of(host, worker.as_ref(), term);
+    (worker, moves)
+}
+
+/// [`pane_effort`] from a reading already made ([`pane_reading`]).
+fn chip_of(
+    host: &dyn Host,
+    held: Option<&super::LiveRuntime>,
+    term: u32,
+    tail: Option<&str>,
+    worker: Option<&WorkerPane>,
+    moves: Option<&TurnMoves>,
+) -> EffortChip {
     let turn = tail.and_then(effort_in);
-    let summons = worker.and_then(|worker| worker.floor);
+    let summons = worker.and_then(|worker| worker.floor.clone());
     let record = record_of(tail);
-    let pending = held.as_ref().and_then(|held| {
+    let pending = held.and_then(|held| {
         let mut book = held.moves.lock().unwrap_or_else(|held| held.into_inner());
         let book = &mut *book;
         match book.pressed.get_mut(&term) {
@@ -769,21 +834,21 @@ pub(crate) fn pane_effort(host: &dyn Host, term: u32, tail: Option<&str>) -> Eff
                 }
                 pressed.pending.clone()
             }
-            None => seat_keyed(&book.seats, term),
+            None => seat_keyed(&book.seats, term, record),
         }
     });
     let chip = effort_chip::chip(
-        moves.as_ref(),
+        moves,
         turn.as_deref(),
         summons.as_deref(),
         pending.as_deref(),
-        moment(host, held.as_ref(), term),
+        moment(host, held, term, worker.is_some()),
     );
     // The session's record caught up with the press: the word is no longer
     // waiting, though the pane stays the person's.
     if pending.is_some()
         && chip.pending.is_none()
-        && let Some(held) = held.as_ref()
+        && let Some(held) = held
         && let Some(pressed) = held
             .moves
             .lock()
@@ -798,12 +863,21 @@ pub(crate) fn pane_effort(host: &dyn Host, term: u32, tail: Option<&str>) -> Eff
 
 /// The rung the seat's own keys put `term`'s session on, while its move
 /// waits for the next turn to end — the record still says the rung before.
-fn seat_keyed(seats: &HashMap<String, Seat>, term: u32) -> Option<String> {
+fn seat_keyed(seats: &HashMap<String, Seat>, term: u32, record: Option<u64>) -> Option<String> {
     seats.values().find_map(|seat| {
-        let open = seat.open.as_ref().filter(|open| open.term == term)?;
-        matches!(open.stage, Stage::Settled { applied: true, .. })
-            .then(|| open.to.clone())
-            .flatten()
+        let open = seat.open.as_ref().filter(|open| open.term == term);
+        if let Some(open) = open {
+            return matches!(open.stage, Stage::Settled { applied: true, .. })
+                .then(|| open.to.clone())
+                .flatten();
+        }
+        // The label was written without a turn having ended (its window ran
+        // out): the session is still on the rung the seat keyed, until its
+        // record says anything else (t-81861).
+        seat.keyed
+            .as_ref()
+            .filter(|keyed| keyed.term == term && keyed.record == record)
+            .map(|keyed| keyed.to.clone())
     })
 }
 
@@ -821,18 +895,38 @@ fn record_of(tail: Option<&str>) -> Option<u64> {
 /// types unasked reads it ([`composer_at_rest`]), then the person's own
 /// words on the pane's line, then a move of the seat's own still on its way
 /// to the pane's keys, then an earlier press still typing there.
-fn moment(host: &dyn Host, held: Option<&super::LiveRuntime>, term: u32) -> Result<(), Stuck> {
+fn moment(
+    host: &dyn Host,
+    held: Option<&super::LiveRuntime>,
+    term: u32,
+    seated: bool,
+) -> Result<(), Stuck> {
     let heard = super::pane_turns()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .get(&term)
         .copied();
-    composer_at_rest(host, term, heard).map_err(|busy| match busy {
-        ComposerBusy::NeverHeard => Stuck::NeverHeard,
-        ComposerBusy::HeldByPerson => Stuck::HeldByPerson,
-        ComposerBusy::ShellInFront => Stuck::ShellInFront,
-        ComposerBusy::TurnRunning => Stuck::TurnRunning,
-    })?;
+    match composer_at_rest(host, term, heard) {
+        Ok(()) => {}
+        // A turn the person stopped by hand guards what the window types
+        // unasked; a press is asked, and on the person's own pane — no worker
+        // the ledger seated — it is theirs to make (t-81861, P3-2).
+        // The shell check the other road makes is made here too: the person
+        // who stopped the turn may have quit the agent since (t-85293 r2 P3-3).
+        Err(ComposerBusy::HeldByPerson) if !seated => {
+            if host.shell_in_front(term) {
+                return Err(Stuck::ShellInFront);
+            }
+        }
+        Err(busy) => {
+            return Err(match busy {
+                ComposerBusy::NeverHeard => Stuck::NeverHeard,
+                ComposerBusy::HeldByPerson => Stuck::HeldByPerson,
+                ComposerBusy::ShellInFront => Stuck::ShellInFront,
+                ComposerBusy::TurnRunning => Stuck::TurnRunning,
+            });
+        }
+    }
     if host.line_holds_a_draft(term) {
         return Err(Stuck::Draft);
     }
@@ -933,13 +1027,20 @@ pub(crate) fn press(
     tail: Option<&str>,
     to: &str,
 ) -> Result<EffortChip, PressRefused> {
-    let chip = pane_effort(host, term, tail);
+    let held = super::runtime();
+    let (worker, moves) = pane_reading(host, held.as_ref(), term);
+    let chip = chip_of(
+        host,
+        held.as_ref(),
+        term,
+        tail,
+        worker.as_ref(),
+        moves.as_ref(),
+    );
     if let Some(stuck) = chip.stuck {
         return Err(PressRefused::Stuck(stuck));
     }
-    let held = super::runtime();
-    let worker = held.as_ref().and_then(|held| worker_in(held, term));
-    let moves = moves_of(host, worker.as_ref(), term).ok_or(PressRefused::Stuck(Stuck::NoRoad))?;
+    let moves = moves.ok_or(PressRefused::Stuck(Stuck::NoRoad))?;
     let from = chip
         .pending
         .as_deref()
@@ -965,7 +1066,7 @@ pub(crate) fn press(
     })
     .transpose()?
     .flatten();
-    let carried = carry(host, term, &keys);
+    let carried = carry(host, term, worker.is_some(), &keys);
     // A press the door refused gives the pane back as it stood — no pane
     // of the person's when no earlier press had made it one.
     with_pressed(held.as_ref(), |pressed| match (&carried, before) {
@@ -985,7 +1086,14 @@ pub(crate) fn press(
         }
     });
     carried?;
-    Ok(pane_effort(host, term, tail))
+    Ok(chip_of(
+        host,
+        held.as_ref(),
+        term,
+        tail,
+        worker.as_ref(),
+        Some(&moves),
+    ))
 }
 
 /// Write the panes a person moved, under the book's lock — `None` in a
@@ -1005,9 +1113,27 @@ fn with_pressed<R>(
     })
 }
 
+/// Whether an Esc at `term` closes a menu and does no more: between turns,
+/// by the reading every door that types unasked makes, with the agent in
+/// front, over an empty line. A pane the person stopped by hand counts as
+/// between turns when no worker is seated there ([`moment`]'s rule).
+fn closing_is_safe(host: &dyn Host, term: u32, seated: bool) -> bool {
+    let heard = super::pane_turns()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .get(&term)
+        .copied();
+    let at_rest = match composer_at_rest(host, term, heard) {
+        Ok(()) => true,
+        Err(ComposerBusy::HeldByPerson) if !seated => !host.shell_in_front(term),
+        Err(_) => false,
+    };
+    at_rest && !host.line_holds_a_draft(term)
+}
+
 /// Type a press's keys at `term`: the line, or the picker's command and,
 /// once its legend shows, the arrows and the this-session key.
-fn carry(host: &dyn Host, term: u32, keys: &PressKeys) -> Result<(), PressRefused> {
+fn carry(host: &dyn Host, term: u32, seated: bool, keys: &PressKeys) -> Result<(), PressRefused> {
     let line = match keys {
         PressKeys::Line(line) => line.as_str(),
         PressKeys::Picker { keys, .. } => keys.open,
@@ -1030,13 +1156,12 @@ fn carry(host: &dyn Host, term: u32, keys: &PressKeys) -> Result<(), PressRefuse
         if since.elapsed() > wait {
             // Whatever the command opened without its legend is closed, so
             // no picker stands open that nobody drives — at a pane still
-            // between turns only: an Esc into a turn stops it.
-            let heard = super::pane_turns()
-                .lock()
-                .unwrap_or_else(|held| held.into_inner())
-                .get(&term)
-                .copied();
-            if composer_at_rest(host, term, heard).is_ok() {
+            // between turns only: an Esc into a turn stops it. The same
+            // reading the press began on ([`moment`]): a pane the person
+            // stopped by hand is theirs to close the menu on, no worker's;
+            // and their words on the line stay unless the Esc is known not
+            // to clear them (t-85293 r2 P3-2, P3-4).
+            if closing_is_safe(host, term, seated) {
                 host.send(term, keys.cancel);
             }
             return Err(PressRefused::Door(door_outcome::PICKER_MISSING));

@@ -57476,6 +57476,40 @@ suite("worker-question-raised", async ({ browser, origin, ok }) => {
       JSON.stringify({ said, reasons }),
     );
 
+    /* The reason is one quiet line at any width (t-85327, t-84343 r1 P3-4): in the five languages, at 320 px,
+     * every reason stays on one row, and the row carries the whole sentence as its title for what the ellipsis
+     * cut. */
+    await page.setViewportSize({ width: 320, height: 800 });
+    const rows = [];
+    for (const locale of ["ko", "en", "ja", "zh", "es"]) {
+      for (const why of Object.keys(reasons)) {
+        rows.push(await page.evaluate(async ({ locale, why }) => {
+          setLocale(locale);
+          window.__TELL__("hook:agent", { term: window.__TERM__, state: "working", agent: "claude", session: "s-raised" });
+          await window.__BEATS__();
+          window.__TELL__("ask:raised", { term: window.__TERM__, why });
+          window.__TELL__("hook:agent", { term: window.__TERM__, state: "waiting", agent: "claude", session: "s-raised",
+            ask_prompt: window.__ASK__(`${why} — 어느 계정으로 로그인할까요?`) });
+          await window.__BEATS__();
+          const line = document.querySelector(".pane-chat .pane-chat-ask .board-ask-raised");
+          if (!line) return { locale, why, found: false };
+          const rect = line.getBoundingClientRect();
+          const style = getComputedStyle(line);
+          return {
+            locale, why, found: true, rows: Math.round(rect.height / (parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.3)),
+            title: line.dataset.tip === line.textContent, text: line.textContent !== "",
+          };
+        }, { locale, why }));
+      }
+    }
+    await page.evaluate(() => setLocale("ko"));
+    await page.setViewportSize({ width: 1440, height: 900 });
+    ok(
+      "a raised question's reason stays on one row at 320 px in all five languages, and its title is the whole sentence (t-85327, t-84343 r1 P3-4)",
+      rows.length === 20 && rows.every((row) => row.found && row.rows === 1 && row.title && row.text),
+      JSON.stringify(rows.filter((row) => !(row.found && row.rows === 1 && row.title && row.text))),
+    );
+
     /* A question given to the person goes with its pane, and its reason goes too (t-84343, 4275): a card a later
      * pane at the same number draws — a question that was never a coordinator's — says nothing of one. The words
      * are read off the one function every card at that pane opens with. */

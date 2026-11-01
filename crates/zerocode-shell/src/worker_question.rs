@@ -31,9 +31,9 @@
 //! it can no longer take an answer while the pane still asks. A question
 //! given to the person says why on the card (`ask:raised`).
 //!
-//! A question the pane moved past before the answer came is refused back to
-//! the coordinator as 「지나간 질문」 and leaves nothing on the person's
-//! screen: the moving past is the hook's word (a report that is no longer the
+//! A question the pane moved past before the answer came — one handed to the
+//! person that the person never saw included — is refused back to the
+//! coordinator as 「지나간 질문」 and leaves nothing on the person's screen: the moving past is the hook's word (a report that is no longer the
 //! asking), or the answer door's, which reads the screen and refuses
 //! ([`crate::cmd::terminal::refused_as_passed`]) — the judgement t-82287 made
 //! for the person's own answers.
@@ -203,9 +203,16 @@ pub(crate) fn step(
         Standing::Closed => return Step::Raise(Raised::Unanswerable),
         // The coordinator gave it to the person: given at once, then the
         // person's until they answer — or until the worker or its pane goes,
-        // when it is let go with nobody told.
+        // when the person is told nothing more. A worker gone before the
+        // person ever saw the question does not take the card with it: the
+        // pane still asks, so it is raised (t-85327, t-84343 r1 P3-1). A pane
+        // that moved past it before the person ever saw it leaves the
+        // coordinator believing the person holds it: it is told the question
+        // passed (t-85293 r2 P2-1), as a numbered answer to it is.
         Standing::Answered(words) if hands_to_person(words) => {
-            return if passed || seat.is_none() {
+            return if passed && !raised {
+                Step::RefusePassed
+            } else if passed || (raised && seat.is_none()) {
                 Step::Forget
             } else if raised {
                 Step::Wait
@@ -778,13 +785,11 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
     };
     take_up(app, waiting, &facts, now_ms);
     for (question, was) in gone {
-        match facts.standing(&was.seat.run, &question) {
-            Standing::Waiting => {}
-            // Given to the person: nobody to tell.
-            Standing::Answered(words) if hands_to_person(&words) => {
-                left().remove(&question);
-            }
-            Standing::Answered(_) => {
+        match on_late(&facts.standing(&was.seat.run, &question)) {
+            Late::Wait => {}
+            // Answered after the pane left — a 「사람에게」 too: the coordinator
+            // believes the person holds it, and no screen does.
+            Late::Tell => {
                 tell(
                     &was.seat,
                     &question,
@@ -793,7 +798,7 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
                 );
                 left().remove(&question);
             }
-            Standing::Closed => {
+            Late::Drop => {
                 left().remove(&question);
             }
         }
@@ -825,6 +830,29 @@ pub(crate) fn sweep(app: &AppHandle, host: &dyn Host, now_ms: i64) {
         }
     }
     write_down(app, &path);
+}
+
+/// What a beat does with a question its pane already left (it is in `left`)
+/// once the ledger's word on it is read (t-85327, t-84343 r1 P3-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Late {
+    /// No answer yet: look again on the next beat.
+    Wait,
+    /// Answered, so the coordinator is told the question passed — a 「사람에게」
+    /// too: the coordinator believes the person holds it, and no screen does —
+    /// and the question is let go.
+    Tell,
+    /// Closed, or nothing to say: let go.
+    Drop,
+}
+
+/// [`Late`] for the ledger's word on a question the pane left.
+fn on_late(standing: &Standing) -> Late {
+    match standing {
+        Standing::Waiting => Late::Wait,
+        Standing::Answered(_) => Late::Tell,
+        Standing::Closed => Late::Drop,
+    }
 }
 
 /// What one beat reads of the ledger for every question the window carries
@@ -1792,6 +1820,28 @@ mod tests {
         assert!(taken_up(kept, seat(true, false), 4).is_none());
     }
 
+    /// t-85327 (t-84343 r1 P3-2): a coordinator who answers 「사람에게」 after
+    /// the pane left the question is told it passed, as with any answer — the
+    /// person has nothing on their screen to answer.
+    #[test]
+    fn an_answer_to_a_question_the_pane_left_is_told_it_passed_even_when_it_is_to_the_person() {
+        assert_eq!(on_late(&Standing::Waiting), Late::Wait);
+        assert_eq!(on_late(&Standing::Closed), Late::Drop);
+        assert_eq!(on_late(&Standing::Answered("2".into())), Late::Tell);
+        for word in TO_PERSON {
+            assert_eq!(
+                on_late(&Standing::Answered(word.to_string())),
+                Late::Tell,
+                "{word}"
+            );
+            assert_eq!(
+                on_late(&Standing::Answered(format!("「{word}」."))),
+                Late::Tell,
+                "{word}"
+            );
+        }
+    }
+
     #[test]
     fn the_passed_letter_says_the_question_passed_and_nothing_was_typed() {
         let words = passed_letter("w-2", 7, "m-5");
@@ -1907,12 +1957,32 @@ mod tests {
     fn a_question_given_to_the_person_goes_quietly_with_its_worker_or_its_pane() {
         let question = prompt(false);
         let handed = Standing::Answered(TO_PERSON[0].to_string());
-        // The worker is no live worker at that pane any more.
-        for raised in [false, true] {
+        // The worker is no live worker at that pane any more: a question the
+        // person already holds is let go; one the person never saw is raised
+        // first (t-85327, t-84343 r1 P3-1) — the card is not skipped because
+        // the seat emptied in the beat the coordinator answered.
+        assert_eq!(
+            step(&question, &handed, false, None, true, NOW, NOW),
+            Step::Forget
+        );
+        assert_eq!(
+            step(&question, &handed, false, None, false, NOW, NOW),
+            Step::Raise(Raised::CoordinatorHanded)
+        );
+        // The pane moved past it. The person already holds it: nothing to
+        // raise, nobody to tell. The person never saw it: the coordinator
+        // believes the person has it, so it is told the pane moved on
+        // (t-85293 r1 P2-1) — with or without a seat.
+        for seat in [None, Some(&seat(true, false))] {
             assert_eq!(
-                step(&question, &handed, false, None, raised, NOW, NOW),
+                step(&question, &handed, true, seat, true, NOW, NOW),
                 Step::Forget,
-                "raised: {raised}"
+                "raised, seat: {seat:?}"
+            );
+            assert_eq!(
+                step(&question, &handed, true, seat, false, NOW, NOW),
+                Step::RefusePassed,
+                "not raised, seat: {seat:?}"
             );
         }
         // The pane goes: nothing is kept for a late answer to refuse.

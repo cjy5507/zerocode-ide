@@ -759,7 +759,9 @@ pub(crate) fn transcript_log_back<F: std::io::Read + std::io::Seek>(
                     break 'back;
                 }
                 // A line this read stands inside, none taken yet, is read whole.
-                let inside = start == stop;
+                // (None when the first look found no line end within the cap:
+                // that read is spent and stops, saying so — t-85293.)
+                let inside = start == stop && !below.is_empty();
                 if spent >= reach.budget && !inside {
                     break 'back;
                 }

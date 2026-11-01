@@ -148,3 +148,23 @@ fn every_reason_a_press_is_refused_has_words_in_the_window() {
         );
     }
 }
+
+/// t-81861 (P3-8): one press reads the ledger's view and the team index once,
+/// not three times. The press takes the worker and the moves from one reading
+/// that the chip is also drawn from — it calls neither `worker_in` nor
+/// `moves_of` itself, and never `pane_effort`, which reads again.
+#[test]
+fn a_press_reads_the_ledger_and_the_team_index_once() {
+    let seat = shell_source("orchestration/step_effort.rs");
+    let press = super::support::block_after(&seat, "pub(crate) fn press(");
+    for again in ["worker_in(", "moves_of(", "pane_effort("] {
+        assert!(
+            !press.contains(again),
+            "a press reads `{again}` again beside the reading its chip came from:\n{press}"
+        );
+    }
+    assert!(
+        press.contains("pane_reading("),
+        "the press no longer takes its worker and moves from the one reading:\n{press}"
+    );
+}

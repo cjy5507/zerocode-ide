@@ -1179,6 +1179,14 @@ pub(crate) fn close_question(
     if reason.trim().is_empty() {
         return Err("a close without an answer needs its reason".into());
     }
+    // The ledger's own line (t-84271 ①), refused here with the number before
+    // the ledger is asked.
+    let max = zerocode_core::orchestration::QUESTION_CLOSE_REASON_MAX;
+    if reason.trim().chars().count() > max {
+        return Err(format!(
+            "the reason is one line of at most {max} characters"
+        ));
+    }
     as_the_coordinator(
         run_id,
         [
@@ -1336,8 +1344,12 @@ pub(crate) fn pass_review(
 /// The result the board's pass sends (t-82501): the one the task holds now
 /// with the pass added ([`board_pass_result`]) — `task-update` replaces a
 /// result whole, so a pass that sent its one key would take the worker's
-/// summary, tests and report with it. Read from the image the board drew
-/// from; a task that image does not hold is not written over blind.
+/// summary, tests and report with it. Read from the image as it stands at the
+/// press, not the one the board drew; a task that image does not hold is not
+/// written over blind. What this cannot close is the few milliseconds between
+/// that reading and the ledger's write: a `task-update` the coordinator makes
+/// for the same attempt and source in between is written over (t-84271 ④) —
+/// closing it takes a compare in the ledger's own `task-update`.
 fn pass_result(run: Option<&Run>, run_id: &str, task: &str, now_ms: i64) -> Result<String, String> {
     let held = run
         .and_then(|run| run.task(task))
@@ -2858,6 +2870,11 @@ mod tests {
         let unnamed = close_question("run-x", "m-1", "이미 끝난 일", " ", 1)
             .expect_err("a close without a request name");
         assert!(unnamed.contains("retryRequest"), "{unnamed}");
+        // Nor one longer than the line the ledger takes (t-84271 ①): refused here, with the number.
+        let max = zerocode_core::orchestration::QUESTION_CLOSE_REASON_MAX;
+        let long = close_question("run-x", "m-1", &"가".repeat(max + 1), "ui-close-2", 1)
+            .expect_err("a reason over its length");
+        assert!(long.contains(&max.to_string()), "{long}");
     }
 
     /// The board's pass is written over the result the task holds (t-82501):
