@@ -140,6 +140,41 @@ export async function testYourTurn(browser, origin, ok) {
       JSON.stringify(list),
     );
 
+    /* t-84799 B1·B2·B7: the list's cards as the draft says them — the question names the agent's model, a shell
+     * permission reads 「셸 명령 허락 — …」 with its door 「대화 열기 →」, and a permission asked by the plan tool shows the
+     * plan itself instead of a summary line. */
+    const cards = await page.evaluate(async () => {
+      const seen = {};
+      paneModels.set(6, "claude-opus-5-5");
+      const base = window.__turnCards();
+      const plan = { ...base[1], pane: "term:9", heading: "계획 에이전트", ask: "ExitPlanMode",
+        approval: { tool: "ExitPlanMode", summary: "", plan: "## 계획\n\n1. 첫째 단계\n2. 둘째 단계" } };
+      await window.__setTurns([base[0], base[1], plan]);
+      window.__chip().click();
+      await window.__settle();
+      const [question, shell, planned] = window.__items();
+      seen.head = question.querySelector(".your-turn-head").textContent.replace(/\s+/g, " ").trim();
+      seen.shell = shell.querySelector(".your-turn-question").textContent.replace(/\s+/g, " ").trim();
+      const door = shell.querySelector(".your-turn-acts .your-turn-open");
+      seen.door = door?.textContent.trim() ?? null;
+      seen.doorMark = Boolean(door?.querySelector("svg use[href='#i-forward']"));
+      seen.planTitle = planned.querySelector(".your-turn-question")?.textContent.replace(/\s+/g, " ").trim() ?? null;
+      seen.planProse = planned.querySelector(".your-turn-plan")?.textContent.replace(/\s+/g, " ").trim() ?? null;
+      seen.planHeading = Boolean(planned.querySelector(".your-turn-plan h2, .your-turn-plan h3, .your-turn-plan strong"));
+      window.__press("Escape");
+      await window.__settle();
+      paneModels.delete(6);
+      await window.__setTurns(window.__turnCards());
+      return seen;
+    });
+    ok(
+      "a list question names the agent and its model, a shell permission reads 「셸 명령 허락 — npm install」 with a 「대화 열기 →」 door, and a plan permission shows the plan",
+      cards.head.includes("zo") && cards.head.includes("claude-opus-5-5") && cards.shell === "셸 명령 허락 — npm install" &&
+        cards.door === "대화 열기" && cards.doorMark && cards.planTitle === "계획을 승인할까요?" &&
+        cards.planProse?.includes("첫째 단계") && cards.planProse.includes("둘째 단계") && cards.planHeading,
+      JSON.stringify(cards),
+    );
+
     /* A number answers the question through the answer door, and the chip counts down. */
     const answered = await page.evaluate(async () => {
       const seen = {};
