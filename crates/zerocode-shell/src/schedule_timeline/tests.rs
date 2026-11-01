@@ -834,7 +834,10 @@ fn an_answer_says_how_many_finished_jobs_it_could_not_carry() {
     let narrow = book.read(&roots, &ask_from(at(60)), now, KST);
     assert_eq!(narrow.jobs_left_out, None, "a range under the cap");
     let quiet = serde_json::to_value(&narrow).expect("the answer serializes");
-    assert!(quiet.get("jobs_left_out").is_none(), "no word when none is left out");
+    assert!(
+        quiet.get("jobs_left_out").is_none(),
+        "no word when none is left out"
+    );
 }
 
 /// The window places a waiting job's start on the runner's lanes, so the
