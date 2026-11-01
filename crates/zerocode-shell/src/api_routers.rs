@@ -460,6 +460,12 @@ impl RouterKeys for Keychain {
         if !self.available {
             return Err(RouterRefusal::keychain_unavailable());
         }
+        crate::accounts::keychain_refuses_value(service, secret).map_err(|message| {
+            RouterRefusal {
+                kind: RouterRefusalKind::ValueRefused,
+                message,
+            }
+        })?;
         crate::accounts::write_keychain_service(service, secret).map_err(RouterRefusal::from)
     }
 
@@ -628,7 +634,9 @@ fn commit_settings_and_key(
     };
     if let Err(mut error) = changed.and_then(|()| write(path, updated).map_err(RouterRefusal::from))
     {
-        if let Some(change) = key {
+        // A value the keychain's road refused touched nothing, so nothing is put
+        // back: the put-back is a delete and a write of a key that was fine.
+        if let Some(change) = key.filter(|_| error.kind != RouterRefusalKind::ValueRefused) {
             let restored = match change.previous {
                 Some(previous) => keys.write(change.service, previous),
                 None => keys.delete(change.service),

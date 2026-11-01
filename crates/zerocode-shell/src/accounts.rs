@@ -1252,6 +1252,32 @@ const fn keychain_line_too_long(line: &str) -> bool {
     line.len() > SECURITY_LINE_BYTES
 }
 
+/// Why a write of this value would be refused before anything is touched, for a
+/// caller that does something different about such a refusal. In the same words as
+/// the refusal of `write_keychain_service`.
+pub(crate) fn keychain_refuses_value(service: &str, credentials: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // No account to name is the write's own refusal, and no judgment of the value.
+        let Ok(user) = keychain_account(keychain_user()) else {
+            return Ok(());
+        };
+        keychain_add_line(service, &user, credentials)
+            .map(|_| ())
+            .map_err(|error| keychain_write_refused(service, &error))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (service, credentials);
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_write_refused(service: &str, error: &str) -> String {
+    format!("키체인에 자격증명을 쓰지 못했습니다: {service} — {error}")
+}
+
 /// Put the credentials into a named service.
 ///
 /// A no-op off macOS: the keychain is Apple's, and the original guards the same
@@ -1268,8 +1294,7 @@ pub(crate) fn write_keychain_service(service: &str, credentials: &str) -> Result
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let user = keychain_account(keychain_user())?;
-        let refused =
-            |error: String| format!("키체인에 자격증명을 쓰지 못했습니다: {service} — {error}");
+        let refused = |error: String| keychain_write_refused(service, &error);
         // Before the delete below: a value the tool cannot take must not cost the
         // person the item standing there, and no process has seen it yet.
         let line = keychain_add_line(service, &user, credentials).map_err(refused)?;
