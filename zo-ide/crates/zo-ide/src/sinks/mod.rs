@@ -1231,3 +1231,53 @@ mod prompt_wire_tests {
         assert!(json.get("risk_level").is_none(), "a question states no risk: {json}");
     }
 }
+
+#[cfg(test)]
+mod usage_wire_tests {
+    use super::render_block_from_value;
+    use super::serializable::SerializableRenderBlock;
+    use runtime::message_stream::RenderBlock;
+    use runtime::usage::TokenUsage;
+
+    /// A line written before the usage frame named a window still reads, and
+    /// writing it back does not make a window up.
+    #[test]
+    fn a_usage_line_without_a_window_still_reads() {
+        let old = serde_json::json!({
+            "type": "usage",
+            "ctx_tokens": 13,
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cache_read_tokens": 2,
+            "cache_creation_tokens": 1,
+        });
+
+        match render_block_from_value(&old).expect("an old usage line reads") {
+            RenderBlock::Usage { ctx_tokens, cumulative, .. } => {
+                assert_eq!(ctx_tokens, 13);
+                assert_eq!(cumulative.input_tokens, 10);
+                assert_eq!(cumulative.cache_creation_input_tokens, 1);
+            }
+            other => panic!("not a Usage block: {other:?}"),
+        }
+        let frame: SerializableRenderBlock = serde_json::from_value(old.clone()).expect("reads");
+        assert_eq!(serde_json::to_value(&frame).expect("writes"), old);
+    }
+
+    /// The window is the channel's to name, from its status card. A surface
+    /// with no card writes the usage line it always wrote.
+    #[test]
+    fn a_usage_block_alone_names_no_window() {
+        let block = RenderBlock::Usage {
+            ctx_tokens: 13,
+            cumulative: TokenUsage::default(),
+            current: TokenUsage::default(),
+        };
+
+        let json = serde_json::to_value(SerializableRenderBlock::from_block(&block))
+            .expect("serialize");
+
+        assert_eq!(json["type"], "usage");
+        assert!(json.get("context_window").is_none(), "{json}");
+    }
+}

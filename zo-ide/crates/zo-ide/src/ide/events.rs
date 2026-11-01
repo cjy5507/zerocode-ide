@@ -947,6 +947,20 @@ mod tests {
         BlockId, PermissionChoice, PermissionDecision, PermissionPrompt, ToolCallId,
     };
 
+    fn usage_block(ctx_tokens: u64) -> RenderBlock {
+        RenderBlock::Usage {
+            ctx_tokens,
+            cumulative: runtime::usage::TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_input_tokens: 2,
+                cache_creation_input_tokens: 1,
+                output_tokens_details: None,
+            },
+            current: runtime::usage::TokenUsage::default(),
+        }
+    }
+
     fn permission_block(id: u64) -> RenderBlock {
         let (responder, _unused) = tokio::sync::oneshot::channel();
         RenderBlock::PermissionPrompt(PermissionPrompt {
@@ -1049,6 +1063,70 @@ mod tests {
             String::from_utf8(bytes).expect("utf8"),
             r#"{"type":"session_status","session":"s","model":"claude-opus-5","permission_mode":"read-only","effort":"high","cwd":"/tmp/x","ctx_tokens":7,"context_window":200000,"git_branch":null,"autonomy":{"goal":{"phase":"running","next_at":42000,"gates_passed":1,"gates_total":2,"action_turns":3,"stalled_turns":0},"loops":[],"budget":{"continuations":0,"max_continuations":0,"assistant_turns":0,"max_assistant_turns":0,"output_tokens":0,"max_output_tokens":0,"active_millis":0,"max_wall_clock_secs":0}}}"#
         );
+    }
+
+    /// The line the window's composer chip reads (`rememberSessionUsage`). The
+    /// bytes, as with `session_status`, because a field that leaves the frame
+    /// shows up nowhere else: the chip just draws a count with no window.
+    #[tokio::test]
+    async fn usage_frame_bytes_name_the_window_in_tokens() {
+        let channel = open_channel().await;
+        channel.state.set_status(StatusCard {
+            context_window: 200_000,
+            ..StatusCard::default()
+        });
+        let mut frames = channel.state.subscribe();
+
+        assert_eq!(channel.publish(&usage_block(13)), None, "usage asks nothing");
+
+        assert_eq!(
+            frames.try_recv().expect("the usage frame").as_str(),
+            r#"{"type":"usage","ctx_tokens":13,"input_tokens":10,"output_tokens":5,"cache_read_tokens":2,"cache_creation_tokens":1,"context_window":200000}"#
+        );
+    }
+
+    /// Two frames, one number: the usage frame says what the status frame just
+    /// said, also after the status moved to a model with another window.
+    #[tokio::test]
+    async fn a_usage_frame_says_the_window_the_status_frame_says() {
+        let channel = open_channel().await;
+        let mut frames = channel.state.subscribe();
+
+        for window in [1_000_000_u64, 258_000] {
+            let card = StatusCard {
+                context_window: window,
+                ..StatusCard::default()
+            };
+            let status = serde_json::to_value(StatusFrame {
+                kind: FRAME_SESSION_STATUS,
+                session: "s",
+                card: &card,
+            })
+            .expect("a status frame serializes");
+            channel.state.set_status(card);
+
+            let _ = channel.publish(&usage_block(13));
+
+            let line = frames.try_recv().expect("the usage frame");
+            let usage: serde_json::Value = serde_json::from_str(&line).expect("a usage frame is JSON");
+            assert_eq!(usage["context_window"], status["context_window"], "{line}");
+            assert_eq!(usage["context_window"], window, "{line}");
+        }
+    }
+
+    /// A channel no status reached yet knows no window: the key stays out, and
+    /// the window keeps the one it holds. Zero would read as no window at all.
+    #[tokio::test]
+    async fn a_usage_frame_before_any_status_leaves_the_window_out() {
+        let channel = open_channel().await;
+        let mut frames = channel.state.subscribe();
+
+        let _ = channel.publish(&usage_block(13));
+
+        let line = frames.try_recv().expect("the usage frame");
+        let usage: serde_json::Value = serde_json::from_str(&line).expect("a usage frame is JSON");
+        assert_eq!(usage["type"], "usage", "{line}");
+        assert!(usage.get("context_window").is_none(), "{line}");
     }
 
     #[test]
