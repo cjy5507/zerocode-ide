@@ -304,6 +304,9 @@ pub(crate) mod fixtures {
         include_str!("../tests/fixtures/claude-code-2.1.316-queue-inline.reads");
     pub(crate) const FULLSCREEN: &str =
         include_str!("../tests/fixtures/claude-code-2.1.316-queue-fullscreen.reads");
+    /// An empty field at rest and the drafts typed into it, taken from the real CLI.
+    pub(crate) const DRAFTS: &str =
+        include_str!("../tests/fixtures/claude-code-2.1.316-drafts.reads");
 
     /// The marks of each recording: the moments the screen was read.
     pub(crate) const RECORDED_MARKS: [(&str, &[&str]); 2] = [
@@ -383,7 +386,7 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 mod tests {
     use super::fixtures::{
-        CARET, RECORDED_MARKS, WIDTH as RUNNING_WIDTH, hidden, named_rule, recorded,
+        CARET, DRAFTS, RECORDED_MARKS, WIDTH as RUNNING_WIDTH, hidden, named_rule, recorded,
     };
     use super::*;
     use zerocode_pty::Terminal;
@@ -986,5 +989,54 @@ mod tests {
         assert_ne!(said, empty, "a draft and an empty field looked the same");
         // Not the agent this module can read: it says so and nothing else.
         assert!(look("codex", draft.grid()).contains("unread"));
+    }
+
+    /// The drafts the real CLI drew (t-86909 r3): the shapes the hand-built ones above imitate. A
+    /// letter with the caret after it, the caret moved onto it, three letters, a paste chip, the
+    /// caret on a letter in front of a chip — none is an empty field, and the field before them is.
+    #[test]
+    fn the_drafts_a_real_claude_code_2_1_316_drew_are_never_read_as_empty() {
+        assert!(
+            observed("claude", recorded(DRAFTS, "idle").grid()),
+            "the empty field before the drafts was not read as empty"
+        );
+        for mark in [
+            "typed-x",
+            "x-caret-at-start",
+            "xyz-caret-at-end",
+            "xyz-caret-at-start",
+            "big-paste",
+            "big-paste-caret-at-start",
+            "q-left-arrow",
+        ] {
+            assert!(
+                !observed("claude", recorded(DRAFTS, mark).grid()),
+                "{mark}: a real draft was read as empty"
+            );
+        }
+    }
+
+    /// The probe of the hand-over on a real field (t-86909 r3): a space typed on the empty field
+    /// is the recorded screen of a typed letter with that letter's cell blank — the caret stands
+    /// one cell on, the cursor with it, hidden. It holds the probe; the letter is none.
+    #[test]
+    fn the_probe_on_a_real_claude_code_2_1_316_field_is_held_and_a_letter_is_not() {
+        let letter = recorded(DRAFTS, "typed-x");
+        let (row, col) = letter.grid().cursor();
+        assert!(
+            !holds_probe("claude", letter.grid()),
+            "a letter is no probe"
+        );
+        let mut space = recorded(DRAFTS, "typed-x");
+        // the letter's cell is the one before the caret (the column is 0-based, the move 1-based)
+        space.feed(format!("\x1b[{};{}H ", row + 1, col).as_bytes());
+        assert!(
+            holds_probe("claude", space.grid()),
+            "the probe a real field shows was not held"
+        );
+        assert!(
+            !holds_probe("claude", recorded(DRAFTS, "idle").grid()),
+            "an empty field holds no probe"
+        );
     }
 }

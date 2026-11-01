@@ -1889,18 +1889,46 @@ async function testWireStartWithoutAnswer(browser, origin, ok) {
 }
 
 /* P2-3 — 고치는 중에 대화가 선으로 넘어가면 고치던 글이 대기열 제자리에 들어가고 곁에 둔 초안이 상자로 돌아온다. */
+/* The backend a pane's hand-over to a wire asks: a wire at rest that stands at once. */
+async function standWireForHandOver(page) {
+  await page.evaluate(() => {
+    window.__WIRE_LOG__ = {
+      found: true, skipped: false, next: 0, turns: [], status: "idle", asks: [], live: [], agent: "claude", protocol: "app-server",
+      models: [], modes: [], commands: [], version: "2.1.316", steer: true,
+    };
+    window.__ANSWER__.wire_start = (args) => ({ id: 91, agent: args.agent, protocol: "app-server", version: "2.1.316", model: null, session: args.resume });
+    window.__ANSWER__.wire_log = () => window.__WIRE_LOG__;
+    window.__ANSWER__.wire_history = () => ({ found: false, next: 0, turns: [] });
+  });
+}
+
 async function testCarryDuringAnEdit(browser, origin, ok) {
+  await scene(browser, origin, ok, "carry keeps the unsure mark", async (page) => {
+    const term = await openPane(page, "claude", "working");
+    await standWireForHandOver(page);
+    await queueWords(page, "하나", "둘");
+    await page.evaluate(() => { window.__ACTS__.steer = () => { throw "turn-unknown"; }; });
+    await press(page, "steer", 0);
+    await page.evaluate(() => { window.__ACTS__.steer = null; });
+    await page.evaluate(async (term) => { await handPaneToWire(term); }, term);
+    await turnEnds(page, term, 200);
+    await page.waitForFunction(() => tabs.some((tab) => tab.id === "wire:91"), null, { timeout: 6000 }).catch(() => null);
+    await page.waitForTimeout(900);
+    const carried = await page.evaluate(LOOK);
+    await press(page, "drop", 0);
+    await page.waitForTimeout(500);
+    const after = await page.evaluate(LOOK);
+    const sends = (look) => look.calls.filter((call) => call.door === "wire_send");
+    ok(
+      "a_row_of_unknown_outcome_stays_unsure_when_the_queue_goes_to_the_wire: the pane's steer of 「하나」 got no answer; after the hand-over the wire's page holds both rows, 「하나」 is first and was not sent, and deleting it lets 「둘」 go to the wire once",
+      SAME(carried.queue, ["하나", "둘"]) && sends(carried).length === 0 && (carried.why ?? "").length >= 8 &&
+        SAME(sends(after), [{ door: "wire_send", id: 91, text: "둘" }]) && SAME(after.queue, []),
+      JSON.stringify({ carried: { queue: carried.queue, sends: sends(carried) }, after: { queue: after.queue, sends: sends(after) } }),
+    );
+  });
   await scene(browser, origin, ok, "carry during an edit", async (page) => {
     const term = await openPane(page, "claude", "working");
-    await page.evaluate(() => {
-      window.__WIRE_LOG__ = {
-        found: true, skipped: false, next: 0, turns: [], status: "idle", asks: [], live: [], agent: "claude", protocol: "app-server",
-        models: [], modes: [], commands: [], version: "2.1.316", steer: true,
-      };
-      window.__ANSWER__.wire_start = (args) => ({ id: 91, agent: args.agent, protocol: "app-server", version: "2.1.316", model: null, session: args.resume });
-      window.__ANSWER__.wire_log = () => window.__WIRE_LOG__;
-      window.__ANSWER__.wire_history = () => ({ found: false, next: 0, turns: [] });
-    });
+    await standWireForHandOver(page);
     await queueWords(page, "하나", "둘");
     const box = page.locator(".worker-composer-box:visible").first();
     await box.click();
