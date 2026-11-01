@@ -117,8 +117,17 @@ fn the_guide_gives_a_question_to_the_person_in_the_windows_own_words() {
             "the guide does not give the person a question with `{word}`:\n{line}"
         );
     }
+    // Open where the person answers it — the worker's screen — and not in the
+    // ledger, which counts the coordinator's reply as the answer (t-85327,
+    // t-84343 r1 P3-6): the guide says which, so a coordinator does not look
+    // for the question in `check --types question` afterwards.
     assert!(
-        line.contains("the question stays open until the person answers"),
+        line.contains("the question stays open on the worker's screen until the person answers")
+            && line.contains("the ledger counts your reply as its answer"),
+        "{line}"
+    );
+    assert!(
+        !line.contains("the question stays open until the person answers"),
         "{line}"
     );
 }
