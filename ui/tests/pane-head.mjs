@@ -459,5 +459,37 @@ export async function testPaneFirstView(browser, origin, ok, outputDir) {
         back.aloneKept && back.unknownRead === "conversation",
       JSON.stringify({ ...back, wires }),
     );
+
+    /* t-84799 B6b: an agent that left its pane — the backend saw the shell take the terminal back, the hook word
+     * `idle` — leaves no head and no switch on a pane that shows its screen; a conversation standing over the
+     * screen keeps its head, which is the way back; the agent's next word brings the head back. */
+    const left = await page.evaluate(async () => {
+      applySettingsSnapshot({ revision: settingsRevision + 1, agent_pane_first_view: "terminal" });
+      await window.__PAINTED__();
+      const seen = {};
+      const headOf = (term) => {
+        const tab = tabOfTerm(term);
+        const head = paneHeads.get(tab.id);
+        return Boolean(head) && !head.hidden && head.getClientRects().length > 0;
+      };
+      const screenTerm = await window.__OPEN_AGENT_PANE__("s-left-0001");
+      seen.screenBefore = { head: headOf(screenTerm), toggle: !el("view-toggle").hidden, chat: paneChatOn(screenTerm) };
+      await window.__AGAIN__(screenTerm, "s-left-0001", "idle");
+      seen.screenAfter = { head: headOf(screenTerm), toggle: !el("view-toggle").hidden };
+      await window.__AGAIN__(screenTerm, "s-left-0001", "working");
+      seen.screenBack = { head: headOf(screenTerm), toggle: !el("view-toggle").hidden };
+      el("view-toggle-chat").click();
+      await window.__PAINTED__();
+      await window.__AGAIN__(screenTerm, "s-left-0001", "idle");
+      seen.chatKept = { chat: paneChatOn(screenTerm), toggle: !el("view-toggle").hidden, pressed: el("view-toggle-chat").getAttribute("aria-pressed") };
+      return seen;
+    });
+    ok(
+      "a pane whose agent left shows no head and no switch on its screen, keeps them under a conversation (the way back), and the agent's next word brings them back",
+      left.screenBefore.head && left.screenBefore.toggle && !left.screenBefore.chat &&
+        !left.screenAfter.head && !left.screenAfter.toggle && left.screenBack.head && left.screenBack.toggle &&
+        left.chatKept.chat && left.chatKept.toggle && left.chatKept.pressed === "true",
+      JSON.stringify(left),
+    );
   } finally { await page.close(); }
 }
