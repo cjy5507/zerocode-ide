@@ -407,7 +407,10 @@ window.__MODAL_INVENTORY__ = () => Object.keys(MODAL_SPECS);
  * textarea, a select or anything editable is somebody typing into that, and
  * the sink is itself a textarea, so it is already excluded. */
 function rearmKeySink(event) {
-  if (document.activeElement === keySink) return;
+  if (document.activeElement === keySink) {
+    sinkLetterToConversation(event);
+    return;
+  }
   if (modalTop()) return;
   // A primary chord arrives as two keydowns: the modifier first, then its
   // key. Keep the control that owned focus through both. Resolving only the
@@ -439,6 +442,22 @@ function rearmKeySink(event) {
     }
   }
   keySink.focus();
+}
+
+/* The sink already holds the focus — an arrow key pressed with nothing focused arms it (above) — and a character is typed
+ * while a pane's conversation stands over its screen (r4 P3-5). The router has no pane to give it: under a conversation
+ * `frontKeyboardTarget` is null, so the letter was dropped without a word, the very loss the case of nothing focused was
+ * mended for (r3 P3-8). It belongs to the conversation's box. Everything that has the keyboard first keeps it, each by the
+ * same question the router asks: a dialog (`modalTop`), a screen over the stage, a control's ⌘/Ctrl chord (a typed character
+ * has no modifier), the floating shell and the peek (`frontKeyboardTarget` answers with their terminal), and a run of typing
+ * that holds on to its own pane (`typingHold`): its rest goes where it was aimed or nowhere, never into a draft that an Enter
+ * would send. */
+function sinkLetterToConversation(event) {
+  if (!typedCharacter(event) || modalTop()) return;
+  if (!settingsView.hidden || !taskView.hidden || workspaceBoardOpen) return;
+  const front = frontKeyboardTarget();
+  if (front !== null || typingHold(front) !== undefined) return;
+  frontConversationBox()?.focus();
 }
 
 /* Whether a key is a character being typed: one letter with no modifier, or a composition's key. */

@@ -13976,6 +13976,7 @@ function forgetPaneChat(term) {
   // 기다리던 글들은 이 대화의 것이었다 — 대화가 사라지면 같이 사라진다.
   held.run.queue = null;
   dropComposerRelease(held.run);
+  clearQueueStartWatch(held.run);
   paneChats.delete(term);
   paneLive.delete(term);
   paneNow.delete(term);
@@ -16613,7 +16614,11 @@ function workerComposerNode(run, owner = null) {
     delivery.hidden = true;
     send.disabled = false;
     box.focus();
-    // What waited behind the uncertain send goes on now that the person has looked (r2 P3-2).
+    // What waited behind the uncertain send goes on now that the person has looked (r2 P3-2). That send lowered the
+    // bolt, and a send the door ended as `turn-landed` started no turn the window could see — the person may have
+    // cleared the line instead — so nothing would raise it: the person's look raises it here (r4 P2-2). If they sent
+    // the words with Enter, the hook says a turn runs and the settle returns at once, without sending a thing twice.
+    raiseQueueBolt(run);
     settleComposerQueue(run);
   };
   delivery.append(deliveryWords, deliveryReset);

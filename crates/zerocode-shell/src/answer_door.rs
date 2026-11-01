@@ -223,7 +223,9 @@ pub(super) struct RewindPane<'a> {
     /// The ledger's reason the pane is a run's
     /// (`cmd::wire::pane_the_ledger_drives`), already the page's word.
     pub(super) seat: Option<&'static str>,
-    /// Its agent ended its turn and asks nothing (the hook's word).
+    /// Its agent ended its turn and asks nothing (the hook's word), and its output has gone quiet
+    /// ([`wait_for_rest`]): a message the CLI held in its own queue begins its turn with no hook, and
+    /// the way back typed on that turn would open over a turn that is running (t-86909 r4).
     pub(super) between_turns: bool,
     /// The agent whose input line the screen is read for.
     pub(super) agent: &'a str,
@@ -396,6 +398,66 @@ pub(super) struct Timing {
 
 /// How often the screen is looked at while the door waits for the empty line.
 const SCREEN_LOOK_EVERY: Duration = Duration::from_millis(50);
+
+/// How long a pane's output must have been silent before the pane counts as at rest (t-86909 r4).
+///
+/// The hook's word that a turn is over is not enough: Claude Code sends no hook when a message it
+/// held in its own queue begins its turn, so the word says rest, and the input field is empty again,
+/// while that turn runs. Measured on 2.1.316: a turn draws a spinner 18 times in 2 s, and a CLI at rest
+/// draws nothing in 5 s. The slowest redraw of a reduced spinner is its seconds counter, once a second,
+/// so this is half a second over it.
+pub(super) const REST_QUIET: Duration = Duration::from_millis(1_500);
+/// How long a pane that is not yet quiet is waited for before it is called busy (t-86909 r4): a turn
+/// that has just ended is still drawing its last frames, and one that has started again keeps drawing.
+pub(super) const REST_WAIT: Duration = Duration::from_secs(3);
+
+/// Whether a pane that last wrote at `last` has been silent for `quiet` by `now`. A transport that
+/// does not say when it last wrote is read as quiet, as [`secret_prompt`] reads it: nothing shows
+/// otherwise, and the pane's other facts (the hook's word, the screen) still have to hold.
+fn silent_for(last: Option<Instant>, now: Instant, quiet: Duration) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) >= quiet)
+}
+
+/// [`silent_for`] for the pane `pty` as it stands now — a look the caller makes under the lock it
+/// already holds, so it can stand in one hold with the other facts of a pane.
+pub(super) fn output_quiet(pty: &PtyHandle, quiet: Duration) -> bool {
+    silent_for(pty.last_output_at(), Instant::now(), quiet)
+}
+
+/// Look every `poll` until `quiet` answers yes, for at most `wait`: what the last look found. A pane
+/// that went quiet at the very end counts as quiet.
+fn wait_until(mut quiet: impl FnMut() -> bool, wait: Duration, poll: Duration) -> bool {
+    let deadline = Instant::now() + wait;
+    loop {
+        if quiet() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+/// Wait up to `wait` for the output of the pane `held` to have been silent for `quiet`, looking every
+/// `poll`; whether it is quiet at the end. The pane's lock is taken for each look and not kept across
+/// the wait, so the pump that moves its output goes on.
+pub(super) fn wait_for_quiet(
+    held: &HeldTerminal,
+    quiet: Duration,
+    wait: Duration,
+    poll: Duration,
+) -> bool {
+    wait_until(|| output_quiet(&lock_pty(held), quiet), wait, poll)
+}
+
+/// [`wait_for_quiet`] with the window's own bounds ([`REST_QUIET`], [`REST_WAIT`]): the one question
+/// the hand-over's second look and the way back ask of a pane whose hook says its turn is over. The
+/// caller reads [`output_quiet`] again in the hold it reads its other facts in — this wait only gives
+/// a pane that is about to be quiet the time to be.
+pub(super) fn wait_for_rest(held: &HeldTerminal) -> bool {
+    wait_for_quiet(held, REST_QUIET, REST_WAIT, SCREEN_LOOK_EVERY)
+}
 
 /// [`type_at_a_turn`] for the words of a send now, after its stop (t-86909 r2):
 /// the hook says the turn is over, and the screen is given up to `wait` to show

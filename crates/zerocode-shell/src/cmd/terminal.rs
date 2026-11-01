@@ -2424,10 +2424,20 @@ pub(crate) fn pane_rewind(
     // and its runs' coordinators' seats as they stand now — and a ledger that
     // cannot be read refuses.
     let seat = crate::answer_door::rewind_seat_word(crate::cmd::wire::ledger_pane_refusal(term));
-    let between_turns = state
+    let held = state
+        .terminals()
+        .handle(term)
+        .ok_or("터미널이 떠 있지 않습니다")?;
+    // The hook's word says the turn is over; the pane's output has to say so too (t-86909 r4
+    // P3-3): a message the CLI held in its own queue begins its turn with no hook, and the way back
+    // typed over that turn would open on a turn that runs. The same question the hand-over asks
+    // before its exit command, one function for both (`answer_door::wait_for_rest`) — asked only
+    // where the hook's word already says done, so a pane that works is not waited for.
+    let said_done = state
         .pane_states()
         .get(&term)
-        .is_some_and(|held| held.state == zerocode_core::hook::HookState::Done);
+        .is_some_and(|said| said.state == zerocode_core::hook::HookState::Done);
+    let between_turns = said_done && crate::answer_door::wait_for_rest(&held);
     let pane = crate::answer_door::RewindPane {
         seat,
         between_turns,
@@ -2441,11 +2451,10 @@ pub(crate) fn pane_rewind(
         pty.terminal_mut().grid_mut().view_to_bottom();
         Ok(())
     })?;
-    let held = state
-        .terminals()
-        .handle(term)
-        .ok_or("터미널이 떠 있지 않습니다")?;
-    crate::answer_door::type_rewind(&held, &pane, &key_group_bytes(first))?;
+    // The word goes in as a bracketed paste, as the hand-over's exit command does (r4 P3-2): measured on 2.1.316,
+    // `/rewind` typed as keys at vim NORMAL left `nd` on the line and the Enter sent it to the model, while the
+    // paste opened the picker in that mode and in the default one.
+    crate::answer_door::type_rewind(&held, &pane, &pasted_group_bytes(first))?;
     state.cadence().wake();
     crate::human_input::keyed(term);
     std::thread::sleep(step);
@@ -2953,6 +2962,23 @@ pub(crate) fn key_group_bytes(group: &zerocode_core::ask::KeyGroup) -> Vec<u8> {
     match group {
         KeyGroup::Raw(raw) => raw.clone().into_bytes(),
         KeyGroup::Text(text) => encode_paste(text, text.contains(['\r', '\n'])),
+    }
+}
+
+/// [`key_group_bytes`] for the first group of a line the window types by itself
+/// at a CLI's empty field — the hand-over's exit command, the way back
+/// ([`pane_rewind`]): its text ALWAYS goes in as a bracketed paste, a one-line
+/// word too (t-86909 r4 P3-2). As keys, `/exit` in Claude Code's vim mode at
+/// NORMAL is a row of vim commands (measured on 2.1.316: a `t` stayed on the
+/// line and the Enter sent it to the model as a request); a paste lands whole
+/// in either mode, and ended the CLI at NORMAL too. The door that types it
+/// ([`answer_door::type_if_up`]) has read the field first, and for the CLIs it
+/// can read that reading includes bracketed paste being on.
+pub(crate) fn pasted_group_bytes(group: &zerocode_core::ask::KeyGroup) -> Vec<u8> {
+    use zerocode_core::ask::KeyGroup;
+    match group {
+        KeyGroup::Text(text) => encode_paste(text, true),
+        KeyGroup::Raw(_) => key_group_bytes(group),
     }
 }
 

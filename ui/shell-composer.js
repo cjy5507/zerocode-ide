@@ -383,6 +383,7 @@ function queueComposerMessage(run, message) {
   queueIdsOf(run);
   run.queue.push(message);
   run.queueIds.push(++queueRowSeq);
+  watchQueueStart(run);
   return run.queueIds.at(-1);
 }
 
@@ -489,6 +490,18 @@ function composerQueueWords(message) {
  * seen, and when a second stop may be asked: past a slow hook's 10 s, short of the
  * 30 s a person would call stuck. */
 const SEND_NOW_STOP_MS = 12_000;
+
+/* How long a row that waits behind the bolt (`run.queueArmed === false`) waits to SEE the turn of the row sent before it
+ * start (r4 P3-1). The bolt comes up when the hook says a turn runs — the state, not a clock — and a row that starts no
+ * turn (`/context`, a command the CLI answers itself) never raises it: the rows behind it, and the words typed behind a
+ * doubted line, would wait for good. A turn shows within a second or two of its row; this is the bound after which nothing
+ * is being waited for. */
+const QUEUE_START_WAIT_MS = 5_000;
+
+/* How long after a refusal of `turn-in-flight` the queue asks once more (r4 P3-6). The pane keeps its lease 400 ms after
+ * the last key typed at it (`ANSWER_SETTLE` in the backend's answer door); a resting pane makes no move after that, and
+ * a row has no button to press there, so the refusal's "press again" had nobody to press it. */
+const QUEUE_FLIGHT_RETRY_MS = 600;
 
 /* 문이 거절한 낱말(코어 `agent::turn_refusal`)과 창이 스스로 더하는 둘(`turn-unconfirmed`,
  * `turn-editing`)을 사람의 한 문장으로. 모르는 말은 그 말 그대로 — 꾸며 대지 않는다. */
@@ -892,6 +905,7 @@ function dropQueuedMessage(run, at) {
   }
   run.queueNote = null;
   if (run.queue.length === 0) dropComposerRelease(run);
+  watchQueueStart(run);
   syncWorkerComposers(run);
   settleComposerQueue(run);
 }
@@ -1095,9 +1109,10 @@ function composerQueueKeyTarget(act) {
  * 한 턴에 하나. 보낸 직후에는 훅도 선도 아직 「작업 중」이라 말하지 않아서,
  * 그 짧은 창에 이 문이 다시 불리면 대기열이 통째로 쏟아진다. 그래서 보낼
  * 때 빗장(`run.queueArmed`)을 내리고, 상태가 실제로 working으로 오른 것을
- * 본 뒤에만 다시 올린다 — 시계가 아니라 상태가 기준이다. 시계는 판의 대화를
- * 선으로 넘기는 일이 끝내 끝나지 않을 때만 쓴다: 그 붙잡음은
- * `COMPOSER_HOLD_MS` 뒤 풀린다(`armComposerRelease`, t-84670).
+ * 본 뒤에만 다시 올린다 — 시계가 아니라 상태가 기준이다. 시계는 둘뿐이다: 판의 대화를
+ * 선으로 넘기는 일이 끝내 끝나지 않을 때(그 붙잡음은 `COMPOSER_HOLD_MS` 뒤 풀린다,
+ * `armComposerRelease`, t-84670), 그리고 보낸 글이 턴을 시작하지 않을 때(`/context`처럼 CLI가
+ * 스스로 답하는 글 — `QUEUE_START_WAIT_MS` 뒤 빗장이 올라간다, `watchQueueStart`, r4 P3-1).
  *
  * 턴이 끝난 이 자리에서 멈춤의 걸쇠가 풀린다(`queueStopped`). 바로 보내기로 앞에 온 글(`queueFront`)은
  * 판이면 문(`sendFront`)이 입력줄을 다시 보고 친다 — 멈춤이 되돌려 놓은 글 뒤에 붙지 않게(r2 P2-2);
@@ -1111,7 +1126,7 @@ function settleComposerQueue(run) {
     return;
   }
   if (composerWorking(run)) {
-    run.queueArmed = true;
+    raiseQueueBolt(run);
     return;
   }
   // The turn is over: the stop sent for it has done its work.
@@ -1153,7 +1168,46 @@ function settleComposerQueue(run) {
     .finally(() => {
       run.delivering = false;
       syncWorkerComposers(run);
+      watchQueueStart(run);
     });
+}
+
+/* The bolt up: the next row may be sent (r4). It is raised by the state — the hook says a turn runs — by a row that could not
+ * be sent and stands first again, by the person who looked after a send of unknown outcome, and, when none of these comes, by
+ * the clock below. Whatever raises it ends the clock. */
+function raiseQueueBolt(run) {
+  run.queueArmed = true;
+  clearQueueStartWatch(run);
+}
+
+function clearQueueStartWatch(run) {
+  clearTimeout(run.queueStartWatch);
+  run.queueStartWatch = null;
+}
+
+/* One clock per run, for the case the state never answers (r4 P3-1): a row was sent and started no turn, so the bolt it
+ * lowered stays down and the rows behind it — and the words typed behind a doubted line — wait for nothing. The clock runs
+ * exactly while a row waits behind a lowered bolt: it starts when the send is over (or a row is queued behind a bolt
+ * that is down), it ends when the bolt comes up some other way or the queue is empty, and a clock that runs out raises
+ * the bolt and asks the queue. A row still going in has not been sent yet: the clock looks again once it has. Asked wherever
+ * the bolt goes down or a row is added or taken away; idempotent. */
+function watchQueueStart(run) {
+  if (run.queueArmed !== false || !run.queue?.length) {
+    clearQueueStartWatch(run);
+    return;
+  }
+  if (run.queueStartWatch != null) return;
+  run.queueStartWatch = setTimeout(() => {
+    run.queueStartWatch = null;
+    if (run.queueArmed !== false) return;
+    if (run.delivering || run.sending) {
+      watchQueueStart(run);
+      return;
+    }
+    raiseQueueBolt(run);
+    syncWorkerComposers(run);
+    settleComposerQueue(run);
+  }, QUEUE_START_WAIT_MS);
 }
 
 /* A row shifted out to be sent that could not be — nothing of it reached the pane — stands first again and is asked
@@ -1164,7 +1218,7 @@ function putBackQueueHead(run, row, error = null) {
   run.queue ??= [];
   putQueueRow(run, 0, row);
   if (run.queueEdit) run.queueEdit.at += 1;
-  run.queueArmed = true;
+  raiseQueueBolt(run);
   if (error !== null && composerQueueRefusalWord(error) === "turn-unknown") {
     markQueueRowUnsure(run, row.id);
     noteComposerQueue(run, composerQueueRefusalWords(error));
@@ -1191,12 +1245,14 @@ function showQueueError(error) {
  * refusal after they went in, which leaves the queue and asks the person to look at the pane. A refusal because the
  * line holds words (`turn-line`) makes the line doubted until a row has been typed through the door. */
 async function deliverQueueFront(run, row) {
+  let refused = null;
   try {
     await composerRoad(run).sendFront(row.message);
     // The door saw the line empty and typed on it: nothing is left to doubt.
     run.lineDoubt = false;
   } catch (error) {
     const word = composerQueueRefusalWord(error);
+    refused = word;
     if (word === "turn-landed") {
       run.sendUncertain = true;
     } else {
@@ -1211,7 +1267,24 @@ async function deliverQueueFront(run, row) {
   } finally {
     run.delivering = false;
     syncWorkerComposers(run);
+    // The words went in: a clock for the turn they should start. Refused: the bolt is up, and the clock ends.
+    watchQueueStart(run);
+    askQueueAfterFlight(run, refused);
   }
+}
+
+/* A door that was refused because another key of the pane's was still going in (`turn-in-flight`) is asked once more when
+ * that key's lease is surely gone (r4 P3-6): a resting pane makes no move after the refusal, and the row has no button there
+ * to press as the sentence says ("press again"). Once — a pane still busy after that is the person's to look at, and the
+ * sentence under the queue says what it said. Any other outcome ends the count. */
+function askQueueAfterFlight(run, word) {
+  if (word !== "turn-in-flight") {
+    run.queueFlightAsked = false;
+    return;
+  }
+  if (run.queueFlightAsked === true) return;
+  run.queueFlightAsked = true;
+  setTimeout(() => settleComposerQueue(run), QUEUE_FLIGHT_RETRY_MS);
 }
 
 /* The marks a queue keeps about what it sent and what it is unsure of, gone with the queue. */
@@ -1221,8 +1294,10 @@ function forgetComposerQueueMarks(run) {
   run.queueRefused = null;
   run.lineDoubt = false;
   run.queueUnsure = null;
+  run.queueFlightAsked = false;
   clearTimeout(run.queueNowWatch);
   run.queueNowWatch = null;
+  clearQueueStartWatch(run);
 }
 
 /* What waited for a hand-over that typed the pane's exit command and was
