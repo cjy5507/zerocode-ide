@@ -1383,6 +1383,7 @@ fn grant_codex_trust(
     entries: &[zerocode_hookd::codex_trust::TrustEntry],
 ) -> Result<zerocode_hookd::codex_grant::Grant, zerocode_hookd::codex_grant::GrantError> {
     let system = zerocode_hookd::codex_install::system_home(home);
+    let (expected_keys, optional_keys) = zerocode_hookd::codex_grant::keys_of(entries);
     let plan = zerocode_hookd::codex_grant::GrantPlan {
         invocation: zerocode_hookd::codex_grant::Invocation::native(
             AgentKind::Codex.command(),
@@ -1390,14 +1391,8 @@ fn grant_codex_trust(
             true,
         ),
         hooks_list_cwd: home.to_path_buf(),
-        expected_keys: entries
-            .iter()
-            .map(|entry| {
-                zerocode_hookd::codex_grant::normalize_listing_key(
-                    &zerocode_hookd::codex_trust::trust_key(entry),
-                )
-            })
-            .collect(),
+        expected_keys,
+        optional_keys,
         managed_command: entries
             .first()
             .map(|entry| entry.command.clone())
@@ -2517,8 +2512,16 @@ pub fn report_of(
     // tool landing mid-turn carries what it just did — Orca updates
     // `lastAssistantMessage` on both (`extractClaudeToolFields`,
     // out/main/index.js:9541), so a card is not silent for a whole turn.
+    //
+    // A turn that ended with no answer has no answer to show: a failed model
+    // request shows why it failed, and an aborted turn clears the line rather
+    // than reach into the transcript for an earlier turn's.
     let said = if state == zerocode_core::hook::HookState::Done {
-        zerocode_core::transcript::said_in_parsed(&payload)
+        zerocode_core::hook::model_request_failure_parsed(&event, &payload).or_else(|| {
+            zerocode_core::hook::turn_end_carries_answer(&event)
+                .then(|| zerocode_core::transcript::said_in_parsed(&payload))
+                .flatten()
+        })
     } else {
         let word: String = event
             .chars()
@@ -3629,6 +3632,50 @@ mod tests {
         let report = report_of(&stopped, None).expect("a stop row");
         assert_eq!(report.state, zerocode_core::hook::HookState::Done);
         assert!(!report.session_boundary);
+    }
+
+    /// Codex's two turn ends that are not `Stop`, as codex-cli 0.166 wrote them:
+    /// the pane stops saying "working", and the card holds no earlier turn's words
+    /// — the transcript named here would otherwise supply them.
+    #[test]
+    fn a_codex_turn_ended_without_an_answer_lands_without_an_old_one() {
+        let transcript = tempfile::NamedTempFile::new().expect("a transcript");
+        std::fs::write(
+            transcript.path(),
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"an earlier turn's answer"}]}}"#,
+        )
+        .expect("write the transcript");
+        let path = transcript.path().display();
+        let aborted = envelope(
+            "term-7",
+            "",
+            &format!(
+                r#"{{"hook_event_name":"Interrupt","session_id":"s","transcript_path":"{path}"}}"#
+            ),
+        );
+        let report = report_of(&aborted, None).expect("an interrupt row");
+        assert_eq!(report.state, zerocode_core::hook::HookState::Done);
+        assert_eq!(report.said, None);
+
+        let failed = envelope(
+            "term-7",
+            "",
+            &format!(
+                r#"{{"hook_event_name":"PostModelRequest","session_id":"s","transcript_path":"{path}","status":"failed","error":"You've hit your usage limit.","token_usage":null}}"#
+            ),
+        );
+        let report = report_of(&failed, None).expect("a failed request row");
+        assert_eq!(report.state, zerocode_core::hook::HookState::Done);
+        assert_eq!(report.said.as_deref(), Some("You've hit your usage limit."));
+
+        // A request that came back is no row at all — Windows posts them, since
+        // its script cannot look at the payload first.
+        let completed = envelope(
+            "term-7",
+            "",
+            r#"{"hook_event_name":"PostModelRequest","session_id":"s","status":"completed","error":null}"#,
+        );
+        assert!(report_of(&completed, None).is_none());
     }
 
     /// 도우미 귀속은 **봉투 하나만으로** 답할 수 있는 사실이라 여기서

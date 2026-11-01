@@ -53,6 +53,24 @@ use crate::codex_trust::{CODEX_EVENTS, TrustEntry};
 /// is part of the trust hash — changing it un-trusts every hook we installed.
 pub const MANAGED_TIMEOUT_SECONDS: u64 = 10;
 
+/// The timeout our `Interrupt` hook carries. Codex runs that hook while the
+/// person is waiting on a turn they just aborted, and it clamps it — `SessionEnd`
+/// too — to three seconds at most (measured on codex-cli 0.166: a `timeout: 10`
+/// there is answered with `timeoutSec: 3` and a "clamping Interrupt hook timeout
+/// to 3s" warning). The timeout is part of the trust hash, so writing the number
+/// Codex will use keeps the hash we compute the one Codex computes, and keeps that
+/// warning off the user's screen.
+pub const INTERRUPT_TIMEOUT_SECONDS: u64 = 3;
+
+/// The timeout our hook carries on `event_label`'s event.
+pub fn managed_timeout_seconds(event_label: &str) -> u64 {
+    if event_label == "interrupt" {
+        INTERRUPT_TIMEOUT_SECONDS
+    } else {
+        MANAGED_TIMEOUT_SECONDS
+    }
+}
+
 /// Why we did not write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
@@ -185,11 +203,11 @@ pub fn managed_matcher(script_file_name: &str) -> impl Fn(&str) -> bool + '_ {
 }
 
 /// The handler object our hooks are (`buildManagedCommandHook`, :730-736).
-fn managed_hook(command: &str) -> Value {
+fn managed_hook(command: &str, timeout_seconds: u64) -> Value {
     serde_json::json!({
         "type": "command",
         "command": command,
-        "timeout": MANAGED_TIMEOUT_SECONDS
+        "timeout": timeout_seconds
     })
 }
 
@@ -289,6 +307,7 @@ pub fn reconcile(
     current: &[Value],
     ours: &impl Fn(&str) -> bool,
     command: &str,
+    timeout_seconds: u64,
 ) -> (Vec<Value>, Placed) {
     let has_direct = current.iter().any(|definition| {
         DIRECT_KEYS
@@ -331,7 +350,7 @@ pub fn reconcile(
                     .cloned()
                     .unwrap_or_default();
                 if at.handler_index < hooks.len() {
-                    hooks[at.handler_index] = managed_hook(command);
+                    hooks[at.handler_index] = managed_hook(command, timeout_seconds);
                     let mut map = definition.as_object().cloned().unwrap_or_default();
                     map.insert("hooks".to_string(), Value::Array(hooks));
                     definitions[at.group_index] = Value::Object(map);
@@ -343,7 +362,7 @@ pub fn reconcile(
 
     let mut definitions = remove_managed(current, ours);
     let group_index = definitions.len();
-    definitions.push(serde_json::json!({ "hooks": [managed_hook(command)] }));
+    definitions.push(serde_json::json!({ "hooks": [managed_hook(command, timeout_seconds)] }));
     (
         definitions,
         Placed {
@@ -386,7 +405,8 @@ pub fn plan(found: &Found, config_path: &Path, script_file_name: &str, command: 
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let (definitions, at) = reconcile(&current, &ours, command);
+        let timeout_seconds = managed_timeout_seconds(event_label);
+        let (definitions, at) = reconcile(&current, &ours, command, timeout_seconds);
         hooks.insert(event_name.to_string(), Value::Array(definitions));
         entries.push(TrustEntry {
             source_path: config_path.to_path_buf(),
@@ -394,7 +414,7 @@ pub fn plan(found: &Found, config_path: &Path, script_file_name: &str, command: 
             group_index: at.group_index,
             handler_index: at.handler_index,
             command: command.to_string(),
-            timeout_seconds: Some(MANAGED_TIMEOUT_SECONDS),
+            timeout_seconds: Some(timeout_seconds),
             async_hook: false,
             matcher: None,
             status_message: None,
@@ -827,7 +847,7 @@ pub fn unland(
                 group_index: 0,
                 handler_index: 0,
                 command: command.to_string(),
-                timeout_seconds: Some(MANAGED_TIMEOUT_SECONDS),
+                timeout_seconds: Some(managed_timeout_seconds(label)),
                 async_hook: false,
                 matcher: None,
                 status_message: None,
@@ -1310,7 +1330,7 @@ mod tests {
         let before = vec![serde_json::json!({
             "hooks": [{ "type": "command", "command": OURS, "timeout": 10 }]
         })];
-        let (after, at) = reconcile(&before, &ours(), OURS);
+        let (after, at) = reconcile(&before, &ours(), OURS, MANAGED_TIMEOUT_SECONDS);
         assert_eq!(
             at,
             Placed {
@@ -1329,7 +1349,7 @@ mod tests {
                 { "type": "command", "command": OURS }
             ]}),
         ];
-        let (after, at) = reconcile(&mixed, &ours(), OURS);
+        let (after, at) = reconcile(&mixed, &ours(), OURS, MANAGED_TIMEOUT_SECONDS);
         assert_eq!(
             at,
             Placed {
@@ -1349,7 +1369,7 @@ mod tests {
             serde_json::json!({ "hooks": [{ "type": "command", "command": OURS }] }),
             serde_json::json!({ "hooks": [{ "type": "command", "command": OURS }] }),
         ];
-        let (after, at) = reconcile(&twice, &ours(), OURS);
+        let (after, at) = reconcile(&twice, &ours(), OURS, MANAGED_TIMEOUT_SECONDS);
         assert_eq!(
             at,
             Placed {
@@ -1365,7 +1385,7 @@ mod tests {
             "matcher": "Bash",
             "hooks": [{ "type": "command", "command": OURS }]
         })];
-        let (after, at) = reconcile(&conditional, &ours(), OURS);
+        let (after, at) = reconcile(&conditional, &ours(), OURS, MANAGED_TIMEOUT_SECONDS);
         assert_eq!(at.group_index, 0);
         assert_eq!(after.len(), 1);
         assert!(
@@ -2024,12 +2044,61 @@ mod tests {
             written["hooks"]["PreToolUse"][pre.group_index]["hooks"][pre.handler_index]["command"],
             OURS
         );
-        // Every entry carries our timeout, which the trust hash covers.
-        assert!(
-            entries
-                .iter()
-                .all(|entry| entry.timeout_seconds == Some(MANAGED_TIMEOUT_SECONDS)),
-            "an entry disagreed with the timeout actually written"
+        // Every entry carries the timeout actually written for its event, which
+        // the trust hash covers — ten seconds, except `Interrupt`, which Codex
+        // clamps to three.
+        for ((event_name, event_label), entry) in CODEX_EVENTS.iter().zip(&entries) {
+            let written_timeout = &written["hooks"][*event_name][entry.group_index]["hooks"]
+                [entry.handler_index]["timeout"];
+            assert_eq!(
+                entry.timeout_seconds,
+                Some(managed_timeout_seconds(event_label)),
+                "{event_name}: the entry disagreed with the timeout it should carry"
+            );
+            assert_eq!(
+                *written_timeout,
+                serde_json::json!(managed_timeout_seconds(event_label)),
+                "{event_name}: the entry disagreed with the timeout actually written"
+            );
+        }
+    }
+
+    /// Codex clamps an `Interrupt` hook to three seconds and warns about anything
+    /// longer, and the timeout is part of the trust hash — so the one we write
+    /// has to be the one Codex will use, or the hook is untrusted from the start.
+    #[test]
+    fn the_interrupt_hook_carries_the_timeout_codex_will_use() {
+        assert_eq!(managed_timeout_seconds("interrupt"), 3);
+        for (_, label) in CODEX_EVENTS {
+            if label != "interrupt" {
+                assert_eq!(
+                    managed_timeout_seconds(label),
+                    MANAGED_TIMEOUT_SECONDS,
+                    "{label}"
+                );
+            }
+        }
+        let found = Found {
+            raw: None,
+            config: Map::new(),
+            mode: None,
+        };
+        let planned = plan(
+            &found,
+            Path::new("/h/.codex/hooks.json"),
+            "codex-hook.sh",
+            OURS,
+        );
+        let interrupt = planned
+            .entries
+            .iter()
+            .find(|entry| entry.event_label == "interrupt")
+            .expect("no interrupt entry was planned");
+        assert_eq!(interrupt.timeout_seconds, Some(INTERRUPT_TIMEOUT_SECONDS));
+        assert_eq!(interrupt.matcher, None);
+        assert_eq!(
+            planned.config["hooks"]["Interrupt"][0]["hooks"][0]["timeout"],
+            serde_json::json!(INTERRUPT_TIMEOUT_SECONDS)
         );
     }
 

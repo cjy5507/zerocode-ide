@@ -213,14 +213,16 @@ pub const fn sight(agent: AgentKind) -> Sight {
         AgentKind::Opencode => none(Unseen::NoHooks),
         AgentKind::Claude => CLAUDE,
         // Devin, Kimi and Cursor say at their turn's end that the person
-        // stopped it (`hook::interrupt_declared`); Amp's plugin says it on
-        // `agent.end`, and carries no prompt event this window reads.
-        AgentKind::Devin | AgentKind::Kimi | AgentKind::Cursor => STOPS_ITS_TURN,
+        // stopped it (`hook::interrupt_declared`), and Codex has an event for
+        // nothing else (`Interrupt`, on the hook list this window installs);
+        // Amp's plugin says it on `agent.end`, and carries no prompt event this
+        // window reads.
+        AgentKind::Codex | AgentKind::Devin | AgentKind::Kimi | AgentKind::Cursor => STOPS_ITS_TURN,
         AgentKind::Amp => Sight {
             prompt: Sees::No(Unseen::NoPromptEvent),
             ..STOPS_ITS_TURN
         },
-        AgentKind::Codex | AgentKind::Droid | AgentKind::Copilot | AgentKind::Grok => NO_STOP,
+        AgentKind::Droid | AgentKind::Copilot | AgentKind::Grok => NO_STOP,
         AgentKind::CommandCode => Sight {
             prompt: Sees::No(Unseen::NoPromptEvent),
             ..NO_STOP
@@ -597,7 +599,10 @@ pub fn moments_parsed(
         }
         Phase::Stopped => {
             if row.turn_end.yes() {
-                let said = if (asking.claim || asking.project_rules) && row.turn_answer.yes() {
+                let said = if (asking.claim || asking.project_rules)
+                    && row.turn_answer.yes()
+                    && hook::turn_end_carries_answer(event)
+                {
                     crate::transcript::said_at_in_parsed(parsed).map(|said| match said {
                         SaidAt::Words(words) => {
                             SaidAt::Words(crate::clone::scrub_credentials(&words))

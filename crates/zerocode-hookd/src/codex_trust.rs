@@ -60,7 +60,7 @@ use sha2::{Digest, Sha256};
 ///
 /// The label, not the event name, is what the hash sees — so this pairing is
 /// part of the contract and not a display convenience.
-pub const CODEX_EVENTS: [(&str, &str); 8] = [
+pub const CODEX_EVENTS: [(&str, &str); 10] = [
     ("SessionStart", "session_start"),
     ("UserPromptSubmit", "user_prompt_submit"),
     ("PreToolUse", "pre_tool_use"),
@@ -69,7 +69,35 @@ pub const CODEX_EVENTS: [(&str, &str); 8] = [
     ("SubagentStart", "subagent_start"),
     ("SubagentStop", "subagent_stop"),
     ("Stop", "stop"),
+    // Two ways a turn ends that never reach `Stop`, so without them the pane keeps
+    // saying "working" for good — measured on codex-cli 0.166 against a local
+    // endpoint. They are Codex's own events, not Orca's, which is why they are
+    // last: the eight above are the measured Orca set, in Orca's order. An older
+    // Codex does not know them: see [`event_may_be_unknown`].
+    //
+    // A person's Esc: `UserPromptSubmit`, …, `Interrupt`, and nothing after it.
+    ("Interrupt", "interrupt"),
+    // A request that failed (429, 500, `context_length_exceeded`), the one
+    // `status` of this event anything reads: see
+    // `zerocode_core::hook::model_request_failure_parsed`. The rest are dropped by
+    // the hook script before it starts curl.
+    //
+    // Its sibling `PreModelRequest` is deliberately not here. It blocks each model
+    // request until the hook returns (a hook sleeping 1 s moved the request 1 s),
+    // and it would say nothing the window reads.
+    ("PostModelRequest", "post_model_request"),
 ];
+
+/// Is this one of the events a Codex may simply not know?
+///
+/// Such a Codex ignores the key in `hooks.json` and leaves it out of `hooks/list`
+/// (measured: 0.157.1 lists no `PostModelRequest`, with no warning and no error),
+/// so a grant that demanded it would call a healthy install a mismatch and take
+/// every hook out of the user's home. A Codex updated later lists it as untrusted
+/// and the next grant trusts it.
+pub fn event_may_be_unknown(event_label: &str) -> bool {
+    matches!(event_label, "interrupt" | "post_model_request")
+}
 
 /// Codex's default timeout when a hook does not name one (`computeTrustedHash`
 /// uses `entry.timeoutSec ?? 600`). Present so the hash is right for an entry
@@ -96,11 +124,16 @@ pub struct TrustEntry {
 
 /// Does this event's identity include a matcher at all?
 ///
-/// `user_prompt_submit` and `stop` return undefined from
-/// `matcherPatternForEvent` — for them the key is absent from the hashed object
-/// rather than null, which is a different string and therefore a different hash.
+/// `user_prompt_submit` and `stop` return undefined from `matcherPatternForEvent`,
+/// and `interrupt` and `post_model_request` hash the same way on a real Codex
+/// (pinned in this file's tests) — for them the key is absent from the hashed
+/// object rather than null, which is a different string and therefore a different
+/// hash.
 pub fn event_takes_matcher(event_label: &str) -> bool {
-    !matches!(event_label, "user_prompt_submit" | "stop")
+    !matches!(
+        event_label,
+        "user_prompt_submit" | "stop" | "interrupt" | "post_model_request"
+    )
 }
 
 /// Normalise a hook file's path the way trust does (`normalizeCodexHookSourcePath`,
@@ -632,12 +665,63 @@ mod tests {
         );
     }
 
-    /// Two events carry no matcher at all, and for them the key must be ABSENT
+    /// Hashes read off a real Codex, not derived: codex-cli 0.166.0, a
+    /// `hooks.json` with `Stop` (timeout 10), `Interrupt` (timeout 3, reported as
+    /// `timeoutSec: 3` with no warning, where 10 is answered with a "clamping"
+    /// warning and the same hash) and `PostModelRequest` (timeout 10), listed
+    /// through `app-server`'s `hooks/list`. The new events are the ones that matter
+    /// — the proof that they hash with the timeout Codex uses and with no matcher
+    /// key, the two ways a new event could have quietly disagreed with Codex.
+    #[test]
+    fn the_events_after_orcas_hash_as_a_real_codex_hashes_them() {
+        let held = |label: &str, timeout: u64| TrustEntry {
+            source_path: PathBuf::from("/private/tmp/codex-live-check/home/hooks.json"),
+            event_label: label.into(),
+            group_index: 0,
+            handler_index: 0,
+            command: "/bin/true".into(),
+            timeout_seconds: Some(timeout),
+            async_hook: false,
+            matcher: None,
+            status_message: None,
+        };
+        assert_eq!(
+            trusted_hash(&held("stop", 10)),
+            "sha256:3c75cb092e3950863ad8058f4bb30d306cedb26dfb7b5eb217733b2635579c77"
+        );
+        assert_eq!(
+            trusted_hash(&held("interrupt", 3)),
+            "sha256:ef1c86835d2a04ec45af9d3e5f48b788aff61e070d754d733f6581b3b0ffaa98"
+        );
+        assert_eq!(
+            trusted_hash(&held("post_model_request", 10)),
+            "sha256:6d5cc6f41348e9db6b0f90d9a9b01e012a64f6f07ba99aab8b42ced2465c5f03"
+        );
+    }
+
+    /// Only the events Codex added after the measured set may be missing from a
+    /// listing. If `Stop` could be, a Codex that lost our whole file would pass.
+    #[test]
+    fn only_codexs_newer_events_may_be_unknown_to_it() {
+        let may: Vec<&str> = CODEX_EVENTS
+            .iter()
+            .map(|(_, label)| *label)
+            .filter(|label| event_may_be_unknown(label))
+            .collect();
+        assert_eq!(may, ["interrupt", "post_model_request"]);
+    }
+
+    /// Four events carry no matcher at all, and for them the key must be ABSENT
     /// from the hashed object — not null, not empty. A different string is a
     /// different hash.
     #[test]
     fn the_events_with_no_matcher_omit_the_key_entirely() {
-        for label in ["user_prompt_submit", "stop"] {
+        for label in [
+            "user_prompt_submit",
+            "stop",
+            "interrupt",
+            "post_model_request",
+        ] {
             let mut held = entry(label);
             held.matcher = Some("Bash".into());
             assert!(
@@ -657,7 +741,10 @@ mod tests {
         }
         // Every other measured event does take one.
         for (_, label) in CODEX_EVENTS {
-            if label == "user_prompt_submit" || label == "stop" {
+            if matches!(
+                label,
+                "user_prompt_submit" | "stop" | "interrupt" | "post_model_request"
+            ) {
                 continue;
             }
             assert!(event_takes_matcher(label), "{label}");

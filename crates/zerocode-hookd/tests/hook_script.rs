@@ -416,6 +416,69 @@ async fn a_live_bridge_receives_what_the_script_sends() {
     assert_eq!(envelope.version, zerocode_hookd::HOOK_CONTRACT_VERSION);
 }
 
+/// `PostModelRequest` blocks every model request until the hook returns, and only
+/// a failed one means anything. So the script leaves on the rest without starting
+/// curl, and a failed one reaches the window — in the JSON codex-cli 0.166 writes,
+/// including an error whose text quotes the very words the script looks for.
+#[cfg_attr(
+    not(unix),
+    ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead"
+)]
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_failed_model_request_leaves_codexs_script() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    install_hook_scripts(dir.path()).expect("install");
+    let script = dir.path().join("codex-hook.sh");
+    let (state, mut events, _teams, _browser) = BridgeState::new("secret", "browser-secret");
+    let (addr, _server) = serve(state, 0).await.expect("serve");
+    let env = vec![
+        (env_var::PORT, addr.port().to_string()),
+        (env_var::TOKEN, "secret".to_string()),
+        (env_var::PANE_KEY, "tab-1/leaf-1".to_string()),
+    ];
+    let report = |status: &str, error: &str| {
+        format!(
+            r#"{{"session_id":"s","turn_id":"t","cwd":"/work","transcript_path":"/x.jsonl","model":"m","hook_event_name":"PostModelRequest","status":"{status}","error":{error},"token_usage":null}}"#
+        )
+    };
+    for quiet in ["completed", "cancelled"] {
+        let (path, env, payload) = (script.clone(), env.clone(), report(quiet, "null"));
+        let output = tokio::task::spawn_blocking(move || run_script(&path, &env, &payload))
+            .await
+            .expect("join");
+        assert!(output.status.success(), "{quiet}");
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), events.recv())
+            .await
+            .is_err(),
+        "a request that did not end the turn reached the window"
+    );
+    let failed = report("failed", r#""the server said \"status\":\"completed\"""#);
+    let (path, sent, payload) = (script.clone(), env.clone(), failed.clone());
+    let output = tokio::task::spawn_blocking(move || run_script(&path, &sent, &payload))
+        .await
+        .expect("join");
+    assert!(output.status.success());
+    let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        .await
+        .expect("a failed request never reached the window")
+        .expect("envelope");
+    assert_eq!(envelope.payload, failed);
+    // Every other event still goes, whatever words its payload happens to hold.
+    let stop = r#"{"hook_event_name":"Stop","last_assistant_message":"\"status\":\"completed\""}"#;
+    let (path, sent) = (script.clone(), env.clone());
+    let output = tokio::task::spawn_blocking(move || run_script(&path, &sent, stop))
+        .await
+        .expect("join");
+    assert!(output.status.success());
+    let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        .await
+        .expect("a Stop never reached the window")
+        .expect("envelope");
+    assert_eq!(envelope.payload, stop);
+}
+
 #[cfg_attr(
     not(unix),
     ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead"
