@@ -124,5 +124,33 @@ export async function testStackedWork(browser, origin, ok) {
         seen.repoDoor && seen.scmShown,
       JSON.stringify(seen),
     );
+
+    /* t-84799 B9: the gate line reads the schedule's last answer — the gate the board's own line names — and keeps its dash
+     * only where the schedule has nothing to say. */
+    const gate = await page.evaluate(async () => {
+      const seen = {};
+      const now = Date.now();
+      const minute = 60_000;
+      const step = (kind, state, start, end) => ({ name: `0-${Math.round((now - 20 * minute) / 1000)}-run1-l61r-${kind}`, who: "run1-l61r", state,
+        class: "first", lane: 1, cap_secs: 600, queued_ms: now - 20 * minute, start_ms: start, end_ms: end,
+        secs: start && end ? Math.round((end - start) / 1000) : null, rc: state === "failed" ? 1 : state === "passed" ? 0 : null,
+        kind, gate: "l61", part: "r", what: null, expected: { secs: 300, samples: 5 } });
+      boardScheduleAnswer = { revision: 7, unchanged: false, read_ms: now, line: { found: true, runner_lanes: [1], paused: false }, lanes: [],
+        jobs: [step("g1-build", "passed", now - 18 * minute, now - 12 * minute), step("g2-tests", "failed", now - 12 * minute, now - 6 * minute)] };
+      const tab = document.getElementById("activity-pile-tab");
+      tab.click();
+      await window.__PAINTED__();
+      paintStackedWork();
+      seen.gate = document.querySelector("#activity-pile .pile-gate")?.textContent.replace(/\s+/g, " ").trim() ?? "";
+      boardScheduleAnswer = null;
+      paintStackedWork();
+      seen.dash = document.querySelector("#activity-pile .pile-gate")?.textContent.replace(/\s+/g, " ").trim() ?? "";
+      return seen;
+    });
+    ok(
+      "the gate line of 쌓인 일 names the gate the schedule's last answer holds and what became of it — a dash only without one",
+      gate.gate.includes("l61") && gate.gate.includes("실패") && !gate.gate.includes("—") && gate.dash.includes("—"),
+      JSON.stringify(gate),
+    );
   } finally { await page.close(); }
 }
