@@ -637,6 +637,23 @@ async function testTabMenuFold(browser, origin, ok) {
       widths.tokens.join() === "1360px,1000px,760px,480px" &&
         widths.folds.length === 3 && widths.folds.every((when) => widths.tokens.slice(1).some((width) => when.includes(width))),
       JSON.stringify(widths));
+    /* t-84799 A3: the board's head folds from five layers to three at one width, and that width has a name too. */
+    const head = await page.evaluate(() => {
+      const token = getComputedStyle(document.documentElement).getPropertyValue("--fold-board-head").trim();
+      const whens = new Set();
+      const visit = (rules) => {
+        for (const rule of rules) {
+          if (rule instanceof CSSContainerRule && /\.is-task-board > \.agent-relations-toolbar/.test(rule.cssText)) whens.add(rule.conditionText);
+          else if (rule.cssRules) visit(rule.cssRules);
+        }
+      };
+      for (const sheet of document.styleSheets) {
+        try { visit(sheet.cssRules); } catch { /* a sheet from elsewhere */ }
+      }
+      return { token, whens: [...whens] };
+    });
+    ok("the board's head folds to three layers at a named width — 700 px — and the rule that does it writes that number",
+      head.token === "700px" && head.whens.length === 1 && head.whens[0].includes(head.token), JSON.stringify(head));
     ok("the tab menu scene raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
