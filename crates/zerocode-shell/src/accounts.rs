@@ -5939,7 +5939,7 @@ JSON
     /// deadline are the shipped runner's while no keychain is anywhere near it.
     #[cfg(target_os = "macos")]
     fn shell_tool(script: &str) -> std::process::Command {
-        let mut tool = std::process::Command::new("/bin/sh");
+        let mut tool = crate::proc::quiet_command("/bin/sh");
         tool.args(["-c", script]);
         tool
     }
