@@ -38245,7 +38245,8 @@ details.task-board-section > summary {
  * the title row's right end (the head keeps that room free), and the
  * schedule's range stands at the tab row's right end — the content starts a
  * hundred pixels higher. The nav strip stays under the head (the selector
- * contract). A narrow board keeps both in rows of their own. */
+ * contract). A narrow board keeps both in rows of their own. The width is
+ * `--fold-board-head`, written out because a container query cannot read it. */
 @container board (min-width: 700px) {
   .is-task-board > .agent-graph-head {
     padding-inline-end: calc(var(--board-head-find-width) + var(--space-5) + var(--space-4));
