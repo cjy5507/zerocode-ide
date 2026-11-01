@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>fixture checkout (country selects)</title>
+<form id="checkout" action="/checkout" method="post">
+  <input name="c1" autocomplete="shipping given-name">
+  <input name="c2" autocomplete="shipping postal-code">
+  <!-- the option's value is an internal number; only its text names the country -->
+  <select name="c3" autocomplete="shipping country">
+    <option value="">--</option>
+    <option value="101">Korea</option>
+    <option value="102">Malaysia</option>
+  </select>
+  <!-- the option's text is something else; its value is the two-letter code -->
+  <select name="c4" autocomplete="billing country">
+    <option value="">--</option>
+    <option value="KR">+82</option>
+    <option value="MY">+60</option>
+  </select>
+  <!-- a country the table does not know stays empty -->
+  <select name="c5" autocomplete="country">
+    <option value="">--</option>
+    <option value="1">Narnia</option>
+  </select>
+</form>

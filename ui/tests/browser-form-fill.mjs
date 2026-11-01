@@ -132,6 +132,33 @@ try {
   check("a sign-in form shows one kind (email), below the two an offer needs",
     signin.kinds.length === 1 && signin.kinds[0] === "email", JSON.stringify(signin));
 
+  // 4b. a country select (t-84200): the backend hands the stored value and the other
+  // spellings the window's one table gives it (code and name); the page picks the option
+  // that matches any of them by value or by text, and a country no spelling matches stays empty.
+  await page.goto(`${origin}/address-country-select.html`);
+  const countries = await run(page, "fill", {
+    values: { country: "MY", "given-name": "[합성-이름]" },
+    alts: { country: ["MY", "Malaysia"] },
+    entries: {},
+  });
+  const picked = await fieldValues(page);
+  check("a select whose option text is the country's name takes the stored code",
+    picked.c3 === "102", JSON.stringify(picked));
+  check("a select whose option value is the code takes it too",
+    picked.c4 === "MY", JSON.stringify(picked));
+  check("a select that has no option for the country stays empty",
+    picked.c5 === "" && countries.fields === 3, JSON.stringify({ picked, countries }));
+  await page.goto(`${origin}/address-country-select.html`);
+  await run(page, "fill", { values: { country: "Malaysia" }, alts: { country: ["MY", "Malaysia"] }, entries: {} });
+  const byName = await fieldValues(page);
+  check("a stored name finds the option that holds the code",
+    byName.c3 === "102" && byName.c4 === "MY", JSON.stringify(byName));
+  await page.goto(`${origin}/address-country-select.html`);
+  await run(page, "fill", { values: { country: "MY" }, entries: {} });
+  const bare = await fieldValues(page);
+  check("without the table's spellings only the stored value is tried",
+    bare.c3 === "" && bare.c4 === "MY", JSON.stringify(bare));
+
   // 5. a street kept in two lines welds into one line in a one-line field.
   await page.setContent("<!doctype html><form><input autocomplete=name><input autocomplete=street-address name=s></form>");
   await run(page, "fill", { values: { name: "[합성-이름]", "street-address": "[합성-주소-1줄]\n[합성-주소-2줄]" } });

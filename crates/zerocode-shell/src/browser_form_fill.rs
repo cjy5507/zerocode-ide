@@ -417,6 +417,26 @@ mod tests {
         );
     }
 
+    /// 나라 칸은 저장된 값이 코드든 이름이든 같은 나라의 다른 표기까지 식에
+    /// 싣는다 — 페이지 쪽 select가 값이나 글자로 맞는 옵션을 고르게 (t-84200).
+    /// 모르는 값은 표기를 지어내지 않고 저장된 값 하나만 간다.
+    #[test]
+    fn the_fill_script_carries_a_countrys_code_and_name_for_a_select() {
+        let carried = |country: &str| {
+            let values = BTreeMap::from([("country".to_string(), country.to_string())]);
+            fill_script(&values, &BTreeMap::new())
+        };
+        for stored in ["MY", "my", "Malaysia"] {
+            let script = carried(stored);
+            assert!(
+                script.contains("\"MY\"") && script.contains("\"Malaysia\""),
+                "{stored}: {script}"
+            );
+        }
+        let unknown = carried("Narnia");
+        assert!(!unknown.contains("\"alts\":{\"country\""), "{unknown}");
+    }
+
     /// 채움 식은 값을 싣고 가고, 탐지 식은 아무 값도 싣지 않으며, 돌아오는
     /// 답에서는 칸 수만 꺼낸다.
     #[test]

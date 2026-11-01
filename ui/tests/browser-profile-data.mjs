@@ -239,6 +239,19 @@ export async function testBrowserProfileData(browser, origin, ok) {
         && offered.acts === 4 && offered.picks[0].includes("[합성-이름-나]") && offered.entries[0].includes("[합성-별명]"),
       JSON.stringify(offered));
     ok("the fill strip is the person's alone", offered.personOnly);
+    // The entry's button wears the primary ink like the address buttons; only the dismiss
+    // button stays on the secondary ink, so the two are not read as the same rank (t-84200).
+    const inks = await page.evaluate(() => {
+      const bar = document.querySelector(".browser-view:not([hidden]) .browser-fillbar");
+      const ink = (selector) => getComputedStyle(bar.querySelector(selector)).color;
+      return {
+        entry: ink(".browser-fillbar-act.is-entry"),
+        primary: ink(".browser-fillbar-act.is-primary"),
+        dismiss: ink(".browser-fillbar-act:not(.is-primary):not(.is-entry)"),
+      };
+    });
+    ok("an entry button reads in the primary ink and the dismiss button does not",
+      inks.entry === inks.primary && inks.entry !== inks.dismiss, JSON.stringify(inks));
     await page.click(".browser-view:not([hidden]) .browser-fillbar-act.is-primary");
     await page.waitForFunction(() => window.__ADDRESS_FILLS__.length === 1);
     await page.waitForFunction(() => /6/.test(document.querySelector(".browser-view:not([hidden]) .browser-fillbar-words")?.textContent ?? ""));

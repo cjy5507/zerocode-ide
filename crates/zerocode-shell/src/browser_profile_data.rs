@@ -930,6 +930,61 @@ mod tests {
         assert_eq!(read.held_back, 4);
     }
 
+    /// 한 낱말 값의 비밀 표식(`sk-`·`AKIA`·`eyJ` …)은 낱말의 가장자리에 설 때
+    /// 만 센다. 나라 이름 「Malaysia」(ASIA)나 「desk-lamp」(sk-)처럼 낱말 가운데
+    /// 표식이 우연히 든 값은 옮겨지고, 표식 뒤에 토큰 꼴이 이어지는 값은 남는다
+    /// (t-84200). 토큰 꼴 값은 시험이 실행 중에 짓는다.
+    #[test]
+    fn a_one_word_value_is_secret_by_a_mark_at_its_edge_not_one_inside_a_word() {
+        for value in [
+            "Malaysia",
+            "Asia",
+            "Asian",
+            "Asia-Pacific",
+            "desk-lamp",
+            "task_sk-list",
+            "xoxo",
+        ] {
+            assert!(!entry_is_secret("q", value), "{value} was held back");
+        }
+        let held = [
+            format!("AKIA{}", "Q7".repeat(8)),
+            format!("akia{}", "q7".repeat(8)),
+            format!("sk-{}", "a1".repeat(12)),
+            format!("sk_{}", "a1".repeat(12)),
+            format!("eyJ{}", "hGci".repeat(5)),
+            format!("xoxb-{}", "12".repeat(6)),
+            format!("key={}", format!("sk-{}", "a1".repeat(12))),
+        ];
+        for value in &held {
+            assert!(entry_is_secret("q", value), "{value} was moved");
+        }
+    }
+
+    /// 북마크 파일이 깨져도 Web Data의 주소는 읽힌다 — 두 몫은 따로 읽는다
+    /// (t-84200).
+    #[test]
+    fn a_broken_bookmarks_file_does_not_stop_the_addresses_from_being_read() {
+        let home = tempfile::tempdir().expect("home");
+        let scratch = home.path().join("scratch");
+        let Some(folder) =
+            crate::browser_cookie_import::chromium_profile_dir("chrome", "Default", home.path())
+                .filter(|folder| folder.starts_with(home.path()))
+        else {
+            return;
+        };
+        std::fs::create_dir_all(&folder).expect("folder");
+        std::fs::write(folder.join(BOOKMARKS_FILE), "{not json").expect("broken");
+        rusqlite::Connection::open(folder.join(WEB_DATA_FILE))
+            .expect("create")
+            .execute_batch(WEB_DATA_FIXTURE)
+            .expect("fixture schema");
+        let (_bookmarks, web) =
+            read_chromium_profile_data("chrome", "Default", home.path(), &scratch)
+                .expect("a broken Bookmarks file must not stop the addresses read");
+        assert_eq!(web.book.addresses.len(), 2);
+    }
+
     /// 옛 판의 Web Data: 주소 칸은 autofill_profiles에, 이름·이메일·전화는 곁표에.
     #[test]
     fn a_legacy_web_data_reads_its_side_tables() {
