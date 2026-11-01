@@ -199,7 +199,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
             state: dot.dataset.state ?? null,
             klass: dot.className,
             tip: dot.dataset.tip ?? "",
-            aria: row.getAttribute("aria-label") ?? "",
+            aria: (row.closest(".wt-node") ?? row).getAttribute("aria-label") ?? "",
             chip: shown ? chip.textContent : null,
             chipPhase: chip?.dataset.phase ?? null,
             chipTip: shown ? chip.dataset.tip ?? "" : null,

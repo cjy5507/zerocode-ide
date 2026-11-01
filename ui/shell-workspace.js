@@ -4516,7 +4516,8 @@ function dressWorktreeDot(row, state) {
   dot.dataset.state = indicator;
   dot.className = `wt-dot is-${indicator}`;
   dot.dataset.tip = label;
-  row.setAttribute("aria-label", `${row.querySelector(".wt-title").textContent}, ${label}`);
+  // The tree item carries the name; the row inside it is a plain box (t-88672).
+  (row.closest(".wt-node") ?? row).setAttribute("aria-label", `${row.querySelector(".wt-title").textContent}, ${label}`);
   if (indicator === "working") wakeWorktreeSpin();
 }
 
@@ -4779,6 +4780,8 @@ function makeWorktreeNode(worktree, held) {
   row.tabIndex = -1;
   row.dataset.tip = worktree.path;
   row.dataset.label = worktreeDisplayName(worktree);
+  // In its node from the start: the node wears the name the row's first painting writes.
+  node.appendChild(row);
   row.innerHTML =
     '<button class="wt-twist" type="button"></button>' +
     '<span class="wt-dot" aria-hidden="true"></span>' +

@@ -178,6 +178,9 @@ export async function testSidebarAria({ browser, origin, ok, faults }) {
     });
     ok("the resting line stays a tabbable button and a press opens it",
       opened.button && opened.tabbable && opened.expanded === "true", JSON.stringify(opened));
+    // ⑤ Nothing in the list wears a name it may not (axe: a name on a plain box).
+    const named = await ownedChildrenViolations(page, "#worktrees", ["aria-prohibited-attr", "aria-allowed-attr", "aria-valid-attr-value"]);
+    ok("the sidebar list's names and states stand on elements that may wear them (axe)", named.length === 0, JSON.stringify(named));
     ok("the scene raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
