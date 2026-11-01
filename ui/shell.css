@@ -2711,16 +2711,10 @@ svg.wt-agent-dot {
   margin-inline-start: var(--space-1);
 }
 
-/* The landing chip's words wrap inside its track instead of being cut to their tail (t-84799 A10, r3): at a
- * sidebar folded to its 1000 px width the track holds 107 px of the 129 that 「미반영 6 · main보다 20 뒤」 takes in
- * Korean, and 164 to 213 px of the other four languages' words are wider still. Wrapped it says all of them at the
- * cost of a line on the one row that needs it; the tooltip keeps the whole sentence either way. */
-.wt-titlebox .wt-landing {
-  height: auto;
-  min-height: 15px;
-  text-overflow: clip;
-  white-space: normal;
-}
+/* The landing chip stays one line of the row's own height (t-84799 A10, r3 undone, t-88929): a chip that wraps
+ * grows the row when it arrives and shrinks it when it leaves, which `sidebar-landing-state` pins ("the chip does
+ * not grow the row"). What its track cannot hold ends in an ellipsis, as the base `.wt-landing` rule says
+ * (`white-space: nowrap`, `overflow: hidden`, a fixed `height`); the tooltip keeps the whole sentence. */
 
 /* Each chip in its own track past the room left over, in the order they
  * stand in the row. */
