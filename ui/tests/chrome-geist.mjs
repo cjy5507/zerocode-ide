@@ -717,6 +717,45 @@ async function testQuietContrast(browser, origin, ok) {
   }
 }
 
+/* A2 (t-84799) — a tab whose agent waits on the person says what it asks: a permission wears a hollow square where a
+ * question wears the hollow ring, and the tip says 「권한」 or 「질문」 where it said only 「확인 필요」. A wait the hook only
+ * signalled (no question to describe) keeps the old word and the ring. */
+async function testTabAsk(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await standChrome(page);
+    const seen = await page.evaluate(async () => {
+      const tell = (name, payload) => { for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload }); };
+      const seen = {};
+      const stand = async (name, payload) => {
+        const term = await openTermTab({ placement: "tab" });
+        paneAgents.set(term, "claude");
+        tell("hook:agent", { term, state: "needs-attention", agent: "claude", session: `s-${name}`, ...payload });
+        renderTabs();
+        await window.__PAINTED__();
+        const tab = document.querySelector(`.tab[data-tab="${tabOfTerm(term).id}"]`);
+        const dot = tab.querySelector(".tab-dot");
+        const style = getComputedStyle(dot);
+        return { ask: tab.dataset.ask ?? null, tip: tab.dataset.tip, round: style.borderRadius === "50%", waiting: tab.classList.contains("is-waiting"),
+          ring: style.boxShadow !== "none" };
+      };
+      seen.permission = await stand("perm", { approval: { tool: "Bash", summary: "npm install" } });
+      seen.question = await stand("ask", { ask_prompt: { questions: [{ question: "어느 쪽?", multi_select: false, options: [{ label: "가" }, { label: "나" }] }] } });
+      seen.signalled = await stand("plain", {});
+      return seen;
+    });
+    ok("a waiting tab with a permission wears a hollow square and says 「권한」; a question wears the ring and says 「질문」; a bare signal keeps 「확인 필요」",
+      seen.permission.waiting && seen.permission.ask === "permission" && !seen.permission.round && seen.permission.ring && seen.permission.tip.split(" · ").includes("권한") &&
+        seen.question.ask === "question" && seen.question.round && seen.question.tip.split(" · ").includes("질문") &&
+        seen.signalled.ask === null && seen.signalled.round && seen.signalled.tip.split(" · ").includes("확인 필요"),
+      JSON.stringify(seen));
+    ok("the tab ask scene raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
 export async function testChromeGeist(browser, origin, ok) {
   await testGeistShips(browser, origin, ok);
   await testChromeSidebarAndTabs(browser, origin, ok);
@@ -727,6 +766,7 @@ export async function testChromeGeist(browser, origin, ok) {
   await testNarrowFolds(browser, origin, ok);
   await testTabMenuFold(browser, origin, ok);
   await testQuietContrast(browser, origin, ok);
+  await testTabAsk(browser, origin, ok);
 }
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1] ?? "")).href) {
