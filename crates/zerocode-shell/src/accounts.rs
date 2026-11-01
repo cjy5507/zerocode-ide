@@ -5496,42 +5496,174 @@ JSON
         assert_eq!(read_keychain_service(awkward).as_deref(), Ok("fixture"));
     }
 
-    /// A real Claude blob is 509–2040 bytes, and the line takes about 3.9 KB. A
-    /// value over that is refused with its size, before any process has seen it
-    /// and before the item standing there is touched. `'` and `\` take two bytes
-    /// of the line each, which is the edge this walks.
+    /// The command around the value on the line, in bytes.
+    #[cfg(target_os = "macos")]
+    fn room_on_the_line(service: &str, user: &str) -> usize {
+        let around = format!("add-generic-password -A -s '{service}' -a '{user}' -w ''");
+        SECURITY_LINE_BYTES - around.len()
+    }
+
+    /// A value the line can carry never stands in an argv, and a value it cannot
+    /// goes on the old argument road whole: refusing it stopped every launch of an
+    /// account whose login had grown. `'` and a backslash take two bytes of the line each,
+    /// which is the edge this walks.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_value_past_the_line_limit_is_refused_before_any_process_starts() {
+    fn only_a_value_past_the_line_limit_takes_the_argument_road() {
         let service = "zerocode-test-line-limit";
         let user = this_machines_account();
-        let fixed = keychain_add_line(service, &user, "").unwrap().len() - 1;
-        let room = SECURITY_LINE_BYTES - fixed;
-
-        let longest = "T".repeat(room);
-        write_keychain_service(service, &longest).expect("the longest value that fits");
-        assert_eq!(
-            read_keychain_service(service).as_deref(),
-            Ok(longest.as_str())
-        );
-        let login_sized = "L".repeat(2040);
-        write_keychain_service(service, &login_sized).expect("a login's largest measured size");
-
-        let quotes = "'".repeat(room / 2 + 1);
-        let backslashes = "\\".repeat(room / 2 + 1);
-        for too_long in ["T".repeat(room + 1), quotes, backslashes] {
+        let room = room_on_the_line(service, &user);
+        let written = |value: &str| {
             SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
-            let refused = write_keychain_service(service, &too_long).unwrap_err();
-            let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
-            assert!(started.is_empty(), "the tool was started: {started:?}");
-            assert!(refused.contains("너무 길어"), "{refused}");
-            assert!(!refused.contains(&too_long[..8]), "{refused}");
-            assert_eq!(
-                read_keychain_service(service).as_deref(),
-                Ok(login_sized.as_str()),
-                "a refused value cost the item standing there"
+            write_keychain_service(service, value).expect("the write");
+            assert_eq!(read_keychain_service(service).as_deref(), Ok(value));
+            SECURITY_ARGV_SEEN.with(std::cell::RefCell::take)
+        };
+        for fits in [
+            "T".repeat(room),
+            "'".repeat(room / 2),
+            "\\".repeat(room / 2),
+            "L".repeat(2040),
+            "short".to_string(),
+        ] {
+            let started = written(&fits);
+            assert!(started.iter().any(|argv| argv == &["-i"]), "{started:?}");
+            assert!(
+                !started.iter().flatten().any(|arg| arg == &fits),
+                "a value the line can carry stood in an argv"
             );
         }
+        for too_long in [
+            "T".repeat(room + 1),
+            "'".repeat(room / 2 + 1),
+            "\\".repeat(room / 2 + 1),
+            "T".repeat(20_000),
+        ] {
+            let started = written(&too_long);
+            let add = [
+                "add-generic-password",
+                "-A",
+                "-s",
+                service,
+                "-a",
+                &user,
+                "-w",
+                &too_long,
+            ];
+            assert!(
+                started.iter().any(|argv| argv == &add),
+                "not on the argument road"
+            );
+            assert!(!started.iter().any(|argv| argv == &["-i"]));
+        }
+    }
+
+    /// The length changes the road and nothing else: a long value with a byte the
+    /// tool would answer in hex, or a line break, is no more welcome in an argv.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_long_value_the_tool_cannot_return_is_still_refused_before_any_process_starts() {
+        let service = "zerocode-test-long-refused";
+        write_keychain_service(service, "standing").expect("seed");
+        let long = "FAKE".repeat(2_000);
+        for value in [
+            format!("{long}\n"),
+            format!("{long}\r"),
+            format!("{long}\0"),
+            format!("{long}한글"),
+            format!("{long}\t"),
+        ] {
+            SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+            let refused = write_keychain_service(service, &value).unwrap_err();
+            let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+            assert!(started.is_empty(), "the tool was started: {started:?}");
+            assert!(!refused.contains("FAKE"), "{refused}");
+            assert_eq!(read_keychain_service(service).as_deref(), Ok("standing"));
+        }
+    }
+
+    /// The argument road keeps the rest of the write: a duplicate is classified and
+    /// retried, and the read-back removes a cut of its own value.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_argument_road_keeps_the_retry_and_the_read_back() {
+        let user = this_machines_account();
+        let long = "T".repeat(6_000);
+
+        let service = "zerocode-test-long-duplicate";
+        write_keychain_service(service, "stale").expect("seed");
+        security_command(&["test-pin-item", "-s", service, "-a", &user], None).expect("arm");
+        write_keychain_service(service, &long).expect("the retry lands the write");
+        assert_eq!(read_keychain_service(service).as_deref(), Ok(long.as_str()));
+
+        let service = "zerocode-test-long-cut";
+        security_command(&["test-cut-next-add", "-s", service, "-a", &user], None).expect("arm");
+        let refused = write_keychain_service(service, &long).unwrap_err();
+        assert!(refused.contains("항목을 지웠습니다"), "{refused}");
+        assert!(
+            read_keychain_service(service)
+                .unwrap_err()
+                .contains(NO_SUCH_ITEM)
+        );
+    }
+
+    /// The whole road a long login walks, which is what the refusal broke: a switch
+    /// to it, the launch after it, and the CLI itself growing the login in the home.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_login_past_the_line_limit_still_switches_and_launches() {
+        let config = tempfile::tempdir().expect("no config dir");
+        let home = tempfile::tempdir().expect("no home");
+        let first = one_account(config.path(), "a-1", "one@example.com", "tok-one");
+        let second = one_account(config.path(), "a-2", "two@example.com", "tok-two");
+        let long_login = |email: &str, mark: &str| {
+            serde_json::json!({
+                "claudeAiOauth": {"accessToken": "FAKE", "mcpOAuth": mark.repeat(5_000)},
+                "oauthAccount": {"emailAddress": email},
+            })
+            .to_string()
+        };
+        // Indented with a Korean name: the document's form first, then its length.
+        let grown = serde_json::to_string_pretty(&serde_json::json!({
+            "claudeAiOauth": {"accessToken": "FAKE", "mcpOAuth": "s".repeat(5_000)},
+            "oauthAccount": {"emailAddress": "two@example.com", "organizationName": "한글"},
+        }))
+        .expect("json");
+        let second_store = Path::new(&second.config_dir);
+        std::fs::write(second_store.join(CREDENTIALS_FILE), &grown).expect("the store's file");
+
+        materialize_into(config.path(), &second, home.path()).expect("the switch");
+
+        let service = keychain_services(home.path()).remove(0);
+        let held = read_keychain_service(&service).expect("the home's item");
+        let meaning = |text: &str| serde_json::from_str::<serde_json::Value>(text).expect("json");
+        assert_eq!(meaning(&held), meaning(&grown));
+        assert!(held.is_ascii() && !held.contains('\n'));
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(CREDENTIALS_FILE)).expect("the home's file"),
+            held
+        );
+        assert_eq!(read_runtime(config.path()).written.as_deref(), Some(&*held));
+
+        SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+        materialize_into(config.path(), &second, home.path()).expect("the next launch");
+        let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+        assert!(
+            !started
+                .iter()
+                .flatten()
+                .any(|arg| arg == "add-generic-password" || arg == "-i"),
+            "the next launch wrote the keychain again: {started:?}"
+        );
+
+        // The CLI grows the login in the home, and the next switch files it first.
+        let refreshed = long_login("two@example.com", "r");
+        cli_writes_credentials(home.path(), &refreshed);
+        materialize_into(config.path(), &first, home.path()).expect("the switch back");
+        assert_eq!(
+            credentials_at(second_store).as_deref(),
+            Some(refreshed.as_str())
+        );
     }
 
     /// A line break would end the command and run the value's rest as the next

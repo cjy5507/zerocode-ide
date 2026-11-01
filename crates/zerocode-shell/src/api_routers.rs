@@ -2368,11 +2368,7 @@ mod tests {
         let keychain = Keychain { available: true };
         let service = "zerocode-test-router-value-refused";
         keychain.write(service, "fixture-standing").expect("seed");
-        for value in [
-            "FAKE".repeat(2_000),
-            "FAKE한글".to_string(),
-            "FAKE\nbreak".to_string(),
-        ] {
+        for value in ["FAKE한글".to_string(), "FAKE\nbreak".to_string()] {
             let refused = keychain.write(service, &value).unwrap_err();
             assert_eq!(refused.kind, RouterRefusalKind::ValueRefused);
             assert!(!refused.message.contains("FAKE"), "{}", refused.message);
@@ -2381,6 +2377,22 @@ mod tests {
                 Some("fixture-standing")
             );
         }
+    }
+
+    /// A key past the line's limit is kept whole. It is one the keychain's road can
+    /// carry, on the old argument road, and refusing it would lose a save that worked
+    /// before.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_key_past_the_line_limit_is_kept_whole() {
+        let keychain = Keychain { available: true };
+        let service = "zerocode-test-router-long-key";
+        let key = "FAKE".repeat(2_000);
+        keychain.write(service, &key).expect("the long key");
+        assert_eq!(
+            keychain.read(service).unwrap().as_deref(),
+            Some(key.as_str())
+        );
     }
 
     #[test]
