@@ -1946,6 +1946,9 @@ mod provider_tests;
 mod builtin_tests;
 
 #[cfg(test)]
+mod erase_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
