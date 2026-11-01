@@ -105,6 +105,21 @@ export async function testSidebarFinishedFold({ browser, origin, ok, faults }) {
         await page.screenshot({ path: join(shots, `finished-${treatment}-${width}.png`), animations: "disabled" });
       }
     }
+    // Folding the sidebar takes the title bar's left plane with it (t-85293, t-84136 r1 P3-c): the rule
+    // reads the bar's following sibling, so a move of either element out of the other's reach would
+    // leave the plane behind a folded sidebar without any test noticing.
+    await page.setViewportSize({ width: 1280, height: 900 });
+    const plane = () => page.evaluate(() => getComputedStyle(document.querySelector(".titlebar")).getPropertyValue("--titlebar-left-width").trim());
+    const planeOpen = await plane();
+    await page.evaluate(() => setPanelFolded("sidebar", true));
+    const planeFolded = await plane();
+    await page.evaluate(() => setPanelFolded("sidebar", false));
+    const planeBack = await plane();
+    ok(
+      "folding the sidebar takes the title bar's left plane to 0px, and unfolding brings it back",
+      planeOpen !== "" && planeOpen !== "0px" && planeFolded === "0px" && planeBack === planeOpen,
+      JSON.stringify({ planeOpen, planeFolded, planeBack }),
+    );
   } finally {
     await page.close();
   }

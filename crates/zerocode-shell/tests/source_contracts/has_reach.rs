@@ -213,3 +213,17 @@ fn a_has_rule_styles_no_bare_tag() {
         wrong.join("\n  ")
     );
 }
+
+/// The scan reads every stylesheet the window loads, not only `shell.css`
+/// (t-85293, t-84136 r1 P3-d): a `body:has(…)` that came in through
+/// `tokens.css` would otherwise pass both rules unseen.
+#[test]
+fn the_scan_reads_tokens_css_as_well_as_shell_css() {
+    let selectors = has_selectors();
+    assert!(
+        selectors
+            .iter()
+            .any(|one| one.starts_with(".file-view:has(.agent-graph-layout)")),
+        "the `:has()` rules of `ui/tokens.css` are not scanned: {selectors:?}"
+    );
+}

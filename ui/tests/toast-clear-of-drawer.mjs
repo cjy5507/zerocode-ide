@@ -55,6 +55,30 @@ export async function testToastClearOfDrawer(browser, origin, ok) {
       ok(`a save toast covers no button of ${scene.name}`, seen.covered === 0 && seen.unreachable === 0, JSON.stringify(seen));
     } finally { await page.close(); }
   }
+  // A drawer whose page goes away stops counting at once (t-85293, t-84136 r1 P3-e): the toast layer
+  // leaves the drawer's side when the page the drawer stood in is taken off the strip, with no toast
+  // to prompt it — a sticky toast already standing there is the one that showed the old side.
+  const { page } = await openWindowTestPage(browser, origin, { faults: [] });
+  try {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const seen = await page.evaluate(async () => {
+      const term = await openTermTab({ placement: "tab" });
+      const tab = tabs.find((one) => one.layout?.term === term) ?? tabs[tabs.length - 1];
+      const host = paneHosts.get(tab.id);
+      const drawer = document.createElement("aside");
+      drawer.className = "jev-drawer";
+      host.append(drawer);
+      sayDrawersDocked();
+      const beside = toastLayer.classList.contains("is-beside-drawer");
+      dropTab(tab.id, { closed: true });
+      return { beside, gone: !drawer.isConnected, after: toastLayer.classList.contains("is-beside-drawer") };
+    });
+    ok(
+      "the toast layer leaves a drawer's side when the page the drawer stood in goes",
+      seen.beside && seen.gone && !seen.after,
+      JSON.stringify(seen),
+    );
+  } finally { await page.close(); }
 }
 
 if (process.argv[1] && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href) {
