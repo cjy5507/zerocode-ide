@@ -5,12 +5,12 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{Case, MAX_CASE_BYTES, Outcome, Reason};
-use crate::jev::{JevUse, door, promote};
+use crate::jev::{JevUse, door, erase, promote};
 
 /// A full queue remains inspectable and exportable; it never grows without a bound.
 pub const MAX_CASES: usize = 512;
@@ -124,6 +124,8 @@ pub enum Recorded {
     Saved,
     Existing,
     Full,
+    /// The seat was deleted while its answer was on the way: nothing is kept.
+    SeatDeleted,
 }
 
 #[derive(Debug, Default)]
@@ -152,6 +154,7 @@ pub struct Review {
 
 #[derive(Debug, Clone)]
 pub struct Store {
+    home: PathBuf,
     root: PathBuf,
 }
 
@@ -173,6 +176,7 @@ impl Store {
     #[must_use]
     pub fn at(home: &Path) -> Self {
         Self {
+            home: home.to_path_buf(),
             root: home.join(DIRECTORY),
         }
     }
@@ -199,6 +203,9 @@ impl Store {
     pub fn record(&self, case: &Case) -> io::Result<Recorded> {
         case.validate().map_err(io::Error::other)?;
         let _lock = self.lock()?;
+        if erase::seat_written_off(&self.home, &case.seat) {
+            return Ok(Recorded::SeatDeleted);
+        }
         let path = self.root.join(format!("{}.json", case.id));
         if path.exists() {
             let existing: Case = read_json(&path, MAX_CASE_BYTES)?;
@@ -218,6 +225,50 @@ impl Store {
         }
         atomic_json(&path, case)?;
         Ok(Recorded::Saved)
+    }
+
+    /// Remove the cases of the seats `goes` names, each with its labels, and so
+    /// free their slots. A case that names no seat it can be read for stays. No
+    /// store is left as it stood, with no folder and no lock file made for it.
+    ///
+    /// # Errors
+    /// A busy store, or whatever keeps a case from being read or removed. The
+    /// cases are all tried first. A case keeps its file until its labels are gone,
+    /// so a failure in between is found and retried.
+    pub(crate) fn forget(&self, goes: &dyn Fn(&str) -> bool) -> io::Result<usize> {
+        if let Err(error) = fs::symlink_metadata(&self.root) {
+            return match error.kind() {
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => Ok(0),
+                _ => Err(error),
+            };
+        }
+        let _lock = self.lock()?;
+        let mut removed = 0;
+        let mut failed = None;
+        for entry in fs::read_dir(&self.root)? {
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(error) => {
+                    failed = Some(error);
+                    continue;
+                }
+            };
+            let named = path
+                .file_name()
+                .is_some_and(|name| case_name(&name.to_string_lossy()));
+            if !named {
+                continue;
+            }
+            match seat_of(&path) {
+                Ok(Some(seat)) if goes(&seat) => match remove_case(&path) {
+                    Ok(()) => removed += 1,
+                    Err(error) => failed = Some(error),
+                },
+                Ok(_) => {}
+                Err(error) => failed = Some(error),
+            }
+        }
+        failed.map_or(Ok(removed), Err)
     }
 
     fn paths(&self) -> io::Result<Vec<PathBuf>> {
@@ -397,6 +448,31 @@ fn read_case(path: &Path) -> io::Result<Case> {
         ));
     }
     Ok(case)
+}
+
+/// The seat a case file names, without judging the rest of it: a case an older
+/// version wrote still says whose it is. `None` for what no reader would trust,
+/// and for what names no seat.
+fn seat_of(path: &Path) -> io::Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct Named {
+        seat: String,
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.len() > MAX_CASE_BYTES as u64 {
+        return Ok(None);
+    }
+    Ok(serde_json::from_slice::<Named>(&fs::read(path)?)
+        .ok()
+        .map(|named| named.seat))
+}
+
+fn remove_case(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path.with_extension("outcomes")) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    fs::remove_file(path)
 }
 
 fn read_outcomes(path: &Path, case: &Case) -> (Vec<Outcome>, usize) {

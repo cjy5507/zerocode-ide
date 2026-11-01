@@ -22,6 +22,9 @@
 //! grow. Reading it whole on every lookup is the point — a lookup must stay
 //! cheaper than the question it answers for ([`super::JUDGMENT_MEMO_DEADLINE_MS`]).
 //!
+//! A deleted seat's rows go by a rewrite ([`super::erase`]), so every write holds
+//! the lock that rewrite takes. A lookup takes none.
+//!
 //! Nothing here asks the door. The door asks the memo
 //! ([`super::door::pass_remembering`]), after its own four questions and
 //! before it counts: a hit is a request that passed and did not leave.
@@ -30,7 +33,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use super::{JevUse, rubric_fingerprint};
+use super::{JevUse, erase, rubric_fingerprint};
 
 /// The memo's file name, under the Jev folder of a config home.
 pub const MEMO_FILE: &str = "judgment-memo.jsonl";
@@ -93,10 +96,13 @@ pub fn recall(memo: &Path, key: &str) -> Option<Recalled> {
 }
 
 /// Remember `answer` under `key`, newest last. Past [`MEMO_ROWS_CAP`] the
-/// oldest half is dropped first, so the file never outgrows a lookup's wall.
+/// oldest half is dropped first, so the file never outgrows a lookup's wall. A
+/// seat deleted while its answer was on the way is not remembered.
 ///
 /// # Errors
-/// The file could not be written.
+/// The file could not be written, or its lock stayed busy
+/// ([`erase::shared_ledger_lock`]). The caller holds its answer either way: only
+/// this row is lost.
 pub fn remember(
     memo: &Path,
     seat: &JevUse,
@@ -107,6 +113,10 @@ pub fn remember(
     let row = json!({ KEY: key, SEAT: seat.id, ANSWER: answer, AT: now_ms }).to_string();
     if let Some(folder) = memo.parent() {
         std::fs::create_dir_all(folder)?;
+    }
+    let _lock = erase::shared_ledger_lock(memo)?;
+    if !erase::may_remember(memo, seat.id) {
+        return Ok(());
     }
     let held = std::fs::read_to_string(memo).unwrap_or_default();
     let rows = held.lines().filter(|line| !line.is_empty()).count();
