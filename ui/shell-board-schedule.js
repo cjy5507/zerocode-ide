@@ -1361,6 +1361,25 @@ function boardScheduleRowNode(view) {
   return row;
 }
 
+/* 쌓인 일의 「게이트 일감」 줄(t-84799 B9): 일정의 마지막 답이 말하는 게이트 — 안내판의 둘째 줄과 같은 규칙으로 고른 것 —
+ * 의 이름과 그 게이트에 일어난 일. 답이 게이트를 하나도 싣지 않았거나 아직 답이 없으면 빈 글이다. 글은 답 하나에
+ * 한 분(分)·한 언어에 한 번만 센다 — 쌓인 일 패널은 사실이 바뀔 때만 다시 그리고, 이 줄은 그 사실 가운데 하나다. */
+const boardScheduleGateWordsHeld = new WeakMap();
+
+function boardScheduleGateWords(now = Date.now()) {
+  const answer = boardScheduleAnswer;
+  if (!answer || !Array.isArray(answer.jobs)) return "";
+  const minute = Math.floor(now / 60_000) * 60_000;
+  const held = boardScheduleGateWordsHeld.get(answer);
+  if (held?.minute === minute && held.language === document.documentElement.lang) return held.words;
+  const model = boardScheduleModel(answer, [], minute, { zoom: "now", folded: new Set(), opened: new Set(), log: null }, 900,
+    false, null, { hourPx: 120, tickPx: 16, leastPx: 24 });
+  const line = model.board.lines[1];
+  const words = line.name ? [line.name, line.word, line.big === "—" ? "" : line.big].filter(Boolean).join(" · ") : "";
+  boardScheduleGateWordsHeld.set(answer, { minute, language: document.documentElement.lang, words });
+  return words;
+}
+
 /* 블록 하나(t-77628): 단추 하나에 이름(`<b>`, id는 가상 요소) — 요소 둘. 게이트의 블록만 단계 칸 줄(`<i>`)을
  * 하나 더 든다. 둘째 줄·셋째 줄·행동 칩은 `data-*`를 읽는 가상 요소다. 자리는 커스텀 속성(`--from`·`--to`:
  * 범위의 퍼센트, `--col`·`--cols`: 부열)이고 CSS가 시간당 높이로 푼다. */

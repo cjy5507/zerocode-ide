@@ -463,7 +463,7 @@ function paintStackedWork() {
   const tally = checksTally(checks).filter(([, count]) => count > 0);
   const unseated = checkouts.filter((worktree) => worktreeAgentRows(worktree.path).length === 0).length;
   const drawing = JSON.stringify([locale, project?.name, lane?.sha, lane?.version, lane?.phase, deskReleaseVerdict(lane ?? {}),
-    checkouts.map((worktree) => [worktree.path, worktree.branch, worktree.landing]), unseated,
+    checkouts.map((worktree) => [worktree.path, worktree.branch, worktree.landing]), unseated, boardScheduleGateWords(),
     branchHead, upstreamState?.upstream, scmEntries.length, tally.map(([name, count]) => [name, count]),
     pileHistory?.rows.map((row) => row.item.id), pileHistory?.more]);
   if (drawing === pileDrawn && panel.childElementCount > 0) return;
@@ -479,7 +479,8 @@ function paintStackedWork() {
 
 /* The release lane, as the build line's card says it: its version, its verdict
  * and the step it is on, then the gate's line. The window holds no gate job
- * outside the board's schedule, so that line says a dash rather than a guess;
+ * outside the board's schedule, so that line reads the schedule's last answer
+ * (`boardScheduleGateWords`) and says a dash, not a guess, where it holds no gate;
  * the count is of the lines that say something. */
 function pileReleaseSection(lane) {
   const rows = [];
@@ -495,7 +496,7 @@ function pileReleaseSection(lane) {
     rows.push(row);
   }
   const gate = deskElement("p", "pile-gate");
-  gate.append(deskElement("strong", "pile-release-title", t("pile.gate", "게이트 일감")), deskElement("span", "pile-release-state", "—"));
+  gate.append(deskElement("strong", "pile-release-title", t("pile.gate", "게이트 일감")), deskElement("span", "pile-release-state", boardScheduleGateWords() || "—"));
   return pileSectionNode(t("pile.release", "발행 · 게이트"), rows.length, [...rows, gate]);
 }
 
