@@ -298,7 +298,7 @@ impl Field {
 pub enum Refusal {
     /// The id is not `ID_PREFIX` and eight lowercase hex digits.
     Id,
-    /// A decision, or one in the trash, already has this id.
+    /// A decision already has this id.
     IdTaken,
     /// The name is empty or longer than [`NAME_MAX_CHARS`].
     NameLength,

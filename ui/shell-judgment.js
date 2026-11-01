@@ -35,7 +35,7 @@ const judgmentProviderController = {
     const scope = t("settings.judgment.usageScope", "이 컴퓨터의 창 요청 · 최근 기록 범위");
     if (usage.state === "none_observed") return `${scope} · ${t("settings.judgment.usageNoneObserved", "최근 기록에서 현재 모델의 실제 요청을 찾지 못했습니다.")}`;
     const last = usage.lastRequest;
-    const feature = jevFeature(last.feature)?.name;
+    const feature = jevBuiltinSaved(last.feature).deleted ? null : jevFeature(last.feature)?.name;
     const name = feature ? t(feature.key, feature.source) : t("settings.judgment.usageFeature", "판단 기능");
     const when = last.atMs == null ? t("settings.judgment.usageTimeUnknown", "시각 정보 없음")
       : new Intl.DateTimeFormat(document.documentElement.lang || "ko", { dateStyle: "short", timeStyle: "medium" }).format(new Date(last.atMs));

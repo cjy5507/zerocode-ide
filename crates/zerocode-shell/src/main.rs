@@ -436,8 +436,8 @@ use cmd::{
 };
 use cmd::{artifact_export_formats, artifact_export_reveal};
 use cmd::{
-    check_custom_decision, delete_custom_decision, list_custom_decisions, restore_custom_decision,
-    save_custom_decision, set_custom_decision_mode,
+    check_custom_decision, delete_custom_decision, list_custom_decisions, save_custom_decision,
+    set_custom_decision_mode,
 };
 use cmd::{
     claim_coordinator_seat, coordinator_handover_status, coordinator_seat_runs, coordinator_seats,
@@ -2706,7 +2706,6 @@ fn main() -> ExitCode {
             check_custom_decision,
             save_custom_decision,
             delete_custom_decision,
-            restore_custom_decision,
             set_custom_decision_mode,
             set_judgment_provider,
             managed_judgment_apply,
@@ -3738,6 +3737,9 @@ fn main() -> ExitCode {
             // to the update state for the settings pane's one line.
             let zo_resources = app.path().resource_dir().ok();
             std::thread::spawn(move || {
+                // What a delete left in the person's decision store goes first:
+                // two folder reads and, at most, a few file removals.
+                cmd::tidy_decision_store_at_start();
                 if hooks::hooks_enabled(&config_root) {
                     hooks::reconcile(&config_root, &local_data_root, &installed_agent_slugs());
                 } else {

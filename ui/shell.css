@@ -47635,7 +47635,7 @@ h4.knowledge-inspector-head::after {
   line-height: var(--leading-body);
 }
 
-.jev-custom-list, .jev-custom-trash-list, .jev-custom-options {
+.jev-custom-list, .jev-custom-options {
   display: grid;
   margin: 0;
   padding: 0;
@@ -47709,25 +47709,16 @@ h4.knowledge-inspector-head::after {
   box-shadow: var(--shadow-1);
 }
 
-.jev-custom-actions, .jev-custom-trashed {
+.jev-custom-actions {
   display: flex;
   align-items: center;
   gap: var(--space-2);
 }
 
-.jev-custom-trashed {
-  justify-content: space-between;
-}
-
-.jev-custom-trash summary, .jev-custom-preview summary {
+.jev-custom-preview summary {
   color: var(--ink-mist);
   font-size: var(--jev-meta-size);
   cursor: pointer;
-}
-
-.jev-custom-trash-list {
-  gap: var(--space-2);
-  margin-top: var(--space-2);
 }
 
 .jev-custom-scrim {
@@ -53801,7 +53792,6 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .jev-builtin-action:hover { color: var(--ink-chalk); }
 .jev-builtin-status { margin: 0; color: var(--ink-mist); }
 .jev-builtin-status.is-error { color: var(--signal-halt); }
-.jev-builtin-trash { margin: var(--space-3) 0; }
 
 /* Settings › 모델 and 모델 연결 (t-75762 v2): full-bleed rows divided by
  * rules, each a model's name, how it is reached and its state in words.

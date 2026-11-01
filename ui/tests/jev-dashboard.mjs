@@ -302,7 +302,7 @@ export function jevDashboardFixture(real = null) {
   const rules = {
     feature: "custom", decisionsMax: 3, nameMaxChars: 30, questionMaxChars: 900, meaningMaxChars: 300,
     options: { least: 2, most: 6 }, hourly: { least: 2, most: 90 }, hourlyDefault: 17, hourlyAll: 55,
-    actFrom: { least: 0.55, most: 0.9 }, actFromDefault: 0.75, trashKeptDays: 21,
+    actFrom: { least: 0.55, most: 0.9 }, actFromDefault: 0.75,
     kinds: ["yes_no", "choice", "score"],
     points: [
       { at: "turn_start", inputs: ["task"] },
@@ -312,8 +312,8 @@ export function jevDashboardFixture(real = null) {
     ],
     modes: modes.filter((choice) => !choice.automatic),
   };
-  const store = { decisions: [], trash: [], folders: ["/Users/p/project", "/Users/p/shop"], everywhere: false };
-  const custom = { rules, store, saves: [], checks: 0, lines: [], modes: [], deletes: [], restores: [], made: 0, deleted: new Map() };
+  const store = { decisions: [], folders: ["/Users/p/project", "/Users/p/shop"], everywhere: false };
+  const custom = { rules, store, saves: [], checks: 0, lines: [], modes: [], deletes: [], made: 0 };
   window.__JEV__ = { seats, modeOf, asks: [], jev, pressed: [], custom };
   const builtin = { saved: {}, calls: [], failNext: false };
   window.__JEV__.builtin = builtin;
@@ -349,13 +349,15 @@ export function jevDashboardFixture(real = null) {
     if (builtin.failNext) { builtin.failNext = false; throw { message: "fixture_write_failed" }; }
     const before = builtin.saved[id] ?? {};
     if (JSON.stringify(before) !== JSON.stringify(expected)) throw { message: "builtin_decision_changed" };
+    // A deleted decision stays deleted: the backend refuses save and reset on it, and restore on any.
+    if (before.deleted && (action === "save" || action === "reset")) throw { message: "builtin_decision_deleted" };
     if (action === "save") {
       const next = structuredClone(draft);
       if ((next.question || next.criteria || Object.keys(next.questions ?? {}).length) && (next.question !== (before.question ?? null) || next.criteria !== (before.criteria ?? null) || JSON.stringify(next.questions ?? {}) !== JSON.stringify(before.questions ?? {}))) next.mode = "shadow";
       builtin.saved[id] = next;
-    } else if (action === "delete") builtin.saved[id] = { ...before, deleted: true };
-    else if (action === "restore") builtin.saved[id] = { ...before, deleted: false };
+    } else if (action === "delete") builtin.saved[id] = { deleted: true };
     else if (action === "reset") delete builtin.saved[id];
+    else throw { message: "builtin_decision_action" };
     return settings();
   };
 
@@ -424,16 +426,7 @@ export function jevDashboardFixture(real = null) {
   };
   window.__ANSWER__.delete_custom_decision = ({ id }) => {
     custom.deletes.push(id);
-    const [gone] = store.decisions.splice(store.decisions.findIndex((one) => one.draft.id === id), 1);
-    custom.deleted.set(id, gone);
-    store.trash.push({ id, name: gone.draft.name, deletedAt: stamp() });
-    return structuredClone(store);
-  };
-  window.__ANSWER__.restore_custom_decision = ({ id }) => {
-    custom.restores.push(id);
-    store.trash = store.trash.filter((one) => one.id !== id);
-    store.decisions.push(custom.deleted.get(id));
-    store.decisions.sort((one, other) => one.createdAt.localeCompare(other.createdAt));
+    store.decisions.splice(store.decisions.findIndex((one) => one.draft.id === id), 1);
     return structuredClone(store);
   };
   if (real) {
@@ -3082,6 +3075,7 @@ export async function testJevCustomDecisions(browser, origin, ok) {
       await window.__PAINTED__();
     });
 
+    const secondName = await page.evaluate((id) => window.__JEV__.custom.store.decisions.find((one) => one.draft.id === id).draft.name, secondId);
     await press(`#jev-view [data-jev-custom-row="${secondId}"] [data-jev-custom-delete]`);
     await waitFor(() => el("jev-custom-delete-scrim")?.hidden === false);
     const asking = await page.evaluate(() => ({
@@ -3089,63 +3083,57 @@ export async function testJevCustomDecisions(browser, origin, ok) {
       title: el("jev-custom-delete-title")?.textContent ?? "", body: el("jev-custom-delete-body")?.textContent ?? "",
       focus: document.activeElement !== null && document.activeElement === el("jev-custom-delete-cancel"),
     }));
-    ok("「삭제」 asks once, naming the decision, that its records stay, and for how many days it can come back",
-      asking.open && asking.top === "jev-custom-delete-scrim" && asking.title.includes(secret.name)
-        && asking.body.includes(String(rules.trashKeptDays)) && asking.focus,
+    ok("「삭제」 asks once, naming the decision and saying it cannot be undone — no word of records kept or of restoring",
+      asking.open && asking.top === "jev-custom-delete-scrim" && asking.title.includes(secondName)
+        && asking.body.includes("되돌릴 수 없") && !/기록|되살|복원|일 동안|[0-9]/.test(asking.body) && asking.focus,
       JSON.stringify(asking));
     await picture("delete-confirm");
+    // The question says the same in every language: it cannot be undone, with nothing about records or restoring.
+    const said = await page.evaluate((korean) => {
+      const out = { ko: korean };
+      for (const language of ["en", "ja", "zh", "es"]) {
+        setLocale(language);
+        out[language] = t("jev.custom.deleteBody", "KO");
+      }
+      setLocale("ko");
+      return out;
+    }, asking.body);
+    const never = { ko: /되돌릴 수 없/, en: /cannot be undone/, ja: /元に戻せません/, zh: /无法恢复/, es: /no se puede deshacer/ };
+    const stale = { ko: /기록|되살|복원|일 동안/, en: /record|restor|days/i, ja: /記録|復元|日間/, zh: /记录|天内/, es: /registro|restaur|días/i };
+    ok("the delete question says it cannot be undone in all five languages, and none still offers a restore or keeps a day count",
+      Object.keys(never).every((language) => never[language].test(said[language]) && !stale[language].test(said[language]) && !said[language].includes("{{"))
+        && new Set(Object.values(said)).size === 5,
+      JSON.stringify(said));
     await press("#jev-custom-delete-ok");
     await waitFor((id) => window.__JEV__.custom.deletes.length === 1
-      && document.querySelector(`#jev-view [data-jev-custom-row="${id}"]`) === null
-      && document.querySelector(`.toast[data-jev-custom-undo="${id}"] .toast-action`) !== null, secondId);
-    const deleted = await page.evaluate((id) => ({
-      deletes: window.__JEV__.custom.deletes.slice(), row: document.querySelector(`#jev-view [data-jev-custom-row="${id}"]`) !== null,
-      confirm: el("jev-custom-delete-scrim")?.hidden === false,
-      undo: document.querySelector(`.toast[data-jev-custom-undo="${id}"] .toast-action`)?.textContent.trim() ?? null,
-    }), secondId);
-    ok("「지우기」 deletes it through the store, and the toast offers 「되돌리기」",
-      deleted.deletes.join() === secondId && !deleted.row && !deleted.confirm && deleted.undo === "되돌리기", JSON.stringify(deleted));
-    await picture("undo");
-    await press(`.toast[data-jev-custom-undo="${secondId}"] .toast-action`);
-    const undone = await waitFor((id) => window.__JEV__.custom.restores.length === 1
-      && document.querySelector(`#jev-view [data-jev-custom-row="${id}"]`) !== null
-      && document.querySelector(`.toast[data-jev-custom-undo="${id}"]`) === null, secondId);
-    ok("「되돌리기」 brings it back through the store and takes the toast away",
-      undone, JSON.stringify(await page.evaluate(() => window.__JEV__.custom.restores)));
-
-    await press(`#jev-view [data-jev-custom-row="${secondId}"] [data-jev-custom-delete]`);
-    await waitFor(() => el("jev-custom-delete-scrim")?.hidden === false);
-    const held = await page.evaluate(async (id) => {
-      const started = performance.now();
-      el("jev-custom-delete-ok")?.click();
-      const undoMs = typeof JEV_CUSTOM_UNDO_MS === "number" ? JEV_CUSTOM_UNDO_MS : 0;
-      await new Promise((done) => setTimeout(done, TOAST_MS + 250));
-      const standing = document.querySelector(`.toast[data-jev-custom-undo="${id}"]`) !== null;
-      await new Promise((done) => setTimeout(done, Math.max(0, undoMs + 400 - (performance.now() - started))));
-      return { standing, gone: document.querySelector(`.toast[data-jev-custom-undo="${id}"]`) === null, undoMs, toastMs: TOAST_MS };
-    }, secondId);
-    ok("the undo stands past a plain toast's time and leaves at the design's eight seconds",
-      held.standing && held.gone && held.undoMs === 8_000 && held.undoMs > held.toastMs, JSON.stringify(held));
-    const trash = await page.evaluate((id) => {
-      const fold = document.querySelector("#jev-view [data-jev-custom-trash]");
+      && document.querySelector(`#jev-view [data-jev-custom-row="${id}"]`) === null, secondId);
+    const deleted = await page.evaluate(async (name) => {
+      const toasts = [...document.querySelectorAll(".toast")];
+      const said = toasts.map((one) => one.textContent.trim());
+      for (const one of toasts) one.style.display = "none";
+      await window.__PAINTED__();
       return {
-        shown: Boolean(fold) && fold.getClientRects().length > 0,
-        items: [...(fold?.querySelectorAll("[data-jev-custom-restore]") ?? [])].map((one) => one.dataset.jevCustomRestore),
-        row: document.querySelector(`#jev-view [data-jev-custom-row="${id}"]`) !== null,
+        deletes: window.__JEV__.custom.deletes.slice(), confirm: el("jev-custom-delete-scrim")?.hidden === false,
+        said, actions: document.querySelectorAll(".toast .toast-action").length,
+        undo: document.querySelectorAll("[data-jev-custom-undo]").length,
+        fold: document.querySelectorAll("[data-jev-custom-trash]").length,
+        restore: document.querySelectorAll("[data-jev-custom-restore]").length,
+        restoreWord: document.body.innerText.includes("되살리기") || document.body.innerText.includes("되돌리기"),
+        onScreen: document.body.innerText.includes(name),
       };
-    }, secondId);
-    ok("with the undo gone the deleted decision waits in a fold under the list", trash.shown && trash.items.join() === secondId && !trash.row,
-      JSON.stringify(trash));
-    await page.evaluate(() => {
-      const fold = document.querySelector("#jev-view [data-jev-custom-trash]");
-      if (fold) fold.open = true;
+    }, secondName);
+    ok("「지우기」 deletes it through the store; the toast is one line with no button, and no fold, restore button or undo mark is left",
+      deleted.deletes.join() === secondId && !deleted.confirm && deleted.said.some((line) => line.includes("결정을 지웠습니다"))
+        && deleted.actions === 0 && deleted.undo === 0 && deleted.fold === 0 && deleted.restore === 0 && !deleted.restoreWord,
+      JSON.stringify(deleted));
+    ok("the deleted decision's name is on no part of the screen once its toast is gone", !deleted.onScreen, JSON.stringify(deleted));
+    await picture("deleted");
+    const moved = await page.evaluate(() => {
+      const now = document.activeElement;
+      return { tag: now?.tagName ?? null, id: now?.id ?? "", inView: !!now?.closest("#jev-view"),
+        onNewDecision: !!now?.matches("[data-jev-custom-new], [data-jev-custom-guide]") };
     });
-    await press(`#jev-view [data-jev-custom-restore="${secondId}"]`);
-    const restored = await waitFor((id) => window.__JEV__.custom.restores.length === 2
-      && document.querySelector(`#jev-view [data-jev-custom-row="${id}"]`) !== null
-      && (document.querySelector("#jev-view [data-jev-custom-trash]")?.getClientRects().length ?? 0) === 0, secondId);
-    ok("「되살리기」 in the fold brings it back through the store", restored,
-      JSON.stringify(await page.evaluate(() => window.__JEV__.custom.restores)));
+    ok("focus lands on the part's 「새 결정」 or its guide, not on the page body and not on the row that left", moved.inView && moved.onNewDecision, JSON.stringify(moved));
 
     const full = await page.evaluate(async () => {
       const custom = window.__JEV__.custom;
@@ -3230,7 +3218,7 @@ export async function testJevCustomDecisions(browser, origin, ok) {
     confirm.closed = await waitFor(() => el("jev-custom-delete-scrim")?.hidden !== false);
     confirm.drawer = await page.evaluate(() => el("jev-custom-scrim")?.hidden === false && window.__MODAL_STACK__().at(-1) === "jev-custom-scrim");
     confirm.back = await focusIs("#jev-custom-delete");
-    confirm.nothingDeleted = await page.evaluate(() => window.__JEV__.custom.deletes.length === 2);
+    confirm.nothingDeleted = await page.evaluate(() => window.__JEV__.custom.deletes.length === 1);
     await page.keyboard.press("Escape");
     confirm.drawerClosed = await drawerClosed();
     confirm.edit = await focusIs(`#jev-view [data-jev-custom-row="${firstId}"] [data-jev-custom-edit]`);
@@ -3400,24 +3388,120 @@ export async function testJevBuiltinDecisions(browser, origin, ok) {
     }
     await page.setViewportSize({ width: 1280, height: 860 });
     await page.locator("#jev-builtin-cancel").click();
-    await page.locator('#jev-view [data-jev-builtin-delete="recall"]').click();
-    await page.locator("#jev-custom-delete-ok").click();
-    await page.waitForFunction(() => !document.querySelector('#jev-view [data-jev-dash-row="recall"]'));
-    ok("deleting a built-in decision removes its row and offers restoration", await page.locator('#jev-view [data-jev-builtin-restore="recall"]').count() === 1);
-    const toggle = page.locator("#jev-view [data-jev-switch]");
-    await toggle.uncheck(); await toggle.check();
-    saved = await page.evaluate(() => window.__JEV__.builtin.saved.recall);
-    ok("turning all decisions on does not resurrect a deleted built-in decision", saved.deleted && await page.locator('#jev-view [data-jev-dash-row="recall"]').count() === 0);
-    await page.locator('#jev-view [data-jev-builtin-restore="recall"]').click();
-    await page.waitForSelector('#jev-view [data-jev-dash-row="recall"]');
     await open();
-    ok("restoring a deleted built-in decision preserves its saved question", await page.locator('[data-jev-question-instructions="n*"]').inputValue() === saved.questions["n*"].instructions);
     await page.locator("#jev-builtin-reset").click();
     await save();
     await open();
     ok("loading and saving defaults restores the shipped question", await page.locator('[data-jev-question-instructions="n*"]').inputValue() === "기본 판단 질문"
       && await page.evaluate(() => !window.__JEV__.builtin.saved.recall));
     await page.locator("#jev-builtin-cancel").click();
+
+    // Deleting is final: the row, its name and any way back are gone, and turning every feature on again changes nothing.
+    const gone = "stall";
+    const goneName = await page.evaluate((id) => jevSeatName(id), gone);
+    if (!await page.locator(`#jev-view [data-jev-builtin-delete="${gone}"]`).count()) await page.locator("#jev-view .jev-fold").click();
+    await page.locator(`#jev-view [data-jev-builtin-delete="${gone}"]`).click();
+    await page.waitForFunction(() => document.getElementById("jev-custom-delete-scrim")?.hidden === false);
+    const asked = await page.evaluate(() => ({ title: el("jev-custom-delete-title").textContent, body: el("jev-custom-delete-body").textContent }));
+    ok("deleting a built-in decision asks once: it cannot be undone and stays off when all features are turned on, with no word of records or restoring",
+      asked.title.includes(goneName) && asked.body.includes("되돌릴 수 없") && asked.body.includes("전체 기능을 다시 켜도")
+        && !/기록|되살|복원|일 동안/.test(asked.body), JSON.stringify(asked));
+    const builtinSaid = await page.evaluate((korean) => {
+      const out = { ko: korean };
+      for (const language of ["en", "ja", "zh", "es"]) {
+        setLocale(language);
+        out[language] = t("jev.builtin.deleteBody", "KO");
+      }
+      setLocale("ko");
+      return out;
+    }, asked.body);
+    const cannot = { ko: /되돌릴 수 없/, en: /cannot be undone/, ja: /元に戻せません/, zh: /无法恢复/, es: /no se puede deshacer/ };
+    const staysOff = { ko: /전체 기능을 다시 켜도/, en: /turning all features on again/, ja: /全機能をオン/, zh: /重新开启全部功能/, es: /Activar todas las funciones/ };
+    const stale = { ko: /기록|되살|복원|일 동안/, en: /record|restor|days/i, ja: /記録|復元|日間/, zh: /记录|天内/, es: /registro|restaur|días/i };
+    ok("the built-in delete question speaks all five languages: it cannot be undone, all-on does not bring it back, and nothing offers a restore",
+      Object.keys(cannot).every((language) => cannot[language].test(builtinSaid[language]) && staysOff[language].test(builtinSaid[language])
+        && !stale[language].test(builtinSaid[language]) && !builtinSaid[language].includes("{{"))
+        && new Set(Object.values(builtinSaid)).size === 5,
+      JSON.stringify(builtinSaid));
+    await page.locator("#jev-custom-delete-ok").click();
+    await page.waitForFunction((id) => !document.querySelector(`#jev-view [data-jev-dash-row="${id}"]`)
+      && window.__JEV__.builtin.saved[id]?.deleted === true, gone);
+    const after = await page.evaluate(async ({ id, name }) => {
+      const toasts = [...document.querySelectorAll(".toast")];
+      const said = toasts.map((one) => one.textContent.trim());
+      for (const one of toasts) one.style.display = "none";
+      await window.__PAINTED__();
+      return {
+        said, actions: document.querySelectorAll(".toast .toast-action").length,
+        row: document.querySelectorAll(`[data-jev-dash-row="${id}"], [data-jev-builtin-edit="${id}"], [data-jev-builtin-delete="${id}"]`).length,
+        fold: document.querySelectorAll("[data-jev-builtin-trash], [data-jev-builtin-restore], [data-jev-custom-trash]").length,
+        wording: document.body.innerText.includes("되살리기") || document.body.innerText.includes("되돌리기"),
+        onScreen: document.body.innerText.includes(name),
+        calls: window.__JEV__.builtin.calls.filter((one) => one.id === id).map((one) => one.action),
+        focus: (() => {
+          const now = document.activeElement;
+          return { tag: now?.tagName ?? null, inView: !!now?.closest("#jev-view"),
+            onKeptRow: !!now?.matches("[data-jev-dash-row] [data-jev-builtin-edit]"), onHead: !!now?.matches("h1, h2") };
+        })(),
+      };
+    }, { id: gone, name: goneName });
+    ok("deleting a built-in decision removes its row with a one-line toast and no restore, undo or fold",
+      after.row === 0 && after.fold === 0 && after.actions === 0 && !after.wording && after.said.some((line) => line.includes("결정을 지웠습니다")) && after.calls.join() === "delete",
+      JSON.stringify(after));
+    ok("a deleted built-in decision's name is on no part of the screen once its toast is gone", !after.onScreen, JSON.stringify(after));
+    ok("focus lands on a kept row's edit button or the head of the view, not on the page body", after.focus.inView && (after.focus.onKeptRow || after.focus.onHead), JSON.stringify(after.focus));
+    const toggle = page.locator("#jev-view [data-jev-switch]");
+    await toggle.uncheck(); await toggle.check();
+    const stays = await page.evaluate(async ({ id, name }) => {
+      await window.__PAINTED__();
+      return { deleted: window.__JEV__.builtin.saved[id]?.deleted === true, row: document.querySelectorAll(`[data-jev-dash-row="${id}"]`).length,
+        onScreen: document.body.innerText.includes(name), restoreCalls: window.__JEV__.builtin.calls.filter((one) => one.action === "restore").length };
+    }, { id: gone, name: goneName });
+    ok("turning all decisions on does not bring a deleted built-in decision back", stays.deleted && stays.row === 0 && !stays.onScreen && stays.restoreCalls === 0, JSON.stringify(stays));
+    // Another window deleted "recall" while this one still draws its row: pressing its edit button opens nothing,
+    // says the decision is deleted, and draws the list again without it.
+    if (!await page.locator('#jev-view [data-jev-builtin-edit="recall"]').count()) await page.locator("#jev-view .jev-fold").click();
+    const callsBefore = await page.evaluate(() => {
+      window.__JEV__.builtin.saved.recall = { deleted: true };
+      return window.__JEV__.builtin.calls.length;
+    });
+    await page.locator('#jev-view [data-jev-builtin-edit="recall"]').click();
+    await page.waitForFunction(() => !document.querySelector('#jev-view [data-jev-dash-row="recall"]'));
+    const otherWindow = await page.evaluate(async (before) => {
+      await window.__PAINTED__();
+      const said = [...document.querySelectorAll(".toast")].map((one) => one.textContent.trim());
+      return { open: document.getElementById("jev-builtin-scrim").hidden === false, said,
+        row: document.querySelectorAll('[data-jev-dash-row="recall"], [data-jev-builtin-edit="recall"]').length,
+        saves: window.__JEV__.builtin.calls.length - before };
+    }, callsBefore);
+    ok("the editor of a decision another window deleted does not open: it says so and the list is drawn again without the row",
+      !otherWindow.open && otherWindow.row === 0 && otherWindow.saves === 0
+        && otherWindow.said.some((line) => line.includes("지운 결정은")), JSON.stringify(otherWindow));
+    await page.evaluate(async () => {
+      delete window.__JEV__.builtin.saved.recall;
+      paintTypeSafe(await invoke("typesafe_settings"));
+      await window.__PAINTED__();
+    });
+    const refused = await page.evaluate(() => {
+      const words = {};
+      for (const language of ["ko", "en", "ja", "zh", "es"]) {
+        setLocale(language);
+        words[language] = jevBuiltinFailure(new Error("builtin_decision_deleted"));
+      }
+      setLocale("ko");
+      return words;
+    });
+    ok("a save or reset on a deleted decision is refused in words of all five languages",
+      new Set(Object.values(refused)).size === 5 && Object.values(refused).every((line) => line && !line.includes("builtin_decision_deleted"))
+        && /지운|삭제/.test(refused.ko) && /deleted/i.test(refused.en), JSON.stringify(refused));
+    // The settings page's line on the last request names its feature — but never one that was deleted.
+    const lastRequest = await page.evaluate(({ id, name, other }) => {
+      const say = (feature) => Object.assign(Object.create(judgmentProviderController), {
+        currentUsage: () => ({ state: "observed", lastRequest: { feature, outcome: "answered", applied: true, atMs: 1_700_000_000_000, elapsedMs: 12 }, unattributedNewer: false }),
+      }).usageWords();
+      return { deleted: say(id).includes(name), kept: say(other).includes(jevSeatName(other)) };
+    }, { id: gone, name: goneName, other: "recall" });
+    ok("the settings line on the last request does not name a deleted decision, and still names a kept one", !lastRequest.deleted && lastRequest.kept, JSON.stringify(lastRequest));
     await open("command_guard");
     await page.locator('#jev-builtin-form [data-jev-input-preview] > summary').click();
     await page.waitForSelector('[data-preview-type="noul"]');

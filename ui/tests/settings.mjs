@@ -3383,12 +3383,12 @@ class StatefulBackend {
         return this.typesafeSettings();
       }
       case "list_custom_decisions":
-        this.customDecisions ??= { decisions: [], trash: [], folders: [], everywhere: false };
+        this.customDecisions ??= { decisions: [], folders: [], everywhere: false };
         return clone(this.customDecisions);
       case "check_custom_decision":
         return { refusals: [], version: JSON.stringify(args.draft), questions: { [args.draft.id ?? "draft"]: args.draft.question }, line: args.draft.name };
       case "save_custom_decision": {
-        this.customDecisions ??= { decisions: [], trash: [], folders: [], everywhere: false };
+        this.customDecisions ??= { decisions: [], folders: [], everywhere: false };
         const store = this.customDecisions;
         const kept = store.decisions.find((one) => one.draft.id === args.draft.id);
         const version = JSON.stringify(args.draft);
@@ -3396,7 +3396,8 @@ class StatefulBackend {
           Object.assign(kept, { draft: clone(args.draft), version });
         } else {
           const recording = JEV_SEATS.find((seat) => seat.setting === "customDecisions").modes.split(" ")[1];
-          const id = `cd-${String(store.decisions.length + store.trash.length + 1).padStart(8, "0")}`;
+          this.customMade = (this.customMade ?? 0) + 1;
+          const id = `cd-${String(this.customMade).padStart(8, "0")}`;
           store.decisions.push({ mode: recording, version, createdAt: "", updatedAt: "", draft: { ...clone(args.draft), id } });
         }
         return clone(store);
@@ -3409,15 +3410,7 @@ class StatefulBackend {
       case "delete_custom_decision": {
         const store = this.customDecisions;
         const at = store.decisions.findIndex((one) => one.draft.id === args.id);
-        const [gone] = store.decisions.splice(at, 1);
-        store.trash.push({ id: args.id, name: gone.draft.name, deletedAt: "", kept: gone });
-        return clone(store);
-      }
-      case "restore_custom_decision": {
-        const store = this.customDecisions;
-        const trashed = store.trash.find((one) => one.id === args.id);
-        store.trash = store.trash.filter((one) => one !== trashed);
-        store.decisions.push(trashed.kept);
+        store.decisions.splice(at, 1);
         return clone(store);
       }
       case "set_judgment_provider": {

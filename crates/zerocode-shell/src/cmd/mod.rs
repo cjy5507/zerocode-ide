@@ -168,6 +168,7 @@ pub(crate) use api_routers::{
 };
 
 pub(crate) mod typesafe;
+pub(crate) use typesafe::tidy_decision_store_at_start;
 pub(crate) use typesafe::{
     builtin_decision_definition, check_typesafe_key, jev_day, jev_review, jev_review_outcome,
     jev_summary, refresh_summon_lineup, remove_typesafe_key, save_typesafe_key, set_jev_enabled,
@@ -175,8 +176,8 @@ pub(crate) use typesafe::{
     typesafe_settings, update_builtin_decision,
 };
 pub(crate) use typesafe::{
-    check_custom_decision, delete_custom_decision, list_custom_decisions, restore_custom_decision,
-    save_custom_decision, set_custom_decision_mode,
+    check_custom_decision, delete_custom_decision, list_custom_decisions, save_custom_decision,
+    set_custom_decision_mode,
 };
 pub(crate) use typesafe::{
     judgment_latest_request, judgment_models, preflight_judgment_provider, set_judgment_provider,
