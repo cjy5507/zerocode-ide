@@ -432,16 +432,6 @@ pub(crate) fn word_on_report(
     }
 }
 
-/// Whether two folders are one, read as the system resolves them: `lsof` says
-/// `/private/tmp/x` of a process the window started in `/tmp/x`. Either that
-/// will not resolve is compared as spelled (t-68069 P3-7).
-fn same_folder(one: &Path, other: &Path) -> bool {
-    match (one.canonicalize(), other.canonicalize()) {
-        (Ok(one), Ok(other)) => one == other,
-        _ => one == other,
-    }
-}
-
 /// A pane this window started, as the folder judgment reads it.
 #[derive(Debug, Clone)]
 struct PaneLaunch {
@@ -611,7 +601,7 @@ pub(crate) fn neighbour_in_folder<'a>(
             window
                 .pane_folder(*pane)
                 .or_else(|| started.clone())
-                .is_some_and(|folder| same_folder(&folder, root))
+                .is_some_and(|folder| zerocode_core::git_dir::same_folder(&folder, root))
                 && !window.shell_in_front(*pane)
         })
         .map(|(pane, _)| pane);

@@ -13931,7 +13931,9 @@ impl Ledger {
     /// one pane ran its neighbour's conversation: an agent's own "continue"
     /// picks the newest conversation of its folder, and two workers make
     /// two of them. The summons that seats the second is where that is
-    /// still a choice — a `--worktree` cut is a folder of its own.
+    /// still a choice — a `--worktree` cut is a folder of its own. One folder
+    /// spelled two ways is one folder (t-85366), so this asks the disk once
+    /// per live row: asked at a summons, never from a verb the ledger replays.
     #[must_use]
     pub fn workers_sharing_checkout(
         &self,
@@ -13944,7 +13946,12 @@ impl Ledger {
             .filter(|(_, one)| {
                 one.id != worker
                     && one.state.may_occupy_pane()
-                    && one.checkout.as_deref() == Some(checkout)
+                    && one.checkout.as_deref().is_some_and(|held| {
+                        crate::git_dir::same_folder(
+                            std::path::Path::new(held),
+                            std::path::Path::new(checkout),
+                        )
+                    })
             })
             .map(|(run, one)| (run.id.clone(), one.id.clone(), one.agent.clone()))
             .collect()
