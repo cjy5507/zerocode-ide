@@ -115,56 +115,31 @@ pub(super) fn scan_listeners() -> Option<String> {
     None
 }
 
-/// 폴링 간격 — 자식이 끝났는지 이만큼마다 본다.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-const OUTPUT_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+/// 포트를 훑지 못했을 때 화면에 말하는 이유 (t-84800 r2 P3-3). `scan_listeners` 가 `None` 인 까닭은
+/// 둘이다 — 이 플랫폼이 지원되지 않거나, `lsof` 가 제 시간 안에 끝나지 않았다. 하나로 단정하면
+/// 느린 맥의 사람에게 틀린 말이 되므로 둘 다 말한다.
+pub(super) fn listeners_unread(platform: &str) -> String {
+    format!(
+        "{platform}에서는 포트를 읽지 못했습니다 — 지원하지 않는 플랫폼이거나 lsof가 시간 안에 끝나지 않았습니다"
+    )
+}
 
 /// 자식을 `within` 안에 끝내고 출력을 돌려준다. 그 안에 안 끝나면 자식을 죽이고 `None`.
 ///
 /// 종료 코드는 보지 않는다 — 시간 안에 끝났으면 0이 아니어도 출력을 돌려준다(`lsof` 는 보고할
 /// 것이 없을 때 0이 아닌 코드로 끝난다). 창의 답이 한 자식을 영원히 기다리지 않게 하는 문이다.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// 자식을 돌리는 것은 프로세스 목록과 같은 하나의 실행기다(`resource_usage::run_bounded`) —
+/// 죽인 뒤의 기다림도 그쪽 스레드의 몫이라 자식의 손자가 파이프를 쥐고 있어도 여기서 기다리지 않는다.
+#[cfg(any(target_os = "macos", all(test, unix)))]
 pub(super) fn output_within(
-    mut command: std::process::Command,
+    command: std::process::Command,
     within: std::time::Duration,
 ) -> Option<std::process::Output> {
-    use std::io::Read;
-    use std::process::Stdio;
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().ok()?;
-    let mut stdout = child.stdout.take()?;
-    let mut stderr = child.stderr.take()?;
-    let read_out = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stdout.read_to_end(&mut bytes);
-        bytes
-    });
-    let read_err = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stderr.read_to_end(&mut bytes);
-        bytes
-    });
-    let deadline = std::time::Instant::now() + within;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(OUTPUT_POLL),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = read_out.join();
-                let _ = read_err.join();
-                return None;
-            }
-        }
-    };
+    let run = crate::resource_usage::run_bounded(command, within).ok()?;
     Some(std::process::Output {
-        status,
-        stdout: read_out.join().ok()?,
-        stderr: read_err.join().ok()?,
+        status: run.status,
+        stdout: run.stdout.bytes,
+        stderr: run.stderr.bytes,
     })
 }
 

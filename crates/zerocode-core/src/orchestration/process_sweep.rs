@@ -99,6 +99,7 @@ pub enum ProcessSweepAsk {
     Find {
         needle: String,
         checkouts: Vec<Checkout>,
+        project_roots: Vec<String>,
         coordinator_seats: Vec<String>,
     },
     /// End these pids, one at a time, and tell `run`'s coordinator — the
@@ -111,6 +112,7 @@ pub enum ProcessSweepAsk {
         request: String,
         targets: Vec<Target>,
         checkouts: Vec<Checkout>,
+        project_roots: Vec<String>,
         coordinator_seats: Vec<String>,
     },
 }
@@ -121,6 +123,16 @@ impl ProcessSweepAsk {
     pub fn checkouts(&self) -> &[Checkout] {
         match self {
             Self::Find { checkouts, .. } | Self::End { checkouts, .. } => checkouts,
+        }
+    }
+
+    /// Each run's git common directory (`<main checkout>/.git`), as either mode carries them: what
+    /// the window takes the main checkout out of the worker checkouts by once it has read every
+    /// path as the system spells it (t-84800 r2 P2-3).
+    #[must_use]
+    pub fn project_roots(&self) -> &[String] {
+        match self {
+            Self::Find { project_roots, .. } | Self::End { project_roots, .. } => project_roots,
         }
     }
 
@@ -163,6 +175,14 @@ pub trait Judge {
     /// reads where these stand, in one read, before any row is judged.
     fn places_for(&self, pids: &[u32]) -> Vec<u32> {
         pids.to_vec()
+    }
+
+    /// The pids of the call that is asking and of every process above it: the shell the asking
+    /// command runs in, the agent that started that shell, the pane, the window. They are not
+    /// candidates — a list that showed them as processes to end would offer the coordinator's own
+    /// tree — and the judge refuses them as well. Empty when the window cannot tell.
+    fn asking(&self) -> &[u32] {
+        &[]
     }
 }
 
@@ -326,6 +346,7 @@ pub(super) fn ask(
         (Some(needle), None) => Ok(ProcessSweepAsk::Find {
             needle: needle_of(needle)?,
             checkouts: checkouts(ledger),
+            project_roots: project_roots(ledger),
             coordinator_seats: coordinator_seats(ledger),
         }),
         (None, Some(_)) => {
@@ -366,6 +387,7 @@ pub(super) fn ask(
                 request: request.to_string(),
                 targets,
                 checkouts: checkouts(ledger),
+                project_roots: project_roots(ledger),
                 coordinator_seats: coordinator_seats(ledger),
             })
         }
@@ -444,9 +466,7 @@ fn targets_of(words: &[String]) -> Result<Vec<Target>, String> {
 /// — the safe refusal, until those workers are gone or seated again.
 fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
     let mut found = Vec::new();
-    let mut roots = Vec::new();
     for run in ledger.runs() {
-        roots.extend(run.project.as_ref().map(|project| project.root.clone()));
         for worker in run.workers.iter().filter(|worker| worker.in_worktree) {
             let Some(path) = worker.checkout.clone() else {
                 continue;
@@ -465,7 +485,19 @@ fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
             });
         }
     }
-    outside(found, &roots)
+    outside(found, &project_roots(ledger))
+}
+
+/// Every run's git common directory (`RunProject.root`, `<main checkout>/.git`): the checkout that
+/// holds one is the main checkout, nobody's worker checkout. The window takes it out again after
+/// reading each path as the system spells it, since a path told through a link names the main
+/// checkout only once it is followed.
+fn project_roots(ledger: &Ledger) -> Vec<String> {
+    ledger
+        .runs()
+        .iter()
+        .filter_map(|run| run.project.as_ref().map(|project| project.root.clone()))
+        .collect()
 }
 
 /// The live coordinator seat (`team/pane`) of every run, for the window to
@@ -517,22 +549,39 @@ pub fn owner<'a>(cwd: &str, checkouts: &'a [Checkout]) -> Option<&'a Checkout> {
 /// The asking command's own rows hold the needle too (`zerocode-orc
 /// process-sweep --find cargo` contains `cargo`); they are not candidates.
 ///
-/// Only that row is hidden (r1-1): a word that is exactly the verb, right after a word that names
-/// the orchestration command (`zerocode-orc`, with or without a shim's `sh` and a folder before
-/// it). A build whose folder, package or test filter happens to spell `process-sweep` is a process
-/// a list must show.
-fn is_candidate(row: &ProcessRow, needle: &str) -> bool {
-    row.args.contains(needle) && !is_asking_command(&row.args)
+/// The window names them by where they stand — the processes above the asking call
+/// ([`Judge::asking`]). This is the reading for where it cannot (a shim that sends its headers in
+/// no argument, a table the window could not follow), and it hides only that row (r1-1): the
+/// verb as a word right after a word that names the orchestration command, however a shell
+/// quoted, chained or launched it (`eval 'zerocode-orc …'`, `zerocode-orc.ps1`, a call after
+/// another call). A build whose folder, package or test filter happens to spell `process-sweep` is
+/// a process a list must show.
+fn is_candidate(row: &ProcessRow, needle: &str, asking: &[u32]) -> bool {
+    row.args.contains(needle) && !asking.contains(&row.pid) && !is_asking_command(&row.args)
 }
 
 fn is_asking_command(args: &str) -> bool {
-    let mut words = args.split_whitespace();
-    let names_the_command = |word: &str| {
-        Path::new(word)
-            .file_name()
-            .is_some_and(|name| name == crate::agent_shims::ORCHESTRATION_COMMAND)
+    // A word as the shell left it in the table: the quotes, brackets and separators a command
+    // line wraps round it are not part of it.
+    let bare = |word: &str| {
+        word.trim_matches(|c: char| {
+            matches!(
+                c,
+                '\'' | '"' | '`' | '(' | ')' | '{' | '}' | ';' | '&' | '|'
+            )
+        })
+        .to_string()
     };
-    words.any(names_the_command) && words.next() == Some(VERB)
+    // The command's name: a folder before it and a launcher's `.ps1` after it are not part of it.
+    let names_the_command = |word: &str| {
+        let word = bare(word);
+        let name = word.rsplit(['/', '\\']).next().unwrap_or(&word);
+        name.strip_suffix(".ps1").unwrap_or(name) == crate::agent_shims::ORCHESTRATION_COMMAND
+    };
+    let words: Vec<&str> = args.split_whitespace().collect();
+    words
+        .windows(2)
+        .any(|pair| names_the_command(pair[0]) && bare(pair[1]) == VERB)
 }
 
 /// How long after a worker's row began a folder may still be born and be that worker's: the
@@ -558,10 +607,10 @@ pub fn target_pids(targets: &[Target]) -> Vec<u32> {
 /// The pids a list for `needle` will show, in pid order — so the window reads
 /// where those, and only those, stand.
 #[must_use]
-pub fn matching_pids(table: &[ProcessRow], needle: &str) -> Vec<u32> {
+pub fn matching_pids(table: &[ProcessRow], needle: &str, asking: &[u32]) -> Vec<u32> {
     let mut pids: Vec<u32> = table
         .iter()
-        .filter(|row| is_candidate(row, needle))
+        .filter(|row| is_candidate(row, needle, asking))
         .map(|row| row.pid)
         .collect();
     pids.sort_unstable();
@@ -581,7 +630,7 @@ pub fn find(
 ) -> serde_json::Value {
     let mut matched: Vec<&ProcessRow> = table
         .iter()
-        .filter(|row| is_candidate(row, needle))
+        .filter(|row| is_candidate(row, needle, judge.asking()))
         .collect();
     matched.sort_by_key(|row| row.pid);
     let total = matched.len();

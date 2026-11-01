@@ -216,9 +216,10 @@ fn read_text_file(flag: &str, path: &str) -> Result<String, String> {
 
 /// The file at `path`, opened for reading when it is not a link at its last part and not a pipe
 /// that nobody writes (`O_NOFOLLOW`, `O_NONBLOCK` on Unix). Elsewhere the open follows a link and
-/// the caller's look at the open file is the only check.
+/// the caller's look at the open file is the only check. Every road that reads a file a person or
+/// an agent named opens it this way, then looks at what it opened (t-84800 r2 P3-6).
 #[cfg(unix)]
-fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
+pub fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::File::options()
         .read(true)
@@ -227,7 +228,7 @@ fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 #[cfg(not(unix))]
-fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
+pub fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(path)
 }
 

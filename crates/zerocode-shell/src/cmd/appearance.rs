@@ -407,7 +407,7 @@ pub(crate) fn listening_ports(state: State<'_, AppState>) -> PortScan {
         return PortScan {
             ports: Vec::new(),
             // Said the way Orca says it: which platform, and what about it.
-            unavailable: Some(format!("{platform}에서는 포트를 훑을 수 없습니다")),
+            unavailable: Some(listeners_unread(&platform)),
             platform,
         };
     };
@@ -487,7 +487,7 @@ pub(crate) fn stop_workspace_port(
     port: u16,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
-    let raw = scan_listeners().ok_or("이 플랫폼에서는 포트를 훑을 수 없습니다")?;
+    let raw = scan_listeners().ok_or_else(|| listeners_unread(std::env::consts::OS))?;
     let rows = parse_lsof_listeners(&raw);
     if !rows.iter().any(|row| row.pid == pid && row.port == port) {
         return Err("그 프로세스는 더 이상 그 포트를 듣지 않습니다".to_string());

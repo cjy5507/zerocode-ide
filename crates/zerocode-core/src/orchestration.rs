@@ -4968,8 +4968,9 @@ pub fn worker_done_succeeded(body: &str) -> Result<bool, String> {
         .and_then(|said| said.get("ok").and_then(serde_json::Value::as_bool))
         .ok_or_else(|| {
             format!(
-                "worker_done needs a verdict it can read — send \
-                 --body '{{\"ok\":true,\"summary\":\"…\"}}' or '{{\"ok\":false}}'. \
+                "worker_done needs a verdict it can read — write \
+                 {{\"ok\":true,\"summary\":\"…\"}} (or {{\"ok\":false}}) to a file with a quoted \
+                 heredoc and send --body-file <that file's absolute path>. \
                  This body said nothing either way: {body}"
             )
         })
@@ -21127,7 +21128,8 @@ pub fn worker_briefing(task: &str, title: &str, spec: &str) -> String {
         "You are a worker in this window's orchestration, carrying task {carrying}. \
 When your work is done, write this JSON \
 {{\"ok\":true,\"{summary}\":\"<what changed and how you verified it>\",\"{head}\":\"<the commit you hand in, when the work is code>\"}} \
-to a file with a quoted heredoc (no shell reads a quoted heredoc) and run: zerocode-orc send --type worker_done \
+to a file outside every checkout — in your scratchpad or `$TMPDIR`, under a name of your own such as \
+`done-{task}.json` — with a quoted heredoc (no shell reads a quoted heredoc; PowerShell writes `@'…'@`) and run: zerocode-orc send --type worker_done \
 --retry-request done-{task} --body-file <that file's absolute path> \
 — with \"ok\":false instead if you could not finish; the coordinator reviews \
 the commit you name. If you are blocked, write your question to a file the same way and run: \
@@ -21199,7 +21201,8 @@ pub fn federated_briefing(home_dispatch: &str) -> String {
         "You are a worker borrowed by another window's orchestration \
 (remote dispatch {home_dispatch}). When your work is done, write this JSON \
 {{\"ok\":true,\"{summary}\":\"<what changed and how you verified it>\",\"{head}\":\"<the commit you hand in, when the work is code>\"}} \
-to a file with a quoted heredoc (no shell reads a quoted heredoc) and run: zerocode-orc \
+to a file outside every checkout — in your scratchpad or `$TMPDIR`, under a name of your own such as \
+`done-{home_dispatch}.json` — with a quoted heredoc (no shell reads a quoted heredoc; PowerShell writes `@'…'@`) and run: zerocode-orc \
 send --type worker_done --retry-request done-{home_dispatch} --body-file <that file's absolute path> \
 — with \"ok\":false instead if you could not finish; the coordinator reviews \
 the commit you name. If you are blocked, write your question to a file the same way and run: \

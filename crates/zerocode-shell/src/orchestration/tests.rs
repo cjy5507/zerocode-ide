@@ -31124,3 +31124,31 @@ fn a_verb_text_in_a_file_is_read_by_the_window_before_the_verb_runs() {
         "a refused request wrote a task: {listed}"
     );
 }
+
+/// A receipt is read the way a text file is (t-84800 r2 P3-6): a plain file reads, a link and a pipe
+/// do not, and the open is the one `text_file` makes, so the name turning into a pipe between the
+/// look and the open cannot make the window wait on it.
+#[cfg(unix)]
+#[test]
+fn a_receipt_is_read_as_a_text_file_is() {
+    let dir = tempfile::tempdir().expect("scratch");
+    let plain = dir.path().join("plain.log");
+    std::fs::write(&plain, "ok\n").expect("a receipt");
+    assert_eq!(
+        super::read_receipt_text(&plain.display().to_string()).as_deref(),
+        Some("ok\n")
+    );
+    let link = dir.path().join("link.log");
+    std::os::unix::fs::symlink(&plain, &link).expect("link");
+    assert!(super::read_receipt_text(&link.display().to_string()).is_none());
+    let pipe = dir.path().join("pipe.log");
+    let name = std::ffi::CString::new(pipe.display().to_string()).expect("a name");
+    // SAFETY: `name` is a NUL-terminated path that outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    assert!(super::read_receipt_text(&pipe.display().to_string()).is_none());
+    let source = include_str!("../orchestration.rs");
+    let reads = &source[source.find("fn read_receipt_text(").expect("the reader")..];
+    let reads = &reads[..reads.find("\n}\n").expect("its end")];
+    assert!(reads.contains("text_file::open_plain("), "{reads}");
+    assert!(!reads.contains("File::open("), "{reads}");
+}

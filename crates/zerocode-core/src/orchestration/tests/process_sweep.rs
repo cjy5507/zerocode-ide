@@ -181,15 +181,15 @@ fn outcomes(ended: &[Ended]) -> Vec<(u32, Outcome)> {
 #[test]
 fn the_needle_is_text_never_a_pattern() {
     let table = table();
-    assert_eq!(matching_pids(&table, "cargo"), vec![4100, 4200]);
-    assert!(matching_pids(&table, "cargo.*").is_empty());
-    assert!(matching_pids(&table, "^cargo").is_empty());
+    assert_eq!(matching_pids(&table, "cargo", &[]), vec![4100, 4200]);
+    assert!(matching_pids(&table, "cargo.*", &[]).is_empty());
+    assert!(matching_pids(&table, "^cargo", &[]).is_empty());
 }
 
 /// The asking command holds its own needle; it is not listed.
 #[test]
 fn the_asking_command_is_not_its_own_candidate() {
-    assert!(!matching_pids(&table(), "cargo").contains(&4400));
+    assert!(!matching_pids(&table(), "cargo", &[]).contains(&4400));
 }
 
 /// A row says its target, parent, start, place, owner and the judge's word;
@@ -627,6 +627,7 @@ fn a_list_carries_the_needle_and_the_ledgers_checkouts() {
         needle,
         checkouts,
         coordinator_seats,
+        ..
     } = asked(&planned)
     else {
         panic!("a list was asked for")
@@ -708,9 +709,16 @@ fn only_a_tree_of_the_workers_own_is_a_worker_checkout() {
         seat: None,
     });
     let planned = bench.run(&format!("{VERB} --find cargo"));
-    let ProcessSweepAsk::Find { checkouts, .. } = asked(&planned) else {
+    let ProcessSweepAsk::Find {
+        checkouts,
+        project_roots,
+        ..
+    } = asked(&planned)
+    else {
         panic!("a list was asked for")
     };
+    // The window takes the main checkout out again once it reads every path as the system spells it.
+    assert_eq!(project_roots, vec!["/main/.git".to_string()]);
     let workers: Vec<&str> = checkouts.iter().map(|one| one.worker.as_str()).collect();
     assert_eq!(workers, vec![own.as_str(), own_heir.as_str()]);
     assert!(owner("/main", &checkouts).is_none());
@@ -787,6 +795,7 @@ fn an_end_call_names_its_run_and_targets() {
                 },
             ],
             checkouts: Vec::new(),
+            project_roots: Vec::new(),
             coordinator_seats: seats,
         }
     );
@@ -1026,7 +1035,7 @@ fn only_the_asking_command_is_hidden_from_its_own_list() {
         row(21, 1, "cargo test -p zerocode-core process_sweep"),
         row(22, 1, "cargo test process-sweep"),
     ];
-    assert_eq!(matching_pids(&table, "cargo"), vec![20, 21, 22]);
+    assert_eq!(matching_pids(&table, "cargo", &[]), vec![20, 21, 22]);
     let said = find(&table, "cargo", &[], &Protects(Vec::new()));
     assert_eq!(said["matched"], 3, "{said}");
 }
@@ -1066,7 +1075,35 @@ fn the_asking_command_is_hidden_however_its_shell_quoted_or_chained_it() {
         ),
         row(41, 1, "cargo test process-sweep"),
     ];
-    assert_eq!(matching_pids(&table, "cargo"), vec![40, 41]);
+    assert_eq!(matching_pids(&table, "cargo", &[]), vec![40, 41]);
+}
+
+/// The processes above the asking call are not candidates, whatever they spell (t-84800 r2 P2-2):
+/// the window names them by where they stand, so a shell that ran the call in a way no rule on
+/// words foresaw is hidden all the same, and a build that spells the verb stays.
+#[test]
+fn the_processes_above_the_asking_call_are_not_candidates() {
+    struct Above(Vec<u32>);
+    impl Judge for Above {
+        fn judge(&self, _row: &ProcessRow, _table: &[ProcessRow]) -> Judgment {
+            Judgment::Allow
+        }
+        fn asking(&self) -> &[u32] {
+            &self.0
+        }
+    }
+    let table = vec![
+        row(50, 1, "claude cargo-aware agent"),
+        row(51, 50, "/bin/zsh -c run-it cargo --some-new-launcher"),
+        row(52, 51, "curl --max-time 5 cargo"),
+        row(60, 1, "cargo build"),
+    ];
+    let above = Above(vec![50, 51, 52]);
+    assert_eq!(matching_pids(&table, "cargo", above.asking()), vec![60]);
+    let said = find(&table, "cargo", &[], &above);
+    assert_eq!(said["matched"], 1, "{said}");
+    assert_eq!(said["rows"][0]["pid"], 60, "{said}");
+    assert_eq!(matching_pids(&table, "cargo", &[]), vec![50, 51, 52, 60]);
 }
 
 /// A folder deleted and made again under the same name is not the old worker's (r3w-6): the
