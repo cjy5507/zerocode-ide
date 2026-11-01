@@ -73,6 +73,39 @@ fn worker_briefings_teach_the_file_road_for_the_report_and_the_question() {
     }
 }
 
+/// The briefing says where the report file goes (t-84800 r2 P2-4): a file inside the checkout is
+/// an uncommitted change that keeps the checkout from being taken back and may be committed into a
+/// public repository, and a name every worker picks is a name two workers overwrite.
+#[test]
+fn worker_briefings_say_where_the_report_file_goes() {
+    for (briefing, id) in [
+        (worker_briefing("t-1", "lint", ""), "done-t-1.json"),
+        (federated_briefing("d-1"), "done-d-1.json"),
+    ] {
+        let (before, _) = briefing
+            .split_once(BRIEFING_HANDS_OVER)
+            .expect("the briefing hands over");
+        assert_eq!(
+            before.matches("outside every checkout").count(),
+            1,
+            "{before}"
+        );
+        assert!(before.contains(id), "a name of its own, {id}: {before}");
+        assert!(before.contains("$TMPDIR"), "{before}");
+        assert!(before.contains("@'"), "PowerShell has no heredoc: {before}");
+    }
+}
+
+/// A refusal of a report that said nothing either way teaches the file road, not the inline body
+/// the briefing no longer teaches (t-84800 r2 P3-5): a worker sending it again copies the shape in
+/// front of it.
+#[test]
+fn a_report_with_no_verdict_is_refused_with_the_file_road() {
+    let why = worker_done_succeeded("{}").expect_err("no verdict");
+    assert!(why.contains("--body-file"), "{why}");
+    assert!(!why.contains("--body '"), "{why}");
+}
+
 /// A worker is told that a report citing a file it named writes the file's absolute path in its
 /// text (t-79642, review t-79586 P3-8): a log called only `red.log` was cited in a report and found
 /// nowhere, because the path rode in the hand-in's payload and not in the words a reader has.

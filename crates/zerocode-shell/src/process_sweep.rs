@@ -783,6 +783,20 @@ mod tests {
         assert!(why(&rows[1]).contains("the ZeroCode window"), "{rows:?}");
     }
 
+    /// A refusal does not say `kill` (r1-13): this verb signals with TERM through its own road, and
+    /// a coordinator reading "`kill 500` would signal …" looks for a `kill` it never ran. The
+    /// guard's reason quotes the call as it was written, so the call is written as this verb.
+    #[test]
+    fn a_refusal_names_this_verb_and_never_a_kill_command() {
+        let (_, rows) = guarded_end(&[4200, 500, 4400]);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        for row in &rows {
+            assert!(!why(row).contains("`kill"), "{row}");
+        }
+        assert!(why(&rows[0]).contains("process-sweep"), "{rows:?}");
+        assert!(why(&rows[1]).contains("process-sweep"), "{rows:?}");
+    }
+
     /// A process no pane holds that stands in no worker checkout — a
     /// build-line runner — is a question nobody can be asked: refused.
     #[test]
@@ -890,6 +904,45 @@ mod tests {
             .expect("it finished");
         assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
         assert!(!output.status.success());
+    }
+
+    /// A worker's folder that is now a link is nobody's checkout (t-84800 r2 P2-3): the link may
+    /// lead to an older folder — the main checkout — and every check that follows it would read the
+    /// main checkout as the worker's, so a process standing there looks like a worker's orphan.
+    /// `git worktree add` never makes a link; a link as the last part of the path is not a worktree.
+    #[cfg(unix)]
+    #[test]
+    fn a_checkout_that_is_now_a_link_is_nobodys() {
+        let dir = tempfile::tempdir().expect("scratch");
+        let root = dir.path().canonicalize().expect("real");
+        let main = root.join("main");
+        std::fs::create_dir_all(main.join(".git")).expect("main checkout");
+        let swapped = root.join("t-9");
+        std::os::unix::fs::symlink(&main, &swapped).expect("link");
+        let mut taken = told(&swapped.display().to_string());
+        taken.started_ms = i64::MAX / 4;
+        let ask = end_call_over(Vec::new(), vec![taken]);
+        let held = held_checkouts(&ask, &[]);
+        assert!(held.is_empty(), "{held:?}");
+    }
+
+    /// A child killed at its deadline is not waited for (t-84800 r2 P3-1): a helper it started holds
+    /// the pipe open after the child is gone, and a read to the end would wait for the helper.
+    #[cfg(unix)]
+    #[test]
+    fn a_killed_child_whose_helper_holds_the_pipe_is_not_waited_for() {
+        let began = std::time::Instant::now();
+        let mut command = crate::proc::quiet_command("sh");
+        command.args(["-c", "sleep 3 & exec sleep 3"]);
+        assert!(
+            crate::system_runtime::output_within(command, std::time::Duration::from_millis(150))
+                .is_none()
+        );
+        assert!(
+            began.elapsed() < std::time::Duration::from_millis(1_500),
+            "waited {:?}",
+            began.elapsed()
+        );
     }
 
     /// A worker's checkout told through a link is the folder the system says its processes

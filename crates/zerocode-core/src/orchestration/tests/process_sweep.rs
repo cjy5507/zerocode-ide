@@ -1031,6 +1031,44 @@ fn only_the_asking_command_is_hidden_from_its_own_list() {
     assert_eq!(said["matched"], 3, "{said}");
 }
 
+/// The asking command is hidden however its shell wrote it (t-84800 r2 P2-2): a coordinator
+/// that runs `eval 'zerocode-orc process-sweep --find …'` leaves a shell whose word is
+/// `'zerocode-orc`, a Windows shim is `zerocode-orc.ps1`, and a call after another orc call has the
+/// verb behind a second command word. None of them is a process to end, and a build that spells
+/// the verb in a path or a test filter still shows.
+#[test]
+fn the_asking_command_is_hidden_however_its_shell_quoted_or_chained_it() {
+    let table = vec![
+        row(
+            30,
+            1,
+            "/bin/zsh -c source ~/.zshrc && eval 'zerocode-orc process-sweep --find cargo' < /dev/null",
+        ),
+        row(
+            31,
+            1,
+            "powershell -File C:/shims/zerocode-orc.ps1 process-sweep --find cargo",
+        ),
+        row(
+            32,
+            1,
+            "sh -c zerocode-orc check; zerocode-orc process-sweep --find cargo",
+        ),
+        row(
+            33,
+            1,
+            "/bin/zsh -c eval \"zerocode-orc process-sweep --find cargo\" && echo cargo",
+        ),
+        row(
+            40,
+            1,
+            "cargo build --manifest-path /w/t-84800-orc-17-process-sweep-v1-1-107/Cargo.toml",
+        ),
+        row(41, 1, "cargo test process-sweep"),
+    ];
+    assert_eq!(matching_pids(&table, "cargo"), vec![40, 41]);
+}
+
 /// A folder deleted and made again under the same name is not the old worker's (r3w-6): the
 /// folder's birth is well after the worker row began, while a worktree cut for the summons is
 /// born within minutes of it.
