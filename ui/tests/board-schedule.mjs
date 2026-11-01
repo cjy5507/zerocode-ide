@@ -1141,7 +1141,7 @@ export async function testBoardSchedule(browser, origin, ok) {
       queuedGate.what === "게이트 l61" && queuedGate.word === "도는 중" && queuedGate.heads.includes("gate:l62") && queuedGate.l62act === "",
       JSON.stringify(queuedGate));
 
-    /* ---- 안내판 게이트 줄의 규칙 — 한 문장, 스물한 경우의 표 (review r4~r6, t-77851·t-77880·t-77892): 「도는 단계가 있는 게이트
+    /* ---- 안내판 게이트 줄의 규칙 — 한 문장, 스물두 경우의 표 (review r4~r6, t-77851·t-77880·t-77892): 「도는 단계가 있는 게이트
      * → 없으면 실제로 시작한(끝난 단계가 하나라도 있는) 게이트 가운데 마지막 활동이 가장 늦은 것(통과·실패·단계 사이 대기)
      * → 없으면 마지막으로 줄 선 것」. 마지막 활동은 단계마다 마지막 일감 가운데 가장 늦은 시작이다 — 같은 이름으로 다시
      * 도는 게이트는 첫 시도가 아니라 지금 시도로(⑨·⑩), 한 단계만 다시 돈 것도 그 단계로(⑮) 비교된다. 같으면 실패 > 단계
@@ -1274,8 +1274,14 @@ export async function testBoardSchedule(browser, origin, ok) {
         { name: "⑳ l61 실패 → 재시도가 줄만 섬 → 시작 예상은 새 시도의 계획(지금), 첫 시도의 08:10이 아님(실린 과업 행도)", jobs: queuedAgain, paused: false,
           tasks: [carried("t-90002", now)], want: ["l61", "차례 기다림"], note: (note) => note.endsWith("09:50 시작 예상") && !note.includes("다음 단계"),
           said: (said) => said === "대기 1개 · 09:50 시작 예상", task: "t-90002", why: (why) => why === "l61에 실림 → 차례 기다림 · 09:50 시작 예상" },
-        { name: "㉑ l61 g1 통과 · 남은 단계는 held만 → 시작 모름(지난 09:30이 아님)", jobs: heldOnly, paused: false,
-          want: ["l61", "차례 기다림"], note: (note) => note.endsWith("시작 모름"), said: (said) => said === "대기 1개 · 시작 모름" },
+        { name: "㉑ l61 g1 통과 · 남은 단계는 held만 → 시작 모름(지난 09:30이 아님) · 실린 과업 행도 같은 말(t-84799 ①)", jobs: carry(heldOnly, heldOnly[1].name, "t-90003"), paused: false,
+          tasks: [carried("t-90003", now)], want: ["l61", "차례 기다림"], note: (note) => note.endsWith("시작 모름"), said: (said) => said === "대기 1개 · 시작 모름",
+          task: "t-90003", why: (why) => why === "l61에 실림 → 차례 기다림 · 시작 모름" },
+        /* ㉒ (t-84799 ⑥b): 끝 기록이 없는 단계만 있는 게이트는 통과한 단계가 0개다 — 「통과」가 아니다. */
+        { name: "㉒ l61의 모든 단계가 끝 기록 없음(lost) → 「통과」가 아니라 끝 기록 없음, 통과 단계 0개", jobs: [
+          l61r("g1-build", "lost", at(30), null, { queued_ms: at(31) }), l61r("g2-tests", "lost", at(20), null, { queued_ms: at(31) })],
+        paused: false, want: ["l61", "끝 기록 없음"], note: (note) => !note.includes("통과"), state: "idle",
+        said: (said) => said === "끝 기록 없음 2개" },
       ];
       const choice = { zoom: "now", folded: new Set(), opened: new Set(), log: null };
       return cases.map((one) => {
@@ -1285,11 +1291,12 @@ export async function testBoardSchedule(browser, origin, ok) {
         const head = model.groups.find((group) => group.id === "gates")?.rows.find((row) => row.key === `gate:${one.want[0]}`) ?? null;
         const task = one.task ? model.groups.find((group) => group.id === "workers")?.rows.find((row) => row.id === one.task) ?? null : null;
         const ok = got.name === one.want[0] && got.word === one.want[1] && (one.note ? one.note(got.note) : true)
-          && (one.said ? head !== null && one.said(head.said) : true) && (one.why ? task !== null && one.why(task.why) : true);
+          && (one.said ? head !== null && one.said(head.said) : true) && (one.why ? task !== null && one.why(task.why) : true)
+          && (one.state ? head?.state === one.state : true);
         return { name: one.name, want: one.want, got: [got.name, got.word, got.note, head?.said ?? null, task?.why ?? null], ok };
       });
     }, SCHEDULE_NOW);
-    ok("the board's gate line follows one rule in all twenty-one cases — running first, then the gate whose latest step began last (a gate or a step run again is its new attempt; on two lanes the later start, not the later end), then the one queued last; a tie is decided, and a waiting gate's row, its line and the task it carries say one present-attempt time, never a past moment as an expected start",
+    ok("the board's gate line follows one rule in all twenty-two cases — running first, then the gate whose latest step began last (a gate or a step run again is its new attempt; on two lanes the later start, not the later end), then the one queued last; a tie is decided, and a waiting gate's row, its line and the task it carries say one present-attempt time, never a past moment as an expected start",
       gateTable.every((row) => row.ok), JSON.stringify(gateTable.filter((row) => !row.ok)));
 
     /* ---- 비어 있어도 넉 줄: 레인도 게이트도 과업도 없는 답 ---- */
