@@ -1120,6 +1120,10 @@ fn fake_security_tool(args: &[&str], stdin: Option<&str>) -> Result<String, Stri
             if pinned.remove(&format!("gone\u{0}{key}")) {
                 return Ok(String::new());
             }
+            let password = table
+                .remove(&format!("other\u{0}{key}"))
+                .and_then(Result::ok)
+                .unwrap_or(password);
             table.insert(key, Ok(password));
             Ok(String::new())
         }
@@ -1174,6 +1178,11 @@ fn fake_security_tool(args: &[&str], stdin: Option<&str>) -> Result<String, Stri
         // Another process removes the item between the next add and its read.
         Some("test-vanish-after-add") => {
             pinned.insert(format!("gone\u{0}{key}"));
+            Ok(String::new())
+        }
+        // Another process writes this value between the next add and its read.
+        Some("test-other-writer-after-add") => {
+            table.insert(format!("other\u{0}{key}"), Ok(value_after("-w")));
             Ok(String::new())
         }
         other => Err(format!("이 시험 키체인이 모르는 명령입니다: {other:?}")),
@@ -5550,6 +5559,58 @@ JSON
         switched.expect("the add landed, so the switch did");
         assert!(held_after_the_switch.contains("tok-two"));
         assert_eq!(file_after_the_switch, held_after_the_switch);
+    }
+
+    /// The item differs because somebody else wrote it. The CLI refreshing a token
+    /// between the add and the read is the ordinary way, and that value is the only
+    /// live copy: its refresh token has already replaced the one in our file.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_value_another_writer_left_at_the_read_back_stands() {
+        let user = this_machines_account();
+        for (service, theirs) in [
+            (
+                "zerocode-test-read-back-other",
+                "FAKE-another-writers-value",
+            ),
+            ("zerocode-test-read-back-empty", ""),
+        ] {
+            security_command(
+                &[
+                    "test-other-writer-after-add",
+                    "-s",
+                    service,
+                    "-a",
+                    &user,
+                    "-w",
+                    theirs,
+                ],
+                None,
+            )
+            .expect("arm");
+            let refused = write_keychain_service(service, "FAKE-this-writers-value").unwrap_err();
+            assert!(refused.contains("그대로 두었습니다"), "{refused}");
+            assert!(!refused.contains("FAKE"), "{refused}");
+            assert_eq!(
+                read_keychain_service(service).as_deref(),
+                Ok(theirs),
+                "the other writer's value was removed"
+            );
+        }
+    }
+
+    /// A read whose output could not be taken is no answer. It came out as an
+    /// empty value, which the read-back took for a value that differs, and which
+    /// removed a good item.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn output_the_runner_could_not_read_is_no_answer() {
+        let answer = run_keychain_tool(
+            shell_tool("printf '\\377\\376'"),
+            None,
+            std::time::Duration::from_secs(5),
+        );
+        assert!(answer.is_err(), "{answer:?}");
     }
 
     /// `security -i` prints what stands in a line's command position: on
