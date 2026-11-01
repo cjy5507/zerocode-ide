@@ -12751,6 +12751,9 @@ listen("hook:agent", (event) => {
   }
   const wasMidTurn = isMidTurn(hookStates.get(term));
   hookStates.set(term, state);
+  // Whether the agent stands in its pane is read off this very word (`paneWearsAgent`): the switch and the head
+  // that were painted above wore the old one (t-84799 B6b).
+  paintViewToggle();
   if (asking && !shaped) watchSignalledWait(term);
   else clearSignalledWait(term);
   // The state moved: whatever the notify seat said about the LAST ring of
@@ -14039,7 +14042,15 @@ function activeAgentTerm() {
   const active = currentTab();
   if (active?.kind !== "term") return null;
   const term = activePaneOf(active);
-  return term !== null && paneAgents.has(term) ? term : null;
+  return term !== null && paneWearsAgent(term) ? term : null;
+}
+
+/* Whether a pane's head and switch stand for an agent. `paneAgents` is kept until the pane dies, so a pane the
+ * agent left (the shell took the terminal back: `paneProgramLeft`) would keep wearing its last head. It stands
+ * down — unless its conversation stands over the screen: the switch is then the way back to the shell
+ * (t-84799 B6b). */
+function paneWearsAgent(term) {
+  return paneAgents.has(term) && (!paneProgramLeft(term) || paneChatOn(term));
 }
 
 /* The switch, held by node: it travels with its pane's head line, which a
@@ -14218,7 +14229,14 @@ function paintShownPaneHeads() {
     if (head.parentElement?.hidden !== false) continue;
     const tab = tabs.find((one) => one.id === id);
     const term = tab ? activePaneOf(tab) : null;
-    if (term !== null && paneAgents.has(term)) paintPaneHead(tab, term);
+    if (term === null) continue;
+    if (paneWearsAgent(term)) {
+      paintPaneHead(tab, term);
+    } else if (!head.hidden) {
+      // The agent left: its head goes, and the shells below take the room back.
+      head.hidden = true;
+      remeasurePanes(tab);
+    }
   }
 }
 
