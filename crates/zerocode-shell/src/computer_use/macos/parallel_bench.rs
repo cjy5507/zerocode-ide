@@ -219,6 +219,168 @@ fn parallel_bench_memory() {
     println!("{text}");
 }
 
+/// How long ago the person last touched the mouse or the keyboard, in seconds.
+fn person_idle_secs() -> u64 {
+    let out = crate::proc::quiet_command("/usr/sbin/ioreg")
+        .args(["-c", "IOHIDSystem"])
+        .output()
+        .expect("ioreg");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|line| line.contains("\"HIDIdleTime\""))
+        .and_then(|line| line.split('=').nth(1))
+        .and_then(|nanos| nanos.trim().parse::<u64>().ok())
+        .map_or(0, |nanos| nanos / 1_000_000_000)
+}
+
+fn front_app() -> String {
+    let out = crate::proc::quiet_command("/usr/bin/lsappinfo")
+        .arg("front")
+        .output()
+        .expect("lsappinfo");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn pointer_at(session: &Session) -> (f64, f64) {
+    let (_, at) = call(session, "cursorPosition", &json!({}));
+    let at = at.expect("the pointer");
+    (at["x"].as_f64().expect("x"), at["y"].as_f64().expect("y"))
+}
+
+/// What one borrowed act left behind: its answer, and whether the person's
+/// pointer and front app came back.
+fn borrowed_act(session: &Session, method: &str, params: &Value) -> Value {
+    let (pointer, front) = (pointer_at(session), front_app());
+    let (ms, answer) = call(session, method, params);
+    let back = pointer_at(session);
+    let moved = (back.0 - pointer.0).abs().max((back.1 - pointer.1).abs());
+    // Bringing the app back is asked of the system; give it a moment to answer.
+    let settled = Instant::now();
+    while front_app() != front && settled.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let front_back = front_app() == front;
+    assert!(moved < 1.0, "{method} left the pointer {moved} away");
+    assert!(front_back, "{method} left another app in front");
+    match answer {
+        Ok(result) => json!({
+            "ms": ms.round(),
+            "borrowed": result.pointer("/action/borrowedDesktop"),
+            "path": result.pointer("/action/path"),
+            "delivery": result.pointer("/action/delivery"),
+            "pointerBack": true,
+            "frontBack": true,
+        }),
+        Err(refused) => json!({
+            "ms": ms.round(),
+            "refused": refused,
+            "pointerBack": true,
+            "frontBack": true,
+        }),
+    }
+}
+
+/// Real input, on owned windows only, and only while the person is away: an act
+/// borrows the pointer and the keyboard, another agent's background presses go on
+/// beside it, and the person's pointer and front app come back. Under a minute.
+#[test]
+#[ignore = "takes the real pointer on an owned fixture; run by hand while the person is away"]
+fn parallel_bench_borrow() {
+    const AWAY_SECS: u64 = 120;
+    let idle = person_idle_secs();
+    assert!(
+        idle >= AWAY_SECS,
+        "the person acted {idle} s ago: real input waits for {AWAY_SECS} s away"
+    );
+    let program = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_FIXTURE").expect("fixture"));
+    let built = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BUILT").expect("built helper"));
+    let out = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_OUT").expect("report path"));
+    let root = out.parent().expect("report folder").join("fixtures");
+    let session = Session::connect(launch_at(&built).expect("helper")).expect("answers");
+    let borrowed = Fixture::start(&program, &root, "borrowed", 30);
+    let beside = Fixture::start(&program, &root, "beside", 30);
+    let (app, other) = (borrowed.app(), beside.app());
+    let state = look(&session, &app);
+    let (target, field) = (
+        number_of(&state, "button Target", 0),
+        number_of(&state, "text field", 0),
+    );
+    let other_target = number_of(&look(&session, &other), "button Target", 0);
+
+    let (presses, report) = std::thread::scope(|scope| {
+        let side = scope.spawn(|| {
+            let mut answers = vec![];
+            for _ in 0..10 {
+                answers.push(press(&session, &other, other_target));
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            answers
+        });
+        let borrow = |extra: Value| {
+            let mut params = json!({
+                "app": app, "noScreenshot": true, "afterAct": "none",
+                "mayBorrowDesktop": true, "borrowApp": app,
+            });
+            for (key, value) in extra.as_object().expect("an object") {
+                params[key] = value.clone();
+            }
+            params
+        };
+        // A double press has no semantic road, so it is the real pointer's.
+        let pointer = borrowed_act(
+            &session,
+            "click",
+            &borrow(json!({"elementIndex": target, "clickCount": 2})),
+        );
+        // Background first: this one the background refuses, so it borrows.
+        let ladder = borrowed_act(
+            &session,
+            "drag",
+            &borrow(json!({
+                "fromElementIndex": target, "toElementIndex": field, "background": true,
+            })),
+        );
+        // The keyboard is checked to be on the fixture before a key goes out.
+        let keyboard = borrowed_act(
+            &session,
+            "typeText",
+            &borrow(json!({"text": "zz", "elementIndex": field})),
+        );
+        let report = json!({"pointer": pointer, "ladder": ladder, "keyboard": keyboard});
+        (side.join().expect("the other agent"), report)
+    });
+    let refused = presses
+        .iter()
+        .filter(|one| one.get("refused").is_some())
+        .count();
+    let delivered = beside
+        .events()
+        .iter()
+        .filter(|line| *line == "target")
+        .count();
+    let pressed = borrowed
+        .events()
+        .iter()
+        .filter(|line| *line == "target")
+        .count();
+    let field_now = look(&session, &app)["snapshot"]["treeText"]
+        .as_str()
+        .unwrap_or_default()
+        .lines()
+        .find(|line| line.contains("text field"))
+        .map(str::to_string);
+    let report = json!({
+        "idleSecsAtStart": idle,
+        "acts": report,
+        "windowSawRealPress": pressed,
+        "fieldAfterTyping": field_now,
+        "beside": {"presses": presses.len(), "refused": refused, "landed": delivered},
+    });
+    let text = serde_json::to_string_pretty(&report).expect("a report");
+    std::fs::write(&out, &text).expect("the report");
+    println!("{text}");
+}
+
 fn helper_rss_kib(pid: Option<i32>) -> u64 {
     let Some(pid) = pid else { return 0 };
     crate::proc::quiet_command("/bin/ps")

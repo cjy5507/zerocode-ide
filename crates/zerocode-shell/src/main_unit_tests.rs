@@ -24656,14 +24656,10 @@ pub(crate) mod computer_desktop_wait {
         }
     }
 
-    /// A desk that sees nothing: the walk judges no landing and watches no
-    /// hand, and says so.
+    /// A desk that sees nothing: the walk judges no landing, and says so.
     struct BlindDesk(std::time::Instant);
 
     impl crate::computer_use::recipe_run::Desk for BlindDesk {
-        fn pointer(&mut self) -> Option<(f64, f64)> {
-            None
-        }
         fn picture(
             &mut self,
             _: [f64; 4],

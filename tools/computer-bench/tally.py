@@ -37,7 +37,7 @@ REFLEX_RUN = "reflex-run.json"
 # per step the phases the run closure timed, per walk resolve/report.
 WALK_PREFIX = "walk-"
 WALK_SUFFIX = ".json"
-STEP_STAGES = ("act", "settle", "verify", "pointer")
+STEP_STAGES = ("act", "settle", "verify")
 RUN_STAGES = ("resolve", "report")
 HANDOFF_VERB = "handoff"
 CONFIRMING_FLAG = "--confirming"

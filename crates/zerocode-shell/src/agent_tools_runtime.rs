@@ -3243,7 +3243,17 @@ pub(super) async fn computer_loop(
             // This guard outlives spawn_blocking and every walked step. The
             // provider mutex alone covered only one step of a batch.
             let _sequence = if let Some(command) = parsed.as_ref() {
-                match sequences.enter(command).await {
+                let names = if computer_use::sequence::takes_a_turn(command.method) {
+                    let (asked, root) = (command.clone(), local_data_root.clone());
+                    tauri::async_runtime::spawn_blocking(move || {
+                        computer_use::sequence::names_of(&asked, &root)
+                    })
+                    .await
+                    .unwrap_or_default()
+                } else {
+                    std::collections::BTreeSet::new()
+                };
+                match sequences.enter(command, &names).await {
                     Ok(owner) => owner,
                     Err(error) => {
                         // Preserve a person's stop/confirmation over contention,
@@ -3331,6 +3341,7 @@ pub(super) async fn computer_loop(
                             cwd.as_deref(),
                             &command,
                             deadline_ms,
+                            &|| !reply.is_closed(),
                         )
                     } else if command.method == zerocode_core::computer_use::ComputerMethod::Batch {
                         run_batch(
@@ -3888,6 +3899,7 @@ fn run_parallel(
     cwd: Option<&str>,
     command: &zerocode_core::computer_use::ComputerCommand,
     deadline_ms: u64,
+    caller_waits: &(dyn Fn() -> bool + Sync),
 ) -> zerocode_hookd::TeamAnswer {
     use computer_use::confirm::Asking;
     use zerocode_core::computer_use::{
@@ -3924,7 +3936,7 @@ fn run_parallel(
                             )
                         },
                         |step, refusal| leave_step(app, root, evidence, step, step, refusal),
-                        || true,
+                        caller_waits,
                     )
                 })
             })

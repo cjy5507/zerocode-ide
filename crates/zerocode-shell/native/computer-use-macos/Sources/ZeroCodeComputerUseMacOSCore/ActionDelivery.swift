@@ -80,6 +80,9 @@ public enum Actionability: Equatable, Sendable {
 
     /// How long a press waits for a control by default, and how often it reads.
     public static var defaultWaitMs: Int { 2_000 }
+    /// The longest a press may be told to wait. Waiting keeps this app's other
+    /// requests in line, and must end well before the window gives up on the answer.
+    public static var longestWaitMs: Int { 10_000 }
     public static var pollMs: Int { 50 }
 }
 

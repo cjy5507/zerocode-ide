@@ -663,6 +663,11 @@ pub fn pinned_click(params: &Value) -> Result<PinnedClick, ComputerUseError> {
     pinned_click_at(params, super::guard::stop_generation())
 }
 
+/// The app a marked look was of, while the look stands.
+pub(super) fn app_of_look(look: &str) -> Option<String> {
+    tables().get(look).map(|table| table.window.app.clone())
+}
+
 /// [`pinned_click`] under the stop `epoch` stands at now: the only door a
 /// mark is pressed through.
 pub(super) fn pinned_click_at(params: &Value, epoch: u64) -> Result<PinnedClick, ComputerUseError> {

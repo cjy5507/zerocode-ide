@@ -165,6 +165,33 @@ final class ElementIdentityBookTests: XCTestCase {
         book.endCompleteWalk(root: "w")
         XCTAssertLessThanOrEqual(book.remembered, ElementIdentityBook<String>.maxEntries)
     }
+
+    func testARelaunchedAppGoesOnFromItsLastNumber() {
+        let numbers = ElementNumbers()
+        let old = ElementIdentityBook<String>(numbers: numbers, hash: { UInt(bitPattern: $0.hashValue) }, equal: { $0 == $1 })
+        old.beginWalk()
+        XCTAssertEqual(["a", "b", "c"].map { old.number(for: $0, root: "w") }, [0, 1, 2])
+        let new = ElementIdentityBook<String>(numbers: numbers, hash: { UInt(bitPattern: $0.hashValue) }, equal: { $0 == $1 })
+        new.beginWalk()
+        XCTAssertEqual(new.number(for: "a", root: "w"), 3, "a number from before the relaunch names nothing new")
+    }
+
+    func testAWalkAlwaysCutShortStillKeepsToTheLimitAndForgetsTheOldestSeen() {
+        let book = book()
+        let limit = ElementIdentityBook<String>.maxEntries
+        book.beginWalk()
+        for at in 0..<limit { _ = book.number(for: "old \(at)", root: "w") }
+        XCTAssertTrue(book.endCutWalk().isEmpty)
+        book.beginWalk()
+        _ = book.number(for: "old 0", root: "w")
+        for at in 0..<10 { _ = book.number(for: "new \(at)", root: "w") }
+        let forgotten = book.endCutWalk()
+        XCTAssertEqual(forgotten.count, 10, "the table forgets the same numbers")
+        XCTAssertEqual(book.remembered, limit)
+        XCTAssertNotNil(book.existingNumber(for: "new 9"))
+        XCTAssertNotNil(book.existingNumber(for: "old 0"), "seen in the last walk, so it stays")
+        XCTAssertNil(book.existingNumber(for: "old 1"))
+    }
 }
 
 final class ElementChangesTests: XCTestCase {

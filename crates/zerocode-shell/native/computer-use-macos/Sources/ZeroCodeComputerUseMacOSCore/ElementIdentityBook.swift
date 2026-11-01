@@ -1,5 +1,22 @@
 import Foundation
 
+/// Hands out numbers. Every process of one app draws from one, so a number kept
+/// from before a relaunch can never name a control of the new process.
+public final class ElementNumbers: @unchecked Sendable {
+    private let lock = NSLock()
+    private var next = 0
+
+    public init() {}
+
+    public func take() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let number = next
+        next += 1
+        return number
+    }
+}
+
 /// The number an element keeps for as long as the app keeps the element.
 ///
 /// A number used to be the element's place in the walk, so a row arriving above
@@ -27,10 +44,15 @@ public final class ElementIdentityBook<Element> {
     private let equal: (Element, Element) -> Bool
     private var buckets: [UInt: [Entry]] = [:]
     private var count = 0
-    private var nextNumber = 0
+    private let numbers: ElementNumbers
     private var walk: UInt64 = 0
 
-    public init(hash: @escaping (Element) -> UInt, equal: @escaping (Element, Element) -> Bool) {
+    public init(
+        numbers: ElementNumbers = ElementNumbers(),
+        hash: @escaping (Element) -> UInt,
+        equal: @escaping (Element, Element) -> Bool
+    ) {
+        self.numbers = numbers
         self.hash = hash
         self.equal = equal
     }
@@ -52,8 +74,7 @@ public final class ElementIdentityBook<Element> {
             buckets[key]?[at].lastSeenWalk = walk
             return buckets[key]?[at].number ?? 0
         }
-        let number = nextNumber
-        nextNumber += 1
+        let number = numbers.take()
         buckets[key, default: []].append(Entry(element: element, number: number, root: root, lastSeenWalk: walk))
         count += 1
         return number
@@ -80,13 +101,22 @@ public final class ElementIdentityBook<Element> {
             buckets[key] = kept.isEmpty ? nil : kept
         }
         count -= gone.count
-        trimToLimit()
-        return gone
+        return gone + trimToLimit()
     }
 
-    private func trimToLimit() {
-        guard count > Self.maxEntries else { return }
-        let entries = buckets.values.flatMap { $0 }.sorted { $0.number < $1.number }
+    /// End a walk that was cut short. It proves nothing gone, but an app that is
+    /// always cut short must not grow the book for ever. Answers the numbers forgotten.
+    @discardableResult
+    public func endCutWalk() -> [Int] {
+        trimToLimit()
+    }
+
+    /// Forget what was seen longest ago, so the window in use keeps its numbers.
+    private func trimToLimit() -> [Int] {
+        guard count > Self.maxEntries else { return [] }
+        let entries = buckets.values.flatMap { $0 }.sorted {
+            ($0.lastSeenWalk, $0.number) < ($1.lastSeenWalk, $1.number)
+        }
         let excess = entries.prefix(count - Self.maxEntries)
         let forgotten = Set(excess.map(\.number))
         for key in Array(buckets.keys) {
@@ -94,5 +124,6 @@ public final class ElementIdentityBook<Element> {
             buckets[key] = kept.isEmpty ? nil : kept
         }
         count -= forgotten.count
+        return Array(forgotten)
     }
 }

@@ -424,6 +424,10 @@ final class Provider {
     /// Each app's element numbers, and every element it last showed by number.
     private var books: [pid_t: ElementIdentityBook<AXUIElement>] = [:]
     private var tables: [pid_t: [Int: ElementRecord]] = [:]
+    /// The numbers each app draws from, kept past any one of its processes.
+    private var numberSources: [String: ElementNumbers] = [:]
+    /// The agents each process has shown numbers to since it or this helper started.
+    private var shownTo: [pid_t: Set<String>] = [:]
     /// The apps whose web accessibility was switched on this session.
     private var webAccessibilityAsked: Set<pid_t> = []
 
@@ -431,7 +435,11 @@ final class Provider {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         if let book = books[pid] { return book }
+        let owner = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "pid:\(pid)"
+        let numbers = numberSources[owner] ?? ElementNumbers()
+        numberSources[owner] = numbers
         let book = ElementIdentityBook<AXUIElement>(
+            numbers: numbers,
             hash: { CFHash($0) },
             equal: { CFEqual($0, $1) }
         )
@@ -453,10 +461,12 @@ final class Provider {
         for number in gone { table[number] = nil }
         table.merge(records) { _, new in new }
         tables[pid] = table
+        if let agent = RequestContext.current.agent { shownTo[pid, default: []].insert(agent) }
         // A process that ended takes its elements with it.
         for known in Array(tables.keys) where known != pid && !pidIsLive(known) {
             tables[known] = nil
             books[known] = nil
+            shownTo[known] = nil
             webAccessibilityAsked.remove(known)
         }
     }
@@ -511,7 +521,7 @@ final class Provider {
                 throw ProviderError.coded(refusal.rawValue, "background input requires an app-scoped action; no foreground fallback was attempted")
             }
             try ShareControlPanel.refuseInput(method: method, params: params)
-            return try borrowingDesktop { try act(method: method, params: foregroundParams(params), scoped: false) }
+            return try borrowingDesktop(method: method, params: foregroundParams(params))
         }
         guard Self.actingMethods.contains(method) else { return try dispatch(method: method, params: params) }
         try ShareControlPanel.refuseInput(method: method, params: params)
@@ -520,9 +530,7 @@ final class Provider {
         try waitUntilActionable(method: method, params: params)
         let background = params["background"]?.bool == true
         if !background, RequestContext.current.mayBorrowDesktop {
-            return try borrowingDesktop(bringingUp: params["borrowApp"]?.string) {
-                try act(method: method, params: params, scoped: false)
-            }
+            return try borrowingDesktop(bringingUp: params["borrowApp"]?.string, method: method, params: params)
         }
         do {
             return try act(method: method, params: params, scoped: background)
@@ -531,7 +539,7 @@ final class Provider {
             // The background road cannot do this one. The person's setting lets
             // the agent borrow the pointer and the keyboard, so it does, and
             // gives them back when it is done.
-            return try borrowingDesktop { try act(method: method, params: foregroundParams(params), scoped: false) }
+            return try borrowingDesktop(method: method, params: foregroundParams(params))
         }
     }
 
@@ -554,23 +562,29 @@ final class Provider {
         return foreground
     }
 
-    /// Take the shared desktop for one act and put back what the person had:
-    /// the app in front and where the pointer was.
-    private func borrowingDesktop<T>(bringingUp query: String? = nil, _ body: () throws -> T) throws -> T {
-        RequestContext.current.borrowed = true
-        let front = NSWorkspace.shared.frontmostApplication
-        let pointer = Input.desktopCursorPosition()
-        defer {
-            CGWarpMouseCursorPosition(pointer)
-            _ = CGAssociateMouseAndMouseCursorPosition(1)
-            if let front, !front.isTerminated, !front.isActive {
-                _ = front.activate(options: [])
-                // A helper in the background is not always let bring an app up.
-                if !front.isActive, let bundle = front.bundleIdentifier { openBundle(bundle) }
+    /// Take the shared desktop for one act and put back what the person had: the
+    /// app in front and where the pointer was. All of it happens with the hand held,
+    /// so a borrow in turn after this one reads what the person had, and raising a
+    /// window or giving it back never lands in the middle of another act's keys.
+    private func borrowingDesktop(bringingUp query: String? = nil, method: String, params: [String: JSONValue]) throws -> Any {
+        try OperatorHandHost.whileHeld(scoped: false) {
+            try OperatorGuardHost.admit()
+            RequestContext.current.borrowed = true
+            let front = NSWorkspace.shared.frontmostApplication
+            let pointer = Input.desktopCursorPosition()
+            defer {
+                CGWarpMouseCursorPosition(pointer)
+                _ = CGAssociateMouseAndMouseCursorPosition(1)
+                if let front, !front.isTerminated, !front.isActive {
+                    _ = front.activate(options: [])
+                    // A helper in the background is not always let bring an app up.
+                    if !front.isActive, let bundle = front.bundleIdentifier { openBundle(bundle) }
+                }
             }
+            if let query, !query.isEmpty { recoverWindow(try resolveApp(query)) }
+            ScreenEye.markAct()
+            return try dispatch(method: method, params: params)
         }
-        if let query, !query.isEmpty { recoverWindow(try resolveApp(query)) }
-        return try body()
     }
 
     private func dispatch(method: String, params unmarked: [String: JSONValue]) throws -> Any {
@@ -887,6 +901,15 @@ final class Provider {
                 "observationDeferred": true,
                 "observation": ["state": "unavailable", "reason": error.code],
             ]
+        } catch let error as ProviderError {
+            // The act is done. Only the look after it failed, and an answer that
+            // called the act a failure would have it done twice.
+            settleDelivery(effectSeen: false)
+            return [
+                "action": action,
+                "observationDeferred": true,
+                "observation": ["state": "unavailable", "reason": error.code],
+            ]
         }
     }
 
@@ -1027,11 +1050,49 @@ final class Provider {
         pruneSnapshotCache()
         if let standing = try standingSnapshot(params: params) { return standing }
         let cached = try cachedSnapshot(params: params)
+        try requireShownBeforeThisWalk(params: params, cached: cached)
         // Why: cached AX frames can be stale after a window move or resize, and
         // stale geometry can turn an intended action into a misclick.
         let snapshot = try observe(params: params.merging(["noScreenshot": .bool(true)]) { _, replacement in replacement }, acting: true)
         try validateRequestedElements(cached: cached, current: snapshot, params: params)
         return snapshot
+    }
+
+    /// The numbers a request names, whichever way it names them.
+    private func requestedNumbers(_ params: [String: JSONValue]) throws -> [Int] {
+        try ["elementIndex", "fromElementIndex", "toElementIndex"].compactMap { key -> Int? in
+            guard params[key]?.number != nil else { return nil }
+            return try optionalInteger(params, key)
+        }
+    }
+
+    /// A walk numbers what it meets, so a number only proves something if it was
+    /// shown before this request walked. One kept from before this helper or this
+    /// process started would otherwise name whatever the walk just numbered.
+    private func requireShownBeforeThisWalk(params: [String: JSONValue], cached: Snapshot?) throws {
+        let requested = try requestedNumbers(params)
+        guard !requested.isEmpty, try markPin(params) == nil else { return }
+        let pid = try cached?.app.pid ?? resolveApp(try requiredString(params, "app")).pid
+        try requireShownToThisAgent(requested, pid: pid)
+        for index in requested where knownRecord(pid: pid, index: index) == nil {
+            throw staleElement(index)
+        }
+    }
+
+    /// Another agent's look can give out a number again after a restart. The agent
+    /// asking must have been shown this process's numbers itself. A request the
+    /// window names no agent for is judged by the numbers alone.
+    private func requireShownToThisAgent(_ requested: [Int], pid: pid_t) throws {
+        guard let agent = RequestContext.current.agent, let first = requested.first else { return }
+        cacheLock.lock()
+        let shown = shownTo[pid]?.contains(agent) == true
+        cacheLock.unlock()
+        guard shown else {
+            throw ProviderError.coded(
+                "element_not_found",
+                "element \(first) is from before this app or the helper restarted; look again and use a current number"
+            )
+        }
     }
 
     private func currentKeyboardSnapshot(params: [String: JSONValue]) throws -> Snapshot {
@@ -1051,10 +1112,8 @@ final class Provider {
               !cached.app.app.isTerminated,
               let bounds = DesktopWindows.bounds(windowId: cached.windowId, ownerPid: cached.app.pid)
         else { return nil }
-        let requested = try ["elementIndex", "fromElementIndex", "toElementIndex"].compactMap { key -> Int? in
-            guard params[key]?.number != nil else { return nil }
-            return try optionalInteger(params, key)
-        }
+        let requested = try requestedNumbers(params)
+        if try markPin(params) == nil { try requireShownToThisAgent(requested, pid: cached.app.pid) }
         var live: [Int: ElementRecord] = [:]
         for index in requested {
             guard let record = cached.elements[index] ?? knownRecord(pid: cached.app.pid, index: index) else { return nil }
@@ -1134,7 +1193,7 @@ final class Provider {
               let cached = try cachedSnapshot(params: params),
               let record = cached.elements[index] ?? knownRecord(pid: cached.app.pid, index: index)
         else { return }
-        let waitMs = try optionalInteger(params, "timeoutMs") ?? Actionability.defaultWaitMs
+        let waitMs = min(try optionalInteger(params, "timeoutMs") ?? Actionability.defaultWaitMs, Actionability.longestWaitMs)
         let giveUp = Date().addingTimeInterval(TimeInterval(waitMs) / 1_000)
         let lastSeen = record.localFrame.map { $0.offsetBy(dx: cached.windowBounds.minX, dy: cached.windowBounds.minY) }
         var previous = lastSeen
@@ -1237,10 +1296,7 @@ final class Provider {
             }
             return
         }
-        let requestedIndexes = try ["elementIndex", "fromElementIndex", "toElementIndex"].compactMap { key -> Int? in
-            guard params[key]?.number != nil else { return nil }
-            return try optionalInteger(params, key)
-        }
+        let requestedIndexes = try requestedNumbers(params)
         guard !requestedIndexes.isEmpty else { return }
         for index in requestedIndexes {
             // A number names one object, so the walk just made has it or it is gone.
@@ -1667,7 +1723,7 @@ final class Provider {
         )
         renderer.render(startsAt)
         let wholeWalk = shape.complete && !renderer.truncated
-        fileRecords(pid: app.pid, records: renderer.records, gone: wholeWalk ? book.endCompleteWalk(root: rootKey) : [])
+        fileRecords(pid: app.pid, records: renderer.records, gone: wholeWalk ? book.endCompleteWalk(root: rootKey) : book.endCutWalk())
         // What tells this window from another of its title (t-69973): its
         // own document — the one read a look adds — else the page its first
         // web area showed the walk above.
@@ -1876,6 +1932,9 @@ final class Provider {
                 return actionMetadata(path: "accessibility", actionName: actionName)
             }
             if let point = center(record.localFrame, in: snapshot.windowBounds) {
+                // A control this walk did not reach is pressed at its place only
+                // if that is what a pointer would hit there.
+                if snapshot.elements[elementIndex] == nil { try requireOnTop(record, in: snapshot) }
                 try Input.click(
                     at: point,
                     button: button,
@@ -2124,7 +2183,7 @@ final class Provider {
         }
         let focused = focusedRecord(snapshot)?.element
         let secureInput = try gateSecretEntry(writesText: true, pastes: false, focused: keyTargets(snapshot), receiver: snapshot.app.pid)
-        if let focused, case .applied(let verification) = TextInput.replaceSelection(focused, with: text) {
+        if let focused, case .applied(let verification) = try TextInput.replaceSelection(focused, with: text) {
             return withSecureInput(actionMetadata(path: "accessibility", actionName: "AXReplaceSelection", verification: verification), secureInput)
         }
         try requireTargetWindowFocused(snapshot, restoreWindowRequested: params["restoreWindow"]?.bool == true)
@@ -2184,7 +2243,7 @@ final class Provider {
         }
         let focused = focusedRecord(snapshot)?.element
         _ = try gateSecretEntry(writesText: true, pastes: false, focused: keyTargets(snapshot), receiver: snapshot.app.pid)
-        if let focused, case .applied(let verification) = TextInput.replaceSelection(focused, with: text) {
+        if let focused, case .applied(let verification) = try TextInput.replaceSelection(focused, with: text) {
             return withSecureInput(actionMetadata(path: "accessibility", actionName: "AXReplaceSelection", verification: verification), SecureInputState.now())
         }
         try requireTargetWindowFocused(snapshot, restoreWindowRequested: params["restoreWindow"]?.bool == true)
@@ -2432,7 +2491,7 @@ final class Provider {
         try requireBackgroundField(focus, in: snapshot)
         if pasting || isMultiLineText(focus) || !KeyboardInputSafety.movesTheFocus(text), isSettable(focus, kAXValueAttribute as String) {
             let state = try gateSecretEntry(writesText: true, pastes: false, focused: [focus], receiver: snapshot.app.pid)
-            switch TextInput.replaceSelection(focus, with: text) {
+            switch try TextInput.replaceSelection(focus, with: text) {
             case let .applied(verification):
                 return withSecureInput(actionMetadata(path: "accessibility", actionName: "AXReplaceSelection", verification: verification), state)
             case .unavailable:
@@ -2531,6 +2590,8 @@ final class Provider {
            let toIndex = try optionalInteger(params, "toElementIndex") {
             let from = try element(snapshot, fromIndex)
             let to = try element(snapshot, toIndex)
+            if snapshot.elements[fromIndex] == nil { try requireOnTop(from, in: snapshot) }
+            if snapshot.elements[toIndex] == nil { try requireOnTop(to, in: snapshot) }
             guard let fromPoint = center(from.localFrame, in: snapshot.windowBounds),
                   let toPoint = center(to.localFrame, in: snapshot.windowBounds)
             else {
@@ -2547,10 +2608,11 @@ final class Provider {
     }
 
     private func element(_ snapshot: Snapshot, _ index: Int) throws -> ElementRecord {
-        guard let record = snapshot.elements[index] ?? knownRecord(pid: snapshot.app.pid, index: index) else {
-            throw staleElement(index)
-        }
-        return record
+        if let record = snapshot.elements[index] { return record }
+        guard let known = knownRecord(pid: snapshot.app.pid, index: index) else { throw staleElement(index) }
+        // This walk did not reach it: cut short, or another window. The table's
+        // frame is from an older look, so it is read from the element itself.
+        return try liveRecord(known, windowBounds: snapshot.windowBounds)
     }
 
     private func focusedRecord(_ snapshot: Snapshot) -> ElementRecord? {
@@ -4726,7 +4788,9 @@ private enum ReplaceSelection {
 }
 
 private enum TextInput {
-    static func replaceSelection(_ element: AXUIElement, with text: String) -> ReplaceSelection {
+    /// Throws when the field did not answer and the text may have landed: typing
+    /// it again down another road could enter it twice.
+    static func replaceSelection(_ element: AXUIElement, with text: String) throws -> ReplaceSelection {
         guard isSettable(element, kAXValueAttribute as String),
               let current = rawStringAttribute(element, kAXValueAttribute as String)
         else {
@@ -4738,7 +4802,22 @@ private enum TextInput {
         let start = String.Index(utf16Offset: startOffset, in: current)
         let end = String.Index(utf16Offset: endOffset, in: current)
         let next = String(current[..<start]) + text + String(current[end...])
-        let setSucceeded = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, next as CFString) == .success
+        let context = RequestContext.current
+        let sentBefore = context.sent
+        context.sent = true
+        let status = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, next as CFString)
+        let setSucceeded = status == .success
+        if !setSucceeded {
+            // A field that answers with what it held took nothing. Any other answer,
+            // or none, may mean the text is in.
+            let holds = rawStringAttribute(element, kAXValueAttribute as String)
+            let verdict = AXActionVerdict.of(raw: status.rawValue)
+            guard verdict != .uncertain || holds == current else {
+                throw ProviderError.coded("delivery_uncertain", "the field did not answer in time, and the text may have landed; read it before typing again")
+            }
+            context.sent = sentBefore
+            return .unavailable
+        }
         if setSucceeded {
             setSelectedTextRange(element, CFRange(location: startOffset + text.utf16.count, length: 0))
         }
@@ -6313,6 +6392,10 @@ func handleRequest(
         return failureAnswer(id: request.id, code: "invalid_argument", message: String(describing: error))
     }
 
+    // The name a sequence holds an app by: however it was spelled, the lane it runs in.
+    if request.method == "appKey" {
+        return ["id": request.id, "ok": true, "result": ["key": provider.lane(method: request.method, params: params)]]
+    }
     // One lane per app: a slow or hung app holds up only the requests naming it.
     let lane = lanes.lock(for: provider.lane(method: request.method, params: params))
     do {

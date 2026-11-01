@@ -28,8 +28,8 @@ Requests to different apps run side by side; a hung app holds up only the reques
 naming it (`app_unresponsive`, after about a second).
 
 - **Numbers last.** An element's number stays with that control until the app
-  removes it, so an earlier look stays good after other acts and other agents'
-  looks. A number that is gone is refused (`element_not_found`).
+  removes it, so an earlier look stays good after other acts and looks. A number
+  that is gone, or older than a restart of the app or helper, is refused: look again.
 - **Answers are small.** An act answers `action` and `changes` (`added`, `changed`,
   `removed`, `omitted`), in lines with numbers you can use. `--full-state` answers
   the whole tree, `--no-state` no look at all.
@@ -38,8 +38,8 @@ naming it (`app_unresponsive`, after about a second).
   `delivery_uncertain` may have landed (a control that opens a dialog answers
   late); `effect: none_seen` was delivered and changed nothing. Look first.
 - **It waits for its control.** A disabled or moving control is waited for, 2 s by
-  default (`--timeout-ms N`, 0 for none), then refused `not_actionable`. A control
-  scrolled out of its list is pressed by its own action.
+  default (`--timeout-ms N`, 0 for none, 10 s at most), then refused `not_actionable`.
+  A control scrolled out of its list is pressed by its own action.
 - **Background first.** An act stays in its app's window and leaves the person's
   pointer and focus alone. Where the setting allows the shared desktop
   (`status.inputPolicy` is `shared-desktop`) and the background cannot do it, the
@@ -47,8 +47,7 @@ naming it (`app_unresponsive`, after about a second).
   front (`borrowedDesktop` in the answer). `--foreground` borrows at once,
   `--background` never does. Under the background-only setting such an act is
   refused `requires_foreground`.
-- **Dense windows and menus.** `observation.md` has `--skeleton`, `--root` and
-  `--surface menubar|menu|sheet`.
+- **Dense windows and menus:** `--skeleton`, `--root`, `--surface` (`observation.md`).
 - **Several apps in one call.** `zerocode-computer parallel --commands
   '[[<batch for one app>],[<batch for another>]]' --json`: each batch keeps its
   own order, they run together, and `result.groups` holds each batch's answer.
@@ -56,6 +55,8 @@ naming it (`app_unresponsive`, after about a second).
   come up behind, without taking focus.
 - **Sign-ins stay the person's.** Fill what you know; a password goes through
   `handoff` (see the rules below). An account already signed in needs nothing.
+- **On Windows** an act goes on the shared desktop, and a number holds only until
+  the window changes: look again then.
 
 ## Reference files — open one when its row says so
 
@@ -474,10 +475,9 @@ zerocode-computer verdict --pass | verdict --fail --reason "…"        # the QA
   Observe the current target again and verify the pending step before
   continuing; a missed interval is not evidence that nothing changed.
 - `screenshot_failed`: grant Screen Recording or retry with `--no-screenshot`.
-- `permission_denied` / `accessibility_error`: use the window's recovery card
-  or `permissions --id <id>`, grant the named helper permission, then check
-  again and retry. For a row that is already on but still denied, use the
-  targeted `--reset` flow above.
+- `permission_denied` / `accessibility_error`: use the window's recovery card or
+  `permissions --id <id>`, grant the named helper permission, then check again and
+  retry. For a row already on but still denied, use the targeted `--reset` flow above.
 - `unsupported_capability`: use an advertised action or the built-in browser /
   emulator route where applicable.
 - `secure_input`: a password field — hand it to the person (`handoff`), then
