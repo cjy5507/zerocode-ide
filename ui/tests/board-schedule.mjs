@@ -1412,8 +1412,7 @@ export async function testBoardSchedule(browser, origin, ok) {
     });
     ok("a person's wheel moves the timetable sideways in a narrow holder", scrolled > 0, String(scrolled));
 
-    /* ---- 키보드: 블록은 단추라 초점이 서고, 서면 할 일과 제 말을 말한다. (Enter의 활성화는 창의 키 처리가
-     * 가로채 행도 블록도 시험 창에서 눌리지 않는다 — 블록 이전부터 같았고, 이 과업 밖이다.) ---- */
+    /* ---- 키보드: 블록은 단추라 초점이 서고, 서면 할 일과 제 말을 말한다. Enter가 눌리는지는 바로 아래 ③. ---- */
     const typed = await page.evaluate(() => {
       const block = document.querySelector('#board-view [data-key="job:1792543500-run11955-t-63492-walk"]');
       block.focus();

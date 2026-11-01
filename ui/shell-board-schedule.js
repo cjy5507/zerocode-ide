@@ -628,9 +628,11 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
     const open = count(["running", "waiting", "held"]);
     const failed = count(["failed", "capped", "refused"]);
     const green = count(["passed"]);
+    // A step with no end on record (`lost`) neither passed nor failed: a gate holding one has no passing to claim.
+    const lost = count(["lost"]);
     const parts = [...new Set(members.map((job) => job.part).filter(Boolean))].sort();
     // A step still running keeps the gate running; a failed step stops it even while others queue (review P3-3).
-    const state = count(["running"]) > 0 ? "running" : failed > 0 ? "failed" : open > 0 ? "waiting" : "done";
+    const state = count(["running"]) > 0 ? "running" : failed > 0 ? "failed" : open > 0 ? "waiting" : lost > 0 ? "idle" : "done";
     // A stopped gate ends where its last finished step ended — the steps queued behind it will not run (review r2 P2);
     // a gate still going reaches the expected end of its steps.
     const finished = members.map((job) => Number(job.end_ms)).filter((ms) => Number.isFinite(ms) && ms > 0);
@@ -645,9 +647,11 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
           : t("board.schedule.gateWaitingUnknown", "대기 {{count}}개 · 시작 모름", { count: open })
         : state === "failed"
           ? t("board.schedule.gateFailed", "실패 {{count}}개 · {{time}}", { count: failed, time: boardScheduleSpan(end - began) })
-          : t("board.schedule.gatePassed", "통과 {{count}}개 · {{time}}", {
-            count: steps.length, time: boardScheduleSpan(end - began),
-          });
+          : state === "idle"
+            ? t("board.schedule.gateLost", "끝 기록 없음 {{count}}개", { count: lost })
+            : t("board.schedule.gatePassed", "통과 {{count}}개 · {{time}}", {
+              count: steps.length, time: boardScheduleSpan(end - began),
+            });
     const opened = choice.opened.has(gate) || (open > 0 && !choice.opened.has(`-${gate}`));
     // The bar's two names (the passed draft's 「12개 초록」): what ended, or the step running and the steps after it.
     const kinds = (states) => steps.filter((job) => states.includes(job.state)).map((job) => job.kind ?? job.name);
@@ -655,7 +659,7 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
       ? t("board.schedule.gateDone", "{{done}}/{{total}} 초록", { done: steps.length, total: steps.length })
       : state === "failed"
         ? t("board.schedule.gateFailedCount", "실패 {{count}}개", { count: failed })
-        : `${steps.length - open}/${steps.length}`;
+        : state === "idle" ? `${green}/${steps.length}` : `${steps.length - open}/${steps.length}`;
     const basis = placed.some((row) => row.basis === "cap") ? "cap" : "history";
     const unknown = state === "waiting" && !startWord;
     // The tasks the gate carries, by its jobs' `# task:` lines or their `what` lines (t-77628).
@@ -700,7 +704,7 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
           ? t("board.schedule.gateBarPassed", "{{count}}개 초록", { count: steps.length })
           : state === "failed"
             ? t("board.schedule.gateBarFailed", "{{count}}개 실패", { count: failed })
-            : kinds(["running"]).join(" · "),
+            : kinds([state === "idle" ? "lost" : "running"]).join(" · "),
         aheadLabel: kinds(["waiting", "held"]).join(" · "),
         act: { fold: gate, opened }, opened, paused: Boolean(stall) && state === "waiting",
         // The step cells of the vertical timetable's gate block, in the steps' order.
@@ -780,7 +784,7 @@ function boardScheduleTaskRide(task, now, link, since) {
     })
     : gate.state === "waiting"
       // The gate's own time word — its next waiting step's expected start, never its first attempt's past start.
-      ? gate.unknown || !gate.startWord
+      ? !gate.startWord
         ? t("board.schedule.whyWaitingUnknown", "{{gate}}에 실림 → 차례 기다림 · 시작 모름", { gate: gate.gate })
         : t("board.schedule.whyWaiting", "{{gate}}에 실림 → 차례 기다림 · {{time}} 시작 예상", {
           gate: gate.gate, time: gate.startWord,
@@ -947,8 +951,9 @@ function boardScheduleBoardLines(groups, now) {
     ? t(BOARD_RUN_STATES.run.key, BOARD_RUN_STATES.run.word)
     : state === "waiting"
       ? t(BOARD_RUN_STATES.queue.key, BOARD_RUN_STATES.queue.word)
-      : state === "failed" ? t("board.schedule.wordFailed", "실패") : t("board.schedule.wordPassed", "통과"));
-  const tones = { running: "run", waiting: "wait", failed: "halt", done: "done" };
+      : state === "failed" ? t("board.schedule.wordFailed", "실패")
+        : state === "idle" ? t("board.schedule.lost", "끝 기록 없음") : t("board.schedule.wordPassed", "통과"));
+  const tones = { running: "run", waiting: "wait", failed: "halt", idle: "halt", done: "done" };
 
   // 1. The next release: the lane running, else the last one that ended in the range.
   const lanes = rows("lanes");
@@ -992,7 +997,8 @@ function boardScheduleBoardLines(groups, now) {
   const gateLine = gate && facts
     ? {
       tone: tones[gate.state] ?? "quiet", name: facts.gate,
-      big: gate.state === "done" || gate.state === "failed" ? clock(gate.end) : gate.eta, word: stateWord(gate.state),
+      big: gate.state === "done" || gate.state === "failed" ? clock(gate.end) : gate.state === "idle" ? "—" : gate.eta,
+      word: stateWord(gate.state),
       note: [
         facts.failedKinds.length > 0
           ? t("board.schedule.failedStep", "{{kind}} 실패", { kind: facts.failedKinds.join(" · ") }) : "",
