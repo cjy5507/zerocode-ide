@@ -30,6 +30,7 @@
 //! from an earlier read of the screen, so there is nothing here to be late.
 
 use super::*;
+use zerocode_core::agent::turn_refusal as refused;
 use zerocode_core::ask::{AskPrompt, AskQuestion, AskSelection};
 use zerocode_core::screen_menu::{self, ScreenMenu};
 use zerocode_core::secret_prompt::SecretPrompt;
@@ -222,22 +223,35 @@ pub(super) struct RewindPane<'a> {
     /// The ledger's reason the pane is a run's
     /// (`cmd::wire::pane_the_ledger_drives`), already the page's word.
     pub(super) seat: Option<&'static str>,
-    /// Its agent ended its turn and asks nothing (the hook's word).
+    /// Its agent ended its turn and asks nothing (the hook's word), and its output has gone quiet
+    /// ([`wait_for_rest`]): a message the CLI held in its own queue begins its turn with no hook, and
+    /// the way back typed on that turn would open over a turn that is running (t-86909 r4).
     pub(super) between_turns: bool,
     /// The agent whose input line the screen is read for.
     pub(super) agent: &'a str,
 }
 
-/// The page's word for the ledger's reason a pane is a run's: the one it
-/// gives when it cannot be read, or a seat.
-pub(crate) fn rewind_seat_word(reason: Option<&str>) -> Option<&'static str> {
+/// The page's word for the ledger's reason a pane is a run's: `unread` when
+/// the ledger could not be read, `seat` for a worker's or a coordinator's seat.
+/// One reading for every door that asks the ledger first (the way back, the
+/// queue's three).
+fn seat_word(
+    reason: Option<&str>,
+    unread: &'static str,
+    seat: &'static str,
+) -> Option<&'static str> {
     reason.map(|said| {
         if said == crate::cmd::wire::LEDGER_UNREAD_PANE_STAYS {
-            REWIND_LEDGER_UNREAD
+            unread
         } else {
-            REWIND_SEAT
+            seat
         }
     })
+}
+
+/// [`seat_word`] as the way back says it.
+pub(crate) fn rewind_seat_word(reason: Option<&str>) -> Option<&'static str> {
+    seat_word(reason, REWIND_LEDGER_UNREAD, REWIND_SEAT)
 }
 
 /// The first key group of a CLI's way back — Claude Code's `/rewind` — typed
@@ -259,11 +273,273 @@ pub(super) fn type_rewind(
     if !pane.between_turns {
         return Err(REWIND_BUSY.to_string());
     }
-    match type_if_up(held, &Expect::no_menu().with_empty_line(pane.agent), first) {
+    match type_on_a_free_line(held, pane.agent, first) {
         Ok(true) => Ok(()),
         Ok(false) => Err(REWIND_SCREEN.to_string()),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error),
     }
+}
+
+/// [`type_if_up`] for a line the window types by itself: only while the
+/// screen shows no menu — whose highlighted row an Enter would take — and
+/// `agent`'s input line shown empty, so nothing joins words a person left
+/// there. `Ok(false)` is a refusal: nothing was typed. The look every door
+/// that types at a pane on the person's behalf takes first (the way back, the
+/// queue's steer and stop).
+fn type_on_a_free_line(held: &HeldTerminal, agent: &str, bytes: &[u8]) -> Result<bool, String> {
+    type_if_up(held, &Expect::no_menu().with_empty_line(agent), bytes)
+        .map_err(|error| error.to_string())
+}
+
+/// [`seat_word`] as the turn doors say it: a seat, or a ledger that cannot be
+/// read.
+pub(crate) fn turn_seat_word(reason: Option<&str>) -> Option<&'static str> {
+    seat_word(reason, refused::LEDGER_UNREAD, refused::SEAT)
+}
+
+/// What the window knows of a pane before it types at the turn running in it.
+pub(super) struct TurnPane<'a> {
+    /// The ledger's reason the pane is a run's, already the page's word
+    /// ([`turn_seat_word`]).
+    pub(super) seat: Option<&'static str>,
+    /// The hook's word is that a turn runs — working, not at rest and not
+    /// asking.
+    pub(super) working: bool,
+    /// The agent whose input line the screen is read for.
+    pub(super) agent: &'a str,
+    /// The pane's CLI has shown it reads its input (`human_input::reads_input`).
+    /// A pane restored a moment ago may stand "working" by a hook word that
+    /// outlived the restart while its CLI is still loading — and keys typed at
+    /// it go to whatever reads the terminal then.
+    pub(super) reads_input: bool,
+}
+
+/// What is asked of a pane before its screen is looked at (t-86909 r2): that
+/// no run's seat holds it, that the hook's word is the one the words are for —
+/// a turn that runs for a steer or a stop, one that is over for the words of a
+/// send now — and that its CLI has shown it reads its input.
+fn before_the_screen(pane: &TurnPane<'_>, moment: Moment) -> Result<(), String> {
+    if let Some(word) = pane.seat {
+        return Err(word.to_string());
+    }
+    match (moment, pane.working) {
+        (Moment::During, false) => return Err(refused::IDLE.to_string()),
+        (Moment::After, true) => return Err(refused::RUNNING.to_string()),
+        _ => {}
+    }
+    if !pane.reads_input {
+        return Err(refused::NOT_READING.to_string());
+    }
+    Ok(())
+}
+
+/// The first key group typed at a pane whose turn RUNS (t-86909): the words a
+/// queued message steers into it, or the key that stops it. Typed only when no
+/// run sits in the pane — nor may, when the ledger cannot be read — the
+/// agent's turn runs, its CLI has shown it reads its input, and — read in the
+/// same hold as the write — the screen shows its input line empty and no menu:
+/// never onto a permission menu, where an Escape would refuse it and an Enter
+/// take its highlighted row, nor after words a person left on the line. A
+/// refusal types nothing and carries the word the page says it with.
+pub(super) fn type_at_a_turn(
+    held: &HeldTerminal,
+    pane: &TurnPane<'_>,
+    first: &[u8],
+) -> Result<(), String> {
+    before_the_screen(pane, Moment::During)?;
+    match type_on_a_free_line(held, pane.agent, first) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(refused::SCREEN.to_string()),
+        Err(error) => Err(error),
+    }
+}
+
+/// The Enter that sends words [`type_at_a_turn`] put on the line, typed
+/// through the same door. The screen is asked again — a menu that came up in
+/// the breath between would take this Enter for its highlighted row — and so
+/// is the person's hand: one that reached the line since (`hand`, the count
+/// read before the words went in) may have added to the words or sent them,
+/// and no Enter of the window's follows it. Any refusal here is
+/// [`refused::LANDED`]: the words are on the pane's line already.
+pub(super) fn type_enter_after_words(
+    held: &HeldTerminal,
+    term: u32,
+    hand: Option<u64>,
+    enter: &[u8],
+) -> Result<(), String> {
+    if crate::human_input::line_of(term).1 != hand {
+        return Err(refused::LANDED.to_string());
+    }
+    match type_if_up(held, &Expect::no_menu(), enter) {
+        Ok(true) => Ok(()),
+        Ok(false) | Err(_) => Err(refused::LANDED.to_string()),
+    }
+}
+
+/// Which side of its turn a line the queue types is for (t-86909 r2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Moment {
+    /// Into the turn that runs — the 끼워 넣기's words: the hook says a turn runs.
+    During,
+    /// After the stop that cleared the way, the turn over — the 바로 보내기's own
+    /// words: the hook no longer says a turn runs.
+    After,
+}
+
+/// How long the queue's typing waits (t-86909 r2).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Timing {
+    /// The breath between the words and their Enter (`line_keys`).
+    pub(super) step: Duration,
+    /// How long a screen that does not yet show the empty line is given to —
+    /// the redraw after a stop may trail the hook's word.
+    pub(super) wait: Duration,
+}
+
+/// How often the screen is looked at while the door waits for the empty line.
+const SCREEN_LOOK_EVERY: Duration = Duration::from_millis(50);
+
+/// How long a pane's output must have been silent before the pane counts as at rest (t-86909 r4).
+///
+/// The hook's word that a turn is over is not enough: Claude Code sends no hook when a message it
+/// held in its own queue begins its turn, so the word says rest, and the input field is empty again,
+/// while that turn runs. Measured on 2.1.316: a turn draws a spinner 18 times in 2 s, and a CLI at rest
+/// draws nothing in 5 s. The slowest redraw of a reduced spinner is its seconds counter, once a second,
+/// so this is half a second over it.
+pub(super) const REST_QUIET: Duration = Duration::from_millis(1_500);
+/// How long a pane that is not yet quiet is waited for before it is called busy (t-86909 r4): a turn
+/// that has just ended is still drawing its last frames, and one that has started again keeps drawing.
+pub(super) const REST_WAIT: Duration = Duration::from_secs(3);
+
+/// Whether a pane that last wrote at `last` has been silent for `quiet` by `now`. A transport that
+/// does not say when it last wrote is read as quiet, as [`secret_prompt`] reads it: nothing shows
+/// otherwise, and the pane's other facts (the hook's word, the screen) still have to hold.
+fn silent_for(last: Option<Instant>, now: Instant, quiet: Duration) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) >= quiet)
+}
+
+/// [`silent_for`] for the pane `pty` as it stands now — a look the caller makes under the lock it
+/// already holds, so it can stand in one hold with the other facts of a pane.
+pub(super) fn output_quiet(pty: &PtyHandle, quiet: Duration) -> bool {
+    silent_for(pty.last_output_at(), Instant::now(), quiet)
+}
+
+/// Look every `poll` until `quiet` answers yes, for at most `wait`: what the last look found. A pane
+/// that went quiet at the very end counts as quiet.
+fn wait_until(mut quiet: impl FnMut() -> bool, wait: Duration, poll: Duration) -> bool {
+    let deadline = Instant::now() + wait;
+    loop {
+        if quiet() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+/// Wait up to `wait` for the output of the pane `held` to have been silent for `quiet`, looking every
+/// `poll`; whether it is quiet at the end. The pane's lock is taken for each look and not kept across
+/// the wait, so the pump that moves its output goes on.
+pub(super) fn wait_for_quiet(
+    held: &HeldTerminal,
+    quiet: Duration,
+    wait: Duration,
+    poll: Duration,
+) -> bool {
+    wait_until(|| output_quiet(&lock_pty(held), quiet), wait, poll)
+}
+
+/// [`wait_for_quiet`] with the window's own bounds ([`REST_QUIET`], [`REST_WAIT`]): the one question
+/// the hand-over's second look and the way back ask of a pane whose hook says its turn is over. The
+/// caller reads [`output_quiet`] again in the hold it reads its other facts in — this wait only gives
+/// a pane that is about to be quiet the time to be.
+pub(super) fn wait_for_rest(held: &HeldTerminal) -> bool {
+    wait_for_quiet(held, REST_QUIET, REST_WAIT, SCREEN_LOOK_EVERY)
+}
+
+/// [`type_at_a_turn`] for the words of a send now, after its stop (t-86909 r2):
+/// the hook says the turn is over, and the screen is given up to `wait` to show
+/// the input line empty and no menu — the redraw after a stop can trail the
+/// hook's word. Words the stop took back onto the line (a steer the CLI had not
+/// taken yet) stay there and refuse these as [`refused::LINE`]: pasted behind
+/// them, an Enter would send both as one message.
+///
+/// The hook's word is read once, by [`before_the_screen`], and not again while the
+/// screen is waited for (t-86909 r3, P3-6: left as it is). A turn that starts in
+/// those `wait` seconds — a steered row the CLI began on its own after the stop, say —
+/// is not seen, and the words go onto the line of a pane that is working again: its own
+/// queue takes them and folds them in at its next step. Nothing is lost and nothing is
+/// sent twice; only the order is the CLI's. Reading the hook's word at each look would
+/// refuse such words as [`refused::RUNNING`] instead, and the page would ask again.
+fn type_after_a_turn(
+    held: &HeldTerminal,
+    pane: &TurnPane<'_>,
+    first: &[u8],
+    wait: Duration,
+) -> Result<(), String> {
+    before_the_screen(pane, Moment::After)?;
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match type_on_a_free_line(held, pane.agent, first) {
+            Ok(true) => return Ok(()),
+            Ok(false) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(SCREEN_LOOK_EVERY);
+            }
+            Ok(false) => return Err(refused::LINE.to_string()),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// A line the queue types at a pane — the words as one bracketed paste, a
+/// breath, their Enter — every key through the door (t-86909 r2).
+///
+/// The words are ALWAYS a bracketed paste, a single line too: bare, a Tab was
+/// the CLI's Tab and a `^C` its Ctrl+C. The door reads the screen first and
+/// types onto an empty field with no menu only, which for the two CLIs it can
+/// read means bracketed paste is on. `Moment::During` is a steer into a running
+/// turn; `Moment::After` the words of a send now, whose Enter is a gesture the
+/// provider's prompt report answers, so the tracker is told what the window's
+/// ordinary delivery tells it (`prompt_transaction::human_write`).
+///
+/// A person's hand that reaches the line between the words and the Enter ends
+/// the Enter ([`type_enter_after_words`]): [`refused::LANDED`].
+pub(super) fn type_queued_line(
+    held: &HeldTerminal,
+    term: u32,
+    pane: &TurnPane<'_>,
+    moment: Moment,
+    text: &str,
+    timing: Timing,
+) -> Result<(), String> {
+    let words = zerocode_pty::encode_paste(text, true);
+    let enter = zerocode_core::ask::line_keys(text)
+        .0
+        .iter()
+        .map(crate::cmd::terminal::key_group_bytes)
+        .next_back()
+        .ok_or_else(|| refused::UNSUPPORTED.to_string())?;
+    // The hand count before the words go in: one that reached the line by the time the Enter is
+    // due may have added to them or sent them.
+    let mut hand = crate::human_input::line_of(term).1;
+    match moment {
+        Moment::During => type_at_a_turn(held, pane, &words)?,
+        Moment::After => {
+            type_after_a_turn(held, pane, &words, timing.wait)?;
+            // The words are on the line: a draft until their Enter closes over them. The mark
+            // moves the count, so the Enter is held to the count after it.
+            crate::human_input::typed(term);
+            hand = crate::human_input::line_of(term).1;
+        }
+    }
+    std::thread::sleep(timing.step);
+    type_enter_after_words(held, term, hand, &enter)?;
+    if moment == Moment::After {
+        crate::human_input::entered(term);
+    }
+    Ok(())
 }
 
 /// What typing the hand-over's probe at a pane showed (t-84850 r2).
@@ -1224,11 +1500,16 @@ mod tests {
 
         /// What the child would draw next, as the child's own bytes.
         fn draw(&self, text: &str) {
-            let mut pty = lock_pty(&self.held);
-            pty.terminal_mut().feed(b"\x1b[2J\x1b[H");
-            pty.terminal_mut()
-                .feed(text.replace('\n', "\r\n").as_bytes());
+            draw_on(&self.held, text);
         }
+    }
+
+    /// [`Pane::draw`] for a screen another thread holds.
+    fn draw_on(held: &HeldTerminal, text: &str) {
+        let mut pty = lock_pty(held);
+        pty.terminal_mut().feed(b"\x1b[2J\x1b[H");
+        pty.terminal_mut()
+            .feed(text.replace('\n', "\r\n").as_bytes());
     }
 
     fn pane(title: &str, options: &[&str], follows_arrows: bool) -> Pane {
@@ -1457,6 +1738,489 @@ mod tests {
         assert!(pane.typed().is_empty(), "a refused way back was typed");
         assert_eq!(type_rewind(&pane.held, &free, b"/rewind"), Ok(()));
         assert_eq!(pane.typed(), vec!["/rewind"]);
+    }
+
+    /// What the queue's 끼워 넣기 and 바로 보내기 type at a pane whose turn runs
+    /// (t-86909) goes in only when no run sits in the pane — nor may, when the
+    /// ledger cannot be read — the agent's turn runs, and the screen shows its
+    /// input line empty with no menu. Never onto a permission menu, where the
+    /// stop would refuse the permission and the steer's Enter would take the
+    /// highlighted row; never after words a person left on the line; never at
+    /// a pane that is at rest. Every refusal types nothing and says its word.
+    #[test]
+    fn words_and_the_stop_are_typed_only_at_a_pane_whose_turn_runs() {
+        let rule = "─".repeat(40);
+        let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+        let running = TurnPane {
+            seat: None,
+            working: true,
+            agent: "claude",
+            reads_input: true,
+        };
+        assert_eq!(
+            type_at_a_turn(&pane.held, &running, b"\x1b"),
+            Err(refused::SCREEN.to_string())
+        );
+        assert!(pane.typed().is_empty(), "a stop was typed into a menu");
+        pane.draw(&format!(
+            "\x1b[?2004h✻ Working…\n\n{rule}\n❯ fix login\n{rule}\x1b[4;12H"
+        ));
+        assert_eq!(
+            type_at_a_turn(&pane.held, &running, b"words"),
+            Err(refused::SCREEN.to_string())
+        );
+        assert!(pane.typed().is_empty(), "words joined a person's words");
+        pane.draw(&format!(
+            "\x1b[?2004h✻ Working…\n\n{rule}\n❯ \n{rule}\x1b[4;3H"
+        ));
+        use crate::cmd::wire::pane_the_ledger_drives as drives;
+        let unread = turn_seat_word(drives(7, || None, || Some(Vec::new())));
+        let unread_seats = turn_seat_word(drives(7, || Some(Vec::new()), || None));
+        let worker = turn_seat_word(drives(7, || Some(vec![7]), || Some(Vec::new())));
+        let coordinator = turn_seat_word(drives(
+            7,
+            || Some(Vec::new()),
+            || {
+                Some(vec![crate::orchestration::restart_census::KeyedPane {
+                    key: "run-1".to_string(),
+                    term: 7,
+                }])
+            },
+        ));
+        assert_eq!(
+            turn_seat_word(drives(7, || Some(Vec::new()), || Some(Vec::new()))),
+            None
+        );
+        for (refused, word) in [
+            (
+                TurnPane {
+                    seat: unread,
+                    ..running
+                },
+                refused::LEDGER_UNREAD,
+            ),
+            (
+                TurnPane {
+                    seat: unread_seats,
+                    ..running
+                },
+                refused::LEDGER_UNREAD,
+            ),
+            (
+                TurnPane {
+                    seat: worker,
+                    ..running
+                },
+                refused::SEAT,
+            ),
+            (
+                TurnPane {
+                    seat: coordinator,
+                    ..running
+                },
+                refused::SEAT,
+            ),
+            (
+                TurnPane {
+                    working: false,
+                    ..running
+                },
+                refused::IDLE,
+            ),
+        ] {
+            assert_eq!(
+                type_at_a_turn(&pane.held, &refused, b"words"),
+                Err(word.to_string())
+            );
+        }
+        assert!(pane.typed().is_empty(), "a refused steer was typed");
+        // An agent whose input line the window cannot read as empty is never
+        // typed at, whatever the screen shows.
+        let unread_agent = TurnPane {
+            agent: "codex",
+            ..running
+        };
+        assert_eq!(
+            type_at_a_turn(&pane.held, &unread_agent, b"words"),
+            Err(refused::SCREEN.to_string())
+        );
+        assert!(pane.typed().is_empty(), "an unreadable line was typed at");
+        assert_eq!(type_at_a_turn(&pane.held, &running, b"words"), Ok(()));
+        assert_eq!(pane.typed(), vec!["words"]);
+    }
+
+    /// The Enter that sends the steered words goes through the door as well
+    /// (t-86909): not onto a menu that came up in the breath between the
+    /// words and it, and not after a hand that reached the line since — a
+    /// person's own Enter or words — whose pane the window no longer reads.
+    /// Either way the words are already on the line, which the page is told
+    /// with [`refused::LANDED`] so it does not queue them a second time.
+    #[test]
+    fn the_enter_after_steered_words_is_typed_only_onto_a_pane_without_a_menu_or_a_new_hand() {
+        let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+        let term = 6_100_001;
+        let hand = crate::human_input::line_of(term).1;
+        assert_eq!(
+            type_enter_after_words(&pane.held, term, hand, b"\r"),
+            Err(refused::LANDED.to_string()),
+            "an Enter was typed onto a menu"
+        );
+        assert!(pane.typed().is_empty());
+        pane.draw("● Working…\n\n❯ words\n");
+        crate::human_input::keyed(term);
+        assert_eq!(
+            type_enter_after_words(&pane.held, term, hand, b"\r"),
+            Err(refused::LANDED.to_string()),
+            "an Enter followed a person's hand"
+        );
+        assert!(pane.typed().is_empty());
+        let after = crate::human_input::line_of(term).1;
+        assert_eq!(
+            type_enter_after_words(&pane.held, term, after, b"\r"),
+            Ok(())
+        );
+        assert_eq!(pane.typed(), vec!["\r"]);
+        crate::human_input::forget_term(term);
+    }
+
+    /// Claude Code's live field, drawn as the existing tests draw it: bracketed paste on, the
+    /// cursor shown, `line` after the `❯ ` and the cursor `cursor_col` columns in.
+    fn field(pane: &Pane, line: &str, cursor_col: usize) {
+        let rule = "─".repeat(40);
+        pane.draw(&format!(
+            "\x1b[?2004h\x1b[?25h✻ Working…\n\n{rule}\n❯ {line}\n{rule}\x1b[4;{}H",
+            cursor_col + 1
+        ));
+    }
+
+    /// A claude pane whose turn runs, and one whose turn is over (the hook's word).
+    fn running() -> TurnPane<'static> {
+        TurnPane {
+            seat: None,
+            working: true,
+            agent: "claude",
+            reads_input: true,
+        }
+    }
+
+    fn over() -> TurnPane<'static> {
+        TurnPane {
+            working: false,
+            ..running()
+        }
+    }
+
+    /// No waiting: a breath of a millisecond between the words and the Enter, and a screen
+    /// that must show the field at once.
+    const QUICK: Timing = Timing {
+        step: Duration::from_millis(1),
+        wait: Duration::ZERO,
+    };
+
+    /// A pane whose CLI has not shown it reads its input — restored a moment ago, a hook word
+    /// that outlived the restart — is typed at by no queue door (t-86909 r2, P3-3): the hand-over
+    /// asks the same of a pane before it types its exit command, and the queue's three doors
+    /// type just as much.
+    #[test]
+    fn a_pane_whose_cli_has_not_shown_it_reads_its_input_is_typed_at_by_no_queue_door() {
+        let term = 6_200_001;
+        let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+        field(&pane, "", 2);
+        let blind = TurnPane {
+            reads_input: false,
+            ..running()
+        };
+        let blind_over = TurnPane {
+            reads_input: false,
+            ..over()
+        };
+        let not_reading = Err(refused::NOT_READING.to_string());
+        assert_eq!(type_at_a_turn(&pane.held, &blind, b"\x1b"), not_reading);
+        for (what, result) in [
+            (
+                "a steer",
+                type_queued_line(&pane.held, term, &blind, Moment::During, "words", QUICK),
+            ),
+            (
+                "a send now's words",
+                type_queued_line(&pane.held, term, &blind_over, Moment::After, "words", QUICK),
+            ),
+        ] {
+            assert_eq!(result, not_reading, "{what}");
+        }
+        assert!(
+            pane.typed().is_empty(),
+            "a pane that was not reading was typed at"
+        );
+        // The ledger's seat is asked before the pane is: a worker's pane says so.
+        let seat = TurnPane {
+            seat: Some(refused::SEAT),
+            reads_input: false,
+            ..running()
+        };
+        assert_eq!(
+            type_at_a_turn(&pane.held, &seat, b"\x1b"),
+            Err(refused::SEAT.to_string())
+        );
+    }
+
+    /// A line the queue types is one bracketed paste whatever it holds (t-86909 r2, P2-3): a
+    /// single line used to go in as bare keys — a Tab as the CLI's Tab, a `^C` as its Ctrl+C —
+    /// where a longer text went in as a paste. Then its Enter, as a key of its own.
+    #[test]
+    fn a_queued_line_is_one_bracketed_paste_and_then_its_enter_whatever_it_holds() {
+        let term = 6_200_002;
+        for (text, pasted) in [
+            ("이름\t값", "\x1b[200~이름\t값\x1b[201~"),
+            ("끝에 \x03 이 든 글", "\x1b[200~끝에 \x03 이 든 글\x1b[201~"),
+            ("\x04와 \x7f", "\x1b[200~\x04와 \x7f\x1b[201~"),
+            ("/exit", "\x1b[200~/exit\x1b[201~"),
+            ("한 줄", "\x1b[200~한 줄\x1b[201~"),
+            ("두 줄\n둘째", "\x1b[200~두 줄\r둘째\x1b[201~"),
+            (
+                "끝에서 닫는 \x1b[201~ 표",
+                "\x1b[200~끝에서 닫는 ␛[201~ 표\x1b[201~",
+            ),
+        ] {
+            let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+            field(&pane, "", 2);
+            assert_eq!(
+                type_queued_line(&pane.held, term, &running(), Moment::During, text, QUICK),
+                Ok(()),
+                "{text:?}"
+            );
+            assert_eq!(pane.typed(), vec![pasted, "\r"], "{text:?}");
+        }
+    }
+
+    /// The words of a 바로 보내기 are typed after the turn is over, onto an empty line — and
+    /// never behind words the stop's Escape took back onto it (t-86909 r2, P2-2). The incident:
+    /// words A are steered into the running turn and the CLI has not taken them yet; B is sent
+    /// now; the Escape makes the CLI put A back on its line; B pasted after A and an Enter would
+    /// send both as one message. The door looks again, at the moment B is due.
+    #[test]
+    fn the_words_of_a_send_now_never_join_words_the_stop_put_back_on_the_line() {
+        let term = 6_200_003;
+        let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+        field(&pane, "", 2);
+        let steered = "앞서 끼워 넣은 글";
+        assert_eq!(
+            type_queued_line(&pane.held, term, &running(), Moment::During, steered, QUICK),
+            Ok(())
+        );
+        assert_eq!(
+            pane.typed(),
+            vec!["\x1b[200~앞서 끼워 넣은 글\x1b[201~", "\r"]
+        );
+        // The Escape the stop typed: the CLI takes A back onto its line.
+        field(&pane, steered, 19);
+        assert_eq!(
+            type_queued_line(
+                &pane.held,
+                term,
+                &over(),
+                Moment::After,
+                "바로 보낼 글",
+                QUICK
+            ),
+            Err(refused::LINE.to_string()),
+            "the send now's words were typed behind the words on the line"
+        );
+        assert_eq!(pane.typed().len(), 2, "something was typed behind A");
+        // A turn that runs again is no time for them either; a menu is no place.
+        field(&pane, "", 2);
+        assert_eq!(
+            type_queued_line(
+                &pane.held,
+                term,
+                &running(),
+                Moment::After,
+                "바로 보낼 글",
+                QUICK
+            ),
+            Err(refused::RUNNING.to_string())
+        );
+        pane.draw("Do you want to proceed?\n❯ 1. Yes\n  2. No\n");
+        assert_eq!(
+            type_queued_line(
+                &pane.held,
+                term,
+                &over(),
+                Moment::After,
+                "바로 보낼 글",
+                QUICK
+            ),
+            Err(refused::LINE.to_string())
+        );
+        // The steer is for a turn that runs, as before.
+        field(&pane, "", 2);
+        assert_eq!(
+            type_queued_line(
+                &pane.held,
+                term,
+                &over(),
+                Moment::During,
+                "끼워 넣을 글",
+                QUICK
+            ),
+            Err(refused::IDLE.to_string())
+        );
+        assert_eq!(pane.typed().len(), 2, "a refusal typed something");
+        // The person cleared the line: now the words go, as one paste and their Enter.
+        assert_eq!(
+            type_queued_line(
+                &pane.held,
+                term,
+                &over(),
+                Moment::After,
+                "바로 보낼 글",
+                QUICK
+            ),
+            Ok(())
+        );
+        assert_eq!(&pane.typed()[2..], ["\x1b[200~바로 보낼 글\x1b[201~", "\r"]);
+        crate::human_input::forget_term(term);
+    }
+
+    /// The redraw after a stop may trail the hook's word (t-86909 r2): the door gives the screen
+    /// its `wait` to show the empty field, types the moment it does, and refuses — typing nothing
+    /// — when it does not within it.
+    #[test]
+    fn a_screen_that_shows_the_empty_line_a_moment_late_is_waited_for_and_one_that_never_does_is_not_typed_at()
+     {
+        let term = 6_200_004;
+        let late = pane("Do you want to proceed?", &["Yes", "No"], true);
+        late.draw("● Interrupted by the person\n");
+        let held = Arc::clone(&late.held);
+        let redraw = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            let rule = "─".repeat(40);
+            draw_on(
+                &held,
+                &format!("\x1b[?2004h\x1b[?25h● Interrupted\n\n{rule}\n❯ \n{rule}\x1b[4;3H"),
+            );
+        });
+        let patient = Timing {
+            step: Duration::from_millis(1),
+            wait: Duration::from_secs(20),
+        };
+        assert_eq!(
+            type_queued_line(
+                &late.held,
+                term,
+                &over(),
+                Moment::After,
+                "늦게 보이는 줄",
+                patient
+            ),
+            Ok(())
+        );
+        redraw.join().unwrap();
+        assert_eq!(late.typed(), vec!["\x1b[200~늦게 보이는 줄\x1b[201~", "\r"]);
+        let stuck = pane("Do you want to proceed?", &["Yes", "No"], true);
+        stuck.draw("● Interrupted by the person\n");
+        let began = Instant::now();
+        let brief = Timing {
+            step: Duration::from_millis(1),
+            wait: Duration::from_millis(150),
+        };
+        assert_eq!(
+            type_queued_line(
+                &stuck.held,
+                term,
+                &over(),
+                Moment::After,
+                "안 보이는 줄",
+                brief
+            ),
+            Err(refused::LINE.to_string())
+        );
+        assert!(
+            began.elapsed() >= Duration::from_millis(150),
+            "the door gave up before its wait"
+        );
+        assert!(stuck.typed().is_empty());
+        crate::human_input::forget_term(term);
+    }
+
+    /// A person's hand between the words and their Enter ends the window's Enter, as a menu
+    /// that came up does (t-86909): the words are on the line already, and the answer says so.
+    #[test]
+    fn a_hand_that_reaches_the_line_between_the_words_and_their_enter_stops_the_enter() {
+        let term = 6_200_005;
+        let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+        field(&pane, "", 2);
+        let toucher = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            crate::human_input::keyed(term);
+        });
+        let slow = Timing {
+            step: Duration::from_millis(300),
+            wait: Duration::ZERO,
+        };
+        assert_eq!(
+            type_queued_line(
+                &pane.held,
+                term,
+                &running(),
+                Moment::During,
+                "손이 닿은 글",
+                slow
+            ),
+            Err(refused::LANDED.to_string())
+        );
+        toucher.join().unwrap();
+        assert_eq!(pane.typed(), vec!["\x1b[200~손이 닿은 글\x1b[201~"]);
+        crate::human_input::forget_term(term);
+    }
+
+    /// The window's own line after a stop is a prompt the provider will report taking, so the
+    /// tracker is told what the old road told it — the words typed, the Enter a gesture — and
+    /// the report answers it (t-86909 r2). A steer is no new prompt (the CLI queues it) and
+    /// marks nothing.
+    #[test]
+    fn a_send_nows_line_leaves_the_gesture_the_providers_prompt_report_answers() {
+        let term = 6_200_006;
+        crate::human_input::forget_term(term);
+        let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+        field(&pane, "", 2);
+        assert_eq!(
+            type_queued_line(
+                &pane.held,
+                term,
+                &running(),
+                Moment::During,
+                "끼워 넣은 글",
+                QUICK
+            ),
+            Ok(())
+        );
+        assert!(
+            !crate::human_input::holds_a_draft(term),
+            "a steer marked the line as a draft"
+        );
+        field(&pane, "", 2);
+        assert_eq!(
+            type_queued_line(
+                &pane.held,
+                term,
+                &over(),
+                Moment::After,
+                "바로 보낸 글",
+                QUICK
+            ),
+            Ok(())
+        );
+        assert!(
+            crate::human_input::holds_a_draft(term),
+            "the line the window sent is not a gesture the provider's report waits for"
+        );
+        crate::human_input::submitted(term);
+        assert!(
+            !crate::human_input::holds_a_draft(term),
+            "the provider's report of the prompt left the line marked"
+        );
+        crate::human_input::forget_term(term);
     }
 
     /// The hand-over's exit command stands alone on its line (t-84850 r2):
@@ -1917,5 +2681,204 @@ mod tests {
         println!(
             "MEASURE memory: rss {before} KiB at the start; after each fifth of {ITERATIONS} card reads {card_rss:?}; of {ITERATIONS} typed answers {type_rss:?}; of {LEASE_CYCLES} lease cycles on distinct panes {lease_rss:?} (a plateau is no growth)"
         );
+    }
+
+    /// The pane's screen swapped for another terminal's — a recording of the real CLI.
+    fn show_on(pane: &Pane, screen: zerocode_pty::Terminal) {
+        *lock_pty(&pane.held).terminal_mut() = screen;
+    }
+
+    /// The door types at the field of a real Claude Code 2.1.316 (t-86909 r3). That CLI hides the
+    /// terminal's cursor for good and draws its caret as a reversed cell, so a door that asked for
+    /// a SHOWN cursor refused every pane of it: the queue's 끼워 넣기, its stop and the words after
+    /// it all came back `turn-screen`. Replayed from the recordings, the inline layout with its
+    /// transcript above the field and the alternate-screen one, with the queued placeholder on
+    /// the field too — the bracketed paste goes in, then its Enter.
+    #[test]
+    fn the_door_types_at_a_real_claude_code_2_1_316_field_that_hides_its_cursor() {
+        use crate::composer_empty::fixtures::{RECORDED_MARKS, recorded};
+        let mut term = 6_200_010;
+        for (fixture, marks) in RECORDED_MARKS {
+            for mark in marks {
+                for (moment, turn) in [(Moment::During, running()), (Moment::After, over())] {
+                    term += 1;
+                    let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+                    show_on(&pane, recorded(fixture, mark));
+                    assert_eq!(
+                        type_queued_line(&pane.held, term, &turn, moment, "words", QUICK),
+                        Ok(()),
+                        "{mark} {moment:?}: the door refused a field that is empty"
+                    );
+                    assert_eq!(
+                        pane.typed(),
+                        vec!["\x1b[200~words\x1b[201~", "\r"],
+                        "{mark} {moment:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// And it types behind nothing a person wrote there, under the same hidden cursor: the shapes
+    /// where the caret stands on the field's first cell and the field looks like the queued
+    /// placeholder (a reversed first letter, then nothing).
+    #[test]
+    fn the_door_refuses_a_draft_on_a_field_that_hides_its_cursor() {
+        use crate::composer_empty::fixtures::{CARET, hidden};
+        let mut term = 6_200_100;
+        for (what, field, cursor_col) in [
+            (
+                "one letter and the caret after it",
+                format!("❯ x{CARET}"),
+                3,
+            ),
+            (
+                "one letter and the caret moved to the start",
+                "❯ \x1b[7mx\x1b[27m".to_string(),
+                2,
+            ),
+            (
+                "letters after the caret's letter",
+                "❯ \x1b[7mx\x1b[27myz".to_string(),
+                2,
+            ),
+        ] {
+            term += 1;
+            let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+            show_on(&pane, hidden(&field, cursor_col));
+            assert_eq!(
+                type_queued_line(&pane.held, term, &running(), Moment::During, "words", QUICK),
+                Err(refused::SCREEN.to_string()),
+                "{what}"
+            );
+            assert_eq!(
+                type_at_a_turn(&pane.held, &running(), b"\x1b"),
+                Err(refused::SCREEN.to_string()),
+                "{what}: the stop key was typed at a draft"
+            );
+            assert!(pane.typed().is_empty(), "{what}: something was typed");
+        }
+    }
+
+    /// The hand-over's second look and the way back ask one question of a pane whose hook says its
+    /// turn is over (t-86909 r4): has its output been silent for the quiet time? One that wrote a
+    /// moment ago has not — a message the CLI held in its own queue began its turn with no hook — and
+    /// one silent for the whole time has.
+    #[test]
+    fn a_pane_is_at_rest_only_once_its_output_has_been_silent_for_the_quiet_time() {
+        let wrote = Instant::now();
+        let quiet = REST_QUIET;
+        assert!(
+            !silent_for(Some(wrote), wrote, quiet),
+            "it wrote this instant"
+        );
+        assert!(!silent_for(
+            Some(wrote),
+            wrote + Duration::from_millis(100),
+            quiet
+        ));
+        assert!(
+            !silent_for(Some(wrote), wrote + quiet - Duration::from_millis(1), quiet),
+            "a millisecond short of the quiet time"
+        );
+        assert!(
+            silent_for(Some(wrote), wrote + quiet, quiet),
+            "the whole quiet time"
+        );
+        assert!(silent_for(
+            Some(wrote),
+            wrote + Duration::from_secs(5),
+            quiet
+        ));
+        // A clock that reads earlier than the write does not make a pane quiet, nor fail.
+        assert!(!silent_for(
+            Some(wrote + Duration::from_secs(1)),
+            wrote,
+            quiet
+        ));
+        // A transport that does not say when it last wrote shows nothing against it.
+        assert!(silent_for(None, wrote, quiet));
+    }
+
+    /// The wait is what its last look found: yes as soon as a look says so, no only once the wait
+    /// is over — and a wait of nothing still looks once.
+    #[test]
+    fn the_wait_for_quiet_answers_what_its_last_look_found() {
+        let mut looks = 0;
+        assert!(wait_until(
+            || {
+                looks += 1;
+                looks == 3
+            },
+            Duration::from_secs(5),
+            Duration::from_millis(1)
+        ));
+        assert_eq!(looks, 3, "it looked again after a yes");
+        let began = Instant::now();
+        let mut never = 0;
+        assert!(!wait_until(
+            || {
+                never += 1;
+                false
+            },
+            Duration::from_millis(60),
+            Duration::from_millis(5)
+        ));
+        assert!(
+            began.elapsed() >= Duration::from_millis(60),
+            "it gave up before the wait was over"
+        );
+        assert!(never > 1, "it looked once and gave up");
+        let mut once = 0;
+        assert!(!wait_until(
+            || {
+                once += 1;
+                false
+            },
+            Duration::ZERO,
+            Duration::from_millis(5)
+        ));
+        assert_eq!(once, 1);
+    }
+
+    /// The same question asked of a real pane: one whose last write is a moment short of the quiet
+    /// time is waited for and found quiet; one that wrote just now and needs longer than the wait is
+    /// called busy only once the wait is over; one already silent is quiet at once.
+    #[test]
+    fn a_pane_about_to_be_quiet_is_waited_for_and_a_busy_one_only_to_the_bound() {
+        let quiet = Duration::from_millis(300);
+        let look = Duration::from_millis(10);
+        let settling = secret_pane("Done.", Duration::from_millis(200));
+        let began = Instant::now();
+        assert!(wait_for_quiet(
+            &settling.held,
+            quiet,
+            Duration::from_secs(5),
+            look
+        ));
+        assert!(
+            began.elapsed() < Duration::from_secs(4),
+            "it waited out the whole bound for a pane that needed 100 ms"
+        );
+        let busy = secret_pane("Working...", Duration::ZERO);
+        let began = Instant::now();
+        let bound = Duration::from_millis(150);
+        assert!(!wait_for_quiet(
+            &busy.held,
+            Duration::from_secs(60),
+            bound,
+            look
+        ));
+        assert!(
+            began.elapsed() >= bound,
+            "it called the pane busy before the bound"
+        );
+        let resting = secret_pane("Done.", quiet * 2);
+        assert!(wait_for_quiet(&resting.held, quiet, bound, look));
+        assert!(output_quiet(&lock_pty(&resting.held), quiet));
+        assert!(!output_quiet(
+            &lock_pty(&busy.held),
+            Duration::from_secs(60)
+        ));
     }
 }

@@ -11,8 +11,11 @@
  *     말하고, `COMPOSER_HOLD_MS`가 지나면 창이 제 시계로 기다린 글을 판에 한 번
  *     보내며, 그 뒤의 Enter는 곧바로 나간다. 선에는 마감(`deadlineMs`)이 실려
  *     늦게 선 선은 백엔드가 닫는다.
- *   - 답이 나간 질문 카드와 보낸 글의 턴 시작은 시계로 풀리지 않는다 — 카드 아래
- *     메뉴에 글이 떨어지는 길(t-81786 P0)을 다시 열지 않는다. 판이 움직이면 나간다.
+ *   - 답이 나간 질문 카드는 시계로 풀리지 않는다 — 카드 아래 메뉴에 글이 떨어지는
+ *     길(t-81786 P0)을 다시 열지 않는다. 판이 움직이면 나간다. 보낸 글의 턴 시작도
+ *     붙잡음의 시계(`COMPOSER_HOLD_MS`)로는 풀리지 않는다: 판이 움직이면 나간다. 그 글이
+ *     턴을 시작하지 않을 때만 자기 시계(`QUEUE_START_WAIT_MS`, 5초)가 푼다 — r4 P3-1,
+ *     장면은 composer-queue-acts.
  *
  * 시계: 긴 타이머(30 s 이상)는 잡아 두었다가 `Date.now`를 기한 너머로 옮긴 뒤
  * 부른다 — 1분을 실제로 기다리지 않고 창이 건 시계 그대로를 돌린다(옮긴 시계는
@@ -567,7 +570,10 @@ async function testAnsweredCardHolds(browser, origin, ok) {
 }
 
 /* ④ The queue sent its first message and no report says the turn it should
- * start began: the rest waits for the pane, never for the clock. */
+ * start began: the rest waits for the pane, never for the hold's clock
+ * (`COMPOSER_HOLD_MS`). A message that starts no turn at all is let go by the
+ * start clock of its own after `QUEUE_START_WAIT_MS` (r4 P3-1, composer-queue-acts):
+ * this scene is shorter than that and passes the HOLD's bound only. */
 async function testSentTurnHolds(browser, origin, ok) {
   await scene(browser, origin, ok, "sent turn holds", async (page) => {
     await page.evaluate(async () => {
@@ -597,7 +603,7 @@ async function testSentTurnHolds(browser, origin, ok) {
     await untilKeys(page, 2);
     const moved = await page.evaluate(LOOK);
     ok(
-      "a_queue_whose_sent_turn_is_not_seen_waits_for_the_pane_not_the_clock: the first held message went at the turn's end; the second waits and says why, still waits past `COMPOSER_HOLD_MS`, and goes once the pane's next turn starts and ends",
+      "a_queue_whose_sent_turn_is_not_seen_waits_for_the_pane_not_the_holds_clock: the first held message went at the turn's end; the second waits and says why, still waits past `COMPOSER_HOLD_MS`, and goes once the pane's next turn starts and ends",
       JSON.stringify(held.sent) === JSON.stringify(["paste:하나", ENTER]) && JSON.stringify(held.queue) === JSON.stringify(["둘"]) &&
         held.why === words.why &&
         JSON.stringify(passed.sent) === JSON.stringify(["paste:하나", ENTER]) && JSON.stringify(passed.queue) === JSON.stringify(["둘"]) &&

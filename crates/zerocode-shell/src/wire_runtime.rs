@@ -87,6 +87,21 @@ impl Protocol {
             .map_or("", |(name, _)| name)
     }
 
+    /// Whether the protocol has a way to put words into the turn that RUNS
+    /// without stopping it (t-86909, the queue's 끼워 넣기) — read off each
+    /// one, not assumed:
+    ///
+    /// - Codex `app-server`: `turn/steer` (0.166.0, `generate-json-schema`:
+    ///   `TurnSteerParams` with a required `expectedTurnId`, which fails the
+    ///   request instead of opening a turn when none runs).
+    /// - Claude Code stream-json: a `user` line written while a turn runs is
+    ///   queued by the CLI (`command_lifecycle` "queued") and absorbed into the
+    ///   turn at its next step (2.1.316 binary: "mid-turn absorption").
+    /// - ACP: a prompt, a cancel — no request that adds to a running prompt.
+    pub(crate) fn steers(self) -> bool {
+        matches!(self, Self::AppServer | Self::ClaudeStream)
+    }
+
     /// JSON-RPC 2.0 on the wire (Codex, ACP); Claude Code's lines are its
     /// own event shapes.
     fn json_rpc(self) -> bool {
@@ -2008,14 +2023,31 @@ impl WireSession {
         params: serde_json::Value,
         wait: Duration,
     ) -> Result<serde_json::Value, String> {
+        self.ask(method, params, wait).map_err(Asked::into_message)
+    }
+
+    /// [`Self::request`] with the way it failed kept (t-86909 r2): a request
+    /// that never left, one the agent refused, and one it never answered are
+    /// three different things to the caller that must say whether a message went in.
+    fn ask(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        wait: Duration,
+    ) -> Result<serde_json::Value, Asked> {
         let (sender, receiver) = mpsc::sync_channel(1);
-        let id = self.send_request(method, params, Some(sender))?;
+        let id = self
+            .send_request(method, params, Some(sender))
+            .map_err(Asked::NotSent)?;
         let answer = receiver.recv_timeout(wait).map_err(|_| {
             let _ = self.replies.lock().map(|mut replies| replies.remove(&id));
-            format!("{method}: no answer in {} s", wait.as_secs())
+            Asked::NoAnswer(format!("{method}: no answer in {} s", wait.as_secs()))
         })?;
         if let Some(error) = answer.get("error").filter(|error| !error.is_null()) {
-            return Err(format!("{method}: {}", text_of(error.get("message"))));
+            return Err(Asked::Refused(format!(
+                "{method}: {}",
+                text_of(error.get("message"))
+            )));
         }
         Ok(answer
             .get("result")
@@ -2092,7 +2124,9 @@ impl WireSession {
                 state.status = "working";
                 drop(state);
                 self.settled();
-                let turn = self.request("turn/start", params, REPLY_WAIT)?;
+                let turn = self
+                    .ask("turn/start", params, REPLY_WAIT)
+                    .map_err(start_word)?;
                 if let Ok(mut state) = self.state.lock() {
                     state.turn = turn
                         .get("turn")
@@ -2134,6 +2168,69 @@ impl WireSession {
                 self.write(&serde_json::json!({ "type": "user", "message": { "role": "user", "content": text } }))
             }
         }
+    }
+
+    /// Put words into the turn that RUNS, without stopping it (t-86909, the
+    /// conversation queue's 끼워 넣기) — the protocol's own request
+    /// ([`Protocol::steers`]), and only while a turn runs: with none, the words
+    /// are refused ([`zerocode_core::agent::turn_refusal::IDLE`]) and stay the page's
+    /// queued message rather than opening a turn the person did not start.
+    ///
+    /// A failure comes back as the page's word ([`steer_word`]); an answer that
+    /// never came is [`zerocode_core::agent::turn_refusal::UNKNOWN`]: the page
+    /// keeps the message and sends it no second time on its own.
+    pub(crate) fn steer(&self, text: &str) -> Result<(), String> {
+        use zerocode_core::agent::turn_refusal::{EMPTY, IDLE, UNSUPPORTED};
+        if !self.protocol.steers() {
+            return Err(UNSUPPORTED.to_string());
+        }
+        if text.trim().is_empty() {
+            return Err(EMPTY.to_string());
+        }
+        let (thread, turn, running) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "wire state lock".to_string())?;
+            (
+                state.thread.clone(),
+                state.turn.clone(),
+                state.status == "working",
+            )
+        };
+        match self.protocol {
+            Protocol::AppServer => {
+                let (Some(thread), Some(turn)) = (thread, turn) else {
+                    return Err(IDLE.to_string());
+                };
+                // `expectedTurnId`: the request fails when the turn it was
+                // aimed at is not the one running, instead of opening a new one.
+                self.ask("turn/steer", steer_params(&thread, &turn, text), REPLY_WAIT)
+                    .map_err(steer_word)?;
+            }
+            Protocol::ClaudeStream => {
+                if !running {
+                    return Err(IDLE.to_string());
+                }
+                // The CLI queues a line that arrives mid-turn and absorbs it at
+                // the turn's next step — the same line a turn starts with, and
+                // the assistant's words in flight (`live`) go on.
+                //
+                // The status read above and this write are two moments: a turn
+                // that ends between them takes the line as the start of a new
+                // one. The words are not lost — they are a message the CLI
+                // answers — but the state reads idle until its `message_start`,
+                // and the page's "read at the next step" was then not true
+                // (t-86909 r2, P3-4: left, as it costs no words).
+                self.write(&serde_json::json!({ "type": "user", "message": { "role": "user", "content": text } }))?;
+            }
+            Protocol::Acp => return Err(UNSUPPORTED.to_string()),
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.say("user", text);
+        }
+        self.settled();
+        Ok(())
     }
 
     /// Answer one open question. `message` is the words a refusal carries
@@ -2360,6 +2457,9 @@ pub(crate) struct WireLog {
     pub(crate) usage: Option<WireUsage>,
     /// The helpers at work (t-6323 A6).
     pub(crate) tasks: Vec<WireTask>,
+    /// Whether words can be put into a running turn on this wire
+    /// ([`Protocol::steers`]) — what the conversation's queue rows steer by.
+    pub(crate) steer: bool,
 }
 
 #[derive(Default)]
@@ -2681,6 +2781,78 @@ pub(crate) fn log_of(session: &WireSession, after: u64) -> Result<WireLog, Strin
         version: state.version.clone(),
         usage: state.usage,
         tasks: state.tasks.clone(),
+        steer: session.protocol.steers(),
+    })
+}
+
+/// How a request to the agent came back when it did not come back with a
+/// result (t-86909 r2). The three differ in the one thing a queue row needs to
+/// know: whether the request may have taken effect.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Asked {
+    /// The agent never answered inside the wait: the request may have taken
+    /// effect, and nobody can say.
+    NoAnswer(String),
+    /// The agent answered with an error: the request did not take effect.
+    Refused(String),
+    /// The request could not be written: it never left.
+    NotSent(String),
+}
+
+impl Asked {
+    /// The words of the failure, whichever it was.
+    fn into_message(self) -> String {
+        match self {
+            Self::NoAnswer(said) | Self::Refused(said) | Self::NotSent(said) => said,
+        }
+    }
+}
+
+/// The phrases Codex refuses a `turn/steer` with when the turn it was aimed at
+/// will not take the words: "no active turn to steer", "expected active turn id
+/// … but found …", "cannot steer a review turn", "cannot steer a compact turn"
+/// (read off the installed binary's strings, t-86909 r1 review).
+const STEER_NOT_TAKEN: [&str; 3] = ["active turn", "steerable", "cannot steer"];
+
+/// A failed steer as the page says it: the word for a turn the agent will not
+/// take the words into, the word for an answer that never came, and anything
+/// else — a line that could not be written, an error the window does not know —
+/// in its own words, which the page shows as they came (t-86909 r2).
+fn steer_word(asked: Asked) -> String {
+    use zerocode_core::agent::turn_refusal::{DENIED, UNKNOWN};
+    match asked {
+        Asked::NoAnswer(_) => UNKNOWN.to_string(),
+        Asked::Refused(said) if STEER_NOT_TAKEN.iter().any(|phrase| said.contains(phrase)) => {
+            DENIED.to_string()
+        }
+        Asked::Refused(said) | Asked::NotSent(said) => said,
+    }
+}
+
+/// A failed `turn/start` as the page says it (t-86909 r3, P2-2): an answer that never came
+/// within the wait is the word for "the words may have started a turn" — the page keeps the
+/// message first in its queue, marked, and sends it no second time on its own. Before, `send`
+/// returned the request's English text, the page put the message back as an ordinary row, and
+/// the turn it may have started was followed by the same words again at its end (the
+/// transcript, written before the request, already held them once). A request that never left
+/// and one the agent refused took nothing: they keep their own words.
+fn start_word(asked: Asked) -> String {
+    use zerocode_core::agent::turn_refusal::UNKNOWN;
+    match asked {
+        Asked::NoAnswer(_) => UNKNOWN.to_string(),
+        other => other.into_message(),
+    }
+}
+
+/// The params of Codex's `turn/steer` (t-86909): the thread, the turn the
+/// words are aimed at — `expectedTurnId` is REQUIRED and makes the request
+/// fail rather than open a turn when it is not the one running — and the
+/// words as one text input.
+fn steer_params(thread: &str, turn: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "threadId": thread,
+        "expectedTurnId": turn,
+        "input": [{ "type": "text", "text": text }],
     })
 }
 
@@ -3889,6 +4061,85 @@ mod tests {
             serde_json::json!({"behavior":"allow","updatedInput":answered})
         );
         assert_eq!(claude_answer(&ask, None, &[], None)["behavior"], "deny");
+    }
+
+    /// Which wires put words into a running turn (t-86909): the two whose
+    /// protocol has a way — Codex's `turn/steer` and Claude Code's mid-turn
+    /// user line — and not ACP, which only prompts and cancels. The Codex
+    /// request names the turn it is aimed at (`expectedTurnId`, required by
+    /// the schema `codex app-server generate-json-schema` prints), so a steer
+    /// for a turn that ended fails instead of opening a new one.
+    #[test]
+    fn a_wire_steers_only_where_its_protocol_has_a_way() {
+        assert!(Protocol::AppServer.steers());
+        assert!(Protocol::ClaudeStream.steers());
+        assert!(!Protocol::Acp.steers());
+        assert_eq!(
+            request_line(
+                Protocol::AppServer,
+                9,
+                "turn/steer",
+                steer_params("th-1", "tu-4", "추가 지시")
+            ),
+            serde_json::json!({"jsonrpc":"2.0","id":9,"method":"turn/steer","params":{
+                "threadId":"th-1","expectedTurnId":"tu-4","input":[{"type":"text","text":"추가 지시"}]}})
+        );
+    }
+
+    /// What a wire's failed steer becomes for the page (t-86909 r2). Codex refuses a steer in
+    /// four ways and all four are the one word the page has a sentence for — the English text of
+    /// "cannot steer a review turn" and "cannot steer a compact turn" reached the person as it
+    /// was; an answer that never came is the word for "the words may have gone in" (the page keeps
+    /// the row and sends it no second time); anything else keeps its own words.
+    #[test]
+    fn a_wires_failed_steer_is_the_pages_word() {
+        use zerocode_core::agent::turn_refusal::{DENIED, UNKNOWN};
+        for said in [
+            "turn/steer: no active turn to steer",
+            "turn/steer: expected active turn id `tu-4` but found `tu-5`",
+            "turn/steer: cannot steer a review turn",
+            "turn/steer: cannot steer a compact turn",
+        ] {
+            assert_eq!(
+                steer_word(Asked::Refused(said.to_string())),
+                DENIED,
+                "{said}"
+            );
+        }
+        assert_eq!(
+            steer_word(Asked::NoAnswer("turn/steer: no answer in 30 s".to_string())),
+            UNKNOWN
+        );
+        assert_eq!(
+            steer_word(Asked::NotSent("broken pipe".to_string())),
+            "broken pipe"
+        );
+        assert_eq!(
+            steer_word(Asked::Refused("turn/steer: out of credit".to_string())),
+            "turn/steer: out of credit"
+        );
+    }
+
+    /// What a wire's failed `turn/start` becomes for the page (t-86909 r3, P2-2). The words of a
+    /// queued message went out for a turn that never answered within the wait: they may have
+    /// started it. That is the word the page keeps the row under, marked, and sends no second
+    /// time — `steer` had it since r2, `send` put the message back to be sent again. A request
+    /// that never left, or one the agent refused, took nothing and keeps its own words.
+    #[test]
+    fn a_wires_turn_start_that_gets_no_answer_is_the_unknown_word() {
+        use zerocode_core::agent::turn_refusal::UNKNOWN;
+        assert_eq!(
+            start_word(Asked::NoAnswer("turn/start: no answer in 30 s".to_string())),
+            UNKNOWN
+        );
+        assert_eq!(
+            start_word(Asked::NotSent("broken pipe".to_string())),
+            "broken pipe"
+        );
+        assert_eq!(
+            start_word(Asked::Refused("turn/start: out of credit".to_string())),
+            "turn/start: out of credit"
+        );
     }
 
     /// Our own requests and their answers wear each protocol's shape: JSON-RPC

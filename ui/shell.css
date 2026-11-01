@@ -17469,7 +17469,9 @@ details[open] > .helper-cap::after {
   display: flex;
   flex-direction: column;
   gap: var(--chat-queue-gap);
-  max-height: var(--chat-queue-max-h);
+  /* Its head lines, the note and four 24 px rows (t-86909): the 96 px the items list
+   * above the box scrolls at (`--chat-queue-max-h`) was four 18 px pills. */
+  max-height: calc(var(--space-6) * 5);
   overflow-y: auto;
   padding: var(--chat-queue-gap) var(--chat-composer-pad-x);
 }
@@ -17479,6 +17481,7 @@ details[open] > .helper-cap::after {
 }
 
 .composer-queue-count {
+  flex: none;
   color: var(--ink-mist);
   font-family: var(--font-ui);
   font-size: var(--chat-pill-size);
@@ -17486,8 +17489,13 @@ details[open] > .helper-cap::after {
 }
 
 /* Why the queue waits, one line under its count (t-84670): the count's voice,
- * cut at the box's width — the whole sentence is its tip. */
-.composer-queue-why {
+ * cut at the box's width — the whole sentence is its tip. The note under it (t-86909)
+ * is the same voice for what the row buttons cannot do or were just refused:
+ * one line, the whole sentence its tip. */
+.composer-queue-why,
+.composer-queue-note {
+  /* Never squeezed out by the rows under it: when they outgrow the box, the box scrolls. */
+  flex: none;
   overflow: hidden;
   color: var(--ink-mist);
   font-family: var(--font-ui);
@@ -17497,19 +17505,35 @@ details[open] > .helper-cap::after {
   text-overflow: ellipsis;
 }
 
+.composer-queue-note[hidden] {
+  display: none;
+}
+
+/* A row (t-86909): the words and its four buttons. 24 px is the button's target, so the
+ * pill stands that tall; a row off the scrolled edge costs neither layout nor paint, so a
+ * queue of two hundred is as light as one of four. */
 .composer-queue-item {
   display: flex;
+  flex: none;
   align-items: center;
   gap: var(--space-1);
-  min-height: var(--chat-pill-height);
-  padding: 0 var(--chat-pill-pad-x);
+  min-height: var(--space-5);
+  padding: 0 var(--space-1) 0 var(--chat-pill-pad-x);
   border-radius: var(--radius-pill);
   background: var(--chat-pill-bg);
+  content-visibility: auto;
+  contain-intrinsic-block-size: var(--space-5);
   transition: background-color var(--motion-fast) var(--ease-standard);
 }
 
 .composer-queue-item:hover {
   background: var(--chat-pill-hover-bg);
+}
+
+/* The row whose words stand in the box: it is the person's now, and the queue lets
+ * nothing past it. Marked by an edge, never by colour alone (the pencil also stays lit). */
+.composer-queue-item[data-editing="true"] {
+  box-shadow: inset 0 0 0 var(--rule-width) var(--ink-mist);
 }
 
 .composer-queue-words {
@@ -17523,23 +17547,67 @@ details[open] > .helper-cap::after {
   text-overflow: ellipsis;
 }
 
-.composer-queue-drop {
+/* The four buttons: an icon, and beside it — where the pane is wide — the action's short
+ * word, which `data-words` carries (drawn here, so a row costs no extra element and a
+ * narrow pane keeps the icon alone with its name in the label). */
+.composer-queue-act {
   display: inline-flex;
+  flex: none;
   align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  min-width: var(--space-5);
+  min-height: var(--space-5);
+  padding: 0 var(--space-1);
   border: 0;
+  border-radius: var(--radius-pill);
   background: none;
   color: var(--ink-mist);
+  font-family: var(--font-ui);
+  font-size: var(--chat-pill-size);
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
-  transition: color var(--motion-fast) var(--ease-standard);
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
 }
 
-.composer-queue-drop:hover {
+.composer-queue-act::after {
+  content: attr(data-words);
+}
+
+.composer-queue-act:hover:enabled {
+  background: var(--chat-pill-hover-bg);
   color: var(--ink-chalk);
 }
 
-.composer-queue-drop .icon {
+.composer-queue-act:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* The row being sent leaves its buttons dark until the door answers. */
+.composer-queue-item[data-acting] .composer-queue-words {
+  color: var(--ink-mist);
+}
+
+/* The queue's keyboard ring, inside the scrolling box (an outer ring would be cut). */
+.composer-queue-act:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
+}
+
+.composer-queue-act .icon {
   width: var(--icon-size-sm);
   height: var(--icon-size-sm);
+}
+
+/* A narrow pane keeps the icons and lets the words go; the labels stay the names. */
+@container pane-chat (max-width: 560px) {
+  .composer-queue-act::after {
+    content: none;
+  }
 }
 
 /* 컨텍스트 알약: 작은 고리와 수. 눌리면 그 CLI의 압축 명령이 나가고,

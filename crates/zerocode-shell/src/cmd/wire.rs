@@ -209,6 +209,14 @@ pub(crate) struct PaneCli<'a> {
     /// Whether the screen shows the agent's input line empty
     /// (`composer_empty::observed`) — positive evidence, never a guess.
     pub(crate) line_shown_empty: bool,
+    /// Whether the pane's output has been silent for the quiet time
+    /// (`answer_door::REST_QUIET`) — a turn draws many times a second and a CLI at
+    /// rest draws nothing (t-86909 r4 P2-1). Claude Code sends no hook when a message
+    /// it held in its own queue begins its turn, so the hook's word can say rest, and
+    /// the input line be empty, while that turn runs. Asked at the second look only
+    /// ([`Probing::Now`]): the first look comes as a turn ends, and its last frames
+    /// are a moment old, so it passes `true` there.
+    pub(crate) output_quiet: bool,
 }
 
 /// Why a pane's CLI is not told its exit command (t-84850 r2), or `None` when
@@ -219,8 +227,11 @@ pub(crate) struct PaneCli<'a> {
 ///   pane's own child, still in front of the terminal, leaves nothing behind
 ///   — a CLI started from the pane's shell leaves that shell standing, and
 ///   the words that waited would be typed at it.
-/// - It has to be at rest, with no helper or background shell the exit would
-///   end, and an empty input line for `/exit` to stand alone on.
+/// - It has to be at rest — the hook's word is done or idle AND the pane's
+///   output is quiet (r4: a message the CLI held in its own queue starts its
+///   turn after the stop with no hook, and `/exit` typed then ends that turn)
+///   — with no helper or background shell the exit would end, and an empty
+///   input line for `/exit` to stand alone on.
 /// - It has to read the line: a CLI that has shown no reading since it began
 ///   may be one still waking (a resumed Claude Code reads nothing for up to a
 ///   minute), and `/exit` would sit on its input line for the words after it
@@ -235,7 +246,7 @@ pub(crate) fn pane_cli_cannot_leave(agent: &str, cli: &PaneCli<'_>) -> Option<&'
     if !spawned_here || cli.child_in_front != Some(true) {
         return Some(SHELL_PANE_STAYS);
     }
-    if !matches!(cli.state, Some(HookState::Done | HookState::Idle)) {
+    if !matches!(cli.state, Some(HookState::Done | HookState::Idle)) || !cli.output_quiet {
         return Some(PANE_NOT_AT_REST);
     }
     if cli.background_work {
@@ -270,6 +281,11 @@ pub(crate) const EXIT_TYPED_PANE_STANDS: &str =
 /// the account, the wire and the conversation's record — so a space is never
 /// typed at a pane the hand-over then refuses for another reason. Before
 /// that, a pane that has shown no reading yet passes, to be asked then.
+///
+/// The same moment is the one that asks the pane's output to be quiet (r4
+/// P2-1): the first look comes as a turn ends and would always find the last
+/// frames a moment old, while the second comes after the wire's handshake, and
+/// waits a little for a pane that is about to be quiet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Probing {
     Later,
@@ -286,7 +302,10 @@ pub(crate) const PROBE_WAIT: std::time::Duration = std::time::Duration::from_sec
 pub(crate) const PROBE_LATE_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// [`pane_cli_cannot_leave`] for the pane as it stands now: its child, the
-/// terminal's foreground and its screen read in one hold of the pane's lock,
+/// terminal's foreground, its screen and whether its output has been quiet
+/// (`answer_door::output_quiet`; at the second look only, after waiting up to
+/// `answer_door::REST_WAIT` for a pane that is about to be) read in one hold of
+/// the pane's lock,
 /// what this window launched there, what its hooks last said, and whether its
 /// program has shown it reads. A pane that has shown no reading yet, and
 /// passes everything else, is asked by the probe (`answer_door::probe_pane`):
@@ -304,12 +323,19 @@ fn pane_cli_refusal(
         .terminals()
         .handle(term)
         .ok_or("터미널이 떠 있지 않습니다")?;
-    let (child, child_in_front, line_shown_empty) = {
+    // The second look waits a moment for the pane's output to go quiet, so a pane that is about
+    // to be is not refused for its last frames; the answer is read again in the hold below (r4).
+    if probe == Probing::Now {
+        crate::answer_door::wait_for_rest(&held);
+    }
+    let (child, child_in_front, line_shown_empty, output_quiet) = {
         let pty = lock_pty(&held);
         (
             pty.pid(),
             pty.foreground_is_child(),
             crate::composer_empty::observed(agent, pty.terminal().grid()),
+            probe == Probing::Later
+                || crate::answer_door::output_quiet(&pty, crate::answer_door::REST_QUIET),
         )
     };
     let launched = crate::pane_leftovers::launched_as(term);
@@ -328,6 +354,7 @@ fn pane_cli_refusal(
         state: said,
         background_work: helpers || hooks::other_background_work(term),
         line_shown_empty,
+        output_quiet,
     };
     match pane_cli_cannot_leave(agent, &cli) {
         None => Ok(()),
@@ -643,7 +670,10 @@ fn hand_over_pane(
     // gave; and a line that holds words would send them with it. So its first
     // key goes through the answer door, which types it only while the screen
     // shows no menu and the input line empty; the rest is the walk every line
-    // takes.
+    // takes. The word itself goes in as a bracketed paste (r4 P3-2): as keys,
+    // `/exit` in Claude Code's vim mode at NORMAL is a row of vim commands —
+    // measured, a `t` stayed on the line and the Enter sent it to the model —
+    // while a paste lands whole in either mode.
     let Some((first, rest)) = groups.split_first() else {
         return Err(format!("{agent}'s exit command has nothing to type"));
     };
@@ -654,7 +684,7 @@ fn hand_over_pane(
     let typed = crate::answer_door::type_if_up(
         &held,
         &crate::answer_door::Expect::no_menu().with_empty_line(agent),
-        &crate::cmd::terminal::key_group_bytes(first),
+        &crate::cmd::terminal::pasted_group_bytes(first),
     )
     .map_err(|error| error.to_string())?;
     state.cadence().wake();
@@ -744,6 +774,22 @@ pub(crate) fn wire_send(
     text: String,
 ) -> Result<(), String> {
     state.shell_runtime().wires.get(id)?.send(&text)
+}
+
+/// Put a queued message into the turn a wire session is running, without
+/// stopping it (t-86909, the conversation queue's 끼워 넣기): the protocol's own
+/// request ([`wire_runtime::Protocol::steers`]), and a refusal word when none
+/// runs or the protocol has no such request
+/// ([`zerocode_core::agent::turn_refusal::IDLE`],
+/// [`zerocode_core::agent::turn_refusal::UNSUPPORTED`]). A wire has no screen to type at,
+/// so there is no key here — and the page keeps the message queued on a refusal.
+#[tauri::command(async)]
+pub(crate) fn wire_steer(
+    state: State<'_, AppState>,
+    id: wire_runtime::WireId,
+    text: String,
+) -> Result<(), String> {
+    state.shell_runtime().wires.get(id)?.steer(&text)
 }
 
 /// Answer one open question: the option picked (an approval), or the answers
