@@ -285,9 +285,15 @@ async function testBranchLineRoom(browser, origin, ok) {
           box: Math.round(box),
           chip: chip && getComputedStyle(chip).display !== "none" ? chip.clientWidth : 0,
           chipWords: chip && getComputedStyle(chip).display !== "none" ? chip.scrollWidth : 0,
-          // A10 (t-84799): the landing chip's words whole, inside the row — no tail cut, none past the edge.
-          chipCut: chip && getComputedStyle(chip).display !== "none"
-            ? Math.max(chip.scrollWidth - chip.clientWidth, chip.scrollHeight - chip.clientHeight) : 0,
+          // A10 (t-88929): the landing chip is one line of the row's height; a chip that overflows ends in an
+          // ellipsis, and its tooltip carries the whole sentence.
+          chipShown: !!chip && getComputedStyle(chip).display !== "none",
+          chipHeight: chip && getComputedStyle(chip).display !== "none" ? Math.round(chip.getBoundingClientRect().height * 100) / 100 : 0,
+          chipRow: Math.round(row.getBoundingClientRect().height * 100) / 100,
+          chipOver: chip && getComputedStyle(chip).display !== "none" ? chip.scrollWidth - chip.clientWidth : 0,
+          chipEllipsis: chip ? getComputedStyle(chip).textOverflow === "ellipsis" && getComputedStyle(chip).whiteSpace === "nowrap" : false,
+          chipTipLen: chip ? (chip.dataset.tip ?? "").length : 0,
+          chipWordLen: chip ? chip.textContent.length : 0,
           chipOut: chip && getComputedStyle(chip).display !== "none"
             ? Math.round(chip.getBoundingClientRect().right - row.querySelector(".wt-titlebox").getBoundingClientRect().right) : 0,
         }];
@@ -295,8 +301,11 @@ async function testBranchLineRoom(browser, origin, ok) {
       ok(`${code} at ${width} px every branch line under a name keeps its words whole or a third of the line, never a syllable (시안 5)`,
         rows.length >= 2 && rows.every((one) => one.line + 1 >= Math.min(one.wants, one.box / 3)),
         JSON.stringify(rows));
-      ok(`${code} at ${width} px a landing chip says all its words — 「미반영 6 · main보다 20 뒤」 in Korean — is not cut to its tail — inside its row (A10)`,
-        rows.some((one) => one.chip > 100) && rows.every((one) => one.chipCut <= 1 && one.chipOut <= 1), JSON.stringify(rows));
+      const chips = rows.filter((one) => one.chipShown);
+      ok(`${code} at ${width} px a landing chip stays one line of 15 px or less and inside its row — it does not grow the row (A10)`,
+        rows.some((one) => one.chip > 60) && chips.every((one) => one.chipHeight <= 15.5 && one.chipOut <= 1), JSON.stringify(rows));
+      ok(`${code} at ${width} px a landing chip too wide for its track ends in an ellipsis (text-overflow), and its tooltip has the whole sentence (A10)`,
+        chips.every((one) => one.chipEllipsis && one.chipTipLen >= one.chipWordLen && (one.chipOver <= 0 || one.chipTipLen > 0)), JSON.stringify(rows));
     }
     }
     ok("the branch line scene raises no browser errors", faults.length === 0, faults.join("\n"));
