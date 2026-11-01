@@ -1537,7 +1537,9 @@ pub(crate) fn resume_command(
 
 /// What the launch button starts for this agent, for a wake whose
 /// conversation was never written: `launch_agent_tab`'s program and launch
-/// plan, with no selector for the agent to fail on.
+/// plan, with no selector for the agent to fail on — and none to take the
+/// folder's newest conversation with (t-68069): a saved `--continue` here put
+/// a pane that never spoke on its neighbour's transcript.
 pub(crate) fn fresh_command(
     agent: &str,
     launch_override: Option<&zerocode_core::LaunchOverride>,
@@ -1550,7 +1552,11 @@ pub(crate) fn fresh_command(
     };
     let plan = zerocode_core::launch_plan(spec.id, launch_override);
     let mut argv: Vec<String> = spec.launch.split_whitespace().map(str::to_string).collect();
-    argv.extend(plan.args.iter().cloned());
+    argv.extend(
+        spec.capabilities()
+            .resume
+            .launch_args_without_selectors(&plan.args),
+    );
     Ok(ResumeCommand { kind, argv, plan })
 }
 

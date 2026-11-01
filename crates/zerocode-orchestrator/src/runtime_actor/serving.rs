@@ -107,6 +107,7 @@ impl RuntimeRequest {
             Self::SleeperUnrecoverable { .. } => "sleeper_unrecoverable",
             Self::WorkerExitSeen { .. } => "worker_exit_seen",
             Self::WorkerSessionReported { .. } => "worker_session_reported",
+            Self::WorkerConversationPicked { .. } => "worker_conversation_picked",
             Self::WorkerSeated { .. } => "worker_seated",
             Self::CoordinatorReturned { .. } => "coordinator_returned",
             Self::CoordinatorFollowed { .. } => "coordinator_followed",

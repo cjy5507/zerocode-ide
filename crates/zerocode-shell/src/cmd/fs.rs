@@ -1057,6 +1057,20 @@ pub(crate) async fn resume_vault_session(
     };
 
     let term = state.take_term_id();
+    // One conversation, one process (t-68069): a vault row is a door like any
+    // other. This one started a second process on a transcript a live pane was
+    // writing; Claude keeps no lease to refuse it. Judged as a wake is, and the
+    // pane is written down before anything can ask again.
+    let record = crate::conversation_wake::vault_record(&session.agent, &session.session_id);
+    let _claim = match &record {
+        Some(held) => crate::conversation_wake::claim_among(&session.agent, held, term, |wanted| {
+            crate::conversation_wake::holding_pane(state.inner(), wanted)
+        })
+        .map_err(|holder| {
+            format!("이 대화는 이미 터미널 {holder}에서 열려 있어 새로 열지 않았습니다")
+        })?,
+        None => None,
+    };
     let launch_token = new_launch_token(term);
     let mut env = hooks::pty_env(&hooks::pane_key_of(term), Some(&launch_token), &root, None);
     env.extend(account_env_for(state.config_root(), &session.agent)?);
@@ -1082,6 +1096,9 @@ pub(crate) async fn resume_vault_session(
     state.hold_terminal(term, pty);
     if let Some(kind) = zerocode_core::AgentKind::from_slug(&session.agent) {
         state.agent_terms().insert(term, kind.slug());
+    }
+    if let Some(record) = record {
+        state.pane_sessions().insert(term, record);
     }
     note_pane_account(&state, term, &env);
     state.launch_tokens().insert(term, launch_token);

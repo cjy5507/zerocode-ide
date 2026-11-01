@@ -90,7 +90,67 @@ impl Ledger {
 /// another worker carries on (t-68069) — refused, and told.
 pub const CONVERSATION_HELD_ELSEWHERE: &str = "conversation_held_by_another_worker";
 
+/// The `reason` of the ledger's letter that a pane re-entered a conversation
+/// nobody asked the window for (t-68069).
+pub const CONVERSATION_PICKED_UNASKED: &str = "conversation_picked_unasked";
+
+/// How much of a conversation's id such a letter names: enough to find it in
+/// the pane's head and the window's log, and not the id itself — a provider id
+/// is private restart material, and the whole of it stays on the worker's row.
+const PICKED_ID_CHARS: usize = 8;
+
 impl Ledger {
+    /// The pane at `seat` re-entered conversation `session`, which nobody
+    /// asked the window for (t-68069): whatever the CLI's own "continue" or
+    /// picker chose. Written to the seated worker's coordinator once per
+    /// conversation, naming the worker and the conversation's first letters.
+    /// Whether a letter was written; a seat with no worker has no run to tell,
+    /// and the window's log keeps that pane's line.
+    pub fn worker_conversation_picked(
+        &mut self,
+        seat: (&str, &str),
+        session: &ProviderSession,
+        now_ms: i64,
+    ) -> bool {
+        let (team, pane) = seat;
+        let Some((run_at, worker)) = self.runs.iter().enumerate().find_map(|(at, run)| {
+            run.workers
+                .iter()
+                .find(|worker| {
+                    worker.team == team && worker.pane == pane && worker.state.may_occupy_pane()
+                })
+                .map(|worker| (at, worker.clone()))
+        }) else {
+            return false;
+        };
+        let picked: String = session.id.trim().chars().take(PICKED_ID_CHARS).collect();
+        let body = serde_json::json!({
+            "reason": CONVERSATION_PICKED_UNASKED,
+            "workerId": worker.id,
+            "pane": worker.pane,
+            "agent": worker.agent,
+            "conversation": picked,
+        });
+        let told = self.runs[run_at].messages.iter().any(|one| {
+            one.from == LEDGER_ITSELF
+                && one.kind == MessageKind::Status
+                && serde_json::from_str::<serde_json::Value>(one.body.as_str()).is_ok_and(|said| {
+                    said["reason"] == CONVERSATION_PICKED_UNASKED
+                        && said["workerId"] == body["workerId"]
+                        && said["conversation"] == body["conversation"]
+                })
+        });
+        if told {
+            return false;
+        }
+        let subject = format!(
+            "{}'s pane re-entered conversation {picked}, which nobody named",
+            worker.id
+        );
+        self.status_to_coordinator(run_at, &worker, &body, subject, now_ms);
+        true
+    }
+
     /// Tell the coordinator of the worker seated at `seat` that its pane
     /// reported `holder`'s conversation, unless it was told already. Whether
     /// a letter was written.
@@ -130,6 +190,24 @@ impl Ledger {
         if told {
             return false;
         }
+        let subject = format!(
+            "{}'s pane reported the conversation {holder} carries; refused",
+            worker.id
+        );
+        self.status_to_coordinator(run_at, &worker, &body, subject, now_ms);
+        true
+    }
+
+    /// One status letter from the ledger to the coordinator of `worker`'s run,
+    /// filed under its attempt.
+    fn status_to_coordinator(
+        &mut self,
+        run_at: usize,
+        worker: &super::Worker,
+        body: &serde_json::Value,
+        subject: String,
+        now_ms: i64,
+    ) {
         let id = self.mint("m-");
         let run = &mut self.runs[run_at];
         let address = run.address();
@@ -144,10 +222,7 @@ impl Ledger {
             to: address.clone(),
             kind: MessageKind::Status,
             body: body.to_string().into(),
-            subject: Text::from(format!(
-                "{}'s pane reported the conversation {holder} carries; refused",
-                worker.id
-            )),
+            subject: Text::from(subject),
             priority: Priority::Normal,
             payload: Text::default(),
             thread: None,
@@ -157,7 +232,6 @@ impl Ledger {
             created_ms: now_ms,
         });
         run.inbox_mut(&address).pending.push_back(id);
-        true
     }
 
     /// Writes the conversation the pane at `seat` reported onto the worker

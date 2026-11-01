@@ -574,6 +574,10 @@ function noteBell(term) {
  * menu — do not offer it. */
 function resumableSessionOf(tab) {
   if (tab.kind !== "term") return null;
+  // The pane in front first (t-68069): on a split tab the menu speaks for the
+  // pane somebody is looking at, not whichever leaf comes first.
+  const front = paneSessions.get(activePaneOf(tab));
+  if (front?.resumable) return front;
   for (const term of paneLeaves(tab.layout)) {
     const known = paneSessions.get(term);
     if (known?.resumable) return known;
@@ -14157,10 +14161,33 @@ function placePaneHeadLine(tab, term) {
 function paintPaneHeadPick(head, term) {
   const pick = head.__line.querySelector(".pane-head-pick");
   const session = paneSessions.get(term)?.session?.id ?? "";
-  writeHidden(pick, session === "");
-  writeTextContent(pick, session ? t("paneHead.pick", "대화 {{session}}", { session: shortSession(session) }) : "");
+  const said = paneConversationWords.get(term);
+  const line = said && (said.session === null || said.session === session) ? said.line : null;
+  writeHidden(pick, session === "" && line === null);
+  writeTextContent(pick, line ?? (session ? t("paneHead.pick", "대화 {{session}}", { session: shortSession(session) }) : ""));
   writeAttribute(pick, "data-tip", session);
 }
+
+/* What the window has to say about a pane's conversation (t-68069), in place of
+ * its plain name: a conversation no door named, one another pane holds too, or
+ * a new one started because a saved selector stood aside. A word about one
+ * conversation lasts while the pane holds it; the two that ask for a look also
+ * say so once as a toast. */
+const paneConversationWords = new Map();
+
+function paneConversationLine({ word, session, holder }) {
+  const short = session ? shortSession(session) : "";
+  if (word === "picked") return t("paneHead.picked", "창이 고르지 않은 대화 {{session}}", { session: short });
+  if (word === "held") return t("paneHead.held", "대화 {{session}} — 터미널 {{holder}}도 쓰는 중", { session: short, holder });
+  return t("paneHead.fresh", "이 폴더의 터미널 {{holder}}이 쓰는 중이라 새 대화로 시작", { holder });
+}
+
+listen("pane:conversation", ({ payload }) => {
+  const line = paneConversationLine(payload);
+  paneConversationWords.set(payload.term, { line, session: payload.session ?? null });
+  if (payload.word !== "picked") toast(line, "warn");
+  paintShownPaneHeads();
+});
 
 /* The heads on screen say what the hooks last said — on the beat the tab strip
  * repaints, so a busy agent costs one paint a frame, not one per event. */

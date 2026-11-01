@@ -6322,6 +6322,7 @@ function dropTermView(term) {
   // menu offering to reopen a conversation from a tab that is gone is a row
   // attached to nothing.
   paneSessions.delete(term);
+  paneConversationWords.delete(term);
   paneAutonomy.delete(term);
   // And which agent held it — the next shell to wear this id is a stranger.
   paneAgents.delete(term);

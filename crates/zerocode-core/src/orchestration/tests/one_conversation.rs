@@ -227,3 +227,63 @@ fn a_worker_seated_in_a_neighbours_checkout_is_told_who_it_shares_it_with() {
         );
     }
 }
+
+/// t-68069 ③: a pane that re-entered a conversation nobody named has its
+/// coordinator told which, once per conversation, by its first letters and
+/// never the whole id. A seat with no worker has nobody to tell.
+#[test]
+fn a_conversation_nobody_named_is_told_once_by_its_first_letters() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name picked");
+    let (mine, pane) = a_worker_on(&mut bench, MINE);
+    let told = |bench: &Bench| -> Vec<Message> {
+        bench.ledger.runs()[0]
+            .messages()
+            .iter()
+            .filter(|one| {
+                one.from == LEDGER_ITSELF
+                    && one.kind == MessageKind::Status
+                    && one.body.as_str().contains(CONVERSATION_PICKED_UNASKED)
+            })
+            .cloned()
+            .collect()
+    };
+
+    assert!(bench.ledger.worker_conversation_picked(
+        ("team-1", &pane),
+        &session(FRESH),
+        1_000
+    ));
+    let letters = told(&bench);
+    assert_eq!(letters.len(), 1);
+    let said: serde_json::Value = serde_json::from_str(letters[0].body.as_str()).expect("json");
+    assert_eq!(said["workerId"].as_str(), Some(mine.as_str()));
+    assert_eq!(said["conversation"].as_str(), Some(&FRESH[..8]));
+    assert!(!letters[0].body.as_str().contains(FRESH) && !letters[0].subject.as_str().contains(FRESH));
+
+    assert!(
+        !bench.ledger.worker_conversation_picked(
+            ("team-1", &pane),
+            &session(FRESH),
+            2_000
+        ),
+        "the same conversation was told twice"
+    );
+    assert!(
+        bench.ledger.worker_conversation_picked(
+            ("team-1", &pane),
+            &session(THEIRS),
+            3_000
+        ),
+        "another conversation was not told"
+    );
+    assert!(
+        !bench.ledger.worker_conversation_picked(
+            ("team-1", "%no-such-pane"),
+            &session(FRESH),
+            4_000
+        ),
+        "a seat with no worker told somebody"
+    );
+    assert_eq!(told(&bench).len(), 2);
+}

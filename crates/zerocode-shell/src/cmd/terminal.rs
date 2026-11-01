@@ -1718,6 +1718,8 @@ pub(crate) fn launch_agent_tab(
     // on the agent's row rather than leaving it in a table nobody reads.
     let launch_override = stored_launch_override(state.settings(), spec.id)?;
     let plan = zerocode_core::launch_plan(spec.id, launch_override.as_ref());
+    // The pane whose conversation a saved selector could have taken (t-68069).
+    let mut stood_aside = None;
     if resume.is_some() {
         // One authoritative selector (#12982): a `--continue` or stale
         // `--resume` saved into the launch args must not compete with the
@@ -1725,7 +1727,18 @@ pub(crate) fn launch_agent_tab(
         // agent's own row; an agent with none gets its args back untouched.
         argv.extend(caps.resume.launch_args_without_selectors(&plan.args));
     } else {
-        argv.extend(plan.args.iter().cloned());
+        // A launch naming no conversation may still carry a saved selector,
+        // and with it the agent takes its folder's newest conversation: beside
+        // a live neighbour that may be the neighbour's (t-68069), so a new one
+        // starts and the pane says why. Alone in the folder it is the person's
+        // setting, and the pane's head says what it took.
+        let (args, neighbour) = crate::conversation_wake::unnamed_launch_args(
+            caps.resume.launch_args_without_selectors(&plan.args),
+            &plan.args,
+            || crate::conversation_wake::neighbour_in_folder(state.inner(), spec.id, &root),
+        );
+        argv.extend(args);
+        stood_aside = neighbour;
     }
     if let Some(session) = resume.as_deref() {
         // The store-resume road is the row's: only an agent whose session
@@ -1926,6 +1939,30 @@ pub(crate) fn launch_agent_tab(
     state.agent_terms().insert(term, spec.id);
     note_pane_account(&state, term, &env);
     state.launch_tokens().insert(term, launch_token);
+    // A named conversation is this pane's from here, as a wake records its
+    // own: its first report is then no surprise (t-68069,
+    // `conversation_wake::word_on_report`), and a door asking meanwhile finds
+    // it held. Only Claude's store reaches here, and its key is the session id.
+    if let Some(session_id) = resume.as_deref() {
+        let mut held = state.pane_sessions();
+        let named = zerocode_core::ProviderSession {
+            key: zerocode_core::SessionKey::SessionId,
+            id: session_id.to_string(),
+            transcript_path: None,
+        }
+        .carrying_forward(held.get(&term));
+        held.insert(term, named);
+    }
+    if let Some(holder) = stood_aside {
+        note_window_event(
+            state.local_data_root(),
+            &format!(
+                "term {term} started {} fresh: a saved selector stood aside beside term {holder}",
+                spec.id
+            ),
+        );
+        crate::pane_runtime::say_pane_conversation(&app, term, "fresh", None, Some(holder));
+    }
     if let Some((addr, token, session_id, observation)) = zo_channel {
         // `session.info` is the durable identity the old bare launch never
         // learned. Record it before subscribing: the first history frame may

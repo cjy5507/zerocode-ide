@@ -590,7 +590,13 @@ pub(super) fn start_automation(
             }
         };
         let plan = zerocode_core::launch_plan(spec.id, launch_override.as_ref());
-        words.extend(plan.args);
+        // A run is a new conversation (t-68069): a saved `--continue` would
+        // put it on whatever its folder wrote last.
+        words.extend(
+            spec.capabilities()
+                .resume
+                .launch_args_without_selectors(&plan.args),
+        );
         launch_env = plan.env;
         words
     } else {

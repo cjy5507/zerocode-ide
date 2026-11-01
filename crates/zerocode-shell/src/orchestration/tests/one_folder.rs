@@ -189,7 +189,7 @@ fn a_summons_beside_a_neighbour_starts_its_own_conversation() {
     for agent in ["claude", "zo"] {
         let catalog = Catalog::new(vec![(agent.to_string(), saved_continue())]);
         let command = catalog
-            .command_for(agent, "keep going", &[])
+            .command_for(agent, "", &[])
             .expect("the summons");
         assert_eq!(
             opened_by(&folder, &command),
