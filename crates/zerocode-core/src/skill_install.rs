@@ -468,6 +468,12 @@ mod tests {
     const SECOND_BRAIN_9F3B7DBCE: &str =
         include_str!("../tests/fixtures/second-brain-9f3b7dbce.md");
 
+    /// The name of the orchestration skill's verb list, and a text an earlier
+    /// release shipped for it (blob 5ddd03741).
+    const VERBS: &str = "verbs.md";
+    const VERBS_5DDD03741: &str =
+        include_str!("../tests/fixtures/orchestration-verbs-5ddd03741.md");
+
     #[cfg(unix)]
     #[test]
     fn a_dead_link_where_the_skill_should_stand_is_replaced_by_the_skill() {
@@ -811,6 +817,125 @@ mod tests {
         );
         let copies = bundled_copies("orchestration", home.path(), &[], &agents).unwrap();
         assert_eq!(copies[0].state, CopyState::Current);
+    }
+
+    /// A build whose reference file alone changed reaches a copy already
+    /// installed: its `SKILL.md` is this build's, its `verbs.md` the text of an
+    /// earlier release, and an install brings that file up and nothing else
+    /// (t-85243). Before, a reference file was written only when it was gone,
+    /// so the copy kept the old text until the next change to `SKILL.md`.
+    #[test]
+    fn a_reference_file_of_an_earlier_release_is_replaced_though_its_skill_file_is_current() {
+        let skill = bundled_skill("orchestration").unwrap();
+        let (_, carried) = skill
+            .files
+            .iter()
+            .find(|(name, _)| *name == VERBS)
+            .expect("the orchestration skill carries verbs.md");
+        assert_ne!(*carried, VERBS_5DDD03741, "the fixture is an earlier text");
+        let home = tempfile::tempdir().unwrap();
+        let agents = detected(&[("claude", "Claude")]);
+        install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+        let dir = claude_skill_dir(home.path());
+        std::fs::write(dir.join(VERBS), VERBS_5DDD03741).unwrap();
+
+        let copies = bundled_copies("orchestration", home.path(), &[], &agents).unwrap();
+        assert_eq!(
+            copies[0].state,
+            CopyState::Stale,
+            "a copy holding an earlier release's reference file reads as current"
+        );
+        let outcomes = install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+        assert_eq!(outcomes[0].state, InstallState::Written);
+        assert_eq!(
+            &std::fs::read_to_string(dir.join(VERBS)).unwrap(),
+            carried,
+            "the installed verbs.md stayed at the earlier release"
+        );
+        let copies = bundled_copies("orchestration", home.path(), &[], &agents).unwrap();
+        assert_eq!(copies[0].state, CopyState::Current);
+        let again = install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+        assert_eq!(again[0].state, InstallState::Unchanged);
+    }
+
+    /// A reference file with a text no release had is somebody's, on both
+    /// roads an install takes: beside a current `SKILL.md`, and beside one of
+    /// an earlier release, which is replaced while the file stays to the byte.
+    /// A file of an earlier release beside it is replaced on that same pass.
+    #[test]
+    fn a_hand_edited_reference_file_is_kept_on_both_roads() {
+        const MINE: &str = "- 내 볼트는 ~/Notes 다.\n";
+        let current = bundled_skill("second-brain").unwrap().content;
+        // Two reference files: `verbs.md` has lines in the release book under
+        // this skill's name, and `mine.md` has none.
+        let skill = BundledSkill {
+            name: "orchestration",
+            content: bundled_skill("orchestration").unwrap().content,
+            files: &[(VERBS, "this build's verbs\n"), ("mine.md", "this build's\n")],
+        };
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(skill.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(VERBS), VERBS_5DDD03741).unwrap();
+        std::fs::write(dir.join("mine.md"), MINE).unwrap();
+
+        // The road of a current `SKILL.md`.
+        std::fs::write(dir.join(SKILL_FILE), skill.content).unwrap();
+        let outcome = install_one(&skill, "claude", "Claude", root.path());
+        assert_eq!(outcome.state, InstallState::Written, "{}", outcome.detail);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(VERBS)).unwrap(),
+            "this build's verbs\n"
+        );
+        assert_eq!(std::fs::read_to_string(dir.join("mine.md")).unwrap(), MINE);
+        let outcome = install_one(&skill, "claude", "Claude", root.path());
+        assert_eq!(
+            outcome.state,
+            InstallState::Unchanged,
+            "a kept file is no reason to write again"
+        );
+
+        // The road of a `SKILL.md` of an earlier release.
+        let earlier = bundled_skill("second-brain").unwrap();
+        let carried_files = BundledSkill {
+            name: earlier.name,
+            content: current,
+            files: &[("mine.md", "this build's\n")],
+        };
+        let dir = root.path().join(earlier.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(SKILL_FILE), SECOND_BRAIN_9F3B7DBCE).unwrap();
+        std::fs::write(dir.join("mine.md"), MINE).unwrap();
+        let outcome = install_one(&carried_files, "claude", "Claude", root.path());
+        assert_eq!(outcome.state, InstallState::Written, "{}", outcome.detail);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(SKILL_FILE)).unwrap(),
+            current
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("mine.md")).unwrap(),
+            MINE,
+            "a new SKILL.md took a person's reference file with it"
+        );
+    }
+
+    /// A hand-edited `SKILL.md` keeps the whole copy: its reference files stay
+    /// even when they hold an earlier release's text, because the person may
+    /// be reading the two together.
+    #[test]
+    fn a_hand_edited_skill_file_keeps_its_reference_files_too() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = detected(&[("claude", "Claude")]);
+        install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+        let dir = claude_skill_dir(home.path());
+        std::fs::write(dir.join(SKILL_FILE), "my own guide\n").unwrap();
+        std::fs::write(dir.join(VERBS), VERBS_5DDD03741).unwrap();
+        let outcomes = install_bundled_skill("orchestration", home.path(), &[], &agents).unwrap();
+        assert_eq!(outcomes[0].state, InstallState::Kept);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(VERBS)).unwrap(),
+            VERBS_5DDD03741
+        );
     }
 
     /// Every bundled skill that carries reference files tells, in its
