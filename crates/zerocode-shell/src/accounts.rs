@@ -934,11 +934,17 @@ fn run_keychain_tool(
 /// A run fed a secret cannot be trusted to keep it: `security -i` prints whatever
 /// stands in a line's command position, and on 2026-11-01 a line past the buffer
 /// came back as `security: unknown command "<the rest of the value>"`. So such a
-/// run keeps the tool's sentence only in the shape its refusals take
-/// (`security: Sec<call> (<keychain>): <why>`) and only when none of its words
-/// came from the input. The exit code classifies the run either way.
+/// run keeps the tool's sentence only in the measured shape of its refusals
+/// (`security: Sec<call> (<default>): <why>`) and only when no word of the why came
+/// from the value. The exit code classifies the run either way.
+///
+/// Only the why against only the value, and only words of `ECHO_WORD_BYTES` or more:
+/// a real login holds `default` in `rateLimitTier` and `user` in `scopes`, and the
+/// tool's own head and sentences hold those words too. Read wider, the check dropped
+/// the sentence on every real login, which left a locked keychain as a bare number.
 #[cfg(target_os = "macos")]
 fn security_refusal(code: Option<i32>, stderr: &str, input: Option<&str>) -> String {
+    const ECHO_WORD_BYTES: usize = 6;
     let Some(input) = input else {
         return security_failure_word(code, stderr);
     };
@@ -947,11 +953,15 @@ fn security_refusal(code: Option<i32>, stderr: &str, input: Option<&str>) -> Str
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or_default();
-    let repeats_the_input = first
-        .split_whitespace()
-        .map(|word| word.trim_matches(|ch: char| ch.is_ascii_punctuation()))
-        .any(|word| word.len() >= 4 && input.contains(word));
-    let cleared = first.starts_with("security: Sec") && !repeats_the_input;
+    let value = input.split_once(" -w '").map_or(input, |(_, value)| value);
+    let cleared = first
+        .strip_prefix("security: Sec")
+        .and_then(|rest| rest.split_once(" (<default>): "))
+        .filter(|(call, _)| call.chars().all(|ch| ch.is_ascii_alphanumeric()))
+        .is_some_and(|(_, why)| {
+            !why.split(|ch: char| !ch.is_ascii_alphanumeric())
+                .any(|word| word.len() >= ECHO_WORD_BYTES && value.contains(word))
+        });
     security_failure_word(code, if cleared { first } else { "" })
 }
 
