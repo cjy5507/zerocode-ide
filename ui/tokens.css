@@ -846,6 +846,11 @@
   --fold-sidebar-rail: 1000px;
   --fold-tab-menu: 760px;
   --fold-tab-only: 480px;
+  /* The task board's own width (a container's, not the window's) from which its head is three layers: the search
+   * stands in the title row and the schedule's range at the tab row's end. Under it both keep rows of their own.
+   * `@container board (min-width: …)` writes this number out and `chrome-geist.mjs` holds it to this name
+   * (t-84799 A3); the board's `max-width: 699px` rules are the same width from below. */
+  --fold-board-head: 700px;
 
   /* A status dot — the smallest mark that still reads as deliberate. */
   --dot-size: 5px;

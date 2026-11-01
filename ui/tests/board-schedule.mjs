@@ -1141,7 +1141,7 @@ export async function testBoardSchedule(browser, origin, ok) {
       queuedGate.what === "게이트 l61" && queuedGate.word === "도는 중" && queuedGate.heads.includes("gate:l62") && queuedGate.l62act === "",
       JSON.stringify(queuedGate));
 
-    /* ---- 안내판 게이트 줄의 규칙 — 한 문장, 스물한 경우의 표 (review r4~r6, t-77851·t-77880·t-77892): 「도는 단계가 있는 게이트
+    /* ---- 안내판 게이트 줄의 규칙 — 한 문장, 스물두 경우의 표 (review r4~r6, t-77851·t-77880·t-77892): 「도는 단계가 있는 게이트
      * → 없으면 실제로 시작한(끝난 단계가 하나라도 있는) 게이트 가운데 마지막 활동이 가장 늦은 것(통과·실패·단계 사이 대기)
      * → 없으면 마지막으로 줄 선 것」. 마지막 활동은 단계마다 마지막 일감 가운데 가장 늦은 시작이다 — 같은 이름으로 다시
      * 도는 게이트는 첫 시도가 아니라 지금 시도로(⑨·⑩), 한 단계만 다시 돈 것도 그 단계로(⑮) 비교된다. 같으면 실패 > 단계
@@ -1274,8 +1274,22 @@ export async function testBoardSchedule(browser, origin, ok) {
         { name: "⑳ l61 실패 → 재시도가 줄만 섬 → 시작 예상은 새 시도의 계획(지금), 첫 시도의 08:10이 아님(실린 과업 행도)", jobs: queuedAgain, paused: false,
           tasks: [carried("t-90002", now)], want: ["l61", "차례 기다림"], note: (note) => note.endsWith("09:50 시작 예상") && !note.includes("다음 단계"),
           said: (said) => said === "대기 1개 · 09:50 시작 예상", task: "t-90002", why: (why) => why === "l61에 실림 → 차례 기다림 · 09:50 시작 예상" },
-        { name: "㉑ l61 g1 통과 · 남은 단계는 held만 → 시작 모름(지난 09:30이 아님)", jobs: heldOnly, paused: false,
-          want: ["l61", "차례 기다림"], note: (note) => note.endsWith("시작 모름"), said: (said) => said === "대기 1개 · 시작 모름" },
+        { name: "㉑ l61 g1 통과 · 남은 단계는 held만 → 시작 모름(지난 09:30이 아님) · 실린 과업 행도 같은 말(t-84799 ①)", jobs: carry(heldOnly, heldOnly[1].name, "t-90003"), paused: false,
+          tasks: [carried("t-90003", now)], want: ["l61", "차례 기다림"], note: (note) => note.endsWith("시작 모름"), said: (said) => said === "대기 1개 · 시작 모름",
+          task: "t-90003", why: (why) => why === "l61에 실림 → 차례 기다림 · 시작 모름" },
+        /* ㉒ (t-84799 ⑥b): 끝 기록이 없는 단계만 있는 게이트는 통과한 단계가 0개다 — 「통과」가 아니다. */
+        { name: "㉒ l61의 모든 단계가 끝 기록 없음(lost) → 「통과」가 아니라 끝 기록 없음, 통과 단계 0개 · 걸림도 말하지 않음 · 실린 과업 행도 같은 말(r2 P2-1·P3-2)", jobs: carry([
+          l61r("g1-build", "lost", at(30), null, { queued_ms: at(31) }), l61r("g2-tests", "lost", at(20), null, { queued_ms: at(31) })],
+        l61r("g1-build", "lost", at(30), null, { queued_ms: at(31) }).name, "t-90004"),
+        paused: false, want: ["l61", "끝 기록 없음"], note: (note) => !note.includes("통과") && !note.includes("걸림"), state: "idle",
+        said: (said) => said === "끝 기록 없음 2개", tasks: [carried("t-90004", now - 40 * minute)], task: "t-90004",
+        why: (why) => why === "l61에 실림 → 끝 기록 없음", etaSub: (etaSub) => etaSub === "" },
+        /* ㉓ (r2 P3-3): 가장 새 게이트 l61이 끝 기록 없이 시작만 했으면 안내판은 그 이야기를 말한다 — 더 옛 l60의 「통과」가 아니라. */
+        { name: "㉓ l60은 통과, 더 나중에 시작한 l61은 끝 기록 없음 → 안내판 게이트 줄은 l61 끝 기록 없음(l60 통과가 아님) · 로그로 가는 길도 l61의 단계", jobs: [
+          job("0-1792543000-run11955-l60r-g1-build", "passed", at(90), at(80), "g1-build", { gate: "l60", queued_ms: at(91) }),
+          l61r("g1-build", "lost", at(30), null, { queued_ms: at(31) })],
+        paused: false, want: ["l61", "끝 기록 없음"], note: (note) => !note.includes("통과") && !note.includes("걸림"),
+        state: "idle", act: (act) => act?.log?.job?.includes("l61r") === true },
       ];
       const choice = { zoom: "now", folded: new Set(), opened: new Set(), log: null };
       return cases.map((one) => {
@@ -1285,11 +1299,13 @@ export async function testBoardSchedule(browser, origin, ok) {
         const head = model.groups.find((group) => group.id === "gates")?.rows.find((row) => row.key === `gate:${one.want[0]}`) ?? null;
         const task = one.task ? model.groups.find((group) => group.id === "workers")?.rows.find((row) => row.id === one.task) ?? null : null;
         const ok = got.name === one.want[0] && got.word === one.want[1] && (one.note ? one.note(got.note) : true)
-          && (one.said ? head !== null && one.said(head.said) : true) && (one.why ? task !== null && one.why(task.why) : true);
-        return { name: one.name, want: one.want, got: [got.name, got.word, got.note, head?.said ?? null, task?.why ?? null], ok };
+          && (one.said ? head !== null && one.said(head.said) : true) && (one.why ? task !== null && one.why(task.why) : true)
+          && (one.state ? head?.state === one.state : true) && (one.etaSub ? one.etaSub(head?.etaSub) : true)
+          && (one.act ? one.act(got.act) : true);
+        return { name: one.name, want: one.want, got: [got.name, got.word, got.note, head?.said ?? null, task?.why ?? null, head?.etaSub ?? null], ok };
       });
     }, SCHEDULE_NOW);
-    ok("the board's gate line follows one rule in all twenty-one cases — running first, then the gate whose latest step began last (a gate or a step run again is its new attempt; on two lanes the later start, not the later end), then the one queued last; a tie is decided, and a waiting gate's row, its line and the task it carries say one present-attempt time, never a past moment as an expected start",
+    ok("the board's gate line follows one rule in all twenty-three cases — running first, then the gate whose latest step began last (a gate or a step run again is its new attempt; on two lanes the later start, not the later end), then the one queued last; a tie is decided, and a waiting gate's row, its line and the task it carries say one present-attempt time, never a past moment as an expected start",
       gateTable.every((row) => row.ok), JSON.stringify(gateTable.filter((row) => !row.ok)));
 
     /* ---- 비어 있어도 넉 줄: 레인도 게이트도 과업도 없는 답 ---- */
@@ -1306,6 +1322,36 @@ export async function testBoardSchedule(browser, origin, ok) {
         && emptyAnswer.lines[3][1] === "0건" && emptyAnswer.lines[3][3] === "이 범위에 없음" && emptyAnswer.lines.every((line) => line[4] === null && line[5] === "quiet")
         && emptyAnswer.gutter >= 4 && emptyAnswer.hours === 4 && emptyAnswer.sum === "다음 발행 없음 · 착지 대기 0",
       JSON.stringify(emptyAnswer));
+
+    /* ---- ⑤ (t-84799): 범위 안에 끝난 레인이 없어도 답이 실은 마지막 레인(`last_lane`)을 안내판 첫 줄이 말한다 ---- */
+    const outsideLane = await page.evaluate((now) => {
+      const base = boardScheduleAnswer;
+      const ended = base.lanes.filter((run) => !run.running).sort((a, b) => b.end_ms - a.end_ms)[0];
+      const model = boardScheduleModel({ ...base, jobs: [], lanes: [], last_lane: ended }, [], now,
+        { zoom: "now", folded: new Set(), opened: new Set(), log: null }, 900, false, null, { hourPx: 120, tickPx: 16, leastPx: 24 });
+      const none = boardScheduleModel({ ...base, jobs: [], lanes: [] }, [], now,
+        { zoom: "now", folded: new Set(), opened: new Set(), log: null }, 900, false, null, { hourPx: 120, tickPx: 16, leastPx: 24 });
+      return { told: model.board.lines[0].note, act: model.board.lines[0].act, silent: none.board.lines[0].note };
+    }, SCHEDULE_NOW);
+    ok("with no lane ended in the range the first line names the answer's last lane, and says nothing of one when the answer has none",
+      /^마지막 v1\.1\.82 레인 \d{2}:\d{2} · /.test(outsideLane.told) && outsideLane.act?.log?.lane === "3e13aaef" && outsideLane.silent === "이 범위에 없음",
+      JSON.stringify(outsideLane));
+
+    /* ---- r2 P3-1: 조용한 동안 창이 옛 답을 그대로 쓰면 `last_lane`이 비어 있다 — 그 답의 레인이 범위 밖으로 밀려도 첫 줄은 그 답의 가장 최근 끝난 레인을 말한다 ---- */
+    const heldLane = await page.evaluate((now) => {
+      const base = boardScheduleAnswer;
+      // No lane running (a running lane is always in its range): only ended ones, every one far behind the later range.
+      const asked = (at) => boardScheduleModel({ ...base, jobs: [], lanes: base.lanes.filter((run) => !run.running), last_lane: undefined }, [], at,
+        { zoom: "now", folded: new Set(), opened: new Set(), log: null }, 900, false, null, { hourPx: 120, tickPx: 16, leastPx: 24 });
+      // Thirty days on: every lane of the held answer is far behind the range, and the answer carries no `last_lane`.
+      const late = asked(now + 30 * 24 * 3_600_000);
+      const ended = base.lanes.filter((run) => !run.running).sort((a, b) => b.end_ms - a.end_ms)[0];
+      return { told: late.board.lines[0].note, act: late.board.lines[0].act, lanes: late.groups.find((group) => group.id === "lanes").rows.length,
+        sha: ended?.sha ?? null };
+    }, SCHEDULE_NOW);
+    ok("a held answer whose lanes fell out of the range, with no `last_lane` of its own, still has the first line name its newest ended lane",
+      heldLane.lanes === 0 && /^마지막 v1\.1\.\d+ 레인 .+ · /.test(heldLane.told) && heldLane.act?.log?.lane === heldLane.sha && heldLane.sha !== null,
+      JSON.stringify(heldLane));
 
     // The same empty answer drawn (review P3-9): the lines, the columns' heads and the empty-future line on the screen.
     const emptyDrawn = await page.evaluate(async (now) => {
@@ -1405,8 +1451,7 @@ export async function testBoardSchedule(browser, origin, ok) {
     });
     ok("a person's wheel moves the timetable sideways in a narrow holder", scrolled > 0, String(scrolled));
 
-    /* ---- 키보드: 블록은 단추라 초점이 서고, 서면 할 일과 제 말을 말한다. (Enter의 활성화는 창의 키 처리가
-     * 가로채 행도 블록도 시험 창에서 눌리지 않는다 — 블록 이전부터 같았고, 이 과업 밖이다.) ---- */
+    /* ---- 키보드: 블록은 단추라 초점이 서고, 서면 할 일과 제 말을 말한다. Enter가 눌리는지는 바로 아래 ③. ---- */
     const typed = await page.evaluate(() => {
       const block = document.querySelector('#board-view [data-key="job:1792543500-run11955-t-63492-walk"]');
       block.focus();
@@ -1416,6 +1461,39 @@ export async function testBoardSchedule(browser, origin, ok) {
     ok("a block takes keyboard focus: a button that says its action and its words",
       typed.focused && typed.tag === "BUTTON" && typed.act === "로그 →" && typed.label.includes("walk") && typed.label.includes("25분"),
       JSON.stringify(typed));
+
+    /* ---- ③ 키보드 Enter (t-84799): 초점이 선 블록에서 Enter가 눌린다. 창의 키 입력칸 되돌림(`rearmKeySink`)이
+     * 단추의 초점을 입력칸으로 옮기면 Enter는 블록에 닿지 않는다 — 진짜 키로 눌러 본다. ---- */
+    await page.evaluate(() => {
+      const block = document.querySelector('#board-view [data-key="job:1792543500-run11955-t-63492-walk"]');
+      window.__blockPressed = 0;
+      block.addEventListener("click", () => { window.__blockPressed += 1; });
+      block.focus();
+    });
+    await page.keyboard.press("Enter");
+    const pressed = await page.evaluate(() => ({ count: window.__blockPressed,
+      keptFocus: document.activeElement?.dataset?.key === "job:1792543500-run11955-t-63492-walk" }));
+    ok("Enter on a focused block presses it, and the block keeps the focus", pressed.count === 1 && pressed.keptFocus, JSON.stringify(pressed));
+
+    /* ---- r2 P2-5: 상황판 탭 위에 떠 있는 터미널이 있으면 키는 그 터미널의 것이다 — 단추의 초점을 지키는 일이 그 키를
+     * 가져가지 않는다. 떠 있는 터미널이 없으면 단추가 초점을 지킨다(위의 Enter). ---- */
+    const floating = await page.evaluate(() => {
+      const block = document.querySelector('#board-view [data-key="job:1792543500-run11955-t-63492-walk"]');
+      const press = () => rearmKeySink(new KeyboardEvent("keydown", { key: "x", code: "KeyX", bubbles: true }));
+      const seen = {};
+      block.focus();
+      termFloat.hidden = false;
+      seen.front = frontKeyboardTarget()?.kind ?? null;
+      press();
+      seen.sinkWithFloat = document.activeElement === keySink;
+      termFloat.hidden = true;
+      block.focus();
+      press();
+      seen.blockKept = document.activeElement === block;
+      return seen;
+    });
+    ok("a floating terminal over the board still gets the keys: the key sink takes the focus from the button then, and not without one",
+      floating.front === "term" && floating.sinkWithFloat && floating.blockKept, JSON.stringify(floating));
 
     ok("the schedule raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {

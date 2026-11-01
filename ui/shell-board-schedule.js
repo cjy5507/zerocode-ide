@@ -28,6 +28,9 @@ const BOARD_SCHEDULE = Object.freeze({
   /* 탭이 보일 때만 도는 박자. 묻을 때 쥔 판 번호를 함께 보내, 파일이 그대로면
    * 백엔드는 「그대로」만 답하고 여기는 아무것도 다시 그리지 않는다. */
   everyMs: 5_000,
+  /* 답을 받은 지 이만큼이 지나면 그 답은 「지금」의 이야기가 아니다: 쌓인 일의 게이트 줄은 낡은 답으로 도는 중이라고
+   * 말하지 않고 「—」를 말한다(검수 r2 P2-2). 박자(5초)의 열두 배 — 몇 번 묻고도 답이 없을 때만 넘는다. */
+  staleMs: 60_000,
   /* 「지금」 선과 남은 시간은 분 단위로 움직인다 — 5초에 옮길 픽셀은 없다. */
   clockMs: 60_000,
   /* 세 확대: 지금 앞뒤로 보이는 길이. 뒤쪽은 가장 늦은 예상 끝까지 늘어나되 상한이
@@ -128,6 +131,9 @@ let boardScheduleAgain = false;
 /* 마지막으로 물은 때. 탭을 다시 열면 이것이 박자 하나보다 오래됐을 때만 곧바로
  * 묻는다 — 열 때마다 묻지도, 첫 박자를 기다리지도 않는다(데스크와 같은 규칙). */
 let boardScheduleAskedAt = 0;
+/* 답을 마지막으로 받은 시각 — 「그대로」 답도 받은 것이다. 판 번호 `read_ms`는 답이 바뀔 때만 움직이니 이 일은 못 한다
+ * (검수 r2 P2-2). 쌓인 일의 게이트 줄이 낡은 답을 지금 일처럼 말하지 않게 하는 기준이다. */
+let boardScheduleAnsweredAt = 0;
 /* 사람이 고른 것: 확대, 접은 묶음, 편 게이트, 연 로그. 고른 탭은 상황판의 것이다
  * (`boardNowTab`). 창의 기억이지 원장의 것이 아니다 — 판이 다시 그려져도 남는다. */
 const boardScheduleChoice = { zoom: "now", folded: new Set(), opened: new Set(), log: null };
@@ -153,6 +159,23 @@ function boardScheduleRemembered(key, make) {
     boardScheduleWords.set(key, said);
   }
   return said;
+}
+
+/* 쌓인 일 패널이 떠 있는가 — 그 안의 게이트 줄이 일정의 답을 읽는다(B9). */
+function stackedWorkIsUp() {
+  const panel = typeof document === "undefined" ? null : document.getElementById("activity-pile");
+  return Boolean(panel) && !panel.hidden;
+}
+
+function paintStackedWorkIfUp() {
+  if (stackedWorkIsUp() && typeof paintStackedWork === "function") paintStackedWork();
+}
+
+/* 쌓인 일 패널이 그려질 때 일정을 다시 묻는다(검수 r2 P2-2) — 박자(`everyMs`)가 허락하는 만큼만, 판 번호를 쥐고. 답이
+ * 오면 `refreshBoardSchedule`이 패널을 다시 그린다. 박자도 이때 세운다: 패널이 떠 있는 동안 5초마다 묻는다. */
+function askBoardScheduleForPile() {
+  boardSchedulePoller.sync();
+  if (Date.now() - boardScheduleAskedAt >= BOARD_SCHEDULE.everyMs) refreshBoardSchedule();
 }
 
 /* 일정이 서 있는 그릇들: 작업 보기의 보드에서 「일정」 탭을 고른 판. */
@@ -207,6 +230,7 @@ function refreshBoardSchedule({ fresh = false } = {}) {
   const known = fresh || !boardScheduleAnswer ? null : boardScheduleAnswer.revision;
   invoke("schedule_timeline", { known, fromMs: boardScheduleFrom() })
     .then((answer) => {
+      if (answer && typeof answer === "object") boardScheduleAnsweredAt = Date.now();
       if (answer && typeof answer === "object" && !answer.unchanged) {
         boardScheduleAnswer = answer;
         // The 지금 tab's 빌드 줄 card reads the same answer (its foot, the lane's steps ahead, t-70028).
@@ -217,6 +241,9 @@ function refreshBoardSchedule({ fresh = false } = {}) {
     .catch(() => {})
     .finally(() => {
       boardScheduleAsking = false;
+      // 쌓인 일 reads this answer's gate (B9): it is drawn again whatever the answer was — a new one, an unchanged one,
+      // or none, since the words depend on how long ago one came.
+      paintStackedWorkIfUp();
       if (boardScheduleAgain) {
         boardScheduleAgain = false;
         refreshBoardSchedule({ fresh: true });
@@ -628,9 +655,11 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
     const open = count(["running", "waiting", "held"]);
     const failed = count(["failed", "capped", "refused"]);
     const green = count(["passed"]);
+    // A step with no end on record (`lost`) neither passed nor failed: a gate holding one has no passing to claim.
+    const lost = count(["lost"]);
     const parts = [...new Set(members.map((job) => job.part).filter(Boolean))].sort();
     // A step still running keeps the gate running; a failed step stops it even while others queue (review P3-3).
-    const state = count(["running"]) > 0 ? "running" : failed > 0 ? "failed" : open > 0 ? "waiting" : "done";
+    const state = count(["running"]) > 0 ? "running" : failed > 0 ? "failed" : open > 0 ? "waiting" : lost > 0 ? "idle" : "done";
     // A stopped gate ends where its last finished step ended — the steps queued behind it will not run (review r2 P2);
     // a gate still going reaches the expected end of its steps.
     const finished = members.map((job) => Number(job.end_ms)).filter((ms) => Number.isFinite(ms) && ms > 0);
@@ -645,9 +674,11 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
           : t("board.schedule.gateWaitingUnknown", "대기 {{count}}개 · 시작 모름", { count: open })
         : state === "failed"
           ? t("board.schedule.gateFailed", "실패 {{count}}개 · {{time}}", { count: failed, time: boardScheduleSpan(end - began) })
-          : t("board.schedule.gatePassed", "통과 {{count}}개 · {{time}}", {
-            count: steps.length, time: boardScheduleSpan(end - began),
-          });
+          : state === "idle"
+            ? t("board.schedule.gateLost", "끝 기록 없음 {{count}}개", { count: lost })
+            : t("board.schedule.gatePassed", "통과 {{count}}개 · {{time}}", {
+              count: steps.length, time: boardScheduleSpan(end - began),
+            });
     const opened = choice.opened.has(gate) || (open > 0 && !choice.opened.has(`-${gate}`));
     // The bar's two names (the passed draft's 「12개 초록」): what ended, or the step running and the steps after it.
     const kinds = (states) => steps.filter((job) => states.includes(job.state)).map((job) => job.kind ?? job.name);
@@ -655,7 +686,7 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
       ? t("board.schedule.gateDone", "{{done}}/{{total}} 초록", { done: steps.length, total: steps.length })
       : state === "failed"
         ? t("board.schedule.gateFailedCount", "실패 {{count}}개", { count: failed })
-        : `${steps.length - open}/${steps.length}`;
+        : state === "idle" ? `${green}/${steps.length}` : `${steps.length - open}/${steps.length}`;
     const basis = placed.some((row) => row.basis === "cap") ? "cap" : "history";
     const unknown = state === "waiting" && !startWord;
     // The tasks the gate carries, by its jobs' `# task:` lines or their `what` lines (t-77628).
@@ -668,7 +699,11 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
     // else the one queued last — a block and the board's line open its log, since a block holds no rows to unfold.
     // A gate none of whose steps has run tells no story yet: no job, no chip (review r2 P3-1).
     const telling = failedJob ?? steps.find((job) => job.state === "running")
-      ?? members.filter((job) => Number(job.end_ms) > 0).sort((a, b) => Number(b.end_ms) - Number(a.end_ms))[0] ?? null;
+      ?? members.filter((job) => Number(job.end_ms) > 0).sort((a, b) => Number(b.end_ms) - Number(a.end_ms))[0]
+      // A step that began and left no end (`lost`) is the story too — else a newest gate of such steps tells nothing and the
+      // board names an older, passed gate instead (r2 P3-3).
+      ?? members.filter((job) => job.state === "lost" && Number(job.start_ms) > 0)
+        .sort((a, b) => Number(b.start_ms) - Number(a.start_ms))[0] ?? null;
     const facts = {
       gate, state, start, end, basis, unknown, green, total: steps.length, failed,
       failedKinds: kinds(["failed", "capped", "refused"]), failedJob: failedJob?.name ?? null,
@@ -695,12 +730,13 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
                 // Between its steps the gate's first step is past: the next step's expected start is the word (t-77880).
                 ? t("board.schedule.nextStepAt", "다음 단계 {{time}} 시작 예상", { time: startWord })
                 : t("board.schedule.startsAt", "{{time}} 시작 예상", { time: startWord })
-            : t("board.schedule.took", "{{time}} 걸림", { time: boardScheduleSpan(end - began) }),
+            // No end on record (`idle`): there is no length to claim, so no 「N 걸림」 (r2 P3-2).
+            : state === "idle" ? "" : t("board.schedule.took", "{{time}} 걸림", { time: boardScheduleSpan(end - began) }),
         nowLabel: state === "done"
           ? t("board.schedule.gateBarPassed", "{{count}}개 초록", { count: steps.length })
           : state === "failed"
             ? t("board.schedule.gateBarFailed", "{{count}}개 실패", { count: failed })
-            : kinds(["running"]).join(" · "),
+            : kinds([state === "idle" ? "lost" : "running"]).join(" · "),
         aheadLabel: kinds(["waiting", "held"]).join(" · "),
         act: { fold: gate, opened }, opened, paused: Boolean(stall) && state === "waiting",
         // The step cells of the vertical timetable's gate block, in the steps' order.
@@ -772,22 +808,27 @@ function boardScheduleTaskRide(task, now, link, since) {
   const ride = link?.carried.get(task.id);
   const gate = ride ? link.gates.get(ride.gate) : null;
   if (!gate) return null;
-  // A gate that ended before this hand-in is an old story (review P3-2): it does not say why the task waits now.
+  // A gate that ended before this hand-in is an old story (review P3-2): it does not say why the task waits now. A gate
+  // with no end on record (`idle`) is told by its latest step's start (r2 P2-1) — it has no end to compare.
   if (["done", "failed"].includes(gate.state) && gate.end < since) return null;
+  if (gate.state === "idle" && Math.max(gate.lastStart ?? 0, gate.end) < since) return null;
   const word = gate.state === "running"
     ? t("board.schedule.whyRunning", "{{gate}}에 실림 → 도는 중 · {{time}} 끝 예상", {
       gate: gate.gate, time: boardScheduleClock(gate.end, now),
     })
     : gate.state === "waiting"
       // The gate's own time word — its next waiting step's expected start, never its first attempt's past start.
-      ? gate.unknown || !gate.startWord
+      ? !gate.startWord
         ? t("board.schedule.whyWaitingUnknown", "{{gate}}에 실림 → 차례 기다림 · 시작 모름", { gate: gate.gate })
         : t("board.schedule.whyWaiting", "{{gate}}에 실림 → 차례 기다림 · {{time}} 시작 예상", {
           gate: gate.gate, time: gate.startWord,
         })
       : gate.state === "failed"
         ? t("board.schedule.whyFailed", "{{gate}}에 실림 → 실패로 멈춤", { gate: gate.gate })
-        : t("board.schedule.whyPassed", "{{gate}} 통과 → 코디 차례", { gate: gate.gate });
+        // A gate whose steps have no end on record neither passed nor failed: the task's row does not say 「통과」 (r2 P2-1).
+        : gate.state === "idle"
+          ? t("board.schedule.whyLost", "{{gate}}에 실림 → 끝 기록 없음", { gate: gate.gate })
+          : t("board.schedule.whyPassed", "{{gate}} 통과 → 코디 차례", { gate: gate.gate });
   const inherits = ["running", "waiting"].includes(gate.state) && gate.end > now;
   return { gate: gate.gate, state: gate.state, end: inherits ? gate.end : now, basis: inherits ? gate.basis : "history",
     inherits, word, act: gate.failedJob ? { log: { job: gate.failedJob } } : { fold: gate.gate, opened: gate.opened } };
@@ -936,7 +977,7 @@ function boardScheduleVertical(zoomId) {
 /* 안내판의 넉 줄(t-77628) — 공항 출발 안내판의 문법: 한 줄에 무엇 · 큰 글(시각이나 수) 하나 · 낱말 · 비고 · 행동.
  * 다음 발행, 게이트, 착지 대기, 끝남. 줄은 비어도 남고 「—」·「이 범위에 없음」을 말한다. 수는 시간표의 행
  * 목록에서 센다 — 따로 세지 않는다. */
-function boardScheduleBoardLines(groups, now) {
+function boardScheduleBoardLines(groups, now, outsideLane = null) {
   const group = (id) => groups.find((one) => one.id === id);
   const rows = (id) => (group(id)?.rows ?? []).filter((row) => row.depth === 0);
   const clock = (ms) => boardScheduleClock(ms, now);
@@ -947,13 +988,15 @@ function boardScheduleBoardLines(groups, now) {
     ? t(BOARD_RUN_STATES.run.key, BOARD_RUN_STATES.run.word)
     : state === "waiting"
       ? t(BOARD_RUN_STATES.queue.key, BOARD_RUN_STATES.queue.word)
-      : state === "failed" ? t("board.schedule.wordFailed", "실패") : t("board.schedule.wordPassed", "통과"));
-  const tones = { running: "run", waiting: "wait", failed: "halt", done: "done" };
+      : state === "failed" ? t("board.schedule.wordFailed", "실패")
+        : state === "idle" ? t("board.schedule.lost", "끝 기록 없음") : t("board.schedule.wordPassed", "통과"));
+  const tones = { running: "run", waiting: "wait", failed: "halt", idle: "halt", done: "done" };
 
   // 1. The next release: the lane running, else the last one that ended in the range.
   const lanes = rows("lanes");
   const running = lanes.find((row) => row.state === "running") ?? null;
-  const lastLane = lanes.filter((row) => row.state !== "running").sort((a, b) => b.end - a.end)[0] ?? null;
+  // The range may hold none that ended: the answer's own last lane (`last_lane`) is the one to name then.
+  const lastLane = lanes.filter((row) => row.state !== "running").sort((a, b) => b.end - a.end)[0] ?? outsideLane;
   const lane = running
     ? {
       tone: running.late ? "wait" : "run", big: running.eta, word: running.etaSub,
@@ -992,7 +1035,8 @@ function boardScheduleBoardLines(groups, now) {
   const gateLine = gate && facts
     ? {
       tone: tones[gate.state] ?? "quiet", name: facts.gate,
-      big: gate.state === "done" || gate.state === "failed" ? clock(gate.end) : gate.eta, word: stateWord(gate.state),
+      big: gate.state === "done" || gate.state === "failed" ? clock(gate.end) : gate.state === "idle" ? "—" : gate.eta,
+      word: stateWord(gate.state),
       note: [
         facts.failedKinds.length > 0
           ? t("board.schedule.failedStep", "{{kind}} 실패", { kind: facts.failedKinds.join(" · ") }) : "",
@@ -1196,10 +1240,18 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false, mea
       const at = percent(tick.at);
       return { ...tick, at, covered: (Math.abs(at - nowAt) / 100) * height < chipReach };
     }),
-    board: boardScheduleBoardLines(groups, now),
+    board: boardScheduleBoardLines(groups, now, boardScheduleOutsideLane(answer, lanes, now)),
     // Nothing moving is expected to end after now: the timetable says so under the 「now」 line.
     aheadEmpty: latest <= now,
   };
+}
+
+/* 범위 밖의 마지막 레인: 답이 실은 `last_lane`, 없으면 — 조용한 동안 창이 옛 답을 그대로 쓰므로 범위가 밀려도 백엔드는
+ * 새로 보내지 않는다 — 그 답의 레인 가운데 가장 최근에 끝난 것(검수 r2 P3-1). 하나도 없으면 null. */
+function boardScheduleOutsideLane(answer, lanes, now) {
+  const ended = answer?.last_lane ?? lanes.filter((run) => !run.running)
+    .sort((a, b) => (Number(b.end_ms) || b.start_ms) - (Number(a.end_ms) || a.start_ms))[0] ?? null;
+  return ended ? boardScheduleLaneRows([ended], now)[0] ?? null : null;
 }
 
 /* ---- 그림 ----------------------------------------------------------------------- */
@@ -1351,6 +1403,27 @@ function boardScheduleRowNode(view) {
     boardScheduleElement("span", "board-schedule-said"));
   row.onclick = () => boardScheduleAct(view, row.__row?.act);
   return row;
+}
+
+/* 쌓인 일의 「게이트 일감」 줄(t-84799 B9): 일정의 마지막 답이 말하는 게이트 — 안내판의 둘째 줄과 같은 규칙으로 고른 것 —
+ * 의 이름과 그 게이트에 일어난 일. 답이 게이트를 하나도 싣지 않았거나 아직 답이 없으면 빈 글이다. 글은 답 하나에
+ * 한 분(分)·한 언어에 한 번만 센다 — 쌓인 일 패널은 사실이 바뀔 때만 다시 그리고, 이 줄은 그 사실 가운데 하나다. */
+const boardScheduleGateWordsHeld = new WeakMap();
+
+function boardScheduleGateWords(now = Date.now()) {
+  const answer = boardScheduleAnswer;
+  if (!answer || !Array.isArray(answer.jobs)) return "";
+  // An answer held for long is an old story, not the gate's present: a dash, whatever the answer says (r2 P2-2).
+  if (now - boardScheduleAnsweredAt >= BOARD_SCHEDULE.staleMs) return "";
+  const minute = Math.floor(now / 60_000) * 60_000;
+  const held = boardScheduleGateWordsHeld.get(answer);
+  if (held?.minute === minute && held.language === document.documentElement.lang) return held.words;
+  const model = boardScheduleModel(answer, [], minute, { zoom: "now", folded: new Set(), opened: new Set(), log: null }, 900,
+    false, null, { hourPx: 120, tickPx: 16, leastPx: 24 });
+  const line = model.board.lines[1];
+  const words = line.name ? [line.name, line.word, line.big === "—" ? "" : line.big].filter(Boolean).join(" · ") : "";
+  boardScheduleGateWordsHeld.set(answer, { minute, language: document.documentElement.lang, words });
+  return words;
 }
 
 /* 블록 하나(t-77628): 단추 하나에 이름(`<b>`, id는 가상 요소) — 요소 둘. 게이트의 블록만 단계 칸 줄(`<i>`)을
@@ -1722,7 +1795,7 @@ function openBoardScheduleTask(view, task) {
 
 /* 보이는 동안의 박자. 보드가 숨거나 다른 탭으로 가면 멈춘다. */
 const boardSchedulePoller = idlePoller({
-  wanted: () => boardScheduleHosts().length > 0,
+  wanted: () => boardScheduleHosts().length > 0 || stackedWorkIsUp(),
   every: BOARD_SCHEDULE.everyMs,
   tick: () => refreshBoardSchedule(),
   onResume: () => refreshBoardSchedule({ fresh: true }),

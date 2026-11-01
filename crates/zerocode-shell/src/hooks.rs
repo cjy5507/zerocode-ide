@@ -1816,6 +1816,16 @@ pub struct PaneHookReport {
     /// applies — `Done` with no words is the clear.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub said: Option<String>,
+    /// The agent's ANSWER, and only that: what a turn-ending event carried
+    /// as the agent's own words, credentials scrubbed. `said` also holds the
+    /// words of a tool that just landed mid-turn (a `cat` of a file is not
+    /// something the agent said), so a line that must quote the agent — the
+    /// 「당신 차례」 list's 「직전 답에서」 — reads this field, never `said`.
+    /// `None` on any event that is not a turn ending with an answer; the
+    /// window clears its copy on a `done` that brings none and when the
+    /// session changes (t-84799 r2 P2-3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
     /// What the agent stopped to ask, when this event is the stopping — the
     /// question, the approval, or the notification's message.
     ///
@@ -2516,12 +2526,16 @@ pub fn report_of(
     // A turn that ended with no answer has no answer to show: a failed model
     // request shows why it failed, and an aborted turn clears the line rather
     // than reach into the transcript for an earlier turn's.
+    //
+    // The turn-ending answer is read once (a transcript tail is a file read) and serves both the line above and the
+    // agent's answer apart from tool output below.
+    let turn_answer = (state == zerocode_core::hook::HookState::Done
+        && zerocode_core::hook::turn_end_carries_answer(&event))
+    .then(|| zerocode_core::transcript::said_in_parsed(&payload))
+    .flatten();
     let said = if state == zerocode_core::hook::HookState::Done {
-        zerocode_core::hook::model_request_failure_parsed(&event, &payload).or_else(|| {
-            zerocode_core::hook::turn_end_carries_answer(&event)
-                .then(|| zerocode_core::transcript::said_in_parsed(&payload))
-                .flatten()
-        })
+        zerocode_core::hook::model_request_failure_parsed(&event, &payload)
+            .or_else(|| turn_answer.clone())
     } else {
         let word: String = event
             .chars()
@@ -2535,6 +2549,12 @@ pub fn report_of(
         }
     }
     .map(sanitize_card_text);
+    // The agent's own answer, apart from `said`: only a turn-ending event's words, never the tool result a mid-turn
+    // `PostToolUse` carries, and credentials scrubbed before it can ride to a card (t-84799 r2 P2-3). A failed model
+    // request's reason is not an answer either, so it stays out.
+    let answer = turn_answer
+        .map(|answer| zerocode_core::clone::scrub_credentials(&answer))
+        .map(sanitize_card_text);
     let ask = (state == zerocode_core::hook::HookState::NeedsAttention)
         .then(|| zerocode_core::transcript::ask_in_parsed(&payload))
         .flatten();
@@ -2568,11 +2588,14 @@ pub fn report_of(
         // (`AgentVoice::plan_tool`). An agent the catalog does not voice
         // names no plan tool, so its permissions stay ordinary approvals.
         .map(|mut approval| {
+            // A plan is the agent's prose and may quote a URL with its credentials: scrubbed here, where the card is
+            // filled, as the answer is (t-84799 r2 P3-8).
             approval.plan = zerocode_core::ask::plan_in(
                 payload.tree().and_then(|tree| tree.get("tool_input")),
                 &approval.tool,
                 zerocode_core::agent::agent_voice(envelope.agent.slug()).plan_tool,
-            );
+            )
+            .map(|plan| zerocode_core::clone::scrub_credentials(&plan));
             approval
         });
     Some(PaneHookReport {
@@ -2612,6 +2635,7 @@ pub fn report_of(
         named: None,
         prompt,
         said,
+        answer,
         ask,
         ask_prompt,
         approval,
@@ -3761,6 +3785,77 @@ mod tests {
         );
         let report = report_of(&envelope("term-3", "", ordinary), None).expect("a report");
         assert_eq!(report.approval.expect("an approval").plan, None);
+    }
+
+    /// 계획 글도 카드에 오르기 전에 가려진다 — 주소에 박힌 자격 증명이 상황판
+    /// 카드와 「당신 차례」 목록에 그대로 보이면 안 된다(t-84799 r2 P3-8).
+    #[test]
+    fn a_plan_is_scrubbed_of_credentials_before_it_reaches_a_card() {
+        let planning = concat!(
+            r#"{"hook_event_name":"PermissionRequest","tool_name":"ExitPlanMode","#,
+            r#""tool_input":{"plan":"1. clone https://deploy:tok3n@git.example/o/r.git\n2. build"}}"#
+        );
+        let report = report_of(&envelope("term-3", "", planning), None).expect("a report");
+        let plan = report
+            .approval
+            .as_ref()
+            .and_then(|approval| approval.plan.as_deref())
+            .expect("a plan");
+        assert!(!plan.contains("tok3n"), "{plan}");
+        assert!(!plan.contains("deploy:"), "{plan}");
+        assert!(plan.contains("https://***@git.example/o/r.git"), "{plan}");
+        assert!(plan.contains("\n2. build"), "the lines stay: {plan}");
+    }
+
+    /// 「직전 답」 칸은 턴 끝의 답만 든다. 도구가 방금 돌려준 글(`cat .env`의
+    /// 출력)은 `said`에는 오르지만 답이 아니다 — 진짜 길(PostToolUse)로 확인한다
+    /// (t-84799 r2 P2-3).
+    #[test]
+    fn the_answer_line_holds_a_turn_end_answer_and_never_a_tools_output() {
+        let tool = concat!(
+            r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","#,
+            r#""tool_input":{"command":"cat .env"},"tool_response":"API_KEY=hunter2-not-an-answer"}"#
+        );
+        let report = report_of(&envelope("term-3", "", tool), None).expect("a report");
+        assert_eq!(
+            report.said.as_deref(),
+            Some("API_KEY=hunter2-not-an-answer"),
+            "the sidebar's line still follows the tool"
+        );
+        assert_eq!(
+            report.answer, None,
+            "a tool's output is not the agent's answer"
+        );
+
+        let stop = concat!(
+            r#"{"hook_event_name":"Stop","last_assistant_message":"#,
+            r#""Pushed to https://bot:s3cr3t@git.example/o/r.git — 617 checks green."}"#
+        );
+        let report = report_of(&envelope("term-3", "", stop), None).expect("a report");
+        assert_eq!(report.state, zerocode_core::hook::HookState::Done);
+        let answer = report.answer.as_deref().expect("a turn end with an answer");
+        assert!(
+            !answer.contains("s3cr3t") && !answer.contains("bot:"),
+            "{answer}"
+        );
+        assert!(
+            answer.contains("https://***@git.example/o/r.git — 617 checks green."),
+            "{answer}"
+        );
+
+        // 답 없이 끝난 턴(끊김)은 답이 없다 — 창은 이것을 지움으로 읽는다.
+        let aborted = envelope("term-3", "", r#"{"hook_event_name":"Interrupt"}"#);
+        let report = report_of(&aborted, None).expect("an interrupt row");
+        assert_eq!(report.state, zerocode_core::hook::HookState::Done);
+        assert_eq!(report.answer, None);
+
+        // 물음에 멈춘 이벤트도 답이 아니다.
+        let asking = concat!(
+            r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","#,
+            r#""tool_input":{"command":"ls"},"message":"may I run ls?"}"#
+        );
+        let report = report_of(&envelope("term-3", "", asking), None).expect("a report");
+        assert_eq!(report.answer, None);
     }
 
     /// The model rides the report when the payload says one, and stays off

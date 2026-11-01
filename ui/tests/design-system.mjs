@@ -4,10 +4,13 @@
 // 그대로 읽어 그린다: 토큰 전수(누락 0 — 값이 안 풀리는 토큰은 「조건부」로 따로 표시하고 누락으로
 // 세지 않는다), 컴포넌트 7종 × 6상태(다크·라이트는 페이지 안 스위치). 값은 다시 적지 않는다.
 //
+// 이 파일은 시험 하나를 내보낼 뿐 혼자 돌지 않는다: `WINDOW_SUITES=design-system node ui/tests/window.mjs`로 돈다.
+// 혼자 부르면 아무것도 재지 않은 채 끝나므로(PASS 0), 아래 끝의 줄이 그렇게 말하고 실패로 끝낸다 (t-84799 ⑦).
+//
 // 그리는 시간은 `DESIGN_PAGE_REPORT=1`일 때 9번 그려 중앙값을 밀리초로 내고 5 ms 이하를 요구한다.
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPORT_RUNS = 9;
@@ -130,4 +133,9 @@ export async function testDesignSystem(browser, origin, standBackend, ok) {
     ok("the page draws in 5 ms or less", median <= 5, `median=${median.toFixed(1)} ms`);
   }
   await page.close();
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  console.error("design-system.mjs does not run alone — it measured nothing. Run: WINDOW_SUITES=design-system node ui/tests/window.mjs");
+  process.exitCode = 2;
 }

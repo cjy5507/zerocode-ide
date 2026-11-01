@@ -1577,26 +1577,21 @@ kbd {
   display: none;
 }
 
-/* `line-height: 1`, as the task id below: on the Geist steps (t-67607, the
- * person's 10-21 pass of draft B) 2xs is 12px, a step over the 11px branch
- * line it sits in, and at its own line height it grew the row by 1.4px. */
-.wt-unseated {
-  /* Takes what the line has left after the folder's name before it, and
-   * elides there: a short line cuts the note, not the name to a letter
-   * (t-78107). From nothing, so the name is laid first; the line still
-   * measures the note whole when it sizes itself. */
-  flex: 1 1 0;
+/* 「에이전트 창 없음 N」 on a project's head (t-84799 A1): said once for the checkouts that hold no agent window, in the
+ * mist the row's second lines use. It gives way before the project's name does, and the head's hover actions
+ * keep their place at the end. */
+.proj-unseated {
+  flex: 0 1 auto;
   min-width: 0;
-  margin-inline-start: var(--space-1);
+  margin-inline-start: var(--space-2);
   overflow: hidden;
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
-  line-height: 1;
+  font: var(--type-label-12);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.wt-unseated[hidden] {
+.proj-unseated[hidden] {
   display: none;
 }
 
@@ -2714,6 +2709,17 @@ svg.wt-agent-dot {
   grid-row: 2;
   max-width: none;
   margin-inline-start: var(--space-1);
+}
+
+/* The landing chip's words wrap inside its track instead of being cut to their tail (t-84799 A10, r3): at a
+ * sidebar folded to its 1000 px width the track holds 107 px of the 129 that 「미반영 6 · main보다 20 뒤」 takes in
+ * Korean, and 164 to 213 px of the other four languages' words are wider still. Wrapped it says all of them at the
+ * cost of a line on the one row that needs it; the tooltip keeps the whole sentence either way. */
+.wt-titlebox .wt-landing {
+  height: auto;
+  min-height: 15px;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 /* Each chip in its own track past the room left over, in the order they
@@ -6809,6 +6815,12 @@ body.is-dragging-pane {
 .tab.is-waiting .tab-dot {
   background: none;
   box-shadow: inset 0 0 0 var(--status-dot-ring) var(--signal-you);
+}
+
+/* A permission is a hollow square where a question is the ring (t-84799 A2) — the shape the 「당신 차례」 list gives the
+ * same two kinds, and the tip says the word beside it. */
+.tab.is-waiting[data-ask="permission"] .tab-dot {
+  border-radius: var(--radius-xs);
 }
 
 /* 2차 A (t-78107, 시안 17): under `--fold-sidebar-rail` the strip folds the
@@ -38245,7 +38257,8 @@ details.task-board-section > summary {
  * the title row's right end (the head keeps that room free), and the
  * schedule's range stands at the tab row's right end — the content starts a
  * hundred pixels higher. The nav strip stays under the head (the selector
- * contract). A narrow board keeps both in rows of their own. */
+ * contract). A narrow board keeps both in rows of their own. The width is
+ * `--fold-board-head`, written out because a container query cannot read it. */
 @container board (min-width: 700px) {
   .is-task-board > .agent-graph-head {
     padding-inline-end: calc(var(--board-head-find-width) + var(--space-5) + var(--space-4));
@@ -54170,6 +54183,15 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   flex: none;
 }
 
+/* The model the agent runs, after its name: mono, and the first to elide when the line is short. */
+.your-turn-model {
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-label-12-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .your-turn-age {
   flex: none;
   margin-left: auto;
@@ -54183,6 +54205,17 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   margin: 0;
   color: var(--ink-chalk);
   font: var(--type-label-14);
+}
+
+/* The line of context under a question: two lines at most, in the mist. */
+.your-turn-context {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .your-turn-acts,

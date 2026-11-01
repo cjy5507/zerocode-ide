@@ -188,6 +188,10 @@ pub(crate) struct Timeline {
     pub(crate) line: LineFacts,
     pub(crate) jobs: Vec<Job>,
     pub(crate) lanes: Vec<LaneRun>,
+    /// The newest lane run that ended, sent only when the range holds none:
+    /// the board's first line still names the last release (t-84799).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_lane: Option<LaneRun>,
     /// When the board's tasks landed and shipped, as git at the open
     /// repository says it, by task (t-71840, [`crate::artifact_flow::landings`]):
     /// the window ends a finished task's bar there before the times the desk
@@ -520,6 +524,26 @@ impl Book {
         // stamps the tie was made from, never the disk's a moment later — a
         // file that came in between is a change the next look reports.
         self.signature = with_ties(read_so_far, self.ties_tied());
+        let lanes: Vec<LaneRun> = self
+            .lanes
+            .runs
+            .iter()
+            .filter(|run| run.running || run.end_ms.unwrap_or(run.start_ms) >= from_ms)
+            .cloned()
+            .collect();
+        // A range holding no ended lane still names the last one that ended.
+        let last_lane = lanes
+            .iter()
+            .all(|run| run.running)
+            .then(|| {
+                self.lanes
+                    .runs
+                    .iter()
+                    .filter(|run| !run.running)
+                    .max_by_key(|run| run.end_ms.unwrap_or(run.start_ms))
+                    .cloned()
+            })
+            .flatten();
         Timeline {
             revision: self.revision,
             unchanged: false,
@@ -537,13 +561,8 @@ impl Book {
             },
             task_lines: task_lines(&jobs),
             jobs,
-            lanes: self
-                .lanes
-                .runs
-                .iter()
-                .filter(|run| run.running || run.end_ms.unwrap_or(run.start_ms) >= from_ms)
-                .cloned()
-                .collect(),
+            lanes,
+            last_lane,
             landings: self.landings.clone(),
             log,
         }

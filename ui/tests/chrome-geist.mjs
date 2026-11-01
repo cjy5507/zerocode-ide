@@ -241,9 +241,32 @@ async function testBranchLineRoom(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
     await standChrome(page);
+    // The five languages the window ships: the chip's words are longest in some and shortest in others, and a
+    // width that holds the Korean ones whole is no proof of the Spanish (t-84799 r3).
+    for (const code of ["ko", "en", "ja", "zh", "es"]) {
+    await page.evaluate((one) => { setLocale(one, { persist: false }); }, code);
+    await page.evaluate(async () => { await refreshWorktrees(); await window.__PAINTED__(); });
     for (const width of [1280, 1000]) {
       await page.setViewportSize({ width, height: 900 });
       await frames(page);
+      // The sidebar's width is a transition (`--panel-fold-duration`, 280 → 240 px at 1000 px): measured while it
+      // runs, the chip read 4 times in 2 as whole at a width the sidebar never stays at (t-84799 r3). It is
+      // measured once the sidebar's box has stood still for three frames, not after a time.
+      await page.evaluate(() => new Promise((done) => {
+        const side = document.querySelector(".threads");
+        let last = -1;
+        let still = 0;
+        let frame = 0;
+        const step = () => {
+          const now = side.getBoundingClientRect().width;
+          still = now === last ? still + 1 : 0;
+          last = now;
+          frame += 1;
+          if (still >= 3 || frame >= 120) done();
+          else requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+      }));
       const rows = await page.evaluate(() => [...document.querySelectorAll(".wt-row")].flatMap((row) => {
         const line = row.querySelector(".wt-titlebox > .wt-branch");
         if (!line || line.hidden || line.offsetParent === null) return [];
@@ -261,11 +284,20 @@ async function testBranchLineRoom(browser, origin, ok) {
           wants: Math.round(wants),
           box: Math.round(box),
           chip: chip && getComputedStyle(chip).display !== "none" ? chip.clientWidth : 0,
+          chipWords: chip && getComputedStyle(chip).display !== "none" ? chip.scrollWidth : 0,
+          // A10 (t-84799): the landing chip's words whole, inside the row — no tail cut, none past the edge.
+          chipCut: chip && getComputedStyle(chip).display !== "none"
+            ? Math.max(chip.scrollWidth - chip.clientWidth, chip.scrollHeight - chip.clientHeight) : 0,
+          chipOut: chip && getComputedStyle(chip).display !== "none"
+            ? Math.round(chip.getBoundingClientRect().right - row.querySelector(".wt-titlebox").getBoundingClientRect().right) : 0,
         }];
       }));
-      ok(`at ${width} px every branch line under a name keeps its words whole or a third of the line, never a syllable (시안 5)`,
+      ok(`${code} at ${width} px every branch line under a name keeps its words whole or a third of the line, never a syllable (시안 5)`,
         rows.length >= 2 && rows.every((one) => one.line + 1 >= Math.min(one.wants, one.box / 3)),
         JSON.stringify(rows));
+      ok(`${code} at ${width} px a landing chip says all its words — 「미반영 6 · main보다 20 뒤」 in Korean — is not cut to its tail — inside its row (A10)`,
+        rows.some((one) => one.chip > 100) && rows.every((one) => one.chipCut <= 1 && one.chipOut <= 1), JSON.stringify(rows));
+    }
     }
     ok("the branch line scene raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
@@ -637,6 +669,23 @@ async function testTabMenuFold(browser, origin, ok) {
       widths.tokens.join() === "1360px,1000px,760px,480px" &&
         widths.folds.length === 3 && widths.folds.every((when) => widths.tokens.slice(1).some((width) => when.includes(width))),
       JSON.stringify(widths));
+    /* t-84799 A3: the board's head folds from five layers to three at one width, and that width has a name too. */
+    const head = await page.evaluate(() => {
+      const token = getComputedStyle(document.documentElement).getPropertyValue("--fold-board-head").trim();
+      const whens = new Set();
+      const visit = (rules) => {
+        for (const rule of rules) {
+          if (rule instanceof CSSContainerRule && /\.is-task-board > \.agent-relations-toolbar/.test(rule.cssText)) whens.add(rule.conditionText);
+          else if (rule.cssRules) visit(rule.cssRules);
+        }
+      };
+      for (const sheet of document.styleSheets) {
+        try { visit(sheet.cssRules); } catch { /* a sheet from elsewhere */ }
+      }
+      return { token, whens: [...whens] };
+    });
+    ok("the board's head folds to three layers at a named width — 700 px — and the rule that does it writes that number",
+      head.token === "700px" && head.whens.length === 1 && head.whens[0].includes(head.token), JSON.stringify(head));
     ok("the tab menu scene raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
@@ -700,6 +749,64 @@ async function testQuietContrast(browser, origin, ok) {
   }
 }
 
+/* A2 (t-84799) — a tab whose agent waits on the person says what it asks: a permission wears a hollow square where a
+ * question wears the hollow ring, and the tip says 「권한」 or 「질문」 where it said only 「확인 필요」. A wait the hook only
+ * signalled (no question to describe) keeps the old word and the ring. */
+async function testTabAsk(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await standChrome(page);
+    const seen = await page.evaluate(async () => {
+      const tell = (name, payload) => { for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload }); };
+      const seen = {};
+      const stand = async (name, payload) => {
+        const term = await openTermTab({ placement: "tab" });
+        paneAgents.set(term, "claude");
+        tell("hook:agent", { term, state: "needs-attention", agent: "claude", session: `s-${name}`, ...payload });
+        renderTabs();
+        await window.__PAINTED__();
+        const tab = document.querySelector(`.tab[data-tab="${tabOfTerm(term).id}"]`);
+        const dot = tab.querySelector(".tab-dot");
+        const style = getComputedStyle(dot);
+        return { ask: tab.dataset.ask ?? null, tip: tab.dataset.tip, round: style.borderRadius === "50%", waiting: tab.classList.contains("is-waiting"),
+          ring: style.boxShadow !== "none" };
+      };
+      seen.permission = await stand("perm", { approval: { tool: "Bash", summary: "npm install" } });
+      seen.question = await stand("ask", { ask_prompt: { questions: [{ question: "어느 쪽?", multi_select: false, options: [{ label: "가" }, { label: "나" }] }] } });
+      seen.signalled = await stand("plain", {});
+      return seen;
+    });
+    ok("a waiting tab with a permission wears a hollow square and says 「권한」; a question wears the ring and says 「질문」; a bare signal keeps 「확인 필요」",
+      seen.permission.waiting && seen.permission.ask === "permission" && !seen.permission.round && seen.permission.ring && seen.permission.tip.split(" · ").includes("권한") &&
+        seen.question.ask === "question" && seen.question.round && seen.question.tip.split(" · ").includes("질문") &&
+        seen.signalled.ask === null && seen.signalled.round && seen.signalled.tip.split(" · ").includes("확인 필요"),
+      JSON.stringify(seen));
+    /* r2 P3-10: inside one wait a question can turn into a permission (the state stays needs-attention); the strip is drawn
+     * again by the event alone — nothing here calls renderTabs. */
+    const turned = await page.evaluate(async () => {
+      const tell = (name, payload) => { for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload }); };
+      const term = await openTermTab({ placement: "tab" });
+      paneAgents.set(term, "claude");
+      const read = () => document.querySelector(`.tab[data-tab="${tabOfTerm(term).id}"]`)?.dataset.ask ?? null;
+      tell("hook:agent", { term, state: "needs-attention", agent: "claude", session: "s-turn",
+        ask_prompt: { questions: [{ question: "어느 쪽?", multi_select: false, options: [{ label: "가" }, { label: "나" }] }] } });
+      renderTabs();
+      await window.__PAINTED__();
+      const asked = read();
+      tell("hook:agent", { term, state: "needs-attention", agent: "claude", session: "s-turn", approval: { tool: "Bash", summary: "npm install" } });
+      await window.__PAINTED__();
+      await window.__PAINTED__();
+      return { asked, then: read() };
+    });
+    ok("a question that turns into a permission inside one wait changes the tab's word and square without any other repaint",
+      turned.asked === "question" && turned.then === "permission", JSON.stringify(turned));
+    ok("the tab ask scene raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
 export async function testChromeGeist(browser, origin, ok) {
   await testGeistShips(browser, origin, ok);
   await testChromeSidebarAndTabs(browser, origin, ok);
@@ -710,6 +817,7 @@ export async function testChromeGeist(browser, origin, ok) {
   await testNarrowFolds(browser, origin, ok);
   await testTabMenuFold(browser, origin, ok);
   await testQuietContrast(browser, origin, ok);
+  await testTabAsk(browser, origin, ok);
 }
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1] ?? "")).href) {

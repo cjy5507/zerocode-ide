@@ -31876,7 +31876,10 @@ mod tests {
                 "let payload = zerocode_core::payload::HookPayload::of(&envelope.payload);"
             ) && reporting.contains("userpromptsubmit")
                 && reporting.contains("prompt_in_parsed")
-                && reporting.matches(".map(sanitize_card_text)").count() == 2
+                // The prompt, the pane's `said` line, and the agent's answer apart from tool output — the last
+                // scrubbed of credentials first (t-84799 r2 P2-3).
+                && reporting.matches(".map(sanitize_card_text)").count() == 3
+                && reporting.contains("zerocode_core::clone::scrub_credentials(&answer)")
                 && reporting.contains("HookState::Done {")
                 && reporting.contains("said_in_parsed")
                 && reporting.contains("\"posttooluse\" => ")
@@ -35445,7 +35448,13 @@ mod tests {
             "the prompt fetch lost its bound or stopped sharing the row \
              cache:\n{fetching}"
         );
-        let tally = block_after(window, "function paintChecksSummary(");
+        // One count serves the summary row and the pile (t-84799 B11): the summary reads it, never counts again.
+        let summary = block_after(window, "function paintChecksSummary(");
+        assert!(
+            summary.contains("checksTally(checks)"),
+            "the summary counts the verdicts again instead of reading `checksTally`:\n{summary}"
+        );
+        let tally = block_after(window, "function checksTally(");
         assert!(
             tally.contains("\"action_required\""),
             "the failing count stopped counting approval blockers:\n{tally}"

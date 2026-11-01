@@ -151,8 +151,17 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
           branch: node.querySelector(".wt-branch")?.textContent ?? "",
           stage: node.querySelector(".wt-stage")?.textContent ?? "",
           taskId: node.querySelector(".wt-task-id")?.textContent ?? "",
-          unseatedShown: (node.querySelector(".wt-unseated") && !node.querySelector(".wt-unseated").hidden) === true,
+          // The row itself never says 「에이전트 창 없음」 any more (t-84799 A1): the project's head does, with a count.
+          unseatedOnRow: node.querySelector(".wt-unseated") !== null,
         } : null;
+      };
+      // The project's head: what it says and the checkouts it should count — those whose card holds nothing and that say no
+      // stage (t-44016, t-84799 A1).
+      window.__HEAD__ = (project, paths, finished) => {
+        const note = document.querySelector(`.proj-row[data-project-path="${CSS.escape(project)}"] .proj-unseated`);
+        const empty = paths.filter((path) => document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(path)}"]`)?.hidden === true);
+        const counted = empty.filter((path) => window.__WT__(path)?.stage === "");
+        return { shown: Boolean(note) && !note.hidden, text: note?.textContent ?? "", counted: counted.length, finishedCounted: counted.includes(finished) };
       };
       // The strip's own words for a terminal tab (`tabLabel`), read without painting a strip per tab.
       window.__TAB__ = (term) => tabLabel(tabs.find((one) => one.id === `tab-${term}`) ?? { kind: "gone" });
@@ -184,8 +193,15 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
       "a worktree row says its task id and title, the stage its work stands at in the ledger's words, and the agent that worked there with its model and end time — and 「에이전트 창 없음」 is not said beside that stage",
       wt !== null && wt.taskId.includes("t-44016") && wt.title.includes(TASK) && wt.stage === "착지 대기" &&
         wt.branch.includes("Claude") && wt.branch.includes("haiku-5-5") && wt.branch.includes("끝") &&
-        wt.unseatedShown === false && empty !== null,
+        wt.unseatedOnRow === false && empty !== null,
       JSON.stringify({ finished: wt, empty, rows: wtNumbers }),
+    );
+    // The rule of t-44016 now stands on the project's head: a checkout that says a stage is not counted as one without a window.
+    const headCount = await page.evaluate(([paths, finished]) => window.__HEAD__("/r", paths, finished), [SCENE_PATHS, FINISHED]);
+    ok(
+      "the project's head counts the checkouts whose card holds nothing and that say no stage — the finished checkout, with its work row and its 「착지 대기」, is not one of them",
+      headCount.shown && headCount.counted >= 1 && !headCount.finishedCounted && headCount.text === `에이전트 창 없음 ${headCount.counted}`,
+      JSON.stringify(headCount),
     );
 
     /* ③ — the empty worktree's summary card. Activating it is what a person does to open it. */

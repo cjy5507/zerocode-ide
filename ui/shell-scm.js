@@ -422,6 +422,8 @@ function leaveStackedWork() {
   el("activity-pile").replaceChildren();
   pileHistory = null;
   pileHistoryHead = null;
+  // The schedule's beat stops with the last thing that wanted it.
+  if (typeof boardSchedulePoller !== "undefined") boardSchedulePoller.sync();
 }
 
 /* The checkouts of the project on screen whose commits are not in main yet. */
@@ -453,6 +455,9 @@ let pileDrawn = "";
 
 function paintStackedWork() {
   const panel = el("activity-pile");
+  // The gate line reads the schedule's last answer: while this panel is up the schedule is asked again at its own pace, and
+  // its answer draws the panel again (r2 P2-2).
+  if (!panel.hidden && typeof askBoardScheduleForPile === "function") askBoardScheduleForPile();
   const project = projectOfWorktree(activeWorktreePath) ?? projects[0];
   const checkouts = unlandedCheckouts(project);
   const here = releaseLaneHere();
@@ -463,7 +468,7 @@ function paintStackedWork() {
   const tally = checksTally(checks).filter(([, count]) => count > 0);
   const unseated = checkouts.filter((worktree) => worktreeAgentRows(worktree.path).length === 0).length;
   const drawing = JSON.stringify([locale, project?.name, lane?.sha, lane?.version, lane?.phase, deskReleaseVerdict(lane ?? {}),
-    checkouts.map((worktree) => [worktree.path, worktree.branch, worktree.landing]), unseated,
+    checkouts.map((worktree) => [worktree.path, worktree.branch, worktree.landing]), unseated, boardScheduleGateWords(),
     branchHead, upstreamState?.upstream, scmEntries.length, tally.map(([name, count]) => [name, count]),
     pileHistory?.rows.map((row) => row.item.id), pileHistory?.more]);
   if (drawing === pileDrawn && panel.childElementCount > 0) return;
@@ -479,7 +484,8 @@ function paintStackedWork() {
 
 /* The release lane, as the build line's card says it: its version, its verdict
  * and the step it is on, then the gate's line. The window holds no gate job
- * outside the board's schedule, so that line says a dash rather than a guess;
+ * outside the board's schedule, so that line reads the schedule's last answer
+ * (`boardScheduleGateWords`) and says a dash, not a guess, where it holds no gate;
  * the count is of the lines that say something. */
 function pileReleaseSection(lane) {
   const rows = [];
@@ -495,7 +501,7 @@ function pileReleaseSection(lane) {
     rows.push(row);
   }
   const gate = deskElement("p", "pile-gate");
-  gate.append(deskElement("strong", "pile-release-title", t("pile.gate", "게이트 일감")), deskElement("span", "pile-release-state", "—"));
+  gate.append(deskElement("strong", "pile-release-title", t("pile.gate", "게이트 일감")), deskElement("span", "pile-release-state", boardScheduleGateWords() || "—"));
   return pileSectionNode(t("pile.release", "발행 · 게이트"), rows.length, [...rows, gate]);
 }
 
@@ -4692,24 +4698,11 @@ function paintChecksSummary(checks) {
   row.hidden = checks.length === 0;
   row.setAttribute("aria-expanded", checksExpanded ? "true" : "false");
   el("checks-fold").classList.toggle("is-folded", !checksExpanded);
-  const tally = {
-    pass: checks.filter((check) => checkVerdict(check) === "success").length,
-    fail: checks.filter((check) =>
-      ["failure", "cancelled", "timed_out", "action_required"].includes(
-        checkVerdict(check),
-      ),
-    ).length,
-    wait: checks.filter((check) => checkVerdict(check) === "pending").length,
-  };
-  const words = {
-    pass: t("checks.passing", "통과"),
-    fail: t("checks.failing", "실패"),
-    wait: t("checks.pending", "대기"),
-  };
-  for (const [name, count] of Object.entries(tally)) {
+  // The one count of the three verdicts (`checksTally`), here and on the pile (t-84799 B11).
+  for (const [name, count, word] of checksTally(checks)) {
     const span = el(`checks-${name}`);
     span.hidden = count === 0;
-    span.textContent = `${count} ${words[name]}`;
+    span.textContent = `${count} ${word}`;
   }
   el("checks-spin").hidden = !checksLoading;
 }

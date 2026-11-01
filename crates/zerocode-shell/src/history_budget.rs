@@ -31,6 +31,8 @@ pub(crate) struct PaneHistory {
     pub(crate) chosen: usize,
     /// Scrolled back: somebody is reading this history right now.
     pub(crate) reading: bool,
+    /// How far back it is scrolled, in lines — what tells two readers apart.
+    pub(crate) offset: usize,
     /// A window shows it (`readers_by_term`).
     pub(crate) watched: bool,
     /// When it last printed or was read back; `None` when not since the
@@ -56,8 +58,18 @@ pub(crate) fn shares(panes: &mut [PaneHistory]) -> Vec<(TermId, usize)> {
     // their clocks say: a clock alone ties a reader with a pane that printed
     // in the same round, and a tie fell to the pool's hash order. Among the
     // rest `None` orders first — a pane that has not moved since the window
-    // began counting is the quietest there is.
-    panes.sort_by_key(|pane| (pane.reading, pane.watched, pane.moved));
+    // began counting is the quietest there is. Two readers are stamped at the
+    // same round's clock and tie on every key above: the one read less far back
+    // gives first, and past that the lower pane number — decided, never drawn.
+    panes.sort_by_key(|pane| {
+        (
+            pane.reading,
+            pane.watched,
+            pane.moved,
+            pane.offset,
+            pane.term,
+        )
+    });
     let mut kept = Vec::new();
     for pane in panes.iter() {
         if total <= budget {
@@ -92,7 +104,10 @@ pub(crate) fn hold(
         .map(|(term, held)| {
             let pty = lock_pty(held);
             let grid = pty.terminal().grid();
-            let reading = grid.view_offset() > 0;
+            // Read back by somebody: scrolled back AND a window shows it. A pane scrolled
+            // back and left behind another tab keeps its scroll for good — it is not read,
+            // and stamped as moved every beat it would outlast the pane being looked at.
+            let reading = grid.view_offset() > 0 && watched.contains_key(term);
             if reading {
                 moved.insert(*term, now);
             }
@@ -101,6 +116,7 @@ pub(crate) fn hold(
                 lines: grid.scrollback_len(),
                 chosen: grid.scrollback_cap(),
                 reading,
+                offset: grid.view_offset(),
                 watched: watched.contains_key(term),
                 moved: moved.get(term).copied(),
             }
@@ -127,6 +143,7 @@ mod tests {
             lines,
             chosen,
             reading: false,
+            offset: 0,
             watched: false,
             moved,
         }
@@ -301,7 +318,9 @@ mod tests {
             seat(&pool, quiet, CHOSEN, CHOSEN, 0);
             let mut moved = HashMap::from([(read, now), (quiet, now)]);
             let mut entries = Vec::new();
-            hold(&pool, &mut entries, &HashMap::new(), &mut moved, now);
+            // The reader is on screen: a scroll left behind a tab is not a reading.
+            let watched = HashMap::from([(read, vec!["main".to_owned()])]);
+            hold(&pool, &mut entries, &watched, &mut moved, now);
             assert_eq!(held(&pool, read), (CHOSEN, 7_000), "round {round}");
             assert_eq!(
                 held(&pool, quiet),
@@ -352,5 +371,72 @@ mod tests {
         assert_eq!(held(&pool, 3).0, DEFAULT_SCROLLBACK_LINES);
         assert_eq!(held(&pool, 1).0, DEFAULT_SCROLLBACK_LINES);
         assert_eq!(held(&pool, 2).0, CHOSEN);
+    }
+
+    /// Two panes read back at once, over the budget together (t-84801, the
+    /// review's P2-1): both are `reading`, both on screen, both stamped at the
+    /// round's clock — every key tied, and which of the two lost its history
+    /// fell to the pool's hash order. The one read less far back goes first,
+    /// whichever way the pool lists them.
+    #[test]
+    fn two_readers_over_the_budget_give_by_how_far_back_they_read() {
+        const CHOSEN: usize = 12_000;
+        let now = Instant::now();
+        let reader = |term, offset| PaneHistory {
+            reading: true,
+            watched: true,
+            offset,
+            ..pane(term, CHOSEN, CHOSEN, Some(now))
+        };
+        for listed in [
+            [reader(1, 100), reader(2, 9_000)],
+            [reader(2, 9_000), reader(1, 100)],
+        ] {
+            let mut panes = listed;
+            // Budget 17,000 of 24,000: one reader gives 7,000, to the default.
+            assert_eq!(shares(&mut panes), vec![(1, DEFAULT_SCROLLBACK_LINES)]);
+        }
+        // Read exactly as far back, the lower pane number goes: decided, not drawn.
+        for listed in [
+            [reader(1, 500), reader(2, 500)],
+            [reader(2, 500), reader(1, 500)],
+        ] {
+            let mut panes = listed;
+            assert_eq!(shares(&mut panes), vec![(1, DEFAULT_SCROLLBACK_LINES)]);
+        }
+    }
+
+    /// A pane scrolled back and then left behind another tab is not being
+    /// read (the review's P3-1): its scroll stood forever, stamped `moved =
+    /// now` every beat, so the pane the person was looking at gave up its
+    /// history first. Over the budget the hidden pane goes before it.
+    #[test]
+    fn a_pane_scrolled_back_and_hidden_is_not_being_read() {
+        const CHOSEN: usize = 12_000;
+        let now = Instant::now();
+        let hour_ago = now
+            .checked_sub(Duration::from_secs(3_600))
+            .expect("an hour ago");
+        for round in 0..16 {
+            let pool = TerminalRegistry::default();
+            let (hidden, shown) = if round % 2 == 0 { (1, 2) } else { (2, 1) };
+            seat(&pool, hidden, CHOSEN, CHOSEN, 7_000);
+            seat(&pool, shown, CHOSEN, CHOSEN, 0);
+            let mut moved = HashMap::from([(hidden, hour_ago), (shown, now)]);
+            let watched = HashMap::from([(shown, vec!["main".to_owned()])]);
+            let mut entries = Vec::new();
+            hold(&pool, &mut entries, &watched, &mut moved, now);
+            assert_eq!(held(&pool, shown), (CHOSEN, 0), "round {round}");
+            assert_eq!(
+                held(&pool, hidden).0,
+                DEFAULT_SCROLLBACK_LINES,
+                "round {round}"
+            );
+            assert_eq!(
+                moved.get(&hidden),
+                Some(&hour_ago),
+                "a hidden scroll is not a reading: it is not stamped as moved"
+            );
+        }
     }
 }

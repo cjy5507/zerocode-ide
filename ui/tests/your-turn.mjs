@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { openWindowTestPage } from "./window-boot.mjs";
+import { installHarnessWaits } from "./harness-waits.mjs";
 import { axeViolations } from "./settings-quality.mjs";
 
 /* 「당신 차례」 — the chip, the list that drops from it, and the group at the top
@@ -60,6 +61,7 @@ export const installTurns = () => {
 export async function testYourTurn(browser, origin, ok) {
   const { page } = await openWindowTestPage(browser, origin);
   try {
+    await installHarnessWaits(page);
     await page.evaluate(installTurns);
 
     /* The chip: grey at nothing, blue with the count when something waits. */
@@ -85,8 +87,9 @@ export async function testYourTurn(browser, origin, ok) {
       seen.onSolid = getComputedStyle(probe).color;
       seen.solid = getComputedStyle(probe).backgroundColor;
       probe.remove();
-      // The colour eases in over the shared motion pair; read it once it has.
-      await new Promise((done) => setTimeout(done, 250));
+      // The colour eases in over the shared motion pair; read it once it has — named, not timed (t-84799 B8).
+      await window.__UNTIL__(() => getComputedStyle(node.querySelector(".your-turn-count")).color === seen.onSolid &&
+        getComputedStyle(node).backgroundColor === seen.solid, "the chip's colours eased to the lit pill", 8000);
       // The draft's lit chip: a filled you-blue pill, its words and count white, a chevron down.
       seen.liveColor = getComputedStyle(node.querySelector(".your-turn-count")).color;
       seen.liveGround = getComputedStyle(node).backgroundColor;
@@ -139,6 +142,121 @@ export async function testYourTurn(browser, origin, ok) {
         list.closedHidden && list.closedChildren === 0 && list.focusBack,
       JSON.stringify(list),
     );
+
+    /* t-84799 B1·B2·B7: the list's cards as the draft says them — the question names the agent's model, a shell
+     * permission reads 「셸 명령 허락 — …」 with its door 「대화 열기 →」, and a permission asked by the plan tool shows the
+     * plan itself instead of a summary line. */
+    const cards = await page.evaluate(async () => {
+      const seen = {};
+      paneModels.set(6, "claude-opus-5-5");
+      paneAnswer.set(6, "짧은 판은 600자, 긴 판은 1,800자입니다.");
+      const base = window.__turnCards();
+      const plan = { ...base[1], pane: "term:9", heading: "계획 에이전트", ask: "ExitPlanMode",
+        approval: { tool: "ExitPlanMode", summary: "", plan: "## 계획\n\n1. 첫째 단계\n2. 둘째 단계" } };
+      await window.__setTurns([base[0], base[1], plan]);
+      window.__chip().click();
+      await window.__settle();
+      const [question, shell, planned] = window.__items();
+      seen.head = question.querySelector(".your-turn-head").textContent.replace(/\s+/g, " ").trim();
+      seen.shell = shell.querySelector(".your-turn-question").textContent.replace(/\s+/g, " ").trim();
+      const door = shell.querySelector(".your-turn-acts .your-turn-open");
+      seen.door = door?.textContent.trim() ?? null;
+      seen.doorMark = Boolean(door?.querySelector("svg use[href='#i-forward']"));
+      seen.context = question.querySelector(".your-turn-context")?.textContent.replace(/\s+/g, " ").trim() ?? null;
+      seen.shellContext = shell.querySelector(".your-turn-context") === null;
+      seen.planTitle = planned.querySelector(".your-turn-question")?.textContent.replace(/\s+/g, " ").trim() ?? null;
+      seen.planProse = planned.querySelector(".your-turn-plan")?.textContent.replace(/\s+/g, " ").trim() ?? null;
+      seen.planHeading = Boolean(planned.querySelector(".your-turn-plan h2, .your-turn-plan h3, .your-turn-plan strong"));
+      window.__press("Escape");
+      await window.__settle();
+      paneModels.delete(6);
+      paneAnswer.delete(6);
+      await window.__setTurns(window.__turnCards());
+      return seen;
+    });
+    ok(
+      "a list question names the agent and its model and quotes the agent's last answer, a shell permission reads 「셸 명령 허락 — npm install」 with a 「대화 열기 →」 door, and a plan permission shows the plan",
+      cards.head.includes("zo") && cards.head.includes("claude-opus-5-5") &&
+        cards.context === "직전 답에서 — 「짧은 판은 600자, 긴 판은 1,800자입니다.」" && cards.shellContext && cards.shell === "셸 명령 허락 — npm install" &&
+        cards.door === "대화 열기" && cards.doorMark && cards.planTitle === "계획을 승인할까요?" &&
+        cards.planProse?.includes("첫째 단계") && cards.planProse.includes("둘째 단계") && cards.planHeading,
+      JSON.stringify(cards),
+    );
+
+    /* r2 P2-3: the line quotes the agent's ANSWER — what its last turn ended with — through the road the hooks really take. A tool's
+     * output (a `cat .env` that landed mid-turn) is carried as `said` by the sidebar but is no answer; a turn that ends with none
+     * leaves nothing to quote; a new session on the pane starts without the old one's answer. */
+    const road = await page.evaluate(async () => {
+      const seen = {};
+      const tell = (payload) => { for (const handler of window.__LISTENERS__["hook:agent"] ?? []) handler({ payload }); };
+      const term = await openTermTab({ placement: "tab" });
+      await window.__settle();
+      const base = window.__turnCards()[0];
+      const card = { ...base, pane: `term:${term}`, agent: "claude" };
+      const context = async () => {
+        await window.__setTurns([card]);
+        window.__chip().click();
+        await window.__settle();
+        const text = window.__items()[0]?.querySelector(".your-turn-context")?.textContent.replace(/\s+/g, " ").trim() ?? null;
+        window.__press("Escape");
+        await window.__settle();
+        return text;
+      };
+      // The pane then asks (a described question): the list stands the card, and the answer is whatever the window kept.
+      const asks = async (session) => {
+        tell({ term, state: "needs-attention", agent: "claude", session: { id: session }, resumable: true, ask_prompt: card.ask_prompt });
+        await window.__settle();
+        return context();
+      };
+      tell({ term, state: "done", agent: "claude", session: { id: "s-road-a" }, resumable: true, said: "배포는 끝났습니다.", answer: "배포는 끝났습니다." });
+      await window.__settle();
+      seen.afterAnswer = await asks("s-road-a");
+      // The tool's output lands mid-turn: `said` follows it, the answer does not.
+      tell({ term, state: "working", agent: "claude", session: { id: "s-road-a" }, resumable: true, said: "API_KEY=hunter2-not-an-answer" });
+      await window.__settle();
+      seen.saidFollowsTool = paneSaid.get(term) === "API_KEY=hunter2-not-an-answer";
+      seen.afterTool = await asks("s-road-a");
+      // A turn that ended with no answer (interrupted) leaves none.
+      tell({ term, state: "done", agent: "claude", session: { id: "s-road-a" }, resumable: true });
+      await window.__settle();
+      seen.afterNoAnswer = await asks("s-road-a");
+      tell({ term, state: "done", agent: "claude", session: { id: "s-road-a" }, resumable: true, answer: "다시 답했습니다." });
+      await window.__settle();
+      seen.afterAgain = await asks("s-road-a");
+      // A new session on the same pane starts without the old one's answer.
+      seen.afterNewSession = await asks("s-road-b");
+      paneAnswer.delete(term);
+      await window.__setTurns(window.__turnCards());
+      return seen;
+    });
+    ok(
+      "the list's 「직전 답에서」 quotes only the answer a turn ended with: never a tool's output, nothing after an interrupted turn, nothing from the pane's previous session",
+      road.afterAnswer === "직전 답에서 — 「배포는 끝났습니다.」" && road.afterTool === "직전 답에서 — 「배포는 끝났습니다.」" && road.saidFollowsTool &&
+        road.afterNoAnswer === null && road.afterAgain === "직전 답에서 — 「다시 답했습니다.」" && road.afterNewSession === null,
+      JSON.stringify(road),
+    );
+
+    /* t-84799 B4: an open list stays hung from its chip when the window changes size. */
+    const followed = await page.evaluate(async () => {
+      const seen = {};
+      window.__chip().click();
+      await window.__settle();
+      const list = window.__list();
+      const hung = () => ({ chip: Math.round(window.__chip().getBoundingClientRect().left), list: Math.round(list.getBoundingClientRect().left) });
+      seen.before = hung();
+      // A resize that moves the chip (here the sidebar's width, which the title bar's left edge follows).
+      window.__chip().style.marginLeft = "48px";
+      window.dispatchEvent(new Event("resize"));
+      await window.__settle();
+      seen.after = hung();
+      window.__chip().style.marginLeft = "";
+      window.__press("Escape");
+      await window.__settle();
+      return seen;
+    });
+    ok("an open list follows its chip when the window resizes",
+      followed.before.chip === followed.before.list && followed.after.chip !== followed.before.chip && followed.after.chip === followed.after.list,
+      JSON.stringify(followed));
 
     /* A number answers the question through the answer door, and the chip counts down. */
     const answered = await page.evaluate(async () => {
@@ -326,7 +444,9 @@ export async function testYourTurn(browser, origin, ok) {
       await window.__settle();
       const seen = {
         blue,
-        color: await new Promise((done) => setTimeout(() => done(getComputedStyle(node).backgroundColor), 250)),
+        // Motion stands still when reduced, so the colour is there at once; named, not timed (t-84799 B8).
+        color: await window.__UNTIL__(() => getComputedStyle(node).backgroundColor === blue, "the chip's you-blue", 8000)
+          .then(() => getComputedStyle(node).backgroundColor, () => getComputedStyle(node).backgroundColor),
         motion: getComputedStyle(node).transitionDuration,
         listMotion: getComputedStyle(window.__list()).transitionDuration,
       };

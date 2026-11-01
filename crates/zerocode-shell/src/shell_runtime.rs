@@ -1061,6 +1061,7 @@ pub(super) fn note_zo_pane_state(
             prompt_id: None,
             named: None,
             said: None,
+            answer: None,
             ask,
             ask_prompt: None,
             approval: None,

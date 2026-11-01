@@ -459,5 +459,96 @@ export async function testPaneFirstView(browser, origin, ok, outputDir) {
         back.aloneKept && back.unknownRead === "conversation",
       JSON.stringify({ ...back, wires }),
     );
+
+    /* t-84799 B6b: an agent that left its pane — the backend saw the shell take the terminal back, the hook word
+     * `idle` — leaves no head and no switch on a pane that shows its screen; a conversation standing over the
+     * screen keeps its head, which is the way back; the agent's next word brings the head back. */
+    const left = await page.evaluate(async () => {
+      applySettingsSnapshot({ revision: settingsRevision + 1, agent_pane_first_view: "terminal" });
+      await window.__PAINTED__();
+      const seen = {};
+      const headOf = (term) => {
+        const tab = tabOfTerm(term);
+        const head = paneHeads.get(tab.id);
+        return Boolean(head) && !head.hidden && head.getClientRects().length > 0;
+      };
+      const screenTerm = await window.__OPEN_AGENT_PANE__("s-left-0001");
+      seen.screenBefore = { head: headOf(screenTerm), toggle: !el("view-toggle").hidden, chat: paneChatOn(screenTerm) };
+      const named = (term) => document.querySelector(`.pane-slot[data-term="${term}"]`)?.classList.contains("is-named-above") === true;
+      seen.namedBefore = named(screenTerm);
+      await window.__AGAIN__(screenTerm, "s-left-0001", "idle");
+      seen.screenAfter = { head: headOf(screenTerm), toggle: !el("view-toggle").hidden };
+      // The name bar says the pane's name again once the head that named it is gone (r2 P3-5).
+      seen.namedAfter = named(screenTerm);
+      await window.__AGAIN__(screenTerm, "s-left-0001", "working");
+      seen.screenBack = { head: headOf(screenTerm), toggle: !el("view-toggle").hidden };
+      seen.namedBack = named(screenTerm);
+      el("view-toggle-chat").click();
+      await window.__PAINTED__();
+      await window.__AGAIN__(screenTerm, "s-left-0001", "idle");
+      seen.chatKept = { chat: paneChatOn(screenTerm), toggle: !el("view-toggle").hidden, pressed: el("view-toggle-chat").getAttribute("aria-pressed") };
+      // The person turns to the screen from the conversation of an agent that left: the way back stays (r2 P3-5).
+      el("view-toggle-term").click();
+      await window.__PAINTED__();
+      seen.toScreen = { chat: paneChatOn(screenTerm), head: headOf(screenTerm), toggle: !el("view-toggle").hidden };
+      el("view-toggle-chat").click();
+      await window.__PAINTED__();
+      seen.backToChat = { chat: paneChatOn(screenTerm), toggle: !el("view-toggle").hidden };
+      return seen;
+    });
+    ok(
+      "a pane whose agent left shows no head and no switch on its screen, keeps them under a conversation (the way back), and the agent's next word brings them back",
+      left.screenBefore.head && left.screenBefore.toggle && !left.screenBefore.chat &&
+        !left.screenAfter.head && !left.screenAfter.toggle && left.screenBack.head && left.screenBack.toggle &&
+        left.chatKept.chat && left.chatKept.toggle && left.chatKept.pressed === "true" &&
+        left.namedBefore && !left.namedAfter && left.namedBack,
+      JSON.stringify(left),
+    );
+    ok(
+      "a conversation the person has had on a pane keeps the head and the switch while the agent is gone, so 터미널 can be undone with 대화 (r2 P3-5)",
+      !left.toScreen.chat && left.toScreen.head && left.toScreen.toggle && left.backToChat.chat && left.backToChat.toggle,
+      JSON.stringify({ toScreen: left.toScreen, backToChat: left.backToChat }),
+    );
+
+    /* r2 P2-4: in a tab split between an agent's pane and a plain shell, choosing the shell does not take the head down — it
+     * stays while any pane of the tab wears an agent — so picking a pane never resizes the panes (no term_resize) and the
+     * agent's TUI is not redrawn at every click. */
+    const split = await page.evaluate(async () => {
+      const seen = {};
+      const resizes = [];
+      window.__ANSWER__.term_resize = (args) => { resizes.push(args.term); return null; };
+      const agentTerm = await window.__OPEN_AGENT_PANE__("s-split-0001");
+      await splitActivePane("vertical");
+      await window.__PAINTED__();
+      const tab = tabOfTerm(agentTerm);
+      const shellTerm = paneLeaves(tab.layout).find((term) => term !== agentTerm);
+      const headShown = () => {
+        const head = paneHeads.get(tab.id);
+        return Boolean(head) && !head.hidden && head.getClientRects().length > 0;
+      };
+      tab.activePane = agentTerm;
+      paintShownPaneHeads();
+      await window.__PAINTED__();
+      await new Promise((done) => setTimeout(done, 120));
+      seen.leaves = paneLeaves(tab.layout).length;
+      seen.headAtFirst = headShown();
+      const before = resizes.length;
+      const heads = [];
+      for (const term of [shellTerm, agentTerm, shellTerm, agentTerm]) {
+        tab.activePane = term;
+        paintShownPaneHeads();
+        await window.__PAINTED__();
+        heads.push(headShown());
+      }
+      seen.heads = heads;
+      seen.resizes = resizes.length - before;
+      // A tab with no agent in any pane takes the head down, as before.
+      return seen;
+    });
+    ok(
+      "choosing between an agent's pane and a plain shell in one tab leaves the head standing and sends no term_resize",
+      split.leaves === 2 && split.headAtFirst && split.heads.every(Boolean) && split.resizes === 0,
+      JSON.stringify(split),
+    );
   } finally { await page.close(); }
 }

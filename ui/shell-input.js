@@ -422,6 +422,12 @@ function rearmKeySink(event) {
   // are for — pulling focus back to it would take the arrow keys away from
   // the screen the person is actually reading.
   if (!settingsView.hidden || !taskView.hidden || workspaceBoardOpen) return;
+  // The task board's tab covers the stage the same way, and its blocks, rows and cards are buttons: a focused
+  // one that lost the focus to the sink on its Enter never saw the press (t-84799 ③). The board that is a window of its
+  // own (`isPopout`) has no tab list, so it is asked by the window. And only while the keys have no other owner: a floating
+  // terminal or the peek over the board takes them first (`frontKeyboardTarget`), and the sink must still get the focus
+  // for them (r2 P2-5).
+  if ((isPopout || activeTabIn(focusedPane)?.kind === "board") && frontKeyboardTarget() === null) return;
   // Where the key then goes is not this handler's business. The three
   // routing paths already ask the one function that answers that, and with
   // nothing staged they drop the key. Asking again here would put a fourth

@@ -1711,6 +1711,37 @@ export async function testArtifactPreviewBytes(page, ok) {
     seen.kept === "b,c" && seen.held <= 1000, JSON.stringify(seen));
   ok("…and a preview larger than the ceiling is shown but not kept",
     seen.hugeShown && seen.afterHuge === "b,c", JSON.stringify(seen));
+
+  /* t-84799 g·h: the window counts a preview the way the store does (`PreviewPayload::cost` — the text's bytes, the
+   * picture's characters and the digest it keeps), and a preview that is looked at again goes to the back of the
+   * line, so the oldest to go is the one nobody has looked at lately. */
+  const counted = await page.evaluate(async () => {
+    const saved = { preview: window.__ANSWER__.artifact_preview, thumb: artifactListing.thumb };
+    const out = {
+      korean: artifactPreviewSize({ kind: "text", text: "가".repeat(100) }),
+      ascii: artifactPreviewSize({ kind: "text", text: "a".repeat(100) }),
+      picture: artifactPreviewSize({ kind: "image", data_url: "data:image/png;base64,AAAA" }),
+      withDigest: artifactPreviewSize({ kind: "text", text: "a", digest: { kind: "steps", rows: [{ kind: "step", tool: "Bash", verb: "ran", target: "x".repeat(300) }] } }),
+    };
+    const picture = (id, length) => ({ kind: "image", data_url: `data:image/png;base64,${id.padEnd(length, "A")}`, bytes: length, truncated: false });
+    window.__ANSWER__.artifact_preview = (args) => picture(args.id, 400);
+    artifactPreviews.clear();
+    artifactListing.thumb = { queue_max: 4, cache_bytes: 1000 };
+    await askArtifactPreview("a");
+    await askArtifactPreview("b");
+    await askArtifactPreview("a");
+    await askArtifactPreview("c");
+    out.lru = [...artifactPreviews.keys()].join(",");
+    artifactPreviews.clear();
+    window.__ANSWER__.artifact_preview = saved.preview;
+    artifactListing.thumb = saved.thumb;
+    return out;
+  });
+  ok("a preview is counted in the store's bytes: a Korean text three to the character, a picture by its characters, a digest by what it keeps",
+    counted.korean === 300 && counted.ascii === 100 && counted.picture === 26 && counted.withDigest > 300 + 1,
+    JSON.stringify(counted));
+  ok("a preview looked at again goes to the back of the line, so the cache lets go of the one nobody looked at (LRU, not FIFO)",
+    counted.lru === "a,c", JSON.stringify(counted));
 }
 
 /* 다시 찾기(2026-09-28 항목 6): 프로젝트·에이전트·기간(오늘 · 이번 주 · 전체)으로

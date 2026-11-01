@@ -22,21 +22,25 @@ export async function exercisePaneFollow() {
   ];
   await refreshWorktrees(); await settle();
   paintWorktreeAgents();
-  const childCaption = () => document.querySelector('.wt-row[data-worktree-path="/tmp/follow/.zo/worktrees/feat"] .wt-unseated');
-  const emptyExplained = childCaption()?.hidden === false && childCaption()?.textContent === "No agent window";
-  const detached = document.querySelector('.wt-row[data-worktree-path="/tmp/follow/.zo/worktrees/detached"] .wt-unseated');
-  const detachedExplained = detached?.hidden === false && !detached.parentElement.hidden;
+  // 「에이전트 창 없음」 is said once, on the project's head with the count of its checkouts that hold no agent window
+  // (t-84799 A1) — not again on every row.
+  const head = () => document.querySelector('.proj-row[data-project-path="/tmp/follow"] .proj-unseated');
+  const emptyExplained = head()?.hidden === false && head()?.textContent === "No agent window 3";
+  const rowsSayNothing = document.querySelectorAll(".wt-row .wt-unseated").length === 0;
   locale = "ko"; applyLocale();
-  const captionLocalized = childCaption()?.textContent === "에이전트 창 없음";
+  paintWorktreeAgents();
+  const captionLocalized = head()?.textContent === "에이전트 창 없음 3";
   mountTermTab(9401, { agent: "zo", worktree: "/tmp/follow" }, { placement: "tab", focus: false });
   paneAgents.set(9401, "zo");
   const fire = (cwd) => { for (const handler of window.__LISTENERS__["term:cwd"] ?? []) handler({ payload: { term: 9401, cwd } }); };
   const seen = { before: tabOfTerm(9401)?.worktree };
   fire("/tmp/follow/.zo/worktrees/feat/crates/zerocode-shell"); await settle(); await settle();
   seen.followed = tabOfTerm(9401)?.worktree;
-  seen.emptyCaptionGone = childCaption()?.hidden === true;
+  // The agent stands in main, then follows into feat: of the three checkouts, the ones without a window are main and
+  // detached — the head counts again.
+  seen.emptyCaptionGone = head()?.textContent === "에이전트 창 없음 2";
   seen.emptyExplained = emptyExplained;
-  seen.detachedExplained = detachedExplained;
+  seen.detachedExplained = rowsSayNothing;
   seen.captionLocalized = captionLocalized;
   fire("/tmp/follow-bee/src"); await settle(); await settle();
   seen.prefixSafe = tabOfTerm(9401)?.worktree;

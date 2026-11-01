@@ -3639,6 +3639,47 @@ function workspaceStateGroups() {
     .filter((group) => group.members.length > 0);
 }
 
+/* The checkouts whose card holds nothing (no agent row, no finished-work or restart row, no restore-waiting row): the
+ * painter that decides it (`paintWorktreeAgents`, a card's `hidden`) hands the set over. `null` until it has run: a head
+ * built before that counts the checkouts with no live agent row — the first paint then corrects it from the cards
+ * (r2 P3-7), so the head never stands without its words while the list is being built. */
+let projectSeatless = null;
+
+/* How many of a project's checkouts hold no agent window and say no stage of the ledger's (a stage says more —
+ * t-44016): what 「에이전트 창 없음」 on the project's head counts. A checkout folded under its task's row is not
+ * on the list. The stage is asked only of the few checkouts with an empty card. */
+function projectUnseatedCount(project) {
+  let count = 0;
+  for (const worktree of project.worktrees ?? []) {
+    const empty = projectSeatless === null ? worktreeAgentRows(worktree.path).length === 0 : projectSeatless.has(worktree.path);
+    if (empty && !taskFoldedPaths.has(worktree.path) && landingStageWord(worktreeStageOf(worktree.path)) === "") count += 1;
+  }
+  return count;
+}
+
+/* What each head last said, so a repaint over the same count writes nothing but the words' language. */
+const projectUnseatedSaid = new WeakMap();
+
+function dressProjectUnseated(row, project) {
+  const note = row.querySelector(".proj-unseated");
+  const count = projectUnseatedCount(project);
+  const said = `${locale}:${count}`;
+  if (projectUnseatedSaid.get(note) === said) return;
+  projectUnseatedSaid.set(note, said);
+  writeHidden(note, count === 0);
+  writeTextContent(note, count === 0 ? "" : t("worktree.unseatedGroup", "에이전트 창 없음 {{count}}", { count }));
+  writeAttribute(note, "data-tip", count === 0 ? "" : t("worktree.unseatedTip", "이 워크스페이스에서 열린 에이전트 창이 없습니다. 다른 창의 에이전트가 이 폴더의 파일을 수정할 수는 있습니다."));
+}
+
+/* The heads' counts, again when the agents' cards moved: `seatless` is the paths whose card holds nothing. */
+function paintProjectUnseated(seatless) {
+  projectSeatless = seatless;
+  for (const row of worktreeList.querySelectorAll(".proj-row[data-project-path]")) {
+    const project = projects.find((one) => one.path === row.dataset.projectPath);
+    if (project) dressProjectUnseated(row, project);
+  }
+}
+
 function makeProjectHeader(project) {
   const row = document.createElement("div");
   row.className = "proj-row";
@@ -3659,6 +3700,8 @@ function makeProjectHeader(project) {
     // repository turns out to have one.
     '<span class="proj-mark" aria-hidden="true" hidden></span>' +
     '<span class="proj-name"></span>' +
+    // 「에이전트 창 없음 N」 — once for the checkouts of this project that hold no agent window (`paintProjectUnseated`).
+    '<span class="proj-unseated" hidden></span>' +
     '<span class="project-actions">' +
     // Hover-only bare-goes-to-the-Task-screen shortcuts. Orca's own row shows
     // GitHub/GitLab/Linear/Jira icons only on hover/focus-within (measured,
@@ -3671,6 +3714,7 @@ function makeProjectHeader(project) {
     '<span class="twist project-twist"></span></span>';
 
   row.querySelector(".proj-name").textContent = project.name;
+  dressProjectUnseated(row, project);
   row.querySelector(".project-twist").innerHTML = icon("chevron", !folded);
   row.dataset.tip = project.path;
 
@@ -4941,19 +4985,8 @@ function makeWorktreeNode(worktree, held) {
   // before the row could be pressed, and the arrows step between rows here.
   agents.dataset.keyboardOwner = "true";
   agents.addEventListener("keydown", stepAgentRows);
-  // A directory without a pane is still a real checkout. Say which list is
-  // empty, beside the branch, without inventing an agent or moving a process.
-  const unseated = document.createElement("span");
-  unseated.className = "wt-unseated";
-  const unseatedWord = { key: "worktree.unseated", word: "에이전트 창 없음" };
-  unseated.dataset.i18n = unseatedWord.key;
-  unseated.dataset.i18nSource = unseatedWord.word;
-  unseated.textContent = t(unseatedWord.key, unseatedWord.word);
-  const unseatedTip = { key: "worktree.unseatedTip", word: "이 워크스페이스에서 열린 에이전트 창이 없습니다. 다른 창의 에이전트가 이 폴더의 파일을 수정할 수는 있습니다." };
-  unseated.dataset.i18nTitle = unseatedTip.key;
-  unseated.dataset.i18nSourcedatatip = unseatedTip.word;
-  unseated.dataset.tip = t(unseatedTip.key, unseatedTip.word);
-  unseated.hidden = true;
+  // A directory without a pane is still a real checkout. The words for it stand once on its project's head
+  // (`.proj-unseated`, `paintProjectUnseated`), not again on every row (t-84799 A1).
   // The task id, the stage and the worker of the work in this checkout (t-44016), set on the branch line where the
   // title keeps its whole width; `dressWorktreeWork` fills them.
   const taskId = document.createElement("span");
@@ -4988,7 +5021,6 @@ function makeWorktreeNode(worktree, held) {
   vacant.hidden = true;
   branch.prepend(taskId);
   branch.append(stage, blocker, worker, vacant);
-  branch.appendChild(unseated);
   branch.appendChild(fold);
   // A workspace can be carried straight from the rail into a board lane. If
   // the board was closed, the drag opens a preview sheet; a successful drop
