@@ -7482,6 +7482,19 @@ const termFind = await page.evaluate(async () => {
   seen.paintedAfterGone = marked();
   seen.countAfterGone = bar.querySelector(".file-find-count").textContent;
 
+  // A search cut at its ceiling (t-84799 r2-P3-8): the list the backend gave was the first 2000, so after twenty of
+  // its lines leave the top the 1980 left are still only what was found — the count keeps its 「+」.
+  window.__ANSWER__.term_search = () => Array.from({ length: 2000 }, (_, at) => ({ line: at, col: 0, len: 3 }));
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  await new Promise((done) => setTimeout(done, 60));
+  seen.cappedCount = bar.querySelector(".file-find-count").textContent;
+  await feed({ full: true, rows: [row(0, "abc def ghi")], scrollback_len: 100, view_offset: 50, scrollback_trimmed: 20 });
+  seen.cappedAfterTrim = bar.querySelector(".file-find-count").textContent;
+  window.__ANSWER__.term_search = () => [{ line: 70, col: 4, len: 3 }];
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  await new Promise((done) => setTimeout(done, 60));
+  seen.uncappedCount = bar.querySelector(".file-find-count").textContent;
+
   // Typing into the bar must not also type at the shell.
   const before = window.__COUNTS__.term_text ?? 0;
   field.dispatchEvent(new KeyboardEvent("keydown", { key: "e", bubbles: true }));
@@ -7516,6 +7529,11 @@ ok(
     termFind.countAfterGone !== "1/1" &&
     termFind.countAfterGone !== "",
   JSON.stringify(termFind),
+);
+ok(
+  "a search cut at its ceiling keeps its 「+」 after lines leave the top (the 1980 left are still only what was found); an uncut one counts exactly",
+  termFind.cappedCount === "2000/2000+" && termFind.cappedAfterTrim === "1980/1980+" && termFind.uncappedCount === "1/1",
+  JSON.stringify({ capped: termFind.cappedCount, afterTrim: termFind.cappedAfterTrim, uncapped: termFind.uncappedCount }),
 );
 ok(
   "a hit is highlighted where it lands, the bar's keys stay out of the shell, and closing clears it",
