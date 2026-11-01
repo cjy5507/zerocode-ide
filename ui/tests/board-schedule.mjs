@@ -1417,6 +1417,19 @@ export async function testBoardSchedule(browser, origin, ok) {
       typed.focused && typed.tag === "BUTTON" && typed.act === "로그 →" && typed.label.includes("walk") && typed.label.includes("25분"),
       JSON.stringify(typed));
 
+    /* ---- ③ 키보드 Enter (t-84799): 초점이 선 블록에서 Enter가 눌린다. 창의 키 입력칸 되돌림(`rearmKeySink`)이
+     * 단추의 초점을 입력칸으로 옮기면 Enter는 블록에 닿지 않는다 — 진짜 키로 눌러 본다. ---- */
+    await page.evaluate(() => {
+      const block = document.querySelector('#board-view [data-key="job:1792543500-run11955-t-63492-walk"]');
+      window.__blockPressed = 0;
+      block.addEventListener("click", () => { window.__blockPressed += 1; });
+      block.focus();
+    });
+    await page.keyboard.press("Enter");
+    const pressed = await page.evaluate(() => ({ count: window.__blockPressed,
+      keptFocus: document.activeElement?.dataset?.key === "job:1792543500-run11955-t-63492-walk" }));
+    ok("Enter on a focused block presses it, and the block keeps the focus", pressed.count === 1 && pressed.keptFocus, JSON.stringify(pressed));
+
     ok("the schedule raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
