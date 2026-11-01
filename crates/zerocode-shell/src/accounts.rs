@@ -5724,6 +5724,17 @@ JSON
         }
     }
 
+    /// The fake tool's `-i` holds the item's access list to what the shipped line
+    /// has to say. Without `-A` the real tool lists only itself, and the CLI asks
+    /// for a password on every launch.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_fake_tools_line_refuses_an_add_with_no_open_access_list() {
+        let refused =
+            fake_security_lines("add-generic-password -s 'no-access-list' -a 'u' -w 'v'\n");
+        assert!(refused.is_err(), "{refused:?}");
+    }
+
     /// `security -i` prints what stands in a line's command position: on
     /// 2026-11-01 a 5,000-byte line returned 1,808 bytes of its value as
     /// `unknown command "…"`. That first line is what `security_failure_word`
