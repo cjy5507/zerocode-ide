@@ -36,15 +36,19 @@ pub(crate) struct Filed {
 /// Carry one decided call against this machine. `roots` is the asking pane's
 /// own process and the trees it may not signal, as the window reads them;
 /// `coordinator_trees` are where the ledger's live coordinator seats stand
-/// ([`coordinator_trees`]).
+/// ([`coordinator_trees`]); `team` and `pane` are the seat that asked, by which
+/// the processes above the asking call are found ([`asking_pids`]).
 pub(crate) fn carry(
     ask: &ProcessSweepAsk,
     roots: Option<KillRoots>,
     coordinator_trees: &[String],
+    team: &str,
+    pane: &str,
 ) -> Result<Carried, String> {
     let (rows, table) = table()?;
     let checkouts = held_checkouts(ask, coordinator_trees);
-    let judge = judge(roots, table, checkouts.clone(), std::process::id());
+    let asking = asking_pids(&rows, team, pane);
+    let judge = judge(roots, table, checkouts.clone(), std::process::id(), asking);
     carry_with(
         ask,
         &checkouts,
@@ -55,10 +59,104 @@ pub(crate) fn carry(
     )
 }
 
+/// The pids of the call that is asking and of every process above it, read from the table the
+/// call is judged over (t-84800 r2 P2-2, r1-2).
+///
+/// A call from a pane reaches the window through the shim's `curl`, and that `curl` carries the
+/// team and the pane in its own arguments (the headers the window reads them from). So the
+/// asking call is the `curl` row naming this team and pane, and everything above it — the shim's
+/// shell, the shell a coordinator's tool started, the agent, the pane's shell, the window — is
+/// found by the parent each row names, not by what any of them spells. A pane that has several
+/// calls in flight has all of them found: more is hidden and refused, never less. Empty when the
+/// table holds no such call (a shim that sends its headers some other way) or the seat is not
+/// named.
+fn asking_pids(rows: &[ProcessRow], team: &str, pane: &str) -> Vec<u32> {
+    if team.is_empty() || pane.is_empty() {
+        return Vec::new();
+    }
+    let parents: HashMap<u32, u32> = rows.iter().map(|row| (row.pid, row.ppid)).collect();
+    let mut asking: Vec<u32> = Vec::new();
+    for call in rows.iter().filter(|row| is_call_of(&row.args, team, pane)) {
+        let mut at = call.pid;
+        while at > 1 && !asking.contains(&at) {
+            asking.push(at);
+            match parents.get(&at) {
+                Some(parent) => at = *parent,
+                None => break,
+            }
+        }
+    }
+    asking.sort_unstable();
+    asking
+}
+
+/// Whether a command line is the shim's request to the window's team road for this seat: its
+/// address ends in `/agent-teams`, and the team and pane headers are followed by this team and
+/// pane as words of their own.
+fn is_call_of(args: &str, team: &str, pane: &str) -> bool {
+    let words: Vec<&str> = args.split_whitespace().collect();
+    let header = |name: &str, value: &str| {
+        let key = format!("{name}:");
+        words
+            .windows(2)
+            .any(|pair| pair[0] == key && pair[1] == value)
+    };
+    words.iter().any(|word| word.ends_with("/agent-teams"))
+        && header(zerocode_hookd::TEAM_ID_HEADER, team)
+        && header(zerocode_hookd::TEAM_PANE_HEADER, pane)
+}
+
 /// The worker checkouts this call reads: the ask's, less each that is or
-/// holds a coordinator's tree.
+/// holds a coordinator's tree or a run's project root.
+///
+/// Paths are read as the system names them (r1-10): `lsof` prints a process's real folder, so a
+/// checkout or a tree told through a link is compared by where the link leads. A checkout whose
+/// folder was made again after its worker began is nobody's (r3w-6), and so is one that is now a
+/// link: `git worktree add` never makes one, and a link leads wherever it was pointed — to an older
+/// folder that passes the check above, even to the main checkout. The main checkout is taken out
+/// again after the paths are read this way, since the ledger could only compare them as told
+/// (t-84800 r2 P2-3).
 fn held_checkouts(ask: &ProcessSweepAsk, coordinator_trees: &[String]) -> Vec<Checkout> {
-    sweep::outside(ask.checkouts().to_vec(), coordinator_trees)
+    let mut trees: Vec<String> = coordinator_trees.iter().map(|tree| real(tree)).collect();
+    for root in ask.project_roots() {
+        trees.push(root.clone());
+        trees.push(real(root));
+    }
+    let told: Vec<Checkout> = ask
+        .checkouts()
+        .iter()
+        .filter(|checkout| !is_link(&checkout.path) && !made_again(checkout))
+        .map(|checkout| Checkout {
+            path: real(&checkout.path),
+            ..checkout.clone()
+        })
+        .collect();
+    sweep::outside(told, &trees)
+}
+
+/// Whether the last part of `path` is a link. A path the system cannot read is not one.
+fn is_link(path: &str) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|named| named.file_type().is_symlink())
+}
+
+/// `path` as the file system spells it, links resolved; as told when it cannot be read (a folder
+/// gone, a path the system does not know), which compares as before.
+fn real(path: &str) -> String {
+    std::fs::canonicalize(path).map_or_else(
+        |_| path.to_string(),
+        |real| real.to_string_lossy().into_owned(),
+    )
+}
+
+/// Whether the folder now at the checkout's path was born after the worker that reported it began.
+/// A birth the system does not say counts as not made again, which is the reading before this.
+fn made_again(checkout: &Checkout) -> bool {
+    let born = std::fs::metadata(&checkout.path)
+        .and_then(|held| held.created())
+        .ok()
+        .and_then(|born| born.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|since| i64::try_from(since.as_millis()).ok());
+    born.is_some_and(|born| sweep::recreated(born, checkout.started_ms))
 }
 
 /// The tree each live coordinator seat (`team/pane`) stands in, as the window
@@ -102,6 +200,7 @@ fn judge(
     table: ProcessTable,
     checkouts: Vec<Checkout>,
     window: u32,
+    asking: Vec<u32>,
 ) -> Box<dyn Judge> {
     match roots {
         Some(roots) => {
@@ -122,9 +221,10 @@ fn judge(
                 caller: roots.caller,
                 protected,
                 checkouts,
+                asking,
             })
         }
-        None => Box::new(NoRoots),
+        None => Box::new(NoRoots { asking }),
     }
 }
 
@@ -148,6 +248,8 @@ struct KillRule {
     caller: Option<u32>,
     protected: Vec<kill::ProtectedRoot>,
     checkouts: Vec<Checkout>,
+    /// The asking call and every process above it ([`asking_pids`]).
+    asking: Vec<u32>,
 }
 
 impl KillRule {
@@ -187,13 +289,28 @@ impl Judge for KillRule {
                     .to_string(),
             };
         }
+        // Written as this verb: the guard quotes the call in its refusal, and a `kill` there names
+        // a command nobody ran (r1-13).
         let call = KillCall {
-            written: format!("kill {}", row.pid),
+            written: format!("{} --kill {}", sweep::VERB, row.pid),
             targets: vec![KillTarget::Pid(row.pid)],
         };
+        // The guard's own refusal names what protects a process (a pane, the window), so it is
+        // said first; what it would allow is refused when the process is above the asking call —
+        // the coordinator's own tree is a pane's own tree, which the guard lets a pane signal
+        // (r1-2).
+        let above_the_call = || Judgment::Deny {
+            why: "it is the asking call or a process above it — the shell and the agent this call \
+                  runs in, up to the window; ending one ends the call and the answer it is \
+                  waiting for"
+                .to_string(),
+        };
+        let is_above = self.asking.contains(&row.pid);
         match kill::judge_kill(&[call], &self.table, self.caller, &self.protected) {
+            KillVerdict::Allow if is_above => above_the_call(),
             KillVerdict::Allow => Judgment::Allow,
             KillVerdict::Deny { reason } => Judgment::Deny { why: reason },
+            KillVerdict::Ask { .. } if is_above => above_the_call(),
             // For one pid the guard asks for two things: a process no pane
             // and not the window holds, or a table that did not read. Only
             // the first is the coordinator's to answer, and only for an
@@ -214,6 +331,10 @@ impl Judge for KillRule {
         }
     }
 
+    fn asking(&self) -> &[u32] {
+        &self.asking
+    }
+
     /// The asked pids and every pid above them below pid 1, so the chain's
     /// places come from the same one read.
     fn places_for(&self, pids: &[u32]) -> Vec<u32> {
@@ -229,9 +350,15 @@ impl Judge for KillRule {
     }
 }
 
-struct NoRoots;
+struct NoRoots {
+    asking: Vec<u32>,
+}
 
 impl Judge for NoRoots {
+    fn asking(&self) -> &[u32] {
+        &self.asking
+    }
+
     fn judge(&self, _row: &ProcessRow, _table: &[ProcessRow]) -> Judgment {
         Judgment::Deny {
             why: "this window could not say which processes are its panes', so nothing is ended"
@@ -252,7 +379,8 @@ fn carry_with(
 ) -> Result<Carried, String> {
     match ask {
         ProcessSweepAsk::Find { needle, .. } => {
-            let cwds = read_cwds(&judge.places_for(&sweep::matching_pids(&table, needle)));
+            let cwds =
+                read_cwds(&judge.places_for(&sweep::matching_pids(&table, needle, judge.asking())));
             sweep::with_cwds(&mut table, &cwds);
             Ok(Carried {
                 said: sweep::find(&table, needle, checkouts, judge).to_string(),
@@ -440,6 +568,7 @@ mod tests {
             request: "sweep-1".to_string(),
             targets,
             checkouts,
+            project_roots: Vec::new(),
             coordinator_seats: Vec::new(),
         }
     }
@@ -461,6 +590,7 @@ mod tests {
             &ProcessSweepAsk::Find {
                 needle: "cargo".to_string(),
                 checkouts: Vec::new(),
+                project_roots: Vec::new(),
                 coordinator_seats: Vec::new(),
             },
             &[],
@@ -516,7 +646,13 @@ mod tests {
     fn without_the_panes_roots_nothing_is_ended() {
         let fixture = vec![row(4100, "cargo build")];
         let signals = Recorded::over(&fixture);
-        let judge = judge(None, ProcessTable::new(Vec::new()), Vec::new(), 500);
+        let judge = judge(
+            None,
+            ProcessTable::new(Vec::new()),
+            Vec::new(),
+            500,
+            Vec::new(),
+        );
         let carried = carry_with(
             &end_call(vec![target(4100, "cargo build")]),
             &[],
@@ -637,7 +773,13 @@ mod tests {
             .collect();
         let ask = end_call_over(targets, told);
         let checkouts = held_checkouts(&ask, coordinator_trees);
-        let judge = judge(Some(guarded_roots()), guard_table, checkouts.clone(), 500);
+        let judge = judge(
+            Some(guarded_roots()),
+            guard_table,
+            checkouts.clone(),
+            500,
+            Vec::new(),
+        );
         let signals = Recorded::over(&rows);
         let carried = carry_with(&ask, &checkouts, rows, &places, judge.as_ref(), &signals)
             .expect("an end call");
@@ -678,6 +820,7 @@ mod tests {
             run: "run-1".to_string(),
             worker: format!("w-{at}"),
             task: Some(format!("t-{at}")),
+            started_ms: 0,
         }
     }
 
@@ -705,7 +848,13 @@ mod tests {
         let (signalled, rows) = guarded_end(&[5510, 5500]);
         assert_eq!(signalled, vec![5510, 5500], "{rows:?}");
         let table = ProcessTable::from_listing(LISTING, None);
-        let judge = judge(Some(guarded_roots()), table, guarded_checkouts(), 500);
+        let judge = judge(
+            Some(guarded_roots()),
+            table,
+            guarded_checkouts(),
+            500,
+            Vec::new(),
+        );
         assert_eq!(judge.places_for(&[5510]), vec![5510, 5500]);
         assert_eq!(judge.places_for(&[4420]), vec![4420, 4410, 4400]);
     }
@@ -746,6 +895,155 @@ mod tests {
         assert!(why(&rows[0]).contains("pane term-3"), "{rows:?}");
         assert_eq!(rows[1]["outcome"], "refused");
         assert!(why(&rows[1]).contains("the ZeroCode window"), "{rows:?}");
+    }
+
+    /// A refusal does not say `kill` (r1-13): this verb signals with TERM through its own road, and
+    /// a coordinator reading "`kill 500` would signal …" looks for a `kill` it never ran. The
+    /// guard's reason quotes the call as it was written, so the call is written as this verb.
+    #[test]
+    fn a_refusal_names_this_verb_and_never_a_kill_command() {
+        let (_, rows) = guarded_end(&[4200, 500, 4400]);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        for row in &rows {
+            assert!(!why(row).contains("`kill"), "{row}");
+        }
+        assert!(why(&rows[0]).contains("process-sweep"), "{rows:?}");
+        assert!(why(&rows[1]).contains("process-sweep"), "{rows:?}");
+    }
+
+    /// The listing of a coordinator that runs `eval 'zerocode-orc process-sweep …'` from a tool
+    /// shell: the window (500), the pane (600), the agent (700), the tool's shell (710), the
+    /// shim (720) and its subshell (721) with the `curl` (722) that carries the call, a second
+    /// pane's call (820, under 810) and a build of the agent's own (4100).
+    const CALLING: &str = "\
+        500 1 500 /Applications/ZeroCode.app/Contents/MacOS/zerocode-shell\n\
+        600 500 600 -zsh\n\
+        700 600 600 claude --model opus\n\
+        710 700 710 /bin/zsh -c source ~/.zshrc && eval 'zerocode-orc process-sweep --find cargo'\n\
+        720 710 710 sh /w/orchestration-bin/zerocode-orc process-sweep --find cargo\n\
+        721 720 710 sh /w/orchestration-bin/zerocode-orc process-sweep --find cargo\n\
+        722 721 710 curl -q -sS --noproxy * --proto =http --max-time 12 -w \\n%{http_code} -K /dev/fd/3 -H x-zerocode-team-id: team-a -H x-zerocode-team-pane: %1 -H content-type: application/octet-stream --data-binary @- http://127.0.0.1:52506/agent-teams\n\
+        810 500 810 -zsh\n\
+        820 810 810 curl -q -sS --noproxy * --proto =http --max-time 12 -w \\n%{http_code} -K /dev/fd/3 -H x-zerocode-team-id: team-a -H x-zerocode-team-pane: %10 -H content-type: application/octet-stream --data-binary @- http://127.0.0.1:52506/agent-teams\n\
+        4100 700 600 cargo build -p zerocode-shell\n";
+
+    fn calling_rows() -> Vec<ProcessRow> {
+        CALLING
+            .lines()
+            .map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid: u32 = fields.next().expect("pid").parse().expect("a pid");
+                let ppid: u32 = fields.next().expect("ppid").parse().expect("a ppid");
+                let _pgid = fields.next();
+                let args = fields.collect::<Vec<_>>().join(" ");
+                ProcessRow {
+                    ppid,
+                    ..row(pid, &args)
+                }
+            })
+            .collect()
+    }
+
+    /// The asking call is the `curl` that names this team and pane, and everything above it is
+    /// found by the parent each row names (t-84800 r2 P2-2): the tool's shell is above it
+    /// whatever its command line spells, and another pane's call is not this one's, though its pane
+    /// begins with the same characters.
+    #[test]
+    fn the_asking_call_and_everything_above_it_are_found_by_where_they_stand() {
+        let rows = calling_rows();
+        assert_eq!(
+            asking_pids(&rows, "team-a", "%1"),
+            vec![500, 600, 700, 710, 720, 721, 722]
+        );
+        assert_eq!(asking_pids(&rows, "team-a", "%10"), vec![500, 810, 820]);
+        assert!(asking_pids(&rows, "team-b", "%1").is_empty());
+        assert!(asking_pids(&rows, "", "%1").is_empty());
+        assert!(asking_pids(&rows, "team-a", "").is_empty());
+    }
+
+    /// A list hides the processes above the asking call whatever their command lines spell, and
+    /// shows the agent's own build (r1-2, P2-2).
+    #[test]
+    fn a_list_hides_the_processes_above_its_own_call() {
+        let rows = calling_rows();
+        let asking = asking_pids(&rows, "team-a", "%1");
+        let judge = judge(
+            Some(guarded_roots()),
+            ProcessTable::from_listing(CALLING, None),
+            Vec::new(),
+            500,
+            asking,
+        );
+        let ask = ProcessSweepAsk::Find {
+            needle: "c".to_string(),
+            checkouts: Vec::new(),
+            project_roots: Vec::new(),
+            coordinator_seats: Vec::new(),
+        };
+        let signals = Recorded::over(&rows);
+        let carried =
+            carry_with(&ask, &[], rows, &no_cwds, judge.as_ref(), &signals).expect("a list");
+        let said: serde_json::Value = serde_json::from_str(&carried.said).expect("JSON");
+        let shown: Vec<u64> = said["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter_map(|row| row["pid"].as_u64())
+            .collect();
+        // 820 (another pane's call) and 4100 (the agent's build) stand; 500-722 do not.
+        assert_eq!(shown, vec![820, 4100], "{said}");
+    }
+
+    /// The agent a coordinator runs in is a pane's own process, which the guard lets a pane signal;
+    /// it and the shells between it and the call are refused as the call's own tree (r1-2), and the
+    /// agent's build beside them is ended as before.
+    #[test]
+    fn the_coordinators_own_tree_above_the_call_is_refused() {
+        let rows = calling_rows();
+        let asking = asking_pids(&rows, "team-a", "%1");
+        let judge = judge(
+            Some(guarded_roots()),
+            ProcessTable::from_listing(CALLING, None),
+            Vec::new(),
+            500,
+            asking,
+        );
+        for pid in [700, 710, 720, 722] {
+            let row = rows.iter().find(|row| row.pid == pid).expect("a row");
+            match judge.judge(row, &rows) {
+                Judgment::Deny { why } => assert!(why.contains("above"), "{pid}: {why}"),
+                Judgment::Allow => panic!("{pid} may be ended: the coordinator's own tree"),
+            }
+        }
+        let build = rows.iter().find(|row| row.pid == 4100).expect("a row");
+        assert!(matches!(judge.judge(build, &rows), Judgment::Allow));
+    }
+
+    /// The main checkout is taken out again after every path is read as the system spells it
+    /// (t-84800 r2 P2-3): a worker's path that reaches the main checkout through a link above it
+    /// passes the ledger's comparison of told paths.
+    #[cfg(unix)]
+    #[test]
+    fn the_main_checkout_reached_through_a_link_above_is_nobodys() {
+        let dir = tempfile::tempdir().expect("scratch");
+        let root = dir.path().canonicalize().expect("real");
+        let main = root.join("area/main");
+        std::fs::create_dir_all(main.join(".git")).expect("main checkout");
+        let worker = root.join("area/t-9");
+        std::fs::create_dir_all(&worker).expect("worker checkout");
+        let through = root.join("through");
+        std::os::unix::fs::symlink(root.join("area"), &through).expect("link");
+        let mut main_told = told(&through.join("main").display().to_string());
+        main_told.started_ms = i64::MAX / 4;
+        let mut worker_told = told(&through.join("t-9").display().to_string());
+        worker_told.started_ms = i64::MAX / 4;
+        let mut ask = end_call_over(Vec::new(), vec![main_told, worker_told]);
+        if let ProcessSweepAsk::End { project_roots, .. } = &mut ask {
+            project_roots.push(root.join("area/main/.git").display().to_string());
+        }
+        let held = held_checkouts(&ask, &[]);
+        let paths: Vec<&str> = held.iter().map(|one| one.path.as_str()).collect();
+        assert_eq!(paths, vec![worker.display().to_string()], "{held:?}");
     }
 
     /// A process no pane holds that stands in no worker checkout — a
@@ -816,12 +1114,140 @@ mod tests {
     fn a_checkout_no_coordinator_stands_in_still_holds_its_orphan() {
         let mut told_rows = guarded_checkouts();
         told_rows.push(told("/build-line"));
-        let ask = end_call_over(Vec::new(), told_rows);
+        let ask = end_call_over(Vec::new(), told_rows.clone());
         let held = held_checkouts(&ask, &["/w/coordinator".to_string()]);
         assert!(held.iter().any(|one| one.path == "/build-line"), "{held:?}");
+        // And through the whole call (r3-P3-6): with no coordinator in that tree, the orphan
+        // there is ended, the one pid asked and no other.
+        let (signalled, rows) = guarded_end_told(
+            LISTING,
+            ProcessTable::from_listing(LISTING, None),
+            told_rows,
+            &["/w/coordinator".to_string()],
+            &[4400],
+        );
+        assert_eq!(signalled, vec![4400], "{rows:?}");
+        assert_eq!(rows[0]["outcome"], "signaled", "{rows:?}");
         let held = held_checkouts(&ask, &["/build-line".to_string()]);
         let paths: Vec<&str> = held.iter().map(|one| one.path.as_str()).collect();
         assert_eq!(paths, vec!["/w/t-9", "/w/t-8"]);
+    }
+
+    /// 끝나지 않는 자식은 시간 안에 죽고 `None` 이다 — 창의 답이 그 자식을 기다리지 않는다.
+    /// 시간 안에 끝난 자식은 종료 코드가 0이 아니어도 출력을 돌려준다(lsof 는 보고할 것이
+    /// 없을 때 0이 아닌 코드로 끝난다).
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_does_not_finish_is_ended_and_answers_none() {
+        let began = std::time::Instant::now();
+        let mut slow = crate::proc::quiet_command("sleep");
+        slow.arg("3");
+        assert!(
+            crate::system_runtime::output_within(slow, std::time::Duration::from_millis(150))
+                .is_none()
+        );
+        assert!(began.elapsed() < std::time::Duration::from_millis(2_500));
+        let mut quick = crate::proc::quiet_command("sh");
+        quick.args(["-c", "echo hello; exit 1"]);
+        let output = crate::system_runtime::output_within(quick, std::time::Duration::from_secs(5))
+            .expect("it finished");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+        assert!(!output.status.success());
+    }
+
+    /// A worker's folder that is now a link is nobody's checkout (t-84800 r2 P2-3): the link may
+    /// lead to an older folder — the main checkout — and every check that follows it would read the
+    /// main checkout as the worker's, so a process standing there looks like a worker's orphan.
+    /// `git worktree add` never makes a link; a link as the last part of the path is not a worktree.
+    #[cfg(unix)]
+    #[test]
+    fn a_checkout_that_is_now_a_link_is_nobodys() {
+        let dir = tempfile::tempdir().expect("scratch");
+        let root = dir.path().canonicalize().expect("real");
+        let main = root.join("main");
+        std::fs::create_dir_all(main.join(".git")).expect("main checkout");
+        let swapped = root.join("t-9");
+        std::os::unix::fs::symlink(&main, &swapped).expect("link");
+        let mut taken = told(&swapped.display().to_string());
+        taken.started_ms = i64::MAX / 4;
+        let ask = end_call_over(Vec::new(), vec![taken]);
+        let held = held_checkouts(&ask, &[]);
+        assert!(held.is_empty(), "{held:?}");
+    }
+
+    /// A child killed at its deadline is not waited for (t-84800 r2 P3-1): a helper it started holds
+    /// the pipe open after the child is gone, and a read to the end would wait for the helper.
+    #[cfg(unix)]
+    #[test]
+    fn a_killed_child_whose_helper_holds_the_pipe_is_not_waited_for() {
+        let began = std::time::Instant::now();
+        let mut command = crate::proc::quiet_command("sh");
+        command.args(["-c", "sleep 3 & exec sleep 3"]);
+        assert!(
+            crate::system_runtime::output_within(command, std::time::Duration::from_millis(150))
+                .is_none()
+        );
+        assert!(
+            began.elapsed() < std::time::Duration::from_millis(1_500),
+            "waited {:?}",
+            began.elapsed()
+        );
+    }
+
+    /// A scan that answered nothing is not always an unsupported platform (t-84800 r2 P3-3): on
+    /// macOS the bounded `lsof` answers `None` at its deadline too, and the screen says both.
+    #[test]
+    fn an_unread_port_scan_does_not_blame_the_platform_alone() {
+        let said = crate::system_runtime::listeners_unread("macos");
+        assert!(said.contains("macos"), "{said}");
+        assert!(said.contains("시간"), "{said}");
+        assert!(said.contains("플랫폼"), "{said}");
+    }
+
+    /// A worker's checkout told through a link is the folder the system says its processes
+    /// stand in (r1-10): `lsof` prints the real place, and a tree told the other way round
+    /// still takes its checkout out.
+    #[cfg(unix)]
+    #[test]
+    fn a_checkout_told_through_a_link_is_read_as_the_real_folder() {
+        let dir = tempfile::tempdir().expect("scratch");
+        let real = dir.path().canonicalize().expect("real").join("real");
+        std::fs::create_dir_all(real.join("t-9/crates")).expect("folders");
+        let link = dir.path().canonicalize().expect("real").join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("link");
+        let now = i64::MAX / 4;
+        let mut through_link = told(&link.join("t-9").display().to_string());
+        through_link.started_ms = now;
+        let ask = end_call_over(Vec::new(), vec![through_link.clone()]);
+        let held = held_checkouts(&ask, &[]);
+        assert_eq!(held.len(), 1, "{held:?}");
+        let standing = real.join("t-9/crates").display().to_string();
+        assert!(sweep::owner(&standing, &held).is_some(), "{held:?}");
+        let tree = link.join("t-9/crates").display().to_string();
+        let mut real_told = told(&real.join("t-9").display().to_string());
+        real_told.started_ms = now;
+        let ask = end_call_over(Vec::new(), vec![real_told]);
+        assert!(held_checkouts(&ask, &[tree]).is_empty());
+    }
+
+    /// A folder deleted and made again under the same name is not the old worker's checkout
+    /// (r3w-6): a process standing there is outside every checkout, which is the refusal.
+    #[test]
+    fn a_folder_made_again_under_a_workers_name_is_not_that_workers_checkout() {
+        let dir = tempfile::tempdir().expect("scratch");
+        let old = dir.path().join("t-9");
+        let current = dir.path().join("t-8");
+        std::fs::create_dir_all(&old).expect("folder");
+        std::fs::create_dir_all(&current).expect("folder");
+        let mut long_gone = told(&old.display().to_string());
+        long_gone.started_ms = 1_000;
+        let mut live = told(&current.display().to_string());
+        live.started_ms = i64::MAX / 4;
+        let ask = end_call_over(Vec::new(), vec![long_gone, live]);
+        let held = held_checkouts(&ask, &[]);
+        let paths: Vec<&str> = held.iter().map(|one| one.path.as_str()).collect();
+        assert_eq!(paths.len(), 1, "{paths:?}");
+        assert!(paths[0].ends_with("t-8"), "{paths:?}");
     }
 
     /// The window reads a live coordinator seat's tree from the pane it

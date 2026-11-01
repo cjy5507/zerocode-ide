@@ -181,15 +181,15 @@ fn outcomes(ended: &[Ended]) -> Vec<(u32, Outcome)> {
 #[test]
 fn the_needle_is_text_never_a_pattern() {
     let table = table();
-    assert_eq!(matching_pids(&table, "cargo"), vec![4100, 4200]);
-    assert!(matching_pids(&table, "cargo.*").is_empty());
-    assert!(matching_pids(&table, "^cargo").is_empty());
+    assert_eq!(matching_pids(&table, "cargo", &[]), vec![4100, 4200]);
+    assert!(matching_pids(&table, "cargo.*", &[]).is_empty());
+    assert!(matching_pids(&table, "^cargo", &[]).is_empty());
 }
 
 /// The asking command holds its own needle; it is not listed.
 #[test]
 fn the_asking_command_is_not_its_own_candidate() {
-    assert!(!matching_pids(&table(), "cargo").contains(&4400));
+    assert!(!matching_pids(&table(), "cargo", &[]).contains(&4400));
 }
 
 /// A row says its target, parent, start, place, owner and the judge's word;
@@ -203,12 +203,14 @@ fn a_list_says_each_rows_target_place_owner_and_verdict() {
             run: "run-1".to_string(),
             worker: "w-1".to_string(),
             task: Some("t-1".to_string()),
+            started_ms: 0,
         },
         Checkout {
             path: "/w/t-2".to_string(),
             run: "run-2".to_string(),
             worker: "w-2".to_string(),
             task: None,
+            started_ms: 0,
         },
     ];
     let judge = Protects(vec![(4200, "another run's build")]);
@@ -625,6 +627,7 @@ fn a_list_carries_the_needle_and_the_ledgers_checkouts() {
         needle,
         checkouts,
         coordinator_seats,
+        ..
     } = asked(&planned)
     else {
         panic!("a list was asked for")
@@ -706,9 +709,16 @@ fn only_a_tree_of_the_workers_own_is_a_worker_checkout() {
         seat: None,
     });
     let planned = bench.run(&format!("{VERB} --find cargo"));
-    let ProcessSweepAsk::Find { checkouts, .. } = asked(&planned) else {
+    let ProcessSweepAsk::Find {
+        checkouts,
+        project_roots,
+        ..
+    } = asked(&planned)
+    else {
         panic!("a list was asked for")
     };
+    // The window takes the main checkout out again once it reads every path as the system spells it.
+    assert_eq!(project_roots, vec!["/main/.git".to_string()]);
     let workers: Vec<&str> = checkouts.iter().map(|one| one.worker.as_str()).collect();
     assert_eq!(workers, vec![own.as_str(), own_heir.as_str()]);
     assert!(owner("/main", &checkouts).is_none());
@@ -725,6 +735,7 @@ fn a_checkout_holding_a_coordinators_tree_is_nobodys() {
         run: "run-1".to_string(),
         worker: "w-1".to_string(),
         task: None,
+        started_ms: 0,
     };
     let held = outside(
         vec![
@@ -784,6 +795,7 @@ fn an_end_call_names_its_run_and_targets() {
                 },
             ],
             checkouts: Vec::new(),
+            project_roots: Vec::new(),
             coordinator_seats: seats,
         }
     );
@@ -934,6 +946,7 @@ fn an_empty_relative_or_root_checkout_holds_nothing() {
         run: "run-1".to_string(),
         worker: "w-1".to_string(),
         task: None,
+        started_ms: 0,
     };
     for path in ["", "/", "w/t-1"] {
         let checkouts = [told(path)];
@@ -999,4 +1012,117 @@ fn the_help_says_never_to_kill_by_pattern() {
         .expect("the verb is in the table");
     assert!(about.contains("패턴으로 죽이는 명령은 쓰지 않는다 — 인자가 패턴이 된다"));
     assert!(about.contains("코디가 목록을 읽고 고른 pid = 물음에 대한 예, 판 안·창은 예외 없음"));
+}
+
+/// Only the asking command's own row is hidden (r1-1): a build whose folder, package or test
+/// filter is named `process-sweep` is a process a list must show, and the asking command stays
+/// hidden wherever its shim stands and however it is run.
+#[test]
+fn only_the_asking_command_is_hidden_from_its_own_list() {
+    let table = vec![
+        row(10, 1, "sh /shims/zerocode-orc process-sweep --find cargo"),
+        row(11, 1, "zerocode-orc process-sweep --find cargo"),
+        row(
+            12,
+            1,
+            "/usr/local/bin/zerocode-orc process-sweep --kill 5@abc --find cargo",
+        ),
+        row(
+            20,
+            1,
+            "cargo build --manifest-path /w/t-84800-orc-17-process-sweep-v1-1-107/Cargo.toml",
+        ),
+        row(21, 1, "cargo test -p zerocode-core process_sweep"),
+        row(22, 1, "cargo test process-sweep"),
+    ];
+    assert_eq!(matching_pids(&table, "cargo", &[]), vec![20, 21, 22]);
+    let said = find(&table, "cargo", &[], &Protects(Vec::new()));
+    assert_eq!(said["matched"], 3, "{said}");
+}
+
+/// The asking command is hidden however its shell wrote it (t-84800 r2 P2-2): a coordinator
+/// that runs `eval 'zerocode-orc process-sweep --find …'` leaves a shell whose word is
+/// `'zerocode-orc`, a Windows shim is `zerocode-orc.ps1`, and a call after another orc call has the
+/// verb behind a second command word. None of them is a process to end, and a build that spells
+/// the verb in a path or a test filter still shows.
+#[test]
+fn the_asking_command_is_hidden_however_its_shell_quoted_or_chained_it() {
+    let table = vec![
+        row(
+            30,
+            1,
+            "/bin/zsh -c source ~/.zshrc && eval 'zerocode-orc process-sweep --find cargo' < /dev/null",
+        ),
+        row(
+            31,
+            1,
+            "powershell -File C:/shims/zerocode-orc.ps1 process-sweep --find cargo",
+        ),
+        row(
+            32,
+            1,
+            "sh -c zerocode-orc check; zerocode-orc process-sweep --find cargo",
+        ),
+        row(
+            33,
+            1,
+            "/bin/zsh -c eval \"zerocode-orc process-sweep --find cargo\" && echo cargo",
+        ),
+        row(
+            40,
+            1,
+            "cargo build --manifest-path /w/t-84800-orc-17-process-sweep-v1-1-107/Cargo.toml",
+        ),
+        row(41, 1, "cargo test process-sweep"),
+    ];
+    assert_eq!(matching_pids(&table, "cargo", &[]), vec![40, 41]);
+}
+
+/// The processes above the asking call are not candidates, whatever they spell (t-84800 r2 P2-2):
+/// the window names them by where they stand, so a shell that ran the call in a way no rule on
+/// words foresaw is hidden all the same, and a build that spells the verb stays.
+#[test]
+fn the_processes_above_the_asking_call_are_not_candidates() {
+    struct Above(Vec<u32>);
+    impl Judge for Above {
+        fn judge(&self, _row: &ProcessRow, _table: &[ProcessRow]) -> Judgment {
+            Judgment::Allow
+        }
+        fn asking(&self) -> &[u32] {
+            &self.0
+        }
+    }
+    let table = vec![
+        row(50, 1, "claude cargo-aware agent"),
+        row(51, 50, "/bin/zsh -c run-it cargo --some-new-launcher"),
+        row(52, 51, "curl --max-time 5 cargo"),
+        row(60, 1, "cargo build"),
+    ];
+    let above = Above(vec![50, 51, 52]);
+    assert_eq!(matching_pids(&table, "cargo", above.asking()), vec![60]);
+    let said = find(&table, "cargo", &[], &above);
+    assert_eq!(said["matched"], 1, "{said}");
+    assert_eq!(said["rows"][0]["pid"], 60, "{said}");
+    assert_eq!(matching_pids(&table, "cargo", &[]), vec![50, 51, 52, 60]);
+}
+
+/// A folder deleted and made again under the same name is not the old worker's (r3w-6): the
+/// folder's birth is well after the worker row began, while a worktree cut for the summons is
+/// born within minutes of it.
+#[test]
+fn a_folder_born_long_after_the_worker_began_is_not_its_checkout() {
+    use crate::orchestration::process_sweep::recreated;
+    let began = 1_000_000_000_000;
+    let minute = 60_000;
+    assert!(
+        !recreated(began - 5 * minute, began),
+        "born before the row: an inherited tree"
+    );
+    assert!(!recreated(began, began));
+    assert!(
+        !recreated(began + minute, began),
+        "cut a moment after the reservation"
+    );
+    assert!(recreated(began + 60 * minute, began));
+    assert!(recreated(began + 3 * 24 * 60 * minute, began));
 }

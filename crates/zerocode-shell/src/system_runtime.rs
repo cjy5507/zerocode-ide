@@ -115,12 +115,46 @@ pub(super) fn scan_listeners() -> Option<String> {
     None
 }
 
+/// 포트를 훑지 못했을 때 화면에 말하는 이유 (t-84800 r2 P3-3). `scan_listeners` 가 `None` 인 까닭은
+/// 둘이다 — 이 플랫폼이 지원되지 않거나, `lsof` 가 제 시간 안에 끝나지 않았다. 하나로 단정하면
+/// 느린 맥의 사람에게 틀린 말이 되므로 둘 다 말한다.
+pub(super) fn listeners_unread(platform: &str) -> String {
+    format!(
+        "{platform}에서는 포트를 읽지 못했습니다 — 지원하지 않는 플랫폼이거나 lsof가 시간 안에 끝나지 않았습니다"
+    )
+}
+
+/// 자식을 `within` 안에 끝내고 출력을 돌려준다. 그 안에 안 끝나면 자식을 죽이고 `None`.
+///
+/// 종료 코드는 보지 않는다 — 시간 안에 끝났으면 0이 아니어도 출력을 돌려준다(`lsof` 는 보고할
+/// 것이 없을 때 0이 아닌 코드로 끝난다). 창의 답이 한 자식을 영원히 기다리지 않게 하는 문이다.
+/// 자식을 돌리는 것은 프로세스 목록과 같은 하나의 실행기다(`resource_usage::run_bounded`) —
+/// 죽인 뒤의 기다림도 그쪽 스레드의 몫이라 자식의 손자가 파이프를 쥐고 있어도 여기서 기다리지 않는다.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+pub(super) fn output_within(
+    command: std::process::Command,
+    within: std::time::Duration,
+) -> Option<std::process::Output> {
+    let run = crate::resource_usage::run_bounded(command, within).ok()?;
+    Some(std::process::Output {
+        status: run.status,
+        stdout: run.stdout.bytes,
+        stderr: run.stderr.bytes,
+    })
+}
+
+/// How long one `lsof` may take (r3w-4). The window answers a coordinator within
+/// `zerocode_hookd::TEAM_DEADLINE` (10 s) and `process-sweep` reads the table and the places in
+/// that time, so a machine whose `lsof` hangs on a stalled mount is answered as "unread" — no
+/// places, no listeners, a checkout kept — not waited on.
+#[cfg(target_os = "macos")]
+const LSOF_WITHIN: std::time::Duration = std::time::Duration::from_secs(4);
+
 #[cfg(target_os = "macos")]
 pub(super) fn run_lsof(args: &[&str]) -> Option<String> {
-    let output = crate::proc::quiet_command("lsof")
-        .args(args)
-        .output()
-        .ok()?;
+    let mut command = crate::proc::quiet_command("lsof");
+    command.args(args);
+    let output = output_within(command, LSOF_WITHIN)?;
     // lsof exits non-zero when it merely had nothing to report, so the status
     // is not the test — whether it wrote anything is.
     Some(String::from_utf8_lossy(&output.stdout).into_owned())

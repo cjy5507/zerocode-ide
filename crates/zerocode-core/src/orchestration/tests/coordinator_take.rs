@@ -358,6 +358,24 @@ fn a_live_workers_attempt_is_not_taken_from_under_it() {
     assert!(refused.contains("closed"), "{refused}");
 }
 
+/// A hand-in with no body is refused with the file road (t-84800 r2 P3-5), the one the briefing
+/// teaches: an inline `--body '…'` of JSON is the shape in which a shell expands what a summary holds.
+#[test]
+fn a_hand_in_without_a_body_is_told_the_file_road() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name take");
+    let task = task_of(&mut bench, "hand-in-body");
+    bench.json(&format!("task-take --task {task}"));
+    let refused = refusal_seeing(
+        &mut bench,
+        agent_teams::LEADER_PANE,
+        &format!("hand-in --task {task} --head {LANDED}"),
+        Some(git_says()),
+    );
+    assert!(refused.contains("--body-file"), "{refused}");
+    assert!(!refused.contains("--body '"), "{refused}");
+}
+
 /// ③ A hand-in names a commit git answered for, on the seat's own open attempt, once.
 #[test]
 fn a_hand_in_is_refused_unless_git_answered_for_its_commit_on_the_seats_own_attempt() {
