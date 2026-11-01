@@ -90,7 +90,7 @@ const MARK_TAIL_MIN_BYTES: usize = 8;
 
 /// Whether one whole word carries a [`VALUE_MARKS`] mark at a word edge — at its
 /// start, or just after a non-alphanumeric byte (`key=sk-…`) — with a token-shaped
-/// run of at least [`MARK_TAIL_MIN_BYTES`] bytes right after it. Stricter than
+/// run of at least `MARK_TAIL_MIN_BYTES` bytes right after it. Stricter than
 /// [`looks_like_a_credential`], whose substring reading is right for scanning
 /// free text and too eager for judging a value a person typed: 「Asia」 is
 /// `ASIA` and 「desk-lamp」 holds `sk-`, and neither is a key.
@@ -588,7 +588,7 @@ mod tests {
         let keys = [
             format!("AKIA{}", "Q7".repeat(8)),
             format!("sk-{}", "a1".repeat(12)),
-            format!("key={}", format!("eyJ{}", "hGci".repeat(5))),
+            format!("key=eyJ{}", "hGci".repeat(5)),
         ];
         for key in &keys {
             assert!(carries_a_value_mark_at_a_word_edge(key), "{key}");

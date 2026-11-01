@@ -1036,7 +1036,7 @@ mod tests {
             format!("sk_{}", "a1".repeat(12)),
             format!("eyJ{}", "hGci".repeat(5)),
             format!("xoxb-{}", "12".repeat(6)),
-            format!("key={}", format!("sk-{}", "a1".repeat(12))),
+            format!("key=sk-{}", "a1".repeat(12)),
         ];
         for value in &held {
             assert!(entry_is_secret("q", value), "{value} was moved");
