@@ -29251,3 +29251,146 @@ fn a_file_flag_the_window_did_not_read_writes_nothing() {
     let listed = bench.json("task-list");
     assert_eq!(listed["tasks"].as_array().expect("tasks").len(), 0);
 }
+
+/// Every list's stamp in a ledger, run by run, and the receipts'.
+fn every_stamp(ledger: &Ledger) -> Vec<u64> {
+    let mut stamps: Vec<u64> = ledger.runs().iter().flat_map(stamps_of).collect();
+    stamps.push(ledger.served.edit());
+    stamps
+}
+
+fn stamps_of(run: &Run) -> [u64; 7] {
+    [
+        run.tasks.edit(),
+        run.dispatches.edit(),
+        run.workers.edit(),
+        run.messages.edit(),
+        run.inboxes.edit(),
+        run.gates.edit(),
+        run.attachments.edit(),
+    ]
+}
+
+/// A restart with nothing to settle reaches for no list (t-85378 r2): the
+/// store reads a moved stamp as rows that may have changed, and digests every
+/// letter of the run on the next write. A window opens through this sweep, so
+/// a stamp moved here is the first write of every window.
+#[test]
+fn a_restart_with_nothing_to_settle_moves_no_lists_stamp() {
+    let mut bench = a_bench_with_mail(5);
+    let before = every_stamp(&bench.ledger);
+    bench.ledger.window_restarted(5_000_000);
+    assert_eq!(every_stamp(&bench.ledger), before);
+}
+
+/// A continuation left typing is the one row a restart rewrites, as it always
+/// did. The letters beside it keep their words, another run keeps every stamp,
+/// and the next restart finds nothing left to rewrite (t-85378 r2).
+#[test]
+fn a_restart_rewrites_the_unsettled_row_and_moves_only_its_runs_letters() {
+    const NOW: i64 = 5_000_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name restart");
+    bench.json("handover-policy --on-transient-error resume");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, _) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let plan = resume_plan(
+        &bench.ledger.runs()[0],
+        &worker,
+        &a_transient_marker("k1"),
+        NOW,
+    )
+    .expect("a continuation");
+    let id = bench.ledger.resume_begin(&plan, NOW).expect("reserved");
+    bench.peer_status("a letter beside it");
+    let quiet = bench.ledger.create_run("quiet", 1);
+    bench
+        .ledger
+        .post(
+            &quiet,
+            Draft {
+                from: LEDGER_ITSELF.to_string(),
+                to: format!("run:{quiet}"),
+                kind: MessageKind::Status,
+                body: Text::from("in another run"),
+                subject: Text::default(),
+                priority: Priority::Normal,
+                payload: Text::default(),
+                thread: None,
+                task: None,
+                dispatch: None,
+            },
+            NOW,
+        )
+        .expect("a letter");
+    let words = |bench: &Bench| -> Vec<(String, String)> {
+        bench.ledger.runs()[0]
+            .messages
+            .iter()
+            .map(|held| (held.id.clone(), held.body.as_str().to_string()))
+            .collect()
+    };
+    let before = words(&bench);
+    let letters = bench.ledger.runs()[0].messages.edit();
+    let others = stamps_of(&bench.ledger.runs()[1]);
+
+    assert!(bench.ledger.window_restarted(NOW + 5).moved);
+
+    assert_eq!(stamps_of(&bench.ledger.runs()[1]), others);
+    assert_ne!(bench.ledger.runs()[0].messages.edit(), letters);
+    let after = words(&bench);
+    for (at, (held, body)) in before.iter().enumerate() {
+        assert_eq!(&after[at].0, held);
+        if held != &id {
+            assert_eq!(&after[at].1, body, "{held} is not the row to rewrite");
+        }
+    }
+    let body = resume_receipt(&bench, &id);
+    assert_eq!(body["status"], HANDOVER_INTERRUPTED);
+    assert_eq!(body["interruptedMs"], NOW + 5);
+    assert_eq!(
+        body["why"],
+        "the window restarted while the continuation was being typed; whether its \
+         words reached the composer is unknown, so this error is not typed at again \
+         — read the worker's screen"
+    );
+    assert_eq!(bench.json("check --peek --types resumed")["count"], 1);
+
+    let settled = every_stamp(&bench.ledger);
+    bench.ledger.window_restarted(NOW + 6);
+    assert_eq!(every_stamp(&bench.ledger), settled);
+}
+
+/// An hourly sweep that gives nothing up reaches for no list either (t-85378
+/// r2). A window's first beat makes one when the last was over an hour ago, so
+/// a stamp moved here is every receipt digested by the first write.
+#[test]
+fn a_sweep_that_gives_up_nothing_moves_no_lists_stamp() {
+    let mut bench = a_bench_with_mail(3);
+    bench.json("task-create --spec keep-it --retry-request a-receipt");
+    let now = 4_000_000;
+    assert!(bench.ledger.sweep_due(now));
+    let before = every_stamp(&bench.ledger);
+    let swept = bench.ledger.sweep_retention(now);
+    assert!(!swept.moved(), "{swept:?}");
+    assert_eq!(every_stamp(&bench.ledger), before);
+}
+
+/// A sweep that does give a receipt up counts it once, whichever rule took it,
+/// and moves the receipts' stamp (t-85378 r2).
+#[test]
+fn a_sweep_that_expires_a_receipt_counts_it_once_and_moves_the_stamp() {
+    let mut bench = a_bench_with_mail(1);
+    bench.json("task-create --spec keep-it --retry-request a-receipt");
+    let filed = bench.ledger.served.len();
+    assert!(filed > 0, "the verb filed a receipt");
+    let before = bench.ledger.served.edit();
+    let long_after = bench.clock + 400 * DAY_MS;
+    let swept = bench.ledger.sweep_retention(long_after);
+    assert_eq!(swept.receipts_expired, filed);
+    assert!(bench.ledger.served.iter().all(Served::is_tombstone));
+    assert_ne!(bench.ledger.served.edit(), before);
+}

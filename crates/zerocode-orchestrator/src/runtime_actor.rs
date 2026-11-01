@@ -1758,6 +1758,19 @@ pub struct RuntimeImage {
     /// revision, so two images of one revision may differ here and are
     /// still equal.
     copies: u64,
+    /// How this runtime's first write went, once it has made one. Not a fact
+    /// of the revision either.
+    first_write: Option<FirstWrite>,
+}
+
+/// How a runtime's first write after its boot went (t-85378): whether the
+/// lists took the digests the store's open made, and how many rows the request
+/// that first wrote serialized and hashed. Numbers alone, so the window can
+/// keep them in its log without a word any row says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstWrite {
+    pub lists_carried: bool,
+    pub rows_digested: u64,
 }
 
 impl std::fmt::Debug for RuntimeImage {
@@ -1841,6 +1854,12 @@ impl RuntimeImage {
     #[must_use]
     pub const fn said_goodbye(&self) -> bool {
         self.said_goodbye
+    }
+
+    /// How this runtime's first write went; `None` until it has made one.
+    #[must_use]
+    pub const fn first_write(&self) -> Option<FirstWrite> {
+        self.first_write
     }
 
     /// How many times this runtime had copied its ledger when this image was
@@ -3659,6 +3678,12 @@ struct RuntimeState {
     poison: Option<RuntimeError>,
     recovery_permits: Vec<EffectPermit>,
     repairs: Vec<String>,
+    /// Whether the boot's ledger took the digests the store's open made.
+    lists_carried: bool,
+    /// This thread's write work when the boot ended: everything counted after
+    /// it is this runtime's own.
+    work_at_boot: ledger_store::WriteWork,
+    first_write: Option<FirstWrite>,
     /// This process's attachment to the store, held for the actor's life
     /// (t-37679): the actor opens connections per request and closed them
     /// all before the next, so every request rebuilt the WAL index and
@@ -3682,7 +3707,7 @@ fn rebuild_stored_ledger(
     lease: &AuthorityLease,
     mut held: ledger_store::Held,
     now_ms: i64,
-) -> Result<(Ledger, u64, Vec<String>), RuntimeError> {
+) -> Result<(Ledger, u64, Vec<String>, bool), RuntimeError> {
     let receipts = tombstone_unverifiable_legacy_receipts(&mut held.projection);
     if !held.bytes_match && receipts == 0 {
         return Err(RuntimeError::StoreCorrupt);
@@ -3699,8 +3724,8 @@ fn rebuild_stored_ledger(
          * those very rows, its first write carries those digests on and digests
          * only what moved (t-85378). When it exports anything else, nothing is
          * carried, and the first write digests as it always did. */
-        journal.adopt_lists(lease, &ledger.export_marked());
-        return Ok((ledger, held.revision, repairs));
+        let carried = journal.adopt_lists(lease, &ledger.export_marked());
+        return Ok((ledger, held.revision, repairs, carried));
     }
 
     journal
@@ -3710,7 +3735,7 @@ fn rebuild_stored_ledger(
         .revision
         .checked_add(1)
         .ok_or(RuntimeError::RevisionMismatch)?;
-    Ok((ledger, revision, repairs))
+    Ok((ledger, revision, repairs, false))
 }
 
 impl RuntimeState {
@@ -3741,7 +3766,7 @@ impl RuntimeState {
             .as_ref()
             .map_or(0, |held| held.updated_at_ms)
             .max(boot_now_ms(&boot));
-        let (ledger, revision, repairs) = match (held, boot) {
+        let (ledger, revision, repairs, lists_carried) = match (held, boot) {
             /* A fresh start that adopted somebody's ledger is how work
              * disappears without anybody being told. */
             #[cfg(test)]
@@ -3753,7 +3778,7 @@ impl RuntimeState {
                 let ledger = Ledger::new();
                 ledger_store::write(&connection, &ledger_id, 0, 1, &ledger.export(), now_ms)
                     .map_err(runtime_error)?;
-                (ledger, 1, Vec::new())
+                (ledger, 1, Vec::new(), false)
             }
             #[cfg(test)]
             (None, RuntimeBoot::Reopen) => return Err(RuntimeError::MissingLedger),
@@ -3787,7 +3812,7 @@ impl RuntimeState {
                 journal
                     .import_legacy(&lease, &ledger.export(), &legacy_digest, now_ms)
                     .map_err(runtime_error)?;
-                (ledger, 0, Vec::new())
+                (ledger, 0, Vec::new(), false)
             }
             (
                 None,
@@ -3805,7 +3830,7 @@ impl RuntimeState {
                 journal
                     .initialize_fresh(&lease, &ledger.export(), now_ms)
                     .map_err(runtime_error)?;
-                (ledger, 0, Vec::new())
+                (ledger, 0, Vec::new(), false)
             }
         };
         drop(connection);
@@ -3828,6 +3853,9 @@ impl RuntimeState {
             poison: None,
             recovery_permits,
             repairs,
+            lists_carried,
+            work_at_boot: ledger_store::write_work_here(),
+            first_write: None,
             _store_hold: store_hold,
         })
     }
@@ -3852,6 +3880,23 @@ impl RuntimeState {
             repairs: self.repairs.clone(),
             said_goodbye: self.ledger.said_goodbye(),
             copies: self.ledger.copies,
+            first_write: self.first_write,
+        }
+    }
+
+    /// Keep what the first request that wrote cost. Read off this thread's
+    /// count rather than at each of the doors that write, of which there are
+    /// many: every write this runtime makes is made on its own thread.
+    fn note_first_write(&mut self) {
+        if self.first_write.is_some() {
+            return;
+        }
+        let spent = ledger_store::write_work_here().since(self.work_at_boot);
+        if spent.writes > 0 {
+            self.first_write = Some(FirstWrite {
+                lists_carried: self.lists_carried,
+                rows_digested: spent.rows_digested,
+            });
         }
     }
 
@@ -7107,6 +7152,7 @@ fn actor_main(
             ActorCommand::Request { request, reply } => {
                 let begun = serving.begin(request.verb(), Instant::now());
                 let answered = state.request(*request);
+                state.note_first_write();
                 drop(begun);
                 match answered {
                     Ok(answer) => {
@@ -8386,11 +8432,16 @@ mod tests {
     /// what a window finds when it opens (t-85378). Answers the folder that
     /// keeps it, and its path.
     fn a_store_left_on_disk(letters: usize, body_bytes: usize) -> (TempDir, std::path::PathBuf) {
-        let fixture = Fixture::new();
         let mut seeded = ledger_store::a_ledger_with_mail_of(letters, body_bytes);
         for at in 0..3 {
             ledger_store::a_letter_to(&mut seeded, 1, 3 + at);
         }
+        a_store_holding(&seeded)
+    }
+
+    /// A store left on disk holding `seeded`, its own handle and runtime gone.
+    fn a_store_holding(seeded: &Ledger) -> (TempDir, std::path::PathBuf) {
+        let fixture = Fixture::new();
         let actor = start(
             &fixture,
             RuntimeBoot::Cutover {
@@ -8430,7 +8481,7 @@ mod tests {
         )
         .expect("the store reads")
         .expect("the ledger is there");
-        let (ledger, revision, repairs) =
+        let (ledger, revision, repairs, _) =
             rebuild_stored_ledger(&journal, &lease, held, 100).expect("a sound ledger");
         assert!(repairs.is_empty(), "nothing here needs repair: {repairs:?}");
         Opened {
@@ -8505,6 +8556,138 @@ mod tests {
                 now_ms,
             ))
             .map(|(decision, _)| decision)
+    }
+
+    /// A clock past the hour a first sweep waits for, and before any letter of
+    /// these ledgers is old enough for it to give up.
+    const WINDOW_NOW_MS: i64 = 4_000_000;
+
+    /// What a window does with a store on its way up, in its order
+    /// (`orchestration::open_with_headroom` in the shell): the open, the
+    /// runtime, a look for what the last window left unsettled, the restart
+    /// sweep.
+    fn a_windows_boot(path: &std::path::Path, now_ms: i64) -> (WorkflowStore, RuntimeActor) {
+        let store = WorkflowStore::open(path).expect("the open checks the store");
+        let actor = RuntimeActor::start(
+            &store,
+            "main-ledger",
+            RuntimeBoot::Cutover {
+                legacy: None,
+                now_ms,
+            },
+            4,
+            TableFixture::holding(a_team()),
+            Box::new(NoLauncher),
+        )
+        .expect("runtime actor");
+        let image = actor.view().expect("an image");
+        assert!(image.recoveries().is_empty(), "nothing here was in flight");
+        actor.window_restarted(now_ms).expect("the restart sweep");
+        (store, actor)
+    }
+
+    /// The sweeps of a window's beat with nothing to tell (`orchestration::tick`
+    /// in the shell), the hourly one due.
+    fn a_windows_first_beat(actor: &RuntimeActor, now_ms: i64) {
+        actor
+            .readiness_sweep(Vec::new(), Vec::new(), now_ms)
+            .expect("the readiness sweep");
+        actor
+            .quiet_sweep(Vec::new(), now_ms)
+            .expect("the quiet sweep");
+        actor
+            .idle_sweep(Vec::new(), now_ms)
+            .expect("the idle sweep");
+        actor
+            .panes_missing(Vec::new(), now_ms)
+            .expect("the missing panes");
+        actor
+            .panes_seen(Vec::new(), now_ms)
+            .expect("the seen panes");
+        actor.retention_sweep(now_ms).expect("the hourly sweep");
+    }
+
+    /// The first letter of a window that came up as a window does digests what
+    /// moved (t-85378 r2): its restart sweep and its first beat found nothing
+    /// to do, and reached for no list.
+    #[test]
+    fn the_first_letter_after_a_windows_boot_digests_only_what_moved() {
+        const LETTERS: usize = 2_000;
+        let (_root, path) = a_store_left_on_disk(LETTERS, 500);
+        let (store, actor) = a_windows_boot(&path, WINDOW_NOW_MS);
+        a_windows_first_beat(&actor, WINDOW_NOW_MS);
+        let image = actor.view().expect("an image");
+        assert_eq!(image.first_write(), None, "nothing here needed a write");
+
+        let sent = a_letter_by(&actor, "r-first", WINDOW_NOW_MS + 1).expect("the letter");
+        assert_eq!(sent.reply.exit_code, 0, "{}", sent.reply.stderr);
+
+        let first = actor
+            .view()
+            .expect("an image")
+            .first_write()
+            .expect("the letter was written");
+        assert!(first.lists_carried, "the open's digests were not carried");
+        assert!(
+            first.rows_digested < (LETTERS / 10) as u64,
+            "the first letter digested {} rows of a ledger of {LETTERS} letters",
+            first.rows_digested
+        );
+        actor.shutdown().expect("release owner");
+        drop(store);
+        WorkflowStore::open(&path).expect("the next open checks every witness the write left");
+    }
+
+    /// A restart with rows to settle writes them, and digests the run they sit
+    /// in, not the run with the mail (t-85378 r2). What it settled is what it
+    /// always settled, and the next open passes the store.
+    #[test]
+    fn a_restart_that_settles_rows_digests_only_the_run_they_sit_in() {
+        const LETTERS: usize = 2_000;
+        let (_root, path) = a_store_holding(&ledger_store::a_ledger_with_every_table(LETTERS, 500));
+        let (store, actor) = a_windows_boot(&path, WINDOW_NOW_MS);
+        let image = actor.view().expect("an image");
+        let first = image.first_write().expect("the sweep wrote");
+        assert!(first.lists_carried, "the open's digests were not carried");
+        assert!(
+            first.rows_digested < (LETTERS / 10) as u64,
+            "the sweep digested {} rows of a ledger of {LETTERS} letters",
+            first.rows_digested
+        );
+        let rows = image.projection();
+        let walked = rows
+            .messages
+            .iter()
+            .find(|held| held.id == "m-walking")
+            .expect("the handover row");
+        let body: serde_json::Value = serde_json::from_str(walked.body.as_str()).expect("json");
+        assert_eq!(body["status"], "interrupted");
+        assert_eq!(body["interruptedMs"], WINDOW_NOW_MS);
+        assert_eq!(
+            rows.runs[1]
+                .coordinator
+                .as_ref()
+                .and_then(|held| held.vacated_ms),
+            Some(WINDOW_NOW_MS)
+        );
+        let state_of = |id: &str| {
+            rows.workers
+                .iter()
+                .find(|worker| worker.id == id)
+                .map(|worker| worker.state.as_str())
+                .expect("the worker")
+        };
+        assert_eq!(state_of("w-asleep"), "sleeping");
+        assert_eq!(state_of("w-far"), "released");
+        assert!(
+            rows.messages
+                .iter()
+                .any(|held| held.from == "worker:w-far" && held.body.as_str().contains("borrowed")),
+            "the borrowed pane's ending was not queued for its home"
+        );
+        actor.shutdown().expect("release owner");
+        drop(store);
+        WorkflowStore::open(&path).expect("the next open checks what the sweep left");
     }
 
     /// The first write after a window opens digests what moved, not the whole
@@ -8842,15 +9025,16 @@ mod tests {
         WorkflowStore::open(&path).expect("the next open checks it");
     }
 
-    /// What a runtime that opens a store twice leaves, line by line, on a ledger
-    /// nothing random went into: the root, the rows and where each table's rows
-    /// sit. Printed, never asserted: the same lines read on the tree before a
-    /// change to the write and after it (t-85378).
+    /// What a window that opens a store three times leaves, line by line, on a
+    /// ledger nothing random went into and with rows in every table: the root,
+    /// the rows and where each table's rows sit. Printed, never asserted: the
+    /// same lines read on the tree before a change to the write and after it
+    /// (t-85378).
     #[test]
     #[ignore = "a comparison: prints what a reopened runtime leaves, to diff across two trees"]
     fn print_what_a_reopened_runtime_leaves() {
         use sha2::{Digest as _, Sha256};
-        let (_root, path) = a_store_left_on_disk(300, 500);
+        let (_root, path) = a_store_holding(&ledger_store::a_ledger_with_every_table(300, 500));
         let say = |step: &str, store: &WorkflowStore| {
             let connection = store.connection().expect("store connection");
             let held = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
@@ -8868,6 +9052,10 @@ mod tests {
             for table in [
                 "ledger_runs",
                 "ledger_tasks",
+                "ledger_dispatches",
+                "ledger_workers",
+                "ledger_attachments",
+                "ledger_gates",
                 "ledger_messages",
                 "ledger_inboxes",
                 "ledger_acked",
@@ -8892,19 +9080,12 @@ mod tests {
                 Sha256::digest(&rows),
             );
         };
-        let mut now_ms = 1_000;
+        let mut now_ms = WINDOW_NOW_MS;
         for opening in 0..3 {
-            let store = WorkflowStore::open(&path).expect("the open checks the store");
-            let actor = RuntimeActor::start(
-                &store,
-                "main-ledger",
-                RuntimeBoot::Reopen,
-                4,
-                TableFixture::holding(a_team()),
-                Box::new(NoLauncher),
-            )
-            .expect("runtime actor");
-            say(&format!("opening {opening}, booted"), &store);
+            let (store, actor) = a_windows_boot(&path, now_ms);
+            say(&format!("opening {opening}, restarted"), &store);
+            a_windows_first_beat(&actor, now_ms);
+            say(&format!("opening {opening}, first beat"), &store);
             let busy = actor.view().expect("an image").projection().runs[0]
                 .id
                 .clone();
@@ -8936,20 +9117,35 @@ mod tests {
         }
     }
 
-    /// What the first write after an open costs, on a ledger of the person's
-    /// letters and bytes (t-85378): the open, the boot, the first letter and
-    /// the one after it, a round for each opening. Prints, never asserts: the
-    /// same lines read on the tree before the change and after it. Run it
-    /// alone, as the work it reads is the whole process's, and under
-    /// `taskpolicy -b` for the low-spec profile.
+    /// What the first write costs on a window's way up, on a ledger of the
+    /// person's letters and bytes (t-85378 r2): the open, the boot, the restart
+    /// sweep, the first letter and the one after it, a round for each opening.
+    /// The first round's sweep has seats, workers and a handover to settle, and
+    /// the rounds after it have nothing. Prints, never asserts: the same lines
+    /// read on the tree before the change and after it. Run it alone, as the
+    /// work it reads is the whole process's, and under `taskpolicy -b` for the
+    /// low-spec profile.
     #[test]
     #[ignore = "a measurement: prints what the first write after an open costs"]
     fn measure_the_first_write_after_an_open() {
         const LETTERS: usize = 43_540;
         const BODY_BYTES: usize = 1_000;
-        const ROUNDS: usize = 5;
-        let (_root, path) = a_store_left_on_disk(LETTERS, BODY_BYTES);
-        let mut now_ms = 1_000;
+        const ROUNDS: usize = 6;
+        let (_root, path) = a_store_holding(&ledger_store::a_ledger_with_every_table(
+            LETTERS, BODY_BYTES,
+        ));
+        let mut now_ms = WINDOW_NOW_MS;
+        let cost = |spent: ledger_store::WriteWork| {
+            format!(
+                "digests={:.1}ms rows={:.1}ms digested={} rows, {} bytes, written={} rows, writes={}",
+                spent.digest_ns as f64 / 1e6,
+                spent.rows_ns as f64 / 1e6,
+                spent.rows_digested,
+                spent.bytes_digested,
+                spent.rows_written,
+                spent.writes,
+            )
+        };
         for round in 0..ROUNDS {
             let opening = std::time::Instant::now();
             let store = WorkflowStore::open(&path).expect("the open checks the store");
@@ -8958,13 +9154,22 @@ mod tests {
             let actor = RuntimeActor::start(
                 &store,
                 "main-ledger",
-                RuntimeBoot::Reopen,
+                RuntimeBoot::Cutover {
+                    legacy: None,
+                    now_ms,
+                },
                 4,
                 TableFixture::holding(a_team()),
                 Box::new(NoLauncher),
             )
             .expect("runtime actor");
             let boot_ms = booting.elapsed().as_secs_f64() * 1000.0;
+            let work = ledger_store::write_work();
+            let sweeping = std::time::Instant::now();
+            actor.window_restarted(now_ms).expect("the restart sweep");
+            let sweep_ms = sweeping.elapsed().as_secs_f64() * 1000.0;
+            let swept = cost(ledger_store::write_work().since(work));
+            a_windows_first_beat(&actor, now_ms);
             let busy = actor.view().expect("an image").projection().runs[0]
                 .id
                 .clone();
@@ -8995,20 +9200,12 @@ mod tests {
                 let wall_ms = sending.elapsed().as_secs_f64() * 1000.0;
                 assert_eq!(sent.reply.exit_code, 0, "{}", sent.reply.stderr);
                 let spent = ledger_store::write_work().since(work);
-                letters.push_str(&format!(
-                    " {which}: wall={wall_ms:.1}ms digests={:.1}ms rows={:.1}ms \
-                     digested={} rows, {} bytes, written={} rows;",
-                    spent.digest_ns as f64 / 1e6,
-                    spent.rows_ns as f64 / 1e6,
-                    spent.rows_digested,
-                    spent.bytes_digested,
-                    spent.rows_written,
-                ));
+                letters.push_str(&format!(" {which}: wall={wall_ms:.1}ms {};", cost(spent)));
             }
             actor.shutdown().expect("release owner");
             eprintln!(
                 "measure: round {round}, {LETTERS} letters of {BODY_BYTES} bytes: \
-                 open={open_ms:.1}ms boot={boot_ms:.1}ms;{letters}"
+                 open={open_ms:.1}ms boot={boot_ms:.1}ms sweep={sweep_ms:.1}ms ({swept});{letters}"
             );
         }
     }

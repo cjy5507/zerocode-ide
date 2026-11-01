@@ -3905,6 +3905,169 @@ pub(crate) fn a_ledger_with_mail_of(
     Ledger::rebuild(rows).expect("a ledger with mail")
 }
 
+/// [`a_ledger_with_mail_of`], with something in every table: in its second run
+/// a seated coordinator, a task under a live worker that can sleep, a finished
+/// attempt, a borrowed pane, a gate, a handover the last window was walking;
+/// then a binding, a receipt, and a third run a sweep has compacted (t-85378).
+/// A window restart has something to do with each of them.
+#[cfg(test)]
+pub(crate) fn a_ledger_with_every_table(
+    letters: usize,
+    body_bytes: usize,
+) -> zerocode_core::orchestration::Ledger {
+    use zerocode_core::orchestration::{CoordinatorSeat, Ledger, RunSummary};
+    let mut rows = a_ledger_with_mail_of(letters, body_bytes).export();
+    let quiet = rows.runs[1].id.clone();
+    rows.runs[1].coordinator = Some(CoordinatorSeat {
+        seat: "team-2/%1".to_string(),
+        actor: None,
+        generation: 1,
+        since_ms: 2,
+        vacated_ms: None,
+        handover: None,
+    });
+    let task = |id: &str, status: &str| TaskRow {
+        run: quiet.clone(),
+        id: id.to_string(),
+        spec: Text::from("something to do"),
+        title: Text::from("something"),
+        deps: Vec::new(),
+        parent: None,
+        status: serde_json::from_str(&format!("\"{status}\"")).expect("a status"),
+        result: Text::default(),
+        failures: 0,
+        created_ms: 3,
+        result_author: None,
+        closed: None,
+    };
+    rows.tasks.push(task("t-asleep", "dispatched"));
+    rows.tasks.push(task("t-done", "completed"));
+    rows.tasks.push(task("t-gated", "blocked"));
+    let dispatch = |id: &str, task: &str, worker: &str, ended_ms: Option<i64>| DispatchRow {
+        run: quiet.clone(),
+        id: id.to_string(),
+        task: task.to_string(),
+        worker: worker.to_string(),
+        started_ms: 4,
+        ended_ms,
+        succeeded: ended_ms.map(|_| true),
+        retry_of: None,
+        source: None,
+        session_history: None,
+        remote: None,
+    };
+    rows.dispatches
+        .push(dispatch("dp-asleep", "t-asleep", "w-asleep", None));
+    rows.dispatches
+        .push(dispatch("dp-done", "t-done", "w-done", Some(5)));
+    let worker =
+        |id: &str, state: &str, dispatch: Option<&str>, checkout: Option<&str>| WorkerRow {
+            run: quiet.clone(),
+            id: id.to_string(),
+            team: "team-2".to_string(),
+            agent: "codex".to_string(),
+            pane: format!("%{id}"),
+            state: serde_json::from_str(&format!("\"{state}\"")).expect("a state"),
+            started_ms: 4,
+            dispatch: dispatch.map(str::to_string),
+            model: None,
+            effort: None,
+            session: None,
+            ready_by_ms: None,
+            hook_unreachable_since_ms: None,
+            pane_missing_since_ms: None,
+            taken_over: false,
+            checkout: checkout.map(str::to_string),
+            in_worktree: false,
+            quiet_at: None,
+            archive: None,
+            started_by: None,
+            adopted_by: None,
+            on_quota_wall: None,
+            quota_wait: false,
+            exit_unconfirmed: None,
+        };
+    rows.workers.push(worker(
+        "w-asleep",
+        "active",
+        Some("dp-asleep"),
+        Some("/wt/asleep"),
+    ));
+    rows.workers.push(worker("w-done", "released", None, None));
+    rows.workers.push(worker("w-far", "active", None, None));
+    rows.attachments.push(AttachmentRow {
+        run: quiet.clone(),
+        dispatch: "dp-far".to_string(),
+        home: "home-fp-abcd".to_string(),
+        worker: "w-far".to_string(),
+        state: serde_json::from_str("\"ready\"").expect("a state"),
+        to_home: Vec::new(),
+        acked_seq: 0,
+        imported_seq: 0,
+        created_ms: 4,
+    });
+    rows.gates.push(GateRow {
+        run: quiet.clone(),
+        id: "gate-1".to_string(),
+        task: "t-gated".to_string(),
+        question: Text::from("which way?"),
+        options: vec![Text::from("left"), Text::from("right")],
+        status: serde_json::from_str("\"pending\"").expect("a status"),
+        resolution: Text::default(),
+        created_ms: 5,
+        resolved_ms: None,
+        held_for: None,
+    });
+    rows.messages.push(MessageRow {
+        run: quiet.clone(),
+        id: "m-walking".to_string(),
+        from: "ledger".to_string(),
+        to: format!("run:{quiet}"),
+        kind: serde_json::from_str("\"handover\"").expect("a kind"),
+        body: Text::from(r#"{"status":"walking","steps":[{"name":"wip-commit","ok":true}]}"#),
+        subject: Text::default(),
+        priority: Default::default(),
+        payload: Text::default(),
+        thread: None,
+        task: None,
+        dispatch: None,
+        author_seat: None,
+        created_ms: 5,
+    });
+    rows.bound.push(BoundRow {
+        caller: Text::from("team-2/%1"),
+        run: quiet,
+    });
+    rows.served.push(ServedRow {
+        caller: Some(Text::from("somebody")),
+        request: Text::from("r-kept"),
+        answer: ServedAnswer::Inline("what it printed\n".to_string()),
+        fingerprint: Some(Text::from("f".repeat(64))),
+        verb: None,
+        filed_ms: Some(5),
+        expired: false,
+    });
+    let mut compacted = rows.runs[1].clone();
+    compacted.id = "run-compacted".to_string();
+    compacted.name = Text::from("long done");
+    compacted.coordinator = None;
+    compacted.summary = Some(RunSummary {
+        tasks: 3,
+        completed: 2,
+        failed: 1,
+        dispatches: 4,
+        workers: 2,
+        messages: 9,
+        gates: 1,
+        headlines: vec![Text::from("drain the gate")],
+        last_activity_ms: 2,
+        compacted_ms: 3,
+        sweeps: 1,
+    });
+    rows.runs.push(compacted);
+    Ledger::rebuild(rows).expect("a ledger with every table")
+}
+
 /// One more status letter from the writer to the first run of
 /// [`a_ledger_with_mail`].
 #[cfg(test)]
@@ -6003,6 +6166,50 @@ mod tests {
             "these lists hold the rows the open digested"
         );
         (ledger, held.revision)
+    }
+
+    /// A ledger with rows in every table, saved and opened again, gives its
+    /// lists the digests the open made, and the write after it leaves what a
+    /// whole write would (t-85378 r2).
+    #[test]
+    fn a_ledger_with_every_table_takes_what_its_open_digested() {
+        let (_root, path, store) = a_current_store();
+        let connection = store.connection().expect("ledger connection");
+        let seeded = a_ledger_with_every_table(60, 50);
+        let projection = seeded.export();
+        for (table, rows) in [
+            ("runs", projection.runs.len()),
+            ("tasks", projection.tasks.len()),
+            ("dispatches", projection.dispatches.len()),
+            ("workers", projection.workers.len()),
+            ("attachments", projection.attachments.len()),
+            ("gates", projection.gates.len()),
+            ("messages", projection.messages.len()),
+            ("inboxes", projection.inboxes.len()),
+            ("acked", projection.acked.len()),
+            ("bound", projection.bound.len()),
+            ("served", projection.served.len()),
+        ] {
+            assert!(rows > 0, "the fixture holds no {table}");
+        }
+        write(&connection, "main-ledger", 0, 1, &projection, 10).expect("the ledger");
+        drop(connection);
+        drop(store);
+
+        let store = crate::workflow_store::WorkflowStore::open(&path).expect("the open");
+        let connection = store.connection().expect("ledger connection");
+        // The helper asserts that the lists took what the open digested.
+        let (mut ledger, mut revision) = a_ledger_opened_from(&store, &connection);
+        a_letter_to(&mut ledger, 1, 20);
+        let mut now_ms = 20;
+        let spent = write_and_compare(
+            &connection,
+            store.written(),
+            &ledger,
+            (&mut revision, &mut now_ms),
+            "the first write",
+        );
+        assert!(spent.rows_digested < 60, "{spent:?}");
     }
 
     /// From the first write after an open on, whatever a ledger does — nothing,

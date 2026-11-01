@@ -3598,6 +3598,29 @@ pub(crate) fn ledger_image() -> Option<Arc<Ledger>> {
     Some(cached_ledger(&held, &image))
 }
 
+/// Says once, in the window's log, how this window's first ledger write went:
+/// whether its lists took the digests the store's open made, and how many rows
+/// that write digested (t-85378). Numbers alone. A saving nobody can see gone
+/// is one that can go without anybody knowing, as it did once already.
+fn note_first_write(image: &RuntimeImage) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(first) = image.first_write() else {
+        return;
+    };
+    if SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let Some(root) = BLACKBOX.get() else { return };
+    crate::note_window_event(
+        root,
+        &format!(
+            "orchestration: first ledger write after the open: lists carried={} rows digested={}",
+            u8::from(first.lists_carried),
+            first.rows_digested
+        ),
+    );
+}
+
 fn note_ledger_unwritten(what: &str) {
     let Some(root) = BLACKBOX.get() else { return };
     crate::note_window_event(root, &format!("orchestration: {what} was not written"));
@@ -10808,6 +10831,7 @@ fn beat(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_ms: i64) ->
     let Ok(image) = actor.view() else {
         return 0;
     };
+    note_first_write(&image);
     let rows = cached_ledger(&held, &image);
     let planned: Vec<zerocode_core::orchestration::Dispatchable> = rows
         .runs()
