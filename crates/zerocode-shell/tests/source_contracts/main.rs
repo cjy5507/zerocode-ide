@@ -22814,7 +22814,9 @@ mod tests {
     fn the_inbox_close_reason_has_one_length_in_the_ledger_the_desk_and_the_page() {
         let ledger = include_str!("../../../zerocode-core/src/orchestration.rs");
         let number_after = |source: &str, mark: &str| -> usize {
-            let at = source.find(mark).unwrap_or_else(|| panic!("`{mark}` is gone"));
+            let at = source
+                .find(mark)
+                .unwrap_or_else(|| panic!("`{mark}` is gone"));
             source[at + mark.len()..]
                 .trim_start()
                 .chars()
@@ -22840,7 +22842,8 @@ mod tests {
             "the desk no longer holds a close's reason to the ledger's length"
         );
         assert!(
-            include_str!("../../../../ui/shell-inbox.js").contains("maxLength = INBOX_CLOSE_REASON_MAX"),
+            include_str!("../../../../ui/shell-inbox.js")
+                .contains("maxLength = INBOX_CLOSE_REASON_MAX"),
             "the page's field takes any length"
         );
     }

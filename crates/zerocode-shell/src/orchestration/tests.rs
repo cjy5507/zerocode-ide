@@ -5186,16 +5186,18 @@ impl Host for Stopped {
             .then(|| "claude".to_string())
     }
     fn capture(&self, term: u32) -> Option<String> {
-        Some(if term == self.worker_term
-            || *self.persons.lock().unwrap_or_else(|held| held.into_inner()) == Some(term)
-        {
-            self.screen
-                .lock()
-                .unwrap_or_else(|held| held.into_inner())
-                .clone()
-        } else {
-            String::new()
-        })
+        Some(
+            if term == self.worker_term
+                || *self.persons.lock().unwrap_or_else(|held| held.into_inner()) == Some(term)
+            {
+                self.screen
+                    .lock()
+                    .unwrap_or_else(|held| held.into_inner())
+                    .clone()
+            } else {
+                String::new()
+            },
+        )
     }
     fn focus(&self, _term: u32) -> bool {
         true
