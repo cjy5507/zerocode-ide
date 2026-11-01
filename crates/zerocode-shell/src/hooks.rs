@@ -2526,12 +2526,16 @@ pub fn report_of(
     // A turn that ended with no answer has no answer to show: a failed model
     // request shows why it failed, and an aborted turn clears the line rather
     // than reach into the transcript for an earlier turn's.
+    //
+    // The turn-ending answer is read once (a transcript tail is a file read) and serves both the line above and the
+    // agent's answer apart from tool output below.
+    let turn_answer = (state == zerocode_core::hook::HookState::Done
+        && zerocode_core::hook::turn_end_carries_answer(&event))
+    .then(|| zerocode_core::transcript::said_in_parsed(&payload))
+    .flatten();
     let said = if state == zerocode_core::hook::HookState::Done {
-        zerocode_core::hook::model_request_failure_parsed(&event, &payload).or_else(|| {
-            zerocode_core::hook::turn_end_carries_answer(&event)
-                .then(|| zerocode_core::transcript::said_in_parsed(&payload))
-                .flatten()
-        })
+        zerocode_core::hook::model_request_failure_parsed(&event, &payload)
+            .or_else(|| turn_answer.clone())
     } else {
         let word: String = event
             .chars()
@@ -2545,7 +2549,12 @@ pub fn report_of(
         }
     }
     .map(sanitize_card_text);
-    let answer: Option<String> = None;
+    // The agent's own answer, apart from `said`: only a turn-ending event's words, never the tool result a mid-turn
+    // `PostToolUse` carries, and credentials scrubbed before it can ride to a card (t-84799 r2 P2-3). A failed model
+    // request's reason is not an answer either, so it stays out.
+    let answer = turn_answer
+        .map(|answer| zerocode_core::clone::scrub_credentials(&answer))
+        .map(sanitize_card_text);
     let ask = (state == zerocode_core::hook::HookState::NeedsAttention)
         .then(|| zerocode_core::transcript::ask_in_parsed(&payload))
         .flatten();
@@ -2579,11 +2588,14 @@ pub fn report_of(
         // (`AgentVoice::plan_tool`). An agent the catalog does not voice
         // names no plan tool, so its permissions stay ordinary approvals.
         .map(|mut approval| {
+            // A plan is the agent's prose and may quote a URL with its credentials: scrubbed here, where the card is
+            // filled, as the answer is (t-84799 r2 P3-8).
             approval.plan = zerocode_core::ask::plan_in(
                 payload.tree().and_then(|tree| tree.get("tool_input")),
                 &approval.tool,
                 zerocode_core::agent::agent_voice(envelope.agent.slug()).plan_tool,
-            );
+            )
+            .map(|plan| zerocode_core::clone::scrub_credentials(&plan));
             approval
         });
     Some(PaneHookReport {
@@ -3810,7 +3822,10 @@ mod tests {
             Some("API_KEY=hunter2-not-an-answer"),
             "the sidebar's line still follows the tool"
         );
-        assert_eq!(report.answer, None, "a tool's output is not the agent's answer");
+        assert_eq!(
+            report.answer, None,
+            "a tool's output is not the agent's answer"
+        );
 
         let stop = concat!(
             r#"{"hook_event_name":"Stop","last_assistant_message":"#,
@@ -3819,7 +3834,10 @@ mod tests {
         let report = report_of(&envelope("term-3", "", stop), None).expect("a report");
         assert_eq!(report.state, zerocode_core::hook::HookState::Done);
         let answer = report.answer.as_deref().expect("a turn end with an answer");
-        assert!(!answer.contains("s3cr3t") && !answer.contains("bot:"), "{answer}");
+        assert!(
+            !answer.contains("s3cr3t") && !answer.contains("bot:"),
+            "{answer}"
+        );
         assert!(
             answer.contains("https://***@git.example/o/r.git — 617 checks green."),
             "{answer}"

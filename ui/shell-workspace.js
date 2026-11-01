@@ -3639,24 +3639,40 @@ function workspaceStateGroups() {
     .filter((group) => group.members.length > 0);
 }
 
+/* The checkouts whose card holds nothing (no agent row, no finished-work or restart row, no restore-waiting row): the
+ * painter that decides it (`paintWorktreeAgents`, a card's `hidden`) hands the set over. Empty until it has run — a
+ * head built before that says nothing rather than guess a count that the first paint would then correct (r2 P3-7). */
+let projectSeatless = new Set();
+
 /* How many of a project's checkouts hold no agent window and say no stage of the ledger's (a stage says more —
  * t-44016): what 「에이전트 창 없음」 on the project's head counts. A checkout folded under its task's row is not
- * on the list. */
+ * on the list. The stage is asked only of the few checkouts with an empty card. */
 function projectUnseatedCount(project) {
-  return (project.worktrees ?? []).filter((worktree) => !taskFoldedPaths.has(worktree.path)
-    && worktreeAgentRows(worktree.path).length === 0 && landingStageWord(worktreeStageOf(worktree.path)) === "").length;
+  let count = 0;
+  for (const worktree of project.worktrees ?? []) {
+    if (projectSeatless.has(worktree.path) && !taskFoldedPaths.has(worktree.path)
+      && landingStageWord(worktreeStageOf(worktree.path)) === "") count += 1;
+  }
+  return count;
 }
+
+/* What each head last said, so a repaint over the same count writes nothing but the words' language. */
+const projectUnseatedSaid = new WeakMap();
 
 function dressProjectUnseated(row, project) {
   const note = row.querySelector(".proj-unseated");
   const count = projectUnseatedCount(project);
+  const said = `${locale}:${count}`;
+  if (projectUnseatedSaid.get(note) === said) return;
+  projectUnseatedSaid.set(note, said);
   writeHidden(note, count === 0);
   writeTextContent(note, count === 0 ? "" : t("worktree.unseatedGroup", "에이전트 창 없음 {{count}}", { count }));
   writeAttribute(note, "data-tip", count === 0 ? "" : t("worktree.unseatedTip", "이 워크스페이스에서 열린 에이전트 창이 없습니다. 다른 창의 에이전트가 이 폴더의 파일을 수정할 수는 있습니다."));
 }
 
-/* The heads' counts, again when the agents' rows moved. */
-function paintProjectUnseated() {
+/* The heads' counts, again when the agents' cards moved: `seatless` is the paths whose card holds nothing. */
+function paintProjectUnseated(seatless) {
+  projectSeatless = seatless;
   for (const row of worktreeList.querySelectorAll(".proj-row[data-project-path]")) {
     const project = projects.find((one) => one.path === row.dataset.projectPath);
     if (project) dressProjectUnseated(row, project);

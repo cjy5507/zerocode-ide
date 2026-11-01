@@ -148,6 +148,10 @@ const hookStamps = new Map();
  * already row-sized. Dropped with the shell in `dropTermView`. */
 const panePrompts = new Map();
 const paneSaid = new Map();
+/* What the agent ANSWERED when its last turn ended — and only that. `paneSaid` also follows the tool that just landed (a
+ * `cat` of a file is not something the agent said), so a line that quotes the agent reads this map: the 「당신 차례」 list's
+ * 「직전 답에서」 (r2 P2-3). Cleared by a turn ending with no answer, by a new session on the pane, and when the pane goes. */
+const paneAnswer = new Map();
 
 /* And WHICH CONVERSATION each shell is on, when its agent said so.
  *
@@ -2353,11 +2357,11 @@ const YOUR_TURN_SHELL_TOOLS = new Set(["bash", "shell", "sh", "zsh", "run_shell_
 /* A permission, as the list says it: the sentence (a plan permission asks about the plan) and, for the plan tool, the
  * plan itself in the well the board's card gives it — one painter, so a heading and a numbered step look the same. */
 /* A question's one line of context (the draft's 「직전 답에서 — 「…」」): what the agent last said in its pane — the words the
- * hook carried (`paneSaid`) — so the question is read with what led to it. Nothing where the window knows no such
+ * turn ended with (`paneAnswer`, never a tool's output) — so the question is read with what led to it. Nothing where the window knows no such
  * words; the line is cut by its box, never by a count of letters. */
 function yourTurnContextNodes(card) {
   const pane = typeof card.pane === "string" && card.pane.startsWith("term:") ? Number(card.pane.slice(5)) : NaN;
-  const said = Number.isInteger(pane) ? String(paneSaid.get(pane) ?? "").replace(/\s+/g, " ").trim() : "";
+  const said = Number.isInteger(pane) ? String(paneAnswer.get(pane) ?? "").replace(/\s+/g, " ").trim() : "";
   if (said === "") return [];
   const line = document.createElement("p");
   line.className = "your-turn-context";
@@ -12228,7 +12232,8 @@ function restartSessionGroups(items) {
 function paintWorktreeAgents() {
   if (revealStartupActiveProjects()) void refreshWorktrees();
   const held = worktreeLanes();
-  for (const host of worktreeList.querySelectorAll(".wt-agents[data-worktree-path]")) {
+  const hosts = worktreeList.querySelectorAll(".wt-agents[data-worktree-path]");
+  for (const host of hosts) {
     const path = host.dataset.worktreePath;
     const all = worktreeAgentRows(path);
     const open = expandedWorktrees.has(path);
@@ -12336,7 +12341,11 @@ function paintWorktreeAgents() {
     // only dresses it.
     host.closest(".wt-node")?.classList.toggle("has-agents", !host.hidden);
   }
-  paintProjectUnseated();
+  // The project heads count the cards that hold nothing — read off the cards themselves, so a card that held (a
+  // restore-waiting row, a finished work's row) is not counted as empty (r2 P3-7).
+  const seatless = new Set();
+  for (const host of hosts) if (host.hidden) seatless.add(host.dataset.worktreePath);
+  paintProjectUnseated(seatless);
   retainedTicker.sync();
 }
 
@@ -12706,6 +12715,13 @@ listen("hook:agent", (event) => {
     paneAutonomy.delete(term);
   }
   const named = Boolean(session) && paneSessions.get(term)?.session?.id !== session.id;
+  // The answer the list quotes belongs to the session that gave it (r2 P2-3): a new one on this pane starts without it,
+  // and a turn that ended with no answer (an interrupt) leaves none to quote.
+  if (named) paneAnswer.delete(term);
+  if (state === "done") {
+    if (event.payload.answer) paneAnswer.set(term, event.payload.answer);
+    else paneAnswer.delete(term);
+  }
   // A pane that stood in for a conversation it could not bring back, and that
   // a new conversation has now taken (t-12063): the old one is kept as owed
   // once the new one holds the pane, never dropped with the old record.
@@ -12745,8 +12761,9 @@ listen("hook:agent", (event) => {
       scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
     } else if (askNow !== askBefore) {
       // Another question under the same state: the column the badge reads
-      // is asked again, as a state move asks it (t-82287).
-      scheduleAgentPaint(["cards", "badge", "board"]);
+      // is asked again, as a state move asks it (t-82287). The tab says 질문 or 권한 by what it asks, so a
+      // question that turns into a permission inside one wait redraws the strip too (r2 P3-10).
+      scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
     } else if (clearedRestoreBirth || event.payload.prompt || event.payload.said || modelMoved) {
       scheduleAgentPaint(["cards", "board"]);
     }
@@ -13986,6 +14003,12 @@ function paneChatOn(term) {
   return paneChats.get(term)?.on === true;
 }
 
+/* Whether the conversation has ever stood on this pane. Its record is then something to go back to: the switch is the
+ * way back from the screen, so a pane holding one keeps its head and switch even after its agent left (r2 P3-5). */
+function paneHoldsConversation(term) {
+  return paneChats.get(term)?.stood === true;
+}
+
 async function setPaneChat(term, on, { wire = true } = {}) {
   const held = paneChatOf(term);
   if (held.on === on) {
@@ -14003,6 +14026,8 @@ async function setPaneChat(term, on, { wire = true } = {}) {
     held.wireRefusal = null;
     held.exitTyped = false;
   }
+  // Once the conversation has stood on this pane it is a record the pane holds (`paneHoldsConversation`).
+  if (on) held.stood = true;
   // The late line's wait, read while nothing on the page has moved yet.
   if (on) chatLateMs();
   held.on = on;
@@ -14055,10 +14080,10 @@ function activeAgentTerm() {
 
 /* Whether a pane's head and switch stand for an agent. `paneAgents` is kept until the pane dies, so a pane the
  * agent left (the shell took the terminal back: `paneProgramLeft`) would keep wearing its last head. It stands
- * down — unless its conversation stands over the screen: the switch is then the way back to the shell
- * (t-84799 B6b). */
+ * down — unless its conversation stands over the screen (the switch is then the way back to the shell), or has
+ * stood on it (the switch is then the way back to the conversation, r2 P3-5) (t-84799 B6b). */
 function paneWearsAgent(term) {
-  return paneAgents.has(term) && (!paneProgramLeft(term) || paneChatOn(term));
+  return paneAgents.has(term) && (!paneProgramLeft(term) || paneChatOn(term) || paneHoldsConversation(term));
 }
 
 /* The switch, held by node: it travels with its pane's head line, which a
@@ -14240,9 +14265,13 @@ function paintShownPaneHeads() {
     if (term === null) continue;
     if (paneWearsAgent(term)) {
       paintPaneHead(tab, term);
-    } else if (!head.hidden) {
-      // The agent left: its head goes, and the shells below take the room back.
+    } else if (!head.hidden && !paneLeaves(tab.layout).some(paneWearsAgent)) {
+      // No pane of this tab runs an agent any more: its head goes, and the shells below take the room back. A tab split
+      // between an agent's pane and a plain shell keeps it whichever pane is chosen — taking it down and putting it back
+      // at every click would resize every pane and redraw the agent's TUI each time (r2 P2-4).
       head.hidden = true;
+      // The head named the pane; with the head gone the name bar says it again (r2 P3-5).
+      for (const slot of paneHost(tab).querySelectorAll(".pane-slot.is-named-above")) writeClass(slot, "is-named-above", false);
       remeasurePanes(tab);
     }
   }

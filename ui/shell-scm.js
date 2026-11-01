@@ -422,6 +422,8 @@ function leaveStackedWork() {
   el("activity-pile").replaceChildren();
   pileHistory = null;
   pileHistoryHead = null;
+  // The schedule's beat stops with the last thing that wanted it.
+  if (typeof boardSchedulePoller !== "undefined") boardSchedulePoller.sync();
 }
 
 /* The checkouts of the project on screen whose commits are not in main yet. */
@@ -453,6 +455,9 @@ let pileDrawn = "";
 
 function paintStackedWork() {
   const panel = el("activity-pile");
+  // The gate line reads the schedule's last answer: while this panel is up the schedule is asked again at its own pace, and
+  // its answer draws the panel again (r2 P2-2).
+  if (!panel.hidden && typeof askBoardScheduleForPile === "function") askBoardScheduleForPile();
   const project = projectOfWorktree(activeWorktreePath) ?? projects[0];
   const checkouts = unlandedCheckouts(project);
   const here = releaseLaneHere();

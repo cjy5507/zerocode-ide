@@ -6321,6 +6321,7 @@ function dropTermView(term) {
   // stranger's sentence.
   panePrompts.delete(term);
   paneSaid.delete(term);
+  paneAnswer.delete(term);
   // And the conversation page it wore, if any — same owner, same ending.
   forgetPaneChat(term);
   // The conversation goes with it. Not because the id went stale — the vendor
