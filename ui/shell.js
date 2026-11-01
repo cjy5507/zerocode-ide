@@ -973,7 +973,7 @@ function askPanelNode(card, draft) {
     why.className = "board-ask-raised";
     why.setAttribute("role", "status");
     why.textContent = raised;
-    why.title = raised;
+    why.dataset.tip = raised;
     panel.appendChild(why);
   }
 

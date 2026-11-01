@@ -57494,7 +57494,7 @@ suite("worker-question-raised", async ({ browser, origin, ok }) => {
           const style = getComputedStyle(line);
           return {
             locale, why, found: true, rows: Math.round(rect.height / (parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.3)),
-            title: line.title === line.textContent, text: line.textContent !== "",
+            title: line.dataset.tip === line.textContent, text: line.textContent !== "",
           };
         }, { locale, why }));
       }
