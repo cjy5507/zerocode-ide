@@ -26101,7 +26101,9 @@ mod tests {
         );
         assert!(
             accounts.contains("const SECURITY_LINE_BYTES: usize = 4094;")
-                && keychain_line.contains("line.len() > SECURITY_LINE_BYTES")
+                && keychain_line.contains("keychain_line_too_long(&line)")
+                && block_after(accounts, "fn keychain_line_too_long(")
+                    .contains("line.len() > SECURITY_LINE_BYTES")
                 && keychain_line.contains("line.contains(['\\n', '\\r', '\\0'])")
                 && keychain_line.contains("(0x20..0x7f).contains(&byte)"),
             "the line limit measured against the real tool lost its check:\n{keychain_line}"

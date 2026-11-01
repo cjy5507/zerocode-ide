@@ -1225,13 +1225,21 @@ fn keychain_add_line(service: &str, user: &str, credentials: &str) -> Result<Str
                 .to_string(),
         );
     }
-    if line.len() > SECURITY_LINE_BYTES {
+    if keychain_line_too_long(&line) {
         return Err(format!(
             "값이 너무 길어 쓰지 않았습니다(입력 줄 {}바이트, 상한 {SECURITY_LINE_BYTES}바이트)",
             line.len()
         ));
     }
     Ok(line + "\n")
+}
+
+/// Whether a command line is longer than `security -i` runs whole. The one
+/// judgment of length on this road: what a too-long value does next is decided by
+/// whoever asks, and the limit is read nowhere else.
+#[cfg(target_os = "macos")]
+const fn keychain_line_too_long(line: &str) -> bool {
+    line.len() > SECURITY_LINE_BYTES
 }
 
 /// Put the credentials into a named service.
