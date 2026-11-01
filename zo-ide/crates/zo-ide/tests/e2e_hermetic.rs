@@ -4914,7 +4914,7 @@ async fn e2e_a_tall_edit_cell_keeps_the_composer_on_the_floor() {
     let service = ScriptedAnthropicService::writes_then_bash(
         files,
         None,
-        Duration::from_secs(4),
+        Duration::ZERO,
         "### Done\n\n- five files written\n",
     )
     .await
