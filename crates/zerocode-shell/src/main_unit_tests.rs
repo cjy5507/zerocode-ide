@@ -33418,3 +33418,37 @@ fn the_hand_over_asks_its_gates_before_typing_and_names_a_refusal_after_it() {
         "a walk that stops part way does not say the exit command was typed:\n{walk}"
     );
 }
+
+/// What the queue's doors write in the window log when they refuse (t-86909 r3): a refusal that
+/// came from reading the screen carries the look the reading took, and the others do not ask for it.
+#[test]
+fn a_screen_refusal_logs_the_look_and_another_refusal_logs_only_its_word() {
+    use crate::cmd::terminal::door_note;
+    use zerocode_core::agent::turn_refusal as refused;
+    let look = || Some("look claude: cursor=hidden paste=on row=3 of=8 col=2".to_string());
+    assert_eq!(
+        door_note("pane_steer", 7, Some(refused::SCREEN), look),
+        "pane_steer: pane 7 refused (turn-screen) — look claude: cursor=hidden paste=on row=3 of=8 col=2"
+    );
+    assert!(door_note("pane_send_now", 7, Some(refused::LINE), look).contains("— look claude"));
+    for word in [
+        refused::IDLE,
+        refused::SEAT,
+        refused::NOT_READING,
+        refused::LANDED,
+    ] {
+        let line = door_note("pane_steer", 7, Some(word), || {
+            panic!("the look was asked for {word}")
+        });
+        assert_eq!(line, format!("pane_steer: pane 7 refused ({word})"));
+    }
+    assert_eq!(
+        door_note("pane_interrupt", 7, None, look),
+        "pane_interrupt: pane 7 done"
+    );
+    // A pane whose look could not be taken (no terminal) still logs the refusal.
+    assert_eq!(
+        door_note("pane_steer", 7, Some(refused::SCREEN), || None),
+        "pane_steer: pane 7 refused (turn-screen)"
+    );
+}

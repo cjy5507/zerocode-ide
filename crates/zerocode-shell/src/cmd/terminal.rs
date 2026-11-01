@@ -2497,8 +2497,9 @@ fn note_turn_door(state: &State<'_, AppState>, door: &str, term: TermId, refusal
 }
 
 /// The text of [`note_turn_door`]'s line: `look` is asked only for a refusal that
-/// came from the screen.
-fn door_note(
+/// came from the screen. Tested in `main_unit_tests.rs`: the window's source tests
+/// cut this file where a test module begins, and the fence contract allows none here.
+pub(crate) fn door_note(
     door: &str,
     term: TermId,
     refusal: Option<&str>,
@@ -3278,43 +3279,4 @@ pub(crate) fn resize_lane(
         .registry()
         .resize(id, rows, cols)
         .map_err(|error| error.to_string())
-}
-
-/// Placed last in the file: the window's source tests cut `cmd/terminal.rs` where its first test module
-/// begins, and a test module in the middle would hide everything below it from them. (This comment does
-/// not spell the attribute out for the same reason: the cut is a plain text search.)
-#[cfg(test)]
-mod door_note_tests {
-    use super::*;
-
-    /// A refusal from the screen carries the look and the others do not ask for it (t-86909 r3).
-    #[test]
-    fn a_screen_refusal_logs_the_look_and_another_refusal_logs_only_its_word() {
-        let look = || Some("look claude: cursor=hidden paste=on row=3 of=8 col=2".to_string());
-        assert_eq!(
-            door_note("pane_steer", 7, Some(refused::SCREEN), look),
-            "pane_steer: pane 7 refused (turn-screen) — look claude: cursor=hidden paste=on row=3 of=8 col=2"
-        );
-        assert!(door_note("pane_send_now", 7, Some(refused::LINE), look).contains("— look claude"));
-        for word in [
-            refused::IDLE,
-            refused::SEAT,
-            refused::NOT_READING,
-            refused::LANDED,
-        ] {
-            let line = door_note("pane_steer", 7, Some(word), || {
-                panic!("the look was asked for {word}")
-            });
-            assert_eq!(line, format!("pane_steer: pane 7 refused ({word})"));
-        }
-        assert_eq!(
-            door_note("pane_interrupt", 7, None, look),
-            "pane_interrupt: pane 7 done"
-        );
-        // A pane whose look could not be taken (no terminal) still logs the refusal.
-        assert_eq!(
-            door_note("pane_steer", 7, Some(refused::SCREEN), || None),
-            "pane_steer: pane 7 refused (turn-screen)"
-        );
-    }
 }
