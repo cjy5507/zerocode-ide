@@ -175,6 +175,28 @@ export async function testYourTurn(browser, origin, ok) {
       JSON.stringify(cards),
     );
 
+    /* t-84799 B4: an open list stays hung from its chip when the window changes size. */
+    const followed = await page.evaluate(async () => {
+      const seen = {};
+      window.__chip().click();
+      await window.__settle();
+      const list = window.__list();
+      const hung = () => ({ chip: Math.round(window.__chip().getBoundingClientRect().left), list: Math.round(list.getBoundingClientRect().left) });
+      seen.before = hung();
+      // A resize that moves the chip (here the sidebar's width, which the title bar's left edge follows).
+      window.__chip().style.marginLeft = "48px";
+      window.dispatchEvent(new Event("resize"));
+      await window.__settle();
+      seen.after = hung();
+      window.__chip().style.marginLeft = "";
+      window.__press("Escape");
+      await window.__settle();
+      return seen;
+    });
+    ok("an open list follows its chip when the window resizes",
+      followed.before.chip === followed.before.list && followed.after.chip !== followed.before.chip && followed.after.chip === followed.after.list,
+      JSON.stringify(followed));
+
     /* A number answers the question through the answer door, and the chip counts down. */
     const answered = await page.evaluate(async () => {
       const seen = {};
