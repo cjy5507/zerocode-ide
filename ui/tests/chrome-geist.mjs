@@ -261,11 +261,17 @@ async function testBranchLineRoom(browser, origin, ok) {
           wants: Math.round(wants),
           box: Math.round(box),
           chip: chip && getComputedStyle(chip).display !== "none" ? chip.clientWidth : 0,
+          // A10 (t-84799): the landing chip's words whole, inside the row — no tail cut, none past the edge.
+          chipCut: chip && getComputedStyle(chip).display !== "none" ? chip.scrollWidth - chip.clientWidth : 0,
+          chipOut: chip && getComputedStyle(chip).display !== "none"
+            ? Math.round(chip.getBoundingClientRect().right - row.querySelector(".wt-titlebox").getBoundingClientRect().right) : 0,
         }];
       }));
       ok(`at ${width} px every branch line under a name keeps its words whole or a third of the line, never a syllable (시안 5)`,
         rows.length >= 2 && rows.every((one) => one.line + 1 >= Math.min(one.wants, one.box / 3)),
         JSON.stringify(rows));
+      ok(`at ${width} px a landing chip says all its words — 「미반영 6 · main보다 20 뒤」 is not cut to its tail — inside its row (A10)`,
+        rows.some((one) => one.chip > 100) && rows.every((one) => one.chipCut <= 1 && one.chipOut <= 1), JSON.stringify(rows));
     }
     ok("the branch line scene raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {

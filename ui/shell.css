@@ -1577,26 +1577,21 @@ kbd {
   display: none;
 }
 
-/* `line-height: 1`, as the task id below: on the Geist steps (t-67607, the
- * person's 10-21 pass of draft B) 2xs is 12px, a step over the 11px branch
- * line it sits in, and at its own line height it grew the row by 1.4px. */
-.wt-unseated {
-  /* Takes what the line has left after the folder's name before it, and
-   * elides there: a short line cuts the note, not the name to a letter
-   * (t-78107). From nothing, so the name is laid first; the line still
-   * measures the note whole when it sizes itself. */
-  flex: 1 1 0;
+/* 「에이전트 창 없음 N」 on a project's head (t-84799 A1): said once for the checkouts that hold no agent window, in the
+ * mist the row's second lines use. It gives way before the project's name does, and the head's hover actions
+ * keep their place at the end. */
+.proj-unseated {
+  flex: 0 1 auto;
   min-width: 0;
-  margin-inline-start: var(--space-1);
+  margin-inline-start: var(--space-2);
   overflow: hidden;
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
-  line-height: 1;
+  font: var(--type-label-12);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.wt-unseated[hidden] {
+.proj-unseated[hidden] {
   display: none;
 }
 

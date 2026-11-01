@@ -12313,15 +12313,9 @@ function paintWorktreeAgents() {
     // content and must keep its handle; only a genuinely empty card hides the
     // host (a restore-waiting row also keeps it visible).
     host.hidden = all.length + deadSummary.total === 0 && !restoring;
-    const unseated = host.previousElementSibling?.querySelector(".wt-unseated");
-    if (unseated) {
-      // 「에이전트 창 없음」 is not said beside a stage the ledger holds (t-44016): the stage says more. On a folder
-      // with nothing to say, it stays as the explanation of its empty list.
-      unseated.hidden = !host.hidden || landingStageWord(worktreeStageOf(path)) !== "";
-      // The branch line's standing is one decision (`dressWorktreeTitle`):
-      // a name the title already said, a base chip, this marker.
-      dressWorktreeTitle(host.previousElementSibling);
-    }
+    // The branch line's standing is one decision (`dressWorktreeTitle`): a name the title already said and a base chip.
+    // 「에이전트 창 없음」 is no longer one of its parts: it stands once on the project's head (t-84799 A1).
+    dressWorktreeTitle(host.previousElementSibling);
     // The card boundary and the list read the SAME fact. Deriving ownership
     // again with `:has([hidden])` left an inactive worker looking like a
     // top-level sibling in the measured browser even though this painter had
@@ -12329,6 +12323,7 @@ function paintWorktreeAgents() {
     // only dresses it.
     host.closest(".wt-node")?.classList.toggle("has-agents", !host.hidden);
   }
+  paintProjectUnseated();
   retainedTicker.sync();
 }
 

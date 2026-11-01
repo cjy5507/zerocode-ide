@@ -3639,6 +3639,30 @@ function workspaceStateGroups() {
     .filter((group) => group.members.length > 0);
 }
 
+/* How many of a project's checkouts hold no agent window and say no stage of the ledger's (a stage says more —
+ * t-44016): what 「에이전트 창 없음」 on the project's head counts. A checkout folded under its task's row is not
+ * on the list. */
+function projectUnseatedCount(project) {
+  return (project.worktrees ?? []).filter((worktree) => !taskFoldedPaths.has(worktree.path)
+    && worktreeAgentRows(worktree.path).length === 0 && landingStageWord(worktreeStageOf(worktree.path)) === "").length;
+}
+
+function dressProjectUnseated(row, project) {
+  const note = row.querySelector(".proj-unseated");
+  const count = projectUnseatedCount(project);
+  writeHidden(note, count === 0);
+  writeTextContent(note, count === 0 ? "" : t("worktree.unseatedGroup", "에이전트 창 없음 {{count}}", { count }));
+  writeAttribute(note, "data-tip", count === 0 ? "" : t("worktree.unseatedTip", "이 워크스페이스에서 열린 에이전트 창이 없습니다. 다른 창의 에이전트가 이 폴더의 파일을 수정할 수는 있습니다."));
+}
+
+/* The heads' counts, again when the agents' rows moved. */
+function paintProjectUnseated() {
+  for (const row of worktreeList.querySelectorAll(".proj-row[data-project-path]")) {
+    const project = projects.find((one) => one.path === row.dataset.projectPath);
+    if (project) dressProjectUnseated(row, project);
+  }
+}
+
 function makeProjectHeader(project) {
   const row = document.createElement("div");
   row.className = "proj-row";
@@ -3659,6 +3683,8 @@ function makeProjectHeader(project) {
     // repository turns out to have one.
     '<span class="proj-mark" aria-hidden="true" hidden></span>' +
     '<span class="proj-name"></span>' +
+    // 「에이전트 창 없음 N」 — once for the checkouts of this project that hold no agent window (`paintProjectUnseated`).
+    '<span class="proj-unseated" hidden></span>' +
     '<span class="project-actions">' +
     // Hover-only bare-goes-to-the-Task-screen shortcuts. Orca's own row shows
     // GitHub/GitLab/Linear/Jira icons only on hover/focus-within (measured,
@@ -3671,6 +3697,7 @@ function makeProjectHeader(project) {
     '<span class="twist project-twist"></span></span>';
 
   row.querySelector(".proj-name").textContent = project.name;
+  dressProjectUnseated(row, project);
   row.querySelector(".project-twist").innerHTML = icon("chevron", !folded);
   row.dataset.tip = project.path;
 
@@ -4941,19 +4968,8 @@ function makeWorktreeNode(worktree, held) {
   // before the row could be pressed, and the arrows step between rows here.
   agents.dataset.keyboardOwner = "true";
   agents.addEventListener("keydown", stepAgentRows);
-  // A directory without a pane is still a real checkout. Say which list is
-  // empty, beside the branch, without inventing an agent or moving a process.
-  const unseated = document.createElement("span");
-  unseated.className = "wt-unseated";
-  const unseatedWord = { key: "worktree.unseated", word: "에이전트 창 없음" };
-  unseated.dataset.i18n = unseatedWord.key;
-  unseated.dataset.i18nSource = unseatedWord.word;
-  unseated.textContent = t(unseatedWord.key, unseatedWord.word);
-  const unseatedTip = { key: "worktree.unseatedTip", word: "이 워크스페이스에서 열린 에이전트 창이 없습니다. 다른 창의 에이전트가 이 폴더의 파일을 수정할 수는 있습니다." };
-  unseated.dataset.i18nTitle = unseatedTip.key;
-  unseated.dataset.i18nSourcedatatip = unseatedTip.word;
-  unseated.dataset.tip = t(unseatedTip.key, unseatedTip.word);
-  unseated.hidden = true;
+  // A directory without a pane is still a real checkout. The words for it stand once on its project's head
+  // (`.proj-unseated`, `paintProjectUnseated`), not again on every row (t-84799 A1).
   // The task id, the stage and the worker of the work in this checkout (t-44016), set on the branch line where the
   // title keeps its whole width; `dressWorktreeWork` fills them.
   const taskId = document.createElement("span");
@@ -4988,7 +5004,6 @@ function makeWorktreeNode(worktree, held) {
   vacant.hidden = true;
   branch.prepend(taskId);
   branch.append(stage, blocker, worker, vacant);
-  branch.appendChild(unseated);
   branch.appendChild(fold);
   // A workspace can be carried straight from the rail into a board lane. If
   // the board was closed, the drag opens a preview sheet; a successful drop
