@@ -823,6 +823,7 @@ pub(super) async fn hook_loop(
                 let record = state.pane_sessions().get(&report.term).cloned();
                 conversation_wake::word_on_report(
                     report.agent.slug(),
+                    report.term,
                     record.as_ref(),
                     &reported,
                     || {
@@ -853,7 +854,9 @@ pub(super) async fn hook_loop(
                     state.local_data_root(),
                     &word.line(report.term, report.agent.slug(), &session.id),
                 );
-                orchestration::pane_conversation_picked(report.term, &session, now_epoch_ms());
+                if word.tells_the_coordinator() {
+                    orchestration::pane_conversation_picked(report.term, &session, now_epoch_ms());
+                }
                 let holder = match word {
                     conversation_wake::ReportedWord::HeldBy(holder) => Some(holder),
                     conversation_wake::ReportedWord::Picked => None,

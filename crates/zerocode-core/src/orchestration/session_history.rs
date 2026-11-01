@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use super::{LEDGER_ITSELF, Ledger, Message, MessageKind, Priority, Text};
-use crate::provider_session::ProviderSession;
+use crate::provider_session::{ProviderSession, session_id_prefix};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,16 +95,14 @@ pub const CONVERSATION_HELD_ELSEWHERE: &str = "conversation_held_by_another_work
 /// nobody asked the window for (t-68069).
 pub const CONVERSATION_PICKED_UNASKED: &str = "conversation_picked_unasked";
 
-/// How much of a conversation's id such a letter names: enough to find it in
-/// the pane's head and the window's log, and not the id itself — a provider id
-/// is private restart material, and the whole of it stays on the worker's row.
-const PICKED_ID_CHARS: usize = 8;
-
 impl Ledger {
     /// The pane at `seat` re-entered conversation `session`, which nobody
     /// asked the window for (t-68069): whatever the CLI's own "continue" or
     /// picker chose. Written to the seated worker's coordinator once per
-    /// conversation, naming the worker and the conversation's first letters.
+    /// conversation, naming the worker and the conversation as a line names it
+    /// (`session_id_prefix`), the same words the pane's head and the window's log
+    /// find it by. What decides "once" is the whole id, kept here only as its
+    /// digest: the letter's words alone cannot be asked (t-68069 P3-3).
     /// Whether a letter was written; a seat with no worker has no run to tell,
     /// and the window's log keeps that pane's line.
     pub fn worker_conversation_picked(
@@ -123,13 +122,15 @@ impl Ledger {
         }) else {
             return false;
         };
-        let picked: String = session.id.trim().chars().take(PICKED_ID_CHARS).collect();
+        let picked = session_id_prefix(session.id.trim());
+        let digest = format!("{:x}", Sha256::digest(session.id.trim().as_bytes()));
         let body = serde_json::json!({
             "reason": CONVERSATION_PICKED_UNASKED,
             "workerId": worker.id,
             "pane": worker.pane,
             "agent": worker.agent,
             "conversation": picked,
+            "conversationDigest": digest,
         });
         let told = self.runs[run_at].messages.iter().any(|one| {
             one.from == LEDGER_ITSELF
@@ -137,7 +138,7 @@ impl Ledger {
                 && serde_json::from_str::<serde_json::Value>(one.body.as_str()).is_ok_and(|said| {
                     said["reason"] == CONVERSATION_PICKED_UNASKED
                         && said["workerId"] == body["workerId"]
-                        && said["conversation"] == body["conversation"]
+                        && said["conversationDigest"] == body["conversationDigest"]
                 })
         });
         if told {

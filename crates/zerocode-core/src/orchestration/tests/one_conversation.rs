@@ -260,7 +260,8 @@ fn a_conversation_nobody_named_is_told_once_by_its_first_letters() {
     assert_eq!(said["workerId"].as_str(), Some(mine.as_str()));
     assert_eq!(said["conversation"].as_str(), Some(&FRESH[..8]));
     assert!(
-        !letters[0].body.as_str().contains(FRESH) && !letters[0].subject.as_str().contains(FRESH)
+        !letters[0].body.as_str().contains(FRESH) && !letters[0].subject.as_str().contains(FRESH),
+        "the whole id reached the letter"
     );
 
     assert!(
@@ -284,4 +285,56 @@ fn a_conversation_nobody_named_is_told_once_by_its_first_letters() {
         "a seat with no worker told somebody"
     );
     assert_eq!(told(&bench).len(), 2);
+}
+
+/// t-68069 P3-3: eight letters of a zo id are always the word every zo id opens
+/// with. The letter names the conversation by what follows that word, and two
+/// conversations of one worker are told apart by the whole id. Two ids a line
+/// would spell alike are still two conversations.
+#[test]
+fn two_zo_conversations_of_one_worker_are_two_letters_that_read_apart() {
+    const FIRST: &str = "session-1792758210243-0";
+    const SECOND: &str = "session-1792758210243-1";
+    let mut bench = Bench::new();
+    bench.json("run-create --name picked-zo");
+    let (_, pane) = a_worker_on(&mut bench, MINE);
+    let said = |bench: &Bench| -> Vec<String> {
+        bench.ledger.runs()[0]
+            .messages()
+            .iter()
+            .filter(|one| one.body.as_str().contains(CONVERSATION_PICKED_UNASKED))
+            .map(|one| {
+                serde_json::from_str::<serde_json::Value>(one.body.as_str()).expect("json")
+                    ["conversation"]
+                    .as_str()
+                    .expect("its words")
+                    .to_string()
+            })
+            .collect()
+    };
+    for (at, id) in [FIRST, SECOND].into_iter().enumerate() {
+        assert!(
+            bench.ledger.worker_conversation_picked(
+                ("team-1", &pane),
+                &session(id),
+                1_000 + i64::try_from(at).expect("two")
+            ),
+            "{id} was taken for a conversation already told"
+        );
+    }
+    assert_eq!(said(&bench), ["1792758210243-0", "1792758210243-1"]);
+
+    // Past what a line carries of a zo id, two ids still differ.
+    let long = |tail: &str| format!("session-{}-{tail}", "1".repeat(40));
+    assert!(bench.ledger.worker_conversation_picked(
+        ("team-1", &pane),
+        &session(&long("a")),
+        2_000
+    ));
+    assert!(
+        bench
+            .ledger
+            .worker_conversation_picked(("team-1", &pane), &session(&long("b")), 2_001),
+        "two conversations a line spells alike were counted as one"
+    );
 }

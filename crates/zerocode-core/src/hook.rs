@@ -2820,9 +2820,6 @@ mod tests {
         assert_eq!(hook_state("teammate_idle", "{}"), None);
     }
 
-    /// Claude's `SessionStart` may land only as the idle boundary it is —
-    /// gated on source, on attribution, and on the one vendor whose contract
-    /// says land it at all (the map's P0-4).
     /// t-68069: a process's own word that it came back on a conversation.
     /// A start that says nothing is not presumed to have, and neither is a
     /// helper's, which is not the pane's lead.
@@ -2842,6 +2839,9 @@ mod tests {
         ));
     }
 
+    /// Claude's `SessionStart` may land only as the idle boundary it is —
+    /// gated on source, on attribution, and on the one vendor whose contract
+    /// says land it at all (the map's P0-4).
     #[test]
     fn a_session_start_is_a_boundary_only_on_claudes_idle_sources() {
         for source in ["startup", "resume", "clear"] {

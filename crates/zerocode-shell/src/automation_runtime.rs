@@ -852,6 +852,9 @@ pub(super) fn start_automation(
     // The record says which agent this run drives; the terminal it opened is
     // therefore a send target like any other agent terminal.
     if let Some(driving) = driving {
+        crate::conversation_wake::PANE_LAUNCHES
+            .opening(term, Some(driving), &root)
+            .opened();
         state.agent_terms().insert(term, driving);
     }
     note_pane_account(&state, term, &env);

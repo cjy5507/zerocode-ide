@@ -2184,6 +2184,9 @@ pub(crate) struct ResumeLaunch {
     root: PathBuf,
     session_id: String,
     _auth_launch_lock: Option<zerocode_hookd::codex_runtime_auth::LaunchLock>,
+    /// This pane's line in the folder book (t-68069), taken back with the
+    /// launch unless it starts.
+    opening: crate::conversation_wake::OpeningPane<'static>,
 }
 
 /// A started zo pane's private channel, published once the pane is recorded.
@@ -2295,6 +2298,8 @@ impl WakeWindow for ResumeDoor<'_> {
                 kind.slug()
             );
         }
+        let opening =
+            crate::conversation_wake::PANE_LAUNCHES.opening(term, Some(kind.slug()), &root);
         Ok(ResumeLaunch {
             kind,
             caps,
@@ -2306,6 +2311,7 @@ impl WakeWindow for ResumeDoor<'_> {
             root,
             session_id: session_id.to_string(),
             _auth_launch_lock,
+            opening,
         })
     }
 
@@ -2332,6 +2338,7 @@ impl WakeWindow for ResumeDoor<'_> {
             root,
             session_id,
             _auth_launch_lock,
+            opening,
         } = launch;
         // Zo resumes through the same pane-owned channel as a fresh IDE pane.
         // Replaying `zo --resume ID` in a generic PTY restores the
@@ -2381,6 +2388,7 @@ impl WakeWindow for ResumeDoor<'_> {
             );
             error
         })?;
+        opening.opened();
         if let Some(screen) = &self.restore {
             super::settings::replay_stored_screen(state.config_root(), screen, pty.terminal_mut());
         }

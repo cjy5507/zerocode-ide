@@ -603,7 +603,7 @@ fn reseat_sleeping_in_line(
 /// (t-7812): no terminal carries id 0, so a door told the conversation is
 /// held here finds no tab to go to and opens nothing — the reseat's own tab
 /// arrives with `term:worker`.
-const RESEAT_CLAIM_TERM: u32 = 0;
+pub(crate) const RESEAT_CLAIM_TERM: u32 = 0;
 
 /// The hold one sleeper's reseat keeps on its conversation, from before its
 /// pane is cut until the pane answers for it (t-7812). Dropped at the end of
@@ -11909,6 +11909,7 @@ fn carried(
                     prompt: prepared.prompt.clone(),
                     timeout_ms: prepared.prompt_timeout_ms,
                     resumed: None,
+                    session: None,
                     seat: Some(crate::agent_teams::WorkerSeatWords::of(prepared)),
                 })
                 .or_else(|| {
@@ -11921,6 +11922,7 @@ fn carried(
                             prompt: prepared.prompt.clone(),
                             timeout_ms: prepared.prompt_timeout_ms,
                             resumed: Some(prepared.resumed),
+                            session: sleeper_record(&prepared.worker),
                             seat: None,
                         })
                 });

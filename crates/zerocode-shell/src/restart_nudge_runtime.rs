@@ -3,15 +3,6 @@ use super::*;
 /// The receipt clock and its log projection live in one small table. No call
 /// site carries a second number that can drift from the timer it describes.
 pub(super) const RESUME_NUDGE_RECEIPT_MS: u64 = 20_000;
-const RESUME_LOG_SESSION_PREFIX_CHARS: usize = 8;
-/// The word every zo session id opens with (`session-<ms>-<n>`, zo's
-/// core-types session id): eight characters of a zo id are always that word
-/// alone (t-77787).
-const ZO_SESSION_ID_HEAD: &str = "session-";
-/// How much of a zo id after [`ZO_SESSION_ID_HEAD`] a line carries: its
-/// millisecond stamp and counter (`1792758210243-0`, fifteen characters)
-/// fit whole.
-const RESUME_LOG_ZO_SESSION_CHARS: usize = 24;
 /// How much of a commit subject the worktree line carries — a line, not a
 /// changelog.
 const WORKTREE_SUBJECT_CHARS: usize = 72;
@@ -632,7 +623,7 @@ pub(super) fn declined_line(term: TermId, agent: &str, session_id: &str) -> Stri
     format!(
         "term {term} did not resume {agent} {}: a finished worker's conversation, read off a \
          stored record",
-        session_prefix(session_id)
+        zerocode_core::session_id_prefix(session_id)
     )
 }
 
@@ -643,19 +634,6 @@ fn receipt_word(receipt: Option<Duration>) -> String {
         || "none".to_string(),
         |elapsed| format!("working@{}s", elapsed.as_secs()),
     )
-}
-
-/// The first characters of a session id, as every wake's line carries it —
-/// for a zo id, what follows the word all of them open with (t-77787): two
-/// zo conversations read apart, and the same as the placed line's id.
-pub(crate) fn session_prefix(session_id: &str) -> String {
-    match session_id.strip_prefix(ZO_SESSION_ID_HEAD) {
-        Some(rest) if !rest.is_empty() => rest.chars().take(RESUME_LOG_ZO_SESSION_CHARS).collect(),
-        _ => session_id
-            .chars()
-            .take(RESUME_LOG_SESSION_PREFIX_CHARS)
-            .collect(),
-    }
 }
 
 /// The line a wake files once it pressed Enter alone more than once
@@ -671,7 +649,7 @@ pub(super) fn retry_line(
     presses: u8,
     receipt: Option<Duration>,
 ) -> String {
-    let session = session_prefix(session_id);
+    let session = zerocode_core::session_id_prefix(session_id);
     let receipt = receipt_word(receipt);
     format!("term {term} resumed {agent} {session} nudge=enter-retry n={presses} receipt={receipt}")
 }
@@ -708,7 +686,7 @@ fn resumed_head(
     session_id: &str,
     road: Option<zerocode_core::NudgeRoad>,
 ) -> String {
-    let session = session_prefix(session_id);
+    let session = zerocode_core::session_id_prefix(session_id);
     let road = match road {
         Some(zerocode_core::NudgeRoad::Argv) => "argv",
         Some(zerocode_core::NudgeRoad::Composer) => "composer",
@@ -738,7 +716,7 @@ pub(super) fn fallback_line(term: TermId, pending: &PendingNudge, fallback: Fall
 /// conversation was never written (`conversation_never_written`), so the pane
 /// started the agent fresh instead of resuming into an exit.
 pub(super) fn fresh_line(term: TermId, agent: &str, session_id: &str) -> String {
-    let session = session_prefix(session_id);
+    let session = zerocode_core::session_id_prefix(session_id);
     format!("term {term} started {agent} fresh: {session} was never written")
 }
 
@@ -1973,10 +1951,6 @@ mod tests {
             "term 7 did not resume zo 1792758210243-0: a finished worker's conversation, read off \
              a stored record"
         );
-        // Every other agent's id keeps its first eight characters, and a
-        // bare word is no zo id.
-        assert_eq!(session_prefix("01234567-session"), "01234567");
-        assert_eq!(session_prefix("session-"), "session-");
     }
 
     /// t-57717: what every wake's line ends with — the road its door named,

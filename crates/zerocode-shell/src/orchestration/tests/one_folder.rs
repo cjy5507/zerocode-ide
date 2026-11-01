@@ -6,14 +6,19 @@
 //! two processes then wrote one transcript.
 //!
 //! Driven through the production roads behind a fake launcher, as
-//! `restore_door.rs` is: the door's wake (`wake_conversation`) and the
-//! ledger's summons (`Catalog::command_for`). What each started command line
-//! opens is read by [`opened_by`], which does what the CLI does with its
+//! `restore_door.rs` is: the door's wake (`wake_conversation`), the ledger's
+//! summons (`Catalog::command_for`) and the launch door's judgment
+//! (`neighbour_in_folder`, `unnamed_launch_args`). What each started command
+//! line opens is read by [`opened_by`], which does what the CLI does with its
 //! selectors over a real temporary folder.
 
 use super::restore_door::Door;
 use super::*;
-use crate::conversation_wake::WakeRoad;
+use crate::conversation_wake::{
+    FolderPanes, PaneLaunches, ReportedWord, WakeRoad, neighbour_in_folder, unnamed_launch_args,
+    word_on_report,
+};
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use zerocode_core::{LaunchOverride, ProviderSession, SessionKey};
 
@@ -86,7 +91,10 @@ impl Folder {
 /// own `--help`), kept to the words the launch roads can carry.
 fn opened_by(folder: &Folder, command: &str) -> Option<String> {
     let words: Vec<&str> = command.split_whitespace().collect();
-    if let Some(at) = words.iter().position(|word| *word == "--resume") {
+    if let Some(at) = words
+        .iter()
+        .position(|word| matches!(*word, "--resume" | "-r"))
+    {
         return words.get(at + 1).map(|named| (*named).to_string());
     }
     words
@@ -195,6 +203,241 @@ fn a_summons_beside_a_neighbour_starts_its_own_conversation() {
             "{agent} was summoned onto the folder's newest: {command}"
         );
     }
+}
+
+/// t-68069 P3-5: zo's `-r` is `--resume` by another name (`zo-ide`
+/// `ide/args.rs`): `-r latest` is the folder's newest.
+#[test]
+fn a_summons_carries_no_short_resume_either() {
+    let folder = Folder::new();
+    let catalog = Catalog::new(vec![(
+        "zo".to_string(),
+        LaunchOverride {
+            args: Some("-r latest".to_string()),
+            env: None,
+        },
+    )]);
+    let command = catalog.command_for("zo", "", &[]).expect("the summons");
+    assert_eq!(
+        opened_by(&folder, &command),
+        None,
+        "zo was summoned onto the folder's newest: {command}"
+    );
+}
+
+/// The launch door's judgment in the production order: the book and the args,
+/// over a window whose panes have not reported anything yet. Answers the
+/// command line it starts.
+struct LaunchDoor<'a> {
+    book: PaneLaunches,
+    folder: &'a Folder,
+}
+
+/// A window whose agents have not reported: nothing stands in its pane tables,
+/// so only the book can see them.
+struct NoReportYet;
+
+impl FolderPanes for NoReportYet {
+    fn agent_panes(&self) -> HashMap<u32, &'static str> {
+        HashMap::new()
+    }
+    fn pane_folder(&self, _term: u32) -> Option<std::path::PathBuf> {
+        None
+    }
+    fn shell_in_front(&self, _term: u32) -> bool {
+        false
+    }
+}
+
+impl<'a> LaunchDoor<'a> {
+    fn new(folder: &'a Folder) -> Self {
+        Self {
+            book: PaneLaunches::new(),
+            folder,
+        }
+    }
+
+    /// Open a pane with `--continue` saved. `restored_leaf` is what a restore's
+    /// id-less leaf says.
+    fn launch(&self, term: u32, restored_leaf: bool) -> Option<String> {
+        let (neighbour, opening) =
+            neighbour_in_folder(&self.book, &NoReportYet, term, "claude", self.folder.path());
+        opening.opened();
+        let planned = vec![SAVED_CONTINUE.to_string()];
+        let launch = unnamed_launch_args(Vec::new(), &planned, restored_leaf, neighbour);
+        let command = std::iter::once("claude".to_string())
+            .chain(launch.args)
+            .collect::<Vec<_>>()
+            .join(" ");
+        opened_by(self.folder, &command)
+    }
+}
+
+/// t-68069 P2-3: two panes opened one after another with `--continue` saved.
+/// The first has not reported anything when the second asks: the second starts
+/// a new conversation, and one transcript has one writer.
+#[test]
+fn two_panes_opened_in_a_row_with_a_saved_continue_do_not_share_a_conversation() {
+    let folder = Folder::new();
+    let door = LaunchDoor::new(&folder);
+    assert_eq!(
+        door.launch(1, false).as_deref(),
+        Some(NEWEST),
+        "alone in the folder, the person's setting stands"
+    );
+    assert_eq!(
+        door.launch(2, false),
+        None,
+        "the second pane took the first's conversation before the first had reported"
+    );
+}
+
+/// t-68069 P2-3: a restore whose id-less leaf comes before the leaf naming the
+/// folder's newest conversation. The id-less leaf starts a new conversation, so
+/// the named leaf keeps its own and exactly one process opens it.
+#[test]
+fn an_id_less_leaf_before_a_named_one_leaves_it_its_conversation() {
+    const ID_LESS: u32 = 680_730;
+    const NAMED: u32 = 680_731;
+    let (_window, _store) = PrivateWindow::boot();
+    let folder = Folder::new();
+    let launch_door = LaunchDoor::new(&folder);
+    let door = Door::new(folder.path());
+    door.saves_launch_args(SAVED_CONTINUE);
+    door.on_road(WakeRoad::RestoreFront);
+
+    let id_less = launch_door.launch(ID_LESS, true);
+    door.wake_with(NAMED, "claude", folder.record(NEWEST))
+        .expect("the named leaf's wake");
+    let started = door.started();
+    let (_, command) = started
+        .iter()
+        .find(|(held, _)| *held == NAMED)
+        .expect("the named leaf started");
+    let named = opened_by(&folder, command);
+
+    assert_eq!(
+        named.as_deref(),
+        Some(NEWEST),
+        "the named leaf lost its own"
+    );
+    assert_eq!(
+        id_less, None,
+        "the id-less leaf took the conversation the named leaf names: two processes on one \
+         transcript"
+    );
+}
+
+/// t-68069 P2-3: the production door says what the scene above assumes. A
+/// restored leaf says so, the launch door passes it on, and a launch's line is
+/// written with its judgment before its process exists.
+#[test]
+fn a_restored_leaf_says_so_and_the_launch_door_judges_before_it_spawns() {
+    let window = include_str!("../../../../../ui/shell-term.js");
+    assert!(
+        window.contains(r#"launchAgentTab({ agent: launched, prompt: "", restoredLeaf: true,"#),
+        "a restore's id-less leaf no longer says it is one"
+    );
+    let source = include_str!("../../cmd/terminal.rs");
+    let door = &source[source.find("fn launch_agent_tab(").expect("the door")..];
+    let judged = door.find("neighbour_in_folder(").expect("the judgment");
+    let spawned = door.find("let spawned = if").expect("the spawn");
+    assert!(
+        judged < spawned,
+        "the pane is judged after its process exists"
+    );
+    assert!(
+        door.contains("restored_leaf.unwrap_or(false)"),
+        "the launch door dropped a restored leaf's word"
+    );
+    let named = door
+        .find("state.pane_sessions().insert(")
+        .expect("the record");
+    assert!(
+        named < spawned,
+        "a named conversation is written after its process exists"
+    );
+}
+
+/// t-68069 P2-1: a wake's process reports before the wake writes its record, as
+/// zo's `source: "resume"` does right after its channel. Driven through the
+/// door's own road: inside its wake the report is that wake's conversation, so
+/// the pane's head and the coordinator hear nothing. Once settled, the record
+/// answers.
+#[test]
+fn a_report_before_the_wakes_record_is_no_surprise() {
+    const TERM: u32 = 680_740;
+    let (_window, _store) = PrivateWindow::boot();
+    let folder = Folder::new();
+    let door = Door::new(folder.path());
+    let reported = folder.record(NEWEST);
+    let heard: std::sync::Arc<Mutex<Vec<Option<ReportedWord>>>> = Default::default();
+    *door.during_prepare.lock().unwrap() = Some(Box::new({
+        let heard = std::sync::Arc::clone(&heard);
+        let reported = reported.clone();
+        move || {
+            let word = word_on_report("claude", TERM, None, &reported, || true, |_| None);
+            heard.lock().unwrap().push(word);
+        }
+    }));
+    door.wake_with(TERM, "claude", reported).expect("the wake");
+    assert_eq!(
+        *heard.lock().unwrap(),
+        vec![None],
+        "the door's own conversation was said as one the CLI picked"
+    );
+}
+
+/// t-68069 P2-1: the ledger's reseat has no pane number to claim by, so its
+/// record is written before the process exists: the ask carries it, and the
+/// split host writes it first. Read off the source because the split needs a
+/// whole window; `an_id_less_leaf…` and the ledger's own tests hold the rest.
+#[test]
+fn a_reseat_writes_its_conversation_before_its_process_exists() {
+    let ledger = include_str!("../../orchestration.rs");
+    assert!(
+        ledger.contains("session: sleeper_record(&prepared.worker),"),
+        "the reseat's ask does not carry its conversation"
+    );
+    let source = include_str!("../../agent_tools_runtime.rs");
+    let split = &source[source.find("fn split(").expect("the split")..];
+    let written = split
+        .find("state.pane_sessions().insert(term, session);")
+        .expect("the record");
+    let spawned = split.find("PtyLane::spawn(").expect("the spawn");
+    assert!(
+        written < spawned,
+        "the reseat's record comes after its process"
+    );
+}
+
+/// t-68069 P3-6: a vault row's door answers as every other door does, and waits
+/// out a wake on a thread of its own.
+#[test]
+fn a_vault_row_is_answered_with_the_pane_and_keeps_no_runtime_thread_waiting() {
+    let source = include_str!("../../cmd/fs.rs");
+    let door = source.find("fn resume_vault_session(").expect("the door");
+    assert!(
+        source[..door]
+            .trim_end()
+            .ends_with("#[tauri::command(async)]\npub(crate)"),
+        "the vault's door holds a runtime worker across its wait"
+    );
+    let body = &source[door..];
+    assert!(
+        body.contains("ConversationWake::standing(holder)")
+            && body.contains("RESEAT_CLAIM_TERM")
+            && !body.contains("터미널 {holder}"),
+        "the vault's door names a pane number it may not have, or names no way to it"
+    );
+    let window = include_str!("../../../../../ui/shell.js");
+    let reopening = &window[window
+        .find("async function resumeVaultSession(")
+        .expect("the window's door")..];
+    assert!(
+        reopening.contains("if (woke.standing)") && reopening.contains("focusAgentPane("),
+        "the window does not take the person to the pane holding the conversation"
+    );
 }
 
 /// t-68069 ①: `latest` is not a conversation, it is zo's word for the folder's

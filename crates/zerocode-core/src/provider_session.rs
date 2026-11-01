@@ -316,6 +316,30 @@ fn names_the_folders_newest(agent: AgentKind, id: &str) -> bool {
             .any(|word| id.trim().eq_ignore_ascii_case(word))
 }
 
+/// The word every zo session id opens with (`session-<ms>-<n>`, zo's
+/// core-types session id): eight characters of a zo id are always that word
+/// alone (t-77787).
+const ZO_SESSION_ID_HEAD: &str = "session-";
+/// How much of a zo id after [`ZO_SESSION_ID_HEAD`] a line carries: its
+/// millisecond stamp and counter (`1792758210243-0`, fifteen characters)
+/// fit whole.
+const ZO_SESSION_ID_LINE_CHARS: usize = 24;
+/// How much of any other id a line carries.
+const SESSION_ID_LINE_CHARS: usize = 8;
+
+/// The first characters of a session id, as every line that names a
+/// conversation carries it — the window's log and the ledger's letters — for a
+/// zo id what follows the word all of them open with (t-77787, t-68069): two zo
+/// conversations read apart. A way to find it, never a way to compare two:
+/// whether two ids are one conversation is asked of the whole id.
+#[must_use]
+pub fn session_id_prefix(session_id: &str) -> String {
+    match session_id.strip_prefix(ZO_SESSION_ID_HEAD) {
+        Some(rest) if !rest.is_empty() => rest.chars().take(ZO_SESSION_ID_LINE_CHARS).collect(),
+        _ => session_id.chars().take(SESSION_ID_LINE_CHARS).collect(),
+    }
+}
+
 /// The word Codex re-enters a thread by — `codex resume <id>` — named once,
 /// for [`resume_argv`] and for the window road that must know a launch line
 /// is a resume before it rewrites one (t-7812: a remote app-server route put
@@ -419,6 +443,22 @@ pub fn resume_argv_continuing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// t-77787, t-68069: a line names a zo conversation by what follows the
+    /// word all of them open with, and any other by its first letters.
+    #[test]
+    fn a_line_tells_two_conversations_apart() {
+        assert_eq!(session_id_prefix("01234567-session"), "01234567");
+        assert_eq!(session_id_prefix("session-"), "session-");
+        assert_eq!(
+            session_id_prefix("session-1792758210243-0"),
+            "1792758210243-0"
+        );
+        assert_ne!(
+            session_id_prefix("session-1792758210243-0"),
+            session_id_prefix("session-1792758210243-1")
+        );
+    }
 
     /// t-68069: a word for the folder's newest is not a conversation. Only zo
     /// spells them; to anything else they are an id like any other.

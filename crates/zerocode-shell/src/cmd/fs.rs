@@ -992,14 +992,17 @@ fn vault_roster_snapshot(state: &AppState) -> Vec<zerocode_core::vault::ChildTra
 /// as given, for the reason [`open_lane`] resolves its own — this becomes a
 /// process's working directory, and a webview naming a path must never be
 /// enough to start a shell inside it.
-#[tauri::command]
-pub(crate) async fn resume_vault_session(
+// Not `async fn`: it may wait out a wake in flight on the conversation, thirty
+// seconds at most (`conversation_wake::claim_among`), and `(async)` runs that on
+// a thread of its own rather than holding one of the runtime's workers.
+#[tauri::command(async)]
+pub(crate) fn resume_vault_session(
     state: State<'_, AppState>,
     session: zerocode_core::vault::VaultSession,
     worktree: Option<String>,
     rows: u16,
     cols: u16,
-) -> Result<TermId, String> {
+) -> Result<crate::conversation_wake::ConversationWake, String> {
     // The same base the panel's rows wore (`vault_resume_base`), so the
     // equality check below compares like with like.
     let base = vault_resume_base(state.settings(), &session.agent)?;
@@ -1060,17 +1063,30 @@ pub(crate) async fn resume_vault_session(
     // One conversation, one process (t-68069): a vault row is a door like any
     // other. This one started a second process on a transcript a live pane was
     // writing; Claude keeps no lease to refuse it. Judged as a wake is, and the
-    // pane is written down before anything can ask again.
+    // pane is written down before anything can ask again. Held in a pane, the
+    // answer is that pane, as every other door's is (`ConversationWake`).
     let record = crate::conversation_wake::vault_record(&session.agent, &session.session_id);
     let _claim = match &record {
-        Some(held) => crate::conversation_wake::claim_among(&session.agent, held, term, |wanted| {
-            crate::conversation_wake::holding_pane(state.inner(), wanted)
-        })
-        .map_err(|holder| {
-            format!("이 대화는 이미 터미널 {holder}에서 열려 있어 새로 열지 않았습니다")
-        })?,
+        Some(held) => {
+            match crate::conversation_wake::claim_among(&session.agent, held, term, |wanted| {
+                crate::conversation_wake::holding_pane(state.inner(), wanted)
+            }) {
+                Ok(claim) => claim,
+                Err(crate::orchestration::RESEAT_CLAIM_TERM) => {
+                    return Err(crate::conversation_wake::VAULT_RESEATING.to_string());
+                }
+                Err(holder) => {
+                    return Ok(crate::conversation_wake::ConversationWake::standing(holder));
+                }
+            }
+        }
         None => None,
     };
+    let opening = crate::conversation_wake::PANE_LAUNCHES.opening(
+        term,
+        zerocode_core::AgentKind::from_slug(&session.agent).map(|kind| kind.slug()),
+        &root,
+    );
     let launch_token = new_launch_token(term);
     let mut env = hooks::pty_env(&hooks::pane_key_of(term), Some(&launch_token), &root, None);
     env.extend(account_env_for(state.config_root(), &session.agent)?);
@@ -1089,6 +1105,7 @@ pub(crate) async fn resume_vault_session(
         cols,
     )
     .map_err(|error| error.to_string())?;
+    opening.opened();
     note_window_event(
         state.local_data_root(),
         &format!("term {term} spawned /bin/sh -lc (vault resume)"),
@@ -1103,7 +1120,7 @@ pub(crate) async fn resume_vault_session(
     note_pane_account(&state, term, &env);
     state.launch_tokens().insert(term, launch_token);
     state.cadence().wake();
-    Ok(term)
+    Ok(crate::conversation_wake::ConversationWake::opened(term))
 }
 
 #[tauri::command]

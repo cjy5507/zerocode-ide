@@ -28102,7 +28102,7 @@ const vaultDrop = await page.evaluate(async () => {
   // one id is two tabs sharing a screen.
   window.__ANSWER__.resume_vault_session = (args) => {
     window.__RESUMED_VAULT__ = args;
-    return 93;
+    return { term: 93, standing: false };
   };
   await refreshWorktrees();
 

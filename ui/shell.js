@@ -9127,16 +9127,24 @@ async function resumeVaultSession(session, worktree) {
   // rather than leaving a terminal in a workspace nobody is standing in.
   if (worktree && worktree !== activeWorktreePath && !(await activateWorktree(worktree))) return;
   try {
-    const term = await invoke("resume_vault_session", {
+    const woke = await invoke("resume_vault_session", {
       session,
       worktree: worktree ?? null,
       ...spawnGrid({ placement: "tab" }),
     });
+    // Held in a pane already: that pane is the answer, as on every other door
+    // (t-68069). One with no tab yet is on its way to the stage by itself.
+    if (woke.standing) {
+      const tab = tabOfTerm(woke.term);
+      if (tab) await focusAgentPane(tab.worktree, tab.id, woke.term, session.agent);
+      toast(t("vault.alreadyOpen", "이 대화는 이미 터미널 {{term}}번에서 열려 있어 새로 열지 않았습니다", { term: woke.term }), "warn");
+      return;
+    }
     // Named for what was SAID in it, not for the agent: a vault with five Claude
     // conversations would otherwise open five tabs all called `claude`, which is
     // the exact thing reopening a specific one is for. A tab for the same reason
     // the pane menu's 이어서 is one — a conversation reopened is somewhere to go.
-    mountTermTab(term, { agent: session.title }, { placement: "tab" });
+    mountTermTab(woke.term, { agent: session.title }, { placement: "tab" });
   } catch (error) {
     showError(String(error));
   }
@@ -12569,6 +12577,7 @@ listen("hook:agent", (event) => {
     (row) => row.id === `run:${agent}` && row.state !== "done",
   );
   if (agent && ownAgent && agent !== ownAgent && fromNested) return;
+  settlePaneConversationWord(term, state, session);
   // The snapshot fence is about observations, not transitions. A repeated
   // Working is still newer than a Done snapshot whose request was already in
   // flight, even though it must not reset the row's elapsed clock below.
@@ -14168,21 +14177,32 @@ function paintPaneHeadPick(head, term) {
   // too, where the plain session steps aside for the count (t-81786 P3-12).
   pick.classList.toggle("is-said", line !== null);
   writeTextContent(pick, line ?? (session ? t("paneHead.pick", "대화 {{session}}", { session: shortSession(session) }) : ""));
-  writeAttribute(pick, "data-tip", session);
+  // A narrow pane cuts the line short; its tooltip reads it whole (t-68069).
+  writeAttribute(pick, "data-tip", line ?? session);
 }
 
 /* What the window has to say about a pane's conversation (t-68069), in place of
- * its plain name: a conversation no door named, one another pane holds too, or
- * a new one started because a saved selector stood aside. A word about one
- * conversation lasts while the pane holds it; the two that ask for a look also
- * say so once as a toast. */
+ * its plain name: a conversation the CLI picked by itself, one another pane
+ * holds too, or a new one started because a saved selector stood aside. A word
+ * about one conversation lasts while the pane holds it; the word about a new
+ * one lasts until the pane has words or a conversation of its own
+ * (`settlePaneConversationWord`); the two that ask for a look also say so once
+ * as a toast. */
 const paneConversationWords = new Map();
 
 function paneConversationLine({ word, session, holder }) {
   const short = session ? shortSession(session) : "";
-  if (word === "picked") return t("paneHead.picked", "창이 고르지 않은 대화 {{session}}", { session: short });
-  if (word === "held") return t("paneHead.held", "대화 {{session}} — 터미널 {{holder}}도 쓰는 중", { session: short, holder });
-  return t("paneHead.fresh", "이 폴더의 터미널 {{holder}}이 쓰는 중이라 새 대화로 시작", { holder });
+  if (word === "picked") return t("paneHead.picked", "CLI가 직접 고른 대화 {{session}}", { session: short });
+  if (word === "held") return t("paneHead.held", "대화 {{session}} — 터미널 {{holder}}번도 쓰는 중", { session: short, holder });
+  return t("paneHead.fresh", "터미널 {{holder}}번이 이 폴더를 쓰는 중이라 새 대화로 시작", { holder });
+}
+
+/* The word about a new conversation has said what it had to once the pane took
+ * its first prompt or reported its conversation: left there, it would keep the
+ * pane's name off its head for as long as the pane lives. */
+function settlePaneConversationWord(term, state, session) {
+  const said = paneConversationWords.get(term);
+  if (said && said.session === null && (session || state === "working")) paneConversationWords.delete(term);
 }
 
 listen("pane:conversation", ({ payload }) => {
