@@ -1824,7 +1824,11 @@ mod tests {
         assert_eq!(on_late(&Standing::Closed), Late::Drop);
         assert_eq!(on_late(&Standing::Answered("2".into())), Late::Tell);
         for word in TO_PERSON {
-            assert_eq!(on_late(&Standing::Answered(word.to_string())), Late::Tell, "{word}");
+            assert_eq!(
+                on_late(&Standing::Answered(word.to_string())),
+                Late::Tell,
+                "{word}"
+            );
             assert_eq!(
                 on_late(&Standing::Answered(format!("「{word}」."))),
                 Late::Tell,
