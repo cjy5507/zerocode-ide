@@ -897,7 +897,10 @@ mod tests {
         let skill = BundledSkill {
             name: "orchestration",
             content: bundled_skill("orchestration").unwrap().content,
-            files: &[(VERBS, "this build's verbs\n"), ("mine.md", "this build's\n")],
+            files: &[
+                (VERBS, "this build's verbs\n"),
+                ("mine.md", "this build's\n"),
+            ],
         };
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join(skill.name);

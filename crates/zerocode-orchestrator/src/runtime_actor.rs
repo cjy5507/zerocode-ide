@@ -3695,6 +3695,11 @@ fn rebuild_stored_ledger(
     ));
     let ledger = Ledger::rebuild(held.projection).map_err(RuntimeError::LedgerInvariant)?;
     if receipts == 0 && repairs.is_empty() {
+        /* The store's open digested the rows it read. When this ledger exports
+         * those very rows, its first write carries those digests on and digests
+         * only what moved (t-85378). When it exports anything else, nothing is
+         * carried, and the first write digests as it always did. */
+        journal.adopt_lists(lease, &ledger.export_marked());
         return Ok((ledger, held.revision, repairs));
     }
 
@@ -8598,7 +8603,8 @@ mod tests {
     /// store the next open passes, and so do the writes after it (t-85378).
     #[test]
     fn a_store_of_any_format_opens_after_a_kill_before_the_first_write_and_after_the_writes() {
-        const NO_GENERATION: &str = "ALTER TABLE ledger_table_digests DROP COLUMN format_generation;
+        const NO_GENERATION: &str =
+            "ALTER TABLE ledger_table_digests DROP COLUMN format_generation;
              ALTER TABLE orchestration_ledger_heads DROP COLUMN table_digest_root;
              ALTER TABLE orchestration_ledger_heads DROP COLUMN table_digest_format_generation;";
         const FEWER_COLUMNS: &str = "ALTER TABLE ledger_messages DROP COLUMN payload;
@@ -8823,9 +8829,7 @@ mod tests {
             )
             .expect("row fault");
         assert_eq!(
-            a_letter_by(&actor, "r-lost", 200)
-                .err()
-                .expect("a write the rows refused"),
+            a_letter_by(&actor, "r-lost", 200).expect_err("a write the rows refused"),
             RuntimeError::NotDurable
         );
         connection
@@ -8882,7 +8886,9 @@ mod tests {
             eprintln!(
                 "leaves: {step} revision={} root={} rows={:x}{places}",
                 held.revision,
-                root.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+                root.iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>(),
                 Sha256::digest(&rows),
             );
         };
@@ -8899,7 +8905,9 @@ mod tests {
             )
             .expect("runtime actor");
             say(&format!("opening {opening}, booted"), &store);
-            let busy = actor.view().expect("an image").projection().runs[0].id.clone();
+            let busy = actor.view().expect("an image").projection().runs[0]
+                .id
+                .clone();
             let address = format!("run:{busy}");
             for (step, argv) in [
                 (
@@ -8957,15 +8965,26 @@ mod tests {
             )
             .expect("runtime actor");
             let boot_ms = booting.elapsed().as_secs_f64() * 1000.0;
-            let busy = actor.view().expect("an image").projection().runs[0].id.clone();
+            let busy = actor.view().expect("an image").projection().runs[0]
+                .id
+                .clone();
             let address = format!("run:{busy}");
             let mut letters = String::new();
             for which in ["first", "second"] {
                 let name = format!("r-{round}-{which}");
                 let command = a_command(
                     &[
-                        "send", "--run", &busy, "--to", &address, "--type", "status", "--body",
-                        "one more", "--retry-request", &name,
+                        "send",
+                        "--run",
+                        &busy,
+                        "--to",
+                        &address,
+                        "--type",
+                        "status",
+                        "--body",
+                        "one more",
+                        "--retry-request",
+                        &name,
                     ],
                     now_ms,
                 );
