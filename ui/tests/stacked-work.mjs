@@ -169,9 +169,9 @@ export async function testStackedWork(browser, origin, ok) {
         secs: start && end ? Math.round((end - start) / 1000) : null, rc: state === "failed" ? 1 : state === "passed" ? 0 : null,
         kind, gate: "l61", part: "r", what: null, expected: { secs: 300, samples: 5 } });
       const line = { found: true, runner_lanes: [1], paused: false };
-      // Five hours ago the gate was running; the held answer says so and was received five hours ago.
+      // The held answer says the gate is running (it started minutes ago by the clock), but it was received five hours ago.
       boardScheduleAnswer = { revision: 11, unchanged: false, read_ms: now - 300 * minute, line, lanes: [],
-        jobs: [step("g1-build", "running", now - 301 * minute, null, now - 302 * minute)] };
+        jobs: [step("g1-build", "running", now - 3 * minute, null, now - 4 * minute)] };
       boardScheduleAnsweredAt = now - 300 * minute;
       boardScheduleAskedAt = 0;
       const asked = [];
@@ -190,7 +190,7 @@ export async function testStackedWork(browser, origin, ok) {
       seen.askedAfterRepaints = asked.length;
       // The answer comes: a gate that failed since. No paint is called from here.
       release({ revision: 12, unchanged: false, read_ms: Date.now(), line, lanes: [],
-        jobs: [step("g1-build", "failed", now - 301 * minute, now - 295 * minute, now - 302 * minute)] });
+        jobs: [step("g1-build", "failed", now - 3 * minute, now - minute, now - 4 * minute)] });
       await frames(6);
       seen.freshText = gateText();
       seen.answeredNow = Math.abs(Date.now() - boardScheduleAnsweredAt) < 5_000;

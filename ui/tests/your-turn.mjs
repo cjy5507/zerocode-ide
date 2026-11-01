@@ -202,25 +202,29 @@ export async function testYourTurn(browser, origin, ok) {
         await window.__settle();
         return text;
       };
+      // The pane then asks (a described question): the list stands the card, and the answer is whatever the window kept.
+      const asks = async (session) => {
+        tell({ term, state: "needs-attention", agent: "claude", session: { id: session }, resumable: true, ask_prompt: card.ask_prompt });
+        await window.__settle();
+        return context();
+      };
       tell({ term, state: "done", agent: "claude", session: { id: "s-road-a" }, resumable: true, said: "배포는 끝났습니다.", answer: "배포는 끝났습니다." });
       await window.__settle();
-      seen.afterAnswer = await context();
+      seen.afterAnswer = await asks("s-road-a");
       // The tool's output lands mid-turn: `said` follows it, the answer does not.
       tell({ term, state: "working", agent: "claude", session: { id: "s-road-a" }, resumable: true, said: "API_KEY=hunter2-not-an-answer" });
       await window.__settle();
-      seen.afterTool = await context();
       seen.saidFollowsTool = paneSaid.get(term) === "API_KEY=hunter2-not-an-answer";
+      seen.afterTool = await asks("s-road-a");
       // A turn that ended with no answer (interrupted) leaves none.
       tell({ term, state: "done", agent: "claude", session: { id: "s-road-a" }, resumable: true });
       await window.__settle();
-      seen.afterNoAnswer = await context();
+      seen.afterNoAnswer = await asks("s-road-a");
       tell({ term, state: "done", agent: "claude", session: { id: "s-road-a" }, resumable: true, answer: "다시 답했습니다." });
       await window.__settle();
-      seen.afterAgain = await context();
+      seen.afterAgain = await asks("s-road-a");
       // A new session on the same pane starts without the old one's answer.
-      tell({ term, state: "working", agent: "claude", session: { id: "s-road-b" }, resumable: true });
-      await window.__settle();
-      seen.afterNewSession = await context();
+      seen.afterNewSession = await asks("s-road-b");
       paneAnswer.delete(term);
       await window.__setTurns(window.__turnCards());
       return seen;
