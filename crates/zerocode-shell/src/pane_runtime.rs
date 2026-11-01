@@ -1294,7 +1294,7 @@ pub(super) fn note_pane_state(
     // supervision road below — the facts it needs are merged here and nowhere
     // else, and recomputing them after the borrow closes would be the same
     // merge written twice.
-    let (began_ms, ended) = {
+    let (began_ms, ended, waiting) = {
         let state = app.state::<AppState>();
         let states = state.pane_states();
         let runtime = state.shell_runtime();
@@ -1511,12 +1511,9 @@ pub(super) fn note_pane_state(
         // evaluation, and NeedsAttention is the one state that means a
         // person — stamped with when that state began, which outlives the
         // dozens of tool events one waiting stretch can produce.
-        orchestration::pane_attention_noted(
-            report.term,
-            (report.state == zerocode_core::hook::HookState::NeedsAttention)
-                .then_some(state_started_at),
-            now,
-        );
+        let waiting = (report.state == zerocode_core::hook::HookState::NeedsAttention)
+            .then_some((state_started_at, now));
+        orchestration::pane_attention_seen(report.term, waiting.map(|(since_ms, _)| since_ms));
         (
             state_started_at,
             (report.state == zerocode_core::hook::HookState::Done).then_some((
@@ -1524,8 +1521,15 @@ pub(super) fn note_pane_state(
                 interrupted,
                 now,
             )),
+            waiting,
         )
     };
+    // The ledger hears it only now. A move's observation of ANY pane needs the
+    // lock above while the actor waits for it, so a report that stood in the
+    // actor's line holding that lock stood the window still (t-75383).
+    if let Some((since_ms, now)) = waiting {
+        orchestration::pane_attention_told(report.term, since_ms, now);
+    }
     // A `working` that is the lead's own `Stop` held back by the work it
     // left running: the done gate in [`hook_loop`] parked that very event a
     // moment ago, and every newer word evicts it first. The card stays

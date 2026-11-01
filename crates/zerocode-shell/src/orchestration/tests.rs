@@ -526,6 +526,15 @@ fn a_runs_shadow(id: &str) -> String {
     )
 }
 
+/// A report's two halves with nothing between them: the window's record, then
+/// the ledger's word (`pane_runtime::note_pane_state`, t-75383).
+fn pane_attention_noted(term: u32, waiting_since: Option<i64>, now_ms: i64) {
+    super::pane_attention_seen(term, waiting_since);
+    if let Some(since_ms) = waiting_since {
+        super::pane_attention_told(term, since_ms, now_ms);
+    }
+}
+
 /// The rows, as the runtime shows them to everybody.
 fn the_rows() -> zerocode_core::orchestration::LedgerProjectionV1 {
     super::runtime()
@@ -12115,12 +12124,12 @@ fn a_worker_observation_carries_the_windows_wait_verdict() {
     );
     // Evaluated and quiet: an explicit null, which must not print the
     // same as never-looked.
-    super::pane_attention_noted(WORKER, None, 4_000);
+    pane_attention_noted(WORKER, None, 4_000);
     let seen = show();
     assert!(seen.get("agentWait").is_some());
     assert!(seen["agentWait"].is_null());
     // Waiting on the person: the evidence and its clock.
-    super::pane_attention_noted(WORKER, Some(4_242), 4_300);
+    pane_attention_noted(WORKER, Some(4_242), 4_300);
     let seen = show();
     assert_eq!(seen["agentWait"]["source"], "hook");
     assert_eq!(seen["agentWait"]["since"], 4_242);
@@ -12282,7 +12291,7 @@ fn a_zo_workers_wait_names_the_event_channel_as_its_source() {
     let started: serde_json::Value = serde_json::from_str(&started.stdout).expect("a worker");
     let worker = started["workerId"].as_str().expect("a worker id");
 
-    super::pane_attention_noted(WORKER, Some(4_243), 4_300);
+    pane_attention_noted(WORKER, Some(4_243), 4_300);
     let shown = run(
         &host,
         Vec::new(),
@@ -24486,6 +24495,78 @@ fn a_workers_claimed_merge_reaches_the_roster_row_as_a_claim() {
     }
 }
 
+/// t-75383 r2: a report tells the ledger of a question after letting
+/// `pane_states` go, so another thread's report of the answer can reach the
+/// ledger first. The thread's last line is the last state the ledger saw the
+/// receiver in (`notice_owed`), and an asker read at its deadline must not be
+/// left with a question that is over. So the actor reads the window's record
+/// when it serves the word: the answer wrote that record before it told anyone.
+#[test]
+fn a_question_answered_before_the_ledger_heard_it_is_not_told_after_the_answer() {
+    const LEADER: u32 = 11_126;
+    const WORKER: u32 = 11_127;
+    let (_window, _store) = PrivateWindow::boot();
+    let team = format!("team-attention-order-{LEADER}");
+    let (_run, worker, _pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let asked = run(
+        &Nowhere,
+        Vec::new(),
+        &team,
+        zerocode_core::agent_teams::LEADER_PANE,
+        TEST_CAPABILITY,
+        &words(&format!(
+            "ask --to worker:{worker} --body which-branch --timeout-ms {}",
+            zerocode_core::orchestration::WAIT_BUDGET_MIN_MS
+        )),
+        clock(),
+    );
+    assert_eq!(asked.exit_code, 0, "{}", asked.stderr);
+    let asked: serde_json::Value = serde_json::from_str(&asked.stdout).expect("an answer");
+    let question = asked["questionId"]
+        .as_str()
+        .expect("a question")
+        .to_string();
+    let told = || -> Vec<String> {
+        the_rows()
+            .messages
+            .iter()
+            .filter(|row| {
+                row.from == zerocode_core::orchestration::LEDGER_ITSELF
+                    && row.thread.as_deref() == Some(question.as_str())
+            })
+            .map(|row| {
+                let body: serde_json::Value =
+                    serde_json::from_str(row.body.as_str()).expect("a notice is JSON");
+                body["reason"].as_str().expect("a reason").to_string()
+            })
+            .collect()
+    };
+    let since = clock();
+    // The question's report has written its word and let the lock go.
+    super::pane_attention_seen(WORKER, Some(since));
+    // The answer's report, on another thread, goes all the way through.
+    super::pane_attention_seen(WORKER, None);
+    super::pane_turn_ended(WORKER, since + 1, false, since + 2);
+    // Only now does the question's report reach the actor.
+    super::pane_attention_told(WORKER, since, since + 3);
+    assert_eq!(
+        told(),
+        vec![zerocode_core::orchestration::ReceiverNews::TurnEnded.word().to_string()],
+        "the ledger's last word on the receiver is a question already over"
+    );
+    // A question of the same pane that still stands is told as ever.
+    let next = since + 4;
+    pane_attention_noted(WORKER, Some(next), next + 1);
+    assert_eq!(
+        told().last().map(String::as_str),
+        Some(zerocode_core::orchestration::ReceiverNews::AwaitingInput.word()),
+        "a standing question went untold"
+    );
+    super::forget_pane_attention(WORKER);
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+}
+
 /// What the window SAW is not what the ledger was TOLD (astra R1a,
 /// t-6740 r2). A wait on the person that the disk refused to write down is
 /// told on the next sighting of the same wait — the window's map of what it
@@ -24542,7 +24623,7 @@ fn a_refused_attention_notice_is_told_on_the_next_sighting() {
         )
         .expect("the disk refuses the notice");
     let since = clock();
-    super::pane_attention_noted(WORKER, Some(since), since + 1);
+    pane_attention_noted(WORKER, Some(since), since + 1);
     assert!(
         told().is_empty(),
         "a notice the disk refused stood in the rows"
@@ -24551,7 +24632,7 @@ fn a_refused_attention_notice_is_told_on_the_next_sighting() {
     connection
         .execute_batch("DROP TRIGGER refuse_attention_write;")
         .expect("the disk comes back");
-    super::pane_attention_noted(WORKER, Some(since), since + 2);
+    pane_attention_noted(WORKER, Some(since), since + 2);
     let lines = told();
     assert_eq!(
         lines.len(),
@@ -24564,7 +24645,7 @@ fn a_refused_attention_notice_is_told_on_the_next_sighting() {
     );
     assert_eq!(lines[0]["factMs"], since);
     // Seen again: the ledger's record answers, and nothing is added.
-    super::pane_attention_noted(WORKER, Some(since), since + 3);
+    pane_attention_noted(WORKER, Some(since), since + 3);
     assert_eq!(told().len(), 1, "one wait was told twice");
 
     // The terminal changes hands: its worker is stopped and the terminal is
@@ -24624,14 +24705,14 @@ fn a_refused_attention_notice_is_told_on_the_next_sighting() {
             })
             .count()
     };
-    super::pane_attention_noted(WORKER, Some(since), clock());
+    pane_attention_noted(WORKER, Some(since), clock());
     assert_eq!(
         told_next(),
         0,
         "the new owner was told the last owner's wait"
     );
     let own = clock();
-    super::pane_attention_noted(WORKER, Some(own), own + 1);
+    pane_attention_noted(WORKER, Some(own), own + 1);
     assert_eq!(told_next(), 1, "the new owner's own wait was not told");
 
     super::forget_pane_attention(WORKER);
@@ -26438,6 +26519,67 @@ fn a_persons_panes_keep_their_login_and_a_line_with_their_words_waits() {
     assert_eq!(default["panesAtTurnEnd"], 2);
     assert_eq!(stood.died(at + 40), 0);
     for term in [own, stood.leader + 100] {
+        crate::agent_teams::forget_term(term);
+    }
+}
+
+/// t-75383 r2: the report of a question stands in the actor's line, behind a
+/// move's commit, with the hook word's lock already let go — so the observation
+/// the actor waits for, and the pump's read of every pane with a delivery, take
+/// that lock freely. `note_pane_state` needs a live `AppHandle`, so `words` stands
+/// in for `pane_states`; the order is the source contract's
+/// (`a_report_writes_the_pane_word_and_tells_the_ledger_with_the_lock_let_go`),
+/// and the actor, the fence and both halves of the report here are the real ones.
+#[test]
+fn a_question_reported_during_a_move_waits_for_the_ledger_with_the_hook_word_free() {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    let stood = WalledClaude::near_limit(93_260, 1, 1);
+    let at = stood.began + 20_000;
+    let (worker, term) = stood.working[0].clone();
+    let asking = stood.leader + 200;
+    let plan = stood.plan(at);
+    stood.host.seating_onto(stood.leader + 100);
+    crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+        .expect("applied");
+    stood.host.busy.lock().unwrap().remove(&term);
+    let words = Arc::new(Mutex::new(std::collections::HashMap::<u32, i64>::new()));
+    let (told_tx, told) = mpsc::channel::<()>();
+    let (looked_tx, looked) = mpsc::channel();
+    *stood.host.during_observation.lock().unwrap() = Some(Box::new(move || {
+        let (seen_tx, seen) = mpsc::channel();
+        let reporting = Arc::clone(&words);
+        std::thread::spawn(move || {
+            {
+                let mut states = reporting.lock().unwrap();
+                states.insert(asking, at);
+                super::pane_attention_seen(asking, Some(at));
+            }
+            let _ = seen_tx.send(());
+            super::pane_attention_told(asking, at, at + 1);
+            let _ = told_tx.send(());
+        });
+        seen.recv().expect("the report wrote its word");
+        // The actor stands at this move's fence, so the report cannot be
+        // answered yet — and nothing it holds stops anyone here.
+        let waited = told.recv_timeout(Duration::from_millis(150)).is_err();
+        let free = words.try_lock().is_ok();
+        let _ = looked_tx.send((waited, free, told));
+    }));
+    assert_eq!(
+        crate::account_switch::follow_with(&stood.host, &stood.world, at + 10),
+        1
+    );
+    let (waited, free, told) = looked.recv().expect("the observation ran");
+    assert!(waited, "the report was answered with the actor at a fence");
+    assert!(free, "the report stood in the actor's line holding the hook word");
+    assert!(
+        told.recv_timeout(Duration::from_secs(10)).is_ok(),
+        "the report still waits after the move's commit"
+    );
+    assert_ne!(term_now(&worker), term);
+    super::forget_pane_attention(asking);
+    for term in [stood.leader + 100, stood.leader + 101] {
         crate::agent_teams::forget_term(term);
     }
 }
@@ -30317,7 +30459,7 @@ fn a_pane_waiting_on_its_person_is_not_read_at_rest_by_its_silence() {
     host.rests(rest);
 
     super::pane_turn_began(LEADER, clock());
-    super::pane_attention_noted(LEADER, Some(clock()), clock());
+    pane_attention_noted(LEADER, Some(clock()), clock());
     let held = crate::agent_teams::current_pane_capability(&team, &pane)
         .expect("the split minted the worker a capability");
     let done = run(
@@ -30345,7 +30487,7 @@ fn a_pane_waiting_on_its_person_is_not_read_at_rest_by_its_silence() {
         "a line was typed at a pane that waits on its person"
     );
 
-    super::pane_attention_noted(LEADER, None, clock());
+    pane_attention_noted(LEADER, None, clock());
     super::pane_turn_began(LEADER, clock());
     super::forget_pane_attention(LEADER);
     crate::agent_teams::forget_term(LEADER);

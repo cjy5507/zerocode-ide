@@ -1082,7 +1082,7 @@ fn a_worker_waiting_on_the_person_is_not_told_to_go_on() {
         a_worker(&host, &team, "--agent codex", Some("session-t7812-working"));
     for term in [asking_door_term, asking_term] {
         super::super::pane_turn_began(term, clock());
-        super::super::pane_attention_noted(term, Some(clock()), clock());
+        super::pane_attention_noted(term, Some(clock()), clock());
     }
     super::super::pane_turn_began(working_term, clock());
     the_window_goes(

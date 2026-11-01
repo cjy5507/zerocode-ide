@@ -5959,7 +5959,20 @@ fn pane_attention() -> &'static Mutex<std::collections::HashMap<u32, Option<i64>
     ATTENTION.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-/// A hook report said whether this terminal is waiting on the person.
+/// A hook report said whether this terminal is waiting on the person: the
+/// window's own record of it, written under `pane_states` so it stands in the
+/// order the words do. Asks the ledger nothing: its worker can be waiting for
+/// an observation that needs that lock (t-75383). [`pane_attention_told`] is
+/// the other half.
+pub(crate) fn pane_attention_seen(term: u32, waiting_since: Option<i64>) {
+    pane_attention()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert(term, waiting_since);
+}
+
+/// Tell the ledger of a wait [`pane_attention_seen`] wrote down, with no lock
+/// held: this stands in the actor's line, and a move's commit can be ahead.
 ///
 /// The map records what the window SAW; it is not the record of what the
 /// ledger was TOLD (t-6740). Every sighting of a wait goes to the actor, and
@@ -5973,14 +5986,7 @@ fn pane_attention() -> &'static Mutex<std::collections::HashMap<u32, Option<i64>
 /// wait's own events (the question, its permission request, its
 /// notification), never a working turn's tool events — and a look at a
 /// fact already told writes nothing.
-pub(crate) fn pane_attention_noted(term: u32, waiting_since: Option<i64>, now_ms: i64) {
-    pane_attention()
-        .lock()
-        .unwrap_or_else(|held| held.into_inner())
-        .insert(term, waiting_since);
-    let Some(since_ms) = waiting_since else {
-        return;
-    };
+pub(crate) fn pane_attention_told(term: u32, since_ms: i64, now_ms: i64) {
     // A hook event, not a verb: as in [`pane_turn_ended`], a degraded
     // window has nobody to refuse and simply does not tell — this time.
     if unavailable().is_some() {
