@@ -36,7 +36,20 @@ const AROUND_CONVERSATIONS: &[&str] = &[
 /// Every selector in the stylesheet that names a `:has()`, one complex
 /// selector at a time, its whitespace folded.
 fn has_selectors() -> Vec<String> {
-    let css = strip_comments(include_str!("../../../../ui/shell.css"));
+    // Every stylesheet the window loads (t-85293): `tokens.css` is read as
+    // `shell.css` is.
+    [
+        include_str!("../../../../ui/shell.css"),
+        include_str!("../../../../ui/tokens.css"),
+    ]
+    .into_iter()
+    .flat_map(has_selectors_in)
+    .collect()
+}
+
+/// [`has_selectors`] of one stylesheet.
+fn has_selectors_in(source: &str) -> Vec<String> {
+    let css = strip_comments(source);
     let mut selectors = Vec::new();
     let mut buf = String::new();
     for glyph in css.chars() {
