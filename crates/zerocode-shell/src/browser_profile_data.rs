@@ -408,11 +408,13 @@ const SECRET_ENTRY_NAME_WORDS: [&str; 12] = [
 ];
 
 /// 이 입력값은 비밀인가 — 값의 종류로 가른다. 칸 이름이 비밀번호·토큰·결제
-/// 카드·인증번호를 말하거나, 값이 카드 번호 꼴이거나, 값이 띄어 쓰지 않은 한
-/// ASCII 낱말로 토큰 꼴일 때다 — 토큰 표식은 낱말의 가장자리에 서고 그 뒤에 토큰이
-/// 이어질 때만 센다(「Asia」는 ASIA 표식이 아니다). 주소·메모처럼 띄어 쓴 글과 한글이 든 값은
-/// 길고 숫자와 글자가 섞여도 토큰이 아니다 — core의 「긴 혼합 낱말」 규칙은
-/// 한 낱말에만 건다.
+/// 카드·인증번호를 말하거나, 값이 카드 번호 꼴이거나, 값의 어느 조각(공백으로
+/// 나눈 것)이 토큰 표식을 달았거나, 값이 띄어 쓰지 않은 한 ASCII 낱말로 긴 혼합
+/// 토큰 꼴일 때다 — 토큰 표식은 낱말의 가장자리에 서고 그 뒤에 토큰이 이어질
+/// 때만 센다(「Asia」는 ASIA 표식이 아니다). 주소·메모처럼 띄어 쓴 글과 한글이
+/// 든 값은 길고 숫자와 글자가 섞여도 토큰이 아니다 — core의 「긴 혼합 낱말」
+/// 규칙은 한 낱말에만 건다. 그래도 `Bearer eyJ…`나 `키:AKIA…`처럼 조각 하나가
+/// 키면 값 전체가 남는다.
 fn entry_is_secret(name: &str, value: &str) -> bool {
     use zerocode_core::credential;
     let one_word = value.is_ascii() && !value.bytes().any(|byte| byte.is_ascii_whitespace());
@@ -421,9 +423,10 @@ fn entry_is_secret(name: &str, value: &str) -> bool {
             .iter()
             .any(|word| credential::contains_ascii_case(name, word))
         || credential::looks_like_a_payment_card(value)
-        || (one_word
-            && (credential::carries_a_value_mark_at_a_word_edge(value)
-                || credential::looks_like_an_opaque_token(value)))
+        || value
+            .split_whitespace()
+            .any(credential::carries_a_value_mark_at_a_word_edge)
+        || (one_word && credential::looks_like_an_opaque_token(value))
 }
 
 fn read_entries(
@@ -678,8 +681,10 @@ pub struct ProfileDataSkippedParts {
 
 /// 읽은 두 몫을 대상 프로필에 두고, 읽지 못한 몫은 까닭과 함께 돌려준다. 한
 /// 몫만 읽었어도 그 몫은 옮겨지고(수는 `Some`), 둘 다 못 읽었으면 수가 없다.
-/// 저장이 실패하면 읽은 몫도 못 옮긴 것이라 두 몫 모두 `Unsaved`다. 자세한
-/// 글자는 `log` 한 줄씩으로만 간다.
+/// 저장이 실패하면 읽은 몫이 못 옮긴 것이라 그 몫은 `Unsaved`고, 못 읽은 몫은
+/// 제 까닭을 둔다. 돌려주는 수는 이번에 옮긴 몫만 센다(못 읽은 몫은 0 —
+/// 저장 파일과 `last_imported`는 지난 수를 그대로 둔다). 자세한 글자는 `log`
+/// 한 줄씩으로만 간다.
 pub fn import_profile_data(
     read: ProfileDataRead,
     config_root: &Path,
@@ -710,21 +715,39 @@ pub fn import_profile_data(
         at_unix,
     ) {
         Ok(counts) => (
-            Some(counts),
+            Some(counts_carried_now(counts, skipped)),
             (skipped != ProfileDataSkippedParts::default()).then_some(skipped),
         ),
         Err(detail) => {
             log(&format!("browser profile data import skipped: {detail}"));
+            // 저장이 실패하면 읽은 몫이 못 옮긴 것이다 — 못 읽은 몫은 제 까닭을 둔다.
             let unsaved = Some(ProfileDataSkipped::Unsaved);
             (
                 None,
                 Some(ProfileDataSkippedParts {
-                    bookmarks: unsaved,
-                    addresses: unsaved,
+                    bookmarks: skipped.bookmarks.or(unsaved),
+                    addresses: skipped.addresses.or(unsaved),
                 }),
             )
         }
     }
+}
+
+/// 가져오기 카드로 가는 수 — 이번 누름에 옮긴 몫만 센다. `save_imported`의 수는
+/// 못 읽은 몫에 지난번 값을 두는데(저장 파일과 설정 화면은 저장된 양을 보인다),
+/// 카드의 「가져옴」에 그 몫이 들면 같은 카드가 못 읽었다고 말하는 몫을 가져왔다고
+/// 말하게 된다.
+fn counts_carried_now(saved: ImportedData, skipped: ProfileDataSkippedParts) -> ImportedData {
+    let mut now = saved;
+    if skipped.bookmarks.is_some() {
+        now.bookmarks = 0;
+    }
+    if skipped.addresses.is_some() {
+        now.addresses = 0;
+        now.autofill_entries = 0;
+        now.held_back = 0;
+    }
+    now
 }
 
 /// 창 로그 한 줄 — 수와 Web Data의 스키마 버전만 적는다. 값·이름·주소는

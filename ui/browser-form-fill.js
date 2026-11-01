@@ -122,8 +122,15 @@
         const wanted = [value, ...(Array.isArray(others) ? others : [])]
           .filter((one) => typeof one === "string" && one.trim() !== "")
           .map((one) => one.trim().toLowerCase());
-        const option = [...element.options].find((one) =>
-          wanted.includes(one.value.trim().toLowerCase()) || wanted.includes(one.text.trim().toLowerCase()));
+        // A page's option codes can mean another country than the stored value (a
+        // FIPS `KR` is Kiribati), so the match is asked in three passes: an option
+        // whose value AND text both match, then one whose text matches, then one
+        // whose value matches — never the first of any, in document order.
+        const byValue = (one) => wanted.includes(one.value.trim().toLowerCase());
+        const byText = (one) => wanted.includes(one.text.trim().toLowerCase());
+        const options = [...element.options];
+        const option = options.find((one) => byValue(one) && byText(one))
+          ?? options.find(byText) ?? options.find(byValue);
         if (!option || option.selected) return false;
         element.value = option.value;
       } else if (element instanceof HTMLTextAreaElement) {

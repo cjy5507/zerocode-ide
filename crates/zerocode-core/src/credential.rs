@@ -88,24 +88,50 @@ pub fn looks_like_an_opaque_token(word: &str) -> bool {
 /// a word that happens to begin with it (「Asia」, 「xoxo」).
 const MARK_TAIL_MIN_BYTES: usize = 8;
 
+/// An AWS access key id is its four-letter prefix, upper case, and this many
+/// more `[A-Z0-9]` bytes.
+const AWS_KEY_TAIL_BYTES: usize = 16;
+
+/// Whether a byte can sit inside a vendor token: what the run after a mark is made of.
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+}
+
+/// An upper-case `AKIA`/`ASIA` and 16 more `[A-Z0-9]` bytes, wherever it sits in
+/// the word: letters glued in front of an access key (`ab` + key) leave it a key,
+/// and the 16-byte tail is what 「MALAYSIA」 and 「Asia」 never have.
+fn holds_an_aws_key_id(bytes: &[u8]) -> bool {
+    const PREFIXES: [&[u8]; 2] = [b"AKIA", b"ASIA"];
+    bytes.windows(4 + AWS_KEY_TAIL_BYTES).any(|part| {
+        PREFIXES.contains(&&part[..4])
+            && part[4..]
+                .iter()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    })
+}
+
 /// Whether one whole word carries a [`VALUE_MARKS`] mark at a word edge — at its
-/// start, or just after a non-alphanumeric byte (`key=sk-…`) — with a token-shaped
-/// run of at least `MARK_TAIL_MIN_BYTES` bytes right after it. Stricter than
-/// [`looks_like_a_credential`], whose substring reading is right for scanning
-/// free text and too eager for judging a value a person typed: 「Asia」 is
-/// `ASIA` and 「desk-lamp」 holds `sk-`, and neither is a key.
+/// start, or just after a non-alphanumeric byte (`key=sk-…`) — with a run of at
+/// least `MARK_TAIL_MIN_BYTES` token bytes (`[A-Za-z0-9_-]`) right after it, or
+/// holds an AWS access key id wherever it sits (letters in front of it do not
+/// unmake it). Stricter than [`looks_like_a_credential`], whose substring
+/// reading is right for scanning free text and too eager for judging a value a
+/// person typed: 「Asia」 is `ASIA`, 「desk-lamp」 holds `sk-` and an e-mail
+/// 「asiakim@…」 begins with it, and none of them is a key.
 #[must_use]
 pub fn carries_a_value_mark_at_a_word_edge(word: &str) -> bool {
     let bytes = word.as_bytes();
-    VALUE_MARKS.iter().any(|mark| {
-        bytes.windows(mark.len()).enumerate().any(|(at, part)| {
-            let tail = &bytes[at + mark.len()..];
-            part.eq_ignore_ascii_case(mark.as_bytes())
-                && (at == 0 || !bytes[at - 1].is_ascii_alphanumeric())
-                && tail.len() >= MARK_TAIL_MIN_BYTES
-                && tail[0].is_ascii_alphanumeric()
+    holds_an_aws_key_id(bytes)
+        || VALUE_MARKS.iter().any(|mark| {
+            bytes.windows(mark.len()).enumerate().any(|(at, part)| {
+                let tail = &bytes[at + mark.len()..];
+                part.eq_ignore_ascii_case(mark.as_bytes())
+                    && (at == 0 || !bytes[at - 1].is_ascii_alphanumeric())
+                    && tail.first().is_some_and(u8::is_ascii_alphanumeric)
+                    && tail.iter().take_while(|byte| is_token_byte(**byte)).count()
+                        >= MARK_TAIL_MIN_BYTES
+            })
         })
-    })
 }
 
 /// A complete payment-card-shaped value, including common display separators.
