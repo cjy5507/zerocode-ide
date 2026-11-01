@@ -585,8 +585,17 @@ impl Book {
     }
 
     /// What [`Self::jobs`] could not carry of the finished jobs from `from_ms` on.
-    fn jobs_left_out(&self, _from_ms: i64) -> Option<JobsLeftOut> {
-        None
+    fn jobs_left_out(&self, from_ms: i64) -> Option<JobsLeftOut> {
+        let mut in_range = self
+            .runner
+            .finished
+            .iter()
+            .rev()
+            .filter_map(|job| job.end_ms.or(job.start_ms))
+            .filter(|at| *at >= from_ms);
+        let before_ms = in_range.nth(SENT_JOBS - 1)?;
+        let count = in_range.count();
+        (count > 0).then_some(JobsLeftOut { count, before_ms })
     }
 
     /// The jobs the board draws from `from_ms` on: those that ended, those
