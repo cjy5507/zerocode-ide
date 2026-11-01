@@ -192,9 +192,8 @@ impl Script {
                 tool_message_sse("msg_ledger_spawn", |body| append_tool_use(body, 0, "toolu_ledger_spawn", tool, input))
             }
             Self::LedgerSpawn { final_text, .. } => text_sse("msg_ledger_final", final_text),
-            Self::Spawn { .. } if request_index == 0 => spawn_sse(),
+            Self::Spawn { .. } | Self::SpawnChildAnswersLate { .. } if request_index == 0 => spawn_sse(),
             Self::Spawn { final_text } => text_sse("msg_spawn_final", final_text),
-            Self::SpawnChildAnswersLate { .. } if request_index == 0 => spawn_sse(),
             Self::SpawnChildAnswersLate { final_text, .. } => {
                 spawn_child_answers_late_response(request, final_text)
             }
@@ -245,16 +244,7 @@ impl Script {
             }
             Self::ToolCalls { final_text, .. } => text_sse("msg_tool_calls_final", final_text),
             Self::WritesThenBash { files, command, .. } if request_index == 0 => {
-                tool_message_sse("msg_writes_then_bash", |body| {
-                    for (index, (path, content)) in files.iter().enumerate() {
-                        let input = json!({"path": path, "content": content}).to_string();
-                        append_tool_use(body, index, &format!("toolu_write_{index}"), "write_file", &input);
-                    }
-                    if let Some(command) = command {
-                        let input = json!({"command": command, "timeout": 10_000}).to_string();
-                        append_tool_use(body, files.len(), "toolu_bash_after_writes", "bash", &input);
-                    }
-                })
+                writes_then_bash_sse(files, command.as_deref())
             }
             Self::WritesThenBash { final_text, .. } => text_sse("msg_writes_then_bash_final", final_text),
         }
@@ -1237,6 +1227,21 @@ const SPAWN_CHILD_PROMPT: &str = "look around and report";
 
 /// The read a [`Script::SpawnChildAnswersLate`] child makes first.
 const SPAWN_CHILD_READ_ID: &str = "toolu_spawn_child_read";
+
+/// One assistant message announcing `files` with `write_file` and, after them,
+/// `command` with `bash`: see [`Script::WritesThenBash`].
+fn writes_then_bash_sse(files: &[(String, String)], command: Option<&str>) -> String {
+    tool_message_sse("msg_writes_then_bash", |body| {
+        for (index, (path, content)) in files.iter().enumerate() {
+            let input = json!({"path": path, "content": content}).to_string();
+            append_tool_use(body, index, &format!("toolu_write_{index}"), "write_file", &input);
+        }
+        if let Some(command) = command {
+            let input = json!({"command": command, "timeout": 10_000}).to_string();
+            append_tool_use(body, files.len(), "toolu_bash_after_writes", "bash", &input);
+        }
+    })
+}
 
 /// The parent's requests get `final_text`, and the child a read and then its
 /// last answer.
