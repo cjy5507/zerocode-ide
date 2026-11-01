@@ -468,3 +468,204 @@ fn a_seat_the_first_start_cannot_clear_is_noted_and_the_first_start_is_done() {
     assert!(home.path().join(PENDING_FILE).exists());
     assert_eq!(smart_of(&settings)[SWEPT_KEY], true);
 }
+
+/// Each of these is what `builtin::in_root` reads as deleted so as not to bring
+/// a decision back by accident. None of them is a person's delete, so none of
+/// them may cost a record.
+#[test]
+fn a_mark_that_is_not_a_persons_delete_erases_nothing() {
+    let shapes = [
+        json!(null),
+        json!([]),
+        json!({ RECALL.id: null }),
+        json!({ RECALL.id: "deleted" }),
+        json!({ RECALL.id: { "deleted": "yes" } }),
+        json!({ RECALL.id: { "deleted": true, "questionSchema": 3, "questionDeleted": true } }),
+        json!({ RECALL.id: { "deleted": true, "questionSchema": 2 } }),
+        json!({ RECALL.id: { "deleted": true, "questionSchema": 2, "questionDeleted": false } }),
+    ];
+    for decisions in shapes {
+        let home = home();
+        let settings = settings_with(
+            home.path(),
+            &json!({ builtin::SETTING: decisions, STALL.setting: JevMode::Shadow.key() }),
+        );
+        plant_ledgers(home.path(), &[&RECALL, &STALL, &ROUTING]);
+
+        let lift = lift_kept_seats(&settings);
+        tidy_at_start(&settings, lift.is_ok());
+
+        for seat in [&RECALL, &STALL, &ROUTING] {
+            assert!(
+                all_stand(home.path(), seat),
+                "{} under {decisions}",
+                seat.id
+            );
+        }
+        assert_eq!(
+            smart_of(&settings)[STALL.setting],
+            JevMode::Shadow.key(),
+            "the lift moved a seat under {decisions}"
+        );
+    }
+}
+
+#[test]
+fn a_typed_edit_the_person_deleted_is_erased() {
+    let home = home();
+    let settings = settings_with(
+        home.path(),
+        &json!({ builtin::SETTING: {
+            RECALL.id: { "deleted": true, "questionSchema": 2, "questionDeleted": true },
+        } }),
+    );
+    plant_ledgers(home.path(), &[&RECALL]);
+
+    tidy_at_start(&settings, true);
+
+    assert!(none_stands(home.path(), &RECALL));
+}
+
+#[test]
+fn a_note_naming_a_seat_whose_mark_is_malformed_erases_nothing() {
+    let home = home();
+    let settings = settings_marking_four(home.path());
+    tidy_at_start(&settings, true);
+    let jammed = jam_ledger(home.path(), &RECALL);
+    seat_deleted(&settings, RECALL.id);
+    fs::remove_dir_all(jammed).unwrap();
+    plant_ledgers(home.path(), &[&RECALL]);
+    let mut smart = smart_of(&settings);
+    smart[builtin::SETTING] = json!(null);
+    let settings = settings_with(home.path(), &smart);
+
+    tidy_at_start(&settings, true);
+
+    assert!(all_stand(home.path(), &RECALL));
+    assert!(!home.path().join(PENDING_FILE).exists());
+}
+
+#[test]
+fn a_file_already_lifted_does_not_wait_for_the_settings_lock() {
+    let home = home();
+    let settings = settings_with(home.path(), &json!({}));
+    lift_kept_seats(&settings).unwrap();
+    let other_writer = crate::settings_file_lock::SettingsFileLock::acquire(&settings).unwrap();
+
+    assert_eq!(lift_kept_seats(&settings).unwrap(), false);
+    forget_seat(&settings, STALL.id).unwrap();
+
+    drop(other_writer);
+}
+
+#[test]
+fn a_stray_file_beside_the_folders_owes_nothing() {
+    let home = home();
+    let settings = settings_marking_four(home.path());
+    plant_ledgers(home.path(), &[&RECALL]);
+    write(&home.path().join("projects/.DS_Store"), "");
+    write(&home.path().join("jev/providers/.DS_Store"), "");
+    write(
+        &home
+            .path()
+            .join("projects")
+            .join(PROJECT)
+            .join("state/smart-router/providers/.DS_Store"),
+        "",
+    );
+    write(&home.path().join("projects/a-file-for-state/state"), "");
+
+    tidy_at_start(&settings, true);
+
+    assert!(none_stands(home.path(), &RECALL));
+    assert!(
+        !home.path().join(PENDING_FILE).exists(),
+        "a stray file left a debt"
+    );
+    assert_eq!(smart_of(&settings)[SWEPT_KEY], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cannot_be_listed_leaves_the_first_start_unfinished() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = home();
+    let settings = settings_marking_four(home.path());
+    plant_ledgers(home.path(), &[&RECALL]);
+    let projects = home.path().join("projects");
+    fs::set_permissions(&projects, fs::Permissions::from_mode(0o000)).unwrap();
+
+    tidy_at_start(&settings, true);
+    let unfinished = smart_of(&settings).get(SWEPT_KEY).is_none();
+    fs::set_permissions(&projects, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(unfinished, "the first start said it had seen every folder");
+    tidy_at_start(&settings, true);
+    assert!(
+        none_stands(home.path(), &RECALL),
+        "the next start left the record"
+    );
+    assert_eq!(smart_of(&settings)[SWEPT_KEY], true);
+}
+
+#[test]
+fn a_note_that_cannot_be_written_leaves_the_first_start_unfinished() {
+    let home = home();
+    let settings = settings_marking_four(home.path());
+    jam_ledger(home.path(), &RECALL);
+    fs::create_dir_all(home.path().join(PENDING_FILE)).unwrap();
+
+    tidy_at_start(&settings, true);
+
+    assert!(smart_of(&settings).get(SWEPT_KEY).is_none());
+}
+
+#[test]
+fn a_broken_note_brings_the_first_start_back_once() {
+    let home = home();
+    let settings = settings_marking_four(home.path());
+    tidy_at_start(&settings, true);
+    assert_eq!(smart_of(&settings)[SWEPT_KEY], true);
+    plant_ledgers(home.path(), &[&RECALL]);
+    fs::write(home.path().join(PENDING_FILE), "{ torn").unwrap();
+
+    tidy_at_start(&settings, true);
+
+    assert!(
+        none_stands(home.path(), &RECALL),
+        "what the note named is unknown"
+    );
+    assert!(
+        !home.path().join(PENDING_FILE).exists(),
+        "the broken note stayed"
+    );
+    assert_eq!(smart_of(&settings)[SWEPT_KEY], true);
+}
+
+#[test]
+fn a_lifted_routing_with_no_word_stays_off() {
+    let home = home();
+    let settings = settings_with(
+        home.path(),
+        &json!({ builtin::SETTING: { ROUTING.id: { "deleted": true } } }),
+    );
+
+    assert!(lift_kept_seats(&settings).unwrap());
+
+    assert_eq!(smart_of(&settings)[ROUTING.setting], JevMode::Off.key());
+}
+
+#[test]
+fn a_rewrite_keeps_bytes_it_cannot_read_as_they_stood() {
+    let home = home();
+    let ledger = home.path().join("jev").join(CUSTOM_DECISIONS.ledger);
+    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    let mut bytes = b"{\"decision\":\"d-gone\"}\n".to_vec();
+    let kept = b"{\"decision\":\"d-kept\",\"note\":\"\xff\"}\n";
+    bytes.extend_from_slice(kept);
+    fs::write(&ledger, bytes).unwrap();
+
+    assert_eq!(forget_custom(home.path(), "d-gone").unwrap(), 1);
+
+    assert_eq!(fs::read(&ledger).unwrap(), kept);
+}
