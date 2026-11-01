@@ -246,6 +246,7 @@ export async function testComposerQueueActs(browser, origin, ok) {
   await testTurnBoundaryKeepsTheRows(browser, origin, ok);
   await testRefusalsInFiveLanguages(browser, origin, ok);
   await testFailedDeliveryKeepsTheWords(browser, origin, ok);
+  await testComposerQueueActsR3(browser, origin, ok);
 }
 
 /* ① 행의 모양: 고치기·끼워 넣기·바로 보내기·지우기가 이 차례로 서고, 각 단추는 이름을
@@ -1438,6 +1439,9 @@ async function testAltEnter(browser, origin, ok) {
   await scene(browser, origin, ok, "alt enter", async (page) => {
     const term = await openPane(page, "claude", "working");
     await queueWords(page, "첫 글");
+    // On macOS WebKit may report the Option key as AltGraph (r3 P3-7): there the chord still steers.
+    // Only where AltGr is a Ctrl+Alt of its own (Windows, Linux) does it send the box as an Enter.
+    const onMac = await page.evaluate(() => usesCommandModifier);
     const key = (init) => page.evaluate((init) => {
       const box = window.__COMPOSER__().querySelector(".worker-composer-box");
       box.focus();
@@ -1463,16 +1467,29 @@ async function testAltEnter(browser, origin, ok) {
       SAME(alt.queue, ["첫 글", "알트로 보낸 글"]) && alt.box === "" && alt.calls.length === 0,
       JSON.stringify(alt),
     );
-    ok(
-      "altgr_enter_asks_the_queue_for_nothing: Ctrl+Alt+Enter that the browser says is AltGr asked no door; it is no chord, so the box sent as an Enter",
-      altGr.calls.length === 0 && SAME(altGr.queue, ["첫 글", "알트로 보낸 글", "지알로 보낸 글"]),
-      JSON.stringify(altGr),
-    );
-    ok(
-      "the_real_chord_still_steers_the_first_row_and_leaves_the_box: ⌘/Ctrl+Alt+Enter steered the first row and the draft stayed in the box",
-      SAME(chord.calls, [{ door: "pane_steer", term, text: "첫 글" }]) && chord.box === "초안",
-      JSON.stringify(chord),
-    );
+    if (onMac) {
+      ok(
+        "on_macos_a_chord_the_browser_calls_altgraph_still_steers: ⌘+Option+Enter that WebKit may report as AltGraph is still the queue's chord — it steered the first row and left the draft in the box; AltGr is Windows's Ctrl+Alt and means nothing on a Mac",
+        SAME(altGr.calls, [{ door: "pane_steer", term, text: "첫 글" }]) && altGr.box === "지알로 보낸 글" && SAME(altGr.queue, ["알트로 보낸 글"]),
+        JSON.stringify(altGr),
+      );
+      ok(
+        "the_real_chord_still_steers_the_first_row_and_leaves_the_box: ⌘/Ctrl+Alt+Enter steered the first row and the draft stayed in the box",
+        SAME(chord.calls.slice(1), [{ door: "pane_steer", term, text: "알트로 보낸 글" }]) && chord.box === "초안",
+        JSON.stringify(chord),
+      );
+    } else {
+      ok(
+        "altgr_enter_asks_the_queue_for_nothing: Ctrl+Alt+Enter that the browser says is AltGr asked no door; it is no chord, so the box sent as an Enter",
+        altGr.calls.length === 0 && SAME(altGr.queue, ["첫 글", "알트로 보낸 글", "지알로 보낸 글"]),
+        JSON.stringify(altGr),
+      );
+      ok(
+        "the_real_chord_still_steers_the_first_row_and_leaves_the_box: ⌘/Ctrl+Alt+Enter steered the first row and the draft stayed in the box",
+        SAME(chord.calls, [{ door: "pane_steer", term, text: "첫 글" }]) && chord.box === "초안",
+        JSON.stringify(chord),
+      );
+    }
   });
 }
 
@@ -1697,6 +1714,398 @@ async function testFailedDeliveryKeepsTheWords(browser, origin, ok) {
       "the_kept_words_go_first_at_the_panes_next_edge: once the pane takes a paste again, the next turn's end sends the same first message — paste, then Enter — and the second keeps waiting",
       SAME(later.sent, ["paste:가", ENTER]) && SAME(later.queue, ["나"]),
       JSON.stringify({ sent: later.sent, queue: later.queue }),
+    );
+  });
+}
+
+/* ============================ r3 (비저자 검수 r2, 헤드 54f08414d) ============================
+ *
+ * 실제 Claude Code 2.1.316을 가짜 서버로 재어 본 것(crates/zerocode-shell/tests/fixtures/claude-code-2.1.316-*.reads):
+ * Esc는 끼워 넣은 글을 입력줄로 되돌리지 않고 CLI가 곧바로 다음 턴으로 보낸다. 그래도 입력줄이 의심스러운 길은
+ * 모두 문(`pane_send_now`)을 지난다 — 글이 입력줄 뒤에 붙어 한 메시지로 나가는 것은 시험이 알 수 없는 CLI에서도
+ * 일어나서는 안 되기 때문이다. */
+export async function testComposerQueueActsR3(browser, origin, ok) {
+  await testDoubtfulLine(browser, origin, ok);
+  await testWireStartWithoutAnswer(browser, origin, ok);
+  await testCarryDuringAnEdit(browser, origin, ok);
+  await testWaitingForThePerson(browser, origin, ok);
+  await testBoxStaysOpenAtTheDoor(browser, origin, ok);
+  await testDropIsOnePerPress(browser, origin, ok);
+  await testStopIsOneWhileTheStopIsOut(browser, origin, ok);
+  await testTypingIntoTheConversation(browser, origin, ok);
+  await testRowIdentity(browser, origin, ok);
+}
+
+/* 턴이 끝났다고 판이 말한다. 문이 답하고 대기열이 한 걸음 가도록 조금 기다린다. */
+async function turnEnds(page, term, wait = 450) {
+  await page.evaluate(async (term) => {
+    window.__TELL__({ term, state: "done", agent: "claude" });
+    await window.__PAINT__(3);
+  }, term);
+  await page.waitForTimeout(wait);
+}
+
+const DOOR_CALLS = (look) => look.calls.filter((call) => call.door === "pane_send_now");
+const PASTES = (look) => look.sent.filter((one) => one.startsWith("paste:"));
+
+/* P2-1 — 입력줄이 의심스러운 길은 모두 문을 지난다. 끼워 넣은 글이 CLI 대기열에 있는 동안 어떤 키가 그 글을 입력줄로
+ * 되돌릴 수 있고, 문이 `turn-line`으로 거절한 뒤의 입력줄에는 글이 있다. 그 뒤의 글은 붙여넣기(`term_paste`)로 가지 않는다:
+ * 0번. 입력칸의 전송도 대기 글을 앞지르지 않는다. */
+async function testDoubtfulLine(browser, origin, ok) {
+  await scene(browser, origin, ok, "doubtful line: the stop button", async (page) => {
+    const term = await openPane(page, "claude", "working");
+    await queueWords(page, "A 글", "B 글");
+    await press(page, "steer", 0);
+    // 사람이 대화의 중지 단추를 누른다 — 판에 CLI의 중지 키가 간다(사람의 손이다).
+    await page.locator(".worker-composer-send:visible").first().click();
+    await page.waitForTimeout(150);
+    const stopped = await page.evaluate(LOOK);
+    await turnEnds(page, term);
+    const seen = await page.evaluate(LOOK);
+    ok(
+      "after_a_steer_the_next_row_goes_through_the_door_even_when_the_stop_was_the_persons: A was steered, the page's stop button typed the CLI's own stop key, and B — the next row — was typed by the door that looks at the line again; the window pasted nothing and pressed no Enter",
+      SAME(stopped.sent, [ESCAPE_KEY]) && SAME(DOOR_CALLS(seen), [{ door: "pane_send_now", term, text: "B 글" }]) &&
+        PASTES(seen).length === 0 && SAME(seen.sent, [ESCAPE_KEY]) && SAME(seen.queue, []),
+      JSON.stringify({ stopped: stopped.sent, calls: seen.calls, sent: seen.sent, queue: seen.queue }),
+    );
+  });
+  await scene(browser, origin, ok, "doubtful line: refused, then the box", async (page) => {
+    const term = await openPane(page, "claude", "working");
+    await queueWords(page, "가", "나");
+    await press(page, "now", 1);
+    await page.evaluate(() => { window.__ACTS__.front = () => { throw "turn-line"; }; });
+    await turnEnds(page, term);
+    const held = await page.evaluate(LOOK);
+    await queueWords(page, "다");
+    await page.waitForTimeout(700);
+    const seen = await page.evaluate(LOOK);
+    ok(
+      "a_send_from_the_box_never_overtakes_a_refused_row_and_never_pastes: the door refused 나 (the line holds words), the pane rests, and 다 sent from the box stands behind 나 and 가 — nothing was pasted, no Enter was pressed, the box is empty again",
+      SAME(held.queue, ["나", "가"]) && SAME(seen.queue, ["나", "가", "다"]) && PASTES(seen).length === 0 && REACHED(seen.sent).length === 0 && seen.box === "",
+      JSON.stringify({ held: held.queue, queue: seen.queue, sent: seen.sent, box: seen.box }),
+    );
+  });
+  await scene(browser, origin, ok, "doubtful line: the refused row is dropped", async (page) => {
+    const term = await openPane(page, "claude", "working");
+    await queueWords(page, "가", "나");
+    await press(page, "now", 1);
+    await page.evaluate(() => { window.__ACTS__.front = () => { throw "turn-line"; }; });
+    await turnEnds(page, term);
+    await page.evaluate(() => { window.__ACTS__.calls.length = 0; });
+    await press(page, "drop", 0);
+    await page.waitForTimeout(500);
+    const seen = await page.evaluate(LOOK);
+    ok(
+      "deleting_the_refused_row_does_not_open_the_pastes_road_for_the_next: with 나 deleted, 가 is the next row and the line is still doubted — the door was asked for it, the window pasted nothing and pressed nothing",
+      SAME(DOOR_CALLS(seen), [{ door: "pane_send_now", term, text: "가" }]) && PASTES(seen).length === 0 && REACHED(seen.sent).length === 0,
+      JSON.stringify({ calls: seen.calls, sent: seen.sent, queue: seen.queue }),
+    );
+  });
+  await scene(browser, origin, ok, "doubtful line: the box after a steer", async (page) => {
+    const term = await openPane(page, "claude", "working");
+    await queueWords(page, "하나");
+    await press(page, "steer", 0);
+    await turnEnds(page, term);
+    await page.evaluate(() => { window.__ACTS__.calls.length = 0; window.__ACTS__.sent.length = 0; });
+    await queueWords(page, "둘");
+    await page.waitForTimeout(700);
+    const doubted = await page.evaluate(LOOK);
+    await page.evaluate(() => { window.__ACTS__.calls.length = 0; window.__ACTS__.sent.length = 0; });
+    await queueWords(page, "셋");
+    await page.waitForTimeout(1000);
+    const plain = await page.evaluate(LOOK);
+    ok(
+      "a_box_send_after_a_steer_goes_through_the_door: the steered row left the queue and the turn ended; 둘 sent from the idle pane's box was typed by the door — no paste, no Enter of the window's",
+      SAME(DOOR_CALLS(doubted), [{ door: "pane_send_now", term, text: "둘" }]) && PASTES(doubted).length === 0 && REACHED(doubted.sent).length === 0 && SAME(doubted.queue, []) && doubted.box === "",
+      JSON.stringify({ calls: doubted.calls, sent: doubted.sent, queue: doubted.queue, box: doubted.box }),
+    );
+    ok(
+      "the_doubt_ends_when_the_door_has_typed_a_row: after the door typed 둘 the line was seen empty, so the next box send is the ordinary road again — paste, then Enter, and no door",
+      DOOR_CALLS(plain).length === 0 && SAME(plain.sent, ["paste:셋", ENTER]),
+      JSON.stringify({ calls: plain.calls, sent: plain.sent }),
+    );
+  });
+}
+
+/* P2-2 — 선(wire)의 `wire_send`도 답이 없으면 글이 들어갔는지 모른다: 그 행은 표시된 채 대기열에 남고 두 번 가지 않는다. */
+async function testWireStartWithoutAnswer(browser, origin, ok) {
+  await scene(browser, origin, ok, "wire start without an answer", async (page) => {
+    await openWire(page, { protocol: "app-server", steer: true, status: "working" });
+    await queueWords(page, "선에 하나", "선에 둘");
+    await page.evaluate(() => {
+      window.__ANSWER__.wire_send = (args) => {
+        window.__ACTS__.calls.push({ door: "wire_send", ...args });
+        throw "turn-unknown";
+      };
+    });
+    const edge = async (status) => {
+      await page.evaluate(async (status) => {
+        window.__WIRE_LOG__ = { ...window.__WIRE_LOG__, status };
+        await pollHelperPages();
+        await window.__PAINT__(3);
+      }, status);
+      await page.waitForTimeout(450);
+    };
+    await edge("idle");
+    const first = await page.evaluate(LOOK);
+    const said = await page.evaluate(() => window.__WORDS__("turn-unknown"));
+    await edge("working");
+    await edge("idle");
+    const later = await page.evaluate(LOOK);
+    const sends = (look) => look.calls.filter((call) => call.door === "wire_send");
+    ok(
+      "a_start_with_no_answer_keeps_the_row_marked_and_says_it_does_not_know: the wire_send of the first row got the word for an answer that never came — the row stands first in the queue, the line says the words may have gone in, and its steer and send now are off",
+      SAME(sends(first), [{ door: "wire_send", id: 91, text: "선에 하나" }]) && SAME(first.queue, ["선에 하나", "선에 둘"]) &&
+        first.note === said && said.length >= 8 && first.rows[0].off.includes("steer") && first.rows[0].off.includes("now"),
+      JSON.stringify({ sends: sends(first), queue: first.queue, note: first.note, off: first.rows.map((row) => row.off) }),
+    );
+    ok(
+      "the_same_words_do_not_go_to_the_wire_twice: two more turn edges later the unanswered row was not sent again and the row behind it did not go past it",
+      SAME(sends(later), [{ door: "wire_send", id: 91, text: "선에 하나" }]) && SAME(later.queue, ["선에 하나", "선에 둘"]),
+      JSON.stringify({ sends: sends(later), queue: later.queue }),
+    );
+    await page.evaluate(() => {
+      window.__ANSWER__.wire_send = (args) => (window.__ACTS__.calls.push({ door: "wire_send", ...args }), null);
+    });
+    await press(page, "drop", 0);
+    await page.waitForTimeout(500);
+    const after = await page.evaluate(LOOK);
+    ok(
+      "deleting_the_unanswered_row_lets_the_queue_go_on: with the row gone the next one was sent once",
+      SAME(sends(after).slice(1), [{ door: "wire_send", id: 91, text: "선에 둘" }]) && SAME(after.queue, []),
+      JSON.stringify({ sends: sends(after), queue: after.queue }),
+    );
+  });
+}
+
+/* P2-3 — 고치는 중에 대화가 선으로 넘어가면 고치던 글이 대기열 제자리에 들어가고 곁에 둔 초안이 상자로 돌아온다. */
+async function testCarryDuringAnEdit(browser, origin, ok) {
+  await scene(browser, origin, ok, "carry during an edit", async (page) => {
+    const term = await openPane(page, "claude", "working");
+    await page.evaluate(() => {
+      window.__WIRE_LOG__ = {
+        found: true, skipped: false, next: 0, turns: [], status: "idle", asks: [], live: [], agent: "claude", protocol: "app-server",
+        models: [], modes: [], commands: [], version: "2.1.316", steer: true,
+      };
+      window.__ANSWER__.wire_start = (args) => ({ id: 91, agent: args.agent, protocol: "app-server", version: "2.1.316", model: null, session: args.resume });
+      window.__ANSWER__.wire_log = () => window.__WIRE_LOG__;
+      window.__ANSWER__.wire_history = () => ({ found: false, next: 0, turns: [] });
+    });
+    await queueWords(page, "하나", "둘");
+    const box = page.locator(".worker-composer-box:visible").first();
+    await box.click();
+    await page.keyboard.type("초안");
+    await press(page, "edit", 0);
+    await box.click();
+    await page.keyboard.press("End");
+    await page.keyboard.type(" 고침");
+    // 턴 한가운데서 연 대화: 선으로 넘기기가 턴 끝으로 미뤄진다. 턴이 끝나면 선이 서고 대기열이 옮겨 간다.
+    const pending = await page.evaluate(async (term) => {
+      await handPaneToWire(term);
+      return paneChats.get(term)?.pendingWire === true;
+    }, term);
+    await turnEnds(page, term, 200);
+    await page.waitForFunction(() => tabs.some((tab) => tab.id === "wire:91"), null, { timeout: 6000 }).catch(() => null);
+    await page.waitForTimeout(900);
+    const seen = await page.evaluate(LOOK);
+    seen.editing = await page.evaluate(() => window.__COMPOSER__()?.__workerRun?.queueEdit ?? null);
+    const sends = seen.calls.filter((call) => call.door === "wire_send");
+    ok(
+      "an_edit_in_the_box_goes_to_the_wire_as_the_edited_row_and_the_draft_comes_back: the hand-over waited for the turn, then the wire's first message was 「하나 고침」 — the change in the box, not the old 「하나」 — the draft set aside (「초안」) stands in the new page's box, and nothing is still being edited",
+      pending && SAME(sends, [{ door: "wire_send", id: 91, text: "하나 고침" }]) && seen.box === "초안" && SAME(seen.queue, ["둘"]) && seen.editing === null,
+      JSON.stringify({ pending, sends, box: seen.box, queue: seen.queue, editing: seen.editing }),
+    );
+  });
+}
+
+/* P3-1 — 문이 거절한 뒤 판이 쉬면 대기열 밑줄이 「곧 보냅니다」라 하지 않는다: 이 글은 사람이 풀어 줄 때까지 기다린다. */
+async function testWaitingForThePerson(browser, origin, ok) {
+  const said = {};
+  for (const locale of ["ko", "en", "ja", "zh", "es"]) {
+    await scene(browser, origin, ok, `waiting for the person in ${locale}`, async (page) => {
+      await page.evaluate(async (locale) => { await setLocale(locale, { refresh: false, persist: false }); }, locale);
+      const term = await openPane(page, "claude", "working");
+      await queueWords(page, "가", "나");
+      await press(page, "now", 1);
+      await page.evaluate(() => { window.__ACTS__.front = () => { throw "turn-line"; }; });
+      await turnEnds(page, term);
+      said[locale] = await page.evaluate(() => ({
+        why: document.querySelector(".composer-queue-why")?.textContent ?? null,
+        going: t("composer.queue.why.going", "곧 보냅니다"),
+        refused: t("composer.queue.why.refused", ""),
+        note: document.querySelector(".composer-queue-note")?.textContent ?? "",
+      }));
+    });
+  }
+  const problems = [];
+  for (const locale of ["ko", "en", "ja", "zh", "es"]) {
+    const one = said[locale];
+    if (!one) { problems.push(`${locale}: no scene`); continue; }
+    if (one.refused.length < 8) problems.push(`${locale}: no sentence for a refused row`);
+    if (one.why !== one.refused) problems.push(`${locale}: the line under the count is 「${one.why}」, not the refused row's sentence`);
+    if (one.why === one.going) problems.push(`${locale}: the line says it goes soon`);
+    if (one.note.length < 8) problems.push(`${locale}: the refusal's line is missing`);
+    if (locale !== "en" && one.refused === said.en?.refused) problems.push(`${locale}: the English sentence`);
+    if (locale !== "ko" && one.refused === said.ko?.refused) problems.push(`${locale}: the Korean sentence`);
+  }
+  ok(
+    "a_row_the_door_refused_waits_for_the_person_and_says_so_in_five_languages: after turn-line the pane rests but the line under the count no longer says the row goes soon — it says the row is waiting for the reason below to be cleared, in ko, en, ja, zh and es",
+    problems.length === 0,
+    problems.join("\n"),
+  );
+}
+
+/* P3-2 — 문이 기다리는 동안 입력칸은 잠기지 않는다: 그 사이 친 글자가 사라지지 않는다. */
+async function testBoxStaysOpenAtTheDoor(browser, origin, ok) {
+  await scene(browser, origin, ok, "box open at the door", async (page) => {
+    const term = await openPane(page, "claude", "working");
+    await queueWords(page, "가");
+    await press(page, "now", 0);
+    // 문이 입력줄을 기다리는 1.2초 — 진짜 문은 최대 2초 기다린다.
+    await page.evaluate(() => { window.__ACTS__.front = () => new Promise((done) => window.__REAL_TIMEOUT__(() => done(null), 1200)); });
+    await page.evaluate(async (term) => {
+      window.__TELL__({ term, state: "done", agent: "claude" });
+      await window.__PAINT__(3);
+    }, term);
+    await page.waitForTimeout(250);
+    const waiting = await page.evaluate(() => ({
+      readOnly: window.__COMPOSER__().querySelector(".worker-composer-box").readOnly,
+      doors: window.__ACTS__.calls.filter((call) => call.door === "pane_send_now").length,
+    }));
+    const box = page.locator(".worker-composer-box:visible").first();
+    await box.click();
+    await page.keyboard.type("그 사이에 쓴 글");
+    await page.waitForTimeout(1400);
+    const after = await page.evaluate(LOOK);
+    ok(
+      "the_box_takes_words_while_the_door_waits_for_the_line: the door was asked and had not answered, the box was not read-only, the words typed meanwhile are in it afterwards, and the queue went out",
+      waiting.doors === 1 && waiting.readOnly === false && after.box === "그 사이에 쓴 글" && SAME(after.queue, []),
+      JSON.stringify({ waiting, box: after.box, queue: after.queue }),
+    );
+  });
+}
+
+/* P3-3 — ✕는 한 번 누름에 한 행만 지운다. 되돌리기는 없으므로 이 단추의 누름은 의도한 한 번이어야 한다: 더블클릭의 둘째
+ * 눌림(click의 detail이 2)과 누르고 있는 키의 반복(keydown의 repeat — 브라우저는 반복되는 Enter마다 click을 낸다, 그리고
+ * 지운 행의 자리에는 다음 행의 ✕가 초점을 받는다)은 아무 행도 지우지 않는다. Playwright는 키 반복의 기본 동작(click)을 못
+ * 만들므로, 이 시험은 처리기가 받는 이벤트 그대로를 보낸다. */
+async function testDropIsOnePerPress(browser, origin, ok) {
+  await scene(browser, origin, ok, "drop is one per press", async (page) => {
+    await openPane(page, "claude", "working");
+    await queueWords(page, "하나", "둘", "셋", "넷", "다섯");
+    const click = (detail) => page.evaluate((detail) => {
+      const button = window.__ROWBTN__(0, "drop");
+      button?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail }));
+      return [...window.__COMPOSER__().__workerRun.queue];
+    }, detail);
+    const repeating = await page.evaluate(() => {
+      const button = window.__ROWBTN__(0, "drop");
+      button.focus();
+      const event = new KeyboardEvent("keydown", { key: "Enter", code: "Enter", repeat: true, bubbles: true, cancelable: true });
+      button.dispatchEvent(event);
+      return { prevented: event.defaultPrevented, queue: [...window.__COMPOSER__().__workerRun.queue] };
+    });
+    const second = await click(2);
+    const third = await click(3);
+    const first = await click(1);
+    const keyboard = await click(0);
+    ok(
+      "a_pressed_cross_removes_one_row_and_the_second_press_of_a_double_click_removes_none: a press with a click count of 1 and the click a key makes (count 0) each removed the first row; a click that is the second or third of a quick run removed nothing",
+      SAME(second, ["하나", "둘", "셋", "넷", "다섯"]) && SAME(third, ["하나", "둘", "셋", "넷", "다섯"]) && SAME(first, ["둘", "셋", "넷", "다섯"]) && SAME(keyboard, ["셋", "넷", "다섯"]),
+      JSON.stringify({ second, third, first, keyboard }),
+    );
+    ok(
+      "a_held_key_on_a_queue_button_is_stopped_before_it_presses_the_button: the repeating Enter that would click the focused cross again and again was prevented, and the queue is as it was",
+      repeating.prevented === true && SAME(repeating.queue, ["하나", "둘", "셋", "넷", "다섯"]),
+      JSON.stringify(repeating),
+    );
+    // 진짜 손: 더블클릭과 누르고 있는 Enter는 어느 쪽이든 한 행 넘게 지우지 못한다.
+    await page.locator(".composer-queue-item").nth(0).locator('button[data-act="drop"]').dblclick({ force: true }).catch(() => null);
+    await page.waitForTimeout(250);
+    const dbl = await page.evaluate(LOOK);
+    await page.evaluate(() => window.__ROWBTN__(0, "drop")?.focus());
+    await page.keyboard.down("Enter");
+    for (let again = 0; again < 4; again += 1) {
+      await page.keyboard.down("Enter");
+      await page.waitForTimeout(40);
+    }
+    await page.keyboard.up("Enter");
+    await page.waitForTimeout(250);
+    const held = await page.evaluate(LOOK);
+    ok(
+      "a_real_double_click_and_a_real_held_enter_remove_at_most_one_row_each: from three rows a double click on the first cross left at least two, and Enter held on the focused cross left at least one fewer than that — never the whole queue",
+      dbl.queue.length >= 2 && held.queue.length >= dbl.queue.length - 1,
+      JSON.stringify({ dbl: dbl.queue, held: held.queue }),
+    );
+  });
+}
+
+/* P3-4 — 바로 보내기의 멈춤이 나가 있는 동안 대화의 Esc와 중지 단추는 아무것도 치지 않는다: 둘째 Esc는 쉬는 입력줄에서 CLI의 되감기를 연다. */
+async function testStopIsOneWhileTheStopIsOut(browser, origin, ok) {
+  await scene(browser, origin, ok, "stop is one", async (page) => {
+    const term = await openPane(page, "claude", "working");
+    await queueWords(page, "가", "나");
+    await press(page, "now", 1);
+    const out = await page.evaluate(LOOK);
+    await page.evaluate(() => window.__ROWBTN__(0, "edit").focus());
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(150);
+    // 상자가 비어 있고 턴이 도는 동안의 단추는 중지다 — 그것도 멈춤이 나가 있는 동안은 누름이 아니다.
+    await page.locator(".worker-composer-send:visible").first().click().catch(() => null);
+    await page.waitForTimeout(250);
+    const seen = await page.evaluate(LOOK);
+    ok(
+      "while_the_stop_of_a_send_now_is_out_esc_and_the_stop_button_type_nothing: the queue's stop went through its door once; an Esc on the page and a press of the stop button afterwards typed no key at the pane and asked no second stop",
+      SAME(out.calls, [{ door: "pane_interrupt", term }]) && SAME(seen.calls, [{ door: "pane_interrupt", term }]) && REACHED(seen.sent).length === 0,
+      JSON.stringify({ calls: seen.calls, sent: seen.sent }),
+    );
+  });
+}
+
+/* P3-8 — 대화의 빈 곳을 누른 뒤 친 글자는 입력칸으로 간다(판으로도, 아무 데로도 아니다). */
+async function testTypingIntoTheConversation(browser, origin, ok) {
+  await scene(browser, origin, ok, "typing into the conversation", async (page) => {
+    await openPane(page, "claude", "done");
+    await page.evaluate(() => { document.activeElement?.blur?.(); });
+    const before = await page.evaluate(() => document.activeElement === document.body || document.activeElement === null);
+    await page.keyboard.type("x");
+    await page.waitForTimeout(200);
+    const seen = await page.evaluate(LOOK);
+    ok(
+      "a_letter_typed_after_nothing_has_the_focus_lands_in_the_conversations_box: with the page's blank under the pointer (no field focused) the letter is in the composer's box and nothing was typed at the pane",
+      before && seen.box === "x" && REACHED(seen.sent).length === 0 && seen.focus.inBox,
+      JSON.stringify({ before, box: seen.box, sent: seen.sent, focus: seen.focus }),
+    );
+  });
+}
+
+/* P3-9 — 의심스러운 행은 글 내용이 아니라 행으로 찾는다: 같은 글이 또 있어도 그 행만 꺼지고, 그 곁의 행을 지워도 풀리지 않는다. */
+async function testRowIdentity(browser, origin, ok) {
+  await scene(browser, origin, ok, "row identity", async (page) => {
+    const term = await openPane(page, "claude", "working");
+    await queueWords(page, "같은 글", "같은 글", "다른 글");
+    await page.evaluate(() => { window.__ACTS__.steer = () => { throw "turn-unknown"; }; });
+    await press(page, "steer", 1);
+    await page.evaluate(() => { window.__ACTS__.steer = null; window.__ACTS__.calls.length = 0; });
+    const first = await page.evaluate(LOOK);
+    await queueWords(page, "같은 글");
+    const added = await page.evaluate(LOOK);
+    await press(page, "drop", 0);
+    const dropped = await page.evaluate(LOOK);
+    await turnEnds(page, term, 600);
+    const ended = await page.evaluate(LOOK);
+    const off = (row) => row.off.includes("steer") && row.off.includes("now");
+    const free = (row) => !row.off.includes("steer") && !row.off.includes("now");
+    ok(
+      "only_the_row_of_unknown_outcome_is_off_not_every_row_with_its_words: the second 「같은 글」 is off, the first 「같은 글」 beside it is not, and neither is the same words queued again",
+      first.rows.length === 3 && off(first.rows[1]) && free(first.rows[0]) && free(first.rows[2]) && added.rows.length === 4 && free(added.rows[3]),
+      JSON.stringify({ first: first.rows.map((row) => row.off), added: added.rows.map((row) => row.off) }),
+    );
+    ok(
+      "deleting_a_twin_does_not_free_the_row_of_unknown_outcome_and_the_turns_end_does_not_send_it: with the first 「같은 글」 deleted the row that moved up is still off, and when the turn ended nothing went to the pane",
+      SAME(dropped.queue, ["같은 글", "다른 글", "같은 글"]) && off(dropped.rows[0]) && free(dropped.rows[2]) &&
+        REACHED(ended.sent).length === 0 && SAME(ended.queue, ["같은 글", "다른 글", "같은 글"]),
+      JSON.stringify({ dropped: dropped.rows.map((row) => row.off), ended: { queue: ended.queue, sent: ended.sent } }),
     );
   });
 }
