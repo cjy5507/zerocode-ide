@@ -26086,15 +26086,20 @@ mod tests {
         // tool's password prompt it kept 128 bytes of a login (09-06 to 09-10,
         // measured). The line has its own limit, measured 2026-11-01: past
         // `SECURITY_LINE_BYTES` the value is cut, the exit lies and the rest is
-        // printed. So the limit is checked before any process starts, and what
-        // fails it is refused rather than sent down the argument road.
+        // printed. So the limit is checked before any process starts, and only
+        // what fails it goes as the argument (the person's decision, 2026-11-01),
+        // which beats a login that can no longer launch.
         let keychain_words = keychain_write
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
             keychain_write.contains("security_command(&[\"-i\"], Some(&line))")
-                && !keychain_words.contains("\"-w\", credentials")
+                && keychain_words.contains(
+                    "if past_the_line { security_command( &[ \"add-generic-password\", \"-A\","
+                )
+                && keychain_words.contains("let past_the_line = keychain_line_too_long(&line);")
+                && keychain_words.matches("\"-w\", credentials").count() == 1
                 && !keychain_write.contains("Some(credentials)"),
             "the credential left the tool's stdin, for its argv or its password \
              prompt:\n{keychain_write}"
@@ -26116,9 +26121,8 @@ mod tests {
         );
         assert!(
             accounts.contains("const SECURITY_LINE_BYTES: usize = 4094;")
-                && keychain_line.contains("keychain_line_too_long(&line)")
                 && block_after(accounts, "fn keychain_line_too_long(")
-                    .contains("line.len() > SECURITY_LINE_BYTES")
+                    .contains("line.len() - 1 > SECURITY_LINE_BYTES")
                 && keychain_line.contains("line.contains(['\\n', '\\r', '\\0'])")
                 && keychain_line.contains("(0x20..0x7f).contains(&byte)"),
             "the line limit measured against the real tool lost its check:\n{keychain_line}"

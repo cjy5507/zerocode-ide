@@ -839,7 +839,9 @@ thread_local! {
 /// runs. Leaving the value off `-w` is not the alternative: that opens the tool's
 /// password prompt, which kept 128 bytes of a login (`SECURITY_PROMPT_BYTES`).
 /// `-i` runs a line through the same command code as argv, so the item's access
-/// list and partition came out the same (measured 2026-11-01).
+/// list and partition came out the same (measured 2026-11-01). Only a value past
+/// the line's limit still goes as the argument, and says so
+/// (`keychain_line_too_long`).
 ///
 /// **Under test this never runs.** The suite exercises the whole switch, and a
 /// switch reaches the keychain — so a version of this without the guard below
@@ -933,18 +935,10 @@ fn run_keychain_tool(
 ///
 /// A run fed a secret cannot be trusted to keep it: `security -i` prints whatever
 /// stands in a line's command position, and on 2026-11-01 a line past the buffer
-/// came back as `security: unknown command "<the rest of the value>"`. So such a
-/// run keeps the tool's sentence only in the measured shape of its refusals
-/// (`security: Sec<call> (<default>): <why>`) and only when no word of the why came
-/// from the value. The exit code classifies the run either way.
-///
-/// Only the why against only the value, and only words of `ECHO_WORD_BYTES` or more:
-/// a real login holds `default` in `rateLimitTier` and `user` in `scopes`, and the
-/// tool's own head and sentences hold those words too. Read wider, the check dropped
-/// the sentence on every real login, which left a locked keychain as a bare number.
+/// came back as `security: unknown command "<the rest of the value>"`. The exit
+/// code classifies the run either way.
 #[cfg(target_os = "macos")]
 fn security_refusal(code: Option<i32>, stderr: &str, input: Option<&str>) -> String {
-    const ECHO_WORD_BYTES: usize = 6;
     let Some(input) = input else {
         return security_failure_word(code, stderr);
     };
@@ -954,15 +948,49 @@ fn security_refusal(code: Option<i32>, stderr: &str, input: Option<&str>) -> Str
         .find(|line| !line.is_empty())
         .unwrap_or_default();
     let value = input.split_once(" -w '").map_or(input, |(_, value)| value);
-    let cleared = first
-        .strip_prefix("security: Sec")
+    let cleared = tool_sentence_is_clear(first, value);
+    security_failure_word(code, if cleared { first } else { "" })
+}
+
+/// Whether a line the tool printed is safe to keep beside a secret: it has the
+/// measured shape of the tool's refusals (`security: Sec<call> (<default>): <why>`),
+/// and no word of the why came from the value.
+///
+/// Only the why against only the value, and only words of `ECHO_WORD_BYTES` or more:
+/// a real login holds `default` in `rateLimitTier` and `user` in `scopes`, and the
+/// tool's own head and sentences hold those words too. Read wider, the check dropped
+/// the sentence on every real login, which left a locked keychain as a bare number.
+#[cfg(target_os = "macos")]
+fn tool_sentence_is_clear(line: &str, value: &str) -> bool {
+    const ECHO_WORD_BYTES: usize = 6;
+    line.strip_prefix("security: Sec")
         .and_then(|rest| rest.split_once(" (<default>): "))
         .filter(|(call, _)| call.chars().all(|ch| ch.is_ascii_alphanumeric()))
         .is_some_and(|(_, why)| {
             !why.split(|ch: char| !ch.is_ascii_alphanumeric())
                 .any(|word| word.len() >= ECHO_WORD_BYTES && value.contains(word))
-        });
-    security_failure_word(code, if cleared { first } else { "" })
+        })
+}
+
+/// The refusal of a run that carried `value` as its argument: the classification
+/// the callers read, and the tool's sentence only as `security_refusal` would keep
+/// it. Nothing measured echoes the argument, but this road's stderr gets the same
+/// distrust as the line's.
+#[cfg(target_os = "macos")]
+fn argument_road_refusal(error: &str, value: &str) -> String {
+    match error.split_once(" — ") {
+        Some((word, said)) if !tool_sentence_is_clear(said, value) => word.to_string(),
+        _ => error.to_string(),
+    }
+}
+
+/// What the log says when a value goes as the tool's argument: its size and what
+/// that costs, and nothing else about it.
+#[cfg(target_os = "macos")]
+fn argument_road_warning(value_bytes: usize) -> String {
+    format!(
+        "zerocode-shell: 키체인에 쓸 값이 {value_bytes}바이트로 길어 명령줄 인자로 넘깁니다. 이 값은 ps에 잠깐 보일 수 있습니다"
+    )
 }
 
 /// The exit of a `security` run, in words. Code 44 is its "no such item" and 45
@@ -1211,15 +1239,17 @@ fn fake_security_tool(args: &[&str], stdin: Option<&str>) -> Result<String, Stri
 pub(crate) const KEYCHAIN_AVAILABLE: bool = cfg!(target_os = "macos");
 
 /// The command line that adds one item through `security -i`, or why this value
-/// cannot take that road. The words of a refusal carry sizes and never the value.
+/// cannot be kept on either road. The words of a refusal never carry the value.
 ///
-/// There is deliberately no fallback to the argument road for what this refuses.
 /// A line break would end the command and run the rest of the value as the next
-/// one, which the tool then prints; NUL ends the line early; and the length bound
-/// is `SECURITY_LINE_BYTES`. A value with any byte outside printable ASCII would
-/// land, but `find -w` answers it in hex on either road (measured 2026-11-01 for
-/// Korean, a tab and a carriage return), so no reader could get it back. Refused
-/// here rather than by the read-back, which runs after the old item is gone.
+/// one, which the tool then prints; NUL ends the line early. A value with any byte
+/// outside printable ASCII would land, but `find -w` answers it in hex on either
+/// road (measured 2026-11-01 for Korean, a tab and a carriage return), so no reader
+/// could get it back. Refused here rather than by the read-back, which runs after
+/// the old item is gone, and whatever the value's length: the argument road is for
+/// what the line cannot hold and not for what no reader could read.
+///
+/// The line's length is not judged here: see `keychain_line_too_long`.
 #[cfg(target_os = "macos")]
 fn keychain_add_line(service: &str, user: &str, credentials: &str) -> Result<String, String> {
     let quoted = |text: &str| text.replace('\\', "\\\\").replace('\'', "\\'");
@@ -1238,21 +1268,20 @@ fn keychain_add_line(service: &str, user: &str, credentials: &str) -> Result<Str
                 .to_string(),
         );
     }
-    if keychain_line_too_long(&line) {
-        return Err(format!(
-            "값이 너무 길어 쓰지 않았습니다(입력 줄 {}바이트, 상한 {SECURITY_LINE_BYTES}바이트)",
-            line.len()
-        ));
-    }
     Ok(line + "\n")
 }
 
-/// Whether a command line is longer than `security -i` runs whole. The one
-/// judgment of length on this road: what a too-long value does next is decided by
-/// whoever asks, and the limit is read nowhere else.
+/// Whether a command line is longer than `security -i` runs whole, newline not
+/// counted. The one judgment of length, and the one place the two roads part.
+///
+/// Such a value goes as the tool's argument (the person's decision, 2026-11-01):
+/// refusing it stopped every launch of an account whose login had grown past the
+/// line, and the argument is where every value went before. It stands in `ps` while
+/// the tool runs, so the write says so. Measured 2026-11-01 for 4,011 to 60,000
+/// bytes: the same value read back, and exit 45 over a standing item.
 #[cfg(target_os = "macos")]
 const fn keychain_line_too_long(line: &str) -> bool {
-    line.len() > SECURITY_LINE_BYTES
+    line.len() - 1 > SECURITY_LINE_BYTES
 }
 
 /// Why a write of this value would be refused before anything is touched, for a
@@ -1298,8 +1327,8 @@ pub(crate) fn write_keychain_service(service: &str, credentials: &str) -> Result
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let user = keychain_account(keychain_user())?;
         let refused = |error: String| keychain_write_refused(service, &error);
-        // Before the delete below: a value the tool cannot take must not cost the
-        // person the item standing there, and no process has seen it yet.
+        // Before the delete below: a value no reader could get back must not cost
+        // the person the item standing there, and no process has seen it yet.
         let line = keychain_add_line(service, &user, credentials).map_err(refused)?;
         let delete = || {
             security_command(
@@ -1307,7 +1336,30 @@ pub(crate) fn write_keychain_service(service: &str, credentials: &str) -> Result
                 None,
             )
         };
-        let add = || security_command(&["-i"], Some(&line));
+        let past_the_line = keychain_line_too_long(&line);
+        if past_the_line {
+            eprintln!("{}", argument_road_warning(credentials.len()));
+        }
+        let add = || {
+            if past_the_line {
+                security_command(
+                    &[
+                        "add-generic-password",
+                        "-A",
+                        "-s",
+                        service,
+                        "-a",
+                        &user,
+                        "-w",
+                        credentials,
+                    ],
+                    None,
+                )
+                .map_err(|error| argument_road_refusal(&error, credentials))
+            } else {
+                security_command(&["-i"], Some(&line))
+            }
+        };
         // Delete, then add — deliberately not `-U`. An update in place keeps
         // the OLD item's access list, and the reason every write goes through
         // `security -A` is to leave an item any signer can read (see
@@ -5364,7 +5416,7 @@ JSON
 
     /// t-76905: while `security` runs, its argv is readable by other users'
     /// processes through `ps` on this Mac, so no argument of any run may carry
-    /// the secret, in plain text or as the hex `-X` takes.
+    /// a secret the line can carry, in plain text or as the hex `-X` takes.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_keychain_write_keeps_the_secret_out_of_the_tools_argv() {
@@ -5607,6 +5659,30 @@ JSON
         );
     }
 
+    /// A refusal on the argument road keeps the word the callers classify by, and
+    /// the tool's sentence only as the line's road would. The warning carries a size
+    /// and what that costs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_argument_road_says_nothing_of_the_value() {
+        let value = format!("FAKE-value-fragment{}", "T".repeat(5_000));
+        let duplicate = format!(
+            "security {DUPLICATE_ITEM} — security: SecKeychainItemCreateFromContent (<default>): The specified item already exists in the keychain."
+        );
+        assert_eq!(argument_road_refusal(&duplicate, &value), duplicate);
+        for echoed in [
+            format!("security 종료 1 — security: unknown command \"{value}\""),
+            "security 종료 1 — add-generic-password -w FAKE-value-fragment".to_string(),
+            "security 종료 1 — security: SecKeychainItemCreateFromContent (<default>): FAKE-value-fragment".to_string(),
+        ] {
+            assert_eq!(argument_road_refusal(&echoed, &value), "security 종료 1");
+        }
+        assert_eq!(
+            argument_road_warning(value.len()),
+            "zerocode-shell: 키체인에 쓸 값이 5019바이트로 길어 명령줄 인자로 넘깁니다. 이 값은 ps에 잠깐 보일 수 있습니다"
+        );
+    }
+
     /// The whole road a long login walks, which is what the refusal broke: a switch
     /// to it, the launch after it, and the CLI itself growing the login in the home.
     #[cfg(target_os = "macos")]
@@ -5658,7 +5734,22 @@ JSON
 
         // The CLI grows the login in the home, and the next switch files it first.
         let refreshed = long_login("two@example.com", "r");
-        cli_writes_credentials(home.path(), &refreshed);
+        let user = this_machines_account();
+        security_command(
+            &[
+                "add-generic-password",
+                "-U",
+                "-A",
+                "-s",
+                &service,
+                "-a",
+                &user,
+                "-w",
+                &refreshed,
+            ],
+            None,
+        )
+        .expect("the CLI's write");
         materialize_into(config.path(), &first, home.path()).expect("the switch back");
         assert_eq!(
             credentials_at(second_store).as_deref(),
