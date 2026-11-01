@@ -1474,6 +1474,26 @@ export async function testBoardSchedule(browser, origin, ok) {
       keptFocus: document.activeElement?.dataset?.key === "job:1792543500-run11955-t-63492-walk" }));
     ok("Enter on a focused block presses it, and the block keeps the focus", pressed.count === 1 && pressed.keptFocus, JSON.stringify(pressed));
 
+    /* ---- r2 P2-5: 상황판 탭 위에 떠 있는 터미널이 있으면 키는 그 터미널의 것이다 — 단추의 초점을 지키는 일이 그 키를
+     * 가져가지 않는다. 떠 있는 터미널이 없으면 단추가 초점을 지킨다(위의 Enter). ---- */
+    const floating = await page.evaluate(() => {
+      const block = document.querySelector('#board-view [data-key="job:1792543500-run11955-t-63492-walk"]');
+      const press = () => rearmKeySink(new KeyboardEvent("keydown", { key: "x", code: "KeyX", bubbles: true }));
+      const seen = {};
+      block.focus();
+      termFloat.hidden = false;
+      seen.front = frontKeyboardTarget()?.kind ?? null;
+      press();
+      seen.sinkWithFloat = document.activeElement === keySink;
+      termFloat.hidden = true;
+      block.focus();
+      press();
+      seen.blockKept = document.activeElement === block;
+      return seen;
+    });
+    ok("a floating terminal over the board still gets the keys: the key sink takes the focus from the button then, and not without one",
+      floating.front === "term" && floating.sinkWithFloat && floating.blockKept, JSON.stringify(floating));
+
     ok("the schedule raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();

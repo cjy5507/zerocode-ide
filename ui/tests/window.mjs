@@ -52885,8 +52885,8 @@ ok(
     freezeWrites(freezeRenaming, "button.tab-close aria-label") === 0 &&
     freezeWrites(freezeRenaming, "span#sb-count.sb-figure childList") <= 1 &&
     // The empty-agent caption changes once when the first agent appears.
-    freezeWrites(freezeRenaming, "span.wt-unseated hidden") <= 1 &&
-    freezeRenaming.mutations - freezeWrites(freezeRenaming, "span.wt-unseated hidden") <= FREEZE_FRAMES * 2 + 4,
+    freezeWrites(freezeRenaming, "span.proj-unseated hidden") <= 1 &&
+    freezeRenaming.mutations - freezeWrites(freezeRenaming, "span.proj-unseated hidden") <= FREEZE_FRAMES * 2 + 4,
   JSON.stringify(freezeRenaming),
 );
 /* The workspace spinner writes a class only when it crosses one of its
@@ -55979,6 +55979,9 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       const sentBeforeOpus = calls.length;
       opus?.click();
       await until(() => calls.length >= sentBeforeOpus + 2);
+      // A frame more, then the count exactly: a third call arriving late would move `slice(-2)` (r2 P3-11).
+      await settle(60);
+      seen.modelCalls = calls.length - sentBeforeOpus;
       seen.modelSent = JSON.stringify(calls.slice(-2));
       seen.wantModelSent = JSON.stringify([["paste", term, "/model claude-opus-5"], ["key", term, "Enter", false]]);
       seen.modelRoads = JSON.stringify(roads.slice(-2));
@@ -56048,6 +56051,8 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       const sentBeforeClear = calls.length;
       press("Enter");
       await until(() => calls.length >= sentBeforeClear + 2);
+      await settle(60);
+      seen.enterCalls = calls.length - sentBeforeClear;
       seen.enterRan = JSON.stringify(calls.slice(-2));
       seen.wantEnterRan = JSON.stringify([["paste", term, "/clear"], ["key", term, "Enter", false]]);
       seen.enterRanRoads = JSON.stringify(roads.slice(-2));
@@ -56091,6 +56096,8 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       const sentBeforeAstra = calls.length;
       astra?.click();
       await until(() => calls.length >= sentBeforeAstra + 2);
+      await settle(60);
+      seen.codexCalls = calls.length - sentBeforeAstra;
       seen.codexPick = JSON.stringify(calls.slice(-2));
       seen.wantCodexPick = JSON.stringify([["paste", codexTerm, "/model"], ["key", codexTerm, "Enter", false]]);
       seen.codexRoads = JSON.stringify(roads.slice(-2));
@@ -56155,7 +56162,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // same CLI), so the menu's wire section names it after the other CLIs.
       seen.menuOpen && JSON.stringify(seen.menuModels) === JSON.stringify(["Fable 5.1*", "Opus 5", "Codex", "Claude"]) &&
         seen.chipModelNamed === " · Fable 5.1" &&
-        seen.modelSent === seen.wantModelSent && seen.menuClosed &&
+        seen.modelSent === seen.wantModelSent && seen.modelCalls === 2 && seen.menuClosed &&
         // The chip says the mode in Claude Code's own word — the catalog row's
         // label (t-6323 A3), not the spelling opened up.
         seen.modeShown && seen.modeWords === "Bypass permissions" && seen.modeKey === seen.wantModeKey &&
@@ -56170,7 +56177,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
         JSON.stringify(seen.innerWord) === JSON.stringify(["/codex:review"]) &&
         seen.none === seen.wantNone &&
         seen.hotAfterDown === "/context" && seen.tabFilled === "/context " && seen.tabSentNothing && seen.paletteClosedAfterTab &&
-        seen.enterRan === seen.wantEnterRan && seen.boxClearedAfterRun &&
+        seen.enterRan === seen.wantEnterRan && seen.enterCalls === 2 && seen.boxClearedAfterRun &&
         seen.artifactListed === "/artifact" && seen.artifactFilled,
       JSON.stringify(seen),
     );
@@ -56182,7 +56189,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
     );
     ok(
       "a CLI whose picker lives on its own screen gets the bare command and the screen back, and a documented list is named as such on the palette's head",
-      seen.codexPick === seen.wantCodexPick && seen.codexScreenBack && seen.codexHead === seen.wantCodexHead,
+      seen.codexPick === seen.wantCodexPick && seen.codexCalls === 2 && seen.codexScreenBack && seen.codexHead === seen.wantCodexHead,
       JSON.stringify(seen),
     );
     ok(

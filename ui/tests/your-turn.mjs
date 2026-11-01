@@ -149,7 +149,7 @@ export async function testYourTurn(browser, origin, ok) {
     const cards = await page.evaluate(async () => {
       const seen = {};
       paneModels.set(6, "claude-opus-5-5");
-      paneSaid.set(6, "짧은 판은 600자, 긴 판은 1,800자입니다.");
+      paneAnswer.set(6, "짧은 판은 600자, 긴 판은 1,800자입니다.");
       const base = window.__turnCards();
       const plan = { ...base[1], pane: "term:9", heading: "계획 에이전트", ask: "ExitPlanMode",
         approval: { tool: "ExitPlanMode", summary: "", plan: "## 계획\n\n1. 첫째 단계\n2. 둘째 단계" } };
@@ -170,7 +170,7 @@ export async function testYourTurn(browser, origin, ok) {
       window.__press("Escape");
       await window.__settle();
       paneModels.delete(6);
-      paneSaid.delete(6);
+      paneAnswer.delete(6);
       await window.__setTurns(window.__turnCards());
       return seen;
     });
@@ -181,6 +181,55 @@ export async function testYourTurn(browser, origin, ok) {
         cards.door === "대화 열기" && cards.doorMark && cards.planTitle === "계획을 승인할까요?" &&
         cards.planProse?.includes("첫째 단계") && cards.planProse.includes("둘째 단계") && cards.planHeading,
       JSON.stringify(cards),
+    );
+
+    /* r2 P2-3: the line quotes the agent's ANSWER — what its last turn ended with — through the road the hooks really take. A tool's
+     * output (a `cat .env` that landed mid-turn) is carried as `said` by the sidebar but is no answer; a turn that ends with none
+     * leaves nothing to quote; a new session on the pane starts without the old one's answer. */
+    const road = await page.evaluate(async () => {
+      const seen = {};
+      const tell = (payload) => { for (const handler of window.__LISTENERS__["hook:agent"] ?? []) handler({ payload }); };
+      const term = await openTermTab({ placement: "tab" });
+      await window.__settle();
+      const base = window.__turnCards()[0];
+      const card = { ...base, pane: `term:${term}`, agent: "claude" };
+      const context = async () => {
+        await window.__setTurns([card]);
+        window.__chip().click();
+        await window.__settle();
+        const text = window.__items()[0]?.querySelector(".your-turn-context")?.textContent.replace(/\s+/g, " ").trim() ?? null;
+        window.__press("Escape");
+        await window.__settle();
+        return text;
+      };
+      tell({ term, state: "done", agent: "claude", session: { id: "s-road-a" }, resumable: true, said: "배포는 끝났습니다.", answer: "배포는 끝났습니다." });
+      await window.__settle();
+      seen.afterAnswer = await context();
+      // The tool's output lands mid-turn: `said` follows it, the answer does not.
+      tell({ term, state: "working", agent: "claude", session: { id: "s-road-a" }, resumable: true, said: "API_KEY=hunter2-not-an-answer" });
+      await window.__settle();
+      seen.afterTool = await context();
+      seen.saidFollowsTool = paneSaid.get(term) === "API_KEY=hunter2-not-an-answer";
+      // A turn that ended with no answer (interrupted) leaves none.
+      tell({ term, state: "done", agent: "claude", session: { id: "s-road-a" }, resumable: true });
+      await window.__settle();
+      seen.afterNoAnswer = await context();
+      tell({ term, state: "done", agent: "claude", session: { id: "s-road-a" }, resumable: true, answer: "다시 답했습니다." });
+      await window.__settle();
+      seen.afterAgain = await context();
+      // A new session on the same pane starts without the old one's answer.
+      tell({ term, state: "working", agent: "claude", session: { id: "s-road-b" }, resumable: true });
+      await window.__settle();
+      seen.afterNewSession = await context();
+      paneAnswer.delete(term);
+      await window.__setTurns(window.__turnCards());
+      return seen;
+    });
+    ok(
+      "the list's 「직전 답에서」 quotes only the answer a turn ended with: never a tool's output, nothing after an interrupted turn, nothing from the pane's previous session",
+      road.afterAnswer === "직전 답에서 — 「배포는 끝났습니다.」" && road.afterTool === "직전 답에서 — 「배포는 끝났습니다.」" && road.saidFollowsTool &&
+        road.afterNoAnswer === null && road.afterAgain === "직전 답에서 — 「다시 답했습니다.」" && road.afterNewSession === null,
+      JSON.stringify(road),
     );
 
     /* t-84799 B4: an open list stays hung from its chip when the window changes size. */

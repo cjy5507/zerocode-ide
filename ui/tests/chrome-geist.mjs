@@ -756,6 +756,25 @@ async function testTabAsk(browser, origin, ok) {
         seen.question.ask === "question" && seen.question.round && seen.question.tip.split(" · ").includes("질문") &&
         seen.signalled.ask === null && seen.signalled.round && seen.signalled.tip.split(" · ").includes("확인 필요"),
       JSON.stringify(seen));
+    /* r2 P3-10: inside one wait a question can turn into a permission (the state stays needs-attention); the strip is drawn
+     * again by the event alone — nothing here calls renderTabs. */
+    const turned = await page.evaluate(async () => {
+      const tell = (name, payload) => { for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload }); };
+      const term = await openTermTab({ placement: "tab" });
+      paneAgents.set(term, "claude");
+      const read = () => document.querySelector(`.tab[data-tab="${tabOfTerm(term).id}"]`)?.dataset.ask ?? null;
+      tell("hook:agent", { term, state: "needs-attention", agent: "claude", session: "s-turn",
+        ask_prompt: { questions: [{ question: "어느 쪽?", multi_select: false, options: [{ label: "가" }, { label: "나" }] }] } });
+      renderTabs();
+      await window.__PAINTED__();
+      const asked = read();
+      tell("hook:agent", { term, state: "needs-attention", agent: "claude", session: "s-turn", approval: { tool: "Bash", summary: "npm install" } });
+      await window.__PAINTED__();
+      await window.__PAINTED__();
+      return { asked, then: read() };
+    });
+    ok("a question that turns into a permission inside one wait changes the tab's word and square without any other repaint",
+      turned.asked === "question" && turned.then === "permission", JSON.stringify(turned));
     ok("the tab ask scene raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
