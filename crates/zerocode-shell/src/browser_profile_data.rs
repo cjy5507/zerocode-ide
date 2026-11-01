@@ -409,7 +409,8 @@ const SECRET_ENTRY_NAME_WORDS: [&str; 12] = [
 
 /// 이 입력값은 비밀인가 — 값의 종류로 가른다. 칸 이름이 비밀번호·토큰·결제
 /// 카드·인증번호를 말하거나, 값이 카드 번호 꼴이거나, 값이 띄어 쓰지 않은 한
-/// ASCII 낱말로 토큰 꼴일 때다. 주소·메모처럼 띄어 쓴 글과 한글이 든 값은
+/// ASCII 낱말로 토큰 꼴일 때다 — 토큰 표식은 낱말의 가장자리에 서고 그 뒤에 토큰이
+/// 이어질 때만 센다(「Asia」는 ASIA 표식이 아니다). 주소·메모처럼 띄어 쓴 글과 한글이 든 값은
 /// 길고 숫자와 글자가 섞여도 토큰이 아니다 — core의 「긴 혼합 낱말」 규칙은
 /// 한 낱말에만 건다.
 fn entry_is_secret(name: &str, value: &str) -> bool {
@@ -420,7 +421,9 @@ fn entry_is_secret(name: &str, value: &str) -> bool {
             .iter()
             .any(|word| credential::contains_ascii_case(name, word))
         || credential::looks_like_a_payment_card(value)
-        || (one_word && credential::looks_like_a_credential(value))
+        || (one_word
+            && (credential::carries_a_value_mark_at_a_word_edge(value)
+                || credential::looks_like_an_opaque_token(value)))
 }
 
 fn read_entries(
@@ -604,26 +607,27 @@ pub fn discard(config_root: &Path, profile_id: &str) {
 }
 
 /// 읽은 자료를 대상 프로필의 저장소에 둔다. 새 가져오기는 옛 자료를 갈아
-/// 끼운다 — 원본 브라우저가 진실이다.
+/// 끼운다 — 원본 브라우저가 진실이다. 읽지 못한 몫(`None`)은 건드리지 않아
+/// 지난번에 옮긴 자료가 그대로 남고, 그 수도 지난 수 그대로 센다.
 pub fn save_imported(
     config_root: &Path,
     profile_id: &str,
-    bookmarks: &BookmarksRead,
-    web_data: &WebDataRead,
+    bookmarks: Option<&BookmarksRead>,
+    web_data: Option<&WebDataRead>,
     at_unix: i64,
 ) -> Result<ImportedData, String> {
-    save_private(
-        &bookmarks_file(config_root, profile_id),
-        &bookmarks.bookmarks,
-    )?;
-    save_private(&address_book_file(config_root, profile_id), &web_data.book)?;
-    let counts = ImportedData {
-        bookmarks: bookmarks.bookmarks.len(),
-        addresses: web_data.book.addresses.len(),
-        autofill_entries: web_data.book.entries.len(),
-        held_back: web_data.held_back,
-        at_unix,
-    };
+    let before = last_imported(config_root, profile_id).unwrap_or_default();
+    let mut counts = ImportedData { at_unix, ..before };
+    if let Some(read) = bookmarks {
+        save_private(&bookmarks_file(config_root, profile_id), &read.bookmarks)?;
+        counts.bookmarks = read.bookmarks.len();
+    }
+    if let Some(read) = web_data {
+        save_private(&address_book_file(config_root, profile_id), &read.book)?;
+        counts.addresses = read.book.addresses.len();
+        counts.autofill_entries = read.book.entries.len();
+        counts.held_back = read.held_back;
+    }
     save_private(&imported_file(config_root, profile_id), &counts)?;
     Ok(counts)
 }
@@ -661,25 +665,100 @@ impl std::fmt::Display for ProfileDataError {
     }
 }
 
+/// 옮기지 못한 몫과 그 까닭 — 북마크와 주소(Web Data)가 각자 까닭을 말한다.
+/// 가져오기 카드가 이 값으로 몫마다 사람 말을 고른다.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileDataSkippedParts {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bookmarks: Option<ProfileDataSkipped>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addresses: Option<ProfileDataSkipped>,
+}
+
+/// 읽은 두 몫을 대상 프로필에 두고, 읽지 못한 몫은 까닭과 함께 돌려준다. 한
+/// 몫만 읽었어도 그 몫은 옮겨지고(수는 `Some`), 둘 다 못 읽었으면 수가 없다.
+/// 저장이 실패하면 읽은 몫도 못 옮긴 것이라 두 몫 모두 `Unsaved`다. 자세한
+/// 글자는 `log` 한 줄씩으로만 간다.
+pub fn import_profile_data(
+    read: ProfileDataRead,
+    config_root: &Path,
+    profile_id: &str,
+    at_unix: i64,
+    mut log: impl FnMut(&str),
+) -> (Option<ImportedData>, Option<ProfileDataSkippedParts>) {
+    let mut skip = |error: ProfileDataError| {
+        log(&format!("browser profile data import skipped: {error}"));
+        error.kind
+    };
+    let bookmarks = read.bookmarks.map_err(&mut skip);
+    let web_data = read.web_data.map_err(&mut skip);
+    let skipped = ProfileDataSkippedParts {
+        bookmarks: bookmarks.as_ref().err().copied(),
+        addresses: web_data.as_ref().err().copied(),
+    };
+    let (kept_bookmarks, kept_web_data) = (bookmarks.as_ref().ok(), web_data.as_ref().ok());
+    if kept_bookmarks.is_none() && kept_web_data.is_none() {
+        return (None, Some(skipped));
+    }
+    log(&import_log_line(kept_bookmarks, kept_web_data));
+    match save_imported(
+        config_root,
+        profile_id,
+        kept_bookmarks,
+        kept_web_data,
+        at_unix,
+    ) {
+        Ok(counts) => (
+            Some(counts),
+            (skipped != ProfileDataSkippedParts::default()).then_some(skipped),
+        ),
+        Err(detail) => {
+            log(&format!("browser profile data import skipped: {detail}"));
+            let unsaved = Some(ProfileDataSkipped::Unsaved);
+            (
+                None,
+                Some(ProfileDataSkippedParts {
+                    bookmarks: unsaved,
+                    addresses: unsaved,
+                }),
+            )
+        }
+    }
+}
+
 /// 창 로그 한 줄 — 수와 Web Data의 스키마 버전만 적는다. 값·이름·주소는
-/// 어느 것도 적지 않는다.
-pub fn import_log_line(bookmarks: &BookmarksRead, web_data: &WebDataRead) -> String {
+/// 어느 것도 적지 않는다. 읽지 못한 몫은 「not read」다(까닭은 따로 한 줄).
+pub fn import_log_line(
+    bookmarks: Option<&BookmarksRead>,
+    web_data: Option<&WebDataRead>,
+) -> String {
+    let count =
+        |read: Option<usize>| read.map_or_else(|| "not read".to_string(), |n| n.to_string());
     format!(
         "browser profile data imported: bookmarks {} (not web addresses {}, over the cap {}), \
          addresses {}, entries {}, held back {}, web data schema {}",
-        bookmarks.bookmarks.len(),
-        bookmarks.skipped,
-        bookmarks.over_cap,
-        web_data.book.addresses.len(),
-        web_data.book.entries.len(),
-        web_data.held_back,
+        count(bookmarks.map(|read| read.bookmarks.len())),
+        count(bookmarks.map(|read| read.skipped)),
+        count(bookmarks.map(|read| read.over_cap)),
+        count(web_data.map(|read| read.book.addresses.len())),
+        count(web_data.map(|read| read.book.entries.len())),
+        count(web_data.map(|read| read.held_back)),
         web_data
-            .schema_version
+            .and_then(|read| read.schema_version)
             .map_or_else(|| "none".to_string(), |version| version.to_string()),
     )
 }
 
-/// 한 Chromium 프로필의 북마크와 Web Data를 읽는다. 원본이 없으면 그 몫은
+/// 한 Chromium 프로필에서 읽은 두 몫 — 북마크와 Web Data(주소·입력값). 한
+/// 몫이 깨져도 다른 몫은 읽힌다: 각자 읽고 각자 까닭을 말한다.
+#[derive(Debug)]
+pub struct ProfileDataRead {
+    pub bookmarks: Result<BookmarksRead, ProfileDataError>,
+    pub web_data: Result<WebDataRead, ProfileDataError>,
+}
+
+/// 한 Chromium 프로필의 북마크와 Web Data를 따로 읽는다. 원본이 없으면 그 몫은
 /// 비어 있다 — 북마크를 하나도 만든 적 없는 프로필도 흔하다. Web Data는
 /// 브라우저가 쥐고 고쳐 쓰는 DB라 쿠키처럼 안정된 사본에서 읽는다. 사본을
 /// 뜨지 못하면 [`ProfileDataSkipped::Locked`], 그 밖에 읽지 못하면
@@ -689,7 +768,7 @@ pub fn read_chromium_profile_data(
     profile: &str,
     home: &Path,
     scratch: &Path,
-) -> Result<(BookmarksRead, WebDataRead), ProfileDataError> {
+) -> ProfileDataRead {
     let unreadable = || ProfileDataError::of(ProfileDataSkipped::Unreadable);
     let bookmarks = match crate::browser_cookie_import::chromium_profile_file(
         family,
@@ -700,8 +779,8 @@ pub fn read_chromium_profile_data(
         Some(path) => std::fs::read_to_string(&path)
             .map_err(|error| error.to_string())
             .and_then(|text| parse_chromium_bookmarks(&text))
-            .map_err(unreadable())?,
-        None => BookmarksRead::default(),
+            .map_err(unreadable()),
+        None => Ok(BookmarksRead::default()),
     };
     let web_data = match crate::browser_cookie_import::chromium_profile_file(
         family,
@@ -715,11 +794,14 @@ pub fn read_chromium_profile_data(
                 .and_then(|copy| read_chromium_web_data(&copy).map_err(unreadable()));
             // 사본은 읽었든 못 읽었든 남지 않는다 — 사람의 주소가 든 파일이다.
             let _ = std::fs::remove_dir_all(scratch);
-            read?
+            read
         }
-        None => WebDataRead::default(),
+        None => Ok(WebDataRead::default()),
     };
-    Ok((bookmarks, web_data))
+    ProfileDataRead {
+        bookmarks,
+        web_data,
+    }
 }
 
 #[cfg(test)]
@@ -931,7 +1013,7 @@ mod tests {
     }
 
     /// 한 낱말 값의 비밀 표식(`sk-`·`AKIA`·`eyJ` …)은 낱말의 가장자리에 설 때
-    /// 만 센다. 나라 이름 「Malaysia」(ASIA)나 「desk-lamp」(sk-)처럼 낱말 가운데
+    /// 만 센다. 대륙 이름 「Asia」(ASIA)나 「desk-lamp」(sk-)처럼 낱말 가운데
     /// 표식이 우연히 든 값은 옮겨지고, 표식 뒤에 토큰 꼴이 이어지는 값은 남는다
     /// (t-84200). 토큰 꼴 값은 시험이 실행 중에 짓는다.
     #[test]
@@ -959,30 +1041,6 @@ mod tests {
         for value in &held {
             assert!(entry_is_secret("q", value), "{value} was moved");
         }
-    }
-
-    /// 북마크 파일이 깨져도 Web Data의 주소는 읽힌다 — 두 몫은 따로 읽는다
-    /// (t-84200).
-    #[test]
-    fn a_broken_bookmarks_file_does_not_stop_the_addresses_from_being_read() {
-        let home = tempfile::tempdir().expect("home");
-        let scratch = home.path().join("scratch");
-        let Some(folder) =
-            crate::browser_cookie_import::chromium_profile_dir("chrome", "Default", home.path())
-                .filter(|folder| folder.starts_with(home.path()))
-        else {
-            return;
-        };
-        std::fs::create_dir_all(&folder).expect("folder");
-        std::fs::write(folder.join(BOOKMARKS_FILE), "{not json").expect("broken");
-        rusqlite::Connection::open(folder.join(WEB_DATA_FILE))
-            .expect("create")
-            .execute_batch(WEB_DATA_FIXTURE)
-            .expect("fixture schema");
-        let (_bookmarks, web) =
-            read_chromium_profile_data("chrome", "Default", home.path(), &scratch)
-                .expect("a broken Bookmarks file must not stop the addresses read");
-        assert_eq!(web.book.addresses.len(), 2);
     }
 
     /// 옛 판의 Web Data: 주소 칸은 autofill_profiles에, 이름·이메일·전화는 곁표에.
@@ -1021,8 +1079,14 @@ mod tests {
         let bookmarks = parse_chromium_bookmarks(BOOKMARKS_FIXTURE).expect("parses");
         let (_yard, path) = current_web_data();
         let read = read_chromium_web_data(&path).expect("reads");
-        let counts =
-            save_imported(root.path(), &id, &bookmarks, &read, 1_793_200_000).expect("saves");
+        let counts = save_imported(
+            root.path(),
+            &id,
+            Some(&bookmarks),
+            Some(&read),
+            1_793_200_000,
+        )
+        .expect("saves");
         assert_eq!(
             counts,
             ImportedData {
@@ -1033,7 +1097,7 @@ mod tests {
                 at_unix: 1_793_200_000,
             }
         );
-        let line = import_log_line(&bookmarks, &read);
+        let line = import_log_line(Some(&bookmarks), Some(&read));
         assert!(
             line.contains("bookmarks 6 (not web addresses 2, over the cap 0)")
                 && line.contains("addresses 2")
@@ -1047,7 +1111,36 @@ mod tests {
         );
         assert_eq!(load_bookmarks(root.path(), &id), bookmarks.bookmarks);
         assert_eq!(load_address_book(root.path(), &id), read.book);
-        assert_eq!(last_imported(root.path(), &id), Some(counts));
+        assert_eq!(last_imported(root.path(), &id), Some(counts.clone()));
+
+        // 한 몫을 읽지 못한 가져오기(None)는 그 몫의 저장된 자료와 수를 건드리지
+        // 않고, 읽은 몫만 갈아 끼운다.
+        let fewer = BookmarksRead::default();
+        let partial = save_imported(root.path(), &id, Some(&fewer), None, 1_793_200_001)
+            .expect("saves a part");
+        assert_eq!(
+            partial,
+            ImportedData {
+                bookmarks: 0,
+                at_unix: 1_793_200_001,
+                ..counts
+            }
+        );
+        assert_eq!(load_address_book(root.path(), &id), read.book);
+        assert!(load_bookmarks(root.path(), &id).is_empty());
+        let line = import_log_line(None, Some(&read));
+        assert!(
+            line.contains("bookmarks not read") && line.contains("addresses 2"),
+            "{line}"
+        );
+        save_imported(
+            root.path(),
+            &id,
+            Some(&bookmarks),
+            Some(&read),
+            1_793_200_000,
+        )
+        .expect("restored");
         let wire = serde_json::to_value(load_bookmarks(root.path(), &id)).expect("wire");
         assert_eq!(wire[0]["root"], "bar");
         assert!(
@@ -1082,15 +1175,83 @@ mod tests {
         assert!(!imported_file(root.path(), &id).exists());
     }
 
+    /// 한 몫만 읽힌 가져오기: 읽은 몫은 옮겨지고 수가 서며, 못 읽은 몫만 까닭이
+    /// 카드로 간다. 둘 다 못 읽으면 수가 없다. 로그에는 값이 없다(t-84200).
+    #[test]
+    fn each_part_of_an_import_says_its_own_reason() {
+        let root = tempfile::tempdir().expect("root");
+        let id = "b".repeat(32);
+        let (_yard, path) = current_web_data();
+        let web = read_chromium_web_data(&path).expect("reads");
+        let mut lines = Vec::new();
+        let (counts, skipped) = import_profile_data(
+            ProfileDataRead {
+                bookmarks: Err(ProfileDataError {
+                    kind: ProfileDataSkipped::Unreadable,
+                    detail: "bad json".into(),
+                }),
+                web_data: Ok(web),
+            },
+            root.path(),
+            &id,
+            7,
+            |line| lines.push(line.to_string()),
+        );
+        let counts = counts.expect("the addresses were carried");
+        assert_eq!((counts.bookmarks, counts.addresses), (0, 2));
+        assert_eq!(
+            skipped,
+            Some(ProfileDataSkippedParts {
+                bookmarks: Some(ProfileDataSkipped::Unreadable),
+                addresses: None
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(skipped).expect("wire"),
+            serde_json::json!({ "bookmarks": "unreadable" })
+        );
+        assert_eq!(load_address_book(root.path(), &id).addresses.len(), 2);
+        assert!(lines.iter().all(|line| !line.contains("합성")), "{lines:?}");
+
+        let (counts, skipped) = import_profile_data(
+            ProfileDataRead {
+                bookmarks: Err(ProfileDataError {
+                    kind: ProfileDataSkipped::Unreadable,
+                    detail: "bad json".into(),
+                }),
+                web_data: Err(ProfileDataError {
+                    kind: ProfileDataSkipped::Locked,
+                    detail: "busy".into(),
+                }),
+            },
+            root.path(),
+            &id,
+            8,
+            |_| {},
+        );
+        assert!(counts.is_none());
+        assert_eq!(
+            skipped,
+            Some(ProfileDataSkippedParts {
+                bookmarks: Some(ProfileDataSkipped::Unreadable),
+                addresses: Some(ProfileDataSkipped::Locked)
+            })
+        );
+        // 못 읽은 가져오기는 지난번 자료를 지우지 않는다.
+        assert_eq!(load_address_book(root.path(), &id).addresses.len(), 2);
+    }
+
     /// 원본 폴더에서 읽기: 북마크와 Web Data가 없으면 빈 몫이고, 있으면
     /// Web Data는 사본에서 읽혀 사본 폴더는 남지 않는다.
     #[test]
     fn a_source_profile_reads_from_its_own_folder_through_a_snapshot() {
         let home = tempfile::tempdir().expect("home");
         let scratch = home.path().join("scratch");
-        let (bookmarks, web) =
-            read_chromium_profile_data("chrome", "Default", home.path(), &scratch)
-                .expect("an absent profile reads as empty");
+        let absent = read_chromium_profile_data("chrome", "Default", home.path(), &scratch);
+        let (bookmarks, web) = (
+            absent.bookmarks.expect("an absent profile reads as empty"),
+            absent.web_data.expect("an absent profile reads as empty"),
+        );
         assert!(bookmarks.bookmarks.is_empty() && web.book.addresses.is_empty());
 
         // 뿌리가 환경(LOCALAPPDATA·XDG_CONFIG_HOME)에서 오는 OS에서는 시험이
@@ -1107,28 +1268,56 @@ mod tests {
             .expect("create")
             .execute_batch(WEB_DATA_FIXTURE)
             .expect("fixture schema");
-        let (bookmarks, web) =
-            read_chromium_profile_data("chrome", "Default", home.path(), &scratch).expect("reads");
+        let read = read_chromium_profile_data("chrome", "Default", home.path(), &scratch);
+        let (bookmarks, web) = (
+            read.bookmarks.expect("reads"),
+            read.web_data.expect("reads"),
+        );
         assert_eq!(bookmarks.bookmarks.len(), 6);
         assert_eq!(web.book.addresses.len(), 2);
         assert!(!scratch.exists(), "the snapshot outlived the read");
         // 프로필 이름은 바깥 데이터다 — 길을 품은 이름은 읽지 않는다.
         assert!(
             read_chromium_profile_data("chrome", "../Default", home.path(), &scratch)
+                .bookmarks
                 .expect("fenced")
-                .0
                 .bookmarks
                 .is_empty()
         );
+        // 두 몫은 따로 읽는다: 깨진 북마크 파일은 북마크만 못 읽게 하고 주소는
+        // 그대로 읽힌다(t-84200).
         std::fs::write(folder.join(BOOKMARKS_FILE), "{not json").expect("broken");
-        let broken = read_chromium_profile_data("chrome", "Default", home.path(), &scratch)
-            .expect_err("a broken Bookmarks file reads");
-        assert_eq!(broken.kind, ProfileDataSkipped::Unreadable);
+        let broken = read_chromium_profile_data("chrome", "Default", home.path(), &scratch);
+        let skipped = broken.bookmarks.expect_err("a broken Bookmarks file reads");
+        assert_eq!(skipped.kind, ProfileDataSkipped::Unreadable);
+        assert_eq!(
+            broken
+                .web_data
+                .expect("the addresses still read")
+                .book
+                .addresses
+                .len(),
+            2
+        );
         // 카드에는 종류 낱말 하나만 간다 — 글자는 로그 몫이다.
         assert_eq!(
-            serde_json::to_value(broken.kind).expect("wire"),
+            serde_json::to_value(skipped.kind).expect("wire"),
             "unreadable"
         );
+        // 거꾸로 Web Data가 깨져도 북마크는 읽힌다.
+        std::fs::write(folder.join(BOOKMARKS_FILE), BOOKMARKS_FIXTURE).expect("bookmarks");
+        std::fs::write(folder.join(WEB_DATA_FILE), "not a database").expect("broken");
+        let broken = read_chromium_profile_data("chrome", "Default", home.path(), &scratch);
+        assert_eq!(
+            broken
+                .bookmarks
+                .expect("the bookmarks still read")
+                .bookmarks
+                .len(),
+            6
+        );
+        assert!(broken.web_data.is_err());
+        assert!(!scratch.exists(), "the snapshot outlived the failed read");
         assert_eq!(
             serde_json::to_value(ProfileDataSkipped::Locked).expect("wire"),
             "locked"

@@ -79,6 +79,7 @@ mod awake;
 mod boot_timeline;
 mod browser_cookie_import;
 mod browser_cookies;
+mod browser_country_names;
 mod browser_diagnose;
 mod browser_form_fill;
 mod browser_guest_runtime;

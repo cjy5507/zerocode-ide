@@ -10613,7 +10613,11 @@ body.is-dragging-pane {
   cursor: pointer;
 }
 
-.browser-fillbar-act.is-primary {
+/* An entry button is a thing to press like an address button: it reads in the
+ * primary ink. Only the dismiss button stays on the secondary ink, and the
+ * 「입력값 ·」 words in front still say which kind of value it is. */
+.browser-fillbar-act.is-primary,
+.browser-fillbar-act.is-entry {
   color: var(--ink-chalk);
 }
 

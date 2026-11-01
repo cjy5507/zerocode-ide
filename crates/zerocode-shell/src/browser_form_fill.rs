@@ -212,7 +212,14 @@ pub fn fill_script(
     values: &BTreeMap<String, String>,
     entries: &BTreeMap<String, String>,
 ) -> String {
-    let args = serde_json::json!({ "values": values, "entries": entries });
+    // 나라 칸은 저장된 값(코드든 이름이든)과 같은 나라의 다른 표기도 함께 싣는다
+    // — 페이지의 select가 값이나 글자로 맞는 옵션을 고르게. 표는 한 곳이다.
+    let alts: BTreeMap<&str, Vec<String>> = values
+        .get("country")
+        .and_then(|stored| crate::browser_country_names::spellings(stored))
+        .map(|spellings| BTreeMap::from([("country", spellings)]))
+        .unwrap_or_default();
+    let args = serde_json::json!({ "values": values, "entries": entries, "alts": alts });
     format!("({FORM_FILL_JS})(\"fill\", {args})")
 }
 

@@ -1185,8 +1185,8 @@ fn the_settings_view_marks_staged_and_default_profiles() {
     browser_profile_data::save_imported(
         dir.path(),
         &b,
-        &carried,
-        &browser_profile_data::WebDataRead::default(),
+        Some(&carried),
+        Some(&browser_profile_data::WebDataRead::default()),
         1_793_200_000,
     )
     .expect("carried");
@@ -1265,8 +1265,8 @@ fn deleting_a_profile_takes_its_staging_and_default_with_it() {
     browser_profile_data::save_imported(
         dir.path(),
         &a,
-        &browser_profile_data::BookmarksRead::default(),
-        &browser_profile_data::WebDataRead::default(),
+        Some(&browser_profile_data::BookmarksRead::default()),
+        Some(&browser_profile_data::WebDataRead::default()),
         1,
     )
     .expect("carried");
