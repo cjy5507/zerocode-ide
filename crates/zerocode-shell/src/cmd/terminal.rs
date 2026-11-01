@@ -3280,8 +3280,9 @@ pub(crate) fn resize_lane(
         .map_err(|error| error.to_string())
 }
 
-/// Placed last in the file: the window's source tests cut `cmd/terminal.rs` at its first `#[cfg(test)]`,
-/// and a test module in the middle would hide everything below it from them.
+/// Placed last in the file: the window's source tests cut `cmd/terminal.rs` where its first test module
+/// begins, and a test module in the middle would hide everything below it from them. (This comment does
+/// not spell the attribute out for the same reason: the cut is a plain text search.)
 #[cfg(test)]
 mod door_note_tests {
     use super::*;
