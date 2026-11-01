@@ -352,6 +352,35 @@ mod tests {
         assert!(folder.join(NOTIFY.ledger).exists());
     }
 
+    /// A rewrite replaces the shared ledger whole: a row appended between its
+    /// read and its rename would go with the old file. Each round here gives
+    /// the eraser a row to take, so it rewrites all through the appends.
+    #[test]
+    fn a_row_appended_while_the_shared_ledger_is_rewritten_is_kept() {
+        use zerocode_core::jev::{erase, CUSTOM_DECISIONS};
+        const ROUNDS: usize = 600;
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("settings.json"), "{}").unwrap();
+        let ledger = home.path().join("jev").join(CUSTOM_DECISIONS.ledger);
+        let appending = {
+            let ledger = ledger.clone();
+            std::thread::spawn(move || {
+                for round in 0..ROUNDS {
+                    let kept = serde_json::json!({"decision": "d-kept", "round": round});
+                    append_shadow_row(&ledger, &kept, u64::MAX).unwrap();
+                    append_shadow_row(&ledger, &serde_json::json!({"decision": "d-gone"}), u64::MAX).unwrap();
+                }
+            })
+        };
+        while !appending.is_finished() {
+            erase::forget_custom(home.path(), "d-gone").unwrap();
+        }
+        appending.join().unwrap();
+        erase::forget_custom(home.path(), "d-gone").unwrap();
+        let text = fs::read_to_string(&ledger).unwrap();
+        assert_eq!(text.lines().count(), ROUNDS, "rows went with a rewrite");
+    }
+
     /// The challenger arm's share of the one judge (t-6263, t-6877): the arm
     /// hands [`judge_seat_rows`] its ledger's rows as its readers read them,
     /// and that road reads one rubric's series as every seat's judge does. On

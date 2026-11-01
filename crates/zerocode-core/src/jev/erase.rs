@@ -347,5 +347,17 @@ fn home_of(ledger: &Path) -> Option<PathBuf> {
     None
 }
 
+// RED STUBS BEGIN
+const SWEPT_KEY: &str = "deletedRecordsSwept";
+pub const PENDING_FILE: &str = "jev-forget-pending.json";
+pub fn seat_deleted(settings: &Path, id: &str) {
+    let _ = forget_seat(settings, id);
+}
+pub fn decision_deleted(home: &Path, id: &str) {
+    let _ = forget_custom(home, id);
+}
+pub fn tidy_at_start(_settings: &Path, _lifted: bool) {}
+// RED STUBS END
+
 #[cfg(test)]
 mod tests;

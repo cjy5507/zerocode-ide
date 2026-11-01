@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::{forget_custom, forget_seat, lift_kept_seats, may_write};
+use super::{
+    PENDING_FILE, SWEPT_KEY, forget_custom, forget_seat, lift_kept_seats, may_write, seat_deleted,
+    tidy_at_start,
+};
 use crate::jev::builtin;
 use crate::jev::door::JEV_SETTINGS_KEY;
 use crate::jev::{COMMAND_GUARD, CUSTOM_DECISIONS, JevMode, NOTIFY, RECALL, ROUTING, STALL};
@@ -291,4 +294,177 @@ fn no_settings_file_is_left_alone() {
     let settings = home.path().join("settings.json");
     assert!(!lift_kept_seats(&settings).expect("nothing to lift"));
     assert!(!settings.exists());
+}
+
+/// Marks for two seats the person deleted, and the two the lift brings back.
+fn settings_marking_four(home: &Path) -> PathBuf {
+    settings_with(
+        home,
+        &json!({ builtin::SETTING: {
+            RECALL.id: { "deleted": true },
+            NOTIFY.id: { "deleted": true },
+            STALL.id: { "deleted": true },
+            ROUTING.id: { "deleted": true },
+        } }),
+    )
+}
+
+fn plant_ledgers(home: &Path, seats: &[&crate::jev::JevUse]) {
+    for folder in evidence_folders(home) {
+        for seat in seats {
+            write(&folder.join(seat.ledger), "{\"at\":1}\n");
+        }
+    }
+}
+
+fn a_ledger_stands(home: &Path, seat: &crate::jev::JevUse) -> Vec<bool> {
+    evidence_folders(home)
+        .iter()
+        .map(|folder| folder.join(seat.ledger).exists())
+        .collect()
+}
+
+fn none_stands(home: &Path, seat: &crate::jev::JevUse) -> bool {
+    a_ledger_stands(home, seat).iter().all(|stands| !stands)
+}
+
+fn all_stand(home: &Path, seat: &crate::jev::JevUse) -> bool {
+    a_ledger_stands(home, seat).iter().all(|stands| *stands)
+}
+
+/// A folder where the ledger should be: it cannot be removed as a file, on any
+/// platform, until the test takes it away.
+fn jam_ledger(home: &Path, seat: &crate::jev::JevUse) -> PathBuf {
+    let jammed = home.join("jev").join(seat.ledger);
+    fs::create_dir_all(jammed.join("in-the-way")).unwrap();
+    jammed
+}
+
+#[test]
+fn the_first_start_erases_what_marked_seats_left_and_keeps_the_lifted_seats() {
+    let home = home();
+    let settings = settings_marking_four(home.path());
+    plant_ledgers(
+        home.path(),
+        &[&RECALL, &NOTIFY, &STALL, &ROUTING, &COMMAND_GUARD],
+    );
+
+    let lift = lift_kept_seats(&settings);
+    tidy_at_start(&settings, lift.is_ok());
+
+    assert!(none_stands(home.path(), &RECALL));
+    assert!(none_stands(home.path(), &NOTIFY));
+    assert!(
+        all_stand(home.path(), &STALL),
+        "a lifted seat keeps its records"
+    );
+    assert!(
+        all_stand(home.path(), &ROUTING),
+        "a lifted seat keeps its records"
+    );
+    assert!(
+        all_stand(home.path(), &COMMAND_GUARD),
+        "a seat never deleted"
+    );
+    assert_eq!(smart_of(&settings)[SWEPT_KEY], true);
+}
+
+#[test]
+fn a_failed_lift_erases_nothing() {
+    let home = home();
+    let settings = settings_marking_four(home.path());
+    plant_ledgers(home.path(), &[&RECALL, &STALL]);
+    let other_writer = crate::settings_file_lock::SettingsFileLock::acquire(&settings).unwrap();
+
+    let lift = lift_kept_seats(&settings);
+    assert!(lift.is_err(), "the lock was held");
+    tidy_at_start(&settings, lift.is_ok());
+    drop(other_writer);
+
+    assert!(all_stand(home.path(), &RECALL));
+    assert!(all_stand(home.path(), &STALL));
+    assert!(smart_of(&settings).get(SWEPT_KEY).is_none());
+}
+
+#[test]
+fn a_later_start_with_no_note_reads_no_folder() {
+    let home = home();
+    let settings = settings_marking_four(home.path());
+    tidy_at_start(&settings, true);
+    assert_eq!(smart_of(&settings)[SWEPT_KEY], true);
+
+    plant_ledgers(home.path(), &[&RECALL]);
+    tidy_at_start(&settings, true);
+
+    assert!(
+        all_stand(home.path(), &RECALL),
+        "the later start went looking"
+    );
+}
+
+#[test]
+fn a_later_start_erases_only_what_the_note_names_and_strikes_the_note() {
+    let home = home();
+    let settings = settings_marking_four(home.path());
+    tidy_at_start(&settings, true);
+    let jammed = jam_ledger(home.path(), &RECALL);
+    seat_deleted(&settings, RECALL.id);
+    assert!(
+        home.path().join(PENDING_FILE).exists(),
+        "the failure left no note"
+    );
+
+    fs::remove_dir_all(jammed).unwrap();
+    plant_ledgers(home.path(), &[&RECALL, &NOTIFY]);
+    tidy_at_start(&settings, true);
+
+    assert!(none_stands(home.path(), &RECALL), "the named seat stayed");
+    assert!(
+        all_stand(home.path(), &NOTIFY),
+        "a seat the note does not name went"
+    );
+    assert!(!home.path().join(PENDING_FILE).exists(), "the note stayed");
+}
+
+#[test]
+fn a_note_stays_while_the_record_still_will_not_go() {
+    let home = home();
+    let settings = settings_marking_four(home.path());
+    tidy_at_start(&settings, true);
+    jam_ledger(home.path(), &RECALL);
+    seat_deleted(&settings, RECALL.id);
+
+    tidy_at_start(&settings, true);
+
+    assert!(home.path().join(PENDING_FILE).exists());
+}
+
+#[test]
+fn a_note_naming_a_seat_no_longer_deleted_erases_nothing() {
+    let home = home();
+    let settings = settings_marking_four(home.path());
+    tidy_at_start(&settings, true);
+    let jammed = jam_ledger(home.path(), &COMMAND_GUARD);
+    seat_deleted(&settings, COMMAND_GUARD.id);
+    fs::remove_dir_all(jammed).unwrap();
+    plant_ledgers(home.path(), &[&COMMAND_GUARD]);
+
+    tidy_at_start(&settings, true);
+
+    assert!(all_stand(home.path(), &COMMAND_GUARD));
+    assert!(!home.path().join(PENDING_FILE).exists());
+}
+
+#[test]
+fn a_seat_the_first_start_cannot_clear_is_noted_and_the_first_start_is_done() {
+    let home = home();
+    let settings = settings_marking_four(home.path());
+    plant_ledgers(home.path(), &[&NOTIFY]);
+    jam_ledger(home.path(), &RECALL);
+
+    tidy_at_start(&settings, true);
+
+    assert!(none_stands(home.path(), &NOTIFY));
+    assert!(home.path().join(PENDING_FILE).exists());
+    assert_eq!(smart_of(&settings)[SWEPT_KEY], true);
 }
