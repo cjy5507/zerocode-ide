@@ -100,7 +100,10 @@ const LANE_LOG_BYTES: u64 = 4 * 1024 * 1024;
 const FLOOR_BYTES: u64 = 64;
 /// Finished jobs kept between looks, the newest last.
 const KEPT_JOBS: usize = 3_000;
-/// The most finished jobs one answer carries: the newest.
+/// The most finished jobs one answer carries: the newest. The week's seven days
+/// hold 362 to 837 on a busy machine, and what is left out is said
+/// ([`JobsLeftOut`]): at 1,000 a changed beat of the busy week took 19 ms on the
+/// low-end profile, over the 16 ms the window allows it, and at 400 it took 10 ms.
 const SENT_JOBS: usize = 400;
 const DAY_MS: i64 = 86_400_000;
 /// How far back an answer reaches at most, and when the window names nothing.
@@ -187,6 +190,10 @@ pub(crate) struct Timeline {
     pub(crate) read_ms: i64,
     pub(crate) line: LineFacts,
     pub(crate) jobs: Vec<Job>,
+    /// The finished jobs in the range this answer could not carry, sent only
+    /// when there are any: the window says so instead of drawing a day short.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) jobs_left_out: Option<JobsLeftOut>,
     pub(crate) lanes: Vec<LaneRun>,
     /// The newest lane run that ended, sent only when the range holds none:
     /// the board's first line still names the last release (t-84799).
@@ -205,6 +212,14 @@ pub(crate) struct Timeline {
     pub(crate) task_lines: BTreeMap<String, TaskLine>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) log: Option<LogTail>,
+}
+
+/// The oldest finished jobs of a range past [`SENT_JOBS`]: how many, and the
+/// moment the newest of them is older than — the oldest job the answer carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct JobsLeftOut {
+    pub(crate) count: usize,
+    pub(crate) before_ms: i64,
 }
 
 /// One task's time on the build line: the jobs that named it and ran to an
@@ -561,11 +576,26 @@ impl Book {
             },
             task_lines: task_lines(&jobs),
             jobs,
+            jobs_left_out: self.jobs_left_out(from_ms),
             lanes,
             last_lane,
             landings: self.landings.clone(),
             log,
         }
+    }
+
+    /// What [`Self::jobs`] could not carry of the finished jobs from `from_ms` on.
+    fn jobs_left_out(&self, from_ms: i64) -> Option<JobsLeftOut> {
+        let mut in_range = self
+            .runner
+            .finished
+            .iter()
+            .rev()
+            .filter_map(|job| job.end_ms.or(job.start_ms))
+            .filter(|at| *at >= from_ms);
+        let before_ms = in_range.nth(SENT_JOBS - 1)?;
+        let count = in_range.count();
+        (count > 0).then_some(JobsLeftOut { count, before_ms })
     }
 
     /// The jobs the board draws from `from_ms` on: those that ended, those

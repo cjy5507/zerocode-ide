@@ -6,8 +6,10 @@
  * 지금을 기준으로 지어, 시계를 고정하지 않고도 같은 그림이 선다 — 쉬는 CPU는 실제 시계(1분마다
  * 「지금」 선을 옮기는 박자까지)로 재야 한다.
  *
- * 그림은 둘이다(t-77628): 「하루」는 안내판과 세로 시간표(블록 — 게이트의 일감은 블록 안의 단계 칸이라 50행
- * 픽스처가 블록 40개로 선다), 「한 주」는 가로 막대 차트(행 50개). 둘 다 재고 둘 다 예산 안이어야 한다.
+ * 그림은 둘이다: 「하루」는 안내판과 세로 시간표(t-77628, 블록 — 게이트의 일감은 블록 안의 단계 칸이라 50행
+ * 픽스처가 블록 40개로 선다), 「한 주」는 일곱 칸 달력(t-84802, 칸마다 넘치는 블록은 수로 접힌다). 둘 다 재고 둘 다
+ * 예산 안이어야 한다. 일이 많은 주(레인 50, 블록 500 — `boardScheduleHeavyWeek`)는 달력을 따로 잰다: 요소는 같은
+ * 예산, 다시 그리기는 한 프레임의 예산이다.
  *
  * 네 수:
  *   1. 그림 ms — 그릇을 처음 그리는 한 번(요소를 짓는다)과, 답이 움직인 박자의 다시 그리기(행
@@ -21,7 +23,8 @@
  * 저사양 프로필(tools/low-spec/profile.mjs의 두 단계):
  *   taskpolicy -b node ui/tests/board-schedule-perf.mjs            효율 코어·배경 QoS (low)
  *   WINDOW_CPU_THROTTLE=4 node ui/tests/board-schedule-perf.mjs    페이지 CPU 4배 감속 (cpu4x)
- *   node ui/tests/board-schedule-perf.mjs --polls 40 --idle-secs 30 --json out.json */
+ *   node ui/tests/board-schedule-perf.mjs --polls 40 --idle-secs 30 --json out.json
+ *   node ui/tests/board-schedule-perf.mjs --line-jobs 860   더 긴 빌드 줄: 답의 일감 상한을 정할 때 잰다 */
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -33,7 +36,11 @@ import { loadNote } from "./machine-load.mjs";
 /* 예산: 이 선을 넘으면 무게 시험이 떨어진다. 다시 그리기는 저사양(taskpolicy -b)의 p50으로
  * 판정하고 p95는 기록만 한다 — 코디 10-21 결정(m-68953), 저사양 p50 2.2 ms 실측. 요소 수는
  * 장면 시험(`board-schedule.mjs`)도 이 값으로 잰다. */
-export const BOARD_SCHEDULE_BUDGET = Object.freeze({ movedPaintP50Ms: 2.5, elements: 300, idleDeltaPercent: 0.5 });
+export const BOARD_SCHEDULE_BUDGET = Object.freeze({ movedPaintP50Ms: 2.5, elements: 300, idleDeltaPercent: 0.5,
+  // A busy week (fifty lanes, five hundred blocks) moves within one frame of the 60 Hz screen, on the low-end profile.
+  heavyMovedPaintP50Ms: 16,
+  // A press answered within about six frames reads as immediate; one page of a busy day stands inside it.
+  heavyPressMs: 100 });
 
 const option = (name, fallback) => {
   const at = process.argv.indexOf(`--${name}`);
@@ -118,6 +125,56 @@ export function boardScheduleFiftyRows(now) {
   return { answer, desk };
 }
 
+/* A busy week (t-84802), the same shapes: fifty lanes, ten gates of five jobs, 140 line jobs and three hundred worker
+ * tasks — five hundred blocks — spread from `weekFrom` to `now`, the past five cells and today, one task in five over several
+ * days. `lineJobs` asks for a longer build line, the length the answer's job cap is measured at. */
+export function boardScheduleHeavyWeek(now, weekFrom, lineJobs = 140) {
+  const hour = 3_600_000;
+  const at = (index, count) => weekFrom + Math.floor((index / count) * (now - weekFrom)) + 600_000;
+  const past = (ms) => Math.min(ms, now - 60_000);
+  const lanes = Array.from({ length: 50 }, (_, index) => {
+    const start = past(at(index, 50));
+    const end = start + 2 * hour;
+    return { sha: `bb${String(index).padStart(6, "0")}`, version: `2.0.${index}`, start_ms: start, end_ms: Math.min(end, now - 1), verdict: "green",
+      result: "passed", reason: null, running: false,
+      stages: [{ name: "gate-root", start_ms: start, end_ms: Math.min(end, now - 1), rc: 0, secs: 7_200 }], ahead: [] };
+  });
+  const job = (name, state, start, end, extra = {}) => ({
+    name, who: extra.who ?? "run1", state, class: "plain", lane: 1, cap_secs: 1800, queued_ms: start - 60_000, start_ms: start,
+    end_ms: end, secs: end ? (end - start) / 1000 : null, rc: state === "passed" ? 0 : state === "failed" ? 1 : null, kind: null,
+    gate: null, part: null, what: null, expected: null, ...extra,
+  });
+  const jobs = [];
+  for (let gate = 0; gate < 10; gate += 1) {
+    for (let step = 0; step < 5; step += 1) {
+      const start = past(at(gate, 10) + step * 600_000);
+      jobs.push(job(`0-${gate}${step}-run1-l${80 + gate}z-g${step}`, "passed", start, start + 500_000,
+        { gate: `l${80 + gate}`, part: "z", kind: `g${step}`, who: `run1-l${80 + gate}z` }));
+    }
+  }
+  for (let index = 0; index < lineJobs; index += 1) {
+    const start = past(at(index, lineJobs));
+    jobs.push(job(`3${index}-w${index}-t${index}-red`, index % 7 === 0 ? "failed" : "passed", start, start + 300_000, { who: `w${index}` }));
+  }
+  const stages = ["merged", "merged", "merged", "verified", "reported", "dispatched"];
+  const tasks = Array.from({ length: 300 }, (_, index) => {
+    const stage = stages[index % stages.length];
+    const start = past(at(index, 300));
+    const end = Math.min(start + (index % 5 === 0 ? 40 : 3) * hour, now - 1);
+    return {
+      run: "run-heavy", id: `t-${5000 + index}`, title: `바쁜 주 과업 ${index + 1}`, stage, gate: null, blocked_by: [], closed: null,
+      created_ms: start - 60_000, cost: null, writing: null,
+      times: { started_ms: start, handed_ms: stage === "dispatched" ? null : end, verified_ms: ["merged", "verified"].includes(stage) ? end : null,
+        landed_ms: stage === "merged" ? end : null, ended_ms: null, release: null },
+    };
+  });
+  const answer = { revision: 9000, unchanged: false, read_ms: now,
+    line: { folder: "/work/build-line/build-queue", found: true, paused: false, pause_note: null, disk_floor_gib: 12, disk_low: false,
+      quiet_wanted: false, runner_lanes: [1, 2], lanes_folder: "/work/release/out" }, jobs, lanes };
+  return { answer, desk: { runs: [{ run: "run-heavy", name: "바쁜 주", seat: false }], tasks, stages: [], mail: [], news: [],
+    counts: { mail: 0, news: 0, folded: 0 }, folded_batches: [], land_batches: [] } };
+}
+
 async function measure(page, { polls, idleSecs }) {
   await installBoardWaits(page);
   await page.evaluate(({ answer, desk }) => {
@@ -150,13 +207,15 @@ async function measure(page, { polls, idleSecs }) {
       await window.__UNTIL__(() => !boardScheduleAsking, "the zoom's answer");
       await window.__UNTIL__(() => host.querySelectorAll(".board-schedule-row, .board-schedule-block").length >= least, `${least} rows`, 5000);
     }
+    // The busy week is read as of its last day, when every cell holds its work: `__WEEK_NOW__` stands for the clock.
+    const clock = () => window.__WEEK_NOW__ ?? Date.now();
     // The first paint of a holder: its elements built, then laid out.
     boardSchedulePainted.delete(host);
     boardScheduleBuilt.delete(host);
     host.replaceChildren();
     await settle();
     let began = performance.now();
-    paintBoardScheduleHost(host, view, Date.now());
+    paintBoardScheduleHost(host, view, clock());
     host.getBoundingClientRect();
     const first = performance.now() - began;
     const rows = host.querySelectorAll(".board-schedule-row, .board-schedule-block").length;
@@ -171,13 +230,13 @@ async function measure(page, { polls, idleSecs }) {
       window.__SCHEDULE__ = { ...held, revision: held.revision + 1, jobs };
       boardScheduleAnswer = window.__SCHEDULE__;
       began = performance.now();
-      paintBoardScheduleHost(host, view, Date.now());
+      paintBoardScheduleHost(host, view, clock());
       host.getBoundingClientRect();
       moved.push(performance.now() - began);
     }
     return { first, rows, elements, moved };
   }, { polls, zoom, least });
-  const week = await paintFor("week", 50);
+  const week = await paintFor("week", 1);
   const day = await paintFor("day", 40);
   const paint = await page.evaluate(async () => {
     const view = document.querySelector("#board-view");
@@ -215,7 +274,44 @@ async function measure(page, { polls, idleSecs }) {
   const open = await idle();
   await page.evaluate(() => document.querySelector('#board-view [data-board-tab-button="now"]').click());
   const closed = await idle();
-  return { ...day, week, ...paint, idleOpenPercent: open, idleClosedPercent: closed, idleDeltaPercent: open - closed };
+  // The busy week, last: the same drawing, fifty lanes and five hundred blocks in the answer and the desk, from the
+  // first cell to now, the middle of the sixth cell.
+  const weekFrom = await page.evaluate(() => boardScheduleWeekBoundaries(Date.now())[0]);
+  const weekNow = weekFrom + 5.5 * 86_400_000;
+  await page.evaluate(({ answer, desk, weekNow }) => {
+    window.__WEEK_NOW__ = weekNow;
+    window.__SCHEDULE__ = answer;
+    window.__ANSWER__.board_desk = () => desk;
+    deskLedger = desk;
+    boardScheduleAnswer = answer;
+    document.querySelector('#board-view [data-board-tab-button="schedule"]').click();
+    boardScheduleChoice.zoom = "day";
+  }, { ...boardScheduleHeavyWeek(weekNow, weekFrom, Number(option("line-jobs", 140))), weekNow });
+  const heavy = await paintFor("week", 1);
+  // What one changed answer costs the page before any drawing: its size and reading it.
+  heavy.answer = await page.evaluate(() => {
+    const text = JSON.stringify(window.__SCHEDULE__);
+    const runs = [];
+    for (let run = 0; run < 15; run += 1) {
+      const began = performance.now();
+      JSON.parse(text);
+      runs.push(performance.now() - began);
+    }
+    return { bytes: text.length, parseMs: runs.sort((a, b) => a - b)[7] };
+  });
+  // A press on the busiest day's 「+N」 stands one page of it; the old chart has no such press.
+  heavy.expand = await page.evaluate(async () => {
+    const more = [...document.querySelectorAll("#board-view .board-schedule-week-day .board-schedule-more:not(.board-schedule-week-less)")]
+      .filter((one) => !one.hidden).sort((a, b) => parseInt(b.textContent.slice(1), 10) - parseInt(a.textContent.slice(1), 10))[0];
+    if (!more) return null;
+    const host = document.querySelector("#board-view .task-board-schedule");
+    const began = performance.now();
+    more.click();
+    host.getBoundingClientRect();
+    const ms = performance.now() - began;
+    return { ms, elements: host.querySelectorAll("*").length };
+  });
+  return { ...day, week, heavy, ...paint, idleOpenPercent: open, idleClosedPercent: closed, idleDeltaPercent: open - closed };
 }
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
@@ -238,13 +334,24 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
       firstPaintMs: Number(result.first.toFixed(2)),
       movedPaintP50Ms: Number(median(result.moved).toFixed(2)),
       movedPaintP95Ms: Number(quantile(result.moved, 0.95).toFixed(2)),
-      // The week's chart (rows), beside the day's timetable (blocks) the fields above read.
+      // The week's calendar, beside the day's timetable (blocks) the fields above read, and the busy week.
       week: {
         rows: result.week.rows,
         elements: result.week.elements,
         firstPaintMs: Number(result.week.first.toFixed(2)),
         movedPaintP50Ms: Number(median(result.week.moved).toFixed(2)),
         movedPaintP95Ms: Number(quantile(result.week.moved, 0.95).toFixed(2)),
+      },
+      heavyWeek: {
+        rows: result.heavy.rows,
+        elements: result.heavy.elements,
+        firstPaintMs: Number(result.heavy.first.toFixed(2)),
+        movedPaintP50Ms: Number(median(result.heavy.moved).toFixed(2)),
+        movedPaintP95Ms: Number(quantile(result.heavy.moved, 0.95).toFixed(2)),
+        expandPaintMs: result.heavy.expand ? Number(result.heavy.expand.ms.toFixed(2)) : null,
+        expandedElements: result.heavy.expand?.elements ?? null,
+        answerBytes: result.heavy.answer.bytes,
+        answerParseMs: Number(result.heavy.answer.parseMs.toFixed(2)),
       },
       quietBeatMs: Number(result.quiet.toFixed(2)),
       quietWrites: result.writes,
@@ -257,7 +364,12 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
     if (json) writeFileSync(json, `${JSON.stringify(summary, null, 2)}\n`);
     const fail = [
       summary.rows < 40 && `day blocks ${summary.rows} < 40`,
-      summary.week.rows < 50 && `week rows ${summary.week.rows} < 50`,
+      summary.week.rows < 1 && "the week drew no block",
+      summary.heavyWeek.elements > budget.elements && `busy week elements ${summary.heavyWeek.elements} > ${budget.elements}`,
+      summary.heavyWeek.expandPaintMs > budget.heavyPressMs
+        && `a press on a busy day takes ${summary.heavyWeek.expandPaintMs} ms > ${budget.heavyPressMs} ms`,
+      summary.heavyWeek.movedPaintP50Ms > budget.heavyMovedPaintP50Ms
+        && `a moved beat of the busy week paints in ${summary.heavyWeek.movedPaintP50Ms} ms > ${budget.heavyMovedPaintP50Ms} ms`,
       summary.elements > budget.elements && `day elements ${summary.elements} > ${budget.elements}`,
       summary.week.elements > budget.elements && `week elements ${summary.week.elements} > ${budget.elements}`,
       summary.movedPaintP50Ms > budget.movedPaintP50Ms

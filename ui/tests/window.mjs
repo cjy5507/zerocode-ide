@@ -62,6 +62,7 @@ import { testAgentGraphRail } from "./agent-graph-rail.mjs";
 import { testBoardLive } from "./board-live.mjs";
 import { testBoardOrbit } from "./board-orbit.mjs";
 import { testBoardSchedule } from "./board-schedule.mjs";
+import { testBoardScheduleWeek } from "./board-schedule-week.mjs";
 import { testAutonomyBoard } from "./autonomy-board.mjs";
 import { testConnectedWorkbench } from "./connected-workbench.mjs";
 import { testWorkbenchResponsive } from "./workbench-responsive.mjs";
@@ -360,6 +361,8 @@ suite("board-orbit", ({ browser, origin, ok }) => testBoardOrbit(browser, origin
 // The task board's schedule (t-67482): the build line, its gates, the release lanes and the
 // worker tasks on one time axis, each running or waiting one with its ETA.
 suite("board-schedule", ({ browser, origin, ok }) => testBoardSchedule(browser, origin, ok));
+// The week zoom is a calendar of seven day cells (t-84802), its own suite beside the timetable's.
+suite("board-schedule-week", ({ browser, origin, ok }) => testBoardScheduleWeek(browser, origin, ok));
 suite("autonomy-board", ({ browser, origin, ok }) => testAutonomyBoard(browser, origin, ok));
 suite("connected-workbench", ({ browser, origin, ok }) => testConnectedWorkbench(browser, origin, ok));
 suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsive(browser, origin, ok));
