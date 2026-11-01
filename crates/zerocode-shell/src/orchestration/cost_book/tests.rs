@@ -274,6 +274,28 @@ fn a_jev_ledger_is_read_on_only_while_the_rows_already_read_are_the_ones_it_hold
 /// A finished task's cost is worked out once and remembered: a quiet beat
 /// works out nothing, and a new scan or a new row of the task's is what makes
 /// it work the cost out again. A cost no beat asked for is let go.
+/// A deleted seat's ledger goes while the book is open (t-87506): its rows
+/// leave the tally on the next beat, and the seats beside it stand.
+#[test]
+fn a_ledger_erased_under_the_book_reads_as_nothing() {
+    let ledger = Ledger::new();
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let stall = dir.path().join("stall-cause.jsonl");
+    let summon = dir.path().join("summon-choice.jsonl");
+    std::fs::write(&stall, row("t-1", 1)).expect("rows");
+    std::fs::write(&summon, row("t-1", 10)).expect("rows");
+    let ledgers = vec![stall.clone(), summon];
+    let mut book = CostBook::default();
+    let beat = |book: &mut CostBook| {
+        book.begin_with(&ledger, [None; 3], |_| {}, &ledgers);
+        book.end();
+        book.jev_tally("t-1").requests
+    };
+    assert_eq!(beat(&mut book), 11);
+    std::fs::remove_file(&stall).expect("the seat's ledger goes");
+    assert_eq!(beat(&mut book), 10);
+}
+
 #[test]
 fn a_finished_task_is_worked_out_once_until_what_it_is_made_of_moves() {
     let mut ledger = Ledger::new();

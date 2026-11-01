@@ -332,6 +332,25 @@ mod tests {
         assert_eq!(rows, vec![serde_json::json!({"n": 1}), serde_json::json!({"n": 2})]);
     }
 
+    /// A seat the person deleted keeps no records (t-87506): another pane's zo
+    /// that still holds an answer brings no file back.
+    #[test]
+    fn a_deleted_seat_is_not_written_back() {
+        use zerocode_core::jev::{builtin, NOTIFY, RECALL};
+        let home = tempfile::tempdir().unwrap();
+        fs::write(
+            home.path().join("settings.json"),
+            serde_json::json!({"smart": {(builtin::SETTING): {(RECALL.id): {"deleted": true}}}}).to_string(),
+        )
+        .unwrap();
+        let folder = home.path().join("projects/slug/state/smart-router/providers/judgment-aaaa");
+        let row = serde_json::json!({"n": 1});
+        append_shadow_row(&folder.join(RECALL.ledger), &row, u64::MAX).unwrap();
+        append_shadow_row(&folder.join(NOTIFY.ledger), &row, u64::MAX).unwrap();
+        assert!(!folder.join(RECALL.ledger).exists());
+        assert!(folder.join(NOTIFY.ledger).exists());
+    }
+
     /// The challenger arm's share of the one judge (t-6263, t-6877): the arm
     /// hands [`judge_seat_rows`] its ledger's rows as its readers read them,
     /// and that road reads one rubric's series as every seat's judge does. On
