@@ -125,10 +125,11 @@ export function boardScheduleFiftyRows(now) {
 }
 
 /* A busy week (t-84802), the same shapes: fifty lanes, ten gates of five jobs, 140 line jobs and three hundred worker
- * tasks — five hundred blocks — spread over the seven days from `weekFrom` around `now`, one task in five over several days. */
-export function boardScheduleHeavyWeek(now, weekFrom) {
+ * tasks — five hundred blocks — spread from `weekFrom` to `now`, the past five cells and today, one task in five over several
+ * days. `lineJobs` asks for a longer build line, the length the answer's job cap is measured at. */
+export function boardScheduleHeavyWeek(now, weekFrom, lineJobs = 140) {
   const hour = 3_600_000;
-  const at = (index, count) => weekFrom + Math.floor((index / count) * 7 * 24 * hour) + 600_000;
+  const at = (index, count) => weekFrom + Math.floor((index / count) * (now - weekFrom)) + 600_000;
   const past = (ms) => Math.min(ms, now - 60_000);
   const lanes = Array.from({ length: 50 }, (_, index) => {
     const start = past(at(index, 50));
@@ -150,8 +151,8 @@ export function boardScheduleHeavyWeek(now, weekFrom) {
         { gate: `l${80 + gate}`, part: "z", kind: `g${step}`, who: `run1-l${80 + gate}z` }));
     }
   }
-  for (let index = 0; index < 140; index += 1) {
-    const start = past(at(index, 140));
+  for (let index = 0; index < lineJobs; index += 1) {
+    const start = past(at(index, lineJobs));
     jobs.push(job(`3${index}-w${index}-t${index}-red`, index % 7 === 0 ? "failed" : "passed", start, start + 300_000, { who: `w${index}` }));
   }
   const stages = ["merged", "merged", "merged", "verified", "reported", "dispatched"];
@@ -272,11 +273,10 @@ async function measure(page, { polls, idleSecs }) {
   const open = await idle();
   await page.evaluate(() => document.querySelector('#board-view [data-board-tab-button="now"]').click());
   const closed = await idle();
-  // The busy week, last: the same drawing, fifty lanes and five hundred blocks in the answer and the desk. The week
-  // the fixture fills starts where the view's own week does; a window with no calendar week yet reads five days back.
-  const weekFrom = await page.evaluate(() => (typeof boardScheduleWeekBoundaries === "function"
-    ? boardScheduleWeekBoundaries(Date.now())[0] : Date.now() - 5 * 86_400_000));
-  const weekNow = weekFrom + 6.5 * 86_400_000;
+  // The busy week, last: the same drawing, fifty lanes and five hundred blocks in the answer and the desk, from the
+  // first cell to now, the middle of the sixth cell.
+  const weekFrom = await page.evaluate(() => boardScheduleWeekBoundaries(Date.now())[0]);
+  const weekNow = weekFrom + 5.5 * 86_400_000;
   await page.evaluate(({ answer, desk, weekNow }) => {
     window.__WEEK_NOW__ = weekNow;
     window.__SCHEDULE__ = answer;

@@ -1,8 +1,8 @@
 /* 일정의 「한 주」 (t-84802) — 가로 차트가 아니라 요일별 일곱 칸 달력으로 서는가.
  *
- * 사람이 통과시킨 일정 B의 둘째 판이다. 잰다: 칸 일곱과 요일 머리와 오늘, 칸마다 그날의 레인·게이트·과업 블록,
- * 칸을 넘는 블록의 수와 펴기, 날을 넘는 일의 이어짐, 블록의 누름과 Enter, 실린 과업, 안내판, 범위 선택, 시간대,
- * 다섯 언어의 주 시작과 요일 이름, 좁은 폭의 쌓임, 다크·라이트, 요소 수, 조용한 박자, 키보드, axe.
+ * 사람이 통과시킨 일정 B의 둘째 판이다. 잰다: 5일 전부터 내일까지 칸 일곱과 요일 머리와 오늘, 칸마다 그날의 레인·게이트·과업 블록,
+ * 칸의 상태 순서, 칸을 넘는 블록의 수와 펴기, 날을 넘는 일의 이어짐, 블록의 누름과 Enter, 실린 과업, 안내판, 범위 선택, 시간대,
+ * 자정을 넘는 창, 답이 싣지 못한 일감의 말, 다섯 언어의 요일 이름, 좁은 폭의 쌓임, 다크·라이트, 요소 수, 조용한 박자, 키보드, axe.
  *
  *   node ui/tests/board-schedule-week.mjs */
 import { createRequire } from "node:module";
@@ -16,10 +16,17 @@ import { axeViolations, setQualityTheme } from "./settings-quality.mjs";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
-/* The fixture's moment is Wednesday 2026-10-21 09:50 in Seoul: its calendar week, Sunday first, starts 10-18 00:00. */
+/* The fixture's moment is Wednesday 2026-10-21 09:50 in Seoul. The seven days run from five days before it to the day after:
+ * Friday 10-16 00:00 to the end of Thursday 10-22, so today is the sixth cell and tomorrow the seventh. */
 const SEOUL = "Asia/Seoul";
-const SUNDAY = Date.UTC(2026, 9, 17, 15);
-const MONDAY = SUNDAY + DAY;
+const FIRST = Date.UTC(2026, 9, 15, 15);
+const TODAY = 5;
+const SUNDAY_CELL = 2;
+const MONDAY_CELL = 3;
+const TUESDAY_CELL = 4;
+const TOMORROW = 6;
+/* The Sunday of the fixture's week, for the scenes that move the clock. */
+const SUNDAY = FIRST + SUNDAY_CELL * DAY;
 
 /* The calendar as a person sees it: each day's box, head and blocks, in the DOM's order. */
 export async function readWeek(page) {
@@ -38,6 +45,7 @@ export async function readWeek(page) {
         at: Number(day.dataset.day), end: Number(day.dataset.dayEnd), current: day.getAttribute("aria-current"),
         label: day.getAttribute("aria-label"), tab: day.tabIndex, box: box(day),
         head: head.textContent, chip: head.dataset.now ?? "", count: Number(head.dataset.count),
+        partial: head.dataset.partial ?? "", tip: head.dataset.tip ?? "",
         more: more.hidden ? "" : more.textContent, moreName: more.getAttribute("aria-label") ?? "",
         less: less.hidden ? "" : less.textContent, lessName: less.getAttribute("aria-label") ?? "",
         blocks: [...day.querySelectorAll(".board-schedule-block")].map((block) => {
@@ -65,6 +73,8 @@ export async function readWeek(page) {
         sub: one.querySelector(".board-schedule-group-head").dataset.sub ?? "",
       })),
       legend: host.querySelector(".board-schedule-cal-legend")?.textContent ?? "",
+      name: week?.getAttribute("aria-label") ?? "",
+      note: host.querySelector(".board-schedule-note").hidden ? "" : host.querySelector(".board-schedule-note").textContent,
       log: !host.querySelector(".board-schedule-log").hidden,
       asked: window.__SCHEDULE_ASKED__,
     };
@@ -128,16 +138,16 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     let week = await readWeek(page);
     ok("the week is a calendar of seven day cells, and no horizontal chart stands anywhere",
       week.shown && week.days.length === 7 && week.chart === 0, JSON.stringify({ shown: week.shown, days: week.days.length, chart: week.chart }));
-    ok("in Korean the week starts on the Sunday of the week now is in, each cell one local day after the last",
-      week.days[0]?.at === SUNDAY && week.days.every((day, at) => day.at === SUNDAY + at * DAY && day.end === day.at + DAY),
+    ok("the seven cells run from five days ago to tomorrow, each one local day after the last",
+      week.days[0]?.at === FIRST && week.days.every((day, at) => day.at === FIRST + at * DAY && day.end === day.at + DAY),
       JSON.stringify(week.days.map((day) => [day.at, day.end])));
     ok("the seven heads read the weekdays in order with their dates",
-      JSON.stringify(week.days.map((day) => day.head.slice(0, 1))) === JSON.stringify(["일", "월", "화", "수", "목", "금", "토"])
-        && week.days[3].head.includes("21"), JSON.stringify(week.days.map((day) => day.head)));
-    ok("today alone is marked: aria-current=date, a chip with words, and its name says today",
-      week.days.filter((day) => day.current === "date").length === 1 && week.days[3].current === "date"
-        && week.days[3].chip === "지금 09:50" && week.days[3].label.includes("오늘")
-        && week.days.filter((day, at) => at !== 3).every((day) => day.chip === "" && !day.label.includes("오늘")),
+      JSON.stringify(week.days.map((day) => day.head.slice(0, 1))) === JSON.stringify(["금", "토", "일", "월", "화", "수", "목"])
+        && week.days[TODAY].head.includes("21"), JSON.stringify(week.days.map((day) => day.head)));
+    ok("today alone is marked, on the sixth cell: aria-current=date, a chip with words, and its name says today",
+      week.days.filter((day) => day.current === "date").length === 1 && week.days[TODAY].current === "date"
+        && week.days[TODAY].chip === "지금 09:50" && week.days[TODAY].label.includes("오늘")
+        && week.days.filter((day, at) => at !== TODAY).every((day) => day.chip === "" && !day.label.includes("오늘")),
       JSON.stringify(week.days.map((day) => [day.current, day.chip, day.label])));
     const lefts = week.days.map((day) => Math.round(day.box.left));
     ok("in a wide holder the seven cells stand side by side at one width",
@@ -151,45 +161,68 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     ok("the four groups' heads stand over the calendar and count their blocks",
       week.groups.map((one) => one.id).join(",") === "lanes,gates,line,workers" && week.groups.every((one) => one.sub !== ""),
       JSON.stringify(week.groups));
-    ok("the week's ask starts at the calendar week's first day, with no revision",
-      week.asked.some((one) => one.known === null && one.fromMs === SUNDAY), JSON.stringify(week.asked.slice(-3)));
-    ok("the legend says what a flat end means", week.legend.includes("이어짐"), week.legend);
+    ok("the week's ask starts at the first cell, five days back, with no revision",
+      week.asked.some((one) => one.known === null && one.fromMs === FIRST), JSON.stringify(week.asked.slice(-3)));
+    ok("the legend says what a flat end means, and calls the teeth the range's edge, as the other zooms do",
+      week.legend.includes("이어짐") && week.legend.includes("범위") && !week.legend.includes("이 주"), week.legend);
+    ok("the calendar's name says what it covers and that the arrow keys walk it",
+      week.name.includes("5일 전") && week.name.includes("내일") && week.name.includes("방향키"), week.name);
 
     /* ---- 칸마다 그날의 일 ---------------------------------------------------------------- */
     const inDay = (at, key) => week.days[at].blocks.find((block) => block.key === key || block.key.startsWith(key));
-    const sundayLanes = week.days[0].blocks.filter((block) => block.group === "lanes");
+    const sundayLanes = week.days[SUNDAY_CELL].blocks.filter((block) => block.group === "lanes");
     ok("Sunday holds Sunday's release lanes, v1.1.77's three runs among them",
-      sundayLanes.filter((block) => block.title.startsWith("v1.1.77 ")).length === 3 && inDay(0, "lane:") !== undefined,
+      sundayLanes.filter((block) => block.title.startsWith("v1.1.77 ")).length === 3 && inDay(SUNDAY_CELL, "lane:") !== undefined,
       JSON.stringify(sundayLanes.map((block) => block.title)));
-    ok("Monday holds the task that landed that day", week.days[1].blocks.some((block) => block.key.endsWith("t-62493"))
-      || week.days[1].more !== "", JSON.stringify(week.days[1].blocks.map((block) => block.key)));
+    const mondayAll = await page.evaluate(async (at) => {
+      const cell = document.querySelectorAll("#board-view .board-schedule-week-day")[at];
+      const more = cell.querySelector(".board-schedule-more:not(.board-schedule-week-less)");
+      while (!more.hidden) {
+        more.click();
+        await new Promise((done) => requestAnimationFrame(done));
+      }
+      const keys = [...cell.querySelectorAll(".board-schedule-block")].map((block) => block.dataset.key);
+      const less = cell.querySelector(".board-schedule-week-less");
+      if (!less.hidden) less.click();
+      await new Promise((done) => requestAnimationFrame(done));
+      return keys;
+    }, MONDAY_CELL);
+    ok("Monday holds the task that landed that day", mondayAll.some((key) => key.endsWith("t-62493")), JSON.stringify(mondayAll));
     ok("Wednesday holds today's running lane, and it reads as running",
-      week.days[3].blocks.some((block) => block.group === "lanes" && block.state === "running"),
-      JSON.stringify(week.days[3].blocks.map((block) => [block.key, block.state])));
+      week.days[TODAY].blocks.some((block) => block.group === "lanes" && block.state === "running"),
+      JSON.stringify(week.days[TODAY].blocks.map((block) => [block.key, block.state])));
     ok("a day with no work stands empty and says zero",
-      week.days[4].blocks.length === 0 && week.days[4].count === 0, JSON.stringify(week.days[4]));
+      week.days[TOMORROW].blocks.length === 0 && week.days[TOMORROW].count === 0, JSON.stringify(week.days[TOMORROW]));
 
     /* ---- 날을 넘는 일: 잘리지 않고 이어진다 ---------------------------------------------- */
     const overnight = fixture.answer.lanes.filter((run) => run.version === "1.1.77").at(-1);
     const overnightKey = `lane:${overnight.sha}:${overnight.start_ms}`;
-    const before = inDay(0, overnightKey);
-    const after = inDay(1, overnightKey);
+    const before = inDay(SUNDAY_CELL, overnightKey);
+    const after = inDay(MONDAY_CELL, overnightKey);
     ok("a lane over midnight stands in both days it touches",
       Boolean(before) && Boolean(after), JSON.stringify({ before, after }));
     ok("the first day's piece says since when and flows out, the next day's says until when and flows in",
       before?.flow === "out" && before.sub.startsWith("22:48부터") && after?.flow === "in" && after.sub.startsWith("00:42까지"),
       JSON.stringify({ before: [before?.flow, before?.sub], after: [after?.flow, after?.sub] }));
+    const pastPieces = week.days.slice(0, TODAY).flatMap((day) => day.blocks).filter((block) => !block.cutStart);
+    ok("a past cell's blocks speak in hours and minutes: the cell is already that date, so no year stands in their line (review P3-4)",
+      pastPieces.length > 0 && pastPieces.every((block) => !/20\d\d/.test(block.sub) && !/20\d\d/.test(block.name)),
+      JSON.stringify(pastPieces.filter((block) => /20\d\d/.test(block.sub)).map((block) => block.sub)));
+    const oneDayEnded = pastPieces.find((block) => block.flow === "" && block.state === "done");
+    ok("a finished block of one day says when it began and when it ended",
+      /^\d\d:\d\d · /.test(oneDayEnded?.sub ?? "") && / · \d\d:\d\d$/.test(oneDayEnded?.sub ?? ""), oneDayEnded?.sub);
+    ok("a piece flowing in says its end once", (after?.sub.match(/00:42/g) ?? []).length === 1, after?.sub);
     ok("each piece's name tells a screen reader it continues",
       before?.name.includes("다음 날로 이어짐") && after?.name.includes("앞 날에서 이어짐"),
       JSON.stringify({ before: before?.name, after: after?.name }));
     ok("the two pieces stand on one line across the midnight, and meet at the cell's edge",
-      Math.abs(before.box.top - after.box.top) <= 1 && Math.abs(before.box.height - after.box.height) <= 1
+      Boolean(before && after) && Math.abs(before.box.top - after.box.top) <= 1 && Math.abs(before.box.height - after.box.height) <= 1
         && after.box.left - before.box.right <= 1, JSON.stringify({ before: before?.box, after: after?.box }));
 
     const tasks = [
       ...fixture.desk.tasks,
       task("t-90001", "dispatched", { started_ms: SCHEDULE_NOW - 2 * DAY }),
-      task("t-90002", "dispatched", { started_ms: SUNDAY - 3 * DAY }),
+      task("t-90002", "dispatched", { started_ms: FIRST - 3 * DAY }),
     ];
     const lanes = [...fixture.answer.lanes.map((run) => (run.running ? {
       ...run,
@@ -199,22 +232,56 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     week = await readWeek(page);
     const middle = week.days.map((day) => day.blocks.find((block) => block.key.endsWith("t-90001")));
     ok("a task running since two days ago stands in each day to today, the day between saying only that it continues",
-      middle[1]?.flow === "out" && middle[2]?.flow === "both" && middle[2].sub.startsWith("이어짐") && middle[3]?.flow === "in"
-        && middle[4] === undefined, JSON.stringify(middle.map((one) => [one?.flow, one?.sub])));
-    const runningLane = week.days[3].blocks.find((block) => block.group === "lanes" && block.state === "running");
-    const laneTomorrow = week.days[4].blocks.find((block) => block.key === runningLane?.key);
+      middle[MONDAY_CELL]?.flow === "out" && middle[TUESDAY_CELL]?.flow === "both" && middle[TUESDAY_CELL].sub.startsWith("이어짐")
+        && middle[TODAY]?.flow === "in" && middle[TOMORROW] === undefined, JSON.stringify(middle.map((one) => [one?.flow, one?.sub])));
+    ok("what is still going says it goes on until now, not a clock that moves every minute (review P3-3)",
+      middle[TODAY]?.sub.startsWith("지금까지") && !/^\d\d:\d\d/.test(middle[TODAY]?.sub ?? ""), middle[TODAY]?.sub);
+    const runningLane = week.days[TODAY].blocks.find((block) => block.group === "lanes" && block.state === "running");
+    const laneTomorrow = week.days[TOMORROW].blocks.find((block) => block.key === runningLane?.key);
     ok("a piece before now is filled, today's expected work is filled to now, and tomorrow's is all ahead",
-      middle[2]?.done === 100 && runningLane?.done > 0 && runningLane.done < 100 && laneTomorrow?.done === 0,
-      JSON.stringify({ gone: middle[2]?.done, today: runningLane?.done, tomorrow: laneTomorrow?.done }));
+      middle[TUESDAY_CELL]?.done === 100 && runningLane?.done > 0 && runningLane.done < 100 && laneTomorrow?.done === 0,
+      JSON.stringify({ gone: middle[TUESDAY_CELL]?.done, today: runningLane?.done, tomorrow: laneTomorrow?.done }));
     const cutStart = week.days[0].blocks.find((block) => block.key.endsWith("t-90002"));
-    ok("a task begun before the week is toothed on the week's first day and says since when, with the date",
-      cutStart?.cutStart === true && cutStart.flow === "both" && cutStart.sub.includes("부터") && cutStart.sub.includes("15"),
+    ok("a task begun before the range is toothed on the first cell and says since when, with the date",
+      cutStart?.cutStart === true && cutStart.flow === "both" && cutStart.sub.includes("부터") && cutStart.sub.includes("13"),
       JSON.stringify(cutStart));
-    const cutEnd = week.days[6].blocks.find((block) => block.group === "lanes" && block.state === "running");
-    ok("a lane expected past the week is toothed on the week's last day, and the days between hold it",
-      cutEnd?.cutEnd === true && cutEnd.flow === "both" && week.days[5].blocks.some((block) => block.key === cutEnd.key),
+    const cutEnd = week.days[TOMORROW].blocks.find((block) => block.group === "lanes" && block.state === "running");
+    ok("a lane expected past the range is toothed on the last cell, and today holds it too",
+      cutEnd?.cutEnd === true && cutEnd.flow === "both" && week.days[TODAY].blocks.some((block) => block.key === cutEnd.key),
       JSON.stringify(week.days.map((day) => day.blocks.filter((block) => block.state === "running" && block.group === "lanes").map((block) => block.flow))));
     await moveWeek(page, { tasks: fixture.desk.tasks, lanes: fixture.answer.lanes });
+
+    /* ---- 칸의 차례는 상태의 것이다: 도는 일이 「+N개 더」 뒤로 숨지 않는다 (검수 r1 P2-1) ------------- */
+    const rank = { running: 0, failed: 1, waiting: 2, held: 2, idle: 3, done: 4 };
+    const runningFirst = (blocks) => {
+      const states = blocks.map((block) => block.state);
+      return blocks[0]?.group === "lanes" && states[0] === "running" && blocks[1]?.group === "gates" && states[1] === "running"
+        && states.every((state, at) => at === 0 || rank[state] >= rank[states[at - 1]]);
+    };
+    const oldWaits = Array.from({ length: 6 }, (_, at) => task(`t-92${at}`, "reported", {
+      started_ms: SCHEDULE_NOW - 3 * DAY - at * HOUR, handed_ms: SCHEDULE_NOW - 3 * DAY,
+    }));
+    await moveWeek(page, { tasks: [...fixture.desk.tasks, ...oldWaits] });
+    week = await readWeek(page);
+    ok("six tasks waiting since three days ago do not take today's lines from the running lane and gate",
+      runningFirst(week.days[TODAY].blocks), JSON.stringify(week.days[TODAY].blocks.map((block) => [block.key, block.state])));
+    const overnightEnds = Array.from({ length: 6 }, (_, at) => task(`t-93${at}`, "merged", {
+      started_ms: SCHEDULE_NOW - DAY + at * 60_000, landed_ms: SCHEDULE_NOW - 3_600_000 + at * 60_000,
+    }));
+    await moveWeek(page, { tasks: [...fixture.desk.tasks, ...overnightEnds] });
+    week = await readWeek(page);
+    ok("six tasks that began yesterday and ended today do not stand before the running lane and gate",
+      runningFirst(week.days[TODAY].blocks), JSON.stringify(week.days[TODAY].blocks.map((block) => [block.key, block.state])));
+    const allEnded = [...fixture.desk.tasks, ...Array.from({ length: 12 }, (_, at) => task(`t-94${String(at).padStart(2, "0")}`, "merged", {
+      started_ms: FIRST + TUESDAY_CELL * DAY + (8 + at) * HOUR, landed_ms: FIRST + TUESDAY_CELL * DAY + (8.5 + at) * HOUR,
+    }))];
+    await moveWeek(page, { tasks: allEnded });
+    week = await readWeek(page);
+    const tuesdayEnded = week.days[TUESDAY_CELL].blocks.filter((block) => block.group === "workers").map((block) => block.key);
+    ok("among what ended the newest stands first: the last thing to finish that day is not behind the count",
+      tuesdayEnded.some((key) => key.endsWith("t-9411")) && tuesdayEnded.findIndex((key) => key.endsWith("t-9411")) < tuesdayEnded.findIndex((key) => key.endsWith("t-9410")),
+      JSON.stringify(tuesdayEnded));
+    await moveWeek(page, { tasks: fixture.desk.tasks });
 
     /* ---- 칸을 넘는 블록: 수를 말하고, 누르면 다 선다 ---------------------------------------- */
     const crowd = [
@@ -305,6 +372,34 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     ok("a gate job's block opens that job's log", week.log && week.asked.some((one) => one.log?.job?.includes("l61")),
       JSON.stringify(week.asked));
     await page.evaluate(() => document.querySelector("#board-view .board-schedule-log-close").click());
+    // An unfolded gate pushed behind the count takes its jobs with it: a job never stands with no head (review P3-2).
+    const busyLanes = [...fixture.answer.lanes, ...Array.from({ length: 7 }, (_, at) => {
+      const run = fixture.answer.lanes.find((one) => one.running);
+      return { ...run, sha: `cc00000${at}`, version: `9.9.${at}`, start_ms: run.start_ms + at * 1_000 };
+    })];
+    await moveWeek(page, { lanes: busyLanes });
+    week = await readWeek(page);
+    const gateDay = week.days[gateAt];
+    ok("an unfolded gate behind the count leaves no job of it standing with no head",
+      !gateDay.blocks.some((block) => block.key === gateKey) && gateDay.blocks.every((block) => block.depth === "0") && gateDay.more !== "",
+      JSON.stringify(gateDay.blocks.map((block) => [block.key, block.depth])));
+    await page.evaluate(async (gateAt) => {
+      const cell = document.querySelectorAll("#board-view .board-schedule-week-day")[gateAt];
+      cell.querySelector(".board-schedule-more:not(.board-schedule-week-less)").click();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    }, gateAt);
+    week = await readWeek(page);
+    const standing = week.days[gateAt].blocks.map((block) => block.key);
+    const headAt = standing.indexOf(gateKey);
+    ok("pressed out of the count, the gate stands first and its jobs right behind it",
+      headAt >= 0 && week.days[gateAt].blocks.slice(headAt + 1, headAt + 1 + l61jobs).every((block) => block.depth === "1"),
+      JSON.stringify(week.days[gateAt].blocks.map((block) => [block.key, block.depth])));
+    await page.evaluate(async (gateAt) => {
+      const cell = document.querySelectorAll("#board-view .board-schedule-week-day")[gateAt];
+      cell.querySelector(".board-schedule-week-less").click();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    }, gateAt);
+    await moveWeek(page, { lanes: fixture.answer.lanes });
     await pressGate();
     // The gate carries two tasks by its running job's words, the way the timetable's scene does.
     const lint = fixture.answer.jobs.find((job) => job.gate === "l61" && job.state === "running");
@@ -352,38 +447,38 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     });
     week = await readWeek(keys);
     const stops = week.days.flatMap((day) => [day.tab, ...day.blocks.map((block) => block.tab)]).filter((tab) => tab === 0);
-    ok("the calendar is one Tab stop, on today's cell at first", stops.length === 1 && week.days[3].tab === 0,
+    ok("the calendar is one Tab stop, on today's cell at first", stops.length === 1 && week.days[TODAY].tab === 0,
       JSON.stringify(week.days.map((day) => [day.tab, day.blocks.filter((block) => block.tab === 0).length])));
     await keys.evaluate(() => document.querySelector('#board-view [data-group="workers"] .board-schedule-group-head').focus());
     await keys.keyboard.press("Tab");
     let where = await focused();
     ok("Tab from the group heads lands on today's cell, its name read and its focus shown",
-      where.day === 3 && where.cell && where.name.includes("오늘") && where.outline !== "none", JSON.stringify(where));
+      where.day === TODAY && where.cell && where.name.includes("오늘") && where.outline !== "none", JSON.stringify(where));
     await keys.keyboard.press("ArrowLeft");
     where = await focused();
-    ok("← goes to the day before", where.day === 2 && where.cell, JSON.stringify(where));
+    ok("← goes to the day before", where.day === TODAY - 1 && where.cell, JSON.stringify(where));
     await keys.keyboard.press("ArrowRight");
     await keys.keyboard.press("ArrowDown");
     where = await focused();
-    ok("↓ on a cell goes into its first block", where.day === 3 && where.block && where.key !== "", JSON.stringify(where));
+    ok("↓ on a cell goes into its first block", where.day === TODAY && where.block && where.key !== "", JSON.stringify(where));
     const firstBlock = where.key;
     await keys.keyboard.press("ArrowDown");
     where = await focused();
-    ok("↓ on a block goes to the next one in the day", where.day === 3 && where.block && where.key !== firstBlock, JSON.stringify(where));
+    ok("↓ on a block goes to the next one in the day", where.day === TODAY && where.block && where.key !== firstBlock, JSON.stringify(where));
     await keys.keyboard.press("ArrowUp");
     await keys.keyboard.press("ArrowUp");
     where = await focused();
-    ok("↑ from the first block goes back to the cell", where.day === 3 && where.cell, JSON.stringify(where));
+    ok("↑ from the first block goes back to the cell", where.day === TODAY && where.cell, JSON.stringify(where));
     await keys.keyboard.press("ArrowDown");
     await keys.keyboard.press("ArrowLeft");
     where = await focused();
-    ok("← on a block goes to the block at the same place the day before", where.day === 2 && where.block, JSON.stringify(where));
+    ok("← on a block goes to the block at the same place the day before", where.day === TODAY - 1 && where.block, JSON.stringify(where));
     await keys.keyboard.press("Home");
     where = await focused();
-    ok("Home goes to the week's first cell", where.day === 0 && where.cell, JSON.stringify(where));
+    ok("Home goes to the first cell", where.day === 0 && where.cell, JSON.stringify(where));
     await keys.keyboard.press("End");
     where = await focused();
-    ok("End goes to the week's last cell", where.day === 6 && where.cell, JSON.stringify(where));
+    ok("End goes to the last cell", where.day === 6 && where.cell, JSON.stringify(where));
     week = await readWeek(keys);
     ok("the Tab stop follows the focus: still one, on the cell last visited",
       week.days[6].tab === 0 && week.days.flatMap((day) => [day.tab, ...day.blocks.map((block) => block.tab)]).filter((tab) => tab === 0).length === 1,
@@ -408,10 +503,10 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     await keys.keyboard.press("Enter");
     const backed = await keys.evaluate(() => document.activeElement.className);
     ok("and folding hands it back", backed === "board-schedule-more", backed);
-    await keys.evaluate(() => document.querySelectorAll("#board-view .board-schedule-week-day")[3].focus());
+    await keys.evaluate((at) => document.querySelectorAll("#board-view .board-schedule-week-day")[at].focus(), TODAY);
     await keys.keyboard.press("Enter");
     where = await focused();
-    ok("Enter on a cell goes into its first block rather than pressing anything", where.day === 3 && where.block, JSON.stringify(where));
+    ok("Enter on a cell goes into its first block rather than pressing anything", where.day === TODAY && where.block, JSON.stringify(where));
     await keys.close();
 
     /* ---- 조용한 박자는 아무것도 쓰지 않는다 ------------------------------------------------- */
@@ -439,14 +534,14 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     const nextMinute = await writes(`paintBoardScheduleHosts();`);
     week = await readWeek(page);
     ok("the next minute moves only what the minute moved: today's chip says it, and far fewer writes than blocks",
-      week.days[3].chip === "지금 09:51" && nextMinute < 60, String(nextMinute));
+      week.days[TODAY].chip === "지금 09:51" && nextMinute < 60, String(nextMinute));
     await page.clock.setFixedTime(new Date(SCHEDULE_NOW));
     await page.evaluate(settle);
 
     /* ---- 요소 수 ---------------------------------------------------------------------------- */
     week = await readWeek(page);
     ok(`the fixture's week stays within ${BOARD_SCHEDULE_BUDGET.elements} elements`, week.elements <= BOARD_SCHEDULE_BUDGET.elements, String(week.elements));
-    const heavy = boardScheduleHeavyWeek(SCHEDULE_NOW, SUNDAY);
+    const heavy = boardScheduleHeavyWeek(SCHEDULE_NOW, FIRST);
     await page.evaluate(async ({ answer, desk }) => {
       window.__SCHEDULE__ = answer;
       window.__DESK__ = desk;
@@ -518,10 +613,45 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     await page.evaluate(() => paintBoardScheduleHosts());
     await page.evaluate(settle);
     const stackedGaps = await readWeek(page);
-    const sunday = stackedGaps.days[0].blocks;
+    const sunday = stackedGaps.days[SUNDAY_CELL].blocks;
     ok("stacked, a day's blocks follow one another with no empty slots between",
       sunday.every((block, at) => at === 0 || block.box.top - sunday[at - 1].box.bottom <= 8),
       JSON.stringify(sunday.map((block) => [block.box.top, block.box.bottom])));
+
+    /* ---- 쌓인 폭에서 달력을 열면 오늘이 보인다, 한 번만 (검수 r1 P3-5) --------------------------------- */
+    const scrolled = await page.evaluate(async () => {
+      const host = document.querySelector("#board-view .task-board-schedule");
+      const frame = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const press = async (zoom) => {
+        document.querySelector(`#board-view [data-schedule-zoom="${zoom}"]`).click();
+        await window.__UNTIL__(() => !boardScheduleAsking, "the answer");
+        await frame();
+      };
+      const scroller = () => {
+        for (let node = host; node; node = node.parentElement) {
+          if (node.scrollHeight > node.clientHeight + 1 && /(auto|scroll)/.test(getComputedStyle(node).overflowY)) return node;
+        }
+        return document.scrollingElement;
+      };
+      await press("day");
+      await press("week");
+      const today = document.querySelector('#board-view .board-schedule-week-day[aria-current="date"]');
+      const box = scroller().getBoundingClientRect();
+      const seen = today.getBoundingClientRect();
+      const opened = seen.top < box.bottom && seen.top >= box.top - 1;
+      // The person scrolls away; the next beats and the next minute leave the scroll where they put it.
+      scroller().scrollTop = 0;
+      const put = scroller().scrollTop;
+      paintBoardScheduleHosts();
+      window.__SCHEDULE__ = { ...window.__SCHEDULE__, revision: window.__SCHEDULE__.revision + 1 };
+      refreshBoardSchedule();
+      await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "a new answer");
+      paintBoardScheduleHosts();
+      await frame();
+      return { opened, top: seen.top, bottom: box.bottom, put, after: scroller().scrollTop };
+    });
+    ok("opening the calendar stacked brings today into view, and no beat scrolls after that",
+      scrolled.opened && scrolled.after === scrolled.put, JSON.stringify(scrolled));
 
     /* ---- 다크·라이트, axe -------------------------------------------------------------------- */
     const axeModule = createRequire(import.meta.url)("@axe-core/playwright");
@@ -536,63 +666,155 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
       }
     }
     await setQualityTheme(page, "dark");
+
+    /* ---- 기다리는 블록의 칠은 글 뒤를 지나지 않는다 (검수 r1 P3-7) ------------------------------------- */
+    await page.setViewportSize({ width: 1280, height: 860 });
+    await page.evaluate(settle);
+    const waitingPaint = await page.evaluate(() => {
+      const block = document.querySelector('#board-view .board-schedule-week [data-bar-state="waiting"]');
+      if (!block) return null;
+      const style = getComputedStyle(block);
+      const label = block.querySelector(".board-schedule-label").getBoundingClientRect();
+      const box = block.getBoundingClientRect();
+      const strip = parseFloat(style.backgroundSize.split(",")[0].trim().split(" ")[1]);
+      return { size: style.backgroundSize, position: style.backgroundPosition, strip, height: box.height, labelTop: label.top - box.top };
+    });
+    ok("a waiting block's fill is a strip along its foot, so no words stand on it",
+      waitingPaint && waitingPaint.strip > 0 && waitingPaint.strip < waitingPaint.height / 2 && waitingPaint.position.includes("100%"),
+      JSON.stringify(waitingPaint));
     ok("the calendar raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }
 
-  /* ---- 언어: 주 시작과 요일 이름 ---------------------------------------------------------- */
-  const starts = [["ko", 0, "일"], ["en", 0, "Sun"], ["ja", 0, "日"], ["es", 1, "lun"]];
-  for (const [tongue, startDay, first] of starts) {
+  /* ---- 언어: 범위는 언어를 타지 않고, 요일 이름만 그 언어다 ---------------------------------------- */
+  const tongues = [["ko", "금"], ["en", "Fri"], ["ja", "金"], ["zh", "周五"], ["es", "vie"]];
+  for (const [tongue, first] of tongues) {
     const local = await freshWeek(browser, origin, fixture, { tongue });
     try {
       const seen = await readWeek(local);
-      const asked = startDay === 0 ? SUNDAY : MONDAY;
-      ok(`in ${tongue} the week starts on the day the language's calendar starts it, named in that language`,
-        seen.days[0]?.at === asked && seen.days[0].head.startsWith(first)
-          && seen.asked.some((one) => one.known === null && one.fromMs === asked),
+      ok(`in ${tongue} the seven days are the same days, the first head named in that language`,
+        seen.days[0]?.at === FIRST && seen.days[0].head.startsWith(first)
+          && seen.asked.some((one) => one.known === null && one.fromMs === FIRST),
         JSON.stringify({ at: seen.days[0]?.at, head: seen.days[0]?.head, asked: seen.asked.slice(-2) }));
-      ok(`in ${tongue} today is still the one marked`, seen.days.filter((day) => day.current === "date").length === 1
-        && seen.days.find((day) => day.current === "date").at <= SCHEDULE_NOW
-        && SCHEDULE_NOW < seen.days.find((day) => day.current === "date").end, JSON.stringify(seen.days.map((day) => day.current)));
+      ok(`in ${tongue} today is the sixth cell, and the calendar's name is in that language`,
+        seen.days[TODAY].current === "date" && seen.days.filter((day) => day.current === "date").length === 1
+          && seen.name !== "" && (tongue === "ko" || !seen.name.includes("방향키")),
+        JSON.stringify({ current: seen.days.map((day) => day.current), name: seen.name }));
     } finally {
       await local.close();
     }
   }
-  // zh follows the same source as the others: whatever the browser's own calendar data says for it.
-  const zh = await freshWeek(browser, origin, fixture, { tongue: "zh" });
+  const switcher = await freshWeek(browser, origin, fixture);
   try {
-    const seen = await readWeek(zh);
-    const expected = await zh.evaluate(() => {
-      const locale = new Intl.Locale(document.documentElement.lang);
-      return (locale.getWeekInfo?.() ?? locale.weekInfo).firstDay % 7;
-    });
-    const firstDay = await zh.evaluate((at) => new Date(at).getDay(), seen.days[0].at);
-    ok("in zh the week starts where the browser's calendar data says", firstDay === expected, JSON.stringify({ firstDay, expected }));
-    // A language whose week starts earlier asks again: the answer held starts a day late.
-    const asks = await zh.evaluate(async () => {
+    const asks = await switcher.evaluate(async () => {
+      window.__SCHEDULE_ASKED__.length = 0;
       setLocale("es", { refresh: false, persist: false });
       paintBoardScheduleHosts();
-      await window.__UNTIL__(() => !boardScheduleAsking, "the language's answer");
-      window.__SCHEDULE_ASKED__.length = 0;
-      setLocale("ko", { refresh: false, persist: false });
       refreshBoardSchedule();
-      await window.__UNTIL__(() => !boardScheduleAsking, "the earlier week's answer");
-      return window.__SCHEDULE_ASKED__.slice();
+      await window.__UNTIL__(() => !boardScheduleAsking, "the beat's answer");
+      return { asked: window.__SCHEDULE_ASKED__.slice(), weekStartRule: typeof boardScheduleWeekFirstDay };
     });
-    ok("a beat in a language whose week starts earlier asks afresh, with no revision",
-      asks.some((one) => one.known === null && one.fromMs === SUNDAY), JSON.stringify(asks));
+    ok("changing the language moves no cell, so the beat asks with the revision it holds, and no week-start rule is left",
+      asks.asked.every((one) => one.known !== null && one.fromMs === FIRST) && asks.weekStartRule === "undefined", JSON.stringify(asks));
   } finally {
-    await zh.close();
+    await switcher.close();
+  }
+
+  /* ---- 달력 주의 구멍이 없다: 일요일과 월요일 아침에도 지난 닷새가 보인다 (검수 r1 P1-1) ------------------- */
+  const saturdayLate = Date.UTC(2026, 9, 24, 14, 50); // Saturday 10-24 23:50 in Seoul.
+  const fridayNoon = Date.UTC(2026, 9, 23, 3);
+  const endOfWeek = [
+    task("t-95001", "merged", { started_ms: saturdayLate - HOUR, landed_ms: saturdayLate }),
+    task("t-95002", "merged", { started_ms: fridayNoon - HOUR, landed_ms: fridayNoon }),
+    ...Array.from({ length: 7 }, (_, at) => task(`t-9510${at}`, "merged", {
+      started_ms: Date.UTC(2026, 9, 26 + at, 0) - 5 * DAY, landed_ms: Date.UTC(2026, 9, 26 + at, 1) - 5 * DAY,
+    })),
+  ];
+  const quietFixture = { answer: { ...fixture.answer, jobs: [], lanes: [] }, desk: { ...fixture.desk, tasks: endOfWeek } };
+  for (const [word, now, saturdayCell] of [["Sunday", Date.UTC(2026, 9, 25, 0), 4], ["Monday", Date.UTC(2026, 9, 26, 0), 3]]) {
+    const morning = await freshWeek(browser, origin, quietFixture, { now });
+    try {
+      const seen = await readWeek(morning);
+      const held = (cell, id) => seen.days[cell].blocks.some((block) => block.key.endsWith(id));
+      ok(`on ${word} morning no cell before tomorrow stands empty, and today is the sixth cell`,
+        seen.days.slice(0, TOMORROW).every((day) => day.count > 0) && seen.days[TODAY].current === "date",
+        JSON.stringify(seen.days.map((day) => [day.head, day.count])));
+      ok(`on ${word} morning Saturday night's task and Friday's are in their days`,
+        held(saturdayCell, "t-95001") && held(saturdayCell - 1, "t-95002"),
+        JSON.stringify(seen.days.map((day) => day.blocks.map((block) => block.key))));
+      const ended = await morning.evaluate(() => document.querySelector('#board-view [data-line="ended"]').getAttribute("aria-label"));
+      ok(`on ${word} morning the board's ended line counts them instead of saying the range holds none`,
+        !ended.includes("이 범위에 없음"), ended);
+    } finally {
+      await morning.close();
+    }
+  }
+
+  /* ---- 창을 켜 둔 채 자정을 넘으면 칸이 넘어간다 ---------------------------------------------------- */
+  const midnight = await freshWeek(browser, origin, fixture);
+  try {
+    const was = await readWeek(midnight);
+    const nextDay = Date.UTC(2026, 9, 21, 15, 5); // Thursday 10-22 00:05 in Seoul.
+    await midnight.clock.setFixedTime(new Date(nextDay));
+    await midnight.evaluate(async () => {
+      window.__SCHEDULE_ASKED__.length = 0;
+      refreshBoardSchedule();
+      await window.__UNTIL__(() => !boardScheduleAsking, "the beat after midnight");
+      paintBoardScheduleHosts();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    });
+    const now = await readWeek(midnight);
+    ok("past midnight every cell moves one day: yesterday's today is the fifth cell, and the sixth is the new today",
+      now.days[0].at === FIRST + DAY && now.days[TODAY].at === was.days[TOMORROW].at && now.days[TODAY].current === "date"
+        && now.days[TODAY].chip === "지금 00:05" && now.days.filter((day) => day.current === "date").length === 1,
+      JSON.stringify(now.days.map((day) => [day.head, day.current, day.chip])));
+    const finished = was.days[TUESDAY_CELL].blocks.filter((block) => block.state === "done").map((block) => block.key);
+    ok("what was in a cell has moved with its day", finished.every((key) => now.days[TUESDAY_CELL - 1].blocks.some((block) => block.key === key)),
+      JSON.stringify({ finished, there: now.days[TUESDAY_CELL - 1].blocks.map((block) => block.key) }));
+    ok("the one Tab stop is still today's cell: a person who never moved it is not left on a day gone by (review P3-1)",
+      now.days[TODAY].tab === 0 && now.days.filter((day) => day.tab === 0).length === 1, JSON.stringify(now.days.map((day) => day.tab)));
+    ok("the beat after midnight still holds its revision: the range only moved forward", now.asked.every((one) => one.known !== null),
+      JSON.stringify(now.asked));
+  } finally {
+    await midnight.close();
+  }
+
+  /* ---- 일감이 답에 다 못 실리면 말한다 (검수 r1 P2-2) --------------------------------------------- */
+  const leftAt = FIRST + MONDAY_CELL * DAY + 6 * HOUR;
+  const clipped = await freshWeek(browser, origin, { ...fixture, answer: { ...fixture.answer, jobs_left_out: { count: 198, before_ms: leftAt } } });
+  try {
+    let seen = await readWeek(clipped);
+    ok("an answer that left finished jobs out says how many and from when, over the calendar",
+      seen.note.includes("198") && seen.note.includes("일감"), seen.note);
+    ok("every cell the cut reaches marks its count and says so; the cells after it say nothing",
+      seen.days.slice(0, MONDAY_CELL + 1).every((day) => day.partial === "+" && day.label.includes("일부") && day.tip.includes("일부"))
+        && seen.days.slice(MONDAY_CELL + 1).every((day) => day.partial === "" && !day.label.includes("일부")),
+      JSON.stringify(seen.days.map((day) => [day.partial, day.label, day.tip])));
+    const marked = await clipped.evaluate(() => getComputedStyle(document.querySelector("#board-view .board-schedule-week-head"), "::before").content);
+    ok("the mark stands beside the count on screen", marked.includes("+"), marked);
+    await clipped.evaluate(async (before) => {
+      window.__SCHEDULE__ = { ...window.__SCHEDULE__, revision: window.__SCHEDULE__.revision + 1, jobs_left_out: { count: 3, before_ms: before } };
+      refreshBoardSchedule();
+      await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the moved answer");
+      paintBoardScheduleHosts();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    }, FIRST - HOUR);
+    seen = await readWeek(clipped);
+    ok("a cut older than the first cell touches nothing on screen, so nothing is said",
+      !seen.note.includes("일감") && seen.days.every((day) => day.partial === ""), JSON.stringify({ note: seen.note }));
+  } finally {
+    await clipped.close();
   }
 
   /* ---- 시간대: 칸의 경계는 그 기계의 자정이다 ------------------------------------------------- */
   const utc = await freshWeek(browser, origin, fixture, { timezoneId: "UTC" });
   try {
     const seen = await readWeek(utc);
-    // Wed 00:50 UTC: its Sunday is 10-18 00:00 UTC, nine hours after Seoul's.
+    // Wed 00:50 UTC: five days back is 10-16 00:00 UTC, nine hours after Seoul's.
     ok("in UTC the cells turn at UTC's midnight and the chip reads UTC's clock",
-      seen.days[0].at === Date.UTC(2026, 9, 18) && seen.days.find((day) => day.current === "date")?.chip === "지금 00:50",
+      seen.days[0].at === Date.UTC(2026, 9, 16) && seen.days[TODAY].at === Date.UTC(2026, 9, 21)
+        && seen.days.find((day) => day.current === "date")?.chip === "지금 00:50",
       JSON.stringify({ at: seen.days[0].at, chip: seen.days.map((day) => day.chip) }));
     const overnight = fixture.answer.lanes.filter((run) => run.version === "1.1.77").at(-1);
     const key = `lane:${overnight.sha}:${overnight.start_ms}`;
@@ -603,14 +825,14 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
   } finally {
     await utc.close();
   }
-  // New York leaves summer time on Sunday 2026-11-01: that Sunday has twenty-five hours, and midnight is still midnight.
+  // New York leaves summer time on Sunday 2026-11-01: on Monday that Sunday is the fifth cell, twenty-five hours long, and midnight is still midnight.
   const newYork = await freshWeek(browser, origin, fixture, { timezoneId: "America/New_York", now: Date.UTC(2026, 10, 2, 15) });
   try {
     const seen = await readWeek(newYork);
     const lengths = seen.days.map((day) => (day.end - day.at) / HOUR);
     const midnights = await newYork.evaluate((days) => days.map((day) => new Date(day.at).getHours() + new Date(day.at).getMinutes()), seen.days);
     ok("over a clock change every cell still runs midnight to midnight: that Sunday has twenty-five hours",
-      lengths[0] === 25 && lengths.slice(1).every((one) => one === 24) && midnights.every((one) => one === 0),
+      lengths[4] === 25 && lengths.every((one, at) => at === 4 || one === 24) && midnights.every((one) => one === 0),
       JSON.stringify({ lengths, midnights }));
   } finally {
     await newYork.close();

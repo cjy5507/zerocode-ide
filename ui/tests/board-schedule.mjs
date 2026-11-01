@@ -101,11 +101,11 @@ export async function readBoardSchedule(page) {
         said: row.dataset.said ?? "",
         // The passed draft's cells (t-71840): the line under the name, the end cell's two lines, the bar's two names.
         sub: label.dataset.sub ?? "",
-        eta: row.dataset.eta ?? "",
-        etaSub: row.dataset.etaSub ?? "",
+        eta: row.__row?.eta ?? "",
+        etaSub: row.__row?.etaSub ?? "",
         why: row.dataset.why ?? "",
-        nowLabel: row.dataset.nowLabel ?? "",
-        aheadLabel: row.dataset.aheadLabel ?? "",
+        nowLabel: row.__row?.nowLabel ?? "",
+        aheadLabel: row.__row?.aheadLabel ?? "",
         from: Number(row.style.getPropertyValue("--from")), to: Number(row.style.getPropertyValue("--to")),
         done: Number(row.style.getPropertyValue("--done")),
         // The vertical timetable's block (t-77628): its sub-column, its cut top, the gate's time it inherited.
@@ -559,10 +559,10 @@ export async function testBoardSchedule(browser, origin, ok) {
 
     /* ---- 한 주로 넓히면: 달력의 자세한 몫은 board-schedule-week.mjs가 잰다 ------------------ */
     await openBoardSchedule(page);
-    // The fixture's Wednesday's week, Sunday first in Korean, by the page's own clock and zone.
+    // Five days before the fixture's Wednesday, by the page's own clock and zone.
     const weekFrom = await page.evaluate((now) => {
       const day = new Date(now);
-      return new Date(day.getFullYear(), day.getMonth(), day.getDate() - day.getDay()).getTime();
+      return new Date(day.getFullYear(), day.getMonth(), day.getDate() - 5).getTime();
     }, SCHEDULE_NOW);
     await page.evaluate(async (weekFrom) => {
       window.__WEEK_FROM__ = weekFrom;
@@ -574,7 +574,7 @@ export async function testBoardSchedule(browser, origin, ok) {
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     }, weekFrom);
     drawn = await readBoardSchedule(page);
-    ok("the week view asks from the calendar week's first day with no revision",
+    ok("the week view asks from its first cell, five days back, with no revision",
       drawn.asked.some((one) => one.known === null && one.fromMs === weekFrom), JSON.stringify(drawn.asked.slice(-3)));
     ok("the week view holds every lane run since — v1.1.77's three runs are three rows",
       drawn.groups.lanes.rows.length === answer.lanes.length
