@@ -224,11 +224,29 @@ pub struct GrantPlan {
     pub invocation: Invocation,
     /// The directory `hooks/list` is asked about.
     pub hooks_list_cwd: PathBuf,
-    /// The normalised trust keys we expect to see, and only those.
+    /// The normalised trust keys that must be listed.
     pub expected_keys: BTreeSet<String>,
+    /// The normalised trust keys of events this Codex may not know
+    /// ([`crate::codex_trust::event_may_be_unknown`]). Granted like the others when
+    /// it lists them; a Codex that leaves them out is still a healthy install.
+    pub optional_keys: BTreeSet<String>,
     /// The exact command string our hooks carry. A listing whose command differs
     /// is somebody else's hook and is never touched.
     pub managed_command: String,
+}
+
+/// The keys a grant asks about, as (must be listed, may be missing).
+pub fn keys_of(entries: &[crate::codex_trust::TrustEntry]) -> (BTreeSet<String>, BTreeSet<String>) {
+    let (optional, expected): (Vec<_>, Vec<_>) = entries
+        .iter()
+        .partition(|entry| crate::codex_trust::event_may_be_unknown(&entry.event_label));
+    let keys = |group: Vec<&crate::codex_trust::TrustEntry>| {
+        group
+            .into_iter()
+            .map(|entry| normalize_listing_key(&crate::codex_trust::trust_key(entry)))
+            .collect()
+    };
+    (keys(expected), keys(optional))
 }
 
 /// Does a listing report one of our hooks?
@@ -237,10 +255,16 @@ pub struct GrantPlan {
 /// either alone would let us grant trust to a hook we did not write, which is
 /// consent we have no business giving.
 fn is_ours(listing: &HookListing, plan: &GrantPlan) -> bool {
+    let key = normalize_listing_key(&listing.key);
     listing.command.as_deref() == Some(plan.managed_command.as_str())
-        && plan
-            .expected_keys
-            .contains(&normalize_listing_key(&listing.key))
+        && (plan.expected_keys.contains(&key) || plan.optional_keys.contains(&key))
+}
+
+/// Whether what Codex listed is what we wrote: every key that must be there, and
+/// no key twice. Everything in `ours` already passed [`is_ours`], so the only keys
+/// that may be missing are the optional ones.
+fn listing_matches(ours: &[HookListing], covered: &BTreeSet<String>, plan: &GrantPlan) -> bool {
+    ours.len() == covered.len() && plan.expected_keys.is_subset(covered)
 }
 
 /// Fold a reported key the way trust lookups do
@@ -657,7 +681,7 @@ fn grant_in(session: &mut Session, plan: &GrantPlan) -> Result<Grant, GrantError
         .iter()
         .map(|listing| normalize_listing_key(&listing.key))
         .collect();
-    if ours.len() != plan.expected_keys.len() || !plan.expected_keys.is_subset(&covered) {
+    if !listing_matches(&ours, &covered, plan) {
         return Ok(Grant::VerifyFailed {
             reason: format!(
                 "hooks/list reported {} entries covering {} of {} expected",
@@ -718,7 +742,7 @@ fn grant_in(session: &mut Session, plan: &GrantPlan) -> Result<Grant, GrantError
             class: VerifyClass::PostGrantUntrusted,
         });
     }
-    if verified.len() != plan.expected_keys.len() || !plan.expected_keys.is_subset(&verified_keys) {
+    if !listing_matches(&verified, &verified_keys, plan) {
         return Ok(Grant::VerifyFailed {
             reason: format!(
                 "post-grant verify reported {} entries covering {} of {} expected",
@@ -827,6 +851,9 @@ mod tests {
             invocation: Invocation::native("codex", std::path::Path::new("/h"), true),
             hooks_list_cwd: PathBuf::from("/h"),
             expected_keys: ["/h/hooks.json:stop:0:0".to_string()].into_iter().collect(),
+            optional_keys: ["/h/hooks.json:interrupt:0:0".to_string()]
+                .into_iter()
+                .collect(),
             managed_command: "ours".to_string(),
         };
         let listing = |key: &str, command: Option<&str>| HookListing {
@@ -850,6 +877,15 @@ mod tests {
             &plan
         ));
         assert!(!is_ours(&listing("/h/hooks.json:stop:0:0", None), &plan));
+        // An event this Codex may not know is ours like any other, command included.
+        assert!(is_ours(
+            &listing("/h/hooks.json:interrupt:0:0", Some("ours")),
+            &plan
+        ));
+        assert!(!is_ours(
+            &listing("/h/hooks.json:interrupt:0:0", Some("theirs")),
+            &plan
+        ));
         // And an unnormalised spelling of our key still matches, which is the
         // point of folding it.
         assert!(is_ours(
@@ -870,6 +906,7 @@ mod tests {
             ),
             hooks_list_cwd: PathBuf::from("/h"),
             expected_keys: BTreeSet::new(),
+            optional_keys: BTreeSet::new(),
             managed_command: "ours".to_string(),
         };
         match grant(&plan) {

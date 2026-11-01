@@ -112,6 +112,7 @@ fn plan(script: &Path, log: &Path, keys: &[&str]) -> GrantPlan {
         invocation,
         hooks_list_cwd: PathBuf::from("/h"),
         expected_keys: keys.iter().map(|key| key.to_string()).collect(),
+        optional_keys: BTreeSet::new(),
         managed_command: MANAGED.to_string(),
     }
 }
@@ -288,6 +289,123 @@ fn a_hook_codex_cannot_see_is_a_list_mismatch() {
     };
     assert_eq!(class, VerifyClass::ListMismatch);
     assert!(reason.contains("0 of 1"), "{reason}");
+}
+
+/// An older Codex does not know the newer events: it ignores them in the file and
+/// leaves them out of the list (measured on 0.157.1). That is a healthy install —
+/// answered as a mismatch, it would take every hook out of the user's home.
+#[cfg_attr(
+    not(unix),
+    ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)"
+)]
+#[test]
+fn a_codex_that_does_not_know_a_newer_event_is_still_granted() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let log = dir.path().join("asked.jsonl");
+    let stop = format!(
+        "[{}]",
+        listing("/h/hooks.json:stop:0:0", MANAGED, "sha256:a", "trusted")
+    );
+    let script = server(dir.path(), &stop, &stop, "");
+    let mut held = plan(&script, &log, &["/h/hooks.json:stop:0:0"]);
+    held.optional_keys = ["/h/hooks.json:interrupt:0:0".to_string()]
+        .into_iter()
+        .collect();
+    let outcome = zerocode_hookd::codex_grant::grant(&held).expect("the fake server answers");
+    assert!(
+        matches!(outcome, Grant::Granted { .. }),
+        "a Codex without the newer event was refused: {outcome:?}"
+    );
+}
+
+/// A Codex that DOES list a newer event gets it trusted like any other, and one
+/// that leaves a required event out is still refused, optional keys or not.
+#[cfg_attr(
+    not(unix),
+    ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)"
+)]
+#[test]
+fn a_newer_event_codex_lists_is_trusted_and_a_required_one_stays_required() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let log = dir.path().join("asked.jsonl");
+    let both = |status: &str| {
+        format!(
+            "[{},{}]",
+            listing("/h/hooks.json:stop:0:0", MANAGED, "sha256:a", "trusted"),
+            listing("/h/hooks.json:interrupt:0:0", MANAGED, "sha256:b", status)
+        )
+    };
+    let script = server(dir.path(), &both("untrusted"), &both("trusted"), "");
+    let mut held = plan(&script, &log, &["/h/hooks.json:stop:0:0"]);
+    held.optional_keys = ["/h/hooks.json:interrupt:0:0".to_string()]
+        .into_iter()
+        .collect();
+    let outcome = zerocode_hookd::codex_grant::grant(&held).expect("the fake server answers");
+    assert!(
+        matches!(
+            outcome,
+            Grant::Granted {
+                wrote_trust: true,
+                ..
+            }
+        ),
+        "the newer event was not trusted: {outcome:?}"
+    );
+    let written = requests(&log)
+        .into_iter()
+        .find(|request| request["method"] == "config/batchWrite")
+        .expect("trust was written");
+    let value = &written["params"]["edits"][0]["value"];
+    assert_eq!(
+        value["/h/hooks.json:interrupt:0:0"]["trusted_hash"],
+        "sha256:b"
+    );
+    assert!(value.get("/h/hooks.json:stop:0:0").is_none());
+
+    // Listed untrusted and left that way stalls an agent, optional or not.
+    let stuck = server(dir.path(), &both("untrusted"), &both("untrusted"), "");
+    let mut held = plan(&stuck, &log, &["/h/hooks.json:stop:0:0"]);
+    held.optional_keys = ["/h/hooks.json:interrupt:0:0".to_string()]
+        .into_iter()
+        .collect();
+    let outcome = zerocode_hookd::codex_grant::grant(&held).expect("the fake server answers");
+    assert!(
+        matches!(
+            outcome,
+            Grant::VerifyFailed {
+                class: VerifyClass::PostGrantUntrusted,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+
+    // A required key the list lost is the mismatch it always was.
+    let only_optional = format!(
+        "[{}]",
+        listing(
+            "/h/hooks.json:interrupt:0:0",
+            MANAGED,
+            "sha256:b",
+            "trusted"
+        )
+    );
+    let lost = server(dir.path(), &only_optional, &only_optional, "");
+    let mut held = plan(&lost, &log, &["/h/hooks.json:stop:0:0"]);
+    held.optional_keys = ["/h/hooks.json:interrupt:0:0".to_string()]
+        .into_iter()
+        .collect();
+    let outcome = zerocode_hookd::codex_grant::grant(&held).expect("the fake server answers");
+    assert!(
+        matches!(
+            outcome,
+            Grant::VerifyFailed {
+                class: VerifyClass::ListMismatch,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
 }
 
 /// Trust written and still not trusted. This is the state that stalls an agent,

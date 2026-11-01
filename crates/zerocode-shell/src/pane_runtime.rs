@@ -829,8 +829,20 @@ pub(super) async fn hook_loop(
             codex_queue::bind_session(report.term, &session);
             orchestration::pane_session_reported(report.term, &session, now_epoch_ms());
         }
-        // And what it is doing, stamped, and out to the window.
-        note_pane_state(&app, Some(&envelope.worktree_id), &report);
+        // And what it is doing, stamped, and out to the window. A turn whose model
+        // request failed tells the ledger so, and why, the road zo's own channel
+        // takes (t-69010) — a worker that hit a wall did not merely go quiet.
+        let failure = (report.state == zerocode_core::hook::HookState::Done)
+            .then(|| {
+                zerocode_core::hook::model_request_failure_parsed(
+                    &report.event,
+                    &zerocode_core::payload::HookPayload::of(&envelope.payload),
+                )
+            })
+            .flatten();
+        orchestration::with_turn_failure(report.term, failure, || {
+            note_pane_state(&app, Some(&envelope.worktree_id), &report);
+        });
         ring_for_pane(&app, &envelope.worktree_id, &report);
         note_automation_completion(&app, &report);
     }

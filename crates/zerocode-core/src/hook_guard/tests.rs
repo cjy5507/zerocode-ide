@@ -51,10 +51,7 @@ fn every_agent_has_a_row_and_a_row_that_cannot_see_says_why() {
         );
     }
     assert!(sight(AgentKind::Claude).stopped_call.yes());
-    assert_eq!(
-        sight(AgentKind::Codex).stopped_call,
-        Sees::No(Unseen::NoStopFlag)
-    );
+    assert!(sight(AgentKind::Codex).stopped_call.yes());
     // Every reason has its own word.
     let words: std::collections::BTreeSet<&str> =
         Unseen::ALL.iter().map(|why| why.word()).collect();
@@ -255,11 +252,73 @@ fn a_shells_answer_is_a_text_only_inside_the_windows_fence() {
     );
 }
 
+/// Codex's two ways out of a turn that are not `Stop`, as codex-cli 0.166 wrote
+/// them. Both name the session's transcript and neither brought an answer, so
+/// neither may hand the seats that judge a turn's last words an earlier turn's.
+#[test]
+fn a_codex_turn_ended_without_an_answer_says_how_and_offers_no_words() {
+    let asking = Asking {
+        claim: true,
+        project_rules: true,
+        ..Asking::default()
+    };
+    let stopped = serde_json::json!({
+        "session_id": "s", "turn_id": "t", "transcript_path": "/x.jsonl", "cwd": "/w",
+        "hook_event_name": "Interrupt", "model": "m", "permission_mode": "default",
+    })
+    .to_string();
+    assert_eq!(
+        moments_parsed(
+            AgentKind::Codex,
+            "Interrupt",
+            &HookPayload::of(&stopped),
+            asking
+        ),
+        [Moment::TurnEnded {
+            stopped: true,
+            said: None
+        }]
+    );
+    let failed = serde_json::json!({
+        "session_id": "s", "turn_id": "t", "transcript_path": "/x.jsonl", "cwd": "/w",
+        "hook_event_name": "PostModelRequest", "model": "m", "status": "failed",
+        "error": "You've hit your usage limit.", "token_usage": null,
+    })
+    .to_string();
+    assert_eq!(
+        moments_parsed(
+            AgentKind::Codex,
+            "PostModelRequest",
+            &HookPayload::of(&failed),
+            asking
+        ),
+        [Moment::TurnEnded {
+            stopped: false,
+            said: None
+        }]
+    );
+    let completed = serde_json::json!({
+        "transcript_path": "/x.jsonl", "hook_event_name": "PostModelRequest",
+        "status": "completed", "error": null,
+    })
+    .to_string();
+    assert!(
+        moments_parsed(
+            AgentKind::Codex,
+            "PostModelRequest",
+            &HookPayload::of(&completed),
+            asking
+        )
+        .is_empty()
+    );
+}
+
 /// Codex's hooks, as its hook runtime writes them: the shell tool named
 /// `Bash` with its command in `tool_input`, a result as the model-facing
-/// text, an MCP answer as its content list — and no word for a stopped call.
+/// text, an MCP answer as its content list — and no word on a call itself that
+/// it was stopped: that is the turn's `Interrupt`, above.
 #[test]
-fn a_codex_turn_reads_the_same_moments_with_no_stop_flag() {
+fn a_codex_turn_reads_the_same_moments_as_a_claude_one() {
     let about = serde_json::json!({
         "session_id": "session-2", "turn_id": "turn-1", "cwd": "/w/project",
         "hook_event_name": "PreToolUse", "model": "a-model", "permission_mode": "default",
@@ -431,8 +490,9 @@ fn a_seat_reads_what_each_agents_row_shows_it() {
             misses: Vec::new(),
         }
     );
+    assert!(of(&COMMAND_GUARD, AgentKind::Codex).misses.is_empty());
     assert_eq!(
-        of(&COMMAND_GUARD, AgentKind::Codex).misses,
+        of(&COMMAND_GUARD, AgentKind::Grok).misses,
         [Unseen::NoStopFlag]
     );
     assert_eq!(

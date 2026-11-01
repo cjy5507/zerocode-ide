@@ -670,8 +670,12 @@ pub fn helper_attributed_parsed(payload: &HookPayload<'_>) -> bool {
 /// | kimi (`:3316`) | `Stop` + `is_interrupt == true` | no |
 /// | amp (`:3495`) | `agent.end` + `status == "cancelled"` | no |
 /// | cursor (`:3979`) | `stop` + a `status` string that is not `"completed"` | no |
+/// | codex | `Interrupt`, whatever its payload | no |
 ///
-/// Codex says nothing at the lead level, so it never declares here.
+/// Codex's `Stop` says nothing about who stopped, so a Codex `Stop` never
+/// declares here; its `Interrupt` event is the declaration itself — Codex runs
+/// it for a turn the person aborted, and its payload carries no flag to read
+/// (measured on codex-cli 0.166), so the event name is the only witness there is.
 ///
 /// Claude is the only one that reads the child attribution and the only one
 /// that accepts `StopFailure`, and it is the only one whose flag survives the
@@ -694,6 +698,9 @@ pub fn interrupt_declared(
     // sends it, because the readable spelling silently never matches and a test
     // is the only thing that would ever say so.
     let event = normalized_event(event_name);
+    if agent == AgentKind::Codex {
+        return event == "interrupt";
+    }
     let boundary = match agent {
         AgentKind::Claude => event == "stop" || event == "stopfailure",
         AgentKind::Devin | AgentKind::Kimi => event == "stop",
@@ -842,10 +849,70 @@ pub fn hook_state_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option<
         // the lead's cached state (agent-hook-listener.ts:2870-2874); until
         // roster rows carry states of their own, saying nothing is the
         // truthful reduction.
+        //
+        // `Interrupt` is Codex's own word for a turn the person aborted: the turn
+        // is detached before it, so no `Stop` follows, and without this the pane
+        // keeps saying "working" after Esc.
         "stop" | "stopfailure" | "afteragentresponse" | "postinvocation" | "erroroccurred"
-        | "agentend" | "sessionidle" => Some(HookState::Done),
+        | "agentend" | "sessionidle" | "interrupt" => Some(HookState::Done),
+        // A model request reported every time says nothing about the turn —
+        // only the failed one does: see [`model_request_failure_parsed`].
+        "postmodelrequest" if model_request_failed(payload) => Some(HookState::Done),
         _ => None,
     }
+}
+
+/// What a failed model request says when its `error` is empty — the field is
+/// optional, and the turn is over whether or not it explained why.
+const MODEL_REQUEST_FAILED: &str = "model request failed";
+
+/// Whether a `PostModelRequest` payload reports a request that failed.
+fn model_request_failed(payload: &HookPayload<'_>) -> bool {
+    payload
+        .tree()
+        .and_then(|tree| tree.get("status"))
+        .and_then(serde_json::Value::as_str)
+        == Some("failed")
+}
+
+/// The error a turn ended on, when this event is a model request that failed.
+///
+/// Codex reports each model request once, after its own retries, as `completed`,
+/// `cancelled` (an `Interrupt` follows) or `failed`. A failed one is the end of
+/// the turn and **nothing comes after it** — measured on codex-cli 0.166 against
+/// a local endpoint answering 429 (`usageLimitExceeded`), 500 and a stream's
+/// `context_length_exceeded`: `turn/completed` said `failed` every time, with
+/// neither `Stop` nor `Interrupt`. A first attempt answering 500 that a retry
+/// recovered reported only the final `completed`, so `failed` is never a
+/// mid-retry word. This is the only word a pane gets that such a turn is over.
+#[must_use]
+pub fn model_request_failure_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option<String> {
+    if normalized_event(event_name) != "postmodelrequest" || !model_request_failed(payload) {
+        return None;
+    }
+    let error = payload
+        .tree()
+        .and_then(|tree| tree.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|error| !error.is_empty())
+        .unwrap_or(MODEL_REQUEST_FAILED);
+    // By name and by shape: these words reach a card and a coordinator's mail.
+    Some(crate::credential::mask_values(error))
+}
+
+/// Whether a turn-ending event can hold the agent's answer.
+///
+/// Both of these name the session's transcript and neither ended on an answer:
+/// a turn the person aborted and one whose model request failed have nothing to
+/// report, so reading that transcript's tail would hand the card — and the seats
+/// that judge a turn's last words — the answer of an **earlier** turn.
+#[must_use]
+pub fn turn_end_carries_answer(event_name: &str) -> bool {
+    !matches!(
+        normalized_event(event_name).as_str(),
+        "interrupt" | "postmodelrequest"
+    )
 }
 
 /// Words in a notification's message that mean an agent is waiting on a
@@ -1868,7 +1935,9 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
     }
     // Every way a turn ends, borrowed from the one table that already knows
     // them all rather than copied into a second list that would drift from it.
-    if hook_state(event_name, "{}") == Some(HookState::Done) {
+    // The real payload, because one of those ways is in it: a failed model
+    // request is a `PostModelRequest` whose status says so.
+    if hook_state_parsed(event_name, payload) == Some(HookState::Done) {
         return Some(Activity {
             verb: Tool::Other(STOP_VERB.to_string()),
             target: None,
@@ -3054,9 +3123,123 @@ mod tests {
             false
         ));
 
-        // codex는 리드 층위에서 아무것도 보내지 않는다.
+        // codex의 `Stop`은 누가 멈췄는지 말하지 않는다 — 어떤 페이로드가 와도.
         assert!(!interrupt_declared(AgentKind::Codex, "Stop", SAYS, false));
         assert!(!interrupt_declared(AgentKind::Codex, "Stop", SAYS, true));
+        // 사람이 끊은 턴에 대해서만 codex가 직접 실행하는 `Interrupt` 이벤트는
+        // 그 자체가 선언이다 — 페이로드에는 읽을 플래그가 없다.
+        for spelling in ["Interrupt", "interrupt"] {
+            assert!(
+                interrupt_declared(AgentKind::Codex, spelling, "{}", false),
+                "{spelling}"
+            );
+        }
+        // 다른 벤더의 이벤트가 같은 이름을 쓴다고 선언이 되지는 않는다.
+        assert!(!interrupt_declared(
+            AgentKind::Claude,
+            "Interrupt",
+            SAYS,
+            false
+        ));
+        assert!(!interrupt_declared(
+            AgentKind::Cursor,
+            "interrupt",
+            "{}",
+            false
+        ));
+    }
+
+    /// Codex runs `Interrupt` after it has detached a turn the person aborted,
+    /// and no `Stop` follows — so the event itself must end the turn, or the
+    /// pane stays "working" forever after Esc.
+    #[test]
+    fn a_codex_interrupt_ends_the_turn_and_says_so() {
+        const PAYLOAD: &str = r#"{"hook_event_name":"Interrupt","session_id":"s","turn_id":"t","cwd":"/work","model":"m","permission_mode":"default"}"#;
+        for spelling in ["Interrupt", "interrupt"] {
+            assert_eq!(
+                hook_state(spelling, PAYLOAD),
+                Some(HookState::Done),
+                "{spelling}"
+            );
+            let stopped = activity_of(spelling, PAYLOAD).expect("an interrupt said nothing");
+            assert_eq!(stopped.phase, Phase::Stopped, "{spelling}");
+        }
+        assert!(interrupt_declared(
+            AgentKind::Codex,
+            "Interrupt",
+            PAYLOAD,
+            false
+        ));
+        assert!(!turn_end_carries_answer("Interrupt"));
+    }
+
+    /// `PostModelRequest`, in the words codex-cli 0.166 wrote them: only the
+    /// failed request ends the turn, and it ends it in the error's own words.
+    #[test]
+    fn a_failed_model_request_ends_the_turn_and_no_other_says_anything() {
+        let report = |status: &str, error: &str| {
+            format!(
+                r#"{{"session_id":"s","turn_id":"t","cwd":"/work","transcript_path":"/x.jsonl","model":"m","hook_event_name":"PostModelRequest","status":"{status}","error":{error},"token_usage":null}}"#
+            )
+        };
+        let failed = report("failed", r#""You've hit your usage limit.""#);
+        for spelling in ["PostModelRequest", "post_model_request"] {
+            assert_eq!(hook_state(spelling, &failed), Some(HookState::Done));
+            let stopped = activity_of(spelling, &failed).expect("a failed request said nothing");
+            assert_eq!(stopped.phase, Phase::Stopped);
+            assert_eq!(
+                model_request_failure_parsed(spelling, &HookPayload::of(&failed)).as_deref(),
+                Some("You've hit your usage limit.")
+            );
+            assert!(!turn_end_carries_answer(spelling));
+        }
+        // Nobody stopped this one: a failure rings, an interrupt does not.
+        assert!(!interrupt_declared(
+            AgentKind::Codex,
+            "PostModelRequest",
+            &failed,
+            false
+        ));
+        // The turn is over even when the request could not say why.
+        for silent in ["null", r#""""#, r#""   ""#] {
+            assert_eq!(
+                model_request_failure_parsed(
+                    "PostModelRequest",
+                    &HookPayload::of(&report("failed", silent))
+                )
+                .as_deref(),
+                Some(MODEL_REQUEST_FAILED),
+                "{silent}"
+            );
+        }
+        // A request that came back, or that a person cancelled — an `Interrupt`
+        // follows that one — is not an end of anything.
+        for other in ["completed", "cancelled", ""] {
+            let quiet = report(other, "null");
+            assert_eq!(hook_state("PostModelRequest", &quiet), None, "{other}");
+            assert!(activity_of("PostModelRequest", &quiet).is_none(), "{other}");
+            assert_eq!(
+                model_request_failure_parsed("PostModelRequest", &HookPayload::of(&quiet)),
+                None,
+                "{other}"
+            );
+        }
+        // Only this event's status means this: a tool result has one of its own.
+        assert_eq!(
+            model_request_failure_parsed("PostToolUse", &HookPayload::of(&failed)),
+            None
+        );
+        // An ordinary end still answers.
+        assert!(turn_end_carries_answer("Stop"));
+    }
+
+    /// The error reaches a card and a coordinator's mail, so a key in it does not.
+    #[test]
+    fn a_failed_model_requests_error_is_scrubbed() {
+        let payload = r#"{"status":"failed","error":"401 for key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"}"#;
+        let said = model_request_failure_parsed("PostModelRequest", &HookPayload::of(payload))
+            .expect("a failed request");
+        assert!(!said.contains("abcdefghijklmnopqrstuvwxyz"), "{said}");
     }
 
     /// A stop that names live background work has not ended for the pane —

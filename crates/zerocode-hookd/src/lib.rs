@@ -2258,7 +2258,26 @@ pub struct HookScriptSpec {
     pub claude_guards: bool,
     /// The bridge's JSON reply is printed back to the agent.
     pub prints_context: bool,
+    /// Payloads nothing reads, as `case` patterns: the POSIX script leaves on them
+    /// before it starts curl. The Windows dialect cannot look at stdin, so there
+    /// they reach the bridge and the window drops them.
+    pub unread_payloads: &'static [&'static str],
 }
+
+/// Codex's model requests that did not end the turn. `PostModelRequest` fires on
+/// every model request and blocks Codex until the hook returns, and only a
+/// `failed` one is read (`zerocode_core::hook::model_request_failure_parsed`):
+/// leaving here costs the request 6 ms where a post costs it a curl and a window
+/// wake-up.
+///
+/// Naming the statuses to drop rather than the one to keep fails towards posting:
+/// a Codex that spelled its JSON differently would cost a post, not a failed turn.
+/// A status can't be forged by the `error` beside it either — quotes inside a JSON
+/// string arrive as `\"`, which these patterns do not match.
+const CODEX_UNREAD_PAYLOADS: &[&str] = &[
+    r#"*'"hook_event_name":"PostModelRequest"'*'"status":"completed"'*"#,
+    r#"*'"hook_event_name":"PostModelRequest"'*'"status":"cancelled"'*"#,
+];
 
 /// What a hook prints before it posts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2288,6 +2307,11 @@ pub const fn hook_script_spec(agent: AgentKind) -> HookScriptSpec {
         empty_payload_is_event,
         claude_guards: matches!(agent, AgentKind::Claude),
         prints_context: agent.hook_additional_context().is_some(),
+        unread_payloads: if matches!(agent, AgentKind::Codex) {
+            CODEX_UNREAD_PAYLOADS
+        } else {
+            &[]
+        },
     }
 }
 
@@ -2496,6 +2520,14 @@ pub fn hook_script(agent: AgentKind) -> String {
         lines.push("  exit 0".into());
     }
     lines.push("fi".into());
+
+    if !spec.unread_payloads.is_empty() {
+        lines.push(r#"case "$payload" in"#.into());
+        for pattern in spec.unread_payloads {
+            lines.push(format!("  {pattern}) exit 0 ;;"));
+        }
+        lines.push("esac".into());
+    }
 
     if spec.claude_guards {
         lines.push(r#"if [ -n "$DEVIN_PROJECT_DIR" ]; then"#.into());

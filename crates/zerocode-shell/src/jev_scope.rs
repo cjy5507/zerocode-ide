@@ -1258,7 +1258,7 @@ mod tests {
         };
         assert_eq!(said("zo"), (3, None, vec!["own_runtime".to_string()]));
         assert_eq!(said("claude"), (5, None, vec![]));
-        assert_eq!(said("codex"), (2, None, vec!["no_stop_flag".to_string()]));
+        assert_eq!(said("codex"), (2, None, vec![]));
         assert_eq!(said("opencode"), (0, Some("no_hooks".to_string()), vec![]));
         assert_eq!(
             said("antigravity").2,

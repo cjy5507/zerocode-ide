@@ -1895,6 +1895,15 @@ mod tests {
                 carries(&["pretooluse"]),
                 "{agent:?} edited path"
             );
+            // Codex's way of saying a person stopped a call: no flag anywhere, an
+            // event of its own, which only counts if it is on the list.
+            if agent == AgentKind::Codex {
+                assert_eq!(
+                    row.stopped_call.yes(),
+                    carries(&["interrupt"]),
+                    "{agent:?} stopped call"
+                );
+            }
         }
     }
 }
