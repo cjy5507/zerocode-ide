@@ -1642,7 +1642,7 @@ const PTY_OPEN_PASSING_ERRORS: [i32; 0] = [];
 ///
 /// `errno_of` reads the `errno` out of whatever error `open` fails with:
 /// the raw `io::Error::raw_os_error` for a caller that opens with
-/// `libc::openpty` itself, the text of a `portable_pty` failure for a lane
+/// `libc::openpty` itself, the text of an open failure for a lane
 /// (`open_pty`). The set of `errno`s and the bound are this one's, so no
 /// caller restates them. The last error comes back as it was.
 ///
@@ -1682,10 +1682,11 @@ fn open_pty<P, E: std::fmt::Display>(
     .map_err(PtyError::Open)
 }
 
-/// The `errno` in a `portable_pty` open failure.
+/// The `errno` in a lane's pty open failure.
 ///
-/// Its error carries the `io::Error` only as text — `bail!("failed to
-/// openpty: {:?}", …)` — so the code is read back out of the `Debug` form,
+/// The lane words it `failed to openpty: {:?}` (as `portable_pty` did, whose
+/// error carried the `io::Error` only as text), so the code is read back out
+/// of the `Debug` form,
 /// `Os { code: -6, kind: …`. Text worded any other way gives `None`, which
 /// is never asked again: a reworded dependency costs the retry, not the
 /// error.

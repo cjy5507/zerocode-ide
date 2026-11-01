@@ -21,6 +21,7 @@ vte = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 # The echo flag of a terminal is read with `tcgetattr` on the master descriptor.
 libc = { workspace = true }
+anyhow = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # The ConPTY has no foreground process group; the lane reads the process
