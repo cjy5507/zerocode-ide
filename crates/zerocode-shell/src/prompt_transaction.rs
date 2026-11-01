@@ -261,8 +261,10 @@ pub(super) fn observed_then_committed(
 
 /// The guard a hook report writes the pane's word under: `states`, once no
 /// move holds the pane. Asked under the lock, so a hold taken before this look
-/// is seen, and one taken after it reads what this report writes. Never asked
-/// from the pump's round, whose sweep leaves a held pane for its next look.
+/// is seen, and one taken after it reads what this report writes. The pump's
+/// round looks first at the two places it reports from, and leaves a held pane
+/// for its next round, so it waits here only for a hold taken inside that gap:
+/// one commit, as long as it waited before the hold existed.
 pub(super) fn word_may_land<'a>(
     mut states: MutexGuard<'a, HashMap<TermId, PaneState>>,
     lock: &'a Mutex<HashMap<TermId, PaneState>>,
@@ -1081,7 +1083,8 @@ mod tests {
 
     /// Every way a hold ends lets the waiting word go and leaves no mark: an
     /// observation that says no, a commit that writes nothing (a refused
-    /// move), and a commit that unwinds. A timeout, not a hang, on a miss.
+    /// move), and a commit that unwinds. A hold that never ends fails the
+    /// timeout's assert and then hangs: the scope waits for the word's thread.
     #[test]
     fn a_hold_ends_on_a_refused_observation_a_failed_commit_and_a_panic() {
         use zerocode_core::hook::HookState::Working;

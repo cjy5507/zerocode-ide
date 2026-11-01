@@ -24551,7 +24551,11 @@ fn a_question_answered_before_the_ledger_heard_it_is_not_told_after_the_answer()
     super::pane_attention_told(WORKER, since, since + 3);
     assert_eq!(
         told(),
-        vec![zerocode_core::orchestration::ReceiverNews::TurnEnded.word().to_string()],
+        vec![
+            zerocode_core::orchestration::ReceiverNews::TurnEnded
+                .word()
+                .to_string()
+        ],
         "the ledger's last word on the receiver is a question already over"
     );
     // A question of the same pane that still stands is told as ever.
@@ -26572,7 +26576,10 @@ fn a_question_reported_during_a_move_waits_for_the_ledger_with_the_hook_word_fre
     );
     let (waited, free, told) = looked.recv().expect("the observation ran");
     assert!(waited, "the report was answered with the actor at a fence");
-    assert!(free, "the report stood in the actor's line holding the hook word");
+    assert!(
+        free,
+        "the report stood in the actor's line holding the hook word"
+    );
     assert!(
         told.recv_timeout(Duration::from_secs(10)).is_ok(),
         "the report still waits after the move's commit"

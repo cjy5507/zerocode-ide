@@ -21136,7 +21136,12 @@ mod tests {
             held.contains("orchestration::pane_attention_seen("),
             "the window's record of a wait no longer stands in the order of the words:\n{held}"
         );
-        for ledger in ["pane_attention_told(", "pane_turn_", "pane_lead_rested(", ".actor"] {
+        for ledger in [
+            "pane_attention_told(",
+            "pane_turn_",
+            "pane_lead_rested(",
+            ".actor",
+        ] {
             assert!(
                 !held.contains(ledger),
                 "`{ledger}` reaches the ledger under the lock its observation needs:\n{held}"

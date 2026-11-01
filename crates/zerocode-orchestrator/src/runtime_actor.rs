@@ -366,6 +366,13 @@ pub trait PaneTable: Send {
     /// `action` settle against that answer before the lock is given back.
     #[allow(clippy::type_complexity)] // One closure parameter; an alias would only move the shape.
     fn with_seat_of_term(&self, term: u32, action: &mut dyn FnMut(Option<(&str, &str)>));
+    /// Whether the window's last word on this terminal is still the wait that
+    /// began at `since_ms`. Read when the actor serves that wait: a report
+    /// writes this record before it tells the actor anything, so the report of
+    /// the answer, if it has been served, has already changed it (t-75383).
+    fn attention_stands(&self, _term: u32, _since_ms: i64) -> bool {
+        true
+    }
     /// [`with_team`], behind the caller's own proof.
     ///
     /// Run `action` with the team borrowed mutably ONLY if `presented` is the
@@ -4627,6 +4634,15 @@ impl RuntimeState {
         }
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
+        }
+        // A report leaves its lock before it reaches this line, so what it
+        // says of a question can arrive after the report of the answer. The
+        // thread's last line is the last state the ledger saw the receiver in.
+        if !self.panes.attention_stands(term, since_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
         }
         let ledger = &mut self.ledger;
         let mut moved = false;

@@ -1153,8 +1153,8 @@ pub trait Host {
     /// the moment the pane went quiet, which a pause dialog's witness is
     /// timed from. Quiet as [`Self::decline_quiet_since`] reads it, with
     /// [`zerocode_core::orchestration::DECLINE_DIALOG_UNANSWERED_MS`] as the
-    /// hook's term. Call `commit` at most once, and keep the locks until it
-    /// returns.
+    /// hook's term. Call `commit` at most once, and keep what they guard still
+    /// until it returns.
     fn with_classifier_decline_observation(
         &self,
         _term: u32,

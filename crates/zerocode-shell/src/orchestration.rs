@@ -4175,6 +4175,14 @@ impl PaneTable for ShellPaneTable {
         }
     }
 
+    fn attention_stands(&self, term: u32, since_ms: i64) -> bool {
+        pane_attention()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&term)
+            == Some(&Some(since_ms))
+    }
+
     fn with_pane_authority(
         &self,
         team: &str,

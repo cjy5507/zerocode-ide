@@ -2833,6 +2833,13 @@ pub(super) fn publish_owed_rosters(app: &AppHandle) {
         owed.drain().collect()
     };
     for parent in owed {
+        // A parked all-clear would land at the door that waits out a pane's
+        // account move. Still owed, and asked again next round (t-75383).
+        let state = app.state::<AppState>();
+        if state.shell_runtime().pane_holds.holds(parent) {
+            state.unpublished_rosters().insert(parent);
+            continue;
+        }
         let rows = app
             .state::<AppState>()
             .subagents()
