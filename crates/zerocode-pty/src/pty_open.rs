@@ -9,17 +9,24 @@
 //! Here the ends are opened with `O_CLOEXEC` in the call that makes them
 //! (`posix_openpt`, then the slave by its name), so there is no gap. What
 //! the pair does afterwards — the size, the reader and writer, the
-//! foreground group, the child's session and controlling terminal — is what
-//! `portable_pty` does, written out for these two descriptors, because its
-//! own types cannot be built from descriptors that were opened elsewhere.
+//! foreground group — is what `portable_pty` does, written out for these two
+//! descriptors, because its own types cannot be built from descriptors that
+//! were opened elsewhere.
+//!
+//! macOS only. Every other system still opens through `portable_pty`, and
+//! the gap stays there: on Linux a child another thread starts while a pane
+//! opens keeps the new pane's ends for its whole life. Linux is not shipped
+//! (and does not build here yet); closing the gap there is a start of its
+//! own, with its own fork-and-exec to write and test.
+//!
+//! The reader, the writer and the size calls follow `portable-pty` 0.9
+//! (`src/unix.rs`, MIT licence, copyright (c) 2018 Wez Furlong).
 
 use std::cell::Cell;
 use std::ffi::{CStr, CString, OsStr};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt as _;
-#[cfg(not(target_os = "macos"))]
-use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtyPair, PtySize, SlavePty};
@@ -29,7 +36,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtyPair, PtySize, SlavePty}
 pub(crate) fn open_pair(size: PtySize) -> io::Result<PtyPair> {
     let (master, slave, name) = open_ends(size)?;
     Ok(PtyPair {
-        slave: Box::new(UnixSlave { fd: slave }),
+        slave: Box::new(UnixSlave { _end: slave }),
         master: Box::new(UnixMaster {
             fd: master,
             took_writer: Cell::new(false),
@@ -77,13 +84,9 @@ fn open_ends(size: PtySize) -> io::Result<(OwnedFd, OwnedFd, PathBuf)> {
 /// way that keeps no state between threads.
 fn slave_name(master: RawFd) -> io::Result<PathBuf> {
     let mut buffer = [0 as libc::c_char; 128];
-    #[cfg(target_os = "macos")]
     // SAFETY: `TIOCPTYGNAME` writes a NUL-terminated name of at most 128
     // bytes into the buffer it is given, which is 128 long.
     let named = unsafe { libc::ioctl(master, libc::TIOCPTYGNAME as _, buffer.as_mut_ptr()) };
-    #[cfg(not(target_os = "macos"))]
-    // SAFETY: `ptsname_r` writes at most `buffer.len()` bytes, NUL included.
-    let named = unsafe { libc::ptsname_r(master, buffer.as_mut_ptr(), buffer.len()) };
     if named != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -130,10 +133,9 @@ struct UnixMaster {
 
 /// The slave end. Closes with the value.
 struct UnixSlave {
-    /// Held so that it closes with the value (the lane drops it once the
-    /// child has the terminal); only a start that is not macOS's reads it.
-    #[cfg_attr(target_os = "macos", allow(dead_code, reason = "held for its close"))]
-    fd: OwnedFd,
+    /// Held only so that it closes with the value (the lane drops it once
+    /// the child has the terminal).
+    _end: OwnedFd,
 }
 
 /// A copy of the master that reads: the slave closing is the end of the
@@ -222,152 +224,22 @@ impl SlavePty for UnixSlave {
         &self,
         builder: CommandBuilder,
     ) -> Result<Box<dyn Child + Send + Sync>, anyhow::Error> {
-        self.start(builder)
-    }
-}
-
-impl UnixSlave {
-    /// On macOS a lane starts its child without a fork, by the terminal's
-    /// name ([`crate::posix_launch`]); nothing asks the slave to start one,
-    /// and a start here would be the fork that module exists to avoid.
-    #[cfg(target_os = "macos")]
-    fn start(&self, _: CommandBuilder) -> Result<Box<dyn Child + Send + Sync>, anyhow::Error> {
+        // A lane on macOS starts its child without a fork, by the terminal's
+        // name ([`crate::posix_launch`]); nothing asks the slave to start
+        // one, and a start here would be the fork that module exists to avoid.
+        let _ = builder;
         anyhow::bail!("a lane on macOS starts its child through posix_launch")
-    }
-
-    /// The child leads a session of its own whose controlling terminal is
-    /// this slave; signals it inherited are put back to their defaults and
-    /// every descriptor above 2 is closed before it runs, as
-    /// `portable_pty` starts one. A builder's `umask` is not carried (its
-    /// field is private, and no lane sets one), and a default program is
-    /// refused (no lane asks for one).
-    #[cfg(not(target_os = "macos"))]
-    fn start(
-        &self,
-        builder: CommandBuilder,
-    ) -> Result<Box<dyn Child + Send + Sync>, anyhow::Error> {
-        let controlling_tty = builder.get_controlling_tty();
-        let mut command = command_of(&builder)?;
-        // SAFETY: the closure runs between fork and exec and calls only
-        // async-signal-safe functions (`signal`, `sigprocmask`, `setsid`,
-        // `ioctl`, `close`) — except `close_random_fds`, which
-        // lists `/dev/fd` as `portable_pty` does.
-        unsafe {
-            command
-                .stdin(self.fd.try_clone()?)
-                .stdout(self.fd.try_clone()?)
-                .stderr(self.fd.try_clone()?)
-                .pre_exec(move || {
-                    for signal in [
-                        libc::SIGCHLD,
-                        libc::SIGHUP,
-                        libc::SIGINT,
-                        libc::SIGQUIT,
-                        libc::SIGTERM,
-                        libc::SIGALRM,
-                    ] {
-                        libc::signal(signal, libc::SIG_DFL);
-                    }
-                    let empty: libc::sigset_t = std::mem::zeroed();
-                    libc::sigprocmask(libc::SIG_SETMASK, &raw const empty, std::ptr::null_mut());
-                    if libc::setsid() == -1 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    if controlling_tty && libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    close_inherited();
-                    Ok(())
-                });
-        }
-        let mut child = command.spawn()?;
-        child.stdin.take();
-        child.stdout.take();
-        child.stderr.take();
-        Ok(Box::new(child))
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-/// The `Command` a builder describes, as `portable_pty` builds it from the
-/// builder's own program, arguments, working directory and environment (its
-/// own way is private to it): the program looked up on the builder's `PATH`,
-/// shown to itself under the name it was given, started in the working
-/// directory when that is one (else `HOME`, else `/`), with only the
-/// builder's environment and a `SHELL` among it.
-fn command_of(builder: &CommandBuilder) -> Result<std::process::Command, anyhow::Error> {
-    anyhow::ensure!(
-        !builder.is_default_prog(),
-        "a default program is not started here"
-    );
-    let argv = builder.get_argv();
-    let program = argv
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("no program to start"))?;
-    let directory = builder
-        .get_cwd()
-        .map(PathBuf::from)
-        .filter(|directory| directory.is_dir())
-        .or_else(|| builder.get_env("HOME").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("/"));
-    let mut command = std::process::Command::new(program);
-    command.arg0(program);
-    command.args(&argv[1..]);
-    command.current_dir(directory);
-    command.env_clear();
-    command.envs(builder.iter_full_env_as_str());
-    if builder.get_env("SHELL").is_none() {
-        command.env("SHELL", login_shell());
-    }
-    Ok(command)
-}
-
-#[cfg(not(target_os = "macos"))]
-/// This user's login shell from the password database, `/bin/sh` if it
-/// names none.
-fn login_shell() -> String {
-    // SAFETY: `getpwuid` answers null or a record that stays valid until the
-    // next call of the password database on this thread, read at once below.
-    let entry = unsafe { libc::getpwuid(libc::getuid()) };
-    if entry.is_null() {
-        return "/bin/sh".to_string();
-    }
-    // SAFETY: a non-null record holds a NUL-terminated shell path or null.
-    let shell = unsafe { (*entry).pw_shell };
-    if shell.is_null() {
-        return "/bin/sh".to_string();
-    }
-    // SAFETY: checked non-null above; NUL-terminated by the library.
-    let shell = unsafe { CStr::from_ptr(shell) };
-    shell.to_string_lossy().into_owned()
-}
-
-#[cfg(not(target_os = "macos"))]
-/// Close every descriptor above 2 the child was handed, as `portable_pty`
-/// does for the ones a GUI process leaks.
-fn close_inherited() {
-    let Ok(directory) = std::fs::read_dir("/dev/fd") else {
-        return;
-    };
-    let numbers: Vec<libc::c_int> = directory
-        .filter_map(|entry| entry.ok()?.file_name().into_string().ok()?.parse().ok())
-        .filter(|number| *number > 2)
-        .collect();
-    for number in numbers {
-        // SAFETY: closing a descriptor number the directory listed.
-        unsafe { libc::close(number) };
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::open_pair;
-    use portable_pty::{PtyPair, PtySize};
+    use portable_pty::{PtyPair, PtySize, native_pty_system};
     use std::io;
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
     use std::process::{Command, Stdio};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, PoisonError, RwLock};
     use std::time::{Duration, Instant};
 
     const SIZE: PtySize = PtySize {
@@ -382,8 +254,8 @@ mod tests {
     /// Threads that start children while the panes open.
     const STARTERS: usize = 4;
     /// How long the children that stay live: well past any start of a
-    /// process, so a pane's end still held after [`HELD_TOO_LONG`] is
-    /// held by one that lives, and not by one still on its way to `exec`.
+    /// process, so a pane's end still held once every start has returned is
+    /// held by one that lives.
     const CHILD_LIFE: f64 = 1.5;
     /// Long-lived children one starter keeps at a time. Beside them it
     /// starts and waits for `true` as fast as it can, so a pane that opens
@@ -392,14 +264,33 @@ mod tests {
     /// Panes held by a child that lived on, at which the run stops: one is
     /// the failure, a few say how often it happens.
     const ENOUGH_KEPT: usize = 3;
-    /// A process in the middle of its start holds a copy of every descriptor
-    /// of the window, close-on-exec or not, until its `exec` takes the
-    /// close-on-exec ones away: a few milliseconds, longer on a loaded
-    /// machine. A pane end still held after this is held by a child that
-    /// went on living with it.
-    const HELD_TOO_LONG: Duration = Duration::from_millis(600);
     /// The longest a stream is read for its end.
     const PATIENCE: Duration = Duration::from_secs(5);
+
+    /// A pair, asked for again where the kernel says another open took the
+    /// pty (the same rule a lane follows): the tests of this binary and of
+    /// the others open ptys at the same moment.
+    fn a_pty(size: PtySize) -> PtyPair {
+        open_here(size).expect("a pty")
+    }
+
+    /// The way a lane opens a pane.
+    fn open_here(size: PtySize) -> io::Result<PtyPair> {
+        crate::lane::ask_for_pty(|| super::open_pair(size), io::Error::raw_os_error)
+    }
+
+    /// The way before t-85167: `portable_pty`'s own `openpty`, asked up to
+    /// five times, for the measurement of what the pressure sees there.
+    fn open_before(size: PtySize) -> io::Result<PtyPair> {
+        let mut asked = 1;
+        loop {
+            match native_pty_system().openpty(size) {
+                Ok(pair) => return Ok(pair),
+                Err(_) if asked < 5 => asked += 1,
+                Err(error) => return Err(io::Error::other(error.to_string())),
+            }
+        }
+    }
 
     fn hung_up(fd: RawFd) -> bool {
         let mut poll = libc::pollfd {
@@ -429,68 +320,111 @@ mod tests {
         unsafe { OwnedFd::from_raw_fd(fd) }
     }
 
+    /// Held for reading by a starter for as long as one of its `spawn`
+    /// calls has not returned. A process in the middle of its start holds a
+    /// copy of every descriptor of the window, close-on-exec or not, until
+    /// its `exec` takes the close-on-exec ones away; `posix_spawn` returns to
+    /// its caller after that `exec`, so once no `spawn` is in flight no
+    /// start is left holding a copy.
+    type Gate = RwLock<()>;
+
     /// Children started by other threads for as long as it lives, as the
-    /// window starts `git` and `ps` while a pane opens.
+    /// window starts `git` and `ps` while a pane opens. Dropping it stops the
+    /// threads, so a test that panics does not leave them running under the
+    /// next one.
     struct Starters {
         stop: Arc<AtomicBool>,
-        threads: Vec<std::thread::JoinHandle<()>>,
+        gate: Arc<Gate>,
+        threads: Vec<std::thread::JoinHandle<usize>>,
     }
 
     impl Starters {
         fn begin() -> Self {
             let stop = Arc::new(AtomicBool::new(false));
+            let gate = Arc::new(Gate::new(()));
             let threads = (0..STARTERS)
                 .map(|_| {
                     let stop = Arc::clone(&stop);
+                    let gate = Arc::clone(&gate);
                     std::thread::spawn(move || {
                         let mut alive = Vec::new();
-                        let mut started = 0u32;
+                        let mut started = 0usize;
+                        let mut generation = 0u32;
                         // Lives differ by up to half a second, so the
                         // children of a starter end one by one and a new one
                         // takes each one's place, not all at once.
                         let mut quiet = || {
-                            started += 1;
+                            generation += 1;
                             let mut command = Command::new("/bin/sleep");
                             command
                                 .arg(format!(
                                     "{:.2}",
-                                    CHILD_LIFE + f64::from(started % 10) * 0.05
+                                    CHILD_LIFE + f64::from(generation % 10) * 0.05
                                 ))
                                 .stdin(Stdio::null())
                                 .stdout(Stdio::null())
                                 .stderr(Stdio::null());
                             command
                         };
+                        let spawn = |mut command: Command| {
+                            let _in_flight = gate.read().unwrap_or_else(PoisonError::into_inner);
+                            command.spawn()
+                        };
                         while !stop.load(Ordering::Relaxed) {
                             alive.retain_mut(|child: &mut std::process::Child| {
                                 matches!(child.try_wait(), Ok(None))
                             });
                             if alive.len() < LIVING_PER_STARTER {
-                                if let Ok(child) = quiet().spawn() {
+                                if let Ok(child) = spawn(quiet()) {
+                                    started += 1;
                                     alive.push(child);
                                 }
                             } else {
-                                let _ = Command::new("/usr/bin/true")
+                                let mut command = Command::new("/usr/bin/true");
+                                command
                                     .stdin(Stdio::null())
                                     .stdout(Stdio::null())
-                                    .stderr(Stdio::null())
-                                    .status();
+                                    .stderr(Stdio::null());
+                                if let Ok(mut child) = spawn(command) {
+                                    started += 1;
+                                    let _ = child.wait();
+                                }
                             }
                         }
                         for mut child in alive {
                             let _ = child.kill();
                             let _ = child.wait();
                         }
+                        started
                     })
                 })
                 .collect();
-            Self { stop, threads }
+            Self {
+                stop,
+                gate,
+                threads,
+            }
         }
 
-        fn end(self) {
+        fn gate(&self) -> &Gate {
+            &self.gate
+        }
+
+        /// Stops the threads; how many children they started.
+        fn end(mut self) -> usize {
             self.stop.store(true, Ordering::Relaxed);
-            for thread in self.threads {
-                thread.join().expect("a starter thread");
+            self.threads
+                .drain(..)
+                .map(|thread| thread.join().expect("a starter thread"))
+                .sum()
+        }
+    }
+
+    impl Drop for Starters {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            for thread in self.threads.drain(..) {
+                let _ = thread.join();
             }
         }
     }
@@ -498,54 +432,123 @@ mod tests {
     /// How a pane's end was seen after its other end closed.
     #[derive(Default)]
     struct Seen {
-        /// Ends still held after [`HELD_TOO_LONG`]: held by a child that lived on.
+        /// Ends still not hung up once every start in flight had returned:
+        /// held by a child that lived on.
         kept: usize,
-        /// Ends not hung up at once but hung up in time: a start going on.
+        /// Ends not hung up at once but hung up when the starts in flight
+        /// returned: a start going on.
         passing: usize,
+        /// The longest and the whole time spent waiting for those starts.
         slowest: Duration,
         total: Duration,
     }
 
     impl Seen {
-        /// `hung` is asked at once; a no is waited out for [`HELD_TOO_LONG`].
-        fn note(&mut self, mut hung: impl FnMut() -> bool) {
+        /// `hung` is asked at once. A no waits for the starts in flight —
+        /// it takes the gate for writing, which every `spawn` in flight
+        /// holds for reading and which keeps new ones out — and is asked
+        /// once more: still no is a holder. No clock decides.
+        fn note(&mut self, gate: &Gate, mut hung: impl FnMut() -> bool) {
             if hung() {
                 return;
             }
             let begun = Instant::now();
-            while !hung() {
-                if begun.elapsed() >= HELD_TOO_LONG {
-                    self.kept += 1;
-                    return;
-                }
-                std::thread::sleep(Duration::from_micros(200));
+            let settled = gate.write().unwrap_or_else(PoisonError::into_inner);
+            let waited = begun.elapsed();
+            if hung() {
+                self.passing += 1;
+                self.slowest = self.slowest.max(waited);
+                self.total += waited;
+            } else {
+                self.kept += 1;
             }
-            let held = begun.elapsed();
-            self.passing += 1;
-            self.slowest = self.slowest.max(held);
-            self.total += held;
+            drop(settled);
         }
     }
 
-    /// A hangup that comes only when a start in flight returns is a start
-    /// passing, not a holder — however long the start takes on a loaded
-    /// machine (t-84451 saw a process stall for seconds before its `exec`).
-    /// Here the start takes 900 ms, longer than [`HELD_TOO_LONG`].
-    #[test]
-    fn a_hangup_that_waits_for_a_start_in_flight_is_not_a_holder() {
-        let start_done = Arc::new(AtomicBool::new(false));
-        let start = {
-            let start_done = Arc::clone(&start_done);
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(900));
-                start_done.store(true, Ordering::SeqCst);
-            })
+    /// What one run of the pressure saw.
+    struct Pressure {
+        opened: usize,
+        elapsed: Duration,
+        /// Children the starters started during the run.
+        started: usize,
+        open_total: Duration,
+        open_slowest: Duration,
+        master: Seen,
+        slave: Seen,
+    }
+
+    impl Pressure {
+        fn kept(&self) -> usize {
+            self.master.kept + self.slave.kept
+        }
+
+        fn report(&self, way: &str) {
+            let seen = |name: &str, seen: &Seen| {
+                format!(
+                    "{name}: {} held by a child that lived on, {} held while a start passed \
+                     (slowest {:?}, total {:?})",
+                    seen.kept, seen.passing, seen.slowest, seen.total
+                )
+            };
+            eprintln!(
+                "pty_open pressure ({way}): {} of {OPENS} panes in {:?}, {} children started, \
+                 open time total {:?} slowest {:?}; {}; {}",
+                self.opened,
+                self.elapsed,
+                self.started,
+                self.open_total,
+                self.open_slowest,
+                seen("master", &self.master),
+                seen("slave", &self.slave),
+            );
+        }
+    }
+
+    /// Opens [`OPENS`] panes with `open` while children start beside them,
+    /// and sees whether each pane's end hangs up when its other end closes.
+    /// Stops at `stop_at` panes held by a child that lived on.
+    fn pressure(open: fn(PtySize) -> io::Result<PtyPair>, stop_at: usize) -> Pressure {
+        let starters = Starters::begin();
+        let mut seen = Pressure {
+            opened: 0,
+            elapsed: Duration::ZERO,
+            started: 0,
+            open_total: Duration::ZERO,
+            open_slowest: Duration::ZERO,
+            master: Seen::default(),
+            slave: Seen::default(),
         };
-        let mut seen = Seen::default();
-        seen.note(|| start_done.load(Ordering::SeqCst));
-        start.join().unwrap();
-        assert_eq!(seen.kept, 0, "a start still in flight was counted a holder");
-        assert_eq!(seen.passing, 1);
+        let began = Instant::now();
+        for round in 0..OPENS {
+            if seen.kept() >= stop_at {
+                break;
+            }
+            seen.opened += 1;
+            let opening = Instant::now();
+            let PtyPair { master, slave } = open(SIZE).expect("a pty");
+            let took = opening.elapsed();
+            seen.open_total += took;
+            seen.open_slowest = seen.open_slowest.max(took);
+            if round % 2 == 0 {
+                // Close the master; the slave (ours) should hang up.
+                let held = slave_by_name(master.as_ref());
+                drop(slave);
+                drop(master);
+                seen.master
+                    .note(starters.gate(), || hung_up(held.as_raw_fd()));
+            } else {
+                // Close the slaves; the master should hang up.
+                let held = slave_by_name(master.as_ref());
+                drop(slave);
+                drop(held);
+                let fd = master.as_raw_fd().expect("a master descriptor");
+                seen.slave.note(starters.gate(), || hung_up(fd));
+            }
+        }
+        seen.elapsed = began.elapsed();
+        seen.started = starters.end();
+        seen
     }
 
     /// Whether `hung` answers yes within [`PATIENCE`]: a hangup already
@@ -561,13 +564,68 @@ mod tests {
         true
     }
 
+    /// A hangup that comes only when a start in flight returns is a start
+    /// passing, not a holder — however long the start takes on a loaded
+    /// machine (t-84451 saw a process stall for seconds before its `exec`).
+    /// Here the start takes 900 ms.
+    #[test]
+    fn a_hangup_that_waits_for_a_start_in_flight_is_not_a_holder() {
+        let gate = Arc::new(Gate::new(()));
+        let hung = Arc::new(AtomicBool::new(false));
+        let (entered, start_entered) = std::sync::mpsc::channel();
+        let start = {
+            let (gate, hung) = (Arc::clone(&gate), Arc::clone(&hung));
+            std::thread::spawn(move || {
+                let _in_flight = gate.read().unwrap();
+                entered.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(900));
+                hung.store(true, Ordering::SeqCst);
+            })
+        };
+        start_entered.recv().unwrap();
+        let mut seen = Seen::default();
+        seen.note(&gate, || hung.load(Ordering::SeqCst));
+        start.join().unwrap();
+        assert_eq!(seen.kept, 0, "a start still in flight was counted a holder");
+        assert_eq!(seen.passing, 1);
+        assert!(
+            seen.slowest >= Duration::from_millis(800),
+            "{:?}",
+            seen.slowest
+        );
+    }
+
+    /// The other side of it: no start in flight and no hangup is a holder,
+    /// at once.
+    #[test]
+    fn no_hangup_with_no_start_in_flight_is_a_holder() {
+        let gate = Gate::new(());
+        let mut seen = Seen::default();
+        let begun = Instant::now();
+        seen.note(&gate, || false);
+        assert_eq!((seen.kept, seen.passing), (1, 0));
+        assert!(begun.elapsed() < Duration::from_millis(500));
+    }
+
+    /// The pressure's starters stop when they are dropped, and an
+    /// early return or a panic in the test leaves none behind.
+    #[test]
+    fn starters_stop_when_dropped() {
+        let starters = Starters::begin();
+        let stop = Arc::clone(&starters.stop);
+        drop(starters);
+        assert!(stop.load(Ordering::Relaxed));
+        // Every thread was joined: only this test's own `Arc` is left.
+        assert_eq!(Arc::strong_count(&stop), 1);
+    }
+
     /// The control: with nobody holding the other end, the hangup is there
     /// once an end closes, and is not there while the end is open — so a
     /// miss under pressure means a holder, nothing else.
     #[test]
     #[ignore = "the pressure's own process, started by `the_pty_open_leaves_no_end_to_a_child_started_beside_it`"]
     fn alone_a_pane_end_hangs_up_when_the_other_closes_and_not_before() {
-        let PtyPair { master, slave } = open_pair(SIZE).expect("a pty");
+        let PtyPair { master, slave } = a_pty(SIZE);
         let held = slave_by_name(master.as_ref());
         drop(slave);
         let master_fd = master.as_raw_fd().expect("a master descriptor");
@@ -579,7 +637,7 @@ mod tests {
             "the master saw no hangup, no slave left"
         );
 
-        let PtyPair { master, slave } = open_pair(SIZE).expect("a pty");
+        let PtyPair { master, slave } = a_pty(SIZE);
         let held = slave_by_name(master.as_ref());
         drop(slave);
         drop(master);
@@ -590,53 +648,34 @@ mod tests {
     }
 
     /// No child another thread starts while panes open ends up holding a
-    /// pane's master or slave. The red before the fix is a count of panes
-    /// whose end hung up late; after it, none (1000 panes).
+    /// pane's master or slave: once the starts in flight have returned, every
+    /// pane's end has hung up (1000 panes), and children were in fact being
+    /// started.
     #[test]
     #[ignore = "the pressure's own process, started by `the_pty_open_leaves_no_end_to_a_child_started_beside_it`"]
     fn alone_a_child_started_while_a_pane_opens_holds_none_of_its_ends() {
-        let starters = Starters::begin();
-        let (mut master_held, mut slave_held) = (Seen::default(), Seen::default());
-        let began = Instant::now();
-        let mut opened = 0;
-        for round in 0..OPENS {
-            if master_held.kept + slave_held.kept >= ENOUGH_KEPT {
-                break;
-            }
-            opened += 1;
-            let PtyPair { master, slave } = open_pair(SIZE).expect("a pty");
-            if round % 2 == 0 {
-                // Close the master; the slave (ours) should hang up.
-                let held = slave_by_name(master.as_ref());
-                drop(slave);
-                drop(master);
-                master_held.note(|| hung_up(held.as_raw_fd()));
-            } else {
-                // Close the slaves; the master should hang up.
-                let held = slave_by_name(master.as_ref());
-                drop(slave);
-                drop(held);
-                let fd = master.as_raw_fd().expect("a master descriptor");
-                slave_held.note(|| hung_up(fd));
-            }
-        }
-        let elapsed = began.elapsed();
-        starters.end();
-        eprintln!(
-            "pty_open pressure: {opened} of {OPENS} panes in {elapsed:?}; master: {} held by a child that \
-             lived on, {} held while a start passed (slowest {:?}, total {:?}); slave: {} held \
-             by a child that lived on, {} held while a start passed (slowest {:?}, total {:?})",
-            master_held.kept,
-            master_held.passing,
-            master_held.slowest,
-            master_held.total,
-            slave_held.kept,
-            slave_held.passing,
-            slave_held.slowest,
-            slave_held.total,
+        let seen = pressure(open_here, ENOUGH_KEPT);
+        seen.report("pty_open");
+        assert!(seen.started > 0, "no child was started: nothing was tested");
+        assert_eq!(seen.master.kept, 0, "a child holds a pane's master");
+        assert_eq!(seen.slave.kept, 0, "a child holds a pane's slave");
+    }
+
+    /// The same pressure against the way before t-85167 (`portable_pty`'s
+    /// own `openpty`) catches panes held by a child that lived on. Run by
+    /// hand (`--ignored --exact`), not in the gate: it is a measurement of a
+    /// race, and that it caught nothing in one run says little.
+    #[test]
+    #[ignore = "a measurement of the way before t-85167, run by hand"]
+    fn alone_the_way_before_is_caught_by_the_same_pressure() {
+        let seen = pressure(open_before, usize::MAX);
+        seen.report("portable_pty");
+        assert!(seen.started > 0, "no child was started: nothing was tested");
+        assert!(
+            seen.kept() > 0,
+            "the pressure caught nothing in {} panes",
+            seen.opened
         );
-        assert_eq!(master_held.kept, 0, "a child holds a pane's master");
-        assert_eq!(slave_held.kept, 0, "a child holds a pane's slave");
     }
 
     /// The pressure's tests, each in a process of its own with the pane
@@ -683,7 +722,9 @@ mod tests {
     /// opening call itself on this system, not by a call after it.
     #[test]
     fn both_ends_are_close_on_exec_as_opened() {
-        let (master, slave, name) = super::open_ends(SIZE).expect("a pty");
+        let (master, slave, name) =
+            crate::lane::ask_for_pty(|| super::open_ends(SIZE), io::Error::raw_os_error)
+                .expect("a pty");
         assert!(close_on_exec(master.as_raw_fd()), "the master leaks");
         assert!(close_on_exec(slave.as_raw_fd()), "the slave leaks");
         assert!(name.starts_with("/dev/"), "{name:?}");
@@ -699,7 +740,7 @@ mod tests {
             pixel_width: 0,
             pixel_height: 0,
         };
-        let PtyPair { master, .. } = open_pair(size).expect("a pty");
+        let PtyPair { master, .. } = a_pty(size);
         let got = master.get_size().expect("a size");
         assert_eq!((got.rows, got.cols), (30, 100));
         master
@@ -716,58 +757,45 @@ mod tests {
         assert!(name.exists(), "{name:?}");
     }
 
-    /// The writer is taken once; dropping it ends the child's input.
+    /// The writer is taken once.
     #[test]
     fn the_writer_is_taken_once() {
-        let PtyPair { master, .. } = open_pair(SIZE).expect("a pty");
+        let PtyPair { master, .. } = a_pty(SIZE);
         let _writer = master.take_writer().expect("the first writer");
         assert!(master.take_writer().is_err(), "a second writer was given");
     }
 
-    /// A child started on the slave leads a session whose controlling
-    /// terminal is the pty: it is its own process group and the terminal's
-    /// foreground group (`ps` pid, pgid, tpgid), `tty` names the slave, and
-    /// the window size is the pane's. The reader sees the stream end when
-    /// the child is gone.
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn a_child_started_on_the_slave_leads_a_session_with_the_pty_as_its_terminal() {
-        use std::io::Read as _;
-        let PtyPair { master, slave } = open_pair(SIZE).expect("a pty");
-        let name = master.tty_name().expect("a name");
-        let mut command = portable_pty::CommandBuilder::new("/bin/sh");
-        command.arg("-c");
-        command.arg(
-            "echo TTY $(tty); echo IDS $(ps -o pid=,pgid=,tpgid= -p $$); echo SIZE $(stty size)",
-        );
-        let mut child = slave.spawn_command(command).expect("a child");
-        drop(slave);
-        let mut reader = master.try_clone_reader().expect("a reader");
-        let mut said = String::new();
-        let mut buffer = [0u8; 1024];
-        let begun = Instant::now();
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) | Err(_) => break,
-                Ok(count) => said.push_str(&String::from_utf8_lossy(&buffer[..count])),
-            }
-            assert!(begun.elapsed() < PATIENCE * 4, "no end of stream: {said}");
+    /// What `fd` has to read now: `Err` with the `errno` where there is
+    /// nothing yet (the slave is opened without blocking), an empty read at
+    /// the end of the input.
+    fn read_now(fd: RawFd) -> io::Result<Vec<u8>> {
+        let mut buffer = [0u8; 16];
+        // SAFETY: reads at most the 16 bytes of the buffer.
+        let count = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if count < 0 {
+            return Err(io::Error::last_os_error());
         }
-        child.wait().expect("the child ends");
-        let line = |tag: &str| {
-            said.lines()
-                .find_map(|line| line.trim_end().strip_prefix(tag))
-                .unwrap_or_else(|| panic!("no {tag} line in {said:?}"))
-                .trim()
-                .to_string()
-        };
-        assert_eq!(line("TTY "), name.to_string_lossy());
-        let ids: Vec<&str> = line("IDS ").leak().split_whitespace().collect();
-        assert_eq!(ids.len(), 3, "{ids:?}");
-        assert!(
-            ids[0] == ids[1] && ids[1] == ids[2],
-            "not a session leader in the foreground of its terminal: {ids:?}"
+        Ok(buffer[..count as usize].to_vec())
+    }
+
+    /// Dropping the writer tells the terminal the input is over: a newline,
+    /// and then the terminal's own end-of-file character. The program on
+    /// the slave reads the newline as a line and then the end of its input;
+    /// before the drop it has read nothing.
+    #[test]
+    fn dropping_the_writer_ends_the_input_with_a_newline_and_then_end_of_file() {
+        let PtyPair { master, slave } = a_pty(SIZE);
+        let held = slave_by_name(master.as_ref());
+        drop(slave);
+        let writer = master.take_writer().expect("a writer");
+        let nothing = read_now(held.as_raw_fd()).expect_err("nothing written yet");
+        assert_eq!(nothing.raw_os_error(), Some(libc::EAGAIN));
+        drop(writer);
+        assert_eq!(read_now(held.as_raw_fd()).expect("a line"), b"\n");
+        assert_eq!(
+            read_now(held.as_raw_fd()).expect("the end of the input"),
+            b"",
+            "the newline was not followed by the end-of-file character"
         );
-        assert_eq!(line("SIZE "), "24 80");
     }
 }

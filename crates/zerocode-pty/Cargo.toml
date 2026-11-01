@@ -21,6 +21,10 @@ vte = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 # The echo flag of a terminal is read with `tcgetattr` on the master descriptor.
 libc = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The error type of `portable_pty`'s `MasterPty` and `SlavePty` traits, which
+# the pty opened here implements.
 anyhow = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]

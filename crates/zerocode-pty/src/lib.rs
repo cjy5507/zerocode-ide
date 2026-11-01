@@ -20,7 +20,7 @@ pub mod lane;
 mod packed_row;
 #[cfg(target_os = "macos")]
 mod posix_launch;
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 mod pty_open;
 pub mod readers;
 pub mod ready;
