@@ -31,9 +31,9 @@
 //! it can no longer take an answer while the pane still asks. A question
 //! given to the person says why on the card (`ask:raised`).
 //!
-//! A question the pane moved past before the answer came is refused back to
-//! the coordinator as 「지나간 질문」 and leaves nothing on the person's
-//! screen: the moving past is the hook's word (a report that is no longer the
+//! A question the pane moved past before the answer came — one handed to the
+//! person that the person never saw included — is refused back to the
+//! coordinator as 「지나간 질문」 and leaves nothing on the person's screen: the moving past is the hook's word (a report that is no longer the
 //! asking), or the answer door's, which reads the screen and refuses
 //! ([`crate::cmd::terminal::refused_as_passed`]) — the judgement t-82287 made
 //! for the person's own answers.
@@ -203,11 +203,16 @@ pub(crate) fn step(
         Standing::Closed => return Step::Raise(Raised::Unanswerable),
         // The coordinator gave it to the person: given at once, then the
         // person's until they answer — or until the worker or its pane goes,
-        // when it is let go with nobody told. A worker gone before the person
-        // ever saw the question does not take the card with it: the pane still
-        // asks, so it is raised (t-85327, t-84343 r1 P3-1).
+        // when the person is told nothing more. A worker gone before the
+        // person ever saw the question does not take the card with it: the
+        // pane still asks, so it is raised (t-85327, t-84343 r1 P3-1). A pane
+        // that moved past it before the person ever saw it leaves the
+        // coordinator believing the person holds it: it is told the question
+        // passed (t-85293 r2 P2-1), as a numbered answer to it is.
         Standing::Answered(words) if hands_to_person(words) => {
-            return if passed || (raised && seat.is_none()) {
+            return if passed && !raised {
+                Step::RefusePassed
+            } else if passed || (raised && seat.is_none()) {
                 Step::Forget
             } else if raised {
                 Step::Wait

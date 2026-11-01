@@ -675,7 +675,11 @@ fn a_press_types_no_esc_into_a_turn_that_began_while_it_waited_for_the_legend() 
         crate::orchestration::pane_turn_began(stood.host.worker_term, stood.began + 6_000);
     });
     assert_eq!(answer.err(), Some(PressRefused::Door("picker_missing")));
-    assert_eq!(sent, [CLAUDE_EFFORT_PICKER.open, "\r"], "no Esc into a turn");
+    assert_eq!(
+        sent,
+        [CLAUDE_EFFORT_PICKER.open, "\r"],
+        "no Esc into a turn"
+    );
 }
 
 /// t-85293 r2 (P3-4, the press's side): the person's words on the line are
@@ -747,5 +751,8 @@ fn a_press_on_the_persons_stopped_pane_with_a_shell_in_front_types_nothing() {
         press(&stood.host, term, tail.as_deref(), "high").err(),
         Some(PressRefused::Stuck(Stuck::ShellInFront))
     );
-    assert!(stood.host.typed_at(term).is_empty(), "nothing went to the shell");
+    assert!(
+        stood.host.typed_at(term).is_empty(),
+        "nothing went to the shell"
+    );
 }

@@ -636,7 +636,10 @@ fn advance(
                     // Whatever the command opened without its legend is closed,
                     // as a person's press closes it — at a pane between turns
                     // only: an Esc into a turn stops it (t-81861).
+                    // And over an empty line: the person's own words there are
+                    // theirs, and an Esc may clear them (t-85293 r2 P3-4).
                     if look.at_rest
+                        && !host.line_holds_a_draft(look.pane.term)
                         && let Some(keys) = keys
                     {
                         host.send(look.pane.term, keys.cancel);
@@ -908,7 +911,13 @@ fn moment(
         // A turn the person stopped by hand guards what the window types
         // unasked; a press is asked, and on the person's own pane — no worker
         // the ledger seated — it is theirs to make (t-81861, P3-2).
-        Err(ComposerBusy::HeldByPerson) if !seated => {}
+        // The shell check the other road makes is made here too: the person
+        // who stopped the turn may have quit the agent since (t-85293 r2 P3-3).
+        Err(ComposerBusy::HeldByPerson) if !seated => {
+            if host.shell_in_front(term) {
+                return Err(Stuck::ShellInFront);
+            }
+        }
         Err(busy) => {
             return Err(match busy {
                 ComposerBusy::NeverHeard => Stuck::NeverHeard,
@@ -1057,7 +1066,7 @@ pub(crate) fn press(
     })
     .transpose()?
     .flatten();
-    let carried = carry(host, term, &keys);
+    let carried = carry(host, term, worker.is_some(), &keys);
     // A press the door refused gives the pane back as it stood — no pane
     // of the person's when no earlier press had made it one.
     with_pressed(held.as_ref(), |pressed| match (&carried, before) {
@@ -1104,9 +1113,27 @@ fn with_pressed<R>(
     })
 }
 
+/// Whether an Esc at `term` closes a menu and does no more: between turns,
+/// by the reading every door that types unasked makes, with the agent in
+/// front, over an empty line. A pane the person stopped by hand counts as
+/// between turns when no worker is seated there ([`moment`]'s rule).
+fn closing_is_safe(host: &dyn Host, term: u32, seated: bool) -> bool {
+    let heard = super::pane_turns()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .get(&term)
+        .copied();
+    let at_rest = match composer_at_rest(host, term, heard) {
+        Ok(()) => true,
+        Err(ComposerBusy::HeldByPerson) if !seated => !host.shell_in_front(term),
+        Err(_) => false,
+    };
+    at_rest && !host.line_holds_a_draft(term)
+}
+
 /// Type a press's keys at `term`: the line, or the picker's command and,
 /// once its legend shows, the arrows and the this-session key.
-fn carry(host: &dyn Host, term: u32, keys: &PressKeys) -> Result<(), PressRefused> {
+fn carry(host: &dyn Host, term: u32, seated: bool, keys: &PressKeys) -> Result<(), PressRefused> {
     let line = match keys {
         PressKeys::Line(line) => line.as_str(),
         PressKeys::Picker { keys, .. } => keys.open,
@@ -1129,13 +1156,12 @@ fn carry(host: &dyn Host, term: u32, keys: &PressKeys) -> Result<(), PressRefuse
         if since.elapsed() > wait {
             // Whatever the command opened without its legend is closed, so
             // no picker stands open that nobody drives — at a pane still
-            // between turns only: an Esc into a turn stops it.
-            let heard = super::pane_turns()
-                .lock()
-                .unwrap_or_else(|held| held.into_inner())
-                .get(&term)
-                .copied();
-            if composer_at_rest(host, term, heard).is_ok() {
+            // between turns only: an Esc into a turn stops it. The same
+            // reading the press began on ([`moment`]): a pane the person
+            // stopped by hand is theirs to close the menu on, no worker's;
+            // and their words on the line stay unless the Esc is known not
+            // to clear them (t-85293 r2 P3-2, P3-4).
+            if closing_is_safe(host, term, seated) {
                 host.send(term, keys.cancel);
             }
             return Err(PressRefused::Door(door_outcome::PICKER_MISSING));

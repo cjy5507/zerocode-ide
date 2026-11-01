@@ -706,6 +706,32 @@ async function ackInboxBatch(item, pressed) {
   }
 }
 
+/* The one sentence a refused reply or close shows (t-85293 r2 P2-2). It tells the person to press again
+ * only for a refusal pressing again can lift (the ledger's runtime not up yet). A question whose asker
+ * is gone cannot be answered, so the sentence names the way out the page offers (close it without an
+ * answer); a window that holds no seat of the run says where to go instead; any other refusal says no
+ * way, and the ledger's own words are the line's hover. The words matched are the ledger's and the
+ * desk's own refusals (orchestration.rs `unroutable address`, desk.rs `as_the_coordinator`). */
+function inboxRefusal(act, words) {
+  const reply = act === "reply";
+  if (/unroutable address/.test(words) && reply) {
+    return t("inbox.reply.refusedGone", "답을 보내지 못했습니다 — 질문한 판이 사라졌습니다. 「답 없이 닫기」로 닫을 수 있습니다.");
+  }
+  if (/coordinator seat/.test(words)) {
+    return reply
+      ? t("inbox.reply.refusedSeat", "답을 보내지 못했습니다 — 이 런의 코디 자리를 이 창이 쥐고 있지 않습니다. 코디 자리가 있는 창에서 보내 주세요.")
+      : t("inbox.close.refusedSeat", "답 없이 닫지 못했습니다 — 이 런의 코디 자리를 이 창이 쥐고 있지 않습니다. 코디 자리가 있는 창에서 닫아 주세요.");
+  }
+  if (/runtime unavailable/.test(words)) {
+    return reply
+      ? t("inbox.reply.refusedRetry", "답을 보내지 못했습니다 — 잠시 뒤 다시 눌러 주세요.")
+      : t("inbox.close.refusedRetry", "답 없이 닫지 못했습니다 — 잠시 뒤 다시 눌러 주세요.");
+  }
+  return reply
+    ? t("inbox.reply.refused", "답을 보내지 못했습니다 — 까닭은 이 줄에 포인터를 올리면 보입니다.")
+    : t("inbox.close.refused", "답 없이 닫지 못했습니다 — 까닭은 이 줄에 포인터를 올리면 보입니다.");
+}
+
 async function sendInboxReply(item) {
   const draft = item && inboxDraft(item.id);
   const body = draft?.text.trim() ?? "";
@@ -724,7 +750,7 @@ async function sendInboxReply(item) {
     void refreshInbox();
   } catch (error) {
     // The name stays: pressing again replays the one receipt rather than writing a second answer.
-    draft.error = t("inbox.reply.refused", "답을 보내지 못했습니다 — 잠시 뒤 다시 눌러 주세요.");
+    draft.error = inboxRefusal("reply", String(error));
     draft.errorRaw = String(error);
   } finally {
     draft.sending = false;
@@ -760,7 +786,7 @@ async function closeInboxQuestion(item) {
   } catch (error) {
     // The name stays: pressing again replays the one receipt rather than closing twice. The page says one
     // sentence; the ledger's own words are its hover.
-    closing.error = t("inbox.close.refused", "답 없이 닫지 못했습니다 — 잠시 뒤 다시 눌러 주세요.");
+    closing.error = inboxRefusal("close", String(error));
     closing.errorRaw = String(error);
   } finally {
     closing.sending = false;

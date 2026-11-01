@@ -22762,7 +22762,7 @@ mod tests {
     }
 
     /// The words the inbox page asks the catalog for.
-    const INBOX_KEYS: [&str; 41] = [
+    const INBOX_KEYS: [&str; 46] = [
         "inbox.title",
         "inbox.tabs.label",
         "inbox.tab.all",
@@ -22803,7 +22803,12 @@ mod tests {
         "inbox.answered",
         "inbox.note.answered",
         "inbox.close.refused",
+        "inbox.close.refusedSeat",
+        "inbox.close.refusedRetry",
         "inbox.reply.refused",
+        "inbox.reply.refusedGone",
+        "inbox.reply.refusedSeat",
+        "inbox.reply.refusedRetry",
     ];
 
     /// The length of a close's reason is one number (t-84271 ①): the ledger's
