@@ -382,7 +382,7 @@ export async function testInbox(browser, origin, standBackend, ok) {
     view.querySelector('[data-inbox-act="close"]')?.click();
     await new Promise((resolve) => setTimeout(resolve, 50));
     const refused = view.querySelector(".inbox-close .inbox-error")?.textContent ?? "";
-    const refusedTitle = view.querySelector(".inbox-close .inbox-error")?.title ?? "";
+    const refusedTitle = view.querySelector(".inbox-close .inbox-error")?.dataset.tip ?? "";
     view.querySelector('[data-inbox-act="close"]')?.click();
     await new Promise((resolve) => setTimeout(resolve, 50));
     return {

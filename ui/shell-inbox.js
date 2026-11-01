@@ -65,6 +65,13 @@ const inboxRead = new Set();
  * replays one receipt. */
 const inboxDrafts = new Map();
 const inboxCloses = new Map();
+/* The one delegated tooltip's text on a node (`data-tip`): the ledger's own words behind a sentence of ours, or
+ * none. */
+function setTip(node, words) {
+  if (words) node.dataset.tip = words;
+  else delete node.dataset.tip;
+}
+
 /* The longest reason a close takes, in characters: the ledger's `QUESTION_CLOSE_REASON_MAX`, which the desk's
  * command refuses past too. A source contract holds the three to one number (t-84271). */
 const INBOX_CLOSE_REASON_MAX = 200;
@@ -590,7 +597,7 @@ function paintInboxPreview(view, item, now) {
   }
   const error = reply.querySelector(".inbox-error");
   writeTextContent(error, draft?.error ?? "");
-  error.title = draft?.errorRaw ?? "";
+  setTip(error, draft?.errorRaw ?? "");
   writeHidden(error, !draft?.error);
 
   const act = (name) => detail.querySelector(`[data-inbox-act="${name}"]`);
@@ -603,7 +610,7 @@ function paintInboxPreview(view, item, now) {
   }
   const closeError = close.querySelector(".inbox-error");
   writeTextContent(closeError, closing?.error ?? "");
-  closeError.title = closing?.errorRaw ?? "";
+  setTip(closeError, closing?.errorRaw ?? "");
   writeHidden(closeError, !closing?.error);
   const closeButton = act("close");
   writeDisabled(closeButton, Boolean(closing?.sending));
