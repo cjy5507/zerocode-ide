@@ -39,7 +39,10 @@ export async function countScheduleOverReplay(browser, origin, replay, source = 
       // Every zoom the schedule of that tree has: day and week before the change, 「지금 앞뒤」 too after it.
       for (const zoom of Object.keys(BOARD_SCHEDULE.zooms)) {
         const choice = { zoom, folded: new Set(), opened: new Set(), log: null };
-        const model = boardScheduleModel(answer, replay.tasks, replay.now_ms, choice, 900);
+        // A schedule from before the calendar (t-84802) still takes the axis's width as its fifth argument.
+        const model = boardScheduleModel.length > 4
+          ? boardScheduleModel(answer, replay.tasks, replay.now_ms, choice, 900)
+          : boardScheduleModel(answer, replay.tasks, replay.now_ms, choice);
         const workers = model.groups.find((group) => group.id === "workers");
         const rows = workers.rows.filter((row) => row.depth === 0);
         const ended = rows.filter((row) => row.state === "done" || row.state === "failed");
