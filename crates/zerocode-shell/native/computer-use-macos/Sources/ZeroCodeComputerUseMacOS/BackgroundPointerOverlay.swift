@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import QuartzCore
 import ZeroCodeComputerUseMacOSCore
 
 @MainActor
@@ -19,19 +20,22 @@ final class BackgroundPointerOverlay {
     nonisolated(unsafe) private static var displayed: [String: WindowPointerAnchor] = [:]
     nonisolated(unsafe) private static var presentationQueued = false
     private var slots: [String: Slot] = [:]
-    private var activationObserver: NSObjectProtocol?
     private static let arrowSize = CGSize(width: 28, height: 34)
+    /// How long a pointer stays after its agent's last act: long enough to see where
+    /// it is working between one act and the next.
+    private static let staysSeconds = 5
+    /// How long it takes to move to the next act. The act does not wait for it.
+    private static let glideSeconds: TimeInterval = 0.25
+    /// Where it first comes from, so its first act is seen as movement too.
+    private static let firstApproach = CGSize(width: -60, height: 60)
+    /// Over a window the person has covered it shows the agent is there, without
+    /// reading as something happening in what they are looking at.
+    private static let coveredAlpha: CGFloat = 0.55
     /// More pointers than this tell a person nothing: the oldest gives way.
     private static let maxPointers = 8
     nonisolated private static let unnamedAgent = ""
 
-    private init() {
-        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.clearAll() }
-        }
-    }
+    private init() {}
 
     nonisolated static func owns(_ info: [String: Any]) -> Bool {
         guard info[kCGWindowOwnerPID as String] as? pid_t == getpid(),
@@ -95,10 +99,7 @@ final class BackgroundPointerOverlay {
         let cocoaPoint = CGPoint(x: anchor.point.x, y: displayHeight - anchor.point.y)
         let size = PointerView.size(arrow: Self.arrowSize, agent: agent)
         guard !OperatorGuardHost.isStopped(),
-              NSWorkspace.shared.frontmostApplication?.processIdentifier != anchor.pid,
               NSScreen.screens.contains(where: { $0.frame.contains(cocoaPoint) }),
-              DesktopSelf.ownerPid(at: anchor.point) == anchor.pid,
-              anchor.visible(in: Self.windows(), ignoringWindowIDs: Self.windowIDs()),
               let frame = anchor.panelFrame(mainDisplayHeight: displayHeight, size: size)
         else {
             clear(agent: agent)
@@ -114,7 +115,8 @@ final class BackgroundPointerOverlay {
         if let panel = slot.panel {
             shown = panel
         } else {
-            shown = PointerPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
+            let arrivesFrom = frame.offsetBy(dx: Self.firstApproach.width, dy: Self.firstApproach.height)
+            shown = PointerPanel(contentRect: arrivesFrom, styleMask: [.borderless, .nonactivatingPanel],
                                  backing: .buffered, defer: false)
             shown.isOpaque = false
             shown.backgroundColor = .clear
@@ -123,7 +125,9 @@ final class BackgroundPointerOverlay {
             shown.hidesOnDeactivate = false
             shown.isReleasedWhenClosed = false
             shown.level = .floating
-            shown.collectionBehavior = [.transient, .ignoresCycle, .fullScreenAuxiliary]
+            // The person's to see, and no part of what an agent reads off the screen.
+            shown.sharingType = .none
+            shown.collectionBehavior = [.transient, .ignoresCycle, .fullScreenAuxiliary, .canJoinAllSpaces]
             shown.contentView = PointerView(frame: CGRect(origin: .zero, size: size), agent: agent)
             shown.setAccessibilityElement(false)
             slot.panel = shown
@@ -132,19 +136,26 @@ final class BackgroundPointerOverlay {
         Self.identityLock.lock()
         Self.pointerWindowIDs.insert(windowID)
         Self.identityLock.unlock()
-        shown.setFrame(frame, display: true)
+        let inView = DesktopSelf.ownerPid(at: anchor.point) == anchor.pid
+            && anchor.visible(in: Self.windows(), ignoringWindowIDs: Self.windowIDs())
+        shown.alphaValue = inView ? 1 : Self.coveredAlpha
         shown.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.glideSeconds
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            shown.animator().setFrame(frame, display: true)
+        }
         Self.identityLock.lock()
         Self.displayed[agent] = shown.isVisible ? anchor : nil
         Self.identityLock.unlock()
         if let expiry = slot.expiry {
-            expiry.schedule(deadline: .now() + .seconds(1))
+            expiry.schedule(deadline: .now() + .seconds(Self.staysSeconds))
         } else {
             let expiry = DispatchSource.makeTimerSource(queue: .main)
             expiry.setEventHandler { [weak self] in
                 MainActor.assumeIsolated { self?.clear(agent: agent) }
             }
-            expiry.schedule(deadline: .now() + .seconds(1))
+            expiry.schedule(deadline: .now() + .seconds(Self.staysSeconds))
             expiry.resume()
             slot.expiry = expiry
         }

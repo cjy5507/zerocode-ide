@@ -1,6 +1,6 @@
 # Looking: what a repeated look proves, `observe`, `--diff`, `watch`, marks
 
-Read this when you look at a window, a tab or the screen and must judge what the look shows: the bounds on unchanged looks, the purple pointer, `--no-screenshot`, OCR, `observe --diff --settle`, `watch`, marks. The text was moved here word for word from the former single-file guide.
+Read this when you look at a window, a tab or the screen and must judge what the look shows: the bounds on unchanged looks, the agents' pointers, `--no-screenshot`, OCR, `observe --diff --settle`, `watch`, marks. The text was moved here word for word from the former single-file guide.
 
 Where a paragraph below says "above" or "below", it means the whole guide, which is now split over several files: the table in `SKILL.md` says which file holds what.
 
@@ -30,11 +30,12 @@ A recipe never watches the person's pointer: it goes on when they move it, and
 they stop it with the stop chord or the band. Under background-only policy each
 desktop input is admitted independently and an unsupported step stops.
 
-Accepted macOS background clicks and scrolls update a separate purple pointer
-on the visible part of the target window. It cannot take keyboard focus or
-receive mouse input. Target visibility and geometry are checked before it is
-shown; stopping or changing the foreground clears it, and it expires when
-idle. The helper status reports its latest accepted
+Every accepted macOS background act moves a separate pointer to where it
+happened, in the agent's own colour with its name, so a person can watch several
+agents at once. It is faint over a window they have covered. It cannot take
+keyboard focus or receive mouse input, and agents' screen captures leave it out.
+A stop clears it, and it goes 5 s after the agent's last act. The helper status
+reports its latest accepted
 window-local point separately from the point actually displayed; neither is
 the person's hardware cursor. This indicator is not a separate desktop or a
 claim that the task succeeded.

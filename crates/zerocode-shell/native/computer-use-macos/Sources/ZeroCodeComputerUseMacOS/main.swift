@@ -840,6 +840,25 @@ final class Provider {
         return result
     }
 
+    private static let actsWithNoPoint: Set<String> = ["typeText", "pasteText", "pressKey", "hotkey", "setValue", "performSecondaryAction"]
+
+    /// Where an act with no point of its own happens, so a person can see it: the
+    /// control it names, else the focus. Clicks and scrolls show their own point.
+    private func showPointerForKeys(params: [String: JSONValue], look: Snapshot) {
+        guard Self.actsWithNoPoint.contains(params["method"]?.string ?? "") else { return }
+        let pid = look.app.pid
+        let named = (try? optionalInteger(params, "elementIndex")).flatMap { $0 }.flatMap { index in
+            look.elements[index] ?? knownRecord(pid: pid, index: index)
+        }
+        let frame = named.flatMap { absoluteFrame($0.element) } ?? appFocusedElement(pid).flatMap { absoluteFrame($0) }
+        let bounds = DesktopWindows.bounds(windowId: look.windowId, ownerPid: pid) ?? look.windowBounds
+        var point = CGPoint(x: bounds.midX, y: bounds.midY)
+        if let frame, bounds.contains(CGPoint(x: frame.midX, y: frame.midY)) {
+            point = CGPoint(x: frame.midX, y: frame.midY)
+        }
+        BackgroundPointerOverlay.show(pid: pid, windowID: look.windowId, bounds: bounds, point: point, agent: RequestContext.current.agent)
+    }
+
     private func actionResult(params: [String: JSONValue], action runAction: () throws -> [String: Any]) throws -> [String: Any] {
         let foreground = params["background"]?.bool == true ? NSWorkspace.shared.frontmostApplication?.processIdentifier : nil
         // What the window showed before the act, to tell what the act changed.
@@ -851,6 +870,7 @@ final class Provider {
             action["appActionMs"] = RequestContext.current.appActionMs as Any
         }
         if RequestContext.current.borrowed { action["borrowedDesktop"] = true }
+        if params["background"]?.bool == true, let before { showPointerForKeys(params: params, look: before) }
         func settleDelivery(effectSeen: Bool) {
             let verified = (action["verification"] as? [String: Any])?["state"] as? String == "verified"
             let delivery = ActionDelivery.finished(readBackVerified: verified, effectSeen: effectSeen)
@@ -1072,7 +1092,9 @@ final class Provider {
     private func requireShownBeforeThisWalk(params: [String: JSONValue], cached: Snapshot?) throws {
         let requested = try requestedNumbers(params)
         guard !requested.isEmpty, try markPin(params) == nil else { return }
-        let pid = try cached?.app.pid ?? resolveApp(try requiredString(params, "app")).pid
+        // A look at a process that has ended says nothing about the one running now.
+        let looked = cached.flatMap { $0.app.app.isTerminated ? nil : $0.app.pid }
+        let pid = try looked ?? resolveApp(try requiredString(params, "app")).pid
         try requireShownToThisAgent(requested, pid: pid)
         for index in requested where knownRecord(pid: pid, index: index) == nil {
             throw staleElement(index)
@@ -1191,6 +1213,7 @@ final class Provider {
         guard ["click", "performSecondaryAction", "setValue"].contains(method),
               let index = try optionalInteger(params, "elementIndex"),
               let cached = try cachedSnapshot(params: params),
+              !cached.app.app.isTerminated,
               let record = cached.elements[index] ?? knownRecord(pid: cached.app.pid, index: index)
         else { return }
         let waitMs = min(try optionalInteger(params, "timeoutMs") ?? Actionability.defaultWaitMs, Actionability.longestWaitMs)
