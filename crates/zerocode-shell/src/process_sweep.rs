@@ -57,8 +57,42 @@ pub(crate) fn carry(
 
 /// The worker checkouts this call reads: the ask's, less each that is or
 /// holds a coordinator's tree.
+///
+/// Paths are read as the system names them (r1-10): `lsof` prints a process's real folder, so a
+/// checkout or a tree told through a link is compared by where the link leads. A checkout whose
+/// folder was made again after its worker began is nobody's (r3w-6).
 fn held_checkouts(ask: &ProcessSweepAsk, coordinator_trees: &[String]) -> Vec<Checkout> {
-    sweep::outside(ask.checkouts().to_vec(), coordinator_trees)
+    let trees: Vec<String> = coordinator_trees.iter().map(|tree| real(tree)).collect();
+    let told: Vec<Checkout> = ask
+        .checkouts()
+        .iter()
+        .filter(|checkout| !made_again(checkout))
+        .map(|checkout| Checkout {
+            path: real(&checkout.path),
+            ..checkout.clone()
+        })
+        .collect();
+    sweep::outside(told, &trees)
+}
+
+/// `path` as the file system spells it, links resolved; as told when it cannot be read (a folder
+/// gone, a path the system does not know), which compares as before.
+fn real(path: &str) -> String {
+    std::fs::canonicalize(path).map_or_else(
+        |_| path.to_string(),
+        |real| real.to_string_lossy().into_owned(),
+    )
+}
+
+/// Whether the folder now at the checkout's path was born after the worker that reported it began.
+/// A birth the system does not say counts as not made again, which is the reading before this.
+fn made_again(checkout: &Checkout) -> bool {
+    let born = std::fs::metadata(&checkout.path)
+        .and_then(|held| held.created())
+        .ok()
+        .and_then(|born| born.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|since| i64::try_from(since.as_millis()).ok());
+    born.is_some_and(|born| sweep::recreated(born, checkout.started_ms))
 }
 
 /// The tree each live coordinator seat (`team/pane`) stands in, as the window

@@ -115,12 +115,18 @@ pub(super) fn scan_listeners() -> Option<String> {
     None
 }
 
+/// How long one `lsof` may take (r3w-4). The window answers a coordinator within
+/// `zerocode_hookd::TEAM_DEADLINE` (10 s) and `process-sweep` reads the table and the places in
+/// that time, so a machine whose `lsof` hangs on a stalled mount is answered as "unread" — no
+/// places, no listeners, a checkout kept — not waited on.
+#[cfg(target_os = "macos")]
+const LSOF_WITHIN: std::time::Duration = std::time::Duration::from_secs(4);
+
 #[cfg(target_os = "macos")]
 pub(super) fn run_lsof(args: &[&str]) -> Option<String> {
-    let output = crate::proc::quiet_command("lsof")
-        .args(args)
-        .output()
-        .ok()?;
+    let mut command = crate::proc::quiet_command("lsof");
+    command.args(args);
+    let output = crate::proc::output_within(command, LSOF_WITHIN)?;
     // lsof exits non-zero when it merely had nothing to report, so the status
     // is not the test — whether it wrote anything is.
     Some(String::from_utf8_lossy(&output.stdout).into_owned())

@@ -516,14 +516,36 @@ pub fn owner<'a>(cwd: &str, checkouts: &'a [Checkout]) -> Option<&'a Checkout> {
 
 /// The asking command's own rows hold the needle too (`zerocode-orc
 /// process-sweep --find cargo` contains `cargo`); they are not candidates.
+///
+/// Only that row is hidden (r1-1): a word that is exactly the verb, right after a word that names
+/// the orchestration command (`zerocode-orc`, with or without a shim's `sh` and a folder before
+/// it). A build whose folder, package or test filter happens to spell `process-sweep` is a process
+/// a list must show.
 fn is_candidate(row: &ProcessRow, needle: &str) -> bool {
-    row.args.contains(needle) && !row.args.contains(VERB)
+    row.args.contains(needle) && !is_asking_command(&row.args)
 }
 
-/// Whether a folder born at `born_ms` was made after the worker that reported it began.
+fn is_asking_command(args: &str) -> bool {
+    let mut words = args.split_whitespace();
+    let names_the_command = |word: &str| {
+        Path::new(word)
+            .file_name()
+            .is_some_and(|name| name == crate::agent_shims::ORCHESTRATION_COMMAND)
+    };
+    words.any(names_the_command) && words.next() == Some(VERB)
+}
+
+/// How long after a worker's row began a folder may still be born and be that worker's: the
+/// worktree is cut within moments of the reservation, so a folder born past this is a later one
+/// under the same name.
+pub const CHECKOUT_BORN_GRACE_MS: i64 = 10 * 60 * 1000;
+
+/// Whether a folder born at `born_ms` was made after the worker that reported it began (r3w-6):
+/// the worker's checkout was deleted and a folder of the same name made again, which is nobody's.
+/// A folder born before the row (a tree an attempt inherited) is the worker's.
 #[must_use]
-pub fn recreated(_born_ms: i64, _started_ms: i64) -> bool {
-    false
+pub fn recreated(born_ms: i64, started_ms: i64) -> bool {
+    born_ms > started_ms.saturating_add(CHECKOUT_BORN_GRACE_MS)
 }
 
 /// The pids an end call names, so the window reads where those, and only

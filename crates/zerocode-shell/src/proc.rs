@@ -164,12 +164,56 @@ fn resolve_on_path(program: &OsStr, path: &OsStr) -> std::path::PathBuf {
         })
 }
 
+/// 폴링 간격 — 자식이 끝났는지 이만큼마다 본다.
+const OUTPUT_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// 자식을 `within` 안에 끝내고 출력을 돌려준다. 그 안에 안 끝나면 자식을 죽이고 `None`.
+///
+/// 종료 코드는 보지 않는다 — 시간 안에 끝났으면 0이 아니어도 출력을 돌려준다(`lsof` 는 보고할
+/// 것이 없을 때 0이 아닌 코드로 끝난다). 창의 답이 한 자식을 영원히 기다리지 않게 하는 문이다.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn output_within(
     mut command: std::process::Command,
-    _within: std::time::Duration,
+    within: std::time::Duration,
 ) -> Option<std::process::Output> {
-    command.output().ok()
+    use std::io::Read;
+    use std::process::Stdio;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let mut stderr = child.stderr.take()?;
+    let read_out = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let read_err = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.read_to_end(&mut bytes);
+        bytes
+    });
+    let deadline = std::time::Instant::now() + within;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(OUTPUT_POLL),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = read_out.join();
+                let _ = read_err.join();
+                return None;
+            }
+        }
+    };
+    Some(std::process::Output {
+        status,
+        stdout: read_out.join().ok()?,
+        stderr: read_err.join().ok()?,
+    })
 }
 
 #[cfg(test)]

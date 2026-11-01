@@ -8098,6 +8098,7 @@ version = "1.1.112"
 dependencies = [
  "criterion",
  "judgment-provider",
+ "libc",
  "model-prices",
  "nix 0.29.0",
  "regex",

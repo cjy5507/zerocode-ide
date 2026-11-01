@@ -3367,7 +3367,13 @@ mod tests {
                 "-File",
             ])
             .arg(&shim)
-            .args(["send", "--type", "note", "--body", "run `ls` and $(pwd) now"])
+            .args([
+                "send",
+                "--type",
+                "note",
+                "--body",
+                "run `ls` and $(pwd) now",
+            ])
             .env("PORT_V", port.to_string())
             .env("TOKEN_V", "tok")
             .env(TEAM_ID_VAR, "team-1")

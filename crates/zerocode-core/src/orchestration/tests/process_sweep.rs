@@ -1013,7 +1013,11 @@ fn only_the_asking_command_is_hidden_from_its_own_list() {
     let table = vec![
         row(10, 1, "sh /shims/zerocode-orc process-sweep --find cargo"),
         row(11, 1, "zerocode-orc process-sweep --find cargo"),
-        row(12, 1, "/usr/local/bin/zerocode-orc process-sweep --kill 5@abc --find cargo"),
+        row(
+            12,
+            1,
+            "/usr/local/bin/zerocode-orc process-sweep --kill 5@abc --find cargo",
+        ),
         row(
             20,
             1,
@@ -1035,9 +1039,15 @@ fn a_folder_born_long_after_the_worker_began_is_not_its_checkout() {
     use crate::orchestration::process_sweep::recreated;
     let began = 1_000_000_000_000;
     let minute = 60_000;
-    assert!(!recreated(began - 5 * minute, began), "born before the row: an inherited tree");
+    assert!(
+        !recreated(began - 5 * minute, began),
+        "born before the row: an inherited tree"
+    );
     assert!(!recreated(began, began));
-    assert!(!recreated(began + minute, began), "cut a moment after the reservation");
+    assert!(
+        !recreated(began + minute, began),
+        "cut a moment after the reservation"
+    );
     assert!(recreated(began + 60 * minute, began));
     assert!(recreated(began + 3 * 24 * 60 * minute, began));
 }

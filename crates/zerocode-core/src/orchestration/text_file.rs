@@ -25,6 +25,7 @@ pub const TEXT_FILE_FLAGS: &[(&str, &str)] = &[
     ("--question-file", "--question"),
     ("--resolution-file", "--resolution"),
     ("--reason-file", "--reason"),
+    ("--why-file", "--why"),
 ];
 
 /// What inline text holding one of these may have been through before the window saw it: a shell
@@ -33,11 +34,17 @@ pub const SHELL_RUNS: &[&str] = &["`", "$("];
 
 /// The sentence the shim says once for an inline text holding [`SHELL_RUNS`]. It carries no
 /// apostrophe, so both shims can quote it in single quotes and no shell reads it as a command.
+///
+/// It does not say the shell ran the text: a shim sees only the words the shell had already made,
+/// so a backtick that survived to here sat in single quotes or was escaped, and one that sat in
+/// double quotes was run and is gone. The shim cannot tell the two apart, so the sentence names the
+/// one road no shell reads — the file — instead of guessing which this was (t-80980 6).
 pub fn inline_warning() -> String {
     let files: Vec<&str> = TEXT_FILE_FLAGS.iter().map(|(file, _)| *file).collect();
     format!(
-        "warning: a text holds a backtick or $( - the shell may already have run it \
-         before this verb saw it; give the text as a file with {} instead",
+        "warning: a text holds a backtick or $( - inside double quotes the shell has already run \
+         it, and this shim cannot tell whether that happened; to be sure no shell reads a text, \
+         give it as a file with {} instead",
         files.join(", ")
     )
 }
@@ -127,13 +134,22 @@ pub fn expand(argv: &[String]) -> Result<Cow<'_, [String]>, String> {
     Ok(Cow::Owned(expanded))
 }
 
-/// A file's text, whole, as it lies: a plain file by its absolute path, UTF-8, not past the prose
-/// bound, with something in it.
+/// A file's text, whole: a plain file by its absolute path, UTF-8, not past the prose bound, with
+/// something in it. A leading byte-order mark is not part of the text and a Windows line end
+/// (`\r\n`) arrives as `\n`; nothing else is changed.
 ///
-/// Absolute because the window reads it from its own folder, not the caller's. A link is not
-/// followed — the window opens what the caller names, and a link is a way to name something
-/// else — the rule a worker's receipt file is read by. A file past the bound is refused whole,
-/// because a cut briefing is one nobody wrote.
+/// Absolute because the window reads it from its own folder, not the caller's. A link at the end
+/// of the path is not followed — the window opens what the caller names, and a link is a way to
+/// name something else — the rule a worker's receipt file is read by. A link in a folder above
+/// the file is followed: that folder is part of where the caller says the file is. A file past
+/// the bound is refused whole, because a cut briefing is one nobody wrote.
+///
+/// The name is opened once and everything after asks the open file, not the name, so a file
+/// swapped between a look and the read — for a link, a pipe, or a file that grew — is the file or
+/// the refusal, never a half of each. No folder scope is checked: the caller is an agent that can
+/// already read any file it names, so a list of folders would stop no read and block the
+/// legitimate ones outside it (scratch, reports, another data root) (t-80980 9, decided
+/// 2026-11-02 by the coordinator).
 fn read_text_file(flag: &str, path: &str) -> Result<String, String> {
     if path.is_empty() {
         return Err(format!("{flag} needs a path"));
@@ -145,33 +161,83 @@ fn read_text_file(flag: &str, path: &str) -> Result<String, String> {
         ));
     }
     let unreadable = |why: &dyn std::fmt::Display| format!("{flag} {path:?} cannot be read: {why}");
-    let held = std::fs::symlink_metadata(path).map_err(|why| unreadable(&why))?;
+    let not_plain = || {
+        format!(
+            "{flag} {path:?} is not a plain file — a link or a folder is not followed (a link as \
+             the last part of the path is refused; one in a folder above it is read)"
+        )
+    };
+    if std::fs::symlink_metadata(path).is_ok_and(|named| !named.is_file()) {
+        return Err(not_plain());
+    }
+    let file = open_plain(Path::new(path)).map_err(|why| {
+        // The name may have become a link since the look above; the open refuses it.
+        match std::fs::symlink_metadata(path) {
+            Ok(named) if !named.is_file() => not_plain(),
+            _ => unreadable(&why),
+        }
+    })?;
+    let held = file.metadata().map_err(|why| unreadable(&why))?;
     if !held.is_file() {
-        return Err(format!(
-            "{flag} {path:?} is not a plain file — a link or a folder is not followed"
-        ));
+        return Err(not_plain());
     }
+    let past = |size: &dyn std::fmt::Display| {
+        format!(
+            "{flag} {path:?} is {size} bytes and a text holds {MAX_PROSE} — nothing was written, \
+             so give a shorter file"
+        )
+    };
     if held.len() > MAX_PROSE as u64 {
+        return Err(past(&held.len()));
+    }
+    let bytes = read_capped(file)
+        .map_err(|why| unreadable(&why))?
+        .ok_or_else(|| past(&format!("more than {MAX_PROSE}")))?;
+    let utf16 = matches!(bytes.as_slice(), [0xff, 0xfe, ..] | [0xfe, 0xff, ..]);
+    let text = String::from_utf8(bytes).map_err(|_| {
+        let hint = if utf16 {
+            " (it starts like UTF-16, which Windows editors write; save it as UTF-8)"
+        } else {
+            ""
+        };
+        format!("{flag} {path:?} is not UTF-8 text{hint} — nothing was written")
+    })?;
+    if text.contains('\0') {
         return Err(format!(
-            "{flag} {path:?} is {} bytes and a text holds {MAX_PROSE} — nothing was written, \
-             so give a shorter file",
-            held.len()
+            "{flag} {path:?} holds a NUL byte, so it is not text — nothing was written"
         ));
     }
-    let bytes = std::fs::read(path).map_err(|why| unreadable(&why))?;
-    let text = String::from_utf8(bytes)
-        .map_err(|_| format!("{flag} {path:?} is not UTF-8 text — nothing was written"))?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     if text.trim().is_empty() {
         return Err(format!("{flag} {path:?} is empty — nothing was written"));
     }
-    Ok(text)
+    Ok(text.replace("\r\n", "\n"))
 }
 
-/// At most [`MAX_PROSE`] bytes of `reader`, or `None` when it holds more.
-fn read_capped(mut reader: impl std::io::Read) -> std::io::Result<Option<Vec<u8>>> {
+/// The file at `path`, opened for reading when it is not a link at its last part and not a pipe
+/// that nobody writes (`O_NOFOLLOW`, `O_NONBLOCK` on Unix). Elsewhere the open follows a link and
+/// the caller's look at the open file is the only check.
+#[cfg(unix)]
+fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::File::options()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+/// At most [`MAX_PROSE`] bytes of `reader`, or `None` when it holds more — read one byte past the
+/// bound, so a file that grew since it was measured is refused and never cut.
+fn read_capped(reader: impl std::io::Read) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
     let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    Ok(Some(bytes))
+    reader.take(MAX_PROSE as u64 + 1).read_to_end(&mut bytes)?;
+    Ok((bytes.len() <= MAX_PROSE).then_some(bytes))
 }
 
 /// Refuse a request that reached the plan with a file flag still in it.
@@ -381,11 +447,16 @@ mod tests {
     #[test]
     fn the_bound_is_in_bytes_the_last_one_in_and_the_next_one_out() {
         let (_in_dir, exact) = written(&vec![b'a'; MAX_PROSE]);
-        let read = expand(&argv(&["send", "--body-file", &exact])).expect("262,144 B fits").into_owned();
+        let read = expand(&argv(&["send", "--body-file", &exact]))
+            .expect("262,144 B fits")
+            .into_owned();
         assert_eq!(read[2].len(), MAX_PROSE);
         let (_out_dir, past) = written(&vec![b'a'; MAX_PROSE + 1]);
         let why = expand(&argv(&["send", "--body-file", &past])).expect_err("262,145 B is past it");
-        assert!(why.contains("--body-file") && why.contains("262145"), "{why}");
+        assert!(
+            why.contains("--body-file") && why.contains("262145"),
+            "{why}"
+        );
     }
 
     #[test]
@@ -398,7 +469,9 @@ mod tests {
     #[test]
     fn a_byte_order_mark_is_not_part_of_the_text() {
         let (_dir, path) = written("\u{feff}첫 줄\n둘째".as_bytes());
-        let read = expand(&argv(&["send", "--body-file", &path])).expect("reads").into_owned();
+        let read = expand(&argv(&["send", "--body-file", &path]))
+            .expect("reads")
+            .into_owned();
         assert_eq!(read[2], "첫 줄\n둘째");
         let (_blank_dir, only_mark) = written("\u{feff}\n".as_bytes());
         let why = expand(&argv(&["send", "--body-file", &only_mark])).expect_err("only a mark");
@@ -408,7 +481,9 @@ mod tests {
     #[test]
     fn a_windows_line_end_arrives_as_a_line_end() {
         let (_dir, path) = written(b"one\r\ntwo\r\n\r\nlone\rcarriage");
-        let read = expand(&argv(&["send", "--body-file", &path])).expect("reads").into_owned();
+        let read = expand(&argv(&["send", "--body-file", &path]))
+            .expect("reads")
+            .into_owned();
         assert_eq!(read[2], "one\ntwo\n\nlone\rcarriage");
     }
 
@@ -431,15 +506,22 @@ mod tests {
         let folder = dir.path().join("folder-link");
         std::os::unix::fs::symlink(dir.path(), &folder).expect("folder link");
         let through = folder.join("text.md").display().to_string();
-        let read = expand(&argv(&["send", "--body-file", &through])).expect("reads").into_owned();
+        let read = expand(&argv(&["send", "--body-file", &through]))
+            .expect("reads")
+            .into_owned();
         assert_eq!(read[2], "text");
     }
 
     #[test]
     fn the_why_of_a_take_comes_as_a_file_too() {
         let (_dir, path) = written("`pkill` $(x)".as_bytes());
-        let read = expand(&argv(&["task-take", "--task", "t-1", "--why-file", &path])).expect("reads").into_owned();
-        assert_eq!(read.as_ref(), argv(&["task-take", "--task", "t-1", "--why", "`pkill` $(x)"]));
+        let read = expand(&argv(&["task-take", "--task", "t-1", "--why-file", &path]))
+            .expect("reads")
+            .into_owned();
+        assert_eq!(
+            read.as_ref(),
+            argv(&["task-take", "--task", "t-1", "--why", "`pkill` $(x)"])
+        );
     }
 
     #[test]
@@ -449,6 +531,9 @@ mod tests {
         assert!(warning.contains("cannot tell"), "{warning}");
         assert!(warning.contains("--body-file"), "{warning}");
         assert!(!warning.contains("may already have run"), "{warning}");
-        assert!(!warning.contains('\''), "both shims quote it in single quotes: {warning}");
+        assert!(
+            !warning.contains('\''),
+            "both shims quote it in single quotes: {warning}"
+        );
     }
 }

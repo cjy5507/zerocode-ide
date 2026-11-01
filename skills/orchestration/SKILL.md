@@ -57,7 +57,8 @@ moment calls for them.
 Each line is the short form of a paragraph below or in a reference file.
 
 1. **A verb's text goes in as a file** (`--prompt-file`, `--body-file`,
-   `--spec-file`, `--question-file`, `--resolution-file`, `--reason-file`),
+   `--spec-file`, `--question-file`, `--resolution-file`, `--reason-file`,
+   `--why-file`),
    written with a quoted heredoc. No backtick, `$(…)` or `$VAR` inside an inline
    double-quoted text: the shell runs it before the verb sees a word. A file
    argument works only on a v1.1.102 or newer window; an older window takes
@@ -175,9 +176,9 @@ that everyone finished at the moment the ledger died. Read the failure as a
 failure.
 
 **Give a verb its text as a file, never inside double quotes.** `--prompt`,
-`--body`, `--spec`, `--question`, `--resolution` and `--reason` each have a
+`--body`, `--spec`, `--question`, `--resolution`, `--reason` and `--why` each have a
 file form — `--prompt-file`, `--body-file`, `--spec-file`, `--question-file`,
-`--resolution-file`, `--reason-file` — that takes the ABSOLUTE path of a UTF-8
+`--resolution-file`, `--reason-file`, `--why-file` — that takes the ABSOLUTE path of a UTF-8
 file and reads it as it lies, with no shell in between. Do not write a
 backtick, `$(…)` or `$VAR` inside an inline double-quoted text: the shell runs
 or replaces it before `zerocode-orc` sees a word. Twice (2026-10-28) a `pkill`
