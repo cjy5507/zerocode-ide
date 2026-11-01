@@ -8880,14 +8880,32 @@ async function askArtifactThumb(node, id) {
   thumb.hidden = false;
 }
 
-/* 미리보기 한 장이 캐시에서 차지하는 글자 수 — 그림의 data URL과 글. */
+/* 미리보기 한 장이 캐시에서 차지하는 바이트 — 본체 캐시가 세는 것(`PreviewPayload::cost`)과 같은 셈: 글은 UTF-8
+ * 바이트(한글 한 글자 셋), 그림의 data URL은 글자 수(ASCII), 증거 요약(`digest`)은 그것이 든 글의 바이트다. 한 장의
+ * 셈은 한 번만 한다 — 캐시를 비울 때 든 것 전부를 다시 세므로(t-84799 g). */
+const artifactPreviewSizes = new WeakMap();
+const artifactPreviewEncoder = new TextEncoder();
+
 function artifactPreviewSize(payload) {
-  return (payload?.data_url?.length ?? 0) + (payload?.text?.length ?? 0);
+  if (payload === null || typeof payload !== "object") return 0;
+  let size = artifactPreviewSizes.get(payload);
+  if (size === undefined) {
+    const bytes = (text) => (typeof text === "string" ? artifactPreviewEncoder.encode(text).length : 0);
+    size = (payload.data_url?.length ?? 0) + bytes(payload.text) +
+      (payload.digest ? bytes(JSON.stringify(payload.digest)) : 0);
+    artifactPreviewSizes.set(payload, size);
+  }
+  return size;
 }
 
 async function askArtifactPreview(id) {
   const held = artifactPreviews.get(id);
-  if (held) return held;
+  if (held) {
+    // Looked at again: to the back of the line, so the cache lets go of the one nobody has looked at lately (t-84799 h).
+    artifactPreviews.delete(id);
+    artifactPreviews.set(id, held);
+    return held;
+  }
   const pending = artifactPreviewAsks.get(id);
   if (pending) return pending;
   const ask = (async () => {
