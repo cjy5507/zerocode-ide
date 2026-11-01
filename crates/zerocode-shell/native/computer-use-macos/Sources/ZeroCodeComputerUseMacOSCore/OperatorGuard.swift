@@ -398,13 +398,36 @@ public protocol HandSleeper: Sendable {
     func wake()
 }
 
-public final class SemaphoreSleeper: HandSleeper {
-    private let semaphore = DispatchSemaphore(value: 0)
+public final class SemaphoreSleeper: HandSleeper, @unchecked Sendable {
+    private let condition = NSCondition()
+    /// Moves at every wake, so every holder asleep hears a stop, and a holder
+    /// about to sleep sees a wake that came just before it.
+    private var wakes: UInt64 = 0
+    private var heard: UInt64 = 0
     public init() {}
     public func sleep(untilNs deadlineNs: UInt64) {
-        _ = semaphore.wait(timeout: DispatchTime(uptimeNanoseconds: deadlineNs))
+        condition.lock()
+        defer { condition.unlock() }
+        // A wake with nobody waiting makes the next wait return early.
+        guard wakes == heard else {
+            heard = wakes
+            return
+        }
+        let start = wakes
+        while wakes == start {
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadlineNs else { return }
+            let seconds = TimeInterval(deadlineNs - now) / 1_000_000_000
+            if !condition.wait(until: Date(timeIntervalSinceNow: seconds)) { return }
+        }
+        heard = wakes
     }
-    public func wake() { semaphore.signal() }
+    public func wake() {
+        condition.lock()
+        wakes &+= 1
+        condition.broadcast()
+        condition.unlock()
+    }
 }
 
 /// The helper's one hand (realtime v1 §5.4): every synthetic event — a
@@ -417,8 +440,14 @@ public final class SemaphoreSleeper: HandSleeper {
 /// ledger and each post, never a wait: a holder sleeps outside it.
 public final class OperatorHand: @unchecked Sendable {
     public enum Owner: Equatable, Sendable {
-        /// One provider request (the verbs a CLI call runs).
+        /// One provider request that uses the shared pointer and keyboard.
+        /// Only one holds the hand at a time.
         case request
+        /// One provider request that stays inside its target app: accessibility
+        /// actions and events posted to that app's window. Several run at once,
+        /// and beside a shared-desktop request, because none of them can reach
+        /// another's window. A stop still ends every one of them.
+        case scoped
         /// A reflex run, by its run id.
         case reflex(String)
     }
@@ -454,6 +483,8 @@ public final class OperatorHand: @unchecked Sendable {
 
     public struct Snapshot: Equatable, Sendable {
         public let holder: Owner?
+        /// How many window-scoped requests hold their own part of the hand.
+        public let scopedHolds: Int
         public let revoked: String?
         public let stopped: String?
         public let held: [HeldInput]
@@ -477,10 +508,13 @@ public final class OperatorHand: @unchecked Sendable {
     public let tag: Int64
     private var lastId: UInt64 = 0
     private var holder: Token?
-    private var revokedReason: String?
+    private var scoped: Set<UInt64> = []
+    /// Why a current hold was taken back, by hold. A hold in here keeps its
+    /// place but presses nothing more.
+    private var revokedHolds: [UInt64: String] = [:]
     private var stoppedReason: String?
-    /// The presses still down, oldest first — only ever the current hold's:
-    /// a hold is let go of whole before the hand changes hands.
+    /// The presses still down, oldest first, each with the hold that pressed
+    /// it: a hold's presses are let go of whole when that hold ends.
     private var held: [Press] = []
     private var pointer: SmoothPointerPath.Point?
     private var posted: UInt64 = 0
@@ -496,30 +530,48 @@ public final class OperatorHand: @unchecked Sendable {
 
     public func nowNs() -> UInt64 { clock.nowNs() }
 
-    /// Take the hand for `owner`, or say who has it or why nobody may.
+    /// Take the hand for `owner`, or say who has it or why nobody may. A
+    /// window-scoped request waits for nobody but a reflex run; a shared-desktop
+    /// request waits for the one before it; a reflex run has the desk alone.
     public func acquire(_ owner: Owner) throws -> Token {
         lock.lock()
         defer { lock.unlock() }
         if let stoppedReason { throw Refusal.stopped(stoppedReason) }
-        if let holder { throw Refusal.busy(holder.owner) }
+        switch owner {
+        case .scoped:
+            if let holder, case .reflex = holder.owner { throw Refusal.busy(holder.owner) }
+        case .request:
+            if let holder { throw Refusal.busy(holder.owner) }
+        case .reflex:
+            if let holder { throw Refusal.busy(holder.owner) }
+            if !scoped.isEmpty { throw Refusal.busy(.scoped) }
+        }
         if unconfirmedReleases > 0 { throw Refusal.releaseUnconfirmed }
         lastId += 1
         let token = Token(id: lastId, owner: owner)
-        holder = token
-        revokedReason = nil
+        if owner == .scoped {
+            scoped.insert(token.id)
+        } else {
+            holder = token
+        }
         return token
     }
 
-    /// Give the hand back; whatever is still held is let go of first.
+    /// Give the hold back; whatever it still holds is let go of first.
     @discardableResult
     public func relinquish(_ token: Token) -> Release {
         lock.lock()
         defer { lock.unlock() }
-        guard holder == token else { return emptyRelease() }
-        let release = releaseHeldLocked()
-        holder = nil
-        revokedReason = nil
+        guard isCurrentLocked(token) else { return emptyRelease() }
+        let release = releaseHeldLocked(of: token.id)
+        if holder == token { holder = nil }
+        scoped.remove(token.id)
+        revokedHolds.removeValue(forKey: token.id)
         return release
+    }
+
+    private func isCurrentLocked(_ token: Token) -> Bool {
+        holder == token || (token.owner == .scoped && scoped.contains(token.id))
     }
 
     /// Post one event for the holder `token`. A release of something this hold
@@ -556,8 +608,10 @@ public final class OperatorHand: @unchecked Sendable {
             try poster.post(event, tag: tag)
         } catch {
             unconfirmedReleases += 1
-            if holder == token, revokedReason == nil { revokedReason = HoldRevocation.releaseUnconfirmed }
-            _ = releaseHeldLocked()
+            if isCurrentLocked(token), revokedHolds[token.id] == nil {
+                revokedHolds[token.id] = HoldRevocation.releaseUnconfirmed
+            }
+            _ = releaseHeldLocked(of: token.id)
             lock.unlock()
             sleeper.wake()
             throw error
@@ -588,8 +642,8 @@ public final class OperatorHand: @unchecked Sendable {
 
     private func refusalLocked(_ token: Token) -> Refusal? {
         if let stoppedReason { return .stopped(stoppedReason) }
-        guard holder == token else { return .notHolder }
-        if let revokedReason { return .revoked(revokedReason) }
+        guard isCurrentLocked(token) else { return .notHolder }
+        if let reason = revokedHolds[token.id] { return .revoked(reason) }
         return nil
     }
 
@@ -604,8 +658,10 @@ public final class OperatorHand: @unchecked Sendable {
         if !(stoppedReason.map(StopReason.isPersons) ?? false) || StopReason.isPersons(reason) {
             stoppedReason = reason
         }
-        if holder != nil, revokedReason == nil { revokedReason = stoppedReason ?? reason }
-        let release = releaseHeldLocked()
+        for hold in [holder?.id].compactMap({ $0 }) + Array(scoped) where revokedHolds[hold] == nil {
+            revokedHolds[hold] = stoppedReason ?? reason
+        }
+        let release = releaseHeldLocked(of: nil)
         lock.unlock()
         sleeper.wake()
         return release
@@ -630,12 +686,12 @@ public final class OperatorHand: @unchecked Sendable {
     @discardableResult
     public func revoke(_ token: Token, reason: String) -> Release {
         lock.lock()
-        guard holder == token else {
+        guard isCurrentLocked(token) else {
             lock.unlock()
             return emptyRelease()
         }
-        if revokedReason == nil { revokedReason = reason }
-        let release = releaseHeldLocked()
+        if revokedHolds[token.id] == nil { revokedHolds[token.id] = reason }
+        let release = releaseHeldLocked(of: token.id)
         lock.unlock()
         sleeper.wake()
         return release
@@ -674,9 +730,11 @@ public final class OperatorHand: @unchecked Sendable {
     public var snapshot: Snapshot {
         lock.lock()
         defer { lock.unlock() }
+        let revoked = holder.flatMap { revokedHolds[$0.id] } ?? scoped.lazy.compactMap { self.revokedHolds[$0] }.first
         return Snapshot(
             holder: holder?.owner,
-            revoked: revokedReason,
+            scopedHolds: scoped.count,
+            revoked: revoked,
             stopped: stoppedReason,
             held: held.compactMap(\.event.holds),
             posted: posted,
@@ -689,14 +747,20 @@ public final class OperatorHand: @unchecked Sendable {
         return Release(released: [], unconfirmed: [], startedNs: now, endedNs: now)
     }
 
-    /// Let go of every held input, newest first — a key before the modifiers
-    /// it was pressed with — each with the modifiers still held after it.
-    private func releaseHeldLocked() -> Release {
+    /// Let go of `hold`'s held input, or of everyone's when `hold` is nil,
+    /// newest first — a key before the modifiers it was pressed with — each
+    /// with the modifiers still held after it.
+    private func releaseHeldLocked(of hold: UInt64?) -> Release {
         let startedNs = clock.nowNs()
         var released: [HeldInput] = []
         var unconfirmed: [HeldInput] = []
         let at = poster.pointerLocation() ?? pointer
+        var kept: [Press] = []
         while let heldPress = held.popLast() {
+            if let hold, heldPress.hold != hold {
+                kept.append(heldPress)
+                continue
+            }
             let press = heldPress.event
             guard let input = press.holds else { continue }
             let flags = held.lazy.filter { $0.event.route == press.route }.reduce(UInt64(0)) { $0 | $1.event.modifierFlag }
@@ -715,6 +779,7 @@ public final class OperatorHand: @unchecked Sendable {
                 unconfirmed.append(input)
             }
         }
+        held = kept.reversed()
         unconfirmedReleases += UInt64(unconfirmed.count)
         return Release(released: released, unconfirmed: unconfirmed, startedNs: startedNs, endedNs: clock.nowNs())
     }

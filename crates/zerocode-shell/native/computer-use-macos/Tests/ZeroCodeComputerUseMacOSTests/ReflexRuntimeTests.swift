@@ -779,13 +779,14 @@ final class ReflexRuntimeTests: XCTestCase {
 
     /// The stop answers while an action in flight holds the provider lock.
     func test_the_stop_road_does_not_wait_for_the_provider_lock() throws {
-        let providerLock = NSLock()
+        let lanes = LaneLocks()
+        let providerLock = lanes.lock(for: "desktop")
         providerLock.lock()
         let answered = DispatchSemaphore(value: 0)
         let answer = Box<[String: Any]>()
         Thread.detachNewThread {
             guard let request = try? JSONDecoder().decode(Request.self, from: Data(#"{"id":7,"method":"stop"}"#.utf8)) else { return }
-            answer.value = handleRequest(provider: Provider(), lock: providerLock, request: request, expectedToken: nil, authorizedPeer: true) as? [String: Any]
+            answer.value = handleRequest(provider: Provider(), lanes: lanes, request: request, expectedToken: nil, authorizedPeer: true) as? [String: Any]
             answered.signal()
         }
         let result = answered.wait(timeout: .now() + 5)

@@ -33,6 +33,19 @@ public enum BackgroundInput {
         return hasApp ? nil : .invalidArgument
     }
 
+    /// Whether the shared desktop can do what the background road just refused.
+    /// A field that cannot be written is the same field with the app in front.
+    public static func foregroundMayTakeOver(method: String, refusal: String) -> Bool {
+        switch refusal {
+        case "requires_foreground", "focus_changed":
+            return true
+        case "value_not_settable":
+            return method == "typeText" || method == "pasteText"
+        default:
+            return false
+        }
+    }
+
     public static func admitsTarget(_ target: Int32, foreground: Int32?) -> Bool {
         guard target > 0, let foreground, foreground > 0 else { return false }
         return target != foreground

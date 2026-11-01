@@ -1,4 +1,5 @@
 import AppKit
+import ZeroCodeComputerUseMacOSCore
 import XCTest
 @testable import ZeroCodeComputerUseMacOS
 
@@ -120,7 +121,8 @@ extension ShareControlPanelTests {
         let params: [String: Any] = ["revision": 100, "generation": 0, "takenBack": false]
         let line = try JSONSerialization.data(withJSONObject: ["id": 1, "method": "sharePanel", "params": params])
         let request = try JSONDecoder().decode(Request.self, from: line)
-        let providerLock = NSLock()
+        let lanes = LaneLocks()
+        let providerLock = lanes.lock(for: "desktop")
         providerLock.lock()
         defer { providerLock.unlock() }
         // A regression to the provider route times out, rather than hanging the suite.
@@ -128,14 +130,14 @@ extension ShareControlPanelTests {
         let answered = DispatchSemaphore(value: 0)
         Thread.detachNewThread {
             guard let threaded = try? JSONDecoder().decode(Request.self, from: line) else { answered.signal(); return }
-            result.value = handleRequest(provider: Provider(), lock: providerLock, request: threaded,
+            result.value = handleRequest(provider: Provider(), lanes: lanes, request: threaded,
                                          expectedToken: nil, authorizedPeer: true) as? [String: Any]
             answered.signal()
         }
         XCTAssertEqual(answered.wait(timeout: .now() + 1), .success)
         let answer = try XCTUnwrap(result.value)
         XCTAssertEqual(answer["ok"] as? Bool, true)
-        let refused = try XCTUnwrap(handleRequest(provider: Provider(), lock: providerLock, request: request,
+        let refused = try XCTUnwrap(handleRequest(provider: Provider(), lanes: lanes, request: request,
                                                  expectedToken: "fixture-token", authorizedPeer: true) as? [String: Any])
         XCTAssertEqual(refused["ok"] as? Bool, false)
     }

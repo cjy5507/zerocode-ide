@@ -31,8 +31,14 @@ public struct WindowPointerAnchor: Equatable, Sendable {
     }
 
     public func visible(in orderedWindows: [Window], ignoringWindowID: UInt32?) -> Bool {
+        visible(in: orderedWindows, ignoringWindowIDs: ignoringWindowID.map { [$0] } ?? [])
+    }
+
+    /// Whether the window stands where it was and nothing else covers the point.
+    /// Agents' pointers are not covers.
+    public func visible(in orderedWindows: [Window], ignoringWindowIDs: Set<UInt32>) -> Bool {
         for window in orderedWindows {
-            if window.id == ignoringWindowID { continue }
+            if ignoringWindowIDs.contains(window.id) { continue }
             if window.id == windowID {
                 return window.pid == pid && window.bounds == bounds && window.alpha > 0
             }
