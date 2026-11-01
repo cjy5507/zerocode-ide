@@ -70,6 +70,7 @@ import { testTabstripOverflow } from "./tabstrip-overflow.mjs";
 import { testNarrowWindow } from "./narrow-window.mjs";
 import { testChromeGeist } from "./chrome-geist.mjs";
 import { testSidebarAria } from "./sidebar-aria.mjs";
+import { testQuestionCloseRows } from "./question-close-rows.mjs";
 import { testPasteRoad } from "./paste-road.mjs";
 import { testTermMouseMotion } from "./term-mouse-motion.mjs";
 import { testFaultReportStorm } from "./fault-report-storm.mjs";
@@ -373,6 +374,8 @@ suite("narrow-window", async ({ browser, origin, ok }) => { await testNarrowWind
 suite("chrome-geist", async ({ browser, origin, ok }) => { await testChromeGeist(browser, origin, ok); });
 // The sidebar list and the tab strip own only what their roles allow (t-88672).
 suite("sidebar-aria", testSidebarAria);
+// A question closes without an answer from the board rows and the sidebar team too (t-88847).
+suite("question-close-rows", testQuestionCloseRows);
 // A paste never stops the window's main thread (t-19409).
 suite("paste-road", ({ browser, origin, ok }) => testPasteRoad(browser, origin, ok));
 // A pointer over a program that asked for motion is reported once per cell (t-20972).
