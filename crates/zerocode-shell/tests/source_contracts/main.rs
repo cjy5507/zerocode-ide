@@ -1105,15 +1105,22 @@ mod tests {
             .filter(|line| line.starts_with("row.addEventListener(\"click\""))
             .collect();
 
-        // Most independent rows use `actsAsButton`. A workspace row is an
-        // option inside one focusable listbox instead: the list owns Arrow,
-        // Home, End and keyboard context-menu handling, which is the ARIA
-        // pattern Orca uses for its multi-selection surface.
+        // Most independent rows use `actsAsButton`. A checkout's row is the
+        // one exception: it stands inside a tree item, and the tree (the list)
+        // owns Arrow, Home, End, Left, Right, Enter and the keyboard
+        // context-menu key, which is the ARIA tree pattern. The handler must be
+        // the one in the checkout's own builder, and the tree's keys must be
+        // there — not just any `role` string somewhere in the window.
+        let node = block_after(source, "function makeWorktreeNode(worktree, held) {");
+        let keys = block_after(source, "worktreeList.addEventListener(\"keydown\"");
         assert!(
             bare.is_empty()
                 || (bare.len() == 1
-                    && source.contains("row.setAttribute(\"role\", \"option\")")
-                    && source.contains("worktreeList.addEventListener(\"keydown\"")),
+                    && node.contains("row.addEventListener(\"click\"")
+                    && node.contains("node.setAttribute(\"role\", \"treeitem\")")
+                    && ["ArrowUp", "ArrowDown", "Home", "End", "ArrowLeft", "ArrowRight", "Enter"]
+                        .iter()
+                        .all(|key| keys.contains(&format!("\"{key}\"")))),
             "a row got a click handler and no keyboard-equivalent owner: {bare:?}"
         );
         // Otherwise deleting every row would satisfy the rule above.

@@ -1,4 +1,5 @@
 import { openWindowTestPage } from "./window-boot.mjs";
+import { standSidebarAria } from "./sidebar-aria.mjs";
 
 /* ZeroCode's own window as a Computer Use target (t-73906): the page's half.
  *
@@ -821,5 +822,43 @@ export async function testSelfAct(browser, origin, ok) {
     ok("a page's click() on a checkbox's label after an await names no person (t-75676 ②)", hand(pageLabel, "jira_connect").join() === "none", JSON.stringify(pageLabel));
     ok("a page's pick in a select and a range names no person (t-75676 ③)", hand(pagePick, "board_columns_probe").join() === "none,none", JSON.stringify(pagePick));
     ok("text the page's own paste road inserts, from no person's event, saves no person's cookie (t-75676 ①)", hand(pagePasted, "set_opencode_cookie").join() === "none", JSON.stringify(pagePasted));
+  });
+
+  /* The sidebar's rows are tree items (t-88672): an agent that presses one by what a look shows (a row named for
+   * its checkout, a row named for its project) does what a person's press on the row does — switches the checkout,
+   * folds the project — and not nothing while the answer says it was done. */
+  await scenario(browser, origin, "tree", ok, async (page) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await standSidebarAria(page);
+    const said = await page.evaluate(async () => {
+      const T = window.__SELF_T__;
+      const nameOf = (path) => document.querySelector(`#worktrees .wt-row[data-worktree-path="${path}"]`)?.closest(".wt-node")?.getAttribute("aria-label") ?? "";
+      const press = async (look, control) => {
+        const facts = await T.ask({ kind: "facts", lookId: look.ok.lookId, id: control.id });
+        return T.ask({ kind: "do", lookId: look.ok.lookId, id: control.id, act: "click", facts: facts?.ok?.facts });
+      };
+      const look = await T.ask({ kind: "look" });
+      const checkoutName = nameOf("/z/wt/two");
+      const checkout = look?.ok?.controls?.find((control) => control.role === "AXRow" && control.name === checkoutName);
+      const before = { active: activeWorktreePath, shut: closedProjects.has("/z") };
+      const pressedCheckout = checkout ? await press(look, checkout) : null;
+      await window.__PAINTED__();
+      const afterCheckout = { selected: [...selectedWorktreePaths].sort(), done: pressedCheckout?.ok?.done ?? null };
+      const second = await T.ask({ kind: "look" });
+      const project = second?.ok?.controls?.find((control) => control.role === "AXRow" && control.name === "work");
+      const pressedProject = project ? await press(second, project) : null;
+      await new Promise((done) => setTimeout(done, 100));
+      await window.__PAINTED__();
+      return {
+        checkoutName, found: Boolean(checkout), projectFound: Boolean(project), before, afterCheckout,
+        projectDone: pressedProject?.ok?.done ?? null, shutAfter: closedProjects.has("/z"),
+      };
+    });
+    ok("a look lists the sidebar's checkout and project rows as pressable rows",
+      said.found && said.projectFound, JSON.stringify(said));
+    ok("pressing a checkout's row by a look switches to that checkout, as the person's press does",
+      said.afterCheckout.done === true && said.afterCheckout.selected.join() === "/z/wt/two", JSON.stringify(said));
+    ok("pressing a project's row by a look folds the project, as the person's press does",
+      said.projectDone === true && said.before.shut === false && said.shutAfter === true, JSON.stringify(said));
   });
 }

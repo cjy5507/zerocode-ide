@@ -15,7 +15,8 @@ import { standTeamScene } from "./sidebar-team.mjs";
  *   ③ a refusal says the one sentence the inbox says and keeps the ledger's own words as its hover;
  *   ④ a window without the run's seat shows no button;
  *   ⑤ the sidebar's worker row shows the control only while it is pointed at or focused, over the row — the row
- *      keeps its height and width — and only for a worker the window already reads an open question of;
+ *      keeps its height and width — and only for a worker the ledger says is asking; the press reads the ledger once,
+ *      closes the question it finds (never an old copy's), names it on the form, and says closed, answered first, or gone;
  *   ⑥ the keyboard reaches it with Tab and leaves with Esc.
  * The fixture is a fake ledger; nothing is closed anywhere. */
 
@@ -140,6 +141,32 @@ async function boardScene({ browser, origin, ok, faults }) {
         && refused.tip.includes("coordinator seat"),
       JSON.stringify(refused));
 
+    // ③b A question somebody answered first: the ledger says `already` with the answer's id, and the row says
+    //    answered — not closed (t-84271's word, on both surfaces).
+    const third = '[data-desk-block="asks"] .board-asks > li[data-letter="run-desk/m-903"]';
+    await page.evaluate(async () => {
+      window.__CLOSED__.length = 0;
+      window.__CLOSE_FAIL__ = null;
+      window.__ANSWER__.desk_question_close = (args) => {
+        window.__CLOSED__.push(args);
+        return { closed: false, already: true, answerId: "a-77" };
+      };
+      const [asked] = deskLedger.mail;
+      deskLedger = { ...deskLedger, mail: [...deskLedger.mail, { ...asked, id: "m-903", body: "셋째 질문" }] };
+      scheduleDeskPaint();
+      await window.__PAINTED__();
+    });
+    await page.click(`${third} .board-desk-letter-close`);
+    await page.fill(`${third} .board-desk-close-field`, "답이 먼저 왔는지 본다");
+    await page.click(`${third} .board-desk-close-send`);
+    const answeredFirst = await page.evaluate(async (third) => {
+      await window.__PAINTED__();
+      return { note: document.querySelector(`${third} .board-desk-letter-note`)?.textContent ?? "", calls: window.__CLOSED__.length };
+    }, third);
+    ok("a question answered first reads 답함, not 답 없이 닫음, on the board's row",
+      answeredFirst.calls === 1 && answeredFirst.note === "그 사이 다른 쪽에서 답했어요 · 원장에 적히면 목록에서 빠져요",
+      JSON.stringify(answeredFirst));
+
     // ④ No seat, no button.
     const unseated = await page.evaluate(async (row) => {
       deskLedger = { ...deskLedger, runs: deskLedger.runs.map((run) => ({ ...run, seat: false })) };
@@ -154,7 +181,7 @@ async function boardScene({ browser, origin, ok, faults }) {
   }
 }
 
-// ⑤ ⑥ The sidebar's worker row.
+// ⑤ ⑥ The sidebar's worker row (r2: the control reads the ledger at the press, not a copy the board may never have taken).
 async function sidebarScene({ browser, origin, ok, faults }) {
   const { page: side } = await openWindowTestPage(browser, origin, { faults });
   try {
@@ -162,17 +189,28 @@ async function sidebarScene({ browser, origin, ok, faults }) {
     await standTeamScene(side, { now: Date.now() });
     await stand(side);
     await side.evaluate(() => {
-      deskLedger = {
-        runs: [{ run: "run-team-b", name: "판정 런", seat: true }, { run: "run-team-a", name: "묶음 런", seat: false }],
-        mail: [
-          { run: "run-team-b", id: "m-q1", kind: "question", worker: "w-b1", task_id: "t-2001", body: "어느 쪽으로 갈까요?", created_ms: Date.now() - 60_000 },
-          { run: "run-team-a", id: "m-q2", kind: "question", worker: "w-a1", task_id: "t-1001", body: "다른 런의 질문", created_ms: Date.now() - 60_000 },
-        ],
-        news: [], counts: { mail: 2, news: 0, folded: 0 }, tasks: [], stages: [],
+      // The board was never opened in this window: its own copy of the desk is empty. What the control reads is the
+      // ledger at the press.
+      deskLedger = null;
+      window.__DESK_READS__ = 0;
+      window.__LETTER__ = (id, worker, body, minutes, over = {}) => ({
+        run: "run-team-b", id, kind: "question", worker, task_id: worker === "w-b1" ? "t-2001" : "t-2002", body,
+        created_ms: Date.now() - minutes * 60_000, ...over,
+      });
+      window.__FRESH__ = {
+        runs: [{ run: "run-team-b", name: "판정 런", seat: true }],
+        mail: [window.__LETTER__("m-q1", "w-b1", "어느 쪽으로 갈까요?\n둘째 줄은 폼의 머리에 들어가지 않습니다", 5)],
+        news: [], counts: { mail: 1, news: 0, folded: 0 }, tasks: [], stages: [],
       };
-      // The ledger the window reads again after a close is this one, as it stands.
-      window.__ANSWER__.board_desk = () => deskLedger;
+      window.__ANSWER__.board_desk = () => {
+        window.__DESK_READS__ += 1;
+        return window.__FRESH__;
+      };
+      // A worker of another run asks too, in a run whose seat this window does not hold.
+      window.__LEDGER__.find((row) => row.worker === "w-a1").asking = true;
+      window.__SEATS__ = window.__SEATS__.map((seat) => (seat.run === "run-team-a" ? { ...seat, seat: false } : seat));
     });
+    await side.evaluate(() => window.__LEDGER_MOVED__());
     const rowOf = (worker) => `#sidebar-team [data-team-key$="/${worker}"]`;
     const geometry = (selector) => side.evaluate((selector) => {
       const node = document.querySelector(selector);
@@ -184,8 +222,10 @@ async function sidebarScene({ browser, origin, ok, faults }) {
       if (!one) return { present: false, shown: false };
       const box = one.getBoundingClientRect();
       return { present: true, shown: one.checkVisibility() && box.width > 0, left: Math.round(box.left), right: Math.round(box.right),
-        top: Math.round(box.top), bottom: Math.round(box.bottom), text: one.textContent, tag: one.tagName };
+        top: Math.round(box.top), bottom: Math.round(box.bottom), text: one.textContent, tag: one.tagName,
+        label: one.getAttribute("aria-label") ?? "" };
     });
+    const toasts = () => side.evaluate(() => [...document.querySelectorAll(".toast")].map((node) => node.textContent));
 
     const rest = await geometry(rowOf("w-b1"));
     await side.mouse.move(2, 2);
@@ -195,19 +235,28 @@ async function sidebarScene({ browser, origin, ok, faults }) {
     await side.hover(rowOf("w-b1"));
     const hovered = await control();
     const same = await geometry(rowOf("w-b1"));
-    ok("pointing at a worker with an open question shows the control over the row, which keeps its height and width",
-      hovered.shown && hovered.tag === "BUTTON" && hovered.text === "답 없이 닫기"
+    const readsAtHover = await side.evaluate(() => ({ reads: window.__DESK_READS__, desk: deskLedger }));
+    ok("pointing at an asking worker shows the control over the row — with the board never opened, and no ledger read of its own — and the row keeps its height and width",
+      hovered.shown && hovered.tag === "BUTTON" && hovered.text === "답 없이 닫기" && readsAtHover.desk === null && readsAtHover.reads === 0
         && hovered.left >= same.left && hovered.right <= same.left + same.w && hovered.top >= same.top && hovered.bottom <= same.top + same.h
         && same.w === rest.w && same.h === rest.h,
-      JSON.stringify({ rest, same, hovered }));
+      JSON.stringify({ rest, same, hovered, readsAtHover }));
+    ok("the control's name says which worker's question it closes",
+      hovered.label.startsWith("답 없이 닫기") && hovered.label.includes("Jev: 판정이 실제로 일어나게"), hovered.label);
 
     await side.hover(rowOf("w-b2"));
     const none = await control();
-    ok("a worker the window reads no open question of gets no control", none.shown === false, JSON.stringify(none));
+    ok("a worker the ledger does not say is asking gets no control", none.shown === false, JSON.stringify(none));
 
     await side.hover(rowOf("w-a1"));
     const stranger = await control();
-    ok("a worker of a run whose seat this window does not hold gets no control", stranger.shown === false, JSON.stringify(stranger));
+    ok("an asking worker of a run whose seat this window does not hold gets no control", stranger.shown === false, JSON.stringify(stranger));
+
+    // The window's copy of the desk is old: it still holds a question the worker has since been answered.
+    await side.evaluate(() => {
+      deskLedger = { runs: [{ run: "run-team-b", name: "판정 런", seat: true }], mail: [window.__LETTER__("m-old", "w-b1", "옛 질문", 40)],
+        news: [], counts: { mail: 1, news: 0, folded: 0 }, tasks: [], stages: [] };
+    });
 
     // ⑥ The keyboard: the row, Tab, Enter, Esc.
     await side.mouse.move(2, 2);
@@ -218,13 +267,20 @@ async function sidebarScene({ browser, origin, ok, faults }) {
     ok("focusing the row shows the control and Tab reaches it", focused.shown && tabbed.onControl, JSON.stringify({ focused, tabbed }));
 
     await side.keyboard.press("Enter");
+    await side.waitForFunction(() => document.querySelector(".team-close-form")?.checkVisibility() === true);
     const open = await side.evaluate(() => {
       const form = document.querySelector(".team-close-form");
       const field = form?.querySelector(".team-close-field");
       return { shown: form?.checkVisibility() ?? false, focused: document.activeElement === field, max: field?.maxLength ?? null,
-        want: INBOX_CLOSE_REASON_MAX };
+        want: INBOX_CLOSE_REASON_MAX, reads: window.__DESK_READS__,
+        who: form?.querySelector(".team-close-who")?.textContent ?? "", ask: form?.querySelector(".team-close-ask")?.textContent ?? "",
+        count: form?.querySelector(".team-close-count")?.textContent ?? "", tip: form?.querySelector(".team-close-head")?.dataset.tip ?? "" };
     });
-    ok("Enter opens the why, on the inbox's limit, with the cursor in it", open.shown && open.focused && open.max === 200 && open.max === open.want, JSON.stringify(open));
+    ok("Enter reads the ledger once, and the why opens on the inbox's limit with the cursor in it",
+      open.shown && open.focused && open.max === 200 && open.max === open.want && open.reads === 1, JSON.stringify(open));
+    ok("the form says whose question it closes and what it says — the first line, with the whole of it as the hover — and not a count for one question",
+      open.who === "Jev: 판정이 실제로 일어나게" && open.ask === "어느 쪽으로 갈까요?" && open.tip.includes("둘째 줄") && open.count === "",
+      JSON.stringify(open));
 
     await side.keyboard.press("Enter");
     const empty = await side.evaluate(() => ({ calls: window.__CLOSED__.length, error: document.querySelector(".team-close-error")?.textContent ?? "" }));
@@ -234,27 +290,112 @@ async function sidebarScene({ browser, origin, ok, faults }) {
     await side.keyboard.press("Enter");
     const closed = await side.evaluate(async () => {
       await window.__PAINTED__();
-      return { calls: window.__CLOSED__.map((call) => ({ run: call.run, message: call.message, reason: call.reason })) };
+      return {
+        calls: window.__CLOSED__.map((call) => ({ run: call.run, message: call.message, reason: call.reason })),
+        shown: [...document.querySelectorAll(".toast")].map((node) => node.textContent),
+      };
     });
-    ok("a why and Enter close that worker's question through the same door",
+    ok("a why and Enter close the question the ledger holds now — not the one the window's old copy held — through the same door",
       JSON.stringify(closed.calls) === JSON.stringify([{ run: "run-team-b", message: "m-q1", reason: "답이 필요 없어졌습니다" }]),
       JSON.stringify(closed));
+    ok("the sidebar says once that it was closed",
+      closed.shown.some((words) => words.startsWith("답 없이 닫음")), JSON.stringify(closed.shown));
 
+    // A question answered first: the ledger says `already` with the answer's id, and the sidebar says answered.
     await side.evaluate(() => {
-      const [asked] = deskLedger.mail;
-      deskLedger = { ...deskLedger, mail: [...deskLedger.mail, { ...asked, id: "m-q3", worker: "w-b2", task_id: "t-2002" }] };
+      window.__FRESH__ = { ...window.__FRESH__, mail: [window.__LETTER__("m-q3", "w-b2", "둘째 워커의 질문", 3)] };
+      window.__LEDGER__.find((row) => row.worker === "w-b2").asking = true;
+      window.__CLOSED__.length = 0;
+      window.__ANSWER__.desk_question_close = (args) => {
+        window.__CLOSED__.push(args);
+        return { closed: false, already: true, answerId: "a-9" };
+      };
     });
-    await side.focus(rowOf("w-b2"));
-    await side.keyboard.press("Tab");
+    await side.evaluate(() => window.__LEDGER_MOVED__());
+    await side.hover(rowOf("w-b2"));
+    await side.click(".team-close");
+    await side.waitForFunction(() => document.querySelector(".team-close-form")?.checkVisibility() === true);
+    await side.keyboard.type("먼저 답이 왔는지 본다");
     await side.keyboard.press("Enter");
+    await side.waitForFunction(() => window.__CLOSED__.length === 1);
+    const answeredFirst = await toasts();
+    ok("a question answered first is told as answered, not as closed",
+      answeredFirst.some((words) => words.startsWith("그 사이 다른 쪽에서 답했어요")),
+      JSON.stringify(answeredFirst));
+
+    // A worker the ledger no longer holds an open question of: the press says so and closes nothing.
+    await side.evaluate(() => {
+      window.__FRESH__ = { ...window.__FRESH__, mail: [] };
+      window.__CLOSED__.length = 0;
+    });
+    await side.mouse.move(2, 2);
+    await side.hover(rowOf("w-b1"));
+    await side.click(".team-close");
+    const gone = await side.evaluate(async () => {
+      await window.__PAINTED__();
+      return { form: document.querySelector(".team-close-form")?.checkVisibility() ?? false, calls: window.__CLOSED__.length,
+        shown: [...document.querySelectorAll(".toast")].map((node) => node.textContent) };
+    });
+    ok("a press that finds no open question of that worker says so and opens no form",
+      gone.form === false && gone.calls === 0 && gone.shown.some((words) => words === "이 워커의 열린 질문이 원장에 없습니다 — 이미 답했거나 닫혔을 수 있어요"),
+      JSON.stringify(gone));
+
+    // Two questions of one worker: the oldest, said so.
+    await side.evaluate(() => {
+      window.__FRESH__ = { ...window.__FRESH__, mail: [
+        window.__LETTER__("m-q5", "w-b1", "나중 질문", 1), window.__LETTER__("m-q4", "w-b1", "먼저 한 질문", 9)] };
+      window.__CLOSED__.length = 0;
+    });
+    await side.mouse.move(2, 2);
+    await side.hover(rowOf("w-b1"));
+    await side.click(".team-close");
+    await side.waitForFunction(() => document.querySelector(".team-close-form")?.checkVisibility() === true);
+    const two = await side.evaluate(() => ({
+      ask: document.querySelector(".team-close-ask")?.textContent ?? "", count: document.querySelector(".team-close-count")?.textContent ?? "" }));
+    ok("with two open questions the form names the oldest and says there are two",
+      two.ask === "먼저 한 질문" && two.count === "2건 중 가장 오래된 질문", JSON.stringify(two));
+
+    // Esc from a button of the form puts it away as well, and the focus goes back to the row.
+    await side.focus(".team-close-cancel");
     await side.keyboard.press("Escape");
-    const left = await side.evaluate(() => ({
-      form: document.querySelector(".team-close-form")?.checkVisibility() ?? false,
-      onRow: document.activeElement?.dataset.teamKey ?? "",
-      calls: window.__CLOSED__.length,
-    }));
-    ok("Esc puts the why away, closes nothing, and the focus goes back to the row",
-      left.form === false && left.onRow === "w:run-team-b/w-b2" && left.calls === 1, JSON.stringify(left));
+    const escaped = await side.evaluate(() => ({ form: document.querySelector(".team-close-form")?.checkVisibility() ?? false,
+      onRow: document.activeElement?.dataset.teamKey ?? "", calls: window.__CLOSED__.length }));
+    ok("Esc on the form's own button puts the why away, closes nothing, and the focus goes back to the row",
+      escaped.form === false && escaped.onRow === "w:run-team-b/w-b1" && escaped.calls === 0, JSON.stringify(escaped));
+
+    // The rows move under the control: it and the form go with the row they were opened for.
+    await side.evaluate(() => {
+      window.__LEDGER__.find((row) => row.worker === "w-b2").asking = true;
+      window.__FRESH__ = { ...window.__FRESH__, mail: [window.__LETTER__("m-q6", "w-b1", "움직이는 행의 질문", 4)] };
+    });
+    await side.evaluate(() => window.__LEDGER_MOVED__());
+    await side.mouse.move(2, 2);
+    await side.hover(rowOf("w-b1"));
+    await side.click(".team-close");
+    await side.waitForFunction(() => document.querySelector(".team-close-form")?.checkVisibility() === true);
+    await side.evaluate(async () => {
+      // The ledger lists the second worker first: both ask, so the order is the ledger's.
+      window.__LEDGER__.reverse();
+      await window.__LEDGER_MOVED__();
+    });
+    const followed = await side.evaluate(() => {
+      const row = document.querySelector('#sidebar-team [data-team-key$="/w-b1"]').getBoundingClientRect();
+      const form = document.querySelector(".team-close-form").getBoundingClientRect();
+      return { rowTop: Math.round(row.top), rowBottom: Math.round(row.bottom), formTop: Math.round(form.top), formBottom: Math.round(form.bottom),
+        who: document.querySelector(".team-close-who")?.textContent ?? "" };
+    });
+    ok("when the rows change order the form follows its worker's row (under it, or above it when the window ends first) and still names that worker",
+      (Math.abs(followed.formTop - followed.rowBottom) <= 2 || Math.abs(followed.formBottom - followed.rowTop) <= 2)
+        && followed.who === "Jev: 판정이 실제로 일어나게",
+      JSON.stringify(followed));
+
+    // Leaving the team view takes the control and the form away with it.
+    await side.evaluate(() => setSidebarView({ layout: "branches" }));
+    await side.evaluate(() => window.__PAINTED__());
+    const away = await side.evaluate(() => ({
+      button: document.querySelector(".team-close")?.checkVisibility() ?? false,
+      form: document.querySelector(".team-close-form")?.checkVisibility() ?? false }));
+    ok("leaving the team view takes the control and the form away", away.button === false && away.form === false, JSON.stringify(away));
     ok("the scenes raise no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await side.close();
