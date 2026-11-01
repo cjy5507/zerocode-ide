@@ -1983,6 +1983,9 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
    * answer. `hitAt` is which one is current; it is an index into `hits` rather
    * than a copy of one, so "which is current" has a single answer. */
   let hits = [];
+  // The backend's list was cut at `TERM_SEARCH_MAX`: what is left of it after lines leave the top is still only what
+  // was found, not what there is (t-84799 r2-P3-8). Set by the search, kept by `shiftHits`.
+  let hitsCapped = false;
   let hitsByLine = new Map();
   let hitAt = -1;
 
@@ -3394,7 +3397,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
           : t("file.findNone", "일치 없음")
         : t("file.findHits", "{{at}}/{{count}}", {
             at: hitAt + 1,
-            count: hits.length >= TERM_SEARCH_MAX ? `${TERM_SEARCH_MAX}+` : hits.length,
+            count: hitsCapped ? `${hits.length}+` : hits.length,
           });
   }
 
@@ -3404,6 +3407,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     const query = findField.value;
     if (query === "") {
       hits = [];
+      hitsCapped = false;
       hitAt = -1;
       settleHits();
       return;
@@ -3415,6 +3419,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
       return;
     }
     hits = found ?? [];
+    hitsCapped = hits.length >= TERM_SEARCH_MAX;
     if (hits.length === 0) {
       hitAt = -1;
       settleHits();
@@ -3465,6 +3470,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
   function closeTermFind() {
     find.hidden = true;
     hits = [];
+    hitsCapped = false;
     hitAt = -1;
     settleHits();
     keySink.focus();
