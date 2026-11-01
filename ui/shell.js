@@ -2222,14 +2222,29 @@ function yourTurnRowNode(card, now) {
 
 /* ---- the list dropped from the chip ---- */
 
+/* Hung from the chip's own edge, wherever the title bar has put it — read
+ * before the list stands, so the read lays nothing out; and read again when
+ * the window changes size, which is what moves the title bar (t-84799 B4). */
+function hangYourTurnList() {
+  const box = el("your-turn").getBoundingClientRect();
+  const list = el("your-turn-list");
+  list.style.setProperty("--your-turn-top", `${Math.round(box.bottom)}px`);
+  list.style.setProperty("--your-turn-left", `${Math.round(box.left)}px`);
+}
+
+let yourTurnHangFrame = 0;
+window.addEventListener("resize", () => {
+  if (el("your-turn-list").hidden || yourTurnHangFrame !== 0) return;
+  yourTurnHangFrame = requestAnimationFrame(() => {
+    yourTurnHangFrame = 0;
+    if (!el("your-turn-list").hidden) hangYourTurnList();
+  });
+});
+
 function openYourTurnList() {
   const list = el("your-turn-list");
   const chip = el("your-turn");
-  // Hung from the chip's own edge, wherever the title bar has put it — read
-  // before the list stands, so the read lays nothing out.
-  const box = chip.getBoundingClientRect();
-  list.style.setProperty("--your-turn-top", `${Math.round(box.bottom)}px`);
-  list.style.setProperty("--your-turn-left", `${Math.round(box.left)}px`);
+  hangYourTurnList();
   if (list.hidden) {
     list.hidden = false;
     chip.setAttribute("aria-expanded", "true");
