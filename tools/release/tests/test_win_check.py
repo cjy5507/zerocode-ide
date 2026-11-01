@@ -14,10 +14,10 @@ REPO = Path(__file__).resolve().parents[3]
 JUST = shutil.which("just")
 LLVM_LIB = "/opt/homebrew/opt/llvm/bin/llvm-lib"
 XWIN_TARGET_ARGS = ["--workspace", "--all-targets", "--target", "x86_64-pc-windows-msvc"]
-# The root recipe lints with the CI leg's `-D warnings`; zo-ide's still only checks.
+# Both recipes lint with the CI leg's `-D warnings`.
 XWIN_ARGS = {
     "justfile": ["xwin", "clippy", *XWIN_TARGET_ARGS, "--", "-D", "warnings"],
-    "zo-ide/justfile": ["xwin", "check", *XWIN_TARGET_ARGS],
+    "zo-ide/justfile": ["xwin", "clippy", *XWIN_TARGET_ARGS, "--", "-D", "warnings"],
 }
 
 
