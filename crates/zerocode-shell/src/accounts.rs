@@ -798,6 +798,15 @@ const KEYCHAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 #[cfg(all(target_os = "macos", test))]
 const SECURITY_PROMPT_BYTES: usize = 128;
 
+// Every argv the fake tool was started with on this thread: what a `ps` on this
+// Mac would have shown. Per thread because the suite runs in parallel and a
+// write calls the tool on the caller's own thread.
+#[cfg(all(target_os = "macos", test))]
+thread_local! {
+    static SECURITY_ARGV_SEEN: std::cell::RefCell<Vec<Vec<String>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Every keychain call goes through Apple's own tool, and the reason is the
 /// ACCESS LIST rather than convenience.
 ///
@@ -920,6 +929,10 @@ fn security_command(args: &[&str], stdin: Option<&str>) -> Result<String, String
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
+    SECURITY_ARGV_SEEN.with(|seen| {
+        seen.borrow_mut()
+            .push(args.iter().map(|arg| (*arg).to_string()).collect());
+    });
     type TestKeychain = HashMap<String, Result<String, String>>;
     static HELD: OnceLock<Mutex<TestKeychain>> = OnceLock::new();
     // Items a test asked the fixture to refuse deleting, once each — the
@@ -4982,6 +4995,38 @@ JSON
         assert!(refused.is_empty(), "{refused:?}");
         let held = read_keychain_service(service).expect("one item stands");
         assert!(held.starts_with("hand-"), "{held}");
+    }
+
+    /// t-76905: while `security` runs, its argv is readable by other users'
+    /// processes through `ps` on this Mac, so no argument of any run may carry
+    /// the secret, in plain text or as the hex `-X` takes. Red until the write
+    /// stops passing the secret after `-w`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_keychain_write_keeps_the_secret_out_of_the_tools_argv() {
+        let service = "zerocode-test-secret-not-in-argv";
+        let secret = "fixture-not-a-real-secret-t76905";
+        let secret_hex: String = secret.bytes().map(|byte| format!("{byte:02x}")).collect();
+
+        SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+        write_keychain_service(service, secret).expect("write");
+        let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+
+        assert!(!started.is_empty(), "the write never started the tool");
+        let carrying: Vec<_> = started
+            .iter()
+            .filter(|argv| {
+                argv.iter().any(|arg| {
+                    let lowered = arg.to_ascii_lowercase();
+                    arg.contains(secret) || lowered.contains(&secret_hex)
+                })
+            })
+            .collect();
+        assert!(
+            carrying.is_empty(),
+            "the secret stood in a process's argv: {carrying:?}"
+        );
+        assert_eq!(read_keychain_service(service).as_deref(), Ok(secret));
     }
 
     /// A real Claude blob is 509–2040 bytes and a router table can be longer.
